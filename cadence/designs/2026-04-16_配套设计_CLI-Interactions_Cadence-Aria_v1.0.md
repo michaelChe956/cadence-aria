@@ -1,8 +1,8 @@
 # Cadence-Aria CLI Interactions 配套设计
 
-> **版本**：v1.0
+> **版本**：v1.0.1
 > **日期**：2026-04-16
-> **关联主文档**：`cadence/designs/2026-04-16_方案设计_Cadence-Aria_v1.3.md`
+> **关联主文档**：`cadence/designs/2026-04-16_方案设计_Cadence-Aria_v1.4.md`（当前修订：v1.4.3）
 
 ## 目标
 
@@ -36,11 +36,33 @@ $ aria:intake "为 Aria 增加 capability report 结构化输出"
 $ aria:start --task-id aria-20260416-001
 
 [Aria]
-- status: planned
+- status: spec-review
+- clarification_required: false
+- spec_summary:
+  - goal: "为 Aria 增加 capability report 结构化输出"
+  - scope: "新增 capability report 结构、落盘逻辑与 CLI 展示"
+  - risks: [schema_drift, compatibility]
+- next: confirm-spec --task-id aria-20260416-001
+```
+
+```text
+$ confirm-spec --task-id aria-20260416-001
+
+[Aria]
+- status: plan-review
 - plan_id: plan-aria-20260416-001
 - exec_unit_count: 2
 - parallel_candidates: [exec-01, exec-02]
 - quality_gates: [format_check, contract_validation]
+- next: confirm-plan --task-id aria-20260416-001
+```
+
+```text
+$ confirm-plan --task-id aria-20260416-001
+
+[Aria]
+- status: plan-approved
+- approved_plan_id: plan-aria-20260416-001
 - next: aria:run --task-id aria-20260416-001
 ```
 
@@ -72,7 +94,7 @@ $ aria:start --task-id aria-20260416-001 --replan
 - previous_plan_id: plan-aria-20260416-001
 - new_plan_id: plan-aria-20260416-002
 - superseded: [plan-aria-20260416-001]
-- status: planned
+- status: plan-review
 ```
 
 ### 约束
@@ -191,7 +213,7 @@ $ aria:start --task-id aria-20260416-006
 - task_id: aria-20260416-006
 - status: blocked
 - error_code: ARIA-CAP-101
-- reason: "openspec.change.create unavailable"
+- reason: "OpenSpec 前置基础设施异常：change.create 入口不可用"
 - next: "修复依赖后重试 aria:start --task-id aria-20260416-006"
 ```
 
@@ -206,6 +228,36 @@ $ aria:run --task-id aria-20260416-007 --resume
 - error_code: ARIA-STATE-002
 - reason: "state.yaml 与 dispatch contract 不一致"
 - next: "按恢复规则人工修复或退回 plan/spec"
+```
+
+## 示例 9：clarification 多轮澄清
+
+```text
+$ aria:start --task-id aria-20260416-008
+
+[Aria]
+- task_id: aria-20260416-008
+- status: clarification
+- reason: "需求边界不清，且需结合现有代码确认改动范围"
+- questions:
+  - "capability report 是新增独立命令，还是并入 aria:doctor / aria:status？"
+  - "是否需要持久化到任务目录之外的全局诊断目录？"
+- next: "请继续多轮澄清；确认后重新执行 aria:start --task-id aria-20260416-008"
+```
+
+## 示例 10：低风险任务自动通过确认点
+
+```text
+$ aria:fast "修正文档中的错误码拼写"
+
+[Aria]
+- task_id: aria-20260416-009
+- flow_type_suggestion: fast-lane
+- risk_level: low
+- auto_approved:
+  - spec-review
+  - plan-review
+- next: aria:run --task-id aria-20260416-009
 ```
 
 ## 快照测试建议

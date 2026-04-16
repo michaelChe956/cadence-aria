@@ -1,8 +1,8 @@
 # Cadence-Aria Runtime Schemas 配套设计
 
-> **版本**：v1.0
+> **版本**：v1.0.2
 > **日期**：2026-04-16
-> **关联主文档**：`cadence/designs/2026-04-16_方案设计_Cadence-Aria_v1.3.md`
+> **关联主文档**：`cadence/designs/2026-04-16_方案设计_Cadence-Aria_v1.4.md`（当前修订：v1.4.3）
 
 ## 目标
 
@@ -31,9 +31,13 @@
 | `task_id` | string | 是 | `aria-YYYYMMDD-NNN` |
 | `source` | enum | 是 | `vk \| native \| aria-native` |
 | `flow_type` | enum | 是 | `formal \| fast-lane` |
+| `risk_level` | enum | 是 | `low \| medium \| high` |
 | `status` | enum | 是 | 必须属于状态机合法状态 |
 | `current_round` | integer | 是 | `>= 1` |
 | `active_exec_units` | string[] | 是 | 可为空数组 |
+| `confirmation_pending` | enum | 是 | `none \| spec \| plan` |
+| `confirmation_mode` | enum | 是 | `manual \| auto-policy` |
+| `confirmation_artifact_path` | string/null | 是 | 指向当前待确认工件，可为 `null` |
 | `review_status` | enum | 是 | `pending \| passed \| failed` |
 | `test_status` | enum | 是 | `pending \| passed \| failed` |
 | `patch_required_by` | enum | 是 | `none \| review \| test \| both` |
@@ -42,8 +46,6 @@
 | `patch_units` | map | 否 | key 为 `patch-xx` |
 | `created_at` | datetime string | 是 | ISO 8601 |
 | `updated_at` | datetime string | 是 | ISO 8601 |
-| `workspace_ref` | string | 否 | 可空 |
-| `worktree_ref` | string | 否 | 可空 |
 
 ### `exec_units.<id>`
 
@@ -70,6 +72,36 @@
 | `started_at` | datetime string | 否 | 未开始可空 |
 | `finished_at` | datetime string | 否 | 未结束可空 |
 
+### `status` 推荐枚举
+
+`state.yaml.status` 一期建议至少支持以下值：
+
+- `intake`
+- `clarification`
+- `spec-drafting`
+- `spec-review`
+- `spec-approved`
+- `planning`
+- `plan-review`
+- `plan-approved`
+- `dispatched`
+- `executing`
+- `reviewing/testing`
+- `patching`
+- `verified`
+- `done`
+- `cancelled`
+
+### 确认点字段说明
+
+为支撑“自动编排 + 用户确认点”模式，一期建议在 `state.yaml` 中保留以下确认相关字段：
+
+| 字段 | 用途 |
+|------|------|
+| `confirmation_pending` | 当前是否存在待确认节点 |
+| `confirmation_mode` | 当前确认点由人工确认还是由低风险策略自动通过 |
+| `confirmation_artifact_path` | 指向当前需要展示给用户的 spec / plan 工件 |
+
 ## `task intake card`
 
 | 字段 | 类型 | 必填 | 约束 |
@@ -82,6 +114,17 @@
 | `boundary_check` | object | 是 | 包含布尔边界判定字段 |
 | `created_at` | datetime string | 是 | ISO 8601 |
 
+### `boundary_check`
+
+`boundary_check` 建议至少包含以下布尔字段：
+
+| 字段 | 类型 | 用途 |
+|------|------|------|
+| `needs_clarification` | boolean | 是否必须进入多轮澄清 |
+| `cross_module` | boolean | 是否存在跨模块影响 |
+| `requires_formal_flow` | boolean | 是否必须进入正式流 |
+| `eligible_for_auto_approval` | boolean | 是否满足低风险自动通过条件 |
+
 ## `plan brief`
 
 | 字段 | 类型 | 必填 | 约束 |
@@ -93,6 +136,16 @@
 | `parallel_candidates` | array | 否 | 每项为 exec unit 组 |
 | `acceptance_strategy` | enum/string | 是 | 一期至少支持 `all_units_pass` |
 | `generated_at` | datetime string | 是 | ISO 8601 |
+
+### `plan brief` 补充字段建议
+
+若实现阶段需要更稳定地支撑 `plan-review` 展示，一期可在 `plan brief` 中补充以下字段：
+
+| 字段 | 类型 | 必填 | 约束 |
+|------|------|------|------|
+| `approval_required` | boolean | 否 | `formal` 任务建议为 `true` |
+| `approval_mode` | enum | 否 | `manual \| auto-policy` |
+| `ownership_summary` | string[] | 否 | 供 `plan-review` 摘要展示 |
 
 ### `quality_gates[]`
 
@@ -113,6 +166,7 @@
 | `suggestions` | object[] | 否 | 建议项不得进入 `must_fix` |
 | `verdict` | enum | 是 | `passed \| failed \| needs_patch` |
 | `reviewed_at` | datetime string | 是 | ISO 8601 |
+| `security_findings` | object[] | 否 | 安全审查结果 |
 
 ### `blockers[]` / `suggestions[]`
 
@@ -124,6 +178,16 @@
 | `description` | string | 是 | 非空 |
 | `file_path` | string | 否 | 仓库相对路径 |
 | `line_range` | string | 否 | 文本表示范围 |
+
+### `security_findings[]`
+
+| 字段 | 类型 | 必填 | 约束 |
+|------|------|------|------|
+| `category` | string | 是 | 如 `hardcoded-secret`、`command-injection` |
+| `severity` | enum | 是 | `blocker \| advisory` |
+| `file_path` | string | 否 | 仓库相对路径 |
+| `line_range` | string | 否 | 文本表示范围 |
+| `description` | string | 是 | 非空 |
 
 ## `test report`
 

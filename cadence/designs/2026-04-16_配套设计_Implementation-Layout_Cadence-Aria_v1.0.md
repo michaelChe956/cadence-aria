@@ -1,8 +1,8 @@
 # Cadence-Aria Implementation Layout 配套设计
 
-> **版本**：v1.0
+> **版本**：v1.0.2
 > **日期**：2026-04-16
-> **关联主文档**：`cadence/designs/2026-04-16_方案设计_Cadence-Aria_v1.3.md`
+> **关联主文档**：`cadence/designs/2026-04-16_方案设计_Cadence-Aria_v1.4.md`（当前修订：v1.4.3）
 
 ## 目标
 
@@ -19,21 +19,32 @@
 
 ```text
 cadence-aria/
-  commands/
-  runtime/
-    orchestrator/
-    contracts/
-    states/
+  src/
+    commands/
+    runtime/
+      orchestrator/
+      state-machine/
+      scheduler/
+      arbitrator/
+      contracts/
+      reports/
+      persistence/
     adapters/
-    reports/
-    persistence/
+      codex/
+      openspec/
+      superpowers/
+      vk/
+      host/
+    schemas/
+    config/
     diagnostics/
+    utils/
+  skills/
   codex/
     prompts/
-    workflows/
     templates/
-  references/
   templates/
+  tests/
   docs/
 ```
 
@@ -41,23 +52,29 @@ cadence-aria/
 
 | 目录 | 职责 | 不应承担的职责 |
 |------|------|---------------|
-| `commands/` | CLI 命令入口、参数解析、用户输出组装 | 状态机逻辑、contract 生成 |
-| `runtime/orchestrator/` | 任务调度、状态推进、角色编排 | 直接做底层适配或模板渲染 |
-| `runtime/contracts/` | `dispatch/patch` 等 contract 的构建、校验、序列化 | 调用外部工具执行任务 |
-| `runtime/states/` | 状态机定义、守卫条件、状态转换 | 文件 IO、CLI 输出 |
-| `runtime/adapters/` | Claude/Codex/OpenSpec/superpowers/VK 的 capability 适配 | 决定业务状态流转 |
-| `runtime/reports/` | `review/test/verification/closure` 等报告构造 | 直接启动进程 |
-| `runtime/persistence/` | `state.yaml` 与运行时工件读写 | 业务仲裁 |
-| `runtime/diagnostics/` | capability report、错误码转写、日志辅助 | 改写核心业务状态 |
+| `src/commands/` | CLI 命令入口、参数解析、用户输出组装 | 状态机逻辑、contract 生成 |
+| `src/runtime/orchestrator/` | 任务调度、状态推进、角色编排 | 直接做底层适配或模板渲染 |
+| `src/runtime/contracts/` | `dispatch/patch` 等 contract 的构建、校验、序列化 | 调用外部工具执行任务 |
+| `src/runtime/state-machine/` | 状态机定义、守卫条件、状态转换 | 文件 IO、CLI 输出 |
+| `src/runtime/scheduler/` | 执行单元调度、并行管理、依赖解析 | 直接产出用户文案 |
+| `src/runtime/arbitrator/` | review/test 仲裁与 patch contract 生成 | 直接启动外部进程 |
+| `src/adapters/` | Claude/Codex/OpenSpec/superpowers/VK 的 capability 适配 | 决定业务状态流转 |
+| `src/runtime/reports/` | `review/test/verification/closure` 等报告构造 | 直接启动进程 |
+| `src/runtime/persistence/` | `state.yaml` 与运行时工件读写 | 业务仲裁 |
+| `src/diagnostics/` | capability report、错误码转写、日志辅助 | 改写核心业务状态 |
+| `src/schemas/` | Zod schema 与运行时类型约束 | 访问外部系统 |
+| `src/config/` | 配置加载、优先级合并、默认值装配 | 决定状态流转 |
+| `src/utils/` | 路径、时间、ID 等通用工具 | 持有业务状态 |
 | `codex/prompts/` | Codex prompt 模板与边界约束模板 | 直接做状态推进 |
-| `codex/workflows/` | Codex 执行/修补工作流模板 | 命令入口解析 |
+| `codex/templates/` | Codex 输出模板 | 直接参与编排决策 |
+| `tests/` | 单元、集成、E2E 验证 | 存放运行时逻辑 |
 
 ## 推荐文件落位
 
-### `commands/`
+### `src/commands/`
 
 ```text
-commands/
+src/commands/
   intake.ts
   start.ts
   run.ts
@@ -71,31 +88,31 @@ commands/
 #### 责任
 
 1. 解析命令参数
-2. 调用 `runtime/orchestrator/` 的公开接口
+2. 调用 `src/runtime/orchestrator/` 的公开接口
 3. 组装符合 CLI 交互设计的输出
 4. 将错误码转为用户可读摘要
 
-### `runtime/orchestrator/`
+### `src/runtime/orchestrator/`
 
 ```text
-runtime/orchestrator/
+src/runtime/orchestrator/
   task-orchestrator.ts
   formal-flow.ts
   fast-lane-flow.ts
-  review-test-arbitration.ts
+  prompt-service.ts
 ```
 
 #### 责任
 
-1. 驱动 `intake -> spec -> plan -> dispatch -> exec -> review/test -> patch`
-2. 协调 `states/`、`contracts/`、`adapters/`、`reports/`、`persistence/`
+1. 驱动 `intake -> clarification/spec-drafting/spec-review -> planning/plan-review -> dispatch -> exec -> review/test -> patch`
+2. 协调 `state-machine/`、`scheduler/`、`arbitrator/`、`contracts/`、`adapters/`、`reports/`、`persistence/`
 3. 维护单任务调度上下文
 4. 生成下一步动作与用户提示
 
-### `runtime/states/`
+### `src/runtime/state-machine/`
 
 ```text
-runtime/states/
+src/runtime/state-machine/
   state-machine.ts
   guards.ts
   transitions.ts
@@ -110,10 +127,43 @@ runtime/states/
 3. 定义恢复与重试规则
 4. 提供纯函数式状态判断
 
-### `runtime/contracts/`
+### `src/runtime/scheduler/`
 
 ```text
-runtime/contracts/
+src/runtime/scheduler/
+  exec-scheduler.ts
+  dependency-graph.ts
+  worktree-manager.ts
+  timeout-monitor.ts
+```
+
+#### 责任
+
+1. 调度 `exec` / `patch` 执行单元
+2. 管理并行上限、依赖关系与等待队列
+3. 分配或回收 worktree
+4. 处理超时、取消与重试前置判断
+
+### `src/runtime/arbitrator/`
+
+```text
+src/runtime/arbitrator/
+  review-test-arbitrator.ts
+  patch-decision.ts
+  conflict-detector.ts
+```
+
+#### 责任
+
+1. 汇总 review/test 结论
+2. 生成 `patch contract`
+3. 判定是否退回 `plan-review` 或 `spec-review`
+4. 保持纯逻辑，不直接调用外部系统
+
+### `src/runtime/contracts/`
+
+```text
+src/runtime/contracts/
   dispatch-contract.ts
   patch-contract.ts
   contract-validator.ts
@@ -129,15 +179,20 @@ runtime/contracts/
 3. 校验 `files_allowed/files_blocked`
 4. 校验 contract 与 OpenSpec/plan 的映射关系
 
-### `runtime/adapters/`
+### `src/adapters/`
 
 ```text
-runtime/adapters/
-  host-adapter.ts
-  codex-adapter.ts
-  openspec-adapter.ts
-  superpowers-adapter.ts
-  vibe-kanban-adapter.ts
+src/adapters/
+  host/
+    host-adapter.ts
+  codex/
+    codex-adapter.ts
+  openspec/
+    openspec-adapter.ts
+  superpowers/
+    superpowers-adapter.ts
+  vk/
+    vibe-kanban-adapter.ts
   capability-detector.ts
 ```
 
@@ -148,10 +203,10 @@ runtime/adapters/
 3. 返回结构化结果与错误码
 4. 禁止在 adapter 内做状态机推进
 
-### `runtime/reports/`
+### `src/runtime/reports/`
 
 ```text
-runtime/reports/
+src/runtime/reports/
   intake-card.ts
   plan-brief.ts
   review-report.ts
@@ -166,10 +221,10 @@ runtime/reports/
 2. 统一报告字段名与展示格式
 3. 供 `orchestrator` 写入任务目录
 
-### `runtime/persistence/`
+### `src/runtime/persistence/`
 
 ```text
-runtime/persistence/
+src/runtime/persistence/
   state-repository.ts
   task-repository.ts
   file-lock.ts
@@ -183,10 +238,10 @@ runtime/persistence/
 3. 防止多处写入同一任务状态
 4. 隔离文件系统细节
 
-### `runtime/diagnostics/`
+### `src/diagnostics/`
 
 ```text
-runtime/diagnostics/
+src/diagnostics/
   error-codes.ts
   capability-report.ts
   logger.ts
@@ -200,64 +255,101 @@ runtime/diagnostics/
 3. 记录结构化日志
 4. 辅助同步漂移诊断
 
+### `src/schemas/`
+
+```text
+src/schemas/
+  state-schema.ts
+  contract-schema.ts
+  report-schema.ts
+```
+
+#### 责任
+
+1. 定义所有运行时工件的 schema
+2. 提供运行时校验器与类型导出
+3. 保持为最底层模块，不依赖运行时实现
+
+### `src/config/`
+
+```text
+src/config/
+  load-config.ts
+  merge-config.ts
+  default-config.ts
+```
+
+#### 责任
+
+1. 加载项目级配置
+2. 处理默认值与优先级合并
+3. 向 orchestrator、scheduler、adapters 暴露稳定配置接口
+
 ## 推荐调用链
 
 ### `aria:start`
 
 ```text
-commands/start
-  -> runtime/orchestrator/formal-flow
-    -> runtime/adapters/openspec-adapter
-    -> runtime/adapters/superpowers-adapter
-    -> runtime/reports/intake-card
-    -> runtime/reports/plan-brief
-    -> runtime/persistence/state-repository
+src/commands/start
+  -> src/runtime/orchestrator/formal-flow
+    -> src/adapters/openspec/openspec-adapter
+    -> src/adapters/superpowers/superpowers-adapter
+    -> src/runtime/reports/intake-card
+    -> src/runtime/reports/plan-brief
+    -> src/runtime/persistence/state-repository
 ```
 
 ### `aria:run`
 
 ```text
-commands/run
-  -> runtime/orchestrator/task-orchestrator
-    -> runtime/states/state-machine
-    -> runtime/contracts/dispatch-contract
-    -> runtime/adapters/codex-adapter
-    -> runtime/reports/review-report
-    -> runtime/reports/test-report
-    -> runtime/contracts/patch-contract
-    -> runtime/reports/verification-summary
-    -> runtime/reports/closure-summary
-    -> runtime/persistence/state-repository
+src/commands/run
+  -> src/runtime/orchestrator/task-orchestrator
+    -> src/runtime/state-machine/state-machine
+    -> src/runtime/contracts/dispatch-contract
+    -> src/runtime/scheduler/exec-scheduler
+    -> src/adapters/codex/codex-adapter
+    -> src/runtime/arbitrator/review-test-arbitrator
+    -> src/runtime/reports/review-report
+    -> src/runtime/reports/test-report
+    -> src/runtime/contracts/patch-contract
+    -> src/runtime/reports/verification-summary
+    -> src/runtime/reports/closure-summary
+    -> src/runtime/persistence/state-repository
 ```
 
 ### `aria:status`
 
 ```text
-commands/status
-  -> runtime/persistence/state-repository
-  -> runtime/adapters/vibe-kanban-adapter (optional sync)
-  -> runtime/diagnostics/sync-drift
+src/commands/status
+  -> src/runtime/persistence/state-repository
+  -> src/adapters/vk/vibe-kanban-adapter (optional sync)
+  -> src/diagnostics/sync-drift
 ```
 
 ## 依赖方向约束
 
 ### 允许的依赖
 
-1. `commands -> runtime/orchestrator`
-2. `runtime/orchestrator -> runtime/states`
-3. `runtime/orchestrator -> runtime/contracts`
-4. `runtime/orchestrator -> runtime/adapters`
-5. `runtime/orchestrator -> runtime/reports`
-6. `runtime/orchestrator -> runtime/persistence`
-7. `runtime/orchestrator -> runtime/diagnostics`
+1. `src/commands -> src/runtime/orchestrator`
+2. `src/runtime/orchestrator -> src/runtime/state-machine`
+3. `src/runtime/orchestrator -> src/runtime/contracts`
+4. `src/runtime/orchestrator -> src/runtime/scheduler`
+5. `src/runtime/orchestrator -> src/runtime/arbitrator`
+6. `src/runtime/orchestrator -> src/adapters`
+7. `src/runtime/orchestrator -> src/runtime/reports`
+8. `src/runtime/orchestrator -> src/runtime/persistence`
+9. `src/runtime/orchestrator -> src/diagnostics`
+10. `src/runtime/* -> src/schemas`
+11. `src/* -> src/config`（只读配置消费）
 
 ### 禁止的依赖
 
-1. `commands -> runtime/adapters` 直接调用外部系统
-2. `runtime/adapters -> runtime/states` 直接推进状态机
-3. `runtime/reports -> runtime/adapters` 在报告层访问外部系统
-4. `runtime/contracts -> commands` 反向依赖命令层
-5. `runtime/persistence -> runtime/orchestrator` 反向依赖业务层
+1. `src/commands -> src/adapters` 直接调用外部系统
+2. `src/adapters -> src/runtime/state-machine` 直接推进状态机
+3. `src/runtime/reports -> src/adapters` 在报告层访问外部系统
+4. `src/runtime/contracts -> src/commands` 反向依赖命令层
+5. `src/runtime/persistence -> src/runtime/orchestrator` 反向依赖业务层
+6. `src/schemas -> src/runtime/*` 反向依赖业务层
 
 ## 模块边界规则
 
@@ -289,7 +381,7 @@ commands/status
 2. 自行修改 OpenSpec 边界
 3. 自行写 closure summary
 
-### `states`
+### `state-machine`
 
 状态层应保持纯逻辑。允许：
 
@@ -304,11 +396,11 @@ commands/status
 
 ## 实现顺序建议
 
-1. 先实现 `runtime/states` 与 `runtime/contracts`
-2. 再实现 `runtime/persistence`
-3. 然后实现 `runtime/adapters/capability-detector`
-4. 再串 `runtime/orchestrator`
-5. 最后接 `commands` 和 CLI 输出
+1. 先实现 `src/schemas`、`src/runtime/state-machine` 与 `src/runtime/contracts`
+2. 再实现 `src/runtime/persistence`
+3. 然后实现 `src/adapters/capability-detector` 与 `src/config`
+4. 再串 `src/runtime/orchestrator`、`src/runtime/scheduler`、`src/runtime/arbitrator`
+5. 最后接 `src/commands` 和 CLI 输出
 
 ## 与配套文档的关系
 

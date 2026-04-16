@@ -1,8 +1,8 @@
 # Cadence-Aria 方案设计
 
-> **版本**：v1.4.2
+> **版本**：v1.4.3
 > **更新日期**：2026-04-16
-> **更新说明**：v1.4.1 基础上，根据更系统的 superpowers skills 调研结果修正假设1结论：superpowers  skills 可被自动调用，只是需区分"自动执行型"（writing-plans/executing-plans/requesting-code-review 等）与"多轮交互型"（brainstorming 等）。将 orchestrator 恢复为"全自动编排器"定位；capability_mapping 恢复为"自动调用映射"，并增加 `execution_mode` 字段区分调用类型；MVP 阶段在关键状态节点保留用户确认点，但最终目标是全自动编排。
+> **更新说明**：v1.4.2 基础上，收敛 `OpenSpec` / `superpowers` 与自动化定义的歧义：将两者明确为 `Claude Code` 侧前置基础设施；将 orchestrator 从“全自动编排”改写为“自动编排 + 用户确认点”；在正式流中补入 `clarification`、`spec-review`、`plan-review`；新增“风险分级驱动的确认策略”；同步修正文档中的旧状态与错误处理口径。
 
 ## 概述
 
@@ -21,7 +21,7 @@
 1. 能从 `Vibe Kanban` 或 `Aria` 原生命令入口统一接收任务
 2. 所有正式任务强制进入 `OpenSpec` 主线
 3. `Claude Code` 能通过 `Aria runtime` 驱动 `Codex` 并行执行 `exec`
-4. `Claude Code` 能在 Aria 的全自动编排下完成 `review` 和 `test`（Aria 自动调用对应 superpowers skills，收集产出并推进状态；MVP 阶段关键节点保留用户确认点）
+4. `Claude Code` 能在 Aria 的自动编排 + 用户确认点模式下完成 `review` 和 `test`（Aria 组织对应 superpowers 能力，收集产出并推进状态；关键边界节点保留用户确认）
 5. `Codex` 能在 `Aria runtime` 注入的修补上下文中执行 `patch`
 6. `Aria` 能输出结构化状态与闭环摘要
 
@@ -381,67 +381,82 @@ Cadence-Aria:
 
 ## 耦合原则
 
-`Cadence-Aria` 必须与 `OpenSpec` 和 `superpowers` 保持协议级松耦合，不做代码级内嵌。
+`Cadence-Aria` 必须与 `OpenSpec` 和 `superpowers` 保持协议级松耦合，不做代码级内嵌；但在 `Claude Code` 侧，它们是 `Aria` 的前置基础设施，而不是可选增强项。
 
 ### 约束
 
-1. `OpenSpec` 和 `superpowers` 是前置 plugin
-2. 两者**必须**安装在 `Claude Code` 侧
-3. `Codex` 侧**最小依赖**：`Codex CLI` + `Codex adapter` 所需最小执行能力
-4. 一期**默认不要求** `OpenSpec` 与 `superpowers` 在 `Codex` 侧也必须可用
-5. `Aria` 只依赖：
-   - 能力存在
-   - 入口可探测
-   - 角色到能力映射可配置
-6. `Aria` 不复制：
+1. `OpenSpec` 和 `superpowers` 必须预先安装在 `Claude Code` 侧
+2. `Aria` 不复制：
    - OpenSpec 工件体系
    - superpowers skill 内容
+3. `Aria` 只负责组织调用、状态推进、结果汇总与工件衔接
+4. `Codex` 侧最小依赖仍为：
+   - `Codex CLI`
+   - `Codex adapter`
+   - Git worktree / diff 等执行能力
+5. `Vibe Kanban` 仍是可选接入层，不是前置基础设施
 
 ### 依赖分层
 
 | 层级 | 所在端 | 强依赖 | 说明 |
 |------|--------|--------|------|
-| 编排层 | `Claude Code` | `OpenSpec`、`superpowers`、`Aria runtime` | 负责 contract 解释、状态机、仲裁、方法层编排 |
-| 执行层 | `Codex` | `Codex CLI`、`Codex adapter` | 负责在受控 prompt 下执行代码修改，不直接解析 YAML contract |
+| 编排层 | `Claude Code` | `OpenSpec`、`superpowers`、`Aria runtime` | 负责工件主线、方法工作流、状态机、仲裁 |
+| 执行层 | `Codex` | `Codex CLI`、`Codex adapter` | 负责受控执行，不承担主状态机与正式工件主线 |
+| 集成层 | 可选 | `Vibe Kanban` | 负责任务来源与状态投影，不影响主闭环定义 |
 
 ### 兼容策略
 
 1. 采用最小依赖面
-2. 优先做能力检测
+2. 优先做兼容性检查
 3. 提供推荐版本范围，但不内嵌固定版本
-4. 不兼容时必须明确报错能力缺失点
+4. 不兼容时必须明确报错具体入口、版本或协议问题
 
-## 前置依赖与检查机制
+## 前置基础设施与兼容性检查
 
-`Cadence-Aria` 启动时必须先完成前置依赖检查，再允许进入正式流或 `fast-lane`。
-
-### 前置依赖
-
-**Claude Code 侧（编排层）**
+`Cadence-Aria` 运行前默认以下基础设施已由用户预先安装：
 
 1. `OpenSpec plugin`
 2. `superpowers plugin`
-3. `Aria runtime` 自身
 
-**Codex 侧（执行层）**
+因此，一期不将 `OpenSpec / superpowers` 缺失视为正常业务分支，而视为环境异常。
 
-4. `Codex` 可执行入口
-5. `Codex adapter` 最小可用能力
-6. Git worktree 能力
+### 检查目标
 
-### 检查项
+`aria:doctor` 或启动前检查的重点不是判断“是否允许缺失继续运行”，而是判断：
 
-| 检查项 | 检查方式 | 失败处理 |
-|------|---------|---------|
-| `OpenSpec` 可用 | 探测命令入口与核心产物能力 | 阻断正式流，提示安装或修复 |
-| `superpowers` 可用 | 探测关键 skill 是否存在 | 阻断对应角色流转 |
-| `Codex` 可用 | 探测 `codex` 执行入口与最小调用能力 | 阻断 `aria:run` 与 `aria:fast` |
-| `Codex adapter` 可用 | 探测 prompt 注入、工作目录切换、结果回写、超时控制能力 | 阻断正式 `exec/patch`，允许仅做只读预检 |
-| Git worktree 可用 | 探测 Git 仓库状态与 worktree 能力 | 阻断并行执行，允许退化为串行 |
+1. 是否已安装
+2. 版本是否在兼容范围内
+3. 调用入口是否稳定可用
+4. 工件协议是否符合 Aria 预期
+
+### 环境异常处理
+
+若 `OpenSpec` 或 `superpowers` 出现以下问题之一：
+
+- 未安装
+- 版本不兼容
+- 入口失效
+- 工件协议不匹配
+
+则：
+
+1. 标记为环境异常
+2. 阻断正式流
+3. 由 `aria:doctor` 输出修复建议
+4. 不进入正常业务状态机分支
+
+### 仍需 capability 检查的对象
+
+以下对象仍保留 capability 检查与降级逻辑：
+
+1. `Codex adapter`
+2. `Codex CLI`
+3. Git worktree / diff
+4. `Vibe Kanban` 拉取与同步能力
 
 ### 能力契约定义
 
-为避免把“插件存在”误判为“能力可用”，一期必须把外部依赖的可用性收敛到**能力契约**，而不是名字契约。
+为避免把“入口存在”误判为“协议可用”，一期必须把可用性收敛到**兼容性 + capability contract**。
 
 #### 宿主能力矩阵
 
@@ -463,10 +478,10 @@ Cadence-Aria:
 
 | 依赖 | capability | 判定标准 | 失败后行为 |
 |------|------------|---------|-----------|
-| `OpenSpec` | `openspec.change.create` | 能创建或更新正式任务的 `proposal/design/tasks` 最小集合 | 阻断 formal flow |
-| `OpenSpec` | `openspec.artifact.read` | 能读取既有 `proposal/design/tasks` 并稳定解析目标字段 | 阻断 `spec -> plan` |
-| `superpowers` | `superpowers.plan` | 存在 `brainstorming`、`writing-plans` 等方法能力中被一期使用的最小集合 | 阻断对应角色 |
-| `superpowers` | `superpowers.review` | 存在 `requesting-code-review`、`verification-before-completion` 等验证能力 | 阻断 `review/test` |
+| `OpenSpec` | `openspec.change.create` | 能创建或更新正式任务的 `proposal/design/tasks` 最小集合 | 标记环境异常，阻断 formal flow |
+| `OpenSpec` | `openspec.artifact.read` | 能读取既有 `proposal/design/tasks` 并稳定解析目标字段 | 标记环境异常，阻断 `spec-drafting -> planning` |
+| `superpowers` | `superpowers.plan` | 存在 Aria 所需的计划与澄清方法能力集合 | 标记环境异常，阻断 `planning` |
+| `superpowers` | `superpowers.review` | 存在 Aria 所需的 review / verify 方法能力集合 | 标记环境异常，阻断 `review/test` |
 | `Codex adapter` | `codex.exec.single` | 能在指定工作目录运行一轮 `Codex` 并收集退出状态与结果文件 | 阻断 `exec/patch` |
 | `Vibe Kanban` | `vk.task.pull` | 能拉取外部任务基础字段 | 禁用 `vk intake`，保留 `native intake` |
 | `Vibe Kanban` | `vk.status.push` | 能按 task 映射写入状态摘要 | 禁用同步，不阻断主流程 |
@@ -651,85 +666,111 @@ SyncService:    → adapters/vk/
 
 #### Orchestrator 的推进机制
 
-> **v1.4.2 修正**：orchestrator 是统一自动推进的。任务创建后，状态机按守卫条件自然流转；只有在需求边界不清、需要创意探索时，才会在 `intake` / `spec-required` 阶段调用 `brainstorming` 这类多轮交互型 skill。一旦进入 `spec-approved` 及之后的阶段，`plan`、`review`、`test` 等状态转换均由 orchestrator 自动调用对应 superpowers skills 完成。MVP 阶段可在关键状态节点增加用户确认提示，但最终版本应移除确认实现全自动。
+`orchestrator` 采用的不是“无人值守全自动”，而是 **自动编排 + 用户确认点** 的协同推进模式。
 
-**统一自动推进流程**
+其核心原则是：
 
-orchestrator 按状态机守卫条件自动完成所有状态转换：
-- `intake -> spec-required`（基于 intake card 判定）
-- `spec-required -> spec-approved`（基于工件存在性判定 + 用户确认）
-- `spec-approved -> planned`（orchestrator 自动调用 `writing-plans` skill，生成 plan brief 后流转）
-- `planned -> dispatched`（用户显式执行 `aria:run`）
-- `dispatched -> executing`（基于 contract 和 worktree 准备状态）
-- `executing -> reviewing/testing`（基于所有 exec_unit 完成）
-- `reviewing/testing -> patching`（基于仲裁结果）
-- `patching -> reviewing/testing`（基于 patch_unit 完成）
-- `reviewing/testing -> verified`（orchestrator 自动调用 `requesting-code-review` 和 `verification-before-completion`，读取 report 后判定）
-- `verified -> done`（基于 summary 落盘）
+1. 自动推进机械化流程
+2. 在需要用户决策的节点显式停下
+3. 输出摘要或全量工件供用户确认
+4. 在用户确认后继续推进
+5. 仅对低风险任务允许按策略自动通过部分确认点
 
-**多轮交互型 skills 的介入点**
+**自动推进的事项**：
 
-在以下阶段，若需求边界不清或需要创意探索，orchestrator 可提示用户调用多轮交互型 skill：
-- `intake` / `spec-required` 阶段（可选）：orchestrator 提示用户调用 `/brainstorming` 澄清需求
-- 用户完成多轮对话后，产出工件（如澄清后的 proposal）落盘，orchestrator 继续推进后续状态
+- intake 标准化
+- 工件存在性检测
+- 状态推进
+- 调用 `OpenSpec` / `superpowers` / `Codex` 对应能力
+- review/test/patch 闭环推进
+- 状态、日志、报告落盘
 
-**MVP 安全网（用户确认点）**：
-- `spec-approved -> planned`：Aria 自动调用 `writing-plans` 前，MVP 可先提示"即将自动制定执行计划，是否继续？"
-- `executing -> reviewing/testing`：Aria 自动调用 `requesting-code-review` / `verification-before-completion` 前，MVP 可先提示"即将自动执行代码审查与验证，是否继续？"
+**必须停给用户确认的事项**：
 
-**规则**：
-1. orchestrator 是**统一自动推进**的，状态转换由守卫条件驱动，不因 skill 类型而切换推进模式
-2. **自动执行型 superpowers skills**（`writing-plans`、`requesting-code-review`、`verification-before-completion` 等）：orchestrator 在对应状态节点**自动调用**，通过检测产出工件推进状态
-3. **多轮交互型 superpowers skills**（如 `brainstorming`）：仅在需求澄清阶段由 orchestrator 生成调用指引，等待用户完成 skill 调用后检测工件并继续自动推进
-4. **MVP 阶段**：关键自动调用节点可增加用户确认提示，但最终版本应移除确认点实现全自动
-5. 用户未响应交互型 skill 提示前，状态机保持在当前状态，不悬空
+- 需求理解是否正确
+- 边界是否清晰
+- spec 是否通过
+- plan / 任务拆分是否通过
+- 是否进入正式执行
+
+**必须进入多轮交互的事项**：
+
+- issue 或任务描述存在歧义
+- 需要澄清真实目标
+- 需要结合现有代码确认影响范围
+- 用户目标与现有实现可能冲突
+
+#### 推进规则
+
+1. `clarification` 阶段：
+   - 支持多轮对话
+   - 可结合已有代码上下文澄清边界
+   - 未澄清完成前不得强行推进
+
+2. `spec-drafting -> spec-review`：
+   - Aria 负责组织 spec 工件生成
+   - 到达 `spec-review` 后，必须向用户展示摘要或全量内容
+   - 是否自动通过，由风险分级策略决定
+
+3. `planning -> plan-review`：
+   - Aria 负责组织 plan brief / task split 生成
+   - 到达 `plan-review` 后，必须向用户展示摘要或全量内容
+   - 是否自动通过，由风险分级策略决定
+
+4. `plan-approved -> dispatched -> executing`：
+   - 一旦用户确认，或策略允许自动通过，后续执行由系统自动推进
+
+5. `reviewing/testing -> patching -> verified`：
+   - 系统自动执行 review/test/patch 闭环
+   - 若 patch 导致边界变化、设计变化或任务拆分变化，必须退回 `plan-review` 或 `spec-review`
 
 #### PromptService 输出示例
 
-**自动执行型 skill 的确认提示**（MVP 阶段，最终版可跳过确认）：
+**`spec-review` 提示**：
 
-当任务处于 `spec-approved` 状态时，PromptService 可能输出：
+当任务到达 `spec-review` 状态时，PromptService 可能输出：
 
 ```text
 [Aria]
-当前状态：spec-approved
-下一步：自动制定执行计划
-即将调用：/writing-plans
-要求产出：cadence/cache/aria/tasks/<task-id>/plan-brief.md
-流转条件：plan brief 包含 plan_id、quality_gates（至少1条）、exec_unit_count（>=1）
-[MVP 确认] 是否继续？(y/n)
+当前状态：spec-review
+下一步：等待用户确认 spec
+摘要：
+- goal: ...
+- scope: ...
+- non-goals: ...
+- risks: ...
+查看全量工件：cadence/cache/aria/tasks/<task-id>/spec/
+操作：
+- confirm-spec
+- revise-spec
+- enter-clarification
 ```
 
-**自动执行型 skill 的执行中提示**（最终版）：
+**`plan-review` 提示**：
+
+当任务到达 `plan-review` 状态时：
 
 ```text
 [Aria]
-当前状态：spec-approved
-正在调用：/writing-plans
+当前状态：plan-review
+下一步：等待用户确认 plan
+摘要：
+- exec_unit_count: 2
+- parallel_candidates: [exec-01, exec-02]
+- quality_gates: [format_check, contract_validation]
+- acceptance_strategy: all_units_pass
 预期产出：cadence/cache/aria/tasks/<task-id>/plan-brief.md
 ```
 
-**多轮交互型 skill 的提示**：
+**`clarification` 提示**：
 
-当任务处于 `spec-required` 且需要需求澄清时：
-
-```text
-[Aria]
-当前状态：spec-required
-下一步：需求澄清与创意探索
-推荐调用：/brainstorming
-说明：该 skill 需要多轮问答交互，请手动调用
-```
-
-当任务处于 `reviewing/testing` 且 review 未完成时（最终版自动调用）：
+当任务需要需求澄清时：
 
 ```text
 [Aria]
-当前状态：reviewing/testing
-review_status：pending
-test_status：passed
-正在调用：/requesting-code-review
-预期产出：cadence/cache/aria/tasks/<task-id>/review-report.md
+当前状态：clarification
+下一步：需求澄清与边界确认
+建议：结合现有代码进行多轮对话，确认目标、影响范围、验收口径
 ```
 
 `orchestrator`（精简版）自身是有状态的。状态以任务为单位持久化，而不是全局单例内存态。
@@ -831,8 +872,12 @@ cadence/cache/aria/
 task_id: aria-20260415-001
 source: vk | native
 flow_type: formal | fast-lane
-status: planned
+risk_level: low | medium | high
+status: plan-review
 current_round: 1
+confirmation_pending: plan
+confirmation_mode: manual
+confirmation_artifact_path: "cadence/cache/aria/tasks/aria-20260415-001/plan-brief.md"
 review_status: pending
 test_status: pending
 patch_required_by: none
@@ -922,15 +967,26 @@ updated_at: "2026-04-15T10:30:00+08:00"
 
 正式任务状态机如下：
 
-`intake -> spec-required -> spec-approved -> planned -> dispatched -> executing -> reviewing/testing -> patching -> verified -> done`
+`intake -> clarification -> spec-drafting -> spec-review -> spec-approved -> planning -> plan-review -> plan-approved -> dispatched -> executing -> reviewing/testing -> patching -> verified -> done`
 
 ### 状态定义
 
 | 状态 | 含义 |
 |------|------|
-| `intake` | 任务进入 Aria，由 `intake` 标准化与分类 |
-| `spec-required` | 任务被判定为正式任务，必须进入 OpenSpec |
-| `spec-approved` | `OpenSpec` 主线工件达到最小完整集合 |
+| `intake` | 任务进入 Aria，完成标准化、风险分级与正式流判定 |
+| `clarification` | 需求澄清阶段，允许多轮交互，并可结合现有代码确认真实影响范围 |
+| `spec-drafting` | 生成或补全 OpenSpec 正式工件集合 |
+| `spec-review` | 向用户展示 spec 摘要或全量内容，等待确认 |
+| `spec-approved` | spec 已确认通过 |
+| `planning` | 基于 spec 生成执行计划、质量门、任务拆分 |
+| `plan-review` | 向用户展示 plan 摘要或全量内容，等待确认 |
+| `plan-approved` | plan 已确认通过 |
+| `dispatched` | dispatch contract 已生成，准备执行 |
+| `executing` | Codex 执行中 |
+| `reviewing/testing` | review / test 正在执行或已部分完成 |
+| `patching` | 基于 review/test 报告执行修补 |
+| `verified` | review/test 已通过，结果可归档 |
+| `done` | 正式闭环完成 |
 
 #### `spec-approved` 最小门槛表
 
@@ -952,87 +1008,105 @@ updated_at: "2026-04-15T10:30:00+08:00"
 
 #### 状态流转与守卫条件
 
-> **v1.4.2 修正**：恢复自动调用定位，仅 `brainstorming` 等多轮交互型 skills 需要用户手动调用。MVP 阶段关键自动调用节点可带用户确认点。
-
 正式任务状态机的每个转换必须满足以下守卫条件：
 
-| 当前状态 | 目标状态 | 进入条件 | 负责角色 | 触发方式 | 退出条件（目标状态完成标志） |
-|---------|---------|---------|---------|---------|---------------------------|
-| `intake` | `spec-required` | intake card 已落盘，flow_type 判定为 `formal` | `orchestrator` | 自动 | intake card 包含 task_id、source、risk_level |
-| `spec-required` | `spec-approved` | 门槛表全部通过（见上方门槛表） | `spec` → 用户确认 | 自动（工件检测）+ 用户确认 | proposal/design/tasks 工件存在且字段完整，用户已确认 |
-| `spec-approved` | `planned` | plan brief 已落盘，包含 plan_id、quality_gates、exec_unit_count、parallel_candidates、acceptance_strategy | `plan` | **自动调用** `writing-plans`（MVP 可带确认点） | plan brief 中所有字段非空，quality_gates 至少 1 条，exec_unit_count >= 1 |
-| `planned` | `dispatched` | 用户显式执行 `aria:run --task-id <id>` | 用户触发 → `orchestrator` | 用户命令触发 | dispatch contract 已为每个 exec_unit 生成，state.yaml 中 exec_units 非空 |
-| `dispatched` | `executing` | 所有 exec_unit 的 dispatch contract 已落盘，worktree 已创建 | `orchestrator` | 自动 | 至少 1 个 exec_unit 状态为 `running` |
-| `executing` | `reviewing/testing` | 所有 exec_unit 状态均为 `succeeded`/`failed`/`timeout`，无 `running` 或 `pending` 状态 | `orchestrator` | 自动 | review_status 和 test_status 不全为 `pending` |
-| `reviewing/testing` | `patching` | review_status 或 test_status 为 `failed` | `orchestrator` | 自动 | patch contract 已生成且落盘，至少 1 个 patch_unit 状态为 `running` |
-| `reviewing/testing` | `verified` | review_status 和 test_status 均为 `passed`，无需 patch | `orchestrator` | 自动 | verification summary 已落盘 |
-| `patching` | `reviewing/testing` | 所有 patch_unit 状态不为 `running`，patch 结果已落盘 | `orchestrator` | 自动 | review_status 和 test_status 被重置为 `pending` |
-| `verified` | `done` | verification summary 与 closure summary 均已落盘 | `orchestrator` | 自动 | 任务标记为 `done`，向 VK 推送完成摘要 |
-| 任意状态 | `cancelled` | 用户执行 `aria:cancel` | 用户触发 | 用户命令触发 | 所有 running 进程已停止，工件保留 |
+| 当前状态 | 目标状态 | 进入条件 | 负责方 | 触发方式 | 退出条件 |
+|---------|---------|---------|-------|---------|---------|
+| `intake` | `clarification` | 任务已标准化，存在需求歧义或边界不清 | `orchestrator` | 自动判定 | 澄清问题已收敛 |
+| `intake` | `spec-drafting` | 需求边界初步清晰，可进入 spec 起草 | `orchestrator` | 自动判定 | spec 起草开始 |
+| `clarification` | `spec-drafting` | 用户通过多轮对话确认需求、边界、目标 | 用户 + `orchestrator` | 用户交互 | 可生成稳定 spec |
+| `spec-drafting` | `spec-review` | OpenSpec 最小工件集合已生成 | `Aria + OpenSpec` | 自动 | spec 摘要或全量内容可供展示 |
+| `spec-review` | `spec-approved` | 用户确认通过，或风险策略允许自动通过 | 用户 / 策略引擎 | 人工确认 / 自动通过 | spec 正式生效 |
+| `spec-approved` | `planning` | spec 已确认通过 | `orchestrator` | 自动 | plan 生成开始 |
+| `planning` | `plan-review` | plan brief、quality gates、task split 已生成 | `Aria + superpowers` | 自动 | plan 摘要或全量内容可供展示 |
+| `plan-review` | `plan-approved` | 用户确认通过，或风险策略允许自动通过 | 用户 / 策略引擎 | 人工确认 / 自动通过 | plan 正式生效 |
+| `plan-approved` | `dispatched` | 用户执行 `aria:run` 或策略允许继续执行 | 用户 + `orchestrator` | 用户命令 | dispatch contract 已生成 |
+| `dispatched` | `executing` | contract、worktree、执行上下文已准备好 | `orchestrator` | 自动 | 至少 1 个 exec_unit 进入 running |
+| `executing` | `reviewing/testing` | 所有 exec_unit 已结束 | `orchestrator` | 自动 | review/test 至少一项完成 |
+| `reviewing/testing` | `patching` | review 或 test 未通过 | `orchestrator` | 自动 | patch contract 已生成 |
+| `reviewing/testing` | `verified` | review 和 test 均通过 | `orchestrator` | 自动 | verification summary 已落盘 |
+| `patching` | `reviewing/testing` | patch 已完成并重新提交验证 | `orchestrator` | 自动 | review/test 状态重置并重新执行 |
+| `verified` | `done` | summary 已落盘且归档条件满足 | `orchestrator` | 自动 | 任务标记完成 |
 
-#### 自动执行型 skills 的流转机制
+### `superpowers` 能力的介入方式
 
-> **v1.4.2 修正**：`writing-plans`、`requesting-code-review`、`verification-before-completion` 等自动执行型 skills 由 orchestrator 自动调用，不再需要用户显式触发。
+`Aria` 不追求“跳过用户确认的一路自动调用”，而是按状态与风险策略组织 `superpowers` 对应能力。
 
-**`spec-approved` → `planned` 的自动流转流程**：
+#### planning 阶段
 
-```text
-1. Orchestrator 检测到状态为 spec-approved
-2. [MVP 可选] PromptService 输出确认提示："即将自动调用 /writing-plans 制定执行计划，是否继续？"
-3. Orchestrator 自动调用 /writing-plans skill
-4. Skill 执行完成后，plan brief 工件落盘
-5. Orchestrator 检测到 plan-brief.md 存在且字段完整
-6. StateMachine 执行 spec-approved -> planned 转换
-```
+1. `spec-approved` 后，Aria 组织 `planning` 能力执行
+2. 生成 `plan brief`、质量门、任务拆分结果
+3. 进入 `plan-review`
+4. 向用户展示摘要或全量内容
+5. 由用户确认，或由低风险策略自动通过
 
-**`executing` → `reviewing/testing` 的自动 review 流程**：
+#### review / test 阶段
 
-```text
-1. Orchestrator 检测到所有 exec_unit 已完成
-2. 状态自动进入 reviewing/testing
-3. [MVP 可选] PromptService 输出确认提示
-4. Orchestrator 自动调用 /requesting-code-review skill
-5. Skill 执行完成后，review report 工件落盘
-6. Orchestrator 读取 review report 并更新 review_status
-```
+1. `executing` 完成后，Aria 自动进入 `reviewing/testing`
+2. Aria 组织 review 与 verification 对应能力执行
+3. 生成 `review report` 与 `test report`
+4. 若结果要求 patch，则自动进入 `patching`
+5. 若 patch 导致边界变化，则退回 `plan-review` 或 `spec-review`
 
-**`executing` → `reviewing/testing` 的自动 test 流程**：
+#### clarification 阶段
 
-```text
-1. 与 review 并行（或按序）进行
-2. [MVP 可选] PromptService 输出确认提示
-3. Orchestrator 自动调用 /verification-before-completion skill
-4. Skill 执行完成后，test report 工件落盘
-5. Orchestrator 读取 test report 并更新 test_status
-```
-
-#### 多轮交互型 skills 的流转机制
-
-**`brainstorming` 的用户交互流程**（仅在 intake/spec-required 阶段可选使用）：
-
-```text
-1. Orchestrator 判断当前需求边界不够清晰
-2. PromptService 输出："建议调用 /brainstorming 进行需求澄清，该 skill 需要多轮问答交互"
-3. 用户调用 /brainstorming 并完成多轮交互
-4. 产出工件（如澄清后的 proposal）落盘
-5. Orchestrator 读取工件后继续推进状态
-```
-
-**规则**：
-1. **自动执行型 skills**：orchestrator 自动调用，skill 执行结果通过工件落盘被 Aria 感知
-2. **多轮交互型 skills**：用户未在合理时间内调用时，状态保持不变，orchestrator 可在后续 `aria:status` 查询时再次提示
-3. 所有 skill 调用结果必须通过**工件落盘**被 Aria 感知，而不是通过内存事件
-4. 若产出工件不满足守卫条件，orchestrator 应明确指出缺失项，状态不推进
-5. **MVP 阶段**：关键自动调用节点可增加用户确认提示，最终目标是全自动编排
+1. 当需求边界不清、验收不稳或需要结合已有代码确认时，进入 `clarification`
+2. 该阶段默认允许多轮交互
+3. 用户未完成澄清前，状态保持不变，不强行推进
+4. 澄清结果应沉淀为可消费工件，再继续后续流转
 
 **异常路径守卫**：
 
 | 异常场景 | 守卫条件 | 处理方式 |
 |---------|---------|---------|
 | 部分成功 | 存在 `failed`/`timeout` 的 exec_unit 且无 `running` | 进入 `reviewing/testing`，由 review/test 判定是否需要 patch |
-| patch 超限 | `patch_round` 达到上限（默认 2） | 退回 `planned`（边界仍有效）或 `spec-required`（边界已失效） |
+| patch 超限 | `patch_round` 达到上限（默认 2） | 退回 `plan-review`（边界仍有效）或 `spec-review`（边界已失效） |
 | 状态恢复 | state.yaml 存在且工件目录完整 | 从当前状态继续；若工件损坏，停止执行并要求人工恢复 |
 | 重试 | 执行单元状态为 `failed`/`timeout`/`cancelled` 且 `attempt` 未超上限 | 允许 `aria:retry`；超限则提示退回 `plan` |
+
+## 风险分级驱动的确认策略
+
+Aria 不采用“一律自动通过”或“一律人工确认”的单一策略，而采用 **风险分级驱动的确认机制**。
+
+### 判定维度
+
+确认策略由以下因素共同决定：
+
+1. `flow_type`：`formal` / `fast-lane`
+2. `risk_level`：`low` / `medium` / `high`
+3. 边界清晰度：是否存在需求歧义、范围不明、验收不清
+4. 影响范围：是否跨模块、跨接口、跨工作区
+5. 执行复杂度：是否涉及并行拆分、多执行单元、多轮 patch 风险
+
+### 总体规则
+
+1. `formal` 任务：
+   - `spec-review` 必须人工确认
+   - `plan-review` 必须人工确认
+
+2. `fast-lane` 任务：
+   - 若满足低风险条件，可自动通过部分确认点
+   - 任一条件不满足时，必须转人工确认或升级为正式流
+
+3. 出现以下任一情况时，强制进入 `clarification` 或人工确认：
+   - 需求不清晰
+   - 边界不清晰
+   - 需要结合现有代码确认改动范围
+   - 存在跨模块影响
+   - 存在接口、状态、数据结构调整
+
+### 低风险自动通过条件
+
+仅当以下条件同时满足时，才允许自动通过确认点：
+
+1. `flow_type = fast-lane`
+2. `risk_level = low`
+3. 单文件或单一明确 ownership 范围
+4. 无新增设计决策
+5. 无跨模块影响
+6. 无并行拆分
+7. 无状态迁移、数据迁移、发布影响
+8. spec / plan 的边界与验收条件无歧义
 
 ### fast-lane 轻量通道
 
@@ -1063,9 +1137,9 @@ updated_at: "2026-04-15T10:30:00+08:00"
 
 #### 升级失败时的行为
 
-1. **用户提示**：`orchestrator` 明确告知用户"fast-lane 已超界，但正式流所需的 `<缺失项>` 不可用，任务已挂起"
+1. **用户提示**：`orchestrator` 明确告知用户"fast-lane 已超界，但正式流前置基础设施存在异常，任务已挂起"
 2. **保留工件**：已产生的 `fast-lane` 运行时工件（执行记录、轻量报告）全部保留，不清理
-3. **恢复入口**：用户修复依赖后，可通过 `aria:run --task-id <id> --resume` 自动检测依赖并尝试升级为正式流
+3. **恢复入口**：用户修复环境后，可通过 `aria:run --task-id <id> --resume` 自动检测并尝试升级为正式流
 4. **降级选择**：用户也可以选择取消升级，将任务标记为 `cancelled` 并手动接管
 
 #### 状态机补充
@@ -1075,7 +1149,7 @@ fast-lane execute -> review/testing-lite -> done
                 |
                 -> 超界需升级
                       |
-                      -> 依赖可用 -> 进入 formal flow (intake -> spec-required)
+                      -> 依赖可用 -> 进入 formal flow (intake -> clarification/spec-drafting)
                       -> 依赖不可用 -> upgrade-blocked -> awaiting-dependency-fix
 ```
 
@@ -1891,7 +1965,7 @@ capability_mapping:
 3. 若映射配置中某个 `capability_id` 对应的 skill 全部不可用，则该 capability 标记为 `unavailable`
 4. **自动调用型 skills**（`execution_mode: auto`）：orchestrator 在对应状态节点直接通过 `Skill` 工具加载并执行，通过检测产出工件推进状态
 5. **交互型 skills**（`execution_mode: interactive`）：`PromptService` 生成调用指引，等待用户手动触发
-6. MVP 阶段：自动调用型 skills 可在调用前增加用户确认提示，但最终版本应直接自动调用
+6. MVP 阶段：自动调用型 skills 可在调用前增加用户确认提示；后续版本仍保留由风险策略驱动的确认点，不追求一律跳过确认
 7. 用户可通过修改配置文件将 `capability_id` 映射到不同的 skill 实现，无需修改 Aria 代码
 
 ## Runtime Schemas
@@ -1904,7 +1978,7 @@ capability_mapping:
 
 详细配套文档见：
 
-- `cadence/designs/2026-04-16_配套设计_Runtime-Schemas_Cadence-Aria_v1.0.md`
+- `cadence/designs/2026-04-16_配套设计_Runtime-Schemas_Cadence-Aria_v1.0.md`（当前修订：v1.0.2）
 
 ### `state.yaml` schema 摘要
 
@@ -1913,8 +1987,12 @@ capability_mapping:
 | `task_id` | string | 是 | `aria-YYYYMMDD-NNN` |
 | `source` | enum | 是 | `vk \| native \| aria-native` |
 | `flow_type` | enum | 是 | `formal \| fast-lane` |
+| `risk_level` | enum | 是 | `low \| medium \| high` |
 | `status` | enum | 是 | 状态机中定义的合法状态 |
 | `current_round` | integer | 是 | `>= 1` |
+| `confirmation_pending` | enum | 是 | `none \| spec \| plan` |
+| `confirmation_mode` | enum | 是 | `manual \| auto-policy` |
+| `confirmation_artifact_path` | string/null | 是 | 指向待确认工件，可为 `null` |
 | `review_status` | enum | 是 | `pending \| passed \| failed` |
 | `test_status` | enum | 是 | `pending \| passed \| failed` |
 | `patch_required_by` | enum | 是 | `none \| review \| test \| both` |
@@ -1971,6 +2049,8 @@ capability_mapping:
 | `exec_unit_count` | integer | 是 | `>= 1` |
 | `parallel_candidates` | array | 否 | 每项为 exec unit 组 |
 | `acceptance_strategy` | enum/string | 是 | 一期至少支持 `all_units_pass` |
+| `approval_required` | boolean | 否 | formal 任务建议为 `true` |
+| `approval_mode` | enum | 否 | `manual \| auto-policy` |
 | `generated_at` | datetime string | 是 | ISO 8601 |
 
 ### `review report` / `test report` schema 摘要
@@ -1983,6 +2063,7 @@ capability_mapping:
 | `exec_units_reviewed` | string[] | 是 | 不得为空 |
 | `blockers` | object[] | 否 | 每项必须有 `issue_id` 与 `severity` |
 | `suggestions` | object[] | 否 | 建议项不得进入 `must_fix` |
+| `security_findings` | object[] | 否 | 安全审查结果 |
 | `verdict` | enum | 是 | `passed \| failed \| needs_patch` |
 | `reviewed_at` | datetime string | 是 | ISO 8601 |
 
@@ -2125,7 +2206,7 @@ capability_mapping:
 | 错误类型 | 处理方式 |
 |---------|---------|
 | 前置依赖错误 | 阻断流转，给出明确缺失项 |
-| OpenSpec 创建失败 | 回退到 `spec-required`，等待修复 |
+| OpenSpec 创建失败 | 回退到 `clarification` 或 `spec-drafting`，等待修复 |
 | Codex 执行失败 | 标记执行单元失败，可重试 |
 | review/test 失败 | 进入 `patching` |
 | 状态损坏 | 停止继续执行，要求人工恢复或重建 |
@@ -2250,15 +2331,17 @@ vibe_kanban:
 
 ### `aria:start`
 
-`aria:start` 的结束状态固定为 `planned`。用户确认计划后，由 `aria:run --task-id <id>` 进入 `dispatched`。
+`aria:start` 负责驱动正式流从 `intake` 进入 `clarification/spec-drafting/spec-review/planning/plan-review`。在正常场景下，`aria:start` 的结束状态固定为 `plan-review`，或在需求未收敛时停在 `clarification`。
+
+用户确认 spec 与 plan 后，任务进入 `plan-approved`；随后由 `aria:run --task-id <id>` 进入 `dispatched`。
 
 ### 计划修改语义
 
 为避免把“终止执行”和“重开计划”混用，一期增加显式的计划重开语义：
 
-1. `planned` 状态下如需修改计划，不使用 `aria:cancel`
+1. `plan-review` 或 `plan-approved` 状态下如需修改计划，不使用 `aria:cancel`
 2. 用户可重新执行 `aria:start --task-id <id> --replan`
-3. `--replan` 只允许在 `planned`、`spec-approved`、`upgrade-blocked` 状态使用
+3. `--replan` 只允许在 `plan-review`、`plan-approved`、`spec-approved`、`upgrade-blocked` 状态使用
 4. `--replan` 会保留原 `task-id`，生成新的 `plan_id`
 5. 旧 `plan brief` 与旧 contract 不删除，转入 `superseded` 状态，供审计与回溯
 6. 若任务已进入 `executing` 及之后状态，想改边界必须先显式取消或退回
@@ -2266,9 +2349,9 @@ vibe_kanban:
 #### `--replan` 的状态语义
 
 ```text
-planned
+plan-review / plan-approved
   -> aria:start --task-id <id> --replan
-  -> spec-approved 或 planned（重算计划）
+  -> spec-approved / planning / plan-review（重算计划）
 ```
 
 该示例要求：
@@ -2368,7 +2451,7 @@ aria:run --task-id aria-20260415-001 --retry-failed
 **结论**：
 - 自动执行型 skills **可以被自动调用**，orchestrator 可在对应状态节点自动加载并执行
 - 多轮交互型 skills 保留用户交互，在需求澄清等阶段由用户主动调用
-- MVP 阶段可在关键自动调用节点增加用户确认提示，最终目标是全自动编排
+- MVP 阶段可在关键节点增加更多用户确认提示；最终目标仍是自动编排，但保留由风险策略驱动的确认点
 
 **失败处理**：
 - 若自动执行型 skills 调用后无法正确产出工件：增加更多的人工确认点，或在特定状态退化为提示用户手动调用
@@ -2450,7 +2533,7 @@ aria:run --task-id aria-20260415-001 --retry-failed
 | 假设 3：Codex CLI prompt 注入 | **成立** | Codex CLI v0.121.0 已安装，`codex exec "prompt"` 可直接注入并执行 |
 
 **基于验证结果的方案调整**：
-1. 假设 1 的结论支持 orchestrator 恢复"全自动编排"定位，自动执行型 skills 由 Aria 自动调用，仅 brainstorming 等交互型 skills 保留用户介入
+1. 假设 1 的结论支持 orchestrator 采用“自动编排 + 用户确认点”定位，自动执行型 skills 由 Aria 组织调用，仅 `brainstorming` 等交互型 skills 保留用户介入
 2. 假设 2 的通过意味着并行模型可继续推进，但需在 P0 中增加真实场景二次确认
 3. 假设 3 的通过意味着 Codex adapter 设计无需调整
 
@@ -2567,24 +2650,36 @@ exec 完成
 
 详细配套文档见：
 
-- `cadence/designs/2026-04-16_配套设计_Implementation-Layout_Cadence-Aria_v1.0.md`
+- `cadence/designs/2026-04-16_配套设计_Implementation-Layout_Cadence-Aria_v1.0.md`（当前修订：v1.0.2）
 
 ```text
 cadence-aria/
-  commands/
-  skills/
-  references/
-  templates/
-  runtime/
-    contracts/
-    states/
-    reports/
+  src/
+    commands/
+    runtime/
+      orchestrator/
+      state-machine/
+      scheduler/
+      arbitrator/
+      contracts/
+      reports/
+      persistence/
     adapters/
+      codex/
+      openspec/
+      superpowers/
+      vk/
+      host/
+    schemas/
+    config/
+    diagnostics/
+    utils/
+  skills/
+  templates/
   codex/
-    roles/
     prompts/
-    workflows/
     templates/
+  tests/
   docs/
 ```
 
@@ -2592,18 +2687,17 @@ cadence-aria/
 
 | 目录 | 职责 |
 |------|------|
-| `commands/` | 用户可见的工作流入口 |
+| `src/commands/` | 用户可见的工作流入口 |
 | `skills/` | Aria 自己的编排 skill |
-| `references/` | 角色矩阵、兼容说明、依赖说明 |
 | `templates/` | Aria 自有运行时工件模板 |
-| `runtime/contracts/` | 角色输入输出协议 |
-| `runtime/states/` | 状态机与升级规则 |
-| `runtime/reports/` | 汇总与闭环摘要格式 |
-| `runtime/adapters/` | Claude 与 Codex 的本地桥接逻辑 |
-| `codex/roles/` | Codex 侧角色定义 |
+| `src/runtime/contracts/` | contract 生成、校验与序列化 |
+| `src/runtime/state-machine/` | 状态机与守卫条件 |
+| `src/runtime/reports/` | 汇总与闭环摘要格式 |
+| `src/runtime/persistence/` | 状态与运行时工件落盘 |
+| `src/adapters/` | Claude / Codex / OpenSpec / superpowers / VK / host 的桥接逻辑 |
 | `codex/prompts/` | Codex 侧角色提示与边界约束 |
-| `codex/workflows/` | Codex 执行与修补流程 |
 | `codex/templates/` | Codex 输出模板 |
+| `tests/` | 单元、集成与 E2E 测试 |
 
 
 ## 工件边界
@@ -2647,8 +2741,8 @@ cadence-aria/
 | 命令 | 作用 |
 |------|------|
 | `aria:intake` | 统一任务入口，决定 formal 或 fast-lane 建议 |
-| `aria:start` | 启动正式流，驱动 `intake -> spec -> plan` |
-| `aria:run` | 启动或继续正式执行流，驱动 `dispatch -> exec -> review/test -> patch` |
+| `aria:start` | 启动正式流，驱动 `intake -> clarification/spec-drafting -> spec-review -> planning -> plan-review` |
+| `aria:run` | 启动或继续正式执行流，驱动 `plan-approved -> dispatch -> exec -> review/test -> patch` |
 | `aria:fast` | 启动小修小补轻量流 |
 | `aria:status` | 查看当前任务状态、质量门状态、来源与阻塞点 |
 | `aria:result` | 输出当前任务闭环摘要 |
@@ -2795,7 +2889,7 @@ aria:run --task-id aria-20260415-001 --retry-failed
 
 详细配套文档见：
 
-- `cadence/designs/2026-04-16_配套设计_CLI-Interactions_Cadence-Aria_v1.0.md`
+- `cadence/designs/2026-04-16_配套设计_CLI-Interactions_Cadence-Aria_v1.0.md`（当前修订：v1.0.1）
 
 #### 示例 1：native formal flow
 
@@ -2814,11 +2908,33 @@ $ aria:intake "为 Aria 增加 capability report 结构化输出"
 $ aria:start --task-id aria-20260416-001
 
 [Aria]
-- status: planned
+- status: spec-review
+- clarification_required: false
+- spec_summary:
+  - goal: "为 Aria 增加 capability report 结构化输出"
+  - scope: "新增 capability report 结构、落盘逻辑与 CLI 展示"
+  - risks: [schema_drift, compatibility]
+- next: confirm-spec --task-id aria-20260416-001
+```
+
+```text
+$ confirm-spec --task-id aria-20260416-001
+
+[Aria]
+- status: plan-review
 - plan_id: plan-aria-20260416-001
 - exec_unit_count: 2
 - parallel_candidates: [exec-01, exec-02]
 - quality_gates: [format_check, contract_validation]
+- next: confirm-plan --task-id aria-20260416-001
+```
+
+```text
+$ confirm-plan --task-id aria-20260416-001
+
+[Aria]
+- status: plan-approved
+- approved_plan_id: plan-aria-20260416-001
 - next: aria:run --task-id aria-20260416-001
 ```
 
@@ -2850,7 +2966,7 @@ $ aria:start --task-id aria-20260416-001 --replan
 - previous_plan_id: plan-aria-20260416-001
 - new_plan_id: plan-aria-20260416-002
 - superseded: [plan-aria-20260416-001]
-- status: planned
+- status: plan-review
 ```
 
 该示例要求：
@@ -3134,26 +3250,60 @@ Aria 作为一个多角色编排系统，自身需要独立的测试策略。
 
 MVP 必须覆盖的最小闭环场景：
 
-1. **正式流完整闭环**：`aria:intake` → `aria:start` → Aria 自动调用 `writing-plans` 完成 plan（MVP 可带确认点）→ `aria:run` → exec 完成 → Aria 自动调用 `requesting-code-review` / `verification-before-completion` → `done`
+1. **正式流完整闭环**：`aria:intake` → `aria:start` → `clarification/spec-drafting` → `spec-review` → `planning` → `plan-review` → `aria:run` → exec 完成 → `reviewing/testing` → `done`
 2. **正式流带 patch**：`aria:run` → review fail → patch → Aria 自动重新执行 review → `done`
 3. **fast-lane 闭环**：`aria:fast` → exec → review-lite pass → `done`
 4. **fast-lane 升级**：`aria:fast` → scope 超界 → 升级到正式流
 5. **取消与恢复**：`aria:run` → 中途 `aria:cancel` → `aria:run --resume`
 
-## 用户确认计划的交互方式
+## 用户确认的交互方式
 
-`aria:start` 的结束状态固定为 `planned`，采用**方案 B**交互模式：
+Aria 采用“摘要优先、全量可追溯”的确认模式。
 
-1. `aria:start` 执行完毕时，自动展示 plan brief 摘要（exec_unit_count、parallel_candidates、quality_gates）
-2. 提示用户："计划已生成。确认后执行 `aria:run --task-id <id>`，或先使用 `aria:status --task-id <id>` 查看完整计划"
-3. `aria:run` 启动时不做额外确认，直接从 `planned → dispatched` 转换
-4. 如果用户需要修改计划，应使用 `aria:start --task-id <id> --replan`
+### 通用确认原则
 
-**设计理由**：
+1. 到达 `spec-review` 或 `plan-review` 时，Aria 必须先展示摘要
+2. 用户可进一步查看全量工件
+3. 用户确认后，Aria 才继续推进
+4. 对满足低风险条件的任务，允许策略自动通过确认点
+5. `formal` 任务默认不得跳过人工确认
 
-1. 符合"命令少而稳"原则
-2. 用户确认动作就是"执行 aria:run"，不需要额外的确认步骤
-3. 计划修改通过显式 `--replan` 完成，避免把业务重开与执行取消混为一谈
+### `spec-review` 交互方式
+
+Aria 至少展示：
+
+- 任务目标摘要
+- scope / non-goals 摘要
+- 关键设计决策
+- 风险点
+- 关联工件路径
+
+用户可以：
+
+- 确认通过
+- 要求补充澄清
+- 要求修改 spec
+
+### `plan-review` 交互方式
+
+Aria 至少展示：
+
+- exec_unit_count
+- parallel_candidates
+- quality_gates
+- ownership 切分
+- 验收策略
+- 关键风险
+
+用户可以：
+
+- 确认通过并进入执行
+- 要求重新规划
+- 要求回退到 spec
+
+### 自动通过策略
+
+仅当任务满足低风险自动通过条件时，`spec-review` 或 `plan-review` 才允许由策略自动通过；否则必须等待用户确认。
 
 ## 分阶段开发路线图
 
@@ -3161,17 +3311,17 @@ MVP 必须覆盖的最小闭环场景：
 
 ### P0 - MVP 验证
 
-> **v1.4.2 修正**：P0 目标恢复为"验证全自动编排（MVP 带关键节点用户确认点）+ Codex 执行"。
+> **v1.4.2 修正**：P0 目标调整为“验证自动编排 + 用户确认点 + Codex 执行”。
 
-**目标**：验证核心假设，确认"Aria 自动调用 superpowers skills（自动执行型）+ Codex 执行"的技术路线可行。
+**目标**：验证核心假设，确认“Aria 自动编排流程、在关键节点停给用户确认，并驱动 Codex 执行”的技术路线可行。
 
 **交付物**：
 
 1. `adapters/host/`：宿主能力适配器（Bash 执行、文件读写、Git 操作）
 2. `adapters/codex/`：Codex CLI 最小适配器（启动、prompt 注入、结果收集）
-3. `runtime/state-machine/`：最小状态机（`intake → executing → done`）
+3. `runtime/state-machine/`：最小状态机（`intake → clarification/spec-drafting → spec-review → planning → plan-review → executing → done`）
 4. `runtime/persistence/`：state.yaml 读写
-5. `runtime/orchestrator/prompt-service/`：最小 PromptService（能在 spec-approved / reviewing/testing 等状态输出下一步提示）
+5. `runtime/orchestrator/prompt-service/`：最小 PromptService（能在 `clarification` / `spec-review` / `plan-review` / `reviewing/testing` 等状态输出下一步提示）
 6. `commands/aria:fast`：唯一用户入口（仅支持串行 fast-lane）
 7. `schemas/`：最小 Zod schema（state.yaml）
 
@@ -3179,25 +3329,23 @@ MVP 必须覆盖的最小闭环场景：
 
 ````text
 1. 执行 aria:fast 进入 fast-lane
-2. Aria 自动完成 intake，状态到达 spec-required
-3. 用户手动完成 spec（生成 OpenSpec 最小工件集合）
-4. Aria 检测到 spec-approved
-5. [MVP] PromptService 输出确认提示，用户确认后 Aria 自动调用 /writing-plans
-6. [最终版] Aria 直接自动调用 /writing-plans，生成 plan-brief.md
-7. Aria 读取 plan brief，自动流转到 planned
-8. 用户执行 aria:run，Aria 调度 Codex exec 完成最小修改
-9. exec 完成后，Aria 自动进入 reviewing/testing
-10. [MVP] PromptService 输出确认提示，用户确认后 Aria 自动调用 /requesting-code-review 和 /verification-before-completion
-11. [最终版] Aria 直接自动调用 review/test skills，生成 review-report.md / test-report.md
-12. Aria 读取报告，自动流转到 verified → done
-13. 验证 state.yaml、diff、报告三者一致
+2. Aria 自动完成 intake，必要时进入 clarification
+3. 用户通过多轮对话或确认，完成 spec 工件收敛
+4. Aria 展示 spec 摘要，用户确认后进入 spec-approved
+5. Aria 组织 planning 能力，生成 plan-brief.md
+6. Aria 展示 plan 摘要，用户确认后进入 plan-approved
+7. 用户执行 aria:run，Aria 调度 Codex exec 完成最小修改
+8. exec 完成后，Aria 自动进入 reviewing/testing
+9. Aria 组织 review/test 对应能力，生成 review-report.md / test-report.md
+10. Aria 读取报告，自动流转到 verified → done
+11. 验证 state.yaml、diff、报告三者一致
 ````
 
 **通过准则**：
 
 1. 单轮 `exec` 能稳定完成，且结果、diff、状态三者一致
-2. PromptService 能在正确状态输出准确的自动调用提示或确认提示
-3. Aria 能自动调用 superpowers skills 并正确读取工件、推进状态（MVP 允许带确认点）
+2. PromptService 能在正确状态输出准确的澄清提示、确认提示和下一步提示
+3. Aria 能组织 `OpenSpec` / `superpowers` 对应能力，并正确读取工件、推进状态
 4. 至少 1 个失败场景能稳定进入 `patch`
 5. capability report 中的降级项能触发预期降级，而不是直接崩溃
 6. 状态恢复后不会重复调度已完成单元
@@ -3212,7 +3360,7 @@ MVP 必须覆盖的最小闭环场景：
 
 **验证失败时**：
 - 若 Codex 桥接失败：退化为"纯人工执行 + Aria 记录状态"模式
-- 若自动编排失败（如 skill 自动调用后无法正确产出工件）：增加更多的人工确认点，或在特定状态退化为"提示用户手动调用 skill"
+- 若自动编排失败（如无法稳定组织对应能力产出工件）：增加更多的人工确认点，或在特定状态退化为“用户主导确认后再推进”
 - 若后台进程不稳定：采用串行调度模式，并行设计标记为"暂不启用"
 
 ### P1 - 正式流闭环
@@ -3232,9 +3380,9 @@ MVP 必须覆盖的最小闭环场景：
 
 **通过准则**：
 
-1. `aria:intake` → `aria:start` → Aria 自动调用 `writing-plans` 完成 plan → `aria:run` → exec 完成 → Aria 自动调用 `requesting-code-review` / `verification-before-completion` 完成 review/test → `done` 的完整自动闭环
+1. `aria:intake` → `clarification/spec-drafting` → `spec-review` → `spec-approved` → `planning` → `plan-review` → `plan-approved` → `aria:run` → `executing` → `reviewing/testing` → `done` 的完整协同闭环
 2. `aria:run` → review fail → patch → Aria 自动重新执行 review → `done` 的自动闭环
-3. PromptService 在 `spec-approved`、`reviewing/testing` 等状态能输出准确的自动调用提示或确认提示
+3. PromptService 在 `clarification`、`spec-review`、`plan-review`、`reviewing/testing` 等状态能输出准确提示
 4. spec-approved 门槛检查能正确阻断不完整的 OpenSpec 工件
 5. 文件范围校验能检测越界变更
 
@@ -3397,8 +3545,11 @@ security_findings:
 - 一个新的 `Claude Code plugin`（TypeScript + pnpm + vitest + zod）
 - 带有正式 `Aria runtime` 与薄 `Codex adapter`
 - orchestrator 拆分为 `StateMachine` + `PromptService` + `Scheduler` + `Arbitrator` + `SyncService`
-- **全自动编排 + 关键节点确认**模式：Aria 负责状态维护、执行调度、工件衔接；自动执行型 superpowers skills（`writing-plans`、`requesting-code-review`、`verification-before-completion` 等）由 Aria 在对应状态节点**自动调用**；多轮交互型 skills（如 `brainstorming`）保留用户交互
-- MVP 阶段在关键自动调用节点（`spec-approved → planned`、`executing → reviewing/testing`）可保留用户确认点，最终版本移除确认实现全自动
+- 采用“自动编排 + 用户确认点”的协同模式，而不是无人值守式全自动
+- `OpenSpec` 与 `superpowers` 是 `Claude Code` 侧前置基础设施，不作为正常降级依赖处理
+- 需求澄清、spec 确认、plan 确认属于正式流的正常组成部分
+- 低风险任务可按策略自动通过部分确认点，正式任务必须人工确认
+- 自动执行型能力由 Aria 组织调用，但不会替代用户在关键边界节点的决策权
 - 以 `issue` 为最小闭环单位
 - 强制正式任务进入 `OpenSpec`
 - 通过能力抽象层（`capability_id`）映射 superpowers 调用，不硬编码 skill 名称；`capability_mapping` 增加 `execution_mode` 字段区分 `auto` 与 `interactive`
@@ -3406,12 +3557,12 @@ security_findings:
 - 按分阶段路线图（P0-P3）交付
 - 预留 `branch / PR` 扩展接口
 
-**v1.4.2 关键修正**：
+**v1.4.3 关键修正**：
 
-1. 恢复 `Aria` 的"全自动多角色编排器"定位（MVP 阶段关键节点带用户确认点）
-2. `superpowers` 的调用方式修正为：自动执行型 skills 由 Aria **自动调用**，不需要用户显式输入 `/skill-name`；只有 `brainstorming` 等多轮交互型 skills 需要用户介入
-3. `PromptService` 负责两类提示：自动执行型 skills 的"自动调用提示/MVP 确认提示"，以及多轮交互型 skills 的"用户调用指引"
-4. 需要 superpowers 能力的状态转换（`spec-approved → planned`、review、test）主要由 Aria **自动调用 skill + 检测工件落盘**推进，不再需要用户手动触发
+1. 将 `OpenSpec` 与 `superpowers` 明确为 `Claude Code` 侧前置基础设施，而不是正常降级依赖
+2. 将 orchestrator 定位修正为“自动编排 + 用户确认点”，不再使用“无人值守式全自动”表述
+3. 在正式流中补入 `clarification`、`spec-review`、`plan-review`，把需求澄清与工件确认纳入正常状态机
+4. 将 `superpowers` 的介入方式收敛为：Aria 组织对应能力执行；自动执行型能力负责产出工件，关键边界节点仍由用户确认或由低风险策略自动通过
 
 这一定位能够同时满足：
 
