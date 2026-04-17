@@ -1,6 +1,6 @@
 # Cadence-Aria 一期收敛方案设计
 
-> **版本**：v1.0
+> **版本**：v1.1
 > **日期**：2026-04-17
 > **定位**：在 [`cadence/designs/2026-04-16_方案设计_Cadence-Aria_v1.4.md`](../designs/2026-04-16_方案设计_Cadence-Aria_v1.4.md) 基础上，对一期实现范围、能力边界与落地顺序做收敛设计。
 
@@ -28,7 +28,7 @@
 
 1. 从 `native issue` 建立正式任务
 2. 跑通完整正式流状态：
-   `intake -> clarification -> spec-drafting -> spec-review -> spec-approved -> planning -> plan-review -> plan-approved -> dispatch -> executing -> reviewing/testing -> patching(按需) -> verified -> done`
+   `intake -> clarification -> spec-drafting -> spec-review -> spec-approved -> planning -> plan-review -> plan-approved -> dispatched -> executing -> reviewing/testing -> patching(按需) -> verified -> done`
 3. 支持前段正式工件：
    - `task intake card`
    - `spec artifact`
@@ -55,6 +55,12 @@
 4. 重型策略引擎或全量调用审计系统
 5. 复杂跨多阶段自动回退
 6. 大规模可配置执行模式
+
+### 2.3 术语约定
+
+本文中的 `native issue` 特指通过 `Aria` 原生命令入口建立的任务。
+
+在运行时来源字段中，一期建议将其映射为 `aria-native`。
 
 ## 3. 架构总览
 
@@ -96,6 +102,8 @@
 - 在正确阶段把它们注入给 `Claude` 或 `Codex`
 - 回收产出并写成结构化 runtime 工件
 - 用 guard 决定状态能否继续推进
+
+其中，`Codex` 消费的是由 `Aria` 注入的 `OpenSpec` / `superpowers` 上下文引用，而不是直接承担这两套基础设施的生命周期管理与正式主线维护。
 
 ## 4. 角色与职责边界
 
@@ -185,6 +193,44 @@
 4. `review` 与 `test` 在状态机上合并为 `reviewing/testing`，执行上允许并行
 5. `patching` 为条件状态，仅在 `arbitrator` 判定存在必须修补项时进入
 
+### 5.3 `dispatch` 与 `dispatched` 的语义约定
+
+为避免动作名与状态名混用，一期统一采用以下约定：
+
+- `dispatch` 表示状态推进动作，含义为：基于 approved `plan` 生成并下发 `dispatch contract`
+- `dispatched` 表示正式流状态值，含义为：任务已完成派发，并具备进入 `executing` 的前置条件
+
+因此，`dispatch` 在本文中不作为状态值使用；状态机中的对应状态统一使用 `dispatched`。
+
+进入 `dispatched` 的条件至少包括：
+
+1. 已存在 approved `plan`
+2. 至少一个合法 `dispatch contract` 已生成
+3. 所有待执行单元的 `dispatch contract` 已通过 scope 与 capability 校验
+4. `state.yaml` 中的执行单元映射已完成初始化
+
+### 5.4 `reviewing/testing` 的聚合状态定义
+
+`reviewing/testing` 是一期正式流中的聚合状态。
+
+在该状态内：
+
+- `review` 与 `test` 是两类独立执行活动
+- 两者可以串行执行，也可以并行执行
+- 两者分别产出独立的 `review report` 与 `test report`
+- 状态机不因单一报告先完成而提前离开该状态
+
+`review` 的终态定义为：已生成合法 `review report`，且其 `verdict` 属于可判定终值。  
+`test` 的终态定义为：已生成合法 `test report`，且其 `verdict` 属于可判定终值。
+
+只有当 `review` 与 `test` 均进入终态后，任务才允许离开 `reviewing/testing`，并由 `arbitrator` 基于两类报告进行统一判定。
+
+统一判定后的状态去向仅允许为：
+
+1. `verified`：满足 review/test 通过条件
+2. `patching`：存在必须修补项，且仍处于合法可修补范围内
+3. `blocked`：结果证据不足、运行失败、状态不一致，或无法形成合法仲裁结论
+
 ## 6. 节点-能力映射
 
 下表定义每个节点如何使用 `OpenSpec` 与 `superpowers`。
@@ -208,6 +254,8 @@
 | `done` | 标记正式主线闭环完成 | 前序方法保证已兑现 | Aria | 输出 `closure summary` |
 
 ## 7. 运行时工件与最小 Schema
+
+状态推进语义、角色边界与 Guard 约束以本方案为准；字段级 schema、枚举值和值域定义以 Runtime Schemas 配套文档为准。
 
 ### 7.1 一期最小工件集合
 
@@ -256,9 +304,12 @@
 - `status`
 - `current_round`
 - `confirmation_pending`
+- `confirmation_mode`
+- `confirmation_artifact_path`
 - `review_status`
 - `test_status`
 - `patch_required_by`
+- `patch_round`
 - `active_exec_units`
 - `exec_units`
 - `patch_units`
@@ -377,6 +428,8 @@
 4. **Review / Test Guard**
    - 没有合法 `review report` / `test report` 不能离开 `reviewing/testing`
    - 缺少 `baseline_refs` 或 `method_refs` 视为未完成
+   - 仅当 `review` 与 `test` 均进入终态后，才允许触发统一仲裁
+   - 单一报告先完成不构成离开 `reviewing/testing` 的条件
 
 5. **Verification Guard**
    - 未满足 review/test 通过条件，不能进入 `verified`
@@ -412,31 +465,37 @@
 4. 在 `OpenSpec` 或 `superpowers` 缺失时启动 `patch`
 5. 缺少正式基准或方法依据时，把 `review/test` 视为已完成
 
-### 9.3 blocked / retry 边界
+### 9.3 `blocked` / `retry` / `patching` 边界
 
-进入 `blocked` 的条件：
+一期对三者的语义约定如下：
 
-- 关键能力缺失
-- 关键工件缺失或非法
-- guard 不满足
-- runtime 状态损坏
-- 外部依赖不可恢复失败
+- `patching`：业务结果不通过，但任务输入、能力与状态仍合法，因此进入修补闭环
+- `retry`：对 `exec unit` 或 `patch unit` 的重试动作，不作为正式流顶层状态
+- `blocked`：任务无法继续推进，且不能通过当前自动流程恢复的正式状态
 
-允许 `retry` 的场景：
+统一分流原则如下：
 
-- `exec unit` 执行失败、超时或取消
-- `patch unit` 执行失败
-- review/test 在合法启动后运行报错
+1. 业务结果不通过，但存在合法 `review report` / `test report` 或合法仲裁结果证明存在 must-fix 项：
+   - 进入 `patching`
 
-不允许 `retry` 的场景：
+2. 执行单元运行失败、超时或取消，且满足重试条件：
+   - 不直接改变任务主状态终点
+   - 由 orchestrator 对对应 `exec unit` / `patch unit` 执行 `retry`
 
-- 缺少 approved spec / plan
-- 缺少 required capabilities
-- contract 本身非法
-- state 已损坏
-- 结果属于业务不通过而不是执行失败
+3. 出现以下情况之一：
+   - 关键能力缺失
+   - 关键工件缺失或非法
+   - guard 不满足
+   - runtime 状态损坏
+   - 外部依赖不可恢复失败
+   - 无法形成合法仲裁结论
+   - 进入 `blocked`
 
-业务结果不通过进入 `patching`，系统执行失败才进入 `retry` 或 `blocked`。
+补充约束：
+
+- 纯执行失败不能直接进入 `patching`
+- 只有在正式基准、方法依据与问题项证据齐备时，才允许生成 `patch contract`
+- `retry` 解决的是执行动作重试问题，不替代正式流状态仲裁
 
 ## 10. 一期落地顺序
 

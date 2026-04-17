@@ -1,8 +1,8 @@
 # Cadence-Aria Runtime Schemas 配套设计
 
-> **版本**：v1.0.2
+> **版本**：v1.1
 > **日期**：2026-04-16
-> **关联主文档**：`cadence/designs/2026-04-16_方案设计_Cadence-Aria_v1.4.md`（当前修订：v1.4.3）
+> **关联主文档**：`cadence/designs/2026-04-16_方案设计_Cadence-Aria_v1.4.md`（当前修订：v1.4.4）
 
 ## 目标
 
@@ -12,7 +12,7 @@
 2. 字段的类型、必填性、枚举和值域是什么
 3. 哪些字段必须由系统生成，哪些字段允许为空
 
-本文件不重复解释业务目标、角色边界与状态机原则；这些内容以主设计文档为准。
+本文件不重复解释业务目标、角色边界与状态机原则；这些内容以主设计文档及一期收敛方案为准。
 
 ## 总体约束
 
@@ -92,6 +92,17 @@
 - `done`
 - `cancelled`
 
+补充说明：
+
+1. `dispatched` 是正式流状态值；`dispatch` 是动作名，不属于 `state.yaml.status` 枚举
+2. `reviewing/testing` 是聚合状态，只有 `review` 与 `test` 均进入终态后才允许离开
+
+### `source` 术语说明
+
+一期收敛方案中的 `native issue` 特指通过 `Aria` 原生命令入口建立的任务。
+
+在运行时来源字段中，一期建议将该入口映射为 `aria-native`。若保留 `native` 枚举值，则必须在实现中明确其与 `aria-native` 的差异，不得与上述术语混用。
+
 ### 确认点字段说明
 
 为支撑“自动编排 + 用户确认点”模式，一期建议在 `state.yaml` 中保留以下确认相关字段：
@@ -170,6 +181,14 @@
 
 ### `blockers[]` / `suggestions[]`
 
+`review report.verdict` 只表达 review 报告自身结论：
+
+- `passed`：review 通过
+- `failed`：review 未通过
+- `needs_patch`：存在必须修补项
+
+是否进入 `patching`、`blocked` 或 `verified`，由运行时统一仲裁决定，而不是由该字段单独决定。
+
 | 字段 | 类型 | 必填 | 约束 |
 |------|------|------|------|
 | `issue_id` | string | 是 | 在任务范围内唯一 |
@@ -202,6 +221,13 @@
 | `tested_at` | datetime string | 是 | ISO 8601 |
 
 ### `failures[]`
+
+`test report.verdict` 只表达测试报告自身结论：
+
+- `passed`：测试通过
+- `failed`：测试未通过
+
+是否进入 `patching`、`blocked` 或 `verified`，由运行时统一仲裁决定，而不是由该字段单独决定。
 
 | 字段 | 类型 | 必填 | 约束 |
 |------|------|------|------|

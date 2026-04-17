@@ -1,8 +1,8 @@
 # Cadence-Aria 方案设计
 
-> **版本**：v1.4.3
-> **更新日期**：2026-04-16
-> **更新说明**：v1.4.2 基础上，收敛 `OpenSpec` / `superpowers` 与自动化定义的歧义：将两者明确为 `Claude Code` 侧前置基础设施；将 orchestrator 从“全自动编排”改写为“自动编排 + 用户确认点”；在正式流中补入 `clarification`、`spec-review`、`plan-review`；新增“风险分级驱动的确认策略”；同步修正文档中的旧状态与错误处理口径。
+> **版本**：v1.4.4
+> **更新日期**：2026-04-18
+> **更新说明**：v1.4.3 基础上，补充与一期收敛方案、Runtime Schemas 配套文档的引用分工；将状态语义、`source` 术语和 schema 精确定义下沉到对应配套文档，避免主方案与下位文档口径漂移。
 
 ## 概述
 
@@ -38,6 +38,17 @@
 5. 让 `superpowers` 成为方法层依赖，而不是内嵌副本
 6. 让 `Aria` 能接入 `Vibe Kanban`，也能脱离 `Vibe Kanban` 独立运行
 7. 一期完成 `issue` 级闭环，同时预留 `branch / PR` 扩展接口
+
+## 文档分工
+
+本主方案负责上位架构、角色边界、技术路线与交付批次。
+
+以下内容以下位文档为准：
+
+1. 一期状态语义、Guard 与一期范围边界：`cadence/designs/2026-04-17_方案设计_Cadence-Aria一期收敛方案_v1.0.md`
+2. 字段级 schema、枚举值、值域与工件字段约束：`cadence/designs/2026-04-16_配套设计_Runtime-Schemas_Cadence-Aria_v1.0.md`
+
+若主方案中的摘要示例与上述文档存在差异，应以下位文档的当前修订为准。
 
 ## 技术栈定义
 
@@ -870,7 +881,7 @@ cadence/cache/aria/
 
 ```yaml
 task_id: aria-20260415-001
-source: vk | native
+source: vk | aria-native
 flow_type: formal | fast-lane
 risk_level: low | medium | high
 status: plan-review
@@ -915,7 +926,7 @@ created_at: "2026-04-15T10:00:00+08:00"
 updated_at: "2026-04-15T10:30:00+08:00"
 ```
 
-> **v1.4 修订**：移除原 `workspace_ref` 和 `worktree_ref` 顶层字段。任务级工作区信息通过 `source` 字段（`vk` 来源时记录 VK workspace）承载；执行单元级 worktree 信息通过 `exec_units.<id>.worktree_ref` 承载。避免顶层与单元级字段含义重叠。
+> **v1.4 修订**：移除原 `workspace_ref` 和 `worktree_ref` 顶层字段。任务级工作区信息通过 `source` 字段（`vk` 来源时记录 VK workspace）承载；执行单元级 worktree 信息通过 `exec_units.<id>.worktree_ref` 承载。避免顶层与单元级字段含义重叠。`source` 的精确定义以下位 schema 文档为准。
 ```
 
 #### 字段说明
@@ -1617,7 +1628,7 @@ task intake card
 ```yaml
 ---
 task_id: aria-20260415-001
-source: vk | native | aria-native
+source: vk | aria-native
 flow_type_suggestion: formal | fast-lane
 risk_level: low | medium | high
 scope_summary: "简述任务范围"
@@ -1635,7 +1646,7 @@ created_at: "2026-04-15T10:00:00+08:00"
 | 字段 | 说明 |
 |------|------|
 | `task_id` | 唯一任务标识，格式 `aria-YYYYMMDD-NNN` |
-| `source` | 任务来源：`vk`（Vibe Kanban）、`native`（用户直接输入）、`aria-native`（Aria 内部生成） |
+| `source` | 任务来源摘要：`vk`（Vibe Kanban）或 `aria-native`（Aria 原生命令入口）。精确定义以下位 schema 文档与一期收敛方案为准。 |
 | `flow_type_suggestion` | 建议的流转类型：`formal` 或 `fast-lane` |
 | `risk_level` | 风险初判：`low`/`medium`/`high` |
 | `scope_summary` | 任务范围简述 |
@@ -1978,17 +1989,20 @@ capability_mapping:
 
 详细配套文档见：
 
-- `cadence/designs/2026-04-16_配套设计_Runtime-Schemas_Cadence-Aria_v1.0.md`（当前修订：v1.0.2）
+- `cadence/designs/2026-04-16_配套设计_Runtime-Schemas_Cadence-Aria_v1.0.md`（当前修订：v1.1）
+- `cadence/designs/2026-04-17_方案设计_Cadence-Aria一期收敛方案_v1.0.md`（当前修订：v1.1）
+
+本节只保留摘要视图，用于帮助实现时快速定位字段；状态值、`source` 术语、聚合状态离开条件与报告 verdict 语义，以下位文档为准。
 
 ### `state.yaml` schema 摘要
 
 | 字段 | 类型 | 必填 | 约束 |
 |------|------|------|------|
 | `task_id` | string | 是 | `aria-YYYYMMDD-NNN` |
-| `source` | enum | 是 | `vk \| native \| aria-native` |
+| `source` | enum | 是 | 摘要见下位 schema 文档 |
 | `flow_type` | enum | 是 | `formal \| fast-lane` |
 | `risk_level` | enum | 是 | `low \| medium \| high` |
-| `status` | enum | 是 | 状态机中定义的合法状态 |
+| `status` | enum | 是 | 状态机中定义的合法状态；精确定义见一期收敛方案与 Runtime Schemas |
 | `current_round` | integer | 是 | `>= 1` |
 | `confirmation_pending` | enum | 是 | `none \| spec \| plan` |
 | `confirmation_mode` | enum | 是 | `manual \| auto-policy` |
@@ -2032,7 +2046,7 @@ capability_mapping:
 | 字段 | 类型 | 必填 | 约束 |
 |------|------|------|------|
 | `task_id` | string | 是 | 与 `state.yaml.task_id` 一致 |
-| `source` | enum | 是 | `vk \| native \| aria-native` |
+| `source` | enum | 是 | 摘要见下位 schema 文档 |
 | `flow_type_suggestion` | enum | 是 | `formal \| fast-lane` |
 | `risk_level` | enum | 是 | `low \| medium \| high` |
 | `scope_summary` | string | 是 | 非空 |
@@ -2898,7 +2912,7 @@ $ aria:intake "为 Aria 增加 capability report 结构化输出"
 
 [Aria]
 - task_id: aria-20260416-001
-- source: native
+- source: aria-native
 - flow_type_suggestion: formal
 - risk_level: medium
 - next: aria:start --task-id aria-20260416-001
