@@ -62,7 +62,6 @@ export async function createTask(input: { title: string }): Promise<State> {
   };
 
   await writeState(state);
-  await fs.writeFile(path.join(artifactsDir, 'task-intake-card.md'), `# ${input.title}\n`, 'utf8');
 
   return state;
 }
