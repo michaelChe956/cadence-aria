@@ -2,3 +2,6 @@
 .worktrees/
 .mcp.json
 .codex/config.toml
+node_modules/
+dist/
+coverage/
