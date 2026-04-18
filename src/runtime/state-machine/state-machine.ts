@@ -1,15 +1,29 @@
+import type { State } from '../../schemas/state-schema.js';
+
 import { guardDispatched, guardPlanApproved } from './guards.js';
 
+const allowedTransitions: Record<State['status'], readonly State['status'][]> = {
+  intake: ['clarification', 'spec-drafting'],
+  clarification: ['spec-drafting'],
+  'spec-drafting': ['spec-review'],
+  'spec-review': ['spec-approved'],
+  'spec-approved': ['planning'],
+  planning: ['plan-review'],
+  'plan-review': ['plan-approved'],
+  'plan-approved': ['dispatched'],
+  dispatched: ['executing'],
+  executing: ['reviewing/testing'],
+  'reviewing/testing': ['patching', 'verified'],
+  patching: ['executing'],
+  blocked: [],
+  verified: ['done'],
+  done: [],
+  cancelled: []
+};
+
 export function canTransition(
-  state: {
-    status: string;
-    approved_plan_ref: string | null;
-    approved_spec_ref: string | null;
-    confirmation_event_path?: string | null;
-    dispatch_contract_ref?: string | null;
-    context_bundle_ref?: string | null;
-  },
-  target: string
+  state: State,
+  target: State['status']
 ) {
   if (state.status === 'plan-review' && target === 'plan-approved') {
     return guardPlanApproved(state);
@@ -19,5 +33,9 @@ export function canTransition(
     return guardDispatched(state);
   }
 
-  return { allowed: true as const };
+  if (allowedTransitions[state.status]?.includes(target)) {
+    return { allowed: true as const };
+  }
+
+  return { allowed: false as const, reason: 'invalid_transition' };
 }
