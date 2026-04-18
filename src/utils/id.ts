@@ -8,12 +8,12 @@ function formatDate(now: Date): string {
   return now.toISOString().slice(0, 10).replaceAll('-', '');
 }
 
-export async function createTaskId(now = new Date()): Promise<string> {
+export async function createTaskId(now = new Date(), minimumSuffix = 1): Promise<string> {
   const date = formatDate(now);
   const prefix = `aria-${date}-`;
   const taskRoot = TASK_ROOT;
 
-  let maxSuffix = 0;
+  let maxSuffix = minimumSuffix - 1;
 
   try {
     const entries = await fs.readdir(taskRoot, { withFileTypes: true });
@@ -28,7 +28,7 @@ export async function createTaskId(now = new Date()): Promise<string> {
       }
 
       const suffix = Number(match[2]);
-      if (suffix > maxSuffix) {
+      if (suffix >= minimumSuffix && suffix > maxSuffix) {
         maxSuffix = suffix;
       }
     }

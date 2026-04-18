@@ -77,4 +77,19 @@ describe('createTask', () => {
     expect(first.task_id).toMatch(/^aria-\d{8}-\d{3}$/);
     expect(second.task_id).toMatch(/^aria-\d{8}-\d{3}$/);
   });
+
+  it('并发创建多个任务时 task_id 仍然唯一', async () => {
+    const tasks = await Promise.all(
+      Array.from({ length: 6 }, (_, index) =>
+        createTask({
+          title: `并发任务 ${index + 1}`,
+        }),
+      ),
+    );
+
+    const ids = tasks.map((task) => task.task_id);
+
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids.every((taskId) => /^aria-\d{8}-\d{3}$/.test(taskId))).toBe(true);
+  });
 });

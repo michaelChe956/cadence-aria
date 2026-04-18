@@ -8,11 +8,30 @@ import { nowIso } from '../../utils/time.js';
 import type { State } from '../../schemas/state-schema.js';
 
 export async function createTask(input: { title: string }): Promise<State> {
-  const task_id = await createTaskId();
-  const taskRoot = getTaskRoot(task_id);
+  const now = new Date();
+  let task_id = await createTaskId(now);
+  let taskRoot = getTaskRoot(task_id);
+
+  await fs.mkdir(path.dirname(taskRoot), { recursive: true });
+
+  while (true) {
+    try {
+      await fs.mkdir(taskRoot);
+      break;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'EEXIST') {
+        throw error;
+      }
+
+      const suffix = Number(task_id.slice(-3));
+      task_id = await createTaskId(now, suffix + 1);
+      taskRoot = getTaskRoot(task_id);
+    }
+  }
+
   const artifactsDir = getTaskArtifactsDir(task_id);
 
-  await fs.mkdir(taskRoot, { recursive: true });
   await fs.mkdir(artifactsDir, { recursive: true });
 
   const timestamp = nowIso();
