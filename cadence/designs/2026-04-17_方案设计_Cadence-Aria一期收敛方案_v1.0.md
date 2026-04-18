@@ -1,7 +1,7 @@
 # Cadence-Aria 一期收敛方案设计
 
-> **版本**：v1.1
-> **日期**：2026-04-17
+> **版本**：v1.2
+> **日期**：2026-04-18
 > **定位**：在 [`cadence/designs/2026-04-16_方案设计_Cadence-Aria_v1.4.md`](../designs/2026-04-16_方案设计_Cadence-Aria_v1.4.md) 基础上，对一期实现范围、能力边界与落地顺序做收敛设计。
 
 ## 1. 设计目标
@@ -14,7 +14,7 @@
 
 本次收敛结论为：
 
-- 一期入口只做 `native issue`
+- 一期入口只做 `aria-native`
 - 一期保留正式流全状态
 - 前段允许人工或半自动推进
 - 后段以 `dispatch / exec / review / test / patch` 自动化闭环为重点
@@ -26,7 +26,7 @@
 
 一期必须包含以下能力：
 
-1. 从 `native issue` 建立正式任务
+1. 从 `aria-native` 建立正式任务
 2. 跑通完整正式流状态：
    `intake -> clarification -> spec-drafting -> spec-review -> spec-approved -> planning -> plan-review -> plan-approved -> dispatched -> executing -> reviewing/testing -> patching(按需) -> verified -> done`
 3. 支持前段正式工件：
@@ -60,7 +60,7 @@
 
 本文中的 `native issue` 特指通过 `Aria` 原生命令入口建立的任务。
 
-在运行时来源字段中，一期建议将其映射为 `aria-native`。
+在运行时来源字段中，一期正式流实例值统一使用 `aria-native`。
 
 ## 3. 架构总览
 
@@ -231,7 +231,145 @@
 2. `patching`：存在必须修补项，且仍处于合法可修补范围内
 3. `blocked`：结果证据不足、运行失败、状态不一致，或无法形成合法仲裁结论
 
-## 6. 节点-能力映射
+## 6. 运行时真源、执行契约与恢复模型
+
+### 6.1 运行时双真源规则
+
+一期正式流中，运行时真源必须拆分为两类：
+
+- `OpenSpec`：正式工件内容真源，承载 approved `spec` 与 approved `plan` 的内容本体
+- `state.yaml`：运行时状态与冻结引用真源，承载当前状态、确认点、执行单元状态、活动结果集与恢复元数据
+
+一期后段所有动作只允许消费 `state.yaml` 中显式记录的冻结引用，不允许在运行时临时读取“最新 spec / plan”作为正式输入。
+
+### 6.2 冻结引用与结果集字段
+
+一期运行时至少保留以下字段：
+
+- `approved_spec_ref`
+- `approved_plan_ref`
+- `active_result_set_id`
+
+并满足以下约束：
+
+1. `spec-review -> spec-approved` 时必须写入 `approved_spec_ref`
+2. `plan-review -> plan-approved` 时必须写入 `approved_plan_ref`
+3. `dispatch` 只能基于 `approved_plan_ref`
+4. `exec / patch / review / test / verified` 只能基于当前冻结引用与活动结果集推进
+5. 一旦 `spec` 或 `plan` 重批，旧冻结引用立即失效，不得跨轮混用
+
+### 6.3 执行契约模型
+
+一期中，`dispatch contract` 与 `patch contract` 是 `Aria` 下发给执行端的最小正式契约。`Codex` 的正式输入以 contract 为准，自然语言 prompt 只是 contract 的呈现载体，不能替代结构化契约对象。
+
+两类 contract 至少共享以下字段：
+
+- `task_id`
+- `unit_id`
+- `contract_type`
+- `based_on_spec_ref`
+- `based_on_plan_ref`
+- `goal_statement`
+- `allowed_paths`
+- `blocked_paths`
+- `acceptance_checks`
+- `context_bundle_ref`
+- `output_schema_ref`
+- `generated_at`
+
+`patch contract` 额外必须包含：
+
+- `based_on_result_set_id`
+- `patch_reason`
+- `must_fix_items`
+
+缺少冻结引用、范围约束或验收条件的 contract 不得进入执行态。
+
+### 6.4 `execution context bundle`
+
+`Aria` 对 `OpenSpec + superpowers` 的能力注入，一期必须落成结构化运行时对象 `execution context bundle`，并作为 `dispatch contract` / `patch contract` 的正式组成部分。
+
+一期最小字段如下：
+
+- `spec_ref`
+- `plan_ref`
+- `scope_constraints_ref`
+- `required_methods`
+- `workspace_context`
+- `verification_requirements`
+- `prompt_template_ref`
+
+同时满足以下约束：
+
+1. 执行、重试、patch、审计都必须可回溯到对应 `execution context bundle`
+2. prompt 只是 contract 的渲染结果，不得替代 bundle 本体
+3. `Codex` 接收的上下文必须来自 `Aria` 已冻结的 bundle 引用，而不是自由拼接文本
+
+### 6.5 仲裁结果基线
+
+一期为 review/test 仲裁建立稳定结果基线，采用 `result_set` 机制。
+
+`result_set` 至少包含：
+
+- `result_set_id`
+- `task_id`
+- `source_unit_ids`
+- `result_refs`
+- `created_at`
+
+并满足以下运行时规则：
+
+1. 每次合法执行完成后生成新的 `result_set_id`
+2. `review report` 与 `test report` 必须绑定同一个 `result_set_id`
+3. `arbitrator` 只允许基于同一个 `result_set_id` 做统一判定
+4. 发生 retry 或 patch 后，旧结果集不得继续参与当前轮仲裁
+5. `patch` 成功后必须创建新结果集，再重新进入 `reviewing/testing`
+
+### 6.6 用户确认事件模型
+
+`confirmation_pending`、`confirmation_mode`、`confirmation_artifact_path` 只描述确认门禁，不替代正式事件。
+一期必须引入最小 `confirmation event` 结构：
+
+- `task_id`
+- `confirmation_type`
+- `artifact_ref`
+- `decision`
+- `actor`
+- `timestamp`
+- `note`
+
+状态机约束如下：
+
+1. `spec-review -> spec-approved` 必须由合法 `confirmation event` 触发
+2. `plan-review -> plan-approved` 必须由合法 `confirmation event` 触发
+3. 若 `artifact_ref` 与当前待确认工件不一致，则该事件无效
+4. 自动确认与人工确认结构一致，仅 `actor` 与来源不同
+
+### 6.7 `blocked / retry / cancel` 恢复模型
+
+一期只保留四类阻塞：
+
+- `capability_blocked`
+- `input_blocked`
+- `execution_blocked`
+- `decision_blocked`
+
+每个阻塞实例至少包含：
+
+- `block_reason_code`
+- `blocking_stage`
+- `retryable`
+- `required_action`
+
+恢复规则如下：
+
+1. `retry` 仅对 `retryable = true` 的阻塞或失败执行生效
+2. `decision_blocked` 必须通过新的确认事件或补充输入恢复
+3. `capability_blocked` 必须通过 `doctor` 或依赖修复恢复
+4. `input_blocked` 必须通过重新生成合法工件或 contract 恢复
+5. `execution_blocked` 只能在执行条件重新满足后，通过新的合法执行轮恢复
+
+## 7. 节点-能力映射
 
 下表定义每个节点如何使用 `OpenSpec` 与 `superpowers`。
 
@@ -253,7 +391,7 @@
 | `verified` | 判定是否满足正式主线闭环要求 | 提供 verification 方法 | Aria | 汇总结果并执行 guard |
 | `done` | 标记正式主线闭环完成 | 前序方法保证已兑现 | Aria | 输出 `closure summary` |
 
-## 7. 运行时工件与最小 Schema
+## 8. 运行时工件与最小 Schema
 
 状态推进语义、角色边界与 Guard 约束以本方案为准；字段级 schema、枚举值和值域定义以 Runtime Schemas 配套文档为准。
 
@@ -303,6 +441,9 @@
 - `risk_level`
 - `status`
 - `current_round`
+- `approved_spec_ref`
+- `approved_plan_ref`
+- `active_result_set_id`
 - `confirmation_pending`
 - `confirmation_mode`
 - `confirmation_artifact_path`
@@ -315,6 +456,10 @@
 - `patch_units`
 - `artifacts`
 - `capability_status`
+- `block_reason_code`
+- `blocking_stage`
+- `retryable`
+- `required_action`
 - `created_at`
 - `updated_at`
 
@@ -323,17 +468,16 @@
 至少包含：
 
 - `task_id`
-- `exec_unit_id`
-- `goal`
-- `scope`
-- `files_allowed`
-- `files_blocked`
-- `acceptance_targets`
-- `openspec_refs`
-- `superpowers_refs`
-- `required_capabilities`
-- `blocking_policy`
-- `input_artifact_refs`
+- `unit_id`
+- `contract_type`
+- `based_on_spec_ref`
+- `based_on_plan_ref`
+- `goal_statement`
+- `allowed_paths`
+- `blocked_paths`
+- `acceptance_checks`
+- `context_bundle_ref`
+- `output_schema_ref`
 - `generated_at`
 
 #### `exec result`
@@ -358,6 +502,7 @@
 至少包含：
 
 - `task_id`
+- `result_set_id`
 - `exec_units_reviewed`
 - `baseline_refs`
 - `method_refs`
@@ -373,6 +518,7 @@
 至少包含：
 
 - `task_id`
+- `result_set_id`
 - `exec_units_tested`
 - `baseline_refs`
 - `method_refs`
@@ -390,27 +536,51 @@
 至少包含：
 
 - `task_id`
-- `patch_unit_id`
-- `based_on_exec_unit`
+- `unit_id`
+- `contract_type`
+- `based_on_spec_ref`
+- `based_on_plan_ref`
+- `based_on_result_set_id`
+- `patch_reason`
 - `must_fix_items`
-- `baseline_refs`
-- `method_refs`
-- `openspec_refs`
-- `superpowers_refs`
-- `required_capabilities`
-- `blocking_policy`
+- `context_bundle_ref`
+- `output_schema_ref`
 - `generated_at`
 
-## 8. 强约束与 Guard
+#### `execution context bundle`
 
-### 8.1 整体保证策略
+至少包含：
+
+- `spec_ref`
+- `plan_ref`
+- `scope_constraints_ref`
+- `required_methods`
+- `workspace_context`
+- `verification_requirements`
+- `prompt_template_ref`
+
+#### `confirmation event`
+
+至少包含：
+
+- `task_id`
+- `confirmation_type`
+- `artifact_ref`
+- `decision`
+- `actor`
+- `timestamp`
+- `note`
+
+## 9. 强约束与 Guard
+
+### 9.1 整体保证策略
 
 一期采用：
 
 - **整体接口级保证**
 - **关键主线节点运行时级保证**
 
-### 8.2 关键 Guard
+### 9.2 关键 Guard
 
 1. **Spec Guard**
    - 无合法 `spec artifact` 不能进入 `spec-review`
@@ -428,15 +598,20 @@
 4. **Review / Test Guard**
    - 没有合法 `review report` / `test report` 不能离开 `reviewing/testing`
    - 缺少 `baseline_refs` 或 `method_refs` 视为未完成
+   - `review report` 与 `test report` 不绑定同一 `result_set_id` 时，不得进入统一仲裁
    - 仅当 `review` 与 `test` 均进入终态后，才允许触发统一仲裁
    - 单一报告先完成不构成离开 `reviewing/testing` 的条件
 
-5. **Verification Guard**
+5. **Confirmation Guard**
+   - 无合法 `confirmation event` 不能进入 `spec-approved` 或 `plan-approved`
+   - `artifact_ref` 与当前待确认工件不一致的确认事件必须视为无效
+
+6. **Verification Guard**
    - 未满足 review/test 通过条件，不能进入 `verified`
 
-## 9. 错误处理、降级与恢复
+## 10. 错误处理、降级与恢复
 
-### 9.1 错误分类
+### 10.1 错误分类
 
 一期将错误分为：
 
@@ -446,7 +621,7 @@
 4. 结果不通过
 5. 状态损坏或不一致
 
-### 9.2 降级策略
+### 10.2 降级策略
 
 允许的有限降级只有：
 
@@ -465,7 +640,7 @@
 4. 在 `OpenSpec` 或 `superpowers` 缺失时启动 `patch`
 5. 缺少正式基准或方法依据时，把 `review/test` 视为已完成
 
-### 9.3 `blocked` / `retry` / `patching` 边界
+### 10.3 `blocked` / `retry` / `patching` 边界
 
 一期对三者的语义约定如下：
 
@@ -497,7 +672,51 @@
 - 只有在正式基准、方法依据与问题项证据齐备时，才允许生成 `patch contract`
 - `retry` 解决的是执行动作重试问题，不替代正式流状态仲裁
 
-## 10. 一期落地顺序
+### 10.4 review/test 流程归属
+
+一期中 `review/test` 的流程归属固定如下：
+
+1. `Aria` 是 `review/test` 的流程发起者与结果归档者
+2. `Claude` 是默认分析执行者
+3. 可自动执行的 superpowers 能力由 `Aria` 调用
+
+## 11. 一期实现顺序与范围控制
+
+一期按三层交付顺序推进：
+
+### 11.1 Layer 1
+
+单任务、单执行单元、串行正式闭环。
+
+最小目标：
+
+- 打通 `intake -> ... -> dispatch -> exec -> review/test -> verified | patching | blocked`
+- 仅支持单 `exec unit`
+- 不支持并行调度
+- 具备 `approved refs`、`dispatch contract`、`exec result`、`review report`、`test report`、`verification summary`
+
+### 11.2 Layer 2
+
+在 Layer 1 稳定后补齐：
+
+- `patch contract`
+- `patch result`
+- `result_set_id` 切换
+- `blocked` 分类
+- `retry` 恢复规则
+- `doctor` 能力诊断
+
+### 11.3 Layer 3
+
+最后引入：
+
+- 多 `exec units`
+- worktree 分配
+- 并行上限控制
+- 依赖解析
+- 多单元结果汇总与统一仲裁
+
+## 12. 一期落地顺序
 
 建议按 4 个切片实现：
 
@@ -537,11 +756,11 @@
 - blocked / retry flows
 - 错误码基础域
 
-## 11. 一期验收口径
+## 13. 一期验收口径
 
 一期完成时至少满足以下条件：
 
-1. 可从 `native issue` 建立正式任务
+1. 可从 `aria-native` 建立正式任务
 2. 可形成并确认正式 `spec` 与 `plan`
 3. 可生成带 `OpenSpec + superpowers` 依赖的 `dispatch contract`
 4. `Codex` 可在该上下文中完成 `exec`
@@ -550,7 +769,7 @@
 7. 缺关键能力时进入 `blocked`，而不是静默降级
 8. 最终可产出 `verification summary` 与 `closure summary`
 
-## 12. 结论
+## 14. 结论
 
 一期推荐实现形态为：
 

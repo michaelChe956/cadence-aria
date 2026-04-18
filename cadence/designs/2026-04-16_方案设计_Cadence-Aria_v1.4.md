@@ -1,8 +1,8 @@
 # Cadence-Aria 方案设计
 
-> **版本**：v1.4.4
+> **版本**：v1.4.5
 > **更新日期**：2026-04-18
-> **更新说明**：v1.4.3 基础上，补充与一期收敛方案、Runtime Schemas 配套文档的引用分工；将状态语义、`source` 术语和 schema 精确定义下沉到对应配套文档，避免主方案与下位文档口径漂移。
+> **更新说明**：v1.4.4 基础上，根据 2026-04-18 设计评审收紧一期入口、编排边界与扩展口径；将运行时真源、执行契约、恢复模型的正式定义与配套文档保持一致。
 
 ## 概述
 
@@ -10,15 +10,15 @@
 
 一期目标不是替代现有全部开发基础设施，而是建立一个以 `issue` 为最小闭环单位的多角色编排系统：
 
-- `Claude Code` 负责 `intake / spec / plan / dispatch / review / test`（其中自动执行型 superpowers skills 由 Aria 在对应状态自动调用；多轮交互型 skills 如 `brainstorming` 由用户主动调用）
+- `Claude Code` 负责 `intake / spec / plan / review / test`（其中自动执行型 superpowers skills 由 Aria 在对应状态自动调用；多轮交互型 skills 如 `brainstorming` 由用户主动调用）
 - `Codex` 负责 `exec / patch`
 - `OpenSpec` 负责正式任务的边界与工件主线
 - `superpowers` 负责规划、并行、验证、调试等方法层能力
-- `Vibe Kanban` 只负责 `issue / workspace / worktree / 执行入口 / 状态展示`
+- `Vibe Kanban` 只负责外部任务投影、`workspace / worktree / 状态展示`
 
 一期必须做到：
 
-1. 能从 `Vibe Kanban` 或 `Aria` 原生命令入口统一接收任务
+1. 一期正式支持的任务建立入口只有 `aria-native`
 2. 所有正式任务强制进入 `OpenSpec` 主线
 3. `Claude Code` 能通过 `Aria runtime` 驱动 `Codex` 并行执行 `exec`
 4. `Claude Code` 能在 Aria 的自动编排 + 用户确认点模式下完成 `review` 和 `test`（Aria 组织对应 superpowers 能力，收集产出并推进状态；关键边界节点保留用户确认）
@@ -32,12 +32,12 @@
 ### 设计目标
 
 1. 建立清晰的多角色协作模型
-2. 让 `Claude Code` 成为唯一主编排入口
+2. 让 `Claude Code` 成为用户交互与前段任务组织入口
 3. 让 `Codex` 成为正式执行端与修补端，但由 `Aria runtime` 承担 contract 解释、上下文注入和结果回写
 4. 让 `OpenSpec` 成为正式任务强制主线
 5. 让 `superpowers` 成为方法层依赖，而不是内嵌副本
-6. 让 `Aria` 能接入 `Vibe Kanban`，也能脱离 `Vibe Kanban` 独立运行
-7. 一期完成 `issue` 级闭环，同时预留 `branch / PR` 扩展接口
+6. 让 `Aria` 成为正式流状态推进与工件编排真源
+7. 一期完成 `issue` 级闭环，`branch / PR / merge / release` 仅作为文档级保留点，不进入一期核心 schema、状态机与 contract 设计
 
 ## 文档分工
 
@@ -47,6 +47,7 @@
 
 1. 一期状态语义、Guard 与一期范围边界：`cadence/designs/2026-04-17_方案设计_Cadence-Aria一期收敛方案_v1.0.md`
 2. 字段级 schema、枚举值、值域与工件字段约束：`cadence/designs/2026-04-16_配套设计_Runtime-Schemas_Cadence-Aria_v1.0.md`
+3. 模块落位、运行时对象与目录职责：`cadence/designs/2026-04-16_配套设计_Implementation-Layout_Cadence-Aria_v1.0.md`
 
 若主方案中的摘要示例与上述文档存在差异，应以下位文档的当前修订为准。
 
@@ -320,26 +321,40 @@ Cadence-Aria:
 
 `Cadence-Aria` 采用四层结构：
 
-1. `Vibe Kanban`：任务来源层
+1. `Claude Code`：用户交互与前段任务组织入口
 2. `OpenSpec`：正式任务 contract 层
 3. `superpowers`：方法层
-4. `Cadence-Aria`：编排控制层
+4. `Cadence-Aria`：正式流状态推进与编排控制层
 
 ### 分层职责
 
-#### 1. Vibe Kanban
+#### 1. Claude Code
 
 负责：
 
-- `issue`
+- 用户命令入口
+- 前段任务组织
+- 确认点交互
+- review/test 默认分析执行
+
+不负责：
+
+- 持有正式流状态真源
+- 直接替代 `Aria` 生成正式 contract
+- 脱离 `Aria` 推进正式任务状态
+
+#### 可选接入层：Vibe Kanban
+
+负责：
+
+- 外部任务投影
 - `workspace`
 - `worktree`
-- 执行入口
 - 状态展示
 
 不负责：
 
-- 子任务代理系统
+- 一期正式入口
 - 多角色编排
 - 审查与测试闭环
 - 重型状态机
@@ -382,13 +397,17 @@ Cadence-Aria:
 
 负责：
 
-- 统一接收任务
+- 接收来自 `Claude Code` 的正式任务
 - 驱动 `OpenSpec`
 - 在合适状态调用 `superpowers`
 - 驱动 `Claude -> Codex` 工作流
 - 汇总 `review + test`
 - 生成 `patch contract`
 - 输出闭环结果
+
+硬规则：
+
+`Claude` 是用户交互与前段任务组织入口；`Aria` 是正式流状态推进与工件编排真源。前者面向会话入口，后者面向正式流执行。
 
 ## 耦合原则
 
@@ -463,7 +482,7 @@ Cadence-Aria:
 1. `Codex adapter`
 2. `Codex CLI`
 3. Git worktree / diff
-4. `Vibe Kanban` 拉取与同步能力
+4. `Vibe Kanban` 投影与同步能力
 
 ### 能力契约定义
 
@@ -494,7 +513,7 @@ Cadence-Aria:
 | `superpowers` | `superpowers.plan` | 存在 Aria 所需的计划与澄清方法能力集合 | 标记环境异常，阻断 `planning` |
 | `superpowers` | `superpowers.review` | 存在 Aria 所需的 review / verify 方法能力集合 | 标记环境异常，阻断 `review/test` |
 | `Codex adapter` | `codex.exec.single` | 能在指定工作目录运行一轮 `Codex` 并收集退出状态与结果文件 | 阻断 `exec/patch` |
-| `Vibe Kanban` | `vk.task.pull` | 能拉取外部任务基础字段 | 禁用 `vk intake`，保留 `native intake` |
+| `Vibe Kanban` | `vk.task.pull` | 能拉取外部任务基础字段 | 禁用外部投影拉取，不影响 `aria-native` 正式入口 |
 | `Vibe Kanban` | `vk.status.push` | 能按 task 映射写入状态摘要 | 禁用同步，不阻断主流程 |
 
 #### 能力探测输出
@@ -554,7 +573,7 @@ capabilities:
     status: unavailable
     source: "vk-adapter"
     evidence: "adapter config missing external endpoint"
-    remediation: "disable vk intake or configure adapter"
+    remediation: "disable external projection pull or configure adapter"
 ```
 
 #### capability report 字段约束
@@ -579,7 +598,7 @@ capabilities:
 | `ARIA-CAP-201` | `superpowers` 计划能力缺失 | 阻断 `plan` |
 | `ARIA-CAP-202` | `superpowers` 验证能力缺失 | 阻断 `review/test` |
 | `ARIA-CAP-301` | `Codex adapter` 单轮执行能力缺失 | 阻断 `exec/patch` |
-| `ARIA-CAP-401` | `VK` 拉取能力缺失 | 禁用 `vk intake` |
+| `ARIA-CAP-401` | `VK` 拉取能力缺失 | 禁用外部投影拉取 |
 | `ARIA-CAP-402` | `VK` 推送能力缺失 | 禁用状态同步 |
 
 ### 兼容声明
@@ -881,7 +900,7 @@ cadence/cache/aria/
 
 ```yaml
 task_id: aria-20260415-001
-source: vk | aria-native
+source: aria-native
 flow_type: formal | fast-lane
 risk_level: low | medium | high
 status: plan-review
@@ -926,7 +945,7 @@ created_at: "2026-04-15T10:00:00+08:00"
 updated_at: "2026-04-15T10:30:00+08:00"
 ```
 
-> **v1.4 修订**：移除原 `workspace_ref` 和 `worktree_ref` 顶层字段。任务级工作区信息通过 `source` 字段（`vk` 来源时记录 VK workspace）承载；执行单元级 worktree 信息通过 `exec_units.<id>.worktree_ref` 承载。避免顶层与单元级字段含义重叠。`source` 的精确定义以下位 schema 文档为准。
+> **v1.4 修订**：移除原 `workspace_ref` 和 `worktree_ref` 顶层字段。任务级来源信息通过 `source` 字段承载；若后续存在外部投影映射，工作区信息通过外部适配元数据承载。执行单元级 worktree 信息通过 `exec_units.<id>.worktree_ref` 承载。避免顶层与单元级字段含义重叠。`source` 的精确定义以下位 schema 文档为准。
 ```
 
 #### 字段说明
@@ -1628,7 +1647,7 @@ task intake card
 ```yaml
 ---
 task_id: aria-20260415-001
-source: vk | aria-native
+source: aria-native
 flow_type_suggestion: formal | fast-lane
 risk_level: low | medium | high
 scope_summary: "简述任务范围"
@@ -1646,7 +1665,7 @@ created_at: "2026-04-15T10:00:00+08:00"
 | 字段 | 说明 |
 |------|------|
 | `task_id` | 唯一任务标识，格式 `aria-YYYYMMDD-NNN` |
-| `source` | 任务来源摘要：`vk`（Vibe Kanban）或 `aria-native`（Aria 原生命令入口）。精确定义以下位 schema 文档与一期收敛方案为准。 |
+| `source` | 一期正式流任务来源摘要固定为 `aria-native`。若后续存在外部投影映射，其精确定义以下位 schema 文档与一期收敛方案为准。 |
 | `flow_type_suggestion` | 建议的流转类型：`formal` 或 `fast-lane` |
 | `risk_level` | 风险初判：`low`/`medium`/`high` |
 | `scope_summary` | 任务范围简述 |
@@ -2429,8 +2448,8 @@ aria:run --task-id aria-20260415-001 --retry-failed
 
 至少要验证以下 3 类场景：
 
-1. `native intake -> formal flow -> done`
-2. `vk intake -> formal flow -> patch -> verified`
+1. `aria-native intake -> formal flow -> done`
+2. `aria-native intake -> formal flow -> patch -> verified`
 3. `fast-lane -> done` 与 `fast-lane -> upgrade`
 
 ### 端到端验证目标
@@ -2905,7 +2924,7 @@ aria:run --task-id aria-20260415-001 --retry-failed
 
 - `cadence/designs/2026-04-16_配套设计_CLI-Interactions_Cadence-Aria_v1.0.md`（当前修订：v1.0.1）
 
-#### 示例 1：native formal flow
+#### 示例 1：aria-native formal flow
 
 ```text
 $ aria:intake "为 Aria 增加 capability report 结构化输出"
@@ -3103,16 +3122,12 @@ $ aria:fast "修复跨模块配置读取错误"
 
 `Vibe Kanban` 在一期中只承担三类角色：
 
-1. 任务来源
+1. 可选外部任务投影
 2. 工作区容器
 3. 状态映射目标
 
-为满足“既能接入，也能脱离”的目标，`Aria` 需要支持两类入口：
-
-1. `vk intake`
-2. `native intake`
-
-两类入口统一汇入 `aria:intake`。
+一期正式支持的任务建立入口只有 `aria-native`。
+`Vibe Kanban` 在一期中只作为后续兼容方向保留，不进入一期必交付范围。若 schema 仍保留 `vk` 或 `native` 枚举，仅作为保留值，不得在一期正式流中产生实例。
 
 ### 状态同步机制
 
@@ -3120,7 +3135,7 @@ $ aria:fast "修复跨模块配置读取错误"
 
 1. **`Aria` 内部状态为主事实源**：任务的生命周期、状态流转、仲裁结论以 `Aria` 的 `state.yaml` 为准
 2. **`Vibe Kanban` 仅做投影展示**：`Aria` 在关键状态节点主动向 `Vibe Kanban` 推送状态摘要（如 `spec-approved`、`executing`、`done`、`upgrade-blocked`）
-3. **按需拉取作为补充**：`aria:intake` 从 `Vibe Kanban` 拉取任务列表和初始描述，但拉取后任务即在 `Aria` 内部独立流转
+3. **按需接入作为后续扩展**：若后续接入 `Vibe Kanban`，任务拉取必须在进入正式流前转换为 `aria-native` 上下文，再由 `Aria` 内部独立流转
 4. **同步失败不影响 Aria 内部闭环**：若向 `Vibe Kanban` 推送状态失败，`orchestrator` 记录告警日志并继续执行，不阻断主流程
 5. **冲突处理**：若 `Vibe Kanban` 中的状态与 `Aria` 内部状态不一致，以 `Aria` 内部状态为准，`aria:status` 会提示存在外部状态漂移
 
@@ -3142,7 +3157,7 @@ $ aria:fast "修复跨模块配置读取错误"
 1. `Aria` 内部使用 `task-id + target-status` 作为幂等键
 2. 重复推送同一状态时，适配器应覆盖同一投影，而不是追加新记录
 3. 外部状态回写失败不重置内部状态
-4. 若外部 `external_task_id` 缺失，则禁止走 `vk intake`
+4. 若外部 `external_task_id` 缺失，则禁止创建外部投影映射
 
 #### 漺移修复规则
 
@@ -3154,7 +3169,7 @@ $ aria:fast "修复跨模块配置读取错误"
 
 | 错误码 | 含义 | 处理方式 |
 |-------|------|---------|
-| `ARIA-SYNC-001` | `external_task_id` 缺失 | 禁止 `vk intake` 或状态同步 |
+| `ARIA-SYNC-001` | `external_task_id` 缺失 | 禁止创建外部投影映射或状态同步 |
 | `ARIA-SYNC-002` | 状态推送失败 | 记录告警，主流程继续 |
 | `ARIA-SYNC-003` | 幂等键冲突 | 保留内部状态，要求人工排查适配器 |
 | `ARIA-SYNC-004` | 外部任务不存在或已删除 | 标记外部状态漂移，不阻断内部任务 |
@@ -3460,7 +3475,7 @@ Aria 至少展示：
 2. `Claude -> Codex` 角色编排
 3. `OpenSpec` 正式任务强制主线
 4. `superpowers` 方法层编排（通过能力抽象层）
-5. `Vibe Kanban` 接入与原生入口双支持
+5. `aria-native` 单入口正式流
 6. review/test/patch 闭环
 7. `Codex adapter` 薄桥接实现
 8. 闭环结果摘要输出
@@ -3485,7 +3500,7 @@ Aria 至少展示：
 
 一期成功标准定义如下：
 
-1. 能统一接收来自 `Vibe Kanban` 与原生命令的任务
+1. 能从 `aria-native` 建立并推进正式任务
 2. 正式任务不能绕过 `OpenSpec`
 3. `Claude Code` 能通过 `Aria runtime` 驱动 `Codex` 执行，并在具备条件时并行
 4. `review` 与 `test` 能分别出报告，并被 `orchestrator` 明确仲裁
@@ -3569,7 +3584,7 @@ security_findings:
 - 通过能力抽象层（`capability_id`）映射 superpowers 调用，不硬编码 skill 名称；`capability_mapping` 增加 `execution_mode` 字段区分 `auto` 与 `interactive`
 - 接入但不吞并 `Vibe Kanban`
 - 按分阶段路线图（P0-P3）交付
-- 预留 `branch / PR` 扩展接口
+- `branch / PR / merge / release` 仅作为文档级保留点
 
 **v1.4.3 关键修正**：
 

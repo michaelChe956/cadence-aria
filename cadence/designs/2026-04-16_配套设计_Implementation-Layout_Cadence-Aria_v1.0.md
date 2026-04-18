@@ -1,8 +1,8 @@
 # Cadence-Aria Implementation Layout 配套设计
 
-> **版本**：v1.0.2
-> **日期**：2026-04-16
-> **关联主文档**：`cadence/designs/2026-04-16_方案设计_Cadence-Aria_v1.4.md`（当前修订：v1.4.3）
+> **版本**：v1.0.3
+> **日期**：2026-04-18
+> **关联主文档**：`cadence/designs/2026-04-16_方案设计_Cadence-Aria_v1.4.md`（当前修订：v1.4.5）
 
 ## 目标
 
@@ -54,10 +54,10 @@ cadence-aria/
 |------|------|---------------|
 | `src/commands/` | CLI 命令入口、参数解析、用户输出组装 | 状态机逻辑、contract 生成 |
 | `src/runtime/orchestrator/` | 任务调度、状态推进、角色编排 | 直接做底层适配或模板渲染 |
-| `src/runtime/contracts/` | `dispatch/patch` 等 contract 的构建、校验、序列化 | 调用外部工具执行任务 |
+| `src/runtime/contracts/` | `dispatch/patch` contract 与 `execution context bundle` 的构建、校验、序列化 | 调用外部工具执行任务 |
 | `src/runtime/state-machine/` | 状态机定义、守卫条件、状态转换 | 文件 IO、CLI 输出 |
-| `src/runtime/scheduler/` | 执行单元调度、并行管理、依赖解析 | 直接产出用户文案 |
-| `src/runtime/arbitrator/` | review/test 仲裁与 patch contract 生成 | 直接启动外部进程 |
+| `src/runtime/scheduler/` | 执行单元调度与最小串行执行编排；多单元并行属于 Layer 3 | 直接产出用户文案 |
+| `src/runtime/arbitrator/` | 基于 `result_set_id` 的 review/test 仲裁与 patch contract 生成 | 直接启动外部进程 |
 | `src/adapters/` | Claude/Codex/OpenSpec/superpowers/VK 的 capability 适配 | 决定业务状态流转 |
 | `src/runtime/reports/` | `review/test/verification/closure` 等报告构造 | 直接启动进程 |
 | `src/runtime/persistence/` | `state.yaml` 与运行时工件读写 | 业务仲裁 |
@@ -139,10 +139,10 @@ src/runtime/scheduler/
 
 #### 责任
 
-1. 调度 `exec` / `patch` 执行单元
-2. 管理并行上限、依赖关系与等待队列
-3. 分配或回收 worktree
-4. 处理超时、取消与重试前置判断
+1. Layer 1 / Layer 2 中负责单任务、单执行单元的串行调度
+2. 处理超时、取消与重试前置判断
+3. Layer 3 再引入并行上限、依赖关系、等待队列与 worktree 分配
+4. 不把多执行单元调度作为一期最小闭环前置条件
 
 ### `src/runtime/arbitrator/`
 
@@ -155,9 +155,9 @@ src/runtime/arbitrator/
 
 #### 责任
 
-1. 汇总 review/test 结论
+1. 汇总绑定同一 `result_set_id` 的 review/test 结论
 2. 生成 `patch contract`
-3. 判定是否退回 `plan-review` 或 `spec-review`
+3. 判定是否进入 `verified`、`patching` 或 `blocked`
 4. 保持纯逻辑，不直接调用外部系统
 
 ### `src/runtime/contracts/`
@@ -166,6 +166,7 @@ src/runtime/arbitrator/
 src/runtime/contracts/
   dispatch-contract.ts
   patch-contract.ts
+  execution-context-bundle.ts
   contract-validator.ts
   scope-mapping.ts
   branch-placeholder.md
@@ -176,8 +177,9 @@ src/runtime/contracts/
 
 1. 按 schema 生成 `dispatch contract`
 2. 按仲裁结果生成 `patch contract`
-3. 校验 `files_allowed/files_blocked`
+3. 构建并校验 `execution context bundle`
 4. 校验 contract 与 OpenSpec/plan 的映射关系
+5. 校验 `files_allowed/files_blocked`
 
 ### `src/adapters/`
 
@@ -227,6 +229,8 @@ src/runtime/reports/
 src/runtime/persistence/
   state-repository.ts
   task-repository.ts
+  result-set-repository.ts
+  confirmation-event-repository.ts
   file-lock.ts
   paths.ts
 ```
@@ -234,9 +238,41 @@ src/runtime/persistence/
 #### 责任
 
 1. 读写 `state.yaml`
-2. 维护任务目录路径
-3. 防止多处写入同一任务状态
-4. 隔离文件系统细节
+2. 维护冻结引用、`result_set`、`confirmation event` 与阻塞恢复元数据
+3. 维护任务目录路径
+4. 防止多处写入同一任务状态
+5. 隔离文件系统细节
+
+## 一期分层落位补充
+
+### Layer 1
+
+- `src/runtime/state-machine/`
+- `src/runtime/contracts/`
+- `src/runtime/persistence/`
+- `src/runtime/orchestrator/`
+- `src/runtime/arbitrator/`
+- `src/runtime/reports/`
+
+### Layer 2
+
+- `src/runtime/contracts/patch-contract.ts`
+- `src/runtime/persistence/result-set-repository.ts`
+- `src/runtime/persistence/confirmation-event-repository.ts`
+- `src/diagnostics/`
+
+### Layer 3
+
+- `src/runtime/scheduler/dependency-graph.ts`
+- `src/runtime/scheduler/worktree-manager.ts`
+- `src/adapters/vk/`
+
+## 文档联动修订要求
+
+1. 状态语义变更同步更新一期收敛方案与 Runtime Schemas
+2. 角色职责变更同步更新主方案与一期收敛方案
+3. contract、bundle、report 字段变更同步更新 Runtime Schemas 与 Implementation Layout
+4. 模块边界变更同步更新 Implementation Layout 与主方案
 
 ### `src/diagnostics/`
 

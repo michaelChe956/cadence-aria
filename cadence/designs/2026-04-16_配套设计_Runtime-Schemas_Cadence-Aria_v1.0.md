@@ -1,8 +1,8 @@
 # Cadence-Aria Runtime Schemas 配套设计
 
-> **版本**：v1.1
-> **日期**：2026-04-16
-> **关联主文档**：`cadence/designs/2026-04-16_方案设计_Cadence-Aria_v1.4.md`（当前修订：v1.4.4）
+> **版本**：v1.2
+> **日期**：2026-04-18
+> **关联主文档**：`cadence/designs/2026-04-16_方案设计_Cadence-Aria_v1.4.md`（当前修订：v1.4.5）
 
 ## 目标
 
@@ -34,6 +34,9 @@
 | `risk_level` | enum | 是 | `low \| medium \| high` |
 | `status` | enum | 是 | 必须属于状态机合法状态 |
 | `current_round` | integer | 是 | `>= 1` |
+| `approved_spec_ref` | string/null | 是 | approved spec 冻结引用 |
+| `approved_plan_ref` | string/null | 是 | approved plan 冻结引用 |
+| `active_result_set_id` | string/null | 是 | 当前仲裁结果集标识 |
 | `active_exec_units` | string[] | 是 | 可为空数组 |
 | `confirmation_pending` | enum | 是 | `none \| spec \| plan` |
 | `confirmation_mode` | enum | 是 | `manual \| auto-policy` |
@@ -42,6 +45,10 @@
 | `test_status` | enum | 是 | `pending \| passed \| failed` |
 | `patch_required_by` | enum | 是 | `none \| review \| test \| both` |
 | `patch_round` | integer | 是 | `>= 0` |
+| `block_reason_code` | string/null | 否 | 阻塞原因码 |
+| `blocking_stage` | string/null | 否 | 当前阻塞阶段 |
+| `retryable` | boolean | 否 | 阻塞或失败是否允许重试 |
+| `required_action` | string/null | 否 | 恢复所需动作摘要 |
 | `exec_units` | map | 是 | key 为 `exec-xx` |
 | `patch_units` | map | 否 | key 为 `patch-xx` |
 | `created_at` | datetime string | 是 | ISO 8601 |
@@ -101,7 +108,7 @@
 
 一期收敛方案中的 `native issue` 特指通过 `Aria` 原生命令入口建立的任务。
 
-在运行时来源字段中，一期建议将该入口映射为 `aria-native`。若保留 `native` 枚举值，则必须在实现中明确其与 `aria-native` 的差异，不得与上述术语混用。
+在运行时来源字段中，一期正式流实例值只允许 `aria-native`。若保留 `vk` 或 `native` 枚举值，仅作为后续兼容保留值，不得在一期正式任务中产生实例。
 
 ### 确认点字段说明
 
@@ -112,6 +119,8 @@
 | `confirmation_pending` | 当前是否存在待确认节点 |
 | `confirmation_mode` | 当前确认点由人工确认还是由低风险策略自动通过 |
 | `confirmation_artifact_path` | 指向当前需要展示给用户的 spec / plan 工件 |
+
+`confirmation event` 是触发 `spec-approved` 与 `plan-approved` 的正式事件，至少包含 `task_id`、`confirmation_type`、`artifact_ref`、`decision`、`actor`、`timestamp`、`note`。
 
 ## `task intake card`
 
@@ -172,6 +181,7 @@
 | 字段 | 类型 | 必填 | 约束 |
 |------|------|------|------|
 | `task_id` | string | 是 | 必须映射现有任务 |
+| `result_set_id` | string | 是 | 指向当前仲裁结果集 |
 | `exec_units_reviewed` | string[] | 是 | 不得为空 |
 | `blockers` | object[] | 否 | 每项必须有 `issue_id` 与 `severity` |
 | `suggestions` | object[] | 否 | 建议项不得进入 `must_fix` |
@@ -187,7 +197,7 @@
 - `failed`：review 未通过
 - `needs_patch`：存在必须修补项
 
-是否进入 `patching`、`blocked` 或 `verified`，由运行时统一仲裁决定，而不是由该字段单独决定。
+是否进入 `patching`、`blocked` 或 `verified`，由运行时统一仲裁决定，而不是由该字段单独决定。`review report` 与 `test report` 只有在绑定同一个 `result_set_id` 时才允许进入统一仲裁。
 
 | 字段 | 类型 | 必填 | 约束 |
 |------|------|------|------|
@@ -213,6 +223,7 @@
 | 字段 | 类型 | 必填 | 约束 |
 |------|------|------|------|
 | `task_id` | string | 是 | 必须映射现有任务 |
+| `result_set_id` | string | 是 | 指向当前仲裁结果集 |
 | `exec_units_tested` | string[] | 是 | 不得为空 |
 | `failures` | object[] | 否 | 失败时必须包含 `test_command` 与 `evidence` |
 | `passed_count` | integer | 是 | `>= 0` |
@@ -227,7 +238,7 @@
 - `passed`：测试通过
 - `failed`：测试未通过
 
-是否进入 `patching`、`blocked` 或 `verified`，由运行时统一仲裁决定，而不是由该字段单独决定。
+是否进入 `patching`、`blocked` 或 `verified`，由运行时统一仲裁决定，而不是由该字段单独决定。`review report` 与 `test report` 只有在绑定同一个 `result_set_id` 时才允许进入统一仲裁。
 
 | 字段 | 类型 | 必填 | 约束 |
 |------|------|------|------|
@@ -252,12 +263,17 @@
 | `source_task_refs` | string[] | 是 | 至少 1 项 |
 | `task_id` | string | 是 | 必须映射现有任务 |
 | `timeout_minutes` | integer | 是 | `> 0` 且受配置上限约束 |
+| `based_on_spec_ref` | string | 是 | 指向 approved spec 冻结引用 |
+| `based_on_plan_ref` | string | 是 | 指向 approved plan 冻结引用 |
+| `context_bundle_ref` | string | 是 | 指向 `execution context bundle` |
+| `output_schema_ref` | string | 是 | 指向结果产物 schema |
 
 ### 专属字段
 
 | 字段 | 类型 | 必填 | 约束 |
 |------|------|------|------|
 | `exec_unit_id` | string | 是 | `exec-xx` |
+| `contract_type` | enum | 是 | 一期固定 `dispatch` |
 | `parent_task` | string | 是 | 映射 OpenSpec task |
 | `mode` | enum | 是 | 一期固定 `exec` |
 | `scope` | object | 是 | 至少包含 `files_allowed` |
@@ -286,13 +302,36 @@
 | 字段 | 类型 | 必填 | 约束 |
 |------|------|------|------|
 | `patch_unit_id` | string | 是 | `patch-xx` |
+| `contract_type` | enum | 是 | 一期固定 `patch` |
 | `source_exec_unit` | string | 是 | 必须引用已存在 `exec-xx` |
 | `based_on_dispatch_contract` | string | 是 | 指向原始 dispatch contract |
-| `must_fix` | string[] | 是 | 至少 1 项，且均为 blocker 问题 ID |
+| `based_on_result_set_id` | string | 是 | 指向当前仲裁结果集 |
+| `patch_reason` | string | 是 | 非空，说明触发 patch 的直接原因 |
+| `must_fix_items` | string[] | 是 | 至少 1 项，且均为 blocker 问题 ID |
 | `advisory_only` | string[] | 否 | 可为空 |
 | `must_not_change` | string[] | 是 | 至少 1 项 |
 | `acceptance` | string[] | 是 | 至少 1 项 |
 | `patch_required_by` | enum | 是 | `review \| test \| both` |
+
+一期阻塞分类只允许：
+
+- `capability_blocked`
+- `input_blocked`
+- `execution_blocked`
+- `decision_blocked`
+
+## `execution context bundle`
+
+| 字段 | 类型 | 必填 | 约束 |
+|------|------|------|------|
+| `bundle_id` | string | 是 | 在任务范围内唯一 |
+| `spec_ref` | string | 是 | 指向已冻结 spec |
+| `plan_ref` | string | 是 | 指向已冻结 plan |
+| `scope_constraints_ref` | string | 是 | 指向范围约束定义 |
+| `required_methods` | string[] | 是 | 至少 1 项 |
+| `workspace_context` | object | 是 | 包含仓库路径、worktree、base revision 等上下文 |
+| `verification_requirements` | string[] | 是 | 至少 1 项 |
+| `prompt_template_ref` | string | 是 | 指向 prompt 模板 |
 
 ## `verification summary`
 
