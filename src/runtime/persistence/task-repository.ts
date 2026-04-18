@@ -8,7 +8,7 @@ import { nowIso } from '../../utils/time.js';
 import type { State } from '../../schemas/state-schema.js';
 
 export async function createTask(input: { title: string }): Promise<State> {
-  const task_id = createTaskId();
+  const task_id = await createTaskId();
   const taskRoot = getTaskRoot(task_id);
   const artifactsDir = getTaskArtifactsDir(task_id);
 

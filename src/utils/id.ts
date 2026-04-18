@@ -1,7 +1,43 @@
-let counter = 1;
+import fs from 'node:fs/promises';
+import path from 'node:path';
 
-export function createTaskId(now = new Date('2026-04-18T00:00:00.000Z')): string {
-  const date = now.toISOString().slice(0, 10).replaceAll('-', '');
-  const suffix = String(counter++).padStart(3, '0');
-  return `aria-${date}-${suffix}`;
+const TASK_ROOT = path.posix.join('cadence', 'cache', 'aria', 'tasks');
+const TASK_ID_PATTERN = /^aria-(\d{8})-(\d{3})$/;
+
+function formatDate(now: Date): string {
+  return now.toISOString().slice(0, 10).replaceAll('-', '');
+}
+
+export async function createTaskId(now = new Date()): Promise<string> {
+  const date = formatDate(now);
+  const prefix = `aria-${date}-`;
+  const taskRoot = TASK_ROOT;
+
+  let maxSuffix = 0;
+
+  try {
+    const entries = await fs.readdir(taskRoot, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) {
+        continue;
+      }
+
+      const match = entry.name.match(TASK_ID_PATTERN);
+      if (!match || match[1] !== date) {
+        continue;
+      }
+
+      const suffix = Number(match[2]);
+      if (suffix > maxSuffix) {
+        maxSuffix = suffix;
+      }
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw error;
+    }
+  }
+
+  const nextSuffix = String(maxSuffix + 1).padStart(3, '0');
+  return `${prefix}${nextSuffix}`;
 }

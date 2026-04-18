@@ -12,6 +12,12 @@ export async function readState(taskId: string): Promise<State> {
 
 export async function writeState(state: State): Promise<void> {
   const statePath = getTaskStatePath(state.task_id);
+  const tempPath = `${statePath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   await fs.mkdir(path.dirname(statePath), { recursive: true });
-  await fs.writeFile(statePath, stringifyYaml(state), 'utf8');
+  try {
+    await fs.writeFile(tempPath, stringifyYaml(state), 'utf8');
+    await fs.rename(tempPath, statePath);
+  } finally {
+    await fs.rm(tempPath, { force: true });
+  }
 }
