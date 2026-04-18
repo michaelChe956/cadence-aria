@@ -1,8 +1,9 @@
 # Cadence-Aria 一期收敛方案设计
 
-> **版本**：v1.2
+> **版本**：v1.3
 > **日期**：2026-04-18
 > **定位**：在 [`cadence/designs/2026-04-16_方案设计_Cadence-Aria_v1.4.md`](../designs/2026-04-16_方案设计_Cadence-Aria_v1.4.md) 基础上，对一期实现范围、能力边界与落地顺序做收敛设计。
+> **v1.3 更新**：基于 brainstorming 审视，新增执行上下文注入闭环、前后段交接协议、运行时权威链三个章节（第 15-17 节）。
 
 ## 1. 设计目标
 
@@ -594,6 +595,8 @@
    - 没有 `OpenSpec + superpowers` 不允许启动 `exec`
    - 没有 `OpenSpec + superpowers` 不允许启动 `patch`
    - 缺少能力消费记录视为证据不足
+   - 必须完成 handoff checkpoint 全部 7 步才能从 `plan-approved` 推进到 `dispatched`（见第 16 节）
+   - 执行结果必须通过范围校验和工件校验（见第 15.3 节）
 
 4. **Review / Test Guard**
    - 没有合法 `review report` / `test report` 不能离开 `reviewing/testing`
@@ -784,3 +787,105 @@
 - `Aria` 负责保证它们在正确阶段被检查、注入、记录、校验并收束
 
 这是一版足以进入 implementation plan 的收敛设计，同时保持与主方案一致，不把一期做成重型泛化平台。
+
+## 15. 执行上下文注入-消费-验证闭环
+
+> **v1.3 新增**：明确 Codex 作为 AI 执行端如何接收和使用 Aria、OpenSpec、superpowers 三套能力，以及 Aria 如何结构化验证执行结果。
+
+### 15.1 注入阶段
+
+Aria 将 `execution context bundle` 渲染为分层 prompt，在 prompt 中明确标注每部分的来源和优先级。
+
+分层渲染规则：
+
+| 层级 | 内容来源 | prompt 中的定位 | 优先级 |
+|------|---------|----------------|--------|
+| 契约约束 | `dispatch contract` 的 goal_statement、allowed_paths、blocked_paths、acceptance_checks | 标注为"执行契约（最高优先级，不可偏离）" | 最高 |
+| OpenSpec 基准 | spec_ref、plan_ref、scope_constraints_ref | 标注为"OpenSpec 基准（约束来源）" | 高 |
+| superpowers 方法 | required_methods、verification_requirements | 标注为"superpowers 方法要求（执行方法论）" | 中 |
+
+优先级规则：`契约约束 > OpenSpec 基准 > superpowers 方法建议`。
+
+### 15.2 消费阶段
+
+Codex 接收完整的 contract prompt，在执行过程中：
+
+1. 只能参考已注入的冻结引用，不能回溯读取最新 spec/plan
+2. 必须在 `allowed_paths` 范围内执行变更
+3. 必须避免触及 `blocked_paths`
+4. 应使用 `required_methods` 中指定的方法
+
+### 15.3 验证阶段
+
+Codex 返回 `exec result` 后，Aria 执行以下结构化验证：
+
+1. **范围校验**：通过 `simple-git` diff 检查 `changed_files` 是否在 `allowed_paths` 范围内
+2. **工件校验**：`exec result` 必须包含完整的 `capabilities_used`、`openspec_refs_consumed`、`superpowers_refs_consumed`
+3. **越界处理**：超出 `allowed_paths` 的变更或触及 `blocked_paths` 的变更直接标记为违规，进入 `blocked`
+4. **证据校验**：缺少能力消费记录视为证据不足，不允许通过 verification
+
+验证不依赖 Codex 的自我声明，而是以 Aria 的结构化校验为准。
+
+## 16. 前后段交接协议
+
+> **v1.3 新增**：明确从 Claude 管辖到 Codex 管辖的切换过程中的数据封装、校验和冻结机制。
+
+### 16.1 Handoff Checkpoint
+
+在 `plan-approved` 和 `dispatched` 之间引入明确的交接检查点，包含 7 步：
+
+1. **冻结基准**：Aria 将 `approved_plan_ref` 标记为不可变
+2. **能力检查**：验证 OpenSpec + superpowers 依赖可用
+3. **Bundle 生成**：基于冻结引用生成 `execution context bundle`
+4. **Contract 生成**：基于 bundle 生成 `dispatch contract`
+5. **状态写入**：将 bundle ref 和 contract ref 写入 `state.yaml`
+6. **完整性校验**：校验 contract 字段齐全、引用有效、scope 非空
+7. **状态推进**：`state.yaml` 状态变更为 `dispatched`
+
+### 16.2 交接约束
+
+1. 交接完成后，前段（Claude）不再拥有修改已冻结引用的权限
+2. Codex 只能消费 `dispatch contract` 中已冻结的引用
+3. 如果交接过程中任一步骤失败，任务停留在 `plan-approved`，进入 `blocked`
+4. 交接是原子操作：要么全部 7 步完成，要么回退到 `plan-approved`
+
+### 16.3 接力棒定义
+
+交接的"接力棒"由以下三部分组成：
+
+- `execution context bundle`：包含完整的 spec/plan 基准和方法要求
+- `dispatch contract`：包含具体执行目标和范围约束
+- `state.yaml` 中的冻结引用记录：作为交接完成的正式证据
+
+三部分必须同时存在且互相一致，缺一不可。
+
+## 17. 运行时权威链
+
+> **v1.3 新增**：明确 OpenSpec、superpowers、Aria 三者在运行时的权威层级和仲裁规则。
+
+### 17.1 四层权威层级
+
+| 层级 | 来源 | 权威度 | 适用场景 |
+|------|------|--------|----------|
+| L1 | `state.yaml` + `contract` | 最高 | 状态推进决策、冻结引用、scope 约束 |
+| L2 | `OpenSpec` approved 工件 | 高 | spec/plan 内容基准、边界约束 |
+| L3 | `superpowers` 方法建议 | 中 | 执行方法论、review/test 方法 |
+| L4 | 执行端自主决策 | 最低 | 仅在 L1-L3 未覆盖范围内 |
+
+### 17.2 仲裁规则
+
+1. **Aria 是唯一的运行时仲裁者**，不委托给任何执行端
+2. 当 OpenSpec 基准和 superpowers 建议冲突时，以 OpenSpec 为准
+3. Codex 不直接访问 OpenSpec 或 superpowers 原始服务，只能通过 Aria 注入的 bundle 消费
+4. Claude 在前段直接使用 OpenSpec + superpowers，但所有正式产出必须经过 Aria 的 Guard 校验才能推进状态
+5. 当权威链无法解决冲突时（如 OpenSpec 和 contract 约束矛盾），任务进入 `decision_blocked`，等待人工裁决
+
+### 17.3 权威链在各节点的应用
+
+| 节点 | L1 (contract/state) | L2 (OpenSpec) | L3 (superpowers) | L4 (自主决策) |
+|------|---------------------|---------------|-------------------|---------------|
+| 前段各节点 | Aria 用 Guard 控制 | Claude 直接消费 | Claude 直接消费 | Claude 在未覆盖范围自主 |
+| dispatch | Aria 生成 contract | 写入 contract | 写入 contract | 不适用 |
+| exec/patch | Codex 必须遵循 | 通过 bundle 间接消费 | 通过 bundle 间接消费 | 仅在未覆盖范围 |
+| review/test | 结果写入 state | 作为审查基准 | 作为方法依据 | 分析范围内自主 |
+| verified | Aria 判定 | 满足正式闭环要求 | 方法已兑现 | 不适用 |
