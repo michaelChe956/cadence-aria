@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-const execUnitSchema = z.object({
+export const execUnitSchema = z.object({
   status: z.enum(['pending', 'running', 'succeeded', 'failed', 'timeout', 'cancelled', 'blocked']),
   contract_path: z.string(),
   worktree_ref: z.string().optional(),
@@ -39,6 +39,7 @@ export const stateSchema = z.object({
     'executing',
     'reviewing/testing',
     'patching',
+    'blocked',
     'verified',
     'done',
     'cancelled'
@@ -71,5 +72,4 @@ export function parseState(input: unknown): State {
   return stateSchema.parse(input);
 }
 
-export const execUnitStateSchema = execUnitSchema;
 export const patchUnitStateSchema = patchUnitSchema;

@@ -9,5 +9,5 @@ export function getTaskStatePath(taskId: string): string {
 }
 
 export function getTaskArtifactsDir(taskId: string): string {
-  return getTaskRoot(taskId);
+  return path.posix.join(getTaskRoot(taskId), 'artifacts');
 }

@@ -32,7 +32,7 @@ export const dispatchContractSchema = z.object({
     files_blocked: z.array(z.string()).optional()
   }),
   goal: z.string().min(1),
-  acceptance: z.array(z.string()).min(1),
+  acceptance_checks: z.array(z.string()).min(1),
   dependencies: z.array(z.string()),
   worktree_ref: z.string().optional(),
   result_path: z.string(),
