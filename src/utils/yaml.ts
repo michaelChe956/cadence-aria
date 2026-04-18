@@ -1,7 +1,7 @@
 import { parse as parseYamlDocument, stringify as stringifyYamlDocument } from 'yaml';
 
-export function parseYaml<T>(input: string): T {
-  return parseYamlDocument(input) as T;
+export function parseYaml(input: string): unknown {
+  return parseYamlDocument(input);
 }
 
 export function stringifyYaml(value: unknown): string {
