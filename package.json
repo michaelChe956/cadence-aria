@@ -1,0 +1,16 @@
+{
+  "name": "cadence-aria",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "check": "pnpm build && pnpm test"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "@vitest/coverage-v8": "^3.1.4",
+    "typescript": "^5.8.3",
+    "vitest": "^3.1.4"
+  }
+}
