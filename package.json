@@ -4,9 +4,9 @@
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test:unit": "vitest run tests/unit --coverage",
-    "test:integration": "vitest run tests/integration --passWithNoTests",
-    "test:e2e": "vitest run tests/e2e --passWithNoTests",
+    "test:unit": "vitest run tests/unit",
+    "test:integration": "vitest run tests/integration",
+    "test:e2e": "vitest run tests/e2e",
     "test": "vitest run --coverage",
     "check": "tsc -p tsconfig.json --noEmit"
   },
