@@ -23,7 +23,7 @@ const patchUnitSchema = z.object({
 
 export const stateSchema = z.object({
   task_id: z.string(),
-  task_title: z.string(),
+  task_title: z.string().optional(),
   source: z.enum(['vk', 'native', 'aria-native']),
   flow_type: z.enum(['formal', 'fast-lane']),
   risk_level: z.enum(['low', 'medium', 'high']),

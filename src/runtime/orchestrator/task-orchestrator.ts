@@ -9,6 +9,18 @@ import { buildPlanBrief } from '../reports/plan-brief.js';
 import { buildSpecArtifact } from '../reports/spec-artifact.js';
 import { nowIso } from '../../utils/time.js';
 
+async function readLegacyTaskTitle(taskId: string): Promise<string> {
+  const intakeCardPath = path.join(getTaskArtifactsDir(taskId), 'task-intake-card.md');
+  const content = await fs.readFile(intakeCardPath, 'utf8');
+  const match = content.match(/^scope_summary: (.+)$/m);
+
+  if (!match) {
+    throw new Error(`无法从 intake card 读取标题: ${taskId}`);
+  }
+
+  return match[1];
+}
+
 export async function intakeFormalTask(title: string): Promise<string> {
   const state = await createTask({ title });
   const artifactsDir = getTaskArtifactsDir(state.task_id);
@@ -28,12 +40,14 @@ export async function startFormalTask(taskId: string): Promise<void> {
   const artifactsDir = getTaskArtifactsDir(taskId);
   const specPath = path.join(artifactsDir, 'spec-artifact.md');
   const planPath = path.join(artifactsDir, 'plan-brief.md');
+  const taskTitle = state.task_title ?? await readLegacyTaskTitle(taskId);
 
-  await fs.writeFile(specPath, buildSpecArtifact(state.task_title), 'utf8');
+  await fs.writeFile(specPath, buildSpecArtifact(taskTitle), 'utf8');
   await fs.writeFile(planPath, buildPlanBrief(taskId), 'utf8');
 
   await writeState({
     ...state,
+    task_title: taskTitle,
     status: 'spec-review',
     confirmation_pending: 'spec',
     confirmation_artifact_path: specPath,

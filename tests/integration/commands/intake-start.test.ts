@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { intakeCommand } from '../../../src/commands/intake.js';
 import { startCommand } from '../../../src/commands/start.js';
-import { readState } from '../../../src/runtime/persistence/state-repository.js';
+import { readState, writeState } from '../../../src/runtime/persistence/state-repository.js';
 import { getTaskArtifactsDir } from '../../../src/runtime/persistence/paths.js';
 
 const ORIGINAL_CWD = process.cwd();
@@ -67,5 +67,26 @@ describe('intake/start', () => {
     expect(specContent).toContain(state.task_title);
 
     await expect(startCommand(taskId)).rejects.toThrow('任务不在可启动状态');
+  });
+
+  it('旧状态缺少 task_title 时仍可通过 intake card 兼容启动并回填标题', async () => {
+    const intake = await intakeCommand('为 Aria 增加 capability report 结构化输出');
+    const taskId = intake.match(/task_id: (aria-\d{8}-\d{3})/)?.[1] ?? '';
+    const artifactsDir = getTaskArtifactsDir(taskId);
+    const intakeCardPath = path.join(artifactsDir, 'task-intake-card.md');
+    const specPath = path.join(artifactsDir, 'spec-artifact.md');
+
+    const legacyState = await readState(taskId);
+    delete legacyState.task_title;
+    await writeState(legacyState);
+
+    const start = await startCommand(taskId);
+    expect(start).toContain('status: spec-review');
+
+    const state = await readState(taskId);
+    expect(state.task_title).toBe('为 Aria 增加 capability report 结构化输出');
+    expect(state.confirmation_artifact_path).toBe(specPath);
+    await expect(fs.access(intakeCardPath)).resolves.toBeUndefined();
+    await expect(fs.access(specPath)).resolves.toBeUndefined();
   });
 });

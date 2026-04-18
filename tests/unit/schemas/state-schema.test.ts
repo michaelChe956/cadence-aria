@@ -5,7 +5,6 @@ describe('parseState', () => {
   it('接受一期 formal flow 的最小状态对象', () => {
     const state = parseState({
       task_id: 'aria-20260418-001',
-      task_title: '为 Aria 增加 capability report 结构化输出',
       source: 'aria-native',
       flow_type: 'formal',
       risk_level: 'medium',
