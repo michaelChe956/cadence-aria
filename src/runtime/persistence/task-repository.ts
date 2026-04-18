@@ -37,6 +37,7 @@ export async function createTask(input: { title: string }): Promise<State> {
   const timestamp = nowIso();
   const state: State = {
     task_id,
+    task_title: input.title,
     source: 'aria-native',
     flow_type: 'formal',
     risk_level: 'medium',

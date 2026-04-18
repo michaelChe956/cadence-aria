@@ -43,8 +43,11 @@ describe('intake/start', () => {
 
     const taskId = intake.match(/task_id: (aria-\d{8}-\d{3})/)?.[1] ?? '';
     const artifactsDir = getTaskArtifactsDir(taskId);
+    const intakeCardPath = path.join(artifactsDir, 'task-intake-card.md');
     const specPath = path.join(artifactsDir, 'spec-artifact.md');
     const planPath = path.join(artifactsDir, 'plan-brief.md');
+
+    await fs.rm(intakeCardPath, { force: true });
 
     const start = await startCommand(taskId);
     expect(start).toContain('status: spec-review');
@@ -55,11 +58,14 @@ describe('intake/start', () => {
     await expect(fs.access(planPath)).resolves.toBeUndefined();
 
     const state = await readState(taskId);
+    expect(state.task_title).toBe('为 Aria 增加 capability report 结构化输出');
     expect(state.status).toBe('spec-review');
     expect(state.confirmation_pending).toBe('spec');
     expect(state.confirmation_artifact_path).toBe(specPath);
 
     const specContent = await fs.readFile(specPath, 'utf8');
-    expect(specContent).toContain('为 Aria 增加 capability report 结构化输出');
+    expect(specContent).toContain(state.task_title);
+
+    await expect(startCommand(taskId)).rejects.toThrow('任务不在可启动状态');
   });
 });

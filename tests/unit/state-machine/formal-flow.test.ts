@@ -6,6 +6,7 @@ import { canTransition } from '../../../src/runtime/state-machine/state-machine.
 function createState(overrides: Partial<State> = {}): State {
   return {
     task_id: 'aria-20260418-001',
+    task_title: '为 Aria 增加 capability report 结构化输出',
     source: 'aria-native',
     flow_type: 'formal',
     risk_level: 'medium',
