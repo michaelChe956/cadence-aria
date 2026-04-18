@@ -2,6 +2,10 @@
   "name": "cadence-aria",
   "private": true,
   "type": "module",
+  "dependencies": {
+    "yaml": "^2.8.1",
+    "zod": "^3.25.76"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test:unit": "vitest run tests/unit",
