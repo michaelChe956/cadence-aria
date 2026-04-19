@@ -20,18 +20,6 @@ export function buildClaudeCodeCommand(input: CliCommandInput): string[] {
   ];
 }
 
-export function buildCodexCommand(input: CliCommandInput): string[] {
-  return [
-    'codex',
-    'exec',
-    '-C',
-    input.cwd,
-    '--output-last-message',
-    input.outputPath,
-    input.promptPath,
-  ];
-}
-
 async function runCliCommand(args: string[], cwd: string): Promise<CliExecutionResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(args[0]!, args.slice(1), { cwd });

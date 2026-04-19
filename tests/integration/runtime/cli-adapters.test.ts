@@ -6,8 +6,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   buildClaudeCodeCommand,
-  buildCodexCommand,
 } from '../../../src/adapters/claude-code/claude-code-adapter.js';
+import { buildCodexCommand } from '../../../src/adapters/codex/codex-adapter.js';
 import { detectCapabilities } from '../../../src/adapters/capability-detector.js';
 
 const ORIGINAL_PATH = process.env.PATH ?? '';

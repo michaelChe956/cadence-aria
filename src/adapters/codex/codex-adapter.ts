@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 
-import { buildCodexCommand, type CliCommandInput, type CliExecutionResult } from '../claude-code/claude-code-adapter.js';
 import { nowIso } from '../../utils/time.js';
+import type { CliCommandInput, CliExecutionResult } from '../claude-code/claude-code-adapter.js';
 
 export type CodexExecResult = {
   task_id: string;
@@ -17,6 +17,18 @@ export type CodexExecResult = {
   started_at: string;
   finished_at: string;
 };
+
+export function buildCodexCommand(input: CliCommandInput): string[] {
+  return [
+    'codex',
+    'exec',
+    '-C',
+    input.cwd,
+    '--output-last-message',
+    input.outputPath,
+    input.promptPath,
+  ];
+}
 
 async function runCodexCli(input: CliCommandInput): Promise<CliExecutionResult> {
   const args = buildCodexCommand(input);
