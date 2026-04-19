@@ -1,9 +1,8 @@
 import { spawn } from 'node:child_process';
 
-export type CliCommandInput = {
+export type ClaudeCodeCommandInput = {
   cwd: string;
   promptPath: string;
-  outputPath: string;
 };
 
 export type CliExecutionResult = {
@@ -12,7 +11,7 @@ export type CliExecutionResult = {
   stderr: string;
 };
 
-export function buildClaudeCodeCommand(input: CliCommandInput): string[] {
+export function buildClaudeCodeCommand(input: ClaudeCodeCommandInput): string[] {
   return [
     'claude',
     '-p',
@@ -45,6 +44,6 @@ async function runCliCommand(args: string[], cwd: string): Promise<CliExecutionR
   });
 }
 
-export async function runClaudeCode(input: CliCommandInput): Promise<CliExecutionResult> {
+export async function runClaudeCode(input: ClaudeCodeCommandInput): Promise<CliExecutionResult> {
   return runCliCommand(buildClaudeCodeCommand(input), input.cwd);
 }

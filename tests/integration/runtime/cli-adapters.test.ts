@@ -27,7 +27,6 @@ describe('cli adapters', () => {
     expect(buildClaudeCodeCommand({
       cwd: '/tmp/task-1',
       promptPath: 'cadence/cache/aria/tasks/task-1/artifacts/spec-prompt.md',
-      outputPath: 'cadence/cache/aria/tasks/task-1/artifacts/spec-artifact.md',
     })).toEqual([
       'claude',
       '-p',
@@ -61,6 +60,19 @@ describe('cli adapters', () => {
     expect(detectCapabilities().codex).toEqual({
       available: false,
       source: 'codex'
+    });
+  });
+
+  it('将 codex.cmd 视为可用 launcher', async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cadence-aria-cli-'));
+    const binaryPath = path.join(tempDir, 'codex.cmd');
+    await fs.writeFile(binaryPath, '@echo off\r\nexit /b 0\r\n', 'utf8');
+    await fs.chmod(binaryPath, 0o755);
+    process.env.PATH = tempDir;
+
+    expect(detectCapabilities().codex).toEqual({
+      available: true,
+      source: binaryPath
     });
   });
 });

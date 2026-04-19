@@ -5,20 +5,31 @@ import { getHostCapability } from './host/host-adapter.js';
 import { getOpenSpecCapability } from './openspec/openspec-adapter.js';
 import { getSuperpowersCapability } from './superpowers/superpowers-adapter.js';
 
+function getBinaryCandidates(binaryName: string): string[] {
+  const launcherSuffixes = process.platform === 'win32'
+    ? ['.exe', '.cmd', '.bat', '.ps1', '']
+    : ['', '.cmd', '.bat'];
+
+  return launcherSuffixes.map(suffix => `${binaryName}${suffix}`);
+}
+
 function resolveBinaryPath(binaryName: string): string | null {
   const pathEntries = process.env.PATH?.split(path.delimiter) ?? [];
+  const candidates = getBinaryCandidates(binaryName);
 
   for (const entry of pathEntries) {
     if (!entry) {
       continue;
     }
 
-    const candidate = path.join(entry, binaryName);
-    try {
-      accessSync(candidate, constants.X_OK);
-      return candidate;
-    } catch {
-      continue;
+    for (const candidateName of candidates) {
+      const candidate = path.join(entry, candidateName);
+      try {
+        accessSync(candidate, constants.X_OK);
+        return candidate;
+      } catch {
+        continue;
+      }
     }
   }
 

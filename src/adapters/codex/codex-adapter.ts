@@ -1,7 +1,18 @@
 import { spawn } from 'node:child_process';
 
 import { nowIso } from '../../utils/time.js';
-import type { CliCommandInput, CliExecutionResult } from '../claude-code/claude-code-adapter.js';
+import type { CliExecutionResult } from '../claude-code/claude-code-adapter.js';
+
+export type CodexCommandInput = {
+  cwd: string;
+  promptPath: string;
+  outputPath: string;
+};
+
+export type LegacyCodexExecInput = {
+  task_id: string;
+  unit_id: string;
+};
 
 export type CodexExecResult = {
   task_id: string;
@@ -18,7 +29,7 @@ export type CodexExecResult = {
   finished_at: string;
 };
 
-export function buildCodexCommand(input: CliCommandInput): string[] {
+export function buildCodexCommand(input: CodexCommandInput): string[] {
   return [
     'codex',
     'exec',
@@ -30,7 +41,7 @@ export function buildCodexCommand(input: CliCommandInput): string[] {
   ];
 }
 
-async function runCodexCli(input: CliCommandInput): Promise<CliExecutionResult> {
+export async function runCodexCli(input: CodexCommandInput): Promise<CliExecutionResult> {
   const args = buildCodexCommand(input);
 
   return new Promise((resolve, reject) => {
@@ -57,23 +68,7 @@ async function runCodexCli(input: CliCommandInput): Promise<CliExecutionResult> 
   });
 }
 
-export async function runCodexExec(input: {
-  task_id: string;
-  unit_id: string;
-}): Promise<CodexExecResult>;
-
-export async function runCodexExec(input: CliCommandInput): Promise<CliExecutionResult>;
-
-export async function runCodexExec(
-  input: {
-    task_id: string;
-    unit_id: string;
-  } | CliCommandInput
-): Promise<CodexExecResult | CliExecutionResult> {
-  if ('cwd' in input) {
-    return runCodexCli(input);
-  }
-
+export async function runLegacyCodexExec(input: LegacyCodexExecInput): Promise<CodexExecResult> {
   const startedAt = nowIso();
   const finishedAt = nowIso();
 
@@ -91,4 +86,8 @@ export async function runCodexExec(
     started_at: startedAt,
     finished_at: finishedAt
   };
+}
+
+export async function runCodexExec(input: LegacyCodexExecInput): Promise<CodexExecResult> {
+  return runLegacyCodexExec(input);
 }
