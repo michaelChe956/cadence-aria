@@ -81,6 +81,20 @@ describe('cli adapters', () => {
     });
   });
 
+  it('当 PATH 含空片段时允许在当前目录命中 codex', async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cadence-aria-cli-'));
+    const workspaceBinary = path.join(tempDir, 'codex');
+    await fs.writeFile(workspaceBinary, '#!/bin/sh\nexit 0\n', 'utf8');
+    await fs.chmod(workspaceBinary, 0o755);
+    process.chdir(tempDir);
+    process.env.PATH = ':';
+
+    expect(detectCapabilities().codex).toEqual({
+      available: true,
+      source: 'codex'
+    });
+  });
+
   it('只在 Windows 语义下把 codex.cmd 视为 launcher', async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cadence-aria-cli-'));
     const binaryPath = path.join(tempDir, 'codex.cmd');

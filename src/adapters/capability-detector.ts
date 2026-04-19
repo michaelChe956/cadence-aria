@@ -27,10 +27,6 @@ function resolveBinaryPath(binaryName: string): string | null {
   const candidates = getBinaryCandidates(binaryName);
 
   for (const entry of pathEntries) {
-    if (!entry) {
-      continue;
-    }
-
     for (const candidateName of candidates) {
       const candidate = path.join(entry, candidateName);
       try {
