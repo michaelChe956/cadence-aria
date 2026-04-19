@@ -81,16 +81,24 @@ describe('cli adapters', () => {
     });
   });
 
-  it('将 codex.cmd 视为可用 launcher', async () => {
+  it('只在 Windows 语义下把 codex.cmd 视为 launcher', async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cadence-aria-cli-'));
     const binaryPath = path.join(tempDir, 'codex.cmd');
     await fs.writeFile(binaryPath, '@echo off\r\nexit /b 0\r\n', 'utf8');
     await fs.chmod(binaryPath, 0o755);
     process.env.PATH = tempDir;
 
+    if (process.platform === 'win32') {
+      expect(detectCapabilities().codex).toEqual({
+        available: true,
+        source: binaryPath
+      });
+      return;
+    }
+
     expect(detectCapabilities().codex).toEqual({
-      available: true,
-      source: binaryPath
+      available: false,
+      source: 'codex'
     });
   });
 });

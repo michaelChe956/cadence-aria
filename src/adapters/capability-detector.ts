@@ -15,7 +15,7 @@ function getLauncherSuffixes(): string[] {
     return ['.exe', '.cmd', '.bat', '.ps1'];
   }
 
-  return ['', '.cmd', '.bat'];
+  return [''];
 }
 
 function getBinaryCandidates(binaryName: string): string[] {
