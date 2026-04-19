@@ -30,3 +30,28 @@ node dist/src/index.js aria:status --task-id <task-id>
 node dist/src/index.js aria:result --task-id <task-id>
 node dist/src/index.js aria:doctor
 ```
+
+## 一期真实验收
+
+除 `pnpm check`、`pnpm test`、`pnpm build` 外，还必须满足：
+
+- `aria:start` 生成的 `spec-artifact.md` / `plan-brief.md` 带有 `producer: claude-code`
+- `confirm-plan` 后存在合法 `execution-context-bundle.yaml` 与 `dispatch-contract-exec-01.yaml`
+- `aria:run` 后存在合法 `exec-result-exec-01.yaml`、`review-report.yaml`、`test-report.yaml`
+- `aria:doctor` 返回 `claude_code`、`codex`、`OpenSpec`、`superpowers`
+
+## 检查与验证
+
+人工检查表：
+
+```bash
+cat cadence/checklists/aria-real-integration-checklist.md
+```
+
+只读验证脚本：
+
+```bash
+scripts/verify-real-integration.sh --task-id <task-id>
+```
+
+如果不传 `--task-id`，脚本会自动检查最新任务。脚本只读取已有任务和构建产物，不会创建任务，也不会推进状态。

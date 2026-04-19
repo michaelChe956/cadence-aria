@@ -1,7 +1,8 @@
 # Cadence 工作目录
 .worktrees/
 .mcp.json
-.codex/config.toml
+.codex
+.codex/
 node_modules/
 dist/
 coverage/
