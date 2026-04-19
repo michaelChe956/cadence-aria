@@ -1,4 +1,4 @@
-import { accessSync } from 'node:fs';
+import { accessSync, constants } from 'node:fs';
 import path from 'node:path';
 
 import { getHostCapability } from './host/host-adapter.js';
@@ -15,7 +15,7 @@ function resolveBinaryPath(binaryName: string): string | null {
 
     const candidate = path.join(entry, binaryName);
     try {
-      accessSync(candidate);
+      accessSync(candidate, constants.X_OK);
       return candidate;
     } catch {
       continue;
@@ -27,7 +27,7 @@ function resolveBinaryPath(binaryName: string): string | null {
 
 function detectCli(binaryPath: string) {
   try {
-    accessSync(binaryPath);
+    accessSync(binaryPath, constants.X_OK);
     return { available: true, source: binaryPath };
   } catch {
     return { available: false, source: binaryPath };

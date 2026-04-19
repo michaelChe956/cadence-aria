@@ -1,9 +1,26 @@
-import { describe, expect, it } from 'vitest';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+
+import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   buildClaudeCodeCommand,
   buildCodexCommand,
 } from '../../../src/adapters/claude-code/claude-code-adapter.js';
+import { detectCapabilities } from '../../../src/adapters/capability-detector.js';
+
+const ORIGINAL_PATH = process.env.PATH ?? '';
+
+let tempDir = '';
+
+afterEach(async () => {
+  process.env.PATH = ORIGINAL_PATH;
+  if (tempDir) {
+    await fs.rm(tempDir, { recursive: true, force: true });
+    tempDir = '';
+  }
+});
 
 describe('cli adapters', () => {
   it('为 claude code 构造带工作目录和输入文件的命令', () => {
@@ -13,13 +30,8 @@ describe('cli adapters', () => {
       outputPath: 'cadence/cache/aria/tasks/task-1/artifacts/spec-artifact.md',
     })).toEqual([
       'claude',
-      'code',
-      '--cwd',
-      '/tmp/task-1',
-      '--input',
+      '-p',
       'cadence/cache/aria/tasks/task-1/artifacts/spec-prompt.md',
-      '--output',
-      'cadence/cache/aria/tasks/task-1/artifacts/spec-artifact.md',
     ]);
   });
 
@@ -30,12 +42,25 @@ describe('cli adapters', () => {
       outputPath: 'cadence/cache/aria/tasks/task-1/artifacts/exec-result-exec-01.yaml',
     })).toEqual([
       'codex',
-      '--cwd',
+      'exec',
+      '-C',
       '/tmp/task-1',
-      '--input',
-      'cadence/cache/aria/tasks/task-1/artifacts/dispatch-prompt.md',
-      '--output',
+      '--output-last-message',
       'cadence/cache/aria/tasks/task-1/artifacts/exec-result-exec-01.yaml',
+      'cadence/cache/aria/tasks/task-1/artifacts/dispatch-prompt.md',
     ]);
+  });
+
+  it('将存在但不可执行的 codex 二进制视为不可用', async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cadence-aria-cli-'));
+    const binaryPath = path.join(tempDir, 'codex');
+    await fs.writeFile(binaryPath, '#!/bin/sh\nexit 0\n', 'utf8');
+    await fs.chmod(binaryPath, 0o644);
+    process.env.PATH = tempDir;
+
+    expect(detectCapabilities().codex).toEqual({
+      available: false,
+      source: 'codex'
+    });
   });
 });

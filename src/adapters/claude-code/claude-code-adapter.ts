@@ -15,25 +15,20 @@ export type CliExecutionResult = {
 export function buildClaudeCodeCommand(input: CliCommandInput): string[] {
   return [
     'claude',
-    'code',
-    '--cwd',
-    input.cwd,
-    '--input',
+    '-p',
     input.promptPath,
-    '--output',
-    input.outputPath,
   ];
 }
 
 export function buildCodexCommand(input: CliCommandInput): string[] {
   return [
     'codex',
-    '--cwd',
+    'exec',
+    '-C',
     input.cwd,
-    '--input',
-    input.promptPath,
-    '--output',
+    '--output-last-message',
     input.outputPath,
+    input.promptPath,
   ];
 }
 
