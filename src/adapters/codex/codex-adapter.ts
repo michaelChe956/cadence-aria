@@ -1,3 +1,6 @@
+import { spawn } from 'node:child_process';
+
+import { buildCodexCommand, type CliCommandInput, type CliExecutionResult } from '../claude-code/claude-code-adapter.js';
 import { nowIso } from '../../utils/time.js';
 
 export type CodexExecResult = {
@@ -15,10 +18,50 @@ export type CodexExecResult = {
   finished_at: string;
 };
 
+async function runCodexCli(input: CliCommandInput): Promise<CliExecutionResult> {
+  const args = buildCodexCommand(input);
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(args[0]!, args.slice(1), { cwd: input.cwd });
+    let stdout = '';
+    let stderr = '';
+
+    child.stdout?.on('data', chunk => {
+      stdout += chunk.toString();
+    });
+
+    child.stderr?.on('data', chunk => {
+      stderr += chunk.toString();
+    });
+
+    child.on('error', reject);
+    child.on('close', exitCode => {
+      resolve({
+        exitCode: exitCode ?? 1,
+        stdout,
+        stderr,
+      });
+    });
+  });
+}
+
 export async function runCodexExec(input: {
   task_id: string;
   unit_id: string;
-}): Promise<CodexExecResult> {
+}): Promise<CodexExecResult>;
+
+export async function runCodexExec(input: CliCommandInput): Promise<CliExecutionResult>;
+
+export async function runCodexExec(
+  input: {
+    task_id: string;
+    unit_id: string;
+  } | CliCommandInput
+): Promise<CodexExecResult | CliExecutionResult> {
+  if ('cwd' in input) {
+    return runCodexCli(input);
+  }
+
   const startedAt = nowIso();
   const finishedAt = nowIso();
 
