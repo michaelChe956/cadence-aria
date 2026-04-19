@@ -5,12 +5,21 @@ import { getHostCapability } from './host/host-adapter.js';
 import { getOpenSpecCapability } from './openspec/openspec-adapter.js';
 import { getSuperpowersCapability } from './superpowers/superpowers-adapter.js';
 
-function getBinaryCandidates(binaryName: string): string[] {
-  const launcherSuffixes = process.platform === 'win32'
-    ? ['.exe', '.cmd', '.bat', '.ps1', '']
-    : ['', '.cmd', '.bat'];
+function getLauncherSuffixes(): string[] {
+  if (process.platform === 'win32') {
+    const pathext = process.env.PATHEXT?.split(';').map(value => value.trim()).filter(Boolean) ?? [];
+    if (pathext.length > 0) {
+      return pathext.map(value => (value.startsWith('.') ? value : `.${value}`));
+    }
 
-  return launcherSuffixes.map(suffix => `${binaryName}${suffix}`);
+    return ['.exe', '.cmd', '.bat', '.ps1'];
+  }
+
+  return ['', '.cmd', '.bat'];
+}
+
+function getBinaryCandidates(binaryName: string): string[] {
+  return getLauncherSuffixes().map(suffix => `${binaryName}${suffix}`);
 }
 
 function resolveBinaryPath(binaryName: string): string | null {
@@ -36,22 +45,26 @@ function resolveBinaryPath(binaryName: string): string | null {
   return null;
 }
 
-function detectCli(binaryPath: string) {
+function detectCli(binaryPath: string | null, binaryName: string) {
+  if (!binaryPath) {
+    return { available: false, source: binaryName };
+  }
+
   try {
     accessSync(binaryPath, constants.X_OK);
     return { available: true, source: binaryPath };
   } catch {
-    return { available: false, source: binaryPath };
+    return { available: false, source: binaryName };
   }
 }
 
 export function detectCapabilities() {
-  const codexBinaryPath = resolveBinaryPath('codex') ?? 'codex';
+  const codexBinaryPath = resolveBinaryPath('codex');
 
   return {
     host: getHostCapability(),
     openspec: getOpenSpecCapability(),
     superpowers: getSuperpowersCapability(),
-    codex: detectCli(codexBinaryPath)
+    codex: detectCli(codexBinaryPath, 'codex')
   };
 }

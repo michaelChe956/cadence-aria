@@ -11,6 +11,7 @@ import { buildCodexCommand } from '../../../src/adapters/codex/codex-adapter.js'
 import { detectCapabilities } from '../../../src/adapters/capability-detector.js';
 
 const ORIGINAL_PATH = process.env.PATH ?? '';
+const ORIGINAL_CWD = process.cwd();
 
 let tempDir = '';
 
@@ -20,6 +21,7 @@ afterEach(async () => {
     await fs.rm(tempDir, { recursive: true, force: true });
     tempDir = '';
   }
+  process.chdir(ORIGINAL_CWD);
 });
 
 describe('cli adapters', () => {
@@ -56,6 +58,22 @@ describe('cli adapters', () => {
     await fs.writeFile(binaryPath, '#!/bin/sh\nexit 0\n', 'utf8');
     await fs.chmod(binaryPath, 0o644);
     process.env.PATH = tempDir;
+
+    expect(detectCapabilities().codex).toEqual({
+      available: false,
+      source: 'codex'
+    });
+  });
+
+  it('当工作区存在同名 codex 文件但 PATH 未命中时仍判为不可用', async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cadence-aria-cli-'));
+    const workspaceBinary = path.join(tempDir, 'codex');
+    const isolatedPathDir = path.join(tempDir, 'bin');
+    await fs.mkdir(isolatedPathDir);
+    await fs.writeFile(workspaceBinary, '#!/bin/sh\nexit 0\n', 'utf8');
+    await fs.chmod(workspaceBinary, 0o755);
+    process.chdir(tempDir);
+    process.env.PATH = isolatedPathDir;
 
     expect(detectCapabilities().codex).toEqual({
       available: false,
