@@ -7,6 +7,7 @@ import { beforeEach, afterEach, describe, expect, it } from 'vitest';
 import { appendConfirmationEvent } from '../../../src/runtime/persistence/confirmation-event-repository.js';
 import { createTask } from '../../../src/runtime/persistence/task-repository.js';
 import { readState } from '../../../src/runtime/persistence/state-repository.js';
+import { parseYaml } from '../../../src/utils/yaml.js';
 
 const ORIGINAL_CWD = process.cwd();
 
@@ -63,6 +64,39 @@ describe('createTask', () => {
 
     expect(content).toContain('spec-confirmed');
     expect(content).toContain('confirmed_at');
+  });
+
+  it('重复追加同一确认事件时会复用既有记录', async () => {
+    const task = await createTask({
+      title: '为 Aria 增加 capability report 结构化输出',
+    });
+
+    const firstPath = await appendConfirmationEvent(task.task_id, {
+      task_id: task.task_id,
+      confirmation_type: 'spec',
+      artifact_ref: 'cadence/cache/aria/tasks/aria-20260418-001/artifacts/spec-artifact.md',
+      decision: 'approved',
+      actor: 'user',
+      timestamp: '2026-04-18T00:00:00.000Z',
+      note: 'spec approved',
+    });
+    const secondPath = await appendConfirmationEvent(task.task_id, {
+      task_id: task.task_id,
+      confirmation_type: 'spec',
+      artifact_ref: 'cadence/cache/aria/tasks/aria-20260418-001/artifacts/spec-artifact.md',
+      decision: 'approved',
+      actor: 'user',
+      timestamp: '2026-04-18T00:00:01.000Z',
+      note: 'spec approved again',
+    });
+
+    expect(secondPath).toBe(firstPath);
+
+    const content = await fs.readFile(firstPath, 'utf8');
+    const events = parseYaml(content);
+
+    expect(Array.isArray(events)).toBe(true);
+    expect(events).toHaveLength(1);
   });
 
   it('连续创建两个任务时 task_id 不重复', async () => {

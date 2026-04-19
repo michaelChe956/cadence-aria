@@ -1,7 +1,7 @@
-import { startFormalTask } from '../runtime/orchestrator/task-orchestrator.js';
+import { startFrontPhaseTask } from '../runtime/orchestrator/front-phase-orchestrator.js';
 
 export async function startCommand(taskId: string): Promise<string> {
-  await startFormalTask(taskId);
+  await startFrontPhaseTask(taskId);
 
   return ['[Aria]', '- status: spec-review', '- clarification_required: false', '- next: confirm-spec'].join('\n');
 }

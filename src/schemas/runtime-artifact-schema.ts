@@ -10,6 +10,18 @@ const workspaceContextSchema = z.object({
   base_revision: z.string()
 });
 
+const approvedArtifactEvidenceSchema = z.object({
+  provider: z.literal('OpenSpec'),
+  approved_refs: z.array(z.string()).min(2),
+  evidence_type: z.literal('approved-artifact-ref')
+});
+
+const requiredMethodsEvidenceSchema = z.object({
+  provider: z.literal('superpowers'),
+  methods: z.array(z.string()).min(1),
+  evidence_type: z.literal('required-methods')
+});
+
 export const dispatchContractSchema = z.object({
   contract_version: z.literal('1.0'),
   generated_at: datetimeString,
@@ -52,3 +64,5 @@ export const executionContextBundleSchema = z.object({
 
 export type DispatchContract = z.infer<typeof dispatchContractSchema>;
 export type ExecutionContextBundle = z.infer<typeof executionContextBundleSchema>;
+export type ApprovedArtifactEvidence = z.infer<typeof approvedArtifactEvidenceSchema>;
+export type RequiredMethodsEvidence = z.infer<typeof requiredMethodsEvidenceSchema>;

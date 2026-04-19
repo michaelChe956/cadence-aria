@@ -1,6 +1,5 @@
-import path from 'node:path';
-
 import fs from 'node:fs/promises';
+import path from 'node:path';
 
 import { appendConfirmationEvent } from '../runtime/persistence/confirmation-event-repository.js';
 import { getTaskArtifactsDir } from '../runtime/persistence/paths.js';
@@ -15,6 +14,36 @@ import {
   validateExecutionContextBundle
 } from '../runtime/contracts/contract-validator.js';
 
+function validateFrontPhaseArtifact(input: {
+  content: string;
+  artifactType: 'spec' | 'plan';
+  expectedSpecRef: string;
+  expectedPlanRef: string;
+}): void {
+  const producer = input.content.match(/^producer: (.+)$/m)?.[1]?.trim();
+  if (producer !== 'claude-code') {
+    throw new Error(`缺少合法 ${input.artifactType} 来源证明: producer`);
+  }
+
+  const sourceCapabilities = input.content.match(/^source_capabilities: \[(.+)\]$/m)?.[1]?.trim();
+  if (sourceCapabilities !== 'OpenSpec, superpowers') {
+    throw new Error(`缺少合法 ${input.artifactType} 来源证明: source_capabilities`);
+  }
+
+  const openSpecEvidence = input.content.match(/^open_spec_evidence: (.+)$/m)?.[1]?.trim();
+  const expectedOpenSpecEvidence = `provider=OpenSpec approved_refs=${input.expectedSpecRef},${input.expectedPlanRef} evidence_type=approved-artifact-ref`;
+  if (openSpecEvidence !== expectedOpenSpecEvidence) {
+    throw new Error(`缺少合法 ${input.artifactType} 来源证明: open_spec_evidence`);
+  }
+
+  const superpowersEvidence = input.content.match(/^superpowers_evidence: (.+)$/m)?.[1]?.trim();
+  const expectedMethods = input.artifactType === 'spec' ? 'methods=brainstorming' : 'methods=writing-plans';
+  const expectedSuperpowersEvidence = `provider=superpowers ${expectedMethods} evidence_type=required-methods`;
+  if (superpowersEvidence !== expectedSuperpowersEvidence) {
+    throw new Error(`缺少合法 ${input.artifactType} 来源证明: superpowers_evidence`);
+  }
+}
+
 export async function confirmPlanCommand(taskId: string): Promise<string> {
   const state = await readState(taskId);
   if (state.status !== 'plan-review') {
@@ -27,6 +56,14 @@ export async function confirmPlanCommand(taskId: string): Promise<string> {
   if (!approved_spec_ref || !approved_plan_ref) {
     throw new Error(`缺少待确认 plan 工件或冻结引用: ${taskId}`);
   }
+
+  const planContent = await fs.readFile(approved_plan_ref, 'utf8');
+  validateFrontPhaseArtifact({
+    content: planContent,
+    artifactType: 'plan',
+    expectedSpecRef: approved_spec_ref,
+    expectedPlanRef: approved_plan_ref
+  });
 
   const confirmation_event_path = await appendConfirmationEvent(taskId, {
     task_id: taskId,

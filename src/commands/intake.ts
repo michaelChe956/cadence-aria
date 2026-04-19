@@ -1,7 +1,7 @@
-import { intakeFormalTask } from '../runtime/orchestrator/task-orchestrator.js';
+import { intakeFrontPhaseTask } from '../runtime/orchestrator/front-phase-orchestrator.js';
 
 export async function intakeCommand(title: string): Promise<string> {
-  const taskId = await intakeFormalTask(title);
+  const taskId = await intakeFrontPhaseTask(title);
 
   return [
     '[Aria]',
@@ -9,6 +9,6 @@ export async function intakeCommand(title: string): Promise<string> {
     '- source: aria-native',
     '- flow_type_suggestion: formal',
     '- risk_level: medium',
-    `- next: aria:start --task-id ${taskId}`,
+    `- next: aria:start --task-id ${taskId}`
   ].join('\n');
 }
