@@ -22,6 +22,8 @@ function createState(overrides: Partial<State> = {}): State {
     confirmation_event_path: null,
     dispatch_contract_ref: null,
     context_bundle_ref: null,
+    review_report_ref: null,
+    test_report_ref: null,
     review_status: 'pending',
     test_status: 'pending',
     patch_required_by: 'none',
@@ -178,6 +180,59 @@ describe('canTransition', () => {
     expect(canTransition(createState({ status: 'intake' }), 'done')).toEqual({
       allowed: false,
       reason: 'invalid_transition'
+    });
+  });
+
+  it('reviewing/testing 进入 verified 时缺少 review/test 报告会失败', () => {
+    expect(
+      canTransition(
+        createState({
+          status: 'reviewing/testing',
+          review_status: 'passed',
+          test_status: 'passed',
+          review_report_ref: null,
+          test_report_ref: null
+        }),
+        'verified'
+      )
+    ).toEqual({
+      allowed: false,
+      reason: 'missing_review_test_reports'
+    });
+  });
+
+  it('reviewing/testing 进入 verified 时具备报告且结论通过会成功', () => {
+    expect(
+      canTransition(
+        createState({
+          status: 'reviewing/testing',
+          review_status: 'passed',
+          test_status: 'passed',
+          review_report_ref: 'cadence/cache/aria/tasks/aria-20260418-001/artifacts/review-report.yaml',
+          test_report_ref: 'cadence/cache/aria/tasks/aria-20260418-001/artifacts/test-report.yaml'
+        }),
+        'verified'
+      )
+    ).toEqual({
+      allowed: true
+    });
+  });
+
+  it('reviewing/testing 进入 verified 时任一结论失败会被阻止', () => {
+    expect(
+      canTransition(
+        createState({
+          status: 'reviewing/testing',
+          review_status: 'failed',
+          test_status: 'passed',
+          review_report_ref: 'cadence/cache/aria/tasks/aria-20260418-001/artifacts/review-report.yaml',
+          test_report_ref: 'cadence/cache/aria/tasks/aria-20260418-001/artifacts/test-report.yaml'
+        }),
+        'verified'
+      )
+    ).toEqual({
+      allowed: false,
+      reason: 'review_or_test_not_passed'
     });
   });
 });

@@ -10,8 +10,8 @@ export function buildReviewReport(taskId: string, resultSetId: string) {
     blockers: [],
     suggestions: [],
     verdict: 'passed',
-    producer: 'claude',
-    source_capabilities: ['superpowers'],
+    producer: 'claude-code',
+    source_capabilities: ['OpenSpec', 'superpowers'],
     generated_at: nowIso()
   };
 }

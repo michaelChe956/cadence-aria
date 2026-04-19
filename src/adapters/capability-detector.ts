@@ -55,10 +55,12 @@ function detectCli(binaryPath: string | null, binaryName: string) {
 }
 
 export function detectCapabilities() {
+  const claudeBinaryPath = resolveBinaryPath('claude');
   const codexBinaryPath = resolveBinaryPath('codex');
 
   return {
     host: getHostCapability(),
+    claude_code: detectCli(claudeBinaryPath, 'claude'),
     openspec: getOpenSpecCapability(),
     superpowers: getSuperpowersCapability(),
     codex: detectCli(codexBinaryPath, 'codex')

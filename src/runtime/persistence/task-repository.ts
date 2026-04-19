@@ -53,6 +53,8 @@ export async function createTask(input: { title: string }): Promise<State> {
     confirmation_event_path: null,
     dispatch_contract_ref: null,
     context_bundle_ref: null,
+    review_report_ref: null,
+    test_report_ref: null,
     review_status: 'pending',
     test_status: 'pending',
     patch_required_by: 'none',

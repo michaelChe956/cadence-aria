@@ -32,6 +32,9 @@ function buildDispatchContract(input: {
     context_bundle_ref: input.context_bundle_ref,
     output_schema_ref: 'src/schemas/runtime-artifact-schema.ts',
     exec_unit_id: 'exec-01',
+    worker_cli: 'codex',
+    required_methods: ['test-driven-development', 'verification-before-completion'],
+    verification_requirements: ['pnpm check', 'pnpm test'],
     contract_type: 'dispatch',
     parent_task: input.task_id,
     mode: 'exec',
@@ -66,7 +69,8 @@ export async function createDispatchArtifacts(input: {
     buildExecutionContextBundle({
       task_id: input.task_id,
       spec_ref: input.approved_spec_ref,
-      plan_ref: input.approved_plan_ref
+      plan_ref: input.approved_plan_ref,
+      scope_constraints_ref: input.approved_plan_ref
     })
   );
   const contract = validateDispatchContract(

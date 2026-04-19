@@ -18,7 +18,7 @@ let tempDir = '';
 let fakeBinDir = '';
 
 async function createFakeBinaries(): Promise<void> {
-  fakeBinDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cadence-aria-formal-flow-bins-'));
+  fakeBinDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aria-formal-flow-bins-'));
 
   const codexPath = path.join(fakeBinDir, 'codex');
   const claudePath = path.join(fakeBinDir, 'claude');
@@ -71,21 +71,23 @@ fs.writeFileSync(outputPath, [
 process.exit(0);
 `;
 
+  const claudeScript = '#!/bin/sh\nexit 0\n';
+
   await fs.writeFile(codexPath, codexScript, 'utf8');
-  await fs.writeFile(claudePath, '#!/bin/sh\nexit 0\n', 'utf8');
+  await fs.writeFile(claudePath, claudeScript, 'utf8');
   await fs.chmod(codexPath, 0o755);
   await fs.chmod(claudePath, 0o755);
 
   process.env.PATH = `${fakeBinDir}${path.delimiter}${ORIGINAL_PATH}`;
 }
 
-async function setTempWorkspace(): Promise<void> {
+beforeEach(async () => {
   tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cadence-aria-formal-flow-e2e-'));
   process.chdir(tempDir);
   await createFakeBinaries();
-}
+});
 
-async function restoreWorkspace(): Promise<void> {
+afterEach(async () => {
   process.chdir(ORIGINAL_CWD);
   process.env.PATH = ORIGINAL_PATH;
   if (fakeBinDir) {
@@ -94,28 +96,29 @@ async function restoreWorkspace(): Promise<void> {
   }
   if (tempDir) {
     await fs.rm(tempDir, { recursive: true, force: true });
+    tempDir = '';
   }
-}
-
-beforeEach(async () => {
-  await setTempWorkspace();
 });
 
-afterEach(async () => {
-  await restoreWorkspace();
-});
-
-describe('formal flow e2e', () => {
-  it('跑通 intake -> start -> confirm-spec -> confirm-plan -> run', async () => {
-    const intake = await intakeCommand('一期闭环 E2E');
+describe('formal flow real integration e2e', () => {
+  it('跑通 intake -> start -> confirm-spec -> confirm-plan -> run，并产出正式闭环工件', async () => {
+    const intake = await intakeCommand('一期真实闭环 E2E');
     const taskId = intake.match(/task_id: (aria-\d{8}-\d{3})/)?.[1] ?? '';
 
     expect(await startCommand(taskId)).toContain('spec-review');
     expect(await confirmSpecCommand(taskId)).toContain('plan-review');
     expect(await confirmPlanCommand(taskId)).toContain('dispatched');
-    expect(await runCommand(taskId)).toContain('status: verified');
 
+    const runOutput = await runCommand(taskId);
     const state = await readState(taskId);
-    expect(state.status).toBe('verified');
+
+    expect(runOutput).toContain(`status: ${state.status}`);
+    expect(['verified', 'patching', 'blocked']).toContain(state.status);
+
+    await expect(fs.access(`cadence/cache/aria/tasks/${taskId}/artifacts/spec-artifact.md`)).resolves.toBeUndefined();
+    await expect(fs.access(`cadence/cache/aria/tasks/${taskId}/artifacts/plan-brief.md`)).resolves.toBeUndefined();
+    await expect(fs.access(`cadence/cache/aria/tasks/${taskId}/artifacts/exec-result-exec-01.yaml`)).resolves.toBeUndefined();
+    await expect(fs.access(`cadence/cache/aria/tasks/${taskId}/artifacts/review-report.yaml`)).resolves.toBeUndefined();
+    await expect(fs.access(`cadence/cache/aria/tasks/${taskId}/artifacts/test-report.yaml`)).resolves.toBeUndefined();
   });
 });

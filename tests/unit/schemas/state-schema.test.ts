@@ -17,6 +17,8 @@ describe('parseState', () => {
       confirmation_pending: 'none',
       confirmation_mode: 'manual',
       confirmation_artifact_path: null,
+      review_report_ref: null,
+      test_report_ref: null,
       review_status: 'pending',
       test_status: 'pending',
       patch_required_by: 'none',

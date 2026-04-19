@@ -19,6 +19,9 @@ describe('runtime-artifact-schema', () => {
       context_bundle_ref: 'bundle-1',
       output_schema_ref: 'schema-ref-1',
       exec_unit_id: 'exec-01',
+      worker_cli: 'codex',
+      required_methods: ['test-driven-development', 'verification-before-completion'],
+      verification_requirements: ['pnpm check', 'pnpm test'],
       contract_type: 'dispatch',
       parent_task: 'aria-20260418-001',
       mode: 'exec',
@@ -35,6 +38,9 @@ describe('runtime-artifact-schema', () => {
     });
 
     expect(contract.contract_type).toBe('dispatch');
+    expect(contract.worker_cli).toBe('codex');
+    expect(contract.required_methods).toEqual(['test-driven-development', 'verification-before-completion']);
+    expect(contract.verification_requirements).toEqual(['pnpm check', 'pnpm test']);
   });
 
   it('校验 executionContextBundleSchema 的 happy path', () => {
@@ -44,6 +50,7 @@ describe('runtime-artifact-schema', () => {
       plan_ref: 'plan-ref-1',
       scope_constraints_ref: 'scope-constraints-1',
       required_methods: ['tdd', 'verify'],
+      source_capabilities: ['OpenSpec', 'superpowers'],
       workspace_context: {
         repo_path: '/home/michael/workspace/github/cadence-aria',
         worktree_ref: 'feature-aria-phase1-foundation',
@@ -54,5 +61,6 @@ describe('runtime-artifact-schema', () => {
     });
 
     expect(bundle.bundle_id).toBe('bundle-1');
+    expect(bundle.source_capabilities).toEqual(['OpenSpec', 'superpowers']);
   });
 });

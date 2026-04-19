@@ -8,15 +8,85 @@ import { readState, writeState } from '../../../src/runtime/persistence/state-re
 import { runCli } from '../../../src/commands/run-cli.js';
 
 const ORIGINAL_CWD = process.cwd();
+const ORIGINAL_PATH = process.env.PATH ?? '';
 let tempDir = '';
+let fakeBinDir = '';
+
+async function createFakeBinaries(): Promise<void> {
+  fakeBinDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cadence-aria-cli-smoke-bins-'));
+
+  const codexPath = path.join(fakeBinDir, 'codex');
+  const claudePath = path.join(fakeBinDir, 'claude');
+
+  const codexScript = String.raw`#!/usr/bin/env node
+const fs = require('node:fs');
+
+const args = process.argv.slice(2);
+let outputPath = '';
+let promptContent = '';
+
+for (let index = 0; index < args.length; index += 1) {
+  const arg = args[index];
+  if (arg === 'exec' || arg === '--full-auto') continue;
+  if (arg === '-C') {
+    index += 1;
+    continue;
+  }
+  if (arg === '--output-last-message') {
+    outputPath = args[index + 1] ?? '';
+    index += 1;
+    continue;
+  }
+  promptContent = arg;
+}
+
+const prompt = promptContent;
+const taskId = (prompt.match(/^task_id: (.+)$/m) ?? [])[1] ?? 'unknown';
+
+fs.writeFileSync(outputPath, [
+  'task_id: ' + taskId,
+  'exec_unit_id: exec-01',
+  'status: succeeded',
+  'changed_files:',
+  '  - src/index.ts',
+  'summary: fake codex exec',
+  'capabilities_used:',
+  '  - codex',
+  'openspec_refs_consumed:',
+  '  - artifacts/spec-artifact.md',
+  'superpowers_refs_consumed:',
+  '  - test-driven-development',
+  '  - verification-before-completion',
+  'degraded: false',
+  'degradation_reason: null',
+  'started_at: 2026-04-19T00:00:00.000Z',
+  'finished_at: 2026-04-19T00:00:01.000Z',
+  ''
+].join('\n'), 'utf8');
+process.exit(0);
+`;
+
+  await fs.writeFile(codexPath, codexScript, 'utf8');
+  await fs.writeFile(claudePath, '#!/bin/sh\nexit 0\n', 'utf8');
+  await fs.chmod(codexPath, 0o755);
+  await fs.chmod(claudePath, 0o755);
+
+  process.env.PATH = `${fakeBinDir}${path.delimiter}${ORIGINAL_PATH}`;
+}
 
 async function setTempWorkspace(): Promise<void> {
   tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cadence-aria-cli-smoke-'));
   process.chdir(tempDir);
+  await createFakeBinaries();
 }
 
 async function restoreWorkspace(): Promise<void> {
   process.chdir(ORIGINAL_CWD);
+  process.env.PATH = ORIGINAL_PATH;
+  if (fakeBinDir) {
+    await fs.rm(fakeBinDir, { recursive: true, force: true });
+    fakeBinDir = '';
+  }
   if (tempDir) {
     await fs.rm(tempDir, { recursive: true, force: true });
   }
@@ -75,10 +145,10 @@ describe('runCli', () => {
     await runCli(['confirm-plan', '--task-id', taskId]);
 
     const run = await runCli(['run', '--task-id', taskId]);
-    expect(run).toContain('status: reviewing/testing');
+    expect(run).toContain('status: verified');
 
     const status = await runCli(['status', '--task-id', taskId]);
-    expect(status).toContain('status: reviewing/testing');
+    expect(status).toContain('status: verified');
 
     const cancel = await runCli(['cancel', '--task-id', taskId]);
     expect(cancel).toContain('status: cancelled');

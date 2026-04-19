@@ -6,13 +6,15 @@ export function buildExecutionContextBundle(input: {
   task_id: string;
   spec_ref: string;
   plan_ref: string;
+  scope_constraints_ref: string;
 }): ExecutionContextBundle {
   return {
     bundle_id: `execution-context-bundle-${input.task_id}`,
     spec_ref: input.spec_ref,
     plan_ref: input.plan_ref,
-    scope_constraints_ref: input.plan_ref,
+    scope_constraints_ref: input.scope_constraints_ref,
     required_methods: ['writing-plans', 'test-driven-development', 'verification-before-completion'],
+    source_capabilities: ['OpenSpec', 'superpowers'],
     workspace_context: {
       repo_path: process.cwd(),
       worktree_ref: process.env.CADENCE_WORKTREE_REF ?? path.basename(process.cwd()),

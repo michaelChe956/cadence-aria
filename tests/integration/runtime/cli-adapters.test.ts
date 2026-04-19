@@ -6,8 +6,9 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   buildClaudeCodeCommand,
+  runClaudeCode,
 } from '../../../src/adapters/claude-code/claude-code-adapter.js';
-import { buildCodexCommand } from '../../../src/adapters/codex/codex-adapter.js';
+import { buildCodexCommand, runCodexCli } from '../../../src/adapters/codex/codex-adapter.js';
 import { detectCapabilities } from '../../../src/adapters/capability-detector.js';
 
 const ORIGINAL_PATH = process.env.PATH ?? '';
@@ -17,6 +18,7 @@ let tempDir = '';
 
 afterEach(async () => {
   process.env.PATH = ORIGINAL_PATH;
+  delete process.env.CLAUDE_OUTPUT_PATH;
   if (tempDir) {
     await fs.rm(tempDir, { recursive: true, force: true });
     tempDir = '';
@@ -29,10 +31,12 @@ describe('cli adapters', () => {
     expect(buildClaudeCodeCommand({
       cwd: '/tmp/task-1',
       promptPath: 'cadence/cache/aria/tasks/task-1/artifacts/spec-prompt.md',
+      promptContent: '# Spec\nproducer: claude-code',
     })).toEqual([
       'claude',
+      '--no-session-persistence',
       '-p',
-      'cadence/cache/aria/tasks/task-1/artifacts/spec-prompt.md',
+      '# Spec\nproducer: claude-code',
     ]);
   });
 
@@ -41,14 +45,17 @@ describe('cli adapters', () => {
       cwd: '/tmp/task-1',
       promptPath: 'cadence/cache/aria/tasks/task-1/artifacts/dispatch-prompt.md',
       outputPath: 'cadence/cache/aria/tasks/task-1/artifacts/exec-result-exec-01.yaml',
+      promptContent: '# Dispatch Prompt\ntask_id: aria-20260419-001',
     })).toEqual([
       'codex',
       'exec',
+      '--full-auto',
+      '--ephemeral',
       '-C',
       '/tmp/task-1',
       '--output-last-message',
       'cadence/cache/aria/tasks/task-1/artifacts/exec-result-exec-01.yaml',
-      'cadence/cache/aria/tasks/task-1/artifacts/dispatch-prompt.md',
+      '# Dispatch Prompt\ntask_id: aria-20260419-001',
     ]);
   });
 
@@ -114,5 +121,72 @@ describe('cli adapters', () => {
       available: false,
       source: 'codex'
     });
+  });
+
+  it('运行 codex CLI 时会主动关闭 stdin，避免真实进程等待额外输入', async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cadence-aria-cli-'));
+    const binaryPath = path.join(tempDir, 'codex');
+    const promptPath = path.join(tempDir, 'prompt.md');
+    const outputPath = path.join(tempDir, 'output.txt');
+    const script = String.raw`#!/usr/bin/env node
+const fs = require('node:fs');
+
+const args = process.argv.slice(2);
+let outputPath = '';
+for (let index = 0; index < args.length; index += 1) {
+  if (args[index] === '--output-last-message') {
+    outputPath = args[index + 1] ?? '';
+    index += 1;
+  }
+}
+
+process.stdin.resume();
+process.stdin.on('end', () => {
+  fs.writeFileSync(outputPath, 'stdin closed', 'utf8');
+  process.exit(0);
+});
+`;
+    await fs.writeFile(binaryPath, script, 'utf8');
+    await fs.chmod(binaryPath, 0o755);
+    await fs.writeFile(promptPath, 'prompt', 'utf8');
+    process.env.PATH = `${tempDir}${path.delimiter}${ORIGINAL_PATH}`;
+
+    const result = await runCodexCli({
+      cwd: tempDir,
+      promptPath,
+      outputPath
+    });
+
+    expect(result.exitCode).toBe(0);
+    await expect(fs.readFile(outputPath, 'utf8')).resolves.toBe('stdin closed');
+  });
+
+  it('运行 claude code 时会主动关闭 stdin，避免真实进程等待额外输入', async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cadence-aria-cli-'));
+    const binaryPath = path.join(tempDir, 'claude');
+    const promptPath = path.join(tempDir, 'prompt.md');
+    const outputPath = path.join(tempDir, 'claude-output.txt');
+    const script = String.raw`#!/usr/bin/env node
+const fs = require('node:fs');
+
+process.stdin.resume();
+process.stdin.on('end', () => {
+  fs.writeFileSync(process.env.CLAUDE_OUTPUT_PATH, 'stdin closed', 'utf8');
+  process.exit(0);
+});
+`;
+    await fs.writeFile(binaryPath, script, 'utf8');
+    await fs.chmod(binaryPath, 0o755);
+    await fs.writeFile(promptPath, 'prompt', 'utf8');
+    process.env.PATH = `${tempDir}${path.delimiter}${ORIGINAL_PATH}`;
+    process.env.CLAUDE_OUTPUT_PATH = outputPath;
+
+    const result = await runClaudeCode({
+      cwd: tempDir,
+      promptPath
+    });
+
+    expect(result.exitCode).toBe(0);
+    await expect(fs.readFile(outputPath, 'utf8')).resolves.toBe('stdin closed');
   });
 });

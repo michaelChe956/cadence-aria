@@ -56,6 +56,8 @@ export const stateSchema = z.object({
   confirmation_event_path: z.string().nullable().optional(),
   dispatch_contract_ref: z.string().nullable().optional(),
   context_bundle_ref: z.string().nullable().optional(),
+  review_report_ref: z.string().nullable().optional(),
+  test_report_ref: z.string().nullable().optional(),
   review_status: z.enum(['pending', 'passed', 'failed']),
   test_status: z.enum(['pending', 'passed', 'failed']),
   patch_required_by: z.enum(['none', 'review', 'test', 'both']),

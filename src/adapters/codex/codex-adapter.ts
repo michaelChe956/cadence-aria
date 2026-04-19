@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import fs from 'node:fs/promises';
 
 import { nowIso } from '../../utils/time.js';
 import type { CliExecutionResult } from '../claude-code/claude-code-adapter.js';
@@ -7,6 +8,7 @@ export type CodexCommandInput = {
   cwd: string;
   promptPath: string;
   outputPath: string;
+  promptContent?: string;
 };
 
 export type LegacyCodexExecInput = {
@@ -33,21 +35,29 @@ export function buildCodexCommand(input: CodexCommandInput): string[] {
   return [
     'codex',
     'exec',
+    '--full-auto',
+    '--ephemeral',
     '-C',
     input.cwd,
     '--output-last-message',
     input.outputPath,
-    input.promptPath,
+    input.promptContent ?? input.promptPath,
   ];
 }
 
 export async function runCodexCli(input: CodexCommandInput): Promise<CliExecutionResult> {
-  const args = buildCodexCommand(input);
+  const promptContent = input.promptContent ?? await fs.readFile(input.promptPath, 'utf8');
+  const args = buildCodexCommand({
+    ...input,
+    promptContent
+  });
 
   return new Promise((resolve, reject) => {
     const child = spawn(args[0]!, args.slice(1), { cwd: input.cwd });
     let stdout = '';
     let stderr = '';
+
+    child.stdin?.end();
 
     child.stdout?.on('data', chunk => {
       stdout += chunk.toString();

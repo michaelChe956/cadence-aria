@@ -22,6 +22,21 @@ const requiredMethodsEvidenceSchema = z.object({
   evidence_type: z.literal('required-methods')
 });
 
+const execResultSchema = z.object({
+  task_id: z.string(),
+  exec_unit_id: z.string(),
+  status: z.literal('succeeded'),
+  changed_files: z.array(z.string()),
+  summary: z.string(),
+  capabilities_used: z.array(z.string()).min(1),
+  openspec_refs_consumed: z.array(z.string()).min(1),
+  superpowers_refs_consumed: z.array(z.string()).min(1),
+  degraded: z.boolean(),
+  degradation_reason: z.string().nullable(),
+  started_at: datetimeString,
+  finished_at: datetimeString
+});
+
 export const dispatchContractSchema = z.object({
   contract_version: z.literal('1.0'),
   generated_at: datetimeString,
@@ -36,6 +51,9 @@ export const dispatchContractSchema = z.object({
   context_bundle_ref: z.string(),
   output_schema_ref: z.string(),
   exec_unit_id: z.string(),
+  worker_cli: z.literal('codex'),
+  required_methods: z.array(z.string()).min(1),
+  verification_requirements: z.array(z.string()).min(1),
   contract_type: z.literal('dispatch'),
   parent_task: z.string(),
   mode: z.literal('exec'),
@@ -57,6 +75,7 @@ export const executionContextBundleSchema = z.object({
   plan_ref: z.string(),
   scope_constraints_ref: z.string(),
   required_methods: z.array(z.string()).min(1),
+  source_capabilities: z.array(z.string()).min(1),
   workspace_context: workspaceContextSchema,
   verification_requirements: z.array(z.string()).min(1),
   prompt_template_ref: z.string()
@@ -66,3 +85,6 @@ export type DispatchContract = z.infer<typeof dispatchContractSchema>;
 export type ExecutionContextBundle = z.infer<typeof executionContextBundleSchema>;
 export type ApprovedArtifactEvidence = z.infer<typeof approvedArtifactEvidenceSchema>;
 export type RequiredMethodsEvidence = z.infer<typeof requiredMethodsEvidenceSchema>;
+export type ExecResultArtifact = z.infer<typeof execResultSchema>;
+
+export { execResultSchema };

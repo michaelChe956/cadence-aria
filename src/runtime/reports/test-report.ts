@@ -6,14 +6,14 @@ export function buildTestReport(taskId: string, resultSetId: string) {
     result_set_id: resultSetId,
     exec_units_tested: ['exec-01'],
     baseline_refs: ['artifacts/spec-artifact.md', 'artifacts/plan-brief.md'],
-    method_refs: ['verification-before-completion'],
+    method_refs: ['test-driven-development', 'verification-before-completion'],
     commands_run: ['pnpm check', 'pnpm test'],
     failures: [],
     passed_count: 2,
     failed_count: 0,
     verdict: 'passed',
-    producer: 'claude',
-    source_capabilities: ['superpowers'],
+    producer: 'claude-code',
+    source_capabilities: ['OpenSpec', 'superpowers'],
     generated_at: nowIso()
   };
 }

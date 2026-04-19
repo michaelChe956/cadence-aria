@@ -1,8 +1,10 @@
 import { spawn } from 'node:child_process';
+import fs from 'node:fs/promises';
 
 export type ClaudeCodeCommandInput = {
   cwd: string;
   promptPath: string;
+  promptContent?: string;
 };
 
 export type CliExecutionResult = {
@@ -14,8 +16,9 @@ export type CliExecutionResult = {
 export function buildClaudeCodeCommand(input: ClaudeCodeCommandInput): string[] {
   return [
     'claude',
+    '--no-session-persistence',
     '-p',
-    input.promptPath,
+    input.promptContent ?? input.promptPath,
   ];
 }
 
@@ -24,6 +27,8 @@ async function runCliCommand(args: string[], cwd: string): Promise<CliExecutionR
     const child = spawn(args[0]!, args.slice(1), { cwd });
     let stdout = '';
     let stderr = '';
+
+    child.stdin?.end();
 
     child.stdout?.on('data', chunk => {
       stdout += chunk.toString();
@@ -45,5 +50,9 @@ async function runCliCommand(args: string[], cwd: string): Promise<CliExecutionR
 }
 
 export async function runClaudeCode(input: ClaudeCodeCommandInput): Promise<CliExecutionResult> {
-  return runCliCommand(buildClaudeCodeCommand(input), input.cwd);
+  const promptContent = input.promptContent ?? await fs.readFile(input.promptPath, 'utf8');
+  return runCliCommand(buildClaudeCodeCommand({
+    ...input,
+    promptContent
+  }), input.cwd);
 }

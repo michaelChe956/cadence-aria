@@ -4,7 +4,8 @@ import {
   guardDispatched,
   guardPlanApproved,
   guardPlanReadyForDispatch,
-  guardSpecReviewed
+  guardSpecReviewed,
+  guardVerified
 } from './guards.js';
 
 const allowedTransitions: Record<State['status'], readonly State['status'][]> = {
@@ -44,6 +45,10 @@ export function canTransition(
 
   if (state.status === 'plan-approved' && target === 'dispatched') {
     return guardDispatched(state);
+  }
+
+  if (state.status === 'reviewing/testing' && target === 'verified') {
+    return guardVerified(state);
   }
 
   if (allowedTransitions[state.status]?.includes(target)) {

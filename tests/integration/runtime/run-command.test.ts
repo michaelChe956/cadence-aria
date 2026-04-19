@@ -13,16 +13,73 @@ import { getTaskArtifactsDir } from '../../../src/runtime/persistence/paths.js';
 import { readState } from '../../../src/runtime/persistence/state-repository.js';
 
 const ORIGINAL_CWD = process.cwd();
+const ORIGINAL_PATH = process.env.PATH ?? '';
 
 let tempDir = '';
+let fakeBinDir = '';
+
+async function createFakeBinaries(): Promise<void> {
+  fakeBinDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cadence-aria-run-bins-'));
+
+  const codexPath = path.join(fakeBinDir, 'codex');
+  const claudePath = path.join(fakeBinDir, 'claude');
+
+  const codexScript = String.raw`#!/usr/bin/env node
+const fs = require('node:fs');
+
+const args = process.argv.slice(2);
+let outputPath = '';
+let promptContent = '';
+
+for (let index = 0; index < args.length; index += 1) {
+  const arg = args[index];
+  if (arg === 'exec' || arg === '--full-auto') continue;
+  if (arg === '-C') {
+    index += 1;
+    continue;
+  }
+  if (arg === '--output-last-message') {
+    outputPath = args[index + 1] ?? '';
+    index += 1;
+    continue;
+  }
+  promptContent = arg;
+}
+
+const prompt = promptContent;
+const taskId = (prompt.match(/^task_id: (.+)$/m) ?? [])[1] ?? 'unknown';
+
+if (process.env.ARIA_FAKE_CODEX_FAIL === '1') {
+  process.stderr.write('fake codex failed\n');
+  process.exit(1);
+}
+
+fs.writeFileSync(outputPath, '已读取规则并准备执行任务：' + taskId + '\n', 'utf8');
+process.exit(0);
+`;
+
+  await fs.writeFile(codexPath, codexScript, 'utf8');
+  await fs.writeFile(claudePath, '#!/bin/sh\nexit 0\n', 'utf8');
+  await fs.chmod(codexPath, 0o755);
+  await fs.chmod(claudePath, 0o755);
+
+  process.env.PATH = `${fakeBinDir}${path.delimiter}${ORIGINAL_PATH}`;
+}
 
 async function setTempWorkspace(): Promise<void> {
   tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cadence-aria-run-command-'));
   process.chdir(tempDir);
+  await createFakeBinaries();
 }
 
 async function restoreWorkspace(): Promise<void> {
   process.chdir(ORIGINAL_CWD);
+  process.env.PATH = ORIGINAL_PATH;
+  delete process.env.ARIA_FAKE_CODEX_FAIL;
+  if (fakeBinDir) {
+    await fs.rm(fakeBinDir, { recursive: true, force: true });
+    fakeBinDir = '';
+  }
   if (tempDir) {
     await fs.rm(tempDir, { recursive: true, force: true });
   }
@@ -37,7 +94,7 @@ afterEach(async () => {
 });
 
 describe('runCommand', () => {
-  it('将 dispatched 任务推进到 reviewing/testing 并写入 exec result', async () => {
+  it('将 dispatched 任务推进到最终 review/test 仲裁状态并写入正式报告', async () => {
     const intake = await intakeCommand('为 Aria 增加 capability report 结构化输出');
     const taskId = intake.match(/task_id: (aria-\d{8}-\d{3})/)?.[1] ?? '';
 
@@ -46,17 +103,46 @@ describe('runCommand', () => {
     await confirmPlanCommand(taskId);
 
     const output = await runCommand(taskId);
-    expect(output).toContain('status: reviewing/testing');
-    expect(output).toContain('review_status: pending');
+    expect(output).toContain('status: verified');
+    expect(output).toContain('review_status: passed');
+    expect(output).toContain('test_status: passed');
 
     const resultPath = path.join(getTaskArtifactsDir(taskId), 'exec-result-exec-01.yaml');
+    const reviewPath = path.join(getTaskArtifactsDir(taskId), 'review-report.yaml');
+    const testPath = path.join(getTaskArtifactsDir(taskId), 'test-report.yaml');
     await expect(fs.access(resultPath)).resolves.toBeUndefined();
+    await expect(fs.access(reviewPath)).resolves.toBeUndefined();
+    await expect(fs.access(testPath)).resolves.toBeUndefined();
 
     const state = await readState(taskId);
-    expect(state.status).toBe('reviewing/testing');
-    expect(state.test_status).toBe('pending');
+    expect(state.status).toBe('verified');
+    expect(state.review_status).toBe('passed');
+    expect(state.test_status).toBe('passed');
     expect(state.active_result_set_id).toBe(`result-set-${taskId}-01`);
     expect(state.exec_units['exec-01']?.result_path).toBe(resultPath);
     expect(state.exec_units['exec-01']?.status).toBe('succeeded');
+    expect(state.review_report_ref).toBe(reviewPath);
+    expect(state.test_report_ref).toBe(testPath);
+  });
+
+  it('当 codex 执行失败时收尾为 blocked，且不遗留 running exec unit', async () => {
+    process.env.ARIA_FAKE_CODEX_FAIL = '1';
+    const intake = await intakeCommand('验证 exec 失败收尾');
+    const taskId = intake.match(/task_id: (aria-\d{8}-\d{3})/)?.[1] ?? '';
+
+    await startCommand(taskId);
+    await confirmSpecCommand(taskId);
+    await confirmPlanCommand(taskId);
+
+    await expect(runCommand(taskId)).rejects.toThrow(/codex_exec_failed/);
+
+    const state = await readState(taskId);
+    expect(state.status).toBe('blocked');
+    expect(state.block_reason_code).toBe('execution_blocked');
+    expect(state.blocking_stage).toBe('executing');
+    expect(state.retryable).toBe(true);
+    expect(state.exec_units['exec-01']?.status).toBe('failed');
+    expect(state.exec_units['exec-01']?.exit_code).toBe(1);
+    expect(state.exec_units['exec-01']?.finished_at).toBeTruthy();
   });
 });
