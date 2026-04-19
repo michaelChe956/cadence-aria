@@ -1,11 +1,19 @@
 import path from 'node:path';
 
+import fs from 'node:fs/promises';
+
 import { appendConfirmationEvent } from '../runtime/persistence/confirmation-event-repository.js';
 import { getTaskArtifactsDir } from '../runtime/persistence/paths.js';
 import { readState, writeState } from '../runtime/persistence/state-repository.js';
+import { canTransition } from '../runtime/state-machine/state-machine.js';
+import { parseYaml } from '../utils/yaml.js';
 import { nowIso } from '../utils/time.js';
 
 import { createDispatchArtifacts } from '../runtime/contracts/dispatch-contract.js';
+import {
+  validateDispatchContract,
+  validateExecutionContextBundle
+} from '../runtime/contracts/contract-validator.js';
 
 export async function confirmPlanCommand(taskId: string): Promise<string> {
   const state = await readState(taskId);
@@ -14,10 +22,10 @@ export async function confirmPlanCommand(taskId: string): Promise<string> {
   }
 
   const approved_spec_ref = state.approved_spec_ref;
-  const approved_plan_ref = state.confirmation_artifact_path ?? path.posix.join(getTaskArtifactsDir(taskId), 'plan-brief.md');
+  const approved_plan_ref = state.confirmation_artifact_path;
 
   if (!approved_spec_ref || !approved_plan_ref) {
-    throw new Error(`缺少冻结引用: ${taskId}`);
+    throw new Error(`缺少待确认 plan 工件或冻结引用: ${taskId}`);
   }
 
   const confirmation_event_path = await appendConfirmationEvent(taskId, {
@@ -37,12 +45,41 @@ export async function confirmPlanCommand(taskId: string): Promise<string> {
   });
 
   const result_path = path.posix.join(getTaskArtifactsDir(taskId), 'exec-result-exec-01.yaml');
+  const bundle = validateExecutionContextBundle(
+    parseYaml(await fs.readFile(handoff.context_bundle_ref, 'utf8'))
+  );
+  const contract = validateDispatchContract(
+    parseYaml(await fs.readFile(handoff.dispatch_contract_ref, 'utf8'))
+  );
 
-  await writeState({
+  if (bundle.spec_ref !== approved_spec_ref || bundle.plan_ref !== approved_plan_ref) {
+    throw new Error('execution context bundle 与冻结引用不一致');
+  }
+
+  if (
+    contract.based_on_spec_ref !== approved_spec_ref ||
+    contract.based_on_plan_ref !== approved_plan_ref ||
+    contract.context_bundle_ref !== handoff.context_bundle_ref
+  ) {
+    throw new Error('dispatch contract 与冻结引用或 bundle 不一致');
+  }
+
+  const transition = canTransition({
     ...state,
     approved_plan_ref,
-    status: 'dispatched',
-    confirmation_pending: 'none',
+    confirmation_artifact_path: approved_plan_ref,
+    context_bundle_ref: handoff.context_bundle_ref,
+    dispatch_contract_ref: handoff.dispatch_contract_ref
+  }, 'dispatched');
+  if (!transition.allowed) {
+    throw new Error(`无法推进到 dispatched: ${transition.reason}`);
+  }
+
+  const nextState = {
+    ...state,
+    approved_plan_ref,
+    status: 'dispatched' as const,
+    confirmation_pending: 'none' as const,
     confirmation_artifact_path: null,
     confirmation_event_path,
     context_bundle_ref: handoff.context_bundle_ref,
@@ -50,7 +87,7 @@ export async function confirmPlanCommand(taskId: string): Promise<string> {
     active_exec_units: ['exec-01'],
     exec_units: {
       'exec-01': {
-        status: 'pending',
+        status: 'pending' as const,
         contract_path: handoff.dispatch_contract_ref,
         attempt: 0,
         exit_code: null,
@@ -59,7 +96,9 @@ export async function confirmPlanCommand(taskId: string): Promise<string> {
       }
     },
     updated_at: nowIso()
-  });
+  };
+
+  await writeState(nextState);
 
   return ['[Aria]', '- status: dispatched'].join('\n');
 }

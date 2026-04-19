@@ -1,0 +1,11 @@
+openspec:
+  tasks_path: cadence/openspec/tasks.yaml
+superpowers:
+  required_skills:
+    - brainstorming
+    - test-driven-development
+    - verification-before-completion
+codex:
+  prompt_template: codex/prompts/dispatch.md
+runtime:
+  tasks_root: cadence/cache/aria/tasks

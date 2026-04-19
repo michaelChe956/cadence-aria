@@ -53,7 +53,7 @@ export async function createDispatchArtifacts(input: {
   approved_spec_ref: string;
   approved_plan_ref: string;
 }): Promise<{ context_bundle_ref: string; dispatch_contract_ref: string }> {
-  validateHandoffFields({
+  await validateHandoffFields({
     approved_spec_ref: input.approved_spec_ref,
     approved_plan_ref: input.approved_plan_ref
   });

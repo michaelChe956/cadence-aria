@@ -10,7 +10,7 @@ import { confirmSpecCommand } from '../../../src/commands/confirm-spec.js';
 import { startCommand } from '../../../src/commands/start.js';
 import { createDispatchArtifacts } from '../../../src/runtime/contracts/dispatch-contract.js';
 import { getTaskArtifactsDir } from '../../../src/runtime/persistence/paths.js';
-import { readState } from '../../../src/runtime/persistence/state-repository.js';
+import { readState, writeState } from '../../../src/runtime/persistence/state-repository.js';
 
 const ORIGINAL_CWD = process.cwd();
 
@@ -38,10 +38,18 @@ afterEach(async () => {
 
 describe('handoff checkpoint', () => {
   it('基于冻结引用生成 bundle 与 dispatch contract', async () => {
+    const artifactsDir = getTaskArtifactsDir('aria-20260418-001');
+    const specRef = path.join(artifactsDir, 'spec-artifact.md');
+    const planRef = path.join(artifactsDir, 'plan-brief.md');
+
+    await fs.mkdir(artifactsDir, { recursive: true });
+    await fs.writeFile(specRef, '# spec', 'utf8');
+    await fs.writeFile(planRef, '# plan', 'utf8');
+
     const result = await createDispatchArtifacts({
       task_id: 'aria-20260418-001',
-      approved_spec_ref: 'artifacts/spec-artifact.md',
-      approved_plan_ref: 'artifacts/plan-brief.md'
+      approved_spec_ref: specRef,
+      approved_plan_ref: planRef
     });
 
     expect(result.context_bundle_ref).toContain('execution-context-bundle');
@@ -85,5 +93,21 @@ describe('handoff checkpoint', () => {
     expect(contractContent).toContain(specPath);
     expect(contractContent).toContain(planPath);
     expect(contractContent).toContain(bundlePath);
+  });
+
+  it('缺少 confirmation_artifact_path 时 confirmPlanCommand 会报错', async () => {
+    const intake = await intakeCommand('为 Aria 增加 capability report 结构化输出');
+    const taskId = intake.match(/task_id: (aria-\d{8}-\d{3})/)?.[1] ?? '';
+
+    await startCommand(taskId);
+    await confirmSpecCommand(taskId);
+
+    const state = await readState(taskId);
+    await writeState({
+      ...state,
+      confirmation_artifact_path: null
+    });
+
+    await expect(confirmPlanCommand(taskId)).rejects.toThrow('缺少待确认 plan 工件');
   });
 });

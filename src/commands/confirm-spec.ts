@@ -1,5 +1,6 @@
 import path from 'node:path';
 
+import { canTransition } from '../runtime/state-machine/state-machine.js';
 import { appendConfirmationEvent } from '../runtime/persistence/confirmation-event-repository.js';
 import { getTaskArtifactsDir } from '../runtime/persistence/paths.js';
 import { readState, writeState } from '../runtime/persistence/state-repository.js';
@@ -12,6 +13,11 @@ export async function confirmSpecCommand(taskId: string): Promise<string> {
   }
   if (!state.confirmation_artifact_path) {
     throw new Error(`缺少待确认 spec 工件: ${taskId}`);
+  }
+
+  const transition = canTransition(state, 'plan-review');
+  if (!transition.allowed) {
+    throw new Error(`无法推进到 plan-review: ${transition.reason}`);
   }
 
   const confirmation_event_path = await appendConfirmationEvent(taskId, {

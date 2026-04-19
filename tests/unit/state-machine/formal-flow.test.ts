@@ -67,6 +67,22 @@ describe('canTransition', () => {
     });
   });
 
+  it('spec-review 进入 plan-review 时具备待确认 spec 工件会通过', () => {
+    expect(
+      canTransition(
+        createState({
+          status: 'spec-review',
+          approved_spec_ref: null,
+          approved_plan_ref: null,
+          confirmation_artifact_path: 'cadence/cache/aria/tasks/aria-20260418-001/artifacts/spec-artifact.md'
+        }),
+        'plan-review'
+      )
+    ).toEqual({
+      allowed: true
+    });
+  });
+
   it('plan-approved 进入 dispatched 时缺少 frozen refs 会失败', () => {
     expect(
       canTransition(
@@ -103,6 +119,24 @@ describe('canTransition', () => {
     });
   });
 
+  it('plan-review 进入 dispatched 时缺少 handoff 关键字段会失败', () => {
+    expect(
+      canTransition(
+        createState({
+          status: 'plan-review',
+          approved_spec_ref: 'artifacts/spec.md',
+          approved_plan_ref: 'artifacts/plan.md',
+          confirmation_event_path: 'cadence/cache/aria/tasks/aria-20260418-001/confirmation-event.yaml',
+          confirmation_artifact_path: 'cadence/cache/aria/tasks/aria-20260418-001/artifacts/plan-brief.md'
+        }),
+        'dispatched'
+      )
+    ).toEqual({
+      allowed: false,
+      reason: 'handoff_incomplete'
+    });
+  });
+
   it('plan-approved 进入 dispatched 时具备 frozen refs 和 handoff 工件会通过', () => {
     expect(
       canTransition(
@@ -111,6 +145,25 @@ describe('canTransition', () => {
           approved_spec_ref: 'artifacts/spec.md',
           approved_plan_ref: 'artifacts/plan.md',
           confirmation_event_path: 'cadence/cache/aria/tasks/aria-20260418-001/confirmation-event.yaml',
+          dispatch_contract_ref: 'cadence/cache/aria/tasks/aria-20260418-001/dispatch-contract.yaml',
+          context_bundle_ref: 'cadence/cache/aria/tasks/aria-20260418-001/context-bundle.yaml'
+        }),
+        'dispatched'
+      )
+    ).toEqual({
+      allowed: true
+    });
+  });
+
+  it('plan-review 进入 dispatched 时具备 frozen refs 和 handoff 工件会通过', () => {
+    expect(
+      canTransition(
+        createState({
+          status: 'plan-review',
+          approved_spec_ref: 'artifacts/spec.md',
+          approved_plan_ref: 'artifacts/plan.md',
+          confirmation_event_path: 'cadence/cache/aria/tasks/aria-20260418-001/confirmation-event.yaml',
+          confirmation_artifact_path: 'cadence/cache/aria/tasks/aria-20260418-001/artifacts/plan-brief.md',
           dispatch_contract_ref: 'cadence/cache/aria/tasks/aria-20260418-001/dispatch-contract.yaml',
           context_bundle_ref: 'cadence/cache/aria/tasks/aria-20260418-001/context-bundle.yaml'
         }),
