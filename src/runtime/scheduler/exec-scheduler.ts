@@ -48,6 +48,12 @@ function buildExecPrompt(input: {
     worker_cli: 'codex';
     required_methods: string[];
     verification_requirements: string[];
+    goal?: string;
+    acceptance_checks?: string[];
+    scope?: {
+      files_allowed: string[];
+      files_blocked?: string[];
+    };
   };
 }): string {
   return [
@@ -62,10 +68,17 @@ function buildExecPrompt(input: {
     `worker_cli: ${input.contract.worker_cli}`,
     `contract_required_methods: [${input.contract.required_methods.join(', ')}]`,
     `contract_verification_requirements: [${input.contract.verification_requirements.join(', ')}]`,
+    `goal: ${input.contract.goal ?? '按 dispatch contract 完成实现'}`,
+    `files_allowed: [${input.contract.scope?.files_allowed.join(', ') ?? ''}]`,
+    `files_blocked: [${input.contract.scope?.files_blocked?.join(', ') ?? ''}]`,
+    `acceptance_checks: [${input.contract.acceptance_checks?.join(', ') ?? ''}]`,
     '',
-    '不要读取仓库规则与文件，不要执行命令，不要修改任何文件。',
+    '请先读取仓库规则、spec、plan 与 dispatch contract，再开始执行。',
+    '仅可在 files_allowed 范围内修改文件，必须避开 files_blocked。',
+    '实现时必须遵循 contract_required_methods，并完成 verification_requirements 与 acceptance_checks 中要求的验证。',
+    '可以在允许范围内修改文件、运行必要命令，并在完成实现后运行 verification_requirements。',
     '不要输出 YAML，也不要解释流程。',
-    `只输出一行中文摘要：已接收任务 ${input.taskId}，将按 dispatch contract 执行。`,
+    `只输出一行中文摘要：已接收任务 ${input.taskId}，已完成实现与验证。`,
   ].join('\n');
 }
 

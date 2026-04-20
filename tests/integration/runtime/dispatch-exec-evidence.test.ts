@@ -184,8 +184,9 @@ describe('dispatch and exec evidence', () => {
     expect(prompt).toContain(taskId);
     expect(prompt).toContain(bundle.spec_ref);
     expect(prompt).toContain(contract.required_methods[0]);
-    expect(prompt).toContain('不要读取仓库规则与文件');
-    expect(prompt).toContain('只输出一行中文摘要');
+    expect(prompt).toContain('请先读取仓库规则、spec、plan 与 dispatch contract');
+    expect(prompt).toContain('可以在允许范围内修改文件');
+    expect(prompt).toContain('完成实现后运行 verification_requirements');
 
     const invocationLog = await fs.readFile(path.join(process.cwd(), 'codex-invocation.log'), 'utf8');
     expect(invocationLog).toContain('--output-last-message');

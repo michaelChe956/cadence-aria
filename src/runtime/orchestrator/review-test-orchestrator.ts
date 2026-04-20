@@ -36,17 +36,57 @@ function buildTestPrompt(taskId: string, resultSetId: string): string {
   ].join('\n');
 }
 
-function parseReviewReport(taskId: string, output: string): ReviewReportArtifact {
+function validateReviewReportContext(input: {
+  taskId: string;
+  resultSetId: string;
+  report: ReviewReportArtifact;
+}): ReviewReportArtifact {
+  if (input.report.task_id !== input.taskId) {
+    throw new Error(`review_report_task_mismatch: ${input.taskId}: actual=${input.report.task_id}`);
+  }
+
+  if (input.report.result_set_id !== input.resultSetId) {
+    throw new Error(`review_report_result_set_mismatch: ${input.taskId}: actual=${input.report.result_set_id}`);
+  }
+
+  return input.report;
+}
+
+function validateTestReportContext(input: {
+  taskId: string;
+  resultSetId: string;
+  report: TestReportArtifact;
+}): TestReportArtifact {
+  if (input.report.task_id !== input.taskId) {
+    throw new Error(`test_report_task_mismatch: ${input.taskId}: actual=${input.report.task_id}`);
+  }
+
+  if (input.report.result_set_id !== input.resultSetId) {
+    throw new Error(`test_report_result_set_mismatch: ${input.taskId}: actual=${input.report.result_set_id}`);
+  }
+
+  return input.report;
+}
+
+function parseReviewReport(taskId: string, resultSetId: string, output: string): ReviewReportArtifact {
   try {
-    return reviewReportSchema.parse(parseYaml(output));
+    return validateReviewReportContext({
+      taskId,
+      resultSetId,
+      report: reviewReportSchema.parse(parseYaml(output))
+    });
   } catch (error) {
     throw new Error(`review_report_invalid: ${taskId}: ${(error as Error).message}`);
   }
 }
 
-function parseTestReport(taskId: string, output: string): TestReportArtifact {
+function parseTestReport(taskId: string, resultSetId: string, output: string): TestReportArtifact {
   try {
-    return testReportSchema.parse(parseYaml(output));
+    return validateTestReportContext({
+      taskId,
+      resultSetId,
+      report: testReportSchema.parse(parseYaml(output))
+    });
   } catch (error) {
     throw new Error(`test_report_invalid: ${taskId}: ${(error as Error).message}`);
   }
@@ -75,7 +115,7 @@ export async function runReviewAndTest(taskId: string): Promise<{
   if (reviewRun.exitCode !== 0) {
     throw new Error(`claude_review_failed: ${reviewRun.stderr}`);
   }
-  const reviewReport = parseReviewReport(taskId, reviewRun.stdout);
+  const reviewReport = parseReviewReport(taskId, resultSetId, reviewRun.stdout);
 
   const testRun = await runClaudeCode({
     cwd: process.cwd(),
@@ -84,7 +124,7 @@ export async function runReviewAndTest(taskId: string): Promise<{
   if (testRun.exitCode !== 0) {
     throw new Error(`claude_test_failed: ${testRun.stderr}`);
   }
-  const testReport = parseTestReport(taskId, testRun.stdout);
+  const testReport = parseTestReport(taskId, resultSetId, testRun.stdout);
 
   await fs.writeFile(reviewReportPath, stringifyYaml(reviewReport), 'utf8');
   await fs.writeFile(testReportPath, stringifyYaml(testReport), 'utf8');

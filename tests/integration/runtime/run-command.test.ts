@@ -70,11 +70,14 @@ if (mode === 'invalid') {
   process.exit(0);
 }
 
+const reportTaskId = mode === 'mismatch-task' ? 'aria-19990101-001' : taskId;
+const reportResultSetId = mode === 'mismatch-result-set' ? 'result-set-mismatch-01' : resultSetId;
+
 const isReview = prompt.includes('Claude Code Review Prompt');
 const yaml = isReview
   ? [
-      'task_id: ' + taskId,
-      'result_set_id: ' + resultSetId,
+      'task_id: ' + reportTaskId,
+      'result_set_id: ' + reportResultSetId,
       'exec_units_reviewed:',
       '  - exec-01',
       'baseline_refs:',
@@ -93,8 +96,8 @@ const yaml = isReview
       ''
     ].join('\n')
   : [
-      'task_id: ' + taskId,
-      'result_set_id: ' + resultSetId,
+      'task_id: ' + reportTaskId,
+      'result_set_id: ' + reportResultSetId,
       'exec_units_tested:',
       '  - exec-01',
       'baseline_refs:',
@@ -222,6 +225,28 @@ describe('runCommand', () => {
     await expect(runCommand(taskId)).rejects.toThrow(/report/i);
 
     const state = await readState(taskId);
-    expect(state.status).not.toBe('verified');
+    expect(state.status).toBe('blocked');
+    expect(state.block_reason_code).toBe('review_report_invalid');
+    expect(state.blocking_stage).toBe('reviewing/testing');
+    expect(state.retryable).toBe(false);
+    expect(state.required_action).toBe('人工处理并补齐合法工件');
+  });
+
+  it('当 claude 输出的报告 task_id 不匹配时阻止推进 verified', async () => {
+    process.env.ARIA_FAKE_CLAUDE_MODE = 'mismatch-task';
+    const intake = await intakeCommand('验证 review/test 报告绑定到当前任务');
+    const taskId = intake.match(/task_id: (aria-\d{8}-\d{3})/)?.[1] ?? '';
+
+    await startCommand(taskId);
+    await confirmSpecCommand(taskId);
+    await confirmPlanCommand(taskId);
+
+    await expect(runCommand(taskId)).rejects.toThrow(/review_report_task_mismatch/i);
+
+    const state = await readState(taskId);
+    expect(state.status).toBe('blocked');
+    expect(state.block_reason_code).toBe('review_report_task_mismatch');
+    expect(state.blocking_stage).toBe('reviewing/testing');
+    expect(state.retryable).toBe(false);
   });
 });
