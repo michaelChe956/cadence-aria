@@ -8,7 +8,9 @@ import {
   validateDispatchContract,
   validateExecResult,
   validateExecutionContextBundle,
-  validateHandoffFields
+  validateHandoffFields,
+  validateReviewReport,
+  validateTestReport
 } from '../../../../src/runtime/contracts/contract-validator.js';
 
 let tempDir = '';
@@ -99,6 +101,42 @@ function createExecResult(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function createReviewReport(overrides: Record<string, unknown> = {}) {
+  return {
+    task_id: 'aria-20260419-001',
+    result_set_id: 'result-set-aria-20260419-001-01',
+    exec_units_reviewed: ['exec-01'],
+    baseline_refs: ['artifacts/spec-artifact.md', 'artifacts/plan-brief.md'],
+    method_refs: ['verification-before-completion'],
+    blockers: [],
+    suggestions: [],
+    verdict: 'passed',
+    producer: 'claude-code',
+    source_capabilities: ['OpenSpec', 'superpowers'],
+    generated_at: '2026-04-19T00:00:02.000Z',
+    ...overrides
+  };
+}
+
+function createTestReport(overrides: Record<string, unknown> = {}) {
+  return {
+    task_id: 'aria-20260419-001',
+    result_set_id: 'result-set-aria-20260419-001-01',
+    exec_units_tested: ['exec-01'],
+    baseline_refs: ['artifacts/spec-artifact.md', 'artifacts/plan-brief.md'],
+    method_refs: ['test-driven-development', 'verification-before-completion'],
+    commands_run: ['pnpm check', 'pnpm test'],
+    failures: [],
+    passed_count: 2,
+    failed_count: 0,
+    verdict: 'passed',
+    producer: 'claude-code',
+    source_capabilities: ['OpenSpec', 'superpowers'],
+    generated_at: '2026-04-19T00:00:03.000Z',
+    ...overrides
+  };
+}
+
 describe('contract-validator', () => {
   it('validateHandoffFields 在缺少冻结引用时失败', async () => {
     await expect(validateHandoffFields({
@@ -181,5 +219,57 @@ describe('contract-validator', () => {
     }), expected)).toThrow('exec result 未覆盖 contract 要求的方法集合');
 
     expect(validateExecResult(createExecResult(), expected).status).toBe('succeeded');
+  });
+
+  it('validateReviewReport 校验当前任务绑定的基线、方法与执行单元', () => {
+    const expected = {
+      task_id: 'aria-20260419-001',
+      result_set_id: 'result-set-aria-20260419-001-01',
+      exec_unit_id: 'exec-01',
+      spec_ref: 'cadence/cache/aria/tasks/aria-20260419-001/artifacts/spec-artifact.md',
+      plan_ref: 'cadence/cache/aria/tasks/aria-20260419-001/artifacts/plan-brief.md',
+      required_methods: ['verification-before-completion'],
+      source_capabilities: ['OpenSpec', 'superpowers']
+    };
+
+    expect(() => validateReviewReport(createReviewReport({
+      baseline_refs: ['artifacts/spec-artifact.md']
+    }), expected)).toThrow('review report baseline_refs 不完整');
+
+    expect(() => validateReviewReport(createReviewReport({
+      method_refs: ['test-driven-development']
+    }), expected)).toThrow('review report 未覆盖要求的方法集合');
+
+    expect(() => validateReviewReport(createReviewReport({
+      exec_units_reviewed: ['exec-02']
+    }), expected)).toThrow('review report 未绑定预期 exec_unit');
+
+    expect(validateReviewReport(createReviewReport(), expected).verdict).toBe('passed');
+  });
+
+  it('validateTestReport 校验当前任务绑定的基线、方法与执行单元', () => {
+    const expected = {
+      task_id: 'aria-20260419-001',
+      result_set_id: 'result-set-aria-20260419-001-01',
+      exec_unit_id: 'exec-01',
+      spec_ref: 'cadence/cache/aria/tasks/aria-20260419-001/artifacts/spec-artifact.md',
+      plan_ref: 'cadence/cache/aria/tasks/aria-20260419-001/artifacts/plan-brief.md',
+      required_methods: ['test-driven-development', 'verification-before-completion'],
+      source_capabilities: ['OpenSpec', 'superpowers']
+    };
+
+    expect(() => validateTestReport(createTestReport({
+      baseline_refs: ['artifacts/other-plan.md']
+    }), expected)).toThrow('test report baseline_refs 不完整');
+
+    expect(() => validateTestReport(createTestReport({
+      method_refs: ['verification-before-completion']
+    }), expected)).toThrow('test report 未覆盖要求的方法集合');
+
+    expect(() => validateTestReport(createTestReport({
+      exec_units_tested: ['exec-02']
+    }), expected)).toThrow('test report 未绑定预期 exec_unit');
+
+    expect(validateTestReport(createTestReport(), expected).verdict).toBe('passed');
   });
 });

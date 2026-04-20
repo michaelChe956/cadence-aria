@@ -1,5 +1,7 @@
+import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { promisify } from 'node:util';
 
 import { runCodexCli } from '../../adapters/codex/codex-adapter.js';
 import { detectCapabilities } from '../../adapters/capability-detector.js';
@@ -10,6 +12,9 @@ import { stringifyYaml } from '../../utils/yaml.js';
 import { nowIso } from '../../utils/time.js';
 import { validateDispatchContract, validateExecutionContextBundle, validateExecResult } from '../contracts/contract-validator.js';
 import { resolveRetryableBlock } from '../state-machine/recovery-rules.js';
+import { resolveWorkspacePath } from '../../utils/workspace.js';
+
+const execFileAsync = promisify(execFile);
 
 function toConsumedSpecRef(specRef: string): string {
   return path.posix.join('artifacts', path.posix.basename(specRef));
@@ -18,6 +23,55 @@ function toConsumedSpecRef(specRef: string): string {
 function normalizeExecSummary(input: string): string {
   const summary = input.replace(/\s+/g, ' ').trim();
   return summary || 'codex exec completed';
+}
+
+function normalizeChangedFile(filePath: string): string {
+  return filePath.replaceAll(path.sep, '/').replace(/^\.\//, '');
+}
+
+function matchesScopePattern(filePath: string, pattern: string): boolean {
+  const normalizedFile = normalizeChangedFile(filePath);
+  const normalizedPattern = pattern.replaceAll(path.sep, '/');
+
+  if (normalizedPattern.endsWith('/**')) {
+    const prefix = normalizedPattern.slice(0, -3);
+    return normalizedFile === prefix || normalizedFile.startsWith(`${prefix}/`);
+  }
+
+  return normalizedFile === normalizedPattern;
+}
+
+async function collectChangedFiles(cwd: string): Promise<string[]> {
+  try {
+    const { stdout } = await execFileAsync('git', ['status', '--short', '--untracked-files=all'], { cwd });
+    return stdout
+      .split('\n')
+      .map(line => line.trim())
+      .filter(Boolean)
+      .map(line => normalizeChangedFile(line.slice(3).trim()))
+      .filter(Boolean)
+      .filter((value, index, items) => items.indexOf(value) === index);
+  } catch {
+    return [];
+  }
+}
+
+function assertChangedFilesWithinScope(changedFiles: string[], scope?: { files_allowed: string[]; files_blocked?: string[] }): void {
+  if (!scope) {
+    return;
+  }
+
+  for (const filePath of changedFiles) {
+    const allowed = scope.files_allowed.some(pattern => matchesScopePattern(filePath, pattern));
+    if (!allowed) {
+      throw new Error(`dispatch contract scope 不允许修改文件: ${filePath}`);
+    }
+
+    const blocked = scope.files_blocked?.some(pattern => matchesScopePattern(filePath, pattern)) ?? false;
+    if (blocked) {
+      throw new Error(`dispatch contract scope 明确禁止修改文件: ${filePath}`);
+    }
+  }
 }
 
 async function readExecSummary(resultPath: string, stdout: string, stderr: string): Promise<string> {
@@ -137,9 +191,10 @@ export async function runSingleExecUnit(taskId: string): Promise<void> {
 
   const resultPath = path.join(getTaskArtifactsDir(taskId), 'exec-result-exec-01.yaml');
   const promptPath = path.join(getTaskArtifactsDir(taskId), 'exec-prompt-exec-01.md');
-  const resultOutputPath = path.resolve(resultPath);
-  await fs.mkdir(path.dirname(resultPath), { recursive: true });
-  await fs.writeFile(promptPath, buildExecPrompt({
+  const resultOutputPath = resolveWorkspacePath(resultPath, executionCwd);
+  const promptOutputPath = resolveWorkspacePath(promptPath, executionCwd);
+  await fs.mkdir(path.dirname(resultOutputPath), { recursive: true });
+  await fs.writeFile(promptOutputPath, buildExecPrompt({
     taskId,
     bundle,
     contract
@@ -178,7 +233,7 @@ export async function runSingleExecUnit(taskId: string): Promise<void> {
   try {
     const execOutput = await runCodexCli({
       cwd: executionCwd,
-      promptPath,
+      promptPath: promptOutputPath,
       outputPath: resultOutputPath
     });
     if (execOutput.exitCode !== 0) {
@@ -191,12 +246,14 @@ export async function runSingleExecUnit(taskId: string): Promise<void> {
     }
 
     const finishedAt = nowIso();
+    const changedFiles = await collectChangedFiles(executionCwd);
+    assertChangedFilesWithinScope(changedFiles, contract.scope);
     const execResult = {
       task_id: taskId,
       exec_unit_id: 'exec-01' as const,
       status: 'succeeded' as const,
-      changed_files: [],
-      summary: await readExecSummary(resultPath, execOutput.stdout, execOutput.stderr),
+      changed_files: changedFiles,
+      summary: await readExecSummary(resultOutputPath, execOutput.stdout, execOutput.stderr),
       capabilities_used: [contract.worker_cli],
       openspec_refs_consumed: [toConsumedSpecRef(bundle.spec_ref)],
       superpowers_refs_consumed: [...contract.required_methods],
@@ -205,9 +262,9 @@ export async function runSingleExecUnit(taskId: string): Promise<void> {
       started_at: startedAt,
       finished_at: finishedAt
     };
-    await fs.writeFile(resultPath, stringifyYaml(execResult), 'utf8');
+    await fs.writeFile(resultOutputPath, stringifyYaml(execResult), 'utf8');
 
-    const validatedResult = validateExecResult(parseYaml(await fs.readFile(resultPath, 'utf8')), {
+    const validatedResult = validateExecResult(parseYaml(await fs.readFile(resultOutputPath, 'utf8')), {
       task_id: taskId,
       exec_unit_id: 'exec-01',
       worker_cli: contract.worker_cli,

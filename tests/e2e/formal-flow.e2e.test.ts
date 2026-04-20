@@ -20,7 +20,7 @@ let tempDir = '';
 async function setTempWorkspace(): Promise<void> {
   tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cadence-aria-formal-flow-e2e-'));
   process.chdir(tempDir);
-  await createFakeBinaries({}, ORIGINAL_PATH);
+  await createFakeBinaries({ writeArtifactToDisk: true }, ORIGINAL_PATH);
 }
 
 async function restoreWorkspace(): Promise<void> {

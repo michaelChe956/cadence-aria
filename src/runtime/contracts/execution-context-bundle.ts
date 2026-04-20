@@ -1,6 +1,7 @@
 import path from 'node:path';
 
 import type { ExecutionContextBundle } from '../../schemas/runtime-artifact-schema.js';
+import { findWorkspaceRoot } from '../../utils/workspace.js';
 
 export function buildExecutionContextBundle(input: {
   task_id: string;
@@ -8,6 +9,8 @@ export function buildExecutionContextBundle(input: {
   plan_ref: string;
   scope_constraints_ref: string;
 }): ExecutionContextBundle {
+  const workspaceRoot = findWorkspaceRoot();
+
   return {
     bundle_id: `execution-context-bundle-${input.task_id}`,
     spec_ref: input.spec_ref,
@@ -16,8 +19,8 @@ export function buildExecutionContextBundle(input: {
     required_methods: ['writing-plans', 'test-driven-development', 'verification-before-completion'],
     source_capabilities: ['OpenSpec', 'superpowers'],
     workspace_context: {
-      repo_path: process.cwd(),
-      worktree_ref: process.env.CADENCE_WORKTREE_REF ?? path.basename(process.cwd()),
+      repo_path: workspaceRoot,
+      worktree_ref: process.env.CADENCE_WORKTREE_REF ?? path.basename(workspaceRoot),
       base_revision: process.env.CADENCE_BASE_REVISION ?? 'unknown'
     },
     verification_requirements: ['pnpm check', 'pnpm test'],

@@ -20,7 +20,7 @@ let tempDir = '';
 async function setTempWorkspace(): Promise<void> {
   tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aria-formal-flow-e2e-'));
   process.chdir(tempDir);
-  await createFakeBinaries({}, ORIGINAL_PATH);
+  await createFakeBinaries({ writeArtifactToDisk: true }, ORIGINAL_PATH);
 }
 
 async function restoreWorkspace(): Promise<void> {
@@ -81,7 +81,7 @@ describe('formal flow real integration e2e', () => {
     expect(state.exec_units['exec-01'].status).toBe('failed');
   }, 15000);
 
-  it('review 失败后任务状态进入 patching', async () => {
+  it('review 失败后任务状态进入 blocked，并保留 patch_required_by', async () => {
     const intake = await intakeCommand('review 失败 E2E');
     const taskId = intake.match(/task_id: (aria-\d{8}-\d{3})/)?.[1] ?? '';
 
@@ -90,15 +90,16 @@ describe('formal flow real integration e2e', () => {
     expect(await confirmPlanCommand(taskId)).toContain('dispatched');
 
     await cleanupFakeBinaries();
-    await createFakeBinaries({ reviewVerdict: 'failed', testVerdict: 'passed' }, ORIGINAL_PATH);
+    await createFakeBinaries({ reviewVerdict: 'failed', testVerdict: 'passed', writeArtifactToDisk: true }, ORIGINAL_PATH);
 
     const runOutput = await runCommand(taskId);
     const state = await readState(taskId);
 
-    expect(runOutput).toContain('status: patching');
-    expect(state.status).toBe('patching');
+    expect(runOutput).toContain('status: blocked');
+    expect(state.status).toBe('blocked');
     expect(state.review_status).toBe('failed');
     expect(state.test_status).toBe('passed');
     expect(state.patch_required_by).toBe('review');
+    expect(state.block_reason_code).toBe('must_fix_detected');
   }, 15000);
 });

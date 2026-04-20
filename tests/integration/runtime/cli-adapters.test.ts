@@ -19,6 +19,8 @@ let tempDir = '';
 afterEach(async () => {
   process.env.PATH = ORIGINAL_PATH;
   delete process.env.CLAUDE_OUTPUT_PATH;
+  delete process.env.CADENCE_CODEX_BIN;
+  delete process.env.CADENCE_CLAUDE_BIN;
   if (tempDir) {
     await fs.rm(tempDir, { recursive: true, force: true });
     tempDir = '';
@@ -69,6 +71,29 @@ describe('cli adapters', () => {
     expect(detectCapabilities().codex).toEqual({
       available: false,
       source: 'codex'
+    });
+  });
+
+  it('优先识别 CADENCE_CODEX_BIN 与 CADENCE_CLAUDE_BIN 指向的可执行文件', async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cadence-aria-cli-'));
+    const codexPath = path.join(tempDir, 'custom-codex');
+    const claudePath = path.join(tempDir, 'custom-claude');
+    await fs.writeFile(codexPath, '#!/bin/sh\nexit 0\n', 'utf8');
+    await fs.writeFile(claudePath, '#!/bin/sh\nexit 0\n', 'utf8');
+    await fs.chmod(codexPath, 0o755);
+    await fs.chmod(claudePath, 0o755);
+
+    process.env.PATH = '';
+    process.env.CADENCE_CODEX_BIN = codexPath;
+    process.env.CADENCE_CLAUDE_BIN = claudePath;
+
+    expect(detectCapabilities().codex).toEqual({
+      available: true,
+      source: codexPath
+    });
+    expect(detectCapabilities().claude_code).toEqual({
+      available: true,
+      source: claudePath
     });
   });
 

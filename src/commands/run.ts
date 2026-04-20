@@ -14,6 +14,14 @@ import { resolveRetryableBlock } from '../runtime/state-machine/recovery-rules.j
 function resolveReviewTestFailureReason(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
 
+  if (message.startsWith('review_report_task_mismatch:')) {
+    return 'review_report_task_mismatch';
+  }
+
+  if (message.startsWith('review_report_result_set_mismatch:')) {
+    return 'review_report_result_set_mismatch';
+  }
+
   if (message.startsWith('review_report_invalid:')) {
     if (message.includes('review_report_task_mismatch:')) {
       return 'review_report_task_mismatch';
@@ -22,6 +30,14 @@ function resolveReviewTestFailureReason(error: unknown): string {
       return 'review_report_result_set_mismatch';
     }
     return 'review_report_invalid';
+  }
+
+  if (message.startsWith('test_report_task_mismatch:')) {
+    return 'test_report_task_mismatch';
+  }
+
+  if (message.startsWith('test_report_result_set_mismatch:')) {
+    return 'test_report_result_set_mismatch';
   }
 
   if (message.startsWith('test_report_invalid:')) {
@@ -71,6 +87,10 @@ export async function runCommand(taskId: string): Promise<string> {
     const review = reviewReportSchema.parse(parseYaml(await fs.readFile(reviewReportPath, 'utf8')));
     const test = testReportSchema.parse(parseYaml(await fs.readFile(testReportPath, 'utf8')));
     const arbitration = arbitrateReviewAndTest({ review, test });
+    const arbitrationResolution =
+      arbitration.next_status === 'blocked' && arbitration.reason
+        ? resolveRetryableBlock(arbitration.reason)
+        : null;
     const patchRequiredBy: State['patch_required_by'] =
       review.verdict === 'passed' && test.verdict === 'passed'
         ? 'none'
@@ -90,8 +110,8 @@ export async function runCommand(taskId: string): Promise<string> {
       patch_required_by: patchRequiredBy,
       block_reason_code: arbitration.next_status === 'blocked' ? arbitration.reason : null,
       blocking_stage: arbitration.next_status === 'blocked' ? 'reviewing/testing' : null,
-      retryable: arbitration.next_status === 'blocked' ? false : undefined,
-      required_action: arbitration.next_status === 'blocked' ? 'resolve-review-test-mismatch' : null,
+      retryable: arbitration.next_status === 'blocked' ? arbitrationResolution?.retryable : undefined,
+      required_action: arbitration.next_status === 'blocked' ? arbitrationResolution?.required_action ?? null : null,
       updated_at: nowIso()
     };
 
@@ -102,14 +122,6 @@ export async function runCommand(taskId: string): Promise<string> {
       }, 'verified');
       if (!transition.allowed) {
         throw new Error(`无法推进到 verified: ${transition.reason}`);
-      }
-    } else if (arbitration.next_status === 'patching') {
-      const transition = canTransition({
-        ...nextState,
-        status: 'reviewing/testing'
-      }, 'patching');
-      if (!transition.allowed) {
-        throw new Error(`无法推进到 patching: ${transition.reason}`);
       }
     } else if (arbitration.next_status === 'blocked') {
       // blocked 是合法的安全降级路径，不通过 Guard 检查

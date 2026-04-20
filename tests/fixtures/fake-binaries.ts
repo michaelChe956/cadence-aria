@@ -179,8 +179,7 @@ if (${writeArtifactToDisk} || process.env.ARIA_FAKE_ARTIFACT_ROOT) {
   fs.writeFileSync(artifactPath, yaml + '\\n', 'utf8');
 }
 
-console.error(yaml);
-process.exit(0);
+process.stdout.write(yaml + '\\n', () => process.exit(0));
 `;
 
   await fs.writeFile(codexPath, codexScript, 'utf8');

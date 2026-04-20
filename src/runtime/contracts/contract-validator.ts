@@ -1,8 +1,20 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
-import type { DispatchContract, ExecutionContextBundle, ExecResultArtifact } from '../../schemas/runtime-artifact-schema.js';
-import { dispatchContractSchema, executionContextBundleSchema, execResultSchema } from '../../schemas/runtime-artifact-schema.js';
+import type {
+  DispatchContract,
+  ExecutionContextBundle,
+  ExecResultArtifact,
+  ReviewReportArtifact,
+  TestReportArtifact
+} from '../../schemas/runtime-artifact-schema.js';
+import {
+  dispatchContractSchema,
+  executionContextBundleSchema,
+  execResultSchema,
+  reviewReportSchema,
+  testReportSchema
+} from '../../schemas/runtime-artifact-schema.js';
 
 export const EXPECTED_SOURCE_CAPABILITIES = ['OpenSpec', 'superpowers'] as const;
 export const EXPECTED_BUNDLE_METHODS = ['writing-plans', 'test-driven-development', 'verification-before-completion'] as const;
@@ -16,6 +28,10 @@ function containsAll(actual: string[], expected: readonly string[]): boolean {
 
 function toConsumedSpecRef(specRef: string): string {
   return path.posix.join('artifacts', path.posix.basename(specRef));
+}
+
+function toArtifactRef(inputPath: string): string {
+  return path.posix.join('artifacts', path.posix.basename(inputPath));
 }
 
 export async function validateHandoffFields(input: {
@@ -101,4 +117,88 @@ export function validateExecResult(
   }
 
   return result;
+}
+
+export function validateReviewReport(
+  input: unknown,
+  expected: {
+    task_id: string;
+    result_set_id: string;
+    exec_unit_id: string;
+    spec_ref: string;
+    plan_ref: string;
+    required_methods: string[];
+    source_capabilities: string[];
+  }
+): ReviewReportArtifact {
+  const report = reviewReportSchema.parse(input);
+
+  if (report.task_id !== expected.task_id) {
+    throw new Error(`review report task_id 不一致: expected=${expected.task_id} actual=${report.task_id}`);
+  }
+
+  if (report.result_set_id !== expected.result_set_id) {
+    throw new Error(`review report result_set_id 不一致: expected=${expected.result_set_id} actual=${report.result_set_id}`);
+  }
+
+  if (!report.exec_units_reviewed.includes(expected.exec_unit_id)) {
+    throw new Error(`review report 未绑定预期 exec_unit: ${expected.exec_unit_id}`);
+  }
+
+  const expectedBaselineRefs = [toArtifactRef(expected.spec_ref), toArtifactRef(expected.plan_ref)];
+  if (!containsAll(report.baseline_refs, expectedBaselineRefs)) {
+    throw new Error(`review report baseline_refs 不完整: expected=${expectedBaselineRefs.join(',')}`);
+  }
+
+  if (!containsAll(report.method_refs, expected.required_methods)) {
+    throw new Error('review report 未覆盖要求的方法集合');
+  }
+
+  if (!containsAll(report.source_capabilities, expected.source_capabilities)) {
+    throw new Error('review report source_capabilities 不完整');
+  }
+
+  return report;
+}
+
+export function validateTestReport(
+  input: unknown,
+  expected: {
+    task_id: string;
+    result_set_id: string;
+    exec_unit_id: string;
+    spec_ref: string;
+    plan_ref: string;
+    required_methods: string[];
+    source_capabilities: string[];
+  }
+): TestReportArtifact {
+  const report = testReportSchema.parse(input);
+
+  if (report.task_id !== expected.task_id) {
+    throw new Error(`test report task_id 不一致: expected=${expected.task_id} actual=${report.task_id}`);
+  }
+
+  if (report.result_set_id !== expected.result_set_id) {
+    throw new Error(`test report result_set_id 不一致: expected=${expected.result_set_id} actual=${report.result_set_id}`);
+  }
+
+  if (!report.exec_units_tested.includes(expected.exec_unit_id)) {
+    throw new Error(`test report 未绑定预期 exec_unit: ${expected.exec_unit_id}`);
+  }
+
+  const expectedBaselineRefs = [toArtifactRef(expected.spec_ref), toArtifactRef(expected.plan_ref)];
+  if (!containsAll(report.baseline_refs, expectedBaselineRefs)) {
+    throw new Error(`test report baseline_refs 不完整: expected=${expectedBaselineRefs.join(',')}`);
+  }
+
+  if (!containsAll(report.method_refs, expected.required_methods)) {
+    throw new Error('test report 未覆盖要求的方法集合');
+  }
+
+  if (!containsAll(report.source_capabilities, expected.source_capabilities)) {
+    throw new Error('test report source_capabilities 不完整');
+  }
+
+  return report;
 }

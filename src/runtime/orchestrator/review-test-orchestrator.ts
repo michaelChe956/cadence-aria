@@ -11,7 +11,12 @@ import {
 import { parseYaml, stringifyYaml } from '../../utils/yaml.js';
 import { readState } from '../persistence/state-repository.js';
 import { getTaskArtifactsDir } from '../persistence/paths.js';
-import { validateExecutionContextBundle } from '../contracts/contract-validator.js';
+import {
+  validateExecutionContextBundle,
+  validateReviewReport,
+  validateTestReport
+} from '../contracts/contract-validator.js';
+import { resolveWorkspacePath } from '../../utils/workspace.js';
 
 function buildReviewPrompt(taskId: string, resultSetId: string): string {
   return [
@@ -37,62 +42,64 @@ function buildTestPrompt(taskId: string, resultSetId: string): string {
   ].join('\n');
 }
 
-function validateReviewReportContext(input: {
+function parseReviewReport(input: {
   taskId: string;
   resultSetId: string;
-  report: ReviewReportArtifact;
+  specRef: string;
+  planRef: string;
+  output: string;
 }): ReviewReportArtifact {
-  if (input.report.task_id !== input.taskId) {
-    throw new Error(`review_report_task_mismatch: ${input.taskId}: actual=${input.report.task_id}`);
-  }
-
-  if (input.report.result_set_id !== input.resultSetId) {
-    throw new Error(`review_report_result_set_mismatch: ${input.taskId}: actual=${input.report.result_set_id}`);
-  }
-
-  return input.report;
-}
-
-function validateTestReportContext(input: {
-  taskId: string;
-  resultSetId: string;
-  report: TestReportArtifact;
-}): TestReportArtifact {
-  if (input.report.task_id !== input.taskId) {
-    throw new Error(`test_report_task_mismatch: ${input.taskId}: actual=${input.report.task_id}`);
-  }
-
-  if (input.report.result_set_id !== input.resultSetId) {
-    throw new Error(`test_report_result_set_mismatch: ${input.taskId}: actual=${input.report.result_set_id}`);
-  }
-
-  return input.report;
-}
-
-function parseReviewReport(taskId: string, resultSetId: string, output: string): ReviewReportArtifact {
   try {
-    return validateReviewReportContext({
-      taskId,
-      resultSetId,
-      report: reviewReportSchema.parse(parseYaml(output))
+    return validateReviewReport(reviewReportSchema.parse(parseYaml(input.output)), {
+      task_id: input.taskId,
+      result_set_id: input.resultSetId,
+      exec_unit_id: 'exec-01',
+      spec_ref: input.specRef,
+      plan_ref: input.planRef,
+      required_methods: ['verification-before-completion'],
+      source_capabilities: ['OpenSpec', 'superpowers']
     });
   } catch (error) {
+    const message = (error as Error).message;
+    if (message.includes('review report task_id 不一致')) {
+      throw new Error(`review_report_task_mismatch: ${input.taskId}: ${message}`);
+    }
+    if (message.includes('review report result_set_id 不一致')) {
+      throw new Error(`review_report_result_set_mismatch: ${input.taskId}: ${message}`);
+    }
     throw new Error(
-      `review_report_invalid: ${taskId}: ${(error as Error).message}; output_preview=${JSON.stringify(output.slice(0, 160))}`
+      `review_report_invalid: ${input.taskId}: ${message}; output_preview=${JSON.stringify(input.output.slice(0, 160))}`
     );
   }
 }
 
-function parseTestReport(taskId: string, resultSetId: string, output: string): TestReportArtifact {
+function parseTestReport(input: {
+  taskId: string;
+  resultSetId: string;
+  specRef: string;
+  planRef: string;
+  output: string;
+}): TestReportArtifact {
   try {
-    return validateTestReportContext({
-      taskId,
-      resultSetId,
-      report: testReportSchema.parse(parseYaml(output))
+    return validateTestReport(testReportSchema.parse(parseYaml(input.output)), {
+      task_id: input.taskId,
+      result_set_id: input.resultSetId,
+      exec_unit_id: 'exec-01',
+      spec_ref: input.specRef,
+      plan_ref: input.planRef,
+      required_methods: ['test-driven-development', 'verification-before-completion'],
+      source_capabilities: ['OpenSpec', 'superpowers']
     });
   } catch (error) {
+    const message = (error as Error).message;
+    if (message.includes('test report task_id 不一致')) {
+      throw new Error(`test_report_task_mismatch: ${input.taskId}: ${message}`);
+    }
+    if (message.includes('test report result_set_id 不一致')) {
+      throw new Error(`test_report_result_set_mismatch: ${input.taskId}: ${message}`);
+    }
     throw new Error(
-      `test_report_invalid: ${taskId}: ${(error as Error).message}; output_preview=${JSON.stringify(output.slice(0, 160))}`
+      `test_report_invalid: ${input.taskId}: ${message}; output_preview=${JSON.stringify(input.output.slice(0, 160))}`
     );
   }
 }
@@ -100,23 +107,29 @@ function parseTestReport(taskId: string, resultSetId: string, output: string): T
 async function resolveClaudeStructuredOutput(
   output: string,
   stderr: string,
-  fallbackPath: string
+  fallbackPath: string,
+  executionCwd: string
 ): Promise<string> {
   if (output.trim()) {
     return output;
   }
 
-  if (stderr.trim()) {
-    return stderr;
+  const fallbackCandidates = [fallbackPath, path.join(executionCwd, fallbackPath)].map(candidate =>
+    resolveWorkspacePath(candidate, executionCwd)
+  );
+  for (const candidate of fallbackCandidates) {
+    try {
+      const persisted = await fs.readFile(candidate, 'utf8');
+      if (persisted.trim()) {
+        return persisted;
+      }
+    } catch {
+      continue;
+    }
   }
 
-  try {
-    const persisted = await fs.readFile(fallbackPath, 'utf8');
-    if (persisted.trim()) {
-      return persisted;
-    }
-  } catch {
-    // ignore missing fallback artifact
+  if (stderr.trim()) {
+    return stderr;
   }
 
   return '';
@@ -135,9 +148,15 @@ export async function runReviewAndTest(taskId: string): Promise<{
   const testReportPath = path.join(artifactsDir, 'test-report.yaml');
   const executionCwd = state.context_bundle_ref
     ? validateExecutionContextBundle(
-        parseYaml(await fs.readFile(state.context_bundle_ref, 'utf8'))
+        parseYaml(await fs.readFile(resolveWorkspacePath(state.context_bundle_ref), 'utf8'))
       ).workspace_context.repo_path
     : process.cwd();
+  const specRef = state.approved_spec_ref;
+  const planRef = state.approved_plan_ref;
+
+  if (!specRef || !planRef) {
+    throw new Error(`缺少 review/test 所需的冻结引用: ${taskId}`);
+  }
 
   await fs.mkdir(artifactsDir, { recursive: true });
   await fs.writeFile(reviewPromptPath, buildReviewPrompt(taskId, resultSetId), 'utf8');
@@ -150,8 +169,14 @@ export async function runReviewAndTest(taskId: string): Promise<{
   if (reviewRun.exitCode !== 0) {
     throw new Error(`claude_review_failed: ${reviewRun.stderr}`);
   }
-  const reviewOutput = await resolveClaudeStructuredOutput(reviewRun.stdout, reviewRun.stderr, reviewReportPath);
-  const reviewReport = parseReviewReport(taskId, resultSetId, reviewOutput);
+  const reviewOutput = await resolveClaudeStructuredOutput(reviewRun.stdout, reviewRun.stderr, reviewReportPath, executionCwd);
+  const reviewReport = parseReviewReport({
+    taskId,
+    resultSetId,
+    specRef,
+    planRef,
+    output: reviewOutput
+  });
 
   const testRun = await runClaudeCode({
     cwd: executionCwd,
@@ -160,8 +185,14 @@ export async function runReviewAndTest(taskId: string): Promise<{
   if (testRun.exitCode !== 0) {
     throw new Error(`claude_test_failed: ${testRun.stderr}`);
   }
-  const testOutput = await resolveClaudeStructuredOutput(testRun.stdout, testRun.stderr, testReportPath);
-  const testReport = parseTestReport(taskId, resultSetId, testOutput);
+  const testOutput = await resolveClaudeStructuredOutput(testRun.stdout, testRun.stderr, testReportPath, executionCwd);
+  const testReport = parseTestReport({
+    taskId,
+    resultSetId,
+    specRef,
+    planRef,
+    output: testOutput
+  });
 
   await fs.writeFile(reviewReportPath, stringifyYaml(reviewReport), 'utf8');
   await fs.writeFile(testReportPath, stringifyYaml(testReport), 'utf8');

@@ -54,9 +54,18 @@ function detectCli(binaryPath: string | null, binaryName: string) {
   }
 }
 
+function resolveConfiguredBinaryPath(envName: 'CADENCE_CLAUDE_BIN' | 'CADENCE_CODEX_BIN'): string | null {
+  const configuredPath = process.env[envName]?.trim();
+  if (!configuredPath) {
+    return null;
+  }
+
+  return configuredPath;
+}
+
 export function detectCapabilities() {
-  const claudeBinaryPath = resolveBinaryPath('claude');
-  const codexBinaryPath = resolveBinaryPath('codex');
+  const claudeBinaryPath = resolveConfiguredBinaryPath('CADENCE_CLAUDE_BIN') ?? resolveBinaryPath('claude');
+  const codexBinaryPath = resolveConfiguredBinaryPath('CADENCE_CODEX_BIN') ?? resolveBinaryPath('codex');
 
   return {
     host: getHostCapability(),
