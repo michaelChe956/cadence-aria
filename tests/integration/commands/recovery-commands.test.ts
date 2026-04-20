@@ -76,8 +76,64 @@ fs.writeFileSync(outputPath, [
 process.exit(0);
 `;
 
+  const claudeScript = String.raw`#!/usr/bin/env node
+const prompt = process.argv.slice(2).join(' ');
+const taskId = (prompt.match(/task_id: (.+?)(?:\n|$)/m) ?? [])[1] ?? 'unknown';
+const resultSetId = (prompt.match(/result_set_id: (.+?)(?:\n|$)/m) ?? [])[1] ?? 'result-set-unknown';
+
+if (prompt.includes('Claude Code Review Prompt')) {
+  process.stdout.write([
+    'task_id: ' + taskId,
+    'result_set_id: ' + resultSetId,
+    'exec_units_reviewed:',
+    '  - exec-01',
+    'baseline_refs:',
+    '  - artifacts/spec-artifact.md',
+    '  - artifacts/plan-brief.md',
+    'method_refs:',
+    '  - verification-before-completion',
+    'blockers: []',
+    'suggestions: []',
+    'verdict: passed',
+    'producer: claude-code',
+    'source_capabilities:',
+    '  - OpenSpec',
+    '  - superpowers',
+    'generated_at: 2026-04-19T00:00:02.000Z',
+    ''
+  ].join('\n'));
+} else {
+  process.stdout.write([
+    'task_id: ' + taskId,
+    'result_set_id: ' + resultSetId,
+    'exec_units_tested:',
+    '  - exec-01',
+    'baseline_refs:',
+    '  - artifacts/spec-artifact.md',
+    '  - artifacts/plan-brief.md',
+    'method_refs:',
+    '  - test-driven-development',
+    '  - verification-before-completion',
+    'commands_run:',
+    '  - pnpm check',
+    '  - pnpm test',
+    'failures: []',
+    'passed_count: 2',
+    'failed_count: 0',
+    'verdict: passed',
+    'producer: claude-code',
+    'source_capabilities:',
+    '  - OpenSpec',
+    '  - superpowers',
+    'generated_at: 2026-04-19T00:00:03.000Z',
+    ''
+  ].join('\n'));
+}
+process.exit(0);
+`;
+
   await fs.writeFile(codexPath, codexScript, 'utf8');
-  await fs.writeFile(claudePath, '#!/bin/sh\nexit 0\n', 'utf8');
+  await fs.writeFile(claudePath, claudeScript, 'utf8');
   await fs.chmod(codexPath, 0o755);
   await fs.chmod(claudePath, 0o755);
 
@@ -146,13 +202,15 @@ describe('recovery commands', () => {
     });
 
     const retried = await retryCommand(taskId);
-    expect(retried).toContain('status: executing');
+    expect(retried).toContain('status: dispatched');
 
     const afterRetry = await readState(taskId);
-    expect(afterRetry.status).toBe('executing');
+    expect(afterRetry.status).toBe('dispatched');
+    expect(afterRetry.active_exec_units).toEqual(['exec-01']);
+    expect(afterRetry.exec_units['exec-01']?.status).toBe('pending');
 
     const result = await resultCommand(taskId);
     expect(result).toContain(`task_id: ${taskId}`);
-    expect(result).toContain('final_status: executing');
-  });
+    expect(result).toContain('final_status: dispatched');
+  }, 15000);
 });

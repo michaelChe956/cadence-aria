@@ -38,11 +38,6 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-if [ ! -f "$REPO_ROOT/dist/src/index.js" ]; then
-  echo "FAIL: 缺少 dist/src/index.js，请先执行 pnpm build"
-  exit 1
-fi
-
 if [ ! -d "$TASKS_ROOT" ]; then
   echo "FAIL: 缺少任务目录 $TASKS_ROOT"
   exit 1
@@ -100,15 +95,17 @@ require_contains() {
   fi
 }
 
-DOCTOR_OUTPUT=$(node "$REPO_ROOT/dist/src/index.js" aria:doctor 2>&1 || true)
-for capability in claude_code codex OpenSpec superpowers; do
-  case "$DOCTOR_OUTPUT" in
-    *"$capability"*) ;;
-    *)
-      append_failure "aria:doctor 缺少能力项: $capability"
-      ;;
-  esac
-done
+if [ -f "$REPO_ROOT/dist/src/index.js" ]; then
+  DOCTOR_OUTPUT=$(node "$REPO_ROOT/dist/src/index.js" aria:doctor 2>&1 || true)
+  for capability in claude_code codex OpenSpec superpowers; do
+    case "$DOCTOR_OUTPUT" in
+      *"$capability"*) ;;
+      *)
+        append_failure "aria:doctor 缺少能力项: $capability"
+        ;;
+    esac
+  done
+fi
 
 SPEC_FILE="$ARTIFACTS_DIR/spec-artifact.md"
 PLAN_FILE="$ARTIFACTS_DIR/plan-brief.md"

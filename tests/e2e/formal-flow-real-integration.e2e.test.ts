@@ -71,7 +71,61 @@ fs.writeFileSync(outputPath, [
 process.exit(0);
 `;
 
-  const claudeScript = '#!/bin/sh\nexit 0\n';
+  const claudeScript = String.raw`#!/usr/bin/env node
+const prompt = process.argv.slice(2).join(' ');
+const taskId = (prompt.match(/task_id: (.+?)(?:\n|$)/m) ?? [])[1] ?? 'unknown';
+const resultSetId = (prompt.match(/result_set_id: (.+?)(?:\n|$)/m) ?? [])[1] ?? 'result-set-unknown';
+
+if (prompt.includes('Claude Code Review Prompt')) {
+  process.stdout.write([
+    'task_id: ' + taskId,
+    'result_set_id: ' + resultSetId,
+    'exec_units_reviewed:',
+    '  - exec-01',
+    'baseline_refs:',
+    '  - artifacts/spec-artifact.md',
+    '  - artifacts/plan-brief.md',
+    'method_refs:',
+    '  - verification-before-completion',
+    'blockers: []',
+    'suggestions: []',
+    'verdict: passed',
+    'producer: claude-code',
+    'source_capabilities:',
+    '  - OpenSpec',
+    '  - superpowers',
+    'generated_at: 2026-04-19T00:00:02.000Z',
+    ''
+  ].join('\n'));
+} else {
+  process.stdout.write([
+    'task_id: ' + taskId,
+    'result_set_id: ' + resultSetId,
+    'exec_units_tested:',
+    '  - exec-01',
+    'baseline_refs:',
+    '  - artifacts/spec-artifact.md',
+    '  - artifacts/plan-brief.md',
+    'method_refs:',
+    '  - test-driven-development',
+    '  - verification-before-completion',
+    'commands_run:',
+    '  - pnpm check',
+    '  - pnpm test',
+    'failures: []',
+    'passed_count: 2',
+    'failed_count: 0',
+    'verdict: passed',
+    'producer: claude-code',
+    'source_capabilities:',
+    '  - OpenSpec',
+    '  - superpowers',
+    'generated_at: 2026-04-19T00:00:03.000Z',
+    ''
+  ].join('\n'));
+}
+process.exit(0);
+`;
 
   await fs.writeFile(codexPath, codexScript, 'utf8');
   await fs.writeFile(claudePath, claudeScript, 'utf8');
@@ -120,5 +174,5 @@ describe('formal flow real integration e2e', () => {
     await expect(fs.access(`cadence/cache/aria/tasks/${taskId}/artifacts/exec-result-exec-01.yaml`)).resolves.toBeUndefined();
     await expect(fs.access(`cadence/cache/aria/tasks/${taskId}/artifacts/review-report.yaml`)).resolves.toBeUndefined();
     await expect(fs.access(`cadence/cache/aria/tasks/${taskId}/artifacts/test-report.yaml`)).resolves.toBeUndefined();
-  });
+  }, 15000);
 });

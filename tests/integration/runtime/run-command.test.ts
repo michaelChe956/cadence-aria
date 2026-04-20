@@ -59,7 +59,70 @@ process.exit(0);
 `;
 
   await fs.writeFile(codexPath, codexScript, 'utf8');
-  await fs.writeFile(claudePath, '#!/bin/sh\nexit 0\n', 'utf8');
+  const claudeScript = String.raw`#!/usr/bin/env node
+const mode = process.env.ARIA_FAKE_CLAUDE_MODE ?? 'pass';
+const prompt = process.argv.slice(2).join(' ');
+const taskId = (prompt.match(/task_id: (.+?)(?:\\n|$)/m) ?? [])[1] ?? 'unknown';
+const resultSetId = (prompt.match(/result_set_id: (.+?)(?:\\n|$)/m) ?? [])[1] ?? 'result-set-unknown';
+
+if (mode === 'invalid') {
+  process.stdout.write('not-yaml\\n');
+  process.exit(0);
+}
+
+const isReview = prompt.includes('Claude Code Review Prompt');
+const yaml = isReview
+  ? [
+      'task_id: ' + taskId,
+      'result_set_id: ' + resultSetId,
+      'exec_units_reviewed:',
+      '  - exec-01',
+      'baseline_refs:',
+      '  - artifacts/spec-artifact.md',
+      '  - artifacts/plan-brief.md',
+      'method_refs:',
+      '  - verification-before-completion',
+      'blockers: []',
+      'suggestions: []',
+      'verdict: passed',
+      'producer: claude-code',
+      'source_capabilities:',
+      '  - OpenSpec',
+      '  - superpowers',
+      'generated_at: 2026-04-19T00:00:02.000Z',
+      ''
+    ].join('\n')
+  : [
+      'task_id: ' + taskId,
+      'result_set_id: ' + resultSetId,
+      'exec_units_tested:',
+      '  - exec-01',
+      'baseline_refs:',
+      '  - artifacts/spec-artifact.md',
+      '  - artifacts/plan-brief.md',
+      'method_refs:',
+      '  - test-driven-development',
+      '  - verification-before-completion',
+      'commands_run:',
+      '  - pnpm check',
+      '  - pnpm test',
+      'failures: []',
+      'passed_count: 2',
+      'failed_count: 0',
+      'verdict: passed',
+      'producer: claude-code',
+      'source_capabilities:',
+      '  - OpenSpec',
+      '  - superpowers',
+      'generated_at: 2026-04-19T00:00:03.000Z',
+      ''
+    ].join('\n');
+
+process.stdout.write(yaml);
+process.exit(0);
+`;
+
+  await fs.writeFile(claudePath, claudeScript, 'utf8');
   await fs.chmod(codexPath, 0o755);
   await fs.chmod(claudePath, 0o755);
 
@@ -76,6 +139,7 @@ async function restoreWorkspace(): Promise<void> {
   process.chdir(ORIGINAL_CWD);
   process.env.PATH = ORIGINAL_PATH;
   delete process.env.ARIA_FAKE_CODEX_FAIL;
+  delete process.env.ARIA_FAKE_CLAUDE_MODE;
   if (fakeBinDir) {
     await fs.rm(fakeBinDir, { recursive: true, force: true });
     fakeBinDir = '';
@@ -123,7 +187,7 @@ describe('runCommand', () => {
     expect(state.exec_units['exec-01']?.status).toBe('succeeded');
     expect(state.review_report_ref).toBe(reviewPath);
     expect(state.test_report_ref).toBe(testPath);
-  });
+  }, 15000);
 
   it('当 codex 执行失败时收尾为 blocked，且不遗留 running exec unit', async () => {
     process.env.ARIA_FAKE_CODEX_FAIL = '1';
@@ -144,5 +208,20 @@ describe('runCommand', () => {
     expect(state.exec_units['exec-01']?.status).toBe('failed');
     expect(state.exec_units['exec-01']?.exit_code).toBe(1);
     expect(state.exec_units['exec-01']?.finished_at).toBeTruthy();
+  });
+
+  it('当 claude 未输出合法 review/test 报告时拒绝推进 verified', async () => {
+    process.env.ARIA_FAKE_CLAUDE_MODE = 'invalid';
+    const intake = await intakeCommand('验证 review/test 报告必须来自实际输出');
+    const taskId = intake.match(/task_id: (aria-\d{8}-\d{3})/)?.[1] ?? '';
+
+    await startCommand(taskId);
+    await confirmSpecCommand(taskId);
+    await confirmPlanCommand(taskId);
+
+    await expect(runCommand(taskId)).rejects.toThrow(/report/i);
+
+    const state = await readState(taskId);
+    expect(state.status).not.toBe('verified');
   });
 });

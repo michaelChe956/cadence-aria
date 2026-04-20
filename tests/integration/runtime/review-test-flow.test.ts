@@ -78,7 +78,59 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const args = process.argv.slice(2);
-fs.appendFileSync(path.join(process.cwd(), 'claude-invocation.log'), args.join(' ') + '\n', 'utf8');
+const prompt = args.join(' ');
+const taskId = (prompt.match(/task_id: (.+?)(?:\n|$)/m) ?? [])[1] ?? 'unknown';
+const resultSetId = (prompt.match(/result_set_id: (.+?)(?:\n|$)/m) ?? [])[1] ?? 'result-set-unknown';
+fs.appendFileSync(path.join(process.cwd(), 'claude-invocation.log'), prompt + '\n', 'utf8');
+
+if (prompt.includes('Claude Code Review Prompt')) {
+  process.stdout.write([
+    'task_id: ' + taskId,
+    'result_set_id: ' + resultSetId,
+    'exec_units_reviewed:',
+    '  - exec-01',
+    'baseline_refs:',
+    '  - artifacts/spec-artifact.md',
+    '  - artifacts/plan-brief.md',
+    'method_refs:',
+    '  - verification-before-completion',
+    'blockers: []',
+    'suggestions: []',
+    'verdict: passed',
+    'producer: claude-code',
+    'source_capabilities:',
+    '  - OpenSpec',
+    '  - superpowers',
+    'generated_at: 2026-04-19T00:00:02.000Z',
+    ''
+  ].join('\n'));
+} else {
+  process.stdout.write([
+    'task_id: ' + taskId,
+    'result_set_id: ' + resultSetId,
+    'exec_units_tested:',
+    '  - exec-01',
+    'baseline_refs:',
+    '  - artifacts/spec-artifact.md',
+    '  - artifacts/plan-brief.md',
+    'method_refs:',
+    '  - test-driven-development',
+    '  - verification-before-completion',
+    'commands_run:',
+    '  - pnpm check',
+    '  - pnpm test',
+    'failures: []',
+    'passed_count: 2',
+    'failed_count: 0',
+    'verdict: passed',
+    'producer: claude-code',
+    'source_capabilities:',
+    '  - OpenSpec',
+    '  - superpowers',
+    'generated_at: 2026-04-19T00:00:03.000Z',
+    ''
+  ].join('\n'));
+}
 process.exit(0);
 `;
 
@@ -151,7 +203,7 @@ describe('review and test flow', () => {
     const invocationLog = await fs.readFile(path.join(process.cwd(), 'claude-invocation.log'), 'utf8');
     expect(invocationLog).toContain('Claude Code Review Prompt');
     expect(invocationLog).toContain('Claude Code Test Prompt');
-    expect(invocationLog).toContain('不要读取仓库规则与文件');
-    expect(invocationLog).toContain('只输出一行中文摘要');
-  });
+    expect(invocationLog).toContain('运行必要的检查命令');
+    expect(invocationLog).toContain('只输出合法 YAML');
+  }, 15000);
 });

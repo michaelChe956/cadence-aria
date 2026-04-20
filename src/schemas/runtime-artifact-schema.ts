@@ -22,6 +22,36 @@ const requiredMethodsEvidenceSchema = z.object({
   evidence_type: z.literal('required-methods')
 });
 
+const reviewReportSchema = z.object({
+  task_id: z.string(),
+  result_set_id: z.string(),
+  exec_units_reviewed: z.array(z.string()).min(1),
+  baseline_refs: z.array(z.string()).min(1),
+  method_refs: z.array(z.string()).min(1),
+  blockers: z.array(z.string()),
+  suggestions: z.array(z.string()),
+  verdict: z.enum(['passed', 'failed']),
+  producer: z.literal('claude-code'),
+  source_capabilities: z.array(z.string()).min(1),
+  generated_at: datetimeString
+});
+
+const testReportSchema = z.object({
+  task_id: z.string(),
+  result_set_id: z.string(),
+  exec_units_tested: z.array(z.string()).min(1),
+  baseline_refs: z.array(z.string()).min(1),
+  method_refs: z.array(z.string()).min(1),
+  commands_run: z.array(z.string()).min(1),
+  failures: z.array(z.string()),
+  passed_count: z.number().int().min(0),
+  failed_count: z.number().int().min(0),
+  verdict: z.enum(['passed', 'failed']),
+  producer: z.literal('claude-code'),
+  source_capabilities: z.array(z.string()).min(1),
+  generated_at: datetimeString
+});
+
 const execResultSchema = z.object({
   task_id: z.string(),
   exec_unit_id: z.string(),
@@ -86,5 +116,8 @@ export type ExecutionContextBundle = z.infer<typeof executionContextBundleSchema
 export type ApprovedArtifactEvidence = z.infer<typeof approvedArtifactEvidenceSchema>;
 export type RequiredMethodsEvidence = z.infer<typeof requiredMethodsEvidenceSchema>;
 export type ExecResultArtifact = z.infer<typeof execResultSchema>;
+export type ReviewReportArtifact = z.infer<typeof reviewReportSchema>;
+export type TestReportArtifact = z.infer<typeof testReportSchema>;
 
 export { execResultSchema };
+export { reviewReportSchema, testReportSchema };

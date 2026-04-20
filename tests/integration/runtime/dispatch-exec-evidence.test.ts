@@ -22,7 +22,7 @@ async function createFakeCodexBinary(): Promise<void> {
   fakeCodexDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aria-fake-codex-'));
   const scriptPath = path.join(fakeCodexDir, 'codex');
   const claudePath = path.join(fakeCodexDir, 'claude');
-const script = String.raw`#!/usr/bin/env node
+  const script = String.raw`#!/usr/bin/env node
 const fs = require('node:fs');
 const path = require('node:path');
 
@@ -60,8 +60,64 @@ fs.writeFileSync(outputPath, '已读取规则并准备执行任务：' + taskId 
 process.exit(0);
 `;
 
+  const claudeScript = String.raw`#!/usr/bin/env node
+const prompt = process.argv.slice(2).join(' ');
+const taskId = (prompt.match(/task_id: (.+?)(?:\n|$)/m) ?? [])[1] ?? 'unknown';
+const resultSetId = (prompt.match(/result_set_id: (.+?)(?:\n|$)/m) ?? [])[1] ?? 'result-set-unknown';
+
+if (prompt.includes('Claude Code Review Prompt')) {
+  process.stdout.write([
+    'task_id: ' + taskId,
+    'result_set_id: ' + resultSetId,
+    'exec_units_reviewed:',
+    '  - exec-01',
+    'baseline_refs:',
+    '  - artifacts/spec-artifact.md',
+    '  - artifacts/plan-brief.md',
+    'method_refs:',
+    '  - verification-before-completion',
+    'blockers: []',
+    'suggestions: []',
+    'verdict: passed',
+    'producer: claude-code',
+    'source_capabilities:',
+    '  - OpenSpec',
+    '  - superpowers',
+    'generated_at: 2026-04-19T00:00:02.000Z',
+    ''
+  ].join('\n'));
+} else {
+  process.stdout.write([
+    'task_id: ' + taskId,
+    'result_set_id: ' + resultSetId,
+    'exec_units_tested:',
+    '  - exec-01',
+    'baseline_refs:',
+    '  - artifacts/spec-artifact.md',
+    '  - artifacts/plan-brief.md',
+    'method_refs:',
+    '  - test-driven-development',
+    '  - verification-before-completion',
+    'commands_run:',
+    '  - pnpm check',
+    '  - pnpm test',
+    'failures: []',
+    'passed_count: 2',
+    'failed_count: 0',
+    'verdict: passed',
+    'producer: claude-code',
+    'source_capabilities:',
+    '  - OpenSpec',
+    '  - superpowers',
+    'generated_at: 2026-04-19T00:00:03.000Z',
+    ''
+  ].join('\n'));
+}
+process.exit(0);
+`;
+
   await fs.writeFile(scriptPath, script, 'utf8');
-  await fs.writeFile(claudePath, '#!/bin/sh\nexit 0\n', 'utf8');
+  await fs.writeFile(claudePath, claudeScript, 'utf8');
   await fs.chmod(scriptPath, 0o755);
   await fs.chmod(claudePath, 0o755);
   process.env.PATH = `${fakeCodexDir}${path.delimiter}${ORIGINAL_PATH}`;
@@ -151,5 +207,5 @@ describe('dispatch and exec evidence', () => {
     expect(result.openspec_refs_consumed).toEqual(expect.arrayContaining(['artifacts/spec-artifact.md']));
     expect(result.superpowers_refs_consumed).toEqual(expect.arrayContaining(contract.required_methods));
     expect(result.summary).toContain('已读取规则并准备执行任务');
-  });
+  }, 15000);
 });

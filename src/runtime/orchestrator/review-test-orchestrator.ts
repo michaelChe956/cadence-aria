@@ -2,20 +2,25 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 
 import { runClaudeCode } from '../../adapters/claude-code/claude-code-adapter.js';
-import { stringifyYaml } from '../../utils/yaml.js';
+import {
+  reviewReportSchema,
+  testReportSchema,
+  type ReviewReportArtifact,
+  type TestReportArtifact
+} from '../../schemas/runtime-artifact-schema.js';
+import { parseYaml, stringifyYaml } from '../../utils/yaml.js';
 import { readState } from '../persistence/state-repository.js';
 import { getTaskArtifactsDir } from '../persistence/paths.js';
-import { buildReviewReport } from '../reports/review-report.js';
-import { buildTestReport } from '../reports/test-report.js';
 
 function buildReviewPrompt(taskId: string, resultSetId: string): string {
   return [
     '# Claude Code Review Prompt',
     `task_id: ${taskId}`,
     `result_set_id: ${resultSetId}`,
-    '不要读取仓库规则与文件，不要执行命令，不要修改任何文件。',
-    '不要生成 report 文件，也不要解释流程。',
-    `只输出一行中文摘要：已接收 review 任务 ${taskId}。`
+    '请读取当前任务工件，检查 exec 结果、spec 与 plan 的一致性。',
+    '请运行必要的检查命令；如无法执行，请在 blockers 中明确说明，并给出 failed verdict。',
+    '不要修改任何文件，不要解释流程。',
+    '只输出合法 YAML，字段必须完整：task_id、result_set_id、exec_units_reviewed、baseline_refs、method_refs、blockers、suggestions、verdict、producer、source_capabilities、generated_at。'
   ].join('\n');
 }
 
@@ -24,10 +29,27 @@ function buildTestPrompt(taskId: string, resultSetId: string): string {
     '# Claude Code Test Prompt',
     `task_id: ${taskId}`,
     `result_set_id: ${resultSetId}`,
-    '不要读取仓库规则与文件，不要执行命令，不要修改任何文件。',
-    '不要生成 report 文件，也不要解释流程。',
-    `只输出一行中文摘要：已接收 test 任务 ${taskId}。`
+    '请读取当前任务工件并运行必要的验证命令，至少覆盖 contract 中要求的检查。',
+    '如无法执行命令或验证失败，请在 failures 中记录，并输出 failed verdict。',
+    '不要修改任何文件，不要解释流程。',
+    '只输出合法 YAML，字段必须完整：task_id、result_set_id、exec_units_tested、baseline_refs、method_refs、commands_run、failures、passed_count、failed_count、verdict、producer、source_capabilities、generated_at。'
   ].join('\n');
+}
+
+function parseReviewReport(taskId: string, output: string): ReviewReportArtifact {
+  try {
+    return reviewReportSchema.parse(parseYaml(output));
+  } catch (error) {
+    throw new Error(`review_report_invalid: ${taskId}: ${(error as Error).message}`);
+  }
+}
+
+function parseTestReport(taskId: string, output: string): TestReportArtifact {
+  try {
+    return testReportSchema.parse(parseYaml(output));
+  } catch (error) {
+    throw new Error(`test_report_invalid: ${taskId}: ${(error as Error).message}`);
+  }
 }
 
 export async function runReviewAndTest(taskId: string): Promise<{
@@ -53,6 +75,7 @@ export async function runReviewAndTest(taskId: string): Promise<{
   if (reviewRun.exitCode !== 0) {
     throw new Error(`claude_review_failed: ${reviewRun.stderr}`);
   }
+  const reviewReport = parseReviewReport(taskId, reviewRun.stdout);
 
   const testRun = await runClaudeCode({
     cwd: process.cwd(),
@@ -61,9 +84,10 @@ export async function runReviewAndTest(taskId: string): Promise<{
   if (testRun.exitCode !== 0) {
     throw new Error(`claude_test_failed: ${testRun.stderr}`);
   }
+  const testReport = parseTestReport(taskId, testRun.stdout);
 
-  await fs.writeFile(reviewReportPath, stringifyYaml(buildReviewReport(taskId, resultSetId)), 'utf8');
-  await fs.writeFile(testReportPath, stringifyYaml(buildTestReport(taskId, resultSetId)), 'utf8');
+  await fs.writeFile(reviewReportPath, stringifyYaml(reviewReport), 'utf8');
+  await fs.writeFile(testReportPath, stringifyYaml(testReport), 'utf8');
 
   await fs.access(reviewReportPath);
   await fs.access(testReportPath);
