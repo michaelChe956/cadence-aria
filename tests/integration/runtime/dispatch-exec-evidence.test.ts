@@ -11,144 +11,35 @@ import { runCommand } from '../../../src/commands/run.js';
 import { startCommand } from '../../../src/commands/start.js';
 import { getTaskArtifactsDir } from '../../../src/runtime/persistence/paths.js';
 import { parseYaml } from '../../../src/utils/yaml.js';
+import { createFakeBinaries, cleanupFakeBinaries } from '../../fixtures/fake-binaries.js';
 
 const ORIGINAL_CWD = process.cwd();
 const ORIGINAL_PATH = process.env.PATH ?? '';
 
 let tempDir = '';
-let fakeCodexDir = '';
 
-async function createFakeCodexBinary(): Promise<void> {
-  fakeCodexDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aria-fake-codex-'));
-  const scriptPath = path.join(fakeCodexDir, 'codex');
-  const claudePath = path.join(fakeCodexDir, 'claude');
-  const script = String.raw`#!/usr/bin/env node
-const fs = require('node:fs');
-const path = require('node:path');
-
-const args = process.argv.slice(2);
-fs.writeFileSync(path.join(process.cwd(), 'codex-invocation.log'), args.join('\n') + '\n', 'utf8');
-
-let outputPath = '';
-let promptContent = '';
-
-for (let index = 0; index < args.length; index += 1) {
-  const arg = args[index];
-  if (arg === 'exec' || arg === '--full-auto') {
-    continue;
-  }
-  if (arg === '-C') {
-    index += 1;
-    continue;
-  }
-  if (arg === '--output-last-message') {
-    outputPath = args[index + 1] ?? '';
-    index += 1;
-    continue;
-  }
-  promptContent = arg;
-}
-
-if (!outputPath || !promptContent) {
-  process.stderr.write('missing prompt or output path\n');
-  process.exit(1);
-}
-
-const prompt = promptContent;
-const taskId = (prompt.match(/^task_id: (.+)$/m) ?? [])[1] ?? 'unknown';
-fs.writeFileSync(outputPath, '已读取规则并准备执行任务：' + taskId + '\n', 'utf8');
-process.exit(0);
-`;
-
-  const claudeScript = String.raw`#!/usr/bin/env node
-const fs = require('node:fs');
-const path = require('node:path');
-const prompt = process.argv.slice(2).join(' ');
-const taskId = (prompt.match(/task_id: (.+?)(?:\n|$)/m) ?? [])[1] ?? 'unknown';
-const resultSetId = (prompt.match(/result_set_id: (.+?)(?:\n|$)/m) ?? [])[1] ?? 'result-set-unknown';
-
-if (prompt.includes('Claude Code Review Prompt')) {
-  const yaml = [
-    'task_id: ' + taskId,
-    'result_set_id: ' + resultSetId,
-    'exec_units_reviewed:',
-    '  - exec-01',
-    'baseline_refs:',
-    '  - artifacts/spec-artifact.md',
-    '  - artifacts/plan-brief.md',
-    'method_refs:',
-    '  - verification-before-completion',
-    'blockers: []',
-    'suggestions: []',
-    'verdict: passed',
-    'producer: claude-code',
-    'source_capabilities:',
-    '  - OpenSpec',
-    '  - superpowers',
-    'generated_at: 2026-04-19T00:00:02.000Z',
-    ''
-  ].join('\n');
-  const reportPath = path.join(process.cwd(), 'cadence', 'cache', 'aria', 'tasks', taskId, 'artifacts', 'review-report.yaml');
-  fs.mkdirSync(path.dirname(reportPath), { recursive: true });
-  fs.writeFileSync(reportPath, yaml + '\n', 'utf8');
-  console.error(yaml);
-} else {
-  const yaml = [
-    'task_id: ' + taskId,
-    'result_set_id: ' + resultSetId,
-    'exec_units_tested:',
-    '  - exec-01',
-    'baseline_refs:',
-    '  - artifacts/spec-artifact.md',
-    '  - artifacts/plan-brief.md',
-    'method_refs:',
-    '  - test-driven-development',
-    '  - verification-before-completion',
-    'commands_run:',
-    '  - pnpm check',
-    '  - pnpm test',
-    'failures: []',
-    'passed_count: 2',
-    'failed_count: 0',
-    'verdict: passed',
-    'producer: claude-code',
-    'source_capabilities:',
-    '  - OpenSpec',
-    '  - superpowers',
-    'generated_at: 2026-04-19T00:00:03.000Z',
-    ''
-  ].join('\n');
-  const reportPath = path.join(process.cwd(), 'cadence', 'cache', 'aria', 'tasks', taskId, 'artifacts', 'test-report.yaml');
-  fs.mkdirSync(path.dirname(reportPath), { recursive: true });
-  fs.writeFileSync(reportPath, yaml + '\n', 'utf8');
-  console.error(yaml);
-}
-`;
-
-  await fs.writeFile(scriptPath, script, 'utf8');
-  await fs.writeFile(claudePath, claudeScript, 'utf8');
-  await fs.chmod(scriptPath, 0o755);
-  await fs.chmod(claudePath, 0o755);
-  process.env.PATH = `${fakeCodexDir}${path.delimiter}${ORIGINAL_PATH}`;
-}
-
-beforeEach(async () => {
+async function setTempWorkspace(): Promise<void> {
   tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aria-dispatch-exec-'));
   process.chdir(tempDir);
-  await createFakeCodexBinary();
-});
+  await createFakeBinaries({ writeArtifactToDisk: true }, ORIGINAL_PATH);
+}
 
-afterEach(async () => {
+async function restoreWorkspace(): Promise<void> {
   process.chdir(ORIGINAL_CWD);
   process.env.PATH = ORIGINAL_PATH;
-  if (fakeCodexDir) {
-    await fs.rm(fakeCodexDir, { recursive: true, force: true });
-    fakeCodexDir = '';
-  }
+  await cleanupFakeBinaries();
   if (tempDir) {
     await fs.rm(tempDir, { recursive: true, force: true });
     tempDir = '';
   }
+}
+
+beforeEach(async () => {
+  await setTempWorkspace();
+});
+
+afterEach(async () => {
+  await restoreWorkspace();
 });
 
 describe('dispatch and exec evidence', () => {
@@ -216,6 +107,6 @@ describe('dispatch and exec evidence', () => {
     expect(result.capabilities_used).toEqual(['codex']);
     expect(result.openspec_refs_consumed).toEqual(expect.arrayContaining(['artifacts/spec-artifact.md']));
     expect(result.superpowers_refs_consumed).toEqual(expect.arrayContaining(contract.required_methods));
-    expect(result.summary).toContain('已读取规则并准备执行任务');
+    expect(result.summary).toContain('fake codex exec');
   }, 15000);
 });

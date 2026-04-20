@@ -14,6 +14,7 @@ type VerifiedGuardState = Pick<
   State,
   'review_status' | 'test_status' | 'review_report_ref' | 'test_report_ref'
 >;
+type PatchingGuardState = Pick<State, 'patch_units'>;
 
 export function guardSpecReviewed(input: SpecReviewGuardState) {
   if (!input.confirmation_artifact_path) {
@@ -66,6 +67,14 @@ export function guardVerified(input: VerifiedGuardState) {
 
   if (input.review_status !== 'passed' || input.test_status !== 'passed') {
     return { allowed: false as const, reason: 'review_or_test_not_passed' };
+  }
+
+  return { allowed: true as const };
+}
+
+export function guardPatchingReady(input: PatchingGuardState) {
+  if (!input.patch_units || Object.keys(input.patch_units).length === 0) {
+    return { allowed: false as const, reason: 'missing_patch_contract' };
   }
 
   return { allowed: true as const };

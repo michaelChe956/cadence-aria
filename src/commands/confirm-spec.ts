@@ -5,6 +5,7 @@ import { canTransition } from '../runtime/state-machine/state-machine.js';
 import { appendConfirmationEvent } from '../runtime/persistence/confirmation-event-repository.js';
 import { getTaskArtifactsDir } from '../runtime/persistence/paths.js';
 import { readState, writeState } from '../runtime/persistence/state-repository.js';
+import { parseYaml } from '../utils/yaml.js';
 import { nowIso } from '../utils/time.js';
 
 function validateFrontPhaseArtifact(input: {
@@ -13,23 +14,26 @@ function validateFrontPhaseArtifact(input: {
   expectedSpecRef: string;
   expectedPlanRef: string;
 }): void {
-  const producer = input.content.match(/^producer: (.+)$/m)?.[1]?.trim();
-  if (producer !== 'claude-code') {
+  const parsed = parseYaml(input.content) as Record<string, unknown>;
+
+  if (parsed.producer !== 'claude-code') {
     throw new Error(`缺少合法 ${input.artifactType} 来源证明: producer`);
   }
 
-  const sourceCapabilities = input.content.match(/^source_capabilities: \[(.+)\]$/m)?.[1]?.trim();
-  if (sourceCapabilities !== 'OpenSpec, superpowers') {
+  const sourceCapabilities = Array.isArray(parsed.source_capabilities)
+    ? parsed.source_capabilities
+    : [];
+  if (!sourceCapabilities.includes('OpenSpec') || !sourceCapabilities.includes('superpowers')) {
     throw new Error(`缺少合法 ${input.artifactType} 来源证明: source_capabilities`);
   }
 
-  const openSpecEvidence = input.content.match(/^open_spec_evidence: (.+)$/m)?.[1]?.trim();
+  const openSpecEvidence = String(parsed.open_spec_evidence ?? '');
   const expectedOpenSpecEvidence = `provider=OpenSpec approved_refs=${input.expectedSpecRef},${input.expectedPlanRef} evidence_type=approved-artifact-ref`;
   if (openSpecEvidence !== expectedOpenSpecEvidence) {
     throw new Error(`缺少合法 ${input.artifactType} 来源证明: open_spec_evidence`);
   }
 
-  const superpowersEvidence = input.content.match(/^superpowers_evidence: (.+)$/m)?.[1]?.trim();
+  const superpowersEvidence = String(parsed.superpowers_evidence ?? '');
   const expectedMethods = input.artifactType === 'spec' ? 'methods=brainstorming' : 'methods=writing-plans';
   const expectedSuperpowersEvidence = `provider=superpowers ${expectedMethods} evidence_type=required-methods`;
   if (superpowersEvidence !== expectedSuperpowersEvidence) {

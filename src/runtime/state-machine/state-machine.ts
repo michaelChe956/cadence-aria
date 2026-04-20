@@ -2,6 +2,7 @@ import type { State } from '../../schemas/state-schema.js';
 
 import {
   guardDispatched,
+  guardPatchingReady,
   guardPlanApproved,
   guardPlanReadyForDispatch,
   guardSpecReviewed,
@@ -49,6 +50,10 @@ export function canTransition(
 
   if (state.status === 'reviewing/testing' && target === 'verified') {
     return guardVerified(state);
+  }
+
+  if (state.status === 'patching' && target === 'executing') {
+    return guardPatchingReady(state);
   }
 
   if (allowedTransitions[state.status]?.includes(target)) {

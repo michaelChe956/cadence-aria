@@ -9,7 +9,9 @@ type PlanBriefInput = {
 export function buildPlanBrief(input: PlanBriefInput): string {
   return [
     'producer: claude-code',
-    'source_capabilities: [OpenSpec, superpowers]',
+    'source_capabilities:',
+    '  - OpenSpec',
+    '  - superpowers',
     `open_spec_evidence: provider=${input.openSpecEvidence.provider} approved_refs=${input.openSpecEvidence.approved_refs.join(',')} evidence_type=${input.openSpecEvidence.evidence_type}`,
     `superpowers_evidence: provider=${input.superpowersEvidence.provider} methods=${input.superpowersEvidence.methods.join(',')} evidence_type=${input.superpowersEvidence.evidence_type}`,
     `plan_id: plan-${input.taskId}`,

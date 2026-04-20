@@ -10,155 +10,35 @@ import { intakeCommand } from '../../src/commands/intake.js';
 import { runCommand } from '../../src/commands/run.js';
 import { startCommand } from '../../src/commands/start.js';
 import { readState } from '../../src/runtime/persistence/state-repository.js';
+import { createFakeBinaries, cleanupFakeBinaries } from '../fixtures/fake-binaries.js';
 
 const ORIGINAL_CWD = process.cwd();
 const ORIGINAL_PATH = process.env.PATH ?? '';
 
 let tempDir = '';
-let fakeBinDir = '';
 
-type FakeBinaryOptions = {
-  codexExitCode?: number;
-  reviewVerdict?: 'passed' | 'failed';
-  testVerdict?: 'passed' | 'failed';
-};
-
-async function createFakeBinaries(options: FakeBinaryOptions = {}): Promise<void> {
-  const { codexExitCode = 0, reviewVerdict = 'passed', testVerdict = 'passed' } = options;
-  fakeBinDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aria-formal-flow-bins-'));
-
-  const codexPath = path.join(fakeBinDir, 'codex');
-  const claudePath = path.join(fakeBinDir, 'claude');
-
-  const codexScript = `#!/usr/bin/env node
-const fs = require('node:fs');
-
-const args = process.argv.slice(2);
-let outputPath = '';
-let promptContent = '';
-
-for (let index = 0; index < args.length; index += 1) {
-  const arg = args[index];
-  if (arg === 'exec' || arg === '--full-auto') continue;
-  if (arg === '-C') {
-    index += 1;
-    continue;
-  }
-  if (arg === '--output-last-message') {
-    outputPath = args[index + 1] ?? '';
-    index += 1;
-    continue;
-  }
-  promptContent = arg;
-}
-
-const prompt = promptContent;
-const taskId = (prompt.match(/^task_id: (.+)$/m) ?? [])[1] ?? 'unknown';
-
-fs.writeFileSync(outputPath, [
-  'task_id: ' + taskId,
-  'exec_unit_id: exec-01',
-  'status: succeeded',
-  'changed_files:',
-  '  - src/index.ts',
-  'summary: fake codex exec',
-  'capabilities_used:',
-  '  - codex',
-  'openspec_refs_consumed:',
-  '  - artifacts/spec-artifact.md',
-  'superpowers_refs_consumed:',
-  '  - test-driven-development',
-  '  - verification-before-completion',
-  'degraded: false',
-  'degradation_reason: null',
-  'started_at: 2026-04-19T00:00:00.000Z',
-  'finished_at: 2026-04-19T00:00:01.000Z',
-  ''
-].join('\\n'), 'utf8');
-process.exit(${codexExitCode});
-`;
-
-  const claudeScript = `#!/usr/bin/env node
-const prompt = process.argv.slice(2).join(' ');
-const taskId = (prompt.match(/task_id: (.+?)(?:\\n|$)/m) ?? [])[1] ?? 'unknown';
-const resultSetId = (prompt.match(/result_set_id: (.+?)(?:\\n|$)/m) ?? [])[1] ?? 'result-set-unknown';
-
-if (prompt.includes('Claude Code Review Prompt')) {
-  process.stdout.write([
-    'task_id: ' + taskId,
-    'result_set_id: ' + resultSetId,
-    'exec_units_reviewed:',
-    '  - exec-01',
-    'baseline_refs:',
-    '  - artifacts/spec-artifact.md',
-    '  - artifacts/plan-brief.md',
-    'method_refs:',
-    '  - verification-before-completion',
-    'blockers: []',
-    'suggestions: []',
-    'verdict: ${reviewVerdict}',
-    'producer: claude-code',
-    'source_capabilities:',
-    '  - OpenSpec',
-    '  - superpowers',
-    'generated_at: 2026-04-19T00:00:02.000Z',
-    ''
-  ].join('\\n'));
-} else {
-  process.stdout.write([
-    'task_id: ' + taskId,
-    'result_set_id: ' + resultSetId,
-    'exec_units_tested:',
-    '  - exec-01',
-    'baseline_refs:',
-    '  - artifacts/spec-artifact.md',
-    '  - artifacts/plan-brief.md',
-    'method_refs:',
-    '  - test-driven-development',
-    '  - verification-before-completion',
-    'commands_run:',
-    '  - pnpm check',
-    '  - pnpm test',
-    'failures: []',
-    'passed_count: 2',
-    'failed_count: 0',
-    'verdict: ${testVerdict}',
-    'producer: claude-code',
-    'source_capabilities:',
-    '  - OpenSpec',
-    '  - superpowers',
-    'generated_at: 2026-04-19T00:00:03.000Z',
-    ''
-  ].join('\\n'));
-}
-process.exit(0);
-`;
-
-  await fs.writeFile(codexPath, codexScript, 'utf8');
-  await fs.writeFile(claudePath, claudeScript, 'utf8');
-  await fs.chmod(codexPath, 0o755);
-  await fs.chmod(claudePath, 0o755);
-
-  process.env.PATH = `${fakeBinDir}${path.delimiter}${ORIGINAL_PATH}`;
-}
-
-beforeEach(async () => {
-  tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cadence-aria-formal-flow-e2e-'));
+async function setTempWorkspace(): Promise<void> {
+  tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aria-formal-flow-e2e-'));
   process.chdir(tempDir);
-  await createFakeBinaries();
-});
+  await createFakeBinaries({}, ORIGINAL_PATH);
+}
 
-afterEach(async () => {
+async function restoreWorkspace(): Promise<void> {
   process.chdir(ORIGINAL_CWD);
   process.env.PATH = ORIGINAL_PATH;
-  if (fakeBinDir) {
-    await fs.rm(fakeBinDir, { recursive: true, force: true });
-    fakeBinDir = '';
-  }
+  await cleanupFakeBinaries();
   if (tempDir) {
     await fs.rm(tempDir, { recursive: true, force: true });
     tempDir = '';
   }
+}
+
+beforeEach(async () => {
+  await setTempWorkspace();
+});
+
+afterEach(async () => {
+  await restoreWorkspace();
 });
 
 describe('formal flow real integration e2e', () => {
@@ -191,10 +71,8 @@ describe('formal flow real integration e2e', () => {
     expect(await confirmSpecCommand(taskId)).toContain('plan-review');
     expect(await confirmPlanCommand(taskId)).toContain('dispatched');
 
-    if (fakeBinDir) {
-      await fs.rm(fakeBinDir, { recursive: true, force: true });
-    }
-    await createFakeBinaries({ codexExitCode: 1 });
+    await cleanupFakeBinaries();
+    await createFakeBinaries({ codexExitCode: 1 }, ORIGINAL_PATH);
 
     await expect(runCommand(taskId)).rejects.toThrow();
     const state = await readState(taskId);
@@ -211,10 +89,8 @@ describe('formal flow real integration e2e', () => {
     expect(await confirmSpecCommand(taskId)).toContain('plan-review');
     expect(await confirmPlanCommand(taskId)).toContain('dispatched');
 
-    if (fakeBinDir) {
-      await fs.rm(fakeBinDir, { recursive: true, force: true });
-    }
-    await createFakeBinaries({ reviewVerdict: 'failed', testVerdict: 'passed' });
+    await cleanupFakeBinaries();
+    await createFakeBinaries({ reviewVerdict: 'failed', testVerdict: 'passed' }, ORIGINAL_PATH);
 
     const runOutput = await runCommand(taskId);
     const state = await readState(taskId);

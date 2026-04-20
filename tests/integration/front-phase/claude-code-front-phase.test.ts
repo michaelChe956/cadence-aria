@@ -34,9 +34,13 @@ describe('front phase with claude code', () => {
     const plan = await fs.readFile(`cadence/cache/aria/tasks/${taskId}/artifacts/plan-brief.md`, 'utf8');
 
     expect(spec).toContain('producer: claude-code');
-    expect(spec).toContain('source_capabilities: [OpenSpec, superpowers]');
+    expect(spec).toContain('source_capabilities:');
+    expect(spec).toContain('  - OpenSpec');
+    expect(spec).toContain('  - superpowers');
     expect(plan).toContain('producer: claude-code');
-    expect(plan).toContain('source_capabilities: [OpenSpec, superpowers]');
+    expect(plan).toContain('source_capabilities:');
+    expect(plan).toContain('  - OpenSpec');
+    expect(plan).toContain('  - superpowers');
   });
 
   it('兼容入口 task-orchestrator 也会生成带来源证明的工件', async () => {
@@ -65,7 +69,7 @@ describe('front phase with claude code', () => {
       specPath,
       spec
         .replace('producer: claude-code', 'producer: fake-agent')
-        .replace('source_capabilities: [OpenSpec, superpowers]', 'source_capabilities: [OpenSpec]'),
+        .replace('source_capabilities:\n  - OpenSpec\n  - superpowers', 'source_capabilities:\n  - OpenSpec'),
       'utf8'
     );
 
@@ -85,7 +89,7 @@ describe('front phase with claude code', () => {
       planPath,
       plan
         .replace('producer: claude-code', 'producer: fake-agent')
-        .replace('source_capabilities: [OpenSpec, superpowers]', 'source_capabilities: [OpenSpec]'),
+        .replace('source_capabilities:\n  - OpenSpec\n  - superpowers', 'source_capabilities:\n  - OpenSpec'),
       'utf8'
     );
 

@@ -10,14 +10,6 @@ export const EXPECTED_CONTRACT_METHODS = ['test-driven-development', 'verificati
 export const EXPECTED_VERIFICATION_REQUIREMENTS = ['pnpm check', 'pnpm test'] as const;
 export const EXPECTED_WORKER_CLI = 'codex' as const;
 
-function sameMembers(actual: string[], expected: readonly string[]): boolean {
-  if (actual.length !== expected.length) {
-    return false;
-  }
-
-  return expected.every(value => actual.includes(value));
-}
-
 function containsAll(actual: string[], expected: readonly string[]): boolean {
   return expected.every(value => actual.includes(value));
 }
@@ -43,15 +35,15 @@ export async function validateHandoffFields(input: {
 export function validateExecutionContextBundle(input: unknown): ExecutionContextBundle {
   const bundle = executionContextBundleSchema.parse(input);
 
-  if (!sameMembers(bundle.source_capabilities, EXPECTED_SOURCE_CAPABILITIES)) {
+  if (!containsAll(bundle.source_capabilities, EXPECTED_SOURCE_CAPABILITIES)) {
     throw new Error('缺少合法 execution context bundle 来源能力');
   }
 
-  if (!sameMembers(bundle.required_methods, EXPECTED_BUNDLE_METHODS)) {
+  if (!containsAll(bundle.required_methods, EXPECTED_BUNDLE_METHODS)) {
     throw new Error('缺少合法 execution context bundle required_methods');
   }
 
-  if (!sameMembers(bundle.verification_requirements, EXPECTED_VERIFICATION_REQUIREMENTS)) {
+  if (!containsAll(bundle.verification_requirements, EXPECTED_VERIFICATION_REQUIREMENTS)) {
     throw new Error('缺少合法 execution context bundle verification_requirements');
   }
 
@@ -65,11 +57,11 @@ export function validateDispatchContract(input: unknown): DispatchContract {
     throw new Error('缺少合法 dispatch contract worker_cli');
   }
 
-  if (!sameMembers(contract.required_methods, EXPECTED_CONTRACT_METHODS)) {
+  if (!containsAll(contract.required_methods, EXPECTED_CONTRACT_METHODS)) {
     throw new Error('缺少合法 dispatch contract required_methods');
   }
 
-  if (!sameMembers(contract.verification_requirements, EXPECTED_VERIFICATION_REQUIREMENTS)) {
+  if (!containsAll(contract.verification_requirements, EXPECTED_VERIFICATION_REQUIREMENTS)) {
     throw new Error('缺少合法 dispatch contract 运行要求');
   }
 
