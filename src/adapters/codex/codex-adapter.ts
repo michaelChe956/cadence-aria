@@ -33,7 +33,7 @@ export type CodexExecResult = {
 
 export function buildCodexCommand(input: CodexCommandInput): string[] {
   return [
-    'codex',
+    process.env.CADENCE_CODEX_BIN ?? 'codex',
     'exec',
     '--full-auto',
     '--ephemeral',

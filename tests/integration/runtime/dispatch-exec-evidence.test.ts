@@ -61,12 +61,14 @@ process.exit(0);
 `;
 
   const claudeScript = String.raw`#!/usr/bin/env node
+const fs = require('node:fs');
+const path = require('node:path');
 const prompt = process.argv.slice(2).join(' ');
 const taskId = (prompt.match(/task_id: (.+?)(?:\n|$)/m) ?? [])[1] ?? 'unknown';
 const resultSetId = (prompt.match(/result_set_id: (.+?)(?:\n|$)/m) ?? [])[1] ?? 'result-set-unknown';
 
 if (prompt.includes('Claude Code Review Prompt')) {
-  process.stdout.write([
+  const yaml = [
     'task_id: ' + taskId,
     'result_set_id: ' + resultSetId,
     'exec_units_reviewed:',
@@ -85,9 +87,13 @@ if (prompt.includes('Claude Code Review Prompt')) {
     '  - superpowers',
     'generated_at: 2026-04-19T00:00:02.000Z',
     ''
-  ].join('\n'));
+  ].join('\n');
+  const reportPath = path.join(process.cwd(), 'cadence', 'cache', 'aria', 'tasks', taskId, 'artifacts', 'review-report.yaml');
+  fs.mkdirSync(path.dirname(reportPath), { recursive: true });
+  fs.writeFileSync(reportPath, yaml + '\n', 'utf8');
+  console.error(yaml);
 } else {
-  process.stdout.write([
+  const yaml = [
     'task_id: ' + taskId,
     'result_set_id: ' + resultSetId,
     'exec_units_tested:',
@@ -111,9 +117,12 @@ if (prompt.includes('Claude Code Review Prompt')) {
     '  - superpowers',
     'generated_at: 2026-04-19T00:00:03.000Z',
     ''
-  ].join('\n'));
+  ].join('\n');
+  const reportPath = path.join(process.cwd(), 'cadence', 'cache', 'aria', 'tasks', taskId, 'artifacts', 'test-report.yaml');
+  fs.mkdirSync(path.dirname(reportPath), { recursive: true });
+  fs.writeFileSync(reportPath, yaml + '\n', 'utf8');
+  console.error(yaml);
 }
-process.exit(0);
 `;
 
   await fs.writeFile(scriptPath, script, 'utf8');

@@ -45,9 +45,27 @@ function resolveReviewTestFailureReason(error: unknown): string {
   return 'review_test_failed';
 }
 
+function resolveExecutionFailureReason(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+
+  if (message === 'capability_blocked') {
+    return 'capability_blocked';
+  }
+
+  if (message.startsWith('codex_exec_failed:')) {
+    return 'execution_blocked';
+  }
+
+  if (message.includes('冻结引用') || message.includes('execution context bundle') || message.includes('dispatch contract')) {
+    return 'execution_prerequisites_invalid';
+  }
+
+  return 'execution_blocked';
+}
+
 export async function runCommand(taskId: string): Promise<string> {
-  await runSingleExecUnit(taskId);
   try {
+    await runSingleExecUnit(taskId);
     const { reviewReportPath, testReportPath } = await runReviewAndTest(taskId);
     const state = await readState(taskId);
     const review = reviewReportSchema.parse(parseYaml(await fs.readFile(reviewReportPath, 'utf8')));
@@ -97,7 +115,20 @@ export async function runCommand(taskId: string): Promise<string> {
     ].join('\n');
   } catch (error) {
     const latestState = await readState(taskId);
-    if (latestState.status === 'reviewing/testing') {
+    if (latestState.status === 'dispatched' || latestState.status === 'executing') {
+      const reasonCode = resolveExecutionFailureReason(error);
+      const retryResolution = resolveRetryableBlock(reasonCode);
+      await writeState({
+        ...latestState,
+        status: 'blocked',
+        active_exec_units: [],
+        block_reason_code: reasonCode,
+        blocking_stage: 'executing',
+        retryable: retryResolution.retryable,
+        required_action: retryResolution.required_action,
+        updated_at: nowIso()
+      });
+    } else if (latestState.status === 'reviewing/testing') {
       const reasonCode = resolveReviewTestFailureReason(error);
       const retryResolution = resolveRetryableBlock(reasonCode);
       await writeState({

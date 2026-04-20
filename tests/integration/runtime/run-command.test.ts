@@ -11,6 +11,7 @@ import { runCommand } from '../../../src/commands/run.js';
 import { startCommand } from '../../../src/commands/start.js';
 import { getTaskArtifactsDir } from '../../../src/runtime/persistence/paths.js';
 import { readState } from '../../../src/runtime/persistence/state-repository.js';
+import { parseYaml, stringifyYaml } from '../../../src/utils/yaml.js';
 
 const ORIGINAL_CWD = process.cwd();
 const ORIGINAL_PATH = process.env.PATH ?? '';
@@ -23,9 +24,11 @@ async function createFakeBinaries(): Promise<void> {
 
   const codexPath = path.join(fakeBinDir, 'codex');
   const claudePath = path.join(fakeBinDir, 'claude');
+  const claudeRunnerPath = path.join(fakeBinDir, 'claude-runner.cjs');
 
-  const codexScript = String.raw`#!/usr/bin/env node
+const codexScript = String.raw`#!/usr/bin/env node
 const fs = require('node:fs');
+const path = require('node:path');
 
 const args = process.argv.slice(2);
 let outputPath = '';
@@ -49,6 +52,10 @@ for (let index = 0; index < args.length; index += 1) {
 const prompt = promptContent;
 const taskId = (prompt.match(/^task_id: (.+)$/m) ?? [])[1] ?? 'unknown';
 
+if (process.env.ARIA_FAKE_CODEX_CWD_LOG) {
+  fs.appendFileSync(process.env.ARIA_FAKE_CODEX_CWD_LOG, process.cwd() + '\n', 'utf8');
+}
+
 if (process.env.ARIA_FAKE_CODEX_FAIL === '1') {
   process.stderr.write('fake codex failed\n');
   process.exit(1);
@@ -59,15 +66,26 @@ process.exit(0);
 `;
 
   await fs.writeFile(codexPath, codexScript, 'utf8');
-  const claudeScript = String.raw`#!/usr/bin/env node
+  const claudeScript = String.raw`
+const fs = require('node:fs');
+const path = require('node:path');
+
 const mode = process.env.ARIA_FAKE_CLAUDE_MODE ?? 'pass';
 const prompt = process.argv.slice(2).join(' ');
-const taskId = (prompt.match(/task_id: (.+?)(?:\\n|$)/m) ?? [])[1] ?? 'unknown';
-const resultSetId = (prompt.match(/result_set_id: (.+?)(?:\\n|$)/m) ?? [])[1] ?? 'result-set-unknown';
+const taskId = (prompt.match(/task_id: (.+?)(?:\n|$)/m) ?? [])[1] ?? 'unknown';
+const resultSetId = (prompt.match(/result_set_id: (.+?)(?:\n|$)/m) ?? [])[1] ?? 'result-set-unknown';
+
+if (process.env.ARIA_FAKE_CLAUDE_CWD_LOG) {
+  fs.appendFileSync(process.env.ARIA_FAKE_CLAUDE_CWD_LOG, process.cwd() + '\n', 'utf8');
+}
+
+if (process.env.ARIA_FAKE_CLAUDE_DEBUG_LOG) {
+  fs.appendFileSync(process.env.ARIA_FAKE_CLAUDE_DEBUG_LOG, 'prompt=' + JSON.stringify(prompt) + '\n', 'utf8');
+}
 
 if (mode === 'invalid') {
-  process.stdout.write('not-yaml\\n');
-  process.exit(0);
+  console.error('not-yaml');
+  return;
 }
 
 const reportTaskId = mode === 'mismatch-task' ? 'aria-19990101-001' : taskId;
@@ -121,14 +139,29 @@ const yaml = isReview
       ''
     ].join('\n');
 
-process.stdout.write(yaml);
-process.exit(0);
-`;
+if (process.env.ARIA_FAKE_CLAUDE_DEBUG_LOG) {
+  fs.appendFileSync(process.env.ARIA_FAKE_CLAUDE_DEBUG_LOG, 'yaml=' + JSON.stringify(yaml) + '\n', 'utf8');
+}
 
-  await fs.writeFile(claudePath, claudeScript, 'utf8');
+const artifactName = isReview ? 'review-report.yaml' : 'test-report.yaml';
+const artifactRoot = process.env.ARIA_FAKE_ARTIFACT_ROOT ?? process.cwd();
+const artifactPath = path.join(artifactRoot, 'cadence', 'cache', 'aria', 'tasks', taskId, 'artifacts', artifactName);
+fs.mkdirSync(path.dirname(artifactPath), { recursive: true });
+fs.writeFileSync(artifactPath, yaml + '\n', 'utf8');
+
+console.error(yaml);
+`;
+  const claudeWrapper = `#!/bin/sh\nexec "${process.execPath}" "${claudeRunnerPath}" "$@"\n`;
+
+  await fs.writeFile(claudeRunnerPath, claudeScript, 'utf8');
+  await fs.writeFile(claudePath, claudeWrapper, 'utf8');
   await fs.chmod(codexPath, 0o755);
+  await fs.chmod(claudeRunnerPath, 0o755);
   await fs.chmod(claudePath, 0o755);
 
+  process.env.CADENCE_CODEX_BIN = codexPath;
+  process.env.CADENCE_CLAUDE_BIN = claudePath;
+  process.env.ARIA_FAKE_ARTIFACT_ROOT = process.cwd();
   process.env.PATH = `${fakeBinDir}${path.delimiter}${ORIGINAL_PATH}`;
 }
 
@@ -141,8 +174,14 @@ async function setTempWorkspace(): Promise<void> {
 async function restoreWorkspace(): Promise<void> {
   process.chdir(ORIGINAL_CWD);
   process.env.PATH = ORIGINAL_PATH;
+  delete process.env.CADENCE_CODEX_BIN;
+  delete process.env.CADENCE_CLAUDE_BIN;
+  delete process.env.ARIA_FAKE_ARTIFACT_ROOT;
   delete process.env.ARIA_FAKE_CODEX_FAIL;
+  delete process.env.ARIA_FAKE_CODEX_CWD_LOG;
   delete process.env.ARIA_FAKE_CLAUDE_MODE;
+  delete process.env.ARIA_FAKE_CLAUDE_CWD_LOG;
+  delete process.env.ARIA_FAKE_CLAUDE_DEBUG_LOG;
   if (fakeBinDir) {
     await fs.rm(fakeBinDir, { recursive: true, force: true });
     fakeBinDir = '';
@@ -213,6 +252,28 @@ describe('runCommand', () => {
     expect(state.exec_units['exec-01']?.finished_at).toBeTruthy();
   });
 
+  it('当执行前 capability 检查失败时，也会收尾为 blocked 并标记可重试', async () => {
+    const intake = await intakeCommand('验证执行前 capability 失败收尾');
+    const taskId = intake.match(/task_id: (aria-\d{8}-\d{3})/)?.[1] ?? '';
+
+    await startCommand(taskId);
+    await confirmSpecCommand(taskId);
+    await confirmPlanCommand(taskId);
+
+    process.env.PATH = '';
+
+    await expect(runCommand(taskId)).rejects.toThrow(/capability_blocked/);
+
+    const state = await readState(taskId);
+    expect(state.status).toBe('blocked');
+    expect(state.block_reason_code).toBe('capability_blocked');
+    expect(state.blocking_stage).toBe('executing');
+    expect(state.retryable).toBe(true);
+    expect(state.required_action).toContain('aria:retry');
+    expect(state.active_exec_units).toEqual([]);
+    expect(state.exec_units['exec-01']?.status).toBe('pending');
+  });
+
   it('当 claude 未输出合法 review/test 报告时拒绝推进 verified', async () => {
     process.env.ARIA_FAKE_CLAUDE_MODE = 'invalid';
     const intake = await intakeCommand('验证 review/test 报告必须来自实际输出');
@@ -248,5 +309,36 @@ describe('runCommand', () => {
     expect(state.block_reason_code).toBe('review_report_task_mismatch');
     expect(state.blocking_stage).toBe('reviewing/testing');
     expect(state.retryable).toBe(false);
+  });
+
+  it('exec 与 review/test 都使用 execution context bundle 中的 repo_path 作为工作目录', async () => {
+    const intake = await intakeCommand('验证运行阶段使用 bundle repo_path');
+    const taskId = intake.match(/task_id: (aria-\d{8}-\d{3})/)?.[1] ?? '';
+
+    await startCommand(taskId);
+    await confirmSpecCommand(taskId);
+    await confirmPlanCommand(taskId);
+
+    const alternateRepoPath = await fs.mkdtemp(path.join(tempDir, 'alternate-repo-'));
+    const bundlePath = path.join(getTaskArtifactsDir(taskId), 'execution-context-bundle.yaml');
+    const bundle = parseYaml(await fs.readFile(bundlePath, 'utf8')) as {
+      workspace_context: {
+        repo_path: string;
+        worktree_ref: string;
+        base_revision: string;
+      };
+    };
+    bundle.workspace_context.repo_path = alternateRepoPath;
+    await fs.writeFile(bundlePath, stringifyYaml(bundle), 'utf8');
+
+    const codexCwdLog = path.join(tempDir, 'codex-cwd.log');
+    const claudeCwdLog = path.join(tempDir, 'claude-cwd.log');
+    process.env.ARIA_FAKE_CODEX_CWD_LOG = codexCwdLog;
+    process.env.ARIA_FAKE_CLAUDE_CWD_LOG = claudeCwdLog;
+
+    await runCommand(taskId);
+
+    await expect(fs.readFile(codexCwdLog, 'utf8')).resolves.toBe(`${alternateRepoPath}\n`);
+    await expect(fs.readFile(claudeCwdLog, 'utf8')).resolves.toBe(`${alternateRepoPath}\n${alternateRepoPath}\n`);
   });
 });

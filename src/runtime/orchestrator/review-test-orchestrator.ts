@@ -11,6 +11,7 @@ import {
 import { parseYaml, stringifyYaml } from '../../utils/yaml.js';
 import { readState } from '../persistence/state-repository.js';
 import { getTaskArtifactsDir } from '../persistence/paths.js';
+import { validateExecutionContextBundle } from '../contracts/contract-validator.js';
 
 function buildReviewPrompt(taskId: string, resultSetId: string): string {
   return [
@@ -76,7 +77,9 @@ function parseReviewReport(taskId: string, resultSetId: string, output: string):
       report: reviewReportSchema.parse(parseYaml(output))
     });
   } catch (error) {
-    throw new Error(`review_report_invalid: ${taskId}: ${(error as Error).message}`);
+    throw new Error(
+      `review_report_invalid: ${taskId}: ${(error as Error).message}; output_preview=${JSON.stringify(output.slice(0, 160))}`
+    );
   }
 }
 
@@ -88,8 +91,35 @@ function parseTestReport(taskId: string, resultSetId: string, output: string): T
       report: testReportSchema.parse(parseYaml(output))
     });
   } catch (error) {
-    throw new Error(`test_report_invalid: ${taskId}: ${(error as Error).message}`);
+    throw new Error(
+      `test_report_invalid: ${taskId}: ${(error as Error).message}; output_preview=${JSON.stringify(output.slice(0, 160))}`
+    );
   }
+}
+
+async function resolveClaudeStructuredOutput(
+  output: string,
+  stderr: string,
+  fallbackPath: string
+): Promise<string> {
+  if (output.trim()) {
+    return output;
+  }
+
+  if (stderr.trim()) {
+    return stderr;
+  }
+
+  try {
+    const persisted = await fs.readFile(fallbackPath, 'utf8');
+    if (persisted.trim()) {
+      return persisted;
+    }
+  } catch {
+    // ignore missing fallback artifact
+  }
+
+  return '';
 }
 
 export async function runReviewAndTest(taskId: string): Promise<{
@@ -103,28 +133,35 @@ export async function runReviewAndTest(taskId: string): Promise<{
   const testPromptPath = path.join(artifactsDir, 'test-prompt.md');
   const reviewReportPath = path.join(artifactsDir, 'review-report.yaml');
   const testReportPath = path.join(artifactsDir, 'test-report.yaml');
+  const executionCwd = state.context_bundle_ref
+    ? validateExecutionContextBundle(
+        parseYaml(await fs.readFile(state.context_bundle_ref, 'utf8'))
+      ).workspace_context.repo_path
+    : process.cwd();
 
   await fs.mkdir(artifactsDir, { recursive: true });
   await fs.writeFile(reviewPromptPath, buildReviewPrompt(taskId, resultSetId), 'utf8');
   await fs.writeFile(testPromptPath, buildTestPrompt(taskId, resultSetId), 'utf8');
 
   const reviewRun = await runClaudeCode({
-    cwd: process.cwd(),
+    cwd: executionCwd,
     promptPath: reviewPromptPath
   });
   if (reviewRun.exitCode !== 0) {
     throw new Error(`claude_review_failed: ${reviewRun.stderr}`);
   }
-  const reviewReport = parseReviewReport(taskId, resultSetId, reviewRun.stdout);
+  const reviewOutput = await resolveClaudeStructuredOutput(reviewRun.stdout, reviewRun.stderr, reviewReportPath);
+  const reviewReport = parseReviewReport(taskId, resultSetId, reviewOutput);
 
   const testRun = await runClaudeCode({
-    cwd: process.cwd(),
+    cwd: executionCwd,
     promptPath: testPromptPath
   });
   if (testRun.exitCode !== 0) {
     throw new Error(`claude_test_failed: ${testRun.stderr}`);
   }
-  const testReport = parseTestReport(taskId, resultSetId, testRun.stdout);
+  const testOutput = await resolveClaudeStructuredOutput(testRun.stdout, testRun.stderr, testReportPath);
+  const testReport = parseTestReport(taskId, resultSetId, testOutput);
 
   await fs.writeFile(reviewReportPath, stringifyYaml(reviewReport), 'utf8');
   await fs.writeFile(testReportPath, stringifyYaml(testReport), 'utf8');

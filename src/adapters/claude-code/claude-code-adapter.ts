@@ -15,7 +15,7 @@ export type CliExecutionResult = {
 
 export function buildClaudeCodeCommand(input: ClaudeCodeCommandInput): string[] {
   return [
-    'claude',
+    process.env.CADENCE_CLAUDE_BIN ?? 'claude',
     '--no-session-persistence',
     '-p',
     input.promptContent ?? input.promptPath,

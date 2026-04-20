@@ -1,5 +1,5 @@
 export function resolveRetryableBlock(reason: string) {
-  if (reason === 'execution_blocked') {
+  if (reason === 'execution_blocked' || reason === 'capability_blocked') {
     return { retryable: true, required_action: '修复执行条件后重新运行 aria:retry' };
   }
 

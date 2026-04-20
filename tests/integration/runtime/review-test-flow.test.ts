@@ -84,7 +84,7 @@ const resultSetId = (prompt.match(/result_set_id: (.+?)(?:\n|$)/m) ?? [])[1] ?? 
 fs.appendFileSync(path.join(process.cwd(), 'claude-invocation.log'), prompt + '\n', 'utf8');
 
 if (prompt.includes('Claude Code Review Prompt')) {
-  process.stdout.write([
+  const yaml = [
     'task_id: ' + taskId,
     'result_set_id: ' + resultSetId,
     'exec_units_reviewed:',
@@ -103,9 +103,13 @@ if (prompt.includes('Claude Code Review Prompt')) {
     '  - superpowers',
     'generated_at: 2026-04-19T00:00:02.000Z',
     ''
-  ].join('\n'));
+  ].join('\n');
+  const reportPath = path.join(process.cwd(), 'cadence', 'cache', 'aria', 'tasks', taskId, 'artifacts', 'review-report.yaml');
+  fs.mkdirSync(path.dirname(reportPath), { recursive: true });
+  fs.writeFileSync(reportPath, yaml + '\n', 'utf8');
+  console.error(yaml);
 } else {
-  process.stdout.write([
+  const yaml = [
     'task_id: ' + taskId,
     'result_set_id: ' + resultSetId,
     'exec_units_tested:',
@@ -129,9 +133,12 @@ if (prompt.includes('Claude Code Review Prompt')) {
     '  - superpowers',
     'generated_at: 2026-04-19T00:00:03.000Z',
     ''
-  ].join('\n'));
+  ].join('\n');
+  const reportPath = path.join(process.cwd(), 'cadence', 'cache', 'aria', 'tasks', taskId, 'artifacts', 'test-report.yaml');
+  fs.mkdirSync(path.dirname(reportPath), { recursive: true });
+  fs.writeFileSync(reportPath, yaml + '\n', 'utf8');
+  console.error(yaml);
 }
-process.exit(0);
 `;
 
   await fs.writeFile(codexPath, codexScript, 'utf8');

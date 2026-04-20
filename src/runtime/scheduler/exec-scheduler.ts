@@ -118,6 +118,7 @@ export async function runSingleExecUnit(taskId: string): Promise<void> {
   }
 
   const startedAt = nowIso();
+  const executionCwd = bundle.workspace_context.repo_path;
   const runningState = {
     ...state,
     status: 'executing' as const,
@@ -136,6 +137,7 @@ export async function runSingleExecUnit(taskId: string): Promise<void> {
 
   const resultPath = path.join(getTaskArtifactsDir(taskId), 'exec-result-exec-01.yaml');
   const promptPath = path.join(getTaskArtifactsDir(taskId), 'exec-prompt-exec-01.md');
+  const resultOutputPath = path.resolve(resultPath);
   await fs.mkdir(path.dirname(resultPath), { recursive: true });
   await fs.writeFile(promptPath, buildExecPrompt({
     taskId,
@@ -175,9 +177,9 @@ export async function runSingleExecUnit(taskId: string): Promise<void> {
 
   try {
     const execOutput = await runCodexCli({
-      cwd: process.cwd(),
+      cwd: executionCwd,
       promptPath,
-      outputPath: resultPath
+      outputPath: resultOutputPath
     });
     if (execOutput.exitCode !== 0) {
       await finishExecAsBlocked({
