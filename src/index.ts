@@ -5,4 +5,8 @@ async function main(): Promise<void> {
   process.stdout.write(`${output}\n`);
 }
 
-void main();
+void main().catch((error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error);
+  process.stderr.write(`[Aria] 错误: ${message}\n`);
+  process.exit(1);
+});

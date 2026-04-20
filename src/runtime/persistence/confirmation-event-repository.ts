@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 
 import { parseYaml, stringifyYaml } from '../../utils/yaml.js';
@@ -20,10 +21,11 @@ export async function appendConfirmationEvent(taskId: string, event: Record<stri
   const target = path.join(getTaskRoot(taskId), 'confirmation-events.yaml');
   await fs.mkdir(path.dirname(target), { recursive: true });
 
+  let existingEvents: unknown[] = [];
   try {
     const content = await fs.readFile(target, 'utf8');
     const parsed = parseYaml(content);
-    const existingEvents = Array.isArray(parsed) ? parsed : [];
+    existingEvents = Array.isArray(parsed) ? parsed : [];
 
     if (existingEvents.some(existing => matchesConfirmationEvent(existing, event))) {
       return target;
@@ -32,6 +34,9 @@ export async function appendConfirmationEvent(taskId: string, event: Record<stri
     // no existing confirmation log yet
   }
 
-  await fs.appendFile(target, `${stringifyYaml([event])}\n`, 'utf8');
+  const updatedEvents = [...existingEvents, event];
+  const tmpFile = `${target}.${process.pid}-${Date.now()}.tmp`;
+  await fs.writeFile(tmpFile, stringifyYaml(updatedEvents), 'utf8');
+  await fs.rename(tmpFile, target);
   return target;
 }

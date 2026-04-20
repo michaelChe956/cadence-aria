@@ -1,10 +1,11 @@
 import { readState, writeState } from '../runtime/persistence/state-repository.js';
+import { canTransition } from '../runtime/state-machine/state-machine.js';
 import { nowIso } from '../utils/time.js';
 
 export async function retryCommand(taskId: string): Promise<string> {
   const state = await readState(taskId);
-  if (!state.retryable) {
-    throw new Error(`任务不可重试: ${taskId}`);
+  if (state.status !== 'blocked') {
+    throw new Error(`任务不在可重试状态: ${taskId} (当前: ${state.status})`);
   }
 
   const execUnit = state.exec_units['exec-01'];
@@ -12,26 +13,33 @@ export async function retryCommand(taskId: string): Promise<string> {
     throw new Error(`缺少可重试执行单元: ${taskId}`);
   }
 
-  await writeState({
+  const nextState = {
     ...state,
-    status: 'dispatched',
+    status: 'dispatched' as const,
     active_exec_units: ['exec-01'],
-    block_reason_code: null,
-    blocking_stage: null,
+    block_reason_code: null as string | null,
+    blocking_stage: null as string | null,
     retryable: false,
-    required_action: null,
+    required_action: null as string | null,
     exec_units: {
       ...state.exec_units,
       'exec-01': {
         ...execUnit,
-        status: 'pending',
-        exit_code: null,
-        started_at: undefined,
-        finished_at: undefined
+        status: 'pending' as const,
+        exit_code: null as number | null,
+        started_at: undefined as string | undefined,
+        finished_at: undefined as string | undefined
       }
     },
     updated_at: nowIso()
-  });
+  };
+
+  const transition = canTransition(state, 'dispatched');
+  if (!transition.allowed) {
+    throw new Error(`无法推进到 dispatched: ${transition.reason}`);
+  }
+
+  await writeState(nextState);
 
   return [`[Aria]`, `- status: dispatched`, `- task_id: ${taskId}`].join('\n');
 }

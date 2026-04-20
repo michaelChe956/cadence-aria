@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-const datetimeString = z.string();
+const datetimeString = z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/, 'ISO 8601 datetime required');
 
 const inputArtifactsSchema = z.record(z.union([z.string(), z.array(z.string())]));
 
@@ -28,9 +28,23 @@ const reviewReportSchema = z.object({
   exec_units_reviewed: z.array(z.string()).min(1),
   baseline_refs: z.array(z.string()).min(1),
   method_refs: z.array(z.string()).min(1),
-  blockers: z.array(z.string()),
-  suggestions: z.array(z.string()),
-  verdict: z.enum(['passed', 'failed']),
+  blockers: z.array(z.object({
+    issue_id: z.string(),
+    severity: z.enum(['blocker', 'advisory']),
+    exec_unit: z.string().optional(),
+    description: z.string().min(1),
+    file_path: z.string().optional(),
+    line_range: z.string().optional()
+  })),
+  suggestions: z.array(z.object({
+    issue_id: z.string(),
+    severity: z.enum(['blocker', 'advisory']),
+    exec_unit: z.string().optional(),
+    description: z.string().min(1),
+    file_path: z.string().optional(),
+    line_range: z.string().optional()
+  })),
+  verdict: z.enum(['passed', 'failed', 'needs_patch']),
   producer: z.literal('claude-code'),
   source_capabilities: z.array(z.string()).min(1),
   generated_at: datetimeString
@@ -46,7 +60,7 @@ const testReportSchema = z.object({
   failures: z.array(z.string()),
   passed_count: z.number().int().min(0),
   failed_count: z.number().int().min(0),
-  verdict: z.enum(['passed', 'failed']),
+  verdict: z.enum(['passed', 'failed', 'needs_patch']),
   producer: z.literal('claude-code'),
   source_capabilities: z.array(z.string()).min(1),
   generated_at: datetimeString

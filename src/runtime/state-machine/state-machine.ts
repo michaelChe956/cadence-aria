@@ -1,6 +1,7 @@
 import type { State } from '../../schemas/state-schema.js';
 
 import {
+  guardBlockedRetry,
   guardDispatched,
   guardPatchingReady,
   guardPlanApproved,
@@ -10,19 +11,19 @@ import {
 } from './guards.js';
 
 const allowedTransitions: Record<State['status'], readonly State['status'][]> = {
-  intake: ['clarification', 'spec-drafting'],
-  clarification: ['spec-drafting'],
-  'spec-drafting': ['spec-review'],
-  'spec-review': ['spec-approved', 'plan-review'],
-  'spec-approved': ['planning'],
-  planning: ['plan-review'],
-  'plan-review': ['plan-approved', 'dispatched'],
-  'plan-approved': ['dispatched'],
-  dispatched: ['executing'],
-  executing: ['reviewing/testing'],
-  'reviewing/testing': ['patching', 'verified'],
-  patching: ['executing'],
-  blocked: [],
+  intake: ['clarification', 'spec-drafting', 'cancelled'],
+  clarification: ['spec-drafting', 'cancelled'],
+  'spec-drafting': ['spec-review', 'cancelled'],
+  'spec-review': ['spec-approved', 'plan-review', 'cancelled'],
+  'spec-approved': ['planning', 'cancelled'],
+  planning: ['plan-review', 'cancelled'],
+  'plan-review': ['plan-approved', 'dispatched', 'cancelled'],
+  'plan-approved': ['dispatched', 'cancelled'],
+  dispatched: ['executing', 'cancelled'],
+  executing: ['reviewing/testing', 'cancelled'],
+  'reviewing/testing': ['patching', 'verified', 'cancelled'],
+  patching: ['executing', 'cancelled'],
+  blocked: ['dispatched', 'cancelled'],
   verified: ['done'],
   done: [],
   cancelled: []
@@ -54,6 +55,10 @@ export function canTransition(
 
   if (state.status === 'patching' && target === 'executing') {
     return guardPatchingReady(state);
+  }
+
+  if (state.status === 'blocked' && target === 'dispatched') {
+    return guardBlockedRetry(state);
   }
 
   if (allowedTransitions[state.status]?.includes(target)) {

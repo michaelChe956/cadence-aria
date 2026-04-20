@@ -235,4 +235,85 @@ describe('canTransition', () => {
       reason: 'review_or_test_not_passed'
     });
   });
+
+  it('blocked 进入 dispatched 时 retryable=true 且有 blocking_stage 会通过', () => {
+    expect(
+      canTransition(
+        createState({
+          status: 'blocked',
+          retryable: true,
+          blocking_stage: 'executing'
+        }),
+        'dispatched'
+      )
+    ).toEqual({
+      allowed: true
+    });
+  });
+
+  it('blocked 进入 dispatched 时 retryable=false 会被阻止', () => {
+    expect(
+      canTransition(
+        createState({
+          status: 'blocked',
+          retryable: false,
+          blocking_stage: 'executing'
+        }),
+        'dispatched'
+      )
+    ).toEqual({
+      allowed: false,
+      reason: 'not_retryable'
+    });
+  });
+
+  it('blocked 进入 cancelled 会通过', () => {
+    expect(
+      canTransition(
+        createState({
+          status: 'blocked',
+          retryable: false,
+          blocking_stage: 'executing'
+        }),
+        'cancelled'
+      )
+    ).toEqual({
+      allowed: true
+    });
+  });
+
+  it('done 不能转到 cancelled', () => {
+    expect(
+      canTransition(
+        createState({ status: 'done' }),
+        'cancelled'
+      )
+    ).toEqual({
+      allowed: false,
+      reason: 'invalid_transition'
+    });
+  });
+
+  it('cancelled 不能转到 cancelled', () => {
+    expect(
+      canTransition(
+        createState({ status: 'cancelled' }),
+        'cancelled'
+      )
+    ).toEqual({
+      allowed: false,
+      reason: 'invalid_transition'
+    });
+  });
+
+  it('dispatched 可以转到 cancelled', () => {
+    expect(
+      canTransition(
+        createState({ status: 'dispatched' }),
+        'cancelled'
+      )
+    ).toEqual({
+      allowed: true
+    });
+  });
 });

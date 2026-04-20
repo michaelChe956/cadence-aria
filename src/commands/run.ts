@@ -103,6 +103,20 @@ export async function runCommand(taskId: string): Promise<string> {
       if (!transition.allowed) {
         throw new Error(`无法推进到 verified: ${transition.reason}`);
       }
+    } else if (arbitration.next_status === 'patching') {
+      const transition = canTransition({
+        ...nextState,
+        status: 'reviewing/testing'
+      }, 'patching');
+      if (!transition.allowed) {
+        throw new Error(`无法推进到 patching: ${transition.reason}`);
+      }
+    } else if (arbitration.next_status === 'blocked') {
+      // blocked 是合法的安全降级路径，不通过 Guard 检查
+      // 但确认当前状态是 reviewing/testing
+      if (state.status !== 'reviewing/testing') {
+        throw new Error(`无法从 ${state.status} 进入 blocked`);
+      }
     }
 
     await writeState(nextState);

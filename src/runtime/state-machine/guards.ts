@@ -15,6 +15,7 @@ type VerifiedGuardState = Pick<
   'review_status' | 'test_status' | 'review_report_ref' | 'test_report_ref'
 >;
 type PatchingGuardState = Pick<State, 'patch_units'>;
+type BlockedRetryGuardState = Pick<State, 'retryable' | 'blocking_stage'>;
 
 export function guardSpecReviewed(input: SpecReviewGuardState) {
   if (!input.confirmation_artifact_path) {
@@ -75,6 +76,18 @@ export function guardVerified(input: VerifiedGuardState) {
 export function guardPatchingReady(input: PatchingGuardState) {
   if (!input.patch_units || Object.keys(input.patch_units).length === 0) {
     return { allowed: false as const, reason: 'missing_patch_contract' };
+  }
+
+  return { allowed: true as const };
+}
+
+export function guardBlockedRetry(input: BlockedRetryGuardState) {
+  if (!input.retryable) {
+    return { allowed: false as const, reason: 'not_retryable' };
+  }
+
+  if (!input.blocking_stage) {
+    return { allowed: false as const, reason: 'unknown_blocking_stage' };
   }
 
   return { allowed: true as const };

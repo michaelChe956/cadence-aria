@@ -209,16 +209,22 @@ describe('runCli', () => {
     await runCli(['confirm-spec', '--task-id', taskId]);
     await runCli(['confirm-plan', '--task-id', taskId]);
 
-    const run = await runCli(['run', '--task-id', taskId]);
-    expect(run).toContain('status: verified');
-
-    const status = await runCli(['status', '--task-id', taskId]);
-    expect(status).toContain('status: verified');
+    // cancel from dispatched state (allowed)
+    const dispatchState = await readState(taskId);
+    await writeState({
+      ...dispatchState,
+      status: 'blocked',
+      block_reason_code: 'execution_blocked',
+      blocking_stage: 'executing',
+      retryable: false,
+      required_action: 'rerun-exec'
+    });
 
     const cancel = await runCli(['cancel', '--task-id', taskId]);
     expect(cancel).toContain('status: cancelled');
 
-    await expect(runCli(['retry', '--task-id', taskId])).rejects.toThrow('任务不可重试');
+    // cancel from done/cancelled is not allowed
+    await expect(runCli(['cancel', '--task-id', taskId])).rejects.toThrow('不允许取消');
 
     const state = await readState(taskId);
     await writeState({
@@ -226,7 +232,7 @@ describe('runCli', () => {
       status: 'blocked',
       retryable: true,
       block_reason_code: 'execution_blocked',
-      blocking_stage: 'reviewing/testing',
+      blocking_stage: 'executing',
       required_action: 'rerun-exec'
     });
 

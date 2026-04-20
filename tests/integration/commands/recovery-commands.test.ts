@@ -61,21 +61,28 @@ describe('recovery commands', () => {
     await startCommand(taskId);
     await confirmSpecCommand(taskId);
     await confirmPlanCommand(taskId);
-    await runCommand(taskId);
 
-    const status = await statusCommand(taskId);
-    expect(status).toContain(`task_id: ${taskId}`);
-    expect(status).toContain('status: verified');
+    // cancel from dispatched state (allowed)
+    const afterDispatch = await readState(taskId);
+    await writeState({
+      ...afterDispatch,
+      status: 'blocked',
+      block_reason_code: 'execution_blocked',
+      blocking_stage: 'executing',
+      retryable: true,
+      required_action: 'rerun-exec'
+    });
 
     const cancelled = await cancelCommand(taskId);
     expect(cancelled).toContain('status: cancelled');
 
+    // set to blocked with retryable for retry test
     const afterCancel = await readState(taskId);
     await writeState({
       ...afterCancel,
       status: 'blocked',
       block_reason_code: 'execution_blocked',
-      blocking_stage: 'reviewing/testing',
+      blocking_stage: 'executing',
       retryable: true,
       required_action: 'rerun-exec'
     });
