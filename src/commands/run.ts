@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 
 import type { State } from '../schemas/state-schema.js';
+import { reviewReportSchema, testReportSchema } from '../schemas/runtime-artifact-schema.js';
 import { runSingleExecUnit } from '../runtime/scheduler/exec-scheduler.js';
 import { arbitrateReviewAndTest } from '../runtime/arbitrator/review-test-arbitrator.js';
 import { readState, writeState } from '../runtime/persistence/state-repository.js';
@@ -13,14 +14,8 @@ export async function runCommand(taskId: string): Promise<string> {
   await runSingleExecUnit(taskId);
   const { reviewReportPath, testReportPath } = await runReviewAndTest(taskId);
   const state = await readState(taskId);
-  const review = parseYaml(await fs.readFile(reviewReportPath, 'utf8')) as {
-    verdict: 'passed' | 'failed';
-    result_set_id: string;
-  };
-  const test = parseYaml(await fs.readFile(testReportPath, 'utf8')) as {
-    verdict: 'passed' | 'failed';
-    result_set_id: string;
-  };
+  const review = reviewReportSchema.parse(parseYaml(await fs.readFile(reviewReportPath, 'utf8')));
+  const test = testReportSchema.parse(parseYaml(await fs.readFile(testReportPath, 'utf8')));
   const arbitration = arbitrateReviewAndTest({ review, test });
   const patchRequiredBy: State['patch_required_by'] =
     review.verdict === 'passed' && test.verdict === 'passed'

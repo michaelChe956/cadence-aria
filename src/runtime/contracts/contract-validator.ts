@@ -4,7 +4,13 @@ import path from 'node:path';
 import type { DispatchContract, ExecutionContextBundle, ExecResultArtifact } from '../../schemas/runtime-artifact-schema.js';
 import { dispatchContractSchema, executionContextBundleSchema, execResultSchema } from '../../schemas/runtime-artifact-schema.js';
 
-function sameMembers(actual: string[], expected: string[]): boolean {
+export const EXPECTED_SOURCE_CAPABILITIES = ['OpenSpec', 'superpowers'] as const;
+export const EXPECTED_BUNDLE_METHODS = ['writing-plans', 'test-driven-development', 'verification-before-completion'] as const;
+export const EXPECTED_CONTRACT_METHODS = ['test-driven-development', 'verification-before-completion'] as const;
+export const EXPECTED_VERIFICATION_REQUIREMENTS = ['pnpm check', 'pnpm test'] as const;
+export const EXPECTED_WORKER_CLI = 'codex' as const;
+
+function sameMembers(actual: string[], expected: readonly string[]): boolean {
   if (actual.length !== expected.length) {
     return false;
   }
@@ -12,7 +18,7 @@ function sameMembers(actual: string[], expected: string[]): boolean {
   return expected.every(value => actual.includes(value));
 }
 
-function containsAll(actual: string[], expected: string[]): boolean {
+function containsAll(actual: string[], expected: readonly string[]): boolean {
   return expected.every(value => actual.includes(value));
 }
 
@@ -37,15 +43,15 @@ export async function validateHandoffFields(input: {
 export function validateExecutionContextBundle(input: unknown): ExecutionContextBundle {
   const bundle = executionContextBundleSchema.parse(input);
 
-  if (!sameMembers(bundle.source_capabilities, ['OpenSpec', 'superpowers'])) {
+  if (!sameMembers(bundle.source_capabilities, EXPECTED_SOURCE_CAPABILITIES)) {
     throw new Error('缺少合法 execution context bundle 来源能力');
   }
 
-  if (!sameMembers(bundle.required_methods, ['writing-plans', 'test-driven-development', 'verification-before-completion'])) {
+  if (!sameMembers(bundle.required_methods, EXPECTED_BUNDLE_METHODS)) {
     throw new Error('缺少合法 execution context bundle required_methods');
   }
 
-  if (!sameMembers(bundle.verification_requirements, ['pnpm check', 'pnpm test'])) {
+  if (!sameMembers(bundle.verification_requirements, EXPECTED_VERIFICATION_REQUIREMENTS)) {
     throw new Error('缺少合法 execution context bundle verification_requirements');
   }
 
@@ -55,15 +61,15 @@ export function validateExecutionContextBundle(input: unknown): ExecutionContext
 export function validateDispatchContract(input: unknown): DispatchContract {
   const contract = dispatchContractSchema.parse(input);
 
-  if (contract.worker_cli !== 'codex') {
+  if (contract.worker_cli !== EXPECTED_WORKER_CLI) {
     throw new Error('缺少合法 dispatch contract worker_cli');
   }
 
-  if (!sameMembers(contract.required_methods, ['test-driven-development', 'verification-before-completion'])) {
+  if (!sameMembers(contract.required_methods, EXPECTED_CONTRACT_METHODS)) {
     throw new Error('缺少合法 dispatch contract required_methods');
   }
 
-  if (!sameMembers(contract.verification_requirements, ['pnpm check', 'pnpm test'])) {
+  if (!sameMembers(contract.verification_requirements, EXPECTED_VERIFICATION_REQUIREMENTS)) {
     throw new Error('缺少合法 dispatch contract 运行要求');
   }
 

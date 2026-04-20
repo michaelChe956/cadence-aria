@@ -52,8 +52,12 @@ export async function runCodexCli(input: CodexCommandInput): Promise<CliExecutio
     promptContent
   });
 
+  if (args.length === 0) {
+    throw new Error('spawn args cannot be empty');
+  }
+
   return new Promise((resolve, reject) => {
-    const child = spawn(args[0]!, args.slice(1), { cwd: input.cwd });
+    const child = spawn(args[0], args.slice(1), { cwd: input.cwd });
     let stdout = '';
     let stderr = '';
 
