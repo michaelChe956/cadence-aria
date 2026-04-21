@@ -4,8 +4,8 @@ import path from 'node:path';
 
 export type FakeBinaryOptions = {
   codexExitCode?: number;
-  reviewVerdict?: 'passed' | 'failed';
-  testVerdict?: 'passed' | 'failed';
+  reviewVerdict?: 'passed' | 'failed' | 'needs_patch';
+  testVerdict?: 'passed' | 'failed' | 'needs_patch';
   claudeMode?: 'pass' | 'invalid' | 'mismatch-task' | 'mismatch-result-set';
   writeArtifactToDisk?: boolean;
 };
@@ -64,6 +64,14 @@ fs.appendFileSync(path.join(process.cwd(), 'codex-invocation.log'), args.join('\
 if (process.env.ARIA_FAKE_CODEX_FAIL === '1') {
   process.stderr.write('fake codex failed\\n');
   process.exit(1);
+}
+
+if (process.env.ARIA_FAKE_CODEX_MODE === 'rename') {
+  fs.mkdirSync(path.join(process.cwd(), 'src'), { recursive: true });
+  fs.renameSync(
+    path.join(process.cwd(), 'src', 'rename-old.ts'),
+    path.join(process.cwd(), 'src', 'rename-new.ts')
+  );
 }
 
 fs.writeFileSync(outputPath, [

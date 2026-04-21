@@ -27,6 +27,20 @@ function normalizeChangedFile(filePath: string): string {
   return filePath.replaceAll(path.sep, '/').replace(/^\.\//, '');
 }
 
+function parseChangedFileFromStatusLine(line: string): string | null {
+  if (!line) {
+    return null;
+  }
+
+  const payload = line.slice(3).trim();
+  if (!payload) {
+    return null;
+  }
+
+  const renameTarget = payload.includes(' -> ') ? payload.split(' -> ').at(-1) ?? payload : payload;
+  return normalizeChangedFile(renameTarget);
+}
+
 function matchesScopePattern(filePath: string, pattern: string): boolean {
   const normalizedFile = normalizeChangedFile(filePath);
   const normalizedPattern = pattern.replaceAll(path.sep, '/');
@@ -44,9 +58,7 @@ async function collectChangedFiles(cwd: string): Promise<string[]> {
     const { stdout } = await execFileAsync('git', ['status', '--short', '--untracked-files=all'], { cwd });
     return stdout
       .split('\n')
-      .map(line => line.trim())
-      .filter(Boolean)
-      .map(line => normalizeChangedFile(line.slice(3).trim()))
+      .map(line => parseChangedFileFromStatusLine(line))
       .filter(Boolean)
       .filter((value, index, items) => items.indexOf(value) === index);
   } catch {

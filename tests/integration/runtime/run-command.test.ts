@@ -45,6 +45,7 @@ async function restoreWorkspace(): Promise<void> {
   delete process.env.CADENCE_CLAUDE_BIN;
   delete process.env.ARIA_FAKE_ARTIFACT_ROOT;
   delete process.env.ARIA_FAKE_CODEX_FAIL;
+  delete process.env.ARIA_FAKE_CODEX_MODE;
   delete process.env.ARIA_FAKE_CODEX_CWD_LOG;
   delete process.env.ARIA_FAKE_CLAUDE_MODE;
   delete process.env.ARIA_FAKE_CLAUDE_CWD_LOG;
@@ -175,6 +176,33 @@ describe('runCommand', () => {
     expect(state.retryable).toBe(false);
   });
 
+  it('当 review/test 需要修补时生成 patch contract 与 patch_units，并进入 patching', async () => {
+    await cleanupFakeBinaries();
+    await createFakeBinaries({ reviewVerdict: 'needs_patch', testVerdict: 'passed', writeArtifactToDisk: true }, ORIGINAL_PATH);
+
+    const intake = await intakeCommand('验证 needs_patch 进入正式 patching 闭环');
+    const taskId = intake.match(/task_id: (aria-\d{8}-\d{3})/)?.[1] ?? '';
+
+    await startCommand(taskId);
+    await confirmSpecCommand(taskId);
+    await confirmPlanCommand(taskId);
+
+    const output = await runCommand(taskId);
+    expect(output).toContain('status: patching');
+    expect(output).toContain('review_status: needs_patch');
+    expect(output).toContain('test_status: passed');
+
+    const state = await readState(taskId);
+    expect(state.status).toBe('patching');
+    expect(state.patch_required_by).toBe('review');
+    expect(state.patch_units).toBeTruthy();
+    expect(state.patch_units?.['patch-01']?.based_on_exec_unit).toBe('exec-01');
+    expect(state.patch_units?.['patch-01']?.status).toBe('pending');
+
+    const patchContractPath = state.patch_units?.['patch-01']?.contract_path ?? '';
+    await expect(fs.access(patchContractPath)).resolves.toBeUndefined();
+  });
+
   it('exec 与 review/test 都使用 execution context bundle 中的 repo_path 作为工作目录', async () => {
     const intake = await intakeCommand('验证运行阶段使用 bundle repo_path');
     const taskId = intake.match(/task_id: (aria-\d{8}-\d{3})/)?.[1] ?? '';
@@ -222,5 +250,29 @@ describe('runCommand', () => {
     const resultPath = path.join(getTaskArtifactsDir(taskId), 'exec-result-exec-01.yaml');
     const execResult = parseYaml(await fs.readFile(resultPath, 'utf8')) as { changed_files: string[] };
     expect(execResult.changed_files).not.toContain('README.md');
+  });
+
+  it('正确识别 rename 产生的新路径，不因 git status 的箭头格式误判越界', async () => {
+    await fs.mkdir(path.join(tempDir, 'src'), { recursive: true });
+    await fs.writeFile(path.join(tempDir, 'src', 'rename-old.ts'), 'export const renamed = true;\n', 'utf8');
+    await execFileAsync('git', ['add', 'src/rename-old.ts'], { cwd: tempDir });
+    await execFileAsync('git', ['commit', '-m', 'add rename fixture'], { cwd: tempDir });
+
+    process.env.ARIA_FAKE_CODEX_MODE = 'rename';
+
+    const intake = await intakeCommand('验证 rename 不会被误判越界');
+    const taskId = intake.match(/task_id: (aria-\d{8}-\d{3})/)?.[1] ?? '';
+
+    await startCommand(taskId);
+    await confirmSpecCommand(taskId);
+    await confirmPlanCommand(taskId);
+
+    const output = await runCommand(taskId);
+    expect(output).toContain('status: verified');
+
+    const resultPath = path.join(getTaskArtifactsDir(taskId), 'exec-result-exec-01.yaml');
+    const execResult = parseYaml(await fs.readFile(resultPath, 'utf8')) as { changed_files: string[] };
+    expect(execResult.changed_files).toContain('src/rename-new.ts');
+    expect(execResult.changed_files).not.toContain('src/rename-old.ts -> src/rename-new.ts');
   });
 });

@@ -10,6 +10,7 @@ import { parseYaml } from '../utils/yaml.js';
 import { nowIso } from '../utils/time.js';
 import { canTransition } from '../runtime/state-machine/state-machine.js';
 import { resolveRetryableBlock } from '../runtime/state-machine/recovery-rules.js';
+import { createPatchArtifacts } from '../runtime/contracts/patch-contract.js';
 
 function resolveReviewTestFailureReason(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
@@ -81,12 +82,30 @@ export async function runCommand(taskId: string): Promise<string> {
     const state = await readState(taskId);
     const review = reviewReportSchema.parse(parseYaml(await fs.readFile(reviewReportPath, 'utf8')));
     const test = testReportSchema.parse(parseYaml(await fs.readFile(testReportPath, 'utf8')));
+    const specRef = state.approved_spec_ref;
+    const planRef = state.approved_plan_ref;
+    const resultSetId = review.result_set_id;
+    if (!specRef || !planRef) {
+      throw new Error(`缺少 review/test 所需的冻结引用: ${taskId}`);
+    }
     const arbitration = arbitrateReviewAndTest({ review, test });
     const arbitrationResolution =
       arbitration.next_status === 'blocked' && arbitration.reason
         ? resolveRetryableBlock(arbitration.reason)
         : null;
     const patchRequiredBy = resolvePatchRequiredBy(review.verdict, test.verdict);
+    const patchArtifacts =
+      arbitration.next_status === 'patching' && patchRequiredBy !== 'none' && state.dispatch_contract_ref && state.context_bundle_ref
+        ? await createPatchArtifacts({
+            taskId,
+            resultSetId,
+            dispatchContractRef: state.dispatch_contract_ref,
+            contextBundleRef: state.context_bundle_ref,
+            specRef,
+            planRef,
+            patchRequiredBy
+          })
+        : null;
 
     const nextState = {
       ...state,
@@ -98,8 +117,21 @@ export async function runCommand(taskId: string): Promise<string> {
       patch_required_by: patchRequiredBy,
       block_reason_code: arbitration.next_status === 'blocked' ? arbitration.reason : null,
       blocking_stage: arbitration.next_status === 'blocked' ? 'reviewing/testing' : null,
+      active_exec_units: [],
       retryable: arbitration.next_status === 'blocked' ? arbitrationResolution?.retryable : undefined,
       required_action: arbitration.next_status === 'blocked' ? arbitrationResolution?.required_action ?? null : null,
+      patch_round: arbitration.next_status === 'patching' ? state.patch_round + 1 : state.patch_round,
+      patch_units:
+        arbitration.next_status === 'patching' && patchArtifacts
+          ? {
+              'patch-01': {
+                status: 'pending' as const,
+                based_on_exec_unit: 'exec-01',
+                contract_path: patchArtifacts.patchContractRef,
+                attempt: 0
+              }
+            }
+          : state.patch_units,
       updated_at: nowIso()
     };
 
@@ -116,6 +148,17 @@ export async function runCommand(taskId: string): Promise<string> {
       // 但确认当前状态是 reviewing/testing
       if (state.status !== 'reviewing/testing') {
         throw new Error(`无法从 ${state.status} 进入 blocked`);
+      }
+    } else if (arbitration.next_status === 'patching') {
+      const transition = canTransition(
+        {
+          ...nextState,
+          status: 'patching'
+        },
+        'executing'
+      );
+      if (!transition.allowed) {
+        throw new Error(`无法进入 patching: ${transition.reason}`);
       }
     }
 
