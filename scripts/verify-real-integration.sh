@@ -44,7 +44,7 @@ if [ ! -d "$TASKS_ROOT" ]; then
 fi
 
 if [ -z "$TASK_ID" ]; then
-  TASK_ID=$(find "$TASKS_ROOT" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort | tail -n 1)
+  TASK_ID=$(find "$TASKS_ROOT" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort | tail -n 1)
 fi
 
 if [ -z "$TASK_ID" ]; then

@@ -1,6 +1,8 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -16,12 +18,23 @@ import { createFakeBinaries, cleanupFakeBinaries } from '../../fixtures/fake-bin
 
 const ORIGINAL_CWD = process.cwd();
 const ORIGINAL_PATH = process.env.PATH ?? '';
+const execFileAsync = promisify(execFile);
 
 let tempDir = '';
 
 async function setTempWorkspace(): Promise<void> {
   tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cadence-aria-run-command-'));
   process.chdir(tempDir);
+  await execFileAsync('git', ['init'], { cwd: tempDir });
+  await execFileAsync('git', ['config', 'user.name', 'Codex Test'], { cwd: tempDir });
+  await execFileAsync('git', ['config', 'user.email', 'codex@example.com'], { cwd: tempDir });
+  await fs.writeFile(
+    '.gitignore',
+    ['codex-invocation.log', 'claude-invocation.log', 'codex-cwd.log', 'claude-cwd.log'].join('\n'),
+    'utf8'
+  );
+  await execFileAsync('git', ['add', '.gitignore'], { cwd: tempDir });
+  await execFileAsync('git', ['commit', '-m', 'test baseline'], { cwd: tempDir });
   await createFakeBinaries({ writeArtifactToDisk: true }, ORIGINAL_PATH);
 }
 
@@ -191,5 +204,23 @@ describe('runCommand', () => {
 
     await expect(fs.readFile(codexCwdLog, 'utf8')).resolves.toBe(`${alternateRepoPath}\n`);
     await expect(fs.readFile(claudeCwdLog, 'utf8')).resolves.toBe(`${alternateRepoPath}\n${alternateRepoPath}\n`);
+  });
+
+  it('忽略执行前已存在的脏文件，不将其计入本次 exec changed_files 或 scope 校验', async () => {
+    await fs.writeFile(path.join(tempDir, 'README.md'), 'pre-existing dirty file\n', 'utf8');
+
+    const intake = await intakeCommand('验证脏工作区不会污染 exec 结果');
+    const taskId = intake.match(/task_id: (aria-\d{8}-\d{3})/)?.[1] ?? '';
+
+    await startCommand(taskId);
+    await confirmSpecCommand(taskId);
+    await confirmPlanCommand(taskId);
+
+    const output = await runCommand(taskId);
+    expect(output).toContain('status: verified');
+
+    const resultPath = path.join(getTaskArtifactsDir(taskId), 'exec-result-exec-01.yaml');
+    const execResult = parseYaml(await fs.readFile(resultPath, 'utf8')) as { changed_files: string[] };
+    expect(execResult.changed_files).not.toContain('README.md');
   });
 });

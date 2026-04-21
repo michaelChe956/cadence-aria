@@ -126,6 +126,30 @@ async function runScript(taskId: string): Promise<{ code: number | null; stdout:
   });
 }
 
+async function runScriptWithoutTaskId(): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(SCRIPT_PATH, [], {
+      cwd: REPO_ROOT
+    });
+
+    let stdout = '';
+    let stderr = '';
+
+    child.stdout.on('data', chunk => {
+      stdout += chunk.toString();
+    });
+
+    child.stderr.on('data', chunk => {
+      stderr += chunk.toString();
+    });
+
+    child.on('error', reject);
+    child.on('close', code => {
+      resolve({ code, stdout, stderr });
+    });
+  });
+}
+
 afterEach(async () => {
   for (const taskId of createdTaskIds.splice(0)) {
     await fs.rm(path.join(TASKS_ROOT, taskId), { recursive: true, force: true });
@@ -155,5 +179,19 @@ describe('verify-real-integration script', () => {
     expect(result.stdout).toContain('缺少文件: spec-artifact.md');
     expect(result.stdout.match(/缺少文件: spec-artifact\.md/g)?.length ?? 0).toBe(1);
     expect(result.stdout).not.toContain('文件缺少字段: spec-artifact.md');
+  });
+
+  it('未传 --task-id 时自动选择最新任务', async () => {
+    const datePrefix = new Date().toISOString().slice(0, 10).replaceAll('-', '');
+    const olderTaskId = `aria-${datePrefix}-920`;
+    const latestTaskId = `aria-${datePrefix}-921`;
+    await createTaskFixture({ taskId: olderTaskId });
+    await createTaskFixture({ taskId: latestTaskId });
+
+    const result = await runScriptWithoutTaskId();
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain('PASS');
+    expect(result.stdout).toContain(`task_id: ${latestTaskId}`);
   });
 });

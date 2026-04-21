@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -51,6 +52,39 @@ async function collectChangedFiles(cwd: string): Promise<string[]> {
   } catch {
     return [];
   }
+}
+
+async function fingerprintChangedFile(cwd: string, filePath: string): Promise<string> {
+  const absolutePath = path.resolve(cwd, filePath);
+
+  try {
+    const content = await fs.readFile(absolutePath);
+    return createHash('sha256').update(content).digest('hex');
+  } catch {
+    return '__missing__';
+  }
+}
+
+async function collectChangedFileSnapshot(cwd: string): Promise<Map<string, string>> {
+  const changedFiles = await collectChangedFiles(cwd);
+  const snapshot = new Map<string, string>();
+
+  await Promise.all(
+    changedFiles.map(async filePath => {
+      snapshot.set(filePath, await fingerprintChangedFile(cwd, filePath));
+    })
+  );
+
+  return snapshot;
+}
+
+function diffChangedFilesSinceBaseline(
+  baseline: Map<string, string>,
+  current: Map<string, string>
+): string[] {
+  return [...current.entries()]
+    .filter(([filePath, fingerprint]) => baseline.get(filePath) !== fingerprint)
+    .map(([filePath]) => filePath);
 }
 
 function assertChangedFilesWithinScope(changedFiles: string[], scope?: { files_allowed: string[]; files_blocked?: string[] }): void {
@@ -196,6 +230,7 @@ export async function runSingleExecUnit(taskId: string): Promise<void> {
     bundle,
     contract
   }), 'utf8');
+  const changedFilesBaseline = await collectChangedFileSnapshot(executionCwd);
 
   const finishExecAsBlocked = async (input: {
     reasonCode: string;
@@ -246,7 +281,10 @@ export async function runSingleExecUnit(taskId: string): Promise<void> {
     }
 
     const finishedAt = nowIso();
-    const changedFiles = await collectChangedFiles(executionCwd);
+    const changedFiles = diffChangedFilesSinceBaseline(
+      changedFilesBaseline,
+      await collectChangedFileSnapshot(executionCwd)
+    );
     assertChangedFilesWithinScope(changedFiles, contract.scope);
     const execResult = {
       task_id: taskId,
