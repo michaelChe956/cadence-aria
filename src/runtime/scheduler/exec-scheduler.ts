@@ -59,7 +59,7 @@ async function collectChangedFiles(cwd: string): Promise<string[]> {
     return stdout
       .split('\n')
       .map(line => parseChangedFileFromStatusLine(line))
-      .filter(Boolean)
+      .filter((value): value is string => value !== null)
       .filter((value, index, items) => items.indexOf(value) === index);
   } catch {
     return [];

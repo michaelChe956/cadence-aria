@@ -3,14 +3,15 @@
 set -euo pipefail
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
-TASKS_ROOT="$REPO_ROOT/cadence/cache/aria/tasks"
+ARIA_REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
+TARGET_REPO_ROOT="$ARIA_REPO_ROOT"
 TASK_ID=""
+INPUT_REPO_ROOT=""
 
 usage() {
   cat <<'EOF'
 用法:
-  scripts/verify-real-integration.sh [--task-id <task-id>]
+  scripts/verify-real-integration.sh [--task-id <task-id>] [--repo-root <repo-root>]
 
 说明:
   只读验证已有任务，不创建任务、不推进状态。
@@ -27,6 +28,14 @@ while [ "$#" -gt 0 ]; do
       TASK_ID="$2"
       shift 2
       ;;
+    --repo-root)
+      if [ "$#" -lt 2 ]; then
+        echo "FAIL: 缺少 --repo-root 参数值"
+        exit 1
+      fi
+      INPUT_REPO_ROOT="$2"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -37,6 +46,17 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+
+if [ -n "$INPUT_REPO_ROOT" ]; then
+  if [ ! -d "$INPUT_REPO_ROOT" ]; then
+    echo "FAIL: repo root 不存在 $INPUT_REPO_ROOT"
+    exit 1
+  fi
+
+  TARGET_REPO_ROOT=$(CDPATH= cd -- "$INPUT_REPO_ROOT" && pwd)
+fi
+
+TASKS_ROOT="$TARGET_REPO_ROOT/cadence/cache/aria/tasks"
 
 if [ ! -d "$TASKS_ROOT" ]; then
   echo "FAIL: 缺少任务目录 $TASKS_ROOT"
@@ -95,8 +115,8 @@ require_contains() {
   fi
 }
 
-if [ -f "$REPO_ROOT/dist/src/index.js" ]; then
-  DOCTOR_OUTPUT=$(node "$REPO_ROOT/dist/src/index.js" aria:doctor 2>&1 || true)
+if [ -f "$ARIA_REPO_ROOT/dist/src/index.js" ]; then
+  DOCTOR_OUTPUT=$(node "$ARIA_REPO_ROOT/dist/src/index.js" aria:doctor 2>&1 || true)
   for capability in claude_code codex OpenSpec superpowers; do
     case "$DOCTOR_OUTPUT" in
       *"$capability"*) ;;

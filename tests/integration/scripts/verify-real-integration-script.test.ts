@@ -10,11 +10,18 @@ const TASKS_ROOT = path.join(REPO_ROOT, 'cadence/cache/aria/tasks');
 const SCRIPT_PATH = path.join(REPO_ROOT, 'scripts/verify-real-integration.sh');
 
 const createdTaskIds: string[] = [];
+const cleanupDirs: string[] = [];
 
-async function createTaskFixture(input: { taskId: string; broken?: boolean }): Promise<void> {
-  const taskRoot = path.join(TASKS_ROOT, input.taskId);
+async function createTaskFixture(input: { taskId: string; broken?: boolean; repoRoot?: string }): Promise<void> {
+  const repoRoot = input.repoRoot ?? REPO_ROOT;
+  const tasksRoot = path.join(repoRoot, 'cadence/cache/aria/tasks');
+  const taskRoot = path.join(tasksRoot, input.taskId);
   const artifactsDir = path.join(taskRoot, 'artifacts');
-  createdTaskIds.push(input.taskId);
+  if (repoRoot === REPO_ROOT) {
+    createdTaskIds.push(input.taskId);
+  } else {
+    cleanupDirs.push(repoRoot);
+  }
 
   await fs.mkdir(artifactsDir, { recursive: true });
   await fs.writeFile(
@@ -102,9 +109,20 @@ async function createTaskFixture(input: { taskId: string; broken?: boolean }): P
   }
 }
 
-async function runScript(taskId: string): Promise<{ code: number | null; stdout: string; stderr: string }> {
+async function runScript(input: {
+  taskId?: string;
+  repoRoot?: string;
+}): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(SCRIPT_PATH, ['--task-id', taskId], {
+    const args: string[] = [];
+    if (input.taskId) {
+      args.push('--task-id', input.taskId);
+    }
+    if (input.repoRoot) {
+      args.push('--repo-root', input.repoRoot);
+    }
+
+    const child = spawn(SCRIPT_PATH, args, {
       cwd: REPO_ROOT
     });
 
@@ -154,6 +172,10 @@ afterEach(async () => {
   for (const taskId of createdTaskIds.splice(0)) {
     await fs.rm(path.join(TASKS_ROOT, taskId), { recursive: true, force: true });
   }
+
+  for (const dir of cleanupDirs.splice(0)) {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
 });
 
 describe('verify-real-integration script', () => {
@@ -161,7 +183,7 @@ describe('verify-real-integration script', () => {
     const taskId = `aria-${new Date().toISOString().slice(0, 10).replaceAll('-', '')}-910`;
     await createTaskFixture({ taskId });
 
-    const result = await runScript(taskId);
+    const result = await runScript({ taskId });
 
     expect(result.code).toBe(0);
     expect(result.stdout).toContain('PASS');
@@ -172,7 +194,7 @@ describe('verify-real-integration script', () => {
     const taskId = `aria-${new Date().toISOString().slice(0, 10).replaceAll('-', '')}-911`;
     await createTaskFixture({ taskId, broken: true });
 
-    const result = await runScript(taskId);
+    const result = await runScript({ taskId });
 
     expect(result.code).not.toBe(0);
     expect(result.stdout).toContain('FAIL');
@@ -193,5 +215,20 @@ describe('verify-real-integration script', () => {
     expect(result.code).toBe(0);
     expect(result.stdout).toContain('PASS');
     expect(result.stdout).toContain(`task_id: ${latestTaskId}`);
+  });
+
+  it('支持通过 --repo-root 校验外部仓库中的任务', async () => {
+    const externalRepoRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'aria-verify-external-root-'));
+    const taskId = `aria-${new Date().toISOString().slice(0, 10).replaceAll('-', '')}-922`;
+    await createTaskFixture({ taskId, repoRoot: externalRepoRoot });
+
+    const result = await runScript({
+      taskId,
+      repoRoot: externalRepoRoot
+    });
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain('PASS');
+    expect(result.stdout).toContain(taskId);
   });
 });
