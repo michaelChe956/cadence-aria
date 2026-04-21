@@ -170,7 +170,7 @@ describe('runCommand', () => {
     await confirmSpecCommand(taskId);
     await confirmPlanCommand(taskId);
 
-    const alternateRepoPath = await fs.mkdtemp(path.join(tempDir, 'alternate-repo-'));
+    const alternateRepoPath = await fs.realpath(await fs.mkdtemp(path.join(tempDir, 'alternate-repo-')));
     const bundlePath = path.join(getTaskArtifactsDir(taskId), 'execution-context-bundle.yaml');
     const bundle = parseYaml(await fs.readFile(bundlePath, 'utf8')) as {
       workspace_context: {

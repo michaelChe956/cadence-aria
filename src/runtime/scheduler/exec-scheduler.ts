@@ -4,6 +4,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 
 import { runCodexCli } from '../../adapters/codex/codex-adapter.js';
+import { toConsumedSpecRef } from '../../utils/artifact-refs.js';
 import { detectCapabilities } from '../../adapters/capability-detector.js';
 import { getTaskArtifactsDir } from '../persistence/paths.js';
 import { readState, writeState } from '../persistence/state-repository.js';
@@ -15,10 +16,6 @@ import { resolveRetryableBlock } from '../state-machine/recovery-rules.js';
 import { resolveWorkspacePath } from '../../utils/workspace.js';
 
 const execFileAsync = promisify(execFile);
-
-function toConsumedSpecRef(specRef: string): string {
-  return path.posix.join('artifacts', path.posix.basename(specRef));
-}
 
 function normalizeExecSummary(input: string): string {
   const summary = input.replace(/\s+/g, ' ').trim();
@@ -230,6 +227,8 @@ export async function runSingleExecUnit(taskId: string): Promise<void> {
     });
   };
 
+  let execFailedHandled = false;
+
   try {
     const execOutput = await runCodexCli({
       cwd: executionCwd,
@@ -237,6 +236,7 @@ export async function runSingleExecUnit(taskId: string): Promise<void> {
       outputPath: resultOutputPath
     });
     if (execOutput.exitCode !== 0) {
+      execFailedHandled = true;
       await finishExecAsBlocked({
         reasonCode: 'execution_blocked',
         execStatus: 'failed',
@@ -294,7 +294,7 @@ export async function runSingleExecUnit(taskId: string): Promise<void> {
     });
   } catch (error) {
     const latestState = await readState(taskId);
-    if (latestState.exec_units['exec-01']?.status === 'running') {
+    if (!execFailedHandled && latestState.exec_units['exec-01']?.status === 'running') {
       await finishExecAsBlocked({
         reasonCode: 'execution_blocked',
         execStatus: 'blocked',

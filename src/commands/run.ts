@@ -79,6 +79,13 @@ function resolveExecutionFailureReason(error: unknown): string {
   return 'execution_blocked';
 }
 
+function resolvePatchRequiredBy(reviewVerdict: string, testVerdict: string): State['patch_required_by'] {
+  if (reviewVerdict === 'passed' && testVerdict === 'passed') return 'none';
+  if (reviewVerdict !== 'passed' && testVerdict !== 'passed') return 'both';
+  if (reviewVerdict !== 'passed') return 'review';
+  return 'test';
+}
+
 export async function runCommand(taskId: string): Promise<string> {
   try {
     await runSingleExecUnit(taskId);
@@ -91,14 +98,7 @@ export async function runCommand(taskId: string): Promise<string> {
       arbitration.next_status === 'blocked' && arbitration.reason
         ? resolveRetryableBlock(arbitration.reason)
         : null;
-    const patchRequiredBy: State['patch_required_by'] =
-      review.verdict === 'passed' && test.verdict === 'passed'
-        ? 'none'
-        : review.verdict !== 'passed' && test.verdict !== 'passed'
-          ? 'both'
-          : review.verdict !== 'passed'
-            ? 'review'
-            : 'test';
+    const patchRequiredBy = resolvePatchRequiredBy(review.verdict, test.verdict);
 
     const nextState = {
       ...state,

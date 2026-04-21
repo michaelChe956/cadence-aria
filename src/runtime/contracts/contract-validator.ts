@@ -1,6 +1,8 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
+import { toConsumedSpecRef, toArtifactRef } from '../../utils/artifact-refs.js';
+
 import type {
   DispatchContract,
   ExecutionContextBundle,
@@ -24,14 +26,6 @@ export const EXPECTED_WORKER_CLI = 'codex' as const;
 
 function containsAll(actual: string[], expected: readonly string[]): boolean {
   return expected.every(value => actual.includes(value));
-}
-
-function toConsumedSpecRef(specRef: string): string {
-  return path.posix.join('artifacts', path.posix.basename(specRef));
-}
-
-function toArtifactRef(inputPath: string): string {
-  return path.posix.join('artifacts', path.posix.basename(inputPath));
 }
 
 export async function validateHandoffFields(input: {

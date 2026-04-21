@@ -46,12 +46,7 @@ function detectCli(binaryPath: string | null, binaryName: string) {
     return { available: false, source: binaryName };
   }
 
-  try {
-    accessSync(binaryPath, constants.X_OK);
-    return { available: true, source: binaryPath };
-  } catch {
-    return { available: false, source: binaryName };
-  }
+  return { available: true, source: binaryPath };
 }
 
 function resolveConfiguredBinaryPath(envName: 'CADENCE_CLAUDE_BIN' | 'CADENCE_CODEX_BIN'): string | null {
@@ -60,7 +55,12 @@ function resolveConfiguredBinaryPath(envName: 'CADENCE_CLAUDE_BIN' | 'CADENCE_CO
     return null;
   }
 
-  return configuredPath;
+  try {
+    accessSync(configuredPath, constants.X_OK);
+    return configuredPath;
+  } catch {
+    return null;
+  }
 }
 
 export function detectCapabilities() {
