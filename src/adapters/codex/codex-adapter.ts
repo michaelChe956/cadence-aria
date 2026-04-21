@@ -1,7 +1,6 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 
-import { nowIso } from '../../utils/time.js';
 import type { CliExecutionResult } from '../claude-code/claude-code-adapter.js';
 
 export type CodexCommandInput = {
@@ -9,26 +8,7 @@ export type CodexCommandInput = {
   promptPath: string;
   outputPath: string;
   promptContent?: string;
-};
-
-export type LegacyCodexExecInput = {
-  task_id: string;
-  unit_id: string;
-};
-
-export type CodexExecResult = {
-  task_id: string;
-  exec_unit_id: string;
-  status: 'succeeded';
-  changed_files: string[];
-  summary: string;
-  capabilities_used: string[];
-  openspec_refs_consumed: string[];
-  superpowers_refs_consumed: string[];
-  degraded: boolean;
-  degradation_reason: string | null;
-  started_at: string;
-  finished_at: string;
+  timeoutMs?: number;
 };
 
 export function buildCodexCommand(input: CodexCommandInput): string[] {
@@ -44,6 +24,8 @@ export function buildCodexCommand(input: CodexCommandInput): string[] {
     input.promptContent ?? input.promptPath,
   ];
 }
+
+const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 
 export async function runCodexCli(input: CodexCommandInput): Promise<CliExecutionResult> {
   const promptContent = input.promptContent ?? await fs.readFile(input.promptPath, 'utf8');
@@ -61,6 +43,11 @@ export async function runCodexCli(input: CodexCommandInput): Promise<CliExecutio
     let stdout = '';
     let stderr = '';
 
+    const timeout = setTimeout(() => {
+      child.kill('SIGTERM');
+      reject(new Error('codex_exec_timed_out'));
+    }, input.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+
     child.stdin?.end();
 
     child.stdout?.on('data', chunk => {
@@ -71,8 +58,12 @@ export async function runCodexCli(input: CodexCommandInput): Promise<CliExecutio
       stderr += chunk.toString();
     });
 
-    child.on('error', reject);
+    child.on('error', err => {
+      clearTimeout(timeout);
+      reject(err);
+    });
     child.on('close', exitCode => {
+      clearTimeout(timeout);
       resolve({
         exitCode: exitCode ?? 1,
         stdout,
@@ -80,28 +71,4 @@ export async function runCodexCli(input: CodexCommandInput): Promise<CliExecutio
       });
     });
   });
-}
-
-export async function runLegacyCodexExec(input: LegacyCodexExecInput): Promise<CodexExecResult> {
-  const startedAt = nowIso();
-  const finishedAt = nowIso();
-
-  return {
-    task_id: input.task_id,
-    exec_unit_id: input.unit_id,
-    status: 'succeeded',
-    changed_files: ['src/index.ts'],
-    summary: '执行最小骨架生成',
-    capabilities_used: ['codex'],
-    openspec_refs_consumed: ['artifacts/spec-artifact.md'],
-    superpowers_refs_consumed: ['test-driven-development', 'verification-before-completion'],
-    degraded: false,
-    degradation_reason: null,
-    started_at: startedAt,
-    finished_at: finishedAt
-  };
-}
-
-export async function runCodexExec(input: LegacyCodexExecInput): Promise<CodexExecResult> {
-  return runLegacyCodexExec(input);
 }

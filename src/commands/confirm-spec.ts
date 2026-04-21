@@ -23,7 +23,7 @@ export async function confirmSpecCommand(taskId: string): Promise<string> {
     content: specContent,
     artifactType: 'spec',
     expectedSpecRef: state.confirmation_artifact_path,
-    expectedPlanRef: path.join(getTaskArtifactsDir(taskId), 'plan-brief.md')
+    expectedPlanRef: path.posix.join(getTaskArtifactsDir(taskId), 'plan-brief.md')
   });
 
   const transition = canTransition(state, 'plan-review');

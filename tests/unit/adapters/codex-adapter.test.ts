@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildCodexCommand, runLegacyCodexExec, runCodexExec } from '../../../src/adapters/codex/codex-adapter.js';
+import { buildCodexCommand } from '../../../src/adapters/codex/codex-adapter.js';
 
 describe('buildCodexCommand', () => {
   it('使用 promptContent 构建命令', () => {
@@ -35,41 +35,5 @@ describe('buildCodexCommand', () => {
     });
     expect(args[0]).toBe('/custom/codex');
     process.env.CADENCE_CODEX_BIN = originalBin;
-  });
-});
-
-describe('runLegacyCodexExec', () => {
-  it('返回成功的执行结果', async () => {
-    const result = await runLegacyCodexExec({
-      task_id: 'task-001',
-      unit_id: 'exec-01'
-    });
-    expect(result.task_id).toBe('task-001');
-    expect(result.exec_unit_id).toBe('exec-01');
-    expect(result.status).toBe('succeeded');
-    expect(result.changed_files.length).toBeGreaterThan(0);
-    expect(result.degraded).toBe(false);
-    expect(result.degradation_reason).toBeNull();
-  });
-
-  it('包含 capabilities_used 和 refs', async () => {
-    const result = await runLegacyCodexExec({
-      task_id: 'task-001',
-      unit_id: 'exec-01'
-    });
-    expect(result.capabilities_used).toContain('codex');
-    expect(result.openspec_refs_consumed.length).toBeGreaterThan(0);
-    expect(result.superpowers_refs_consumed.length).toBeGreaterThan(0);
-  });
-});
-
-describe('runCodexExec', () => {
-  it('委托给 runLegacyCodexExec', async () => {
-    const result = await runCodexExec({
-      task_id: 'task-002',
-      unit_id: 'exec-01'
-    });
-    expect(result.task_id).toBe('task-002');
-    expect(result.status).toBe('succeeded');
   });
 });

@@ -14,6 +14,7 @@ function buildDispatchContract(input: {
   approved_spec_ref: string;
   approved_plan_ref: string;
   context_bundle_ref: string;
+  goal?: string;
 }): DispatchContract {
   return {
     contract_version: '1.0',
@@ -42,7 +43,7 @@ function buildDispatchContract(input: {
       files_allowed: ['src/**', 'tests/**', 'cadence/cache/aria/**'],
       files_blocked: ['cadence/designs/**', '.claude/**']
     },
-    goal: '实现一期 formal flow 最小闭环',
+    goal: input.goal ?? '按 dispatch contract 完成实现',
     acceptance_checks: ['pnpm check', 'pnpm test'],
     dependencies: [],
     result_path: path.posix.join(getTaskArtifactsDir(input.task_id), 'exec-result-exec-01.yaml'),
@@ -55,6 +56,7 @@ export async function createDispatchArtifacts(input: {
   task_id: string;
   approved_spec_ref: string;
   approved_plan_ref: string;
+  goal?: string;
 }): Promise<{ context_bundle_ref: string; dispatch_contract_ref: string }> {
   await validateHandoffFields({
     approved_spec_ref: input.approved_spec_ref,
@@ -78,7 +80,8 @@ export async function createDispatchArtifacts(input: {
       task_id: input.task_id,
       approved_spec_ref: input.approved_spec_ref,
       approved_plan_ref: input.approved_plan_ref,
-      context_bundle_ref
+      context_bundle_ref,
+      goal: input.goal
     })
   );
 

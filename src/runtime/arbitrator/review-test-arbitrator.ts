@@ -10,5 +10,9 @@ export function arbitrateReviewAndTest(input: {
     return { next_status: 'verified' as const };
   }
 
-  return { next_status: 'blocked' as const, reason: 'must_fix_detected' as const };
+  if (input.review.verdict === 'failed' || input.test.verdict === 'failed') {
+    return { next_status: 'blocked' as const, reason: 'must_fix_detected' as const };
+  }
+
+  return { next_status: 'patching' as const };
 }

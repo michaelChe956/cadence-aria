@@ -50,7 +50,8 @@ export async function confirmPlanCommand(taskId: string): Promise<string> {
   const handoff = await createDispatchArtifacts({
     task_id: taskId,
     approved_spec_ref,
-    approved_plan_ref
+    approved_plan_ref,
+    goal: state.task_title ?? undefined
   });
 
   const result_path = path.posix.join(getTaskArtifactsDir(taskId), 'exec-result-exec-01.yaml');

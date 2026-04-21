@@ -13,6 +13,10 @@ export async function retryCommand(taskId: string): Promise<string> {
     throw new Error(`缺少可重试执行单元: ${taskId}`);
   }
 
+  if (execUnit.attempt >= 3) {
+    throw new Error(`任务已达到最大重试次数 (3): ${taskId}`);
+  }
+
   const nextState = {
     ...state,
     status: 'dispatched' as const,

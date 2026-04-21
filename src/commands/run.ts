@@ -14,39 +14,27 @@ import { resolveRetryableBlock } from '../runtime/state-machine/recovery-rules.j
 function resolveReviewTestFailureReason(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
 
-  if (message.startsWith('review_report_task_mismatch:')) {
+  if (message.includes('review_report_task_mismatch')) {
     return 'review_report_task_mismatch';
   }
 
-  if (message.startsWith('review_report_result_set_mismatch:')) {
+  if (message.includes('review_report_result_set_mismatch')) {
     return 'review_report_result_set_mismatch';
   }
 
   if (message.startsWith('review_report_invalid:')) {
-    if (message.includes('review_report_task_mismatch:')) {
-      return 'review_report_task_mismatch';
-    }
-    if (message.includes('review_report_result_set_mismatch:')) {
-      return 'review_report_result_set_mismatch';
-    }
     return 'review_report_invalid';
   }
 
-  if (message.startsWith('test_report_task_mismatch:')) {
+  if (message.includes('test_report_task_mismatch')) {
     return 'test_report_task_mismatch';
   }
 
-  if (message.startsWith('test_report_result_set_mismatch:')) {
+  if (message.includes('test_report_result_set_mismatch')) {
     return 'test_report_result_set_mismatch';
   }
 
   if (message.startsWith('test_report_invalid:')) {
-    if (message.includes('test_report_task_mismatch:')) {
-      return 'test_report_task_mismatch';
-    }
-    if (message.includes('test_report_result_set_mismatch:')) {
-      return 'test_report_result_set_mismatch';
-    }
     return 'test_report_invalid';
   }
 

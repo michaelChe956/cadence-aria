@@ -150,7 +150,7 @@ export async function runReviewAndTest(taskId: string): Promise<{
     ? validateExecutionContextBundle(
         parseYaml(await fs.readFile(resolveWorkspacePath(state.context_bundle_ref), 'utf8'))
       ).workspace_context.repo_path
-    : process.cwd();
+    : (() => { throw new Error('缺少 execution context bundle，无法确定执行目录'); })();
   const specRef = state.approved_spec_ref;
   const planRef = state.approved_plan_ref;
 

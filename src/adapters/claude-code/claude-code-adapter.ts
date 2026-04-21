@@ -5,6 +5,7 @@ export type ClaudeCodeCommandInput = {
   cwd: string;
   promptPath: string;
   promptContent?: string;
+  timeoutMs?: number;
 };
 
 export type CliExecutionResult = {
@@ -22,7 +23,9 @@ export function buildClaudeCodeCommand(input: ClaudeCodeCommandInput): string[] 
   ];
 }
 
-async function runCliCommand(args: string[], cwd: string): Promise<CliExecutionResult> {
+const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
+
+async function runCliCommand(args: string[], cwd: string, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<CliExecutionResult> {
   if (args.length === 0) {
     throw new Error('spawn args cannot be empty');
   }
@@ -30,6 +33,11 @@ async function runCliCommand(args: string[], cwd: string): Promise<CliExecutionR
     const child = spawn(args[0], args.slice(1), { cwd });
     let stdout = '';
     let stderr = '';
+
+    const timeout = setTimeout(() => {
+      child.kill('SIGTERM');
+      reject(new Error('claude_code_timed_out'));
+    }, timeoutMs);
 
     child.stdin?.end();
 
@@ -41,8 +49,12 @@ async function runCliCommand(args: string[], cwd: string): Promise<CliExecutionR
       stderr += chunk.toString();
     });
 
-    child.on('error', reject);
+    child.on('error', err => {
+      clearTimeout(timeout);
+      reject(err);
+    });
     child.on('close', exitCode => {
+      clearTimeout(timeout);
       resolve({
         exitCode: exitCode ?? 1,
         stdout,
@@ -57,5 +69,5 @@ export async function runClaudeCode(input: ClaudeCodeCommandInput): Promise<CliE
   return runCliCommand(buildClaudeCodeCommand({
     ...input,
     promptContent
-  }), input.cwd);
+  }), input.cwd, input.timeoutMs);
 }
