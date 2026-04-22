@@ -31,7 +31,22 @@
 ```
 
 ## 8. 校验规则
-`decision` 必须属于允许枚举。
+
+### L1 存在性校验
+- `decision` 存在且为 `pass` / `backtrack` / `hold` 之一
+- `blocking_items` 存在（允许为空数组 `[]`）
+- `next_node` 存在且非空
+
+### L2 结构性校验
+- `decision` 为字符串，取值范围：`pass`, `backtrack`, `hold`
+- `blocking_items` 为数组，每个元素为对象（含 `description` 字段）
+- `next_node` 为字符串，必须是合法节点 ID（Nxx 或 Xxx）
+- `required_user_action`（若存在）为字符串类型
+
+### L3 语义性校验（二期增强）
+- `decision` 为 `backtrack` 时，`blocking_items` 不应为空
+- `decision` 为 `hold` 时，`required_user_action` 应存在且非空
+- `next_node` 应与 `decision` 一致（pass → N07, backtrack → N04, hold → X01）
 
 ## 9. 交接规则
 供 `N07` 或回退 `N04` 消费。

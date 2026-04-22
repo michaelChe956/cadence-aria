@@ -31,7 +31,21 @@
 ```
 
 ## 8. 校验规则
-`updated_design_ref` 必须存在。
+
+### L1 存在性校验
+- `revision_summary` 存在且非空
+- `resolved_findings` 存在（允许为空数组 `[]`）
+- `remaining_risks` 存在（允许为空数组 `[]`）
+- `updated_design_ref` 存在且非空
+
+### L2 结构性校验
+- `revision_summary` 为字符串类型
+- `resolved_findings` 为数组，每个元素应引用 design_review 中 findings 的 ID
+- `remaining_risks` 为数组，每个元素为 Risk Registry 中的 `riskId` 引用
+- `updated_design_ref` 为产物引用格式（`art_<type>_<id>`）
+
+### L3 语义性校验（二期增强）
+- `resolved_findings` 中每个条目应在对应 design_review 的 findings 中存在
 
 ## 9. 交接规则
 供 `N08` 再次评审消费。

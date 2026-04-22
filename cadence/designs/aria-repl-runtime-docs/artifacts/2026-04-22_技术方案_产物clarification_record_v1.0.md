@@ -37,7 +37,24 @@
 ```
 
 ## 8. 校验规则
-必须显式列出 `open_questions`，即使为空也要写。
+
+### L1 存在性校验
+- `goal_summary` 存在且非空
+- `constraints` 存在（允许为空数组 `[]`）
+- `assumptions` 存在（允许为空数组 `[]`）
+- `open_questions` 存在（即使为空也必须写 `[]`）
+- `suggested_scope` 存在且非空
+
+### L2 结构性校验
+- `goal_summary` 为字符串类型，长度 >= 20 字符
+- `constraints` 为数组类型，每个元素为对象（含 `description` 字段）
+- `assumptions` 为数组类型，每个元素为字符串
+- `open_questions` 为数组类型，每个元素为字符串；空值必须写 `[]`，不允许 `null`
+- `suggested_scope` 为字符串类型
+
+### L3 语义性校验（二期增强）
+- `goal_summary` 应覆盖用户原始需求的核心意图
+- `open_questions` 中每个问题应可由用户直接回答
 
 ## 9. 交接规则
 供 `N05` 和 `N06` 消费。

@@ -31,7 +31,22 @@ plan 编写完成后产出；最终评审补丁任务也会复用。
 ```
 
 ## 8. 校验规则
-每个 worktask 必须有目标和验收标准。
+
+### L1 存在性校验
+- `worktasks` 存在且为非空数组（至少 1 个）
+- `dependencies` 存在（允许为空数组 `[]`）
+- `parallel_groups` 存在（允许为空数组 `[]`）
+- `acceptance_targets` 存在且为非空数组（至少 1 个）
+
+### L2 结构性校验
+- `worktasks` 为数组，每个元素为对象（含 `id`、`goal`、`acceptance_criteria`、`dependencies` 字段）
+- `dependencies` 为数组，每个元素为对象（含 `from`、`to` 字段）
+- `parallel_groups` 为数组，每个元素为对象（含 `group_id`、`worktask_ids` 字段）
+- `acceptance_targets` 为数组，每个元素为对象（含 `worktask_id`、`targets` 字段）
+
+### L3 语义性校验（二期增强）
+- 每个 worktask 的 `goal` 应可追溯 to plan 中的 work package
+- `dependencies` 不应包含环路
 
 ## 9. 交接规则
 供 `N13` 和 `N26` 消费。

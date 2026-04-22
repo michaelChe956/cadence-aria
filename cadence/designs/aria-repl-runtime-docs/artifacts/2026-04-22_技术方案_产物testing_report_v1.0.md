@@ -21,17 +21,37 @@ testing 完成后产出。
 | `pass_fail_status` | 是 |
 | `failures` | 是 |
 | `next_recommendation` | 是 |
+| `coverage_summary` | 否 |
+| `test_types` | 否 |
 
 ## 6. 推荐结构
 测试集合、通过状态、失败详情、建议下一步。
 
 ## 7. 固定格式示例
 ```json
-{"tests_run":[],"pass_fail_status":"pass|fail","failures":[],"next_recommendation":"N18"}
+{"tests_run":[{"test_id":"t1","name":"test case 1","status":"pass"}],"pass_fail_status":"pass|fail|partial|skip","failures":[],"next_recommendation":"N18","coverage_summary":{"line_coverage":85.2},"test_types":["unit"]}
 ```
 
 ## 8. 校验规则
-失败时 `failures` 不能为空。
+
+### L1 存在性校验
+- `tests_run` 存在且为非空数组（至少 1 条）
+- `pass_fail_status` 存在且为 `pass` / `fail` / `partial` / `skip` 之一
+- `failures` 存在（允许为空数组 `[]`）
+- `next_recommendation` 存在且非空
+
+### L2 结构性校验
+- `tests_run` 为数组，每个元素为对象（含 `test_id`、`name`、`status` 字段）
+- `pass_fail_status` 为字符串，取值范围：`pass`, `fail`, `partial`, `skip`
+- `failures` 为数组，每个元素为对象（含 `test_id`、`error_message` 字段）
+- `next_recommendation` 为字符串，必须是合法节点 ID
+- `coverage_summary`（若存在）为对象（含 `line_coverage`、`branch_coverage` 字段）
+- `test_types`（若存在）为数组，每个元素为字符串（如 `unit`, `integration`, `e2e`）
+
+### L3 语义性校验（二期增强）
+- `pass_fail_status` 为 `fail` 时，`failures` 不应为空
+- `pass_fail_status` 为 `skip` 时，`tests_run` 应为空
+- `coverage_summary` 中的百分比值应在 0-100 范围内
 
 ## 9. 交接规则
 供 `N18` 或 `N19` 消费。

@@ -27,11 +27,27 @@
 
 ## 7. 固定格式示例
 ```json
-{"overallDecision":"pass|followup","completedScope":[],"remainingGaps":[],"followupNeeded":false}
+{"overallDecision":"pass|followup|fail","completedScope":[{"item":"...","status":"completed"}],"remainingGaps":[],"followupNeeded":false}
 ```
 
 ## 8. 校验规则
-`followupNeeded` 为 true 时，`remainingGaps` 不能为空。
+
+### L1 存在性校验
+- `overallDecision` 存在且为 `pass` / `followup` / `fail` 之一
+- `completedScope` 存在且非空
+- `remainingGaps` 存在（允许为空数组 `[]`）
+- `followupNeeded` 存在且为布尔值
+
+### L2 结构性校验
+- `overallDecision` 为字符串，取值范围：`pass`, `followup`, `fail`
+- `completedScope` 为数组，每个元素为对象（含 `item`、`status` 字段）
+- `remainingGaps` 为数组，每个元素为对象（含 `description`、`severity` 字段）
+- `followupNeeded` 为布尔类型
+
+### L3 语义性校验（二期增强）
+- `overallDecision` 为 `followup` 时，`followupNeeded` 必须为 `true` 且 `remainingGaps` 不应为空
+- `overallDecision` 为 `fail` 时，应进入 X08 manual_intervention
+- `completedScope` 中的 `status` 取值应为 `completed` / `partial`
 
 ## 9. 交接规则
 供 `N26` 或 `N27` 消费。

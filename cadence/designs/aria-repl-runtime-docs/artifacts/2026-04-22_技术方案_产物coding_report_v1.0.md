@@ -31,7 +31,22 @@ coding 完成或 rework 后产出。
 ```
 
 ## 8. 校验规则
-`changed_files` 必须至少 1 项或显式声明无代码变更原因。
+
+### L1 存在性校验
+- `workTaskId` 存在且非空
+- `changed_files` 存在且为非空数组（至少 1 项），或显式声明无代码变更原因
+- `implementation_summary` 存在且非空
+- `known_risks` 存在（允许为空数组 `[]`）
+
+### L2 结构性校验
+- `workTaskId` 为字符串，格式符合 `work_` 前缀规则
+- `changed_files` 为数组，每个元素为相对文件路径字符串
+- `implementation_summary` 为字符串类型，长度 >= 20 字符
+- `known_risks` 为数组，每个元素为 Risk Registry 中的 `riskId` 引用
+
+### L3 语义性校验（二期增强）
+- `changed_files` 中的文件路径应存在于 worktree 中
+- `implementation_summary` 应涵盖所有 `changed_files` 的变更意图
 
 ## 9. 交接规则
 供 `N17`、`N18`、`N20` 消费。

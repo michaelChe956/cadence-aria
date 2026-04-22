@@ -27,11 +27,27 @@
 
 ## 7. 固定格式示例
 ```json
-{"review_decision":"pass|revise","findings":[],"required_changes":[],"allow_next_step":false}
+{"review_decision":"pass|revise|conditional_pass","findings":[],"required_changes":[],"allow_next_step":false}
 ```
 
 ## 8. 校验规则
-必须显式写出 `allow_next_step`。
+
+### L1 存在性校验
+- `review_decision` 存在且为 `pass` / `revise` / `conditional_pass` 之一
+- `findings` 存在（允许为空数组 `[]`）
+- `required_changes` 存在（允许为空数组 `[]`）
+- `allow_next_step` 存在且为布尔值
+
+### L2 结构性校验
+- `review_decision` 为字符串，取值范围：`pass`, `revise`, `conditional_pass`
+- `findings` 为数组，每个元素为对象（含 `severity`、`description` 字段）
+- `required_changes` 为数组，每个元素为对象（含 `description` 字段）
+- `allow_next_step` 为布尔类型
+
+### L3 语义性校验（二期增强）
+- `review_decision` 为 `revise` 时，`required_changes` 不应为空
+- `review_decision` 为 `pass` 时，`allow_next_step` 应为 `true`
+- `findings` 中 `severity` 取值应为 `high` / `medium` / `low`
 
 ## 9. 交接规则
 供 `N09` 或 `N10` 消费。

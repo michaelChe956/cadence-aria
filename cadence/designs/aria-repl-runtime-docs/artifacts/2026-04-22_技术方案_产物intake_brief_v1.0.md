@@ -37,7 +37,24 @@
 ```
 
 ## 8. 校验规则
-5 个必填字段必须存在，`raw_user_request` 不能为空。
+
+### L1 存在性校验
+- `request_summary` 存在且非空
+- `raw_user_request` 存在且非空
+- `repo_context` 存在（允许为空对象 `{}`）
+- `initial_constraints` 存在（允许为空数组 `[]`）
+- `requested_goal` 存在且非空
+
+### L2 结构性校验
+- `request_summary` 为字符串类型，长度 >= 10 字符
+- `raw_user_request` 为字符串类型
+- `repo_context` 为对象类型（包含可选子字段：branch, language, framework）
+- `initial_constraints` 为数组类型
+- `requested_goal` 为字符串类型，长度 >= 5 字符
+
+### L3 语义性校验（二期增强）
+- `request_summary` 应包含动词和目标（如"实现"、"修复"、"优化"等）
+- `requested_goal` 应可映射到具体交付物
 
 ## 9. 交接规则
 供 `N02`、`N04`、`N05` 消费。
