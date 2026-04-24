@@ -73,6 +73,7 @@ P3 完成后，必须满足：
 - Create: `tests/cli_adapter_baseline.rs`
 - Create: `tests/provider_error_routes.rs`
 - Create: `tests/planning_chain_fake_provider.rs`
+- Create: `tests/risk_registry_minimal.rs`
 - Create: `tests/support/mod.rs`
 
 ---
@@ -369,6 +370,41 @@ git add src/runtime_units/design_review.rs src/runtime_units/design_revision.rs 
 git commit -m "feat: add planning chain review readiness and dispatch nodes"
 ```
 
+### Task 6: 实现 Risk Registry 最小验证
+
+**Files:**
+- Modify: `src/cross_cutting/provider_run.rs`
+- Modify: `src/protocol/artifacts.rs`
+- Test: `tests/risk_registry_minimal.rs`
+
+- [ ] **Step 1: 写失败测试，覆盖 Risk Registry 最小能力**
+
+  断言：
+  - riskId 可被分配并唯一
+  - risk entry 可被创建，包含 `riskId`、`description`、`severity`、`status`
+  - risk registry 可落盘到 artifact 或 runtime snapshot
+  - daemon 重启后可恢复 risk registry
+  - 产物引用中的 riskId 可被正确解析
+
+- [ ] **Step 2: 在 provider run 和 artifact 中接入 risk registry**
+
+  要求：
+  - `ProviderRunRecord` 的审计字段中保留 `riskRegistryRef`
+  - planning 节点（如 `N08 design_review`、`N10 readiness_check`）发现风险时可写入 risk entry
+  - risk registry snapshot 成为 `RuntimeSnapshot` 的合法子结构
+
+- [ ] **Step 3: 运行验证**
+
+  Run: `cargo test --test risk_registry_minimal`
+  Expected: PASS，riskId 创建、引用、落盘、恢复都通过
+
+- [ ] **Step 4: 提交阶段性变更**
+
+  ```bash
+  git add src/cross_cutting/provider_run.rs src/protocol/artifacts.rs tests/risk_registry_minimal.rs
+  git commit -m "feat: add risk registry minimal validation"
+  ```
+
 ---
 
 ## 4. P3 完成判定
@@ -376,6 +412,7 @@ git commit -m "feat: add planning chain review readiness and dispatch nodes"
 - [ ] `cargo test --test context_builder` 通过
 - [ ] `cargo test --test cli_adapter_baseline --test provider_error_routes` 通过
 - [ ] `cargo test --test planning_chain_fake_provider` 通过
+- [ ] `cargo test --test risk_registry_minimal` 通过，riskId 创建、引用、落盘、恢复覆盖完整
 - [ ] `ProviderContextPackage -> AdapterInput` 映射稳定
 - [ ] fake provider 与 CLI adapter 共用 `AdapterInput` / `AdapterOutput`
 - [ ] provider capability / compatibility matrix / provider error code 写入 `ProviderRunRecord`
@@ -383,3 +420,4 @@ git commit -m "feat: add planning chain review readiness and dispatch nodes"
 - [ ] 真实 Claude Code / Codex 作为用户本机 BYO CLI 接入；CLI 缺失、未登录或权限不足时可诊断失败，不自动安装、不静默降级
 - [ ] `N04-N12` 可在 fake provider 下跑通
 - [ ] `dispatch_package._aria.worktask_routing[]` 稳定生成
+- [ ] 协议不漂移检查：P3 实现字段、provider contract、prompt template、`ProviderRunRecord` 审计字段、fake provider sentinel 与 `实现总契约_v1.0`、`评审后实施规格补齐_v1.1` 一致

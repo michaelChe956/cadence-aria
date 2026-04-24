@@ -60,6 +60,7 @@ P2 完成后，必须满足：
 - Create: `tests/openspec_bundle.rs`
 - Create: `tests/openspec_bundle_schema.rs`
 - Create: `tests/traceability_binding.rs`
+- Create: `tests/superseded_artifact_refs.rs`
 - Create: `tests/support/mod.rs`
 - Create: `tests/fixtures/artifacts/spec.md`
 - Create: `tests/fixtures/artifacts/design.md`
@@ -391,6 +392,38 @@ git add src/protocol/traceability.rs src/cross_cutting/traceability.rs tests/tra
 git commit -m "feat: add traceability binding and coverage checker"
 ```
 
+### Task 7: 实现 superseded artifact refs 验证
+
+**Files:**
+- Modify: `src/cross_cutting/artifact_validate.rs`
+- Test: `tests/superseded_artifact_refs.rs`
+
+- [ ] **Step 1: 写失败测试，覆盖回流后旧产物失效**
+
+  断言：
+  - 回流后旧 artifact 被写入 `supersededArtifactRefs`
+  - 节点进入前不得引用 superseded 产物作为输入
+  - `ArtifactRef` 被标记为 `superseded` 后不可再被 canonical artifact validator 接受为有效输入
+
+- [ ] **Step 2: 在 artifact validator 中接入 superseded 判定**
+
+  要求：
+  - validator 校验输入 artifact 时检查其是否存在于 `supersededArtifactRefs`
+  - 若引用 superseded artifact，返回 `invalid_input_superseded` 错误
+  - 回流操作必须同时更新 task runtime state 的 `supersededArtifactRefs`
+
+- [ ] **Step 3: 运行验证**
+
+  Run: `cargo test --test superseded_artifact_refs`
+  Expected: PASS，回流后旧产物不可作为输入
+
+- [ ] **Step 4: 提交阶段性变更**
+
+  ```bash
+  git add src/cross_cutting/artifact_validate.rs tests/superseded_artifact_refs.rs
+  git commit -m "feat: add superseded artifact ref validation"
+  ```
+
 ---
 
 ## 4. P2 完成判定
@@ -399,7 +432,9 @@ git commit -m "feat: add traceability binding and coverage checker"
 - [ ] `cargo test --test document_ops` 通过
 - [ ] `cargo test --test openspec_bundle --test openspec_bundle_schema` 通过
 - [ ] `cargo test --test traceability_binding` 通过
+- [ ] `cargo test --test superseded_artifact_refs` 通过，回流后旧产物不可再作为输入
 - [ ] `spec/design/plan` 可稳定编译 projection
 - [ ] JSON artifact 的 `_aria` 结构已定稿
 - [ ] OpenSpec skeleton bootstrap、bundle schema 与 traceability binding 可落盘
 - [ ] 17 类一期产物（16 类业务产物 + `runtime_snapshot`）全部进入 validator 注册表
+- [ ] 协议不漂移检查：P2 实现字段、projection payload、OpenSpec bundle schema、fixture golden JSON 与 `实现总契约_v1.0`、`评审后实施规格补齐_v1.1` 一致，顶层序列化字段固定使用 camelCase
