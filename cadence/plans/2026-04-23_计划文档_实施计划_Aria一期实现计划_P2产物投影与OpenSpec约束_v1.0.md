@@ -1,5 +1,9 @@
 # Aria Phase 1 P2 Implementation Plan
 
+> **⚠️ 本版本已废弃（superseded）**
+>
+> 请以 `cadence/plans/2026-04-24_计划文档_实施计划_Aria一期实现计划_P2产物投影与OpenSpec约束_v1.1.md` 为准。本文件保留仅供历史参考。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 建立 Document Operation、canonical artifact 校验、projection 编译、phase1 profile、OpenSpec constraint bundle、traceability binding 这条数据面基础层。
