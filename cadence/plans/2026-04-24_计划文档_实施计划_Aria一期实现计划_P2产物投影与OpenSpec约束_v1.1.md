@@ -1,5 +1,10 @@
 # Aria Phase 1 P2 Implementation Plan
 
+**文档信息**
+- **创建日期**：2026-04-24
+- **版本**：v1.1（评审后修正版）
+- **修正内容**：目标文件结构补充 golden projection fixture；完成判定增加 canonical validator 与 golden JSON 对齐要求。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 建立 Document Operation、canonical artifact 校验、projection 编译、phase1 profile、OpenSpec constraint bundle、traceability binding 这条数据面基础层。
@@ -65,6 +70,9 @@ P2 完成后，必须满足：
 - Create: `tests/fixtures/artifacts/spec.md`
 - Create: `tests/fixtures/artifacts/design.md`
 - Create: `tests/fixtures/artifacts/plan.md`
+- Create: `tests/fixtures/artifacts/golden/spec_projection.json`
+- Create: `tests/fixtures/artifacts/golden/design_projection.json`
+- Create: `tests/fixtures/artifacts/golden/plan_projection.json`
 - Create: `tests/fixtures/openspec/changes/sample-change/proposal.md`
 - Create: `tests/fixtures/openspec/changes/sample-change/specs/sample/spec.md`
 - Create: `tests/fixtures/openspec/changes/sample-change/design.md`
@@ -428,13 +436,14 @@ git commit -m "feat: add traceability binding and coverage checker"
 
 ## 4. P2 完成判定
 
-- [ ] `cargo test --test spec_projection --test design_projection --test plan_projection` 通过
+- [ ] `cargo test --test spec_projection --test design_projection --test plan_projection` 通过，且 compiler 输出与 `tests/fixtures/artifacts/golden/*.json` 逐项对齐
 - [ ] `cargo test --test document_ops` 通过
 - [ ] `cargo test --test openspec_bundle --test openspec_bundle_schema` 通过
 - [ ] `cargo test --test traceability_binding` 通过
 - [ ] `cargo test --test superseded_artifact_refs` 通过，回流后旧产物不可再作为输入
-- [ ] `spec/design/plan` 可稳定编译 projection
+- [ ] `spec/design/plan` 可稳定编译 projection，projection payload 与 golden JSON 对齐
 - [ ] JSON artifact 的 `_aria` 结构已定稿
 - [ ] OpenSpec skeleton bootstrap、bundle schema 与 traceability binding 可落盘
 - [ ] 17 类一期产物（16 类业务产物 + `runtime_snapshot`）全部进入 validator 注册表
+- [ ] canonical validator 同时覆盖 canonical schema 最小字段和 Projection schema，fixture 同时通过两种校验
 - [ ] 协议不漂移检查：P2 实现字段、projection payload、OpenSpec bundle schema、fixture golden JSON 与 `实现总契约_v1.0`、`评审后实施规格补齐_v1.2` 一致，顶层序列化字段固定使用 camelCase

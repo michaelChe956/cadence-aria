@@ -1,5 +1,10 @@
 # Aria Phase 1 P3 Implementation Plan
 
+**文档信息**
+- **创建日期**：2026-04-24
+- **版本**：v1.1（评审后修正版）
+- **修正内容**：范围出口增加 `design_revision_record`；Task 5 增加 N09 revise 路径测试断言与回流失效验证。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 建立 BYO 本地 CLI provider contract、prompt/contract registry、provider context builder，并打通 `N04-N12` 规划链。
@@ -42,6 +47,7 @@ P3 完成后，必须满足：
    - `spec_gate_decision`
    - `design`
    - `design_review`
+   - `design_revision_record`（含 revise 路径回退到 N08 再评审）
    - `readiness_check`
    - `plan`
    - `dispatch_package`
@@ -331,19 +337,28 @@ git commit -m "feat: add planning chain start nodes"
 
 - [ ] **Step 1: 扩展失败测试，覆盖 `N08-N12`**
 
-断言：
-- `design_review`
+断言（happy path + revise path）：
+- `design_review` 生成，`review_decision` 枚举值为 `pass/revise/conditional_pass`
+- `design_review.review_decision=pass` 时路由到 `N10`
+- `design_review.review_decision=revise` 时必须进入 `N09`
+- `N09 design_revision` 必须生成 `design_revision_record` 和更新后的 `design` ref
+- `N09` 完成后必须回到 `N08` 再评审
+- 若修订跨越中间产物，必须按回流失效规则标记相关 artifact 为 `superseded`
 - `readiness_check`
 - `plan`
 - `PlanProjection`
 - `dispatch_package`
-- `dispatch_package._aria.worktask_routing[]`
+- `dispatch_package._aria.worktask_routing[]`，且 `execution_mode` 使用统一枚举 `agent_only/human_assisted/human_required`
 
 - [ ] **Step 2: 实现 `N08 design_review` / `N09 design_revision`**
 
 要求：
-- 支持 review findings
-- 支持 revision route
+- `N08` 产出 `design_review`，`review_decision` 取值严格为 `pass/revise/conditional_pass`
+- `review_decision=revise` 时触发 `N09`
+- `N09` 产出 `design_revision_record`，逐项回应 `design_review.findings`
+- `N09` 同时产出更新后的 `design`，并编译新的 `DesignProjection`
+- `N09` 完成后回到 `N08` 再评审
+- 修订导致的旧 `design` / `DesignProjection` 标记为 `superseded`，由 daemon 写入 `supersededArtifactRefs`
 
 - [ ] **Step 3: 实现 `N10 readiness_check` / `N11 plan_authoring`**
 
@@ -411,13 +426,14 @@ git commit -m "feat: add planning chain review readiness and dispatch nodes"
 
 - [ ] `cargo test --test context_builder` 通过
 - [ ] `cargo test --test cli_adapter_baseline --test provider_error_routes` 通过
-- [ ] `cargo test --test planning_chain_fake_provider` 通过
+- [ ] `cargo test --test planning_chain_fake_provider` 通过，且覆盖 `N08 review_decision=revise` → `N09` → 回到 `N08` 再评审的闭环
 - [ ] `cargo test --test risk_registry_minimal` 通过，riskId 创建、引用、落盘、恢复覆盖完整
 - [ ] `ProviderContextPackage -> AdapterInput` 映射稳定
 - [ ] fake provider 与 CLI adapter 共用 `AdapterInput` / `AdapterOutput`
 - [ ] provider capability / compatibility matrix / provider error code 写入 `ProviderRunRecord`
-- [ ] prompt template registry 注册 `N04-N12` 一期模板并可稳定渲染
+- [ ] prompt template registry 注册 `N04-N12` 一期模板并可稳定渲染；N08 模板差异项使用 `review_decision=pass/revise/conditional_pass`
 - [ ] 真实 Claude Code / Codex 作为用户本机 BYO CLI 接入；CLI 缺失、未登录或权限不足时可诊断失败，不自动安装、不静默降级
-- [ ] `N04-N12` 可在 fake provider 下跑通
-- [ ] `dispatch_package._aria.worktask_routing[]` 稳定生成
+- [ ] `N04-N12` 可在 fake provider 下跑通，且 `design_revision_record` 在 revise 路径中稳定产出
+- [ ] `dispatch_package._aria.worktask_routing[]` 稳定生成，且 `execution_mode` 使用统一枚举 `agent_only/human_assisted/human_required`
+- [ ] fake provider 输出不会绕过 canonical validator；prompt manifest 输出 schema 与上游产物枚举一致
 - [ ] 协议不漂移检查：P3 实现字段、provider contract、prompt template、`ProviderRunRecord` 审计字段、fake provider sentinel 与 `实现总契约_v1.0`、`评审后实施规格补齐_v1.2` 一致
