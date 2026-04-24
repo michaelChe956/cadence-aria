@@ -289,6 +289,20 @@ Provider Adapter 的稳定边界是 `AdapterInput` / `AdapterOutput`，不是具
 
 真实 CLI adapter baseline 只验证 adapter 行为，不要求 Claude Code / Codex 在测试中产出高质量业务结果；业务结果仍通过 fake provider fixture 固化。
 
+一期 provider 错误必须归一化为稳定错误码：
+
+| 错误码 | 说明 |
+|--------|------|
+| `provider_command_missing` | provider command 不存在 |
+| `provider_unauthorized` | CLI 未登录、token 失效或账号未授权 |
+| `provider_permission_denied` | sandbox、文件系统或审批策略拒绝 |
+| `provider_incompatible_output` | provider 不支持所需 output mode 或 schema |
+| `provider_timeout` | provider run 超时 |
+| `provider_parse_error` | structured output 无法解析 |
+| `provider_execution_failed` | 其他 provider 非零退出 |
+
+这些错误码必须进入 `ProviderRunRecord` 和 `provider_run.failed` event；不得只依赖 stderr 文本做路由。
+
 ---
 
 ## 7. 归一化与校验流程
@@ -332,18 +346,18 @@ Provider Adapter 的稳定边界是 `AdapterInput` / `AdapterOutput`，不是具
 
 ## 8. 最小命令面建议
 
-本文件只定义语义，不强制最终 REPL 命令名。为实现一期闭环，建议至少支持：
+本文件只定义语义，不强制最终 REPL 命令名。为实现一期闭环，最小必需命令以 `Aria一期实现总契约` 的 command registry 为准；以下命令语义中，`import/export openspec` 是 P2 之后的扩展建议，不作为 P1 通信验收阻塞项。
 
 | 命令语义 | 作用 |
 |----------|------|
 | `new <request>` | 创建原生 Aria EpicTask |
-| `import openspec <changeId>` | 导入 OpenSpec change 为候选输入 |
+| `import openspec <changeId>` | 导入 OpenSpec change 为候选输入；P2 之后可实现 |
 | `status` | 查看 session、task、gate、queue |
 | `artifacts` | 查看 canonical artifacts 与 external refs |
 | `approve <gateId>` | 通过 gate |
 | `reject <gateId>` | 拒绝 gate 并进入回流或人工介入 |
 | `reply <gateId> <text>` | 为 clarification 或 manual intervention 提供补充 |
-| `export openspec <taskId>` | 将已通过 gate 的 Aria spec/design/plan 导出为 OpenSpec 候选文档 |
+| `export openspec <taskId>` | 将已通过 gate 的 Aria spec/design/plan 导出为 OpenSpec 候选文档；P2 之后可实现 |
 
 ---
 

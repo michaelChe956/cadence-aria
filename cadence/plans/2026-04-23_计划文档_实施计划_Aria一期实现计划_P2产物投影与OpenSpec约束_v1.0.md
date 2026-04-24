@@ -18,7 +18,7 @@ P2 完成后，必须满足：
 2. Markdown / JSON / YAML 文档修改统一走 Document Operation 层
 3. `spec/design/plan` 可以编译出 projection
 4. JSON artifact 支持 `_aria` 扩展与 profile validator
-5. OpenSpec change 可以编译出 `OpenSpecConstraintBundle`
+5. P1 固化的 `changeId` 可以完成 OpenSpec skeleton bootstrap，并编译出字段名稳定的 `OpenSpecConstraintBundle`
 6. traceability binding 可以自动生成
 
 ---
@@ -42,6 +42,7 @@ P2 完成后，必须满足：
 - Create: `tests/design_projection.rs`
 - Create: `tests/plan_projection.rs`
 - Create: `tests/openspec_bundle.rs`
+- Create: `tests/openspec_bundle_schema.rs`
 - Create: `tests/traceability_binding.rs`
 - Create: `tests/support/mod.rs`
 - Create: `tests/fixtures/artifacts/spec.md`
@@ -261,33 +262,44 @@ git add src/protocol/phase1_profile.rs tests/traceability_binding.rs
 git commit -m "feat: add phase1 profile and aria extension models"
 ```
 
-### Task 5: 实现 OpenSpec bootstrap 与 constraint bundle compiler
+### Task 5: 实现 OpenSpec bootstrap、bundle schema 与 constraint compiler
 
 **Files:**
 - Create: `src/protocol/constraints.rs`
 - Create: `src/cross_cutting/openspec_constraints.rs`
 - Test: `tests/openspec_bundle.rs`
+- Test: `tests/openspec_bundle_schema.rs`
 - Create: `tests/fixtures/openspec/changes/sample-change/proposal.md`
 - Create: `tests/fixtures/openspec/changes/sample-change/specs/sample/spec.md`
 - Create: `tests/fixtures/openspec/changes/sample-change/design.md`
 - Create: `tests/fixtures/openspec/changes/sample-change/tasks.md`
 
-- [ ] **Step 1: 写失败测试，覆盖 bundle 编译与 stale 判定**
+- [ ] **Step 1: 写失败测试，覆盖 bundle schema、bootstrap 与 stale 判定**
 
 断言：
 - `changeId` 绑定
 - source manifest
 - `bundleStatus`
 - hash 变化后 `stale`
+- 序列化 JSON 顶层字段固定使用 `proposalConstraints`、`requirementConstraints`、`designConstraints`、`taskConstraints`、`traceabilityRequirements`、`coverageModel`
+- `scope_constraints`、`requirement_ids`、`task_ids`、`traceability_map` 只能作为内部 helper 输出或 payload 子字段，不能替代 bundle 顶层字段名
 
-- [ ] **Step 2: 实现 OpenSpec file manifest**
+- [ ] **Step 2: 实现 OpenSpec skeleton bootstrap**
+
+要求：
+- 读取 P1 task runtime state 中已固化的 `changeId`
+- 若 `openspec/changes/<changeId>/` 不存在，通过 `document_ops.upsert_section` / structured writer 创建最小 skeleton
+- 最小 skeleton 包含 `proposal.md`、`specs/<task-scope>/spec.md`、`design.md`、`tasks.md`
+- bootstrap 完成后将 task runtime state 中 `openspec_bootstrap_status` 从 `bootstrap_pending` 更新为 `bootstrapped`
+
+- [ ] **Step 3: 实现 OpenSpec file manifest**
 
 必须记录：
 - path
 - kind
 - sha256
 
-- [ ] **Step 3: 实现 bundle compiler**
+- [ ] **Step 4: 实现 bundle compiler**
 
 必须生成：
 - `proposalConstraints`
@@ -300,8 +312,9 @@ git commit -m "feat: add phase1 profile and aria extension models"
 要求：
 - OpenSpec Markdown 文件读取必须走 `document_ops.read_document_model`
 - OpenSpec 写入或 bootstrap 必须走 `document_ops.upsert_section` / structured writer
+- `OpenSpecConstraintBundle` Rust 类型、JSON schema 与 fixture golden JSON 必须共享同一套字段名
 
-- [ ] **Step 4: 加入缺文件回流判定**
+- [ ] **Step 5: 加入缺文件回流判定**
 
 要求：
 - `proposal.md` 缺失时阻断 `N05`
@@ -309,15 +322,15 @@ git commit -m "feat: add phase1 profile and aria extension models"
 - `design.md` 缺失时阻断 `N11`
 - `tasks.md` 缺失时阻断 `N12/N16`
 
-- [ ] **Step 5: 运行验证**
+- [ ] **Step 6: 运行验证**
 
-Run: `cargo test --test openspec_bundle`  
-Expected: PASS，bundle 编译与 stale 路径通过
+Run: `cargo test --test openspec_bundle --test openspec_bundle_schema`  
+Expected: PASS，bundle schema、bootstrap、编译与 stale 路径通过
 
-- [ ] **Step 6: 提交阶段性变更**
+- [ ] **Step 7: 提交阶段性变更**
 
 ```bash
-git add src/protocol/constraints.rs src/cross_cutting/openspec_constraints.rs tests/openspec_bundle.rs tests/fixtures/openspec
+git add src/protocol/constraints.rs src/cross_cutting/openspec_constraints.rs tests/openspec_bundle.rs tests/openspec_bundle_schema.rs tests/fixtures/openspec
 git commit -m "feat: add openspec bundle compiler and stale detection"
 ```
 
@@ -368,9 +381,9 @@ git commit -m "feat: add traceability binding and coverage checker"
 
 - [ ] `cargo test --test spec_projection --test design_projection --test plan_projection` 通过
 - [ ] `cargo test --test document_ops` 通过
-- [ ] `cargo test --test openspec_bundle` 通过
+- [ ] `cargo test --test openspec_bundle --test openspec_bundle_schema` 通过
 - [ ] `cargo test --test traceability_binding` 通过
 - [ ] `spec/design/plan` 可稳定编译 projection
 - [ ] JSON artifact 的 `_aria` 结构已定稿
-- [ ] OpenSpec bundle 与 traceability binding 可落盘
+- [ ] OpenSpec skeleton bootstrap、bundle schema 与 traceability binding 可落盘
 - [ ] 17 类一期产物（16 类业务产物 + `runtime_snapshot`）全部进入 validator 注册表

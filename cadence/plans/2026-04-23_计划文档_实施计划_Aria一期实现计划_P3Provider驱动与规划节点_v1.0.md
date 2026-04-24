@@ -18,9 +18,10 @@ P3 完成后，必须满足：
 2. `ProviderContextPackage -> AdapterInput` 映射成立
 3. fake provider 与真实 CLI adapter baseline 共用 `AdapterInput` / `AdapterOutput`
 4. Claude Code / Codex 按用户本机 CLI 接入，Aria 不内置 provider、不托管远程模型、不自动安装 CLI
-5. provider capability / compatibility matrix 能写入 `ProviderRunRecord`
-6. fake provider 下 `N04-N12` 规划链可跑
-7. 可产出：
+5. provider capability / compatibility matrix 与 provider error code 能写入 `ProviderRunRecord`
+6. prompt template registry 有明确 `templateId` 清单、render order 和 output instruction
+7. fake provider 下 `N04-N12` 规划链可跑
+8. 可产出：
    - `clarification_record`
    - `spec`
    - `spec_gate_decision`
@@ -42,6 +43,7 @@ P3 完成后，必须满足：
 - Create: `src/cross_cutting/provider_context_builder.rs`
 - Create: `src/cross_cutting/provider_capabilities.rs`
 - Create: `src/cross_cutting/adapter_compatibility.rs`
+- Create: `src/protocol/provider_errors.rs`
 - Create: `src/runtime_units/clarification.rs`
 - Create: `src/runtime_units/spec_authoring.rs`
 - Create: `src/runtime_units/spec_gate_review.rs`
@@ -50,9 +52,11 @@ P3 完成后，必须满足：
 - Create: `src/runtime_units/design_revision.rs`
 - Create: `src/runtime_units/plan_dispatch.rs`
 - Create: `src/protocol/contracts.rs`
+- Create: `src/protocol/prompt_manifest.rs`
 - Create: `src/runtime_units/prompt_template_registry.rs`
 - Create: `tests/context_builder.rs`
 - Create: `tests/cli_adapter_baseline.rs`
+- Create: `tests/provider_error_routes.rs`
 - Create: `tests/planning_chain_fake_provider.rs`
 - Create: `tests/support/mod.rs`
 
@@ -93,6 +97,7 @@ P3 完成后，必须满足：
 - adapter compatibility ref
 - duration
 - timeout / retry
+- provider error code / error details
 
 - [ ] **Step 4: 运行单元验证**
 
@@ -112,8 +117,10 @@ git commit -m "feat: add provider adapter baseline and fake provider"
 - Create: `src/cross_cutting/cli_adapter.rs`
 - Create: `src/cross_cutting/provider_capabilities.rs`
 - Create: `src/cross_cutting/adapter_compatibility.rs`
+- Create: `src/protocol/provider_errors.rs`
 - Modify: `src/cross_cutting/provider_run.rs`
 - Test: `tests/cli_adapter_baseline.rs`
+- Test: `tests/provider_error_routes.rs`
 - Test support: `tests/support/mod.rs`
 
 - [ ] **Step 1: 写失败测试，覆盖 capability probe 与 compatibility matrix**
@@ -124,6 +131,7 @@ git commit -m "feat: add provider adapter baseline and fake provider"
 - Claude Code / Codex 都有默认 compatibility matrix entry
 - provider command 不存在时返回可诊断错误，不 panic
 - provider command 存在但返回 unauthorized / permission denied 时返回可诊断错误，不进入节点收口
+- provider parse error、timeout、incompatible output mode 都映射为稳定错误码
 - CLI adapter baseline 测试使用 fixture command，不依赖研发机器已安装 Claude Code / Codex
 
 - [ ] **Step 2: 实现 provider capability probe**
@@ -143,7 +151,24 @@ git commit -m "feat: add provider adapter baseline and fake provider"
 - `codex` 的 command、prompt input mode、output parser、resume flag、sandbox、approval policy 字段
 - matrix version，并写入 provider run record
 
-- [ ] **Step 4: 实现 CLI spawn adapter**
+- [ ] **Step 4: 实现 provider error registry**
+
+必须包含：
+- `provider_command_missing`
+- `provider_unauthorized`
+- `provider_permission_denied`
+- `provider_incompatible_output`
+- `provider_timeout`
+- `provider_parse_error`
+- `provider_execution_failed`
+
+路由要求：
+- `provider_command_missing`、`provider_unauthorized`、`provider_permission_denied` 默认进入 gate 或 manual intervention，不自动重试
+- `provider_timeout` 可按 `maxRetries` 重试，超过阈值后进入 manual intervention
+- `provider_parse_error` 可重试一次；再次失败进入 gate，要求用户或开发者修正 provider 输出配置
+- 所有 provider 错误必须写入 `ProviderRunRecord` 和 `provider_run.failed` event payload
+
+- [ ] **Step 5: 实现 CLI spawn adapter**
 
 要求：
 - 在指定 `worktreePath` 下启动进程
@@ -153,15 +178,15 @@ git commit -m "feat: add provider adapter baseline and fake provider"
 - 按 `timeout` 执行 soft terminate / hard kill，并写 `timeoutStatus`
 - command missing / unauthorized / insufficient permission / incompatible output mode 必须映射为稳定错误码，交给 provider router 决定 retry、gate 或 manual intervention
 
-- [ ] **Step 5: 运行 CLI adapter baseline 测试**
+- [ ] **Step 6: 运行 CLI adapter baseline 测试**
 
-Run: `cargo test --test cli_adapter_baseline`
-Expected: PASS，使用本地 fixture command 验证真实 spawn 路径，不依赖机器已安装 Claude Code / Codex
+Run: `cargo test --test cli_adapter_baseline --test provider_error_routes`
+Expected: PASS，使用本地 fixture command 验证真实 spawn 路径、错误码映射和路由，不依赖机器已安装 Claude Code / Codex
 
-- [ ] **Step 6: 提交阶段性变更**
+- [ ] **Step 7: 提交阶段性变更**
 
 ```bash
-git add src/cross_cutting/cli_adapter.rs src/cross_cutting/provider_capabilities.rs src/cross_cutting/adapter_compatibility.rs src/cross_cutting/provider_run.rs tests/cli_adapter_baseline.rs tests/support
+git add src/cross_cutting/cli_adapter.rs src/cross_cutting/provider_capabilities.rs src/cross_cutting/adapter_compatibility.rs src/cross_cutting/provider_run.rs src/protocol/provider_errors.rs tests/cli_adapter_baseline.rs tests/provider_error_routes.rs tests/support
 git commit -m "feat: add cli provider adapter baseline"
 ```
 
@@ -169,6 +194,7 @@ git commit -m "feat: add cli provider adapter baseline"
 
 **Files:**
 - Create: `src/protocol/contracts.rs`
+- Create: `src/protocol/prompt_manifest.rs`
 - Create: `src/runtime_units/prompt_template_registry.rs`
 - Create: `src/cross_cutting/provider_context_builder.rs`
 - Test: `tests/context_builder.rs`
@@ -198,6 +224,18 @@ git commit -m "feat: add cli provider adapter baseline"
 要求：
 - 固定 render order
 - 区分 system / contract / projection / bundle / output schema / failure instruction
+- 注册以下一期模板：
+  - `tpl_n04_clarification_v1`
+  - `tpl_n05_spec_authoring_v1`
+  - `tpl_n06_spec_gate_advisory_v1`
+  - `tpl_n07_design_authoring_v1`
+  - `tpl_n08_design_review_v1`
+  - `tpl_n09_design_revision_v1`
+  - `tpl_n10_readiness_check_v1`
+  - `tpl_n11_plan_authoring_v1`
+  - `tpl_n12_dispatch_authoring_v1`
+- 每个模板必须声明 `requiredSections = [system, node_contract, canonical_inputs, projection_summary, constraint_summary, workflow_discipline, output_schema, completion_or_failure]`
+- 每个模板必须声明 `outputSchemaRef`，并能被 context builder 渲染进 `AdapterInput.prompt`
 
 - [ ] **Step 4: 实现 `ProviderContextPackage` builder**
 
@@ -213,7 +251,7 @@ Expected: PASS，builder 对各节点组包正确
 - [ ] **Step 6: 提交阶段性变更**
 
 ```bash
-git add src/protocol/contracts.rs src/runtime_units/prompt_template_registry.rs src/cross_cutting/provider_context_builder.rs tests/context_builder.rs
+git add src/protocol/contracts.rs src/protocol/prompt_manifest.rs src/runtime_units/prompt_template_registry.rs src/cross_cutting/provider_context_builder.rs tests/context_builder.rs
 git commit -m "feat: add execution contract registries and context builder"
 ```
 
@@ -318,11 +356,12 @@ git commit -m "feat: add planning chain review readiness and dispatch nodes"
 ## 4. P3 完成判定
 
 - [ ] `cargo test --test context_builder` 通过
-- [ ] `cargo test --test cli_adapter_baseline` 通过
+- [ ] `cargo test --test cli_adapter_baseline --test provider_error_routes` 通过
 - [ ] `cargo test --test planning_chain_fake_provider` 通过
 - [ ] `ProviderContextPackage -> AdapterInput` 映射稳定
 - [ ] fake provider 与 CLI adapter 共用 `AdapterInput` / `AdapterOutput`
-- [ ] provider capability / compatibility matrix 写入 `ProviderRunRecord`
+- [ ] provider capability / compatibility matrix / provider error code 写入 `ProviderRunRecord`
+- [ ] prompt template registry 注册 `N04-N12` 一期模板并可稳定渲染
 - [ ] 真实 Claude Code / Codex 作为用户本机 BYO CLI 接入；CLI 缺失、未登录或权限不足时可诊断失败，不自动安装、不静默降级
 - [ ] `N04-N12` 可在 fake provider 下跑通
 - [ ] `dispatch_package._aria.worktask_routing[]` 稳定生成
