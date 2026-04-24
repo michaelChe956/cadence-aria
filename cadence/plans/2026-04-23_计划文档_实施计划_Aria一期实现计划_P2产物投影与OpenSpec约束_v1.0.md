@@ -10,6 +10,22 @@
 
 ---
 
+## 0. 评审后准入门槛
+
+P2 是评审中 P0 缺口最集中的阶段。启动 P2 前，必须先落实 `cadence/designs/2026-04-24_技术方案_Aria一期评审后实施规格补齐_v1.1.md`：
+
+- 第 4.5：`ArtifactProjectionRecord`、`SpecProjection`、`DesignProjection`、`PlanProjection` Rust 类型
+- 第 4.6：`OpenSpecConstraintBundle` Rust 类型与 camelCase JSON 字段
+- 第 5 章：Projection 编译规则、heading mapping、稳定 ID 生成、Markdown parser 裁定
+- 第 6 章：OpenSpec 文件到 bundle 字段的映射、缺文件阻断、stale 判定
+- 第 8 章：artifact 存储路径、版本号策略、ExternalArtifactRef 生命周期
+- 第 10 章：`_aria.traceability_refs` 生成算法
+- 第 15 章：fixture 树、最小输入样例与 golden JSON
+
+特别裁定：Projection compiler、OpenSpec bundle compiler 和 fixture golden test 三者必须一起落地；不得只先写空 compiler 或只用 Markdown 原文裸测。
+
+---
+
 ## 1. 范围与出口
 
 P2 完成后，必须满足：

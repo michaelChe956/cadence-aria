@@ -224,6 +224,16 @@ Aria-managed Superpowers 模式必须遵守：
 | `forbiddenActions` | 是 | 禁止越权写文件、直接集成、直接提交主线等 |
 | `verificationCommands` | 否 | 节点允许执行的验证命令 |
 
+与 `Aria一期实现总契约_v1.0` 的字段映射裁定：
+
+| 本文旧字段 | 实现总契约字段 | 裁定 |
+|-----------|----------------|------|
+| `role` | `runtimeRole` | daemon 内部运行角色，允许 `advisory_reviewer` |
+| `role` | `adapterRole` | 传给底层 adapter 的角色，只允许 `orchestrator` / `executor` / `reviewer` |
+| `role=advisory_reviewer` | `runtimeRole=advisory_reviewer` + `adapterRole=reviewer` + `advisoryOnly=true` | advisory 节点只读，最终决策仍由 daemon 生成 |
+
+后续 Rust 类型与 JSON schema 以 `cadence/designs/2026-04-24_技术方案_Aria一期评审后实施规格补齐_v1.1.md` 第 4.7 章为准；本文表格中的 `role` 保留为概念说明，不作为新增序列化字段。
+
 ### 6.2 Claude Code 节点契约
 
 Claude Code 一期主要作为 orchestrator。

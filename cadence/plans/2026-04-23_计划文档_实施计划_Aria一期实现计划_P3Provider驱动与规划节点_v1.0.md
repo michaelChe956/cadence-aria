@@ -10,6 +10,21 @@
 
 ---
 
+## 0. 评审后准入门槛
+
+P3 启动前必须先落实 `cadence/designs/2026-04-24_技术方案_Aria一期评审后实施规格补齐_v1.1.md` 中与 provider 和 prompt 相关的裁定：
+
+- 第 4.7：`NodeExecutionContract`、`WorkflowDisciplineSpec`、`NodePromptTemplateRef`、`ProviderContextPackage`、`ProviderRunRecord`
+- 第 9.1-9.2：prompt render order 与 `N04-N12` manifest
+- 第 9.3：`N04/N05/N07` 三个完整模板
+- 第 9.4：`N06/N08-N12` 可渲染模板骨架与节点差异项
+- 第 9.5：Provider structured output sentinel 与 parse error / incompatible output 判定
+- 第 15.5：fake provider stdout fixture
+
+P3 可以继续先用 fake provider 跑通规划链，但 fake provider 输出必须使用正式 sentinel 格式，避免后续真实 CLI adapter 重写解析逻辑。P3 的 `ProviderRunRecord` 必须记录 capability、compatibility、adapter input/output、timeout、sandbox、approval、constraint 与 traceability 审计字段，不允许只记录 stdout/stderr 和 exit code。
+
+---
+
 ## 1. 范围与出口
 
 P3 完成后，必须满足：
@@ -18,8 +33,8 @@ P3 完成后，必须满足：
 2. `ProviderContextPackage -> AdapterInput` 映射成立
 3. fake provider 与真实 CLI adapter baseline 共用 `AdapterInput` / `AdapterOutput`
 4. Claude Code / Codex 按用户本机 CLI 接入，Aria 不内置 provider、不托管远程模型、不自动安装 CLI
-5. provider capability / compatibility matrix 与 provider error code 能写入 `ProviderRunRecord`
-6. prompt template registry 有明确 `templateId` 清单、render order 和 output instruction
+5. provider capability / compatibility matrix、provider error code、timeout、sandbox、approval policy 与 traceability refs 能写入 `ProviderRunRecord`
+6. prompt template registry 有明确 `templateId` 清单、render order、output instruction，且 `N04-N12` 每个模板都可渲染
 7. fake provider 下 `N04-N12` 规划链可跑
 8. 可产出：
    - `clarification_record`
@@ -177,6 +192,7 @@ git commit -m "feat: add provider adapter baseline and fake provider"
 - 运行前后检测 worktree diff，写入 `filesModified`
 - 按 `timeout` 执行 soft terminate / hard kill，并写 `timeoutStatus`
 - command missing / unauthorized / insufficient permission / incompatible output mode 必须映射为稳定错误码，交给 provider router 决定 retry、gate 或 manual intervention
+- `ProviderRunRecord` 必须写入 `providerCapabilityRef`、`adapterCompatibilityRef`、`contextPackageRef`、`adapterInputRef`、`adapterOutputRef`、`timeoutStatus`、`retryCount`、`sandboxMode`、`approvalPolicy`、`constraintCheckRef`、`traceabilityBindingRefs`
 
 - [ ] **Step 6: 运行 CLI adapter baseline 测试**
 
@@ -236,6 +252,8 @@ git commit -m "feat: add cli provider adapter baseline"
   - `tpl_n12_dispatch_authoring_v1`
 - 每个模板必须声明 `requiredSections = [system, node_contract, canonical_inputs, projection_summary, constraint_summary, workflow_discipline, output_schema, completion_or_failure]`
 - 每个模板必须声明 `outputSchemaRef`，并能被 context builder 渲染进 `AdapterInput.prompt`
+- `N06/N08-N12` 不允许只注册 ID，必须至少按实施规格补齐文档的通用骨架 + 节点差异项渲染出完整 prompt
+- `context_builder` 测试必须覆盖 `N04-N12` 全部模板的成功渲染和缺变量失败路径
 
 - [ ] **Step 4: 实现 `ProviderContextPackage` builder**
 
