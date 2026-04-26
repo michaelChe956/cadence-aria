@@ -2,3 +2,8 @@
 .worktrees/
 .mcp.json
 .codex/config.toml
+
+# Rust build/cache outputs
+target/
+.cargo-home/
+.rustup-home/
