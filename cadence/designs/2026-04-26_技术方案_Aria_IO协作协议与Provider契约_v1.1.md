@@ -3,9 +3,10 @@
 **文档信息**
 
 - **设计编号**：DES-2026-04-23-ARIA-IO-PROVIDER
-- **创建日期**：2026-04-23
-- **版本**：v1.0
+- **创建日期**：2026-04-26
+- **版本**：v1.1
 - **负责人**：Codex
+- **修正内容**：明确 `ProviderContextPackage`、`AdapterInput`、`AdapterOutput` 的实现类型以规格补齐 v1.3 为准
 - **上游依据**：
   - `cadence/designs/2026-04-23_技术方案_Aria一期MVP精简设计_v1.2.md`
   - `cadence/designs/aria-repl-runtime-docs/2026-04-22_技术方案_Aria全局协议_v1.0.md`
@@ -232,7 +233,11 @@ Aria-managed Superpowers 模式必须遵守：
 | `role` | `adapterRole` | 传给底层 adapter 的角色，只允许 `orchestrator` / `executor` / `reviewer` |
 | `role=advisory_reviewer` | `runtimeRole=advisory_reviewer` + `adapterRole=reviewer` + `advisoryOnly=true` | advisory 节点只读，最终决策仍由 daemon 生成 |
 
-后续 Rust 类型与 JSON schema 以 `cadence/designs/2026-04-24_技术方案_Aria一期评审后实施规格补齐_v1.2.md` 第 4.7 章为准；本文表格中的 `role` 保留为概念说明，不作为新增序列化字段。
+实现裁定：
+
+1. `ProviderContextPackage` 的 Rust 类型与 JSON schema 以 `cadence/designs/2026-04-26_技术方案_Aria一期评审后实施规格补齐_v1.3.md` 第 4.7 章为准。
+2. 本文表格中的 `role` 只保留为概念说明，不作为新增序列化字段；代码实现必须使用 `runtimeRole`、`adapterRole`、`advisoryOnly`。
+3. 底层 provider adapter 的 DTO 以规格补齐 v1.3 第 4.7.3 章 `AdapterInput` / `AdapterOutput` 为准；fake provider 与 CLI adapter 必须共用同一 DTO。
 
 ### 6.2 Claude Code 节点契约
 
@@ -268,7 +273,7 @@ Codex 一期主要作为 executor / reviewer。
 
 ### 6.4 CLI / SDK 边界
 
-Provider Adapter 的稳定边界是 `AdapterInput` / `AdapterOutput`，不是具体 CLI 参数。
+Provider Adapter 的稳定边界是 `AdapterInput` / `AdapterOutput`，不是具体 CLI 参数。字段定义以 `Aria一期评审后实施规格补齐_v1.3` 第 4.7.3 章为准。
 
 一期允许默认配置：
 

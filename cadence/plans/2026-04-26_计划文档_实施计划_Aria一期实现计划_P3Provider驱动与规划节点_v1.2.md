@@ -1,9 +1,9 @@
 # Aria Phase 1 P3 Implementation Plan
 
 **文档信息**
-- **创建日期**：2026-04-24
-- **版本**：v1.1（评审后修正版）
-- **修正内容**：范围出口增加 `design_revision_record`；Task 5 增加 N09 revise 路径测试断言与回流失效验证。
+- **创建日期**：2026-04-26
+- **版本**：v1.2（研发可落地性 Review 修正版）
+- **修正内容**：补充 `AdapterInput` / `AdapterOutput` 字段签名，显式要求规划节点走实现总契约 §8.1 统一执行链，并明确 `N06` advisory 逻辑。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -17,9 +17,11 @@
 
 ## 0. 评审后准入门槛
 
-P3 启动前必须先落实 `cadence/designs/2026-04-24_技术方案_Aria一期评审后实施规格补齐_v1.2.md` 中与 provider 和 prompt 相关的裁定：
+P3 启动前必须先落实 `cadence/designs/2026-04-26_技术方案_Aria一期评审后实施规格补齐_v1.3.md` 中与 provider 和 prompt 相关的裁定：
 
 - 第 4.7：`NodeExecutionContract`、`WorkflowDisciplineSpec`、`NodePromptTemplateRef`、`ProviderContextPackage`、`ProviderRunRecord`
+- 第 4.7.3：`AdapterInput` / `AdapterOutput` 运行时 DTO
+- 第 4.7.4：`RuntimeUnit` 统一 handler 契约
 - 第 9.1-9.2：prompt render order 与 `N04-N12` manifest
 - 第 9.3：`N04/N05/N07` 三个完整模板
 - 第 9.4：`N06/N08-N12` 可渲染模板骨架与节点差异项
@@ -97,9 +99,33 @@ P3 完成后，必须满足：
 - [ ] **Step 1: 定义 `AdapterInput` / `AdapterOutput` 运行时封装**
 
 要求：
-- 能记录 raw stdout/stderr
-- 能记录 structured output
-- 能记录 files modified
+- 字段必须与 `评审后实施规格补齐_v1.3` 第 4.7.3 章一致：
+
+```rust
+pub struct AdapterInput {
+    pub provider_type: ProviderType,
+    pub role: AdapterRole,
+    pub worktree_path: Option<String>,
+    pub prompt: String,
+    pub context_files: Vec<String>,
+    pub output_schema: String,
+    pub timeout: u64,
+    pub max_retries: u32,
+}
+
+pub struct AdapterOutput {
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub structured_output: Option<Value>,
+    pub files_modified: Vec<String>,
+    pub duration_ms: u64,
+    pub timeout_status: TimeoutStatus,
+}
+```
+
+- `AdapterInput` 由 `ProviderContextPackage` 映射得到，禁止 fake provider 或 CLI adapter 各自发明额外强字段
+- `AdapterOutput` 必须能记录 raw stdout/stderr、structured output、files modified、duration、timeout status
 - fake provider 和 CLI adapter 后续必须共用同一组 `AdapterInput` / `AdapterOutput` 类型
 
 - [ ] **Step 2: 实现 fake provider adapter**
@@ -292,6 +318,7 @@ git commit -m "feat: add execution contract registries and context builder"
 - [ ] **Step 1: 写失败测试，覆盖 `N04 -> N07`**
 
 断言：
+- 每个 Agent 节点都按 `实现总契约_v1.0` 第 8.1 章统一执行链执行：组装 `CanonicalNodeInput` -> 读取 projection / bundle -> 组装 `ProviderContextPackage` -> 映射 `AdapterInput` -> 调用 provider -> 收集 `ProviderRunRecord` -> 归一化 provider 输出 -> `artifact_validate` -> 写 checkpoint
 - `clarification_record` 生成
 - `spec` 生成并触发 `SpecProjection`
 - `spec_gate_decision` 生成
@@ -300,20 +327,23 @@ git commit -m "feat: add execution contract registries and context builder"
 - [ ] **Step 2: 实现 `N04 clarification`**
 
 要求：
-- 调用 Claude fake provider
+- 按统一执行链调用 Claude fake provider，不得直接把 fake provider stdout 当作正式产物
 - 产出 `clarification_record`
 
 - [ ] **Step 3: 实现 `N05 spec_authoring` 与 `N06 spec_gate_review`**
 
 要求：
 - `N05` 归一化出 `spec`
-- `N06` 由 daemon 生成 `spec_gate_decision`
+- `N06` 先执行 `artifact_validate` 校验 `spec` 与 `SpecProjection`
+- 若配置启用 advisory review，则通过 context builder 构建只读 advisory 请求并调用 Codex，advisory 输出只能作为候选输入
+- `N06` 最终仍由 daemon 按固定协议字段生成 `spec_gate_decision`，不得由 Codex 直接推进 gate 决策
 
 - [ ] **Step 4: 实现 `N07 design_authoring`**
 
 要求：
 - 产出 `design`
 - 编译 `DesignProjection`
+- 按统一执行链完成 provider 调用、归一化、校验、traceability 和 checkpoint
 
 - [ ] **Step 5: 运行集成测试**
 
@@ -338,6 +368,7 @@ git commit -m "feat: add planning chain start nodes"
 - [ ] **Step 1: 扩展失败测试，覆盖 `N08-N12`**
 
 断言（happy path + revise path）：
+- 每个 Agent 节点都按 `实现总契约_v1.0` 第 8.1 章统一执行链执行，不允许绕过 context builder、ProviderRunRecord、归一化、validator 或 checkpoint
 - `design_review` 生成，`review_decision` 枚举值为 `pass/revise/conditional_pass`
 - `design_review.review_decision=pass` 时路由到 `N10`
 - `design_review.review_decision=revise` 时必须进入 `N09`
@@ -354,6 +385,7 @@ git commit -m "feat: add planning chain start nodes"
 
 要求：
 - `N08` 产出 `design_review`，`review_decision` 取值严格为 `pass/revise/conditional_pass`
+- `N08` 可调用 Codex reviewer，但 review 输出必须先归一化为 `design_review` 并通过 validator
 - `review_decision=revise` 时触发 `N09`
 - `N09` 产出 `design_revision_record`，逐项回应 `design_review.findings`
 - `N09` 同时产出更新后的 `design`，并编译新的 `DesignProjection`
@@ -366,6 +398,7 @@ git commit -m "feat: add planning chain start nodes"
 - 产出 `readiness_check`
 - 产出 `plan`
 - 编译 `PlanProjection`
+- `N10/N11` 必须消费 `SpecProjection`、`DesignProjection` 与 `OpenSpecConstraintBundle`，不得直接解析 Markdown 原文做 readiness 或 plan routing
 
 - [ ] **Step 4: 实现 `N12 dispatch_authoring`**
 
@@ -440,5 +473,5 @@ git commit -m "feat: add planning chain review readiness and dispatch nodes"
 - [ ] `N04-N12` 可在 fake provider 下跑通，且 `design_revision_record` 在 revise 路径中稳定产出
 - [ ] `dispatch_package._aria.worktask_routing[]` 稳定生成，且 `execution_mode` 使用统一枚举 `agent_only/human_assisted/human_required`
 - [ ] fake provider 输出不会绕过 canonical validator；prompt manifest 输出 schema 与上游产物枚举一致
-- [ ] **协议不漂移检查**：P3 实现字段、provider contract、prompt template、`ProviderRunRecord` 审计字段、fake provider sentinel 与 `实现总契约_v1.0`、`评审后实施规格补齐_v1.2` 一致
+- [ ] **协议不漂移检查**：P3 实现字段、provider contract、prompt template、`ProviderRunRecord` 审计字段、fake provider sentinel 与 `实现总契约_v1.0`、`评审后实施规格补齐_v1.3` 一致
 - [ ] **`ProviderRunRecord` 字段一致性**：`ProviderRunRecord` **不**包含 `riskRegistryRef`；Risk Registry 关联通过 `CanonicalNodeInput.riskRegistryRef`、`RuntimeSnapshot.riskRegistry`、`ArtifactTraceabilityBinding.relatedRiskIds` 建立
