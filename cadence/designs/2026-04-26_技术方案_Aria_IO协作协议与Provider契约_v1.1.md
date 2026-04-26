@@ -6,7 +6,7 @@
 - **创建日期**：2026-04-26
 - **版本**：v1.1
 - **负责人**：Codex
-- **修正内容**：明确 `ProviderContextPackage`、`AdapterInput`、`AdapterOutput` 的实现类型以规格补齐 v1.3 为准
+- **修正内容**：明确 `ProviderContextPackage`、`AdapterInput`、`AdapterOutput` 的实现类型以规格补齐 v1.4 为准
 - **上游依据**：
   - `cadence/designs/2026-04-23_技术方案_Aria一期MVP精简设计_v1.2.md`
   - `cadence/designs/aria-repl-runtime-docs/2026-04-22_技术方案_Aria全局协议_v1.0.md`
@@ -59,40 +59,40 @@ Aria 一期必须明确三层真相源：
 
 | 字段 | 必填 | 说明 |
 |------|------|------|
-| `sessionId` | 是 | 当前 ProjectSession |
-| `taskId` | 是 | EpicTask 或 WorkTask |
-| `nodeId` | 是 | 当前协议节点 ID |
+| `session_id` | 是 | 当前 ProjectSession |
+| `task_id` | 是 | EpicTask 或 WorkTask |
+| `node_id` | 是 | 当前协议节点 ID |
 | `phase` | 是 | 当前阶段 |
-| `effectivePolicy` | 是 | 已解析的策略 |
-| `artifactRefs` | 是 | 当前节点可引用的 Aria canonical artifacts |
-| `externalRefs` | 否 | OpenSpec、Superpowers、raw provider output 等外部来源引用 |
-| `worktreeRef` | 条件必填 | 执行阶段节点必须提供 |
-| `riskRegistryRef` | 是 | 当前风险注册表快照 |
-| `loopCounters` | 是 | 当前循环计数器 |
-| `acceptanceTargets` | 条件必填 | 执行、测试、评审节点必须提供 |
-| `inputValidationRefs` | 是 | 节点进入前输入校验记录 |
+| `effective_policy` | 是 | 已解析的策略 |
+| `artifact_refs` | 是 | 当前节点可引用的 Aria canonical artifacts |
+| `external_refs` | 否 | OpenSpec、Superpowers、raw provider output 等外部来源引用 |
+| `worktree_ref` | 条件必填 | 执行阶段节点必须提供 |
+| `risk_registry_ref` | 是 | 当前 Risk Registry sidecar 快照引用，类型以补齐规格 `RiskRegistryRef` 为准 |
+| `loop_counters` | 是 | 当前循环计数器 |
+| `acceptance_targets` | 条件必填 | 执行、测试、评审节点必须提供 |
+| `input_validation_refs` | 是 | 节点进入前输入校验记录 |
 
 约束：
 
-- `artifactRefs` 不得引用 `superseded` 产物。
-- `externalRefs` 只能作为上下文来源，不能替代 `artifactRefs`。
+- `artifact_refs` 不得引用 `superseded` 产物。
+- `external_refs` 只能作为上下文来源，不能替代 `artifact_refs`。
 - 若节点依赖的 canonical artifact 不存在，必须回流到负责产出该 artifact 的上游节点，不能用外部文件直接绕过。
 
 ### 3.2 ExternalArtifactRef
 
 所有外部产物进入 Aria 时必须登记为 `ExternalArtifactRef`。
 
-代码级裁定：`ExternalArtifactRef`、`ExternalImportStatus`、`CanonicalArtifactOrigin` 的 Rust 类型、JSON schema、fixture 以 `cadence/designs/2026-04-26_技术方案_Aria一期评审后实施规格补齐_v1.3.md` 第 4.4 章为准；本节字段表只说明职责边界，不再另起实现字段。
+代码级裁定：`ExternalArtifactRef`、`ExternalImportStatus`、`CanonicalArtifactOrigin` 的 Rust 类型、JSON schema、fixture 以 `cadence/designs/2026-04-26_技术方案_Aria一期评审后实施规格补齐_v1.4.md` 第 4.4 章为准；本节字段表只说明职责边界，不再另起实现字段。
 
 | 字段 | 必填 | 说明 |
 |------|------|------|
-| `externalRefId` | 是 | 唯一 ID，例如 `ext_openspec_add_export_001` |
-| `sourceSystem` | 是 | `openspec` / `superpowers` / `provider_raw_output` / `user_repl` / `local_file` |
-| `sourcePath` | 否 | 仓库内相对路径或 provider run 输出引用 |
-| `sourceUri` | 否 | 外部 URI；与 `sourcePath` 至少应有一项可定位来源 |
+| `external_ref_id` | 是 | 唯一 ID，例如 `ext_openspec_add_export_001` |
+| `source_system` | 是 | `openspec` / `superpowers` / `provider_raw_output` / `user_repl` / `local_file` |
+| `source_path` | 否 | 仓库内相对路径或 provider run 输出引用 |
+| `source_uri` | 否 | 外部 URI；与 `source_path` 至少应有一项可定位来源 |
 | `sha256` | 否 | 外部产物内容 hash，用于审计和 stale 判定 |
-| `importStatus` | 是 | `candidate` / `normalized` / `rejected` / `superseded` |
-| `importedAt` | 是 | 首次登记时间 |
+| `import_status` | 是 | `candidate` / `normalized` / `rejected` / `superseded` |
+| `imported_at` | 是 | 首次登记时间 |
 | `normalizedArtifactRef` | 否 | 归一化后生成的 Aria artifact ref |
 | `rejectionReason` | 否 | `rejected` 时的拒绝原因 |
 
@@ -102,9 +102,9 @@ Aria 产物必须记录来源，避免复制后丢失审计链。
 
 | 字段 | 必填 | 说明 |
 |------|------|------|
-| `originType` | 是 | `user_repl` / `agent_generated` / `openspec_import` / `superpowers_import` / `daemon_generated` |
+| `origin_type` | 是 | `user_repl` / `agent_generated` / `openspec_import` / `superpowers_import` / `daemon_generated` |
 | `originRefs` | 否 | 对应 `ExternalArtifactRef`、`ProviderRun` 或上游 artifact refs |
-| `providerRunRef` | 否 | 若来源为 provider 候选输出，记录对应 provider run |
+| `provider_run_ref` | 否 | 若来源为 provider 候选输出，记录对应 provider run |
 | `createdByNode` | 是 | 完成归一化并创建 canonical artifact 的协议节点 ID |
 | `createdAt` | 是 | 创建时间 |
 
@@ -166,7 +166,7 @@ Aria-managed Superpowers 模式必须遵守：
 
 1. provider 可以使用 Superpowers 作为内部工作流，但最终必须输出 Aria 要求的 schema。
 2. Superpowers 默认要求的提交、分支收口、路径写入等动作，在 Aria 内部执行时不得自动生效；是否提交由 Aria 的集成节点决定。
-3. 如果 Superpowers 生成了 repo 文件，这些文件先登记为 `ExternalArtifactRef(sourceSystem = superpowers)`，再由 Aria 归一化。
+3. 如果 Superpowers 生成了 repo 文件，这些文件先登记为 `ExternalArtifactRef(source_system = superpowers)`，再由 Aria 归一化。
 4. Provider 不得因为 Superpowers 计划中有 `git commit` 步骤就直接提交主线；一期 candidate commit 由 `N20` 生成，integration branch 上的 cherry-pick / rollback 由 `N23 integration_execute` 控制。
 
 ---
@@ -180,8 +180,8 @@ Aria-managed Superpowers 模式必须遵守：
 | `N00 session_bootstrap` | repo root、daemon config | 无 | `runtime_snapshot` | daemon | 建立 session 和恢复入口 |
 | `N01 intake_capture` | 用户 REPL 请求 | OpenSpec `proposal.md` | `intake_brief` | REPL + daemon | 外部 proposal 只能作为候选来源 |
 | `N02 epic_task_create` | `intake_brief` | 无 | `runtime_snapshot` | daemon | 创建 EpicTask |
-| `N03 policy_resolve` | EpicTask、policy config | 阶段级策略覆盖 | `runtime_snapshot` | daemon | 计算 `effectivePolicy` |
-| `N04 clarification` | `intake_brief`、`effectivePolicy` | Superpowers brainstorming 草稿 | `clarification_record` | Claude Code | open questions 可挂 gate |
+| `N03 policy_resolve` | EpicTask、policy config | 阶段级策略覆盖 | `runtime_snapshot` | daemon | 计算 `effective_policy` |
+| `N04 clarification` | `intake_brief`、`effective_policy` | Superpowers brainstorming 草稿 | `clarification_record` | Claude Code | open questions 可挂 gate |
 | `N05 spec_authoring` | `intake_brief`、`clarification_record` | OpenSpec `specs/main/spec.md`、Superpowers spec | `spec` | Claude Code | 输出必须符合 Aria `spec` schema |
 | `N06 spec_gate_review` | `spec`、`clarification_record` | Codex advisory review | `spec_gate_decision` | daemon + 可选 Codex | `pass` 到 `N07`，`backtrack` 到 `N04`，`hold` 挂 gate |
 | `N07 design_authoring` | `spec`、`spec_gate_decision` | OpenSpec `design.md`、Superpowers design | `design` | Claude Code | 风险写入 Risk Registry |
@@ -200,10 +200,10 @@ Aria-managed Superpowers 模式必须遵守：
 | `N20 ready_for_integration` | `coding_report`、`testing_report`、`code_review_report` | Codex advisory | `runtime_snapshot` | daemon + 可选 Codex | daemon 决定 ready/block/rework |
 | `N21 integration_enqueue` | ready WorkTask | 无 | `runtime_snapshot` | daemon | FIFO 入队 |
 | `N22 integration_prepare` | queue item、base ref、worktree | 无 | `runtime_snapshot` | daemon | 冲突预检，必要时 gate |
-| `N23 integration_execute` | prepared worktree、base ref | 无 | `integration_report` | daemon + git/test toolchain | 一期执行 `git cherry-pick --no-commit <candidateCommitSha>`；失败到 `N19` |
+| `N23 integration_execute` | prepared worktree、base ref | 无 | `integration_report` | daemon + git/test toolchain | 一期执行 `git cherry-pick --no-commit <candidate_commit_sha>`；失败到 `N19` |
 | `N24 integration_verify` | `integration_report`、集成后代码 | Codex verification advisory | `integration_report` | daemon + Codex/本地测试 | fail 可 rollback 或回 `N19` |
 | `N25 final_review` | 全部关键 artifacts、integration reports | 无 | `final_review` | Claude Code | pass 到 `N27`；followup 先进入 approval gate，用户确认后才允许 `N26` |
-| `N26 patch_followup_dispatch` | `final_review`、用户确认 | 重编译后的 `taskConstraints` | `dispatch_package` | Claude Code + daemon | 一期必须用户显式确认；provider 只输出候选，OpenSpec 更新由 daemon 执行 |
+| `N26 patch_followup_dispatch` | `final_review`、用户确认 | 重编译后的 `task_constraints` | `dispatch_package` | Claude Code + daemon | 一期必须用户显式确认；provider 只输出候选，OpenSpec 更新由 daemon 执行 |
 | `N27 final_summary` | all key artifacts、`final_review` | 无 | `final_summary` | Claude Code | 用户最终可读输出 |
 | `N28 session_closeout` | `final_summary`、runtime state | 无 | `runtime_snapshot` | daemon | 释放 lease，关闭 session |
 
@@ -217,32 +217,32 @@ Aria-managed Superpowers 模式必须遵守：
 
 | 字段 | 必填 | 说明 |
 |------|------|------|
-| `providerType` | 是 | `claude_code` / `codex` |
+| `provider_type` | 是 | `claude_code` / `codex` |
 | `role` | 是 | `orchestrator` / `executor` / `reviewer` / `advisory_reviewer` |
-| `nodeId` | 是 | 当前节点 |
-| `worktreePath` | 条件必填 | 执行阶段必须提供 |
-| `allowedWriteScope` | 是 | provider 可写路径或只读 |
-| `canonicalInputs` | 是 | Aria canonical artifact 摘要和 refs |
+| `node_id` | 是 | 当前节点 |
+| `worktree_path` | 条件必填 | 执行阶段必须提供 |
+| `allowed_write_scope` | 是 | provider 可写路径或只读 |
+| `canonical_inputs` | 是 | Aria canonical artifact 摘要和 refs |
 | `externalInputs` | 否 | 已登记的 external refs 摘要 |
 | `instructions` | 是 | 节点指令 |
-| `outputSchemaRef` | 是 | 期望输出产物 schema |
-| `completionCriteria` | 是 | 完成判定 |
-| `forbiddenActions` | 是 | 禁止越权写文件、直接集成、直接提交主线等 |
-| `verificationCommands` | 否 | 节点允许执行的验证命令 |
+| `output_schema_ref` | 是 | 期望输出产物 schema |
+| `completion_criteria` | 是 | 完成判定 |
+| `forbidden_actions` | 是 | 禁止越权写文件、直接集成、直接提交主线等 |
+| `verification_commands` | 否 | 节点允许执行的验证命令 |
 
 与 `Aria一期实现总契约_v1.0` 的字段映射裁定：
 
 | 本文旧字段 | 实现总契约字段 | 裁定 |
 |-----------|----------------|------|
-| `role` | `runtimeRole` | daemon 内部运行角色，允许 `advisory_reviewer` |
-| `role` | `adapterRole` | 传给底层 adapter 的角色，只允许 `orchestrator` / `executor` / `reviewer` |
-| `role=advisory_reviewer` | `runtimeRole=advisory_reviewer` + `adapterRole=reviewer` + `advisoryOnly=true` | advisory 节点只读，最终决策仍由 daemon 生成 |
+| `role` | `runtime_role` | daemon 内部运行角色，允许 `advisory_reviewer` |
+| `role` | `adapter_role` | 传给底层 adapter 的角色，只允许 `orchestrator` / `executor` / `reviewer` |
+| `role=advisory_reviewer` | `runtime_role=advisory_reviewer` + `adapter_role=reviewer` + `advisory_only=true` | advisory 节点只读，最终决策仍由 daemon 生成 |
 
 实现裁定：
 
-1. `ProviderContextPackage` 的 Rust 类型与 JSON schema 以 `cadence/designs/2026-04-26_技术方案_Aria一期评审后实施规格补齐_v1.3.md` 第 4.7 章为准。
-2. 本文表格中的 `role` 只保留为概念说明，不作为新增序列化字段；代码实现必须使用 `runtimeRole`、`adapterRole`、`advisoryOnly`。
-3. 底层 provider adapter 的 DTO 以规格补齐 v1.3 第 4.7.3 章 `AdapterInput` / `AdapterOutput` 为准；fake provider 与 CLI adapter 必须共用同一 DTO。
+1. `ProviderContextPackage` 的 Rust 类型与 JSON schema 以 `cadence/designs/2026-04-26_技术方案_Aria一期评审后实施规格补齐_v1.4.md` 第 4.7 章为准。
+2. 本文表格中的 `role` 只保留为概念说明，不作为新增序列化字段；代码实现必须使用 `runtime_role`、`adapter_role`、`advisory_only`。
+3. 底层 provider adapter 的 DTO 以规格补齐 v1.4 第 4.7.3 章 `AdapterInput` / `AdapterOutput` 为准；fake provider 与 CLI adapter 必须共用同一 DTO。
 
 ### 6.2 Claude Code 节点契约
 
@@ -263,9 +263,9 @@ Claude Code 一期主要作为 orchestrator。
 
 `N26` 写权限裁定：
 
-1. Claude Code provider 不得直接修改 `openspec/changes/<changeId>/tasks.md`，只能输出候选 `dispatch_package` 或 patch task delta。
+1. Claude Code provider 不得直接修改 `openspec/changes/<change_id>/tasks.md`，只能输出候选 `dispatch_package` 或 patch task delta。
 2. daemon 在 gate approve 后使用 Document Operation 更新 OpenSpec `tasks.md`，并触发 bundle stale / recompile。
-3. 新 `dispatch_package` 必须绑定重编译后的 `taskConstraints` 并通过 OpenSpec coverage 校验。
+3. 新 `dispatch_package` 必须绑定重编译后的 `task_constraints` 并通过 OpenSpec coverage 校验。
 
 ### 6.3 Codex 节点契约
 
@@ -284,7 +284,7 @@ Codex 一期主要作为 executor / reviewer。
 
 ### 6.4 CLI / SDK 边界
 
-Provider Adapter 的稳定边界是 `AdapterInput` / `AdapterOutput`，不是具体 CLI 参数。字段定义以 `Aria一期评审后实施规格补齐_v1.3` 第 4.7.3 章为准。
+Provider Adapter 的稳定边界是 `AdapterInput` / `AdapterOutput`，不是具体 CLI 参数。字段定义以 `Aria一期评审后实施规格补齐_v1.4` 第 4.7.3 章为准。
 
 一期允许默认配置：
 
@@ -305,12 +305,12 @@ Provider Adapter 的稳定边界是 `AdapterInput` / `AdapterOutput`，不是具
 
 | 项目 | 必须落地的行为 |
 |------|----------------|
-| capability probe | 启动前探测 provider command 是否存在、版本字符串、支持的输出模式，并生成 `providerCapabilityRef` |
+| capability probe | 启动前探测 provider command 是否存在、版本字符串、支持的输出模式，并生成 `provider_capability_ref` |
 | compatibility matrix | 为 Claude Code 与 Codex 分别记录 command、stdin/prompt 输入方式、输出解析策略、session/resume 参数、sandbox/approval 参数 |
-| spawn execution | 能在指定 `worktreePath` 下启动进程，并按 `timeout` / `maxRetries` 执行 |
+| spawn execution | 能在指定 `worktree_path` 下启动进程，并按 `timeout` / `max_retries` 执行 |
 | output capture | stdout、stderr、exit code、duration、structured output、parse error 全部写入 `AdapterOutput` |
-| diff capture | 运行前后检测 worktree 文件变更，生成 `filesModified`；不得只接受 provider 自报 |
-| timeout handling | soft timeout 后尝试终止，hard timeout 后强制结束，并把结果写入 `ProviderRunRecord.timeoutStatus` |
+| diff capture | 运行前后检测 worktree 文件变更，生成 `files_modified`；不得只接受 provider 自报 |
+| timeout handling | soft timeout 后尝试终止，hard timeout 后强制结束，并把结果写入 `ProviderRunRecord.timeout_status` |
 | fake provider parity | fake provider 与 CLI adapter 使用同一 `AdapterInput` / `AdapterOutput` 类型，避免测试路径和真实路径分叉 |
 
 真实 CLI adapter baseline 只验证 adapter 行为，不要求 Claude Code / Codex 在测试中产出高质量业务结果；业务结果仍通过 fake provider fixture 固化。
@@ -336,7 +336,7 @@ Provider Adapter 的稳定边界是 `AdapterInput` / `AdapterOutput`，不是具
 ### 7.1 外部输入导入流程
 
 1. 用户或 daemon 指定外部来源，例如 OpenSpec change。
-2. daemon 创建 `ExternalArtifactRef(importStatus = candidate)`。
+2. daemon 创建 `ExternalArtifactRef(import_status = candidate)`。
 3. daemon 执行来源存在性和 hash 记录。
 4. 对照映射表生成 canonical artifact 草稿。
 5. 写入或更新 Markdown / JSON / YAML 时必须通过 Document Operation 层完成结构化修改。
@@ -377,13 +377,13 @@ Provider Adapter 的稳定边界是 `AdapterInput` / `AdapterOutput`，不是具
 | 命令语义 | 作用 |
 |----------|------|
 | `new <request>` | 创建原生 Aria EpicTask |
-| `import openspec <changeId>` | 导入 OpenSpec change 为候选输入；P2 之后可实现 |
+| `import openspec <change_id>` | 导入 OpenSpec change 为候选输入；P2 之后可实现 |
 | `status` | 查看 session、task、gate、queue |
 | `artifacts` | 查看 canonical artifacts 与 external refs |
 | `approve <gateId>` | 通过 gate |
 | `reject <gateId>` | 拒绝 gate 并进入回流或人工介入 |
 | `reply <gateId> <text>` | 为 clarification 或 manual intervention 提供补充 |
-| `export openspec <taskId>` | 手动重新导出或查看已写回的 OpenSpec 文档；P2 之后可实现，不替代节点内强制写回 |
+| `export openspec <task_id>` | 手动重新导出或查看已写回的 OpenSpec 文档；P2 之后可实现，不替代节点内强制写回 |
 
 ---
 
@@ -398,6 +398,8 @@ Provider Adapter 的稳定边界是 `AdapterInput` / `AdapterOutput`，不是具
 | 产物规范 | 不改 canonical 字段；本文件定义外部产物如何归一化到 canonical 字段 |
 | Provider Adapter | 不替代 `AdapterInput/AdapterOutput`；本文件定义每个节点如何使用 adapter |
 | MVP 精简设计 | 不改变 21 个实现单元；本文件让实现单元能按协议边界组装输入输出 |
+
+代码级字段裁定：本文件中的表格用于说明职责边界，Rust 类型、JSON schema、fixture、字段命名和 adapter DTO 以 `Aria一期评审后实施规格补齐_v1.4` 为准。所有跨进程序列化字段统一使用 `snake_case`。
 
 ---
 
