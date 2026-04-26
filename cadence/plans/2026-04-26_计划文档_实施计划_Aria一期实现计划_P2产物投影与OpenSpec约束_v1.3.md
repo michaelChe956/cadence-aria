@@ -2,8 +2,8 @@
 
 **文档信息**
 - **创建日期**：2026-04-26
-- **版本**：v1.2（研发可落地性 Review 修正版）
-- **修正内容**：明确 `document_ops.rs` 双文件职责，拆分 validator 与 projection 测试文件，更新代码级实施规格引用。
+- **版本**：v1.3（研发可落地性 Review 二次修正版）
+- **修正内容**：补齐 `projection_validator` / `phase1_profile_validator` 最小校验项、OpenSpec 惰性 stale 检测、artifact version 递增规则和测试文件清单对齐。
 
 > **自动化 agent 执行提示**：agentic worker 执行本计划时使用 `superpowers:subagent-driven-development` 或 `superpowers:executing-plans`；人类研发按任务、测试命令和完成判定执行即可，不依赖这些 skill。
 
@@ -17,11 +17,12 @@
 
 ## 0. 评审后准入门槛
 
-P2 是评审中 P0 缺口最集中的阶段。启动 P2 前，必须先落实 `cadence/designs/2026-04-26_技术方案_Aria一期评审后实施规格补齐_v1.3.md`：
+P2 是评审中 P0 缺口最集中的阶段。启动 P2 前，必须先落实 `cadence/designs/2026-04-26_技术方案_Aria一期评审后实施规格补齐_v1.4.md`：
 
 - 第 4.5：`ArtifactProjectionRecord`、`SpecProjection`、`DesignProjection`、`PlanProjection` Rust 类型
 - 第 4.6：`OpenSpecConstraintBundle` Rust 类型与 camelCase JSON 字段
 - 第 5 章：Projection 编译规则、heading mapping、稳定 ID 生成、Markdown parser 裁定
+- 第 5.6-5.7：`projection_validator` 与 `phase1_profile_validator` 的输入、输出、错误码和最小校验项
 - 第 6 章：OpenSpec 文件到 bundle 字段的映射、缺文件阻断、stale 判定
 - 第 8 章：artifact 存储路径、版本号策略、ExternalArtifactRef 生命周期
 - 第 10 章：`_aria.traceability_refs` 生成算法
@@ -210,7 +211,7 @@ Expected: PASS，validator 可被测试引用
 - [ ] **Step 5: 提交阶段性变更**
 
 ```bash
-git add src/protocol/artifacts.rs src/cross_cutting/artifact_validate.rs tests/artifact_validate.rs tests/support
+git add src/protocol/artifacts.rs src/cross_cutting/artifact_validate.rs tests/artifact_validate.rs tests/artifact_schema_min_fields.rs tests/support
 git commit -m "feat: add three-layer validator baseline (canonical/projection/phase1_profile)"
 ```
 
@@ -239,6 +240,13 @@ git commit -m "feat: add three-layer validator baseline (canonical/projection/ph
 - source artifact hash 被记录
 - `projection_validator` 校验 projection schema 和 golden JSON 对齐
 - `projection_validator` 不校验 canonical 最小字段（该职责属于 `canonical_validator`）
+- `projection_validator` 输入为 `ArtifactProjectionRecord`、artifact index 和可选 golden JSON fixture
+- `projection_validator` 输出 `ValidationResult { ok, errors[], warnings[], projectionId, sourceArtifactRef }`
+- 错误码至少覆盖 `projection_missing_field`、`projection_invalid_id`、`projection_source_not_found`、`projection_source_hash_mismatch`、`projection_reference_unknown`、`projection_payload_empty`
+- 通用校验必须覆盖 `projectionId` 格式、`projectionKind` 与 payload kind 匹配、`sourceArtifactRef` 存在且 active、`sourceArtifactVersion` 与当前版本一致、`sourceArtifactHash` 与文件 hash 一致、`compiledAt/compiledByNode` 必填
+- `SpecProjection` 校验 `functionalRequirements[]`、`successCriteria[]` 非空，且 `relatedRequirementIds[]` 指向已知 requirement
+- `DesignProjection` 校验 `designDecisions[]` 非空，且 design decision 关联的 requirement 可在当前 `SpecProjection` 或 bundle 中找到
+- `PlanProjection` 校验 `workPackages[]` 非空、work package ID 唯一、dependency 两端均存在、`traceabilityRefs[]` 至少包含 requirement 或 design/task 之一
 
 - [ ] **Step 2: 实现 projection record 与 payload 结构**
 
@@ -285,6 +293,9 @@ git commit -m "feat: add artifact projection compilers"
 - 校验 `_aria` 扩展字段（不校验 canonical 最小字段，该职责属于 `canonical_validator`）
 - 校验 traceability binding 引用完整性
 - 校验 projection refs 和 constraint refs 的关联关系
+- 输入为 JSON artifact value、artifact kind、projection index、constraint bundle index、traceability binding index、provider run index
+- 输出 `ValidationResult { ok, errors[], warnings[], artifactRef, profileVersion }`
+- 错误码至少覆盖 `profile_missing_aria`、`profile_version_missing`、`profile_projection_ref_unknown`、`profile_constraint_ref_unknown`、`traceability_refs_missing`、`traceability_ref_unknown`、`worktask_routing_source_unknown`、`coverage_summary_missing`
 
 必须包含：
 - `profile_version`
@@ -292,6 +303,13 @@ git commit -m "feat: add artifact projection compilers"
 - `traceability_refs`
 - `provider_run_refs`
 - `projection_refs`
+
+通用规则：
+- `_aria.profileVersion` 一期固定 `phase1.v1`
+- `_aria.providerRunRefs[]` 若存在必须指向已落盘 `ProviderRunRecord`
+- `_aria.projectionRefs[]` 必须指向存在且 source artifact 未 superseded 的 projection
+- `_aria.constraintCheckRef` 必须指向本次消费的 bundle check record
+- report 类 artifact 的 `_aria.traceabilityRefs[]` 必须由 daemon 归一化生成，provider 自报只能作为候选输入
 
 - [ ] **Step 2: 定义 `dispatch_package._aria.worktask_routing[]`**
 
@@ -310,6 +328,12 @@ git commit -m "feat: add artifact projection compilers"
 - covered items
 - uncovered items
 - manual exemptions
+
+校验要求：
+- `dispatch_package._aria.worktask_routing[]` 每项的 `source_work_package_id` 必须能映射到 `PlanProjection.work_packages[]`
+- report 类 JSON artifact 没有 `_aria.traceability_refs` 时必须失败
+- `final_review._aria.coverage_summary` 必须覆盖 closed / uncovered / exempted 三类集合
+- `final_summary` 不得引入 `final_review` 中不存在的新 coverage 结论
 
 - [ ] **Step 4: 运行验证**
 
@@ -342,6 +366,8 @@ git commit -m "feat: add phase1 profile validator and aria extension models"
 - source manifest
 - `bundleStatus`
 - hash 变化后 `stale`
+- 一期不启用文件系统 watch；stale 检测只在依赖 OpenSpec 的节点进入前通过 source manifest hash 比对触发
+- provider run 结束归一化时必须再次做 constraint check；若发现 bundle 已 stale，阻断推进并要求重编译
 - skeleton 文件存在但关键 section 为空时不能返回 ready
 - `compiledFromProjectionRefs` 在纯 OpenSpec 编译时为空；由 projection 写回 OpenSpec 后重编译时记录对应 projection refs
 - 序列化 JSON 顶层字段固定使用 `proposalConstraints`、`requirementConstraints`、`designConstraints`、`taskConstraints`、`traceabilityRequirements`、`coverageModel`
@@ -381,6 +407,7 @@ git commit -m "feat: add phase1 profile validator and aria extension models"
 - `OpenSpecConstraintBundle` Rust 类型、JSON schema 与 fixture golden JSON 必须共享同一套字段名
 - `TaskConstraints` 必须拆分 requirement/design/acceptance 三类映射：`relatedRequirementIdsByTask`、`relatedDesignDecisionIdsByTask`、`acceptanceTargetIdsByTask`
 - `compiledFromProjectionRefs` 按补齐规格规则填充：纯读取 OpenSpec 文件时为空；由 Aria projection 写回 OpenSpec 后触发重编译时记录对应 projection refs
+- artifact version 规则按补齐规格第 8.3 章实现：同一 `ArtifactKind + TaskId + 逻辑产物槽位` 更新时沿用 `artifactId` 并递增 version；全新逻辑产物使用新 `artifactId` 且 version 从 1 开始
 
 - [ ] **Step 5: 加入缺文件与内容未就绪回流判定**
 
@@ -497,4 +524,4 @@ git commit -m "feat: add traceability binding and coverage checker"
 - [ ] `compiledFromProjectionRefs` 填充规则有测试覆盖
 - [ ] 17 类一期产物（16 类业务产物 + `runtime_snapshot`）全部进入 validator 注册表
 - [ ] `canonical_validator` 只覆盖 canonical schema 最小字段；`projection_validator` 校验 `SpecProjection/DesignProjection/PlanProjection` schema 和 golden JSON；`phase1_profile_validator` 校验 `_aria`、traceability、projection refs、constraint refs。fixture 同时通过三种校验
-- [ ] 协议不漂移检查：P2 实现字段、projection payload、OpenSpec bundle schema、fixture golden JSON 与 `实现总契约_v1.0`、`评审后实施规格补齐_v1.3` 一致，顶层序列化字段固定使用 camelCase
+- [ ] 协议不漂移检查：P2 实现字段、projection payload、OpenSpec bundle schema、fixture golden JSON 与 `实现总契约_v1.0`、`评审后实施规格补齐_v1.4` 一致，顶层序列化字段固定使用 camelCase

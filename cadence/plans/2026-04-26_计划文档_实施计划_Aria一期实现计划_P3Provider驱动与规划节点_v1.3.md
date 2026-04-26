@@ -2,8 +2,8 @@
 
 **文档信息**
 - **创建日期**：2026-04-26
-- **版本**：v1.2（研发可落地性 Review 修正版）
-- **修正内容**：补充 `AdapterInput` / `AdapterOutput` 字段签名，显式要求规划节点走实现总契约 §8.1 统一执行链，并明确 `N06` advisory 逻辑。
+- **版本**：v1.3（研发可落地性 Review 二次修正版）
+- **修正内容**：补充 `ProviderRunRecord` raw artifact 与 `AdapterOutput` 落盘关系、provider adapter baseline 的 ID 类型依赖裁定，并固化 `N06` advisory 最终决策权。
 
 > **自动化 agent 执行提示**：agentic worker 执行本计划时使用 `superpowers:subagent-driven-development` 或 `superpowers:executing-plans`；人类研发按任务、测试命令和完成判定执行即可，不依赖这些 skill。
 
@@ -17,7 +17,7 @@
 
 ## 0. 评审后准入门槛
 
-P3 启动前必须先落实 `cadence/designs/2026-04-26_技术方案_Aria一期评审后实施规格补齐_v1.3.md` 中与 provider 和 prompt 相关的裁定：
+P3 启动前必须先落实 `cadence/designs/2026-04-26_技术方案_Aria一期评审后实施规格补齐_v1.4.md` 中与 provider 和 prompt 相关的裁定：
 
 - 第 4.7：`NodeExecutionContract`、`WorkflowDisciplineSpec`、`NodePromptTemplateRef`、`ProviderContextPackage`、`ProviderRunRecord`
 - 第 4.7.3：`AdapterInput` / `AdapterOutput` 运行时 DTO
@@ -100,7 +100,7 @@ P3 完成后，必须满足：
 - [ ] **Step 1: 定义 `AdapterInput` / `AdapterOutput` 运行时封装**
 
 要求：
-- 字段必须与 `评审后实施规格补齐_v1.3` 第 4.7.3 章一致：
+- 字段必须与 `评审后实施规格补齐_v1.4` 第 4.7.3 章一致：
 
 ```rust
 pub struct AdapterInput {
@@ -144,14 +144,26 @@ pub struct AdapterOutput {
 - context package ref
 - provider capability ref
 - adapter compatibility ref
+- adapter input ref
+- adapter output ref
+- stdout ref / stderr ref / structured output ref
+- raw artifact refs
+- files modified
 - duration
 - timeout / retry
 - provider error code / error details
 
+`ProviderRunRecord` 与 `AdapterOutput` 关系：
+- `AdapterOutput.stdout` / `stderr` / `structured_output` 是调用完成后的内联解析输入
+- adapter 或 daemon 必须将 stdout / stderr / structured output 物化到 `.aria/runtime/tasks/<taskId>/provider-runs/<providerRunId>/`
+- `stdoutRef`、`stderrRef`、`structuredOutputRef` 指向物化后的 artifact ref
+- `rawArtifactRefs` 是上述 refs 加 provider 其他中间文件 refs 的有序列表，不包含 worktree 源码改动路径
+- `filesModified` 来自 worktree diff 检测，独立于 `rawArtifactRefs`
+
 - [ ] **Step 4: 运行单元验证**
 
 Run: `cargo test --test provider_adapter_baseline`
-Expected: PASS，`AdapterInput` / `AdapterOutput`、fake provider、`ProviderRunRecord` baseline 可独立验证，不依赖后续 `provider_context_builder.rs`
+Expected: PASS，`AdapterInput` / `AdapterOutput`、fake provider、`ProviderRunRecord` baseline 可独立验证，不依赖后续 `provider_context_builder.rs`。`ContextPackageId`、`AdapterInputRefId`、`AdapterOutputRefId` 等 ID 类型必须来自 `评审后实施规格补齐_v1.4` 第 4.1 章的基础类型定义，不得由 adapter 层重复定义。
 
 - [ ] **Step 5: 提交阶段性变更**
 
@@ -338,8 +350,11 @@ git commit -m "feat: add execution contract registries and context builder"
 要求：
 - `N05` 归一化出 `spec`
 - `N06` 先执行 `artifact_validate` 校验 `spec` 与 `SpecProjection`
-- 若配置启用 advisory review，则通过 context builder 构建只读 advisory 请求并调用 Codex，advisory 输出只能作为候选输入
+- `N06` advisory 是否启用由 `NodeExecutionContract.advisory_only` / runtime role `AdvisoryReviewer` 控制；不得新增临时全局开关覆盖节点 contract
+- advisory 启用时，通过 context builder 构建只读 advisory 请求并调用 Codex，advisory 输出只能作为候选输入和审计证据
 - `N06` 最终仍由 daemon 按固定协议字段生成 `spec_gate_decision`，不得由 Codex 直接推进 gate 决策
+- daemon 决策顺序固定为：`artifact_validate` -> `SpecProjection` 覆盖检查 -> OpenSpec requirement constraints 检查 -> 生成 `spec_gate_decision`
+- advisory 可以提供 findings 或 blocking issue 作为 daemon 判定 `backtrack` 的输入，但 daemon 保留最终决策权；advisory 与 daemon 检查冲突时，以 daemon 检查结果为准
 - `N06` 判定 pass 后，daemon 必须将 canonical `spec` 结构化写回 OpenSpec `specs/main/spec.md`，记录 source manifest，触发 bundle stale / recompile
 
 - [ ] **Step 4: 实现 `N07 design_authoring`**
@@ -489,5 +504,5 @@ git commit -m "feat: add planning chain review readiness and dispatch nodes"
 - [ ] `dispatch_package._aria.worktask_routing[]` 稳定生成，且 `execution_mode` 使用统一枚举 `agent_only/human_assisted/human_required`，每项包含 `source_work_package_id`
 - [ ] `plan_dispatch` 折叠实现单元分别写入 `N10/N11/N12` 的 `RuntimeProtocolStep`、runtime snapshot 与 checkpoint
 - [ ] fake provider 输出不会绕过 canonical validator；prompt manifest 输出 schema 与上游产物枚举一致
-- [ ] **协议不漂移检查**：P3 实现字段、provider contract、prompt template、`ProviderRunRecord` 审计字段、fake provider sentinel 与 `实现总契约_v1.0`、`评审后实施规格补齐_v1.3` 一致
+- [ ] **协议不漂移检查**：P3 实现字段、provider contract、prompt template、`ProviderRunRecord` 审计字段、fake provider sentinel 与 `实现总契约_v1.0`、`评审后实施规格补齐_v1.4` 一致
 - [ ] **`ProviderRunRecord` 字段一致性**：`ProviderRunRecord` **不**包含 `riskRegistryRef`；Risk Registry 关联通过 `CanonicalNodeInput.riskRegistryRef`、`RuntimeSnapshot.riskRegistry`、`ArtifactTraceabilityBinding.relatedRiskIds` 建立
