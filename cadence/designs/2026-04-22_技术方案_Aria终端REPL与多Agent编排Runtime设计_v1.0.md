@@ -19,19 +19,23 @@
 
 ## 文档使用顺序
 
-1. 先读总览文档，理解系统目标、角色分工、MVP 边界与演进方向。
-2. 再读全局协议文档，理解 session、task、phase、artifact、approval、provider run、worktree、event 的统一规则。
-3. 再读节点总目录，确认完整节点集合与上下游关系。
+当前一期研发按以下顺序阅读：
+
+1. 先读 `2026-04-23_技术方案_Aria一期MVP精简设计_v1.2.md`，确认一期边界、实现单元和不可简化项。
+2. 再读 `2026-04-23_技术方案_Aria一期实现总契约_v1.0.md`，确认对象模型、wire protocol、Provider 调用链、OpenSpec 生命周期和阶段收口。
+3. 再读 `2026-04-26_技术方案_Aria_IO协作协议与Provider契约_v1.1.md` 与 `2026-04-26_技术方案_Aria一期评审后实施规格补齐_v1.3.md`，确认 IO、Provider DTO、RuntimeUnit、Projection/OpenSpec 编译、prompt、fixture 和 Git 集成规则。
+4. 再读 `2026-04-26_技术方案_Aria一期研发导读与实施拆解_v1.1.md`，按负责人视角拆分模块。
+5. 最后按 `cadence/plans/2026-04-26_计划文档_实施计划_Aria一期实现计划总览_v1.1.md` 与 P1-P4 子计划执行。
+
+上游文档集仍按以下顺序作为 canonical 协议参考：
+
+1. 总览文档，理解系统目标、角色分工、MVP 边界与演进方向。
+2. 全局协议文档，理解 session、task、phase、artifact、approval、provider run、worktree、event 的统一规则。
+3. 节点总目录，确认完整节点集合与上下游关系。
 4. 需要理解具体执行时，再进入对应节点文档、横切能力文档和产物规范文档。
 
 ## 当前状态
 
-- 本文档集处于 `v1.1`
-- 首轮设计评审问题已合入 v1.1，历史评审报告已按清理要求移除
-- v1.1 修复内容：
-  - 全局协议新增：循环边界控制（§12）、回流失效规则（§13）、枚举值注册表（§14）、Risk Registry（§15）、Runtime Snapshot 规范（§16）、统一术语表（§17）
-  - 新增横切能力：Provider Adapter 接口规范（CC10）
-  - 横切能力增强：策略行为映射表、Event Log compaction、队列调度策略、Gate 超时机制
-  - 产物规范增强：全部 16 个产物增加 L1/L2/L3 三级校验规则
-  - 字段修复：spec 增加非功能需求、design 前后端改为条件必填、testing_report 增加覆盖率、code_review_report 去除冗余字段、final_review 增加 fail 状态
-- 后续只有在用户确认文档集结构和节点协议完整后，才进入 implementation plan
+- 上游协议文档集仍作为 canonical 协议参考。
+- 一期研发实现以 MVP v1.2、实现总契约 v1.0、IO / Provider 契约 v1.1、评审后实施规格补齐 v1.3 和 P1-P4 实施计划为准。
+- implementation plan 已进入文档化阶段，当前不再以“等待用户确认后才进入 implementation plan”的旧状态判断。

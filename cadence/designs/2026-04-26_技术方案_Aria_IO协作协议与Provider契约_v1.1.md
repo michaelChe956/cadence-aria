@@ -133,14 +133,14 @@ OpenSpec 通常围绕一个 change folder 组织 proposal、specs、design、tas
 
 ### 4.2 Aria 到 OpenSpec
 
-Aria 也可以把 canonical artifact 导出到 OpenSpec，用于团队审阅和长期变更追踪。
+OpenSpec 在一期是强约束、非可选。Aria canonical artifact 写入后，必须在关键 gate 后由 daemon 通过 Document Operation 同步到 OpenSpec source，再触发 `OpenSpecConstraintBundle` stale / recompile。这里的“导出”不是可选审阅能力，而是约束闭环的一部分；P2 之后可以额外提供 REPL `export openspec` 命令，但该命令不替代节点内的强制写回。
 
 | Aria 产物 | OpenSpec 目标 | 触发时机 | 规则 |
 |----------|---------------|----------|------|
-| `intake_brief` | `proposal.md` | `N01` 完成后可选 | 仅导出用户目标和范围，不导出 runtime 状态 |
-| `spec` | `specs/main/spec.md` | `N06` pass 后 | 一期只导出到 main scope，且只导出已通过 gate 的 spec |
-| `design` | `design.md` | `N08` pass 或 conditional_pass 后 | 若设计仍需修订，不导出为稳定设计 |
-| `plan` | `tasks.md` 草案 | `N11` 完成后可选 | 只能作为人工审阅草案 |
+| `intake_brief` | `proposal.md` | `N01/N03` task 初始化后 | 写入用户目标和范围，不导出 runtime 状态；P2 bootstrap 可先创建 skeleton，后续由 daemon 结构化补齐 |
+| `spec` | `specs/main/spec.md` | `N06` pass 后 | 一期只写入 main scope，且只写入已通过 gate 的 spec；写入后 bundle stale / recompile |
+| `design` | `design.md` | `N08` pass 或 conditional_pass 后 | 若设计仍需修订，不写入稳定设计；写入后 bundle stale / recompile |
+| `plan` | `tasks.md` 草案 | `N11` 完成后 | 写入 OpenSpec task constraints 来源；`N12` 再生成 Aria 运行态 `dispatch_package` |
 | `dispatch_package` | 不直接导出 | 不适用 | `dispatch_package` 是 Aria 运行交接包，不是 OpenSpec 需求任务文件 |
 
 Document Operation 规则：
@@ -148,6 +148,7 @@ Document Operation 规则：
 1. Aria 自己负责创建、更新、归一化和校验 canonical artifact 与 OpenSpec 文档；provider 只能提供候选内容。
 2. Markdown 文档操作必须基于 Markdown AST / heading model；JSON artifact 与 `_aria` 必须基于 serde 类型或结构化 patch；YAML / JSON 配置必须经 parser 读写。
 3. ast-grep 可以作为可选 tool adapter，用于代码结构搜索、lint、codemod 或支持语言的结构化查询；它不是 Markdown canonical artifact 的主编辑引擎。
+4. 每次写回 OpenSpec 后必须记录 source manifest、标记旧 bundle stale、编译新 bundle，并把新 bundle ref 写入后续 `CanonicalNodeInput`。
 
 ### 4.3 Superpowers 到 Aria
 
@@ -382,7 +383,7 @@ Provider Adapter 的稳定边界是 `AdapterInput` / `AdapterOutput`，不是具
 | `approve <gateId>` | 通过 gate |
 | `reject <gateId>` | 拒绝 gate 并进入回流或人工介入 |
 | `reply <gateId> <text>` | 为 clarification 或 manual intervention 提供补充 |
-| `export openspec <taskId>` | 将已通过 gate 的 Aria spec/design/plan 导出为 OpenSpec 候选文档；P2 之后可实现 |
+| `export openspec <taskId>` | 手动重新导出或查看已写回的 OpenSpec 文档；P2 之后可实现，不替代节点内强制写回 |
 
 ---
 

@@ -5,7 +5,7 @@
 - **版本**：v1.2（研发可落地性 Review 修正版）
 - **修正内容**：补充 `AdapterInput` / `AdapterOutput` 字段签名，显式要求规划节点走实现总契约 §8.1 统一执行链，并明确 `N06` advisory 逻辑。
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **自动化 agent 执行提示**：agentic worker 执行本计划时使用 `superpowers:subagent-driven-development` 或 `superpowers:executing-plans`；人类研发按任务、测试命令和完成判定执行即可，不依赖这些 skill。
 
 **Goal:** 建立 BYO 本地 CLI provider contract、prompt/contract registry、provider context builder，并打通 `N04-N12` 规划链。
 
@@ -323,6 +323,8 @@ git commit -m "feat: add execution contract registries and context builder"
 - `clarification_record` 生成
 - `spec` 生成并触发 `SpecProjection`
 - `spec_gate_decision` 生成
+- `N06 pass` 后 daemon 通过 Document Operation 将通过 gate 的 `spec` 写入 `openspec/changes/<changeId>/specs/main/spec.md`
+- spec 写回后当前 `OpenSpecConstraintBundle` 标记为 `stale` 并重编译，新 bundle 的 requirement constraints 非空
 - `design` 生成并触发 `DesignProjection`
 
 - [ ] **Step 2: 实现 `N04 clarification`**
@@ -338,6 +340,7 @@ git commit -m "feat: add execution contract registries and context builder"
 - `N06` 先执行 `artifact_validate` 校验 `spec` 与 `SpecProjection`
 - 若配置启用 advisory review，则通过 context builder 构建只读 advisory 请求并调用 Codex，advisory 输出只能作为候选输入
 - `N06` 最终仍由 daemon 按固定协议字段生成 `spec_gate_decision`，不得由 Codex 直接推进 gate 决策
+- `N06` 判定 pass 后，daemon 必须将 canonical `spec` 结构化写回 OpenSpec `specs/main/spec.md`，记录 source manifest，触发 bundle stale / recompile
 
 - [ ] **Step 4: 实现 `N07 design_authoring`**
 
@@ -345,6 +348,7 @@ git commit -m "feat: add execution contract registries and context builder"
 - 产出 `design`
 - 编译 `DesignProjection`
 - 按统一执行链完成 provider 调用、归一化、校验、traceability 和 checkpoint
+- `N07` 只生成 Aria `design`；是否写回 OpenSpec 由 `N08` review 结果裁定，避免未通过评审的设计进入稳定 `design.md`
 
 - [ ] **Step 5: 运行集成测试**
 
@@ -372,6 +376,7 @@ git commit -m "feat: add planning chain start nodes"
 - 每个 Agent 节点都按 `实现总契约_v1.0` 第 8.1 章统一执行链执行，不允许绕过 context builder、ProviderRunRecord、归一化、validator 或 checkpoint
 - `design_review` 生成，`review_decision` 枚举值为 `pass/revise/conditional_pass`
 - `design_review.review_decision=pass` 时路由到 `N10`
+- `design_review.review_decision=pass/conditional_pass` 时 daemon 将稳定 `design` 写入 `openspec/changes/<changeId>/design.md`，并触发 bundle stale / recompile
 - `design_review.review_decision=revise` 时必须进入 `N09`
 - `N09 design_revision` 必须生成 `design_revision_record` 和更新后的 `design` ref
 - `N09` 完成后必须回到 `N08` 再评审
@@ -379,8 +384,10 @@ git commit -m "feat: add planning chain start nodes"
 - `readiness_check`
 - `plan`
 - `PlanProjection`
+- `N11` 完成后 daemon 将 plan 中的任务约束写入 `openspec/changes/<changeId>/tasks.md`，并触发 bundle stale / recompile；重编译后的 `taskConstraints.taskIds[]` 必须非空
 - `dispatch_package`
-- `dispatch_package._aria.worktask_routing[]`，且 `execution_mode` 使用统一枚举 `agent_only/human_assisted/human_required`
+- `dispatch_package._aria.worktask_routing[]`，且 `execution_mode` 使用统一枚举 `agent_only/human_assisted/human_required`，每项必须包含 `source_work_package_id`
+- `plan_dispatch` 的 `RuntimeUnitResult.protocol_steps[]` 必须分别包含 `N10`、`N11`、`N12`，并分别写 snapshot / checkpoint
 
 - [ ] **Step 2: 实现 `N08 design_review` / `N09 design_revision`**
 
@@ -400,12 +407,15 @@ git commit -m "feat: add planning chain start nodes"
 - 产出 `plan`
 - 编译 `PlanProjection`
 - `N10/N11` 必须消费 `SpecProjection`、`DesignProjection` 与 `OpenSpecConstraintBundle`，不得直接解析 Markdown 原文做 readiness 或 plan routing
+- `N11` 负责把计划任务约束写入 OpenSpec `tasks.md`；`N12` 不直接导出 `dispatch_package` 到 OpenSpec
+- 写入 `tasks.md` 后必须重编译 bundle，并用新 `taskConstraints` 约束 `N12`
 
 - [ ] **Step 4: 实现 `N12 dispatch_authoring`**
 
 要求：
 - 产出 `dispatch_package`
 - 填充 `_aria.worktask_routing[]`
+- `_aria.worktask_routing[]` 每项必须包含 `source_work_package_id`，用于执行报告 traceability 回查 `PlanProjection.work_packages[]`
 
 - [ ] **Step 5: 运行集成测试**
 
@@ -419,16 +429,17 @@ git add src/runtime_units/design_review.rs src/runtime_units/design_revision.rs 
 git commit -m "feat: add planning chain review readiness and dispatch nodes"
 ```
 
-### Task 6: 实现 Risk Registry 最小验证
+### Task 6: 实现 Risk Registry 条目写入与引用验证
 
 **Files:**
 - Modify: `src/cross_cutting/provider_run.rs`
 - Modify: `src/protocol/artifacts.rs`
 - Test: `tests/risk_registry_minimal.rs`
 
-- [ ] **Step 1: 写失败测试，覆盖 Risk Registry 最小能力**
+- [ ] **Step 1: 写失败测试，覆盖 Risk Registry 条目能力**
 
   断言：
+  - P1/P2 已为 EpicTask 初始化空 Risk Registry snapshot 与 `riskRegistryRef`
   - riskId 可被分配并唯一
   - risk entry 可被创建，包含 `riskId`、`description`、`severity`、`status`
   - risk registry 可落盘到 artifact 或 runtime snapshot
@@ -444,6 +455,7 @@ git commit -m "feat: add planning chain review readiness and dispatch nodes"
     - `ArtifactTraceabilityBinding.relatedRiskIds`：产物与风险的追踪绑定
   - planning 节点（如 `N08 design_review`、`N10 readiness_check`）发现风险时可写入 risk entry
   - risk registry snapshot 成为 `RuntimeSnapshot` 的合法子结构
+  - 若缺少 P1/P2 初始化的 `riskRegistryRef`，`ProviderContextPackage` builder 必须失败，不得临时创建匿名 registry
   - 若后续确实要求 `ProviderRunRecord` 直接持有 `riskRegistryRef`，必须先升版总契约和补齐规格，再让研发实现
 
 - [ ] **Step 3: 运行验证**
@@ -473,7 +485,9 @@ git commit -m "feat: add planning chain review readiness and dispatch nodes"
 - [ ] prompt template registry 注册 `N04-N12` 一期模板并可稳定渲染；N08 模板差异项使用 `review_decision=pass/revise/conditional_pass`
 - [ ] 真实 Claude Code / Codex 作为用户本机 BYO CLI 接入；CLI 缺失、未登录或权限不足时可诊断失败，不自动安装、不静默降级
 - [ ] `N04-N12` 可在 fake provider 下跑通，且 `design_revision_record` 在 revise 路径中稳定产出
-- [ ] `dispatch_package._aria.worktask_routing[]` 稳定生成，且 `execution_mode` 使用统一枚举 `agent_only/human_assisted/human_required`
+- [ ] `N06/N08/N11` 写回 OpenSpec 后都会触发 bundle stale / recompile，且新 bundle 中 requirement/design/task constraints 非空
+- [ ] `dispatch_package._aria.worktask_routing[]` 稳定生成，且 `execution_mode` 使用统一枚举 `agent_only/human_assisted/human_required`，每项包含 `source_work_package_id`
+- [ ] `plan_dispatch` 折叠实现单元分别写入 `N10/N11/N12` 的 `RuntimeProtocolStep`、runtime snapshot 与 checkpoint
 - [ ] fake provider 输出不会绕过 canonical validator；prompt manifest 输出 schema 与上游产物枚举一致
 - [ ] **协议不漂移检查**：P3 实现字段、provider contract、prompt template、`ProviderRunRecord` 审计字段、fake provider sentinel 与 `实现总契约_v1.0`、`评审后实施规格补齐_v1.3` 一致
 - [ ] **`ProviderRunRecord` 字段一致性**：`ProviderRunRecord` **不**包含 `riskRegistryRef`；Risk Registry 关联通过 `CanonicalNodeInput.riskRegistryRef`、`RuntimeSnapshot.riskRegistry`、`ArtifactTraceabilityBinding.relatedRiskIds` 建立

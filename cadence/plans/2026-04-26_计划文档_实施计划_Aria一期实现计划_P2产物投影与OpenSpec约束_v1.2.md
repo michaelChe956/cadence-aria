@@ -5,7 +5,7 @@
 - **版本**：v1.2（研发可落地性 Review 修正版）
 - **修正内容**：明确 `document_ops.rs` 双文件职责，拆分 validator 与 projection 测试文件，更新代码级实施规格引用。
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **自动化 agent 执行提示**：agentic worker 执行本计划时使用 `superpowers:subagent-driven-development` 或 `superpowers:executing-plans`；人类研发按任务、测试命令和完成判定执行即可，不依赖这些 skill。
 
 **Goal:** 建立 Document Operation、canonical artifact 校验、projection 编译、phase1 profile、OpenSpec constraint bundle、traceability binding 这条数据面基础层。
 
@@ -47,6 +47,7 @@ P2 完成后，必须满足：
 ## 2. 目标文件结构
 
 **Files:**
+- Modify: `Cargo.toml`
 - Create: `src/protocol/phase1_profile.rs`
 - Create: `src/protocol/projections.rs`
 - Create: `src/protocol/constraints.rs`
@@ -87,6 +88,11 @@ P2 完成后，必须满足：
 | `src/cross_cutting/document_ops.rs` | 放实现函数：`read_document_model`、`upsert_section`、`extract_projection_source`、`apply_json_patch`、YAML/JSON structured writer、sha256 计算 | 不定义协议层 canonical artifact 身份，不绕过 `protocol/document_ops.rs` 的类型 |
 
 研发不得新增第三个 document operation 入口。其他模块只能依赖上述两个文件：需要类型时引用 `protocol::document_ops`，需要实际读写时引用 `cross_cutting::document_ops`。
+
+依赖裁定：
+
+- P2 负责在 `Cargo.toml` 增加 Markdown / hash / YAML / JSON 结构化操作所需依赖，例如 `pulldown-cmark`、`sha2`、`serde_yaml`，以及团队选定的 JSON patch 实现或等价内部实现。
+- 每次新增依赖后必须运行 `cargo check`，避免后续阶段才发现依赖或 feature 配置错误。
 
 ---
 
@@ -145,7 +151,7 @@ Expected: PASS，文档结构操作、JSON/YAML patch、ast-grep optional probe 
 - [ ] **Step 6: 提交阶段性变更**
 
 ```bash
-git add src/protocol/document_ops.rs src/cross_cutting/document_ops.rs src/cross_cutting/ast_grep_tool.rs tests/document_ops.rs tests/fixtures
+git add Cargo.toml src/protocol/document_ops.rs src/cross_cutting/document_ops.rs src/cross_cutting/ast_grep_tool.rs tests/document_ops.rs tests/fixtures
 git commit -m "feat: add document operation baseline"
 ```
 
@@ -155,6 +161,7 @@ git commit -m "feat: add document operation baseline"
 - Create: `src/cross_cutting/artifact_validate.rs`
 - Create: `src/protocol/artifacts.rs`
 - Test: `tests/artifact_validate.rs`
+- Test: `tests/artifact_schema_min_fields.rs`
 
 - [ ] **Step 1: 建立 artifact 类型注册表**
 
@@ -184,6 +191,7 @@ git commit -m "feat: add document operation baseline"
 - Markdown artifact 返回 canonical 文本验证结果
 - JSON artifact 返回结构化字段验证结果
 - projection schema 和 `_aria` 校验不在此层处理，分别由 `projection_validator` 和 `phase1_profile_validator` 负责
+- 每一类 artifact 都必须有最小正例和缺核心字段负例；不能只做 artifact kind registry
 
 - [ ] **Step 3: 加入 `canonical_validator` 失败路径测试**
 
@@ -192,10 +200,11 @@ git commit -m "feat: add document operation baseline"
 - artifact type 不匹配
 - JSON schema 不合法
 - `canonical_validator` 不校验 projection 字段（防止 implementation profile 字段混入 canonical schema）
+- `artifact_schema_min_fields` 覆盖 17 类一期产物的 canonical 最小字段正/负例
 
 - [ ] **Step 4: 运行验证**
 
-Run: `cargo test --test artifact_validate`  
+Run: `cargo test --test artifact_validate --test artifact_schema_min_fields`  
 Expected: PASS，validator 可被测试引用
 
 - [ ] **Step 5: 提交阶段性变更**
@@ -288,6 +297,7 @@ git commit -m "feat: add artifact projection compilers"
 
 必须包含：
 - `worktask_id`
+- `source_work_package_id`
 - `execution_mode`
 - `human_required_reason`
 - `allowed_write_scope`
@@ -332,6 +342,8 @@ git commit -m "feat: add phase1 profile validator and aria extension models"
 - source manifest
 - `bundleStatus`
 - hash 变化后 `stale`
+- skeleton 文件存在但关键 section 为空时不能返回 ready
+- `compiledFromProjectionRefs` 在纯 OpenSpec 编译时为空；由 projection 写回 OpenSpec 后重编译时记录对应 projection refs
 - 序列化 JSON 顶层字段固定使用 `proposalConstraints`、`requirementConstraints`、`designConstraints`、`taskConstraints`、`traceabilityRequirements`、`coverageModel`
 - `scope_constraints`、`requirement_ids`、`task_ids`、`traceability_map` 只能作为内部 helper 输出或 payload 子字段，不能替代 bundle 顶层字段名
 
@@ -367,14 +379,19 @@ git commit -m "feat: add phase1 profile validator and aria extension models"
 - OpenSpec Markdown 文件读取必须走 `document_ops.read_document_model`
 - OpenSpec 写入或 bootstrap 必须走 `document_ops.upsert_section` / structured writer
 - `OpenSpecConstraintBundle` Rust 类型、JSON schema 与 fixture golden JSON 必须共享同一套字段名
+- `TaskConstraints` 必须拆分 requirement/design/acceptance 三类映射：`relatedRequirementIdsByTask`、`relatedDesignDecisionIdsByTask`、`acceptanceTargetIdsByTask`
+- `compiledFromProjectionRefs` 按补齐规格规则填充：纯读取 OpenSpec 文件时为空；由 Aria projection 写回 OpenSpec 后触发重编译时记录对应 projection refs
 
-- [ ] **Step 5: 加入缺文件回流判定**
+- [ ] **Step 5: 加入缺文件与内容未就绪回流判定**
 
 要求：
 - `proposal.md` 缺失时阻断 `N05`
 - `spec.md` 缺失时阻断 `N07`
 - `design.md` 缺失时阻断 `N11`
 - `tasks.md` 缺失时阻断 `N12/N16`
+- `specs/main/spec.md` 存在但无 requirement id 时阻断 `N07`
+- `design.md` 存在但无 design decision id 且无 component id 时阻断 `N11`
+- `tasks.md` 存在但无 task id 时阻断 `N12/N16`
 
 - [ ] **Step 6: 运行验证**
 
@@ -466,6 +483,7 @@ git commit -m "feat: add traceability binding and coverage checker"
 ## 4. P2 完成判定
 
 - [ ] `cargo test --test artifact_validate` 通过，且 canonical validator 只校验 canonical 最小字段
+- [ ] `cargo test --test artifact_schema_min_fields` 通过，17 类一期产物均有 canonical 最小字段正/负例
 - [ ] `cargo test --test spec_projection --test design_projection --test plan_projection` 通过，且 compiler 输出与 `tests/fixtures/artifacts/golden/*.json` 逐项对齐
 - [ ] `cargo test --test document_ops` 通过
 - [ ] `cargo test --test openspec_bundle --test openspec_bundle_schema` 通过
@@ -474,6 +492,9 @@ git commit -m "feat: add traceability binding and coverage checker"
 - [ ] `spec/design/plan` 可稳定编译 projection，projection payload 与 golden JSON 对齐
 - [ ] JSON artifact 的 `_aria` 结构已定稿
 - [ ] OpenSpec skeleton bootstrap、bundle schema 与 traceability binding 可落盘
+- [ ] OpenSpec bundle readiness 测试覆盖“文件存在但关键约束为空”的阻断路径
+- [ ] `TaskConstraints` 拆分 requirement/design/acceptance 映射，fixture 同时覆盖三类 ID
+- [ ] `compiledFromProjectionRefs` 填充规则有测试覆盖
 - [ ] 17 类一期产物（16 类业务产物 + `runtime_snapshot`）全部进入 validator 注册表
 - [ ] `canonical_validator` 只覆盖 canonical schema 最小字段；`projection_validator` 校验 `SpecProjection/DesignProjection/PlanProjection` schema 和 golden JSON；`phase1_profile_validator` 校验 `_aria`、traceability、projection refs、constraint refs。fixture 同时通过三种校验
 - [ ] 协议不漂移检查：P2 实现字段、projection payload、OpenSpec bundle schema、fixture golden JSON 与 `实现总契约_v1.0`、`评审后实施规格补齐_v1.3` 一致，顶层序列化字段固定使用 camelCase
