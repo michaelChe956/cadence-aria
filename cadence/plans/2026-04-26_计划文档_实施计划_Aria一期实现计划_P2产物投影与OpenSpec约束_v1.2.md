@@ -75,7 +75,7 @@ P2 完成后，必须满足：
 - Create: `tests/fixtures/artifacts/golden/design_projection.json`
 - Create: `tests/fixtures/artifacts/golden/plan_projection.json`
 - Create: `tests/fixtures/openspec/changes/sample-change/proposal.md`
-- Create: `tests/fixtures/openspec/changes/sample-change/specs/sample/spec.md`
+- Create: `tests/fixtures/openspec/changes/sample-change/specs/main/spec.md`
 - Create: `tests/fixtures/openspec/changes/sample-change/design.md`
 - Create: `tests/fixtures/openspec/changes/sample-change/tasks.md`
 
@@ -321,7 +321,7 @@ git commit -m "feat: add phase1 profile validator and aria extension models"
 - Test: `tests/openspec_bundle.rs`
 - Test: `tests/openspec_bundle_schema.rs`
 - Create: `tests/fixtures/openspec/changes/sample-change/proposal.md`
-- Create: `tests/fixtures/openspec/changes/sample-change/specs/sample/spec.md`
+- Create: `tests/fixtures/openspec/changes/sample-change/specs/main/spec.md`
 - Create: `tests/fixtures/openspec/changes/sample-change/design.md`
 - Create: `tests/fixtures/openspec/changes/sample-change/tasks.md`
 
@@ -340,7 +340,10 @@ git commit -m "feat: add phase1 profile validator and aria extension models"
 要求：
 - 读取 P1 task runtime state 中已固化的 `changeId`
 - 若 `openspec/changes/<changeId>/` 不存在，通过 `document_ops.upsert_section` / structured writer 创建最小 skeleton
-- 最小 skeleton 包含 `proposal.md`、`specs/<task-scope>/spec.md`、`design.md`、`tasks.md`
+- 一期固定 `openspecScope = "main"`，不新增 `requested_scope` wire 字段
+- 最小 skeleton 包含 `proposal.md`、`specs/main/spec.md`、`design.md`、`tasks.md`
+- 若已有 change 目录下存在多个 `specs/*/spec.md`，返回 `openspec_multiple_scopes_unsupported` 并进入 gate 或 manual intervention，不自动合并
+- fixture 路径固定为 `tests/fixtures/openspec/changes/sample-change/specs/main/spec.md`
 - bootstrap 完成后将 task runtime state 中 `openspec_bootstrap_status` 从 `bootstrap_pending` 更新为 `bootstrapped`
 
 - [ ] **Step 3: 实现 OpenSpec file manifest**

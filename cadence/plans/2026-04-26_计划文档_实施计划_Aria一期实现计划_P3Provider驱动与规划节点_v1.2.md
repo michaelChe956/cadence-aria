@@ -77,6 +77,7 @@ P3 完成后，必须满足：
 - Create: `src/protocol/contracts.rs`
 - Create: `src/protocol/prompt_manifest.rs`
 - Create: `src/runtime_units/prompt_template_registry.rs`
+- Create: `tests/provider_adapter_baseline.rs`
 - Create: `tests/context_builder.rs`
 - Create: `tests/cli_adapter_baseline.rs`
 - Create: `tests/provider_error_routes.rs`
@@ -94,7 +95,7 @@ P3 完成后，必须满足：
 - Create: `src/cross_cutting/provider_adapter.rs`
 - Create: `src/cross_cutting/provider_run.rs`
 - Create: `src/cross_cutting/provider_router.rs`
-- Test: `tests/context_builder.rs`
+- Test: `tests/provider_adapter_baseline.rs`
 
 - [ ] **Step 1: 定义 `AdapterInput` / `AdapterOutput` 运行时封装**
 
@@ -149,13 +150,13 @@ pub struct AdapterOutput {
 
 - [ ] **Step 4: 运行单元验证**
 
-Run: `cargo test --test context_builder`  
-Expected: PASS，fake provider 可被 builder 调用
+Run: `cargo test --test provider_adapter_baseline`
+Expected: PASS，`AdapterInput` / `AdapterOutput`、fake provider、`ProviderRunRecord` baseline 可独立验证，不依赖后续 `provider_context_builder.rs`
 
 - [ ] **Step 5: 提交阶段性变更**
 
 ```bash
-git add src/cross_cutting/provider_adapter.rs src/cross_cutting/provider_run.rs src/cross_cutting/provider_router.rs tests/context_builder.rs tests/support
+git add src/cross_cutting/provider_adapter.rs src/cross_cutting/provider_run.rs src/cross_cutting/provider_router.rs tests/provider_adapter_baseline.rs tests/support
 git commit -m "feat: add provider adapter baseline and fake provider"
 ```
 
@@ -461,6 +462,7 @@ git commit -m "feat: add planning chain review readiness and dispatch nodes"
 
 ## 4. P3 完成判定
 
+- [ ] `cargo test --test provider_adapter_baseline` 通过
 - [ ] `cargo test --test context_builder` 通过
 - [ ] `cargo test --test cli_adapter_baseline --test provider_error_routes` 通过
 - [ ] `cargo test --test planning_chain_fake_provider` 通过，且覆盖 `N08 review_decision=revise` → `N09` → 回到 `N08` 再评审的闭环
