@@ -312,7 +312,10 @@ git commit -m "feat: add artifact projection compilers"
 **Files:**
 - Create: `src/protocol/phase1_profile.rs`
 - Modify: `src/protocol/projections.rs`
+- Test: `tests/phase1_profile.rs`
 - Test: `tests/traceability_binding.rs`
+
+测试职责裁定：`tests/phase1_profile.rs` 只覆盖 `_aria` 字段、projection refs、constraint refs 与 artifact profile 校验；`tests/traceability_binding.rs` 只覆盖第 10 章 traceability 归一化、conflict log 与 `ArtifactTraceabilityBinding` 生成。
 
 - [ ] **Step 1: 建立 `_aria` 通用字段结构与 `phase1_profile_validator` 校验规则**
 
@@ -384,13 +387,13 @@ git commit -m "feat: add artifact projection compilers"
 
 - [ ] **Step 4: 运行验证**
 
-Run: `cargo test --test traceability_binding`
+Run: `cargo test --test phase1_profile --test traceability_binding`
 Expected: PASS，`phase1_profile_validator` 可正确校验 `_aria` 字段，profile 类型可被 traceability 逻辑消费
 
 - [ ] **Step 5: 建议提交点**
 
 ```bash
-git add src/protocol/phase1_profile.rs tests/traceability_binding.rs
+git add src/protocol/phase1_profile.rs tests/phase1_profile.rs tests/traceability_binding.rs
 git commit -m "feat: add phase1 profile validator and aria extension models"
 ```
 
@@ -415,6 +418,7 @@ git commit -m "feat: add phase1 profile validator and aria extension models"
 - hash 变化后 `stale`
 - 一期不启用文件系统 watch；stale 检测只在依赖 OpenSpec 的节点进入前通过 source manifest hash 比对触发
 - provider run 结束归一化时必须再次做 constraint check；若发现 bundle 已 stale，阻断推进并要求重编译
+- OpenSpec 写回与 bundle recompile 是原子操作；测试必须覆盖 recompile 失败时回滚 Markdown 写回并保留旧 bundle active
 - skeleton 文件存在但关键 section 为空时不能返回 ready
 - `compiled_from_projection_refs` 在纯 OpenSpec 编译时为空；由 projection 写回 OpenSpec 后重编译时记录对应 projection refs
 - 序列化 JSON 顶层字段固定使用 `proposal_constraints`、`requirement_constraints`、`design_constraints`、`task_constraints`、`traceability_requirements`、`coverage_model`

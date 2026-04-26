@@ -102,6 +102,7 @@ P3 完成后，必须满足：
 
 要求：
 - 字段必须与 `评审后实施规格补齐_v1.4` 第 4.7.3 章一致：
+- 本步骤内联结构只用于执行计划可读性；完整字段定义、serde `snake_case`、`context_files` 语义、`AdapterInput` 落盘规则和 parse error 处理均以 `评审后实施规格补齐_v1.4` 第 4.7.3 章为准
 
 ```rust
 pub struct AdapterInput {
@@ -359,6 +360,7 @@ git commit -m "feat: add execution contract registries and context builder"
 - `N06` 不检查 `requirement_constraints` 非空；该约束必须在 `N06 pass` 写回 `specs/main/spec.md` 并重编译 bundle 后，由 `N07` 进入前检查
 - advisory 可以提供 findings 或 blocking issue 作为 daemon 判定 `backtrack` 的输入，但 daemon 保留最终决策权；advisory 与 daemon 检查冲突时，以 daemon 检查结果为准
 - `N06` 判定 pass 后，daemon 必须将 canonical `spec` 结构化写回 OpenSpec `specs/main/spec.md`，记录 source manifest，触发 bundle stale / recompile
+- `N06` 写回与 bundle recompile 必须按补齐规格第 6.7 章作为原子操作；recompile 失败时回滚 `spec.md` 写回并进入 gate
 - spec 写回后的重编译 bundle 必须生成非空 `requirement_constraints`；若为空，阻断 `N07` 并返回 `openspec_requirement_constraints_empty`
 
 - [ ] **Step 4: 实现 `N07 design_authoring`**
@@ -396,6 +398,7 @@ git commit -m "feat: add planning chain start nodes"
 - `design_review` 生成，`review_decision` 枚举值为 `pass/revise/conditional_pass`
 - `design_review.review_decision=pass` 时路由到 `N10`
 - `design_review.review_decision=pass/conditional_pass` 时 daemon 将稳定 `design` 写入 `openspec/changes/<change_id>/design.md`，并触发 bundle stale / recompile
+- `design.md` 写回与 bundle recompile 必须原子提交；重编译失败不得让未通过约束校验的 design 进入后续 `N10/N11`
 - `design_review.review_decision=revise` 时必须进入 `N09`
 - `N09 design_revision` 必须生成 `design_revision_record` 和更新后的 `design` ref
 - `N09` 完成后必须回到 `N08` 再评审
@@ -404,6 +407,7 @@ git commit -m "feat: add planning chain start nodes"
 - `plan`
 - `PlanProjection`
 - `N11` 完成后 daemon 将 plan 中的任务约束写入 `openspec/changes/<change_id>/tasks.md`，并触发 bundle stale / recompile；重编译后的 `task_constraints.task_ids[]` 必须非空
+- `tasks.md` 写回与 bundle recompile 必须原子提交；若重编译后 `task_constraints.task_ids[]` 为空，回滚写回并回流 `N11`
 - `dispatch_package`
 - `dispatch_package._aria.worktask_routing[]`，且 `execution_mode` 使用统一枚举 `agent_only/human_assisted/human_required`，每项必须包含 `source_work_package_id`
 - `plan_dispatch` 的 `RuntimeUnitResult.protocol_steps[]` 必须分别包含 `N10`、`N11`、`N12`，并分别写 snapshot / checkpoint

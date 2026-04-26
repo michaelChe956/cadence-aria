@@ -149,6 +149,7 @@ Document Operation 规则：
 2. Markdown 文档操作必须基于 Markdown AST / heading model；JSON artifact 与 `_aria` 必须基于 serde 类型或结构化 patch；YAML / JSON 配置必须经 parser 读写。
 3. ast-grep 可以作为可选 tool adapter，用于代码结构搜索、lint、codemod 或支持语言的结构化查询；它不是 Markdown canonical artifact 的主编辑引擎。
 4. 每次写回 OpenSpec 后必须记录 source manifest、标记旧 bundle stale、编译新 bundle，并把新 bundle ref 写入后续 `CanonicalNodeInput`。
+5. OpenSpec 写回与 bundle 重编译是原子操作；重编译失败或关键约束为空时必须回滚写回，节点进入 gate 或 manual intervention，不得带着半更新的 OpenSpec 继续推进。
 
 ### 4.3 Superpowers 到 Aria
 
@@ -223,7 +224,7 @@ Aria-managed Superpowers 模式必须遵守：
 | `worktree_path` | 条件必填 | 执行阶段必须提供 |
 | `allowed_write_scope` | 是 | provider 可写路径或只读 |
 | `canonical_inputs` | 是 | Aria canonical artifact 摘要和 refs |
-| `externalInputs` | 否 | 已登记的 external refs 摘要 |
+| `external_inputs` | 否 | 已登记的 external refs 摘要；概念字段，不作为代码级 `ProviderContextPackage` 强字段 |
 | `instructions` | 是 | 节点指令 |
 | `output_schema_ref` | 是 | 期望输出产物 schema |
 | `completion_criteria` | 是 | 完成判定 |
