@@ -82,16 +82,19 @@ Aria 一期必须明确三层真相源：
 
 所有外部产物进入 Aria 时必须登记为 `ExternalArtifactRef`。
 
+代码级裁定：`ExternalArtifactRef`、`ExternalImportStatus`、`CanonicalArtifactOrigin` 的 Rust 类型、JSON schema、fixture 以 `cadence/designs/2026-04-26_技术方案_Aria一期评审后实施规格补齐_v1.3.md` 第 4.4 章为准；本节字段表只说明职责边界，不再另起实现字段。
+
 | 字段 | 必填 | 说明 |
 |------|------|------|
 | `externalRefId` | 是 | 唯一 ID，例如 `ext_openspec_add_export_001` |
-| `sourceSystem` | 是 | `openspec` / `superpowers` / `provider_raw` / `manual_upload` |
-| `sourcePath` | 是 | 仓库内相对路径或 provider run 输出引用 |
-| `sourceVersion` | 否 | 外部产物版本、hash 或时间戳 |
-| `artifactKind` | 是 | `proposal` / `spec` / `design` / `tasks` / `plan` / `review` / `raw_output` |
-| `mappedCanonicalType` | 否 | 归一化后的 Aria artifact 类型 |
-| `importStatus` | 是 | `candidate` / `imported` / `rejected` / `superseded` |
-| `validationRefs` | 否 | 导入校验记录 |
+| `sourceSystem` | 是 | `openspec` / `superpowers` / `provider_raw_output` / `user_repl` / `local_file` |
+| `sourcePath` | 否 | 仓库内相对路径或 provider run 输出引用 |
+| `sourceUri` | 否 | 外部 URI；与 `sourcePath` 至少应有一项可定位来源 |
+| `sha256` | 否 | 外部产物内容 hash，用于审计和 stale 判定 |
+| `importStatus` | 是 | `candidate` / `normalized` / `rejected` / `superseded` |
+| `importedAt` | 是 | 首次登记时间 |
+| `normalizedArtifactRef` | 否 | 归一化后生成的 Aria artifact ref |
+| `rejectionReason` | 否 | `rejected` 时的拒绝原因 |
 
 ### 3.3 CanonicalArtifactOrigin
 
@@ -101,8 +104,9 @@ Aria 产物必须记录来源，避免复制后丢失审计链。
 |------|------|------|
 | `originType` | 是 | `user_repl` / `agent_generated` / `openspec_import` / `superpowers_import` / `daemon_generated` |
 | `originRefs` | 否 | 对应 `ExternalArtifactRef`、`ProviderRun` 或上游 artifact refs |
-| `normalizedByNode` | 是 | 完成归一化的节点 ID |
-| `normalizationSummary` | 是 | 归一化时做了什么转换 |
+| `providerRunRef` | 否 | 若来源为 provider 候选输出，记录对应 provider run |
+| `createdByNode` | 是 | 完成归一化并创建 canonical artifact 的协议节点 ID |
+| `createdAt` | 是 | 创建时间 |
 
 ---
 
