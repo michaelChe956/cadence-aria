@@ -35,7 +35,7 @@ P2 是评审中 P0 缺口最集中的阶段。启动 P2 前，必须先落实 `c
 
 P2 完成后，必须满足：
 
-1. 17 类一期产物（16 类业务产物 + `runtime_snapshot`）有统一 validator
+1. 17 类一期产物（16 类业务产物 + `runtime_snapshot`）有统一三层 validator：`canonical_validator`（canonical 最小字段）→ `projection_validator`（projection schema / golden JSON）→ `phase1_profile_validator`（`_aria` / traceability / projection refs / constraint refs）
 2. Markdown / JSON / YAML 文档修改统一走 Document Operation 层
 3. `spec/design/plan` 可以编译出 projection
 4. JSON artifact 支持 `_aria` 扩展与 profile validator
@@ -133,7 +133,7 @@ git add src/protocol/document_ops.rs src/cross_cutting/document_ops.rs src/cross
 git commit -m "feat: add document operation baseline"
 ```
 
-### Task 2: 建立 canonical artifact validator 基线
+### Task 2: 建立三层 validator 基线（canonical / projection / phase1_profile）
 
 **Files:**
 - Create: `src/cross_cutting/artifact_validate.rs`
@@ -161,18 +161,21 @@ git commit -m "feat: add document operation baseline"
 - `final_summary`
 - `runtime_snapshot`
 
-- [ ] **Step 2: 为 Markdown / JSON 两类 artifact 建立统一校验入口**
+- [ ] **Step 2: 为 Markdown / JSON 两类 artifact 建立 `canonical_validator` 统一校验入口**
 
 要求：
+- `canonical_validator` 只校验 canonical schema 最小字段（如 artifact type、必填字段存在性、字段类型正确性）
 - Markdown artifact 返回 canonical 文本验证结果
 - JSON artifact 返回结构化字段验证结果
+- projection schema 和 `_aria` 校验不在此层处理，分别由 `projection_validator` 和 `phase1_profile_validator` 负责
 
-- [ ] **Step 3: 加入失败路径测试**
+- [ ] **Step 3: 加入 `canonical_validator` 失败路径测试**
 
 至少覆盖：
 - 缺必填字段
 - artifact type 不匹配
 - JSON schema 不合法
+- `canonical_validator` 不校验 projection 字段（防止 implementation profile 字段混入 canonical schema）
 
 - [ ] **Step 4: 运行验证**
 
@@ -183,7 +186,7 @@ Expected: PASS，validator 可被测试引用
 
 ```bash
 git add src/protocol/artifacts.rs src/cross_cutting/artifact_validate.rs tests
-git commit -m "feat: add canonical artifact validator baseline"
+git commit -m "feat: add three-layer validator baseline (canonical/projection/phase1_profile)"
 ```
 
 ### Task 3: 实现 `SpecProjection` / `DesignProjection` / `PlanProjection`
@@ -198,7 +201,7 @@ git commit -m "feat: add canonical artifact validator baseline"
 - Create: `tests/fixtures/artifacts/design.md`
 - Create: `tests/fixtures/artifacts/plan.md`
 
-- [ ] **Step 1: 写 3 组失败测试**
+- [ ] **Step 1: 写 3 组失败测试，覆盖 projection compiler 与 `projection_validator`**
 
 分别覆盖：
 - `SpecProjection`
@@ -209,6 +212,8 @@ git commit -m "feat: add canonical artifact validator baseline"
 - 稳定 ID 生成
 - 结构化 payload 生成
 - source artifact hash 被记录
+- `projection_validator` 校验 projection schema 和 golden JSON 对齐
+- `projection_validator` 不校验 canonical 最小字段（该职责属于 `canonical_validator`）
 
 - [ ] **Step 2: 实现 projection record 与 payload 结构**
 
@@ -233,7 +238,7 @@ git commit -m "feat: add canonical artifact validator baseline"
 - [ ] **Step 4: 运行单元测试**
 
 Run: `cargo test --test spec_projection --test design_projection --test plan_projection`  
-Expected: PASS，三个 projection 都可稳定编译
+Expected: PASS，三个 projection 都可稳定编译，且通过 `projection_validator` 校验
 
 - [ ] **Step 5: 提交阶段性变更**
 
@@ -242,14 +247,19 @@ git add src/protocol/projections.rs src/cross_cutting/artifact_projection.rs tes
 git commit -m "feat: add artifact projection compilers"
 ```
 
-### Task 4: 实现 phase1 profile 与 JSON `_aria` 校验
+### Task 4: 实现 `phase1_profile_validator` 与 JSON `_aria` 校验
 
 **Files:**
 - Create: `src/protocol/phase1_profile.rs`
 - Modify: `src/protocol/projections.rs`
 - Test: `tests/traceability_binding.rs`
 
-- [ ] **Step 1: 建立 `_aria` 通用字段结构**
+- [ ] **Step 1: 建立 `_aria` 通用字段结构与 `phase1_profile_validator` 校验规则**
+
+`phase1_profile_validator` 职责：
+- 校验 `_aria` 扩展字段（不校验 canonical 最小字段，该职责属于 `canonical_validator`）
+- 校验 traceability binding 引用完整性
+- 校验 projection refs 和 constraint refs 的关联关系
 
 必须包含：
 - `profile_version`
@@ -278,13 +288,13 @@ git commit -m "feat: add artifact projection compilers"
 - [ ] **Step 4: 运行验证**
 
 Run: `cargo test --test traceability_binding`
-Expected: PASS，profile 类型可被 traceability 逻辑消费
+Expected: PASS，`phase1_profile_validator` 可正确校验 `_aria` 字段，profile 类型可被 traceability 逻辑消费
 
 - [ ] **Step 5: 提交阶段性变更**
 
 ```bash
 git add src/protocol/phase1_profile.rs tests/traceability_binding.rs
-git commit -m "feat: add phase1 profile and aria extension models"
+git commit -m "feat: add phase1 profile validator and aria extension models"
 ```
 
 ### Task 5: 实现 OpenSpec bootstrap、bundle schema 与 constraint compiler
@@ -445,5 +455,5 @@ git commit -m "feat: add traceability binding and coverage checker"
 - [ ] JSON artifact 的 `_aria` 结构已定稿
 - [ ] OpenSpec skeleton bootstrap、bundle schema 与 traceability binding 可落盘
 - [ ] 17 类一期产物（16 类业务产物 + `runtime_snapshot`）全部进入 validator 注册表
-- [ ] canonical validator 同时覆盖 canonical schema 最小字段和 Projection schema，fixture 同时通过两种校验
+- [ ] `canonical_validator` 只覆盖 canonical schema 最小字段；`projection_validator` 校验 `SpecProjection/DesignProjection/PlanProjection` schema 和 golden JSON；`phase1_profile_validator` 校验 `_aria`、traceability、projection refs、constraint refs。fixture 同时通过三种校验
 - [ ] 协议不漂移检查：P2 实现字段、projection payload、OpenSpec bundle schema、fixture golden JSON 与 `实现总契约_v1.0`、`评审后实施规格补齐_v1.2` 一致，顶层序列化字段固定使用 camelCase

@@ -404,9 +404,13 @@ git commit -m "feat: add planning chain review readiness and dispatch nodes"
 - [ ] **Step 2: 在 provider run 和 artifact 中接入 risk registry**
 
   要求：
-  - `ProviderRunRecord` 的审计字段中保留 `riskRegistryRef`
+  - `ProviderRunRecord` **不**直接持有 `riskRegistryRef`；Risk Registry 关联通过以下字段建立：
+    - `CanonicalNodeInput.riskRegistryRef`：节点输入时的 Risk Registry 快照引用
+    - `RuntimeSnapshot.riskRegistry`：运行时快照中的风险注册表状态
+    - `ArtifactTraceabilityBinding.relatedRiskIds`：产物与风险的追踪绑定
   - planning 节点（如 `N08 design_review`、`N10 readiness_check`）发现风险时可写入 risk entry
   - risk registry snapshot 成为 `RuntimeSnapshot` 的合法子结构
+  - 若后续确实要求 `ProviderRunRecord` 直接持有 `riskRegistryRef`，必须先升版总契约和补齐规格，再让研发实现
 
 - [ ] **Step 3: 运行验证**
 
@@ -436,4 +440,5 @@ git commit -m "feat: add planning chain review readiness and dispatch nodes"
 - [ ] `N04-N12` 可在 fake provider 下跑通，且 `design_revision_record` 在 revise 路径中稳定产出
 - [ ] `dispatch_package._aria.worktask_routing[]` 稳定生成，且 `execution_mode` 使用统一枚举 `agent_only/human_assisted/human_required`
 - [ ] fake provider 输出不会绕过 canonical validator；prompt manifest 输出 schema 与上游产物枚举一致
-- [ ] 协议不漂移检查：P3 实现字段、provider contract、prompt template、`ProviderRunRecord` 审计字段、fake provider sentinel 与 `实现总契约_v1.0`、`评审后实施规格补齐_v1.2` 一致
+- [ ] **协议不漂移检查**：P3 实现字段、provider contract、prompt template、`ProviderRunRecord` 审计字段、fake provider sentinel 与 `实现总契约_v1.0`、`评审后实施规格补齐_v1.2` 一致
+- [ ] **`ProviderRunRecord` 字段一致性**：`ProviderRunRecord` **不**包含 `riskRegistryRef`；Risk Registry 关联通过 `CanonicalNodeInput.riskRegistryRef`、`RuntimeSnapshot.riskRegistry`、`ArtifactTraceabilityBinding.relatedRiskIds` 建立
