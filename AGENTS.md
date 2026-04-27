@@ -41,5 +41,7 @@
 ## Agent 执行要求
 
 - 开始任务前，应先读取 `CLAUDE.md`，并按需查看 `.claude/rules/` 与 `cadence/project-rules/` 中的相关规则文件。
+- 若当前工作区的 `cadence/project-rules/README.md` 存在“已启用项目规则”章节，必须读取该章节列出的每一个规则文件，并按其内容执行。
+- 使用 worktree 开发时，创建或切换到 worktree 后，必须重新读取该 worktree 内的 `AGENTS.md`、`CLAUDE.md`、`.claude/rules/` 与 `cadence/project-rules/README.md`；不得沿用主工作区读取到的旧规则上下文。
 - 执行 issue 时，应先读取 issue 与相关上下文，再修改文件。
 - 完成任务后，必须汇报测试或验证结果。
