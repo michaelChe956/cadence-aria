@@ -1,0 +1,34 @@
+{
+  "work_packages": [
+    {
+      "work_package_id": "wt-001",
+      "description": "实现 REPL wire schema",
+      "execution_mode": "agent_only",
+      "human_required_reason": null,
+      "traceability_refs": ["req-001", "dd-001", "task-001"],
+      "acceptance_targets": ["ac-001"]
+    },
+    {
+      "work_package_id": "wt-002",
+      "description": "实现 daemon handshake",
+      "execution_mode": "agent_only",
+      "human_required_reason": null,
+      "traceability_refs": ["req-002"],
+      "acceptance_targets": ["ac-001"]
+    }
+  ],
+  "dependencies": [
+    {
+      "from_work_package_id": "wt-001",
+      "to_work_package_id": "wt-002",
+      "dependency_type": "blocks"
+    }
+  ],
+  "parallelism_groups": [
+    {
+      "group_id": "pg-001",
+      "work_package_ids": ["wt-001"],
+      "max_parallel": 1
+    }
+  ]
+}

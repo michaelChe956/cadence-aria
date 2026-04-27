@@ -1,0 +1,24 @@
+{
+  "user_stories": [],
+  "functional_requirements": [
+    {
+      "requirement_id": "req-001",
+      "text": "用户可以通过 REPL 创建任务。",
+      "priority": "must"
+    },
+    {
+      "requirement_id": "req-002",
+      "text": "daemon 必须生成稳定 change_id。",
+      "priority": "must"
+    }
+  ],
+  "success_criteria": [
+    {
+      "criterion_id": "ac-001",
+      "text": "输入 `new_task` 后返回 task_id、phase、intake_ref、change_id。",
+      "related_requirement_ids": ["req-001", "req-002"]
+    }
+  ],
+  "open_items": [],
+  "non_functional_requirements": []
+}

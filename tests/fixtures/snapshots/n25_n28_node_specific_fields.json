@@ -1,0 +1,49 @@
+{
+  "N25": {
+    "overall_decision": "pass",
+    "coverage_summary": {
+      "closed": [
+        "WP-001"
+      ],
+      "uncovered": [],
+      "exempted": []
+    },
+    "uncovered_items": [],
+    "manual_exemptions": []
+  },
+  "N26": {
+    "patch_task_delta": [
+      {
+        "delta_type": "add_task",
+        "task_id": "WP-002",
+        "description": "Follow up bounded patch task",
+        "acceptance_targets": [
+          "cargo test --test final_followup_routes"
+        ],
+        "execution_mode": "bounded_patch",
+        "traceability_refs": [
+          "REQ-001"
+        ],
+        "related_requirement_ids": [
+          "REQ-001"
+        ],
+        "related_design_decision_ids": [
+          "DD-001"
+        ]
+      }
+    ],
+    "new_dispatch_package_ref": "dispatch_pkg_patch_0001",
+    "patch_round_counter": 1
+  },
+  "N27": {
+    "overall_status": "closed_successfully",
+    "closed_items": [
+      "WP-001"
+    ],
+    "remaining_risks": []
+  },
+  "N28": {
+    "session_closeout_timestamp": "2026-04-27T00:00:00Z",
+    "final_checkpoint_ref": "checkpoint_task_001_final"
+  }
+}

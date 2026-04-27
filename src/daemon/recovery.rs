@@ -66,6 +66,44 @@ pub struct EventLogEntry {
     pub task_id: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecoverableGateStatus {
+    Open,
+    Resolved,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoverableGate {
+    pub gate_id: String,
+    pub status: RecoverableGateStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoverableRuntimeEvent {
+    pub event_id: u64,
+    pub event_type: String,
+}
+
+pub fn recover_open_gates(gates: &[RecoverableGate]) -> Vec<String> {
+    gates
+        .iter()
+        .filter(|gate| gate.status == RecoverableGateStatus::Open)
+        .map(|gate| gate.gate_id.clone())
+        .collect()
+}
+
+pub fn replay_events_after(
+    events: &[RecoverableRuntimeEvent],
+    last_seen_event_id: Option<u64>,
+) -> Vec<RecoverableRuntimeEvent> {
+    let last_seen_event_id = last_seen_event_id.unwrap_or(0);
+    events
+        .iter()
+        .filter(|event| event.event_id > last_seen_event_id)
+        .cloned()
+        .collect()
+}
+
 pub fn compute_retention_index(
     events: &[EventLogEntry],
     retention: TaskEventRetention,

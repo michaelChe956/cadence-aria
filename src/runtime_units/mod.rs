@@ -1,6 +1,26 @@
+pub mod clarification;
+pub mod code_review;
+pub mod coding;
+pub mod design_authoring;
+pub mod design_review;
+pub mod design_revision;
+pub mod execution_setup;
+pub mod final_review;
+pub mod final_summary;
 pub mod intake_capture;
+pub mod integration_execute;
+pub mod integration_prepare;
+pub mod integration_verify;
+pub mod patch_followup_dispatch;
+pub mod plan_dispatch;
+pub mod prompt_template_registry;
+pub mod rework;
 pub mod session_bootstrap;
+pub mod session_closeout;
+pub mod spec_authoring;
+pub mod spec_gate_review;
 pub mod task_init;
+pub mod testing;
 
 use serde_json::Value;
 use std::future::Future;

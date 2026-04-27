@@ -539,6 +539,7 @@ impl DaemonState {
         let registry = RiskRegistrySnapshot {
             risk_registry_ref: task.risk_registry_ref.clone(),
             risk_ids: vec![],
+            risks: vec![],
         };
         fs::write(
             risk_registry_dir.join("registry.json"),
@@ -584,6 +585,7 @@ impl DaemonState {
                 risk_registry: RiskRegistrySnapshot {
                     risk_registry_ref: task.risk_registry_ref.clone(),
                     risk_ids: vec![],
+                    risks: vec![],
                 },
                 loop_counters: BTreeMap::new(),
                 superseded_artifact_refs: vec![],

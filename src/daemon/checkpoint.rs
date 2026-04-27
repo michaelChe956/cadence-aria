@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+use crate::protocol::artifacts::RiskEntry;
 use crate::protocol::nodes::is_protocol_node_id;
 use crate::protocol::policies::PolicyMode;
 
@@ -10,6 +11,8 @@ use crate::protocol::policies::PolicyMode;
 pub struct RiskRegistrySnapshot {
     pub risk_registry_ref: String,
     pub risk_ids: Vec<String>,
+    #[serde(default)]
+    pub risks: Vec<RiskEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -63,6 +66,7 @@ impl RuntimeSnapshot {
             risk_registry: RiskRegistrySnapshot {
                 risk_registry_ref: "riskreg_task_test_v0001".to_string(),
                 risk_ids: vec![],
+                risks: vec![],
             },
             loop_counters: BTreeMap::new(),
             superseded_artifact_refs: vec![],

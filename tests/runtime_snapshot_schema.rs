@@ -20,6 +20,7 @@ fn runtime_snapshot_round_trips_all_p1_canonical_fields() {
         risk_registry: RiskRegistrySnapshot {
             risk_registry_ref: "riskreg_task_001_v0001".to_string(),
             risk_ids: vec![],
+            risks: vec![],
         },
         loop_counters: BTreeMap::new(),
         superseded_artifact_refs: vec![],
