@@ -1,28 +1,8 @@
+pub use crate::protocol::loop_counters::{LoopCounterName, LoopCounterRegistry};
 use crate::runtime_units::{
     CanonicalNodeInput, DaemonContext, RuntimeUnit, RuntimeUnitError, RuntimeUnitResult,
 };
-use std::collections::BTreeMap;
 use std::future::Future;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LoopCounterRegistry {
-    thresholds: BTreeMap<String, u32>,
-}
-
-impl LoopCounterRegistry {
-    pub fn phase1() -> Self {
-        Self {
-            thresholds: BTreeMap::from([
-                ("rework_counter".to_string(), 3),
-                ("integration_failure_counter".to_string(), 2),
-            ]),
-        }
-    }
-
-    pub fn threshold(&self, name: &str) -> Option<u32> {
-        self.thresholds.get(name).copied()
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReworkUnit;

@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-use crate::protocol::policies::{OpenSpecBootstrapStatus, PolicyMode};
+use crate::protocol::constraints::OpenSpecBootstrapStatus;
+use crate::protocol::policies::PolicyMode;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

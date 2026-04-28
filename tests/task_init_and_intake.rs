@@ -1,5 +1,6 @@
 use cadence_aria::daemon::state_machine::DaemonState;
-use cadence_aria::protocol::policies::{OpenSpecBootstrapStatus, PolicyMode};
+use cadence_aria::protocol::constraints::OpenSpecBootstrapStatus;
+use cadence_aria::protocol::policies::PolicyMode;
 use cadence_aria::protocol::repl_wire::NewTaskRequest;
 use cadence_aria::runtime_units::{
     task_init::TaskInitUnit, CanonicalNodeInput, DaemonContext, RuntimeUnit,

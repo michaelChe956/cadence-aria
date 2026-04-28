@@ -19,7 +19,7 @@ use cadence_aria::runtime_units::integration_prepare::{
 use cadence_aria::runtime_units::integration_verify::{
     run_integration_verify, IntegrationVerifyInput,
 };
-use cadence_aria::runtime_units::rework::LoopCounterRegistry;
+use cadence_aria::protocol::loop_counters::{LoopCounterName, LoopCounterRegistry};
 use cadence_aria::runtime_units::RuntimeUnit;
 use serde_json::json;
 use std::collections::VecDeque;
@@ -239,8 +239,8 @@ fn rework_counter_limit_routes_to_manual_intervention_hold() {
     let workspace = tempfile::tempdir().expect("workspace");
     let provider = ScriptedExecutionProvider::testing_always_fails();
     assert_eq!(
-        LoopCounterRegistry::phase1().threshold("rework_counter"),
-        Some(3)
+        LoopCounterRegistry::phase1().threshold(LoopCounterName::Rework),
+        3
     );
 
     let result =

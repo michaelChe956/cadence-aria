@@ -2,13 +2,12 @@ use crate::cross_cutting::document_ops::{
     compute_sha256, create_document, read_document_model, DocumentOpError, DocumentTemplateKind,
 };
 use crate::protocol::constraints::{
-    BundleStatus, CoverageModel, DesignConstraints, OpenSpecConstraintBundle, OpenSpecSourceFile,
-    OpenSpecSourceKind, ProposalConstraints, RequirementConstraints, TaskConstraints,
-    TraceabilityRequirements,
+    BundleStatus, CoverageModel, DesignConstraints, OpenSpecBootstrapStatus,
+    OpenSpecConstraintBundle, OpenSpecSourceFile, OpenSpecSourceKind, ProposalConstraints,
+    RequirementConstraints, TaskConstraints, TraceabilityRequirements,
 };
 use crate::protocol::document_ops::{DocumentBlock, DocumentModel};
 use crate::protocol::enums::{ChangeId, NodeId, ProjectionId};
-use crate::protocol::policies::OpenSpecBootstrapStatus;
 use chrono::Utc;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};

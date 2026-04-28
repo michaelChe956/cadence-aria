@@ -12,7 +12,7 @@ use crate::cross_cutting::traceability::{normalize_traceability, TraceabilityInd
 use crate::protocol::artifacts::ArtifactKind;
 use crate::protocol::contracts::{ApprovalPolicy, ProviderRunRecord, SandboxMode};
 use crate::protocol::projections::PlanProjection;
-use crate::runtime_units::rework::LoopCounterRegistry;
+use crate::protocol::loop_counters::{LoopCounterName, LoopCounterRegistry};
 use crate::runtime_units::{
     CanonicalNodeInput, DaemonContext, RuntimeProtocolStep, RuntimeStepStatus, RuntimeUnit,
     RuntimeUnitError, RuntimeUnitResult,
@@ -189,8 +189,7 @@ impl ExecutionChainState {
     ) -> Result<bool, ExecutionChainError> {
         self.rework_counter += 1;
         let threshold = LoopCounterRegistry::phase1()
-            .threshold("rework_counter")
-            .unwrap_or(3);
+            .threshold(LoopCounterName::Rework);
         if self.rework_counter > threshold {
             self.next_node = "X08".to_string();
             self.manual_intervention_reason = Some("rework_limit_exceeded".to_string());

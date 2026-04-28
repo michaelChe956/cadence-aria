@@ -1,4 +1,4 @@
-use crate::runtime_units::rework::LoopCounterRegistry;
+use crate::protocol::loop_counters::{LoopCounterName, LoopCounterRegistry};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,7 +68,7 @@ pub enum IntegrationRetryDecision {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IntegrationFailureTracker {
     worktask_id: String,
-    loop_counters: BTreeMap<String, u32>,
+    loop_counters: BTreeMap<LoopCounterName, u32>,
 }
 
 impl IntegrationFailureTracker {
@@ -83,13 +83,12 @@ impl IntegrationFailureTracker {
         let trigger_node = trigger_node.into();
         let count = self
             .loop_counters
-            .entry("integration_failure_counter".to_string())
+            .entry(LoopCounterName::IntegrationFailure)
             .and_modify(|value| *value += 1)
             .or_insert(1);
         let retry_count = *count;
         let threshold = LoopCounterRegistry::phase1()
-            .threshold("integration_failure_counter")
-            .unwrap_or(2);
+            .threshold(LoopCounterName::IntegrationFailure);
         if retry_count >= threshold {
             IntegrationRetryDecision::ManualIntervention {
                 worktask_id: self.worktask_id.clone(),
@@ -106,7 +105,7 @@ impl IntegrationFailureTracker {
         }
     }
 
-    pub fn loop_counters(&self) -> &BTreeMap<String, u32> {
+    pub fn loop_counters(&self) -> &BTreeMap<LoopCounterName, u32> {
         &self.loop_counters
     }
 }

@@ -9,7 +9,9 @@ use crate::daemon::checkpoint::{RiskRegistrySnapshot, RuntimeSnapshot};
 use crate::daemon::recovery::{EventLogIndex, ReplayDecision, ReplayWindow};
 use crate::daemon::task_registry::{TaskRuntimeState, TaskSummary};
 use crate::protocol::nodes::{N00, N01, N02, N03};
-use crate::protocol::policies::{OpenSpecBootstrapStatus, PolicyMode};
+use crate::protocol::constraints::OpenSpecBootstrapStatus;
+use crate::protocol::loop_counters::LoopCounterName;
+use crate::protocol::policies::PolicyMode;
 use crate::protocol::repl_wire::{
     ApproveGateRequest, AttachRequest, AttachResponse, Command, DetachResponse,
     GateResolutionResponse, GetStatusRequest, GetStatusResponse, HelloRequest, HelloResponse,
@@ -587,7 +589,7 @@ impl DaemonState {
                     risk_ids: vec![],
                     risks: vec![],
                 },
-                loop_counters: BTreeMap::new(),
+                loop_counters: BTreeMap::<LoopCounterName, u32>::new(),
                 superseded_artifact_refs: vec![],
                 node_specific_fields: json!({
                     "openspec_bootstrap_status": task.openspec_bootstrap_status

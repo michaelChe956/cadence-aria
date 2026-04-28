@@ -4,6 +4,13 @@ use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum OpenSpecBootstrapStatus {
+    BootstrapPending,
+    Bootstrapped,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum BundleStatus {
     BootstrapPending,
     Ready,

@@ -1,4 +1,5 @@
 use cadence_aria::daemon::checkpoint::{RiskRegistrySnapshot, RuntimeSnapshot};
+use cadence_aria::protocol::loop_counters::LoopCounterName;
 use cadence_aria::protocol::policies::PolicyMode;
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -22,7 +23,7 @@ fn runtime_snapshot_round_trips_all_p1_canonical_fields() {
             risk_ids: vec![],
             risks: vec![],
         },
-        loop_counters: BTreeMap::new(),
+        loop_counters: BTreeMap::<LoopCounterName, u32>::new(),
         superseded_artifact_refs: vec![],
         node_specific_fields: json!({
             "openspec_bootstrap_status": "bootstrap_pending"

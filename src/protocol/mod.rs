@@ -3,6 +3,7 @@ pub mod constraints;
 pub mod contracts;
 pub mod document_ops;
 pub mod enums;
+pub mod loop_counters;
 pub mod nodes;
 pub mod phase1_profile;
 pub mod policies;

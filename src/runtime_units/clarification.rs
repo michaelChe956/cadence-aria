@@ -16,6 +16,7 @@ use crate::protocol::artifacts::{ArtifactKind, ArtifactRef, ArtifactStatus};
 use crate::protocol::constraints::{BundleStatus, OpenSpecConstraintBundle};
 use crate::protocol::contracts::{AdapterOutput, ApprovalPolicy, ProviderRunRecord, SandboxMode};
 use crate::protocol::enums::{ChangeId, SessionId, TaskId};
+use crate::protocol::loop_counters::LoopCounterName;
 use crate::protocol::policies::PolicyMode;
 use crate::runtime_units::{
     CanonicalNodeInput, DaemonContext, RuntimeProtocolStep, RuntimeStepStatus, RuntimeUnit,
@@ -393,7 +394,7 @@ pub fn write_checkpoint(
             risk_ids: vec![],
             risks: vec![],
         },
-        loop_counters: BTreeMap::new(),
+        loop_counters: BTreeMap::<LoopCounterName, u32>::new(),
         superseded_artifact_refs: state.superseded_artifact_refs.clone(),
         node_specific_fields,
         projection_refs,

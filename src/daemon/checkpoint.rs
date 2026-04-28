@@ -3,6 +3,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 use crate::protocol::artifacts::RiskEntry;
+use crate::protocol::loop_counters::LoopCounterName;
 use crate::protocol::nodes::is_protocol_node_id;
 use crate::protocol::policies::PolicyMode;
 
@@ -30,7 +31,7 @@ pub struct RuntimeSnapshot {
     pub worktree_ref: Option<String>,
     pub rework_counter: u32,
     pub risk_registry: RiskRegistrySnapshot,
-    pub loop_counters: BTreeMap<String, u32>,
+    pub loop_counters: BTreeMap<LoopCounterName, u32>,
     pub superseded_artifact_refs: Vec<String>,
     pub node_specific_fields: Value,
     pub projection_refs: Vec<String>,
