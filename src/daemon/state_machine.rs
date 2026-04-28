@@ -8,9 +8,9 @@ use std::path::{Path, PathBuf};
 use crate::daemon::checkpoint::{RiskRegistrySnapshot, RuntimeSnapshot};
 use crate::daemon::recovery::{EventLogIndex, ReplayDecision, ReplayWindow};
 use crate::daemon::task_registry::{TaskRuntimeState, TaskSummary};
-use crate::protocol::nodes::{N00, N01, N02, N03};
 use crate::protocol::constraints::OpenSpecBootstrapStatus;
 use crate::protocol::loop_counters::LoopCounterName;
+use crate::protocol::nodes::{N00, N01, N02, N03};
 use crate::protocol::policies::PolicyMode;
 use crate::protocol::repl_wire::{
     ApproveGateRequest, AttachRequest, AttachResponse, Command, DetachResponse,
@@ -359,7 +359,16 @@ impl DaemonState {
         fs::create_dir_all(&artifact_dir).map_err(io_error)?;
 
         let content = json!({
+            "artifact_kind": "intake_brief",
             "intake_id": format!("intake_{task_id}_0001"),
+            "request_summary": request_text.trim(),
+            "raw_user_request": request_text,
+            "repo_context": {
+                "task_id": task_id,
+                "workspace_root": self.workspace_root.to_string_lossy(),
+            },
+            "initial_constraints": [],
+            "requested_goal": request_text.trim(),
             "request_text": request_text,
             "origin_type": "user_repl",
             "created_at": now_iso8601(),

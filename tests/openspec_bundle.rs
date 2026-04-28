@@ -2,7 +2,9 @@ use cadence_aria::cross_cutting::openspec_constraints::{
     bootstrap_openspec_skeleton, build_openspec_source_manifest, check_bundle_stale,
     compile_constraint_bundle, DefaultDocumentOps, OpenSpecError,
 };
-use cadence_aria::protocol::constraints::{BundleStatus, OpenSpecBootstrapStatus, OpenSpecSourceKind};
+use cadence_aria::protocol::constraints::{
+    BundleStatus, OpenSpecBootstrapStatus, OpenSpecSourceKind,
+};
 use serde_json::json;
 use std::fs;
 use std::path::Path;

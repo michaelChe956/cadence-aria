@@ -1,4 +1,6 @@
+use cadence_aria::cross_cutting::artifact_validate::{canonical_validator, ArtifactContent};
 use cadence_aria::daemon::state_machine::DaemonState;
+use cadence_aria::protocol::artifacts::ArtifactKind;
 use cadence_aria::protocol::constraints::OpenSpecBootstrapStatus;
 use cadence_aria::protocol::policies::PolicyMode;
 use cadence_aria::protocol::repl_wire::NewTaskRequest;
@@ -66,9 +68,14 @@ fn new_task_materializes_intake_brief_and_runtime_state() {
     let content: Value =
         serde_json::from_slice(&std::fs::read(&artifact_path).expect("read intake"))
             .expect("intake json");
-    assert_eq!(content["request_text"], "实现 Aria P1 入口链");
-    assert_eq!(content["origin_type"], "user_repl");
-    assert_eq!(content["task_id"], response.task_id);
+    canonical_validator(
+        ArtifactKind::IntakeBrief,
+        &ArtifactContent::Json(content.clone()),
+    )
+    .expect("new_task intake brief must be canonical");
+    assert_eq!(content["artifact_kind"], "intake_brief");
+    assert_eq!(content["raw_user_request"], "实现 Aria P1 入口链");
+    assert_eq!(content["repo_context"]["task_id"], response.task_id);
 
     let index_path = artifact_path
         .parent()

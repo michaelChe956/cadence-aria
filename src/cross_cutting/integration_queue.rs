@@ -87,8 +87,8 @@ impl IntegrationFailureTracker {
             .and_modify(|value| *value += 1)
             .or_insert(1);
         let retry_count = *count;
-        let threshold = LoopCounterRegistry::phase1()
-            .threshold(LoopCounterName::IntegrationFailure);
+        let threshold =
+            LoopCounterRegistry::phase1().threshold(LoopCounterName::IntegrationFailure);
         if retry_count >= threshold {
             IntegrationRetryDecision::ManualIntervention {
                 worktask_id: self.worktask_id.clone(),

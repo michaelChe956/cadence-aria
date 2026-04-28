@@ -5,6 +5,7 @@ use cadence_aria::cross_cutting::provider_adapter::{
 };
 use cadence_aria::cross_cutting::worktree::{WorktreeLeaseManager, WorktreeLeaseStatus};
 use cadence_aria::protocol::contracts::{AdapterInput, AdapterOutput, TimeoutStatus};
+use cadence_aria::protocol::loop_counters::{LoopCounterName, LoopCounterRegistry};
 use cadence_aria::protocol::projections::{ExecutionMode, PlanProjection, WorkPackageProjection};
 use cadence_aria::runtime_units::coding::{run_worktask_execution_chain, ExecutionWorktaskInput};
 use cadence_aria::runtime_units::execution_setup::{
@@ -19,7 +20,6 @@ use cadence_aria::runtime_units::integration_prepare::{
 use cadence_aria::runtime_units::integration_verify::{
     run_integration_verify, IntegrationVerifyInput,
 };
-use cadence_aria::protocol::loop_counters::{LoopCounterName, LoopCounterRegistry};
 use cadence_aria::runtime_units::RuntimeUnit;
 use serde_json::json;
 use std::collections::VecDeque;
@@ -175,6 +175,35 @@ fn fake_provider_runs_n16_to_n18_happy_path_with_normalized_traceability() {
     }
     assert_eq!(result.next_node, "M20");
     assert_eq!(result.rework_counter, 0);
+}
+
+#[test]
+fn provider_candidate_traceability_refs_are_candidates_not_trusted_coverage() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let provider = ScriptedExecutionProvider::with_candidate_refs(["req-999"]);
+
+    let result =
+        run_worktask_execution_chain(execution_worktask_input(workspace.path()), &provider).expect(
+            "execution chain should reject unknown candidate refs without closing coverage",
+        );
+
+    let coding_report = result
+        .artifacts
+        .iter()
+        .find(|artifact| artifact["artifact_kind"] == "coding_report")
+        .expect("coding report");
+    assert_eq!(
+        coding_report["_aria"]["traceability_refs"],
+        json!(["req-001", "dd-001", "task-001"])
+    );
+    assert!(
+        !coding_report["_aria"]["traceability_refs"]
+            .as_array()
+            .expect("traceability refs")
+            .iter()
+            .any(|value| value == "req-999"),
+        "provider candidate ref must not become trusted coverage"
+    );
 }
 
 #[test]
@@ -498,6 +527,7 @@ struct ScriptedExecutionProvider {
     output_schemas: Mutex<Vec<String>>,
     testing_passes: Mutex<VecDeque<bool>>,
     review_decisions: Mutex<VecDeque<String>>,
+    candidate_refs: Vec<String>,
 }
 
 impl ScriptedExecutionProvider {
@@ -517,11 +547,18 @@ impl ScriptedExecutionProvider {
         Self::new([false, false, false, false], ["pass"])
     }
 
+    fn with_candidate_refs<const C: usize>(candidate_refs: [&str; C]) -> Self {
+        let mut provider = Self::happy();
+        provider.candidate_refs = candidate_refs.into_iter().map(ToOwned::to_owned).collect();
+        provider
+    }
+
     fn new<const T: usize, const R: usize>(testing_passes: [bool; T], reviews: [&str; R]) -> Self {
         Self {
             output_schemas: Mutex::new(Vec::new()),
             testing_passes: Mutex::new(testing_passes.into_iter().collect()),
             review_decisions: Mutex::new(reviews.into_iter().map(ToOwned::to_owned).collect()),
+            candidate_refs: Vec::new(),
         }
     }
 
@@ -543,7 +580,7 @@ impl ProviderAdapter for ScriptedExecutionProvider {
                 "worktask_id": "worktask_001",
                 "files_modified": ["src/feature/lib.rs"],
                 "commands_run": ["cargo test --test execution_chain_fake_provider"],
-                "candidate_traceability_refs": [],
+                "candidate_traceability_refs": self.candidate_refs.clone(),
                 "status": "completed"
             }),
             "schema://aria/artifacts/testing_report/v1" => {

@@ -11,8 +11,8 @@ use crate::cross_cutting::provider_run::provider_run_record_from_output;
 use crate::cross_cutting::traceability::{normalize_traceability, TraceabilityIndexes};
 use crate::protocol::artifacts::ArtifactKind;
 use crate::protocol::contracts::{ApprovalPolicy, ProviderRunRecord, SandboxMode};
-use crate::protocol::projections::PlanProjection;
 use crate::protocol::loop_counters::{LoopCounterName, LoopCounterRegistry};
+use crate::protocol::projections::PlanProjection;
 use crate::runtime_units::{
     CanonicalNodeInput, DaemonContext, RuntimeProtocolStep, RuntimeStepStatus, RuntimeUnit,
     RuntimeUnitError, RuntimeUnitResult,
@@ -188,8 +188,7 @@ impl ExecutionChainState {
         source_ref: &str,
     ) -> Result<bool, ExecutionChainError> {
         self.rework_counter += 1;
-        let threshold = LoopCounterRegistry::phase1()
-            .threshold(LoopCounterName::Rework);
+        let threshold = LoopCounterRegistry::phase1().threshold(LoopCounterName::Rework);
         if self.rework_counter > threshold {
             self.next_node = "X08".to_string();
             self.manual_intervention_reason = Some("rework_limit_exceeded".to_string());
@@ -269,10 +268,8 @@ impl ExecutionChainState {
         record: &ProviderRunRecord,
     ) -> Result<(), ExecutionChainError> {
         let candidate_refs = string_array_field(artifact, "candidate_traceability_refs");
-        let indexes = TraceabilityIndexes::new(known_traceability_refs(
-            &self.input.plan_projection,
-            &candidate_refs,
-        ));
+        let indexes =
+            TraceabilityIndexes::new(known_traceability_refs(&self.input.plan_projection));
         normalize_traceability(
             artifact,
             candidate_refs,
@@ -306,7 +303,6 @@ impl ExecutionChainState {
             },
             &TraceabilityIndex::with_known_refs(known_traceability_refs(
                 &self.input.plan_projection,
-                &Vec::new(),
             )),
             &ProviderRunIndex::with_runs(vec![record.provider_run_id.clone()]),
         )
@@ -477,15 +473,11 @@ fn string_array_field(value: &Value, field: &str) -> Vec<String> {
         .collect()
 }
 
-fn known_traceability_refs(
-    plan_projection: &PlanProjection,
-    candidate_refs: &[String],
-) -> Vec<String> {
+fn known_traceability_refs(plan_projection: &PlanProjection) -> Vec<String> {
     plan_projection
         .work_packages
         .iter()
         .flat_map(|work_package| work_package.traceability_refs.iter())
-        .chain(candidate_refs.iter())
         .map(|ref_id| ref_id.to_ascii_lowercase())
         .collect()
 }

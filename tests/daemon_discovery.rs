@@ -1,6 +1,7 @@
 use cadence_aria::daemon::discovery::{
-    daemon_runtime_dir, default_socket_path, inspect_daemon, read_daemon_metadata, workspace_hash,
-    write_daemon_lock, write_daemon_metadata, DaemonMetadata, DaemonStatus, PROTOCOL_VERSION,
+    daemon_runtime_dir, default_socket_path, inspect_daemon, inspect_daemon_with_pid_checker,
+    read_daemon_metadata, workspace_hash, write_daemon_lock, write_daemon_metadata, DaemonMetadata,
+    DaemonStatus, PROTOCOL_VERSION,
 };
 use sha2::{Digest, Sha256};
 use tempfile::tempdir;
@@ -72,5 +73,29 @@ fn inspect_daemon_marks_dead_pid_or_missing_socket_as_stale() {
     assert_eq!(
         inspect_daemon(workspace.path()).expect("inspect daemon"),
         DaemonStatus::Stale
+    );
+}
+
+#[test]
+fn inspect_daemon_uses_pid_checker_result_for_active_metadata() {
+    let workspace = tempdir().expect("temp workspace");
+    let socket_path = default_socket_path(workspace.path()).expect("socket path");
+    std::fs::create_dir_all(socket_path.parent().expect("socket parent")).expect("socket dir");
+    std::fs::write(&socket_path, "").expect("socket placeholder");
+    let metadata = DaemonMetadata {
+        daemon_session_id: "sess_active".to_string(),
+        pid: 4242,
+        workspace_root: workspace.path().to_string_lossy().to_string(),
+        socket_path: socket_path.to_string_lossy().to_string(),
+        started_at: "2026-04-26T00:00:00Z".to_string(),
+        protocol_version: PROTOCOL_VERSION.to_string(),
+    };
+    write_daemon_metadata(workspace.path(), &metadata).expect("write metadata");
+    write_daemon_lock(workspace.path(), metadata.pid).expect("write lock");
+
+    assert_eq!(
+        inspect_daemon_with_pid_checker(workspace.path(), |pid| pid == 4242)
+            .expect("inspect daemon"),
+        DaemonStatus::Active
     );
 }
