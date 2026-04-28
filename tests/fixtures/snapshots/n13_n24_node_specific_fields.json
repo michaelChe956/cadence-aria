@@ -1,0 +1,86 @@
+{
+  "N13": {
+    "worktask_id": "worktask_001",
+    "routing_ref": "dispatch_pkg_001#worktask_001",
+    "state": "registered"
+  },
+  "N14": {
+    "worktree_path": "tests/fixtures/repos/sample-worktree",
+    "lease_id": "lease_worktask_001_0001",
+    "base_ref": "main",
+    "branch_name": "aria/worktask_001"
+  },
+  "N15": {
+    "dispatch_package_ref": "dispatch_pkg_001",
+    "worktask_routing": [
+      {
+        "worktask_id": "worktask_001",
+        "source_work_package_id": "WP-001",
+        "allowed_write_scope": [
+          "src/feature/"
+        ]
+      }
+    ]
+  },
+  "N16": {
+    "coding_report_ref": "coding_report_worktask_001_0001",
+    "changed_files": [
+      "src/feature/lib.rs"
+    ]
+  },
+  "N17": {
+    "testing_report_ref": "testing_report_worktask_001_0001",
+    "test_results": [
+      {
+        "command": "cargo test --test execution_chain_fake_provider",
+        "status": "passed"
+      }
+    ],
+    "coverage_summary": {
+      "closed": [
+        "WP-001"
+      ],
+      "uncovered": [],
+      "exempted": []
+    }
+  },
+  "N18": {
+    "code_review_report_ref": "code_review_report_worktask_001_0001",
+    "findings": []
+  },
+  "N19": {
+    "rework_scope": {
+      "source": "testing_report_worktask_001_0001",
+      "allowed_write_scope": [
+        "src/feature/"
+      ]
+    },
+    "superseded_report_refs": [
+      "coding_report_worktask_001_0001"
+    ]
+  },
+  "N20": {
+    "candidate_commit_sha": "1111111111111111111111111111111111111111",
+    "ready_decision": "ready",
+    "block_reason": null
+  },
+  "N21": {
+    "queue_position": 1,
+    "integration_record_id": "integration_worktask_001_0001"
+  },
+  "N22": {
+    "integration_branch": "aria/integration/task_001",
+    "pre_merge_sha": "2222222222222222222222222222222222222222",
+    "candidate_commit_sha": "1111111111111111111111111111111111111111"
+  },
+  "N23": {
+    "integration_commit_sha": "3333333333333333333333333333333333333333",
+    "post_merge_sha": "3333333333333333333333333333333333333333",
+    "rollback_ref": null,
+    "next_decision": "verify"
+  },
+  "N24": {
+    "verify_decision": "pass",
+    "rollback_reason": null
+  }
+}

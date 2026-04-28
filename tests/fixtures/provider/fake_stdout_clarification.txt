@@ -1,0 +1,12 @@
+provider log line
+<ARIA_STRUCTURED_OUTPUT>
+{
+  "artifact_kind": "clarification_record",
+  "goal_summary": "fixture goal",
+  "constraints": ["fixture constraint"],
+  "open_questions": [],
+  "assumptions": ["fixture"],
+  "suggested_scope": "fixture scope",
+  "no_question_reason": "fixture is complete"
+}
+</ARIA_STRUCTURED_OUTPUT>

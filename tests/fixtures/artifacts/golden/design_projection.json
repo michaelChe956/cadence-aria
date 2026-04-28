@@ -1,0 +1,29 @@
+{
+  "design_decisions": [
+    {
+      "design_decision_id": "dd-001",
+      "text": "REPL 只作为客户端，daemon 是 runtime truth。",
+      "related_requirement_ids": ["req-001"]
+    }
+  ],
+  "shared_components": [
+    {
+      "component_id": "cmp-001",
+      "name": "repl_wire",
+      "responsibility": "JSON envelope schema"
+    }
+  ],
+  "shared_modules": [],
+  "data_entities": [],
+  "api_entries": [],
+  "risk_refs": [
+    {
+      "risk_id": "risk-001",
+      "text": "REPL 断连后 daemon 状态不一致。",
+      "severity": "high",
+      "mitigation": null,
+      "related_design_decision_ids": ["dd-001"]
+    }
+  ],
+  "open_items": []
+}
