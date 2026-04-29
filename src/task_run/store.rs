@@ -93,6 +93,7 @@ impl TaskRunStore {
         name: &str,
         value: &T,
     ) -> Result<PathBuf, TaskRunError> {
+        validate_runtime_relative_path(name)?;
         let path = self.task_root().join("reports").join(name);
         write_json_file(&path, value)?;
         Ok(path)
@@ -103,14 +104,14 @@ impl TaskRunStore {
         relative_path: &str,
         value: &T,
     ) -> Result<PathBuf, TaskRunError> {
-        validate_artifact_relative_path(relative_path)?;
+        validate_runtime_relative_path(relative_path)?;
         let path = self.task_root().join(relative_path);
         write_json_file(&path, value)?;
         Ok(path)
     }
 }
 
-fn validate_artifact_relative_path(relative_path: &str) -> Result<(), TaskRunError> {
+fn validate_runtime_relative_path(relative_path: &str) -> Result<(), TaskRunError> {
     let path = Path::new(relative_path);
     if path.components().any(|component| {
         matches!(
@@ -120,7 +121,7 @@ fn validate_artifact_relative_path(relative_path: &str) -> Result<(), TaskRunErr
     }) {
         return Err(TaskRunError::new(
             "runtime_store_path_escape",
-            format!("artifact path escapes task root: {relative_path}"),
+            format!("runtime store path escapes task root: {relative_path}"),
         ));
     }
     Ok(())

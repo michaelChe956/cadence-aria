@@ -60,6 +60,30 @@ fn store_initializes_task_root_state_and_report() {
 }
 
 #[test]
+fn store_rejects_parent_directory_report_escape() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let store = TaskRunStore::new(tempdir.path(), "task_0001");
+
+    let error = store
+        .write_json_report("../outside.json", &json!({ "escape": true }))
+        .expect_err("reject parent directory report escape");
+
+    assert_eq!(error.code, "runtime_store_path_escape");
+}
+
+#[test]
+fn store_rejects_absolute_report_escape() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let store = TaskRunStore::new(tempdir.path(), "task_0001");
+
+    let error = store
+        .write_json_report("/tmp/outside.json", &json!({ "escape": true }))
+        .expect_err("reject absolute report escape");
+
+    assert_eq!(error.code, "runtime_store_path_escape");
+}
+
+#[test]
 fn store_writes_json_artifact_under_task_root() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let store = TaskRunStore::new(tempdir.path(), "task_0001");
