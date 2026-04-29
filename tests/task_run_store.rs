@@ -59,6 +59,49 @@ fn store_initializes_task_root_state_and_report() {
     assert!(report_path.exists());
 }
 
+#[test]
+fn store_writes_json_artifact_under_task_root() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let store = TaskRunStore::new(tempdir.path(), "task_0001");
+
+    let artifact_path = store
+        .write_json_artifact(
+            "artifacts/execution/0001.json",
+            &json!({
+                "task_id": "task_0001",
+                "step": "execution"
+            }),
+        )
+        .expect("write artifact");
+
+    assert!(artifact_path.ends_with(".aria/runtime/tasks/task_0001/artifacts/execution/0001.json"));
+    assert!(artifact_path.exists());
+}
+
+#[test]
+fn store_rejects_parent_directory_artifact_escape() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let store = TaskRunStore::new(tempdir.path(), "task_0001");
+
+    let error = store
+        .write_json_artifact("../outside.json", &json!({ "escape": true }))
+        .expect_err("reject parent directory escape");
+
+    assert_eq!(error.code, "runtime_store_path_escape");
+}
+
+#[test]
+fn store_rejects_absolute_artifact_escape() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let store = TaskRunStore::new(tempdir.path(), "task_0001");
+
+    let error = store
+        .write_json_artifact("/tmp/outside.json", &json!({ "escape": true }))
+        .expect_err("reject absolute path escape");
+
+    assert_eq!(error.code, "runtime_store_path_escape");
+}
+
 fn git(cwd: &std::path::Path, args: &[&str]) {
     let output = Command::new("git")
         .args(args)

@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 use serde::Serialize;
@@ -33,17 +33,20 @@ pub fn preflight_workspace(workspace_root: &Path) -> Result<WorkspacePreflight, 
             TaskRunError::new("git_command_failed", format!("run git rev-parse: {error}"))
         })?;
     if !output.status.success() || String::from_utf8_lossy(&output.stdout).trim() != "true" {
+        let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(TaskRunError::new(
             "workspace_not_git_worktree",
             format!(
-                "workspace is not a git worktree: {}",
-                workspace_root.display()
+                "workspace is not a git worktree: {}; status={}; stderr={}",
+                workspace_root.display(),
+                output.status,
+                stderr.trim()
             ),
         ));
     }
 
     let openspec_config = workspace_root.join("openspec/config.yaml");
-    if !openspec_config.exists() {
+    if !openspec_config.is_file() {
         return Err(TaskRunError::new(
             "openspec_config_missing",
             format!("missing {}", openspec_config.display()),
@@ -100,10 +103,27 @@ impl TaskRunStore {
         relative_path: &str,
         value: &T,
     ) -> Result<PathBuf, TaskRunError> {
+        validate_artifact_relative_path(relative_path)?;
         let path = self.task_root().join(relative_path);
         write_json_file(&path, value)?;
         Ok(path)
     }
+}
+
+fn validate_artifact_relative_path(relative_path: &str) -> Result<(), TaskRunError> {
+    let path = Path::new(relative_path);
+    if path.components().any(|component| {
+        matches!(
+            component,
+            Component::Prefix(_) | Component::RootDir | Component::ParentDir
+        )
+    }) {
+        return Err(TaskRunError::new(
+            "runtime_store_path_escape",
+            format!("artifact path escapes task root: {relative_path}"),
+        ));
+    }
+    Ok(())
 }
 
 fn write_json_file<T: Serialize>(path: &Path, value: &T) -> Result<(), TaskRunError> {
