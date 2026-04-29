@@ -102,6 +102,9 @@ impl TaskRunOrchestrator {
         )? {
             let execution = run_worktask_execution_chain(input, &provider)
                 .map_err(|error| TaskRunError::new("execution_chain_failed", error.to_string()))?;
+            for record in &execution.provider_run_records {
+                store.write_provider_run_record(record)?;
+            }
             provider_run_refs.extend(
                 execution
                     .provider_run_records
@@ -191,6 +194,9 @@ impl TaskRunOrchestrator {
             &provider,
         )
         .map_err(|error| TaskRunError::new("final_closure_failed", error.to_string()))?;
+        for record in &final_result.provider_run_records {
+            store.write_provider_run_record(record)?;
+        }
         provider_run_refs.extend(
             final_result
                 .provider_run_records

@@ -3,6 +3,8 @@ use std::process::Command;
 
 use serde::Serialize;
 
+use crate::cross_cutting::provider_run::write_provider_run_record as persist_provider_run_record;
+use crate::protocol::contracts::ProviderRunRecord;
 use crate::task_run::types::TaskRunError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,6 +109,21 @@ impl TaskRunStore {
         validate_runtime_relative_path(relative_path)?;
         let path = self.task_root().join(relative_path);
         write_json_file(&path, value)?;
+        Ok(path)
+    }
+
+    pub fn write_provider_run_record(
+        &self,
+        record: &ProviderRunRecord,
+    ) -> Result<PathBuf, TaskRunError> {
+        validate_runtime_relative_path(&record.provider_run_id)?;
+        let path = self
+            .task_root()
+            .join("provider-runs")
+            .join(&record.provider_run_id)
+            .join("run.json");
+        persist_provider_run_record(&path, record)
+            .map_err(|error| TaskRunError::new("provider_run_persist_failed", error.to_string()))?;
         Ok(path)
     }
 }

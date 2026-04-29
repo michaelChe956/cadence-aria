@@ -103,6 +103,57 @@ fn rejects_interactive_task_run_requests() {
     assert_eq!(error.code, "task_run_requires_non_interactive");
 }
 
+#[test]
+fn task_run_persists_execution_and_final_provider_records() {
+    let workspace = prepare_workspace();
+    let provider = ScriptedTaskRunProvider::happy();
+    let outcome = TaskRunOrchestrator::run_with_provider(task_request(workspace.path()), &provider)
+        .expect("task run");
+
+    let provider_runs_dir = workspace
+        .path()
+        .join(".aria/runtime/tasks/task_0001/provider-runs");
+    for provider_run_id in [
+        "run_n16_0001",
+        "run_n17_0001",
+        "run_n18_0001",
+        "run_n25_0001",
+        "run_n27_0001",
+    ] {
+        assert!(
+            provider_runs_dir
+                .join(provider_run_id)
+                .join("run.json")
+                .exists(),
+            "{provider_run_id} should be persisted"
+        );
+    }
+    assert!(
+        outcome
+            .testing_report_path
+            .expect("testing report")
+            .exists()
+    );
+    assert!(outcome.final_summary_path.expect("final summary").exists());
+}
+
+#[test]
+fn non_interactive_task_run_writes_blocked_report_when_rework_limit_is_exceeded() {
+    let workspace = prepare_workspace();
+    let provider = ScriptedTaskRunProvider::testing_always_fails();
+    let outcome = TaskRunOrchestrator::run_with_provider(task_request(workspace.path()), &provider)
+        .expect("task run");
+
+    assert_eq!(outcome.status, TaskRunStatus::BlockedByGate);
+    assert!(
+        outcome
+            .blocked_report_path
+            .expect("blocked report")
+            .exists()
+    );
+    assert!(outcome.final_summary_path.is_none());
+}
+
 fn prepare_workspace() -> tempfile::TempDir {
     let workspace = tempfile::tempdir().expect("workspace");
     fs::create_dir_all(workspace.path().join("openspec")).expect("openspec dir");
@@ -139,6 +190,14 @@ impl ScriptedTaskRunProvider {
             output_schemas: Mutex::new(Vec::new()),
             seen_timeouts: Mutex::new(Vec::new()),
             testing_passes: Mutex::new([true].into_iter().collect()),
+        }
+    }
+
+    fn testing_always_fails() -> Self {
+        Self {
+            output_schemas: Mutex::new(Vec::new()),
+            seen_timeouts: Mutex::new(Vec::new()),
+            testing_passes: Mutex::new([false, false, false, false].into_iter().collect()),
         }
     }
 
