@@ -114,3 +114,28 @@ fn initial_constraint_bundle_contains_proposal_constraints_and_empty_later_const
     );
     assert_eq!(bundle.compiled_by_node, "N03");
 }
+
+#[test]
+fn rejects_change_id_that_escapes_openspec_changes() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let store = TaskRunStore::new(tempdir.path(), "task_0001");
+    let task_state_path = store
+        .write_task_state(&json!({
+            "task_id": "task_0001",
+            "phase": "intake",
+            "change_id": "../outside",
+            "openspec_bootstrap_status": "bootstrap_pending"
+        }))
+        .expect("task state");
+
+    let error = bootstrap_task_openspec(
+        tempdir.path(),
+        "../outside",
+        "做一个用户登录功能",
+        &task_state_path,
+    )
+    .expect_err("escaping change id must fail");
+
+    assert_eq!(error.code, "invalid_change_id");
+    assert!(!tempdir.path().join("openspec/outside/proposal.md").exists());
+}

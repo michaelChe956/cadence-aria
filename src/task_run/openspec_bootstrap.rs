@@ -15,6 +15,7 @@ pub fn bootstrap_task_openspec(
     request_text: &str,
     task_state_path: &Path,
 ) -> Result<PathBuf, TaskRunError> {
+    validate_change_id(change_id)?;
     let _ =
         bootstrap_openspec_skeleton(&change_id.to_string(), task_state_path, &DefaultDocumentOps)
             .map_err(|error| TaskRunError::new("openspec_bootstrap_failed", error.to_string()))?;
@@ -28,6 +29,7 @@ pub fn build_initial_constraint_bundle(
     change_dir: &Path,
     request_text: &str,
 ) -> Result<OpenSpecConstraintBundle, TaskRunError> {
+    validate_change_id(change_id)?;
     let source_manifest = build_openspec_source_manifest(change_dir)
         .map_err(|error| TaskRunError::new("openspec_manifest_failed", error.to_string()))?;
     Ok(OpenSpecConstraintBundle {
@@ -82,6 +84,20 @@ pub fn build_initial_constraint_bundle(
         compiled_at: chrono::Utc::now().to_rfc3339(),
         compiled_by_node: "N03".to_string(),
     })
+}
+
+fn validate_change_id(change_id: &str) -> Result<(), TaskRunError> {
+    if change_id.is_empty()
+        || !change_id.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '-' || character == '_'
+        })
+    {
+        return Err(TaskRunError::new(
+            "invalid_change_id",
+            format!("OpenSpec change id is invalid: {change_id}"),
+        ));
+    }
+    Ok(())
 }
 
 fn seed_proposal(change_dir: &Path, request_text: &str) -> Result<(), TaskRunError> {
