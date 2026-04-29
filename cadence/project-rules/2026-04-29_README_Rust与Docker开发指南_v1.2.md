@@ -8,6 +8,7 @@
 - 目标读者：项目开发者、维护者、AI Agent
 - 当前推荐镜像：`rust:1-bookworm`
 - 当前固定工具链：`rust-toolchain.toml` 中的 `1.95.0`
+- 修订说明：v1.2 移除 Docker 命令中的 TUNA rustup 镜像变量，改用 rustup 官方默认源；2026-04-29 本机验证 TUNA 镜像返回过期 manifest。
 
 ## 背景
 
@@ -26,8 +27,6 @@ docker run --rm -u "$(id -u):$(id -g)" \
   -e CARGO_HOME=/work/.cargo-home \
   -e CARGO_NET_RETRY=10 \
   -e CARGO_HTTP_TIMEOUT=120 \
-  -e RUSTUP_DIST_SERVER=https://mirrors.tuna.tsinghua.edu.cn/rustup \
-  -e RUSTUP_UPDATE_ROOT=https://mirrors.tuna.tsinghua.edu.cn/rustup/rustup \
   -v "$PWD":/work -w /work \
   rust:1-bookworm cargo fmt --check
 ```
@@ -39,8 +38,6 @@ docker run --rm -u "$(id -u):$(id -g)" \
   -e CARGO_HOME=/work/.cargo-home \
   -e CARGO_NET_RETRY=10 \
   -e CARGO_HTTP_TIMEOUT=120 \
-  -e RUSTUP_DIST_SERVER=https://mirrors.tuna.tsinghua.edu.cn/rustup \
-  -e RUSTUP_UPDATE_ROOT=https://mirrors.tuna.tsinghua.edu.cn/rustup/rustup \
   -v "$PWD":/work -w /work \
   rust:1-bookworm cargo fmt
 ```
@@ -56,8 +53,6 @@ docker run --rm -u "$(id -u):$(id -g)" \
   -e CARGO_HOME=/work/.cargo-home \
   -e CARGO_NET_RETRY=10 \
   -e CARGO_HTTP_TIMEOUT=120 \
-  -e RUSTUP_DIST_SERVER=https://mirrors.tuna.tsinghua.edu.cn/rustup \
-  -e RUSTUP_UPDATE_ROOT=https://mirrors.tuna.tsinghua.edu.cn/rustup/rustup \
   -v "$PWD":/work -w /work \
   rust:1-bookworm cargo clippy --all-targets --all-features --locked -- -D warnings
 ```

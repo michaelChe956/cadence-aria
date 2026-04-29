@@ -24,10 +24,23 @@ fn default_daemon_paths_live_under_task_runtime_dir() {
     let hash = workspace_hash(workspace.path()).expect("workspace hash");
 
     let runtime_dir = daemon_runtime_dir(workspace.path()).expect("runtime dir");
-    let socket_path = default_socket_path(workspace.path()).expect("socket path");
 
     assert!(runtime_dir.ends_with(format!(".aria/runtime/daemon/{hash}")));
-    assert!(socket_path.ends_with(format!(".aria/runtime/daemon/{hash}/daemon.sock")));
+}
+
+#[test]
+fn default_socket_path_uses_short_temp_location() {
+    let workspace = tempdir().expect("temp workspace");
+    let hash = workspace_hash(workspace.path()).expect("workspace hash");
+    let socket_path = default_socket_path(workspace.path()).expect("socket path");
+    let socket_text = socket_path.to_string_lossy();
+
+    assert!(socket_path.ends_with(format!("aria-daemon/{hash}.sock")));
+    assert!(
+        socket_text.len() < 100,
+        "socket path should stay below macOS sockaddr_un limits: {socket_text}"
+    );
+    assert!(!socket_path.starts_with(workspace.path()));
 }
 
 #[test]

@@ -38,7 +38,7 @@ pub fn daemon_runtime_dir(workspace_root: &Path) -> anyhow::Result<PathBuf> {
 }
 
 pub fn default_socket_path(workspace_root: &Path) -> anyhow::Result<PathBuf> {
-    Ok(daemon_runtime_dir(workspace_root)?.join("daemon.sock"))
+    Ok(short_socket_dir().join(format!("{}.sock", workspace_hash(workspace_root)?)))
 }
 
 pub fn daemon_metadata_path(workspace_root: &Path) -> anyhow::Result<PathBuf> {
@@ -125,5 +125,17 @@ fn pid_is_alive(pid: u32) -> bool {
     #[cfg(not(unix))]
     {
         pid == std::process::id()
+    }
+}
+
+fn short_socket_dir() -> PathBuf {
+    #[cfg(unix)]
+    {
+        PathBuf::from("/tmp").join("aria-daemon")
+    }
+
+    #[cfg(not(unix))]
+    {
+        std::env::temp_dir().join("aria-daemon")
     }
 }
