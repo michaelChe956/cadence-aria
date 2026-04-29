@@ -1,7 +1,7 @@
 use cadence_aria::cross_cutting::ast_grep_tool::probe_ast_grep;
 use cadence_aria::cross_cutting::document_ops::{
-    apply_json_patch, create_document, read_document_model, render_document_model, upsert_section,
-    DocumentOpError, DocumentTemplateKind, JsonPatch, JsonPatchOperation,
+    DocumentOpError, DocumentTemplateKind, JsonPatch, JsonPatchOperation, apply_json_patch,
+    create_document, read_document_model, render_document_model, upsert_section,
 };
 use cadence_aria::protocol::document_ops::{DocumentBlock, HeadingPath};
 use serde_json::json;

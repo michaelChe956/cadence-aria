@@ -3,7 +3,7 @@ use crate::protocol::traceability::{
     ArtifactTraceabilityBinding, BindingStatus, CoverageStatus, CoverageSummary, ManualExemption,
 };
 use chrono::Utc;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashSet;
 
 pub type WorkTaskId = String;

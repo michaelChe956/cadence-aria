@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs;
@@ -15,9 +15,9 @@ use crate::protocol::policies::PolicyMode;
 use crate::protocol::repl_wire::{
     ApproveGateRequest, AttachRequest, AttachResponse, Command, DetachResponse,
     GateResolutionResponse, GetStatusRequest, GetStatusResponse, HelloRequest, HelloResponse,
-    ListArtifactsRequest, ListArtifactsResponse, NewTaskRequest, NewTaskResponse,
+    ListArtifactsRequest, ListArtifactsResponse, NewTaskRequest, NewTaskResponse, PROTOCOL_VERSION,
     RejectGateRequest, ReplyGateRequest, RequestEnvelope, ResponseEnvelope, SubscribeRequest,
-    SubscribeResponse, WireError, PROTOCOL_VERSION,
+    SubscribeResponse, WireError,
 };
 
 #[derive(Debug)]
@@ -266,7 +266,7 @@ impl DaemonState {
                         payload
                             .task_id
                             .as_ref()
-                            .map_or(true, |expected| expected == &task.task_id)
+                            .is_none_or(|expected| expected == &task.task_id)
                     })
                     .map(TaskSummary::from)
                     .map(|summary| serde_json::to_value(summary_to_json(summary)).unwrap())
@@ -290,7 +290,7 @@ impl DaemonState {
                     .into_iter()
                     .flatten()
                     .filter(|artifact| {
-                        payload.artifact_kind.as_ref().map_or(true, |expected| {
+                        payload.artifact_kind.as_ref().is_none_or(|expected| {
                             artifact
                                 .get("artifact_kind")
                                 .and_then(Value::as_str)

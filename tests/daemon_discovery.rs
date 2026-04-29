@@ -1,7 +1,7 @@
 use cadence_aria::daemon::discovery::{
-    daemon_runtime_dir, default_socket_path, inspect_daemon, inspect_daemon_with_pid_checker,
-    read_daemon_metadata, workspace_hash, write_daemon_lock, write_daemon_metadata, DaemonMetadata,
-    DaemonStatus, PROTOCOL_VERSION,
+    DaemonMetadata, DaemonStatus, PROTOCOL_VERSION, daemon_runtime_dir, default_socket_path,
+    inspect_daemon, inspect_daemon_with_pid_checker, read_daemon_metadata, workspace_hash,
+    write_daemon_lock, write_daemon_metadata,
 };
 use sha2::{Digest, Sha256};
 use tempfile::tempdir;

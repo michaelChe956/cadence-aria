@@ -295,12 +295,12 @@ fn parse_code_block(lines: &[&str], start: usize) -> Option<(Option<String>, usi
     if !first.starts_with("```") {
         return None;
     }
-    let lang = first
-        .trim_start_matches("```")
-        .trim()
-        .is_empty()
-        .then_some(None)
-        .unwrap_or_else(|| Some(first.trim_start_matches("```").trim().to_string()));
+    let trimmed_lang = first.trim_start_matches("```").trim();
+    let lang = if trimmed_lang.is_empty() {
+        None
+    } else {
+        Some(trimmed_lang.to_string())
+    };
     let mut text = String::new();
     let mut index = start + 1;
     while index < lines.len() {
@@ -617,17 +617,17 @@ fn parse_array_index(
 
 fn template_for(kind: &DocumentTemplateKind) -> Result<&'static str, DocumentOpError> {
     match kind {
-        DocumentTemplateKind::OpenspecProposal => Ok(
-            "# 变更提案\n\n## 目标\n\n待补充目标。\n\n## 范围\n\n待补充范围。\n",
-        ),
+        DocumentTemplateKind::OpenspecProposal => {
+            Ok("# 变更提案\n\n## 目标\n\n待补充目标。\n\n## 范围\n\n待补充范围。\n")
+        }
         DocumentTemplateKind::OpenspecSpec => Ok(
             "# 变更规格\n\n## 需求\n\n- [REQ-001] 待补充需求。\n\n## 验收标准\n\n- [AC-001] 待补充验收标准。Refs: REQ-001\n",
         ),
         DocumentTemplateKind::OpenspecDesign => Ok(
             "# 设计\n\n## 设计决策\n\n- [DEC-001] 待补充设计决策。\n\n## 风险\n\n- [RISK-001] 待补充风险。\n",
         ),
-        DocumentTemplateKind::OpenspecTasks => Ok(
-            "# 任务清单\n\n## 实施任务\n\n- [ ] TASK-001 待补充任务。\n",
-        ),
+        DocumentTemplateKind::OpenspecTasks => {
+            Ok("# 任务清单\n\n## 实施任务\n\n- [ ] TASK-001 待补充任务。\n")
+        }
     }
 }

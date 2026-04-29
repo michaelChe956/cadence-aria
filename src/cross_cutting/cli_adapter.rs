@@ -3,7 +3,7 @@ use crate::cross_cutting::adapter_compatibility::{
 };
 use crate::cross_cutting::document_ops::compute_sha256;
 use crate::cross_cutting::provider_adapter::{
-    parse_last_structured_output, ProviderAdapter, ProviderAdapterError,
+    ProviderAdapter, ProviderAdapterError, parse_last_structured_output,
 };
 use crate::protocol::contracts::{AdapterInput, AdapterOutput, TimeoutStatus};
 use std::collections::{BTreeMap, BTreeSet};
@@ -169,16 +169,16 @@ pub fn run_command_capture(
         }
     })?;
 
-    if let Some(stdin_text) = stdin_text {
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(stdin_text.as_bytes()).map_err(|error| {
-                ProviderAdapterError::permission_denied(
-                    format!("write provider stdin: {error}"),
-                    String::new(),
-                    String::new(),
-                )
-            })?;
-        }
+    if let Some(stdin_text) = stdin_text
+        && let Some(mut stdin) = child.stdin.take()
+    {
+        stdin.write_all(stdin_text.as_bytes()).map_err(|error| {
+            ProviderAdapterError::permission_denied(
+                format!("write provider stdin: {error}"),
+                String::new(),
+                String::new(),
+            )
+        })?;
     }
 
     if let Some(timeout) = timeout {

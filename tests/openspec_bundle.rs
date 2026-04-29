@@ -1,6 +1,6 @@
 use cadence_aria::cross_cutting::openspec_constraints::{
-    bootstrap_openspec_skeleton, build_openspec_source_manifest, check_bundle_stale,
-    compile_constraint_bundle, DefaultDocumentOps, OpenSpecError,
+    DefaultDocumentOps, OpenSpecError, bootstrap_openspec_skeleton, build_openspec_source_manifest,
+    check_bundle_stale, compile_constraint_bundle,
 };
 use cadence_aria::protocol::constraints::{
     BundleStatus, OpenSpecBootstrapStatus, OpenSpecSourceKind,
@@ -37,22 +37,30 @@ fn bootstrap_openspec_skeleton_creates_scope_files_and_marks_task_bootstrapped()
     .expect("bootstrap skeleton");
 
     assert_eq!(status, OpenSpecBootstrapStatus::Bootstrapped);
-    assert!(workspace
-        .path()
-        .join("openspec/changes/sample-change/proposal.md")
-        .exists());
-    assert!(workspace
-        .path()
-        .join("openspec/changes/sample-change/specs/main/spec.md")
-        .exists());
-    assert!(workspace
-        .path()
-        .join("openspec/changes/sample-change/design.md")
-        .exists());
-    assert!(workspace
-        .path()
-        .join("openspec/changes/sample-change/tasks.md")
-        .exists());
+    assert!(
+        workspace
+            .path()
+            .join("openspec/changes/sample-change/proposal.md")
+            .exists()
+    );
+    assert!(
+        workspace
+            .path()
+            .join("openspec/changes/sample-change/specs/main/spec.md")
+            .exists()
+    );
+    assert!(
+        workspace
+            .path()
+            .join("openspec/changes/sample-change/design.md")
+            .exists()
+    );
+    assert!(
+        workspace
+            .path()
+            .join("openspec/changes/sample-change/tasks.md")
+            .exists()
+    );
 
     let task_state: serde_json::Value =
         serde_json::from_slice(&fs::read(&task_state_path).expect("read task state"))

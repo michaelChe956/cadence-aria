@@ -1,6 +1,6 @@
-use crate::cross_cutting::git_command::{args, git_stdout, run_git, GitCommandError};
+use crate::cross_cutting::git_command::{GitCommandError, args, git_stdout, run_git};
 use crate::runtime_units::{RuntimeProtocolStep, RuntimeStepStatus};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq)]

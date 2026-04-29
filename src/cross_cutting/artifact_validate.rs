@@ -605,10 +605,10 @@ pub fn phase1_profile_validator(
         ArtifactKind::CodingReport
         | ArtifactKind::TestingReport
         | ArtifactKind::CodeReviewReport
-        | ArtifactKind::IntegrationReport => {
-            if traceability_refs.is_empty() {
-                return Err(ArtifactValidateError::TraceabilityRefsMissing);
-            }
+        | ArtifactKind::IntegrationReport
+            if traceability_refs.is_empty() =>
+        {
+            return Err(ArtifactValidateError::TraceabilityRefsMissing);
         }
         _ => {}
     }

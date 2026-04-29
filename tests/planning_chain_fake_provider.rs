@@ -1,6 +1,6 @@
 use cadence_aria::cross_cutting::provider_adapter::{
-    parse_last_structured_output, ProviderAdapter, ProviderAdapterError, STRUCTURED_OUTPUT_END,
-    STRUCTURED_OUTPUT_START,
+    ProviderAdapter, ProviderAdapterError, STRUCTURED_OUTPUT_END, STRUCTURED_OUTPUT_START,
+    parse_last_structured_output,
 };
 use cadence_aria::protocol::constraints::{
     BundleStatus, CoverageModel, DesignConstraints, OpenSpecConstraintBundle, ProposalConstraints,
@@ -10,7 +10,7 @@ use cadence_aria::protocol::contracts::{AdapterInput, AdapterOutput, TimeoutStat
 use cadence_aria::protocol::projections::ProjectionPayload;
 use cadence_aria::runtime_units::plan_dispatch::run_planning_full_chain;
 use cadence_aria::runtime_units::spec_gate_review::{
-    run_planning_start_chain, PlanningStartChainInput,
+    PlanningStartChainInput, run_planning_start_chain,
 };
 use serde_json::json;
 use std::collections::VecDeque;
@@ -186,9 +186,11 @@ fn fake_provider_runs_n04_to_n12_happy_path_with_design_tasks_and_dispatch() {
         .expect("routing array");
     assert_eq!(routing[0]["source_work_package_id"], json!("wt-001"));
     assert_eq!(routing[0]["execution_mode"], json!("agent_only"));
-    assert!(routing
-        .iter()
-        .all(|item| item.get("source_work_package_id").is_some()));
+    assert!(
+        routing
+            .iter()
+            .all(|item| item.get("source_work_package_id").is_some())
+    );
 
     for node_id in ["N10", "N11", "N12"] {
         assert!(
@@ -223,7 +225,9 @@ fn fake_provider_routes_revise_review_to_n09_and_back_to_n08() {
             .iter()
             .map(|step| step.node_id.as_str())
             .collect::<Vec<_>>(),
-        vec!["N04", "N05", "N06", "N07", "N08", "N09", "N08", "N10", "N11", "N12"]
+        vec![
+            "N04", "N05", "N06", "N07", "N08", "N09", "N08", "N10", "N11", "N12"
+        ]
     );
     assert_eq!(
         result
@@ -426,7 +430,7 @@ fn planning_input(workspace_root: &Path, change_id: &str) -> PlanningStartChainI
             change_id: change_id.to_string(),
             proposal_constraints: ProposalConstraints {
                 business_intent: vec![
-                    "Users need to create runtime tasks from the REPL.".to_string()
+                    "Users need to create runtime tasks from the REPL.".to_string(),
                 ],
                 scope: vec![
                     "Compile task creation rules into the Phase 1 runtime contract.".to_string(),

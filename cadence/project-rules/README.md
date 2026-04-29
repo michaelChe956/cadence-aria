@@ -44,7 +44,7 @@
 >
 > 本仓库已在 `AGENTS.md` 与 `CLAUDE.md` 中引用 `cadence/project-rules/README.md`，因此本节列出的规则不是示例规则，而是当前项目的强制规则。
 
-- **Rust/Cargo 开发与验证规则**：`cadence/project-rules/2026-04-26_README_Rust与Docker开发指南_v1.0.md`
+- **Rust/Cargo 开发与验证规则**：`cadence/project-rules/2026-04-29_README_Rust与Docker开发指南_v1.1.md`
   - 在宿主机未确认具备可用 Rust 工具链时，必须使用该规则文档中的 Docker 命令进行 `cargo fmt --check`、`cargo check`、`cargo test` 与 CLI 验证。
   - 使用 Docker 执行会改写文件的命令时，必须按规则文档处理文件 ownership，避免产生 root-owned 文件。
   - 若 Rust/Docker 开发命令发生变化，必须同步更新该规则文档。

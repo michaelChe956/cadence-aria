@@ -1,7 +1,7 @@
 use crate::protocol::contracts::{
-    execution_contract_for_node, workflow_discipline_for_node, NodePromptTemplateRef, PromptSection,
+    NodePromptTemplateRef, PromptSection, execution_contract_for_node, workflow_discipline_for_node,
 };
-use crate::protocol::prompt_manifest::{required_prompt_sections, PromptTemplate};
+use crate::protocol::prompt_manifest::{PromptTemplate, required_prompt_sections};
 use std::collections::BTreeMap;
 
 pub fn all_planning_node_ids() -> Vec<&'static str> {
@@ -84,13 +84,17 @@ fn n07_sections() -> BTreeMap<PromptSection, String> {
 
 fn generic_sections(system_delta: &str, artifact_kind: &str) -> BTreeMap<PromptSection, String> {
     section_map(
-        &format!("[system]\n你是 Aria 的 {artifact_kind} 候选产物生成器或 advisory reviewer。Aria daemon 是唯一运行时真相源；你只能输出候选结果或 advisory 结果。\n{system_delta}"),
+        &format!(
+            "[system]\n你是 Aria 的 {artifact_kind} 候选产物生成器或 advisory reviewer。Aria daemon 是唯一运行时真相源；你只能输出候选结果或 advisory 结果。\n{system_delta}"
+        ),
         "[node_contract]\nnode_id={{node_id}}\nruntime_role={{runtime_role}}\nadapter_role={{adapter_role}}\nadvisory_only={{advisory_only}}\nallowed_write_scope={{allowed_write_scope}}\ntimeout_sec={{timeout_sec}}\nmax_retries={{max_retries}}",
         "[canonical_inputs]\n{{canonical_input_summary}}",
         "[projection_summary]\n{{projection_summary}}",
         "[constraint_summary]\n{{constraint_summary}}",
         "[workflow_discipline]\n{{workflow_discipline_summary}}",
-        &format!("[output_schema]\n最终 stdout 必须包含 <ARIA_STRUCTURED_OUTPUT> JSON block，且 artifact_kind 必须等于 {artifact_kind}。\n{{{{output_schema_summary}}}}"),
+        &format!(
+            "[output_schema]\n最终 stdout 必须包含 <ARIA_STRUCTURED_OUTPUT> JSON block，且 artifact_kind 必须等于 {artifact_kind}。\n{{{{output_schema_summary}}}}"
+        ),
         "[completion_or_failure]\nforbidden_actions={{forbidden_actions}}\ncompletion_criteria={{completion_criteria}}\nverification_commands={{verification_commands}}\n不要推进节点状态。不要绕过 daemon 写入 canonical artifact。失败时按 output schema 返回 failure summary。",
     )
 }
@@ -152,21 +156,51 @@ fn artifact_kind(node_id: &str) -> &'static str {
 
 fn system_delta(node_id: &str) -> &'static str {
     match node_id {
-        "N06" => "你是 advisory reviewer，只能指出 spec gate 风险与建议；daemon 才能生成 spec_gate_decision。不得要求 requirement_constraints 已存在。",
-        "N08" => "你是设计评审 reviewer，优先输出阻塞性 findings、风险与明确 review_decision；不得直接修改 design。",
-        "N09" => "你是设计修订候选生成器，只能基于 design_review.findings 产出修订记录和候选 revised_design_markdown。",
-        "N10" => "你是 plan readiness checker，只判断 spec/design/projection/bundle 是否足以进入计划，不生成 plan。",
-        "N11" => "你是计划候选生成器，必须产出带显式 work_package_id、traceability_refs 和 acceptance_targets 的 plan。",
-        "N12" => "你是 dispatch 候选生成器，必须把 PlanProjection work_package 映射为 WorkTask routing，并保留 source_work_package_id。",
-        "N16" => "你是 Codex executor，只能在当前 worktask routing 授权的 worktree 写范围内完成 coding_report 候选输出；不得执行 git commit。",
-        "N17" => "你是 Codex executor，默认只运行验证并产出 testing_report；除非 route 明确授权，不得修改生产代码。",
-        "N18" => "你是 Codex reviewer，只读检查 worktask 改动并输出 code_review_report；不得修改文件。",
-        "N19" => "你是 Codex executor，只能按失败报告或 review findings 做 bounded rework，并产出更新后的 coding_report。",
-        "N20" => "你是 ready advisory reviewer，只能给出 ready/block/rework 候选建议；最终决策由 daemon 生成。",
-        "N24" => "你是 integration verify advisory reviewer，只能给出 verify/rollback 候选建议；rollback 决策由 daemon 生成。",
-        "N25" => "你是 Claude Code orchestrator，基于已有事实生成 final_review 和 coverage_summary 候选输出。",
-        "N26" => "你是 Claude Code orchestrator，只有 approval gate 明确确认后才输出候选 patch task delta 或 dispatch routing 意图。",
-        "N27" => "你是 Claude Code orchestrator，只引用 final_review 中已经存在的验证事实生成 final_summary。",
+        "N06" => {
+            "你是 advisory reviewer，只能指出 spec gate 风险与建议；daemon 才能生成 spec_gate_decision。不得要求 requirement_constraints 已存在。"
+        }
+        "N08" => {
+            "你是设计评审 reviewer，优先输出阻塞性 findings、风险与明确 review_decision；不得直接修改 design。"
+        }
+        "N09" => {
+            "你是设计修订候选生成器，只能基于 design_review.findings 产出修订记录和候选 revised_design_markdown。"
+        }
+        "N10" => {
+            "你是 plan readiness checker，只判断 spec/design/projection/bundle 是否足以进入计划，不生成 plan。"
+        }
+        "N11" => {
+            "你是计划候选生成器，必须产出带显式 work_package_id、traceability_refs 和 acceptance_targets 的 plan。"
+        }
+        "N12" => {
+            "你是 dispatch 候选生成器，必须把 PlanProjection work_package 映射为 WorkTask routing，并保留 source_work_package_id。"
+        }
+        "N16" => {
+            "你是 Codex executor，只能在当前 worktask routing 授权的 worktree 写范围内完成 coding_report 候选输出；不得执行 git commit。"
+        }
+        "N17" => {
+            "你是 Codex executor，默认只运行验证并产出 testing_report；除非 route 明确授权，不得修改生产代码。"
+        }
+        "N18" => {
+            "你是 Codex reviewer，只读检查 worktask 改动并输出 code_review_report；不得修改文件。"
+        }
+        "N19" => {
+            "你是 Codex executor，只能按失败报告或 review findings 做 bounded rework，并产出更新后的 coding_report。"
+        }
+        "N20" => {
+            "你是 ready advisory reviewer，只能给出 ready/block/rework 候选建议；最终决策由 daemon 生成。"
+        }
+        "N24" => {
+            "你是 integration verify advisory reviewer，只能给出 verify/rollback 候选建议；rollback 决策由 daemon 生成。"
+        }
+        "N25" => {
+            "你是 Claude Code orchestrator，基于已有事实生成 final_review 和 coverage_summary 候选输出。"
+        }
+        "N26" => {
+            "你是 Claude Code orchestrator，只有 approval gate 明确确认后才输出候选 patch task delta 或 dispatch routing 意图。"
+        }
+        "N27" => {
+            "你是 Claude Code orchestrator，只引用 final_review 中已经存在的验证事实生成 final_summary。"
+        }
         _ => "",
     }
 }

@@ -1,8 +1,8 @@
 use cadence_aria::cross_cutting::integration_queue::IntegrationQueue;
 use cadence_aria::cross_cutting::openspec_constraints::build_openspec_source_manifest;
 use cadence_aria::cross_cutting::provider_adapter::{
-    parse_last_structured_output, ProviderAdapter, ProviderAdapterError, STRUCTURED_OUTPUT_END,
-    STRUCTURED_OUTPUT_START,
+    ProviderAdapter, ProviderAdapterError, STRUCTURED_OUTPUT_END, STRUCTURED_OUTPUT_START,
+    parse_last_structured_output,
 };
 use cadence_aria::cross_cutting::worktree::WorktreeLeaseManager;
 use cadence_aria::protocol::constraints::{
@@ -11,21 +11,21 @@ use cadence_aria::protocol::constraints::{
 };
 use cadence_aria::protocol::contracts::{AdapterInput, AdapterOutput, TimeoutStatus};
 use cadence_aria::protocol::projections::{PlanProjection, ProjectionPayload};
-use cadence_aria::runtime_units::coding::{run_worktask_execution_chain, ExecutionWorktaskInput};
-use cadence_aria::runtime_units::execution_setup::{run_execution_setup, ExecutionSetupInput};
-use cadence_aria::runtime_units::final_review::{run_final_closure_chain, FinalClosureInput};
+use cadence_aria::runtime_units::coding::{ExecutionWorktaskInput, run_worktask_execution_chain};
+use cadence_aria::runtime_units::execution_setup::{ExecutionSetupInput, run_execution_setup};
+use cadence_aria::runtime_units::final_review::{FinalClosureInput, run_final_closure_chain};
 use cadence_aria::runtime_units::integration_execute::{
-    run_integration_execute, IntegrationExecuteInput,
+    IntegrationExecuteInput, run_integration_execute,
 };
 use cadence_aria::runtime_units::integration_prepare::{
-    run_integration_prepare, IntegrationPrepareInput,
+    IntegrationPrepareInput, run_integration_prepare,
 };
 use cadence_aria::runtime_units::integration_verify::{
-    run_integration_verify, IntegrationVerifyInput,
+    IntegrationVerifyInput, run_integration_verify,
 };
 use cadence_aria::runtime_units::plan_dispatch::run_planning_full_chain;
 use cadence_aria::runtime_units::spec_gate_review::PlanningStartChainInput;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -380,7 +380,7 @@ fn planning_input(workspace_root: &Path, change_id: &str) -> PlanningStartChainI
             change_id: change_id.to_string(),
             proposal_constraints: ProposalConstraints {
                 business_intent: vec![
-                    "Users need to create runtime tasks from the REPL.".to_string()
+                    "Users need to create runtime tasks from the REPL.".to_string(),
                 ],
                 scope: vec![
                     "Compile task creation rules into the Phase 1 runtime contract.".to_string(),

@@ -1,4 +1,4 @@
-use crate::cross_cutting::git_command::{args, git_stdout, run_git, GitCommandError};
+use crate::cross_cutting::git_command::{GitCommandError, args, git_stdout, run_git};
 use crate::cross_cutting::integration_queue::IntegrationQueue;
 use crate::cross_cutting::worktree::validate_write_path;
 use crate::runtime_units::{

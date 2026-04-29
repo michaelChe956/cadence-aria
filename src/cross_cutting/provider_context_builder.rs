@@ -1,8 +1,8 @@
 use crate::protocol::contracts::{
-    execution_contract_for_node, workflow_discipline_for_node, AdapterInput, ProviderContextPackage,
+    AdapterInput, ProviderContextPackage, execution_contract_for_node, workflow_discipline_for_node,
 };
 use crate::protocol::enums::{ConstraintBundleId, ProjectionId, SessionId, TaskId};
-use crate::protocol::prompt_manifest::{render_prompt_template, PromptRenderError};
+use crate::protocol::prompt_manifest::{PromptRenderError, render_prompt_template};
 use crate::runtime_units::prompt_template_registry::prompt_template_for_node;
 use serde_json::Value;
 use std::collections::BTreeMap;

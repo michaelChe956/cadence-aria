@@ -1,13 +1,13 @@
-use cadence_aria::cross_cutting::artifact_validate::{canonical_validator, ArtifactContent};
+use cadence_aria::cross_cutting::artifact_validate::{ArtifactContent, canonical_validator};
 use cadence_aria::daemon::state_machine::DaemonState;
 use cadence_aria::protocol::artifacts::ArtifactKind;
 use cadence_aria::protocol::constraints::OpenSpecBootstrapStatus;
 use cadence_aria::protocol::policies::PolicyMode;
 use cadence_aria::protocol::repl_wire::NewTaskRequest;
 use cadence_aria::runtime_units::{
-    task_init::TaskInitUnit, CanonicalNodeInput, DaemonContext, RuntimeUnit,
+    CanonicalNodeInput, DaemonContext, RuntimeUnit, task_init::TaskInitUnit,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tempfile::tempdir;
 
 #[test]

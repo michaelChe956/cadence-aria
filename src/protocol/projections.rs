@@ -331,6 +331,5 @@ fn normalize_enum_value(value: &str) -> String {
         .trim_matches(';')
         .trim_matches(',')
         .to_ascii_lowercase()
-        .replace('-', "_")
-        .replace(' ', "_")
+        .replace(['-', ' '], "_")
 }

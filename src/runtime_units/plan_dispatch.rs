@@ -1,7 +1,7 @@
 use crate::cross_cutting::artifact_projection::compile_plan_projection;
 use crate::cross_cutting::artifact_validate::{
-    canonical_validator, phase1_profile_validator, projection_validator, ArtifactContent,
-    ArtifactIndex, ConstraintBundleIndex, ProjectionIndex, ProviderRunIndex, TraceabilityIndex,
+    ArtifactContent, ArtifactIndex, ConstraintBundleIndex, ProjectionIndex, ProviderRunIndex,
+    TraceabilityIndex, canonical_validator, phase1_profile_validator, projection_validator,
 };
 use crate::cross_cutting::document_ops::read_document_model;
 use crate::cross_cutting::provider_adapter::ProviderAdapter;
@@ -11,13 +11,13 @@ use crate::protocol::contracts::ProviderRunRecord;
 use crate::protocol::phase1_profile::PHASE1_PROFILE_VERSION;
 use crate::protocol::projections::{ArtifactProjectionRecord, ProjectionPayload};
 use crate::runtime_units::clarification::{
+    PlanningChainState, PlanningNodeTrace, PlanningStartChainInput, PlanningUnitError,
     provider_run_id, record_protocol_step, requirement_constraint_summary, run_clarification,
     run_provider_node, structured_output, write_checkpoint, write_json_artifact,
-    write_markdown_artifact, write_tasks_to_openspec_and_recompile, PlanningChainState,
-    PlanningNodeTrace, PlanningStartChainInput, PlanningUnitError,
+    write_markdown_artifact, write_tasks_to_openspec_and_recompile,
 };
 use crate::runtime_units::design_authoring::run_design_authoring;
-use crate::runtime_units::design_review::{run_design_review, DesignReviewRoute};
+use crate::runtime_units::design_review::{DesignReviewRoute, run_design_review};
 use crate::runtime_units::design_revision::run_design_revision;
 use crate::runtime_units::spec_authoring::run_spec_authoring;
 use crate::runtime_units::spec_gate_review::run_spec_gate_review;
@@ -25,7 +25,7 @@ use crate::runtime_units::{
     CanonicalNodeInput, DaemonContext, RuntimeProtocolStep, RuntimeUnit, RuntimeUnitError,
     RuntimeUnitResult,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -366,10 +366,9 @@ fn run_dispatch_authoring(
             vec![plan_projection.projection_id.clone()],
             work_package_ids,
         ),
-        &ConstraintBundleIndex::with_checks(vec![state
-            .current_bundle
-            .constraint_bundle_id
-            .clone()]),
+        &ConstraintBundleIndex::with_checks(vec![
+            state.current_bundle.constraint_bundle_id.clone(),
+        ]),
         &TraceabilityIndex::with_known_refs(traceability_refs),
         &ProviderRunIndex::with_runs(vec![provider_run_id(&state.input.task_id, "N12")]),
     )

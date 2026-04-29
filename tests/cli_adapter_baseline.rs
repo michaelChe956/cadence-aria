@@ -1,8 +1,8 @@
 mod support;
 
 use cadence_aria::cross_cutting::adapter_compatibility::{
-    default_compatibility_matrix, fixture_compatibility_entry, PromptInputMode,
-    StructuredOutputMode,
+    PromptInputMode, StructuredOutputMode, default_compatibility_matrix,
+    fixture_compatibility_entry,
 };
 use cadence_aria::cross_cutting::cli_adapter::{CliAdapterConfig, CliProviderAdapter};
 use cadence_aria::cross_cutting::provider_adapter::ProviderAdapter;
@@ -57,14 +57,18 @@ fn default_matrix_contains_claude_code_and_codex_cli_entries() {
         codex.structured_output_mode,
         StructuredOutputMode::SentinelJson
     );
-    assert!(claude
-        .unauthorized_patterns
-        .iter()
-        .any(|pattern| pattern.contains("not logged in")));
-    assert!(codex
-        .permission_denied_patterns
-        .iter()
-        .any(|pattern| pattern.contains("permission denied")));
+    assert!(
+        claude
+            .unauthorized_patterns
+            .iter()
+            .any(|pattern| pattern.contains("not logged in"))
+    );
+    assert!(
+        codex
+            .permission_denied_patterns
+            .iter()
+            .any(|pattern| pattern.contains("permission denied"))
+    );
 }
 
 #[test]

@@ -1,5 +1,5 @@
 use cadence_aria::protocol::repl_wire::{Command, DetachRequest, HelloRequest, RequestEnvelope};
-use cadence_aria::repl::discovery::{start_daemon_and_wait_ready, AutoStartOptions};
+use cadence_aria::repl::discovery::{AutoStartOptions, start_daemon_and_wait_ready};
 use cadence_aria::repl::transport::UnixJsonTransport;
 use tempfile::tempdir;
 

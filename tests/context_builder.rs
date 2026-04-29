@@ -1,17 +1,17 @@
 use cadence_aria::cross_cutting::provider_context_builder::{
-    build_provider_context, ProviderContextBuildError, ProviderContextBuilderInput,
+    ProviderContextBuildError, ProviderContextBuilderInput, build_provider_context,
 };
 use cadence_aria::protocol::contracts::{
-    execution_contract_for_node, phase1_node_contract_table, workflow_discipline_for_node,
     AdapterRole, CommandClass, PromptSection, ProviderType, RuntimeRole,
+    execution_contract_for_node, phase1_node_contract_table, workflow_discipline_for_node,
 };
 use cadence_aria::protocol::prompt_manifest::{
-    phase1_prompt_manifest, planning_prompt_manifest, render_prompt_template, PromptRenderError,
+    PromptRenderError, phase1_prompt_manifest, planning_prompt_manifest, render_prompt_template,
 };
 use cadence_aria::runtime_units::prompt_template_registry::{
     all_phase1_provider_node_ids, all_planning_node_ids, prompt_template_for_node,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{collections::BTreeMap, fs};
 
 #[test]
@@ -19,7 +19,9 @@ fn contract_workflow_and_prompt_registries_cover_n04_to_n12() {
     let nodes = all_planning_node_ids();
     assert_eq!(
         nodes,
-        vec!["N04", "N05", "N06", "N07", "N08", "N09", "N10", "N11", "N12"]
+        vec![
+            "N04", "N05", "N06", "N07", "N08", "N09", "N10", "N11", "N12"
+        ]
     );
 
     let manifest = planning_prompt_manifest();
@@ -38,27 +40,37 @@ fn contract_workflow_and_prompt_registries_cover_n04_to_n12() {
         );
         assert_eq!(template.template_ref.required_sections, required_sections());
         assert_eq!(template.template_ref.render_order, required_sections());
-        assert!(workflow
-            .superpowers_required
-            .contains(&"using-superpowers".to_string()));
+        assert!(
+            workflow
+                .superpowers_required
+                .contains(&"using-superpowers".to_string())
+        );
     }
 
-    assert!(workflow_discipline_for_node("N04")
-        .expect("N04 workflow")
-        .superpowers_required
-        .contains(&"brainstorming".to_string()));
-    assert!(workflow_discipline_for_node("N05")
-        .expect("N05 workflow")
-        .superpowers_required
-        .contains(&"brainstorming".to_string()));
-    assert!(workflow_discipline_for_node("N07")
-        .expect("N07 workflow")
-        .superpowers_required
-        .contains(&"brainstorming".to_string()));
-    assert!(workflow_discipline_for_node("N11")
-        .expect("N11 workflow")
-        .superpowers_required
-        .contains(&"writing-plans".to_string()));
+    assert!(
+        workflow_discipline_for_node("N04")
+            .expect("N04 workflow")
+            .superpowers_required
+            .contains(&"brainstorming".to_string())
+    );
+    assert!(
+        workflow_discipline_for_node("N05")
+            .expect("N05 workflow")
+            .superpowers_required
+            .contains(&"brainstorming".to_string())
+    );
+    assert!(
+        workflow_discipline_for_node("N07")
+            .expect("N07 workflow")
+            .superpowers_required
+            .contains(&"brainstorming".to_string())
+    );
+    assert!(
+        workflow_discipline_for_node("N11")
+            .expect("N11 workflow")
+            .superpowers_required
+            .contains(&"writing-plans".to_string())
+    );
 
     let n06 = execution_contract_for_node("N06").expect("N06 contract");
     assert_eq!(n06.runtime_role, RuntimeRole::AdvisoryReviewer);
@@ -98,22 +110,30 @@ fn context_builder_renders_each_planning_prompt_and_maps_adapter_input() {
         );
 
         assert_section_order(&result.adapter_input.prompt);
-        assert!(result
-            .adapter_input
-            .prompt
-            .contains(&format!("node_id={node_id}")));
-        assert!(result
-            .adapter_input
-            .prompt
-            .contains(&contract.output_schema_ref));
-        assert!(result
-            .adapter_input
-            .prompt
-            .contains("canonical summary for test"));
-        assert!(result
-            .adapter_input
-            .prompt
-            .contains("constraint summary for test"));
+        assert!(
+            result
+                .adapter_input
+                .prompt
+                .contains(&format!("node_id={node_id}"))
+        );
+        assert!(
+            result
+                .adapter_input
+                .prompt
+                .contains(&contract.output_schema_ref)
+        );
+        assert!(
+            result
+                .adapter_input
+                .prompt
+                .contains("canonical summary for test")
+        );
+        assert!(
+            result
+                .adapter_input
+                .prompt
+                .contains("constraint summary for test")
+        );
     }
 }
 
@@ -153,12 +173,16 @@ fn contract_workflow_and_prompt_registries_cover_p4_execution_and_closure_nodes(
             }),
             "{node_id} missing from prompt manifest"
         );
-        assert!(workflow
-            .superpowers_required
-            .contains(&"using-superpowers".to_string()));
-        assert!(contract
-            .completion_criteria
-            .contains(&"emit_aria_structured_output".to_string()));
+        assert!(
+            workflow
+                .superpowers_required
+                .contains(&"using-superpowers".to_string())
+        );
+        assert!(
+            contract
+                .completion_criteria
+                .contains(&"emit_aria_structured_output".to_string())
+        );
         assert!(
             !contract.forbidden_actions.is_empty(),
             "{node_id} must carry forbidden actions into provider context"
@@ -174,17 +198,20 @@ fn contract_workflow_and_prompt_registries_cover_p4_execution_and_closure_nodes(
         n16.output_schema_ref,
         "schema://aria/artifacts/coding_report/v1"
     );
-    assert!(n16
-        .allowed_command_classes
-        .contains(&CommandClass::FileWrite));
+    assert!(
+        n16.allowed_command_classes
+            .contains(&CommandClass::FileWrite)
+    );
     assert_eq!(
         n16.allowed_write_scope,
         vec!["<worktask_routing.allowed_write_scope>".to_string()]
     );
-    assert!(workflow_discipline_for_node("N16")
-        .expect("N16 workflow")
-        .superpowers_required
-        .contains(&"test-driven-development".to_string()));
+    assert!(
+        workflow_discipline_for_node("N16")
+            .expect("N16 workflow")
+            .superpowers_required
+            .contains(&"test-driven-development".to_string())
+    );
 
     let n17 = execution_contract_for_node("N17").expect("N17 contract");
     assert_eq!(n17.provider_type, ProviderType::Codex);
@@ -192,10 +219,12 @@ fn contract_workflow_and_prompt_registries_cover_p4_execution_and_closure_nodes(
     assert_eq!(n17.adapter_role, AdapterRole::Executor);
     assert_eq!(n17.allowed_write_scope, Vec::<String>::new());
     assert!(n17.allowed_command_classes.contains(&CommandClass::Test));
-    assert!(workflow_discipline_for_node("N17")
-        .expect("N17 workflow")
-        .superpowers_optional
-        .contains(&"systematic-debugging".to_string()));
+    assert!(
+        workflow_discipline_for_node("N17")
+            .expect("N17 workflow")
+            .superpowers_optional
+            .contains(&"systematic-debugging".to_string())
+    );
 
     let n18 = execution_contract_for_node("N18").expect("N18 contract");
     assert_eq!(n18.runtime_role, RuntimeRole::Reviewer);
@@ -231,12 +260,13 @@ fn contract_workflow_and_prompt_registries_cover_p4_execution_and_closure_nodes(
     assert_eq!(rows.first().expect("first row").node_id, "N13");
     assert_eq!(rows.last().expect("last row").node_id, "N28");
     assert_eq!(rows.len(), 16);
-    assert!(rows
-        .iter()
-        .find(|row| row.node_id == "N23")
-        .expect("N23 row")
-        .prompt_template_id
-        .is_none());
+    assert!(
+        rows.iter()
+            .find(|row| row.node_id == "N23")
+            .expect("N23 row")
+            .prompt_template_id
+            .is_none()
+    );
     assert!(
         rows.iter()
             .find(|row| row.node_id == "N25")
@@ -263,28 +293,36 @@ fn context_builder_renders_p4_provider_nodes_and_rejects_missing_required_inputs
             result.adapter_input.output_schema,
             contract.output_schema_ref
         );
-        assert!(result
-            .context_package
-            .context_files
-            .contains(&"tests/fixtures/artifacts/spec.md".to_string()));
-        assert!(result
-            .context_package
-            .context_files
-            .contains(&"tests/fixtures/projections/plan_projection.json".to_string()));
-        assert!(result
-            .context_package
-            .context_files
-            .contains(&"tests/fixtures/openspec/constraint_bundle.json".to_string()));
+        assert!(
+            result
+                .context_package
+                .context_files
+                .contains(&"tests/fixtures/artifacts/spec.md".to_string())
+        );
+        assert!(
+            result
+                .context_package
+                .context_files
+                .contains(&"tests/fixtures/projections/plan_projection.json".to_string())
+        );
+        assert!(
+            result
+                .context_package
+                .context_files
+                .contains(&"tests/fixtures/openspec/constraint_bundle.json".to_string())
+        );
         assert!(result.context_package.context_files.contains(&format!(
             ".aria/context-packages/task_001/{}.json",
             node_id.to_ascii_lowercase()
         )));
         assert!(result.adapter_input.prompt.contains("forbidden_actions="));
         assert!(result.adapter_input.prompt.contains("completion_criteria="));
-        assert!(result
-            .adapter_input
-            .prompt
-            .contains("verification_commands="));
+        assert!(
+            result
+                .adapter_input
+                .prompt
+                .contains("verification_commands=")
+        );
 
         if matches!(node_id, "N16" | "N19") {
             assert_eq!(

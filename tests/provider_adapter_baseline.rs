@@ -1,5 +1,5 @@
 use cadence_aria::cross_cutting::provider_adapter::{
-    parse_last_structured_output, FakeProviderAdapter, ProviderAdapter,
+    FakeProviderAdapter, ProviderAdapter, parse_last_structured_output,
 };
 use cadence_aria::cross_cutting::provider_router::{ProviderRouter, ProviderRunRequest};
 use cadence_aria::cross_cutting::provider_run::write_provider_run_record;
@@ -7,7 +7,7 @@ use cadence_aria::protocol::contracts::{
     AdapterInput, AdapterRole, ApprovalPolicy, ProviderRunStatus, ProviderType, RuntimeRole,
     SandboxMode, TimeoutStatus,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[test]
 fn adapter_input_and_output_use_shared_snake_case_contract() {
@@ -24,7 +24,7 @@ fn adapter_input_and_output_use_shared_snake_case_contract() {
     );
     assert_eq!(input_json["max_retries"], json!(1));
 
-    let adapter = FakeProviderAdapter::default();
+    let adapter = FakeProviderAdapter;
     let output = adapter.run(&input).expect("fake provider output");
     let output_json = serde_json::to_value(&output).expect("output json");
     assert_eq!(output_json["exit_code"], json!(0));
@@ -56,9 +56,7 @@ fn fake_provider_parses_last_structured_output_sentinel_and_keeps_raw_stdout() {
     assert_eq!(structured["goal_summary"], json!("fixture goal"));
 
     let input = adapter_input(stdout);
-    let output = FakeProviderAdapter::default()
-        .run(&input)
-        .expect("adapter output");
+    let output = FakeProviderAdapter.run(&input).expect("adapter output");
     assert!(output.stdout.starts_with("provider log line"));
     assert_eq!(output.stderr, "");
     assert_eq!(output.files_modified, Vec::<String>::new());
@@ -70,7 +68,7 @@ fn provider_router_records_completed_run_with_external_raw_output_refs() {
     let input = adapter_input(include_str!(
         "fixtures/provider/fake_stdout_clarification.txt"
     ));
-    let router = ProviderRouter::new(Box::new(FakeProviderAdapter::default()));
+    let router = ProviderRouter::new(Box::new(FakeProviderAdapter));
     let (output, record) = router
         .run(
             ProviderRunRequest {

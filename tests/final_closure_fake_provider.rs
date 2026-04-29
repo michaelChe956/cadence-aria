@@ -1,10 +1,10 @@
 use cadence_aria::cross_cutting::provider_adapter::{
-    parse_last_structured_output, ProviderAdapter, ProviderAdapterError, STRUCTURED_OUTPUT_END,
-    STRUCTURED_OUTPUT_START,
+    ProviderAdapter, ProviderAdapterError, STRUCTURED_OUTPUT_END, STRUCTURED_OUTPUT_START,
+    parse_last_structured_output,
 };
 use cadence_aria::protocol::contracts::{AdapterInput, AdapterOutput, TimeoutStatus};
 use cadence_aria::runtime_units::final_review::{
-    run_final_closure_chain, FinalClosureError, FinalClosureInput,
+    FinalClosureError, FinalClosureInput, run_final_closure_chain,
 };
 use serde_json::json;
 use std::sync::Mutex;

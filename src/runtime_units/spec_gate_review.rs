@@ -1,15 +1,15 @@
 pub use crate::runtime_units::clarification::PlanningStartChainInput;
 
-use crate::cross_cutting::artifact_validate::{canonical_validator, ArtifactContent};
+use crate::cross_cutting::artifact_validate::{ArtifactContent, canonical_validator};
 use crate::cross_cutting::provider_adapter::ProviderAdapter;
 use crate::protocol::artifacts::{ArtifactKind, ArtifactRef};
 use crate::protocol::constraints::{BundleStatus, OpenSpecConstraintBundle};
 use crate::protocol::contracts::ProviderRunRecord;
 use crate::protocol::projections::ArtifactProjectionRecord;
 use crate::runtime_units::clarification::{
-    proposal_constraint_summary, record_protocol_step, run_clarification, run_provider_node,
-    structured_output, write_checkpoint, write_json_artifact, write_spec_to_openspec_and_recompile,
-    PlanningChainState, PlanningNodeTrace, PlanningUnitError,
+    PlanningChainState, PlanningNodeTrace, PlanningUnitError, proposal_constraint_summary,
+    record_protocol_step, run_clarification, run_provider_node, structured_output,
+    write_checkpoint, write_json_artifact, write_spec_to_openspec_and_recompile,
 };
 use crate::runtime_units::design_authoring::run_design_authoring;
 use crate::runtime_units::spec_authoring::run_spec_authoring;
@@ -17,7 +17,7 @@ use crate::runtime_units::{
     CanonicalNodeInput, DaemonContext, RuntimeProtocolStep, RuntimeUnit, RuntimeUnitError,
     RuntimeUnitResult,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

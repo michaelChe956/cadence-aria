@@ -1,7 +1,8 @@
 [package]
 name = "cadence-aria"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
+rust-version = "1.95.0"
 
 [lib]
 name = "cadence_aria"
@@ -12,17 +13,17 @@ name = "aria"
 path = "src/main.rs"
 
 [dependencies]
-anyhow = "1"
-chrono = { version = "0.4", features = ["clock", "serde"] }
-hex = "0.4"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-serde_yaml = "0.9"
-sha2 = "0.10"
-thiserror = "1"
-tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
-uuid = { version = "1", features = ["v4"] }
-pulldown-cmark = "0.9"
+anyhow = "1.0.102"
+chrono = { version = "0.4.44", features = ["clock", "serde"] }
+hex = "0.4.3"
+pulldown-cmark = "0.13.3"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+sha2 = "0.10.9"
+thiserror = "2.0.18"
+tokio = { version = "1.52.1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+uuid = { version = "1.23.1", features = ["v4"] }
 
 [dev-dependencies]
-tempfile = "3"
+serde_yaml = "0.9.34"
+tempfile = "3.27.0"

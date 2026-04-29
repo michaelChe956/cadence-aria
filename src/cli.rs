@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
-use crate::daemon::discovery::{inspect_daemon, DaemonStatus};
+use crate::daemon::discovery::{DaemonStatus, inspect_daemon};
 use crate::daemon::runner::{run_daemon_serve_one, run_daemon_until_shutdown};
-use crate::repl::discovery::{resolve_daemon_connection, DiscoveryMode};
+use crate::repl::discovery::{DiscoveryMode, resolve_daemon_connection};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliOutput {

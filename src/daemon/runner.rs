@@ -4,7 +4,7 @@ use tokio::net::UnixListener;
 use tokio::sync::oneshot;
 
 use crate::daemon::discovery::{
-    default_socket_path, write_daemon_lock, write_daemon_metadata, DaemonMetadata, PROTOCOL_VERSION,
+    DaemonMetadata, PROTOCOL_VERSION, default_socket_path, write_daemon_lock, write_daemon_metadata,
 };
 use crate::daemon::{handle_stream, state_machine::DaemonState};
 
@@ -72,9 +72,9 @@ fn cleanup_daemon_files(workspace_root: &Path, socket_path: &Path) {
     if socket_path.exists() {
         let _ = std::fs::remove_file(socket_path);
     }
-    if let Ok(lock_path) = crate::daemon::discovery::daemon_lock_path(workspace_root) {
-        if lock_path.exists() {
-            let _ = std::fs::remove_file(lock_path);
-        }
+    if let Ok(lock_path) = crate::daemon::discovery::daemon_lock_path(workspace_root)
+        && lock_path.exists()
+    {
+        let _ = std::fs::remove_file(lock_path);
     }
 }

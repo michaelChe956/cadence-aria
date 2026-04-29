@@ -1,8 +1,8 @@
 use cadence_aria::cross_cutting::artifact_validate::{
-    artifact_validation_matrix, canonical_validator, ArtifactContent, ArtifactValidateError,
+    ArtifactContent, ArtifactValidateError, artifact_validation_matrix, canonical_validator,
 };
 use cadence_aria::protocol::artifacts::ArtifactKind;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[test]
 fn canonical_validator_accepts_minimal_positive_fixture_for_all_phase1_artifact_kinds() {

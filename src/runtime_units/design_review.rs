@@ -1,17 +1,17 @@
-use crate::cross_cutting::artifact_validate::{canonical_validator, ArtifactContent};
+use crate::cross_cutting::artifact_validate::{ArtifactContent, canonical_validator};
 use crate::cross_cutting::provider_adapter::ProviderAdapter;
 use crate::protocol::artifacts::{ArtifactKind, ArtifactRef};
 use crate::protocol::constraints::{BundleStatus, OpenSpecConstraintBundle};
 use crate::protocol::projections::ArtifactProjectionRecord;
 use crate::runtime_units::clarification::{
-    record_protocol_step, requirement_constraint_summary, run_provider_node, structured_output,
-    write_checkpoint, write_design_to_openspec_and_recompile, write_json_artifact,
-    PlanningChainState, PlanningUnitError,
+    PlanningChainState, PlanningUnitError, record_protocol_step, requirement_constraint_summary,
+    run_provider_node, structured_output, write_checkpoint, write_design_to_openspec_and_recompile,
+    write_json_artifact,
 };
 use crate::runtime_units::{
     CanonicalNodeInput, DaemonContext, RuntimeUnit, RuntimeUnitError, RuntimeUnitResult,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DesignReviewUnit;

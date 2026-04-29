@@ -1,14 +1,14 @@
 use crate::cross_cutting::artifact_projection::compile_design_projection;
 use crate::cross_cutting::artifact_validate::{
-    canonical_validator, projection_validator, ArtifactContent, ArtifactIndex,
+    ArtifactContent, ArtifactIndex, canonical_validator, projection_validator,
 };
 use crate::cross_cutting::document_ops::read_document_model;
 use crate::cross_cutting::provider_adapter::ProviderAdapter;
 use crate::protocol::artifacts::ArtifactKind;
 use crate::protocol::projections::ArtifactProjectionRecord;
 use crate::runtime_units::clarification::{
-    markdown_from_output, record_protocol_step, requirement_constraint_summary, run_provider_node,
-    write_checkpoint, write_markdown_artifact, PlanningChainState, PlanningUnitError,
+    PlanningChainState, PlanningUnitError, markdown_from_output, record_protocol_step,
+    requirement_constraint_summary, run_provider_node, write_checkpoint, write_markdown_artifact,
 };
 use crate::runtime_units::{
     CanonicalNodeInput, DaemonContext, RuntimeUnit, RuntimeUnitError, RuntimeUnitResult,

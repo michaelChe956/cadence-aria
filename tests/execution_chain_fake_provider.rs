@@ -1,26 +1,26 @@
 use cadence_aria::cross_cutting::integration_queue::IntegrationQueue;
 use cadence_aria::cross_cutting::provider_adapter::{
-    parse_last_structured_output, ProviderAdapter, ProviderAdapterError, STRUCTURED_OUTPUT_END,
-    STRUCTURED_OUTPUT_START,
+    ProviderAdapter, ProviderAdapterError, STRUCTURED_OUTPUT_END, STRUCTURED_OUTPUT_START,
+    parse_last_structured_output,
 };
 use cadence_aria::cross_cutting::worktree::{WorktreeLeaseManager, WorktreeLeaseStatus};
 use cadence_aria::protocol::contracts::{AdapterInput, AdapterOutput, TimeoutStatus};
 use cadence_aria::protocol::loop_counters::{LoopCounterName, LoopCounterRegistry};
 use cadence_aria::protocol::projections::{ExecutionMode, PlanProjection, WorkPackageProjection};
-use cadence_aria::runtime_units::coding::{run_worktask_execution_chain, ExecutionWorktaskInput};
+use cadence_aria::runtime_units::RuntimeUnit;
+use cadence_aria::runtime_units::coding::{ExecutionWorktaskInput, run_worktask_execution_chain};
 use cadence_aria::runtime_units::execution_setup::{
-    run_execution_setup, ExecutionSetupInput, ExecutionSetupUnit,
+    ExecutionSetupInput, ExecutionSetupUnit, run_execution_setup,
 };
 use cadence_aria::runtime_units::integration_execute::{
-    run_integration_execute, IntegrationExecuteInput,
+    IntegrationExecuteInput, run_integration_execute,
 };
 use cadence_aria::runtime_units::integration_prepare::{
-    run_integration_prepare, IntegrationPrepareInput, IntegrationPrepareUnit,
+    IntegrationPrepareInput, IntegrationPrepareUnit, run_integration_prepare,
 };
 use cadence_aria::runtime_units::integration_verify::{
-    run_integration_verify, IntegrationVerifyInput,
+    IntegrationVerifyInput, run_integration_verify,
 };
-use cadence_aria::runtime_units::RuntimeUnit;
 use serde_json::json;
 use std::collections::VecDeque;
 use std::fs;
@@ -232,9 +232,11 @@ fn testing_failure_routes_to_rework_then_back_to_testing_and_review() {
         result.protocol_steps[2].node_specific_fields["superseded_report_refs"],
         json!(["coding_report_worktask_001_0001"])
     );
-    assert!(result
-        .workflow_skills_activated
-        .contains(&"systematic-debugging".to_string()));
+    assert!(
+        result
+            .workflow_skills_activated
+            .contains(&"systematic-debugging".to_string())
+    );
     assert_eq!(result.next_node, "M20");
 }
 
@@ -501,7 +503,7 @@ fn execution_worktask_input(workspace_root: &std::path::Path) -> ExecutionWorkta
                     "task-001".to_string(),
                 ],
                 acceptance_targets: vec![
-                    "cargo test --test execution_chain_fake_provider".to_string()
+                    "cargo test --test execution_chain_fake_provider".to_string(),
                 ],
             }],
             dependencies: vec![],

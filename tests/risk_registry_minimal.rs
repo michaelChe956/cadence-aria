@@ -1,15 +1,15 @@
 use cadence_aria::cross_cutting::provider_context_builder::{
-    build_provider_context, ProviderContextBuilderInput,
+    ProviderContextBuilderInput, build_provider_context,
 };
 use cadence_aria::cross_cutting::provider_run::{
-    allocate_next_risk_id, append_risk_entry, load_risk_registry_snapshot,
+    RiskEntryInput, allocate_next_risk_id, append_risk_entry, load_risk_registry_snapshot,
     provider_run_record_from_output, recover_risk_registry_snapshot,
-    sync_risk_registry_to_snapshot, RiskEntryInput,
+    sync_risk_registry_to_snapshot,
 };
-use cadence_aria::cross_cutting::traceability::{normalize_traceability, TraceabilityIndexes};
+use cadence_aria::cross_cutting::traceability::{TraceabilityIndexes, normalize_traceability};
 use cadence_aria::daemon::checkpoint::RuntimeSnapshot;
 use cadence_aria::daemon::state_machine::DaemonState;
-use cadence_aria::protocol::artifacts::{risk_ids_from_artifact_refs, RiskStatus};
+use cadence_aria::protocol::artifacts::{RiskStatus, risk_ids_from_artifact_refs};
 use cadence_aria::protocol::contracts::{
     AdapterInput, AdapterOutput, AdapterRole, ApprovalPolicy, ProviderType, RuntimeRole,
     SandboxMode, TimeoutStatus,
@@ -18,7 +18,7 @@ use cadence_aria::protocol::projections::{
     ExecutionMode, PlanProjection, RiskSeverity, WorkPackageProjection,
 };
 use cadence_aria::protocol::repl_wire::NewTaskRequest;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[test]
 fn risk_registry_entries_persist_recover_and_bind_to_artifact_refs() {

@@ -1,5 +1,5 @@
 use cadence_aria::daemon::discovery::{
-    daemon_lock_path, daemon_metadata_path, default_socket_path, inspect_daemon, DaemonStatus,
+    DaemonStatus, daemon_lock_path, daemon_metadata_path, default_socket_path, inspect_daemon,
 };
 use cadence_aria::daemon::runner::run_daemon_until_shutdown;
 use cadence_aria::protocol::repl_wire::{Command, DetachRequest, HelloRequest, RequestEnvelope};
@@ -55,9 +55,11 @@ async fn daemon_run_writes_metadata_accepts_wire_messages_and_cleans_up_on_shutd
     shutdown_tx.send(()).expect("shutdown send");
     daemon.await.expect("daemon task");
 
-    assert!(!daemon_lock_path(workspace.path())
-        .expect("lock path")
-        .exists());
+    assert!(
+        !daemon_lock_path(workspace.path())
+            .expect("lock path")
+            .exists()
+    );
     assert!(!socket_path.exists());
 }
 

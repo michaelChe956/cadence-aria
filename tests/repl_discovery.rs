@@ -1,8 +1,8 @@
 use cadence_aria::daemon::discovery::{
-    daemon_lock_path, daemon_metadata_path, default_socket_path, write_daemon_lock,
-    write_daemon_metadata, DaemonMetadata, PROTOCOL_VERSION,
+    DaemonMetadata, PROTOCOL_VERSION, daemon_lock_path, daemon_metadata_path, default_socket_path,
+    write_daemon_lock, write_daemon_metadata,
 };
-use cadence_aria::repl::discovery::{resolve_daemon_connection, DiscoveryMode, DiscoveryPlan};
+use cadence_aria::repl::discovery::{DiscoveryMode, DiscoveryPlan, resolve_daemon_connection};
 use tempfile::tempdir;
 
 #[test]
@@ -33,12 +33,16 @@ fn repl_discovery_cleans_stale_metadata_before_auto_start_plan() {
             socket_path: default_socket_path(workspace.path()).expect("socket path")
         }
     );
-    assert!(!daemon_metadata_path(workspace.path())
-        .expect("metadata path")
-        .exists());
-    assert!(!daemon_lock_path(workspace.path())
-        .expect("lock path")
-        .exists());
+    assert!(
+        !daemon_metadata_path(workspace.path())
+            .expect("metadata path")
+            .exists()
+    );
+    assert!(
+        !daemon_lock_path(workspace.path())
+            .expect("lock path")
+            .exists()
+    );
 }
 
 #[test]

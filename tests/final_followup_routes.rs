@@ -1,18 +1,18 @@
 use cadence_aria::cross_cutting::artifact_validate::{
-    phase1_profile_validator, ConstraintBundleIndex, ProjectionIndex, ProviderRunIndex,
-    TraceabilityIndex,
+    ConstraintBundleIndex, ProjectionIndex, ProviderRunIndex, TraceabilityIndex,
+    phase1_profile_validator,
 };
 use cadence_aria::cross_cutting::openspec_constraints::{
     build_openspec_source_manifest, compile_constraint_bundle,
 };
 use cadence_aria::cross_cutting::provider_adapter::{
-    parse_last_structured_output, ProviderAdapter, ProviderAdapterError, STRUCTURED_OUTPUT_END,
-    STRUCTURED_OUTPUT_START,
+    ProviderAdapter, ProviderAdapterError, STRUCTURED_OUTPUT_END, STRUCTURED_OUTPUT_START,
+    parse_last_structured_output,
 };
 use cadence_aria::protocol::artifacts::ArtifactKind;
 use cadence_aria::protocol::contracts::{AdapterInput, AdapterOutput, TimeoutStatus};
 use cadence_aria::runtime_units::patch_followup_dispatch::{
-    run_final_followup_route, ApprovalDecision, FinalFollowupInput,
+    ApprovalDecision, FinalFollowupInput, run_final_followup_route,
 };
 use serde_json::json;
 use std::fs;
@@ -42,9 +42,11 @@ fn approved_followup_gate_runs_n26_updates_tasks_recompiles_bundle_and_returns_t
             .collect::<Vec<_>>(),
         vec!["N25", "X01", "N26", "N13"]
     );
-    assert!(fs::read_to_string(change_dir.join("tasks.md"))
-        .expect("tasks")
-        .contains("TASK-002 Follow up bounded patch"));
+    assert!(
+        fs::read_to_string(change_dir.join("tasks.md"))
+            .expect("tasks")
+            .contains("TASK-002 Follow up bounded patch")
+    );
     assert_eq!(
         result
             .recompiled_bundle
@@ -74,12 +76,14 @@ fn approved_followup_gate_runs_n26_updates_tasks_recompiles_bundle_and_returns_t
             vec!["TASK-002".to_string()],
         ),
         &ConstraintBundleIndex {
-            constraint_bundle_ids: vec![result
-                .recompiled_bundle
-                .as_ref()
-                .expect("bundle")
-                .constraint_bundle_id
-                .clone()],
+            constraint_bundle_ids: vec![
+                result
+                    .recompiled_bundle
+                    .as_ref()
+                    .expect("bundle")
+                    .constraint_bundle_id
+                    .clone(),
+            ],
             constraint_check_ids: Vec::new(),
         },
         &TraceabilityIndex::with_known_refs(vec!["req-001".to_string(), "dd-001".to_string()]),
@@ -111,9 +115,11 @@ fn approved_followup_rejects_unknown_traceability_refs_from_patch_delta() {
     )
     .expect_err("unknown followup traceability refs must be rejected");
 
-    assert!(error
-        .to_string()
-        .contains("unknown traceability ref req-999"));
+    assert!(
+        error
+            .to_string()
+            .contains("unknown traceability ref req-999")
+    );
 }
 
 #[test]

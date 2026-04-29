@@ -1,7 +1,7 @@
 use cadence_aria::cross_cutting::artifact_projection::compile_spec_projection;
 use cadence_aria::cross_cutting::artifact_validate::{
-    projection_validator, record_superseded_artifact_ref, validate_input_artifact_ref,
-    ArtifactIndex, ArtifactValidateError,
+    ArtifactIndex, ArtifactValidateError, projection_validator, record_superseded_artifact_ref,
+    validate_input_artifact_ref,
 };
 use cadence_aria::cross_cutting::document_ops::read_document_model;
 use cadence_aria::protocol::artifacts::{ArtifactKind, ArtifactRef, ArtifactStatus};

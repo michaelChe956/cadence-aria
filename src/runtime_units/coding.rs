@@ -1,14 +1,14 @@
 use crate::cross_cutting::artifact_validate::{
-    canonical_validator, phase1_profile_validator, ArtifactContent, ConstraintBundleIndex,
-    ProjectionIndex, ProviderRunIndex, TraceabilityIndex,
+    ArtifactContent, ConstraintBundleIndex, ProjectionIndex, ProviderRunIndex, TraceabilityIndex,
+    canonical_validator, phase1_profile_validator,
 };
 use crate::cross_cutting::provider_adapter::{ProviderAdapter, ProviderAdapterError};
 use crate::cross_cutting::provider_context_builder::{
-    build_provider_context, ProviderContextBuildError, ProviderContextBuilderInput,
+    ProviderContextBuildError, ProviderContextBuilderInput, build_provider_context,
 };
 use crate::cross_cutting::provider_router::ProviderRunRequest;
 use crate::cross_cutting::provider_run::provider_run_record_from_output;
-use crate::cross_cutting::traceability::{normalize_traceability, TraceabilityIndexes};
+use crate::cross_cutting::traceability::{TraceabilityIndexes, normalize_traceability};
 use crate::protocol::artifacts::ArtifactKind;
 use crate::protocol::contracts::{ApprovalPolicy, ProviderRunRecord, SandboxMode};
 use crate::protocol::loop_counters::{LoopCounterName, LoopCounterRegistry};
@@ -17,7 +17,7 @@ use crate::runtime_units::{
     CanonicalNodeInput, DaemonContext, RuntimeProtocolStep, RuntimeStepStatus, RuntimeUnit,
     RuntimeUnitError, RuntimeUnitResult,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::future::Future;
 use std::path::PathBuf;
 

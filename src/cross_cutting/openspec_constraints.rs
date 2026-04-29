@@ -1,5 +1,5 @@
 use crate::cross_cutting::document_ops::{
-    compute_sha256, create_document, read_document_model, DocumentOpError, DocumentTemplateKind,
+    DocumentOpError, DocumentTemplateKind, compute_sha256, create_document, read_document_model,
 };
 use crate::protocol::constraints::{
     BundleStatus, CoverageModel, DesignConstraints, OpenSpecBootstrapStatus,

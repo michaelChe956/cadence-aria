@@ -1,10 +1,10 @@
 use crate::cross_cutting::artifact_validate::{
-    phase1_profile_validator, ConstraintBundleIndex, ProjectionIndex, ProviderRunIndex,
-    TraceabilityIndex,
+    ConstraintBundleIndex, ProjectionIndex, ProviderRunIndex, TraceabilityIndex,
+    phase1_profile_validator,
 };
 use crate::cross_cutting::document_ops::{read_document_model, upsert_section};
 use crate::cross_cutting::openspec_constraints::{
-    build_openspec_source_manifest, check_bundle_stale, compile_constraint_bundle, OpenSpecError,
+    OpenSpecError, build_openspec_source_manifest, check_bundle_stale, compile_constraint_bundle,
 };
 use crate::cross_cutting::provider_adapter::ProviderAdapter;
 use crate::protocol::artifacts::ArtifactKind;
@@ -12,11 +12,11 @@ use crate::protocol::constraints::{BundleStatus, OpenSpecConstraintBundle};
 use crate::protocol::document_ops::{DocumentBlock, HeadingPath};
 use crate::protocol::phase1_profile::PHASE1_PROFILE_VERSION;
 use crate::runtime_units::final_review::{
-    normalize_final_review_profile, run_final_provider_node, session_closeout_step,
-    FinalClosureError, FinalClosureInput,
+    FinalClosureError, FinalClosureInput, normalize_final_review_profile, run_final_provider_node,
+    session_closeout_step,
 };
 use crate::runtime_units::{RuntimeProtocolStep, RuntimeStepStatus};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -371,10 +371,12 @@ fn dispatch_package_from_deltas(
             constraint_check_ids: Vec::new(),
         },
         &TraceabilityIndex::with_known_refs(input.traceability_refs.clone()),
-        &ProviderRunIndex::with_runs(vec![dispatch_package["_aria"]["provider_run_refs"][0]
-            .as_str()
-            .unwrap_or_default()
-            .to_string()]),
+        &ProviderRunIndex::with_runs(vec![
+            dispatch_package["_aria"]["provider_run_refs"][0]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+        ]),
     )
     .map_err(|error| FinalFollowupError::InvalidPatchTaskDelta(format!("{error:?}")))?;
     Ok(dispatch_package)

@@ -1,11 +1,11 @@
 use cadence_aria::cross_cutting::integration_queue::{
-    candidate_commit_is_not_integrated, IntegrationQueue,
+    IntegrationQueue, candidate_commit_is_not_integrated,
 };
 use cadence_aria::cross_cutting::provider_run::recover_provider_run_records;
 use cadence_aria::cross_cutting::worktree::{WorktreeLeaseManager, WorktreeLeaseStatus};
 use cadence_aria::daemon::recovery::{
-    recover_open_gates, replay_events_after, RecoverableGate, RecoverableGateStatus,
-    RecoverableRuntimeEvent,
+    RecoverableGate, RecoverableGateStatus, RecoverableRuntimeEvent, recover_open_gates,
+    replay_events_after,
 };
 use cadence_aria::protocol::contracts::{
     ApprovalPolicy, ProviderRunRecord, ProviderRunStatus, ProviderType, RuntimeRole, SandboxMode,

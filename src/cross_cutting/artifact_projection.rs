@@ -33,7 +33,7 @@ pub fn compile_spec_projection(
 
     let functional_requirements = requirement_entries
         .iter()
-        .map(|entry| requirement_from_entry(entry))
+        .map(requirement_from_entry)
         .collect::<Result<Vec<_>, _>>()?;
     if functional_requirements.is_empty() {
         return Err(ProjectionCompileError::EmptyPayload {
@@ -678,8 +678,7 @@ fn normalize_key(value: &str) -> String {
         .trim()
         .trim_end_matches(':')
         .to_ascii_lowercase()
-        .replace('-', "_")
-        .replace(' ', "_")
+        .replace(['-', ' '], "_")
 }
 
 fn clean_text(value: &str) -> String {

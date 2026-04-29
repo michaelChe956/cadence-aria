@@ -1,15 +1,15 @@
-use crate::cross_cutting::artifact_validate::{canonical_validator, ArtifactContent};
+use crate::cross_cutting::artifact_validate::{ArtifactContent, canonical_validator};
 use crate::cross_cutting::document_ops::{compute_sha256, read_document_model};
 use crate::cross_cutting::openspec_constraints::{
     build_openspec_source_manifest, check_bundle_stale, compile_constraint_bundle,
 };
 use crate::cross_cutting::provider_adapter::{ProviderAdapter, ProviderAdapterError};
 use crate::cross_cutting::provider_context_builder::{
-    build_provider_context, ProviderContextBuildError, ProviderContextBuilderInput,
+    ProviderContextBuildError, ProviderContextBuilderInput, build_provider_context,
 };
 use crate::cross_cutting::provider_run::{
-    failed_provider_run_record_from_error, provider_run_record_from_output,
-    write_provider_run_record, ProviderRunPersistError,
+    ProviderRunPersistError, failed_provider_run_record_from_error,
+    provider_run_record_from_output, write_provider_run_record,
 };
 use crate::daemon::checkpoint::{RiskRegistrySnapshot, RuntimeSnapshot};
 use crate::protocol::artifacts::{ArtifactKind, ArtifactRef, ArtifactStatus};
@@ -23,7 +23,7 @@ use crate::runtime_units::{
     RuntimeUnitError, RuntimeUnitResult,
 };
 use chrono::{SecondsFormat, Utc};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
