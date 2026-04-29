@@ -1,3 +1,4 @@
+use cadence_aria::cli::{CliError, run_cli};
 use cadence_aria::task_run::command::parse_task_run_args;
 use cadence_aria::task_run::types::{ProviderMode, ReportMode};
 
@@ -58,4 +59,25 @@ fn defaults_provider_timeout_report_and_non_interactive() {
     assert_eq!(options.timeout_secs, 3600);
     assert_eq!(options.report_mode, ReportMode::Text);
     assert!(!options.non_interactive);
+}
+
+#[test]
+fn sync_cli_reports_task_run_requires_async_entry() {
+    let error = run_cli([
+        "task",
+        "run",
+        "--workspace",
+        "/tmp/naruto-aria-e2e-login",
+        "--request",
+        "做一个用户登录功能",
+    ])
+    .expect_err("task run must use async entry");
+
+    assert_eq!(
+        error,
+        CliError {
+            code: "task_run_requires_async".to_string(),
+            message: "task run is only available through run_cli_async".to_string(),
+        }
+    );
 }
