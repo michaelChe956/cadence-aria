@@ -75,6 +75,54 @@ fn plan_projection_rejects_missing_dependency_endpoint() {
     );
 }
 
+#[test]
+fn plan_projection_accepts_sequential_dependency_alias_as_blocks() {
+    let source =
+        read_document_model("tests/fixtures/artifacts/plan_sequential_dependency.md".as_ref())
+            .expect("plan");
+    let source_ref = artifact_ref(
+        "art_ref_plan_0003",
+        "art_plan_003",
+        ArtifactKind::Plan,
+        &source,
+    );
+
+    let record =
+        compile_plan_projection(&source, &source_ref, "N11".to_string()).expect("compile plan");
+    let ProjectionPayload::PlanProjection(payload) = &record.payload else {
+        panic!("expected plan projection payload");
+    };
+
+    assert_eq!(
+        payload.dependencies[0].dependency_type.to_string(),
+        "blocks"
+    );
+}
+
+#[test]
+fn plan_projection_accepts_finish_to_start_dependency_alias_as_blocks() {
+    let source =
+        read_document_model("tests/fixtures/artifacts/plan_finish_to_start_dependency.md".as_ref())
+            .expect("plan");
+    let source_ref = artifact_ref(
+        "art_ref_plan_0004",
+        "art_plan_004",
+        ArtifactKind::Plan,
+        &source,
+    );
+
+    let record =
+        compile_plan_projection(&source, &source_ref, "N11".to_string()).expect("compile plan");
+    let ProjectionPayload::PlanProjection(payload) = &record.payload else {
+        panic!("expected plan projection payload");
+    };
+
+    assert_eq!(
+        payload.dependencies[0].dependency_type.to_string(),
+        "blocks"
+    );
+}
+
 fn artifact_ref(
     artifact_ref_id: &str,
     artifact_id: &str,

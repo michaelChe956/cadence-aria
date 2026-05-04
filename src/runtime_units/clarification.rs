@@ -11,6 +11,7 @@ use crate::cross_cutting::provider_run::{
     ProviderRunPersistError, failed_provider_run_record_from_error,
     provider_run_record_from_output, write_provider_run_record,
 };
+use crate::cross_cutting::runtime_event_log::append_node_event;
 use crate::daemon::checkpoint::{RiskRegistrySnapshot, RuntimeSnapshot};
 use crate::protocol::artifacts::{ArtifactKind, ArtifactRef, ArtifactStatus};
 use crate::protocol::constraints::{BundleStatus, OpenSpecConstraintBundle};
@@ -18,6 +19,8 @@ use crate::protocol::contracts::{AdapterOutput, ApprovalPolicy, ProviderRunRecor
 use crate::protocol::enums::{ChangeId, SessionId, TaskId};
 use crate::protocol::loop_counters::LoopCounterName;
 use crate::protocol::policies::PolicyMode;
+use crate::protocol::projections::{ArtifactProjectionRecord, ProjectionPayload};
+use crate::protocol::provider_errors::{ProviderErrorRoute, route_provider_error};
 use crate::runtime_units::{
     CanonicalNodeInput, DaemonContext, RuntimeProtocolStep, RuntimeStepStatus, RuntimeUnit,
     RuntimeUnitError, RuntimeUnitResult,
@@ -86,6 +89,8 @@ pub enum PlanningUnitError {
     },
     #[error("openspec_requirement_constraints_empty")]
     OpenspecRequirementConstraintsEmpty,
+    #[error("design_revision_limit_exceeded: current={current} threshold={threshold}")]
+    DesignRevisionLimitExceeded { current: u32, threshold: u32 },
 }
 
 impl PlanningUnitError {
@@ -95,6 +100,9 @@ impl PlanningUnitError {
                 "openspec_requirement_constraints_empty".to_string()
             }
             PlanningUnitError::ProviderAdapter(error) => error.code.as_str().to_string(),
+            PlanningUnitError::DesignRevisionLimitExceeded { .. } => {
+                "design_revision_limit_exceeded".to_string()
+            }
             _ => "planning_unit_error".to_string(),
         }
     }
@@ -188,7 +196,8 @@ pub fn run_clarification(
         proposal_constraint_summary(&state.current_bundle),
         Vec::new(),
     )?;
-    let record = structured_output("N04", &output)?;
+    let mut record = structured_output("N04", &output)?;
+    normalize_clarification_record_candidate(&mut record);
     canonical_validator(
         ArtifactKind::ClarificationRecord,
         &ArtifactContent::Json(record.clone()),
@@ -254,23 +263,159 @@ pub fn run_provider_node(
         constraint_check_ref: Some(state.current_bundle.constraint_bundle_id.clone()),
         traceability_binding_refs: Vec::new(),
     };
-    match provider.run(&build_result.adapter_input) {
-        Ok(output) => {
-            let record =
-                provider_run_record_from_output(&request, &build_result.adapter_input, &output);
-            persist_provider_run(state, &record)?;
-            Ok(output)
-        }
-        Err(error) => {
-            let record = failed_provider_run_record_from_error(
-                &request,
-                &build_result.adapter_input,
-                &error,
-            );
-            persist_provider_run(state, &record)?;
-            Err(PlanningUnitError::ProviderAdapter(error))
+    append_node_event(
+        &state.task_root(),
+        &state.input.task_id,
+        node_id,
+        "node_enter",
+        "started",
+        json!({
+            "provider_run_id": request.provider_run_id.clone(),
+            "context_package_ref": build_result.context_package.context_package_id.clone(),
+            "output_schema": build_result.adapter_input.output_schema.clone(),
+        }),
+    );
+    let protected_openspec_snapshot = snapshot_directory(&state.openspec_change_dir())?;
+    let mut retry_count = 0;
+    loop {
+        match provider.run(&build_result.adapter_input) {
+            Ok(output) => {
+                restore_directory_snapshot(
+                    &state.openspec_change_dir(),
+                    &protected_openspec_snapshot,
+                )?;
+                let mut record =
+                    provider_run_record_from_output(&request, &build_result.adapter_input, &output);
+                record.retry_count = retry_count;
+                persist_provider_run(state, &record)?;
+                append_node_event(
+                    &state.task_root(),
+                    &state.input.task_id,
+                    node_id,
+                    "node_exit",
+                    "completed",
+                    json!({
+                        "provider_run_id": record.provider_run_id,
+                        "duration_ms": record.duration_ms,
+                        "retry_count": retry_count,
+                    }),
+                );
+                return Ok(output);
+            }
+            Err(error) => {
+                restore_directory_snapshot(
+                    &state.openspec_change_dir(),
+                    &protected_openspec_snapshot,
+                )?;
+                let route = route_provider_error(
+                    &error.code,
+                    retry_count,
+                    build_result.adapter_input.max_retries,
+                );
+                if route == ProviderErrorRoute::Retry {
+                    retry_count += 1;
+                    continue;
+                }
+                let mut record = failed_provider_run_record_from_error(
+                    &request,
+                    &build_result.adapter_input,
+                    &error,
+                );
+                record.retry_count = retry_count;
+                persist_provider_run(state, &record)?;
+                append_node_event(
+                    &state.task_root(),
+                    &state.input.task_id,
+                    node_id,
+                    "node_exit",
+                    "failed",
+                    json!({
+                        "provider_run_id": record.provider_run_id,
+                        "error_code": record.error_code,
+                        "error_details": record.error_details,
+                        "retry_count": retry_count,
+                    }),
+                );
+                return Err(PlanningUnitError::ProviderAdapter(error));
+            }
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct DirectorySnapshot {
+    existed: bool,
+    files: BTreeMap<PathBuf, Vec<u8>>,
+}
+
+fn snapshot_directory(path: &Path) -> Result<DirectorySnapshot, PlanningUnitError> {
+    let mut files = BTreeMap::new();
+    if !path.exists() {
+        return Ok(DirectorySnapshot {
+            existed: false,
+            files,
+        });
+    }
+    collect_snapshot_files(path, path, &mut files)?;
+    Ok(DirectorySnapshot {
+        existed: true,
+        files,
+    })
+}
+
+fn collect_snapshot_files(
+    root: &Path,
+    path: &Path,
+    files: &mut BTreeMap<PathBuf, Vec<u8>>,
+) -> Result<(), PlanningUnitError> {
+    for entry in std::fs::read_dir(path)
+        .map_err(|error| PlanningUnitError::Io(format!("read {}: {error}", path.display())))?
+    {
+        let entry =
+            entry.map_err(|error| PlanningUnitError::Io(format!("read dir entry: {error}")))?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_snapshot_files(root, &path, files)?;
+        } else if path.is_file() {
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|error| PlanningUnitError::Io(error.to_string()))?
+                .to_path_buf();
+            let content = std::fs::read(&path).map_err(|error| {
+                PlanningUnitError::Io(format!("read {}: {error}", path.display()))
+            })?;
+            files.insert(relative, content);
+        }
+    }
+    Ok(())
+}
+
+fn restore_directory_snapshot(
+    path: &Path,
+    snapshot: &DirectorySnapshot,
+) -> Result<(), PlanningUnitError> {
+    if path.exists() {
+        std::fs::remove_dir_all(path).map_err(|error| {
+            PlanningUnitError::Io(format!("remove {}: {error}", path.display()))
+        })?;
+    }
+    if !snapshot.existed {
+        return Ok(());
+    }
+    std::fs::create_dir_all(path)
+        .map_err(|error| PlanningUnitError::Io(format!("create {}: {error}", path.display())))?;
+    for (relative, content) in &snapshot.files {
+        let target = path.join(relative);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                PlanningUnitError::Io(format!("create {}: {error}", parent.display()))
+            })?;
+        }
+        std::fs::write(&target, content).map_err(|error| {
+            PlanningUnitError::Io(format!("write {}: {error}", target.display()))
+        })?;
+    }
+    Ok(())
 }
 
 fn attach_risk_registry_ref(value: &mut Value, task_id: &str) {
@@ -290,6 +435,17 @@ pub fn structured_output(
         .structured_output
         .clone()
         .ok_or_else(|| PlanningUnitError::StructuredOutputMissing(node_id.to_string()))
+}
+
+pub fn normalize_clarification_record_candidate(record: &mut Value) {
+    let Some(object) = record.as_object_mut() else {
+        return;
+    };
+    for field in ["constraints", "assumptions", "open_questions"] {
+        if matches!(object.get(field), None | Some(Value::Null)) {
+            object.insert(field.to_string(), json!([]));
+        }
+    }
 }
 
 pub fn markdown_from_output(
@@ -466,12 +622,14 @@ pub fn write_spec_to_openspec_and_recompile(
 pub fn write_design_to_openspec_and_recompile(
     state: &mut PlanningChainState,
     design_markdown: &str,
+    design_projection: &ArtifactProjectionRecord,
     projection_refs: Vec<String>,
 ) -> Result<(BundleStatus, OpenSpecConstraintBundle), PlanningUnitError> {
+    let openspec_markdown = canonical_design_to_openspec(design_markdown, design_projection);
     let bundle = write_openspec_file_and_recompile(
         state,
         "design.md",
-        design_markdown,
+        &openspec_markdown,
         projection_refs,
         "N08",
     )?;
@@ -675,6 +833,71 @@ fn canonical_spec_to_openspec(spec_markdown: &str) -> String {
     format!(
         "# Main Spec\n\n### ADDED Requirements\n\n#### Requirement: {requirement_id} Generated requirement\n\n##### Scenario: SCN-001 Generated scenario\n\n- WHEN the accepted planning input is processed\n- THEN the runtime satisfies the canonical spec [{acceptance_id}]\n"
     )
+}
+
+fn canonical_design_to_openspec(
+    design_markdown: &str,
+    design_projection: &ArtifactProjectionRecord,
+) -> String {
+    let ProjectionPayload::DesignProjection(design) = &design_projection.payload else {
+        return design_markdown.to_string();
+    };
+    let mut output = String::from("# Design\n\n## 设计决策\n\n");
+    if design.design_decisions.is_empty() {
+        output.push_str("- [DEC-001] Generated design decision.\n");
+    } else {
+        for decision in &design.design_decisions {
+            output.push_str("- [");
+            output.push_str(&openspec_id(&decision.design_decision_id));
+            output.push_str("] ");
+            output.push_str(&single_line(&decision.text));
+            output.push('\n');
+        }
+    }
+
+    output.push_str("\n## 公共组件\n\n");
+    if design.shared_components.is_empty() && design.shared_modules.is_empty() {
+        output.push_str("- [CMP-001] Generated component.\n");
+    } else {
+        for component in design
+            .shared_components
+            .iter()
+            .chain(design.shared_modules.iter())
+        {
+            output.push_str("- [");
+            output.push_str(&openspec_id(&component.component_id));
+            output.push_str("] ");
+            output.push_str(&single_line(&component.name));
+            if !component.responsibility.trim().is_empty() {
+                output.push_str(": ");
+                output.push_str(&single_line(&component.responsibility));
+            }
+            output.push('\n');
+        }
+    }
+
+    output.push_str("\n## 风险\n\n");
+    if design.risk_refs.is_empty() {
+        output.push_str("- [RISK-001] Generated risk.\n");
+    } else {
+        for risk in &design.risk_refs {
+            output.push_str("- [");
+            output.push_str(&openspec_id(&risk.risk_id));
+            output.push_str("] ");
+            output.push_str(&single_line(&risk.text));
+            output.push('\n');
+        }
+    }
+
+    output
+}
+
+fn openspec_id(value: &str) -> String {
+    value.to_ascii_uppercase()
+}
+
+fn single_line(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn ids_from_markdown(markdown: &str, prefix: &str) -> Vec<String> {

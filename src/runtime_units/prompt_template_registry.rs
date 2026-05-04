@@ -25,6 +25,7 @@ pub fn prompt_template_for_node(node_id: &str) -> Option<PromptTemplate> {
         "N04" => n04_sections(),
         "N05" => n05_sections(),
         "N07" => n07_sections(),
+        "N11" => n11_sections(),
         _ => generic_sections(system_delta(node_id), artifact_kind(node_id)),
     };
 
@@ -47,11 +48,11 @@ fn n04_sections() -> BTreeMap<PromptSection, String> {
     section_map(
         "[system]\n你是 Aria 的候选澄清产物生成器。Aria daemon 是唯一运行时真相源；你只能输出候选 clarification_record。",
         "[node_contract]\nnode_id={{node_id}}\nruntime_role={{runtime_role}}\nadapter_role={{adapter_role}}\nadvisory_only=false\nallowed_write_scope=[]",
-        "[canonical_inputs]\n读取 intake_brief 与 effective_policy 摘要：\n{{canonical_input_summary}}",
+        "[canonical_inputs]\n读取 intake_brief 与 effective_policy 摘要：\n{{canonical_input_summary}}\n\n完整 canonical_inputs（JSON）：\n{{canonical_inputs_json}}",
         "[projection_summary]\n本节点通常没有 projection 输入。如存在历史 projection，只能作为上下文引用：\n{{projection_summary}}",
         "[constraint_summary]\n必须遵守 proposal_constraints：\n{{constraint_summary}}",
-        "[workflow_discipline]\n必须遵守 using-superpowers 与 brainstorming。{{workflow_discipline_summary}}",
-        "[output_schema]\n{{output_schema_summary}}\n最终 stdout 必须包含 ARIA_STRUCTURED_OUTPUT sentinel，artifact_kind=clarification_record。",
+        "[workflow_discipline]\n本节点保留 using-superpowers 与 brainstorming 的纪律约束，但这是 Aria 非交互运行：不得向用户提问或等待确认，不得启动交互式 Todo/确认流程。未决问题必须写入候选产物的 open_questions 或待确认项。{{workflow_discipline_summary}}",
+        "[output_schema]\n{{output_schema_summary}}\n最终 stdout 必须包含 <ARIA_STRUCTURED_OUTPUT> JSON block，且 artifact_kind 必须等于 clarification_record。\n</ARIA_STRUCTURED_OUTPUT> 只能作为结束标签出现。",
         "[completion_or_failure]\n不要推进节点状态。不要写文件。只输出候选结果。",
     )
 }
@@ -60,11 +61,11 @@ fn n05_sections() -> BTreeMap<PromptSection, String> {
     section_map(
         "[system]\n你是 Aria 的候选 spec 生成器。daemon 负责校验、落盘、编译 SpecProjection。",
         "[node_contract]\nnode_id={{node_id}}\nruntime_role={{runtime_role}}\nadapter_role={{adapter_role}}\nadvisory_only={{advisory_only}}\nallowed_write_scope={{allowed_write_scope}}\ntimeout_sec={{timeout_sec}}\nmax_retries={{max_retries}}",
-        "[canonical_inputs]\n输入 artifact：\n{{canonical_input_summary}}",
+        "[canonical_inputs]\n输入 artifact：\n{{canonical_input_summary}}\n\n完整 canonical_inputs（JSON）：\n{{canonical_inputs_json}}",
         "[projection_summary]\n如已有 projection，只能作为一致性参考：\n{{projection_summary}}",
         "[constraint_summary]\n必须覆盖 proposal_constraints，并声明稳定 requirement IDs：\n{{constraint_summary}}",
-        "[workflow_discipline]\n必须遵守 using-superpowers 与 brainstorming。{{workflow_discipline_summary}}",
-        "[output_schema]\n{{output_schema_summary}}\nMarkdown spec 必须包含范围、用户故事、功能需求、成功标准、待确认项和非功能需求。",
+        "[workflow_discipline]\n本节点保留 using-superpowers 与 brainstorming 的纪律约束，但这是 Aria 非交互运行：不得向用户提问或等待确认，不得启动交互式 Todo/确认流程。未决问题必须写入候选产物的 open_questions 或待确认项。{{workflow_discipline_summary}}",
+        "[output_schema]\n{{output_schema_summary}}\n最终 stdout 必须包含 <ARIA_STRUCTURED_OUTPUT> JSON block，且 artifact_kind 必须等于 spec。JSON 内的 markdown 字段必须包含范围、用户故事、功能需求、成功标准、待确认项和非功能需求。\n</ARIA_STRUCTURED_OUTPUT> 只能作为结束标签出现。",
         "[completion_or_failure]\n不要直接修改 OpenSpec。不要直接生成 projection。daemon 会做结构化落盘。",
     )
 }
@@ -73,12 +74,25 @@ fn n07_sections() -> BTreeMap<PromptSection, String> {
     section_map(
         "[system]\n你是 Aria 的候选 design 生成器。你只生成候选设计文档，daemon 负责 canonical 校验、落盘与 DesignProjection 编译。",
         "[node_contract]\nnode_id={{node_id}}\nruntime_role={{runtime_role}}\nadapter_role={{adapter_role}}\nadvisory_only={{advisory_only}}\nallowed_write_scope={{allowed_write_scope}}\ntimeout_sec={{timeout_sec}}\nmax_retries={{max_retries}}",
-        "[canonical_inputs]\n输入 spec 与 spec_gate_decision：\n{{canonical_input_summary}}",
+        "[canonical_inputs]\n输入 spec 与 spec_gate_decision：\n{{canonical_input_summary}}\n\n完整 canonical_inputs（JSON）：\n{{canonical_inputs_json}}",
         "[projection_summary]\nSpecProjection 摘要：\n{{projection_summary}}",
         "[constraint_summary]\n必须覆盖 requirement_constraints：\n{{constraint_summary}}",
-        "[workflow_discipline]\n必须遵守 using-superpowers 与 brainstorming。风险必须显式写入“## 风险”。{{workflow_discipline_summary}}",
-        "[output_schema]\n{{output_schema_summary}}\nMarkdown design 必须包含架构摘要、设计决策、公共组件、数据模型、API 契约、风险和待确认项。",
+        "[workflow_discipline]\n本节点保留 using-superpowers 与 brainstorming 的纪律约束，但这是 Aria 非交互运行：不得向用户提问或等待确认，不得启动交互式 Todo/确认流程。未决问题必须写入候选产物的 open_questions 或待确认项。风险必须显式写入“## 风险”。{{workflow_discipline_summary}}",
+        "[output_schema]\n{{output_schema_summary}}\n最终 stdout 必须包含 <ARIA_STRUCTURED_OUTPUT> JSON block，且 artifact_kind 必须等于 design。JSON 内的 markdown 字段必须包含架构摘要、设计决策、公共组件、数据模型、API 契约、风险和待确认项。\n</ARIA_STRUCTURED_OUTPUT> 只能作为结束标签出现。",
         "[completion_or_failure]\n不要直接修改 plan。不要生成 dispatch_package。",
+    )
+}
+
+fn n11_sections() -> BTreeMap<PromptSection, String> {
+    section_map(
+        "[system]\n你是 Aria 的候选 plan 生成器。你只生成可编译为 PlanProjection 的候选计划文档；daemon 负责 canonical 校验、落盘、OpenSpec tasks 写回和 dispatch_package 生成。",
+        "[node_contract]\nnode_id={{node_id}}\nruntime_role={{runtime_role}}\nadapter_role={{adapter_role}}\nadvisory_only={{advisory_only}}\nallowed_write_scope={{allowed_write_scope}}\ntimeout_sec={{timeout_sec}}\nmax_retries={{max_retries}}",
+        "[canonical_inputs]\n输入 spec_projection、design_projection、readiness_check 与 constraint bundle：\n{{canonical_input_summary}}\n\n完整 canonical_inputs（JSON）：\n{{canonical_inputs_json}}",
+        "[projection_summary]\n{{projection_summary}}",
+        "[constraint_summary]\n必须覆盖 requirement_constraints 与 design_constraints：\n{{constraint_summary}}",
+        "[workflow_discipline]\n本节点保留 using-superpowers 与 writing-plans 的纪律约束，但这是 Aria 非交互运行：不得向用户提问或等待确认，不得启动交互式 Todo/确认流程。未决问题必须写入候选产物。不得输出 superpowers 实施计划、文件写入步骤、commit 步骤、代码块或安装命令。你必须只输出 Aria PlanProjection 可消费的短 markdown。",
+        "[output_schema]\n{{output_schema_summary}}\n最终 stdout 必须包含 <ARIA_STRUCTURED_OUTPUT> JSON block，且 artifact_kind 必须等于 plan。JSON 内 markdown 字段必须严格包含以下 heading 与表格结构：\n# Plan\n\n## 工作包\n\n| ID | Description | Execution Mode | Human Reason | Traceability | Acceptance |\n|----|-------------|----------------|--------------|--------------|------------|\n| WT-001 | ... | agent_only | | REQ-001, DEC-001 | AC-001 |\n\n## 依赖关系\n\n| From | To | Type |\n|------|----|------|\n\n规则：工作包 ID 必须使用 WT-001、WT-002 这类 WT 前缀；Execution Mode 只能使用 agent_only 或 human_required；Traceability 必须引用已知 REQ/DEC；Acceptance 必须引用成功标准 AC/SC。\n</ARIA_STRUCTURED_OUTPUT> 只能作为结束标签出现。",
+        "[completion_or_failure]\n不要直接修改 OpenSpec。不要生成 dispatch_package。不要生成逐文件实现步骤；daemon 会从 PlanProjection 自动写回 tasks.md。",
     )
 }
 
@@ -88,12 +102,12 @@ fn generic_sections(system_delta: &str, artifact_kind: &str) -> BTreeMap<PromptS
             "[system]\n你是 Aria 的 {artifact_kind} 候选产物生成器或 advisory reviewer。Aria daemon 是唯一运行时真相源；你只能输出候选结果或 advisory 结果。\n{system_delta}"
         ),
         "[node_contract]\nnode_id={{node_id}}\nruntime_role={{runtime_role}}\nadapter_role={{adapter_role}}\nadvisory_only={{advisory_only}}\nallowed_write_scope={{allowed_write_scope}}\ntimeout_sec={{timeout_sec}}\nmax_retries={{max_retries}}",
-        "[canonical_inputs]\n{{canonical_input_summary}}",
+        "[canonical_inputs]\n{{canonical_input_summary}}\n\n完整 canonical_inputs（JSON）：\n{{canonical_inputs_json}}",
         "[projection_summary]\n{{projection_summary}}",
         "[constraint_summary]\n{{constraint_summary}}",
         "[workflow_discipline]\n{{workflow_discipline_summary}}",
         &format!(
-            "[output_schema]\n最终 stdout 必须包含 <ARIA_STRUCTURED_OUTPUT> JSON block，且 artifact_kind 必须等于 {artifact_kind}。\n{{{{output_schema_summary}}}}"
+            "[output_schema]\n最终 stdout 必须包含 <ARIA_STRUCTURED_OUTPUT> JSON block，且 artifact_kind 必须等于 {artifact_kind}。\n</ARIA_STRUCTURED_OUTPUT> 只能作为结束标签出现。\n{{{{output_schema_summary}}}}"
         ),
         "[completion_or_failure]\nforbidden_actions={{forbidden_actions}}\ncompletion_criteria={{completion_criteria}}\nverification_commands={{verification_commands}}\n不要推进节点状态。不要绕过 daemon 写入 canonical artifact。失败时按 output schema 返回 failure summary。",
     )
@@ -163,7 +177,7 @@ fn system_delta(node_id: &str) -> &'static str {
             "你是设计评审 reviewer，优先输出阻塞性 findings、风险与明确 review_decision；不得直接修改 design。"
         }
         "N09" => {
-            "你是设计修订候选生成器，只能基于 design_review.findings 产出修订记录和候选 revised_design_markdown。"
+            "你是设计修订候选生成器，只能基于 spec_projection、当前 design 和 design_review.findings 产出修订记录和候选 revised_design_markdown。"
         }
         "N10" => {
             "你是 plan readiness checker，只判断 spec/design/projection/bundle 是否足以进入计划，不生成 plan。"

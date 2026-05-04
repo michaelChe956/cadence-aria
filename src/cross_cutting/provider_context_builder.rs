@@ -64,7 +64,14 @@ pub fn build_provider_context(
         .ok_or_else(|| ProviderContextBuildError::TemplateNotFound(input.node_id.clone()))?;
     validate_required_context(&input, &contract)?;
     let allowed_write_scope = resolve_allowed_write_scope(&contract, &input.canonical_inputs);
-    let variables = prompt_variables(&input, &contract, &workflow, &allowed_write_scope)?;
+    let verification_commands = resolve_verification_commands(&contract, &input.canonical_inputs);
+    let variables = prompt_variables(
+        &input,
+        &contract,
+        &workflow,
+        &allowed_write_scope,
+        &verification_commands,
+    )?;
     let prompt = render_prompt_template(&template, &variables)?;
 
     let context_package = ProviderContextPackage {
@@ -89,7 +96,7 @@ pub fn build_provider_context(
         output_schema_ref: contract.output_schema_ref.clone(),
         completion_criteria: contract.completion_criteria.clone(),
         forbidden_actions: contract.forbidden_actions.clone(),
-        verification_commands: contract.verification_commands.clone(),
+        verification_commands: verification_commands.clone(),
         timeout_sec: contract.timeout_sec,
         max_retries: contract.max_retries,
     };
@@ -175,6 +182,18 @@ fn resolve_allowed_write_scope(
     contract.allowed_write_scope.clone()
 }
 
+fn resolve_verification_commands(
+    contract: &crate::protocol::contracts::NodeExecutionContract,
+    canonical_inputs: &Value,
+) -> Vec<String> {
+    string_array_at(
+        canonical_inputs,
+        &["worktask_routing", "verification_commands"],
+    )
+    .or_else(|| string_array_at(canonical_inputs, &["verification_commands"]))
+    .unwrap_or_else(|| contract.verification_commands.clone())
+}
+
 fn requires_worktree(node_id: &str) -> bool {
     matches!(node_id, "N16" | "N17" | "N18" | "N19" | "N20" | "N24")
 }
@@ -209,6 +228,7 @@ fn prompt_variables(
     contract: &crate::protocol::contracts::NodeExecutionContract,
     workflow: &crate::protocol::contracts::WorkflowDisciplineSpec,
     allowed_write_scope: &[String],
+    verification_commands: &[String],
 ) -> Result<BTreeMap<String, String>, ProviderContextBuildError> {
     let runtime_role = serde_json::to_value(&contract.runtime_role)
         .map_err(|error| ProviderContextBuildError::Serialization(error.to_string()))?
@@ -226,7 +246,9 @@ fn prompt_variables(
         .map_err(|error| ProviderContextBuildError::Serialization(error.to_string()))?;
     let completion_criteria = serde_json::to_string(&contract.completion_criteria)
         .map_err(|error| ProviderContextBuildError::Serialization(error.to_string()))?;
-    let verification_commands = serde_json::to_string(&contract.verification_commands)
+    let verification_commands = serde_json::to_string(verification_commands)
+        .map_err(|error| ProviderContextBuildError::Serialization(error.to_string()))?;
+    let canonical_inputs_json = serde_json::to_string(&input.canonical_inputs)
         .map_err(|error| ProviderContextBuildError::Serialization(error.to_string()))?;
 
     Ok(BTreeMap::from([
@@ -258,7 +280,7 @@ fn prompt_variables(
         ),
         (
             "output_schema_summary".to_string(),
-            contract.output_schema_ref.clone(),
+            output_schema_summary(&input.node_id, &contract.output_schema_ref),
         ),
         (
             "artifact_kind".to_string(),
@@ -267,6 +289,10 @@ fn prompt_variables(
         ("forbidden_actions".to_string(), forbidden_actions),
         ("completion_criteria".to_string(), completion_criteria),
         ("verification_commands".to_string(), verification_commands),
+        (
+            "canonical_inputs_json".to_string(),
+            canonical_inputs_json,
+        ),
     ]))
 }
 
@@ -292,4 +318,47 @@ fn artifact_kind_for_node(node_id: &str) -> &'static str {
         "N27" => "final_summary",
         _ => "unknown",
     }
+}
+
+fn output_schema_summary(node_id: &str, output_schema_ref: &str) -> String {
+    let fields = match artifact_kind_for_node(node_id) {
+        "clarification_record" => {
+            r#"{"artifact_kind":"clarification_record","goal_summary":"...","constraints":[],"assumptions":[],"open_questions":[],"suggested_scope":"..."}"#
+        }
+        "spec" => r#"{"artifact_kind":"spec","markdown":"..."}"#,
+        "advisory_review" => {
+            r#"{"artifact_kind":"advisory_review","findings":[],"blocking_issues":[],"decision_recommendation":"pass"}"#
+        }
+        "design" => r#"{"artifact_kind":"design","markdown":"..."}"#,
+        "design_review" => {
+            r#"{"artifact_kind":"design_review","review_decision":"pass","findings":[]}"#
+        }
+        "design_revision_record" => {
+            r#"{"artifact_kind":"design_revision_record","revision_summary":"...","resolved_findings":[],"revised_design_markdown":"..."}"#
+        }
+        "readiness_check" => {
+            r#"{"artifact_kind":"readiness_check","ready":true,"blocking_items":[]}"#
+        }
+        "plan" => r#"{"artifact_kind":"plan","markdown":"..."}"#,
+        "dispatch_package" => r#"{"artifact_kind":"dispatch_package","worktask_routing":[]}"#,
+        "coding_report" => {
+            r#"{"artifact_kind":"coding_report","worktask_id":"...","files_modified":[],"commands_run":[],"candidate_traceability_refs":[],"status":"completed"}"#
+        }
+        "testing_report" => {
+            r#"{"artifact_kind":"testing_report","worktask_id":"...","commands_run":[],"tests_passed":true,"failures":[],"candidate_traceability_refs":[]}"#
+        }
+        "code_review_report" => {
+            r#"{"artifact_kind":"code_review_report","worktask_id":"...","findings":[],"blocking":false,"candidate_traceability_refs":[]}"#
+        }
+        "final_review" => {
+            r#"{"artifact_kind":"final_review","overall_decision":"pass","coverage_summary":{"closed":[],"uncovered":[],"exempted":[]},"uncovered_items":[],"followup_required":false}"#
+        }
+        "final_summary" => {
+            r#"{"artifact_kind":"final_summary","overall_status":"closed_successfully","next_steps":[],"remaining_risks":[],"closed_items":[]}"#
+        }
+        _ => r#"{"artifact_kind":"..."}"#,
+    };
+    format!(
+        "{output_schema_ref}\n最终 sentinel 内只能放一个 JSON 对象，不要放 Markdown code fence。不要省略任何 key；没有内容的数组字段必须输出 []。JSON 对象必须至少符合：\n{fields}"
+    )
 }

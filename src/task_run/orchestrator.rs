@@ -53,6 +53,12 @@ impl TaskRunOrchestrator {
             &change_dir,
             &request.request_text,
         )?;
+        store.write_task_state(&json!({
+            "task_id": task_id,
+            "phase": "planning",
+            "change_id": request.change_id,
+            "openspec_bootstrap_status": "bootstrapped",
+        }))?;
         let planning = run_planning_full_chain(
             PlanningStartChainInput {
                 session_id: session_id.clone(),
@@ -76,6 +82,12 @@ impl TaskRunOrchestrator {
         )
         .map_err(|error| TaskRunError::new(error.runtime_code(), error.to_string()))?;
 
+        store.write_task_state(&json!({
+            "task_id": task_id,
+            "phase": "planning_complete",
+            "change_id": request.change_id,
+            "openspec_bootstrap_status": "bootstrapped",
+        }))?;
         let plan_projection = extract_plan_projection(&planning.plan_projection.payload)?;
         let mut provider_run_refs = planning
             .provider_run_records
@@ -100,6 +112,14 @@ impl TaskRunOrchestrator {
             &projection_refs,
             &planning.openspec_bundle_after_tasks.constraint_bundle_id,
         )? {
+            let current_worktask = input.worktask_id.clone();
+            store.write_task_state(&json!({
+                "task_id": task_id,
+                "phase": "execution",
+                "change_id": request.change_id,
+                "openspec_bootstrap_status": "bootstrapped",
+                "current_worktask": current_worktask,
+            }))?;
             let execution = run_worktask_execution_chain(input, &provider)
                 .map_err(|error| TaskRunError::new("execution_chain_failed", error.to_string()))?;
             for record in &execution.provider_run_records {
@@ -126,6 +146,16 @@ impl TaskRunOrchestrator {
             }
 
             if execution.manual_intervention_reason.is_some() {
+                store.write_task_state(&json!({
+                    "task_id": task_id,
+                    "phase": "blocked_by_gate",
+                    "change_id": request.change_id,
+                    "openspec_bootstrap_status": "bootstrapped",
+                    "current_worktask": current_worktask,
+                }))?;
+                let testing_report_path = store.task_root().join("reports/testing-report.json");
+                let testing_report_path =
+                    testing_report_path.exists().then_some(testing_report_path);
                 let blocked_path = store.write_json_report(
                     "blocked-report.json",
                     &json!({
@@ -151,9 +181,7 @@ impl TaskRunOrchestrator {
                     report_path,
                     openspec_change_dir: change_dir,
                     provider_run_refs,
-                    testing_report_path: Some(
-                        store.task_root().join("reports/testing-report.json"),
-                    ),
+                    testing_report_path,
                     final_summary_path: None,
                     blocked_report_path: Some(blocked_path),
                 });
@@ -204,6 +232,12 @@ impl TaskRunOrchestrator {
                 .map(|record| record.provider_run_id.clone()),
         );
 
+        store.write_task_state(&json!({
+            "task_id": task_id,
+            "phase": "completed",
+            "change_id": request.change_id,
+            "openspec_bootstrap_status": "bootstrapped",
+        }))?;
         let final_summary_path =
             store.write_json_report("final-summary.json", &final_result.final_summary)?;
         let testing_report_path = store.task_root().join("reports/testing-report.json");

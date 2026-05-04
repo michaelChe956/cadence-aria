@@ -12,6 +12,21 @@ use std::process::Command;
 use std::sync::Mutex;
 
 #[test]
+fn fake_provider_task_run_updates_state_json_phase_through_lifecycle() {
+    let workspace = prepare_workspace();
+    let provider = ScriptedTaskRunProvider::happy();
+    let request = task_request(workspace.path());
+
+    let _outcome = TaskRunOrchestrator::run_with_provider(request, &provider).expect("task run");
+
+    let state = read_json(&workspace.path().join(".aria/runtime/tasks/task_0001/state.json"));
+    assert_eq!(state["task_id"], "task_0001");
+    assert_eq!(state["change_id"], "aria-login-jwt");
+    assert_eq!(state["phase"], "completed");
+    assert_eq!(state["openspec_bootstrap_status"], "bootstrapped");
+}
+
+#[test]
 fn fake_provider_task_run_completes_planning_and_writes_openspec_tasks() {
     let workspace = prepare_workspace();
     let provider = ScriptedTaskRunProvider::happy();
@@ -152,6 +167,50 @@ fn non_interactive_task_run_writes_blocked_report_when_rework_limit_is_exceeded(
             .exists()
     );
     assert!(outcome.final_summary_path.is_none());
+
+    let state = read_json(&workspace.path().join(".aria/runtime/tasks/task_0001/state.json"));
+    assert_eq!(state["phase"], "blocked_by_gate");
+}
+
+#[test]
+fn non_interactive_task_run_writes_blocked_report_when_execution_provider_errors() {
+    let workspace = prepare_workspace();
+    let provider = ScriptedTaskRunProvider::testing_provider_errors();
+    let outcome = TaskRunOrchestrator::run_with_provider(task_request(workspace.path()), &provider)
+        .expect("provider execution error should become blocked task run");
+
+    assert_eq!(outcome.status, TaskRunStatus::BlockedByGate);
+    assert!(outcome.final_summary_path.is_none());
+    assert!(
+        outcome
+            .blocked_report_path
+            .as_ref()
+            .expect("blocked report")
+            .exists()
+    );
+    let blocked_report = read_json(
+        outcome
+            .blocked_report_path
+            .as_ref()
+            .expect("blocked report"),
+    );
+    assert_eq!(blocked_report["reason"], "provider_execution_failed");
+    assert_eq!(blocked_report["next_node"], "X08");
+
+    let failed_run = read_json(
+        &workspace
+            .path()
+            .join(".aria/runtime/tasks/task_0001/provider-runs/run_n17_0001/run.json"),
+    );
+    assert_eq!(failed_run["status"], "failed");
+    assert_eq!(failed_run["error_code"], "provider_execution_failed");
+    assert!(
+        outcome
+            .testing_report_path
+            .as_ref()
+            .is_none_or(|path| path.exists()),
+        "blocked outcome must not point at a missing testing report"
+    );
 }
 
 fn prepare_workspace() -> tempfile::TempDir {
@@ -182,6 +241,7 @@ struct ScriptedTaskRunProvider {
     output_schemas: Mutex<Vec<String>>,
     seen_timeouts: Mutex<Vec<u64>>,
     testing_passes: Mutex<VecDeque<bool>>,
+    fail_testing_with_provider_error: bool,
 }
 
 impl ScriptedTaskRunProvider {
@@ -190,6 +250,7 @@ impl ScriptedTaskRunProvider {
             output_schemas: Mutex::new(Vec::new()),
             seen_timeouts: Mutex::new(Vec::new()),
             testing_passes: Mutex::new([true].into_iter().collect()),
+            fail_testing_with_provider_error: false,
         }
     }
 
@@ -198,6 +259,14 @@ impl ScriptedTaskRunProvider {
             output_schemas: Mutex::new(Vec::new()),
             seen_timeouts: Mutex::new(Vec::new()),
             testing_passes: Mutex::new([false, false, false, false].into_iter().collect()),
+            fail_testing_with_provider_error: false,
+        }
+    }
+
+    fn testing_provider_errors() -> Self {
+        Self {
+            fail_testing_with_provider_error: true,
+            ..Self::happy()
         }
     }
 
@@ -266,15 +335,25 @@ impl ProviderAdapter for ScriptedTaskRunProvider {
                 "candidate_traceability_refs": [],
                 "status": "completed"
             }),
-            "schema://aria/artifacts/testing_report/v1" => json!({
-                "artifact_kind": "testing_report",
-                "artifact_ref": "testing_report_work_wt_001_0001",
-                "worktask_id": "work_wt_001",
-                "commands_run": ["pnpm test"],
-                "tests_passed": self.testing_passes.lock().expect("testing").pop_front().unwrap_or(true),
-                "failures": [],
-                "candidate_traceability_refs": []
-            }),
+            "schema://aria/artifacts/testing_report/v1" => {
+                if self.fail_testing_with_provider_error {
+                    return Err(ProviderAdapterError::execution_failed(
+                        Some(1),
+                        "",
+                        "provider quota exhausted",
+                        1,
+                    ));
+                }
+                json!({
+                    "artifact_kind": "testing_report",
+                    "artifact_ref": "testing_report_work_wt_001_0001",
+                    "worktask_id": "work_wt_001",
+                    "commands_run": ["pnpm test"],
+                    "tests_passed": self.testing_passes.lock().expect("testing").pop_front().unwrap_or(true),
+                    "failures": [],
+                    "candidate_traceability_refs": []
+                })
+            }
             "schema://aria/artifacts/code_review_report/v1" => json!({
                 "artifact_kind": "code_review_report",
                 "artifact_ref": "code_review_report_work_wt_001_0001",

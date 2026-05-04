@@ -52,21 +52,36 @@ pub struct DesignRevisionOutcome {
 pub fn run_design_revision(
     state: &mut PlanningChainState,
     provider: &dyn ProviderAdapter,
+    spec_projection: &ArtifactProjectionRecord,
     design_review: &Value,
     previous_design_ref: &ArtifactRef,
     previous_design_projection: &ArtifactProjectionRecord,
 ) -> Result<DesignRevisionOutcome, PlanningUnitError> {
+    let previous_design_markdown =
+        std::fs::read_to_string(&previous_design_ref.path).map_err(|error| {
+            PlanningUnitError::Io(format!("read {}: {error}", previous_design_ref.path))
+        })?;
+    let canonical_input_summary = design_revision_canonical_input_summary(
+        spec_projection,
+        &previous_design_markdown,
+        design_review,
+        previous_design_ref,
+        previous_design_projection,
+    )?;
     let output = run_provider_node(
         state,
         provider,
         "N09",
         json!({
+            "spec_projection_ref": spec_projection.projection_id,
+            "spec_projection_payload": spec_projection.payload,
             "design_ref": previous_design_ref.artifact_ref_id.clone(),
+            "design_markdown": previous_design_markdown,
             "design_projection_ref": previous_design_projection.projection_id,
             "design_review": design_review,
             "constraint_bundle_ref": state.current_bundle.constraint_bundle_id,
         }),
-        "design, design review findings, and requirement constraints",
+        canonical_input_summary,
         vec![previous_design_projection.projection_id.clone()],
         requirement_constraint_summary(&state.current_bundle),
         Vec::new(),
@@ -154,6 +169,34 @@ pub fn run_design_revision(
         revised_design_ref,
         revised_design_projection,
     })
+}
+
+fn design_revision_canonical_input_summary(
+    spec_projection: &ArtifactProjectionRecord,
+    previous_design_markdown: &str,
+    design_review: &Value,
+    previous_design_ref: &ArtifactRef,
+    previous_design_projection: &ArtifactProjectionRecord,
+) -> Result<String, PlanningUnitError> {
+    let spec_projection_payload = serde_json::to_string_pretty(&spec_projection.payload)
+        .map_err(|error| PlanningUnitError::Serialization(error.to_string()))?;
+    let design_review_json = serde_json::to_string_pretty(design_review)
+        .map_err(|error| PlanningUnitError::Serialization(error.to_string()))?;
+    Ok(format!(
+        "修订必须保留 spec_projection 中的原始需求、语言、验收标准和非功能约束；design_review.findings 只说明需要修正的缺陷，不得替代 spec 真相。\n\n\
+         [spec_projection_ref]\n{spec_projection_ref}\n\n\
+         [spec_projection_payload]\n{spec_projection_payload}\n\n\
+         当前 design artifact_ref={design_ref}\n\
+         当前 design projection_ref={projection_ref}\n\n\
+         [current_design_markdown]\n{previous_design_markdown}\n[/current_design_markdown]\n\n\
+         [design_review]\n{design_review_json}\n[/design_review]\n\n\
+         N09 必须基于 spec_projection、current_design_markdown 和 design_review.findings 输出完整、非空的 revised_design_markdown；不要只输出修订摘要。\n\
+         revised_design_markdown 必须包含 canonical Design heading：# Design、## 设计决策（或 ## Design Decisions）和 ## 风险。",
+        spec_projection_ref = spec_projection.projection_id,
+        spec_projection_payload = spec_projection_payload,
+        design_ref = previous_design_ref.artifact_ref_id,
+        projection_ref = previous_design_projection.projection_id,
+    ))
 }
 
 fn write_projection(

@@ -8,6 +8,7 @@ use crate::cross_cutting::provider_adapter::ProviderAdapter;
 use crate::protocol::artifacts::{ArtifactKind, ArtifactRef};
 use crate::protocol::constraints::{BundleStatus, OpenSpecConstraintBundle};
 use crate::protocol::contracts::ProviderRunRecord;
+use crate::protocol::loop_counters::{LoopCounterName, LoopCounterRegistry};
 use crate::protocol::phase1_profile::PHASE1_PROFILE_VERSION;
 use crate::protocol::projections::{ArtifactProjectionRecord, ProjectionPayload};
 use crate::runtime_units::clarification::{
@@ -103,6 +104,9 @@ pub fn run_planning_full_chain(
     )?;
     let mut design_ref = initial_design_ref.clone();
     let mut design_revision_record = None;
+    let mut design_revision_counter = 0_u32;
+    let design_revision_threshold =
+        LoopCounterRegistry::phase1().threshold(LoopCounterName::DesignRevision);
 
     let (design_review, design_writeback_stale_status, openspec_bundle_after_design) = loop {
         match run_design_review(
@@ -119,9 +123,17 @@ pub fn run_planning_full_chain(
                 ..
             } => break (review, stale_status, bundle_after_design),
             DesignReviewRoute::Revise { review, .. } => {
+                design_revision_counter += 1;
+                if design_revision_counter > design_revision_threshold {
+                    return Err(PlanningUnitError::DesignRevisionLimitExceeded {
+                        current: design_revision_counter,
+                        threshold: design_revision_threshold,
+                    });
+                }
                 let revision = run_design_revision(
                     &mut state,
                     provider,
+                    &spec_projection,
                     &review,
                     &design_ref,
                     &design_projection,
@@ -178,10 +190,12 @@ fn run_readiness_check(
         "N10",
         json!({
             "spec_projection_ref": spec_projection.projection_id,
+            "spec_projection_payload": spec_projection.payload.clone(),
             "design_projection_ref": design_projection.projection_id,
+            "design_projection_payload": design_projection.payload.clone(),
             "constraint_bundle_ref": state.current_bundle.constraint_bundle_id,
         }),
-        "spec projection, design projection, and stable design constraints",
+        spec_design_projection_summary(spec_projection, design_projection)?,
         vec![
             spec_projection.projection_id.clone(),
             design_projection.projection_id.clone(),
@@ -244,10 +258,12 @@ fn run_plan_authoring(
         "N11",
         json!({
             "spec_projection_ref": spec_projection.projection_id,
+            "spec_projection_payload": spec_projection.payload.clone(),
             "design_projection_ref": design_projection.projection_id,
+            "design_projection_payload": design_projection.payload.clone(),
             "constraint_bundle_ref": state.current_bundle.constraint_bundle_id,
         }),
-        "spec projection, design projection, readiness check, and stable design constraints",
+        spec_design_projection_summary(spec_projection, design_projection)?,
         vec![
             spec_projection.projection_id.clone(),
             design_projection.projection_id.clone(),
@@ -331,9 +347,10 @@ fn run_dispatch_authoring(
         "N12",
         json!({
             "plan_projection_ref": plan_projection.projection_id,
+            "plan_projection_payload": plan_projection.payload.clone(),
             "constraint_bundle_ref": state.current_bundle.constraint_bundle_id,
         }),
-        "plan projection and task constraints",
+        plan_projection_summary(plan_projection)?,
         vec![plan_projection.projection_id.clone()],
         task_constraint_summary(&state.current_bundle),
         Vec::new(),
@@ -399,6 +416,32 @@ fn run_dispatch_authoring(
     Ok((dispatch_package, dispatch_ref))
 }
 
+fn spec_design_projection_summary(
+    spec_projection: &ArtifactProjectionRecord,
+    design_projection: &ArtifactProjectionRecord,
+) -> Result<String, PlanningUnitError> {
+    Ok(format!(
+        "[spec_projection_ref]\n{}\n\n[spec_projection_payload]\n{}\n\n[design_projection_ref]\n{}\n\n[design_projection_payload]\n{}",
+        spec_projection.projection_id,
+        serde_json::to_string_pretty(&spec_projection.payload)
+            .map_err(|error| PlanningUnitError::Serialization(error.to_string()))?,
+        design_projection.projection_id,
+        serde_json::to_string_pretty(&design_projection.payload)
+            .map_err(|error| PlanningUnitError::Serialization(error.to_string()))?
+    ))
+}
+
+fn plan_projection_summary(
+    plan_projection: &ArtifactProjectionRecord,
+) -> Result<String, PlanningUnitError> {
+    Ok(format!(
+        "[plan_projection_ref]\n{}\n\n[plan_projection_payload]\n{}",
+        plan_projection.projection_id,
+        serde_json::to_string_pretty(&plan_projection.payload)
+            .map_err(|error| PlanningUnitError::Serialization(error.to_string()))?
+    ))
+}
+
 fn markdown_from_plan_output(
     output: &crate::protocol::contracts::AdapterOutput,
 ) -> Result<String, PlanningUnitError> {
@@ -455,7 +498,7 @@ fn tasks_markdown_from_plan_projection(
             .map(uppercase_id)
             .unwrap_or_else(|| uppercase_id(&work_package.work_package_id.replace("wt-", "task-")));
         let reqs = refs_with_prefix(&work_package.traceability_refs, "req-");
-        let designs = refs_with_prefix(&work_package.traceability_refs, "dd-");
+        let designs = refs_with_prefix_any(&work_package.traceability_refs, &["dd-", "dec-"]);
         let acceptance = work_package
             .acceptance_targets
             .iter()
@@ -498,7 +541,7 @@ fn worktask_routing_from_plan_projection(
                     "human_required_reason": work_package.human_required_reason.clone(),
                     "allowed_write_scope": ["src/", "tests/"],
                     "traceability_refs": work_package.traceability_refs.clone(),
-                    "verification_commands": ["cargo test -j 1"],
+                    "verification_commands": [],
                 })
             })
             .collect(),
@@ -563,6 +606,13 @@ fn first_ref_with_prefix<'a>(refs: &'a [String], prefix: &str) -> Option<&'a str
 fn refs_with_prefix(refs: &[String], prefix: &str) -> Vec<String> {
     refs.iter()
         .filter(|value| value.starts_with(prefix))
+        .map(|value| uppercase_id(value))
+        .collect()
+}
+
+fn refs_with_prefix_any(refs: &[String], prefixes: &[&str]) -> Vec<String> {
+    refs.iter()
+        .filter(|value| prefixes.iter().any(|prefix| value.starts_with(prefix)))
         .map(|value| uppercase_id(value))
         .collect()
 }

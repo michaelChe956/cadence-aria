@@ -58,16 +58,21 @@ pub fn run_design_review(
     design_markdown: &str,
     design_projection: &ArtifactProjectionRecord,
 ) -> Result<DesignReviewRoute, PlanningUnitError> {
+    let canonical_input_summary =
+        design_review_canonical_input_summary(spec_projection, design_markdown, design_projection)?;
     let output = run_provider_node(
         state,
         provider,
         "N08",
         json!({
             "spec_projection_ref": spec_projection.projection_id,
+            "spec_projection_payload": spec_projection.payload,
+            "design_markdown": design_markdown,
             "design_projection_ref": design_projection.projection_id,
+            "design_projection_payload": design_projection.payload,
             "constraint_bundle_ref": state.current_bundle.constraint_bundle_id,
         }),
-        "spec projection, design projection, and requirement constraints",
+        canonical_input_summary,
         vec![
             spec_projection.projection_id.clone(),
             design_projection.projection_id.clone(),
@@ -75,7 +80,8 @@ pub fn run_design_review(
         requirement_constraint_summary(&state.current_bundle),
         Vec::new(),
     )?;
-    let review = structured_output("N08", &output)?;
+    let mut review = structured_output("N08", &output)?;
+    normalize_review_decision_aliases(&mut review);
     canonical_validator(
         ArtifactKind::DesignReview,
         &ArtifactContent::Json(review.clone()),
@@ -85,10 +91,10 @@ pub fn run_design_review(
         .get("review_decision")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if !matches!(decision, "pass" | "conditional_pass" | "revise") {
+    if !matches!(decision, "pass" | "conditional_pass" | "revise" | "fail") {
         return Err(PlanningUnitError::IncompatibleOutput {
             node_id: "N08".to_string(),
-            expected: "pass|conditional_pass|revise".to_string(),
+            expected: "pass|conditional_pass|revise|fail".to_string(),
             got: decision.to_string(),
         });
     }
@@ -97,6 +103,7 @@ pub fn run_design_review(
         let (stale_status, bundle_after_design) = write_design_to_openspec_and_recompile(
             state,
             design_markdown,
+            design_projection,
             vec![
                 spec_projection.projection_id.clone(),
                 design_projection.projection_id.clone(),
@@ -153,5 +160,44 @@ pub fn run_design_review(
             checkpoint_path,
         );
         Ok(DesignReviewRoute::Revise { review, review_ref })
+    }
+}
+
+fn design_review_canonical_input_summary(
+    spec_projection: &ArtifactProjectionRecord,
+    design_markdown: &str,
+    design_projection: &ArtifactProjectionRecord,
+) -> Result<String, PlanningUnitError> {
+    let spec_projection_payload = serde_json::to_string_pretty(&spec_projection.payload)
+        .map_err(|error| PlanningUnitError::Serialization(error.to_string()))?;
+    let design_projection_payload = serde_json::to_string_pretty(&design_projection.payload)
+        .map_err(|error| PlanningUnitError::Serialization(error.to_string()))?;
+    Ok(format!(
+        "只评审以下 Aria runtime canonical inputs；OpenSpec design.md 可能尚未 writeback，不得以 worktree 中的占位 design.md 作为评审真相。\n\n[spec_projection_ref]\n{}\n\n[spec_projection_payload]\n{}\n\n[design_markdown]\n{}\n\n[design_projection_ref]\n{}\n\n[design_projection_payload]\n{}",
+        spec_projection.projection_id,
+        spec_projection_payload,
+        design_markdown,
+        design_projection.projection_id,
+        design_projection_payload
+    ))
+}
+
+fn normalize_review_decision_aliases(review: &mut Value) {
+    let Some(decision) = review
+        .get("review_decision")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+    else {
+        return;
+    };
+    let normalized = match decision.as_str() {
+        "changes_requested" | "change_requested" | "request_changes" | "needs_changes" => {
+            Some("fail")
+        }
+        _ => None,
+    };
+    if let Some(normalized) = normalized {
+        review["review_decision"] = json!(normalized);
+        review["normalized_from_review_decision"] = json!(decision);
     }
 }

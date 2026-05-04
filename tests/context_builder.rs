@@ -134,6 +134,66 @@ fn context_builder_renders_each_planning_prompt_and_maps_adapter_input() {
                 .prompt
                 .contains("constraint summary for test")
         );
+        assert!(
+            result
+                .adapter_input
+                .prompt
+                .contains("<ARIA_STRUCTURED_OUTPUT>"),
+            "{node_id} prompt must include the exact structured output start sentinel"
+        );
+        assert!(
+            result
+                .adapter_input
+                .prompt
+                .contains("</ARIA_STRUCTURED_OUTPUT>"),
+            "{node_id} prompt must include the exact structured output end sentinel"
+        );
+        match node_id {
+            "N04" => {
+                assert!(result.adapter_input.prompt.contains("\"goal_summary\""));
+                assert!(result.adapter_input.prompt.contains("\"constraints\""));
+                assert!(result.adapter_input.prompt.contains("\"assumptions\""));
+                assert!(result.adapter_input.prompt.contains("\"open_questions\""));
+                assert!(result.adapter_input.prompt.contains("\"suggested_scope\""));
+                assert!(result.adapter_input.prompt.contains("不要省略任何 key"));
+            }
+            "N05" | "N07" | "N11" => {
+                assert!(result.adapter_input.prompt.contains("\"markdown\""));
+                if node_id == "N11" {
+                    assert!(result.adapter_input.prompt.contains("## 工作包"));
+                    assert!(result.adapter_input.prompt.contains("WT-001"));
+                    assert!(result.adapter_input.prompt.contains("Traceability"));
+                    assert!(result.adapter_input.prompt.contains("Acceptance"));
+                    assert!(
+                        result
+                            .adapter_input
+                            .prompt
+                            .contains("不得输出 superpowers 实施计划")
+                    );
+                }
+            }
+            _ => {}
+        }
+        if matches!(node_id, "N04" | "N05" | "N07" | "N11") {
+            assert!(
+                result.adapter_input.prompt.contains("非交互运行"),
+                "{node_id} prompt must constrain provider skills to non-interactive mode"
+            );
+            assert!(
+                result
+                    .adapter_input
+                    .prompt
+                    .contains("不得向用户提问或等待确认"),
+                "{node_id} prompt must forbid interactive clarification"
+            );
+            assert!(
+                result
+                    .adapter_input
+                    .prompt
+                    .contains("未决问题必须写入候选产物"),
+                "{node_id} prompt must route open questions into artifacts"
+            );
+        }
     }
 }
 
@@ -367,6 +427,26 @@ fn context_builder_renders_p4_provider_nodes_and_rejects_missing_required_inputs
 }
 
 #[test]
+fn context_builder_uses_worktask_verification_commands_for_execution_nodes() {
+    let mut input = p4_builder_input("N17");
+    input.canonical_inputs["worktask_routing"]["verification_commands"] =
+        json!(["node tests/fibonacciSquareSum.test.js"]);
+
+    let result = build_provider_context(input).expect("context package");
+
+    assert_eq!(
+        result.context_package.verification_commands,
+        vec!["node tests/fibonacciSquareSum.test.js".to_string()]
+    );
+    assert!(
+        result
+            .adapter_input
+            .prompt
+            .contains("node tests/fibonacciSquareSum.test.js")
+    );
+}
+
+#[test]
 fn node_specific_fields_snapshot_fixtures_round_trip_minimal_fields() {
     assert_node_specific_fields_fixture(
         "tests/fixtures/snapshots/n13_n24_node_specific_fields.json",
@@ -520,6 +600,31 @@ fn p4_builder_input(node_id: &str) -> ProviderContextBuilderInput {
     }
 }
 
+#[test]
+fn context_builder_includes_canonical_inputs_json_in_prompt() {
+    let mut input = builder_input("N07");
+    input.canonical_inputs = serde_json::json!({
+        "spec": "# Spec\n\n- [REQ-001] Fibonacci square sum",
+        "spec_gate_decision": "pass",
+        "risk_registry_ref": "risk_registry_001"
+    });
+
+    let result = build_provider_context(input).expect("context package");
+
+    assert!(
+        result.adapter_input.prompt.contains("# Spec"),
+        "N07 prompt must contain the full spec content from canonical_inputs"
+    );
+    assert!(
+        result.adapter_input.prompt.contains("REQ-001"),
+        "N07 prompt must contain requirement IDs from canonical_inputs"
+    );
+    assert!(
+        result.adapter_input.prompt.contains("spec_gate_decision"),
+        "N07 prompt must contain spec_gate_decision from canonical_inputs"
+    );
+}
+
 fn assert_node_specific_fields_fixture(path: &str, required_by_node: &[(&str, &[&str])]) {
     let source = fs::read_to_string(path).expect("fixture readable");
     let value: Value = serde_json::from_str(&source).expect("fixture json");
@@ -575,6 +680,10 @@ fn full_variables(node_id: &str) -> BTreeMap<String, String> {
         ("forbidden_actions".to_string(), "[]".to_string()),
         ("completion_criteria".to_string(), "[]".to_string()),
         ("verification_commands".to_string(), "[]".to_string()),
+        (
+            "canonical_inputs_json".to_string(),
+            r#"{"risk_registry_ref":"risk_registry_001"}"#.to_string(),
+        ),
     ])
 }
 

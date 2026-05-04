@@ -211,6 +211,42 @@ fn check_bundle_stale_detects_hash_change_and_missing_source() {
 }
 
 #[test]
+fn compile_constraint_bundle_extracts_design_ids_from_child_headings() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let change_dir = tempdir.path().join("openspec/changes/sample-change");
+    copy_dir(sample_change_dir(), &change_dir);
+    fs::write(
+        change_dir.join("design.md"),
+        "# Design\n\n\
+## 设计决策\n\n\
+### [DEC-001] 前端框架：React + Vite + TypeScript\n\n\
+### [DEC-002] 后端框架：FastAPI\n\n\
+## 风险\n\n\
+### [RISK-001] Token 泄露风险\n\
+",
+    )
+    .expect("write design");
+
+    let manifest = build_openspec_source_manifest(&change_dir).expect("manifest");
+    let bundle = compile_constraint_bundle(
+        &"sample-change".to_string(),
+        &manifest,
+        vec![],
+        "N11".to_string(),
+    )
+    .expect("compile bundle");
+
+    assert_eq!(
+        bundle.design_constraints.design_decision_ids,
+        vec!["DEC-001".to_string(), "DEC-002".to_string()]
+    );
+    assert_eq!(
+        bundle.design_constraints.risk_ids,
+        vec!["RISK-001".to_string()]
+    );
+}
+
+#[test]
 fn compile_constraint_bundle_maps_missing_or_empty_sources_to_blocking_errors() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let change_dir = tempdir.path().join("openspec/changes/sample-change");

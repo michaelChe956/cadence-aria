@@ -57,6 +57,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "hex",
+ "libc",
  "pulldown-cmark",
  "serde",
  "serde_json",

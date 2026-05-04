@@ -7,7 +7,10 @@ use crate::cross_cutting::provider_context_builder::{
     ProviderContextBuildError, ProviderContextBuilderInput, build_provider_context,
 };
 use crate::cross_cutting::provider_router::ProviderRunRequest;
-use crate::cross_cutting::provider_run::provider_run_record_from_output;
+use crate::cross_cutting::provider_run::{
+    failed_provider_run_record_from_error, provider_run_record_from_output,
+};
+use crate::cross_cutting::runtime_event_log::append_node_event;
 use crate::cross_cutting::traceability::{TraceabilityIndexes, normalize_traceability};
 use crate::protocol::artifacts::ArtifactKind;
 use crate::protocol::contracts::{ApprovalPolicy, ProviderRunRecord, SandboxMode};
@@ -77,6 +80,8 @@ pub enum ExecutionChainError {
     ProviderContext(#[from] ProviderContextBuildError),
     #[error("provider adapter failed: {0}")]
     ProviderAdapter(#[from] ProviderAdapterError),
+    #[error("provider execution routed to manual hold for {0}")]
+    ProviderBlocked(String),
     #[error("provider structured output missing for {0}")]
     StructuredOutputMissing(String),
     #[error("artifact validation failed: {0:?}")]
@@ -116,31 +121,45 @@ pub fn run_worktask_execution_chain(
     provider: &dyn ProviderAdapter,
 ) -> Result<ExecutionWorktaskResult, ExecutionChainError> {
     let mut state = ExecutionChainState::new(input);
-    state.run_report_node(provider, "N16", ArtifactKind::CodingReport, None)?;
+    match state.run_report_node(provider, "N16", ArtifactKind::CodingReport, None) {
+        Ok(_) => {}
+        Err(ExecutionChainError::ProviderBlocked(_)) => return Ok(state.finish()),
+        Err(error) => return Err(error),
+    }
 
     loop {
         let testing_report =
-            state.run_report_node(provider, "N17", ArtifactKind::TestingReport, None)?;
+            match state.run_report_node(provider, "N17", ArtifactKind::TestingReport, None) {
+                Ok(report) => report,
+                Err(ExecutionChainError::ProviderBlocked(_)) => return Ok(state.finish()),
+                Err(error) => return Err(error),
+            };
         if !testing_report
             .get("tests_passed")
             .and_then(Value::as_bool)
             .unwrap_or(false)
         {
             state.push_skill("systematic-debugging");
-            if state.rework_or_hold(provider, "testing_report_worktask_001_0001")? {
+            let testing_report_ref = artifact_ref(&testing_report);
+            if state.rework_or_hold(provider, &testing_report_ref)? {
                 continue;
             }
             break;
         }
 
         let review_report =
-            state.run_report_node(provider, "N18", ArtifactKind::CodeReviewReport, None)?;
+            match state.run_report_node(provider, "N18", ArtifactKind::CodeReviewReport, None) {
+                Ok(report) => report,
+                Err(ExecutionChainError::ProviderBlocked(_)) => return Ok(state.finish()),
+                Err(error) => return Err(error),
+            };
         if review_report
             .get("blocking")
             .and_then(Value::as_bool)
             .unwrap_or(false)
         {
-            if state.rework_or_hold(provider, "code_review_report_worktask_001_0001")? {
+            let code_review_report_ref = artifact_ref(&review_report);
+            if state.rework_or_hold(provider, &code_review_report_ref)? {
                 continue;
             }
             break;
@@ -209,12 +228,16 @@ impl ExecutionChainState {
         if let Some(superseded) = superseded {
             self.superseded_report_refs.push(superseded);
         }
-        self.run_report_node(
+        match self.run_report_node(
             provider,
             "N19",
             ArtifactKind::CodingReport,
             Some(source_ref),
-        )?;
+        ) {
+            Ok(_) => {}
+            Err(ExecutionChainError::ProviderBlocked(_)) => return Ok(false),
+            Err(error) => return Err(error),
+        }
         Ok(true)
     }
 
@@ -226,8 +249,45 @@ impl ExecutionChainState {
         rework_source_ref: Option<&str>,
     ) -> Result<Value, ExecutionChainError> {
         let context = build_provider_context(self.builder_input(node_id))?;
-        let output = provider.run(&context.adapter_input)?;
         let request = provider_run_request(node_id, &context.context_package.context_package_id);
+        append_node_event(
+            &self.task_root(),
+            &self.input.task_id,
+            node_id,
+            "node_enter",
+            "started",
+            json!({
+                "provider_run_id": request.provider_run_id.clone(),
+                "context_package_ref": context.context_package.context_package_id.clone(),
+                "output_schema": context.adapter_input.output_schema.clone(),
+            }),
+        );
+        let output = match provider.run(&context.adapter_input) {
+            Ok(output) => output,
+            Err(error) => {
+                let record =
+                    failed_provider_run_record_from_error(&request, &context.adapter_input, &error);
+                self.provider_run_records.push(record.clone());
+                append_node_event(
+                    &self.task_root(),
+                    &self.input.task_id,
+                    node_id,
+                    "node_exit",
+                    "failed",
+                    json!({
+                        "provider_run_id": request.provider_run_id.clone(),
+                        "error_code": error.code.as_str(),
+                        "error_details": error.details.clone(),
+                    }),
+                );
+                self.route_provider_error_to_manual_hold(
+                    node_id,
+                    error.code.as_str(),
+                    &record.provider_run_id,
+                );
+                return Err(ExecutionChainError::ProviderBlocked(node_id.to_string()));
+            }
+        };
         let record = provider_run_record_from_output(&request, &context.adapter_input, &output);
         let mut artifact = output
             .structured_output
@@ -257,6 +317,22 @@ impl ExecutionChainState {
             produced_artifact_kind: artifact_kind.as_str().to_string(),
         });
         self.provider_run_records.push(record);
+        let record_ref = self
+            .provider_run_records
+            .last()
+            .expect("provider run record just pushed");
+        append_node_event(
+            &self.task_root(),
+            &self.input.task_id,
+            node_id,
+            "node_exit",
+            "completed",
+            json!({
+                "provider_run_id": record_ref.provider_run_id,
+                "duration_ms": record_ref.duration_ms,
+                "retry_count": record_ref.retry_count,
+            }),
+        );
         self.artifacts.push(artifact.clone());
         Ok(artifact)
     }
@@ -311,39 +387,143 @@ impl ExecutionChainState {
     }
 
     fn builder_input(&self, node_id: &str) -> ProviderContextBuilderInput {
+        let verification_commands = self.verification_commands_for_node(node_id);
+        let canonical_inputs = self.canonical_inputs_for_node(&verification_commands);
+        let canonical_input_summary = prompt_json(&canonical_inputs);
+        let projection_summary = prompt_json(&json!({
+            "projection_refs": self.input.projection_refs,
+            "plan_projection": self.input.plan_projection,
+        }));
         ProviderContextBuilderInput {
             session_id: self.input.session_id.clone(),
             task_id: self.input.task_id.clone(),
             node_id: node_id.to_string(),
-            canonical_inputs: json!({
-                "artifact_refs": self
-                    .artifacts
-                    .iter()
-                    .filter_map(|artifact| artifact.get("artifact_ref").and_then(Value::as_str))
-                    .collect::<Vec<_>>(),
-                "risk_registry_ref": self.input.risk_registry_ref,
-                "acceptance_targets": self
-                    .input
-                    .plan_projection
-                    .work_packages
-                    .iter()
-                    .find(|work_package| work_package.work_package_id == self.input.source_work_package_id)
-                    .map(|work_package| work_package.acceptance_targets.clone())
-                    .unwrap_or_default(),
-                "worktask_routing": {
-                    "worktask_id": self.input.worktask_id,
-                    "source_work_package_id": self.input.source_work_package_id,
-                    "allowed_write_scope": self.input.allowed_write_scope,
-                }
-            }),
-            canonical_input_summary: format!("worktask {}", self.input.worktask_id),
+            canonical_inputs,
+            canonical_input_summary,
             projection_refs: self.input.projection_refs.clone(),
-            projection_summary: "spec/design/plan projection summary".to_string(),
+            projection_summary,
             constraint_bundle_ref: self.input.constraint_bundle_ref.clone(),
             constraint_summary: "task constraints".to_string(),
             context_files: self.input.context_files.clone(),
             worktree_path: Some(self.input.worktree_path.to_string_lossy().to_string()),
         }
+    }
+
+    fn canonical_inputs_for_node(&self, verification_commands: &[String]) -> Value {
+        json!({
+            "artifact_refs": self
+                .artifacts
+                .iter()
+                .filter_map(|artifact| artifact.get("artifact_ref").and_then(Value::as_str))
+                .collect::<Vec<_>>(),
+            "prior_artifacts": self.artifacts,
+            "risk_registry_ref": self.input.risk_registry_ref,
+            "acceptance_targets": self.active_acceptance_targets(),
+            "active_work_package": self.active_work_package(),
+            "worktask_routing": self.worktask_route_for_prompt(verification_commands),
+            "worktree_path": self.input.worktree_path,
+        })
+    }
+
+    fn active_work_package(&self) -> Value {
+        self.input
+            .plan_projection
+            .work_packages
+            .iter()
+            .find(|work_package| work_package.work_package_id == self.input.source_work_package_id)
+            .and_then(|work_package| serde_json::to_value(work_package).ok())
+            .unwrap_or_else(|| {
+                json!({
+                    "work_package_id": self.input.source_work_package_id,
+                    "acceptance_targets": [],
+                    "traceability_refs": [],
+                })
+            })
+    }
+
+    fn active_acceptance_targets(&self) -> Vec<String> {
+        self.input
+            .plan_projection
+            .work_packages
+            .iter()
+            .find(|work_package| work_package.work_package_id == self.input.source_work_package_id)
+            .map(|work_package| work_package.acceptance_targets.clone())
+            .unwrap_or_default()
+    }
+
+    fn worktask_route_for_prompt(&self, verification_commands: &[String]) -> Value {
+        let mut route = self.worktask_route().cloned().unwrap_or_else(|| json!({}));
+        route["worktask_id"] = json!(self.input.worktask_id);
+        route["source_work_package_id"] = json!(self.input.source_work_package_id);
+        route["allowed_write_scope"] = json!(self.input.allowed_write_scope);
+        route["verification_commands"] = json!(verification_commands);
+        route
+    }
+
+    fn verification_commands_for_node(&self, node_id: &str) -> Vec<String> {
+        let route_commands = self.route_verification_commands_for_worktask();
+        if !route_commands.is_empty() {
+            return route_commands;
+        }
+        if matches!(node_id, "N17" | "N18" | "N19") {
+            let latest_commands = self.latest_coding_report_commands();
+            if !latest_commands.is_empty() {
+                return latest_commands;
+            }
+        }
+        Vec::new()
+    }
+
+    fn route_verification_commands_for_worktask(&self) -> Vec<String> {
+        self.worktask_route()
+            .and_then(|route| route.get("verification_commands"))
+            .and_then(Value::as_array)
+            .map(|values| string_values(values))
+            .unwrap_or_default()
+    }
+
+    fn latest_coding_report_commands(&self) -> Vec<String> {
+        self.artifacts
+            .iter()
+            .rev()
+            .find(|artifact| artifact["artifact_kind"] == "coding_report")
+            .and_then(|artifact| artifact.get("commands_run"))
+            .and_then(Value::as_array)
+            .map(|commands| {
+                commands
+                    .iter()
+                    .filter_map(|command| {
+                        command.as_str().map(str::to_string).or_else(|| {
+                            command
+                                .get("command")
+                                .and_then(Value::as_str)
+                                .map(str::to_string)
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn worktask_route(&self) -> Option<&Value> {
+        self.input
+            .dispatch_package
+            .pointer("/_aria/worktask_routing")
+            .and_then(Value::as_array)
+            .or_else(|| {
+                self.input
+                    .dispatch_package
+                    .get("worktask_routing")
+                    .and_then(Value::as_array)
+            })
+            .into_iter()
+            .flatten()
+            .find(|route| {
+                route
+                    .get("worktask_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|worktask_id| worktask_id == self.input.worktask_id)
+            })
     }
 
     fn latest_coding_report_ref(&self) -> Option<String> {
@@ -361,6 +541,33 @@ impl ExecutionChainState {
         if !self.workflow_skills_activated.contains(&skill) {
             self.workflow_skills_activated.push(skill);
         }
+    }
+
+    fn route_provider_error_to_manual_hold(
+        &mut self,
+        node_id: &str,
+        reason: &str,
+        provider_run_id: &str,
+    ) {
+        self.next_node = "X08".to_string();
+        self.manual_intervention_reason = Some(reason.to_string());
+        self.protocol_steps.push(RuntimeProtocolStep {
+            node_id: "X08".to_string(),
+            status: RuntimeStepStatus::Blocked,
+            node_specific_fields: json!({
+                "reason": reason,
+                "worktask_id": self.input.worktask_id,
+                "trigger_node": node_id,
+                "provider_run_id": provider_run_id,
+            }),
+        });
+    }
+
+    fn task_root(&self) -> PathBuf {
+        self.input
+            .worktree_path
+            .join(".aria/runtime/tasks")
+            .join(&self.input.task_id)
     }
 
     fn finish(self) -> ExecutionWorktaskResult {
@@ -471,6 +678,18 @@ fn string_array_field(value: &Value, field: &str) -> Vec<String> {
         .filter_map(Value::as_str)
         .map(ToOwned::to_owned)
         .collect()
+}
+
+fn string_values(values: &[Value]) -> Vec<String> {
+    values
+        .iter()
+        .filter_map(Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn prompt_json(value: &Value) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string())
 }
 
 fn known_traceability_refs(plan_projection: &PlanProjection) -> Vec<String> {

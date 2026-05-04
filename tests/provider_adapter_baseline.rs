@@ -64,6 +64,16 @@ fn fake_provider_parses_last_structured_output_sentinel_and_keeps_raw_stdout() {
 }
 
 #[test]
+fn parser_accepts_fenced_json_inside_structured_output_sentinel() {
+    let stdout = "provider log\n<ARIA_STRUCTURED_OUTPUT>\n```json\n{\"artifact_kind\":\"clarification_record\"}\n```\n</ARIA_STRUCTURED_OUTPUT>\n";
+    let structured = parse_last_structured_output(stdout)
+        .expect("parse sentinel")
+        .expect("structured output");
+
+    assert_eq!(structured["artifact_kind"], json!("clarification_record"));
+}
+
+#[test]
 fn provider_router_records_completed_run_with_external_raw_output_refs() {
     let input = adapter_input(include_str!(
         "fixtures/provider/fake_stdout_clarification.txt"

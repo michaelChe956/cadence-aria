@@ -183,9 +183,13 @@ fn changed_files(worktree_path: &std::path::Path) -> Result<Vec<String>, Integra
         .lines()
         .filter_map(|line| line.get(3..))
         .map(str::trim)
-        .filter(|path| !path.is_empty())
+        .filter(|path| !path.is_empty() && !is_aria_runtime_path(path))
         .map(ToOwned::to_owned)
         .collect())
+}
+
+fn is_aria_runtime_path(path: &str) -> bool {
+    path == ".aria" || path.starts_with(".aria/")
 }
 
 fn map_candidate_git_error(error: GitCommandError) -> IntegrationPrepareError {

@@ -403,19 +403,69 @@ fn section_items(model: &DocumentModel, aliases: &[&str]) -> Vec<String> {
 }
 
 fn ids_from_sections(model: &DocumentModel, aliases: &[&str], prefixes: &[&str]) -> Vec<String> {
+    let root_paths = model
+        .sections
+        .iter()
+        .filter(|section| {
+            section.heading_path.last().is_some_and(|title| {
+                aliases
+                    .iter()
+                    .any(|alias| heading_matches_alias(title, alias))
+            })
+        })
+        .map(|section| section.heading_path.clone())
+        .collect::<Vec<_>>();
+
     let ids = model
         .sections
         .iter()
         .filter(|section| {
-            section
-                .heading_path
-                .last()
-                .is_some_and(|title| aliases.iter().any(|alias| title == alias))
+            root_paths
+                .iter()
+                .any(|root_path| section.heading_path.starts_with(root_path))
         })
-        .flat_map(|section| block_items(&section.blocks))
+        .flat_map(|section| {
+            let mut items = block_items(&section.blocks);
+            if let Some(title) = section.heading_path.last() {
+                items.push(title.to_string());
+            }
+            items
+        })
         .flat_map(|item| ids_with_prefix(&item, prefixes))
         .collect();
     dedupe_preserve_order(ids)
+}
+
+fn heading_matches_alias(heading: &str, alias: &str) -> bool {
+    let normalized = normalized_heading(heading);
+    if normalized.eq_ignore_ascii_case(alias) || normalized == alias {
+        return true;
+    }
+    normalized.strip_prefix(alias).is_some_and(|suffix| {
+        let suffix = suffix.trim_start();
+        suffix.starts_with('(') || suffix.starts_with('（')
+    })
+}
+
+fn normalized_heading(heading: &str) -> &str {
+    let trimmed = heading.trim();
+    let mut prefix_end = 0;
+    for (index, character) in trimmed.char_indices() {
+        if character.is_ascii_digit()
+            || character.is_whitespace()
+            || matches!(character, '.' | '。' | ')' | '、')
+        {
+            prefix_end = index + character.len_utf8();
+            continue;
+        }
+        break;
+    }
+    let normalized = trimmed[prefix_end..].trim_start();
+    if normalized.is_empty() {
+        trimmed
+    } else {
+        normalized
+    }
 }
 
 fn block_items(blocks: &[DocumentBlock]) -> Vec<String> {

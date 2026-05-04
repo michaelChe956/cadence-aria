@@ -34,6 +34,34 @@ fn canonical_validator_rejects_minimal_negative_fixture_for_all_phase1_artifact_
     }
 }
 
+#[test]
+fn canonical_validator_accepts_plan_heading_aliases_used_by_projection() {
+    for heading in ["工作包", "任务拆解", "Work Packages"] {
+        let content = ArtifactContent::Markdown(format!(
+            "# Plan\n\n## {heading}\n\n- [WT-001] 实现登录功能。\n"
+        ));
+
+        let result = canonical_validator(ArtifactKind::Plan, &content)
+            .unwrap_or_else(|error| panic!("{heading}: {error:?}"));
+
+        assert!(result.valid, "{heading} should be valid");
+    }
+}
+
+#[test]
+fn canonical_validator_accepts_design_heading_aliases_used_by_projection() {
+    for heading in ["设计决策", "Design Decisions"] {
+        let content = ArtifactContent::Markdown(format!(
+            "# Design\n\n## {heading}\n\n- [DEC-001] Use a small pure function.\n"
+        ));
+
+        let result = canonical_validator(ArtifactKind::Design, &content)
+            .unwrap_or_else(|error| panic!("{heading}: {error:?}"));
+
+        assert!(result.valid, "{heading} should be valid");
+    }
+}
+
 fn minimal_positive_content(kind: ArtifactKind) -> ArtifactContent {
     match kind {
         ArtifactKind::Spec => ArtifactContent::Markdown(
