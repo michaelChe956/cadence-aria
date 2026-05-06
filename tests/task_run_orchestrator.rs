@@ -19,7 +19,11 @@ fn fake_provider_task_run_updates_state_json_phase_through_lifecycle() {
 
     let _outcome = TaskRunOrchestrator::run_with_provider(request, &provider).expect("task run");
 
-    let state = read_json(&workspace.path().join(".aria/runtime/tasks/task_0001/state.json"));
+    let state = read_json(
+        &workspace
+            .path()
+            .join(".aria/runtime/tasks/task_0001/state.json"),
+    );
     assert_eq!(state["task_id"], "task_0001");
     assert_eq!(state["change_id"], "aria-login-jwt");
     assert_eq!(state["phase"], "completed");
@@ -168,7 +172,11 @@ fn non_interactive_task_run_writes_blocked_report_when_rework_limit_is_exceeded(
     );
     assert!(outcome.final_summary_path.is_none());
 
-    let state = read_json(&workspace.path().join(".aria/runtime/tasks/task_0001/state.json"));
+    let state = read_json(
+        &workspace
+            .path()
+            .join(".aria/runtime/tasks/task_0001/state.json"),
+    );
     assert_eq!(state["phase"], "blocked_by_gate");
 }
 

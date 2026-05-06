@@ -485,10 +485,10 @@ fn entries_from_section_tree(
 
 fn entries_from_section(section: &DocumentSection) -> Vec<ProjectionEntry> {
     let mut entries = direct_entries_from_section(section);
-    if entries.is_empty() {
-        if let Some(entry) = entry_from_section_heading(section) {
-            entries.push(entry);
-        }
+    if entries.is_empty()
+        && let Some(entry) = entry_from_section_heading(section)
+    {
+        entries.push(entry);
     }
     entries
 }
@@ -514,10 +514,10 @@ fn direct_entries_from_section(section: &DocumentSection) -> Vec<ProjectionEntry
         }
     }
     for block in &section.blocks {
-        if let DocumentBlock::Paragraph(paragraph) = block {
-            if let Some(entry) = entry_from_paragraph(paragraph) {
-                entries.push(entry);
-            }
+        if let DocumentBlock::Paragraph(paragraph) = block
+            && let Some(entry) = entry_from_paragraph(paragraph)
+        {
+            entries.push(entry);
         }
     }
     entries

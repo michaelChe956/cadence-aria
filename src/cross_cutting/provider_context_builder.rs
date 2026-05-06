@@ -289,10 +289,7 @@ fn prompt_variables(
         ("forbidden_actions".to_string(), forbidden_actions),
         ("completion_criteria".to_string(), completion_criteria),
         ("verification_commands".to_string(), verification_commands),
-        (
-            "canonical_inputs_json".to_string(),
-            canonical_inputs_json,
-        ),
+        ("canonical_inputs_json".to_string(), canonical_inputs_json),
     ]))
 }
 
