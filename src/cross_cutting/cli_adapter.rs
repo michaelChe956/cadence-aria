@@ -209,13 +209,19 @@ pub fn run_command_capture(
     if let Some(stdin_text) = stdin_text
         && let Some(mut stdin) = child.stdin.take()
     {
-        stdin.write_all(stdin_text.as_bytes()).map_err(|error| {
-            ProviderAdapterError::permission_denied(
+        // Provider 进程可能在我们写完之前就退出（例如 fixture 脚本立即报错），
+        // 此时 write 会返回 BrokenPipe。BrokenPipe 不是错误本身，真正的错误来源
+        // 在子进程的 stderr 与 exit_code 中，应让后续 classify_error 处理。
+        if let Err(error) = stdin.write_all(stdin_text.as_bytes())
+            && error.kind() != std::io::ErrorKind::BrokenPipe
+        {
+            return Err(ProviderAdapterError::execution_failed(
+                None,
+                String::new(),
                 format!("write provider stdin: {error}"),
-                String::new(),
-                String::new(),
-            )
-        })?;
+                0,
+            ));
+        }
     }
 
     let status = if let Some(timeout) = timeout {
