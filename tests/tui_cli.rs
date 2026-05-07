@@ -28,3 +28,19 @@ fn cli_rejects_tui_task_id_without_value() {
     assert_eq!(error.code, "invalid_cli_args");
     assert!(error.message.contains("--task-id"));
 }
+
+#[test]
+fn cli_tui_browse_fails_cleanly_when_task_is_missing() {
+    let workspace = tempdir().expect("workspace");
+    let error = run_cli([
+        "tui",
+        "--workspace",
+        workspace.path().to_str().expect("workspace path"),
+        "--task-id",
+        "missing_task",
+        "--check",
+    ])
+    .expect_err("missing task");
+
+    assert_eq!(error.code, "interactive_task_missing");
+}

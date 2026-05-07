@@ -67,6 +67,10 @@ where
         [command, rest @ ..] if command == "tui" => {
             let workspace = parse_workspace(rest)?;
             let task_id = parse_task_id(rest)?;
+            if rest.iter().any(|item| item == "--check") {
+                crate::tui::app::check_tui_browse(&workspace, task_id.as_deref())
+                    .map_err(task_run_error)?;
+            }
             Ok(CliOutput::Text(match task_id {
                 Some(task_id) => format!("tui_browse:{}:{task_id}", workspace.to_string_lossy()),
                 None => format!("tui_browse:{}", workspace.to_string_lossy()),
