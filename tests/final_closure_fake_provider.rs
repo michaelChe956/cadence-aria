@@ -1,9 +1,11 @@
 use cadence_aria::cross_cutting::provider_adapter::{
-    parse_last_structured_output, ProviderAdapter, ProviderAdapterError, STRUCTURED_OUTPUT_END,
-    STRUCTURED_OUTPUT_START,
+    ProviderAdapter, ProviderAdapterError, STRUCTURED_OUTPUT_END, STRUCTURED_OUTPUT_START,
+    parse_last_structured_output,
 };
 use cadence_aria::protocol::contracts::{AdapterInput, AdapterOutput, TimeoutStatus};
-use cadence_aria::runtime_units::final_review::{run_final_closure_chain, FinalClosureInput};
+use cadence_aria::runtime_units::final_review::{
+    FinalClosureError, FinalClosureInput, run_final_closure_chain,
+};
 use serde_json::json;
 use std::sync::Mutex;
 
@@ -50,6 +52,19 @@ fn final_review_pass_routes_to_summary_and_session_closeout() {
     );
 }
 
+#[test]
+fn final_summary_cannot_add_coverage_not_present_in_final_review() {
+    let provider = ScriptedFinalProvider::summary_with_extra_closed_item();
+
+    let error = run_final_closure_chain(final_input(), &provider)
+        .expect_err("final summary must not introduce new coverage conclusions");
+
+    assert!(matches!(
+        error,
+        FinalClosureError::FinalSummaryCoverageUnknown(ref item) if item == "req-999"
+    ));
+}
+
 fn final_input() -> FinalClosureInput {
     FinalClosureInput {
         session_id: "session_001".to_string(),
@@ -82,6 +97,7 @@ fn final_input() -> FinalClosureInput {
 struct ScriptedFinalProvider {
     output_schemas: Mutex<Vec<String>>,
     final_review: serde_json::Value,
+    final_summary: serde_json::Value,
 }
 
 impl ScriptedFinalProvider {
@@ -99,7 +115,26 @@ impl ScriptedFinalProvider {
                 "uncovered_items": [],
                 "followup_required": false
             }),
+            final_summary: json!({
+                "artifact_kind": "final_summary",
+                "overall_status": "closed_successfully",
+                "next_steps": [],
+                "remaining_risks": [],
+                "closed_items": ["req-001", "dd-001", "task-001"]
+            }),
         }
+    }
+
+    fn summary_with_extra_closed_item() -> Self {
+        let mut provider = Self::pass();
+        provider.final_summary = json!({
+            "artifact_kind": "final_summary",
+            "overall_status": "closed_successfully",
+            "next_steps": [],
+            "remaining_risks": [],
+            "closed_items": ["req-001", "dd-001", "task-001", "req-999"]
+        });
+        provider
     }
 
     fn seen_output_schemas(&self) -> Vec<String> {
@@ -115,13 +150,7 @@ impl ProviderAdapter for ScriptedFinalProvider {
             .push(input.output_schema.clone());
         let payload = match input.output_schema.as_str() {
             "schema://aria/artifacts/final_review/v1" => self.final_review.clone(),
-            "schema://aria/artifacts/final_summary/v1" => json!({
-                "artifact_kind": "final_summary",
-                "overall_status": "closed_successfully",
-                "next_steps": [],
-                "remaining_risks": [],
-                "closed_items": ["req-001", "dd-001", "task-001"]
-            }),
+            "schema://aria/artifacts/final_summary/v1" => self.final_summary.clone(),
             other => panic!("unexpected schema {other}"),
         };
         let stdout = format!(

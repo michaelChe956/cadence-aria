@@ -1,6 +1,6 @@
 use crate::runtime_units::{
-    completed_step, CanonicalNodeInput, DaemonContext, RuntimeUnit, RuntimeUnitError,
-    RuntimeUnitResult,
+    CanonicalNodeInput, DaemonContext, RuntimeUnit, RuntimeUnitError, RuntimeUnitResult,
+    completed_step,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]

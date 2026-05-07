@@ -1,6 +1,6 @@
 use cadence_aria::cross_cutting::artifact_validate::{
-    phase1_profile_validator, ArtifactValidateError, ConstraintBundleIndex, ProjectionIndex,
-    ProviderRunIndex, TraceabilityIndex,
+    ArtifactValidateError, ConstraintBundleIndex, ProjectionIndex, ProviderRunIndex,
+    TraceabilityIndex, phase1_profile_validator,
 };
 use cadence_aria::protocol::artifacts::ArtifactKind;
 use serde_json::json;

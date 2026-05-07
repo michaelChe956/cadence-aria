@@ -49,6 +49,7 @@ pub struct AdapterCompatibilityEntry {
     pub output_parser: OutputParser,
     pub supports_session: bool,
     pub supports_resume: bool,
+    pub pass_worktree_path_as_arg: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,7 +75,18 @@ pub fn default_compatibility_matrix() -> AdapterCompatibilityMatrix {
                 probe_command: CommandSpec::new("claude", vec!["--help".to_string()]),
                 version_command: CommandSpec::new("claude", vec!["--version".to_string()]),
                 auth_check_command: CommandSpec::new("claude", vec!["auth".to_string()]),
-                run_command: CommandSpec::new("claude", Vec::new()),
+                run_command: CommandSpec::new(
+                    "claude",
+                    vec![
+                        "-p".to_string(),
+                        "--permission-mode".to_string(),
+                        "dontAsk".to_string(),
+                        "--tools".to_string(),
+                        "".to_string(),
+                        "--strict-mcp-config".to_string(),
+                        "--no-session-persistence".to_string(),
+                    ],
+                ),
                 unauthorized_patterns: vec![
                     "not logged in".to_string(),
                     "unauthorized".to_string(),
@@ -89,6 +101,7 @@ pub fn default_compatibility_matrix() -> AdapterCompatibilityMatrix {
                 output_parser: OutputParser::SentinelBlock,
                 supports_session: true,
                 supports_resume: true,
+                pass_worktree_path_as_arg: false,
             },
             AdapterCompatibilityEntry {
                 provider_type: ProviderType::Codex,
@@ -97,7 +110,14 @@ pub fn default_compatibility_matrix() -> AdapterCompatibilityMatrix {
                 probe_command: CommandSpec::new("codex", vec!["--help".to_string()]),
                 version_command: CommandSpec::new("codex", vec!["--version".to_string()]),
                 auth_check_command: CommandSpec::new("codex", vec!["auth".to_string()]),
-                run_command: CommandSpec::new("codex", Vec::new()),
+                run_command: CommandSpec::new(
+                    "codex",
+                    vec![
+                        "exec".to_string(),
+                        "-s".to_string(),
+                        "workspace-write".to_string(),
+                    ],
+                ),
                 unauthorized_patterns: vec![
                     "not logged in".to_string(),
                     "unauthorized".to_string(),
@@ -113,6 +133,7 @@ pub fn default_compatibility_matrix() -> AdapterCompatibilityMatrix {
                 output_parser: OutputParser::SentinelBlock,
                 supports_session: true,
                 supports_resume: true,
+                pass_worktree_path_as_arg: false,
             },
         ],
     }
@@ -150,5 +171,6 @@ fn command_entry(provider_type: ProviderType, path: &Path) -> AdapterCompatibili
         output_parser: OutputParser::SentinelBlock,
         supports_session: false,
         supports_resume: false,
+        pass_worktree_path_as_arg: true,
     }
 }

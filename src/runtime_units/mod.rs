@@ -1,3 +1,9 @@
+#![allow(
+    clippy::large_enum_variant,
+    clippy::manual_async_fn,
+    clippy::too_many_arguments
+)]
+
 pub mod clarification;
 pub mod code_review;
 pub mod coding;

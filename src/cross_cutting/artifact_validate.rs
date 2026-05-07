@@ -605,10 +605,10 @@ pub fn phase1_profile_validator(
         ArtifactKind::CodingReport
         | ArtifactKind::TestingReport
         | ArtifactKind::CodeReviewReport
-        | ArtifactKind::IntegrationReport => {
-            if traceability_refs.is_empty() {
-                return Err(ArtifactValidateError::TraceabilityRefsMissing);
-            }
+        | ArtifactKind::IntegrationReport
+            if traceability_refs.is_empty() =>
+        {
+            return Err(ArtifactValidateError::TraceabilityRefsMissing);
         }
         _ => {}
     }
@@ -672,15 +672,18 @@ fn validate_markdown_canonical(
             artifact_kind,
         });
     }
-    let required_heading = match artifact_kind {
-        ArtifactKind::Spec => "功能需求",
-        ArtifactKind::Design => "设计决策",
-        ArtifactKind::Plan => "工作包",
+    let (required_heading, heading_aliases): (&str, &[&str]) = match artifact_kind {
+        ArtifactKind::Spec => ("功能需求", &["功能需求"]),
+        ArtifactKind::Design => ("设计决策", &["设计决策", "Design Decisions"]),
+        ArtifactKind::Plan => ("工作包", &["工作包", "任务拆解", "Work Packages"]),
         _ => return Ok(ValidationResult::valid()),
     };
     let has_required_heading = markdown.lines().any(|line| {
         let trimmed = line.trim();
-        trimmed.starts_with('#') && trimmed.contains(required_heading)
+        trimmed.starts_with('#')
+            && heading_aliases
+                .iter()
+                .any(|heading_alias| trimmed.contains(heading_alias))
     });
     if !has_required_heading {
         return Err(ArtifactValidateError::CanonicalMissingField {

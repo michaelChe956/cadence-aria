@@ -1,6 +1,6 @@
 use cadence_aria::protocol::repl_wire::{
-    event_registry, validate_event_payload, Command, EventEnvelope, HelloRequest, MessageType,
-    RequestEnvelope, ResponseEnvelope, WireError, PROTOCOL_VERSION,
+    Command, EventEnvelope, HelloRequest, MessageType, PROTOCOL_VERSION, RequestEnvelope,
+    ResponseEnvelope, WireError, event_registry, validate_event_payload,
 };
 use serde_json::json;
 

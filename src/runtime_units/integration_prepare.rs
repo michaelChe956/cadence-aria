@@ -1,4 +1,4 @@
-use crate::cross_cutting::git_command::{args, git_stdout, run_git, GitCommandError};
+use crate::cross_cutting::git_command::{GitCommandError, args, git_stdout, run_git};
 use crate::cross_cutting::integration_queue::IntegrationQueue;
 use crate::cross_cutting::worktree::validate_write_path;
 use crate::runtime_units::{
@@ -183,9 +183,13 @@ fn changed_files(worktree_path: &std::path::Path) -> Result<Vec<String>, Integra
         .lines()
         .filter_map(|line| line.get(3..))
         .map(str::trim)
-        .filter(|path| !path.is_empty())
+        .filter(|path| !path.is_empty() && !is_aria_runtime_path(path))
         .map(ToOwned::to_owned)
         .collect())
+}
+
+fn is_aria_runtime_path(path: &str) -> bool {
+    path == ".aria" || path.starts_with(".aria/")
 }
 
 fn map_candidate_git_error(error: GitCommandError) -> IntegrationPrepareError {

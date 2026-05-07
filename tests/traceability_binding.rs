@@ -1,9 +1,9 @@
 use cadence_aria::cross_cutting::traceability::{
-    check_coverage_closed, normalize_traceability, TraceabilityError, TraceabilityIndexes,
+    TraceabilityError, TraceabilityIndexes, check_coverage_closed, normalize_traceability,
 };
 use cadence_aria::protocol::projections::{ExecutionMode, PlanProjection, WorkPackageProjection};
 use cadence_aria::protocol::traceability::{BindingStatus, CoverageStatus, ManualExemption};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[test]
 fn normalize_traceability_merges_plan_refs_and_known_candidate_refs() {

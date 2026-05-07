@@ -1,6 +1,6 @@
 use cadence_aria::daemon::recovery::{
-    compute_retention_index, EventLogEntry, EventLogIndex, ReplayDecision, ReplayWindow,
-    TaskEventRetention,
+    EventLogEntry, EventLogIndex, ReplayDecision, ReplayWindow, TaskEventRetention,
+    compute_retention_index,
 };
 use cadence_aria::daemon::state_machine::DaemonState;
 use cadence_aria::protocol::repl_wire::{Command, HelloRequest, RequestEnvelope};

@@ -1,6 +1,6 @@
-use cadence_aria::cli::{run_cli, CliOutput};
+use cadence_aria::cli::{CliOutput, run_cli};
 use cadence_aria::daemon::discovery::{
-    default_socket_path, write_daemon_lock, write_daemon_metadata, DaemonMetadata, PROTOCOL_VERSION,
+    DaemonMetadata, PROTOCOL_VERSION, default_socket_path, write_daemon_lock, write_daemon_metadata,
 };
 use tempfile::tempdir;
 

@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs;
@@ -8,16 +8,16 @@ use std::path::{Path, PathBuf};
 use crate::daemon::checkpoint::{RiskRegistrySnapshot, RuntimeSnapshot};
 use crate::daemon::recovery::{EventLogIndex, ReplayDecision, ReplayWindow};
 use crate::daemon::task_registry::{TaskRuntimeState, TaskSummary};
-use crate::protocol::nodes::{N00, N01, N02, N03};
 use crate::protocol::constraints::OpenSpecBootstrapStatus;
 use crate::protocol::loop_counters::LoopCounterName;
+use crate::protocol::nodes::{N00, N01, N02, N03};
 use crate::protocol::policies::PolicyMode;
 use crate::protocol::repl_wire::{
     ApproveGateRequest, AttachRequest, AttachResponse, Command, DetachResponse,
     GateResolutionResponse, GetStatusRequest, GetStatusResponse, HelloRequest, HelloResponse,
-    ListArtifactsRequest, ListArtifactsResponse, NewTaskRequest, NewTaskResponse,
+    ListArtifactsRequest, ListArtifactsResponse, NewTaskRequest, NewTaskResponse, PROTOCOL_VERSION,
     RejectGateRequest, ReplyGateRequest, RequestEnvelope, ResponseEnvelope, SubscribeRequest,
-    SubscribeResponse, WireError, PROTOCOL_VERSION,
+    SubscribeResponse, WireError,
 };
 
 #[derive(Debug)]
@@ -266,7 +266,7 @@ impl DaemonState {
                         payload
                             .task_id
                             .as_ref()
-                            .map_or(true, |expected| expected == &task.task_id)
+                            .is_none_or(|expected| expected == &task.task_id)
                     })
                     .map(TaskSummary::from)
                     .map(|summary| serde_json::to_value(summary_to_json(summary)).unwrap())
@@ -290,7 +290,7 @@ impl DaemonState {
                     .into_iter()
                     .flatten()
                     .filter(|artifact| {
-                        payload.artifact_kind.as_ref().map_or(true, |expected| {
+                        payload.artifact_kind.as_ref().is_none_or(|expected| {
                             artifact
                                 .get("artifact_kind")
                                 .and_then(Value::as_str)
@@ -359,7 +359,16 @@ impl DaemonState {
         fs::create_dir_all(&artifact_dir).map_err(io_error)?;
 
         let content = json!({
+            "artifact_kind": "intake_brief",
             "intake_id": format!("intake_{task_id}_0001"),
+            "request_summary": request_text.trim(),
+            "raw_user_request": request_text,
+            "repo_context": {
+                "task_id": task_id,
+                "workspace_root": self.workspace_root.to_string_lossy(),
+            },
+            "initial_constraints": [],
+            "requested_goal": request_text.trim(),
             "request_text": request_text,
             "origin_type": "user_repl",
             "created_at": now_iso8601(),

@@ -318,6 +318,7 @@ impl FromStr for DependencyType {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match normalize_enum_value(value).as_str() {
             "blocks" => Ok(DependencyType::Blocks),
+            "sequential" | "sequence" | "then" | "finish_to_start" => Ok(DependencyType::Blocks),
             "depends_on" => Ok(DependencyType::DependsOn),
             "parallel" => Ok(DependencyType::Parallel),
             _ => Err(value.to_string()),
@@ -331,6 +332,5 @@ fn normalize_enum_value(value: &str) -> String {
         .trim_matches(';')
         .trim_matches(',')
         .to_ascii_lowercase()
-        .replace('-', "_")
-        .replace(' ', "_")
+        .replace(['-', ' '], "_")
 }

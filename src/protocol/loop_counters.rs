@@ -54,7 +54,10 @@ impl LoopCounterRegistry {
     }
 
     pub fn threshold(&self, name: LoopCounterName) -> u32 {
-        self.thresholds.get(&name).copied().unwrap_or_else(|| name.default_threshold())
+        self.thresholds
+            .get(&name)
+            .copied()
+            .unwrap_or_else(|| name.default_threshold())
     }
 
     pub fn all_thresholds(&self) -> &BTreeMap<LoopCounterName, u32> {
@@ -74,7 +77,11 @@ pub enum LoopCounterError {
 impl std::fmt::Display for LoopCounterError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LoopCounterError::ThresholdExceeded { counter, current, threshold } => {
+            LoopCounterError::ThresholdExceeded {
+                counter,
+                current,
+                threshold,
+            } => {
                 write!(
                     f,
                     "loop_counter_threshold_exceeded: {} current={} threshold={}",

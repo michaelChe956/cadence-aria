@@ -1,6 +1,6 @@
 use cadence_aria::cross_cutting::provider_adapter::{
-    parse_last_structured_output, ProviderAdapter, ProviderAdapterError, STRUCTURED_OUTPUT_END,
-    STRUCTURED_OUTPUT_START,
+    ProviderAdapter, ProviderAdapterError, STRUCTURED_OUTPUT_END, STRUCTURED_OUTPUT_START,
+    parse_last_structured_output,
 };
 use cadence_aria::protocol::constraints::{
     BundleStatus, CoverageModel, DesignConstraints, OpenSpecConstraintBundle, ProposalConstraints,
@@ -10,9 +10,9 @@ use cadence_aria::protocol::contracts::{AdapterInput, AdapterOutput, TimeoutStat
 use cadence_aria::protocol::projections::ProjectionPayload;
 use cadence_aria::runtime_units::plan_dispatch::run_planning_full_chain;
 use cadence_aria::runtime_units::spec_gate_review::{
-    run_planning_start_chain, PlanningStartChainInput,
+    PlanningStartChainInput, run_planning_start_chain,
 };
-use serde_json::json;
+use serde_json::{Value, json};
 use std::collections::VecDeque;
 use std::fs;
 use std::path::Path;
@@ -127,6 +127,35 @@ fn fake_provider_runs_n04_to_n07_with_spec_writeback_and_requirement_gate() {
 }
 
 #[test]
+fn planning_provider_retries_first_parse_error_for_node() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let change_id = "sample-change".to_string();
+    prepare_change_dir(workspace.path(), &change_id);
+    let provider = FlakySpecProvider::default();
+
+    let result = run_planning_start_chain(planning_input(workspace.path(), &change_id), &provider)
+        .expect("planning start chain should retry transient parse error");
+
+    assert!(
+        result
+            .spec_projection
+            .projection_id
+            .starts_with("proj_spec_projection_")
+    );
+    assert_eq!(*provider.spec_attempts.lock().expect("attempts"), 2);
+    let n05_record: serde_json::Value = serde_json::from_slice(
+        &fs::read(
+            workspace
+                .path()
+                .join(".aria/runtime/tasks/task_0001/provider-runs/prun_task_0001_n05.json"),
+        )
+        .expect("read provider run"),
+    )
+    .expect("provider run json");
+    assert_eq!(n05_record["retry_count"], json!(1));
+}
+
+#[test]
 fn fake_provider_runs_n04_to_n12_happy_path_with_design_tasks_and_dispatch() {
     let workspace = tempfile::tempdir().expect("workspace");
     let change_id = "sample-change".to_string();
@@ -186,9 +215,11 @@ fn fake_provider_runs_n04_to_n12_happy_path_with_design_tasks_and_dispatch() {
         .expect("routing array");
     assert_eq!(routing[0]["source_work_package_id"], json!("wt-001"));
     assert_eq!(routing[0]["execution_mode"], json!("agent_only"));
-    assert!(routing
-        .iter()
-        .all(|item| item.get("source_work_package_id").is_some()));
+    assert!(
+        routing
+            .iter()
+            .all(|item| item.get("source_work_package_id").is_some())
+    );
 
     for node_id in ["N10", "N11", "N12"] {
         assert!(
@@ -205,6 +236,89 @@ fn fake_provider_runs_n04_to_n12_happy_path_with_design_tasks_and_dispatch() {
             "plan_dispatch must write {node_id} checkpoint"
         );
     }
+    let readiness_prompts =
+        provider.seen_prompts_for_schema("schema://aria/artifacts/readiness_check/v1");
+    assert!(
+        readiness_prompts[0].contains("[spec_projection_payload]")
+            && readiness_prompts[0].contains("[design_projection_payload]")
+            && readiness_prompts[0].contains("design_decisions"),
+        "N10 prompt must inline projection payloads for real providers without tools"
+    );
+    let plan_prompts = provider.seen_prompts_for_schema("schema://aria/artifacts/plan/v1");
+    assert!(
+        plan_prompts[0].contains("[spec_projection_payload]")
+            && plan_prompts[0].contains("[design_projection_payload]")
+            && plan_prompts[0].contains("success_criteria"),
+        "N11 prompt must inline spec/design projection payloads"
+    );
+    let dispatch_prompts =
+        provider.seen_prompts_for_schema("schema://aria/artifacts/dispatch_package/v1");
+    assert!(
+        dispatch_prompts[0].contains("[plan_projection_payload]")
+            && dispatch_prompts[0].contains("work_packages"),
+        "N12 prompt must inline plan projection payload"
+    );
+}
+
+#[test]
+fn planning_chain_writes_openspec_design_from_synthesized_projection_ids() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let change_id = "sample-change".to_string();
+    let change_dir = prepare_change_dir(workspace.path(), &change_id);
+    let provider = NoIdDesignProvider::default();
+
+    let result = run_planning_full_chain(planning_input(workspace.path(), &change_id), &provider)
+        .expect("planning full chain");
+
+    assert_eq!(
+        result
+            .openspec_bundle_after_design
+            .design_constraints
+            .design_decision_ids,
+        vec!["DEC-001".to_string()]
+    );
+    assert_eq!(
+        result
+            .openspec_bundle_after_design
+            .design_constraints
+            .component_ids,
+        vec!["CMP-001".to_string()]
+    );
+    let written_design = fs::read_to_string(change_dir.join("design.md")).expect("written design");
+    assert!(written_design.contains("[DEC-001]"));
+    assert!(written_design.contains("[CMP-001]"));
+    assert_eq!(
+        result
+            .openspec_bundle_after_tasks
+            .task_constraints
+            .related_design_decision_ids_by_task
+            .get("TASK-001"),
+        Some(&vec!["DEC-001".to_string()])
+    );
+}
+
+#[test]
+fn planning_chain_dispatch_does_not_hardcode_aria_cargo_verification_commands() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let change_id = "sample-change".to_string();
+    prepare_change_dir(workspace.path(), &change_id);
+    let provider = ScriptedPlanningProvider::default();
+
+    let result = run_planning_full_chain(planning_input(workspace.path(), &change_id), &provider)
+        .expect("planning full chain");
+
+    let routing = result
+        .dispatch_package
+        .get("worktask_routing")
+        .and_then(Value::as_array)
+        .expect("worktask routing");
+    assert!(
+        routing.iter().all(|route| route
+            .get("verification_commands")
+            .and_then(Value::as_array)
+            .is_some_and(|commands| commands.is_empty())),
+        "N12 must not inject Aria-internal cargo tests into target worktree routing"
+    );
 }
 
 #[test]
@@ -223,7 +337,9 @@ fn fake_provider_routes_revise_review_to_n09_and_back_to_n08() {
             .iter()
             .map(|step| step.node_id.as_str())
             .collect::<Vec<_>>(),
-        vec!["N04", "N05", "N06", "N07", "N08", "N09", "N08", "N10", "N11", "N12"]
+        vec![
+            "N04", "N05", "N06", "N07", "N08", "N09", "N08", "N10", "N11", "N12"
+        ]
     );
     assert_eq!(
         result
@@ -252,12 +368,223 @@ fn fake_provider_routes_revise_review_to_n09_and_back_to_n08() {
         2,
         "N08 must run again after N09 revision"
     );
+    let design_review_prompts =
+        provider.seen_prompts_for_schema("schema://aria/artifacts/design_review/v1");
+    assert!(
+        design_review_prompts[1].contains("修订后 REPL 只作为客户端"),
+        "second N08 prompt must include revised design markdown from N09"
+    );
+    let design_revision_prompts =
+        provider.seen_prompts_for_schema("schema://aria/artifacts/design_revision_record/v1");
+    assert_eq!(design_revision_prompts.len(), 1);
+    assert!(
+        design_revision_prompts[0].contains("REPL 只作为客户端"),
+        "N09 prompt must inline the current design markdown because real providers run without tools"
+    );
+    assert!(
+        design_revision_prompts[0].contains("finding-001"),
+        "N09 prompt must inline concrete design review findings"
+    );
+    assert!(
+        design_revision_prompts[0].contains("[spec_projection_payload]")
+            && design_revision_prompts[0].contains("success_criteria"),
+        "N09 prompt must inline spec projection payload so revisions preserve original spec constraints"
+    );
+    assert!(
+        design_revision_prompts[0]
+            .contains("revised_design_markdown 必须包含 canonical Design heading"),
+        "N09 prompt must explicitly preserve canonical Design headings"
+    );
+}
+
+#[test]
+fn fake_provider_routes_fail_review_to_n09_and_back_to_n08() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let change_id = "sample-change".to_string();
+    prepare_change_dir(workspace.path(), &change_id);
+    let provider = ScriptedPlanningProvider::with_review_decisions(["fail", "pass"]);
+
+    let result = run_planning_full_chain(planning_input(workspace.path(), &change_id), &provider)
+        .expect("planning full chain with fail review");
+
+    assert_eq!(
+        result
+            .protocol_steps
+            .iter()
+            .map(|step| step.node_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "N04", "N05", "N06", "N07", "N08", "N09", "N08", "N10", "N11", "N12"
+        ]
+    );
+    assert_eq!(result.design_review["review_decision"], json!("pass"));
+}
+
+#[test]
+fn planning_chain_treats_changes_requested_review_decision_as_revision_request() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let change_id = "sample-change".to_string();
+    prepare_change_dir(workspace.path(), &change_id);
+    let provider = ScriptedPlanningProvider::with_review_decisions(["changes_requested", "pass"]);
+
+    let result = run_planning_full_chain(planning_input(workspace.path(), &change_id), &provider)
+        .expect("changes_requested should route through design revision");
+
+    assert_eq!(
+        result
+            .protocol_steps
+            .iter()
+            .map(|step| step.node_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "N04", "N05", "N06", "N07", "N08", "N09", "N08", "N10", "N11", "N12"
+        ]
+    );
+    assert_eq!(result.design_review["review_decision"], json!("pass"));
+}
+
+#[test]
+fn planning_chain_stops_design_revision_loop_at_registered_threshold() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let change_id = "sample-change".to_string();
+    prepare_change_dir(workspace.path(), &change_id);
+    let provider =
+        ScriptedPlanningProvider::with_review_decisions(["fail", "fail", "fail", "fail", "pass"]);
+
+    let error = run_planning_full_chain(planning_input(workspace.path(), &change_id), &provider)
+        .expect_err("design revision loop must stop at the registered threshold");
+
+    assert!(
+        error.to_string().contains("design_revision_limit_exceeded"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn planning_chain_records_node_enter_and_exit_events() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let change_id = "sample-change".to_string();
+    prepare_change_dir(workspace.path(), &change_id);
+    let provider = ScriptedPlanningProvider::default();
+
+    run_planning_full_chain(planning_input(workspace.path(), &change_id), &provider)
+        .expect("planning full chain");
+
+    let event_log = workspace
+        .path()
+        .join(".aria/runtime/tasks/task_0001/logs/node-events.jsonl");
+    let events = fs::read_to_string(&event_log)
+        .unwrap_or_else(|error| panic!("read {}: {error}", event_log.display()));
+    assert!(
+        events.contains(r#""event_kind":"node_enter""#) && events.contains(r#""node_id":"N04""#),
+        "N04 enter event missing: {events}"
+    );
+    assert!(
+        events.contains(r#""event_kind":"node_exit""#)
+            && events.contains(r#""node_id":"N12""#)
+            && events.contains(r#""status":"completed""#),
+        "N12 completed exit event missing: {events}"
+    );
+}
+
+#[test]
+fn planning_chain_restores_openspec_change_after_provider_side_effects() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let change_id = "sample-change".to_string();
+    let change_dir = prepare_change_dir(workspace.path(), &change_id);
+    let provider = DeletesOpenspecOnDesignProvider::default();
+    let mut input = planning_input(workspace.path(), &change_id);
+    input.worktree_path = Some(workspace.path().to_string_lossy().to_string());
+
+    let result = run_planning_full_chain(input, &provider)
+        .expect("planning chain should restore protected openspec files");
+
+    assert_eq!(result.design_review["review_decision"], json!("pass"));
+    assert!(
+        change_dir.join("proposal.md").exists(),
+        "proposal.md must be restored after provider side effects"
+    );
+    assert!(
+        change_dir.join("specs/main/spec.md").exists(),
+        "spec.md must be restored after provider side effects"
+    );
+    assert!(
+        change_dir.join("design.md").exists(),
+        "design.md must be restored before Aria writes stable design"
+    );
+    assert!(
+        change_dir.join("tasks.md").exists(),
+        "tasks.md must be restored after provider side effects"
+    );
 }
 
 #[derive(Debug)]
 struct ScriptedPlanningProvider {
     output_schemas: Mutex<Vec<String>>,
+    prompts: Mutex<Vec<(String, String)>>,
     review_decisions: Mutex<VecDeque<String>>,
+}
+
+#[derive(Default)]
+struct DeletesOpenspecOnDesignProvider {
+    delegate: ScriptedPlanningProvider,
+}
+
+#[derive(Default)]
+struct NoIdDesignProvider {
+    delegate: ScriptedPlanningProvider,
+}
+
+#[derive(Default)]
+struct FlakySpecProvider {
+    spec_attempts: Mutex<u32>,
+    delegate: ScriptedPlanningProvider,
+}
+
+impl ProviderAdapter for FlakySpecProvider {
+    fn run(&self, input: &AdapterInput) -> Result<AdapterOutput, ProviderAdapterError> {
+        if input.output_schema == "schema://aria/artifacts/spec/v1" {
+            let mut attempts = self.spec_attempts.lock().expect("attempts");
+            *attempts += 1;
+            if *attempts == 1 {
+                return Err(ProviderAdapterError::parse_error(
+                    "missing structured output sentinel",
+                    "provider log without sentinel",
+                    "",
+                ));
+            }
+        }
+        self.delegate.run(input)
+    }
+}
+
+impl ProviderAdapter for DeletesOpenspecOnDesignProvider {
+    fn run(&self, input: &AdapterInput) -> Result<AdapterOutput, ProviderAdapterError> {
+        let output = self.delegate.run(input)?;
+        if input.output_schema == "schema://aria/artifacts/design/v1"
+            && let Some(worktree_path) = &input.worktree_path
+        {
+            let change_dir = Path::new(worktree_path).join("openspec/changes/sample-change");
+            fs::remove_dir_all(change_dir).expect("delete openspec change dir");
+        }
+        Ok(output)
+    }
+}
+
+impl ProviderAdapter for NoIdDesignProvider {
+    fn run(&self, input: &AdapterInput) -> Result<AdapterOutput, ProviderAdapterError> {
+        match input.output_schema.as_str() {
+            "schema://aria/artifacts/design/v1" => provider_output(json!({
+                "artifact_kind": "design",
+                "markdown": no_id_design_markdown()
+            })),
+            "schema://aria/artifacts/plan/v1" => provider_output(json!({
+                "artifact_kind": "plan",
+                "markdown": dec_traceability_plan_markdown()
+            })),
+            _ => self.delegate.run(input),
+        }
+    }
 }
 
 impl Default for ScriptedPlanningProvider {
@@ -266,10 +593,28 @@ impl Default for ScriptedPlanningProvider {
     }
 }
 
+fn provider_output(payload: serde_json::Value) -> Result<AdapterOutput, ProviderAdapterError> {
+    let stdout = format!(
+        "provider log\n{STRUCTURED_OUTPUT_START}\n{}\n{STRUCTURED_OUTPUT_END}\n",
+        serde_json::to_string(&payload).expect("payload json")
+    );
+    let structured_output = parse_last_structured_output(&stdout)?;
+    Ok(AdapterOutput {
+        exit_code: Some(0),
+        stdout,
+        stderr: String::new(),
+        structured_output,
+        files_modified: vec![],
+        duration_ms: 1,
+        timeout_status: TimeoutStatus::NotTimedOut,
+    })
+}
+
 impl ScriptedPlanningProvider {
     fn with_review_decisions<const N: usize>(decisions: [&str; N]) -> Self {
         Self {
             output_schemas: Mutex::new(Vec::new()),
+            prompts: Mutex::new(Vec::new()),
             review_decisions: Mutex::new(
                 decisions
                     .into_iter()
@@ -282,6 +627,16 @@ impl ScriptedPlanningProvider {
     fn seen_output_schemas(&self) -> Vec<String> {
         self.output_schemas.lock().expect("schemas").clone()
     }
+
+    fn seen_prompts_for_schema(&self, output_schema: &str) -> Vec<String> {
+        self.prompts
+            .lock()
+            .expect("prompts")
+            .iter()
+            .filter(|(schema, _)| schema == output_schema)
+            .map(|(_, prompt)| prompt.clone())
+            .collect()
+    }
 }
 
 impl ProviderAdapter for ScriptedPlanningProvider {
@@ -290,6 +645,10 @@ impl ProviderAdapter for ScriptedPlanningProvider {
             .lock()
             .expect("schemas")
             .push(input.output_schema.clone());
+        self.prompts
+            .lock()
+            .expect("prompts")
+            .push((input.output_schema.clone(), input.prompt.clone()));
         let payload = match input.output_schema.as_str() {
             "schema://aria/artifacts/clarification_record/v1" => json!({
                 "artifact_kind": "clarification_record",
@@ -376,12 +735,27 @@ fn canonical_design_markdown() -> &'static str {
     "# Design\n\n## 设计决策\n\n- [DD-001] REPL 只作为客户端，daemon 是 runtime truth。Refs: REQ-001\n\n## 公共组件\n\n- [CMP-001] repl_wire JSON envelope schema\n\n## 风险\n\n- [RISK-001] REPL 断连后 daemon 状态不一致。Severity: high; Refs: DD-001\n"
 }
 
+fn no_id_design_markdown() -> &'static str {
+    "# Design\n\n\
+## 设计决策\n\n\
+| 决策点 | 选择 | 理由 |\n\
+|--------|------|------|\n\
+| runtime truth | daemon | REQ-001 要求运行时状态统一 |\n\n\
+## 公共组件\n\n\
+### Runtime Session Store\n\n\
+- **职责**: 保存任务运行态\n"
+}
+
 fn revised_design_markdown() -> &'static str {
     "# Design\n\n## 设计决策\n\n- [DD-001] 修订后 REPL 只作为客户端，daemon 是 runtime truth。Refs: REQ-001\n\n## 公共组件\n\n- [CMP-001] repl_wire JSON envelope schema\n\n## 风险\n\n- [RISK-001] REPL 断连后 daemon 状态不一致。Severity: high; Refs: DD-001\n"
 }
 
 fn canonical_plan_markdown() -> &'static str {
     "# Plan\n\n## 工作包\n\n| ID | Description | Execution Mode | Human Reason | Traceability | Acceptance |\n|----|-------------|----------------|--------------|--------------|------------|\n| WT-001 | 实现 REPL wire schema | agent_only | | REQ-001, DD-001, TASK-001 | AC-001 |\n| WT-002 | 实现 daemon handshake | agent_only | | REQ-001, DD-001, TASK-002 | AC-001 |\n\n## 依赖关系\n\n| From | To | Type |\n|------|----|------|\n| WT-001 | WT-002 | blocks |\n"
+}
+
+fn dec_traceability_plan_markdown() -> &'static str {
+    "# Plan\n\n## 工作包\n\n| ID | Description | Execution Mode | Human Reason | Traceability | Acceptance |\n|----|-------------|----------------|--------------|--------------|------------|\n| WT-001 | 实现 runtime session store | agent_only | | REQ-001, DEC-001, TASK-001 | AC-001 |\n\n## 依赖关系\n\n| From | To | Type |\n|------|----|------|\n"
 }
 
 fn prepare_change_dir(workspace_root: &Path, change_id: &str) -> std::path::PathBuf {
@@ -426,7 +800,7 @@ fn planning_input(workspace_root: &Path, change_id: &str) -> PlanningStartChainI
             change_id: change_id.to_string(),
             proposal_constraints: ProposalConstraints {
                 business_intent: vec![
-                    "Users need to create runtime tasks from the REPL.".to_string()
+                    "Users need to create runtime tasks from the REPL.".to_string(),
                 ],
                 scope: vec![
                     "Compile task creation rules into the Phase 1 runtime contract.".to_string(),

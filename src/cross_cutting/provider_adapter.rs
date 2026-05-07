@@ -190,11 +190,42 @@ pub fn parse_last_structured_output(stdout: &str) -> Result<Option<Value>, Provi
         ));
     };
     let json_text = after_start[..end_index].trim();
-    serde_json::from_str(json_text).map(Some).map_err(|error| {
+    parse_structured_json_text(json_text)
+        .or_else(|_| {
+            extract_json_candidate(json_text)
+                .ok_or_else(|| {
+                    ProviderAdapterError::parse_error(
+                        "invalid structured output json: no JSON object or array found",
+                        stdout.to_string(),
+                        String::new(),
+                    )
+                })
+                .and_then(parse_structured_json_text)
+        })
+        .map(Some)
+        .map_err(|mut error| {
+            error.stdout = stdout.to_string();
+            error
+        })
+}
+
+fn parse_structured_json_text(json_text: &str) -> Result<Value, ProviderAdapterError> {
+    serde_json::from_str(json_text).map_err(|error| {
         ProviderAdapterError::parse_error(
             format!("invalid structured output json: {error}"),
-            stdout.to_string(),
+            String::new(),
             String::new(),
         )
     })
+}
+
+fn extract_json_candidate(text: &str) -> Option<&str> {
+    let start = text.find(['{', '['])?;
+    let close = match text.as_bytes()[start] {
+        b'{' => '}',
+        b'[' => ']',
+        _ => return None,
+    };
+    let end = text.rfind(close)?;
+    (end >= start).then_some(&text[start..=end])
 }

@@ -1,10 +1,10 @@
 use crate::cross_cutting::artifact_validate::{
-    canonical_validator, phase1_profile_validator, ArtifactContent, ConstraintBundleIndex,
-    ProjectionIndex, ProviderRunIndex, TraceabilityIndex,
+    ArtifactContent, ConstraintBundleIndex, ProjectionIndex, ProviderRunIndex, TraceabilityIndex,
+    canonical_validator, phase1_profile_validator,
 };
 use crate::cross_cutting::provider_adapter::{ProviderAdapter, ProviderAdapterError};
 use crate::cross_cutting::provider_context_builder::{
-    build_provider_context, ProviderContextBuildError, ProviderContextBuilderInput,
+    ProviderContextBuildError, ProviderContextBuilderInput, build_provider_context,
 };
 use crate::cross_cutting::provider_router::ProviderRunRequest;
 use crate::cross_cutting::provider_run::provider_run_record_from_output;
@@ -14,7 +14,7 @@ use crate::runtime_units::{
     CanonicalNodeInput, DaemonContext, RuntimeProtocolStep, RuntimeStepStatus, RuntimeUnit,
     RuntimeUnitError, RuntimeUnitResult,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::future::Future;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -47,6 +47,8 @@ pub enum FinalClosureError {
     StructuredOutputMissing(String),
     #[error("artifact validation failed: {0:?}")]
     ArtifactValidate(crate::cross_cutting::artifact_validate::ArtifactValidateError),
+    #[error("final_summary introduced coverage item not present in final_review: {0}")]
+    FinalSummaryCoverageUnknown(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,13 +97,12 @@ pub fn run_final_closure_chain(
         ArtifactKind::FinalSummary,
         &mut provider_run_records,
     )?;
-    final_summary["_aria"] = json!({
-        "profile_version": "phase1.v1",
-        "constraint_check_ref": input.constraint_bundle_ref,
-        "traceability_refs": input.traceability_refs,
-        "provider_run_refs": [provider_run_records.last().expect("N27 run").provider_run_id],
-        "projection_refs": input.projection_refs,
-    });
+    normalize_final_summary_profile(
+        &input,
+        &final_review,
+        &mut final_summary,
+        &provider_run_records,
+    )?;
 
     Ok(FinalClosureResult {
         protocol_steps: vec![
@@ -185,6 +186,57 @@ pub(crate) fn normalize_final_review_profile(
     Ok(())
 }
 
+pub(crate) fn normalize_final_summary_profile(
+    input: &FinalClosureInput,
+    final_review: &Value,
+    final_summary: &mut Value,
+    records: &[ProviderRunRecord],
+) -> Result<(), FinalClosureError> {
+    validate_final_summary_coverage(final_review, final_summary)?;
+    let provider_run_refs = records
+        .last()
+        .map(|record| vec![record.provider_run_id.clone()])
+        .unwrap_or_default();
+    final_summary["_aria"] = json!({
+        "profile_version": "phase1.v1",
+        "constraint_check_ref": input.constraint_bundle_ref,
+        "traceability_refs": input.traceability_refs,
+        "provider_run_refs": provider_run_refs,
+        "projection_refs": input.projection_refs,
+    });
+    phase1_profile_validator(
+        final_summary,
+        ArtifactKind::FinalSummary,
+        &ProjectionIndex::with_work_packages(input.projection_refs.clone(), Vec::new()),
+        &ConstraintBundleIndex {
+            constraint_bundle_ids: vec![input.constraint_bundle_ref.clone()],
+            constraint_check_ids: Vec::new(),
+        },
+        &TraceabilityIndex::with_known_refs(input.traceability_refs.clone()),
+        &ProviderRunIndex::with_runs(
+            records
+                .iter()
+                .map(|record| record.provider_run_id.clone())
+                .collect(),
+        ),
+    )
+    .map_err(FinalClosureError::ArtifactValidate)?;
+    Ok(())
+}
+
+fn validate_final_summary_coverage(
+    final_review: &Value,
+    final_summary: &Value,
+) -> Result<(), FinalClosureError> {
+    let review_closed = string_array_at(final_review, &["_aria", "coverage_summary", "closed"]);
+    for closed_item in string_array_at(final_summary, &["closed_items"]) {
+        if !review_closed.contains(&closed_item) {
+            return Err(FinalClosureError::FinalSummaryCoverageUnknown(closed_item));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn session_closeout_step(task_id: &str, extra: Value) -> RuntimeProtocolStep {
     let mut fields = json!({
         "session_closeout_timestamp": chrono::Utc::now().to_rfc3339(),
@@ -246,4 +298,21 @@ fn merge_object(target: &mut Value, extra: Value) {
     for (key, value) in extra {
         target.insert(key.clone(), value.clone());
     }
+}
+
+fn string_array_at(value: &Value, path: &[&str]) -> Vec<String> {
+    let mut current = value;
+    for key in path {
+        let Some(next) = current.get(*key) else {
+            return Vec::new();
+        };
+        current = next;
+    }
+    current
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect()
 }

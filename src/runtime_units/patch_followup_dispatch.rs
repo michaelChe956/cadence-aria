@@ -1,17 +1,22 @@
+use crate::cross_cutting::artifact_validate::{
+    ConstraintBundleIndex, ProjectionIndex, ProviderRunIndex, TraceabilityIndex,
+    phase1_profile_validator,
+};
 use crate::cross_cutting::document_ops::{read_document_model, upsert_section};
 use crate::cross_cutting::openspec_constraints::{
-    build_openspec_source_manifest, check_bundle_stale, compile_constraint_bundle, OpenSpecError,
+    OpenSpecError, build_openspec_source_manifest, check_bundle_stale, compile_constraint_bundle,
 };
 use crate::cross_cutting::provider_adapter::ProviderAdapter;
 use crate::protocol::artifacts::ArtifactKind;
 use crate::protocol::constraints::{BundleStatus, OpenSpecConstraintBundle};
 use crate::protocol::document_ops::{DocumentBlock, HeadingPath};
+use crate::protocol::phase1_profile::PHASE1_PROFILE_VERSION;
 use crate::runtime_units::final_review::{
-    normalize_final_review_profile, run_final_provider_node, session_closeout_step,
-    FinalClosureError, FinalClosureInput,
+    FinalClosureError, FinalClosureInput, normalize_final_review_profile, run_final_provider_node,
+    session_closeout_step,
 };
 use crate::runtime_units::{RuntimeProtocolStep, RuntimeStepStatus};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,6 +61,8 @@ pub enum FinalFollowupError {
     Document(#[from] crate::cross_cutting::document_ops::DocumentOpError),
     #[error("provider structured output missing for N26")]
     StructuredOutputMissing,
+    #[error("invalid patch task delta: {0}")]
+    InvalidPatchTaskDelta(String),
 }
 
 pub fn run_final_followup_route(
@@ -108,19 +115,27 @@ pub fn run_final_followup_route(
                 .and_then(Value::as_array)
                 .cloned()
                 .ok_or(FinalFollowupError::StructuredOutputMissing)?;
+            validate_patch_task_deltas(&deltas, &input.traceability_refs)?;
             apply_patch_task_deltas(&input.change_dir, &deltas)?;
             let manifest = build_openspec_source_manifest(&input.change_dir)?;
-            assert!(matches!(
-                check_bundle_stale(&input.current_bundle, &manifest),
-                BundleStatus::Stale
-            ));
+            let stale_status = check_bundle_stale(&input.current_bundle, &manifest);
+            if !matches!(stale_status, BundleStatus::Stale) {
+                return Err(FinalFollowupError::InvalidPatchTaskDelta(format!(
+                    "expected stale bundle after tasks update, got {stale_status:?}"
+                )));
+            }
             let bundle = compile_constraint_bundle(
                 &input.change_id,
                 &manifest,
                 input.projection_refs.clone(),
                 "N26".to_string(),
             )?;
-            let dispatch_package = dispatch_package_from_deltas(&deltas, &bundle);
+            let provider_run_id = records
+                .last()
+                .map(|record| record.provider_run_id.clone())
+                .unwrap_or_else(|| "run_n26_0001".to_string());
+            let dispatch_package =
+                dispatch_package_from_deltas(&input, &deltas, &bundle, provider_run_id)?;
             let patch_round_counter = input.patch_round_counter + 1;
             protocol_steps.push(RuntimeProtocolStep {
                 node_id: "N26".to_string(),
@@ -279,7 +294,43 @@ fn apply_patch_task_deltas(
     Ok(())
 }
 
-fn dispatch_package_from_deltas(deltas: &[Value], bundle: &OpenSpecConstraintBundle) -> Value {
+fn validate_patch_task_deltas(
+    deltas: &[Value],
+    known_traceability_refs: &[String],
+) -> Result<(), FinalFollowupError> {
+    for delta in deltas {
+        for field in [
+            "description",
+            "acceptance_targets",
+            "execution_mode",
+            "traceability_refs",
+        ] {
+            if delta.get(field).is_none() {
+                return Err(FinalFollowupError::InvalidPatchTaskDelta(format!(
+                    "missing {field}"
+                )));
+            }
+        }
+        for traceability_ref in string_array_field(delta, "traceability_refs") {
+            if !known_traceability_refs
+                .iter()
+                .any(|known| normalize_ref_id(known) == normalize_ref_id(&traceability_ref))
+            {
+                return Err(FinalFollowupError::InvalidPatchTaskDelta(format!(
+                    "unknown traceability ref {traceability_ref}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn dispatch_package_from_deltas(
+    input: &FinalFollowupInput,
+    deltas: &[Value],
+    bundle: &OpenSpecConstraintBundle,
+    provider_run_id: String,
+) -> Result<Value, FinalFollowupError> {
     let routing = deltas
         .iter()
         .enumerate()
@@ -296,13 +347,90 @@ fn dispatch_package_from_deltas(deltas: &[Value], bundle: &OpenSpecConstraintBun
             })
         })
         .collect::<Vec<_>>();
-    json!({
+    let traceability_refs = routing_traceability_refs(&routing);
+    let dispatch_package = json!({
         "artifact_kind": "dispatch_package",
         "artifact_ref": format!("dispatch_pkg_patch_{}", bundle.task_constraints.task_ids.len()),
         "worktask_routing": routing,
         "_aria": {
+            "profile_version": PHASE1_PROFILE_VERSION,
+            "constraint_check_ref": bundle.constraint_bundle_id,
+            "traceability_refs": traceability_refs,
+            "provider_run_refs": [provider_run_id],
+            "projection_refs": input.projection_refs,
             "worktask_routing": routing,
             "constraint_bundle_ref": bundle.constraint_bundle_id,
         }
-    })
+    });
+    phase1_profile_validator(
+        &dispatch_package,
+        ArtifactKind::DispatchPackage,
+        &ProjectionIndex::with_work_packages(input.projection_refs.clone(), delta_task_ids(deltas)),
+        &ConstraintBundleIndex {
+            constraint_bundle_ids: vec![bundle.constraint_bundle_id.clone()],
+            constraint_check_ids: Vec::new(),
+        },
+        &TraceabilityIndex::with_known_refs(input.traceability_refs.clone()),
+        &ProviderRunIndex::with_runs(vec![
+            dispatch_package["_aria"]["provider_run_refs"][0]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+        ]),
+    )
+    .map_err(|error| FinalFollowupError::InvalidPatchTaskDelta(format!("{error:?}")))?;
+    Ok(dispatch_package)
+}
+
+fn routing_traceability_refs(routing: &[Value]) -> Vec<String> {
+    let mut refs = Vec::new();
+    for item in routing {
+        for value in item
+            .get("traceability_refs")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(ref_id) = value.as_str() {
+                let ref_id = normalize_ref_id(ref_id);
+                if !refs.contains(&ref_id) {
+                    refs.push(ref_id);
+                }
+            }
+        }
+    }
+    refs
+}
+
+fn delta_task_ids(deltas: &[Value]) -> Vec<String> {
+    deltas
+        .iter()
+        .map(|delta| {
+            delta
+                .get("task_id")
+                .and_then(Value::as_str)
+                .unwrap_or("TASK-NEW")
+                .to_string()
+        })
+        .collect()
+}
+
+fn string_array_field(value: &Value, field: &str) -> Vec<String> {
+    value
+        .get(field)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect()
+}
+
+fn normalize_ref_id(value: &str) -> String {
+    value
+        .trim()
+        .trim_matches(',')
+        .trim_matches(';')
+        .to_ascii_lowercase()
+        .replace('_', "-")
 }

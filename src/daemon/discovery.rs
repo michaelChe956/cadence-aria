@@ -38,7 +38,7 @@ pub fn daemon_runtime_dir(workspace_root: &Path) -> anyhow::Result<PathBuf> {
 }
 
 pub fn default_socket_path(workspace_root: &Path) -> anyhow::Result<PathBuf> {
-    Ok(daemon_runtime_dir(workspace_root)?.join("daemon.sock"))
+    Ok(short_socket_dir().join(format!("{}.sock", workspace_hash(workspace_root)?)))
 }
 
 pub fn daemon_metadata_path(workspace_root: &Path) -> anyhow::Result<PathBuf> {
@@ -77,6 +77,13 @@ pub fn write_daemon_lock(workspace_root: &Path, pid: u32) -> anyhow::Result<()> 
 }
 
 pub fn inspect_daemon(workspace_root: &Path) -> anyhow::Result<DaemonStatus> {
+    inspect_daemon_with_pid_checker(workspace_root, pid_is_alive)
+}
+
+pub fn inspect_daemon_with_pid_checker(
+    workspace_root: &Path,
+    pid_checker: impl Fn(u32) -> bool,
+) -> anyhow::Result<DaemonStatus> {
     let metadata_path = daemon_metadata_path(workspace_root)?;
     let lock_path = daemon_lock_path(workspace_root)?;
 
@@ -94,7 +101,7 @@ pub fn inspect_daemon(workspace_root: &Path) -> anyhow::Result<DaemonStatus> {
     }
 
     let socket_exists = Path::new(&metadata.socket_path).exists();
-    if pid_is_alive(metadata.pid) && socket_exists {
+    if pid_checker(metadata.pid) && socket_exists {
         Ok(DaemonStatus::Active)
     } else {
         Ok(DaemonStatus::Stale)
@@ -106,13 +113,29 @@ fn pid_is_alive(pid: u32) -> bool {
         return false;
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     {
-        Path::new("/proc").join(pid.to_string()).exists()
+        unsafe extern "C" {
+            fn kill(pid: i32, sig: i32) -> i32;
+        }
+
+        unsafe { kill(pid as i32, 0) == 0 }
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(unix))]
     {
         pid == std::process::id()
+    }
+}
+
+fn short_socket_dir() -> PathBuf {
+    #[cfg(unix)]
+    {
+        PathBuf::from("/tmp").join("aria-daemon")
+    }
+
+    #[cfg(not(unix))]
+    {
+        std::env::temp_dir().join("aria-daemon")
     }
 }

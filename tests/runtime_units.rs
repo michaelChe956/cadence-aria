@@ -1,6 +1,6 @@
 use cadence_aria::runtime_units::{
-    intake_capture::IntakeCaptureUnit, session_bootstrap::SessionBootstrapUnit,
-    task_init::TaskInitUnit, RuntimeUnit,
+    RuntimeUnit, intake_capture::IntakeCaptureUnit, session_bootstrap::SessionBootstrapUnit,
+    task_init::TaskInitUnit,
 };
 
 #[test]

@@ -1,8 +1,12 @@
 use std::path::{Path, PathBuf};
 
-use crate::daemon::discovery::{inspect_daemon, DaemonStatus};
+use crate::daemon::discovery::{DaemonStatus, inspect_daemon};
 use crate::daemon::runner::{run_daemon_serve_one, run_daemon_until_shutdown};
-use crate::repl::discovery::{resolve_daemon_connection, DiscoveryMode};
+use crate::repl::discovery::{DiscoveryMode, resolve_daemon_connection};
+use crate::task_run::command::parse_task_run_args;
+use crate::task_run::orchestrator::TaskRunOrchestrator;
+use crate::task_run::provider_factory::real_routing_provider;
+use crate::task_run::types::{ReportMode, TaskRunRequest, TaskRunStatus};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliOutput {
@@ -56,6 +60,10 @@ where
             let plan = resolve_daemon_connection(&workspace, mode)?;
             Ok(CliOutput::Text(format!("{plan:?}")))
         }
+        [command, subcommand, ..] if command == "task" && subcommand == "run" => Err(CliError {
+            code: "task_run_requires_async".to_string(),
+            message: "task run is only available through run_cli_async".to_string(),
+        }),
         _ => Err(CliError {
             code: "invalid_cli_args".to_string(),
             message: "expected daemon status or repl command".to_string(),
@@ -70,6 +78,48 @@ where
 {
     let args: Vec<String> = args.into_iter().map(Into::into).collect();
     match args.as_slice() {
+        [command, subcommand, rest @ ..] if command == "task" && subcommand == "run" => {
+            let options = parse_task_run_args(rest).map_err(task_run_error)?;
+            let change_id = options
+                .change_id
+                .clone()
+                .unwrap_or_else(|| "aria-login-jwt".to_string());
+            let provider = real_routing_provider().map_err(task_run_error)?;
+            let outcome = TaskRunOrchestrator::run_with_provider(
+                TaskRunRequest {
+                    workspace: options.workspace,
+                    request_text: options.request_text,
+                    change_id,
+                    provider_mode: options.provider_mode,
+                    non_interactive: options.non_interactive,
+                    timeout_secs: options.timeout_secs,
+                },
+                &provider,
+            )
+            .map_err(task_run_error)?;
+            let text = match options.report_mode {
+                ReportMode::Text => format!(
+                    "task_id={}\nchange_id={}\nstatus={}\nreport={}",
+                    outcome.task_id,
+                    outcome.change_id,
+                    task_status_text(&outcome.status),
+                    outcome.report_path.to_string_lossy()
+                ),
+                ReportMode::Json => serde_json::to_string_pretty(&serde_json::json!({
+                    "task_id": outcome.task_id,
+                    "change_id": outcome.change_id,
+                    "status": task_status_text(&outcome.status),
+                    "report_path": outcome.report_path,
+                    "openspec_change_dir": outcome.openspec_change_dir,
+                    "provider_run_refs": outcome.provider_run_refs,
+                    "testing_report_path": outcome.testing_report_path,
+                    "final_summary_path": outcome.final_summary_path,
+                    "blocked_report_path": outcome.blocked_report_path,
+                }))
+                .map_err(internal_error)?,
+            };
+            Ok(CliOutput::Text(text))
+        }
         [command, subcommand, rest @ ..] if command == "daemon" && subcommand == "run" => {
             let workspace = parse_workspace(rest)?;
             let socket = parse_socket(rest);
@@ -120,5 +170,20 @@ fn internal_error(error: impl std::fmt::Display) -> CliError {
     CliError {
         code: "internal_error".to_string(),
         message: error.to_string(),
+    }
+}
+
+fn task_run_error(error: crate::task_run::types::TaskRunError) -> CliError {
+    CliError {
+        code: error.code,
+        message: error.message,
+    }
+}
+
+fn task_status_text(status: &TaskRunStatus) -> &'static str {
+    match status {
+        TaskRunStatus::Completed => "completed",
+        TaskRunStatus::Failed => "failed",
+        TaskRunStatus::BlockedByGate => "blocked_by_gate",
     }
 }

@@ -1,5 +1,5 @@
 use cadence_aria::cross_cutting::artifact_validate::{
-    artifact_validation_rule, canonical_validator, ArtifactContent, ArtifactValidateError,
+    ArtifactContent, ArtifactValidateError, artifact_validation_rule, canonical_validator,
 };
 use cadence_aria::protocol::artifacts::ArtifactKind;
 use serde_json::json;

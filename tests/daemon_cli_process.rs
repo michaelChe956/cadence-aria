@@ -53,9 +53,11 @@ async fn aria_daemon_run_starts_socket_and_serves_wire_request() {
 
     let status = child.wait().expect("daemon process exits");
     assert!(status.success());
-    assert!(!daemon_lock_path(workspace.path())
-        .expect("lock path")
-        .exists());
+    assert!(
+        !daemon_lock_path(workspace.path())
+            .expect("lock path")
+            .exists()
+    );
     assert!(!socket_path.exists());
 }
 

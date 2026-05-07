@@ -1,6 +1,6 @@
 use cadence_aria::cross_cutting::worktree::{
-    scopes_may_overlap, validate_write_path, WorktreeError, WorktreeLeaseManager,
-    WorktreeLeaseStatus,
+    WorktreeError, WorktreeLeaseManager, WorktreeLeaseStatus, scopes_may_overlap,
+    validate_write_path,
 };
 use std::fs;
 

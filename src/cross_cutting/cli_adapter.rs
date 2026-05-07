@@ -3,14 +3,22 @@ use crate::cross_cutting::adapter_compatibility::{
 };
 use crate::cross_cutting::document_ops::compute_sha256;
 use crate::cross_cutting::provider_adapter::{
-    parse_last_structured_output, ProviderAdapter, ProviderAdapterError,
+    ProviderAdapter, ProviderAdapterError, STRUCTURED_OUTPUT_END, parse_last_structured_output,
 };
 use crate::protocol::contracts::{AdapterInput, AdapterOutput, TimeoutStatus};
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write;
-use std::path::Path;
-use std::process::{Command, Stdio};
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 #[derive(Debug, Clone)]
 pub struct CliAdapterConfig {
@@ -31,7 +39,9 @@ impl CliProviderAdapter {
 impl ProviderAdapter for CliProviderAdapter {
     fn run(&self, input: &AdapterInput) -> Result<AdapterOutput, ProviderAdapterError> {
         let mut command = self.config.compatibility.run_command.clone();
-        if let Some(worktree_path) = &input.worktree_path {
+        if self.config.compatibility.pass_worktree_path_as_arg
+            && let Some(worktree_path) = &input.worktree_path
+        {
             command.args.push(worktree_path.clone());
         }
 
@@ -160,6 +170,20 @@ pub fn run_command_capture(
     if stdin_text.is_some() {
         command.stdin(Stdio::piped());
     }
+    #[cfg(unix)]
+    {
+        // Put the provider in its own process group so timeout/early-completion cleanup
+        // also terminates shell grandchildren that may otherwise keep stdout pipes open.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setpgid(0, 0) == 0 {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::last_os_error())
+                }
+            });
+        }
+    }
 
     let mut child = command.spawn().map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
@@ -169,37 +193,71 @@ pub fn run_command_capture(
         }
     })?;
 
-    if let Some(stdin_text) = stdin_text {
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(stdin_text.as_bytes()).map_err(|error| {
-                ProviderAdapterError::permission_denied(
-                    format!("write provider stdin: {error}"),
-                    String::new(),
-                    String::new(),
-                )
-            })?;
+    let stdout_stream_path =
+        provider_stream_path(current_dir, &command_spec.program, child.id(), "stdout");
+    let stderr_stream_path =
+        provider_stream_path(current_dir, &command_spec.program, child.id(), "stderr");
+    let stdout_reader = child
+        .stdout
+        .take()
+        .map(|reader| spawn_output_reader(reader, stdout_stream_path));
+    let stderr_reader = child
+        .stderr
+        .take()
+        .map(|reader| spawn_output_reader(reader, stderr_stream_path));
+
+    if let Some(stdin_text) = stdin_text
+        && let Some(mut stdin) = child.stdin.take()
+    {
+        // Provider 进程可能在我们写完之前就退出（例如 fixture 脚本立即报错），
+        // 此时 write 会返回 BrokenPipe。BrokenPipe 不是错误本身，真正的错误来源
+        // 在子进程的 stderr 与 exit_code 中，应让后续 classify_error 处理。
+        if let Err(error) = stdin.write_all(stdin_text.as_bytes())
+            && error.kind() != std::io::ErrorKind::BrokenPipe
+        {
+            return Err(ProviderAdapterError::execution_failed(
+                None,
+                String::new(),
+                format!("write provider stdin: {error}"),
+                0,
+            ));
         }
     }
 
-    if let Some(timeout) = timeout {
+    let status = if let Some(timeout) = timeout {
+        let mut structured_output_seen_at: Option<Instant> = None;
         loop {
-            if child
-                .try_wait()
-                .map_err(|error| {
-                    ProviderAdapterError::execution_failed(
-                        None,
-                        String::new(),
-                        error.to_string(),
-                        0,
-                    )
-                })?
-                .is_some()
-            {
-                break;
+            if let Some(status) = child.try_wait().map_err(|error| {
+                ProviderAdapterError::execution_failed(None, String::new(), error.to_string(), 0)
+            })? {
+                break status;
+            }
+            if structured_output_complete(&stdout_reader) {
+                let first_seen = structured_output_seen_at.get_or_insert_with(Instant::now);
+                if first_seen.elapsed() >= Duration::from_millis(500) {
+                    terminate_child_group(&mut child);
+                    let _ = child.wait().map_err(|error| {
+                        ProviderAdapterError::execution_failed(
+                            None,
+                            String::new(),
+                            error.to_string(),
+                            0,
+                        )
+                    })?;
+                    let stdout = join_output_reader(stdout_reader)?;
+                    let stderr = join_output_reader(stderr_reader)?;
+                    return Ok(CapturedCommandOutput {
+                        exit_code: Some(0),
+                        stdout,
+                        stderr,
+                        duration_ms: started.elapsed().as_millis() as u64,
+                        timeout_status: TimeoutStatus::NotTimedOut,
+                    });
+                }
             }
             if started.elapsed() >= timeout {
-                let _ = child.kill();
-                let output = child.wait_with_output().map_err(|error| {
+                terminate_child_group(&mut child);
+                let _ = child.wait().map_err(|error| {
                     ProviderAdapterError::execution_failed(
                         None,
                         String::new(),
@@ -207,26 +265,178 @@ pub fn run_command_capture(
                         0,
                     )
                 })?;
+                let stdout = join_output_reader(stdout_reader)?;
+                let stderr = join_output_reader(stderr_reader)?;
                 return Err(ProviderAdapterError::timeout(
-                    String::from_utf8_lossy(&output.stdout).to_string(),
-                    String::from_utf8_lossy(&output.stderr).to_string(),
+                    stdout,
+                    stderr,
                     started.elapsed().as_millis() as u64,
                 ));
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-    }
+    } else {
+        child.wait().map_err(|error| {
+            ProviderAdapterError::execution_failed(None, String::new(), error.to_string(), 0)
+        })?
+    };
 
-    let output = child.wait_with_output().map_err(|error| {
-        ProviderAdapterError::execution_failed(None, String::new(), error.to_string(), 0)
-    })?;
+    let stdout = join_output_reader(stdout_reader)?;
+    let stderr = join_output_reader(stderr_reader)?;
     Ok(CapturedCommandOutput {
-        exit_code: output.status.code(),
-        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        exit_code: status.code(),
+        stdout,
+        stderr,
         duration_ms: started.elapsed().as_millis() as u64,
         timeout_status: TimeoutStatus::NotTimedOut,
     })
+}
+
+struct OutputReader {
+    buffer: Arc<Mutex<Vec<u8>>>,
+    structured_output_complete: Arc<AtomicBool>,
+    handle: JoinHandle<std::io::Result<()>>,
+}
+
+fn spawn_output_reader<R>(mut reader: R, stream_path: Option<PathBuf>) -> OutputReader
+where
+    R: Read + Send + 'static,
+{
+    let buffer = Arc::new(Mutex::new(Vec::new()));
+    let structured_output_complete = Arc::new(AtomicBool::new(false));
+    let thread_buffer = Arc::clone(&buffer);
+    let thread_structured_output_complete = Arc::clone(&structured_output_complete);
+    let handle = std::thread::spawn(move || {
+        let mut chunk = [0_u8; 8192];
+        let sentinel = STRUCTURED_OUTPUT_END.as_bytes();
+        let mut scan_tail = Vec::new();
+        let mut stream_file = stream_path.as_ref().map(open_provider_stream).transpose()?;
+        loop {
+            let read = reader.read(&mut chunk)?;
+            if read == 0 {
+                break;
+            }
+            let bytes = &chunk[..read];
+            if !thread_structured_output_complete.load(Ordering::Relaxed) {
+                let mut scan_window = scan_tail;
+                scan_window.extend_from_slice(bytes);
+                if contains_bytes(&scan_window, sentinel) {
+                    thread_structured_output_complete.store(true, Ordering::Relaxed);
+                }
+                scan_tail = if scan_window.len() >= sentinel.len().saturating_sub(1) {
+                    scan_window[scan_window
+                        .len()
+                        .saturating_sub(sentinel.len().saturating_sub(1))..]
+                        .to_vec()
+                } else {
+                    scan_window
+                };
+            }
+            if let Some(file) = stream_file.as_mut() {
+                file.write_all(bytes)?;
+            }
+            thread_buffer
+                .lock()
+                .expect("output buffer poisoned")
+                .extend_from_slice(bytes);
+        }
+        Ok(())
+    });
+    OutputReader {
+        buffer,
+        structured_output_complete,
+        handle,
+    }
+}
+
+fn provider_stream_path(
+    current_dir: Option<&Path>,
+    program: &str,
+    child_id: u32,
+    stream_name: &str,
+) -> Option<PathBuf> {
+    let current_dir = current_dir?;
+    let provider_name = Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(program)
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    Some(
+        current_dir
+            .join(".aria/runtime/provider-streams")
+            .join(format!("{provider_name}-{child_id}-{stream_name}.log")),
+    )
+}
+
+fn open_provider_stream(path: &PathBuf) -> std::io::Result<std::fs::File> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+}
+
+fn join_output_reader(reader: Option<OutputReader>) -> Result<String, ProviderAdapterError> {
+    let Some(reader) = reader else {
+        return Ok(String::new());
+    };
+    let read_result = reader.handle.join().map_err(|_| {
+        ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "provider output reader panicked".to_string(),
+            0,
+        )
+    })?;
+    read_result.map_err(|error| {
+        ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            format!("read provider output: {error}"),
+            0,
+        )
+    })?;
+    let bytes = reader.buffer.lock().map_err(|_| {
+        ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "provider output buffer poisoned".to_string(),
+            0,
+        )
+    })?;
+    Ok(String::from_utf8_lossy(&bytes).to_string())
+}
+
+fn structured_output_complete(reader: &Option<OutputReader>) -> bool {
+    let Some(reader) = reader else {
+        return false;
+    };
+    reader.structured_output_complete.load(Ordering::Relaxed)
+}
+
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+}
+
+fn terminate_child_group(child: &mut Child) {
+    #[cfg(unix)]
+    unsafe {
+        let _ = libc::killpg(child.id() as i32, libc::SIGKILL);
+    }
+    let _ = child.kill();
 }
 
 fn expected_artifact_kind<'a>(
@@ -249,7 +459,7 @@ fn collect_file_hashes_inner(
 ) -> std::io::Result<()> {
     if path
         .file_name()
-        .is_some_and(|name| name == ".git" || name == "target")
+        .is_some_and(|name| name == ".git" || name == ".aria" || name == "target")
     {
         return Ok(());
     }

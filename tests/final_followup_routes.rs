@@ -1,13 +1,18 @@
+use cadence_aria::cross_cutting::artifact_validate::{
+    ConstraintBundleIndex, ProjectionIndex, ProviderRunIndex, TraceabilityIndex,
+    phase1_profile_validator,
+};
 use cadence_aria::cross_cutting::openspec_constraints::{
     build_openspec_source_manifest, compile_constraint_bundle,
 };
 use cadence_aria::cross_cutting::provider_adapter::{
-    parse_last_structured_output, ProviderAdapter, ProviderAdapterError, STRUCTURED_OUTPUT_END,
-    STRUCTURED_OUTPUT_START,
+    ProviderAdapter, ProviderAdapterError, STRUCTURED_OUTPUT_END, STRUCTURED_OUTPUT_START,
+    parse_last_structured_output,
 };
+use cadence_aria::protocol::artifacts::ArtifactKind;
 use cadence_aria::protocol::contracts::{AdapterInput, AdapterOutput, TimeoutStatus};
 use cadence_aria::runtime_units::patch_followup_dispatch::{
-    run_final_followup_route, ApprovalDecision, FinalFollowupInput,
+    ApprovalDecision, FinalFollowupInput, run_final_followup_route,
 };
 use serde_json::json;
 use std::fs;
@@ -37,12 +42,15 @@ fn approved_followup_gate_runs_n26_updates_tasks_recompiles_bundle_and_returns_t
             .collect::<Vec<_>>(),
         vec!["N25", "X01", "N26", "N13"]
     );
-    assert!(fs::read_to_string(change_dir.join("tasks.md"))
-        .expect("tasks")
-        .contains("TASK-002 Follow up bounded patch"));
+    assert!(
+        fs::read_to_string(change_dir.join("tasks.md"))
+            .expect("tasks")
+            .contains("TASK-002 Follow up bounded patch")
+    );
     assert_eq!(
         result
             .recompiled_bundle
+            .as_ref()
             .expect("bundle")
             .task_constraints
             .task_ids,
@@ -52,6 +60,36 @@ fn approved_followup_gate_runs_n26_updates_tasks_recompiles_bundle_and_returns_t
         result.new_dispatch_package["_aria"]["worktask_routing"][0]["source_task_id"],
         "TASK-002"
     );
+    assert_eq!(
+        result.new_dispatch_package["_aria"]["profile_version"],
+        "phase1.v1"
+    );
+    phase1_profile_validator(
+        &result.new_dispatch_package,
+        ArtifactKind::DispatchPackage,
+        &ProjectionIndex::with_work_packages(
+            vec![
+                "proj_spec_projection_001".to_string(),
+                "proj_design_projection_001".to_string(),
+                "proj_plan_projection_001".to_string(),
+            ],
+            vec!["TASK-002".to_string()],
+        ),
+        &ConstraintBundleIndex {
+            constraint_bundle_ids: vec![
+                result
+                    .recompiled_bundle
+                    .as_ref()
+                    .expect("bundle")
+                    .constraint_bundle_id
+                    .clone(),
+            ],
+            constraint_check_ids: Vec::new(),
+        },
+        &TraceabilityIndex::with_known_refs(vec!["req-001".to_string(), "dd-001".to_string()]),
+        &ProviderRunIndex::with_runs(vec!["run_n26_0001".to_string()]),
+    )
+    .expect("N26 dispatch package must pass phase1 profile validation");
     assert_eq!(result.patch_round_counter, 1);
     assert_eq!(
         provider.seen_output_schemas(),
@@ -59,6 +97,28 @@ fn approved_followup_gate_runs_n26_updates_tasks_recompiles_bundle_and_returns_t
             "schema://aria/artifacts/final_review/v1".to_string(),
             "schema://aria/artifacts/dispatch_package/v1".to_string(),
         ]
+    );
+}
+
+#[test]
+fn approved_followup_rejects_unknown_traceability_refs_from_patch_delta() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let change_dir = prepare_change_dir(workspace.path());
+    let provider = ScriptedFollowupProvider::unknown_ref_followup();
+
+    let error = run_final_followup_route(
+        followup_input(&change_dir),
+        &provider,
+        ApprovalDecision::Approved {
+            approved_by: "user".to_string(),
+        },
+    )
+    .expect_err("unknown followup traceability refs must be rejected");
+
+    assert!(
+        error
+            .to_string()
+            .contains("unknown traceability ref req-999")
     );
 }
 
@@ -166,12 +226,21 @@ fn prepare_change_dir(workspace: &Path) -> PathBuf {
 #[derive(Debug)]
 struct ScriptedFollowupProvider {
     output_schemas: Mutex<Vec<String>>,
+    unknown_traceability_ref: bool,
 }
 
 impl ScriptedFollowupProvider {
     fn followup() -> Self {
         Self {
             output_schemas: Mutex::new(Vec::new()),
+            unknown_traceability_ref: false,
+        }
+    }
+
+    fn unknown_ref_followup() -> Self {
+        Self {
+            output_schemas: Mutex::new(Vec::new()),
+            unknown_traceability_ref: true,
         }
     }
 
@@ -208,7 +277,11 @@ impl ProviderAdapter for ScriptedFollowupProvider {
                         "description": "Follow up bounded patch",
                         "acceptance_targets": ["AC-001"],
                         "execution_mode": "bounded_patch",
-                        "traceability_refs": ["req-001", "dd-001"],
+                        "traceability_refs": if self.unknown_traceability_ref {
+                            json!(["req-001", "req-999"])
+                        } else {
+                            json!(["req-001", "dd-001"])
+                        },
                         "related_requirement_ids": ["REQ-001"],
                         "related_design_decision_ids": ["DD-001"]
                     }

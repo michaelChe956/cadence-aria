@@ -1,8 +1,10 @@
 use cadence_aria::cross_cutting::openspec_constraints::{
-    bootstrap_openspec_skeleton, build_openspec_source_manifest, check_bundle_stale,
-    compile_constraint_bundle, DefaultDocumentOps, OpenSpecError,
+    DefaultDocumentOps, OpenSpecError, bootstrap_openspec_skeleton, build_openspec_source_manifest,
+    check_bundle_stale, compile_constraint_bundle,
 };
-use cadence_aria::protocol::constraints::{BundleStatus, OpenSpecBootstrapStatus, OpenSpecSourceKind};
+use cadence_aria::protocol::constraints::{
+    BundleStatus, OpenSpecBootstrapStatus, OpenSpecSourceKind,
+};
 use serde_json::json;
 use std::fs;
 use std::path::Path;
@@ -35,22 +37,30 @@ fn bootstrap_openspec_skeleton_creates_scope_files_and_marks_task_bootstrapped()
     .expect("bootstrap skeleton");
 
     assert_eq!(status, OpenSpecBootstrapStatus::Bootstrapped);
-    assert!(workspace
-        .path()
-        .join("openspec/changes/sample-change/proposal.md")
-        .exists());
-    assert!(workspace
-        .path()
-        .join("openspec/changes/sample-change/specs/main/spec.md")
-        .exists());
-    assert!(workspace
-        .path()
-        .join("openspec/changes/sample-change/design.md")
-        .exists());
-    assert!(workspace
-        .path()
-        .join("openspec/changes/sample-change/tasks.md")
-        .exists());
+    assert!(
+        workspace
+            .path()
+            .join("openspec/changes/sample-change/proposal.md")
+            .exists()
+    );
+    assert!(
+        workspace
+            .path()
+            .join("openspec/changes/sample-change/specs/main/spec.md")
+            .exists()
+    );
+    assert!(
+        workspace
+            .path()
+            .join("openspec/changes/sample-change/design.md")
+            .exists()
+    );
+    assert!(
+        workspace
+            .path()
+            .join("openspec/changes/sample-change/tasks.md")
+            .exists()
+    );
 
     let task_state: serde_json::Value =
         serde_json::from_slice(&fs::read(&task_state_path).expect("read task state"))
@@ -197,6 +207,42 @@ fn check_bundle_stale_detects_hash_change_and_missing_source() {
     assert_eq!(
         check_bundle_stale(&bundle, &missing_manifest),
         BundleStatus::Blocked
+    );
+}
+
+#[test]
+fn compile_constraint_bundle_extracts_design_ids_from_child_headings() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let change_dir = tempdir.path().join("openspec/changes/sample-change");
+    copy_dir(sample_change_dir(), &change_dir);
+    fs::write(
+        change_dir.join("design.md"),
+        "# Design\n\n\
+## 设计决策\n\n\
+### [DEC-001] 前端框架：React + Vite + TypeScript\n\n\
+### [DEC-002] 后端框架：FastAPI\n\n\
+## 风险\n\n\
+### [RISK-001] Token 泄露风险\n\
+",
+    )
+    .expect("write design");
+
+    let manifest = build_openspec_source_manifest(&change_dir).expect("manifest");
+    let bundle = compile_constraint_bundle(
+        &"sample-change".to_string(),
+        &manifest,
+        vec![],
+        "N11".to_string(),
+    )
+    .expect("compile bundle");
+
+    assert_eq!(
+        bundle.design_constraints.design_decision_ids,
+        vec!["DEC-001".to_string(), "DEC-002".to_string()]
+    );
+    assert_eq!(
+        bundle.design_constraints.risk_ids,
+        vec!["RISK-001".to_string()]
     );
 }
 

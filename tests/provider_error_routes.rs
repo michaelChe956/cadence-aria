@@ -10,7 +10,7 @@ use cadence_aria::protocol::contracts::{
     SandboxMode,
 };
 use cadence_aria::protocol::provider_errors::{
-    route_provider_error, ProviderErrorCode, ProviderErrorRoute,
+    ProviderErrorCode, ProviderErrorRoute, route_provider_error,
 };
 
 #[test]
@@ -76,10 +76,12 @@ fn failed_provider_run_record_contains_error_code_and_audit_fields() {
     assert_eq!(record.provider_run_id, "run_error_001");
     assert_eq!(record.status, ProviderRunStatus::Failed);
     assert_eq!(record.error_code, Some("provider_parse_error".to_string()));
-    assert!(record
-        .error_details
-        .expect("error details")
-        .contains("structured output"));
+    assert!(
+        record
+            .error_details
+            .expect("error details")
+            .contains("structured output")
+    );
     assert_eq!(record.provider_capability_ref, "cap_fixture_001");
     assert_eq!(record.adapter_compatibility_ref, "compat_fixture_001");
     assert_eq!(record.approval_policy, ApprovalPolicy::OnRequest);

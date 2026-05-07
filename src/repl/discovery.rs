@@ -5,8 +5,8 @@ use tokio::process::Child;
 
 use crate::cli::CliError;
 use crate::daemon::discovery::{
-    daemon_lock_path, daemon_metadata_path, default_socket_path, inspect_daemon,
-    read_daemon_metadata, DaemonStatus,
+    DaemonStatus, daemon_lock_path, daemon_metadata_path, default_socket_path, inspect_daemon,
+    read_daemon_metadata,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
