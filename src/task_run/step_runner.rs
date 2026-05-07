@@ -1,7 +1,10 @@
 use std::collections::VecDeque;
 
 use crate::interactive::controller::{PendingProviderStep, StepRunner, StepRunnerResult};
+use crate::interactive::policy::NodeWriteClass;
+use crate::protocol::contracts::{AdapterInput, ProviderType};
 use crate::task_run::types::TaskRunError;
+use serde_json::json;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum StepScriptItem {
@@ -64,5 +67,42 @@ impl StepRunner for ScriptedStepRunner {
             provider_run_id: "scripted_provider_run".to_string(),
             prompt,
         })
+    }
+}
+
+pub fn provider_step_from_adapter_input(
+    node_id: &str,
+    input: &AdapterInput,
+) -> Result<PendingProviderStep, TaskRunError> {
+    Ok(PendingProviderStep {
+        node_id: node_id.to_string(),
+        provider_type: provider_type_text(&input.provider_type).to_string(),
+        prompt: input.prompt.clone(),
+        input_summary: json!({
+            "worktree_path": input.worktree_path,
+            "context_files": input.context_files,
+            "timeout": input.timeout,
+            "max_retries": input.max_retries,
+        }),
+        output_schema: input.output_schema.clone(),
+        write_class: write_class_for_node(node_id),
+    })
+}
+
+fn provider_type_text(provider_type: &ProviderType) -> &'static str {
+    match provider_type {
+        ProviderType::ClaudeCode => "claude_code",
+        ProviderType::Codex => "codex",
+        ProviderType::Fake => "fake",
+    }
+}
+
+fn write_class_for_node(node_id: &str) -> NodeWriteClass {
+    match node_id {
+        "N16" | "N19" => NodeWriteClass::WritesWorkspace,
+        "N04" | "N05" | "N07" | "N09" | "N10" | "N11" | "N12" | "N25" | "N26" | "N27" => {
+            NodeWriteClass::WritesRuntime
+        }
+        _ => NodeWriteClass::ReadOnly,
     }
 }

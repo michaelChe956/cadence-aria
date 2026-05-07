@@ -1,6 +1,9 @@
 use cadence_aria::interactive::controller::{PendingProviderStep, StepRunner, StepRunnerResult};
 use cadence_aria::interactive::policy::NodeWriteClass;
-use cadence_aria::task_run::step_runner::{ScriptedStepRunner, StepScriptItem};
+use cadence_aria::protocol::contracts::{AdapterInput, AdapterRole, ProviderType};
+use cadence_aria::task_run::step_runner::{
+    ScriptedStepRunner, StepScriptItem, provider_step_from_adapter_input,
+};
 use serde_json::json;
 
 #[test]
@@ -92,4 +95,27 @@ fn scripted_step_runner_rejects_mismatched_step_without_consuming_queue() {
             .node_id,
         "N16"
     );
+}
+
+#[test]
+fn provider_step_from_adapter_input_maps_node_write_class_and_schema() {
+    let input = AdapterInput {
+        provider_type: ProviderType::Codex,
+        role: AdapterRole::Executor,
+        prompt: "prompt body".to_string(),
+        worktree_path: Some("/tmp/worktree".to_string()),
+        context_files: vec!["src/lib.rs".to_string()],
+        output_schema: "schema://aria/artifacts/coding_report/v1".to_string(),
+        timeout: 30,
+        max_retries: 1,
+    };
+
+    let step = provider_step_from_adapter_input("N16", &input).expect("provider step");
+    assert_eq!(step.node_id, "N16");
+    assert_eq!(step.provider_type, "codex");
+    assert_eq!(
+        step.output_schema,
+        "schema://aria/artifacts/coding_report/v1"
+    );
+    assert_eq!(step.write_class, NodeWriteClass::WritesWorkspace);
 }

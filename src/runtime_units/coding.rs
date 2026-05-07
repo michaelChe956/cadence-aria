@@ -12,14 +12,16 @@ use crate::cross_cutting::provider_run::{
 };
 use crate::cross_cutting::runtime_event_log::append_node_event;
 use crate::cross_cutting::traceability::{TraceabilityIndexes, normalize_traceability};
+use crate::interactive::controller::PendingProviderStep;
 use crate::protocol::artifacts::ArtifactKind;
-use crate::protocol::contracts::{ApprovalPolicy, ProviderRunRecord, SandboxMode};
+use crate::protocol::contracts::{AdapterInput, ApprovalPolicy, ProviderRunRecord, SandboxMode};
 use crate::protocol::loop_counters::{LoopCounterName, LoopCounterRegistry};
 use crate::protocol::projections::PlanProjection;
 use crate::runtime_units::{
     CanonicalNodeInput, DaemonContext, RuntimeProtocolStep, RuntimeStepStatus, RuntimeUnit,
     RuntimeUnitError, RuntimeUnitResult,
 };
+use crate::task_run::types::TaskRunError;
 use serde_json::{Value, json};
 use std::future::Future;
 use std::path::PathBuf;
@@ -250,6 +252,8 @@ impl ExecutionChainState {
     ) -> Result<Value, ExecutionChainError> {
         let context = build_provider_context(self.builder_input(node_id))?;
         let request = provider_run_request(node_id, &context.context_package.context_package_id);
+        let _pending_step = pending_provider_step_for_context(node_id, &context.adapter_input)
+            .map_err(|error| ExecutionChainError::ProviderBlocked(error.message))?;
         append_node_event(
             &self.task_root(),
             &self.input.task_id,
@@ -583,6 +587,13 @@ impl ExecutionChainState {
             manual_intervention_reason: self.manual_intervention_reason,
         }
     }
+}
+
+fn pending_provider_step_for_context(
+    node_id: &str,
+    adapter_input: &AdapterInput,
+) -> Result<PendingProviderStep, TaskRunError> {
+    crate::task_run::step_runner::provider_step_from_adapter_input(node_id, adapter_input)
 }
 
 fn provider_run_request(node_id: &str, context_package_ref: &str) -> ProviderRunRequest {
