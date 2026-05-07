@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
+use crate::interactive::diagnostics::classify_task_diagnostics;
 use crate::interactive::models::{
     ArtifactIndexEntry, ArtifactStatus, ContentType, WorkspaceProjection,
 };
@@ -22,6 +23,7 @@ pub fn build_workspace_projection(
     let state = read_optional_json(&task_root.join("state.json"))?;
     let final_report = read_optional_json(&task_root.join("reports/final-report.json"))?;
     let timeline = read_timeline(&task_root.join("logs/node-events.jsonl"))?;
+    let diagnostics = classify_task_diagnostics(&task_root, &state)?;
     let artifact_index = build_artifact_index(workspace_root, &task_root)?;
 
     let status = string_field(&final_report, "status").or_else(|| string_field(&state, "phase"));
@@ -43,7 +45,7 @@ pub fn build_workspace_projection(
         sessions: Vec::new(),
         timeline,
         artifact_index,
-        diagnostics: Vec::new(),
+        diagnostics,
         available_actions: vec!["refresh".to_string()],
     })
 }

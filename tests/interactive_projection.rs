@@ -217,3 +217,70 @@ fn projection_reads_json_metadata_even_when_json_file_is_classified_as_test() {
     assert_eq!(entry.content_type, ContentType::Test);
     assert_eq!(entry.traceability_refs, vec!["REQ-1"]);
 }
+
+#[test]
+fn projection_classifies_write_scope_gate_blocked_fibonacci_shape() {
+    let workspace = tempdir().expect("workspace");
+    let task_root = workspace.path().join(".aria/runtime/tasks/task_0001");
+    fs::create_dir_all(task_root.join("reports")).expect("reports dir");
+    fs::write(
+        task_root.join("state.json"),
+        serde_json::to_vec_pretty(&json!({
+            "task_id": "task_0001",
+            "change_id": "aria-fibonacci-square",
+            "phase": "blocked_by_gate",
+            "current_worktask": "work_wt_006"
+        }))
+        .expect("state json"),
+    )
+    .expect("write state");
+    fs::write(
+        task_root.join("reports/blocked-report.json"),
+        serde_json::to_vec_pretty(&json!({
+            "status": "blocked_by_gate",
+            "reason": "rework_limit_exceeded",
+            "next_node": "X08"
+        }))
+        .expect("blocked json"),
+    )
+    .expect("write blocked");
+    fs::write(
+        task_root.join("reports/testing-report.json"),
+        serde_json::to_vec_pretty(&json!({
+            "artifact_kind": "testing_report",
+            "tests_passed": false,
+            "failures": [
+                "未发现归档到 cadence/designs/ 与 cadence/reports/ 的文件。",
+                "node_contract.allowed_write_scope=[]，本节点不得写入任何文件。"
+            ]
+        }))
+        .expect("testing json"),
+    )
+    .expect("write testing");
+
+    let projection =
+        build_workspace_projection(workspace.path(), Some("task_0001")).expect("build projection");
+
+    let diagnostic = projection
+        .diagnostics
+        .iter()
+        .find(|entry| entry["category"] == "contract_write_scope_blocked")
+        .expect("write scope diagnostic");
+    assert_eq!(diagnostic["severity"], "blocking");
+    assert_eq!(diagnostic["reason"], "rework_limit_exceeded");
+    assert_eq!(diagnostic["next_node"], "X08");
+}
+
+#[test]
+fn projection_diagnostics_json_error_includes_report_path() {
+    let workspace = tempdir().expect("workspace");
+    let task_root = workspace.path().join(".aria/runtime/tasks/task_0006");
+    fs::create_dir_all(task_root.join("reports")).expect("reports dir");
+    fs::write(task_root.join("reports/blocked-report.json"), "{not-json").expect("write blocked");
+
+    let error =
+        build_workspace_projection(workspace.path(), Some("task_0006")).expect_err("json error");
+
+    assert_eq!(error.code, "interactive_diagnostics_json");
+    assert!(error.message.contains("blocked-report.json"));
+}
