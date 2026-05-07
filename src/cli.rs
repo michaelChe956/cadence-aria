@@ -64,9 +64,17 @@ where
             code: "task_run_requires_async".to_string(),
             message: "task run is only available through run_cli_async".to_string(),
         }),
+        [command, rest @ ..] if command == "tui" => {
+            let workspace = parse_workspace(rest)?;
+            let task_id = parse_task_id(rest)?;
+            Ok(CliOutput::Text(match task_id {
+                Some(task_id) => format!("tui_browse:{}:{task_id}", workspace.to_string_lossy()),
+                None => format!("tui_browse:{}", workspace.to_string_lossy()),
+            }))
+        }
         _ => Err(CliError {
             code: "invalid_cli_args".to_string(),
-            message: "expected daemon status or repl command".to_string(),
+            message: "expected daemon status, repl, task run, or tui command".to_string(),
         }),
     }
 }
@@ -164,6 +172,21 @@ fn parse_socket(args: &[String]) -> Option<PathBuf> {
         index += 1;
     }
     None
+}
+
+fn parse_task_id(args: &[String]) -> Result<Option<String>, CliError> {
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] == "--task-id" {
+            let value = args.get(index + 1).ok_or_else(|| CliError {
+                code: "invalid_cli_args".to_string(),
+                message: "--task-id requires a value".to_string(),
+            })?;
+            return Ok(Some(value.clone()));
+        }
+        index += 1;
+    }
+    Ok(None)
 }
 
 fn internal_error(error: impl std::fmt::Display) -> CliError {
