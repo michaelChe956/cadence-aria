@@ -1,4 +1,7 @@
+use cadence_aria::tui::render::render_workspace_frame;
 use cadence_aria::tui::state::{ActionInputMode, TuiAction, TuiState, TuiTab};
+use ratatui::Terminal;
+use ratatui::backend::TestBackend;
 
 #[test]
 fn tui_state_switches_tabs_and_selects_timeline_entries() {
@@ -36,4 +39,14 @@ fn tui_state_opens_and_closes_rollback_confirmation() {
     );
     state.apply(TuiAction::CloseRollbackConfirmation);
     assert!(state.pending_rollback_checkpoint.is_none());
+}
+
+#[test]
+fn render_workspace_frame_draws_without_panicking() {
+    let backend = TestBackend::new(100, 30);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    let state = TuiState::default();
+    terminal
+        .draw(|frame| render_workspace_frame(frame, &state, None))
+        .expect("draw frame");
 }
