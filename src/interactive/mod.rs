@@ -1,4 +1,5 @@
 pub mod checkpoint;
+pub mod controller;
 pub mod diagnostics;
 pub mod models;
 pub mod policy;
