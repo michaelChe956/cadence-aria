@@ -84,6 +84,7 @@ pnpm --dir web build
 | `tests/web_api_handlers.rs` | axum handler-level API contract |
 | `tests/web_events.rs` | SSE event hub replay 和 projection_updated 事件 |
 | `tests/web_resource_handlers.rs` | `GET /api/tasks`、artifact 内容、文件内容和 checkpoint diff API |
+| `tests/web_provider_output_events.rs` | provider stdout/stderr、structured output、manual gate、retry 和 provider auth diagnostics 事件 |
 | `tests/web_cli.rs` | `aria web --check`、host/port 解析、无效参数 |
 | `tests/task_run_interactive_runner.rs` | 真实 orchestration 拆分前的 runner seam 和非交互回归 |
 
@@ -124,6 +125,7 @@ pnpm --dir web build
 | `web/src/components/flow/FlowRail.test.tsx` | node 状态、provider badge、dropped 灰显 |
 | `web/src/components/evidence/EvidencePanel.test.tsx` | markdown/json/source/log preview selection |
 | `web/src/components/evidence/ArtifactViewer.test.tsx` | artifact 内容加载和 content-type 渲染 |
+| `web/src/components/node/NodeRunPanel.test.tsx` | provider output、manual gate、retry、structured output 渲染 |
 | `web/src/components/rollback/RollbackDialog.test.tsx` | preview counts、dirty checkbox、rollback confirm |
 | `web/e2e/fake-workbench.spec.ts` | fake provider 浏览器闭环 |
 
@@ -2214,6 +2216,312 @@ git add src/web/types.rs src/web/runtime.rs src/web/handlers.rs src/web/app.rs t
 git commit -m "feat: add web task and resource APIs"
 ```
 
+## Task 7.6: Provider Output Stream, Run Diagnostics, And Stop Signal
+
+**Files:**
+- Modify: `src/web/types.rs`
+- Modify: `src/web/events.rs`
+- Modify: `src/web/runtime.rs`
+- Modify: `src/web/handlers.rs`
+- Modify: `src/web/app.rs`
+- Modify: `src/interactive/models.rs`
+- Modify: `src/interactive/web_projection.rs`
+- Modify: `web/src/api/types.ts`
+- Modify: `web/src/api/client.ts`
+- Create: `web/src/components/node/NodeRunPanel.tsx`
+- Modify: `web/src/components/node/NodeWorkspace.tsx`
+- Test: `tests/web_provider_output_events.rs`
+- Test: `web/src/components/node/NodeRunPanel.test.tsx`
+
+- [ ] **Step 1: Write failing backend provider output tests**
+
+Create `tests/web_provider_output_events.rs`:
+
+```rust
+use cadence_aria::web::events::EventHub;
+use cadence_aria::web::runtime::WebRuntime;
+use cadence_aria::web::types::ProviderOutputChunk;
+use serde_json::json;
+use tempfile::tempdir;
+
+#[test]
+fn provider_output_event_carries_stdout_stderr_structured_output_gate_and_retry() {
+    let hub = EventHub::new();
+    let event = hub.publish_provider_output(
+        Some("task_0001"),
+        ProviderOutputChunk {
+            node_id: "N16".to_string(),
+            provider_run_id: "run_n16_0001".to_string(),
+            stream: "stdout".to_string(),
+            text: "running tests".to_string(),
+            structured_output: Some(json!({"artifact_kind":"coding_report"})),
+            manual_gate: Some("approval_required".to_string()),
+            retry_attempt: Some(1),
+        },
+    );
+
+    assert_eq!(event.event_type, "provider_output");
+    assert_eq!(event.payload["stream"], "stdout");
+    assert_eq!(event.payload["structured_output"]["artifact_kind"], "coding_report");
+    assert_eq!(event.payload["manual_gate"], "approval_required");
+    assert_eq!(event.payload["retry_attempt"], 1);
+}
+
+#[test]
+fn provider_auth_failure_is_classified_for_diagnostics_panel() {
+    let workspace = tempdir().expect("workspace");
+    let runtime = WebRuntime::new_fake(workspace.path().to_path_buf());
+    let diagnostic = runtime.provider_command_diagnostic(
+        "codex",
+        "command not found or not authenticated",
+    );
+
+    assert_eq!(diagnostic["category"], "provider_error");
+    assert_eq!(diagnostic["code"], "provider_authorization_or_command_unavailable");
+    assert!(diagnostic["message"].as_str().expect("message").contains("codex"));
+}
+```
+
+- [ ] **Step 2: Write failing frontend run panel test**
+
+Create `web/src/components/node/NodeRunPanel.test.tsx`:
+
+```tsx
+import { render, screen } from "@testing-library/react";
+import { describe, expect, it } from "vitest";
+import { NodeRunPanel } from "./NodeRunPanel";
+
+describe("NodeRunPanel", () => {
+  it("renders stdout stderr structured output manual gate and retry status", () => {
+    render(<NodeRunPanel runItems={[
+      {
+        kind: "provider_output",
+        node_id: "N16",
+        provider_run_id: "run_n16_0001",
+        stream: "stdout",
+        text: "running tests",
+        structured_output: { artifact_kind: "coding_report" },
+        manual_gate: "approval_required",
+        retry_attempt: 1
+      },
+      {
+        kind: "provider_output",
+        node_id: "N16",
+        provider_run_id: "run_n16_0001",
+        stream: "stderr",
+        text: "warning: retrying",
+        retry_attempt: 2
+      }
+    ]} />);
+
+    expect(screen.getByText("stdout")).toBeInTheDocument();
+    expect(screen.getByText("stderr")).toBeInTheDocument();
+    expect(screen.getByText(/running tests/)).toBeInTheDocument();
+    expect(screen.getByText(/coding_report/)).toBeInTheDocument();
+    expect(screen.getByText(/approval_required/)).toBeInTheDocument();
+    expect(screen.getByText(/retry 2/)).toBeInTheDocument();
+  });
+});
+```
+
+- [ ] **Step 3: Run tests and verify failure**
+
+Run:
+
+```bash
+cargo test --test web_provider_output_events --locked
+pnpm --dir web test -- --run web/src/components/node/NodeRunPanel.test.tsx
+```
+
+Expected: FAIL because provider output DTOs, diagnostics helper and run panel are missing.
+
+- [ ] **Step 4: Add provider output DTOs and event helper**
+
+Add to `src/web/types.rs`:
+
+```rust
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ProviderOutputChunk {
+    pub node_id: String,
+    pub provider_run_id: String,
+    pub stream: String,
+    pub text: String,
+    pub structured_output: Option<serde_json::Value>,
+    pub manual_gate: Option<String>,
+    pub retry_attempt: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct StopTaskResponse {
+    pub status: String,
+    pub task_id: String,
+}
+```
+
+Add to `src/web/events.rs`:
+
+```rust
+pub fn publish_provider_output(
+    &self,
+    task_id: Option<&str>,
+    chunk: crate::web::types::ProviderOutputChunk,
+) -> WebEvent {
+    let payload = serde_json::to_value(chunk).expect("provider output chunk");
+    self.publish("provider_output", task_id, payload)
+}
+```
+
+- [ ] **Step 5: Add runtime diagnostics and stop signal**
+
+Add to `src/web/runtime.rs`:
+
+```rust
+pub fn provider_command_diagnostic(
+    &self,
+    provider_type: &str,
+    message: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "category": "provider_error",
+        "code": "provider_authorization_or_command_unavailable",
+        "provider_type": provider_type,
+        "message": format!("{provider_type} provider unavailable: {message}"),
+        "details": {
+            "action": "check provider CLI installation, authentication, and PATH"
+        }
+    })
+}
+
+pub fn stop_task(&mut self, task_id: &str) -> Result<StopTaskResponse, TaskRunError> {
+    Ok(StopTaskResponse {
+        status: "stop_requested".to_string(),
+        task_id: task_id.to_string(),
+    })
+}
+```
+
+Add route in `src/web/app.rs`:
+
+```rust
+.route("/api/tasks/{task_id}/stop", post(handlers::stop_task))
+```
+
+Add handler in `src/web/handlers.rs`:
+
+```rust
+pub async fn stop_task(
+    State(state): State<WebAppState>,
+    Path(task_id): Path<String>,
+) -> ApiResult<Json<StopTaskResponse>> {
+    let mut runtime = state.runtime.lock().expect("runtime lock");
+    let response = runtime.stop_task(&task_id)?;
+    state.events.publish("stop_requested", Some(&task_id), serde_json::json!({ "task_id": task_id }));
+    Ok(Json(response))
+}
+```
+
+- [ ] **Step 6: Include provider output in selected node context**
+
+Modify `src/interactive/web_projection.rs` so `selected_node_context.run` includes `provider_output` entries from `.aria/runtime/tasks/<task_id>/logs/provider-output.jsonl`:
+
+```rust
+fn read_provider_output(task_root: &Path, selected_node_id: Option<&str>) -> Result<Vec<Value>, TaskRunError> {
+    let path = task_root.join("logs/provider-output.jsonl");
+    let file = match std::fs::File::open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(TaskRunError::new("interactive_projection_io", error.to_string())),
+    };
+    let mut items = Vec::new();
+    for line in std::io::BufReader::new(file).lines() {
+        let value: Value = serde_json::from_str(&line.map_err(|error| {
+            TaskRunError::new("interactive_projection_io", error.to_string())
+        })?)
+        .map_err(|error| TaskRunError::new("interactive_projection_json", error.to_string()))?;
+        if selected_node_id.is_none() || value.get("node_id").and_then(Value::as_str) == selected_node_id {
+            items.push(value);
+        }
+    }
+    Ok(items)
+}
+```
+
+- [ ] **Step 7: Add frontend run panel and stop client**
+
+Add to `web/src/api/types.ts`:
+
+```ts
+export type ProviderOutputChunk = {
+  node_id: string;
+  provider_run_id: string;
+  stream: "stdout" | "stderr";
+  text: string;
+  structured_output?: unknown;
+  manual_gate?: string;
+  retry_attempt?: number;
+};
+```
+
+Add to `web/src/api/client.ts`:
+
+```ts
+export function stopTask(taskId: string) {
+  return requestJson<{ status: string; task_id: string }>(
+    `/api/tasks/${encodeURIComponent(taskId)}/stop`,
+    { method: "POST", body: JSON.stringify({}) }
+  );
+}
+```
+
+Create `web/src/components/node/NodeRunPanel.tsx`:
+
+```tsx
+export function NodeRunPanel({ runItems }: { runItems: Array<Record<string, unknown>> }) {
+  return (
+    <section className="space-y-2">
+      {runItems.map((item, index) => (
+        <article key={index} className="rounded-md border border-line bg-white p-3">
+          <div className="flex items-center gap-2 text-xs font-semibold text-slate-500">
+            <span>{String(item.stream ?? item.kind ?? "run")}</span>
+            {item.retry_attempt ? <span>retry {String(item.retry_attempt)}</span> : null}
+            {item.manual_gate ? <span>{String(item.manual_gate)}</span> : null}
+          </div>
+          <pre className="mt-2 whitespace-pre-wrap text-xs">{String(item.text ?? "")}</pre>
+          {item.structured_output ? (
+            <pre className="mt-2 overflow-auto rounded bg-slate-50 p-2 text-xs">
+              {JSON.stringify(item.structured_output, null, 2)}
+            </pre>
+          ) : null}
+        </article>
+      ))}
+    </section>
+  );
+}
+```
+
+Modify `NodeWorkspace.tsx` so the `Run` tab renders `NodeRunPanel` with `selected_node_context.run`.
+
+- [ ] **Step 8: Run provider output tests**
+
+Run:
+
+```bash
+cargo test --test web_provider_output_events --locked
+pnpm --dir web test -- --run web/src/components/node/NodeRunPanel.test.tsx
+pnpm --dir web build
+```
+
+Expected: PASS backend event/diagnostics test, frontend run panel test and build.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add src/web/types.rs src/web/events.rs src/web/runtime.rs src/web/handlers.rs src/web/app.rs src/interactive/models.rs src/interactive/web_projection.rs tests/web_provider_output_events.rs web/src/api/types.ts web/src/api/client.ts web/src/components/node/NodeRunPanel.tsx web/src/components/node/NodeWorkspace.tsx web/src/components/node/NodeRunPanel.test.tsx
+git commit -m "feat: add provider output diagnostics stream"
+```
+
 ## Task 8: `aria web` CLI Entry And Static Asset Serving
 
 **Files:**
@@ -3344,7 +3652,7 @@ export function ActionComposer({
 
 - [ ] **Step 5: Wire ActionComposer into AppShell**
 
-Modify `web/src/main.tsx` to render `ActionComposer` at the bottom. Pass `projection.pending_provider_step`, call `confirmTask`, then refresh projection. For empty projection, pass `null`.
+Modify `web/src/main.tsx` to render `ActionComposer` at the bottom. Pass `projection.pending_provider_step`, call `confirmTask`, then refresh projection. Wire the stop button to `stopTask` from Task 7.6 when a provider run is active. For prompt modification, the textarea is the editable final prompt; the confirmed payload must use the current textarea value, not the original prompt snapshot. For empty projection, pass `null`.
 
 - [ ] **Step 6: Run tests and build**
 
@@ -3942,7 +4250,7 @@ git commit -m "test: verify aria web workbench flow"
 
 ## Self-Review Checklist
 
-- [x] 设计规格覆盖：计划覆盖 `aria web --workspace`、单机单 workspace、新建/继续任务、逐节点暂停确认、provider prompt 编辑确认、输入输出/文档沉淀物展示、任务列表、artifact 内容、文件内容、checkpoint diff、实时事件流、回退预览、dropped 历史、Fibonacci gate 诊断和非交互回归。
+- [x] 设计规格覆盖：计划覆盖 `aria web --workspace`、单机单 workspace、新建/继续任务、逐节点暂停确认、provider prompt 编辑确认、输入输出/文档沉淀物展示、provider stdout/stderr、structured output、manual gate、retry、provider auth diagnostics、任务列表、artifact 内容、文件内容、checkpoint diff、实时事件流、回退预览、dropped 历史、Fibonacci gate 诊断和非交互回归。
 - [x] 页面覆盖 TUI 信息域：Overview、Timeline、IO、Artifacts、Changes、Diagnostics、Action 输入均落到 Flow Rail、Node Workspace、Evidence Panel、Diagnostics Panel、Action Composer。
 - [x] vibe-kanban 参考范围受控：只采用 checkpoint/answer 回退交互语义，不照搬视觉。
 - [x] TDD 覆盖：每个后端和前端阶段都先写失败测试，再实现，再运行验证。
