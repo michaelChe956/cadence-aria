@@ -1,12 +1,14 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use crate::web::events::EventHub;
 use crate::web::runtime::WebRuntime;
 
 #[derive(Clone)]
 pub struct WebAppState {
     pub workspace_root: PathBuf,
     pub runtime: Arc<Mutex<WebRuntime>>,
+    pub events: EventHub,
 }
 
 impl WebAppState {
@@ -14,6 +16,7 @@ impl WebAppState {
         Self {
             workspace_root,
             runtime: Arc::new(Mutex::new(runtime)),
+            events: EventHub::new(),
         }
     }
 }

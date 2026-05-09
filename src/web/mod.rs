@@ -1,5 +1,6 @@
 pub mod app;
 pub mod error;
+pub mod events;
 pub mod handlers;
 pub mod runtime;
 pub mod runtime_store;

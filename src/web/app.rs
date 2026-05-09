@@ -7,6 +7,7 @@ use crate::web::state::WebAppState;
 pub fn build_web_router(state: WebAppState) -> Router {
     Router::new()
         .route("/api/health", get(handlers::health))
+        .route("/api/events", get(handlers::events))
         .route("/api/projection", get(handlers::projection))
         .route("/api/tasks", post(handlers::create_task))
         .route("/api/tasks/{task_id}/advance", post(handlers::advance_task))
