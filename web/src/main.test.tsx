@@ -1,5 +1,6 @@
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import userEvent from "@testing-library/user-event";
+import { describe, expect, it, vi } from "vitest";
 import { AppShell } from "./main";
 
 describe("AppShell", () => {
@@ -9,4 +10,79 @@ describe("AppShell", () => {
     expect(screen.getByRole("navigation", { name: "Node flow" })).toBeInTheDocument();
     expect(screen.getByRole("main")).toHaveTextContent("Node Workspace");
   });
+
+  it("creates a task then advances into provider confirmation", async () => {
+    let advanced = false;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === "/api/tasks") {
+          return jsonResponse({
+            task_id: "task_0001",
+            session_id: "sess_task_0001",
+            change_id: "aria-fibonacci-square",
+            phase: "intake",
+          });
+        }
+        if (url === "/api/tasks/task_0001/advance") {
+          advanced = true;
+          return jsonResponse({ status: "paused_for_approval", pending_step: pendingStep() });
+        }
+        if (url.startsWith("/api/projection")) {
+          return jsonResponse(projection(advanced ? pendingStep() : null));
+        }
+        return jsonResponse({});
+      }),
+    );
+
+    render(<AppShell />);
+    await userEvent.type(screen.getByLabelText("任务请求"), "实现 Fibonacci square sum");
+    await userEvent.type(screen.getByLabelText("change id"), "aria-fibonacci-square");
+    await userEvent.click(screen.getByRole("button", { name: "新建任务" }));
+    await screen.findByRole("button", { name: "推进" });
+    await userEvent.click(screen.getByRole("button", { name: "推进" }));
+
+    expect(await screen.findByLabelText("Provider prompt")).toBeInTheDocument();
+  });
 });
+
+function jsonResponse(body: unknown) {
+  return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
+}
+
+function pendingStep() {
+  return {
+    node_id: "N16",
+    provider_type: "codex",
+    runtime_role: "executor",
+    adapter_role: "executor",
+    prompt: "实现函数",
+    input_summary: {},
+    canonical_input_refs: ["worktask:work_wt_001"],
+    context_files: ["openspec/changes/aria-fibonacci-square/tasks.md"],
+    output_schema: "schema://aria/artifacts/coding_report/v1",
+    allowed_write_scope: ["src/", "tests/"],
+    forbidden_actions: ["修改 cadence/project-rules"],
+    verification_commands: ["cargo test --locked -j 1"],
+    checkpoint_id: "ckpt_0001",
+  };
+}
+
+function projection(pending_provider_step: ReturnType<typeof pendingStep> | null) {
+  return {
+    workspace_root: "/tmp/workspace",
+    active_task_id: "task_0001",
+    active_session_id: "sess_task_0001",
+    overview: { status: pending_provider_step ? "paused" : "intake" },
+    sessions: [],
+    timeline: [],
+    artifact_index: [],
+    diagnostics: [],
+    available_actions: pending_provider_step ? ["confirm_provider_step"] : [],
+    pending_provider_step,
+    selected_node_context: { node_id: null, overview: {}, inputs: [], run: [], outputs: [], diffs: [] },
+    git_summary: { workspace_path: "/tmp/workspace", branch: "main", head: "abc1234", dirty: false, dirty_files: [] },
+    event_cursor: 0,
+  };
+}

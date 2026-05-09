@@ -1,5 +1,6 @@
 import { useState } from "react";
 import {
+  advanceTask,
   confirmTask,
   createTask,
   getProjection,
@@ -29,6 +30,7 @@ export function AppShell() {
   const [rollbackOpen, setRollbackOpen] = useState(false);
   const [rollbackPreviewState, setRollbackPreviewState] =
     useState<RollbackPreviewResponse | null>(null);
+  const [lastCheckpointId, setLastCheckpointId] = useState<string | null>(null);
   const [, setProjectionVersion] = useState(0);
   const projection = store.snapshot.projection;
 
@@ -39,6 +41,7 @@ export function AppShell() {
       const created = await createTask(payload);
       const projection = await getProjection(created.task_id);
       store.setProjection(projection);
+      setLastCheckpointId(projection.pending_provider_step?.checkpoint_id ?? null);
       setTasks((current) => [
         ...current.filter((task) => task.task_id !== created.task_id),
         { task_id: created.task_id, change_id: created.change_id, phase: created.phase },
@@ -58,7 +61,9 @@ export function AppShell() {
     setBusy(true);
     setError(null);
     try {
-      store.setProjection(await getProjection(taskId));
+      const projection = await getProjection(taskId);
+      store.setProjection(projection);
+      setLastCheckpointId(projection.pending_provider_step?.checkpoint_id ?? null);
       setProjectionVersion((version) => version + 1);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "load task failed");
@@ -91,6 +96,7 @@ export function AppShell() {
     try {
       await confirmTask(taskId, payload);
       store.setProjection(await getProjection(taskId, store.snapshot.selectedNodeId ?? undefined));
+      setLastCheckpointId(payload.checkpoint_id);
       setProjectionVersion((version) => version + 1);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "confirm task failed");
@@ -112,6 +118,26 @@ export function AppShell() {
       setProjectionVersion((version) => version + 1);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "stop task failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleAdvanceTask() {
+    const taskId = projection?.active_task_id;
+    if (!taskId) {
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await advanceTask(taskId);
+      const nextProjection = await getProjection(taskId, store.snapshot.selectedNodeId ?? undefined);
+      store.setProjection(nextProjection);
+      setLastCheckpointId(nextProjection.pending_provider_step?.checkpoint_id ?? lastCheckpointId);
+      setProjectionVersion((version) => version + 1);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "advance task failed");
     } finally {
       setBusy(false);
     }
@@ -191,6 +217,29 @@ export function AppShell() {
         <div role="alert" className="border-b border-danger/30 bg-red-50 px-4 py-2 text-sm text-danger">
           {error}
         </div>
+      ) : null}
+      {projection?.active_task_id && !projection.pending_provider_step ? (
+        <section className="border-b border-line bg-white px-4 py-3">
+          <div className="flex gap-2">
+            <button
+              type="button"
+              className="rounded-md bg-signal px-3 py-2 text-sm font-semibold text-ink disabled:opacity-50"
+              disabled={busy}
+              onClick={handleAdvanceTask}
+            >
+              推进
+            </button>
+            {lastCheckpointId ? (
+              <button
+                type="button"
+                className="rounded-md border border-line px-3 py-2 text-sm"
+                onClick={() => void handleRollbackPreview(lastCheckpointId)}
+              >
+                回退
+              </button>
+            ) : null}
+          </div>
+        </section>
       ) : null}
       <div className="grid min-h-[calc(100vh-12rem)] grid-cols-[18rem_minmax(0,1fr)_24rem]">
         <FlowRail

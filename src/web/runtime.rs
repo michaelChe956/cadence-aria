@@ -167,6 +167,17 @@ impl WebRuntime {
             checkpoint_id: checkpoint_id.to_string(),
             force_when_dirty,
         })?;
+        let store = WebRuntimeStore::new(&self.workspace_root, task_id);
+        let policy = policy_for_task(&store)?;
+        let pending = pending_provider_step_for_policy(policy);
+        let decision = policy.decision_for(&ProviderNodeMeta::new(
+            pending.node_id.clone(),
+            pending.provider_type.clone(),
+            write_class_for_pending(&pending),
+        ));
+        if matches!(decision, ConfirmationDecision::PauseForConfirmation) {
+            store.write_json("pending/provider-step.json", &pending)?;
+        }
         self.next_projection_version += 1;
         Ok(RollbackResponse {
             status: "rollback_completed".to_string(),
