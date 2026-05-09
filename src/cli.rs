@@ -76,9 +76,27 @@ where
                 None => format!("tui_browse:{}", workspace.to_string_lossy()),
             }))
         }
+        [command, rest @ ..] if command == "web" => {
+            let options = parse_web_options(rest)?;
+            if options.check {
+                return Ok(CliOutput::Text(format!(
+                    "web_check_ok:{}:{}:{}",
+                    options.workspace.to_string_lossy(),
+                    options.host,
+                    options
+                        .port
+                        .map(|port| port.to_string())
+                        .unwrap_or_else(|| "auto".to_string())
+                )));
+            }
+            Err(CliError {
+                code: "web_requires_async".to_string(),
+                message: "web server is only available through run_cli_async".to_string(),
+            })
+        }
         _ => Err(CliError {
             code: "invalid_cli_args".to_string(),
-            message: "expected daemon status, repl, task run, or tui command".to_string(),
+            message: "expected daemon status, repl, task run, tui, or web command".to_string(),
         }),
     }
 }
@@ -147,8 +165,50 @@ where
             }
             Ok(CliOutput::Text(String::new()))
         }
+        [command, rest @ ..] if command == "web" => {
+            let options = parse_web_options(rest)?;
+            if options.check {
+                return run_cli(args);
+            }
+            crate::web::app::serve_web(options.workspace, options.host, options.port)
+                .await
+                .map_err(internal_error)?;
+            Ok(CliOutput::Text(String::new()))
+        }
         _ => run_cli(args),
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WebOptions {
+    workspace: PathBuf,
+    host: String,
+    port: Option<u16>,
+    check: bool,
+}
+
+fn parse_web_options(args: &[String]) -> Result<WebOptions, CliError> {
+    let workspace = parse_workspace(args)?;
+    let host = parse_value(args, "--host").unwrap_or_else(|| "127.0.0.1".to_string());
+    let port = parse_value(args, "--port")
+        .map(|value| value.parse::<u16>())
+        .transpose()
+        .map_err(|error| CliError {
+            code: "invalid_cli_args".to_string(),
+            message: format!("--port must be a u16: {error}"),
+        })?;
+    Ok(WebOptions {
+        workspace,
+        host,
+        port,
+        check: args.iter().any(|item| item == "--check"),
+    })
+}
+
+fn parse_value(args: &[String], flag: &str) -> Option<String> {
+    args.windows(2)
+        .find(|window| window[0] == flag)
+        .map(|window| window[1].clone())
 }
 
 fn parse_workspace(args: &[String]) -> Result<PathBuf, CliError> {
