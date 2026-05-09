@@ -54,6 +54,7 @@ pnpm --dir web build
 | `src/web/state.rs` | `WebAppState`、workspace 配置、runtime manager 和 event hub 共享状态 |
 | `src/web/events.rs` | SSE broadcast、event cursor、事件序列化 |
 | `src/web/runtime.rs` | Web task 创建、advance、confirm、projection refresh、rollback orchestration |
+| `src/web/runtime_store.rs` | Web runtime 的 turn/node-run/provider-run/checkpoint/pending/event 持久化边界 |
 | `src/web/handlers.rs` | axum handlers：health、tasks、projection、advance、confirm、rollback、artifacts、files、events |
 | `src/web/static_assets.rs` | `web/dist` 静态资源托管和 SPA fallback |
 | `src/web/app.rs` | axum router 组装 |
@@ -81,6 +82,9 @@ pnpm --dir web build
 | `tests/web_projection.rs` | Web projection 包含 pending step、node context、artifact refs、diagnostics、git summary |
 | `tests/web_node_context.rs` | selected node 的 Overview、Inputs、Run、Outputs、Diff 和 OpenSpec evidence refs |
 | `tests/interactive_checkpoint_preview.rs` | rollback preview 计算 dirty、drop counts、files_may_change |
+| `tests/web_runtime_persistence.rs` | pause 前 checkpoint、confirm 后 turn/node-run/provider-run/artifact/report/event 持久化 |
+| `tests/web_policy_runtime.rs` | manual-all/manual-write/auto-review/non-interactive 在 WebRuntime 中的暂停/自动执行行为 |
+| `tests/web_event_taxonomy.rs` | design 规定的全部事件类型发布和 replay |
 | `tests/web_runtime_fake.rs` | fake task create、advance pause、confirm、projection refresh、rollback |
 | `tests/web_api_handlers.rs` | axum handler-level API contract |
 | `tests/web_events.rs` | SSE event hub replay 和 projection_updated 事件 |
@@ -129,6 +133,9 @@ pnpm --dir web build
 | `web/src/components/evidence/EvidencePanel.test.tsx` | markdown/json/source/log preview selection |
 | `web/src/components/evidence/ArtifactViewer.test.tsx` | artifact 内容加载和 content-type 渲染 |
 | `web/src/components/node/NodeRunPanel.test.tsx` | provider output、manual gate、retry、structured output 渲染 |
+| `web/src/components/evidence/ArtifactContentRenderer.test.tsx` | Markdown 目录/锚点、JSON 长字段折叠、source/test/log 渲染 |
+| `web/src/components/shell/TopStatusBar.test.tsx` | blocked_by_gate 顶部拆解和运行状态 |
+| `web/src/components/action/AutoActionStatus.test.tsx` | 内部节点/自动执行阶段底部动作、事件摘要和停止入口 |
 | `web/src/components/rollback/RollbackDialog.test.tsx` | preview counts、dirty checkbox、rollback confirm |
 | `web/e2e/fake-workbench.spec.ts` | fake provider 浏览器闭环 |
 
@@ -181,6 +188,8 @@ fn paused_advance_response_serializes_pending_step() {
             adapter_role: "executor".to_string(),
             prompt: "请实现函数".to_string(),
             input_summary: json!({"worktask_id":"work_wt_001"}),
+            canonical_input_refs: vec!["plan_projection_task_0001_0001".to_string()],
+            context_files: vec!["openspec/changes/aria-fibonacci-square/tasks.md".to_string()],
             output_schema: "schema://aria/artifacts/coding_report/v1".to_string(),
             allowed_write_scope: vec!["src/".to_string(), "tests/".to_string()],
             forbidden_actions: vec!["修改 cadence/project-rules".to_string()],
@@ -193,6 +202,8 @@ fn paused_advance_response_serializes_pending_step() {
     assert_eq!(value["status"], "paused_for_approval");
     assert_eq!(value["pending_step"]["node_id"], "N16");
     assert_eq!(value["pending_step"]["checkpoint_id"], "ckpt_0001");
+    assert_eq!(value["pending_step"]["canonical_input_refs"][0], "plan_projection_task_0001_0001");
+    assert_eq!(value["pending_step"]["context_files"][0], "openspec/changes/aria-fibonacci-square/tasks.md");
 }
 
 #[test]
@@ -305,6 +316,8 @@ pub struct PendingProviderStepDto {
     pub adapter_role: String,
     pub prompt: String,
     pub input_summary: Value,
+    pub canonical_input_refs: Vec<String>,
+    pub context_files: Vec<String>,
     pub output_schema: String,
     pub allowed_write_scope: Vec<String>,
     pub forbidden_actions: Vec<String>,
@@ -441,6 +454,8 @@ fn web_projection_exposes_pending_step_node_context_artifacts_and_git_summary() 
             "adapter_role":"executor",
             "prompt":"实现 fibonacciSquareSum",
             "input_summary":{"context_files":["openspec/changes/aria-fibonacci-square/tasks.md"]},
+            "canonical_input_refs":["plan_projection_task_0001_0001"],
+            "context_files":["openspec/changes/aria-fibonacci-square/tasks.md"],
             "output_schema":"schema://aria/artifacts/coding_report/v1",
             "allowed_write_scope":["src/","tests/"],
             "forbidden_actions":["修改 cadence/project-rules"],
@@ -518,6 +533,8 @@ pub struct PendingProviderStepProjection {
     pub adapter_role: String,
     pub prompt: String,
     pub input_summary: Value,
+    pub canonical_input_refs: Vec<String>,
+    pub context_files: Vec<String>,
     pub output_schema: String,
     pub allowed_write_scope: Vec<String>,
     pub forbidden_actions: Vec<String>,
@@ -821,6 +838,8 @@ fn selected_node_context(
             vec![
                 serde_json::json!({"kind":"prompt_snapshot","prompt":step.prompt}),
                 serde_json::json!({"kind":"input_summary","value":step.input_summary}),
+                serde_json::json!({"kind":"canonical_input_refs","value":step.canonical_input_refs}),
+                serde_json::json!({"kind":"context_files","value":step.context_files}),
                 serde_json::json!({"kind":"allowed_write_scope","value":step.allowed_write_scope}),
                 serde_json::json!({"kind":"output_schema","value":step.output_schema}),
             ]
@@ -1601,6 +1620,206 @@ git add src/web/mod.rs src/web/runtime.rs src/web/state.rs src/web/types.rs test
 git commit -m "feat: add fake web runtime loop"
 ```
 
+## Task 5.5: Web Runtime Persistence Boundaries
+
+**Files:**
+- Create: `src/web/runtime_store.rs`
+- Modify: `src/web/runtime.rs`
+- Modify: `src/web/types.rs`
+- Modify: `src/web/mod.rs`
+- Test: `tests/web_runtime_persistence.rs`
+
+- [ ] **Step 1: Write failing persistence test**
+
+Create `tests/web_runtime_persistence.rs`:
+
+```rust
+use cadence_aria::web::runtime::WebRuntime;
+use cadence_aria::web::types::{ConfirmTaskRequest, CreateTaskRequest};
+use serde_json::Value;
+use std::fs;
+use tempfile::tempdir;
+
+#[test]
+fn advance_creates_checkpoint_and_confirm_persists_turn_node_run_provider_run_artifact_report_and_events() {
+    let workspace = tempdir().expect("workspace");
+    let mut runtime = WebRuntime::new_fake(workspace.path().to_path_buf());
+    let created = runtime
+        .create_task(CreateTaskRequest {
+            request_text: "实现 Fibonacci square sum".to_string(),
+            change_id: "aria-fibonacci-square".to_string(),
+            policy_preset: "manual-write".to_string(),
+            provider_mode: "fake".to_string(),
+            timeout_secs: 2400,
+        })
+        .expect("create");
+    let pending = runtime
+        .advance_task(&created.task_id)
+        .expect("advance")
+        .expect_pending_step()
+        .expect("pending");
+    let task_root = workspace.path().join(".aria/runtime/tasks/task_0001");
+    assert!(task_root.join("checkpoints/ckpt_0001.json").exists());
+    assert!(task_root.join("pending/provider-step.json").exists());
+
+    runtime
+        .confirm_task(
+            &created.task_id,
+            ConfirmTaskRequest {
+                checkpoint_id: pending.checkpoint_id,
+                prompt: "确认执行 N16".to_string(),
+            },
+        )
+        .expect("confirm");
+
+    assert_json_field(task_root.join("turns/turn_0001.json"), "status", "completed");
+    assert_json_field(task_root.join("node-runs/nrun_0001.json"), "status", "completed");
+    assert_json_field(task_root.join("provider-runs/run_n16_0001/run.json"), "provider_type", "codex");
+    assert!(task_root.join("artifacts/execution/0000.json").exists());
+    assert!(task_root.join("reports/provider-run-run_n16_0001.json").exists());
+    let events = fs::read_to_string(task_root.join("logs/node-events.jsonl")).expect("events");
+    assert!(events.contains("node_started"));
+    assert!(events.contains("node_completed"));
+    assert!(events.contains("artifact_written"));
+}
+
+fn assert_json_field(path: std::path::PathBuf, field: &str, expected: &str) {
+    let value: Value = serde_json::from_slice(&fs::read(path).expect("read json")).expect("json");
+    assert_eq!(value[field], expected);
+}
+```
+
+- [ ] **Step 2: Run the test and verify failure**
+
+Run:
+
+```bash
+cargo test --test web_runtime_persistence --locked
+```
+
+Expected: FAIL because WebRuntime does not persist checkpoint, turn, node-run, provider-run, artifacts, reports and event boundaries.
+
+- [ ] **Step 3: Add runtime store helpers**
+
+Create `src/web/runtime_store.rs`:
+
+```rust
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use serde::Serialize;
+use serde_json::{Value, json};
+
+use crate::task_run::types::TaskRunError;
+
+#[derive(Debug, Clone)]
+pub struct WebRuntimeStore {
+    task_root: PathBuf,
+}
+
+impl WebRuntimeStore {
+    pub fn new(workspace_root: &Path, task_id: &str) -> Self {
+        Self {
+            task_root: workspace_root.join(".aria/runtime/tasks").join(task_id),
+        }
+    }
+
+    pub fn task_root(&self) -> &Path {
+        &self.task_root
+    }
+
+    pub fn write_json<T: Serialize>(&self, relative: &str, value: &T) -> Result<PathBuf, TaskRunError> {
+        let path = self.task_root.join(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(io_error)?;
+        }
+        let file = fs::File::create(&path).map_err(io_error)?;
+        serde_json::to_writer_pretty(file, value)
+            .map_err(|error| TaskRunError::new("web_runtime_json", error.to_string()))?;
+        Ok(path)
+    }
+
+    pub fn append_event(&self, event_kind: &str, node_id: &str, details: Value) -> Result<(), TaskRunError> {
+        let path = self.task_root.join("logs/node-events.jsonl");
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(io_error)?;
+        }
+        let event = json!({
+            "event_kind": event_kind,
+            "task_id": self.task_root.file_name().and_then(|name| name.to_str()),
+            "node_id": node_id,
+            "details": details
+        });
+        let mut line = serde_json::to_string(&event)
+            .map_err(|error| TaskRunError::new("web_runtime_json", error.to_string()))?;
+        line.push('\n');
+        fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .map_err(io_error)?
+            .write_all(line.as_bytes())
+            .map_err(io_error)
+    }
+}
+
+fn io_error(error: std::io::Error) -> TaskRunError {
+    TaskRunError::new("web_runtime_io", error.to_string())
+}
+```
+
+Add `use std::io::Write;` at the top of the file.
+
+- [ ] **Step 4: Persist checkpoint on pause and execution records on confirm**
+
+Modify `src/web/runtime.rs` so:
+
+- `advance_task` writes `checkpoints/ckpt_0001.json` before returning `paused_for_approval`.
+- `advance_task` writes `pending/provider-step.json` including `canonical_input_refs` and `context_files`.
+- `confirm_task` writes:
+  - `turns/turn_0001.json`
+  - `node-runs/nrun_0001.json`
+  - `provider-runs/run_n16_0001/run.json`
+  - `artifacts/execution/0000.json`
+  - `reports/provider-run-run_n16_0001.json`
+  - `logs/node-events.jsonl` entries for `node_started`、`provider_output`、`artifact_written`、`node_completed`
+- `confirm_task` removes pending step after successful persistence.
+
+Use explicit JSON fields compatible with existing `InteractionTurn`、`NodeRun` and provider run records:
+
+```rust
+store.write_json("turns/turn_0001.json", &serde_json::json!({
+    "turn_id": "turn_0001",
+    "session_id": "sess_task_0001",
+    "node_id": "N16",
+    "provider_type": "codex",
+    "prompt_snapshot": request.prompt,
+    "checkpoint_before": "ckpt_0001",
+    "provider_run_id": "run_n16_0001",
+    "output_artifact_refs": ["coding_report_work_wt_001_0001"],
+    "changed_files": ["src/fibonacciSquareSum.js"],
+    "status": "completed",
+    "dropped": false
+}))?;
+```
+
+- [ ] **Step 5: Run persistence test and projection regression**
+
+Run:
+
+```bash
+cargo test --test web_runtime_persistence --test web_runtime_fake --test web_projection --locked
+```
+
+Expected: PASS, and projection can still load the persisted runtime files.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/web/runtime_store.rs src/web/runtime.rs src/web/types.rs src/web/mod.rs tests/web_runtime_persistence.rs
+git commit -m "feat: persist web runtime execution records"
+```
+
 ## Task 6: Axum API Handlers
 
 **Files:**
@@ -2056,6 +2275,156 @@ Expected: PASS and existing API contract still returns JSON.
 ```bash
 git add Cargo.toml Cargo.lock src/web/events.rs src/web/state.rs src/web/runtime.rs src/web/handlers.rs src/web/app.rs src/web/mod.rs tests/web_events.rs
 git commit -m "feat: add web event stream"
+```
+
+## Task 7.1: Event Taxonomy Coverage
+
+**Files:**
+- Modify: `src/web/events.rs`
+- Modify: `src/web/runtime.rs`
+- Test: `tests/web_event_taxonomy.rs`
+
+- [ ] **Step 1: Write failing event taxonomy test**
+
+Create `tests/web_event_taxonomy.rs`:
+
+```rust
+use cadence_aria::web::events::{EventHub, WebEventType};
+use serde_json::json;
+
+#[test]
+fn event_taxonomy_contains_every_design_event_type() {
+    let expected = vec![
+        "projection_updated",
+        "node_started",
+        "node_completed",
+        "node_failed",
+        "paused_for_approval",
+        "provider_output",
+        "artifact_written",
+        "gate_blocked",
+        "checkpoint_created",
+        "rollback_previewed",
+        "rollback_completed",
+        "error",
+    ];
+    let actual = WebEventType::all()
+        .into_iter()
+        .map(|event_type| event_type.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn event_hub_can_publish_all_design_event_types() {
+    let hub = EventHub::new();
+    for event_type in WebEventType::all() {
+        hub.publish(event_type.as_str(), Some("task_0001"), json!({"ok": true}));
+    }
+    let replay = hub.replay_after(0);
+    assert_eq!(replay.len(), 12);
+    assert_eq!(replay[0].event_type, "projection_updated");
+    assert_eq!(replay[11].event_type, "error");
+}
+```
+
+- [ ] **Step 2: Run the test and verify failure**
+
+Run:
+
+```bash
+cargo test --test web_event_taxonomy --locked
+```
+
+Expected: FAIL because `WebEventType` is missing and WebRuntime does not publish the full event taxonomy.
+
+- [ ] **Step 3: Add typed event taxonomy**
+
+Modify `src/web/events.rs`:
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebEventType {
+    ProjectionUpdated,
+    NodeStarted,
+    NodeCompleted,
+    NodeFailed,
+    PausedForApproval,
+    ProviderOutput,
+    ArtifactWritten,
+    GateBlocked,
+    CheckpointCreated,
+    RollbackPreviewed,
+    RollbackCompleted,
+    Error,
+}
+
+impl WebEventType {
+    pub fn all() -> Vec<Self> {
+        vec![
+            Self::ProjectionUpdated,
+            Self::NodeStarted,
+            Self::NodeCompleted,
+            Self::NodeFailed,
+            Self::PausedForApproval,
+            Self::ProviderOutput,
+            Self::ArtifactWritten,
+            Self::GateBlocked,
+            Self::CheckpointCreated,
+            Self::RollbackPreviewed,
+            Self::RollbackCompleted,
+            Self::Error,
+        ]
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ProjectionUpdated => "projection_updated",
+            Self::NodeStarted => "node_started",
+            Self::NodeCompleted => "node_completed",
+            Self::NodeFailed => "node_failed",
+            Self::PausedForApproval => "paused_for_approval",
+            Self::ProviderOutput => "provider_output",
+            Self::ArtifactWritten => "artifact_written",
+            Self::GateBlocked => "gate_blocked",
+            Self::CheckpointCreated => "checkpoint_created",
+            Self::RollbackPreviewed => "rollback_previewed",
+            Self::RollbackCompleted => "rollback_completed",
+            Self::Error => "error",
+        }
+    }
+}
+```
+
+- [ ] **Step 4: Publish typed events from runtime transitions**
+
+Modify `src/web/runtime.rs` and handler call sites so:
+
+- task creation publishes `projection_updated`
+- provider pause publishes `checkpoint_created` and `paused_for_approval`
+- provider confirm publishes `node_started`、`provider_output`、`artifact_written`、`node_completed`、`projection_updated`
+- provider/gate failure paths publish `node_failed` or `gate_blocked`
+- rollback preview publishes `rollback_previewed`
+- rollback execution publishes `rollback_completed` and `projection_updated`
+- API error mapping publishes `error` when a handler returns an `ApiError`
+
+Use `WebEventType::X.as_str()` instead of raw strings for all event names.
+
+- [ ] **Step 5: Run taxonomy and handler tests**
+
+Run:
+
+```bash
+cargo test --test web_event_taxonomy --test web_events --test web_api_handlers --locked
+```
+
+Expected: PASS and event names remain aligned with the design.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/web/events.rs src/web/runtime.rs tests/web_event_taxonomy.rs
+git commit -m "feat: cover web event taxonomy"
 ```
 
 ## Task 7.5: Task List, Artifact Content, File Content, And Diff APIs
@@ -3733,6 +4102,7 @@ git commit -m "feat: add web new task panel"
 - Create: `web/src/components/evidence/EvidencePanel.tsx`
 - Create: `web/src/components/diagnostics/DiagnosticsPanel.tsx`
 - Modify: `web/src/main.tsx`
+- Test: `web/src/components/shell/TopStatusBar.test.tsx`
 - Test: `web/src/components/shell/TaskSwitcher.test.tsx`
 - Test: `web/src/components/flow/FlowRail.test.tsx`
 - Test: `web/src/components/evidence/EvidencePanel.test.tsx`
@@ -3747,12 +4117,16 @@ import { describe, expect, it } from "vitest";
 import { FlowRail } from "./FlowRail";
 
 describe("FlowRail", () => {
-  it("renders node state provider badge and dropped history", () => {
+  it("renders node state provider badge attempts artifacts gate marker and dropped history", () => {
     render(<FlowRail timeline={[
-      { node_id: "N16", status: "completed", provider_type: "codex", dropped: false },
-      { node_id: "N17", status: "dropped", provider_type: "codex", dropped: true }
+      { node_id: "N16", status: "completed", provider_type: "codex", dropped: false, attempt: 2, rework_count: 1, artifact_count: 3, diagnostic: "gate_blocked" },
+      { node_id: "N17", status: "dropped", provider_type: "internal", dropped: true, attempt: 1, rework_count: 0, artifact_count: 0 }
     ]} selectedNodeId="N16" onSelectNode={() => undefined} />);
     expect(screen.getByRole("button", { name: /N16/ })).toHaveTextContent("completed");
+    expect(screen.getByRole("button", { name: /N16/ })).toHaveTextContent("attempt 2");
+    expect(screen.getByRole("button", { name: /N16/ })).toHaveTextContent("rework 1");
+    expect(screen.getByRole("button", { name: /N16/ })).toHaveTextContent("artifacts 3");
+    expect(screen.getByRole("button", { name: /N16/ })).toHaveTextContent("gate_blocked");
     expect(screen.getByRole("button", { name: /N17/ })).toHaveAttribute("data-dropped", "true");
   });
 });
@@ -3800,19 +4174,60 @@ describe("TaskSwitcher", () => {
 });
 ```
 
+Create `web/src/components/shell/TopStatusBar.test.tsx`:
+
+```tsx
+import { render, screen } from "@testing-library/react";
+import { describe, expect, it } from "vitest";
+import { TopStatusBar } from "./TopStatusBar";
+
+describe("TopStatusBar", () => {
+  it("renders blocked_by_gate breakdown instead of a single failed label", () => {
+    render(<TopStatusBar projection={{
+      workspace_root: "/tmp/aria-workspace",
+      active_task_id: "task_0001",
+      overview: {
+        status: "blocked_by_gate",
+        change_id: "aria-fibonacci-square",
+        current_node: "N18",
+        current_worktask: "work_wt_001",
+        policy_preset: "manual-write",
+        provider_mode: "fake",
+        e2e_overall: "blocked_by_gate",
+        business_code: "generated",
+        unit_tests: "passed",
+        coverage_gate: "passed",
+        archive_worktask: "failed",
+        root_cause: "cadence/ write scope missing"
+      },
+      git_summary: { branch: "main", head: "abc1234", dirty: true },
+      sse_connected: true,
+      running_state: "blocked"
+    }} />);
+
+    expect(screen.getByText(/Business code: generated/)).toBeInTheDocument();
+    expect(screen.getByText(/Unit tests: passed/)).toBeInTheDocument();
+    expect(screen.getByText(/Archive worktask: failed/)).toBeInTheDocument();
+    expect(screen.getByText(/cadence\\/ write scope missing/)).toBeInTheDocument();
+  });
+});
+```
+
 - [ ] **Step 2: Run tests and verify failure**
 
 Run:
 
 ```bash
-pnpm --dir web test -- --run web/src/components/shell/TaskSwitcher.test.tsx web/src/components/flow/FlowRail.test.tsx web/src/components/evidence/EvidencePanel.test.tsx
+pnpm --dir web test -- --run web/src/components/shell/TopStatusBar.test.tsx web/src/components/shell/TaskSwitcher.test.tsx web/src/components/flow/FlowRail.test.tsx web/src/components/evidence/EvidencePanel.test.tsx
 ```
 
 Expected: FAIL because components do not exist.
 
 - [ ] **Step 3: Implement TopStatusBar, TaskSwitcher and FlowRail**
 
-Create `TopStatusBar.tsx` with workspace, task, phase, provider, git and SSE labels. Create `TaskSwitcher.tsx`:
+Create `TopStatusBar.tsx` with workspace, task, phase/status, current node/worktask, policy preset, provider mode, git branch/head/dirty, running state and SSE labels. When `overview.status === "blocked_by_gate"`, render the full breakdown fields `e2e_overall`、`business_code`、`unit_tests`、`coverage_gate`、`archive_worktask`、`root_cause` instead of a single failure badge.
+
+Create `TaskSwitcher.tsx`:
 
 ```tsx
 export function TaskSwitcher({
@@ -3878,6 +4293,10 @@ export function FlowRail({
               <span className="font-mono font-semibold">{nodeId}</span>
               <span className={dropped ? "text-slate-400 line-through" : "text-slate-700"}>
                 {String(item.status ?? "idle")} {String(item.provider_type ?? "")}
+                {" "}attempt {String(item.attempt ?? 1)}
+                {" "}rework {String(item.rework_count ?? 0)}
+                {" "}artifacts {String(item.artifact_count ?? 0)}
+                {item.diagnostic ? ` ${String(item.diagnostic)}` : ""}
               </span>
             </button>
           );
@@ -3936,7 +4355,7 @@ Modify `web/src/main.tsx` so `AppShell` composes `TopStatusBar`、`FlowRail`、`
 Run:
 
 ```bash
-pnpm --dir web test -- --run web/src/components/shell/TaskSwitcher.test.tsx web/src/components/flow/FlowRail.test.tsx web/src/components/evidence/EvidencePanel.test.tsx
+pnpm --dir web test -- --run web/src/components/shell/TopStatusBar.test.tsx web/src/components/shell/TaskSwitcher.test.tsx web/src/components/flow/FlowRail.test.tsx web/src/components/evidence/EvidencePanel.test.tsx
 pnpm --dir web build
 ```
 
@@ -3945,7 +4364,7 @@ Expected: PASS component tests and build.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add web/src/components/shell/TopStatusBar.tsx web/src/components/shell/TaskSwitcher.tsx web/src/components/flow/FlowRail.tsx web/src/components/node/NodeWorkspace.tsx web/src/components/evidence/EvidencePanel.tsx web/src/components/diagnostics/DiagnosticsPanel.tsx web/src/main.tsx web/src/components/shell/TaskSwitcher.test.tsx web/src/components/flow/FlowRail.test.tsx web/src/components/evidence/EvidencePanel.test.tsx
+git add web/src/components/shell/TopStatusBar.tsx web/src/components/shell/TaskSwitcher.tsx web/src/components/flow/FlowRail.tsx web/src/components/node/NodeWorkspace.tsx web/src/components/evidence/EvidencePanel.tsx web/src/components/diagnostics/DiagnosticsPanel.tsx web/src/main.tsx web/src/components/shell/TopStatusBar.test.tsx web/src/components/shell/TaskSwitcher.test.tsx web/src/components/flow/FlowRail.test.tsx web/src/components/evidence/EvidencePanel.test.tsx
 git commit -m "feat: add web workbench layout"
 ```
 
@@ -3953,9 +4372,11 @@ git commit -m "feat: add web workbench layout"
 
 **Files:**
 - Create: `web/src/components/action/ActionComposer.tsx`
+- Create: `web/src/components/action/AutoActionStatus.tsx`
 - Modify: `web/src/api/client.ts`
 - Modify: `web/src/main.tsx`
 - Test: `web/src/components/action/ActionComposer.test.tsx`
+- Test: `web/src/components/action/AutoActionStatus.test.tsx`
 
 - [ ] **Step 1: Write failing Action Composer tests**
 
@@ -4092,25 +4513,88 @@ export function ActionComposer({
 }
 ```
 
-- [ ] **Step 5: Wire ActionComposer into AppShell**
+- [ ] **Step 5: Add automatic action status for internal or auto-running steps**
+
+Create `web/src/components/action/AutoActionStatus.test.tsx`:
+
+```tsx
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { describe, expect, it, vi } from "vitest";
+import { AutoActionStatus } from "./AutoActionStatus";
+
+describe("AutoActionStatus", () => {
+  it("shows current auto action event summary and stop control", async () => {
+    const onStop = vi.fn();
+    render(<AutoActionStatus currentAction="N00 初始化任务状态" events={[
+      { cursor: 1, event_type: "node_started", task_id: "task_0001", payload: { node_id: "N00" } },
+      { cursor: 2, event_type: "artifact_written", task_id: "task_0001", payload: { artifact_ref: "intake_brief_0001" } }
+    ]} onStop={onStop} />);
+
+    expect(screen.getByText("N00 初始化任务状态")).toBeInTheDocument();
+    expect(screen.getByText(/node_started/)).toBeInTheDocument();
+    expect(screen.getByText(/artifact_written/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "停止" }));
+    expect(onStop).toHaveBeenCalled();
+  });
+});
+```
+
+Create `web/src/components/action/AutoActionStatus.tsx`:
+
+```tsx
+import { Square } from "lucide-react";
+import type { WebEvent } from "../../api/types";
+
+export function AutoActionStatus({
+  currentAction,
+  events,
+  onStop
+}: {
+  currentAction: string;
+  events: WebEvent[];
+  onStop: () => void;
+}) {
+  return (
+    <section className="border-t border-line bg-white px-4 py-3">
+      <div className="flex items-center justify-between">
+        <div>
+          <div className="text-sm font-semibold">{currentAction}</div>
+          <div className="mt-1 text-xs text-slate-500">
+            {events.slice(-3).map((event) => event.event_type).join(" · ")}
+          </div>
+        </div>
+        <button type="button" className="rounded-md border border-line px-3 py-2 text-sm" onClick={onStop}>
+          <Square className="mr-1 inline h-4 w-4" />
+          停止
+        </button>
+      </div>
+    </section>
+  );
+}
+```
+
+- [ ] **Step 6: Wire ActionComposer into AppShell**
 
 Modify `web/src/main.tsx` to render `ActionComposer` at the bottom. Pass `projection.pending_provider_step`, call `confirmTask`, then refresh projection. Wire the stop button to `stopTask` from Task 7.6 when a provider run is active. For prompt modification, the textarea is the editable final prompt; the confirmed payload must use the current textarea value, not the original prompt snapshot. For empty projection, pass `null`.
 
-- [ ] **Step 6: Run tests and build**
+When `projection.pending_provider_step === null` and the task is running an internal or automatic provider step, render `AutoActionStatus` with the current action and last event summary instead of an empty composer.
+
+- [ ] **Step 7: Run tests and build**
 
 Run:
 
 ```bash
-pnpm --dir web test -- --run web/src/components/action/ActionComposer.test.tsx
+pnpm --dir web test -- --run web/src/components/action/ActionComposer.test.tsx web/src/components/action/AutoActionStatus.test.tsx
 pnpm --dir web build
 ```
 
 Expected: PASS test and build.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add web/src/components/action/ActionComposer.tsx web/src/api/client.ts web/src/main.tsx web/src/components/action/ActionComposer.test.tsx
+git add web/src/components/action/ActionComposer.tsx web/src/components/action/AutoActionStatus.tsx web/src/api/client.ts web/src/main.tsx web/src/components/action/ActionComposer.test.tsx web/src/components/action/AutoActionStatus.test.tsx
 git commit -m "feat: add provider action composer"
 ```
 
@@ -4371,6 +4855,175 @@ git add src/web/types.rs src/web/runtime.rs src/web/handlers.rs src/web/app.rs w
 git commit -m "feat: add web rollback workflow"
 ```
 
+## Task 13.5: Rich Artifact Content Rendering
+
+**Files:**
+- Create: `web/src/components/evidence/ArtifactContentRenderer.tsx`
+- Modify: `web/src/components/evidence/ArtifactViewer.tsx`
+- Modify: `web/package.json`
+- Test: `web/src/components/evidence/ArtifactContentRenderer.test.tsx`
+
+- [ ] **Step 1: Write failing content renderer test**
+
+Create `web/src/components/evidence/ArtifactContentRenderer.test.tsx`:
+
+```tsx
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { describe, expect, it } from "vitest";
+import { ArtifactContentRenderer } from "./ArtifactContentRenderer";
+
+describe("ArtifactContentRenderer", () => {
+  it("renders markdown headings with anchor navigation", () => {
+    render(<ArtifactContentRenderer contentType="markdown" content={"# Proposal\n\n## Scope\n正文"} />);
+    expect(screen.getByRole("link", { name: "Proposal" })).toHaveAttribute("href", "#proposal");
+    expect(screen.getByRole("heading", { name: "Scope" })).toHaveAttribute("id", "scope");
+  });
+
+  it("folds long json fields by default", async () => {
+    render(<ArtifactContentRenderer contentType="json" content={JSON.stringify({
+      short: "ok",
+      long: "x".repeat(240)
+    })} />);
+    expect(screen.getByText(/long/)).toBeInTheDocument();
+    expect(screen.queryByText(/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx/)).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /展开 long/ }));
+    expect(screen.getByText(/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx/)).toBeInTheDocument();
+  });
+
+  it("renders source test and log content as preformatted text", () => {
+    render(<ArtifactContentRenderer contentType="source" content={"export const ok = true;"} />);
+    expect(screen.getByText(/export const ok/)).toBeInTheDocument();
+  });
+});
+```
+
+- [ ] **Step 2: Run the test and verify failure**
+
+Run:
+
+```bash
+pnpm --dir web test -- --run web/src/components/evidence/ArtifactContentRenderer.test.tsx
+```
+
+Expected: FAIL because rich content renderer is missing.
+
+- [ ] **Step 3: Add renderer dependency**
+
+Modify `web/package.json`:
+
+```json
+"dependencies": {
+  "react-markdown": "^9.0.0"
+}
+```
+
+- [ ] **Step 4: Implement content renderer**
+
+Create `web/src/components/evidence/ArtifactContentRenderer.tsx`:
+
+```tsx
+import { useMemo, useState } from "react";
+import ReactMarkdown from "react-markdown";
+
+function slug(text: string) {
+  return text.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]+/g, "-").replace(/^-|-$/g, "");
+}
+
+export function ArtifactContentRenderer({
+  contentType,
+  content
+}: {
+  contentType: string;
+  content: string;
+}) {
+  if (contentType === "markdown") {
+    const headings = content
+      .split("\n")
+      .filter((line) => line.startsWith("#"))
+      .map((line) => line.replace(/^#+\s*/, ""));
+    return (
+      <div className="grid grid-cols-[12rem_minmax(0,1fr)] gap-4">
+        <nav aria-label="Markdown outline" className="text-sm">
+          {headings.map((heading) => (
+            <a key={heading} href={`#${slug(heading)}`} className="block py-1 text-slate-600">
+              {heading}
+            </a>
+          ))}
+        </nav>
+        <ReactMarkdown
+          components={{
+            h1: ({ children }) => <h1 id={slug(String(children))}>{children}</h1>,
+            h2: ({ children }) => <h2 id={slug(String(children))}>{children}</h2>,
+            h3: ({ children }) => <h3 id={slug(String(children))}>{children}</h3>
+          }}
+        >
+          {content}
+        </ReactMarkdown>
+      </div>
+    );
+  }
+
+  if (contentType === "json") {
+    return <JsonContent content={content} />;
+  }
+
+  return <pre className="max-h-[34rem] overflow-auto p-3 text-xs leading-5">{content}</pre>;
+}
+
+function JsonContent({ content }: { content: string }) {
+  const value = useMemo(() => JSON.parse(content), [content]);
+  return (
+    <div className="space-y-2 p-3 text-xs">
+      {Object.entries(value).map(([key, item]) => (
+        <JsonField key={key} name={key} value={item} />
+      ))}
+    </div>
+  );
+}
+
+function JsonField({ name, value }: { name: string; value: unknown }) {
+  const [open, setOpen] = useState(false);
+  const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  const long = text.length > 120;
+  return (
+    <div>
+      <strong>{name}</strong>
+      {long && !open ? (
+        <button type="button" className="ml-2 text-signal" onClick={() => setOpen(true)}>
+          展开 {name}
+        </button>
+      ) : null}
+      <pre className="mt-1 rounded bg-slate-50 p-2">{long && !open ? `${text.slice(0, 80)}...` : text}</pre>
+    </div>
+  );
+}
+```
+
+Modify `ArtifactViewer.tsx` so it delegates body rendering:
+
+```tsx
+<ArtifactContentRenderer contentType={artifact.content_type} content={artifact.content} />
+```
+
+- [ ] **Step 5: Run renderer tests and build**
+
+Run:
+
+```bash
+pnpm --dir web test -- --run web/src/components/evidence/ArtifactContentRenderer.test.tsx web/src/components/evidence/ArtifactViewer.test.tsx
+pnpm --dir web build
+```
+
+Expected: PASS for markdown outline/anchors, folded JSON fields, source rendering and production build.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add web/package.json web/pnpm-lock.yaml web/src/components/evidence/ArtifactContentRenderer.tsx web/src/components/evidence/ArtifactViewer.tsx web/src/components/evidence/ArtifactContentRenderer.test.tsx
+git commit -m "feat: add rich artifact renderer"
+```
+
 ## Task 14: Interactive Runner Integration For Planning, Execution, And Final Nodes
 
 **Files:**
@@ -4541,6 +5194,149 @@ git add src/task_run/interactive_runner.rs src/task_run/mod.rs src/runtime_units
 git commit -m "feat: add interactive task runner seam"
 ```
 
+## Task 14.5: Policy Presets And Automatic Internal Steps
+
+**Files:**
+- Modify: `src/task_run/interactive_runner.rs`
+- Modify: `src/web/runtime.rs`
+- Modify: `src/interactive/controller.rs`
+- Test: `tests/web_policy_runtime.rs`
+
+- [ ] **Step 1: Write failing policy/runtime test**
+
+Create `tests/web_policy_runtime.rs`:
+
+```rust
+use cadence_aria::web::runtime::WebRuntime;
+use cadence_aria::web::types::{AdvanceTaskResponse, CreateTaskRequest};
+use tempfile::tempdir;
+
+#[test]
+fn manual_write_auto_runs_readonly_internal_step_then_pauses_write_provider_step() {
+    let workspace = tempdir().expect("workspace");
+    let mut runtime = WebRuntime::new_fake(workspace.path().to_path_buf());
+    let created = runtime
+        .create_task(request_with_policy("manual-write"))
+        .expect("create");
+    let response = runtime.advance_task(&created.task_id).expect("advance");
+    assert!(matches!(response, AdvanceTaskResponse::PausedForApproval { .. }));
+    let projection = runtime.projection(Some(&created.task_id), None).expect("projection");
+    assert!(projection.timeline.iter().any(|item| item["node_id"] == "N00" && item["status"] == "completed"));
+}
+
+#[test]
+fn non_interactive_does_not_pause_for_provider_confirmation() {
+    let workspace = tempdir().expect("workspace");
+    let mut runtime = WebRuntime::new_fake(workspace.path().to_path_buf());
+    let created = runtime
+        .create_task(request_with_policy("non-interactive"))
+        .expect("create");
+    let response = runtime.advance_task(&created.task_id).expect("advance");
+    assert!(matches!(response, AdvanceTaskResponse::Advanced { .. } | AdvanceTaskResponse::Completed { .. }));
+}
+
+#[test]
+fn manual_all_pauses_first_provider_step_even_when_readonly() {
+    let workspace = tempdir().expect("workspace");
+    let mut runtime = WebRuntime::new_fake(workspace.path().to_path_buf());
+    let created = runtime
+        .create_task(request_with_policy("manual-all"))
+        .expect("create");
+    let response = runtime.advance_task(&created.task_id).expect("advance");
+    let pending = response.expect_pending_step().expect("pending");
+    assert_eq!(pending.node_id, "N04");
+}
+
+fn request_with_policy(policy_preset: &str) -> CreateTaskRequest {
+    CreateTaskRequest {
+        request_text: "实现 Fibonacci square sum".to_string(),
+        change_id: "aria-fibonacci-square".to_string(),
+        policy_preset: policy_preset.to_string(),
+        provider_mode: "fake".to_string(),
+        timeout_secs: 2400,
+    }
+}
+```
+
+- [ ] **Step 2: Run the test and verify failure**
+
+Run:
+
+```bash
+cargo test --test web_policy_runtime --locked
+```
+
+Expected: FAIL because WebRuntime does not yet apply all policy presets or internal automatic step execution.
+
+- [ ] **Step 3: Add internal step representation**
+
+Modify `src/task_run/interactive_runner.rs`:
+
+```rust
+pub enum InteractiveStep {
+    Internal {
+        node_id: String,
+        action: String,
+        artifact_refs: Vec<String>,
+    },
+    Provider(PendingProviderStep),
+}
+```
+
+Add runner methods:
+
+```rust
+pub fn next_step(&mut self) -> Result<Option<InteractiveStep>, TaskRunError> {
+    Ok(self.steps.front().cloned())
+}
+
+pub fn run_internal_step(&mut self, node_id: &str) -> Result<StepRunnerResult, TaskRunError> {
+    match self.steps.pop_front() {
+        Some(InteractiveStep::Internal { node_id: expected, .. }) if expected == node_id => {
+            Ok(StepRunnerResult::CompletedStep {
+                node_id: expected,
+                provider_run_id: "internal".to_string(),
+                prompt: String::new(),
+            })
+        }
+        Some(_) => Err(TaskRunError::new("interactive_runner_step_mismatch", "expected internal step")),
+        None => Err(TaskRunError::new("interactive_runner_empty", "no step available")),
+    }
+}
+```
+
+Seed fake runner with an internal `N00` step before provider steps.
+
+- [ ] **Step 4: Apply policy presets in WebRuntime**
+
+Modify `src/web/runtime.rs` so `create_task` stores `policy_preset` in `state.json`, and `advance_task`:
+
+- loops through internal steps and executes them automatically, writing node run/event/artifact records;
+- for provider steps calls existing `PolicyPreset::decision_for`;
+- `manual-all` pauses every provider step;
+- `manual-write` pauses only runtime/workspace write steps and auto-runs read-only provider steps;
+- `auto-review` pauses planning/coding provider steps and auto-runs review/testing/final summary steps;
+- `non-interactive` auto-runs provider steps and returns `Advanced` or `Completed` instead of `PausedForApproval`.
+
+Use the same runtime persistence helpers from Task 5.5 for internal node runs and events.
+
+- [ ] **Step 5: Run policy and controller tests**
+
+Run:
+
+```bash
+cargo test --test web_policy_runtime --test interactive_policy --test interactive_controller --locked
+```
+
+Expected: PASS, and WebRuntime policy behavior matches the design preset table.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/task_run/interactive_runner.rs src/web/runtime.rs src/interactive/controller.rs tests/web_policy_runtime.rs
+git commit -m "feat: apply web policy presets"
+```
+
 ## Task 15: End-To-End Verification And Fibonacci Browsing Acceptance
 
 **Files:**
@@ -4692,8 +5488,8 @@ git commit -m "test: verify aria web workbench flow"
 
 ## Self-Review Checklist
 
-- [x] 设计规格覆盖：计划覆盖 `aria web --workspace`、单机单 workspace、新建/继续任务、逐节点暂停确认、provider prompt 编辑确认、节点 Overview/Inputs/Run/Outputs/Diff 数据填充、OpenSpec 文档沉淀物、provider stdout/stderr、structured output、manual gate、retry、provider auth diagnostics、任务列表、artifact 内容、文件内容、checkpoint diff、实时事件流、回退预览、dropped 历史、Fibonacci gate 诊断和非交互回归。
-- [x] 页面覆盖 TUI 信息域：Overview、Timeline、IO、Artifacts、Changes、Diagnostics、Action 输入均落到 NewTaskPanel、TaskSwitcher、Flow Rail、Node Workspace、Evidence Panel、Diagnostics Panel、Action Composer。
+- [x] 设计规格覆盖：计划覆盖 `aria web --workspace`、单机单 workspace、新建/继续任务、逐节点暂停确认、provider prompt 编辑确认、节点 Overview/Inputs/Run/Outputs/Diff 数据填充、OpenSpec 文档沉淀物、provider stdout/stderr、structured output、manual gate、retry、provider auth diagnostics、任务列表、artifact 内容、文件内容、checkpoint diff、完整 SSE 事件 taxonomy、实时事件流、回退预览、dropped 历史、Fibonacci gate 诊断、policy preset 后端行为、内部节点自动执行和非交互回归。
+- [x] 页面覆盖 TUI 信息域：Overview、Timeline、IO、Artifacts、Changes、Diagnostics、Action 输入均落到 NewTaskPanel、TaskSwitcher、TopStatusBar、Flow Rail、Node Workspace、Evidence Panel、Diagnostics Panel、Action Composer、AutoActionStatus。
 - [x] vibe-kanban 参考范围受控：只采用 checkpoint/answer 回退交互语义，不照搬视觉。
 - [x] TDD 覆盖：每个后端和前端阶段都先写失败测试，再实现，再运行验证。
 - [x] 文件路径符合项目规则：计划文档位于 `cadence/plans/`，前端代码位于 `web/`，后端代码位于 `src/web/` 和既有 runtime 模块。
