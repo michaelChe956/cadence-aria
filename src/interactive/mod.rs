@@ -5,3 +5,4 @@ pub mod models;
 pub mod policy;
 pub mod projection;
 pub mod store;
+pub mod web_projection;

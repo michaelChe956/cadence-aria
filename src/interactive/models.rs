@@ -134,3 +134,60 @@ pub struct WorkspaceProjection {
     pub diagnostics: Vec<Value>,
     pub available_actions: Vec<String>,
 }
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct GitSummary {
+    pub workspace_path: String,
+    pub branch: Option<String>,
+    pub head: Option<String>,
+    pub dirty: bool,
+    pub dirty_files: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SelectedNodeContext {
+    pub node_id: Option<String>,
+    pub overview: Value,
+    pub inputs: Vec<Value>,
+    pub run: Vec<Value>,
+    pub outputs: Vec<Value>,
+    pub diffs: Vec<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PendingProviderStepProjection {
+    pub node_id: String,
+    pub provider_type: String,
+    pub runtime_role: String,
+    pub adapter_role: String,
+    pub prompt: String,
+    pub input_summary: Value,
+    pub canonical_input_refs: Vec<String>,
+    pub context_files: Vec<String>,
+    pub output_schema: String,
+    pub allowed_write_scope: Vec<String>,
+    pub forbidden_actions: Vec<String>,
+    pub verification_commands: Vec<String>,
+    pub checkpoint_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WebWorkspaceProjection {
+    pub workspace_root: String,
+    pub active_task_id: Option<String>,
+    pub active_session_id: Option<String>,
+    pub overview: Value,
+    pub sessions: Vec<TaskSession>,
+    pub timeline: Vec<Value>,
+    pub artifact_index: Vec<ArtifactIndexEntry>,
+    pub diagnostics: Vec<Value>,
+    pub available_actions: Vec<String>,
+    pub pending_provider_step: Option<PendingProviderStepProjection>,
+    pub selected_node_context: SelectedNodeContext,
+    pub git_summary: GitSummary,
+    pub event_cursor: u64,
+}
