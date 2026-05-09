@@ -83,6 +83,7 @@ pnpm --dir web build
 | `tests/web_runtime_fake.rs` | fake task create、advance pause、confirm、projection refresh、rollback |
 | `tests/web_api_handlers.rs` | axum handler-level API contract |
 | `tests/web_events.rs` | SSE event hub replay 和 projection_updated 事件 |
+| `tests/web_resource_handlers.rs` | `GET /api/tasks`、artifact 内容、文件内容和 checkpoint diff API |
 | `tests/web_cli.rs` | `aria web --check`、host/port 解析、无效参数 |
 | `tests/task_run_interactive_runner.rs` | 真实 orchestration 拆分前的 runner seam 和非交互回归 |
 
@@ -102,9 +103,11 @@ pnpm --dir web build
 | `web/src/api/client.ts` | fetch wrapper、错误标准化、SSE client |
 | `web/src/state/workbench-store.ts` | projection、selected node/tab、pending action、event log 状态 |
 | `web/src/components/shell/TopStatusBar.tsx` | workspace/task/status/provider/git/SSE 状态 |
+| `web/src/components/shell/TaskSwitcher.tsx` | 已有 task 列表、继续任务入口、当前 task 选择 |
 | `web/src/components/flow/FlowRail.tsx` | N00-N28 节点流程、状态、dropped 灰显 |
 | `web/src/components/node/NodeWorkspace.tsx` | Overview、Inputs、Run、Outputs、Diff tabs |
 | `web/src/components/evidence/EvidencePanel.tsx` | artifact/report/source/log 预览 |
+| `web/src/components/evidence/ArtifactViewer.tsx` | Markdown、JSON、source、test、log 内容查看器 |
 | `web/src/components/action/ActionComposer.tsx` | Codex-like prompt 输入、确认执行、停止、回退入口 |
 | `web/src/components/rollback/RollbackDialog.tsx` | rollback preview、dirty 确认、执行回退 |
 | `web/src/components/diagnostics/DiagnosticsPanel.tsx` | provider/gate/validation/checkpoint/web_runtime 分类诊断 |
@@ -116,9 +119,11 @@ pnpm --dir web build
 |------|----------|
 | `web/src/api/client.test.ts` | API success/error、SSE parse |
 | `web/src/state/workbench-store.test.ts` | projection refresh、node/tab selection、dropped history |
+| `web/src/components/shell/TaskSwitcher.test.tsx` | 已有 task 展示和继续任务选择 |
 | `web/src/components/action/ActionComposer.test.tsx` | pending provider step、prompt 编辑、confirm payload |
 | `web/src/components/flow/FlowRail.test.tsx` | node 状态、provider badge、dropped 灰显 |
 | `web/src/components/evidence/EvidencePanel.test.tsx` | markdown/json/source/log preview selection |
+| `web/src/components/evidence/ArtifactViewer.test.tsx` | artifact 内容加载和 content-type 渲染 |
 | `web/src/components/rollback/RollbackDialog.test.tsx` | preview counts、dirty checkbox、rollback confirm |
 | `web/e2e/fake-workbench.spec.ts` | fake provider 浏览器闭环 |
 
@@ -1732,13 +1737,25 @@ Add SSE route in `src/web/app.rs`:
 .route("/api/events", get(handlers::events))
 ```
 
-Add `events` handler that converts `WebEvent` into `axum::response::sse::Event`:
+Add `events` handler that replays missed events and then stays subscribed to live broadcasts:
 
 ```rust
 pub async fn events(State(state): State<WebAppState>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let replay = state.events.replay_after(0);
-    let replay_stream = stream::iter(replay.into_iter().map(|event| Ok(sse_event(event))));
-    Sse::new(replay_stream).keep_alive(KeepAlive::default())
+    let replay_stream = stream::iter(state.events.replay_after(0));
+    let live_stream = BroadcastStream::new(state.events.subscribe())
+        .filter_map(|event| async move { event.ok() });
+    let sse_stream = replay_stream
+        .chain(live_stream)
+        .map(|event| Ok(sse_event(event)));
+    Sse::new(sse_stream).keep_alive(KeepAlive::default())
+}
+
+fn sse_event(event: WebEvent) -> Event {
+    Event::default()
+        .id(event.cursor.to_string())
+        .event(event.event_type.clone())
+        .json_data(event)
+        .expect("serialize web event")
 }
 ```
 
@@ -1746,14 +1763,16 @@ Use concrete imports:
 
 ```rust
 use axum::response::sse::{Event, KeepAlive, Sse};
-use futures_util::stream::{self, Stream};
+use futures_util::stream::{self, Stream, StreamExt};
 use std::convert::Infallible;
+use tokio_stream::wrappers::BroadcastStream;
 ```
 
 Add dependency:
 
 ```toml
 futures-util = "0.3"
+tokio-stream = { version = "0.1", features = ["sync"] }
 ```
 
 - [ ] **Step 5: Run event and handler tests**
@@ -1771,6 +1790,428 @@ Expected: PASS and existing API contract still returns JSON.
 ```bash
 git add Cargo.toml Cargo.lock src/web/events.rs src/web/state.rs src/web/runtime.rs src/web/handlers.rs src/web/app.rs src/web/mod.rs tests/web_events.rs
 git commit -m "feat: add web event stream"
+```
+
+## Task 7.5: Task List, Artifact Content, File Content, And Diff APIs
+
+**Files:**
+- Modify: `src/web/types.rs`
+- Modify: `src/web/runtime.rs`
+- Modify: `src/web/handlers.rs`
+- Modify: `src/web/app.rs`
+- Modify: `web/src/api/types.ts`
+- Modify: `web/src/api/client.ts`
+- Create: `web/src/components/evidence/ArtifactViewer.tsx`
+- Test: `tests/web_resource_handlers.rs`
+- Test: `web/src/components/evidence/ArtifactViewer.test.tsx`
+
+- [ ] **Step 1: Write failing backend API tests**
+
+Create `tests/web_resource_handlers.rs`:
+
+```rust
+use axum::body::Body;
+use axum::http::{Method, Request, StatusCode};
+use cadence_aria::web::app::build_web_router;
+use cadence_aria::web::runtime::WebRuntime;
+use cadence_aria::web::state::WebAppState;
+use serde_json::{Value, json};
+use std::fs;
+use tempfile::tempdir;
+use tower::ServiceExt;
+
+#[tokio::test]
+async fn resource_handlers_cover_tasks_artifact_file_and_diff_contracts() {
+    let workspace = tempdir().expect("workspace");
+    let task_root = workspace.path().join(".aria/runtime/tasks/task_0001");
+    fs::create_dir_all(task_root.join("artifacts/execution")).expect("artifacts");
+    fs::create_dir_all(workspace.path().join("src")).expect("src");
+    fs::write(
+        task_root.join("state.json"),
+        r#"{"task_id":"task_0001","phase":"execution","change_id":"aria-fibonacci-square"}"#,
+    )
+    .expect("state");
+    fs::write(
+        task_root.join("artifacts/execution/0000.json"),
+        r#"{"artifact_ref":"coding_report_work_wt_001_0001","artifact_kind":"coding_report","producer_node":"N16"}"#,
+    )
+    .expect("artifact");
+    fs::write(workspace.path().join("src/fibonacciSquareSum.js"), "export const ok = true;\n")
+        .expect("source");
+
+    let state = WebAppState::new(
+        workspace.path().to_path_buf(),
+        WebRuntime::new_fake(workspace.path().to_path_buf()),
+    );
+    let app = build_web_router(state);
+
+    let tasks = request_json(app.clone(), Method::GET, "/api/tasks", json!({})).await;
+    assert_eq!(tasks["tasks"][0]["task_id"], "task_0001");
+
+    let artifact = request_json(
+        app.clone(),
+        Method::GET,
+        "/api/artifacts/coding_report_work_wt_001_0001",
+        json!({}),
+    )
+    .await;
+    assert_eq!(artifact["artifact_ref"], "coding_report_work_wt_001_0001");
+    assert_eq!(artifact["content_type"], "json");
+
+    let file = request_json(
+        app.clone(),
+        Method::GET,
+        "/api/files/content?path=src/fibonacciSquareSum.js",
+        json!({}),
+    )
+    .await;
+    assert_eq!(file["path"], "src/fibonacciSquareSum.js");
+    assert!(file["content"].as_str().expect("content").contains("export const ok"));
+
+    let diff = request_json(
+        app,
+        Method::GET,
+        "/api/files/diff?base_checkpoint=ckpt_0001&path=src/fibonacciSquareSum.js",
+        json!({}),
+    )
+    .await;
+    assert_eq!(diff["path"], "src/fibonacciSquareSum.js");
+    assert!(diff["diff"].is_string());
+}
+
+async fn request_json(app: axum::Router, method: Method, uri: &str, body: Value) -> Value {
+    let request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .expect("request");
+    let response = app.oneshot(request).await.expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("body");
+    serde_json::from_slice(&bytes).expect("json")
+}
+```
+
+- [ ] **Step 2: Write failing frontend artifact viewer test**
+
+Create `web/src/components/evidence/ArtifactViewer.test.tsx`:
+
+```tsx
+import { render, screen } from "@testing-library/react";
+import { describe, expect, it } from "vitest";
+import { ArtifactViewer } from "./ArtifactViewer";
+
+describe("ArtifactViewer", () => {
+  it("renders json artifact content with path and producer node", () => {
+    render(<ArtifactViewer artifact={{
+      artifact_ref: "coding_report_work_wt_001_0001",
+      artifact_kind: "coding_report",
+      producer_node: "N16",
+      path: ".aria/runtime/tasks/task_0001/artifacts/execution/0000.json",
+      content_type: "json",
+      content: "{\"status\":\"completed\"}"
+    }} />);
+    expect(screen.getByText("coding_report")).toBeInTheDocument();
+    expect(screen.getByText(/N16/)).toBeInTheDocument();
+    expect(screen.getByText(/completed/)).toBeInTheDocument();
+  });
+});
+```
+
+- [ ] **Step 3: Run tests and verify failure**
+
+Run:
+
+```bash
+cargo test --test web_resource_handlers --locked
+pnpm --dir web test -- --run web/src/components/evidence/ArtifactViewer.test.tsx
+```
+
+Expected: FAIL because resource DTOs, handlers, client methods and viewer are missing.
+
+- [ ] **Step 4: Add resource DTOs**
+
+Add to `src/web/types.rs`:
+
+```rust
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct TaskListResponse {
+    pub tasks: Vec<TaskListItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct TaskListItem {
+    pub task_id: String,
+    pub change_id: Option<String>,
+    pub phase: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ArtifactContentResponse {
+    pub artifact_ref: String,
+    pub artifact_kind: String,
+    pub producer_node: Option<String>,
+    pub path: String,
+    pub content_type: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct FileContentResponse {
+    pub path: String,
+    pub content_type: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct FileDiffResponse {
+    pub base_checkpoint: String,
+    pub path: String,
+    pub diff: String,
+}
+```
+
+- [ ] **Step 5: Add backend runtime methods and handlers**
+
+Add runtime methods to `src/web/runtime.rs`:
+
+```rust
+pub fn list_tasks(&self) -> Result<TaskListResponse, TaskRunError> {
+    let tasks_root = self.workspace_root.join(".aria/runtime/tasks");
+    let mut tasks = Vec::new();
+    for entry in std::fs::read_dir(&tasks_root).map_err(io_error)? {
+        let entry = entry.map_err(io_error)?;
+        if !entry.file_type().map_err(io_error)?.is_dir() {
+            continue;
+        }
+        let task_id = entry.file_name().to_string_lossy().to_string();
+        let state = read_optional_json(&entry.path().join("state.json"))?;
+        tasks.push(TaskListItem {
+            task_id,
+            change_id: state.get("change_id").and_then(|value| value.as_str()).map(str::to_string),
+            phase: state.get("phase").and_then(|value| value.as_str()).map(str::to_string),
+            updated_at: None,
+        });
+    }
+    tasks.sort_by(|left, right| left.task_id.cmp(&right.task_id));
+    Ok(TaskListResponse { tasks })
+}
+
+pub fn artifact_content(&self, artifact_ref: &str) -> Result<ArtifactContentResponse, TaskRunError> {
+    let projection = self.projection(None, None)?;
+    let entry = projection
+        .artifact_index
+        .iter()
+        .find(|entry| entry.artifact_ref == artifact_ref)
+        .ok_or_else(|| TaskRunError::new("artifact_not_found", format!("artifact not found: {artifact_ref}")))?;
+    let path = self.workspace_root.join(&entry.path);
+    let content = std::fs::read_to_string(&path).map_err(io_error)?;
+    Ok(ArtifactContentResponse {
+        artifact_ref: entry.artifact_ref.clone(),
+        artifact_kind: entry.artifact_kind.clone(),
+        producer_node: entry.producer_node.clone(),
+        path: entry.path.clone(),
+        content_type: format!("{:?}", entry.content_type).to_lowercase(),
+        content,
+    })
+}
+
+pub fn file_content(&self, path: &str) -> Result<FileContentResponse, TaskRunError> {
+    let safe = safe_workspace_path(&self.workspace_root, path)?;
+    Ok(FileContentResponse {
+        path: path.to_string(),
+        content_type: content_type_for_path(path),
+        content: std::fs::read_to_string(safe).map_err(io_error)?,
+    })
+}
+
+pub fn file_diff(&self, base_checkpoint: &str, path: &str) -> Result<FileDiffResponse, TaskRunError> {
+    let diff = std::process::Command::new("git")
+        .args(["diff", base_checkpoint, "--", path])
+        .current_dir(&self.workspace_root)
+        .output()
+        .map_err(|error| TaskRunError::new("git_command_failed", error.to_string()))?;
+    Ok(FileDiffResponse {
+        base_checkpoint: base_checkpoint.to_string(),
+        path: path.to_string(),
+        diff: String::from_utf8_lossy(&diff.stdout).to_string(),
+    })
+}
+```
+
+Add safe path helpers in the same file:
+
+```rust
+fn safe_workspace_path(root: &std::path::Path, path: &str) -> Result<std::path::PathBuf, TaskRunError> {
+    if path.contains("..") || path.starts_with('/') {
+        return Err(TaskRunError::new("invalid_file_path", format!("unsafe path: {path}")));
+    }
+    Ok(root.join(path))
+}
+
+fn content_type_for_path(path: &str) -> String {
+    if path.ends_with(".md") {
+        "markdown".to_string()
+    } else if path.ends_with(".json") {
+        "json".to_string()
+    } else if path.contains("/tests/") || path.contains(".test.") || path.contains(".spec.") {
+        "test".to_string()
+    } else {
+        "source".to_string()
+    }
+}
+
+fn read_optional_json(path: &std::path::Path) -> Result<serde_json::Value, TaskRunError> {
+    match std::fs::File::open(path) {
+        Ok(file) => serde_json::from_reader(file)
+            .map_err(|error| TaskRunError::new("web_runtime_json", error.to_string())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(serde_json::json!({})),
+        Err(error) => Err(io_error(error)),
+    }
+}
+```
+
+Add routes in `src/web/app.rs`:
+
+```rust
+.route("/api/tasks", get(handlers::list_tasks).post(handlers::create_task))
+.route("/api/artifacts/{artifact_ref}", get(handlers::artifact_content))
+.route("/api/files/content", get(handlers::file_content))
+.route("/api/files/diff", get(handlers::file_diff))
+```
+
+Add handlers with query structs:
+
+```rust
+#[derive(Debug, Deserialize)]
+pub struct FileContentQuery {
+    pub path: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FileDiffQuery {
+    pub base_checkpoint: String,
+    pub path: String,
+}
+
+pub async fn list_tasks(State(state): State<WebAppState>) -> ApiResult<Json<TaskListResponse>> {
+    let runtime = state.runtime.lock().expect("runtime lock");
+    Ok(Json(runtime.list_tasks()?))
+}
+
+pub async fn artifact_content(
+    State(state): State<WebAppState>,
+    Path(artifact_ref): Path<String>,
+) -> ApiResult<Json<ArtifactContentResponse>> {
+    let runtime = state.runtime.lock().expect("runtime lock");
+    Ok(Json(runtime.artifact_content(&artifact_ref)?))
+}
+
+pub async fn file_content(
+    State(state): State<WebAppState>,
+    Query(query): Query<FileContentQuery>,
+) -> ApiResult<Json<FileContentResponse>> {
+    let runtime = state.runtime.lock().expect("runtime lock");
+    Ok(Json(runtime.file_content(&query.path)?))
+}
+
+pub async fn file_diff(
+    State(state): State<WebAppState>,
+    Query(query): Query<FileDiffQuery>,
+) -> ApiResult<Json<FileDiffResponse>> {
+    let runtime = state.runtime.lock().expect("runtime lock");
+    Ok(Json(runtime.file_diff(&query.base_checkpoint, &query.path)?))
+}
+```
+
+- [ ] **Step 6: Add frontend client methods and viewer**
+
+Add TypeScript types:
+
+```ts
+export type ArtifactContentResponse = {
+  artifact_ref: string;
+  artifact_kind: string;
+  producer_node: string | null;
+  path: string;
+  content_type: "markdown" | "json" | "source" | "test" | "log" | "unknown";
+  content: string;
+};
+```
+
+Add client methods:
+
+```ts
+export function listTasks() {
+  return requestJson<{ tasks: Array<{ task_id: string; change_id: string | null; phase: string | null }> }>("/api/tasks");
+}
+
+export function getArtifactContent(artifactRef: string) {
+  return requestJson<ArtifactContentResponse>(`/api/artifacts/${encodeURIComponent(artifactRef)}`);
+}
+
+export function getFileContent(path: string) {
+  return requestJson<{ path: string; content_type: string; content: string }>(
+    `/api/files/content?path=${encodeURIComponent(path)}`
+  );
+}
+
+export function getFileDiff(baseCheckpoint: string, path: string) {
+  return requestJson<{ base_checkpoint: string; path: string; diff: string }>(
+    `/api/files/diff?base_checkpoint=${encodeURIComponent(baseCheckpoint)}&path=${encodeURIComponent(path)}`
+  );
+}
+```
+
+Create `web/src/components/evidence/ArtifactViewer.tsx`:
+
+```tsx
+import type { ArtifactContentResponse } from "../../api/types";
+
+export function ArtifactViewer({ artifact }: { artifact: ArtifactContentResponse | null }) {
+  if (!artifact) {
+    return <div className="text-sm text-slate-500">未选择 artifact。</div>;
+  }
+  return (
+    <section className="rounded-md border border-line bg-white">
+      <header className="border-b border-line px-3 py-2">
+        <h3 className="text-sm font-semibold">{artifact.artifact_kind}</h3>
+        <p className="truncate text-xs text-slate-500">
+          {artifact.producer_node ?? "unknown node"} · {artifact.path}
+        </p>
+      </header>
+      <pre className="max-h-[34rem] overflow-auto p-3 text-xs leading-5">
+        {artifact.content}
+      </pre>
+    </section>
+  );
+}
+```
+
+- [ ] **Step 7: Run resource API and viewer tests**
+
+Run:
+
+```bash
+cargo test --test web_resource_handlers --locked
+pnpm --dir web test -- --run web/src/components/evidence/ArtifactViewer.test.tsx
+pnpm --dir web build
+```
+
+Expected: PASS for backend resource APIs, frontend artifact viewer and TypeScript build.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add src/web/types.rs src/web/runtime.rs src/web/handlers.rs src/web/app.rs tests/web_resource_handlers.rs web/src/api/types.ts web/src/api/client.ts web/src/components/evidence/ArtifactViewer.tsx web/src/components/evidence/ArtifactViewer.test.tsx
+git commit -m "feat: add web task and resource APIs"
 ```
 
 ## Task 8: `aria web` CLI Entry And Static Asset Serving
@@ -2536,11 +2977,13 @@ git commit -m "feat: add web frontend api store"
 
 **Files:**
 - Create: `web/src/components/shell/TopStatusBar.tsx`
+- Create: `web/src/components/shell/TaskSwitcher.tsx`
 - Create: `web/src/components/flow/FlowRail.tsx`
 - Create: `web/src/components/node/NodeWorkspace.tsx`
 - Create: `web/src/components/evidence/EvidencePanel.tsx`
 - Create: `web/src/components/diagnostics/DiagnosticsPanel.tsx`
 - Modify: `web/src/main.tsx`
+- Test: `web/src/components/shell/TaskSwitcher.test.tsx`
 - Test: `web/src/components/flow/FlowRail.test.tsx`
 - Test: `web/src/components/evidence/EvidencePanel.test.tsx`
 
@@ -2585,19 +3028,73 @@ describe("EvidencePanel", () => {
 });
 ```
 
+Create `web/src/components/shell/TaskSwitcher.test.tsx`:
+
+```tsx
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { describe, expect, it, vi } from "vitest";
+import { TaskSwitcher } from "./TaskSwitcher";
+
+describe("TaskSwitcher", () => {
+  it("renders existing tasks and selects one to continue", async () => {
+    const onSelectTask = vi.fn();
+    render(<TaskSwitcher tasks={[
+      { task_id: "task_0001", change_id: "aria-fibonacci-square", phase: "blocked_by_gate" },
+      { task_id: "task_0002", change_id: "aria-login-jwt", phase: "execution" }
+    ]} activeTaskId="task_0001" onSelectTask={onSelectTask} />);
+
+    await userEvent.selectOptions(screen.getByLabelText("继续任务"), "task_0002");
+    expect(onSelectTask).toHaveBeenCalledWith("task_0002");
+  });
+});
+```
+
 - [ ] **Step 2: Run tests and verify failure**
 
 Run:
 
 ```bash
-pnpm --dir web test -- --run web/src/components/flow/FlowRail.test.tsx web/src/components/evidence/EvidencePanel.test.tsx
+pnpm --dir web test -- --run web/src/components/shell/TaskSwitcher.test.tsx web/src/components/flow/FlowRail.test.tsx web/src/components/evidence/EvidencePanel.test.tsx
 ```
 
 Expected: FAIL because components do not exist.
 
-- [ ] **Step 3: Implement TopStatusBar and FlowRail**
+- [ ] **Step 3: Implement TopStatusBar, TaskSwitcher and FlowRail**
 
-Create `TopStatusBar.tsx` with workspace, task, phase, provider, git and SSE labels. Create `FlowRail.tsx`:
+Create `TopStatusBar.tsx` with workspace, task, phase, provider, git and SSE labels. Create `TaskSwitcher.tsx`:
+
+```tsx
+export function TaskSwitcher({
+  tasks,
+  activeTaskId,
+  onSelectTask
+}: {
+  tasks: Array<{ task_id: string; change_id: string | null; phase: string | null }>;
+  activeTaskId: string | null;
+  onSelectTask: (taskId: string) => void;
+}) {
+  return (
+    <label className="flex items-center gap-2 text-sm">
+      <span className="text-slate-500">继续任务</span>
+      <select
+        aria-label="继续任务"
+        value={activeTaskId ?? ""}
+        onChange={(event) => onSelectTask(event.target.value)}
+        className="rounded-md border border-line bg-white px-2 py-1"
+      >
+        {tasks.map((task) => (
+          <option key={task.task_id} value={task.task_id}>
+            {task.task_id} · {task.change_id ?? "no change"} · {task.phase ?? "unknown"}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+```
+
+Create `FlowRail.tsx`:
 
 ```tsx
 type TimelineItem = Record<string, unknown>;
@@ -2689,7 +3186,7 @@ Modify `web/src/main.tsx` so `AppShell` composes `TopStatusBar`、`FlowRail`、`
 Run:
 
 ```bash
-pnpm --dir web test -- --run web/src/components/flow/FlowRail.test.tsx web/src/components/evidence/EvidencePanel.test.tsx
+pnpm --dir web test -- --run web/src/components/shell/TaskSwitcher.test.tsx web/src/components/flow/FlowRail.test.tsx web/src/components/evidence/EvidencePanel.test.tsx
 pnpm --dir web build
 ```
 
@@ -2698,7 +3195,7 @@ Expected: PASS component tests and build.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add web/src/components/shell/TopStatusBar.tsx web/src/components/flow/FlowRail.tsx web/src/components/node/NodeWorkspace.tsx web/src/components/evidence/EvidencePanel.tsx web/src/components/diagnostics/DiagnosticsPanel.tsx web/src/main.tsx web/src/components/flow/FlowRail.test.tsx web/src/components/evidence/EvidencePanel.test.tsx
+git add web/src/components/shell/TopStatusBar.tsx web/src/components/shell/TaskSwitcher.tsx web/src/components/flow/FlowRail.tsx web/src/components/node/NodeWorkspace.tsx web/src/components/evidence/EvidencePanel.tsx web/src/components/diagnostics/DiagnosticsPanel.tsx web/src/main.tsx web/src/components/shell/TaskSwitcher.test.tsx web/src/components/flow/FlowRail.test.tsx web/src/components/evidence/EvidencePanel.test.tsx
 git commit -m "feat: add web workbench layout"
 ```
 
@@ -3445,7 +3942,7 @@ git commit -m "test: verify aria web workbench flow"
 
 ## Self-Review Checklist
 
-- [x] 设计规格覆盖：计划覆盖 `aria web --workspace`、单机单 workspace、新建/继续任务、逐节点暂停确认、provider prompt 编辑确认、输入输出/文档沉淀物展示、事件流、回退预览、dropped 历史、Fibonacci gate 诊断和非交互回归。
+- [x] 设计规格覆盖：计划覆盖 `aria web --workspace`、单机单 workspace、新建/继续任务、逐节点暂停确认、provider prompt 编辑确认、输入输出/文档沉淀物展示、任务列表、artifact 内容、文件内容、checkpoint diff、实时事件流、回退预览、dropped 历史、Fibonacci gate 诊断和非交互回归。
 - [x] 页面覆盖 TUI 信息域：Overview、Timeline、IO、Artifacts、Changes、Diagnostics、Action 输入均落到 Flow Rail、Node Workspace、Evidence Panel、Diagnostics Panel、Action Composer。
 - [x] vibe-kanban 参考范围受控：只采用 checkpoint/answer 回退交互语义，不照搬视觉。
 - [x] TDD 覆盖：每个后端和前端阶段都先写失败测试，再实现，再运行验证。
