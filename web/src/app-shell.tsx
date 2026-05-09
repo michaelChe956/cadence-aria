@@ -94,8 +94,9 @@ export function AppShell() {
     setBusy(true);
     setError(null);
     try {
-      await confirmTask(taskId, payload);
-      store.setProjection(await getProjection(taskId, store.snapshot.selectedNodeId ?? undefined));
+      const confirmed = await confirmTask(taskId, payload);
+      store.setProjection(await getProjection(taskId, confirmed.node_id));
+      store.selectTab("run");
       setLastCheckpointId(payload.checkpoint_id);
       setProjectionVersion((version) => version + 1);
     } catch (reason) {

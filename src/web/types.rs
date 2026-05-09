@@ -45,7 +45,7 @@ pub enum AdvanceTaskResponse {
         projection_version: u64,
     },
     PausedForApproval {
-        pending_step: PendingProviderStepDto,
+        pending_step: Box<PendingProviderStepDto>,
     },
     Completed {
         projection_version: u64,
@@ -55,7 +55,7 @@ pub enum AdvanceTaskResponse {
 impl AdvanceTaskResponse {
     pub fn expect_pending_step(self) -> Option<PendingProviderStepDto> {
         match self {
-            AdvanceTaskResponse::PausedForApproval { pending_step } => Some(pending_step),
+            AdvanceTaskResponse::PausedForApproval { pending_step } => Some(*pending_step),
             _ => None,
         }
     }

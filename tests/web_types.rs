@@ -24,7 +24,7 @@ fn create_task_request_uses_snake_case_contract() {
 #[test]
 fn paused_advance_response_serializes_pending_step() {
     let response = AdvanceTaskResponse::PausedForApproval {
-        pending_step: PendingProviderStepDto {
+        pending_step: Box::new(PendingProviderStepDto {
             node_id: "N16".to_string(),
             provider_type: "codex".to_string(),
             runtime_role: "executor".to_string(),
@@ -38,7 +38,7 @@ fn paused_advance_response_serializes_pending_step() {
             forbidden_actions: vec!["修改 cadence/project-rules".to_string()],
             verification_commands: vec!["cargo test --locked -j 1".to_string()],
             checkpoint_id: "ckpt_0001".to_string(),
-        },
+        }),
     };
 
     let value = serde_json::to_value(response).expect("response json");

@@ -91,7 +91,7 @@ impl WebRuntime {
             ConfirmationDecision::PauseForConfirmation => {
                 store.write_json("pending/provider-step.json", &pending)?;
                 Ok(AdvanceTaskResponse::PausedForApproval {
-                    pending_step: pending,
+                    pending_step: Box::new(pending),
                 })
             }
             ConfirmationDecision::RunAutomatically => {
@@ -536,6 +536,7 @@ fn write_checkpoint(
         "checkpoints/projection@ckpt_0001.json",
         &json!({"projection_version": projection_version}),
     )?;
+    let task_root = store.task_root();
     store.write_json(
         "checkpoints/ckpt_0001.json",
         &RuntimeCheckpoint {
@@ -547,13 +548,59 @@ fn write_checkpoint(
             dirty_summary: json!({}),
             state_snapshot_ref: "state@ckpt_0001.json".to_string(),
             projection_snapshot_ref: "projection@ckpt_0001.json".to_string(),
-            artifact_boundary: 0,
-            provider_run_boundary: 0,
-            node_run_boundary: 0,
+            artifact_boundary: count_runtime_artifacts(task_root)?,
+            provider_run_boundary: count_json_files_recursive(&task_root.join("provider-runs"))?,
+            node_run_boundary: count_json_files(&task_root.join("node-runs"))?,
             created_at: "2026-05-09T00:00:00Z".to_string(),
         },
     )?;
     Ok(())
+}
+
+fn count_runtime_artifacts(task_root: &std::path::Path) -> Result<usize, TaskRunError> {
+    Ok(count_json_files_recursive(&task_root.join("artifacts"))?
+        + count_json_files_recursive(&task_root.join("reports"))?)
+}
+
+fn count_json_files(root: &std::path::Path) -> Result<usize, TaskRunError> {
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(io_error(error)),
+    };
+    let mut count = 0;
+    for entry in entries {
+        let entry = entry.map_err(io_error)?;
+        if entry
+            .path()
+            .extension()
+            .and_then(|extension| extension.to_str())
+            == Some("json")
+        {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+fn count_json_files_recursive(root: &std::path::Path) -> Result<usize, TaskRunError> {
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(io_error(error)),
+    };
+    let mut count = 0;
+    for entry in entries {
+        let entry = entry.map_err(io_error)?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(io_error)?;
+        if file_type.is_dir() {
+            count += count_json_files_recursive(&path)?;
+        } else if path.extension().and_then(|extension| extension.to_str()) == Some("json") {
+            count += 1;
+        }
+    }
+    Ok(count)
 }
 
 fn pending_provider_step_for_policy(policy: PolicyPreset) -> PendingProviderStepDto {

@@ -19,7 +19,7 @@ pub enum InteractiveStep {
         action: String,
         artifact_refs: Vec<String>,
     },
-    Provider(PendingProviderStep),
+    Provider(Box<PendingProviderStep>),
 }
 
 impl InteractiveTaskRunner {
@@ -34,23 +34,27 @@ impl InteractiveTaskRunner {
                     action: "bootstrap runtime".to_string(),
                     artifact_refs: vec!["internal_n00".to_string()],
                 },
-                InteractiveStep::Provider(step(
+                InteractiveStep::Provider(Box::new(step(
                     "N04",
                     "claude_code",
                     NodeWriteClass::WritesRuntime,
-                )),
-                InteractiveStep::Provider(step(
+                ))),
+                InteractiveStep::Provider(Box::new(step(
                     "N10",
                     "claude_code",
                     NodeWriteClass::WritesRuntime,
-                )),
-                InteractiveStep::Provider(step("N16", "codex", NodeWriteClass::WritesWorkspace)),
-                InteractiveStep::Provider(step("N17", "codex", NodeWriteClass::ReadOnly)),
-                InteractiveStep::Provider(step(
+                ))),
+                InteractiveStep::Provider(Box::new(step(
+                    "N16",
+                    "codex",
+                    NodeWriteClass::WritesWorkspace,
+                ))),
+                InteractiveStep::Provider(Box::new(step("N17", "codex", NodeWriteClass::ReadOnly))),
+                InteractiveStep::Provider(Box::new(step(
                     "N25",
                     "claude_code",
                     NodeWriteClass::WritesRuntime,
-                )),
+                ))),
             ]
             .into(),
         })
@@ -84,7 +88,7 @@ impl InteractiveTaskRunner {
 impl StepRunner for InteractiveTaskRunner {
     fn next_provider_step(&mut self) -> Result<Option<PendingProviderStep>, TaskRunError> {
         Ok(self.steps.iter().find_map(|step| match step {
-            InteractiveStep::Provider(step) => Some(step.clone()),
+            InteractiveStep::Provider(step) => Some(step.as_ref().clone()),
             InteractiveStep::Internal { .. } => None,
         }))
     }
@@ -102,7 +106,7 @@ impl StepRunner for InteractiveTaskRunner {
                 TaskRunError::new("interactive_runner_empty", "no pending provider step")
             })?;
         let expected = match self.steps.remove(index) {
-            Some(InteractiveStep::Provider(expected)) => expected,
+            Some(InteractiveStep::Provider(expected)) => *expected,
             _ => {
                 return Err(TaskRunError::new(
                     "interactive_runner_empty",

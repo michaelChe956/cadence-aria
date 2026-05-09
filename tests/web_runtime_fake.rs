@@ -130,13 +130,18 @@ fn web_runtime_fake_rollback_preview_and_execute_restores_workspace_history() {
         .expect("artifact")
         .contains("\"dropped\": true")
     );
-    assert!(
-        runtime
-            .projection(Some(&created.task_id), Some("N16"))
-            .expect("projection")
-            .pending_provider_step
-            .is_some()
-    );
+    let projection = runtime
+        .projection(Some(&created.task_id), Some("N16"))
+        .expect("projection");
+    assert!(projection.pending_provider_step.is_some());
+    assert!(projection.timeline.iter().any(|item| {
+        item["node_id"] == "N16"
+            && item.get("dropped").and_then(serde_json::Value::as_bool) == Some(true)
+    }));
+    assert!(!projection.timeline.iter().any(|item| {
+        item["node_id"] == "N00"
+            && item.get("dropped").and_then(serde_json::Value::as_bool) == Some(true)
+    }));
 }
 
 fn git(cwd: &std::path::Path, args: &[&str]) {

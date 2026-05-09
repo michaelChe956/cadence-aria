@@ -70,3 +70,47 @@ fn web_projection_exposes_pending_step_node_context_artifacts_and_git_summary() 
             .contains(&"confirm_provider_step".to_string())
     );
 }
+
+#[test]
+fn web_projection_surfaces_fibonacci_blocked_by_gate_report_breakdown() {
+    let workspace = tempdir().expect("workspace");
+    let task_root = workspace.path().join(".aria/runtime/tasks/task_0001");
+    fs::create_dir_all(task_root.join("reports")).expect("reports");
+    fs::write(
+        task_root.join("state.json"),
+        serde_json::to_vec_pretty(&json!({
+            "task_id":"task_0001",
+            "phase":"blocked_by_gate",
+            "change_id":"aria-fibonacci-square",
+            "current_worktask":"work_wt_archive"
+        }))
+        .expect("state"),
+    )
+    .expect("write state");
+    fs::write(
+        task_root.join("reports/final-report.json"),
+        serde_json::to_vec_pretty(&json!({
+            "status": "blocked_by_gate",
+            "business_code": "generated",
+            "unit_tests": "passed",
+            "coverage_gate": "passed",
+            "archive_worktask": "failed",
+            "root_cause": "write scope contract"
+        }))
+        .expect("final"),
+    )
+    .expect("write final");
+
+    let base = build_workspace_projection(workspace.path(), Some("task_0001")).expect("base");
+    let web = build_web_projection(workspace.path(), base, None).expect("web");
+
+    assert_eq!(web.overview["status"], "blocked_by_gate");
+    assert_eq!(web.overview["business_code"], "generated");
+    assert_eq!(web.overview["unit_tests"], "passed");
+    assert_eq!(web.overview["coverage_gate"], "passed");
+    assert_eq!(web.overview["archive_worktask"], "failed");
+    assert_eq!(web.overview["root_cause"], "write scope contract");
+    let text = serde_json::to_string(&web.diagnostics).expect("diagnostics");
+    assert!(text.contains("archive_worktask"));
+    assert!(text.contains("write scope contract"));
+}

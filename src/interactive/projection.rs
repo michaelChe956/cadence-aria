@@ -22,19 +22,27 @@ pub fn build_workspace_projection(
     let task_root = workspace_root.join(".aria/runtime/tasks").join(&task_id);
     let state = read_optional_json(&task_root.join("state.json"))?;
     let final_report = read_optional_json(&task_root.join("reports/final-report.json"))?;
-    let timeline = read_timeline(&task_root.join("logs/node-events.jsonl"))?;
+    let mut timeline = read_timeline(&task_root.join("logs/node-events.jsonl"))?;
+    timeline.extend(read_dropped_node_runs(&task_root.join("node-runs"))?);
     let diagnostics = classify_task_diagnostics(&task_root, &state)?;
     let change_id =
         string_field(&state, "change_id").or_else(|| string_field(&final_report, "change_id"));
     let artifact_index = build_artifact_index(workspace_root, &task_root, change_id.as_deref())?;
 
     let status = string_field(&final_report, "status").or_else(|| string_field(&state, "phase"));
+    let e2e_overall = string_field(&final_report, "e2e_overall").or_else(|| status.clone());
     let overview = json!({
         "task_id": string_field(&state, "task_id").unwrap_or_else(|| task_id.clone()),
         "change_id": change_id,
         "phase": string_field(&state, "phase"),
         "current_worktask": string_field(&state, "current_worktask"),
         "status": status,
+        "e2e_overall": e2e_overall,
+        "business_code": string_field(&final_report, "business_code"),
+        "unit_tests": string_field(&final_report, "unit_tests"),
+        "coverage_gate": string_field(&final_report, "coverage_gate"),
+        "archive_worktask": string_field(&final_report, "archive_worktask"),
+        "root_cause": string_field(&final_report, "root_cause"),
         "workspace": workspace_root.to_string_lossy(),
     });
 
@@ -169,6 +177,59 @@ fn read_timeline(path: &Path) -> Result<Vec<Value>, TaskRunError> {
         }));
     }
     Ok(timeline)
+}
+
+fn read_dropped_node_runs(root: &Path) -> Result<Vec<Value>, TaskRunError> {
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(TaskRunError::new(
+                "interactive_projection_io",
+                format!("read {}: {error}", root.display()),
+            ));
+        }
+    };
+
+    let mut paths = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            TaskRunError::new(
+                "interactive_projection_io",
+                format!("read {} entry: {error}", root.display()),
+            )
+        })?;
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) == Some("json") {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+
+    let mut dropped = Vec::new();
+    for path in paths {
+        let value = read_json(&path)?;
+        if value.get("dropped").and_then(Value::as_bool) != Some(true) {
+            continue;
+        }
+        let artifact_count = value
+            .get("artifact_refs")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        dropped.push(json!({
+            "kind": "node",
+            "event_kind": "dropped",
+            "node_id": string_field(&value, "node_id"),
+            "status": "dropped",
+            "provider_run_id": string_field(&value, "provider_run_id"),
+            "duration_ms": u64_field(&value, "duration_ms"),
+            "output_schema": string_field(&value, "output_schema"),
+            "changed_files": [],
+            "artifact_count": artifact_count,
+            "dropped": true,
+        }));
+    }
+    Ok(dropped)
 }
 
 fn build_artifact_index(

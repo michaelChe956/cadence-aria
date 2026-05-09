@@ -1,9 +1,13 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AppShell } from "./main";
 
 describe("AppShell", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it("renders the first-screen workbench shell", () => {
     render(<AppShell />);
     expect(screen.getByRole("banner")).toHaveTextContent("Aria Web");
@@ -45,6 +49,50 @@ describe("AppShell", () => {
 
     expect(await screen.findByLabelText("Provider prompt")).toBeInTheDocument();
   });
+
+  it("loads the confirmed provider node context after confirmation", async () => {
+    let advanced = false;
+    let confirmed = false;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === "/api/tasks") {
+          return jsonResponse({
+            task_id: "task_0001",
+            session_id: "sess_task_0001",
+            change_id: "aria-fibonacci-square",
+            phase: "intake",
+          });
+        }
+        if (url === "/api/tasks/task_0001/advance") {
+          advanced = true;
+          return jsonResponse({ status: "paused_for_approval", pending_step: pendingStep() });
+        }
+        if (url === "/api/tasks/task_0001/confirm") {
+          confirmed = true;
+          return jsonResponse({ status: "provider_started", node_id: "N16", turn_id: "turn_0001" });
+        }
+        if (url === "/api/projection?task_id=task_0001&node_id=N16") {
+          return jsonResponse(projectionWithRunOutput());
+        }
+        if (url.startsWith("/api/projection")) {
+          return jsonResponse(projection(advanced && !confirmed ? pendingStep() : null));
+        }
+        return jsonResponse({});
+      }),
+    );
+
+    render(<AppShell />);
+    await userEvent.type(screen.getByLabelText("任务请求"), "实现 Fibonacci square sum");
+    await userEvent.type(screen.getByLabelText("change id"), "aria-fibonacci-square");
+    await userEvent.click(screen.getByRole("button", { name: "新建任务" }));
+    await userEvent.click(await screen.findByRole("button", { name: "推进" }));
+    await userEvent.click(await screen.findByRole("button", { name: "确认执行" }));
+
+    expect(await screen.findByText(/provider_output/)).toBeInTheDocument();
+    expect(screen.getByRole("main")).toHaveTextContent("N16");
+  });
 });
 
 function jsonResponse(body: unknown) {
@@ -84,5 +132,28 @@ function projection(pending_provider_step: ReturnType<typeof pendingStep> | null
     selected_node_context: { node_id: null, overview: {}, inputs: [], run: [], outputs: [], diffs: [] },
     git_summary: { workspace_path: "/tmp/workspace", branch: "main", head: "abc1234", dirty: false, dirty_files: [] },
     event_cursor: 0,
+  };
+}
+
+function projectionWithRunOutput() {
+  return {
+    ...projection(null),
+    timeline: [{ node_id: "N16", status: "completed", artifact_count: 1 }],
+    artifact_index: [
+      {
+        artifact_ref: "coding_report_work_wt_001_0001",
+        artifact_kind: "coding_report",
+        path: ".aria/runtime/tasks/task_0001/artifacts/execution/0000.json",
+        producer_node: "N16",
+      },
+    ],
+    selected_node_context: {
+      node_id: "N16",
+      overview: { node_id: "N16", status: "completed" },
+      inputs: [],
+      run: [{ kind: "provider_output", stream: "stdout", text: "done" }],
+      outputs: [{ artifact_ref: "coding_report_work_wt_001_0001" }],
+      diffs: [],
+    },
   };
 }

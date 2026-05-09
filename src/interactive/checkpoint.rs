@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -306,7 +307,7 @@ fn count_runtime_artifacts_after_boundary(
 fn runtime_artifact_files(task_root: &Path) -> Result<Vec<PathBuf>, TaskRunError> {
     let mut files = json_files(&task_root.join("artifacts"))?;
     files.extend(json_files(&task_root.join("reports"))?);
-    files.sort();
+    sort_paths_by_modified_then_path(&mut files);
     Ok(files)
 }
 
@@ -340,7 +341,7 @@ fn provider_run_files(root: &Path) -> Result<Vec<PathBuf>, TaskRunError> {
             files.push(run_path);
         }
     }
-    files.sort();
+    sort_paths_by_modified_then_path(&mut files);
     Ok(files)
 }
 
@@ -351,8 +352,22 @@ fn json_files(root: &Path) -> Result<Vec<PathBuf>, TaskRunError> {
 
     let mut files = Vec::new();
     collect_json_files(root, &mut files)?;
-    files.sort();
+    sort_paths_by_modified_then_path(&mut files);
     Ok(files)
+}
+
+fn sort_paths_by_modified_then_path(files: &mut [PathBuf]) {
+    files.sort_by(|left, right| {
+        modified_time(left)
+            .cmp(&modified_time(right))
+            .then_with(|| left.cmp(right))
+    });
+}
+
+fn modified_time(path: &Path) -> SystemTime {
+    fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .unwrap_or(UNIX_EPOCH)
 }
 
 fn collect_json_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<(), TaskRunError> {
