@@ -1,6 +1,8 @@
 import { useState } from "react";
-import { createTask, getProjection } from "./api/client";
+import { confirmTask, createTask, getProjection, stopTask } from "./api/client";
 import type { CreateTaskRequest, TaskListResponse } from "./api/types";
+import { ActionComposer } from "./components/action/ActionComposer";
+import { AutoActionStatus } from "./components/action/AutoActionStatus";
 import { DiagnosticsPanel } from "./components/diagnostics/DiagnosticsPanel";
 import { EvidencePanel } from "./components/evidence/EvidencePanel";
 import { FlowRail } from "./components/flow/FlowRail";
@@ -64,6 +66,46 @@ export function AppShell() {
     setProjectionVersion((version) => version + 1);
   }
 
+  async function handleConfirmProvider(payload: {
+    checkpoint_id: string;
+    prompt: string;
+    policy_override?: string | null;
+  }) {
+    const taskId = projection?.active_task_id;
+    if (!taskId) {
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await confirmTask(taskId, payload);
+      store.setProjection(await getProjection(taskId, store.snapshot.selectedNodeId ?? undefined));
+      setProjectionVersion((version) => version + 1);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "confirm task failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleStopTask() {
+    const taskId = projection?.active_task_id;
+    if (!taskId) {
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await stopTask(taskId);
+      store.setProjection(await getProjection(taskId, store.snapshot.selectedNodeId ?? undefined));
+      setProjectionVersion((version) => version + 1);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "stop task failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const selectedNodeContext = projection?.selected_node_context ?? {
     node_id: store.snapshot.selectedNodeId,
     overview: {},
@@ -112,6 +154,29 @@ export function AppShell() {
         />
         <EvidencePanel artifacts={projection?.artifact_index ?? []} diagnostics={projection?.diagnostics ?? []} />
       </div>
+      {projection?.pending_provider_step ? (
+        <ActionComposer
+          pendingStep={projection.pending_provider_step}
+          onConfirm={handleConfirmProvider}
+          onRollback={() => undefined}
+          onStop={handleStopTask}
+          running={busy}
+        />
+      ) : busy ? (
+        <AutoActionStatus
+          currentAction="运行中"
+          events={store.snapshot.events}
+          onStop={handleStopTask}
+        />
+      ) : (
+        <ActionComposer
+          pendingStep={null}
+          onConfirm={handleConfirmProvider}
+          onRollback={() => undefined}
+          onStop={handleStopTask}
+          running={false}
+        />
+      )}
       <DiagnosticsPanel diagnostics={projection?.diagnostics ?? []} />
     </div>
   );

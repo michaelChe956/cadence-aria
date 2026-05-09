@@ -72,3 +72,23 @@ export function stopTask(taskId: string): Promise<StopTaskResponse> {
     body: JSON.stringify({}),
   });
 }
+
+export function confirmTask(
+  taskId: string,
+  payload: { checkpoint_id: string; prompt: string; policy_override?: string | null },
+) {
+  return requestJson<{ status: string; node_id: string; turn_id: string }>(
+    `/api/tasks/${encodeURIComponent(taskId)}/confirm`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export function advanceTask(taskId: string) {
+  return requestJson<unknown>(`/api/tasks/${encodeURIComponent(taskId)}/advance`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
