@@ -165,11 +165,16 @@ pub struct PendingProviderStepProjection {
     pub adapter_role: String,
     pub prompt: String,
     pub input_summary: Value,
+    #[serde(default)]
     pub canonical_input_refs: Vec<String>,
+    #[serde(default)]
     pub context_files: Vec<String>,
     pub output_schema: String,
+    #[serde(default)]
     pub allowed_write_scope: Vec<String>,
+    #[serde(default)]
     pub forbidden_actions: Vec<String>,
+    #[serde(default)]
     pub verification_commands: Vec<String>,
     pub checkpoint_id: String,
 }

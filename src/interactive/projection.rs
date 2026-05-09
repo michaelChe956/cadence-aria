@@ -24,13 +24,14 @@ pub fn build_workspace_projection(
     let final_report = read_optional_json(&task_root.join("reports/final-report.json"))?;
     let timeline = read_timeline(&task_root.join("logs/node-events.jsonl"))?;
     let diagnostics = classify_task_diagnostics(&task_root, &state)?;
-    let artifact_index = build_artifact_index(workspace_root, &task_root)?;
+    let change_id =
+        string_field(&state, "change_id").or_else(|| string_field(&final_report, "change_id"));
+    let artifact_index = build_artifact_index(workspace_root, &task_root, change_id.as_deref())?;
 
     let status = string_field(&final_report, "status").or_else(|| string_field(&state, "phase"));
     let overview = json!({
         "task_id": string_field(&state, "task_id").unwrap_or_else(|| task_id.clone()),
-        "change_id": string_field(&state, "change_id")
-            .or_else(|| string_field(&final_report, "change_id")),
+        "change_id": change_id,
         "phase": string_field(&state, "phase"),
         "current_worktask": string_field(&state, "current_worktask"),
         "status": status,
@@ -162,6 +163,9 @@ fn read_timeline(path: &Path) -> Result<Vec<Value>, TaskRunError> {
             "provider_run_id": string_field(details, "provider_run_id"),
             "duration_ms": u64_field(details, "duration_ms"),
             "output_schema": string_field(details, "output_schema"),
+            "changed_files": details.get("changed_files").cloned().unwrap_or_else(|| json!([])),
+            "failure_route": string_field(details, "failure_route"),
+            "completion_criteria": details.get("completion_criteria").cloned(),
         }));
     }
     Ok(timeline)
@@ -170,16 +174,21 @@ fn read_timeline(path: &Path) -> Result<Vec<Value>, TaskRunError> {
 fn build_artifact_index(
     workspace_root: &Path,
     task_root: &Path,
+    change_id: Option<&str>,
 ) -> Result<Vec<ArtifactIndexEntry>, TaskRunError> {
     let mut files = Vec::new();
     collect_files(&task_root.join("artifacts"), &mut files)?;
     collect_files(&task_root.join("reports"), &mut files)?;
     files.sort();
 
-    files
+    let mut entries = files
         .into_iter()
         .map(|path| artifact_entry(workspace_root, task_root, &path))
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    if let Some(change_id) = change_id {
+        entries.extend(openspec_artifacts(workspace_root, change_id));
+    }
+    Ok(entries)
 }
 
 fn collect_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<(), TaskRunError> {
@@ -285,6 +294,44 @@ fn content_type(path: &Path) -> ContentType {
         Some("log" | "jsonl") => ContentType::Log,
         _ => ContentType::Unknown,
     }
+}
+
+fn openspec_artifacts(workspace_root: &Path, change_id: &str) -> Vec<ArtifactIndexEntry> {
+    let candidates = [
+        (
+            "openspec_proposal",
+            format!("openspec/changes/{change_id}/proposal.md"),
+        ),
+        (
+            "openspec_design",
+            format!("openspec/changes/{change_id}/design.md"),
+        ),
+        (
+            "openspec_tasks",
+            format!("openspec/changes/{change_id}/tasks.md"),
+        ),
+        (
+            "openspec_spec",
+            format!("openspec/changes/{change_id}/specs/main/spec.md"),
+        ),
+    ];
+    candidates
+        .into_iter()
+        .filter_map(|(artifact_kind, relative_path)| {
+            let path = workspace_root.join(&relative_path);
+            path.exists().then(|| ArtifactIndexEntry {
+                artifact_ref: artifact_kind.to_string(),
+                artifact_kind: artifact_kind.to_string(),
+                producer_node: None,
+                path: relative_path,
+                summary: artifact_kind.to_string(),
+                status: ArtifactStatus::Active,
+                content_type: ContentType::Markdown,
+                traceability_refs: Vec::new(),
+                dropped: false,
+            })
+        })
+        .collect()
 }
 
 fn is_json_file(path: &Path) -> bool {
