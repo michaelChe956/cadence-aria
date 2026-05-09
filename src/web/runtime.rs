@@ -5,6 +5,10 @@ use std::str::FromStr;
 
 use serde_json::json;
 
+use crate::interactive::checkpoint::{
+    CheckpointService, RollbackPreviewRequest as CoreRollbackPreviewRequest,
+    RollbackRequest as CoreRollbackRequest,
+};
 use crate::interactive::models::{RuntimeCheckpoint, WebWorkspaceProjection};
 use crate::interactive::policy::{
     ConfirmationDecision, NodeWriteClass, PolicyPreset, ProviderNodeMeta,
@@ -16,7 +20,8 @@ use crate::web::runtime_store::WebRuntimeStore;
 use crate::web::types::{
     AdvanceTaskResponse, ArtifactContentResponse, ConfirmTaskRequest, ConfirmTaskResponse,
     CreateTaskRequest, CreateTaskResponse, FileContentResponse, FileDiffResponse,
-    PendingProviderStepDto, StopTaskResponse, TaskListItem, TaskListResponse,
+    PendingProviderStepDto, RollbackPreviewResponse, RollbackResponse, StopTaskResponse,
+    TaskListItem, TaskListResponse,
 };
 
 pub struct WebRuntime {
@@ -136,6 +141,36 @@ impl WebRuntime {
         Ok(StopTaskResponse {
             status: "stop_requested".to_string(),
             task_id: task_id.to_string(),
+        })
+    }
+
+    pub fn rollback_preview(
+        &self,
+        task_id: &str,
+        checkpoint_id: &str,
+    ) -> Result<RollbackPreviewResponse, TaskRunError> {
+        let preview = CheckpointService::new(&self.workspace_root, task_id).preview_rollback(
+            CoreRollbackPreviewRequest {
+                checkpoint_id: checkpoint_id.to_string(),
+            },
+        )?;
+        Ok(preview.into())
+    }
+
+    pub fn rollback(
+        &mut self,
+        task_id: &str,
+        checkpoint_id: &str,
+        force_when_dirty: bool,
+    ) -> Result<RollbackResponse, TaskRunError> {
+        CheckpointService::new(&self.workspace_root, task_id).rollback(CoreRollbackRequest {
+            checkpoint_id: checkpoint_id.to_string(),
+            force_when_dirty,
+        })?;
+        self.next_projection_version += 1;
+        Ok(RollbackResponse {
+            status: "rollback_completed".to_string(),
+            checkpoint_id: checkpoint_id.to_string(),
         })
     }
 

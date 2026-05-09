@@ -85,6 +85,48 @@ pub struct RollbackPreviewRequest {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub struct RollbackPreviewResponse {
+    pub checkpoint_id: String,
+    pub git_head: Option<String>,
+    pub dirty: bool,
+    pub turns_to_drop: usize,
+    pub node_runs_to_drop: usize,
+    pub provider_runs_to_drop: usize,
+    pub artifacts_to_drop: usize,
+    pub files_may_change: Vec<String>,
+}
+
+impl From<crate::interactive::checkpoint::RollbackPreview> for RollbackPreviewResponse {
+    fn from(preview: crate::interactive::checkpoint::RollbackPreview) -> Self {
+        Self {
+            checkpoint_id: preview.checkpoint_id,
+            git_head: preview.git_head,
+            dirty: preview.dirty,
+            turns_to_drop: preview.turns_to_drop,
+            node_runs_to_drop: preview.node_runs_to_drop,
+            provider_runs_to_drop: preview.provider_runs_to_drop,
+            artifacts_to_drop: preview.artifacts_to_drop,
+            files_may_change: preview.files_may_change,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RollbackRequest {
+    pub checkpoint_id: String,
+    pub force_when_dirty: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RollbackResponse {
+    pub status: String,
+    pub checkpoint_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct WebEvent {
     pub cursor: u64,
     pub event_type: String,

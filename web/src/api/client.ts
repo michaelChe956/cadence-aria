@@ -5,6 +5,7 @@ import type {
   CreateTaskResponse,
   FileContentResponse,
   FileDiffResponse,
+  RollbackPreviewResponse,
   StopTaskResponse,
   TaskListResponse,
   WebWorkspaceProjection,
@@ -91,4 +92,27 @@ export function advanceTask(taskId: string) {
     method: "POST",
     body: JSON.stringify({}),
   });
+}
+
+export function rollbackPreview(taskId: string, checkpointId: string) {
+  return requestJson<RollbackPreviewResponse>(
+    `/api/tasks/${encodeURIComponent(taskId)}/rollback/preview`,
+    {
+      method: "POST",
+      body: JSON.stringify({ checkpoint_id: checkpointId }),
+    },
+  );
+}
+
+export function rollbackTask(
+  taskId: string,
+  payload: { checkpoint_id: string; force_when_dirty: boolean },
+) {
+  return requestJson<{ status: string; checkpoint_id: string }>(
+    `/api/tasks/${encodeURIComponent(taskId)}/rollback`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
 }

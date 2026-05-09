@@ -115,3 +115,14 @@ export type StopTaskResponse = {
   status: string;
   task_id: string;
 };
+
+export type RollbackPreviewResponse = {
+  checkpoint_id: string;
+  git_head: string | null;
+  dirty: boolean;
+  turns_to_drop: number;
+  node_runs_to_drop: number;
+  provider_runs_to_drop: number;
+  artifacts_to_drop: number;
+  files_may_change: string[];
+};

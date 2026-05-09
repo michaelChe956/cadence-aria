@@ -13,8 +13,9 @@ use crate::web::events::WebEventType;
 use crate::web::state::WebAppState;
 use crate::web::types::{
     AdvanceTaskResponse, ArtifactContentResponse, ConfirmTaskRequest, ConfirmTaskResponse,
-    CreateTaskRequest, CreateTaskResponse, FileContentResponse, FileDiffResponse, StopTaskResponse,
-    TaskListResponse, WebEvent,
+    CreateTaskRequest, CreateTaskResponse, FileContentResponse, FileDiffResponse,
+    RollbackPreviewRequest, RollbackPreviewResponse, RollbackRequest, RollbackResponse,
+    StopTaskResponse, TaskListResponse, WebEvent,
 };
 
 #[derive(Debug, Deserialize)]
@@ -128,6 +129,41 @@ pub async fn stop_task(
         WebEventType::ProjectionUpdated.as_str(),
         Some(&task_id),
         json!({ "reason": "stop_requested", "task_id": task_id }),
+    );
+    Ok(Json(response))
+}
+
+pub async fn rollback_preview(
+    State(state): State<WebAppState>,
+    Path(task_id): Path<String>,
+    Json(request): Json<RollbackPreviewRequest>,
+) -> ApiResult<Json<RollbackPreviewResponse>> {
+    let runtime = state.runtime.lock().expect("runtime lock");
+    let response = runtime.rollback_preview(&task_id, &request.checkpoint_id)?;
+    state.events.publish(
+        WebEventType::RollbackPreviewed.as_str(),
+        Some(&task_id),
+        json!({ "checkpoint_id": response.checkpoint_id }),
+    );
+    Ok(Json(response))
+}
+
+pub async fn rollback_task(
+    State(state): State<WebAppState>,
+    Path(task_id): Path<String>,
+    Json(request): Json<RollbackRequest>,
+) -> ApiResult<Json<RollbackResponse>> {
+    let mut runtime = state.runtime.lock().expect("runtime lock");
+    let response = runtime.rollback(&task_id, &request.checkpoint_id, request.force_when_dirty)?;
+    state.events.publish(
+        WebEventType::RollbackCompleted.as_str(),
+        Some(&task_id),
+        json!({ "checkpoint_id": response.checkpoint_id }),
+    );
+    state.events.publish(
+        WebEventType::ProjectionUpdated.as_str(),
+        Some(&task_id),
+        json!({ "reason": "rollback_completed" }),
     );
     Ok(Json(response))
 }

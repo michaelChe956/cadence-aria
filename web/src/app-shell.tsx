@@ -1,6 +1,13 @@
 import { useState } from "react";
-import { confirmTask, createTask, getProjection, stopTask } from "./api/client";
-import type { CreateTaskRequest, TaskListResponse } from "./api/types";
+import {
+  confirmTask,
+  createTask,
+  getProjection,
+  rollbackPreview,
+  rollbackTask,
+  stopTask,
+} from "./api/client";
+import type { CreateTaskRequest, RollbackPreviewResponse, TaskListResponse } from "./api/types";
 import { ActionComposer } from "./components/action/ActionComposer";
 import { AutoActionStatus } from "./components/action/AutoActionStatus";
 import { DiagnosticsPanel } from "./components/diagnostics/DiagnosticsPanel";
@@ -10,6 +17,7 @@ import { NodeWorkspace } from "./components/node/NodeWorkspace";
 import { TaskSwitcher } from "./components/shell/TaskSwitcher";
 import { TopStatusBar } from "./components/shell/TopStatusBar";
 import { NewTaskPanel } from "./components/task/NewTaskPanel";
+import { RollbackDialog } from "./components/rollback/RollbackDialog";
 import { createWorkbenchStore } from "./state/workbench-store";
 import type { WorkbenchTab } from "./state/workbench-store";
 
@@ -18,6 +26,9 @@ export function AppShell() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [tasks, setTasks] = useState<TaskListResponse["tasks"]>([]);
+  const [rollbackOpen, setRollbackOpen] = useState(false);
+  const [rollbackPreviewState, setRollbackPreviewState] =
+    useState<RollbackPreviewResponse | null>(null);
   const [, setProjectionVersion] = useState(0);
   const projection = store.snapshot.projection;
 
@@ -106,6 +117,46 @@ export function AppShell() {
     }
   }
 
+  async function handleRollbackPreview(checkpointId: string) {
+    const taskId = projection?.active_task_id;
+    if (!taskId) {
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      setRollbackPreviewState(await rollbackPreview(taskId, checkpointId));
+      setRollbackOpen(true);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "rollback preview failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleRollbackConfirm(payload: {
+    checkpoint_id: string;
+    force_when_dirty: boolean;
+  }) {
+    const taskId = projection?.active_task_id;
+    if (!taskId) {
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await rollbackTask(taskId, payload);
+      store.setProjection(await getProjection(taskId, store.snapshot.selectedNodeId ?? undefined));
+      setRollbackOpen(false);
+      setRollbackPreviewState(null);
+      setProjectionVersion((version) => version + 1);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "rollback failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const selectedNodeContext = projection?.selected_node_context ?? {
     node_id: store.snapshot.selectedNodeId,
     overview: {},
@@ -158,7 +209,7 @@ export function AppShell() {
         <ActionComposer
           pendingStep={projection.pending_provider_step}
           onConfirm={handleConfirmProvider}
-          onRollback={() => undefined}
+          onRollback={handleRollbackPreview}
           onStop={handleStopTask}
           running={busy}
         />
@@ -172,11 +223,17 @@ export function AppShell() {
         <ActionComposer
           pendingStep={null}
           onConfirm={handleConfirmProvider}
-          onRollback={() => undefined}
+          onRollback={handleRollbackPreview}
           onStop={handleStopTask}
           running={false}
         />
       )}
+      <RollbackDialog
+        open={rollbackOpen}
+        preview={rollbackPreviewState}
+        onConfirm={handleRollbackConfirm}
+        onOpenChange={setRollbackOpen}
+      />
       <DiagnosticsPanel diagnostics={projection?.diagnostics ?? []} />
     </div>
   );
