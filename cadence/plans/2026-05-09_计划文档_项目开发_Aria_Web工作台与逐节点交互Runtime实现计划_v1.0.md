@@ -79,6 +79,7 @@ pnpm --dir web build
 |------|----------|
 | `tests/web_types.rs` | API 类型序列化、错误码 JSON |
 | `tests/web_projection.rs` | Web projection 包含 pending step、node context、artifact refs、diagnostics、git summary |
+| `tests/web_node_context.rs` | selected node 的 Overview、Inputs、Run、Outputs、Diff 和 OpenSpec evidence refs |
 | `tests/interactive_checkpoint_preview.rs` | rollback preview 计算 dirty、drop counts、files_may_change |
 | `tests/web_runtime_fake.rs` | fake task create、advance pause、confirm、projection refresh、rollback |
 | `tests/web_api_handlers.rs` | axum handler-level API contract |
@@ -103,6 +104,7 @@ pnpm --dir web build
 | `web/src/api/types.ts` | 后端 API TypeScript 类型镜像 |
 | `web/src/api/client.ts` | fetch wrapper、错误标准化、SSE client |
 | `web/src/state/workbench-store.ts` | projection、selected node/tab、pending action、event log 状态 |
+| `web/src/components/task/NewTaskPanel.tsx` | 新建任务表单：request、change_id、policy preset、provider mode、timeout |
 | `web/src/components/shell/TopStatusBar.tsx` | workspace/task/status/provider/git/SSE 状态 |
 | `web/src/components/shell/TaskSwitcher.tsx` | 已有 task 列表、继续任务入口、当前 task 选择 |
 | `web/src/components/flow/FlowRail.tsx` | N00-N28 节点流程、状态、dropped 灰显 |
@@ -120,6 +122,7 @@ pnpm --dir web build
 |------|----------|
 | `web/src/api/client.test.ts` | API success/error、SSE parse |
 | `web/src/state/workbench-store.test.ts` | projection refresh、node/tab selection、dropped history |
+| `web/src/components/task/NewTaskPanel.test.tsx` | 新建任务表单提交和 policy/provider 选择 |
 | `web/src/components/shell/TaskSwitcher.test.tsx` | 已有 task 展示和继续任务选择 |
 | `web/src/components/action/ActionComposer.test.tsx` | pending provider step、prompt 编辑、confirm payload |
 | `web/src/components/flow/FlowRail.test.tsx` | node 状态、provider badge、dropped 灰显 |
@@ -676,6 +679,267 @@ Expected: PASS for `web_projection`.
 ```bash
 git add src/interactive/models.rs src/interactive/mod.rs src/interactive/web_projection.rs tests/web_projection.rs
 git commit -m "feat: add web workspace projection"
+```
+
+## Task 2.5: Selected Node IO Context And OpenSpec Evidence
+
+**Files:**
+- Modify: `src/interactive/web_projection.rs`
+- Modify: `src/interactive/projection.rs`
+- Test: `tests/web_node_context.rs`
+
+- [ ] **Step 1: Write failing node context test**
+
+Create `tests/web_node_context.rs`:
+
+```rust
+use cadence_aria::interactive::projection::build_workspace_projection;
+use cadence_aria::interactive::web_projection::build_web_projection;
+use serde_json::json;
+use std::fs;
+use tempfile::tempdir;
+
+#[test]
+fn selected_node_context_contains_overview_inputs_outputs_diffs_and_openspec_refs() {
+    let workspace = tempdir().expect("workspace");
+    let task_root = workspace.path().join(".aria/runtime/tasks/task_0001");
+    let openspec_root = workspace.path().join("openspec/changes/aria-fibonacci-square");
+    fs::create_dir_all(task_root.join("pending")).expect("pending");
+    fs::create_dir_all(task_root.join("artifacts/execution")).expect("artifacts");
+    fs::create_dir_all(task_root.join("logs")).expect("logs");
+    fs::create_dir_all(openspec_root.join("specs/main")).expect("openspec");
+    fs::write(
+        task_root.join("state.json"),
+        serde_json::to_vec_pretty(&json!({
+            "task_id": "task_0001",
+            "phase": "execution",
+            "change_id": "aria-fibonacci-square",
+            "current_node": "N16",
+            "current_worktask": "work_wt_001"
+        }))
+        .expect("state"),
+    )
+    .expect("state file");
+    fs::write(
+        task_root.join("pending/provider-step.json"),
+        serde_json::to_vec_pretty(&json!({
+            "node_id":"N16",
+            "provider_type":"codex",
+            "runtime_role":"executor",
+            "adapter_role":"executor",
+            "prompt":"实现 fibonacciSquareSum",
+            "input_summary":{"context_files":["openspec/changes/aria-fibonacci-square/tasks.md"]},
+            "output_schema":"schema://aria/artifacts/coding_report/v1",
+            "allowed_write_scope":["src/","tests/"],
+            "forbidden_actions":["修改 cadence/project-rules"],
+            "verification_commands":["node --test"],
+            "checkpoint_id":"ckpt_0001"
+        }))
+        .expect("pending"),
+    )
+    .expect("pending file");
+    fs::write(
+        task_root.join("logs/node-events.jsonl"),
+        r#"{"event_kind":"node_completed","task_id":"task_0001","node_id":"N16","status":"completed","details":{"duration_ms":42,"provider_run_id":"run_n16_0001","changed_files":["src/fibonacciSquareSum.js"]}}"#,
+    )
+    .expect("events");
+    fs::write(
+        task_root.join("logs/provider-output.jsonl"),
+        r#"{"kind":"provider_output","node_id":"N16","provider_run_id":"run_n16_0001","stream":"stdout","text":"done"}"#,
+    )
+    .expect("provider output");
+    fs::write(
+        task_root.join("artifacts/execution/0000.json"),
+        serde_json::to_vec_pretty(&json!({
+            "artifact_ref":"coding_report_work_wt_001_0001",
+            "artifact_kind":"coding_report",
+            "producer_node":"N16",
+            "changed_files":["src/fibonacciSquareSum.js"]
+        }))
+        .expect("artifact"),
+    )
+    .expect("artifact file");
+    fs::write(openspec_root.join("proposal.md"), "# Proposal\n").expect("proposal");
+    fs::write(openspec_root.join("design.md"), "# Design\n").expect("design");
+    fs::write(openspec_root.join("tasks.md"), "# Tasks\n").expect("tasks");
+    fs::write(openspec_root.join("specs/main/spec.md"), "# Spec\n").expect("spec");
+
+    let base = build_workspace_projection(workspace.path(), Some("task_0001")).expect("base");
+    let web = build_web_projection(workspace.path(), base, Some("N16")).expect("web");
+    let context = web.selected_node_context;
+
+    assert_eq!(context.node_id, Some("N16".to_string()));
+    assert_eq!(context.overview["provider_type"], "codex");
+    assert!(context.inputs.iter().any(|item| item["kind"] == "prompt_snapshot"));
+    assert!(context.run.iter().any(|item| item["kind"] == "provider_output"));
+    assert!(context.outputs.iter().any(|item| item["artifact_ref"] == "coding_report_work_wt_001_0001"));
+    assert!(context.diffs.iter().any(|item| item["path"] == "src/fibonacciSquareSum.js"));
+    assert!(web.artifact_index.iter().any(|entry| entry.artifact_kind == "openspec_proposal"));
+    assert!(web.artifact_index.iter().any(|entry| entry.artifact_kind == "openspec_spec"));
+}
+```
+
+- [ ] **Step 2: Run the test and verify failure**
+
+Run:
+
+```bash
+cargo test --test web_node_context --locked
+```
+
+Expected: FAIL because selected node context arrays and OpenSpec evidence refs are not populated.
+
+- [ ] **Step 3: Populate selected node overview, inputs, run, outputs and diffs**
+
+Modify `src/interactive/web_projection.rs` so `selected_node_context` accepts `task_root`, `artifact_index`, `timeline`, and `pending_provider_step`:
+
+```rust
+fn selected_node_context(
+    task_root: &Path,
+    selected_node_id: Option<&str>,
+    artifact_index: &[ArtifactIndexEntry],
+    timeline: &[Value],
+    pending: Option<&PendingProviderStepProjection>,
+) -> Result<SelectedNodeContext, TaskRunError> {
+    let overview = selected_node_id
+        .map(|node_id| {
+            serde_json::json!({
+                "node_id": node_id,
+                "provider_type": pending
+                    .filter(|step| step.node_id == node_id)
+                    .map(|step| step.provider_type.clone()),
+                "status": latest_node_status(timeline, node_id),
+                "duration_ms": latest_node_duration(timeline, node_id),
+                "failure_route": latest_node_failure_route(timeline, node_id),
+                "completion_criteria": latest_node_completion_criteria(timeline, node_id)
+            })
+        })
+        .unwrap_or_else(|| serde_json::json!({}));
+    let inputs = selected_node_id
+        .and_then(|node_id| pending.filter(|step| step.node_id == node_id))
+        .map(|step| {
+            vec![
+                serde_json::json!({"kind":"prompt_snapshot","prompt":step.prompt}),
+                serde_json::json!({"kind":"input_summary","value":step.input_summary}),
+                serde_json::json!({"kind":"allowed_write_scope","value":step.allowed_write_scope}),
+                serde_json::json!({"kind":"output_schema","value":step.output_schema}),
+            ]
+        })
+        .unwrap_or_default();
+    let run = read_provider_output(task_root, selected_node_id)?;
+    let outputs = selected_node_id
+        .map(|node_id| {
+            artifact_index
+                .iter()
+                .filter(|entry| entry.producer_node.as_deref() == Some(node_id))
+                .map(serde_json::to_value)
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()
+        .map_err(|error| TaskRunError::new("interactive_projection_json", error.to_string()))?
+        .unwrap_or_default();
+    let diffs = changed_file_refs(timeline, selected_node_id);
+
+    Ok(SelectedNodeContext {
+        node_id: selected_node_id.map(str::to_string),
+        overview,
+        inputs,
+        run,
+        outputs,
+        diffs,
+    })
+}
+```
+
+Add helper functions:
+
+```rust
+fn latest_node_status(timeline: &[Value], node_id: &str) -> Option<String> {
+    timeline
+        .iter()
+        .rev()
+        .find(|item| item.get("node_id").and_then(Value::as_str) == Some(node_id))
+        .and_then(|item| item.get("status").and_then(Value::as_str))
+        .map(str::to_string)
+}
+
+fn latest_node_duration(timeline: &[Value], node_id: &str) -> Option<u64> {
+    timeline
+        .iter()
+        .rev()
+        .find(|item| item.get("node_id").and_then(Value::as_str) == Some(node_id))
+        .and_then(|item| item.get("duration_ms").and_then(Value::as_u64))
+}
+
+fn latest_node_failure_route(timeline: &[Value], node_id: &str) -> Option<String> {
+    timeline
+        .iter()
+        .rev()
+        .find(|item| item.get("node_id").and_then(Value::as_str) == Some(node_id))
+        .and_then(|item| item.get("failure_route").and_then(Value::as_str))
+        .map(str::to_string)
+}
+
+fn latest_node_completion_criteria(timeline: &[Value], node_id: &str) -> Option<Value> {
+    timeline
+        .iter()
+        .rev()
+        .find(|item| item.get("node_id").and_then(Value::as_str) == Some(node_id))
+        .and_then(|item| item.get("completion_criteria").cloned())
+}
+
+fn changed_file_refs(timeline: &[Value], selected_node_id: Option<&str>) -> Vec<Value> {
+    timeline
+        .iter()
+        .filter(|item| selected_node_id.is_none() || item.get("node_id").and_then(Value::as_str) == selected_node_id)
+        .flat_map(|item| {
+            item.get("changed_files")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+        })
+        .filter_map(|path| path.as_str().map(|path| serde_json::json!({"path": path})))
+        .collect()
+}
+```
+
+- [ ] **Step 4: Add OpenSpec docs to artifact index**
+
+Modify `src/interactive/projection.rs` so `build_artifact_index` also indexes:
+
+```text
+openspec/changes/<change_id>/proposal.md
+openspec/changes/<change_id>/design.md
+openspec/changes/<change_id>/tasks.md
+openspec/changes/<change_id>/specs/main/spec.md
+```
+
+Use artifact kinds:
+
+```rust
+"openspec_proposal"
+"openspec_design"
+"openspec_tasks"
+"openspec_spec"
+```
+
+Add each as `ArtifactIndexEntry` with `ContentType::Markdown`, `ArtifactStatus::Active`, `producer_node: None`, `dropped: false`, and relative path under workspace.
+
+- [ ] **Step 5: Run node context and projection tests**
+
+Run:
+
+```bash
+cargo test --test web_node_context --test web_projection --test interactive_projection --locked
+```
+
+Expected: PASS, and selected node context contains non-empty Inputs, Run, Outputs and Diff arrays for the fixture.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/interactive/web_projection.rs src/interactive/projection.rs tests/web_node_context.rs
+git commit -m "feat: add selected node io context"
 ```
 
 ## Task 3: Rollback Preview And Safer Checkpoint Boundary
@@ -3281,6 +3545,184 @@ git add web/src/api/types.ts web/src/api/client.ts web/src/state/workbench-store
 git commit -m "feat: add web frontend api store"
 ```
 
+## Task 10.5: New Task Panel And Policy Controls
+
+**Files:**
+- Create: `web/src/components/task/NewTaskPanel.tsx`
+- Modify: `web/src/main.tsx`
+- Test: `web/src/components/task/NewTaskPanel.test.tsx`
+
+- [ ] **Step 1: Write failing new task panel test**
+
+Create `web/src/components/task/NewTaskPanel.test.tsx`:
+
+```tsx
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { describe, expect, it, vi } from "vitest";
+import { NewTaskPanel } from "./NewTaskPanel";
+
+describe("NewTaskPanel", () => {
+  it("submits request change policy provider and timeout", async () => {
+    const onCreateTask = vi.fn();
+    render(<NewTaskPanel onCreateTask={onCreateTask} busy={false} />);
+
+    await userEvent.type(screen.getByLabelText("任务请求"), "实现 Fibonacci square sum");
+    await userEvent.type(screen.getByLabelText("change id"), "aria-fibonacci-square");
+    await userEvent.selectOptions(screen.getByLabelText("policy preset"), "manual-write");
+    await userEvent.selectOptions(screen.getByLabelText("provider mode"), "fake");
+    await userEvent.clear(screen.getByLabelText("timeout seconds"));
+    await userEvent.type(screen.getByLabelText("timeout seconds"), "2400");
+    await userEvent.click(screen.getByRole("button", { name: "新建任务" }));
+
+    expect(onCreateTask).toHaveBeenCalledWith({
+      request_text: "实现 Fibonacci square sum",
+      change_id: "aria-fibonacci-square",
+      policy_preset: "manual-write",
+      provider_mode: "fake",
+      timeout_secs: 2400
+    });
+  });
+});
+```
+
+- [ ] **Step 2: Run the test and verify failure**
+
+Run:
+
+```bash
+pnpm --dir web test -- --run web/src/components/task/NewTaskPanel.test.tsx
+```
+
+Expected: FAIL because `NewTaskPanel` does not exist.
+
+- [ ] **Step 3: Implement NewTaskPanel**
+
+Create `web/src/components/task/NewTaskPanel.tsx`:
+
+```tsx
+import { Plus } from "lucide-react";
+import { useState } from "react";
+import type { CreateTaskRequest } from "../../api/types";
+
+const policyPresets = ["manual-write", "manual-all", "auto-review", "non-interactive"];
+const providerModes = ["fake", "real"];
+
+export function NewTaskPanel({
+  onCreateTask,
+  busy
+}: {
+  onCreateTask: (payload: CreateTaskRequest) => void;
+  busy: boolean;
+}) {
+  const [requestText, setRequestText] = useState("");
+  const [changeId, setChangeId] = useState("");
+  const [policyPreset, setPolicyPreset] = useState("manual-write");
+  const [providerMode, setProviderMode] = useState("fake");
+  const [timeoutSecs, setTimeoutSecs] = useState(2400);
+
+  return (
+    <form
+      className="border-b border-line bg-white p-3"
+      onSubmit={(event) => {
+        event.preventDefault();
+        onCreateTask({
+          request_text: requestText,
+          change_id: changeId,
+          policy_preset: policyPreset,
+          provider_mode: providerMode,
+          timeout_secs: timeoutSecs
+        });
+      }}
+    >
+      <div className="grid grid-cols-[minmax(16rem,1fr)_13rem_10rem_10rem_8rem_auto] gap-2">
+        <label className="text-xs font-semibold text-slate-500">
+          任务请求
+          <input
+            aria-label="任务请求"
+            className="mt-1 w-full rounded-md border border-line px-2 py-2 text-sm"
+            value={requestText}
+            onChange={(event) => setRequestText(event.target.value)}
+          />
+        </label>
+        <label className="text-xs font-semibold text-slate-500">
+          change id
+          <input
+            aria-label="change id"
+            className="mt-1 w-full rounded-md border border-line px-2 py-2 text-sm"
+            value={changeId}
+            onChange={(event) => setChangeId(event.target.value)}
+          />
+        </label>
+        <label className="text-xs font-semibold text-slate-500">
+          policy preset
+          <select
+            aria-label="policy preset"
+            className="mt-1 w-full rounded-md border border-line px-2 py-2 text-sm"
+            value={policyPreset}
+            onChange={(event) => setPolicyPreset(event.target.value)}
+          >
+            {policyPresets.map((preset) => <option key={preset} value={preset}>{preset}</option>)}
+          </select>
+        </label>
+        <label className="text-xs font-semibold text-slate-500">
+          provider mode
+          <select
+            aria-label="provider mode"
+            className="mt-1 w-full rounded-md border border-line px-2 py-2 text-sm"
+            value={providerMode}
+            onChange={(event) => setProviderMode(event.target.value)}
+          >
+            {providerModes.map((mode) => <option key={mode} value={mode}>{mode}</option>)}
+          </select>
+        </label>
+        <label className="text-xs font-semibold text-slate-500">
+          timeout seconds
+          <input
+            aria-label="timeout seconds"
+            type="number"
+            min={1}
+            className="mt-1 w-full rounded-md border border-line px-2 py-2 text-sm"
+            value={timeoutSecs}
+            onChange={(event) => setTimeoutSecs(Number(event.target.value))}
+          />
+        </label>
+        <button
+          type="submit"
+          disabled={busy || requestText.trim() === "" || changeId.trim() === ""}
+          className="mt-5 inline-flex items-center justify-center rounded-md bg-ink px-3 py-2 text-sm font-semibold text-white disabled:opacity-50"
+        >
+          <Plus className="mr-1 h-4 w-4" />
+          新建任务
+        </button>
+      </div>
+    </form>
+  );
+}
+```
+
+- [ ] **Step 4: Wire NewTaskPanel into AppShell**
+
+Modify `web/src/main.tsx` so `AppShell` renders `NewTaskPanel` above the three-column workbench. On submit, call `createTask`, set the returned task as active, call `getProjection(created.task_id)`, and update the workbench store. Keep `TaskSwitcher` for continuing existing tasks.
+
+- [ ] **Step 5: Run new task panel tests and build**
+
+Run:
+
+```bash
+pnpm --dir web test -- --run web/src/components/task/NewTaskPanel.test.tsx
+pnpm --dir web build
+```
+
+Expected: PASS for form submission and TypeScript build.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add web/src/components/task/NewTaskPanel.tsx web/src/components/task/NewTaskPanel.test.tsx web/src/main.tsx
+git commit -m "feat: add web new task panel"
+```
+
 ## Task 11: Workbench Layout Components
 
 **Files:**
@@ -4250,8 +4692,8 @@ git commit -m "test: verify aria web workbench flow"
 
 ## Self-Review Checklist
 
-- [x] 设计规格覆盖：计划覆盖 `aria web --workspace`、单机单 workspace、新建/继续任务、逐节点暂停确认、provider prompt 编辑确认、输入输出/文档沉淀物展示、provider stdout/stderr、structured output、manual gate、retry、provider auth diagnostics、任务列表、artifact 内容、文件内容、checkpoint diff、实时事件流、回退预览、dropped 历史、Fibonacci gate 诊断和非交互回归。
-- [x] 页面覆盖 TUI 信息域：Overview、Timeline、IO、Artifacts、Changes、Diagnostics、Action 输入均落到 Flow Rail、Node Workspace、Evidence Panel、Diagnostics Panel、Action Composer。
+- [x] 设计规格覆盖：计划覆盖 `aria web --workspace`、单机单 workspace、新建/继续任务、逐节点暂停确认、provider prompt 编辑确认、节点 Overview/Inputs/Run/Outputs/Diff 数据填充、OpenSpec 文档沉淀物、provider stdout/stderr、structured output、manual gate、retry、provider auth diagnostics、任务列表、artifact 内容、文件内容、checkpoint diff、实时事件流、回退预览、dropped 历史、Fibonacci gate 诊断和非交互回归。
+- [x] 页面覆盖 TUI 信息域：Overview、Timeline、IO、Artifacts、Changes、Diagnostics、Action 输入均落到 NewTaskPanel、TaskSwitcher、Flow Rail、Node Workspace、Evidence Panel、Diagnostics Panel、Action Composer。
 - [x] vibe-kanban 参考范围受控：只采用 checkpoint/answer 回退交互语义，不照搬视觉。
 - [x] TDD 覆盖：每个后端和前端阶段都先写失败测试，再实现，再运行验证。
 - [x] 文件路径符合项目规则：计划文档位于 `cadence/plans/`，前端代码位于 `web/`，后端代码位于 `src/web/` 和既有 runtime 模块。
