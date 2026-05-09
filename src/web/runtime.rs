@@ -14,8 +14,9 @@ use crate::interactive::web_projection::build_web_projection;
 use crate::task_run::types::TaskRunError;
 use crate::web::runtime_store::WebRuntimeStore;
 use crate::web::types::{
-    AdvanceTaskResponse, ConfirmTaskRequest, ConfirmTaskResponse, CreateTaskRequest,
-    CreateTaskResponse, PendingProviderStepDto,
+    AdvanceTaskResponse, ArtifactContentResponse, ConfirmTaskRequest, ConfirmTaskResponse,
+    CreateTaskRequest, CreateTaskResponse, FileContentResponse, FileDiffResponse,
+    PendingProviderStepDto, TaskListItem, TaskListResponse,
 };
 
 pub struct WebRuntime {
@@ -246,6 +247,94 @@ impl WebRuntime {
         let base = build_workspace_projection(&self.workspace_root, task_id)?;
         build_web_projection(&self.workspace_root, base, selected_node_id)
     }
+
+    pub fn list_tasks(&self) -> Result<TaskListResponse, TaskRunError> {
+        let tasks_root = self.workspace_root.join(".aria/runtime/tasks");
+        let entries = match fs::read_dir(&tasks_root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(TaskListResponse { tasks: Vec::new() });
+            }
+            Err(error) => return Err(io_error(error)),
+        };
+        let mut tasks = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(io_error)?;
+            if !entry.file_type().map_err(io_error)?.is_dir() {
+                continue;
+            }
+            let task_id = entry.file_name().to_string_lossy().to_string();
+            let state = read_optional_json(&entry.path().join("state.json"))?;
+            tasks.push(TaskListItem {
+                task_id,
+                change_id: state
+                    .get("change_id")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
+                phase: state
+                    .get("phase")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
+                updated_at: None,
+            });
+        }
+        tasks.sort_by(|left, right| left.task_id.cmp(&right.task_id));
+        Ok(TaskListResponse { tasks })
+    }
+
+    pub fn artifact_content(
+        &self,
+        artifact_ref: &str,
+    ) -> Result<ArtifactContentResponse, TaskRunError> {
+        let projection = self.projection(None, None)?;
+        let entry = projection
+            .artifact_index
+            .iter()
+            .find(|entry| entry.artifact_ref == artifact_ref)
+            .ok_or_else(|| {
+                TaskRunError::new(
+                    "artifact_not_found",
+                    format!("artifact not found: {artifact_ref}"),
+                )
+            })?;
+        let path = self.workspace_root.join(&entry.path);
+        let content = fs::read_to_string(path).map_err(io_error)?;
+        Ok(ArtifactContentResponse {
+            artifact_ref: entry.artifact_ref.clone(),
+            artifact_kind: entry.artifact_kind.clone(),
+            producer_node: entry.producer_node.clone(),
+            path: entry.path.clone(),
+            content_type: format!("{:?}", entry.content_type).to_lowercase(),
+            content,
+        })
+    }
+
+    pub fn file_content(&self, path: &str) -> Result<FileContentResponse, TaskRunError> {
+        let safe = safe_workspace_path(&self.workspace_root, path)?;
+        Ok(FileContentResponse {
+            path: path.to_string(),
+            content_type: content_type_for_path(path),
+            content: fs::read_to_string(safe).map_err(io_error)?,
+        })
+    }
+
+    pub fn file_diff(
+        &self,
+        base_checkpoint: &str,
+        path: &str,
+    ) -> Result<FileDiffResponse, TaskRunError> {
+        let _ = safe_workspace_path(&self.workspace_root, path)?;
+        let diff = Command::new("git")
+            .args(["diff", base_checkpoint, "--", path])
+            .current_dir(&self.workspace_root)
+            .output()
+            .map_err(|error| TaskRunError::new("git_command_failed", error.to_string()))?;
+        Ok(FileDiffResponse {
+            base_checkpoint: base_checkpoint.to_string(),
+            path: path.to_string(),
+            diff: String::from_utf8_lossy(&diff.stdout).to_string(),
+        })
+    }
 }
 
 fn io_error(error: std::io::Error) -> TaskRunError {
@@ -262,6 +351,33 @@ fn read_optional_json(path: &std::path::Path) -> Result<serde_json::Value, TaskR
             .map_err(|error| TaskRunError::new("web_runtime_json", error.to_string())),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(json!({})),
         Err(error) => Err(io_error(error)),
+    }
+}
+
+fn safe_workspace_path(
+    root: &std::path::Path,
+    path: &str,
+) -> Result<std::path::PathBuf, TaskRunError> {
+    if path.contains("..") || path.starts_with('/') || path.starts_with('\\') {
+        return Err(TaskRunError::new(
+            "invalid_file_path",
+            format!("unsafe path: {path}"),
+        ));
+    }
+    Ok(root.join(path))
+}
+
+fn content_type_for_path(path: &str) -> String {
+    if path.ends_with(".md") {
+        "markdown".to_string()
+    } else if path.ends_with(".json") {
+        "json".to_string()
+    } else if path.contains("/tests/") || path.contains(".test.") || path.contains(".spec.") {
+        "test".to_string()
+    } else if path.ends_with(".log") || path.ends_with(".jsonl") {
+        "log".to_string()
+    } else {
+        "source".to_string()
     }
 }
 

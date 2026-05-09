@@ -38,7 +38,8 @@ impl IntoResponse for ApiError {
         let status = match self.code.as_str() {
             "invalid_task_request" => StatusCode::BAD_REQUEST,
             "checkpoint_unsafe_dirty_worktree" => StatusCode::CONFLICT,
-            "interactive_task_missing" => StatusCode::NOT_FOUND,
+            "artifact_not_found" | "interactive_task_missing" => StatusCode::NOT_FOUND,
+            "invalid_file_path" => StatusCode::BAD_REQUEST,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, Json(self)).into_response()

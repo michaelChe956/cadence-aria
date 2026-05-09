@@ -91,3 +91,45 @@ pub struct WebEvent {
     pub task_id: Option<String>,
     pub payload: Value,
 }
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct TaskListResponse {
+    pub tasks: Vec<TaskListItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct TaskListItem {
+    pub task_id: String,
+    pub change_id: Option<String>,
+    pub phase: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ArtifactContentResponse {
+    pub artifact_ref: String,
+    pub artifact_kind: String,
+    pub producer_node: Option<String>,
+    pub path: String,
+    pub content_type: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct FileContentResponse {
+    pub path: String,
+    pub content_type: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct FileDiffResponse {
+    pub base_checkpoint: String,
+    pub path: String,
+    pub diff: String,
+}

@@ -12,14 +12,26 @@ use crate::web::error::ApiResult;
 use crate::web::events::WebEventType;
 use crate::web::state::WebAppState;
 use crate::web::types::{
-    AdvanceTaskResponse, ConfirmTaskRequest, ConfirmTaskResponse, CreateTaskRequest,
-    CreateTaskResponse, WebEvent,
+    AdvanceTaskResponse, ArtifactContentResponse, ConfirmTaskRequest, ConfirmTaskResponse,
+    CreateTaskRequest, CreateTaskResponse, FileContentResponse, FileDiffResponse, TaskListResponse,
+    WebEvent,
 };
 
 #[derive(Debug, Deserialize)]
 pub struct ProjectionQuery {
     pub task_id: Option<String>,
     pub node_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FileContentQuery {
+    pub path: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FileDiffQuery {
+    pub base_checkpoint: String,
+    pub path: String,
 }
 
 pub async fn health() -> Json<serde_json::Value> {
@@ -38,6 +50,11 @@ pub async fn create_task(
         json!({"phase": response.phase}),
     );
     Ok(Json(response))
+}
+
+pub async fn list_tasks(State(state): State<WebAppState>) -> ApiResult<Json<TaskListResponse>> {
+    let runtime = state.runtime.lock().expect("runtime lock");
+    Ok(Json(runtime.list_tasks()?))
 }
 
 pub async fn advance_task(
@@ -110,6 +127,32 @@ pub async fn projection(
         query.task_id.as_deref(),
         query.node_id.as_deref(),
     )?))
+}
+
+pub async fn artifact_content(
+    State(state): State<WebAppState>,
+    Path(artifact_ref): Path<String>,
+) -> ApiResult<Json<ArtifactContentResponse>> {
+    let runtime = state.runtime.lock().expect("runtime lock");
+    Ok(Json(runtime.artifact_content(&artifact_ref)?))
+}
+
+pub async fn file_content(
+    State(state): State<WebAppState>,
+    Query(query): Query<FileContentQuery>,
+) -> ApiResult<Json<FileContentResponse>> {
+    let runtime = state.runtime.lock().expect("runtime lock");
+    Ok(Json(runtime.file_content(&query.path)?))
+}
+
+pub async fn file_diff(
+    State(state): State<WebAppState>,
+    Query(query): Query<FileDiffQuery>,
+) -> ApiResult<Json<FileDiffResponse>> {
+    let runtime = state.runtime.lock().expect("runtime lock");
+    Ok(Json(
+        runtime.file_diff(&query.base_checkpoint, &query.path)?,
+    ))
 }
 
 pub async fn events(
