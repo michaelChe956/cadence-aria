@@ -14,10 +14,12 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.102"
+axum = "0.8"
 chrono = { version = "0.4.44", features = ["clock", "serde"] }
 crossterm = "0.28"
 hex = "0.4.3"
 libc = "0.2.177"
+mime_guess = "2.0"
 pulldown-cmark = "0.13.3"
 ratatui = "0.29"
 serde = { version = "1.0.228", features = ["derive"] }
@@ -25,8 +27,10 @@ serde_json = "1.0.149"
 sha2 = "0.10.9"
 thiserror = "2.0.18"
 tokio = { version = "1.52.1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+tower-http = { version = "0.6", features = ["fs", "trace"] }
 uuid = { version = "1.23.1", features = ["v4"] }
 
 [dev-dependencies]
 serde_yaml = "0.9.34"
 tempfile = "3.27.0"
+tower = { version = "0.5", features = ["util"] }
