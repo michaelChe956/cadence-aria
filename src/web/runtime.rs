@@ -16,7 +16,7 @@ use crate::web::runtime_store::WebRuntimeStore;
 use crate::web::types::{
     AdvanceTaskResponse, ArtifactContentResponse, ConfirmTaskRequest, ConfirmTaskResponse,
     CreateTaskRequest, CreateTaskResponse, FileContentResponse, FileDiffResponse,
-    PendingProviderStepDto, TaskListItem, TaskListResponse,
+    PendingProviderStepDto, StopTaskResponse, TaskListItem, TaskListResponse,
 };
 
 pub struct WebRuntime {
@@ -114,6 +114,29 @@ impl WebRuntime {
         }
         let store = WebRuntimeStore::new(&self.workspace_root, task_id);
         self.persist_provider_execution(task_id, &store, request.checkpoint_id, request.prompt)
+    }
+
+    pub fn provider_command_diagnostic(
+        &self,
+        provider_type: &str,
+        message: &str,
+    ) -> serde_json::Value {
+        json!({
+            "category": "provider_error",
+            "code": "provider_authorization_or_command_unavailable",
+            "provider_type": provider_type,
+            "message": format!("{provider_type} provider unavailable: {message}"),
+            "details": {
+                "action": "check provider CLI installation, authentication, and PATH"
+            }
+        })
+    }
+
+    pub fn stop_task(&mut self, task_id: &str) -> Result<StopTaskResponse, TaskRunError> {
+        Ok(StopTaskResponse {
+            status: "stop_requested".to_string(),
+            task_id: task_id.to_string(),
+        })
     }
 
     fn persist_provider_execution(

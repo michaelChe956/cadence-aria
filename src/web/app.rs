@@ -15,6 +15,7 @@ pub fn build_web_router(state: WebAppState) -> Router {
         )
         .route("/api/tasks/{task_id}/advance", post(handlers::advance_task))
         .route("/api/tasks/{task_id}/confirm", post(handlers::confirm_task))
+        .route("/api/tasks/{task_id}/stop", post(handlers::stop_task))
         .route(
             "/api/artifacts/{artifact_ref}",
             get(handlers::artifact_content),

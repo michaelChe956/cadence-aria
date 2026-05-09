@@ -133,3 +133,22 @@ pub struct FileDiffResponse {
     pub path: String,
     pub diff: String,
 }
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ProviderOutputChunk {
+    pub node_id: String,
+    pub provider_run_id: String,
+    pub stream: String,
+    pub text: String,
+    pub structured_output: Option<Value>,
+    pub manual_gate: Option<String>,
+    pub retry_attempt: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct StopTaskResponse {
+    pub status: String,
+    pub task_id: String,
+}

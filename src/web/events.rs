@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::Value;
 use tokio::sync::broadcast;
 
-use crate::web::types::WebEvent;
+use crate::web::types::{ProviderOutputChunk, WebEvent};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WebEventType {
@@ -101,6 +101,15 @@ impl EventHub {
         }
         let _ = self.tx.send(event.clone());
         event
+    }
+
+    pub fn publish_provider_output(
+        &self,
+        task_id: Option<&str>,
+        chunk: ProviderOutputChunk,
+    ) -> WebEvent {
+        let payload = serde_json::to_value(chunk).expect("provider output chunk");
+        self.publish(WebEventType::ProviderOutput.as_str(), task_id, payload)
     }
 
     pub fn replay_after(&self, cursor: u64) -> Vec<WebEvent> {

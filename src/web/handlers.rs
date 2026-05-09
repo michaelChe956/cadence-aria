@@ -13,8 +13,8 @@ use crate::web::events::WebEventType;
 use crate::web::state::WebAppState;
 use crate::web::types::{
     AdvanceTaskResponse, ArtifactContentResponse, ConfirmTaskRequest, ConfirmTaskResponse,
-    CreateTaskRequest, CreateTaskResponse, FileContentResponse, FileDiffResponse, TaskListResponse,
-    WebEvent,
+    CreateTaskRequest, CreateTaskResponse, FileContentResponse, FileDiffResponse, StopTaskResponse,
+    TaskListResponse, WebEvent,
 };
 
 #[derive(Debug, Deserialize)]
@@ -114,6 +114,20 @@ pub async fn confirm_task(
         WebEventType::ProjectionUpdated.as_str(),
         Some(&task_id),
         json!({}),
+    );
+    Ok(Json(response))
+}
+
+pub async fn stop_task(
+    State(state): State<WebAppState>,
+    Path(task_id): Path<String>,
+) -> ApiResult<Json<StopTaskResponse>> {
+    let mut runtime = state.runtime.lock().expect("runtime lock");
+    let response = runtime.stop_task(&task_id)?;
+    state.events.publish(
+        WebEventType::ProjectionUpdated.as_str(),
+        Some(&task_id),
+        json!({ "reason": "stop_requested", "task_id": task_id }),
     );
     Ok(Json(response))
 }
