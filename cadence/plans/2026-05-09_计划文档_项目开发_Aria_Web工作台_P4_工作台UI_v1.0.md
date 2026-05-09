@@ -18,6 +18,7 @@ P4 覆盖：
 - `blocked_by_gate` 拆解：business code、unit tests、coverage gate、archive/integration gate、root cause
 - Flow Rail：N00-N28、状态、provider、attempt/rework、artifact count、gate/diagnostic
 - Node Workspace：Overview、Inputs、Run、Outputs、Diff
+- Timeline/Changes：turn、checkpoint、changed files、diff、dropped history browse state
 - Evidence Panel：OpenSpec、Aria artifacts、reports、provider records、testing/final/blocked report、node-events、源码和测试
 - Markdown 目录/锚点、JSON 长字段折叠、source/test/log 渲染
 - Diagnostics 分类展示
@@ -58,7 +59,7 @@ pnpm --dir web test -- --run web/src/components/shell/TopStatusBar.test.tsx web/
 pnpm --dir web build
 ```
 
-Expected: PASS.
+Expected: PASS, including Timeline/Changes browse affordance for changed files, checkpoint and dropped turn state.
 
 - [ ] **Step 2: Commit**
 

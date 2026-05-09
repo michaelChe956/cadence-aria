@@ -28,9 +28,9 @@ P2 覆盖：
 - `GET /api/files/diff?base_checkpoint=&path=`
 - `GET /api/events`
 - provider output backend stream
-- stop signal backend route and `stop_requested` event
+- stop signal backend route; it must publish only design event taxonomy entries such as `projection_updated`、`node_failed` or `error`
 - provider authorization/command diagnostics
-- `aria web --workspace <PATH> [--host HOST] [--port PORT] [--check]`
+- `aria web --workspace <PATH> [--host HOST] [--port PORT] [--check]`, with automatic port selection when `--port` is omitted
 
 ## Source Tasks From Master Plan
 
@@ -138,7 +138,7 @@ Run:
 cargo test --test web_provider_output_events --locked
 ```
 
-Expected: PASS for `provider_output` payload、`stop_requested` event and provider auth/command diagnostics.
+Expected: PASS for `provider_output` payload、stop signal projection update and provider auth/command diagnostics; no `stop_requested` SSE event type is introduced.
 
 - [ ] **Step 2: Commit**
 

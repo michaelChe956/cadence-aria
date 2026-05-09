@@ -210,10 +210,12 @@ fn paused_advance_response_serializes_pending_step() {
 fn confirm_and_rollback_requests_match_frontend_payloads() {
     let confirm = serde_json::from_value::<ConfirmTaskRequest>(json!({
         "checkpoint_id": "ckpt_0001",
-        "prompt": "最终确认后的 prompt"
+        "prompt": "最终确认后的 prompt",
+        "policy_override": "manual-all"
     }))
     .expect("confirm");
     assert_eq!(confirm.prompt, "最终确认后的 prompt");
+    assert_eq!(confirm.policy_override.as_deref(), Some("manual-all"));
 
     let preview = serde_json::from_value::<RollbackPreviewRequest>(json!({
         "checkpoint_id": "ckpt_0001"
@@ -338,6 +340,7 @@ pub enum AdvanceTaskResponse {
 pub struct ConfirmTaskRequest {
     pub checkpoint_id: String,
     pub prompt: String,
+    pub policy_override: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3050,7 +3053,11 @@ pub async fn stop_task(
 ) -> ApiResult<Json<StopTaskResponse>> {
     let mut runtime = state.runtime.lock().expect("runtime lock");
     let response = runtime.stop_task(&task_id)?;
-    state.events.publish("stop_requested", Some(&task_id), serde_json::json!({ "task_id": task_id }));
+    state.events.publish(
+        "projection_updated",
+        Some(&task_id),
+        serde_json::json!({ "reason": "stop_requested", "task_id": task_id }),
+    );
     Ok(Json(response))
 }
 ```
@@ -3229,7 +3236,7 @@ Modify `src/cli.rs`:
             "web_check_ok:{}:{}:{}",
             options.workspace.to_string_lossy(),
             options.host,
-            options.port
+            options.port.map(|port| port.to_string()).unwrap_or_else(|| "auto".to_string())
         )));
     }
     Err(CliError {
@@ -3246,7 +3253,7 @@ Add:
 struct WebOptions {
     workspace: PathBuf,
     host: String,
-    port: u16,
+    port: Option<u16>,
     check: bool,
 }
 
@@ -3259,8 +3266,7 @@ fn parse_web_options(args: &[String]) -> Result<WebOptions, CliError> {
         .map_err(|error| CliError {
             code: "invalid_cli_args".to_string(),
             message: format!("--port must be a u16: {error}"),
-        })?
-        .unwrap_or(4317);
+        })?;
     Ok(WebOptions {
         workspace,
         host,
@@ -3316,15 +3322,17 @@ use tokio::net::TcpListener;
 pub async fn serve_web(
     workspace_root: std::path::PathBuf,
     host: String,
-    port: u16,
+    port: Option<u16>,
 ) -> anyhow::Result<()> {
-    let addr: SocketAddr = format!("{host}:{port}").parse()?;
+    let addr: SocketAddr = format!("{}:{}", host, port.unwrap_or(0)).parse()?;
     let state = WebAppState::new(
         workspace_root.clone(),
         crate::web::runtime::WebRuntime::new_fake(workspace_root),
     );
     let app = build_web_router(state).fallback_service(crate::web::static_assets::static_dist_service());
     let listener = TcpListener::bind(addr).await?;
+    let bound_addr = listener.local_addr()?;
+    eprintln!("aria web listening on http://{bound_addr}");
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -3692,10 +3700,14 @@ describe("workbench store", () => {
     });
     store.selectNode("N17");
     store.selectTab("outputs");
+    store.restoreSelectionFromSearch(new URLSearchParams("node=N18&tab=run&artifact=art_0001&turn=turn_0001"));
     store.pushEvent({ cursor: 4, event_type: "projection_updated", task_id: "task_0001", payload: {} });
 
-    expect(store.snapshot.selectedNodeId).toBe("N17");
-    expect(store.snapshot.selectedTab).toBe("outputs");
+    expect(store.snapshot.selectedNodeId).toBe("N18");
+    expect(store.snapshot.selectedTab).toBe("run");
+    expect(store.snapshot.selectedArtifactRef).toBe("art_0001");
+    expect(store.snapshot.selectedTurnId).toBe("turn_0001");
+    expect(store.toSearchParams().toString()).toContain("node=N18");
     expect(store.snapshot.events).toHaveLength(1);
   });
 });
@@ -3744,6 +3756,8 @@ export type PendingProviderStep = {
   adapter_role: string;
   prompt: string;
   input_summary: unknown;
+  canonical_input_refs: string[];
+  context_files: string[];
   output_schema: string;
   allowed_write_scope: string[];
   forbidden_actions: string[];
@@ -3844,6 +3858,8 @@ export type WorkbenchSnapshot = {
   projection: WebWorkspaceProjection | null;
   selectedNodeId: string | null;
   selectedTab: WorkbenchTab;
+  selectedArtifactRef: string | null;
+  selectedTurnId: string | null;
   events: WebEvent[];
 };
 
@@ -3852,6 +3868,8 @@ export function createWorkbenchStore() {
     projection: null,
     selectedNodeId: null,
     selectedTab: "overview",
+    selectedArtifactRef: null,
+    selectedTurnId: null,
     events: []
   };
   return {
@@ -3865,6 +3883,20 @@ export function createWorkbenchStore() {
     },
     selectTab(tab: WorkbenchTab) {
       snapshot.selectedTab = tab;
+    },
+    restoreSelectionFromSearch(params: URLSearchParams) {
+      snapshot.selectedNodeId = params.get("node");
+      snapshot.selectedTab = (params.get("tab") as WorkbenchTab | null) ?? "overview";
+      snapshot.selectedArtifactRef = params.get("artifact");
+      snapshot.selectedTurnId = params.get("turn");
+    },
+    toSearchParams() {
+      const params = new URLSearchParams();
+      if (snapshot.selectedNodeId) params.set("node", snapshot.selectedNodeId);
+      if (snapshot.selectedTab) params.set("tab", snapshot.selectedTab);
+      if (snapshot.selectedArtifactRef) params.set("artifact", snapshot.selectedArtifactRef);
+      if (snapshot.selectedTurnId) params.set("turn", snapshot.selectedTurnId);
+      return params;
     },
     pushEvent(event: WebEvent) {
       snapshot.events = [...snapshot.events.slice(-199), event];
@@ -4398,6 +4430,8 @@ describe("ActionComposer", () => {
       adapter_role: "executor",
       prompt: "实现函数",
       input_summary: { worktask_id: "work_wt_001" },
+      canonical_input_refs: ["plan_projection_task_0001_0001"],
+      context_files: ["openspec/changes/aria-fibonacci-square/tasks.md"],
       output_schema: "schema://aria/artifacts/coding_report/v1",
       allowed_write_scope: ["src/", "tests/"],
       forbidden_actions: ["修改 cadence/project-rules"],
@@ -4405,14 +4439,20 @@ describe("ActionComposer", () => {
       checkpoint_id: "ckpt_0001"
     }} onConfirm={onConfirm} onRollback={() => undefined} running={false} />);
 
+    expect(screen.getByText(/plan_projection_task_0001_0001/)).toBeInTheDocument();
+    expect(screen.getByText(/openspec\\/changes\\/aria-fibonacci-square\\/tasks.md/)).toBeInTheDocument();
+    expect(screen.getByText(/修改 cadence\\/project-rules/)).toBeInTheDocument();
+    expect(screen.getByText(/node --test/)).toBeInTheDocument();
     const textarea = screen.getByLabelText("Provider prompt");
     await userEvent.clear(textarea);
     await userEvent.type(textarea, "确认后的 prompt");
+    await userEvent.selectOptions(screen.getByLabelText("Policy override"), "manual-all");
     await userEvent.click(screen.getByRole("button", { name: "确认执行" }));
 
     expect(onConfirm).toHaveBeenCalledWith({
       checkpoint_id: "ckpt_0001",
-      prompt: "确认后的 prompt"
+      prompt: "确认后的 prompt",
+      policy_override: "manual-all"
     });
   });
 });
@@ -4433,7 +4473,7 @@ Expected: FAIL because component is missing.
 Modify `web/src/api/client.ts`:
 
 ```ts
-export function confirmTask(taskId: string, payload: { checkpoint_id: string; prompt: string }) {
+export function confirmTask(taskId: string, payload: { checkpoint_id: string; prompt: string; policy_override?: string | null }) {
   return requestJson<{ status: string; node_id: string; turn_id: string }>(
     `/api/tasks/${encodeURIComponent(taskId)}/confirm`,
     {
@@ -4467,11 +4507,12 @@ export function ActionComposer({
   running
 }: {
   pendingStep: PendingProviderStep | null;
-  onConfirm: (payload: { checkpoint_id: string; prompt: string }) => void;
+  onConfirm: (payload: { checkpoint_id: string; prompt: string; policy_override?: string | null }) => void;
   onRollback: (checkpointId: string) => void;
   running: boolean;
 }) {
   const [prompt, setPrompt] = useState(pendingStep?.prompt ?? "");
+  const [policyOverride, setPolicyOverride] = useState<string>("");
   const scope = useMemo(() => pendingStep?.allowed_write_scope.join(", ") ?? "", [pendingStep]);
 
   if (!pendingStep) {
@@ -4488,6 +4529,10 @@ export function ActionComposer({
         <div>
           <div className="text-sm font-semibold">{pendingStep.node_id} · {pendingStep.provider_type}</div>
           <div className="text-xs text-slate-300">scope: {scope}</div>
+          <div className="text-xs text-slate-300">inputs: {pendingStep.canonical_input_refs.join(", ")}</div>
+          <div className="text-xs text-slate-300">context: {pendingStep.context_files.join(", ")}</div>
+          <div className="text-xs text-slate-300">forbidden: {pendingStep.forbidden_actions.join(", ")}</div>
+          <div className="text-xs text-slate-300">verify: {pendingStep.verification_commands.join(", ")}</div>
         </div>
         <div className="flex gap-2">
           <button type="button" className="rounded-md border border-slate-600 px-3 py-2 text-sm" onClick={() => onRollback(pendingStep.checkpoint_id)}>
@@ -4496,12 +4541,27 @@ export function ActionComposer({
           <button type="button" className="rounded-md border border-slate-600 px-3 py-2 text-sm" disabled={!running}>
             <Square className="mr-1 inline h-4 w-4" /> 停止
           </button>
-          <button type="button" className="rounded-md bg-signal px-3 py-2 text-sm font-semibold text-ink" onClick={() => onConfirm({ checkpoint_id: pendingStep.checkpoint_id, prompt })}>
+          <button type="button" className="rounded-md bg-signal px-3 py-2 text-sm font-semibold text-ink" onClick={() => onConfirm({ checkpoint_id: pendingStep.checkpoint_id, prompt, policy_override: policyOverride || null })}>
             <Play className="mr-1 inline h-4 w-4" /> 确认执行
           </button>
         </div>
       </div>
       <label className="block text-xs font-semibold text-slate-300" htmlFor="provider-prompt">Provider prompt</label>
+      <label className="mt-2 block text-xs font-semibold text-slate-300">
+        Policy override
+        <select
+          aria-label="Policy override"
+          className="ml-2 rounded-md border border-slate-700 bg-[#151b20] px-2 py-1"
+          value={policyOverride}
+          onChange={(event) => setPolicyOverride(event.target.value)}
+        >
+          <option value="">inherit</option>
+          <option value="manual-all">manual-all</option>
+          <option value="manual-write">manual-write</option>
+          <option value="auto-review">auto-review</option>
+          <option value="non-interactive">non-interactive</option>
+        </select>
+      </label>
       <textarea
         id="provider-prompt"
         className="mt-1 min-h-32 w-full rounded-md border border-slate-700 bg-[#151b20] p-3 font-mono text-sm text-white outline-none focus:border-signal"
@@ -5208,7 +5268,7 @@ Create `tests/web_policy_runtime.rs`:
 
 ```rust
 use cadence_aria::web::runtime::WebRuntime;
-use cadence_aria::web::types::{AdvanceTaskResponse, CreateTaskRequest};
+use cadence_aria::web::types::{AdvanceTaskResponse, ConfirmTaskRequest, CreateTaskRequest};
 use tempfile::tempdir;
 
 #[test]
@@ -5233,6 +5293,31 @@ fn non_interactive_does_not_pause_for_provider_confirmation() {
         .expect("create");
     let response = runtime.advance_task(&created.task_id).expect("advance");
     assert!(matches!(response, AdvanceTaskResponse::Advanced { .. } | AdvanceTaskResponse::Completed { .. }));
+}
+
+#[test]
+fn single_node_policy_override_takes_precedence_for_confirmed_step() {
+    let workspace = tempdir().expect("workspace");
+    let mut runtime = WebRuntime::new_fake(workspace.path().to_path_buf());
+    let created = runtime
+        .create_task(request_with_policy("manual-write"))
+        .expect("create");
+    let pending = runtime
+        .advance_task(&created.task_id)
+        .expect("advance")
+        .expect_pending_step()
+        .expect("pending");
+    let response = runtime
+        .confirm_task(
+            &created.task_id,
+            ConfirmTaskRequest {
+                checkpoint_id: pending.checkpoint_id,
+                prompt: pending.prompt,
+                policy_override: Some("manual-all".to_string()),
+            },
+        )
+        .expect("confirm");
+    assert_eq!(response.status, "provider_started");
 }
 
 #[test]
@@ -5309,7 +5394,7 @@ Seed fake runner with an internal `N00` step before provider steps.
 
 - [ ] **Step 4: Apply policy presets in WebRuntime**
 
-Modify `src/web/runtime.rs` so `create_task` stores `policy_preset` in `state.json`, and `advance_task`:
+Modify `src/web/runtime.rs` so `create_task` stores `policy_preset` in `state.json`, `confirm_task` applies optional `policy_override` only to the confirmed node, and `advance_task`:
 
 - loops through internal steps and executes them automatically, writing node run/event/artifact records;
 - for provider steps calls existing `PolicyPreset::decision_for`;
@@ -5371,11 +5456,26 @@ Create `web/e2e/fake-workbench.spec.ts`:
 ```ts
 import { expect, test } from "@playwright/test";
 
-test("fake provider workbench shows node flow, action composer and evidence", async ({ page }) => {
+test("fake provider workbench creates, confirms, observes, rolls back and reruns", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByRole("banner")).toContainText("Aria Web");
   await expect(page.getByRole("navigation", { name: "Node flow" })).toBeVisible();
   await expect(page.getByRole("main")).toContainText("Node Workspace");
+  await page.getByLabel("任务请求").fill("实现 Fibonacci square sum");
+  await page.getByLabel("change id").fill("aria-fibonacci-square");
+  await page.getByLabel("provider mode").selectOption("fake");
+  await page.getByRole("button", { name: "新建任务" }).click();
+  await page.getByRole("button", { name: /推进|Advance/ }).click();
+  await expect(page.getByLabel("Provider prompt")).toBeVisible();
+  await page.getByLabel("Provider prompt").fill("确认后的 fake provider prompt");
+  await page.getByLabel("Policy override").selectOption("manual-all");
+  await page.getByRole("button", { name: "确认执行" }).click();
+  await expect(page.getByText(/provider_output|stdout|artifact/)).toBeVisible();
+  await page.getByRole("button", { name: /回退/ }).click();
+  await expect(page.getByRole("dialog")).toContainText(/checkpoint|Checkpoint/);
+  await page.getByRole("button", { name: "执行回退" }).click();
+  await expect(page.getByText(/dropped/)).toBeVisible();
+  await expect(page.getByLabel("Provider prompt")).toBeVisible();
 });
 ```
 
@@ -5387,7 +5487,7 @@ Run:
 pnpm --dir web test:e2e
 ```
 
-Expected: PASS for first-screen workbench. If browser binaries are missing, run `pnpm --dir web exec playwright install chromium` once, then rerun the command.
+Expected: PASS for full fake provider flow: create task, advance, provider pause, prompt edit, node policy override, confirm, provider output/artifact display, rollback preview, rollback, dropped history and rerun-ready composer. If browser binaries are missing, run `pnpm --dir web exec playwright install chromium` once, then rerun the command.
 
 - [ ] **Step 3: Add Fibonacci browsing fixture assertion**
 
@@ -5475,9 +5575,11 @@ Expected:
 - Top status bar shows workspace, task, phase, provider mode, git summary and SSE state.
 - Flow Rail shows N00-N28 and highlights provider node status.
 - Node Workspace shows Overview、Inputs、Run、Outputs、Diff tabs.
+- Timeline and Changes affordances show turn, checkpoint, changed files, diff and dropped history.
 - Evidence Panel shows artifacts, reports, logs and diagnostics.
-- Action Composer shows Codex/Claude Code-like prompt editor before provider execution.
+- Action Composer shows Codex/Claude Code-like prompt editor, canonical input refs, context files, forbidden actions, verification commands and optional policy override before provider execution.
 - Rollback Dialog previews checkpoint impact and marks dropped history after rollback.
+- URL search params restore selected node, tab, artifact and turn.
 
 - [ ] **Step 7: Commit**
 
@@ -5488,7 +5590,7 @@ git commit -m "test: verify aria web workbench flow"
 
 ## Self-Review Checklist
 
-- [x] 设计规格覆盖：计划覆盖 `aria web --workspace`、单机单 workspace、新建/继续任务、逐节点暂停确认、provider prompt 编辑确认、节点 Overview/Inputs/Run/Outputs/Diff 数据填充、OpenSpec 文档沉淀物、provider stdout/stderr、structured output、manual gate、retry、provider auth diagnostics、任务列表、artifact 内容、文件内容、checkpoint diff、完整 SSE 事件 taxonomy、实时事件流、回退预览、dropped 历史、Fibonacci gate 诊断、policy preset 后端行为、内部节点自动执行和非交互回归。
+- [x] 设计规格覆盖：计划覆盖 `aria web --workspace`、单机单 workspace、默认自动端口选择、新建/继续任务、逐节点暂停确认、provider prompt 编辑确认、PendingProviderStep 全字段展示、单节点临时 policy override、节点 Overview/Inputs/Run/Outputs/Diff 数据填充、Timeline/Changes、OpenSpec 文档沉淀物、provider stdout/stderr、structured output、manual gate、retry、provider auth diagnostics、任务列表、artifact 内容、文件内容、checkpoint diff、完整 SSE 事件 taxonomy、实时事件流、回退预览、dropped 历史、URL search params 恢复、Fibonacci gate 诊断、policy preset 后端行为、内部节点自动执行和非交互回归。
 - [x] 页面覆盖 TUI 信息域：Overview、Timeline、IO、Artifacts、Changes、Diagnostics、Action 输入均落到 NewTaskPanel、TaskSwitcher、TopStatusBar、Flow Rail、Node Workspace、Evidence Panel、Diagnostics Panel、Action Composer、AutoActionStatus。
 - [x] vibe-kanban 参考范围受控：只采用 checkpoint/answer 回退交互语义，不照搬视觉。
 - [x] TDD 覆盖：每个后端和前端阶段都先写失败测试，再实现，再运行验证。

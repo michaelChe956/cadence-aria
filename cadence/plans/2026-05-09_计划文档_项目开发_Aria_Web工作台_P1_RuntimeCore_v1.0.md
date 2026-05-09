@@ -19,6 +19,7 @@ P1 覆盖 design 中这些要求：
 - provider 暂停前创建 checkpoint
 - confirm 后写入 provider run、turn、node run、artifacts、reports、events
 - policy preset：`manual-all`、`manual-write`、`auto-review`、`non-interactive`
+- 单节点临时 policy override 的决策输入和 confirm payload
 - 内部节点自动执行并写入 node run/event/artifact
 - `aria task run --non-interactive` 不回归
 
@@ -193,7 +194,7 @@ Run:
 cargo test --test web_policy_runtime --test interactive_policy --test interactive_controller --locked
 ```
 
-Expected: PASS, matching design policy table.
+Expected: PASS, matching design policy table and single-node temporary override behavior.
 
 - [ ] **Step 3: Commit**
 
