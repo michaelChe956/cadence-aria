@@ -5,7 +5,8 @@ use crate::cross_cutting::openspec_constraints::{
 };
 use crate::cross_cutting::provider_adapter::{ProviderAdapter, ProviderAdapterError};
 use crate::cross_cutting::provider_context_builder::{
-    ProviderContextBuildError, ProviderContextBuilderInput, build_provider_context,
+    ProviderContextBuildError, ProviderContextBuildResult, ProviderContextBuilderInput,
+    build_provider_context,
 };
 use crate::cross_cutting::provider_run::{
     ProviderRunPersistError, failed_provider_run_record_from_error,
@@ -15,7 +16,9 @@ use crate::cross_cutting::runtime_event_log::append_node_event;
 use crate::daemon::checkpoint::{RiskRegistrySnapshot, RuntimeSnapshot};
 use crate::protocol::artifacts::{ArtifactKind, ArtifactRef, ArtifactStatus};
 use crate::protocol::constraints::{BundleStatus, OpenSpecConstraintBundle};
-use crate::protocol::contracts::{AdapterOutput, ApprovalPolicy, ProviderRunRecord, SandboxMode};
+use crate::protocol::contracts::{
+    AdapterInput, AdapterOutput, ApprovalPolicy, ProviderRunRecord, SandboxMode,
+};
 use crate::protocol::enums::{ChangeId, SessionId, TaskId};
 use crate::protocol::loop_counters::LoopCounterName;
 use crate::protocol::policies::PolicyMode;
@@ -249,6 +252,7 @@ pub fn run_provider_node(
         context_files,
         worktree_path: state.input.worktree_path.clone(),
     })?;
+    let adapter_input = planning_adapter_input_for_node(&build_result)?;
     let request = crate::cross_cutting::provider_router::ProviderRunRequest {
         provider_run_id: provider_run_id(&state.input.task_id, node_id),
         node_id: node_id.to_string(),
@@ -272,20 +276,19 @@ pub fn run_provider_node(
         json!({
             "provider_run_id": request.provider_run_id.clone(),
             "context_package_ref": build_result.context_package.context_package_id.clone(),
-            "output_schema": build_result.adapter_input.output_schema.clone(),
+            "output_schema": adapter_input.output_schema.clone(),
         }),
     );
     let protected_openspec_snapshot = snapshot_directory(&state.openspec_change_dir())?;
     let mut retry_count = 0;
     loop {
-        match provider.run(&build_result.adapter_input) {
+        match provider.run(&adapter_input) {
             Ok(output) => {
                 restore_directory_snapshot(
                     &state.openspec_change_dir(),
                     &protected_openspec_snapshot,
                 )?;
-                let mut record =
-                    provider_run_record_from_output(&request, &build_result.adapter_input, &output);
+                let mut record = provider_run_record_from_output(&request, &adapter_input, &output);
                 record.retry_count = retry_count;
                 persist_provider_run(state, &record)?;
                 append_node_event(
@@ -307,20 +310,14 @@ pub fn run_provider_node(
                     &state.openspec_change_dir(),
                     &protected_openspec_snapshot,
                 )?;
-                let route = route_provider_error(
-                    &error.code,
-                    retry_count,
-                    build_result.adapter_input.max_retries,
-                );
+                let route =
+                    route_provider_error(&error.code, retry_count, adapter_input.max_retries);
                 if route == ProviderErrorRoute::Retry {
                     retry_count += 1;
                     continue;
                 }
-                let mut record = failed_provider_run_record_from_error(
-                    &request,
-                    &build_result.adapter_input,
-                    &error,
-                );
+                let mut record =
+                    failed_provider_run_record_from_error(&request, &adapter_input, &error);
                 record.retry_count = retry_count;
                 persist_provider_run(state, &record)?;
                 append_node_event(
@@ -340,6 +337,12 @@ pub fn run_provider_node(
             }
         }
     }
+}
+
+pub(crate) fn planning_adapter_input_for_node(
+    build_result: &ProviderContextBuildResult,
+) -> Result<AdapterInput, PlanningUnitError> {
+    Ok(build_result.adapter_input.clone())
 }
 
 #[derive(Debug, Clone)]

@@ -4,7 +4,8 @@ use crate::cross_cutting::artifact_validate::{
 };
 use crate::cross_cutting::provider_adapter::{ProviderAdapter, ProviderAdapterError};
 use crate::cross_cutting::provider_context_builder::{
-    ProviderContextBuildError, ProviderContextBuilderInput, build_provider_context,
+    ProviderContextBuildError, ProviderContextBuildResult, ProviderContextBuilderInput,
+    build_provider_context,
 };
 use crate::cross_cutting::provider_router::ProviderRunRequest;
 use crate::cross_cutting::provider_run::{
@@ -251,8 +252,9 @@ impl ExecutionChainState {
         rework_source_ref: Option<&str>,
     ) -> Result<Value, ExecutionChainError> {
         let context = build_provider_context(self.builder_input(node_id))?;
+        let adapter_input = execution_adapter_input_for_node(&context)?;
         let request = provider_run_request(node_id, &context.context_package.context_package_id);
-        let _pending_step = pending_provider_step_for_context(node_id, &context.adapter_input)
+        let _pending_step = pending_provider_step_for_context(node_id, &adapter_input)
             .map_err(|error| ExecutionChainError::ProviderBlocked(error.message))?;
         append_node_event(
             &self.task_root(),
@@ -263,14 +265,14 @@ impl ExecutionChainState {
             json!({
                 "provider_run_id": request.provider_run_id.clone(),
                 "context_package_ref": context.context_package.context_package_id.clone(),
-                "output_schema": context.adapter_input.output_schema.clone(),
+                "output_schema": adapter_input.output_schema.clone(),
             }),
         );
-        let output = match provider.run(&context.adapter_input) {
+        let output = match provider.run(&adapter_input) {
             Ok(output) => output,
             Err(error) => {
                 let record =
-                    failed_provider_run_record_from_error(&request, &context.adapter_input, &error);
+                    failed_provider_run_record_from_error(&request, &adapter_input, &error);
                 self.provider_run_records.push(record.clone());
                 append_node_event(
                     &self.task_root(),
@@ -292,7 +294,7 @@ impl ExecutionChainState {
                 return Err(ExecutionChainError::ProviderBlocked(node_id.to_string()));
             }
         };
-        let record = provider_run_record_from_output(&request, &context.adapter_input, &output);
+        let record = provider_run_record_from_output(&request, &adapter_input, &output);
         let mut artifact = output
             .structured_output
             .clone()
@@ -587,6 +589,12 @@ impl ExecutionChainState {
             manual_intervention_reason: self.manual_intervention_reason,
         }
     }
+}
+
+pub(crate) fn execution_adapter_input_for_node(
+    context: &ProviderContextBuildResult,
+) -> Result<AdapterInput, ExecutionChainError> {
+    Ok(context.adapter_input.clone())
 }
 
 fn pending_provider_step_for_context(
