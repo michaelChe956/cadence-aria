@@ -81,6 +81,7 @@ pnpm --dir web build
 | `tests/web_types.rs` | API 类型序列化、错误码 JSON |
 | `tests/web_projection.rs` | Web projection 包含 pending step、node context、artifact refs、diagnostics、git summary |
 | `tests/web_node_context.rs` | selected node 的 Overview、Inputs、Run、Outputs、Diff 和 OpenSpec evidence refs |
+| `tests/interactive_checkpoint.rs` | checkpoint rollback 恢复 Git/runtime snapshot 并标记 dropped history |
 | `tests/interactive_checkpoint_preview.rs` | rollback preview 计算 dirty、drop counts、files_may_change |
 | `tests/web_runtime_persistence.rs` | pause 前 checkpoint、confirm 后 turn/node-run/provider-run/artifact/report/event 持久化 |
 | `tests/web_policy_runtime.rs` | manual-all/manual-write/auto-review/non-interactive 在 WebRuntime 中的暂停/自动执行行为 |
@@ -968,6 +969,7 @@ git commit -m "feat: add selected node io context"
 
 **Files:**
 - Modify: `src/interactive/checkpoint.rs`
+- Modify: `tests/interactive_checkpoint.rs`
 - Test: `tests/interactive_checkpoint_preview.rs`
 
 - [ ] **Step 1: Write the failing rollback preview tests**
@@ -1045,6 +1047,13 @@ fn git_stdout(cwd: &std::path::Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 ```
+
+Also extend `tests/interactive_checkpoint.rs` so rollback proves the full design boundary, not only Git reset:
+
+- `state_snapshot_ref` is restored to the active runtime `state.json`.
+- `projection_snapshot_ref` is restored to the active `projection.json`.
+- later `turns/`、`node-runs/`、`provider-runs/`、`artifacts/` and `reports/` records are marked with `dropped=true`.
+- dropped marking respects `artifact_boundary`、`provider_run_boundary` and `node_run_boundary` where those counters are available.
 
 - [ ] **Step 2: Run the tests and verify failure**
 
@@ -1154,6 +1163,14 @@ fn count_provider_runs(root: &Path) -> Result<usize, TaskRunError> {
 }
 ```
 
+Tighten existing `CheckpointService::rollback` so it remains the single runtime boundary implementation used by both TUI and Web:
+
+- keep the dirty worktree guard and require `force_when_dirty=true` before any reset when dirty;
+- reset Git worktree to checkpoint `git_head`;
+- restore `state_snapshot_ref` and `projection_snapshot_ref` into the active runtime files;
+- mark only records after the checkpoint boundary as dropped for turns、node-runs、provider-runs、artifacts and reports;
+- return a diagnostic `TaskRunError` if checkpoint, snapshot, Git reset, or dropped marking fails.
+
 - [ ] **Step 4: Run checkpoint tests**
 
 Run:
@@ -1162,12 +1179,12 @@ Run:
 cargo test --test interactive_checkpoint --test interactive_checkpoint_preview --locked
 ```
 
-Expected: PASS for existing rollback behavior and new preview behavior.
+Expected: PASS for preview behavior, dirty preflight, Git restore, state/projection snapshot restore, and dropped marking for turns、node-runs、provider-runs、artifacts and reports.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/interactive/checkpoint.rs tests/interactive_checkpoint_preview.rs
+git add src/interactive/checkpoint.rs tests/interactive_checkpoint.rs tests/interactive_checkpoint_preview.rs
 git commit -m "feat: add rollback preview"
 ```
 
@@ -4776,35 +4793,42 @@ pub struct RollbackResponse {
 Add runtime methods:
 
 ```rust
+use crate::interactive::checkpoint::{
+    CheckpointService, RollbackPreviewRequest as CoreRollbackPreviewRequest,
+    RollbackRequest as CoreRollbackRequest,
+};
+
 pub fn rollback_preview(
     &self,
-    _task_id: &str,
+    task_id: &str,
     checkpoint_id: &str,
 ) -> Result<RollbackPreviewResponse, TaskRunError> {
-    Ok(RollbackPreviewResponse {
-        checkpoint_id: checkpoint_id.to_string(),
-        git_head: None,
-        dirty: false,
-        turns_to_drop: 1,
-        node_runs_to_drop: 1,
-        provider_runs_to_drop: 1,
-        artifacts_to_drop: 0,
-        files_may_change: Vec::new(),
-    })
+    let preview = CheckpointService::new(&self.workspace_root, task_id)
+        .preview_rollback(CoreRollbackPreviewRequest {
+            checkpoint_id: checkpoint_id.to_string(),
+        })?;
+    Ok(RollbackPreviewResponse::from(preview))
 }
 
 pub fn rollback(
     &mut self,
-    _task_id: &str,
+    task_id: &str,
     checkpoint_id: &str,
-    _force_when_dirty: bool,
+    force_when_dirty: bool,
 ) -> Result<RollbackResponse, TaskRunError> {
+    CheckpointService::new(&self.workspace_root, task_id).rollback(CoreRollbackRequest {
+        checkpoint_id: checkpoint_id.to_string(),
+        force_when_dirty,
+    })?;
+    self.next_projection_version += 1;
     Ok(RollbackResponse {
         status: "rollback_completed".to_string(),
         checkpoint_id: checkpoint_id.to_string(),
     })
 }
 ```
+
+Add `From<crate::interactive::checkpoint::RollbackPreview> for RollbackPreviewResponse` so API field names stay identical to the design contract.
 
 Add routes:
 
@@ -4814,6 +4838,8 @@ Add routes:
 ```
 
 Add handlers that call runtime, publish `rollback_previewed` and `rollback_completed`.
+
+The handler/runtime implementation must not stop at a fake rollback success response. `tests/web_runtime_fake.rs` must initialize a real temporary Git workspace and assert that the Web rollback path restores the checkpoint Git head, refreshes projection, and exposes dropped history through projection after rollback.
 
 - [ ] **Step 5: Implement frontend rollback dialog and client methods**
 

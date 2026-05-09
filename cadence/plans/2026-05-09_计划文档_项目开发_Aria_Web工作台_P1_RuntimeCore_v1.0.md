@@ -17,6 +17,7 @@ P1 覆盖 design 中这些要求：
 - `WorkspaceProjection`、`InteractionTurn`、`RuntimeCheckpoint`、`ArtifactIndexEntry`
 - selected node 的 Overview、Inputs、Run、Outputs、Diff
 - provider 暂停前创建 checkpoint
+- checkpoint rollback 恢复 Git、runtime state/projection snapshot，并按 boundary 标记后续 turns/node-runs/provider-runs/artifacts/reports 为 dropped
 - confirm 后写入 provider run、turn、node run、artifacts、reports、events
 - policy preset：`manual-all`、`manual-write`、`auto-review`、`non-interactive`
 - 单节点临时 policy override 的决策输入和 confirm payload
@@ -126,6 +127,7 @@ cargo test --test interactive_checkpoint --test interactive_checkpoint_preview -
 ```
 
 Expected: PASS.
+This step must include assertions for Git restore, state/projection snapshot restore, dirty preflight, and dropped marking across turns、node-runs、provider-runs、artifacts and reports.
 
 - [ ] **Step 2: Execute master Task 4**
 
@@ -141,7 +143,7 @@ Expected: PASS.
 - [ ] **Step 3: Commit**
 
 ```bash
-git add src/interactive/checkpoint.rs src/interactive/controller.rs src/task_run/step_runner.rs tests/interactive_checkpoint_preview.rs tests/interactive_controller.rs tests/task_run_step_runner.rs
+git add src/interactive/checkpoint.rs src/interactive/controller.rs src/task_run/step_runner.rs tests/interactive_checkpoint.rs tests/interactive_checkpoint_preview.rs tests/interactive_controller.rs tests/task_run_step_runner.rs
 git commit -m "feat: add aria web checkpoint and provider metadata"
 ```
 
@@ -208,7 +210,7 @@ git commit -m "feat: add aria web interactive runner policy"
 Run:
 
 ```bash
-cargo test --test web_types --test web_projection --test web_node_context --test interactive_checkpoint_preview --test web_runtime_fake --test web_runtime_persistence --test task_run_interactive_runner --test web_policy_runtime --locked
+cargo test --test web_types --test web_projection --test web_node_context --test interactive_checkpoint --test interactive_checkpoint_preview --test web_runtime_fake --test web_runtime_persistence --test task_run_interactive_runner --test web_policy_runtime --locked
 ```
 
 Expected: all listed tests PASS.

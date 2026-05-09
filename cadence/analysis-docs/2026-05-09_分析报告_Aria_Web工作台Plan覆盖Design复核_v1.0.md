@@ -51,7 +51,7 @@
 | SSE 使用 design 事件 taxonomy | P2、P6 | 覆盖；已去掉新增 `stop_requested` 事件类型 |
 | 浏览器断线后通过 projection 恢复 | P2、P3、P6 | 覆盖 |
 | WorkspaceProjection、InteractionTurn、RuntimeCheckpoint、ArtifactIndexEntry | P1 | 覆盖 |
-| rollback preview、dirty 明确确认、恢复 Git/runtime 边界、dropped=true | P1、P5、P6 | 覆盖 |
+| rollback preview、dirty 明确确认、恢复 Git/runtime 边界、dropped=true | P1、P5、P6 | 覆盖；已补强 WebRuntime 必须调用真实 checkpoint service |
 | Web API 契约 listed endpoints | P2 | 覆盖 |
 | Stop 控制 | P2、P5、P6 | 功能覆盖；事件不扩展 taxonomy。后端 stop route 是由 design UI 停止要求推导出的实现入口。 |
 | 错误标准化和 Diagnostics Panel 分类 | P2、P4、P6 | 覆盖 |
@@ -73,6 +73,7 @@
 5. fake provider E2E 太浅：原 Task 15 只验证首屏，不能证明闭环。已改为覆盖 create、advance、pause、prompt edit、policy override、confirm、provider output/artifact、rollback、dropped history、rerun-ready composer。
 6. stop 事件越界：原计划加入 `stop_requested` SSE 事件，超出 design 事件 taxonomy。已改为 stop 后只发布 design 事件表内的 `projection_updated`，错误/失败路径使用 `node_failed` 或 `error`。
 7. Timeline/Changes 在拆分计划中表达不够显式。已补齐 P4/P6 的 Timeline/Changes browse 和验收项。
+8. WebRuntime rollback 表达偏 fake：总计划 Task 13 原本只证明 fake runtime 可返回 rollback 结果，不能证明 Web API 路径会恢复 Git/runtime 边界。已补齐 Task 3、Task 13、P1、P5、P6：WebRuntime rollback 必须调用 `CheckpointService`，并验证 Git head、state/projection snapshot、artifacts/reports/turns/node-runs/provider-runs dropped history。
 
 ## 剩余注意事项
 
