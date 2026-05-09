@@ -1,10 +1,14 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
+use std::str::FromStr;
 
 use serde_json::json;
 
 use crate::interactive::models::{RuntimeCheckpoint, WebWorkspaceProjection};
+use crate::interactive::policy::{
+    ConfirmationDecision, NodeWriteClass, PolicyPreset, ProviderNodeMeta,
+};
 use crate::interactive::projection::build_workspace_projection;
 use crate::interactive::web_projection::build_web_projection;
 use crate::task_run::types::TaskRunError;
@@ -33,6 +37,7 @@ impl WebRuntime {
     ) -> Result<CreateTaskResponse, TaskRunError> {
         let task_id = "task_0001".to_string();
         let session_id = "sess_task_0001".to_string();
+        let change_id = request.change_id.clone();
         let task_root = self
             .workspace_root
             .join(".aria/runtime/tasks")
@@ -44,8 +49,10 @@ impl WebRuntime {
             serde_json::to_vec_pretty(&json!({
                 "task_id": task_id,
                 "phase": "intake",
-                "change_id": request.change_id,
-                "current_node": "N16"
+                "change_id": change_id,
+                "current_node": "N16",
+                "policy_preset": request.policy_preset,
+                "provider_mode": request.provider_mode
             }))
             .map_err(json_error)?,
         )
@@ -53,57 +60,46 @@ impl WebRuntime {
         Ok(CreateTaskResponse {
             task_id,
             session_id,
-            change_id: request.change_id,
+            change_id,
             phase: "intake".to_string(),
         })
     }
 
     pub fn advance_task(&mut self, task_id: &str) -> Result<AdvanceTaskResponse, TaskRunError> {
         let store = WebRuntimeStore::new(&self.workspace_root, task_id);
-        store.write_json(
-            "checkpoints/state@ckpt_0001.json",
-            &read_optional_json(&store.task_root().join("state.json"))?,
+        let policy = policy_for_task(&store)?;
+        run_internal_n00_if_needed(&store)?;
+        write_checkpoint(
+            &self.workspace_root,
+            task_id,
+            &store,
+            self.next_projection_version,
         )?;
-        store.write_json(
-            "checkpoints/projection@ckpt_0001.json",
-            &json!({"projection_version": self.next_projection_version}),
-        )?;
-        store.write_json(
-            "checkpoints/ckpt_0001.json",
-            &RuntimeCheckpoint {
-                checkpoint_id: "ckpt_0001".to_string(),
-                task_id: task_id.to_string(),
-                session_id: "sess_task_0001".to_string(),
-                turn_id: Some("turn_0001".to_string()),
-                git_head: git_head(&self.workspace_root),
-                dirty_summary: json!({}),
-                state_snapshot_ref: "state@ckpt_0001.json".to_string(),
-                projection_snapshot_ref: "projection@ckpt_0001.json".to_string(),
-                artifact_boundary: 0,
-                provider_run_boundary: 0,
-                node_run_boundary: 0,
-                created_at: "2026-05-09T00:00:00Z".to_string(),
-            },
-        )?;
-        let pending = PendingProviderStepDto {
-            node_id: "N16".to_string(),
-            provider_type: "codex".to_string(),
-            runtime_role: "executor".to_string(),
-            adapter_role: "executor".to_string(),
-            prompt: "实现 Fibonacci square sum".to_string(),
-            input_summary: json!({"worktask_id":"work_wt_001"}),
-            canonical_input_refs: vec!["worktask:work_wt_001".to_string()],
-            context_files: vec!["openspec/changes/aria-fibonacci-square/tasks.md".to_string()],
-            output_schema: "schema://aria/artifacts/coding_report/v1".to_string(),
-            allowed_write_scope: vec!["src/".to_string(), "tests/".to_string()],
-            forbidden_actions: vec!["修改 cadence/project-rules".to_string()],
-            verification_commands: vec!["cargo test --locked -j 1".to_string()],
-            checkpoint_id: "ckpt_0001".to_string(),
-        };
-        store.write_json("pending/provider-step.json", &pending)?;
-        Ok(AdvanceTaskResponse::PausedForApproval {
-            pending_step: pending,
-        })
+        let pending = pending_provider_step_for_policy(policy);
+        let decision = policy.decision_for(&ProviderNodeMeta::new(
+            pending.node_id.clone(),
+            pending.provider_type.clone(),
+            write_class_for_pending(&pending),
+        ));
+        match decision {
+            ConfirmationDecision::PauseForConfirmation => {
+                store.write_json("pending/provider-step.json", &pending)?;
+                Ok(AdvanceTaskResponse::PausedForApproval {
+                    pending_step: pending,
+                })
+            }
+            ConfirmationDecision::RunAutomatically => {
+                self.persist_provider_execution(
+                    task_id,
+                    &store,
+                    pending.checkpoint_id,
+                    pending.prompt,
+                )?;
+                Ok(AdvanceTaskResponse::Advanced {
+                    projection_version: self.next_projection_version,
+                })
+            }
+        }
     }
 
     pub fn confirm_task(
@@ -111,9 +107,21 @@ impl WebRuntime {
         task_id: &str,
         request: ConfirmTaskRequest,
     ) -> Result<ConfirmTaskResponse, TaskRunError> {
+        if let Some(policy_override) = request.policy_override.as_deref() {
+            PolicyPreset::from_str(policy_override)
+                .map_err(|error| TaskRunError::new("web_runtime_policy", error))?;
+        }
         let store = WebRuntimeStore::new(&self.workspace_root, task_id);
-        let checkpoint_id = request.checkpoint_id.clone();
-        let prompt = request.prompt.clone();
+        self.persist_provider_execution(task_id, &store, request.checkpoint_id, request.prompt)
+    }
+
+    fn persist_provider_execution(
+        &mut self,
+        _task_id: &str,
+        store: &WebRuntimeStore,
+        checkpoint_id: String,
+        prompt: String,
+    ) -> Result<ConfirmTaskResponse, TaskRunError> {
         store.append_event(
             "node_started",
             "N16",
@@ -141,9 +149,9 @@ impl WebRuntime {
                 "session_id": "sess_task_0001",
                 "node_id": "N16",
                 "provider_type": "codex",
-                "prompt_snapshot": prompt,
+                "prompt_snapshot": prompt.clone(),
                 "input_summary": {"worktask_id":"work_wt_001"},
-                "checkpoint_before": checkpoint_id,
+                "checkpoint_before": checkpoint_id.clone(),
                 "provider_run_id": "run_n16_0001",
                 "output_artifact_refs": ["coding_report_work_wt_001_0001"],
                 "changed_files": ["src/fibonacciSquareSum.js"],
@@ -177,7 +185,7 @@ impl WebRuntime {
                 "provider_run_id": "run_n16_0001",
                 "provider_type": "codex",
                 "status": "completed",
-                "prompt": request.prompt,
+                "prompt": prompt,
                 "dropped": false
             }),
         )?;
@@ -211,7 +219,7 @@ impl WebRuntime {
             "N16",
             json!({
                 "status":"completed",
-                "checkpoint_id":request.checkpoint_id,
+                "checkpoint_id":checkpoint_id,
                 "provider_run_id":"run_n16_0001",
                 "duration_ms":42,
                 "changed_files":["src/fibonacciSquareSum.js"]
@@ -268,4 +276,144 @@ fn git_head(workspace_root: &std::path::Path) -> Option<String> {
         .success()
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
         .filter(|head| !head.is_empty())
+}
+
+fn policy_for_task(store: &WebRuntimeStore) -> Result<PolicyPreset, TaskRunError> {
+    let state = read_optional_json(&store.task_root().join("state.json"))?;
+    let policy = state
+        .get("policy_preset")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("manual-write");
+    PolicyPreset::from_str(policy).map_err(|error| TaskRunError::new("web_runtime_policy", error))
+}
+
+fn run_internal_n00_if_needed(store: &WebRuntimeStore) -> Result<(), TaskRunError> {
+    if node_event_exists(store, "N00")? {
+        return Ok(());
+    }
+    store.append_event("node_started", "N00", json!({"status":"running"}))?;
+    store.write_json(
+        "node-runs/nrun_n00.json",
+        &json!({
+            "node_run_id": "nrun_n00",
+            "node_id": "N00",
+            "turn_id": null,
+            "provider_run_id": null,
+            "input_refs": [],
+            "output_schema": null,
+            "artifact_refs": ["internal_n00"],
+            "status": "completed",
+            "duration_ms": 1,
+            "diagnostic_refs": [],
+            "dropped": false,
+            "created_at": "2026-05-09T00:00:00Z",
+            "updated_at": "2026-05-09T00:00:00Z"
+        }),
+    )?;
+    store.write_json(
+        "artifacts/internal/n00.json",
+        &json!({
+            "artifact_ref": "internal_n00",
+            "artifact_kind": "internal_step",
+            "producer_node": "N00",
+            "summary": "runtime bootstrap",
+            "dropped": false
+        }),
+    )?;
+    store.append_event(
+        "artifact_written",
+        "N00",
+        json!({"status":"completed","artifact_ref":"internal_n00"}),
+    )?;
+    store.append_event("node_completed", "N00", json!({"status":"completed"}))
+}
+
+fn node_event_exists(store: &WebRuntimeStore, node_id: &str) -> Result<bool, TaskRunError> {
+    let path = store.task_root().join("logs/node-events.jsonl");
+    match fs::read_to_string(path) {
+        Ok(events) => Ok(events.contains(&format!("\"node_id\":\"{node_id}\""))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(io_error(error)),
+    }
+}
+
+fn write_checkpoint(
+    workspace_root: &std::path::Path,
+    task_id: &str,
+    store: &WebRuntimeStore,
+    projection_version: u64,
+) -> Result<(), TaskRunError> {
+    store.write_json(
+        "checkpoints/state@ckpt_0001.json",
+        &read_optional_json(&store.task_root().join("state.json"))?,
+    )?;
+    store.write_json(
+        "checkpoints/projection@ckpt_0001.json",
+        &json!({"projection_version": projection_version}),
+    )?;
+    store.write_json(
+        "checkpoints/ckpt_0001.json",
+        &RuntimeCheckpoint {
+            checkpoint_id: "ckpt_0001".to_string(),
+            task_id: task_id.to_string(),
+            session_id: "sess_task_0001".to_string(),
+            turn_id: Some("turn_0001".to_string()),
+            git_head: git_head(workspace_root),
+            dirty_summary: json!({}),
+            state_snapshot_ref: "state@ckpt_0001.json".to_string(),
+            projection_snapshot_ref: "projection@ckpt_0001.json".to_string(),
+            artifact_boundary: 0,
+            provider_run_boundary: 0,
+            node_run_boundary: 0,
+            created_at: "2026-05-09T00:00:00Z".to_string(),
+        },
+    )?;
+    Ok(())
+}
+
+fn pending_provider_step_for_policy(policy: PolicyPreset) -> PendingProviderStepDto {
+    match policy {
+        PolicyPreset::ManualAll => PendingProviderStepDto {
+            node_id: "N04".to_string(),
+            provider_type: "claude_code".to_string(),
+            runtime_role: "orchestrator".to_string(),
+            adapter_role: "orchestrator".to_string(),
+            prompt: "执行 N04".to_string(),
+            input_summary: json!({"node_id":"N04"}),
+            canonical_input_refs: vec!["task:task_0001".to_string()],
+            context_files: vec!["openspec/changes/aria-fibonacci-square/proposal.md".to_string()],
+            output_schema: "schema://aria/artifacts/planning_report/v1".to_string(),
+            allowed_write_scope: vec![".aria/runtime/".to_string(), "openspec/".to_string()],
+            forbidden_actions: vec!["修改 cadence/project-rules".to_string()],
+            verification_commands: vec!["cargo check --locked".to_string()],
+            checkpoint_id: "ckpt_0001".to_string(),
+        },
+        PolicyPreset::ManualWrite | PolicyPreset::AutoReview | PolicyPreset::NonInteractive => {
+            PendingProviderStepDto {
+                node_id: "N16".to_string(),
+                provider_type: "codex".to_string(),
+                runtime_role: "executor".to_string(),
+                adapter_role: "executor".to_string(),
+                prompt: "实现 Fibonacci square sum".to_string(),
+                input_summary: json!({"worktask_id":"work_wt_001"}),
+                canonical_input_refs: vec!["worktask:work_wt_001".to_string()],
+                context_files: vec!["openspec/changes/aria-fibonacci-square/tasks.md".to_string()],
+                output_schema: "schema://aria/artifacts/coding_report/v1".to_string(),
+                allowed_write_scope: vec!["src/".to_string(), "tests/".to_string()],
+                forbidden_actions: vec!["修改 cadence/project-rules".to_string()],
+                verification_commands: vec!["cargo test --locked -j 1".to_string()],
+                checkpoint_id: "ckpt_0001".to_string(),
+            }
+        }
+    }
+}
+
+fn write_class_for_pending(pending: &PendingProviderStepDto) -> NodeWriteClass {
+    match pending.node_id.as_str() {
+        "N16" | "N19" => NodeWriteClass::WritesWorkspace,
+        "N04" | "N05" | "N07" | "N09" | "N10" | "N11" | "N12" | "N25" | "N26" | "N27" => {
+            NodeWriteClass::WritesRuntime
+        }
+        _ => NodeWriteClass::ReadOnly,
+    }
 }

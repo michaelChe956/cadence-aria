@@ -1,4 +1,5 @@
 pub mod command;
+pub mod interactive_runner;
 pub mod openspec_bootstrap;
 pub mod orchestrator;
 pub mod provider_factory;
