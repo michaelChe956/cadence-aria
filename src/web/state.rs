@@ -1,0 +1,19 @@
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+use crate::web::runtime::WebRuntime;
+
+#[derive(Clone)]
+pub struct WebAppState {
+    pub workspace_root: PathBuf,
+    pub runtime: Arc<Mutex<WebRuntime>>,
+}
+
+impl WebAppState {
+    pub fn new(workspace_root: PathBuf, runtime: WebRuntime) -> Self {
+        Self {
+            workspace_root,
+            runtime: Arc::new(Mutex::new(runtime)),
+        }
+    }
+}

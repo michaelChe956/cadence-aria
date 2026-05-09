@@ -52,12 +52,29 @@ pub enum AdvanceTaskResponse {
     },
 }
 
+impl AdvanceTaskResponse {
+    pub fn expect_pending_step(self) -> Option<PendingProviderStepDto> {
+        match self {
+            AdvanceTaskResponse::PausedForApproval { pending_step } => Some(pending_step),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ConfirmTaskRequest {
     pub checkpoint_id: String,
     pub prompt: String,
     pub policy_override: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ConfirmTaskResponse {
+    pub status: String,
+    pub node_id: String,
+    pub turn_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
