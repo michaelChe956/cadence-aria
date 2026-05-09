@@ -12,10 +12,16 @@ fn controller_pauses_before_manual_write_provider_step() {
         next: Some(PendingProviderStep {
             node_id: "N16".to_string(),
             provider_type: "codex".to_string(),
+            runtime_role: "executor".to_string(),
+            adapter_role: "executor".to_string(),
             prompt: "实现功能".to_string(),
             input_summary: json!({"allowed_write_scope":["src/"]}),
             output_schema: "schema://aria/artifacts/coding_report/v1".to_string(),
             write_class: NodeWriteClass::WritesWorkspace,
+            allowed_write_scope: vec!["src/".to_string(), "tests/".to_string()],
+            forbidden_actions: vec!["修改 cadence/project-rules".to_string()],
+            verification_commands: vec!["cargo test --locked -j 1".to_string()],
+            checkpoint_id: Some("ckpt_0001".to_string()),
         }),
     };
     let mut controller = InteractiveController::new(
@@ -39,10 +45,16 @@ fn controller_runs_readonly_step_automatically_under_manual_write() {
         next: Some(PendingProviderStep {
             node_id: "N17".to_string(),
             provider_type: "codex".to_string(),
+            runtime_role: "executor".to_string(),
+            adapter_role: "executor".to_string(),
             prompt: "运行测试".to_string(),
             input_summary: json!({}),
             output_schema: "schema://aria/artifacts/testing_report/v1".to_string(),
             write_class: NodeWriteClass::ReadOnly,
+            allowed_write_scope: Vec::new(),
+            forbidden_actions: vec!["修改 cadence/project-rules".to_string()],
+            verification_commands: vec!["cargo test --locked -j 1".to_string()],
+            checkpoint_id: Some("ckpt_0001".to_string()),
         }),
     };
     let mut controller = InteractiveController::new(
@@ -85,6 +97,45 @@ fn controller_does_not_advance_past_unconfirmed_pending_step() {
     );
 }
 
+#[test]
+fn pending_step_includes_checkpoint_scope_and_verification_metadata() {
+    let workspace = tempdir().expect("workspace");
+    let runner = FakeRunner {
+        next: Some(PendingProviderStep {
+            node_id: "N16".to_string(),
+            provider_type: "codex".to_string(),
+            runtime_role: "executor".to_string(),
+            adapter_role: "executor".to_string(),
+            prompt: "实现功能".to_string(),
+            input_summary: json!({"worktask_id":"work_wt_001"}),
+            output_schema: "schema://aria/artifacts/coding_report/v1".to_string(),
+            write_class: NodeWriteClass::WritesWorkspace,
+            allowed_write_scope: vec!["src/".to_string(), "tests/".to_string()],
+            forbidden_actions: vec!["修改 cadence/project-rules".to_string()],
+            verification_commands: vec!["node --test".to_string()],
+            checkpoint_id: Some("ckpt_0001".to_string()),
+        }),
+    };
+    let mut controller = InteractiveController::new(
+        workspace.path().to_path_buf(),
+        "task_0001".to_string(),
+        PolicyPreset::ManualWrite,
+        runner,
+    );
+
+    controller.advance().expect("advance");
+    let pending = controller.pending_step().expect("pending");
+    assert_eq!(pending.checkpoint_id.as_deref(), Some("ckpt_0001"));
+    assert_eq!(
+        pending.allowed_write_scope,
+        vec!["src/".to_string(), "tests/".to_string()]
+    );
+    assert_eq!(
+        pending.verification_commands,
+        vec!["node --test".to_string()]
+    );
+}
+
 struct TwoStepRunner {
     calls: usize,
 }
@@ -98,19 +149,31 @@ impl StepRunner for TwoStepRunner {
             PendingProviderStep {
                 node_id: "N16".to_string(),
                 provider_type: "codex".to_string(),
+                runtime_role: "executor".to_string(),
+                adapter_role: "executor".to_string(),
                 prompt: "实现功能".to_string(),
                 input_summary: json!({"allowed_write_scope":["src/"]}),
                 output_schema: "schema://aria/artifacts/coding_report/v1".to_string(),
                 write_class: NodeWriteClass::WritesWorkspace,
+                allowed_write_scope: vec!["src/".to_string(), "tests/".to_string()],
+                forbidden_actions: vec!["修改 cadence/project-rules".to_string()],
+                verification_commands: vec!["cargo test --locked -j 1".to_string()],
+                checkpoint_id: Some("ckpt_0001".to_string()),
             }
         } else {
             PendingProviderStep {
                 node_id: "N17".to_string(),
                 provider_type: "codex".to_string(),
+                runtime_role: "executor".to_string(),
+                adapter_role: "executor".to_string(),
                 prompt: "运行测试".to_string(),
                 input_summary: json!({}),
                 output_schema: "schema://aria/artifacts/testing_report/v1".to_string(),
                 write_class: NodeWriteClass::ReadOnly,
+                allowed_write_scope: Vec::new(),
+                forbidden_actions: vec!["修改 cadence/project-rules".to_string()],
+                verification_commands: vec!["cargo test --locked -j 1".to_string()],
+                checkpoint_id: Some("ckpt_0001".to_string()),
             }
         };
         Ok(Some(step))

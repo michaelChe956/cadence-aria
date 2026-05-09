@@ -15,6 +15,23 @@ pub struct RollbackRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RollbackPreviewRequest {
+    pub checkpoint_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RollbackPreview {
+    pub checkpoint_id: String,
+    pub git_head: Option<String>,
+    pub dirty: bool,
+    pub turns_to_drop: usize,
+    pub node_runs_to_drop: usize,
+    pub provider_runs_to_drop: usize,
+    pub artifacts_to_drop: usize,
+    pub files_may_change: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckpointService {
     workspace_root: PathBuf,
     task_id: String,
@@ -52,6 +69,36 @@ impl CheckpointService {
         })
     }
 
+    pub fn preview_rollback(
+        &self,
+        request: RollbackPreviewRequest,
+    ) -> Result<RollbackPreview, TaskRunError> {
+        let checkpoint = self.read_checkpoint(&request.checkpoint_id)?;
+        let task_root = self.task_root();
+        Ok(RollbackPreview {
+            checkpoint_id: checkpoint.checkpoint_id,
+            git_head: checkpoint.git_head,
+            dirty: self.worktree_dirty()?,
+            turns_to_drop: count_turns_to_drop(
+                &task_root.join("turns"),
+                checkpoint.turn_id.as_deref(),
+            )?,
+            node_runs_to_drop: count_json_files_after_boundary(
+                &task_root.join("node-runs"),
+                checkpoint.node_run_boundary,
+            )?,
+            provider_runs_to_drop: count_provider_runs_after_boundary(
+                &task_root.join("provider-runs"),
+                checkpoint.provider_run_boundary,
+            )?,
+            artifacts_to_drop: count_runtime_artifacts_after_boundary(
+                &task_root,
+                checkpoint.artifact_boundary,
+            )?,
+            files_may_change: self.changed_files()?,
+        })
+    }
+
     pub fn rollback(&self, request: RollbackRequest) -> Result<(), TaskRunError> {
         let checkpoint = self.read_checkpoint(&request.checkpoint_id)?;
         if !request.force_when_dirty && self.worktree_dirty()? {
@@ -66,9 +113,26 @@ impl CheckpointService {
         }
 
         let task_root = self.task_root();
-        mark_json_files_dropped(&task_root.join("turns"))?;
-        mark_json_files_dropped(&task_root.join("node-runs"))?;
-        mark_provider_runs_dropped(&task_root.join("provider-runs"))?;
+        restore_snapshot(
+            &task_root,
+            &checkpoint.state_snapshot_ref,
+            &task_root.join("state.json"),
+        )?;
+        restore_snapshot(
+            &task_root,
+            &checkpoint.projection_snapshot_ref,
+            &task_root.join("projection.json"),
+        )?;
+        mark_turns_dropped(&task_root.join("turns"), checkpoint.turn_id.as_deref())?;
+        mark_json_files_dropped_after_boundary(
+            &task_root.join("node-runs"),
+            checkpoint.node_run_boundary,
+        )?;
+        mark_provider_runs_dropped_after_boundary(
+            &task_root.join("provider-runs"),
+            checkpoint.provider_run_boundary,
+        )?;
+        mark_runtime_artifacts_dropped_after_boundary(&task_root, checkpoint.artifact_boundary)?;
         Ok(())
     }
 
@@ -89,6 +153,17 @@ impl CheckpointService {
     fn worktree_dirty(&self) -> Result<bool, TaskRunError> {
         let output = self.git(&["status", "--porcelain"])?;
         Ok(!output.trim().is_empty())
+    }
+
+    fn changed_files(&self) -> Result<Vec<String>, TaskRunError> {
+        let output = self.git(&["status", "--porcelain"])?;
+        Ok(output
+            .lines()
+            .filter_map(|line| line.get(3..))
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(str::to_string)
+            .collect())
     }
 
     fn git(&self, args: &[&str]) -> Result<String, TaskRunError> {
@@ -128,42 +203,180 @@ fn validate_checkpoint_id(checkpoint_id: &str) -> Result<(), TaskRunError> {
     Ok(())
 }
 
-fn mark_json_files_dropped(root: &Path) -> Result<(), TaskRunError> {
+fn restore_snapshot(
+    task_root: &Path,
+    snapshot_ref: &str,
+    active_path: &Path,
+) -> Result<(), TaskRunError> {
+    let snapshot_path = snapshot_path(task_root, snapshot_ref)?;
+    if let Some(parent) = active_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            TaskRunError::new(
+                "checkpoint_io",
+                format!("create {}: {error}", parent.display()),
+            )
+        })?;
+    }
+    fs::copy(&snapshot_path, active_path).map_err(|error| {
+        TaskRunError::new(
+            "checkpoint_io",
+            format!(
+                "restore {} to {}: {error}",
+                snapshot_path.display(),
+                active_path.display()
+            ),
+        )
+    })?;
+    Ok(())
+}
+
+fn snapshot_path(task_root: &Path, snapshot_ref: &str) -> Result<PathBuf, TaskRunError> {
+    let snapshot_ref_path = Path::new(snapshot_ref);
+    if snapshot_ref_path.is_absolute()
+        || snapshot_ref.contains('/')
+        || snapshot_ref.contains('\\')
+        || snapshot_ref.contains("..")
+        || snapshot_ref.is_empty()
+    {
+        return Err(TaskRunError::new(
+            "checkpoint_invalid_snapshot_ref",
+            format!("invalid checkpoint snapshot ref: {snapshot_ref}"),
+        ));
+    }
+    Ok(task_root.join("checkpoints").join(snapshot_ref))
+}
+
+fn mark_turns_dropped(root: &Path, turn_id: Option<&str>) -> Result<(), TaskRunError> {
+    let files = json_files(root)?;
+    let start = turn_id
+        .and_then(|turn_id| {
+            files.iter().position(|path| {
+                path.file_stem()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|stem| stem == turn_id)
+            })
+        })
+        .unwrap_or(0);
+    mark_json_paths_dropped(files.into_iter().skip(start))
+}
+
+fn count_turns_to_drop(root: &Path, turn_id: Option<&str>) -> Result<usize, TaskRunError> {
+    let files = json_files(root)?;
+    let start = turn_id
+        .and_then(|turn_id| {
+            files.iter().position(|path| {
+                path.file_stem()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|stem| stem == turn_id)
+            })
+        })
+        .unwrap_or(0);
+    Ok(files.len().saturating_sub(start))
+}
+
+fn mark_json_files_dropped_after_boundary(
+    root: &Path,
+    boundary: usize,
+) -> Result<(), TaskRunError> {
+    let files = json_files(root)?;
+    mark_json_paths_dropped(files.into_iter().skip(boundary))
+}
+
+fn count_json_files_after_boundary(root: &Path, boundary: usize) -> Result<usize, TaskRunError> {
+    let files = json_files(root)?;
+    Ok(files.len().saturating_sub(boundary))
+}
+
+fn mark_runtime_artifacts_dropped_after_boundary(
+    task_root: &Path,
+    boundary: usize,
+) -> Result<(), TaskRunError> {
+    let files = runtime_artifact_files(task_root)?;
+    mark_json_paths_dropped(files.into_iter().skip(boundary))
+}
+
+fn count_runtime_artifacts_after_boundary(
+    task_root: &Path,
+    boundary: usize,
+) -> Result<usize, TaskRunError> {
+    let files = runtime_artifact_files(task_root)?;
+    Ok(files.len().saturating_sub(boundary))
+}
+
+fn runtime_artifact_files(task_root: &Path) -> Result<Vec<PathBuf>, TaskRunError> {
+    let mut files = json_files(&task_root.join("artifacts"))?;
+    files.extend(json_files(&task_root.join("reports"))?);
+    files.sort();
+    Ok(files)
+}
+
+fn mark_provider_runs_dropped_after_boundary(
+    root: &Path,
+    boundary: usize,
+) -> Result<(), TaskRunError> {
+    let files = provider_run_files(root)?;
+    mark_json_paths_dropped(files.into_iter().skip(boundary))
+}
+
+fn count_provider_runs_after_boundary(root: &Path, boundary: usize) -> Result<usize, TaskRunError> {
+    let files = provider_run_files(root)?;
+    Ok(files.len().saturating_sub(boundary))
+}
+
+fn provider_run_files(root: &Path) -> Result<Vec<PathBuf>, TaskRunError> {
     if !root.exists() {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
+    let mut files = Vec::new();
     for entry in fs::read_dir(root).map_err(|error| {
         TaskRunError::new("checkpoint_io", format!("read {}: {error}", root.display()))
     })? {
         let path = entry
             .map_err(|error| TaskRunError::new("checkpoint_io", error.to_string()))?
             .path();
-        if path
-            .extension()
-            .is_some_and(|extension| extension == "json")
-        {
-            mark_json_file_dropped(&path)?;
+        let run_path = path.join("run.json");
+        if run_path.exists() {
+            files.push(run_path);
         }
     }
-    Ok(())
+    files.sort();
+    Ok(files)
 }
 
-fn mark_provider_runs_dropped(root: &Path) -> Result<(), TaskRunError> {
+fn json_files(root: &Path) -> Result<Vec<PathBuf>, TaskRunError> {
     if !root.exists() {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
+    let mut files = Vec::new();
+    collect_json_files(root, &mut files)?;
+    files.sort();
+    Ok(files)
+}
+
+fn collect_json_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<(), TaskRunError> {
     for entry in fs::read_dir(root).map_err(|error| {
         TaskRunError::new("checkpoint_io", format!("read {}: {error}", root.display()))
     })? {
         let path = entry
             .map_err(|error| TaskRunError::new("checkpoint_io", error.to_string()))?
-            .path()
-            .join("run.json");
-        if path.exists() {
-            mark_json_file_dropped(&path)?;
+            .path();
+        if path.is_dir() {
+            collect_json_files(&path, files)?;
+        } else if path
+            .extension()
+            .is_some_and(|extension| extension == "json")
+        {
+            files.push(path);
         }
+    }
+    Ok(())
+}
+
+fn mark_json_paths_dropped(paths: impl IntoIterator<Item = PathBuf>) -> Result<(), TaskRunError> {
+    for path in paths {
+        mark_json_file_dropped(&path)?;
     }
     Ok(())
 }

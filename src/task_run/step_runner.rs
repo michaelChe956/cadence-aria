@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 
 use crate::interactive::controller::{PendingProviderStep, StepRunner, StepRunnerResult};
 use crate::interactive::policy::NodeWriteClass;
-use crate::protocol::contracts::{AdapterInput, ProviderType};
+use crate::protocol::contracts::{AdapterInput, AdapterRole, ProviderType};
 use crate::task_run::types::TaskRunError;
 use serde_json::json;
 
@@ -77,6 +77,8 @@ pub fn provider_step_from_adapter_input(
     Ok(PendingProviderStep {
         node_id: node_id.to_string(),
         provider_type: provider_type_text(&input.provider_type).to_string(),
+        runtime_role: adapter_role_text(&input.role).to_string(),
+        adapter_role: adapter_role_text(&input.role).to_string(),
         prompt: input.prompt.clone(),
         input_summary: json!({
             "worktree_path": input.worktree_path,
@@ -86,7 +88,22 @@ pub fn provider_step_from_adapter_input(
         }),
         output_schema: input.output_schema.clone(),
         write_class: write_class_for_node(node_id),
+        allowed_write_scope: allowed_write_scope_for_node(node_id),
+        forbidden_actions: vec![
+            "不要修改 .claude/rules".to_string(),
+            "不要修改 cadence/project-rules".to_string(),
+        ],
+        verification_commands: verification_commands_for_node(node_id),
+        checkpoint_id: None,
     })
+}
+
+fn adapter_role_text(role: &AdapterRole) -> &'static str {
+    match role {
+        AdapterRole::Orchestrator => "orchestrator",
+        AdapterRole::Reviewer => "reviewer",
+        AdapterRole::Executor => "executor",
+    }
 }
 
 fn provider_type_text(provider_type: &ProviderType) -> &'static str {
@@ -104,5 +121,23 @@ fn write_class_for_node(node_id: &str) -> NodeWriteClass {
             NodeWriteClass::WritesRuntime
         }
         _ => NodeWriteClass::ReadOnly,
+    }
+}
+
+fn allowed_write_scope_for_node(node_id: &str) -> Vec<String> {
+    match node_id {
+        "N16" | "N19" => vec!["src/".to_string(), "tests/".to_string()],
+        "N04" | "N05" | "N07" | "N09" | "N10" | "N11" | "N12" | "N25" | "N26" | "N27" => {
+            vec![".aria/runtime/".to_string(), "openspec/".to_string()]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn verification_commands_for_node(node_id: &str) -> Vec<String> {
+    match node_id {
+        "N16" | "N17" | "N18" | "N19" => vec!["cargo test --locked -j 1".to_string()],
+        "N25" | "N27" => vec!["cargo test --locked -j 1".to_string()],
+        _ => vec!["cargo check --locked".to_string()],
     }
 }

@@ -20,9 +20,34 @@ fn rollback_restores_git_head_and_marks_later_history_dropped() {
     let before_head = git_stdout(workspace.path(), &["rev-parse", "HEAD"]);
 
     let task_root = workspace.path().join(".aria/runtime/tasks/task_0001");
+    fs::create_dir_all(task_root.join("checkpoints")).expect("checkpoints");
     fs::create_dir_all(task_root.join("turns")).expect("turns");
     fs::create_dir_all(task_root.join("node-runs")).expect("node runs");
     fs::create_dir_all(task_root.join("provider-runs/run_n16_0001")).expect("provider runs");
+    fs::create_dir_all(task_root.join("artifacts/execution")).expect("artifacts");
+    fs::create_dir_all(task_root.join("reports")).expect("reports");
+    fs::write(
+        task_root.join("checkpoints/state@ckpt_0001.json"),
+        serde_json::to_vec_pretty(&json!({"phase":"before_checkpoint"})).expect("state snapshot"),
+    )
+    .expect("write state snapshot");
+    fs::write(
+        task_root.join("checkpoints/projection@ckpt_0001.json"),
+        serde_json::to_vec_pretty(&json!({"overview":{"phase":"before_checkpoint"}}))
+            .expect("projection snapshot"),
+    )
+    .expect("write projection snapshot");
+    fs::write(
+        task_root.join("state.json"),
+        serde_json::to_vec_pretty(&json!({"phase":"after_checkpoint"})).expect("state active"),
+    )
+    .expect("write active state");
+    fs::write(
+        task_root.join("projection.json"),
+        serde_json::to_vec_pretty(&json!({"overview":{"phase":"after_checkpoint"}}))
+            .expect("projection active"),
+    )
+    .expect("write active projection");
     fs::write(
         task_root.join("turns/turn_0001.json"),
         serde_json::to_vec_pretty(&json!({"turn_id":"turn_0001","dropped":false}))
@@ -41,6 +66,18 @@ fn rollback_restores_git_head_and_marks_later_history_dropped() {
             .expect("run json"),
     )
     .expect("write run");
+    fs::write(
+        task_root.join("artifacts/execution/0000.json"),
+        serde_json::to_vec_pretty(&json!({"artifact_ref":"artifact_0001","dropped":false}))
+            .expect("artifact json"),
+    )
+    .expect("write artifact");
+    fs::write(
+        task_root.join("reports/report_0001.json"),
+        serde_json::to_vec_pretty(&json!({"report_id":"report_0001","dropped":false}))
+            .expect("report json"),
+    )
+    .expect("write report");
 
     fs::write(workspace.path().join("file.txt"), "after\n").expect("write after");
     git(workspace.path(), &["add", "file.txt"]);
@@ -81,6 +118,16 @@ fn rollback_restores_git_head_and_marks_later_history_dropped() {
         "before\n"
     );
     assert!(
+        fs::read_to_string(task_root.join("state.json"))
+            .expect("state")
+            .contains("before_checkpoint")
+    );
+    assert!(
+        fs::read_to_string(task_root.join("projection.json"))
+            .expect("projection")
+            .contains("before_checkpoint")
+    );
+    assert!(
         fs::read_to_string(task_root.join("turns/turn_0001.json"))
             .expect("turn")
             .contains("\"dropped\": true")
@@ -93,6 +140,16 @@ fn rollback_restores_git_head_and_marks_later_history_dropped() {
     assert!(
         fs::read_to_string(task_root.join("provider-runs/run_n16_0001/run.json"))
             .expect("run")
+            .contains("\"dropped\": true")
+    );
+    assert!(
+        fs::read_to_string(task_root.join("artifacts/execution/0000.json"))
+            .expect("artifact")
+            .contains("\"dropped\": true")
+    );
+    assert!(
+        fs::read_to_string(task_root.join("reports/report_0001.json"))
+            .expect("report")
             .contains("\"dropped\": true")
     );
 }

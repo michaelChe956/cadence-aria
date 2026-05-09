@@ -11,10 +11,16 @@ use crate::task_run::types::TaskRunError;
 pub struct PendingProviderStep {
     pub node_id: String,
     pub provider_type: String,
+    pub runtime_role: String,
+    pub adapter_role: String,
     pub prompt: String,
     pub input_summary: Value,
     pub output_schema: String,
     pub write_class: NodeWriteClass,
+    pub allowed_write_scope: Vec<String>,
+    pub forbidden_actions: Vec<String>,
+    pub verification_commands: Vec<String>,
+    pub checkpoint_id: Option<String>,
 }
 
 impl PendingProviderStep {
