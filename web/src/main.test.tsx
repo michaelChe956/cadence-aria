@@ -93,6 +93,60 @@ describe("AppShell", () => {
     expect(await screen.findByText(/provider_output/)).toBeInTheDocument();
     expect(screen.getByRole("main")).toHaveTextContent("N16");
   });
+
+  it("refreshes the projection when an SSE projection update arrives", async () => {
+    const eventSources: MockEventSource[] = [];
+    let refreshed = false;
+    vi.stubGlobal(
+      "EventSource",
+      class extends MockEventSource {
+        constructor(url: string) {
+          super(url);
+          eventSources.push(this);
+        }
+      },
+    );
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === "/api/tasks") {
+          return jsonResponse({
+            task_id: "task_0001",
+            session_id: "sess_task_0001",
+            change_id: "aria-fibonacci-square",
+            phase: "intake",
+          });
+        }
+        if (url === "/api/projection?task_id=task_0001") {
+          if (refreshed) {
+            return jsonResponse(projectionWithRunOutput());
+          }
+          return jsonResponse(projection(null));
+        }
+        if (url.startsWith("/api/projection")) {
+          return jsonResponse(projection(null));
+        }
+        return jsonResponse({});
+      }),
+    );
+
+    render(<AppShell />);
+    await userEvent.type(screen.getByLabelText("任务请求"), "实现 Fibonacci square sum");
+    await userEvent.type(screen.getByLabelText("change id"), "aria-fibonacci-square");
+    await userEvent.click(screen.getByRole("button", { name: "新建任务" }));
+    expect(eventSources).toHaveLength(1);
+
+    refreshed = true;
+    eventSources[0].emit("projection_updated", {
+      cursor: 1,
+      event_type: "projection_updated",
+      task_id: "task_0001",
+      payload: {},
+    });
+
+    expect(await screen.findByText(/provider_output/)).toBeInTheDocument();
+  });
 });
 
 function jsonResponse(body: unknown) {
@@ -156,4 +210,36 @@ function projectionWithRunOutput() {
       diffs: [],
     },
   };
+}
+
+class MockEventSource {
+  readonly url: string;
+  onopen: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+  private listeners = new Map<string, Array<(event: MessageEvent) => void>>();
+
+  constructor(url: string) {
+    this.url = url;
+    queueMicrotask(() => this.onopen?.());
+  }
+
+  addEventListener(type: string, listener: (event: MessageEvent) => void) {
+    this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
+  }
+
+  removeEventListener(type: string, listener: (event: MessageEvent) => void) {
+    this.listeners.set(
+      type,
+      (this.listeners.get(type) ?? []).filter((candidate) => candidate !== listener),
+    );
+  }
+
+  close() {}
+
+  emit(type: string, payload: unknown) {
+    const event = new MessageEvent(type, { data: JSON.stringify(payload) });
+    for (const listener of this.listeners.get(type) ?? []) {
+      listener(event);
+    }
+  }
 }

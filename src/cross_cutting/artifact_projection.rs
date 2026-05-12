@@ -104,6 +104,10 @@ pub fn compile_design_projection(
             synthetic_table_entries_from_section_tree(source, decisions_section, "dec-");
     }
     if decision_entries.is_empty() {
+        decision_entries =
+            synthetic_heading_entries_from_section_tree(source, decisions_section, "dec-");
+    }
+    if decision_entries.is_empty() {
         decision_entries = synthetic_entries_from_section_tree(source, decisions_section, "dec-");
     }
     let decisions = decision_entries
@@ -127,7 +131,7 @@ pub fn compile_design_projection(
 
     let payload = DesignProjection {
         design_decisions: decisions,
-        shared_components: optional_entries_with_synthetic(
+        shared_components: optional_entries_with_table_synthetic(
             source,
             &["公共组件", "Shared Components", "shared_components"],
             "cmp-",
@@ -136,7 +140,7 @@ pub fn compile_design_projection(
         .iter()
         .map(component_from_entry)
         .collect::<Result<Vec<_>, _>>()?,
-        shared_modules: optional_entries_with_synthetic(
+        shared_modules: optional_entries_with_table_synthetic(
             source,
             &["共享模块", "Shared Modules", "shared_modules"],
             "sm-",
@@ -154,11 +158,9 @@ pub fn compile_design_projection(
         .iter()
         .map(data_entity_from_entry)
         .collect::<Result<Vec<_>, _>>()?,
-        api_entries: optional_entries_with_synthetic(
+        api_entries: api_entries_with_synthetic(
             source,
             &["API 契约", "API Contract", "api_entries"],
-            "api-",
-            true,
         )
         .iter()
         .map(api_entry_from_entry)
@@ -400,6 +402,60 @@ fn optional_entries_with_synthetic(
     }
 }
 
+fn optional_entries_with_table_synthetic(
+    source: &DocumentModel,
+    aliases: &[&str],
+    id_prefix: &str,
+    prefer_headings: bool,
+) -> Vec<ProjectionEntry> {
+    let Some(section) = find_section(source, aliases) else {
+        return Vec::new();
+    };
+    let entries = entries_from_section_tree(source, section);
+    if !entries.is_empty() {
+        return entries;
+    }
+    let table_entries = synthetic_table_entries_from_section_tree(source, section, id_prefix);
+    if !table_entries.is_empty() {
+        return table_entries;
+    }
+    let first_fallback = if prefer_headings {
+        synthetic_heading_entries_from_section_tree(source, section, id_prefix)
+    } else {
+        synthetic_entries_from_section_tree(source, section, id_prefix)
+    };
+    if !first_fallback.is_empty() {
+        return first_fallback;
+    }
+    if prefer_headings {
+        synthetic_entries_from_section_tree(source, section, id_prefix)
+    } else {
+        synthetic_heading_entries_from_section_tree(source, section, id_prefix)
+    }
+}
+
+fn api_entries_with_synthetic(source: &DocumentModel, aliases: &[&str]) -> Vec<ProjectionEntry> {
+    let Some(section) = find_section(source, aliases) else {
+        return Vec::new();
+    };
+    let direct_api_entries = entries_from_section_tree(source, section)
+        .into_iter()
+        .filter(|entry| entry.id.starts_with("api-"))
+        .collect::<Vec<_>>();
+    if !direct_api_entries.is_empty() {
+        return direct_api_entries;
+    }
+    let structured_entries = structured_api_entries_from_section_tree(source, section);
+    if !structured_entries.is_empty() {
+        return structured_entries;
+    }
+    let heading_entries = synthetic_heading_entries_from_section_tree(source, section, "api-");
+    if !heading_entries.is_empty() {
+        return heading_entries;
+    }
+    synthetic_entries_from_section_tree(source, section, "api-")
+}
+
 fn find_section<'a>(source: &'a DocumentModel, aliases: &[&str]) -> Option<&'a DocumentSection> {
     source.sections.iter().find(|section| {
         section.heading_path.last().is_some_and(|heading| {
@@ -625,6 +681,127 @@ fn synthetic_table_text(headers: &[String], row: &[String]) -> String {
         .join("; ")
 }
 
+fn structured_api_entries_from_section_tree(
+    source: &DocumentModel,
+    root_section: &DocumentSection,
+) -> Vec<ProjectionEntry> {
+    let mut entries = Vec::new();
+    for section in source
+        .sections
+        .iter()
+        .filter(|section| section.heading_path.starts_with(&root_section.heading_path))
+    {
+        for block in &section.blocks {
+            let DocumentBlock::Table { headers, rows } = block else {
+                continue;
+            };
+            if let Some(entry) = api_entry_from_key_value_table(headers, rows, entries.len() + 1) {
+                entries.push(entry);
+                continue;
+            }
+            entries.extend(api_entries_from_record_table(
+                headers,
+                rows,
+                entries.len() + 1,
+            ));
+        }
+    }
+    entries
+}
+
+fn api_entry_from_key_value_table(
+    headers: &[String],
+    rows: &[Vec<String>],
+    sequence: usize,
+) -> Option<ProjectionEntry> {
+    if !is_key_value_table(headers) {
+        return None;
+    }
+    let pairs = rows
+        .iter()
+        .filter_map(|row| {
+            let key = row.first().map(|value| normalize_key(value))?;
+            let value = row.get(1).map(|value| clean_table_cell(value))?;
+            (!key.is_empty() && !value.is_empty()).then_some((key, value))
+        })
+        .collect::<Vec<_>>();
+    let name = value_for_key(&pairs, &["name", "名称"])?;
+    let mut fields = pairs.iter().cloned().collect::<HashMap<String, String>>();
+    fields.insert("name".to_string(), name.clone());
+    let input = summarize_prefixed_fields(&pairs, "input", &["输入", "请求", "请求契约"]);
+    if !input.is_empty() {
+        fields.insert("input".to_string(), input);
+    }
+    let output = summarize_prefixed_fields(&pairs, "output", &["输出", "响应", "成功响应"]);
+    if !output.is_empty() {
+        fields.insert("output".to_string(), output);
+    }
+    Some(ProjectionEntry {
+        id: format!("api-{sequence:03}"),
+        text: name,
+        fields,
+    })
+}
+
+fn api_entries_from_record_table(
+    headers: &[String],
+    rows: &[Vec<String>],
+    start_sequence: usize,
+) -> Vec<ProjectionEntry> {
+    let mut entries = Vec::new();
+    for row in rows {
+        let mut fields = table_fields(headers, row);
+        let Some(name) = field_from_fields(&fields, &["name", "名称", "路径"]) else {
+            continue;
+        };
+        fields.insert("name".to_string(), name.clone());
+        entries.push(ProjectionEntry {
+            id: format!("api-{:03}", start_sequence + entries.len()),
+            text: name,
+            fields,
+        });
+    }
+    entries
+}
+
+fn is_key_value_table(headers: &[String]) -> bool {
+    let first = headers.first().map(|value| normalize_key(value));
+    let second = headers.get(1).map(|value| normalize_key(value));
+    matches!(
+        (first.as_deref(), second.as_deref()),
+        (
+            Some("字段" | "field" | "key" | "属性"),
+            Some("值" | "value")
+        )
+    )
+}
+
+fn value_for_key(pairs: &[(String, String)], aliases: &[&str]) -> Option<String> {
+    aliases.iter().find_map(|alias| {
+        let normalized = normalize_key(alias);
+        pairs
+            .iter()
+            .find(|(key, _)| key == &normalized)
+            .map(|(_, value)| value.clone())
+    })
+}
+
+fn summarize_prefixed_fields(pairs: &[(String, String)], prefix: &str, aliases: &[&str]) -> String {
+    let prefix_with_dot = format!("{prefix}.");
+    let normalized_aliases = aliases
+        .iter()
+        .map(|alias| normalize_key(alias))
+        .collect::<HashSet<_>>();
+    pairs
+        .iter()
+        .filter(|(key, _)| {
+            key == prefix || key.starts_with(&prefix_with_dot) || normalized_aliases.contains(key)
+        })
+        .map(|(key, value)| format!("{key}: {value}"))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 fn entry_from_paragraph(paragraph: &str) -> Option<ProjectionEntry> {
     let first_line = paragraph.lines().find(|line| !line.trim().is_empty())?;
     let cleaned = clean_inline_markup(first_line);
@@ -692,6 +869,10 @@ fn entry_from_table_row(headers: &[String], row: &[String]) -> Option<Projection
         .or_else(|| fields.get("需求id"))
         .or_else(|| fields.get("验收标准_id"))
         .or_else(|| fields.get("验收标准id"))
+        .or_else(|| fields.get("决策_id"))
+        .or_else(|| fields.get("决策id"))
+        .or_else(|| fields.get("风险_id"))
+        .or_else(|| fields.get("风险id"))
         .or_else(|| fields.get("组件标识"))
         .or_else(|| fields.get("组件id"))
         .or_else(|| fields.get("实体标识"))
@@ -708,8 +889,14 @@ fn entry_from_table_row(headers: &[String], row: &[String]) -> Option<Projection
     let text = fields
         .get("text")
         .or_else(|| fields.get("description"))
+        .or_else(|| fields.get("风险描述"))
+        .or_else(|| fields.get("风险"))
         .or_else(|| fields.get("描述"))
         .or_else(|| fields.get("说明"))
+        .or_else(|| fields.get("decision"))
+        .or_else(|| fields.get("决策"))
+        .or_else(|| fields.get("决策项"))
+        .or_else(|| fields.get("选择"))
         .or_else(|| fields.get("需求描述"))
         .or_else(|| fields.get("验收标准"))
         .or_else(|| fields.get("验收标准描述"))
@@ -883,8 +1070,9 @@ fn component_from_entry(
 ) -> Result<ComponentProjection, ProjectionCompileError> {
     Ok(ComponentProjection {
         component_id: entry.id.clone(),
-        name: field(entry, &["name", "组件名", "模块名"]).unwrap_or_else(|| fallback_name(entry)),
-        responsibility: field(entry, &["responsibility", "职责"]).unwrap_or_default(),
+        name: field(entry, &["name", "组件名", "模块名", "组件", "模块"])
+            .unwrap_or_else(|| fallback_name(entry)),
+        responsibility: field(entry, &["responsibility", "职责", "责任"]).unwrap_or_default(),
     })
 }
 
@@ -913,7 +1101,8 @@ fn risk_from_entry(
     entry: &ProjectionEntry,
     known_decisions: &HashSet<String>,
 ) -> Result<RiskProjection, ProjectionCompileError> {
-    ensure_id_prefix(&entry.id, "risk-")?;
+    let risk_id = canonical_risk_id(&entry.id);
+    ensure_id_prefix(&risk_id, "risk-")?;
     let related_design_decision_ids =
         field_values(entry, &["refs", "designs", "related_design_decision_ids"]);
     for ref_id in &related_design_decision_ids {
@@ -932,12 +1121,18 @@ fn risk_from_entry(
             context: "risk_severity".to_string(),
         })?;
     Ok(RiskProjection {
-        risk_id: entry.id.clone(),
+        risk_id,
         text: required_text(entry)?,
         severity,
-        mitigation: field(entry, &["mitigation"]),
+        mitigation: field(entry, &["mitigation", "缓解", "缓解措施"]),
         related_design_decision_ids,
     })
+}
+
+fn canonical_risk_id(id: &str) -> String {
+    id.strip_prefix("r-")
+        .map(|suffix| format!("risk-{suffix}"))
+        .unwrap_or_else(|| id.to_string())
 }
 
 fn work_package_from_entry(
@@ -1054,6 +1249,8 @@ fn required_text(entry: &ProjectionEntry) -> Result<String, ProjectionCompileErr
         &[
             "text",
             "description",
+            "风险描述",
+            "风险",
             "描述",
             "说明",
             "需求描述",
@@ -1086,9 +1283,13 @@ fn fallback_name(entry: &ProjectionEntry) -> String {
 }
 
 fn field(entry: &ProjectionEntry, aliases: &[&str]) -> Option<String> {
+    field_from_fields(&entry.fields, aliases)
+}
+
+fn field_from_fields(fields: &HashMap<String, String>, aliases: &[&str]) -> Option<String> {
     aliases
         .iter()
-        .find_map(|alias| entry.fields.get(&normalize_key(alias)).cloned())
+        .find_map(|alias| fields.get(&normalize_key(alias)).cloned())
         .map(|value| value.trim().trim_matches(';').trim().to_string())
 }
 

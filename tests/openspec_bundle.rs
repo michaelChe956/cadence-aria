@@ -247,6 +247,46 @@ fn compile_constraint_bundle_extracts_design_ids_from_child_headings() {
 }
 
 #[test]
+fn compile_constraint_bundle_synthesizes_design_ids_from_real_provider_numbered_headings() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let change_dir = tempdir.path().join("openspec/changes/sample-change");
+    copy_dir(sample_change_dir(), &change_dir);
+    fs::write(
+        change_dir.join("design.md"),
+        "# climbStairs 模块设计\n\n\
+## 架构摘要\n\n\
+单文件模块，零外部依赖。\n\n\
+## 设计决策\n\n\
+### 1. 算法选择：迭代法 + O(1) 空间优化\n\n\
+采用双变量滚动迭代实现斐波那契递推。\n\n\
+### 2. 校验策略：Fail-fast 前置校验\n\n\
+函数入口处依次执行类型校验、整型校验、非负校验。\n\n\
+## 公共组件\n\n\
+### `climbStairs(n: number): number`\n\n\
+- **功能**：计算每次可爬 1 或 2 阶时，爬到第 n 阶的不同方法数\n\n\
+## 风险\n\n\
+1. **数值溢出**：当 n 较大时可能超过 Number.MAX_SAFE_INTEGER。\n",
+    )
+    .expect("write design");
+
+    let manifest = build_openspec_source_manifest(&change_dir).expect("manifest");
+    let bundle = compile_constraint_bundle(
+        &"sample-change".to_string(),
+        &manifest,
+        vec![],
+        "N11".to_string(),
+    )
+    .expect("real provider numbered design headings should compile");
+
+    assert_eq!(
+        bundle.design_constraints.design_decision_ids,
+        vec!["DEC-001".to_string(), "DEC-002".to_string()]
+    );
+    assert_eq!(bundle.design_constraints.component_ids, vec!["CMP-001"]);
+    assert_eq!(bundle.design_constraints.risk_ids, vec!["RISK-001"]);
+}
+
+#[test]
 fn compile_constraint_bundle_maps_missing_or_empty_sources_to_blocking_errors() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let change_dir = tempdir.path().join("openspec/changes/sample-change");

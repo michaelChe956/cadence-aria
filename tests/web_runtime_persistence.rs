@@ -65,6 +65,37 @@ fn advance_creates_checkpoint_and_confirm_persists_turn_node_run_provider_run_ar
     assert!(events.contains("artifact_written"));
 }
 
+#[test]
+fn create_task_allocates_next_available_task_id_from_disk() {
+    let workspace = tempdir().expect("workspace");
+    let existing_task_root = workspace.path().join(".aria/runtime/tasks/task_0001");
+    fs::create_dir_all(&existing_task_root).expect("existing task root");
+    fs::write(
+        existing_task_root.join("state.json"),
+        r#"{"task_id":"task_0001","phase":"completed","change_id":"old-change"}"#,
+    )
+    .expect("existing state");
+
+    let mut runtime = WebRuntime::new_fake(workspace.path().to_path_buf());
+    let created = runtime
+        .create_task(CreateTaskRequest {
+            request_text: "实现 climbStairs".to_string(),
+            change_id: "aria-climb-stairs-real-web-clean".to_string(),
+            policy_preset: "manual-write".to_string(),
+            provider_mode: "real".to_string(),
+            timeout_secs: 2400,
+        })
+        .expect("create");
+
+    assert_eq!(created.task_id, "task_0002");
+    assert!(
+        workspace
+            .path()
+            .join(".aria/runtime/tasks/task_0002/state.json")
+            .exists()
+    );
+}
+
 fn assert_json_field(path: std::path::PathBuf, field: &str, expected: &str) {
     let value: Value = serde_json::from_slice(&fs::read(path).expect("read json")).expect("json");
     assert_eq!(value[field], expected);

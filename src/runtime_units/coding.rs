@@ -137,11 +137,7 @@ pub fn run_worktask_execution_chain(
                 Err(ExecutionChainError::ProviderBlocked(_)) => return Ok(state.finish()),
                 Err(error) => return Err(error),
             };
-        if !testing_report
-            .get("tests_passed")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
+        if testing_report_requires_current_worktask_rework(&testing_report) {
             state.push_skill("systematic-debugging");
             let testing_report_ref = artifact_ref(&testing_report);
             if state.rework_or_hold(provider, &testing_report_ref)? {
@@ -663,6 +659,38 @@ fn artifact_ref(artifact: &Value) -> String {
         .and_then(Value::as_str)
         .unwrap_or("artifact_ref_unknown")
         .to_string()
+}
+
+fn testing_report_requires_current_worktask_rework(testing_report: &Value) -> bool {
+    if testing_report
+        .get("tests_passed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    !testing_report_has_only_out_of_scope_acceptance_failures(testing_report)
+}
+
+fn testing_report_has_only_out_of_scope_acceptance_failures(testing_report: &Value) -> bool {
+    let scope_result = testing_report
+        .get("scope_result")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !scope_result.ends_with("_scoped_verification_passed") {
+        return false;
+    }
+
+    let Some(failures) = testing_report.get("failures").and_then(Value::as_array) else {
+        return false;
+    };
+    !failures.is_empty()
+        && failures.iter().all(|failure| {
+            failure
+                .get("failure_type")
+                .and_then(Value::as_str)
+                .is_some_and(|failure_type| failure_type == "out_of_scope_acceptance_failure")
+        })
 }
 
 fn ensure_artifact_ref(artifact: &mut Value, node_id: &str, worktask_id: &str) {

@@ -322,6 +322,31 @@ fn planning_chain_dispatch_does_not_hardcode_aria_cargo_verification_commands() 
 }
 
 #[test]
+fn planning_chain_allows_package_json_when_plan_work_package_targets_test_script() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let change_id = "sample-change".to_string();
+    prepare_change_dir(workspace.path(), &change_id);
+    let provider = PackageJsonPlanProvider::default();
+
+    let result = run_planning_full_chain(planning_input(workspace.path(), &change_id), &provider)
+        .expect("planning full chain");
+
+    let routing = result
+        .dispatch_package
+        .get("worktask_routing")
+        .and_then(Value::as_array)
+        .expect("worktask routing");
+    let package_route = routing
+        .iter()
+        .find(|route| route["source_work_package_id"] == json!("wt-003"))
+        .expect("package.json route");
+    assert_eq!(
+        package_route["allowed_write_scope"],
+        json!(["src/", "tests/", "package.json"])
+    );
+}
+
+#[test]
 fn fake_provider_routes_revise_review_to_n09_and_back_to_n08() {
     let workspace = tempfile::tempdir().expect("workspace");
     let change_id = "sample-change".to_string();
@@ -536,6 +561,11 @@ struct NoIdDesignProvider {
 }
 
 #[derive(Default)]
+struct PackageJsonPlanProvider {
+    delegate: ScriptedPlanningProvider,
+}
+
+#[derive(Default)]
 struct FlakySpecProvider {
     spec_attempts: Mutex<u32>,
     delegate: ScriptedPlanningProvider,
@@ -581,6 +611,18 @@ impl ProviderAdapter for NoIdDesignProvider {
             "schema://aria/artifacts/plan/v1" => provider_output(json!({
                 "artifact_kind": "plan",
                 "markdown": dec_traceability_plan_markdown()
+            })),
+            _ => self.delegate.run(input),
+        }
+    }
+}
+
+impl ProviderAdapter for PackageJsonPlanProvider {
+    fn run(&self, input: &AdapterInput) -> Result<AdapterOutput, ProviderAdapterError> {
+        match input.output_schema.as_str() {
+            "schema://aria/artifacts/plan/v1" => provider_output(json!({
+                "artifact_kind": "plan",
+                "markdown": package_json_plan_markdown()
             })),
             _ => self.delegate.run(input),
         }
@@ -752,6 +794,10 @@ fn revised_design_markdown() -> &'static str {
 
 fn canonical_plan_markdown() -> &'static str {
     "# Plan\n\n## 工作包\n\n| ID | Description | Execution Mode | Human Reason | Traceability | Acceptance |\n|----|-------------|----------------|--------------|--------------|------------|\n| WT-001 | 实现 REPL wire schema | agent_only | | REQ-001, DD-001, TASK-001 | AC-001 |\n| WT-002 | 实现 daemon handshake | agent_only | | REQ-001, DD-001, TASK-002 | AC-001 |\n\n## 依赖关系\n\n| From | To | Type |\n|------|----|------|\n| WT-001 | WT-002 | blocks |\n"
+}
+
+fn package_json_plan_markdown() -> &'static str {
+    "# Plan\n\n## 工作包\n\n| ID | Description | Execution Mode | Human Reason | Traceability | Acceptance |\n|----|-------------|----------------|--------------|--------------|------------|\n| WT-001 | 实现 climbStairs 源码模块 | agent_only | | REQ-001, DD-001, TASK-001 | AC-001 |\n| WT-002 | 实现 tests/climbStairs.test.js 测试套件 | agent_only | | REQ-001, DD-001, TASK-002 | AC-002 |\n| WT-003 | 在 package.json 注册 test 脚本 node --test，缺失则创建 package.json | agent_only | | REQ-001, DD-001, TASK-003 | AC-007 |\n\n## 依赖关系\n\n| From | To | Type |\n|------|----|------|\n| WT-002 | WT-003 | blocks |\n"
 }
 
 fn dec_traceability_plan_markdown() -> &'static str {

@@ -5,6 +5,7 @@ use std::str::FromStr;
 
 use serde_json::json;
 
+use crate::cross_cutting::provider_adapter::ProviderAdapter;
 use crate::interactive::checkpoint::{
     CheckpointService, RollbackPreviewRequest as CoreRollbackPreviewRequest,
     RollbackRequest as CoreRollbackRequest,
@@ -15,7 +16,11 @@ use crate::interactive::policy::{
 };
 use crate::interactive::projection::build_workspace_projection;
 use crate::interactive::web_projection::build_web_projection;
+use crate::task_run::orchestrator::TaskRunOrchestrator;
+use crate::task_run::provider_factory::real_routing_provider;
+use crate::task_run::store::allocate_next_task_id;
 use crate::task_run::types::TaskRunError;
+use crate::task_run::types::{ProviderMode, TaskRunRequest, TaskRunStatus};
 use crate::web::runtime_store::WebRuntimeStore;
 use crate::web::types::{
     AdvanceTaskResponse, ArtifactContentResponse, ConfirmTaskRequest, ConfirmTaskResponse,
@@ -27,6 +32,7 @@ use crate::web::types::{
 pub struct WebRuntime {
     workspace_root: PathBuf,
     next_projection_version: u64,
+    real_provider: Option<Box<dyn ProviderAdapter + Send + Sync>>,
 }
 
 impl WebRuntime {
@@ -34,6 +40,26 @@ impl WebRuntime {
         Self {
             workspace_root,
             next_projection_version: 1,
+            real_provider: None,
+        }
+    }
+
+    pub fn new_real(workspace_root: PathBuf) -> Result<Self, TaskRunError> {
+        Ok(Self {
+            workspace_root,
+            next_projection_version: 1,
+            real_provider: Some(Box::new(real_routing_provider()?)),
+        })
+    }
+
+    pub fn new_with_provider(
+        workspace_root: PathBuf,
+        real_provider: Box<dyn ProviderAdapter + Send + Sync>,
+    ) -> Self {
+        Self {
+            workspace_root,
+            next_projection_version: 1,
+            real_provider: Some(real_provider),
         }
     }
 
@@ -41,8 +67,14 @@ impl WebRuntime {
         &mut self,
         request: CreateTaskRequest,
     ) -> Result<CreateTaskResponse, TaskRunError> {
-        let task_id = "task_0001".to_string();
-        let session_id = "sess_task_0001".to_string();
+        if !matches!(request.provider_mode.as_str(), "fake" | "real") {
+            return Err(TaskRunError::new(
+                "unsupported_provider_mode",
+                format!("unsupported provider_mode: {}", request.provider_mode),
+            ));
+        }
+        let task_id = allocate_next_task_id(&self.workspace_root)?;
+        let session_id = format!("sess_{task_id}");
         let change_id = request.change_id.clone();
         let task_root = self
             .workspace_root
@@ -58,7 +90,9 @@ impl WebRuntime {
                 "change_id": change_id,
                 "current_node": "N16",
                 "policy_preset": request.policy_preset,
-                "provider_mode": request.provider_mode
+                "provider_mode": request.provider_mode,
+                "request_text": request.request_text,
+                "timeout_secs": request.timeout_secs
             }))
             .map_err(json_error)?,
         )
@@ -74,6 +108,7 @@ impl WebRuntime {
     pub fn advance_task(&mut self, task_id: &str) -> Result<AdvanceTaskResponse, TaskRunError> {
         let store = WebRuntimeStore::new(&self.workspace_root, task_id);
         let policy = policy_for_task(&store)?;
+        let state = read_optional_json(&store.task_root().join("state.json"))?;
         run_internal_n00_if_needed(&store)?;
         write_checkpoint(
             &self.workspace_root,
@@ -81,7 +116,7 @@ impl WebRuntime {
             &store,
             self.next_projection_version,
         )?;
-        let pending = pending_provider_step_for_policy(policy);
+        let pending = pending_provider_step_for_policy(policy, &state);
         let decision = policy.decision_for(&ProviderNodeMeta::new(
             pending.node_id.clone(),
             pending.provider_type.clone(),
@@ -118,6 +153,14 @@ impl WebRuntime {
                 .map_err(|error| TaskRunError::new("web_runtime_policy", error))?;
         }
         let store = WebRuntimeStore::new(&self.workspace_root, task_id);
+        let state = read_optional_json(&store.task_root().join("state.json"))?;
+        if state
+            .get("provider_mode")
+            .and_then(serde_json::Value::as_str)
+            == Some("real")
+        {
+            return self.persist_real_provider_execution(&store, &state, request.prompt);
+        }
         self.persist_provider_execution(task_id, &store, request.checkpoint_id, request.prompt)
     }
 
@@ -169,7 +212,8 @@ impl WebRuntime {
         })?;
         let store = WebRuntimeStore::new(&self.workspace_root, task_id);
         let policy = policy_for_task(&store)?;
-        let pending = pending_provider_step_for_policy(policy);
+        let state = read_optional_json(&store.task_root().join("state.json"))?;
+        let pending = pending_provider_step_for_policy(policy, &state);
         let decision = policy.decision_for(&ProviderNodeMeta::new(
             pending.node_id.clone(),
             pending.provider_type.clone(),
@@ -182,6 +226,67 @@ impl WebRuntime {
         Ok(RollbackResponse {
             status: "rollback_completed".to_string(),
             checkpoint_id: checkpoint_id.to_string(),
+        })
+    }
+
+    fn persist_real_provider_execution(
+        &mut self,
+        store: &WebRuntimeStore,
+        state: &serde_json::Value,
+        prompt: String,
+    ) -> Result<ConfirmTaskResponse, TaskRunError> {
+        let provider = self.real_provider.as_ref().ok_or_else(|| {
+            TaskRunError::new(
+                "web_real_provider_unavailable",
+                "real provider is not configured for this web runtime",
+            )
+        })?;
+        let change_id = state
+            .get("change_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("aria-web-task")
+            .to_string();
+        let request_text = if prompt.trim().is_empty() {
+            state
+                .get("request_text")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        } else {
+            prompt
+        };
+        let timeout_secs = state
+            .get("timeout_secs")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(2400);
+        let task_id = state
+            .get("task_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("task_0001")
+            .to_string();
+        let pending_path = store.task_root().join("pending/provider-step.json");
+        if pending_path.exists() {
+            fs::remove_file(pending_path).map_err(io_error)?;
+        }
+        let outcome = TaskRunOrchestrator::run_with_provider(
+            TaskRunRequest {
+                task_id: Some(task_id.clone()),
+                workspace: self.workspace_root.clone(),
+                request_text,
+                change_id: change_id.clone(),
+                provider_mode: ProviderMode::Real,
+                non_interactive: true,
+                timeout_secs,
+            },
+            provider.as_ref(),
+        );
+        preserve_web_task_metadata(store, state, &task_id, &change_id, timeout_secs)?;
+        let outcome = outcome?;
+        self.next_projection_version += 1;
+        Ok(ConfirmTaskResponse {
+            status: task_status_text(&outcome.status).to_string(),
+            node_id: "N16".to_string(),
+            turn_id: format!("turn_{task_id}_real"),
         })
     }
 
@@ -406,6 +511,14 @@ impl WebRuntime {
     }
 }
 
+fn task_status_text(status: &TaskRunStatus) -> &'static str {
+    match status {
+        TaskRunStatus::Completed => "completed",
+        TaskRunStatus::Failed => "failed",
+        TaskRunStatus::BlockedByGate => "blocked_by_gate",
+    }
+}
+
 fn io_error(error: std::io::Error) -> TaskRunError {
     TaskRunError::new("web_runtime_io", error.to_string())
 }
@@ -421,6 +534,40 @@ fn read_optional_json(path: &std::path::Path) -> Result<serde_json::Value, TaskR
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(json!({})),
         Err(error) => Err(io_error(error)),
     }
+}
+
+fn preserve_web_task_metadata(
+    store: &WebRuntimeStore,
+    previous_state: &serde_json::Value,
+    task_id: &str,
+    change_id: &str,
+    timeout_secs: u64,
+) -> Result<(), TaskRunError> {
+    let mut current = read_optional_json(&store.task_root().join("state.json"))?;
+    if !current.is_object() {
+        current = json!({});
+    }
+    let object = current.as_object_mut().expect("state object");
+    object.insert("task_id".to_string(), json!(task_id));
+    object.insert("change_id".to_string(), json!(change_id));
+    object.insert("provider_mode".to_string(), json!("real"));
+    object.insert(
+        "request_text".to_string(),
+        previous_state
+            .get("request_text")
+            .cloned()
+            .unwrap_or_else(|| json!("")),
+    );
+    object.insert(
+        "policy_preset".to_string(),
+        previous_state
+            .get("policy_preset")
+            .cloned()
+            .unwrap_or_else(|| json!("manual-write")),
+    );
+    object.insert("timeout_secs".to_string(), json!(timeout_secs));
+    store.write_json("state.json", &current)?;
+    Ok(())
 }
 
 fn safe_workspace_path(
@@ -542,7 +689,7 @@ fn write_checkpoint(
         &RuntimeCheckpoint {
             checkpoint_id: "ckpt_0001".to_string(),
             task_id: task_id.to_string(),
-            session_id: "sess_task_0001".to_string(),
+            session_id: format!("sess_{task_id}"),
             turn_id: Some("turn_0001".to_string()),
             git_head: git_head(workspace_root),
             dirty_summary: json!({}),
@@ -603,17 +750,33 @@ fn count_json_files_recursive(root: &std::path::Path) -> Result<usize, TaskRunEr
     Ok(count)
 }
 
-fn pending_provider_step_for_policy(policy: PolicyPreset) -> PendingProviderStepDto {
+fn pending_provider_step_for_policy(
+    policy: PolicyPreset,
+    state: &serde_json::Value,
+) -> PendingProviderStepDto {
+    let task_id = state
+        .get("task_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("task_0001");
+    let request_text = state
+        .get("request_text")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("实现 Fibonacci square sum");
+    let change_id = state
+        .get("change_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("aria-fibonacci-square");
     match policy {
         PolicyPreset::ManualAll => PendingProviderStepDto {
             node_id: "N04".to_string(),
             provider_type: "claude_code".to_string(),
             runtime_role: "orchestrator".to_string(),
             adapter_role: "orchestrator".to_string(),
-            prompt: "执行 N04".to_string(),
+            prompt: format!("执行 N04：{request_text}"),
             input_summary: json!({"node_id":"N04"}),
-            canonical_input_refs: vec!["task:task_0001".to_string()],
-            context_files: vec!["openspec/changes/aria-fibonacci-square/proposal.md".to_string()],
+            canonical_input_refs: vec![format!("task:{task_id}")],
+            context_files: vec![format!("openspec/changes/{change_id}/proposal.md")],
             output_schema: "schema://aria/artifacts/planning_report/v1".to_string(),
             allowed_write_scope: vec![".aria/runtime/".to_string(), "openspec/".to_string()],
             forbidden_actions: vec!["修改 cadence/project-rules".to_string()],
@@ -626,10 +789,10 @@ fn pending_provider_step_for_policy(policy: PolicyPreset) -> PendingProviderStep
                 provider_type: "codex".to_string(),
                 runtime_role: "executor".to_string(),
                 adapter_role: "executor".to_string(),
-                prompt: "实现 Fibonacci square sum".to_string(),
+                prompt: request_text.to_string(),
                 input_summary: json!({"worktask_id":"work_wt_001"}),
                 canonical_input_refs: vec!["worktask:work_wt_001".to_string()],
-                context_files: vec!["openspec/changes/aria-fibonacci-square/tasks.md".to_string()],
+                context_files: vec![format!("openspec/changes/{change_id}/tasks.md")],
                 output_schema: "schema://aria/artifacts/coding_report/v1".to_string(),
                 allowed_write_scope: vec!["src/".to_string(), "tests/".to_string()],
                 forbidden_actions: vec!["修改 cadence/project-rules".to_string()],

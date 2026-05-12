@@ -22,6 +22,7 @@ use std::future::Future;
 pub struct FinalClosureInput {
     pub session_id: String,
     pub task_id: String,
+    pub worktree_path: String,
     pub projection_refs: Vec<String>,
     pub constraint_bundle_ref: String,
     pub risk_registry_ref: String,
@@ -273,7 +274,7 @@ fn builder_input(input: &FinalClosureInput, node_id: &str) -> ProviderContextBui
         constraint_bundle_ref: input.constraint_bundle_ref.clone(),
         constraint_summary: "final closure constraints".to_string(),
         context_files: input.context_files.clone(),
-        worktree_path: None,
+        worktree_path: Some(input.worktree_path.clone()),
     }
 }
 

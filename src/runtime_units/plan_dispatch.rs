@@ -10,7 +10,9 @@ use crate::protocol::constraints::{BundleStatus, OpenSpecConstraintBundle};
 use crate::protocol::contracts::ProviderRunRecord;
 use crate::protocol::loop_counters::{LoopCounterName, LoopCounterRegistry};
 use crate::protocol::phase1_profile::PHASE1_PROFILE_VERSION;
-use crate::protocol::projections::{ArtifactProjectionRecord, ProjectionPayload};
+use crate::protocol::projections::{
+    ArtifactProjectionRecord, ProjectionPayload, WorkPackageProjection,
+};
 use crate::runtime_units::clarification::{
     PlanningChainState, PlanningNodeTrace, PlanningStartChainInput, PlanningUnitError,
     provider_run_id, record_protocol_step, requirement_constraint_summary, run_clarification,
@@ -534,18 +536,28 @@ fn worktask_routing_from_plan_projection(
         plan.work_packages
             .iter()
             .map(|work_package| {
+                let allowed_write_scope = allowed_write_scope_for_work_package(work_package);
                 json!({
                     "worktask_id": format!("work_{}", work_package.work_package_id.replace('-', "_")),
                     "source_work_package_id": work_package.work_package_id,
                     "execution_mode": work_package.execution_mode.to_string(),
                     "human_required_reason": work_package.human_required_reason.clone(),
-                    "allowed_write_scope": ["src/", "tests/"],
+                    "allowed_write_scope": allowed_write_scope,
                     "traceability_refs": work_package.traceability_refs.clone(),
                     "verification_commands": [],
                 })
             })
             .collect(),
     ))
+}
+
+fn allowed_write_scope_for_work_package(work_package: &WorkPackageProjection) -> Vec<&'static str> {
+    let mut scope = vec!["src/", "tests/"];
+    let description = work_package.description.to_ascii_lowercase();
+    if description.contains("package.json") {
+        scope.push("package.json");
+    }
+    scope
 }
 
 fn plan_work_package_ids(

@@ -169,6 +169,13 @@ fn followup_input(change_dir: &Path) -> FinalFollowupInput {
     FinalFollowupInput {
         session_id: "session_001".to_string(),
         task_id: "task_001".to_string(),
+        worktree_path: change_dir
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("workspace root")
+            .to_string_lossy()
+            .to_string(),
         change_id: "sample-change".to_string(),
         change_dir: change_dir.to_path_buf(),
         projection_refs: vec![

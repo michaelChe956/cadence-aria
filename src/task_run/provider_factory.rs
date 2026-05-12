@@ -5,12 +5,15 @@ use crate::protocol::contracts::{AdapterInput, AdapterOutput, ProviderType};
 use crate::task_run::types::TaskRunError;
 
 pub struct RoutingProviderAdapter {
-    claude: Box<dyn ProviderAdapter>,
-    codex: Box<dyn ProviderAdapter>,
+    claude: Box<dyn ProviderAdapter + Send + Sync>,
+    codex: Box<dyn ProviderAdapter + Send + Sync>,
 }
 
 impl RoutingProviderAdapter {
-    pub fn new(claude: Box<dyn ProviderAdapter>, codex: Box<dyn ProviderAdapter>) -> Self {
+    pub fn new(
+        claude: Box<dyn ProviderAdapter + Send + Sync>,
+        codex: Box<dyn ProviderAdapter + Send + Sync>,
+    ) -> Self {
         Self { claude, codex }
     }
 }

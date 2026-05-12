@@ -31,6 +31,30 @@ fn fake_provider_task_run_updates_state_json_phase_through_lifecycle() {
 }
 
 #[test]
+fn fake_provider_task_run_uses_requested_task_id() {
+    let workspace = prepare_workspace();
+    let provider = ScriptedTaskRunProvider::happy();
+    let mut request = task_request(workspace.path());
+    request.task_id = Some("task_0042".to_string());
+
+    let outcome = TaskRunOrchestrator::run_with_provider(request, &provider).expect("task run");
+
+    assert_eq!(outcome.task_id, "task_0042");
+    let state = read_json(
+        &workspace
+            .path()
+            .join(".aria/runtime/tasks/task_0042/state.json"),
+    );
+    assert_eq!(state["task_id"], "task_0042");
+    assert!(
+        workspace
+            .path()
+            .join(".aria/runtime/tasks/task_0042/reports/final-report.json")
+            .exists()
+    );
+}
+
+#[test]
 fn fake_provider_task_run_completes_planning_and_writes_openspec_tasks() {
     let workspace = prepare_workspace();
     let provider = ScriptedTaskRunProvider::happy();
@@ -235,6 +259,7 @@ fn prepare_workspace() -> tempfile::TempDir {
 
 fn task_request(workspace: &std::path::Path) -> TaskRunRequest {
     TaskRunRequest {
+        task_id: None,
         workspace: workspace.to_path_buf(),
         request_text: "做一个用户登录功能".to_string(),
         change_id: "aria-login-jwt".to_string(),

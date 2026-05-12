@@ -567,7 +567,10 @@ fn required_constraint_kinds(node_id: &str) -> Vec<String> {
 
 fn allowed_external_inputs(node_id: &str) -> Vec<String> {
     let mut inputs = vec!["openspec".to_string(), "superpowers".to_string()];
-    if matches!(node_id, "N16" | "N17" | "N18" | "N19" | "N20" | "N24") {
+    if matches!(
+        node_id,
+        "N16" | "N17" | "N18" | "N19" | "N20" | "N24" | "N25" | "N26" | "N27"
+    ) {
         inputs.push("worktree".to_string());
     }
     inputs

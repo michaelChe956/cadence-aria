@@ -195,7 +195,10 @@ fn resolve_verification_commands(
 }
 
 fn requires_worktree(node_id: &str) -> bool {
-    matches!(node_id, "N16" | "N17" | "N18" | "N19" | "N20" | "N24")
+    matches!(
+        node_id,
+        "N16" | "N17" | "N18" | "N19" | "N20" | "N24" | "N25" | "N26" | "N27"
+    )
 }
 
 fn requires_acceptance_targets(node_id: &str) -> bool {

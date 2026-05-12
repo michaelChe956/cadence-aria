@@ -117,6 +117,7 @@ where
             let provider = real_routing_provider().map_err(task_run_error)?;
             let outcome = TaskRunOrchestrator::run_with_provider(
                 TaskRunRequest {
+                    task_id: None,
                     workspace: options.workspace,
                     request_text: options.request_text,
                     change_id,

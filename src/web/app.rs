@@ -43,7 +43,8 @@ pub async fn serve_web(
     let addr: SocketAddr = format!("{}:{}", host, port.unwrap_or(0)).parse()?;
     let state = WebAppState::new(
         workspace_root.clone(),
-        crate::web::runtime::WebRuntime::new_fake(workspace_root),
+        crate::web::runtime::WebRuntime::new_real(workspace_root)
+            .map_err(|error| anyhow::anyhow!("{:?}: {}", error.code, error.message))?,
     );
     let app =
         build_web_router(state).fallback_service(crate::web::static_assets::static_dist_service());
