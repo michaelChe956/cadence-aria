@@ -21,9 +21,9 @@ export function TopStatusBar({ projection }: { projection: StatusProjection | nu
   const blocked = overview.status === "blocked_by_gate";
 
   return (
-    <section className="border-b border-line bg-white px-4 py-3">
+    <section className="border-b border-cyan-400/10 bg-[#0b1220] px-4 py-3 text-slate-300">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
-        <strong>Aria Web</strong>
+        <strong className="text-cyan-100">Aria Web</strong>
         <span>{text(projection?.active_task_id, "no task")}</span>
         <span>{text(overview.change_id)}</span>
         <span>{text(overview.current_node)}</span>

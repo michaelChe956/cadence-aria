@@ -5,8 +5,9 @@ test("fake provider workbench creates, confirms, observes, rolls back and reruns
 }) => {
   await page.goto("/");
   await expect(page.getByRole("banner")).toContainText("Aria Web");
-  await expect(page.getByRole("navigation", { name: "Node flow" })).toBeVisible();
-  await expect(page.getByRole("main")).toContainText("Node Workspace");
+  await expect(page.getByRole("navigation", { name: "Workflow map" })).toBeVisible();
+  await expect(page.getByRole("main")).toContainText("Workspace");
+  await expect(page.getByRole("region", { name: "Provider stream" })).toBeVisible();
 
   await page.getByLabel("任务请求").fill("实现 Fibonacci square sum");
   await page.getByLabel("change id").fill("aria-fibonacci-square");
@@ -25,6 +26,8 @@ test("fake provider workbench creates, confirms, observes, rolls back and reruns
   await expect(page.getByRole("dialog")).toContainText(/checkpoint|Checkpoint/);
   await page.getByRole("button", { name: "执行回退" }).click();
 
-  await expect(page.getByRole("button", { name: /N16 dropped/ })).toBeVisible();
+  await expect(
+    page.getByRole("navigation", { name: "Workflow map" }).getByRole("button", { name: /N16 dropped/ }).first(),
+  ).toBeVisible();
   await expect(page.getByLabel("Provider prompt")).toBeVisible();
 });

@@ -5,6 +5,7 @@ use std::str::FromStr;
 
 use serde_json::json;
 
+use crate::cross_cutting::cli_adapter::{CliOutputChunk, ProviderOutputSink};
 use crate::cross_cutting::provider_adapter::ProviderAdapter;
 use crate::interactive::checkpoint::{
     CheckpointService, RollbackPreviewRequest as CoreRollbackPreviewRequest,
@@ -16,18 +17,23 @@ use crate::interactive::policy::{
 };
 use crate::interactive::projection::build_workspace_projection;
 use crate::interactive::web_projection::build_web_projection;
+use crate::protocol::contracts::ProviderType;
 use crate::task_run::orchestrator::TaskRunOrchestrator;
-use crate::task_run::provider_factory::real_routing_provider;
+use crate::task_run::provider_factory::{
+    real_routing_provider, real_routing_provider_with_output_sink,
+};
 use crate::task_run::store::allocate_next_task_id;
 use crate::task_run::types::TaskRunError;
 use crate::task_run::types::{ProviderMode, TaskRunRequest, TaskRunStatus};
+use crate::web::events::EventHub;
 use crate::web::runtime_store::WebRuntimeStore;
 use crate::web::types::{
     AdvanceTaskResponse, ArtifactContentResponse, ConfirmTaskRequest, ConfirmTaskResponse,
     CreateTaskRequest, CreateTaskResponse, FileContentResponse, FileDiffResponse,
-    PendingProviderStepDto, RollbackPreviewResponse, RollbackResponse, StopTaskResponse,
-    TaskListItem, TaskListResponse,
+    PendingProviderStepDto, ProviderOutputChunk, RollbackPreviewResponse, RollbackResponse,
+    StopTaskResponse, TaskListItem, TaskListResponse,
 };
+use std::sync::Arc;
 
 pub struct WebRuntime {
     workspace_root: PathBuf,
@@ -49,6 +55,33 @@ impl WebRuntime {
             workspace_root,
             next_projection_version: 1,
             real_provider: Some(Box::new(real_routing_provider()?)),
+        })
+    }
+
+    pub fn new_real_with_events(
+        workspace_root: PathBuf,
+        events: EventHub,
+    ) -> Result<Self, TaskRunError> {
+        let output_sink: ProviderOutputSink = Arc::new(move |chunk: CliOutputChunk| {
+            events.publish_provider_output(
+                None,
+                ProviderOutputChunk {
+                    node_id: provider_node_id_for_schema(&chunk.output_schema).to_string(),
+                    provider_run_id: provider_run_id_for_chunk(&chunk),
+                    stream: chunk.stream,
+                    text: chunk.text,
+                    structured_output: None,
+                    manual_gate: None,
+                    retry_attempt: None,
+                },
+            );
+        });
+        Ok(Self {
+            workspace_root,
+            next_projection_version: 1,
+            real_provider: Some(Box::new(real_routing_provider_with_output_sink(Some(
+                output_sink,
+            ))?)),
         })
     }
 
@@ -418,8 +451,16 @@ impl WebRuntime {
         task_id: Option<&str>,
         selected_node_id: Option<&str>,
     ) -> Result<WebWorkspaceProjection, TaskRunError> {
-        let base = build_workspace_projection(&self.workspace_root, task_id)?;
-        build_web_projection(&self.workspace_root, base, selected_node_id)
+        Self::projection_for_workspace(&self.workspace_root, task_id, selected_node_id)
+    }
+
+    pub fn projection_for_workspace(
+        workspace_root: &std::path::Path,
+        task_id: Option<&str>,
+        selected_node_id: Option<&str>,
+    ) -> Result<WebWorkspaceProjection, TaskRunError> {
+        let base = build_workspace_projection(workspace_root, task_id)?;
+        build_web_projection(workspace_root, base, selected_node_id)
     }
 
     pub fn list_tasks(&self) -> Result<TaskListResponse, TaskRunError> {
@@ -516,6 +557,56 @@ fn task_status_text(status: &TaskRunStatus) -> &'static str {
         TaskRunStatus::Completed => "completed",
         TaskRunStatus::Failed => "failed",
         TaskRunStatus::BlockedByGate => "blocked_by_gate",
+    }
+}
+
+fn provider_node_id_for_schema(output_schema: &str) -> &'static str {
+    if output_schema.contains("clarification_record") {
+        "N04"
+    } else if output_schema.contains("spec_gate_review") {
+        "N06"
+    } else if output_schema.contains("spec/v1") {
+        "N05"
+    } else if output_schema.contains("design_review") {
+        "N08"
+    } else if output_schema.contains("design/v1") {
+        "N07"
+    } else if output_schema.contains("readiness_check") {
+        "N10"
+    } else if output_schema.contains("plan/v1") {
+        "N11"
+    } else if output_schema.contains("dispatch_package") {
+        "N12"
+    } else if output_schema.contains("coding_report") {
+        "N16"
+    } else if output_schema.contains("testing_report") {
+        "N17"
+    } else if output_schema.contains("code_review_report") {
+        "N18"
+    } else if output_schema.contains("final_review") {
+        "N25"
+    } else if output_schema.contains("patch_task_delta") {
+        "N26"
+    } else if output_schema.contains("final_summary") {
+        "N27"
+    } else {
+        "provider"
+    }
+}
+
+fn provider_run_id_for_chunk(chunk: &CliOutputChunk) -> String {
+    format!(
+        "stream_{}_{}",
+        provider_type_slug(&chunk.provider_type),
+        provider_node_id_for_schema(&chunk.output_schema).to_ascii_lowercase()
+    )
+}
+
+fn provider_type_slug(provider_type: &ProviderType) -> &'static str {
+    match provider_type {
+        ProviderType::ClaudeCode => "claude",
+        ProviderType::Codex => "codex",
+        ProviderType::Fake => "fake",
     }
 }
 

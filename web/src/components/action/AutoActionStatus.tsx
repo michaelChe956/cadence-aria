@@ -11,10 +11,10 @@ export function AutoActionStatus({
   onStop: () => void;
 }) {
   return (
-    <section className="border-t border-line bg-white px-4 py-3">
+    <section className="rounded-xl border border-cyan-300/15 bg-white/[0.03] px-4 py-3">
       <div className="flex items-center justify-between gap-3">
         <div>
-          <div className="text-sm font-semibold">{currentAction}</div>
+          <div className="text-sm font-semibold text-slate-100">{currentAction}</div>
           <div className="mt-1 text-xs text-slate-500">
             {events
               .slice(-3)
@@ -22,7 +22,7 @@ export function AutoActionStatus({
               .join(" · ")}
           </div>
         </div>
-        <button type="button" className="rounded-md border border-line px-3 py-2 text-sm" onClick={onStop}>
+        <button type="button" className="rounded-md border border-white/10 px-3 py-2 text-sm text-slate-200" onClick={onStop}>
           <Square className="mr-1 inline h-4 w-4" />
           停止
         </button>

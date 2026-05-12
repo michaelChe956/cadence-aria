@@ -1,5 +1,5 @@
 use crate::cross_cutting::adapter_compatibility::default_compatibility_matrix;
-use crate::cross_cutting::cli_adapter::{CliAdapterConfig, CliProviderAdapter};
+use crate::cross_cutting::cli_adapter::{CliAdapterConfig, CliProviderAdapter, ProviderOutputSink};
 use crate::cross_cutting::provider_adapter::{ProviderAdapter, ProviderAdapterError};
 use crate::protocol::contracts::{AdapterInput, AdapterOutput, ProviderType};
 use crate::task_run::types::TaskRunError;
@@ -33,6 +33,12 @@ impl ProviderAdapter for RoutingProviderAdapter {
 }
 
 pub fn real_routing_provider() -> Result<RoutingProviderAdapter, TaskRunError> {
+    real_routing_provider_with_output_sink(None)
+}
+
+pub fn real_routing_provider_with_output_sink(
+    output_sink: Option<ProviderOutputSink>,
+) -> Result<RoutingProviderAdapter, TaskRunError> {
     let matrix = default_compatibility_matrix();
     let claude = matrix
         .entry_for(ProviderType::ClaudeCode)
@@ -47,10 +53,12 @@ pub fn real_routing_provider() -> Result<RoutingProviderAdapter, TaskRunError> {
         Box::new(CliProviderAdapter::new(CliAdapterConfig {
             compatibility: claude,
             expected_artifact_kind: None,
+            output_sink: output_sink.clone(),
         })),
         Box::new(CliProviderAdapter::new(CliAdapterConfig {
             compatibility: codex,
             expected_artifact_kind: None,
+            output_sink,
         })),
     ))
 }

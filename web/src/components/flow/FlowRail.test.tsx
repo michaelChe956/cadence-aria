@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { FlowRail } from "./FlowRail";
 
 describe("FlowRail", () => {
-  it("renders node state provider badge attempts artifacts gate marker and dropped history", () => {
+  it("renders a horizontal workflow map with node status, edges, and dropped history", () => {
     render(
       <FlowRail
         timeline={[
@@ -31,6 +31,8 @@ describe("FlowRail", () => {
         onSelectNode={() => undefined}
       />,
     );
+    expect(screen.getByRole("navigation", { name: "Workflow map" })).toBeInTheDocument();
+    expect(screen.getByTestId("workflow-edge-N16-N17")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /N16/ })).toHaveTextContent("completed");
     expect(screen.getByRole("button", { name: /N16/ })).toHaveTextContent("attempt 2");
     expect(screen.getByRole("button", { name: /N16/ })).toHaveTextContent("rework 1");

@@ -19,8 +19,8 @@ export function RollbackDialog({
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 bg-black/40" />
-        <Dialog.Content className="fixed left-1/2 top-1/2 w-[34rem] -translate-x-1/2 -translate-y-1/2 rounded-md bg-white p-5 shadow-xl">
+        <Dialog.Overlay className="fixed inset-0 bg-black/70" />
+        <Dialog.Content className="fixed left-1/2 top-1/2 w-[34rem] -translate-x-1/2 -translate-y-1/2 rounded-md border border-cyan-300/15 bg-[#0b1220] p-5 text-slate-100 shadow-xl shadow-cyan-950/60">
           <Dialog.Title className="text-lg font-semibold">回退到 checkpoint</Dialog.Title>
           <Dialog.Description className="mt-1 text-sm text-slate-500">
             确认本次回退会丢弃的运行记录、产物和文件变更。
@@ -47,12 +47,12 @@ export function RollbackDialog({
             </div>
           ) : null}
           <div className="mt-4 flex justify-end gap-2">
-            <button type="button" className="rounded-md border border-line px-3 py-2" onClick={() => onOpenChange(false)}>
+            <button type="button" className="rounded-md border border-white/10 px-3 py-2" onClick={() => onOpenChange(false)}>
               取消
             </button>
             <button
               type="button"
-              className="rounded-md bg-ink px-3 py-2 text-white disabled:opacity-50"
+              className="rounded-md bg-cyan-300 px-3 py-2 text-slate-950 disabled:opacity-50"
               disabled={disabled}
               onClick={() =>
                 preview &&

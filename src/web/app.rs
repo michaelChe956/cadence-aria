@@ -3,6 +3,7 @@ use axum::routing::{get, post};
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
 
+use crate::web::events::EventHub;
 use crate::web::handlers;
 use crate::web::state::WebAppState;
 
@@ -41,10 +42,12 @@ pub async fn serve_web(
     port: Option<u16>,
 ) -> anyhow::Result<()> {
     let addr: SocketAddr = format!("{}:{}", host, port.unwrap_or(0)).parse()?;
-    let state = WebAppState::new(
+    let events = EventHub::new();
+    let state = WebAppState::with_events(
         workspace_root.clone(),
-        crate::web::runtime::WebRuntime::new_real(workspace_root)
+        crate::web::runtime::WebRuntime::new_real_with_events(workspace_root, events.clone())
             .map_err(|error| anyhow::anyhow!("{:?}: {}", error.code, error.message))?,
+        events,
     );
     let app =
         build_web_router(state).fallback_service(crate::web::static_assets::static_dist_service());

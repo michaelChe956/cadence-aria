@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AppShell } from "./main";
@@ -11,8 +11,10 @@ describe("AppShell", () => {
   it("renders the first-screen workbench shell", () => {
     render(<AppShell />);
     expect(screen.getByRole("banner")).toHaveTextContent("Aria Web");
-    expect(screen.getByRole("navigation", { name: "Node flow" })).toBeInTheDocument();
-    expect(screen.getByRole("main")).toHaveTextContent("Node Workspace");
+    expect(screen.getByRole("navigation", { name: "Workflow map" })).toBeInTheDocument();
+    expect(screen.getByRole("main")).toHaveTextContent("Workspace");
+    expect(screen.getByRole("main")).toContainElement(screen.getByLabelText("任务请求"));
+    expect(screen.getByRole("region", { name: "Provider stream" })).toBeInTheDocument();
   });
 
   it("creates a task then advances into provider confirmation", async () => {
@@ -90,7 +92,8 @@ describe("AppShell", () => {
     await userEvent.click(await screen.findByRole("button", { name: "推进" }));
     await userEvent.click(await screen.findByRole("button", { name: "确认执行" }));
 
-    expect(await screen.findByText(/provider_output/)).toBeInTheDocument();
+    const stream = screen.getByRole("region", { name: "Provider stream" });
+    expect(await within(stream).findByText(/done/)).toBeInTheDocument();
     expect(screen.getByRole("main")).toHaveTextContent("N16");
   });
 
@@ -145,7 +148,63 @@ describe("AppShell", () => {
       payload: {},
     });
 
-    expect(await screen.findByText(/provider_output/)).toBeInTheDocument();
+    const stream = screen.getByRole("region", { name: "Provider stream" });
+    expect(await within(stream).findByText(/done/)).toBeInTheDocument();
+  });
+
+  it("appends provider output SSE chunks to the workspace stream", async () => {
+    const eventSources: MockEventSource[] = [];
+    vi.stubGlobal(
+      "EventSource",
+      class extends MockEventSource {
+        constructor(url: string) {
+          super(url);
+          eventSources.push(this);
+        }
+      },
+    );
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === "/api/tasks") {
+          return jsonResponse({
+            task_id: "task_0001",
+            session_id: "sess_task_0001",
+            change_id: "aria-fibonacci-square",
+            phase: "intake",
+          });
+        }
+        if (url.startsWith("/api/projection")) {
+          return jsonResponse(projection(null));
+        }
+        return jsonResponse({});
+      }),
+    );
+
+    render(<AppShell />);
+    await userEvent.type(screen.getByLabelText("任务请求"), "实现 Fibonacci square sum");
+    await userEvent.type(screen.getByLabelText("change id"), "aria-fibonacci-square");
+    await userEvent.click(screen.getByRole("button", { name: "新建任务" }));
+
+    eventSources[0].emit("provider_output", {
+      cursor: 2,
+      event_type: "provider_output",
+      task_id: "task_0001",
+      payload: {
+        node_id: "N16",
+        provider_run_id: "run_n16_0001",
+        stream: "stdout",
+        text: "streamed provider line",
+      },
+    });
+
+    expect(await screen.findByText(/streamed provider line/)).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Provider stream" })).toHaveTextContent("N16");
+    expect(screen.getByRole("list", { name: "Provider output messages" })).toBeInTheDocument();
+    expect(screen.getByRole("listitem", { name: /N16 stdout/ })).toHaveTextContent(
+      "streamed provider line",
+    );
   });
 });
 

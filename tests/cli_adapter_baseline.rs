@@ -10,7 +10,7 @@ use cadence_aria::cross_cutting::provider_capabilities::ProviderCapabilityProbe;
 use cadence_aria::protocol::contracts::{AdapterInput, AdapterRole, ProviderType, TimeoutStatus};
 use serde_json::json;
 use std::fs;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
 static CLI_ADAPTER_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -113,6 +113,7 @@ fn cli_adapter_spawns_fixture_command_parses_sentinel_and_detects_modified_files
     let adapter = CliProviderAdapter::new(CliAdapterConfig {
         compatibility,
         expected_artifact_kind: Some("clarification_record".to_string()),
+        output_sink: None,
     });
 
     let output = adapter
@@ -157,6 +158,7 @@ echo "</ARIA_STRUCTURED_OUTPUT>"
     let adapter = CliProviderAdapter::new(CliAdapterConfig {
         compatibility,
         expected_artifact_kind: Some("clarification_record".to_string()),
+        output_sink: None,
     });
 
     let output = adapter
@@ -206,6 +208,7 @@ esac
     let adapter = CliProviderAdapter::new(CliAdapterConfig {
         compatibility,
         expected_artifact_kind: Some("clarification_record".to_string()),
+        output_sink: None,
     });
 
     let output = adapter
@@ -252,6 +255,7 @@ esac
     let adapter = CliProviderAdapter::new(CliAdapterConfig {
         compatibility,
         expected_artifact_kind: Some("clarification_record".to_string()),
+        output_sink: None,
     });
 
     let started = Instant::now();
@@ -305,6 +309,7 @@ esac
     let adapter = CliProviderAdapter::new(CliAdapterConfig {
         compatibility,
         expected_artifact_kind: Some("clarification_record".to_string()),
+        output_sink: None,
     });
 
     let output = adapter
@@ -328,6 +333,66 @@ esac
         output.files_modified,
         Vec::<String>::new(),
         "runtime stream logs must not be reported as target file changes"
+    );
+}
+
+#[test]
+fn cli_adapter_emits_stdout_and_stderr_chunks_to_stream_sink() {
+    let _guard = cli_adapter_test_guard();
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let command = support::write_executable_script(
+        tempdir.path(),
+        "stream-sink-provider",
+        r#"#!/bin/sh
+set -eu
+case "${1:-run}" in
+  probe|version|auth)
+    echo "ok"
+    exit 0
+    ;;
+  run)
+    cat >/dev/null
+    echo "stdout chunk for browser"
+    echo "stderr chunk for browser" >&2
+    echo "<ARIA_STRUCTURED_OUTPUT>"
+    echo '{"artifact_kind":"clarification_record","goal_summary":"fixture goal","constraints":[],"open_questions":[],"assumptions":[],"suggested_scope":"fixture scope"}'
+    echo "</ARIA_STRUCTURED_OUTPUT>"
+    exit 0
+    ;;
+esac
+"#,
+    );
+    let worktree = tempfile::tempdir().expect("worktree");
+    let compatibility = fixture_compatibility_entry(ProviderType::Fake, command);
+    let chunks = Arc::new(Mutex::new(Vec::new()));
+    let sink_chunks = Arc::clone(&chunks);
+    let adapter = CliProviderAdapter::new(CliAdapterConfig {
+        compatibility,
+        expected_artifact_kind: Some("clarification_record".to_string()),
+        output_sink: Some(Arc::new(move |chunk| {
+            sink_chunks
+                .lock()
+                .expect("chunks")
+                .push((chunk.stream, chunk.text));
+        })),
+    });
+
+    adapter
+        .run(&adapter_input(worktree.path()))
+        .expect("cli run");
+
+    let chunks = chunks.lock().expect("chunks");
+    assert!(
+        chunks
+            .iter()
+            .any(|(stream, text)| stream == "stdout" && text.contains("stdout chunk for browser")),
+        "stdout chunk should be streamed to sink: {chunks:?}"
+    );
+    assert!(
+        chunks
+            .iter()
+            .any(|(stream, text)| stream == "stderr" && text.contains("stderr chunk for browser")),
+        "stderr chunk should be streamed to sink: {chunks:?}"
     );
 }
 

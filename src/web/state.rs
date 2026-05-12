@@ -13,10 +13,14 @@ pub struct WebAppState {
 
 impl WebAppState {
     pub fn new(workspace_root: PathBuf, runtime: WebRuntime) -> Self {
+        Self::with_events(workspace_root, runtime, EventHub::new())
+    }
+
+    pub fn with_events(workspace_root: PathBuf, runtime: WebRuntime, events: EventHub) -> Self {
         Self {
             workspace_root,
             runtime: Arc::new(Mutex::new(runtime)),
-            events: EventHub::new(),
+            events,
         }
     }
 }

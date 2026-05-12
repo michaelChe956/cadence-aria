@@ -10,6 +10,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use crate::interactive::models::WebWorkspaceProjection;
 use crate::web::error::ApiResult;
 use crate::web::events::WebEventType;
+use crate::web::runtime::WebRuntime;
 use crate::web::state::WebAppState;
 use crate::web::types::{
     AdvanceTaskResponse, ArtifactContentResponse, ConfirmTaskRequest, ConfirmTaskResponse,
@@ -172,8 +173,8 @@ pub async fn projection(
     State(state): State<WebAppState>,
     Query(query): Query<ProjectionQuery>,
 ) -> ApiResult<Json<WebWorkspaceProjection>> {
-    let runtime = state.runtime.lock().expect("runtime lock");
-    Ok(Json(runtime.projection(
+    Ok(Json(WebRuntime::projection_for_workspace(
+        &state.workspace_root,
         query.task_id.as_deref(),
         query.node_id.as_deref(),
     )?))
