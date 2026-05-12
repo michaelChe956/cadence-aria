@@ -55,6 +55,15 @@ fn web_runtime_real_mode_runs_task_orchestrator_provider_path() {
     assert_eq!(final_report["status"], "completed");
     assert_eq!(final_report["change_id"], "aria-climb-stairs");
 
+    let state = read_json(
+        &workspace
+            .path()
+            .join(".aria/runtime/tasks/task_0001/state.json"),
+    );
+    assert_eq!(state["phase"], "completed");
+    assert_eq!(state["openspec_bootstrap_status"], "bootstrapped");
+    assert_eq!(state["provider_mode"], "real");
+
     let seen_schemas = seen_schemas.lock().expect("seen schemas").clone();
     assert!(seen_schemas.contains(&json!("schema://aria/artifacts/clarification_record/v1")));
     assert!(seen_schemas.contains(&json!("schema://aria/artifacts/coding_report/v1")));

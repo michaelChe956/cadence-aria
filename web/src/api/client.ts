@@ -11,6 +11,18 @@ import type {
   WebWorkspaceProjection,
 } from "./types";
 
+export class ApiRequestError extends Error implements ApiError {
+  code: string;
+  details: Record<string, unknown>;
+
+  constructor(error: ApiError) {
+    super(error.message);
+    this.name = "ApiRequestError";
+    this.code = error.code;
+    this.details = error.details;
+  }
+}
+
 export async function normalizeApiError(response: Response): Promise<ApiError> {
   const body = await response.json().catch(() => ({}));
   return {
@@ -29,7 +41,7 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
     },
   });
   if (!response.ok) {
-    throw await normalizeApiError(response);
+    throw new ApiRequestError(await normalizeApiError(response));
   }
   return response.json() as Promise<T>;
 }

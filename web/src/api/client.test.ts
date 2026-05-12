@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  confirmTask,
   createTask,
   getArtifactContent,
   getFileContent,
@@ -50,6 +51,37 @@ describe("api client", () => {
       ),
     );
     expect(error.code).toBe("checkpoint_unsafe_dirty_worktree");
+  });
+
+  it("throws standard Error with api message for failed confirm requests", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              code: "provider_execution_failed",
+              message: "provider command timed out",
+              details: { node_id: "N16" },
+            }),
+            { status: 500 },
+          ),
+      ),
+    );
+
+    let thrown: unknown;
+    try {
+      await confirmTask("task_0001", {
+        checkpoint_id: "ckpt_0001",
+        prompt: "confirm",
+        policy_override: null,
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).message).toBe("provider command timed out");
   });
 
   it("calls task resource and stop endpoints with encoded parameters", async () => {
