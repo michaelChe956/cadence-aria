@@ -44,10 +44,12 @@
 >
 > 本仓库已在 `AGENTS.md` 与 `CLAUDE.md` 中引用 `cadence/project-rules/README.md`，因此本节列出的规则不是示例规则，而是当前项目的强制规则。
 
-- **Rust/Cargo 开发与验证规则**：`cadence/project-rules/2026-04-29_README_Rust与Docker开发指南_v1.2.md`
-  - 在宿主机未确认具备可用 Rust 工具链时，必须使用该规则文档中的 Docker 命令进行 `cargo fmt --check`、`cargo check`、`cargo test` 与 CLI 验证。
-  - 使用 Docker 执行会改写文件的命令时，必须按规则文档处理文件 ownership，避免产生 root-owned 文件。
-  - 若 Rust/Docker 开发命令发生变化，必须同步更新该规则文档。
+- **Rust/Cargo 本地开发与验证规则**
+  - 后续本地开发、测试与 CLI 验证必须直接使用宿主机 Rust 环境执行，不使用 Docker 作为默认开发测试环境。
+  - 仓库根目录的 `rust-toolchain.toml` 是唯一工具链声明来源；进入仓库根目录或当前 worktree 根目录后直接运行 `cargo` 命令。
+  - 常用本地验证命令：`cargo fmt --check`、`cargo clippy --all-targets --all-features --locked -- -D warnings`、`cargo check --locked`、`cargo test --locked -j 1`。
+  - 若宿主机 Rust 工具链或组件缺失，应按 `rust-toolchain.toml` 修复宿主机环境，而不是改用 Docker 绕过。
+  - 目录中旧 Docker 开发指南仅作为历史文档保留，不属于已启用项目规则。
 
 **示例规则**（默认不启用，需用户主动添加）：
 
