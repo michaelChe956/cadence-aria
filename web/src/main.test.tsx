@@ -12,9 +12,52 @@ describe("AppShell", () => {
     render(<AppShell />);
     expect(screen.getByRole("banner")).toHaveTextContent("Aria Web");
     expect(screen.getByRole("navigation", { name: "Workflow map" })).toBeInTheDocument();
+    expect(screen.getByRole("main")).toHaveClass("text-[#241B2F]");
     expect(screen.getByRole("main")).toHaveTextContent("Workspace");
     expect(screen.getByRole("main")).toContainElement(screen.getByLabelText("任务请求"));
     expect(screen.getByRole("region", { name: "Provider stream" })).toBeInTheDocument();
+  });
+
+  it("resets page scroll to the top when the workbench loads", () => {
+    const scrollTo = vi.fn();
+    Object.defineProperty(window, "scrollTo", { configurable: true, value: scrollTo });
+    Object.defineProperty(window.history, "scrollRestoration", {
+      configurable: true,
+      value: "auto",
+      writable: true,
+    });
+
+    render(<AppShell />);
+
+    expect(window.history.scrollRestoration).toBe("manual");
+    expect(scrollTo).toHaveBeenCalledWith({ top: 0, left: 0, behavior: "auto" });
+  });
+
+  it("places the interaction window before the workflow navigation", () => {
+    render(<AppShell />);
+
+    const interactionWindow = screen.getByRole("region", { name: "Interaction window" });
+    const workflowMap = screen.getByRole("navigation", { name: "Workflow map" });
+
+    expect(
+      interactionWindow.compareDocumentPosition(workflowMap) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("renders an illustrated AI coding workbench in the interaction window", () => {
+    render(<AppShell />);
+
+    const interactionWindow = screen.getByRole("region", { name: "Interaction window" });
+    expect(
+      within(interactionWindow).getByRole("img", { name: "AI coding workbench illustration" }),
+    ).toBeInTheDocument();
+    expect(
+      within(interactionWindow).getByRole("group", { name: "AI coding workbench status" }),
+    ).toHaveTextContent("AI Coding Workbench");
+    expect(within(interactionWindow).getByTestId("workbench-visual")).toHaveAttribute(
+      "data-motion",
+      "ambient",
+    );
   });
 
   it("creates a task then advances into provider confirmation", async () => {
@@ -95,6 +138,45 @@ describe("AppShell", () => {
     const stream = screen.getByRole("region", { name: "Provider stream" });
     expect(await within(stream).findByText(/done/)).toBeInTheDocument();
     expect(screen.getByRole("main")).toHaveTextContent("N16");
+  });
+
+  it("loads selected node context when a workflow node is clicked", async () => {
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/tasks") {
+        return jsonResponse({
+          task_id: "task_0001",
+          session_id: "sess_task_0001",
+          change_id: "aria-fibonacci-square",
+          phase: "intake",
+        });
+      }
+      if (url === "/api/projection?task_id=task_0001&node_id=N17") {
+        return jsonResponse(projectionWithSelectedNode("N17"));
+      }
+      if (url.startsWith("/api/projection")) {
+        return jsonResponse(projectionWithSelectedNode("N16"));
+      }
+      return jsonResponse({});
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    render(<AppShell />);
+    await userEvent.type(screen.getByLabelText("任务请求"), "实现 Fibonacci square sum");
+    await userEvent.type(screen.getByLabelText("change id"), "aria-fibonacci-square");
+    await userEvent.click(screen.getByRole("button", { name: "新建任务" }));
+    await userEvent.click(await screen.findByRole("button", { name: /N17/ }));
+
+    const nodeDetails = screen.getByRole("region", { name: "Node workspace details" });
+    const summary = await within(nodeDetails).findByRole("group", { name: "当前节点摘要" });
+    expect(within(summary).getByText("N17")).toBeInTheDocument();
+    expect(within(summary).getByText("running")).toBeInTheDocument();
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "/api/projection?task_id=task_0001&node_id=N17",
+      expect.objectContaining({
+        headers: expect.objectContaining({ "content-type": "application/json" }),
+      }),
+    );
   });
 
   it("refreshes the projection when an SSE projection update arrives", async () => {
@@ -266,6 +348,30 @@ function projectionWithRunOutput() {
       inputs: [],
       run: [{ kind: "provider_output", stream: "stdout", text: "done" }],
       outputs: [{ artifact_ref: "coding_report_work_wt_001_0001" }],
+      diffs: [],
+    },
+  };
+}
+
+function projectionWithSelectedNode(nodeId: string) {
+  return {
+    ...projection(null),
+    timeline: [
+      { node_id: "N16", status: "completed", provider_type: "codex", artifact_count: 1 },
+      { node_id: "N17", status: "running", provider_type: "codex", attempt: 2, artifact_count: 3 },
+    ],
+    selected_node_context: {
+      node_id: nodeId,
+      overview: {
+        node_id: nodeId,
+        status: nodeId === "N17" ? "running" : "completed",
+        provider_type: "codex",
+        attempt: nodeId === "N17" ? 2 : 1,
+        artifact_count: nodeId === "N17" ? 3 : 1,
+      },
+      inputs: [],
+      run: [{ kind: "provider_output", stream: "stdout", text: `${nodeId} context loaded` }],
+      outputs: [{ artifact_ref: `coding_report_${nodeId}` }],
       diffs: [],
     },
   };

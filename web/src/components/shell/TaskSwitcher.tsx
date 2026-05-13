@@ -8,13 +8,15 @@ export function TaskSwitcher({
   onSelectTask: (taskId: string) => void;
 }) {
   return (
-    <label className="flex items-center gap-2 text-sm">
-      <span className="text-slate-500">继续任务</span>
+    <label className="flex min-w-0 flex-1 items-center justify-end gap-2 text-sm sm:flex-none">
+      <span className="shrink-0 text-xs font-bold uppercase text-indigo-700">
+        继续任务
+      </span>
       <select
         aria-label="继续任务"
         value={activeTaskId ?? ""}
         onChange={(event) => onSelectTask(event.target.value)}
-        className="rounded-md border border-line bg-white px-2 py-1"
+        className="min-w-0 max-w-[22rem] rounded-lg border-2 border-indigo-200 bg-white px-3 py-1.5 text-sm font-semibold text-indigo-950 shadow-[0_4px_0_rgba(129,140,248,0.18)] outline-none transition-colors hover:border-orange-300 focus-visible:border-orange-400 focus-visible:ring-4 focus-visible:ring-orange-200"
       >
         {tasks.length === 0 ? <option value="">no tasks</option> : null}
         {tasks.map((task) => (

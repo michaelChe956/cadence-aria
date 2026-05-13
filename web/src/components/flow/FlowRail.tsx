@@ -1,29 +1,4 @@
-import {
-  Background,
-  BackgroundVariant,
-  Controls,
-  ReactFlow,
-  type Edge,
-  type Node,
-  type NodeProps,
-  type NodeTypes,
-} from "@xyflow/react";
-import "@xyflow/react/dist/style.css";
-import { useMemo } from "react";
-
 type TimelineItem = Record<string, unknown>;
-
-type WorkflowNodeData = {
-  item: TimelineItem;
-  selected: boolean;
-  onSelectNode: (nodeId: string) => void;
-};
-
-type WorkflowNode = Node<WorkflowNodeData, "workflow">;
-
-const nodeTypes: NodeTypes = {
-  workflow: WorkflowNodeCard,
-};
 
 export function FlowRail({
   timeline,
@@ -34,145 +9,123 @@ export function FlowRail({
   selectedNodeId: string | null;
   onSelectNode: (nodeId: string) => void;
 }) {
-  const nodes: TimelineItem[] =
-    timeline.length > 0
-      ? timeline
-      : Array.from({ length: 29 }, (_, index) => ({
-          node_id: `N${String(index).padStart(2, "0")}`,
-          status: "idle",
-        }));
+  const hasTimeline = timeline.length > 0;
+  const nodes: TimelineItem[] = timeline;
   const edgesForMarkers = nodes.slice(0, -1).map((item, index) => ({
     source: String(item.node_id ?? `N${String(index).padStart(2, "0")}`),
     target: String(nodes[index + 1].node_id ?? `N${String(index + 1).padStart(2, "0")}`),
   }));
-  const { flowNodes, flowEdges } = useMemo(
-    () => buildFlowElements(nodes, selectedNodeId, onSelectNode),
-    [nodes, onSelectNode, selectedNodeId],
-  );
 
   return (
-    <nav aria-label="Workflow map" className="border-b border-cyan-400/15 bg-[#081018] px-4 py-3">
-      <div className="mb-2 flex items-center justify-between">
+    <nav
+      aria-label="Workflow map"
+      className="relative overflow-hidden rounded-lg border-2 border-indigo-200 bg-gradient-to-br from-white via-indigo-50 to-cyan-50 p-4 shadow-[0_10px_0_rgba(79,70,229,0.10),0_18px_34px_rgba(79,70,229,0.16)]"
+    >
+      <div className="pointer-events-none absolute -right-10 top-12 h-28 w-28 rounded-full bg-orange-200/45 blur-2xl" />
+      <div className="pointer-events-none absolute -left-12 bottom-8 h-28 w-28 rounded-full bg-cyan-200/45 blur-2xl" />
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
         <div>
-          <div className="text-xs font-semibold uppercase tracking-[0.18em] text-cyan-200/80">
-            Workflow map
+          <div className="text-xs font-bold uppercase text-indigo-600">
+            Workflow path
           </div>
-          <div className="text-xs text-slate-500">点击节点查看 workspace 中的输入、执行和产物。</div>
+          <div className="mt-1 text-sm font-semibold text-indigo-950/70">
+            节点上下文
+          </div>
         </div>
-        <div className="rounded-full border border-cyan-300/20 bg-cyan-300/10 px-3 py-1 text-xs text-cyan-100">
+        <div className="rounded-lg border-2 border-indigo-200 bg-indigo-50 px-3 py-1 font-mono text-xs font-bold text-indigo-700">
           {nodes.length} nodes
         </div>
       </div>
-      <div className="h-44 overflow-hidden rounded-lg border border-cyan-300/15 bg-[#0b1220] shadow-[0_0_40px_rgba(20,184,166,0.10)]">
-        <ReactFlow
-          colorMode="dark"
-          nodes={flowNodes}
-          edges={flowEdges}
-          nodeTypes={nodeTypes}
-          fitView
-          maxZoom={1.4}
-          minZoom={0.35}
-          nodesDraggable={false}
-          nodesConnectable={false}
-          elementsSelectable={false}
-          panOnDrag
-          zoomOnScroll
-          proOptions={{ hideAttribution: true }}
-        >
-          <Background variant={BackgroundVariant.Dots} gap={20} size={1} color="#1f3b4a" />
-          <Controls showInteractive={false} position="bottom-right" />
-        </ReactFlow>
-      </div>
-      <div className="sr-only">
-        {nodes.map((item) => {
-          const nodeId = String(item.node_id ?? "unknown");
-          const dropped = Boolean(item.dropped) || item.status === "dropped";
-          return (
-            <button
-              key={`a11y-${nodeId}`}
-              type="button"
-              data-dropped={dropped ? "true" : "false"}
-              aria-pressed={selectedNodeId === nodeId}
-              onClick={() => onSelectNode(nodeId)}
-            >
-              {nodeId} {String(item.status ?? "idle")} {String(item.provider_type ?? "")} attempt{" "}
-              {String(item.attempt ?? 1)} rework {String(item.rework_count ?? 0)} artifacts{" "}
-              {String(item.artifact_count ?? 0)}
-              {item.diagnostic ? ` ${String(item.diagnostic)}` : ""}
-            </button>
-          );
-        })}
-        {edgesForMarkers.map((edge) => (
-          <span
-            key={`${edge.source}-${edge.target}`}
-            data-testid={`workflow-edge-${edge.source}-${edge.target}`}
-          />
-        ))}
-      </div>
+      {hasTimeline ? (
+        <>
+          <div
+            data-testid="workflow-path-rail"
+            data-motion="ambient"
+            className="relative grid gap-3 pl-7"
+          >
+            <span
+              aria-hidden="true"
+              className="aria-path-flow absolute bottom-4 left-[0.55rem] top-4 w-1 rounded-full bg-gradient-to-b from-orange-400 via-teal-300 to-rose-300"
+            />
+            {nodes.map((item, index) => {
+              const nodeId = String(item.node_id ?? `N${String(index).padStart(2, "0")}`);
+              const selected = selectedNodeId === nodeId;
+              return (
+                <div key={nodeId} className="relative">
+                  <span
+                    aria-hidden="true"
+                    className={
+                      selected
+                        ? "aria-selected-dot absolute -left-[1.95rem] top-4 h-5 w-5 rounded-lg border-2 border-indigo-700 bg-orange-400 shadow-[0_0_0_6px_rgba(249,115,22,0.18)]"
+                        : "absolute -left-[1.75rem] top-4 h-4 w-4 rounded-lg border-2 border-indigo-200 bg-white shadow-[0_3px_0_rgba(129,140,248,0.18)]"
+                    }
+                  />
+                  <WorkflowNodeButton
+                    item={{ ...item, node_id: nodeId }}
+                    selected={selected}
+                    onSelectNode={onSelectNode}
+                  />
+                </div>
+              );
+            })}
+          </div>
+          <div className="sr-only">
+            {edgesForMarkers.map((edge) => (
+              <span
+                key={`${edge.source}-${edge.target}`}
+                data-testid={`workflow-edge-${edge.source}-${edge.target}`}
+              />
+            ))}
+          </div>
+        </>
+      ) : (
+        <div className="rounded-lg border-2 border-dashed border-indigo-200 bg-indigo-50/70 px-4 py-5">
+          <div className="text-sm font-bold text-indigo-950">暂无 workflow 节点</div>
+          <div className="mt-1 text-sm font-semibold text-indigo-950/65">
+            创建任务后，这里会显示执行节点和状态。
+          </div>
+        </div>
+      )}
     </nav>
   );
 }
 
-function buildFlowElements(
-  nodes: TimelineItem[],
-  selectedNodeId: string | null,
-  onSelectNode: (nodeId: string) => void,
-): { flowNodes: WorkflowNode[]; flowEdges: Edge[] } {
-  const flowNodes: WorkflowNode[] = nodes.map((item, index) => {
-    const nodeId = String(item.node_id ?? `N${String(index).padStart(2, "0")}`);
-    return {
-      id: nodeId,
-      type: "workflow",
-      position: { x: index * 170, y: index % 2 === 0 ? 20 : 88 },
-      data: {
-        item: { ...item, node_id: nodeId },
-        selected: selectedNodeId === nodeId,
-        onSelectNode,
-      },
-      draggable: false,
-    };
-  });
-  const flowEdges: Edge[] = nodes.slice(0, -1).map((item, index) => {
-    const source = String(item.node_id ?? `N${String(index).padStart(2, "0")}`);
-    const target = String(nodes[index + 1].node_id ?? `N${String(index + 1).padStart(2, "0")}`);
-    const active = source === selectedNodeId || target === selectedNodeId;
-    return {
-      id: `edge-${source}-${target}`,
-      source,
-      target,
-      type: "smoothstep",
-      animated: active,
-      style: {
-        stroke: active ? "#22d3ee" : "#1e3a4a",
-        strokeWidth: active ? 2.5 : 1.5,
-      },
-    };
-  });
-  return { flowNodes, flowEdges };
-}
-
-function WorkflowNodeCard({ data }: NodeProps<WorkflowNode>) {
-  const item = data.item;
+function WorkflowNodeButton({
+  item,
+  selected,
+  onSelectNode,
+}: {
+  item: TimelineItem;
+  selected: boolean;
+  onSelectNode: (nodeId: string) => void;
+}) {
   const nodeId = String(item.node_id ?? "unknown");
   const status = String(item.status ?? "idle");
   const dropped = Boolean(item.dropped) || status === "dropped";
   const provider = String(item.provider_type ?? "");
-  const accent = colorForStatus(status, dropped, data.selected);
+  const accent = colorForStatus(status, dropped, selected);
   return (
     <button
       type="button"
-      aria-pressed={data.selected}
+      aria-pressed={selected}
+      data-active={selected ? "true" : "false"}
       data-dropped={dropped ? "true" : "false"}
-      onClick={() => data.onSelectNode(nodeId)}
-      className={`min-w-36 rounded-lg border px-3 py-2 text-left shadow-lg transition hover:-translate-y-0.5 ${accent}`}
+      onClick={() => onSelectNode(nodeId)}
+      className={`aria-pop-in w-full rounded-lg border-2 px-3 py-3 text-left transition-colors motion-reduce:transition-none ${accent}`}
     >
       <span className="flex items-center justify-between gap-2">
         <span className="font-mono text-sm font-semibold">{nodeId}</span>
-        <span className="rounded-full bg-white/10 px-2 py-0.5 text-[10px] uppercase tracking-wide">
+        <span className="rounded-md bg-white/75 px-2 py-0.5 text-[10px] font-bold uppercase text-indigo-900">
           {status}
         </span>
       </span>
-      <span className={dropped ? "mt-1 block text-xs text-slate-500 line-through" : "mt-1 block text-xs text-slate-300"}>
+      <span
+        className={
+          dropped
+            ? "mt-1 block text-xs font-medium text-indigo-950/45 line-through"
+            : "mt-1 block text-xs font-medium text-indigo-950/70"
+        }
+      >
         {provider || "internal"} attempt {String(item.attempt ?? 1)} rework{" "}
         {String(item.rework_count ?? 0)} artifacts {String(item.artifact_count ?? 0)}
         {item.diagnostic ? ` ${String(item.diagnostic)}` : ""}
@@ -183,19 +136,19 @@ function WorkflowNodeCard({ data }: NodeProps<WorkflowNode>) {
 
 function colorForStatus(status: string, dropped: boolean, selected: boolean) {
   if (dropped) {
-    return "border-slate-700 bg-slate-950/80 text-slate-400 opacity-70";
+    return "border-slate-300 bg-slate-100 text-slate-500 opacity-80";
   }
   if (selected) {
-    return "border-cyan-300 bg-cyan-400/15 text-cyan-50 shadow-cyan-500/20";
+    return "aria-selected-glow border-[#8E2D60] bg-[#8E2D60] text-white shadow-[0_8px_0_rgba(142,45,96,0.34)] hover:bg-[#A33A70] focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-orange-300";
   }
   if (status === "completed") {
-    return "border-emerald-300/40 bg-emerald-400/10 text-emerald-50";
+    return "border-emerald-300 bg-emerald-100 text-emerald-950 shadow-[0_6px_0_rgba(16,185,129,0.20)] hover:bg-emerald-50 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-emerald-200";
   }
   if (status === "running") {
-    return "border-cyan-300/40 bg-cyan-400/10 text-cyan-50";
+    return "border-cyan-300 bg-cyan-100 text-cyan-950 shadow-[0_6px_0_rgba(6,182,212,0.22)] hover:bg-cyan-50 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-cyan-200";
   }
   if (status.includes("blocked") || status === "failed") {
-    return "border-amber-300/50 bg-amber-400/10 text-amber-50";
+    return "border-orange-300 bg-orange-100 text-orange-950 shadow-[0_6px_0_rgba(249,115,22,0.22)] hover:bg-orange-50 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-orange-200";
   }
-  return "border-slate-700 bg-[#0f172a]/95 text-slate-200";
+  return "border-indigo-200 bg-white text-indigo-950 shadow-[0_6px_0_rgba(129,140,248,0.22)] hover:bg-indigo-50 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-indigo-200";
 }

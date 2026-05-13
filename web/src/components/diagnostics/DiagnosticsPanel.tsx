@@ -13,10 +13,17 @@ export function DiagnosticsPanel({ diagnostics }: { diagnostics: Array<Record<st
   }));
 
   return (
-    <section className="border-t border-line bg-white px-4 py-2">
-      <div className="flex flex-wrap gap-3 text-xs">
+    <section className="border-t-2 border-indigo-100 bg-white/75 px-4 py-2 backdrop-blur md:px-6 lg:px-8">
+      <div className="flex flex-wrap gap-2 text-xs">
         {grouped.map(({ group, items }) => (
-          <span key={group} className={items.length > 0 ? "text-danger" : "text-slate-500"}>
+          <span
+            key={group}
+            className={
+              items.length > 0
+                ? "rounded-lg border-2 border-rose-200 bg-rose-100 px-2 py-1 font-bold text-rose-900"
+                : "rounded-lg border-2 border-indigo-100 bg-indigo-50 px-2 py-1 font-bold text-indigo-500"
+            }
+          >
             {group}: {items.length}
           </span>
         ))}

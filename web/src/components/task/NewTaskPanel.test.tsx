@@ -24,4 +24,16 @@ describe("NewTaskPanel", () => {
       timeout_secs: 2400,
     });
   });
+
+  it("preserves AI coding workbench terms in grouped execution settings", () => {
+    render(<NewTaskPanel onCreateTask={() => undefined} busy={false} />);
+
+    expect(screen.getByRole("heading", { name: "Workspace" })).toHaveClass("text-[#241B2F]");
+    expect(screen.getByRole("group", { name: "Execution settings" })).toBeInTheDocument();
+    expect(screen.getByText("任务请求")).toBeInTheDocument();
+    expect(screen.getByText("change id")).toBeInTheDocument();
+    expect(screen.getByText("policy preset")).toBeInTheDocument();
+    expect(screen.getByText("provider mode")).toBeInTheDocument();
+    expect(screen.queryByText(/学习|课程|助教/)).not.toBeInTheDocument();
+  });
 });

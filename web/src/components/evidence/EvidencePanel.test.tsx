@@ -3,23 +3,32 @@ import { describe, expect, it } from "vitest";
 import { EvidencePanel } from "./EvidencePanel";
 
 describe("EvidencePanel", () => {
-  it("groups artifacts and diagnostics for the selected node", () => {
+  it("shows clear empty states for artifacts and diagnostics", () => {
+    render(<EvidencePanel artifacts={[]} diagnostics={[]} />);
+
+    expect(screen.getByText("暂无产物")).toBeInTheDocument();
+    expect(screen.getByText("暂无诊断")).toBeInTheDocument();
+  });
+
+  it("renders artifacts as coding evidence cards with a visual preview", () => {
     render(
       <EvidencePanel
         artifacts={[
           {
-            artifact_ref: "coding_report_work_wt_001_0001",
-            artifact_kind: "coding_report",
-            producer_node: "N16",
-            path: ".aria/report.json",
-            content_type: "json",
-            dropped: false,
+            artifact_ref: "report",
+            artifact_kind: "markdown",
+            path: "cadence/report.md",
           },
         ]}
-        diagnostics={[{ code: "gate_blocked", message: "archive worktask failed", node_id: "N18" }]}
+        diagnostics={[]}
       />,
     );
-    expect(screen.getByText("coding_report")).toBeInTheDocument();
-    expect(screen.getByText("archive worktask failed")).toBeInTheDocument();
+
+    expect(screen.getByRole("img", { name: "artifact preview" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Evidence" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /markdown/ })).toHaveTextContent(
+      "cadence/report.md",
+    );
+    expect(screen.queryByText(/学习/)).not.toBeInTheDocument();
   });
 });

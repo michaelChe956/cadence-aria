@@ -19,6 +19,7 @@ import { AutoActionStatus } from "./components/action/AutoActionStatus";
 import { DiagnosticsPanel } from "./components/diagnostics/DiagnosticsPanel";
 import { EvidencePanel } from "./components/evidence/EvidencePanel";
 import { FlowRail } from "./components/flow/FlowRail";
+import { LearningLabHero } from "./components/learning/LearningLabHero";
 import { NodeWorkspace } from "./components/node/NodeWorkspace";
 import { TaskSwitcher } from "./components/shell/TaskSwitcher";
 import { TopStatusBar } from "./components/shell/TopStatusBar";
@@ -40,6 +41,16 @@ export function AppShell() {
   const [, setProjectionVersion] = useState(0);
   const projection = store.snapshot.projection;
   const activeTaskId = projection?.active_task_id ?? null;
+
+  useEffect(() => {
+    const previousScrollRestoration = window.history.scrollRestoration;
+    window.history.scrollRestoration = "manual";
+    window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+
+    return () => {
+      window.history.scrollRestoration = previousScrollRestoration;
+    };
+  }, []);
 
   useEffect(() => {
     if (!activeTaskId || typeof EventSource === "undefined") {
@@ -133,9 +144,21 @@ export function AppShell() {
     }
   }
 
-  function handleSelectNode(nodeId: string) {
+  async function handleSelectNode(nodeId: string) {
     store.selectNode(nodeId);
     setProjectionVersion((version) => version + 1);
+    if (!activeTaskId) {
+      return;
+    }
+    setError(null);
+    try {
+      const nextProjection = await getProjection(activeTaskId, nodeId);
+      store.setProjection(nextProjection);
+      setLastCheckpointId(nextProjection.pending_provider_step?.checkpoint_id ?? lastCheckpointId);
+      setProjectionVersion((version) => version + 1);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "load node context failed");
+    }
   }
 
   function handleSelectTab(tab: WorkbenchTab) {
@@ -255,12 +278,17 @@ export function AppShell() {
   };
 
   return (
-    <div className="min-h-screen bg-[#05070d] text-slate-100">
+    <div className="min-h-screen text-[#241B2F]">
       <header
         role="banner"
-        className="flex h-12 items-center justify-between border-b border-cyan-400/10 bg-[#070d14] px-4"
+        className="sticky top-0 z-20 flex min-h-16 flex-wrap items-center justify-between gap-3 border-b-2 border-rose-200 bg-white/88 px-4 py-3 shadow-[0_10px_30px_rgba(249,115,22,0.12)] backdrop-blur md:px-6 lg:px-8"
       >
-        <strong className="tracking-wide text-cyan-100">Aria Web</strong>
+        <div>
+          <strong className="text-lg text-[#241B2F]">Aria Web</strong>
+          <span className="ml-3 hidden text-sm font-semibold text-[#5E516B] sm:inline">
+            playful coding workbench
+          </span>
+        </div>
         <TaskSwitcher
           tasks={tasks}
           activeTaskId={projection?.active_task_id ?? null}
@@ -275,24 +303,36 @@ export function AppShell() {
         }
       />
       {error ? (
-        <div role="alert" className="border-b border-danger/30 bg-red-50 px-4 py-2 text-sm text-danger">
+        <div
+          role="alert"
+          className="border-b-2 border-rose-200 bg-rose-100 px-4 py-2 text-sm font-semibold text-rose-800 md:px-6 lg:px-8"
+        >
           {error}
         </div>
       ) : null}
-      <FlowRail
-        timeline={projection?.timeline ?? []}
-        selectedNodeId={store.snapshot.selectedNodeId}
-        onSelectNode={handleSelectNode}
-      />
-      <main className="grid min-h-[calc(100vh-20rem)] grid-cols-1 gap-4 p-4 lg:grid-cols-[minmax(0,1fr)_24rem]">
-        <section className="min-w-0 space-y-4">
+      <main
+        aria-label="Aria workbench"
+        className="grid min-h-[calc(100vh-10rem)] grid-cols-1 gap-5 px-4 py-5 text-[#241B2F] md:px-6 lg:grid-cols-[minmax(0,1fr)_25rem] lg:px-8 xl:grid-cols-[minmax(0,1fr)_28rem]"
+      >
+        <section
+          role="region"
+          aria-label="Interaction window"
+          className="min-w-0 space-y-5 rounded-lg border-2 border-rose-200 bg-white/82 p-4 shadow-[0_12px_0_rgba(249,115,22,0.08),0_24px_50px_rgba(190,24,93,0.12)] md:p-5"
+        >
+          <LearningLabHero
+            activeTaskId={projection?.active_task_id ?? null}
+            nodeCount={projection?.timeline.length ?? 0}
+            artifactCount={projection?.artifact_index.length ?? 0}
+            eventCount={store.snapshot.events.length}
+            selectedNodeId={store.snapshot.selectedNodeId}
+          />
           <NewTaskPanel onCreateTask={handleCreateTask} busy={busy} />
           {projection?.active_task_id && !projection.pending_provider_step ? (
-            <section className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-3">
-              <div className="flex gap-2">
+            <section className="rounded-lg border-2 border-orange-200 bg-orange-50 px-4 py-3 shadow-[0_8px_0_rgba(249,115,22,0.18)]">
+              <div className="flex flex-wrap gap-2">
                 <button
                   type="button"
-                  className="rounded-md bg-cyan-300 px-3 py-2 text-sm font-semibold text-slate-950 shadow-lg shadow-cyan-500/20 disabled:opacity-50"
+                  className="rounded-lg border-2 border-orange-600 bg-orange-500 px-4 py-2 text-sm font-bold text-white shadow-[0_5px_0_rgba(154,52,18,0.45)] transition-colors hover:bg-orange-400 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-orange-200 disabled:border-slate-300 disabled:bg-slate-200 disabled:text-slate-500 disabled:shadow-none"
                   disabled={busy}
                   onClick={handleAdvanceTask}
                 >
@@ -301,7 +341,7 @@ export function AppShell() {
                 {lastCheckpointId ? (
                   <button
                     type="button"
-                    className="rounded-md border border-white/10 px-3 py-2 text-sm text-slate-200 hover:border-cyan-300/50"
+                    className="rounded-lg border-2 border-rose-300 bg-white px-4 py-2 text-sm font-bold text-[#8E2D60] shadow-[0_5px_0_rgba(190,24,93,0.16)] transition-colors hover:bg-rose-50 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-orange-200"
                     onClick={() => void handleRollbackPreview(lastCheckpointId)}
                   >
                     回退
@@ -334,15 +374,25 @@ export function AppShell() {
             />
           )}
           <ProviderStreamPanel events={store.snapshot.events} run={selectedNodeContext.run} />
-          <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
+        </section>
+        <aside className="space-y-5">
+          <FlowRail
+            timeline={projection?.timeline ?? []}
+            selectedNodeId={store.snapshot.selectedNodeId}
+            onSelectNode={(nodeId) => void handleSelectNode(nodeId)}
+          />
+          <div className="rounded-lg border-2 border-rose-200 bg-white/92 p-4 shadow-[0_10px_0_rgba(249,115,22,0.08),0_18px_34px_rgba(190,24,93,0.12)]">
             <NodeWorkspace
               context={selectedNodeContext}
               selectedTab={store.snapshot.selectedTab}
               onSelectTab={handleSelectTab}
             />
           </div>
-        </section>
-        <EvidencePanel artifacts={projection?.artifact_index ?? []} diagnostics={projection?.diagnostics ?? []} />
+          <EvidencePanel
+            artifacts={projection?.artifact_index ?? []}
+            diagnostics={projection?.diagnostics ?? []}
+          />
+        </aside>
       </main>
       <RollbackDialog
         open={rollbackOpen}
@@ -356,44 +406,55 @@ export function AppShell() {
 }
 
 function ProviderStreamPanel({ events, run }: { events: WebEvent[]; run: unknown[] }) {
-  const bottomRef = useRef<HTMLDivElement | null>(null);
+  const scrollBoxRef = useRef<HTMLDivElement | null>(null);
   const messages = [
     ...run.map((entry, index) => streamMessageFromRunEntry(entry, `run-${index}`)),
     ...events.map((event) => streamMessageFromEvent(event)),
   ].filter((message): message is ProviderStreamMessage => Boolean(message));
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView?.({ block: "end" });
+    const scrollBox = scrollBoxRef.current;
+    if (scrollBox) {
+      scrollBox.scrollTop = scrollBox.scrollHeight;
+    }
   }, [messages.length]);
 
   return (
     <section
       role="region"
       aria-label="Provider stream"
-      className="rounded-xl border border-cyan-300/15 bg-black/45 p-4 shadow-[0_0_45px_rgba(34,211,238,0.08)]"
+      className="rounded-lg border-2 border-cyan-200 bg-white p-4 text-[#241B2F] shadow-[0_10px_0_rgba(6,182,212,0.12),0_18px_38px_rgba(15,118,110,0.14)]"
     >
-      <div className="mb-3 flex items-center justify-between">
-        <h2 className="text-lg font-semibold text-slate-100">Provider stream</h2>
-        <span className="rounded-full border border-emerald-300/20 bg-emerald-300/10 px-3 py-1 text-xs text-emerald-100">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="text-xl font-black text-[#241B2F]">Interaction stream</h2>
+          <p className="mt-1 text-sm font-semibold text-[#5E516B]">
+            当前步骤：观察输出并确认下一步。
+          </p>
+        </div>
+        <span className="rounded-lg border-2 border-cyan-200 bg-cyan-100 px-3 py-1 text-xs font-bold text-cyan-900">
           live event log
         </span>
       </div>
-      <div className="min-h-40 max-h-72 overflow-auto rounded-lg border border-white/10 bg-[#030712] p-3">
+      <div
+        ref={scrollBoxRef}
+        className="min-h-[22rem] max-h-[34rem] overflow-auto rounded-lg border-2 border-rose-100 bg-rose-50/80 p-3 shadow-inner shadow-rose-200/70"
+      >
         {messages.length > 0 ? (
-          <ul aria-label="Provider output messages" className="space-y-2">
+          <ul aria-label="Provider output messages" aria-live="polite" className="space-y-2">
             {messages.map((message) => (
               <li
                 key={message.id}
                 aria-label={`${message.nodeId} ${message.stream}`}
                 className={
                   message.kind === "provider"
-                    ? "max-w-[92%] rounded-md border border-cyan-300/15 bg-cyan-300/10 px-3 py-2 text-xs text-cyan-50"
-                    : "max-w-[92%] rounded-md border border-white/10 bg-white/[0.04] px-3 py-2 text-xs text-slate-300"
+                    ? "max-w-[92%] rounded-lg border-2 border-cyan-300 bg-cyan-100 px-3 py-2 text-xs text-cyan-950 shadow-[0_5px_0_rgba(6,182,212,0.16)]"
+                    : "max-w-[92%] rounded-lg border-2 border-rose-200 bg-white px-3 py-2 text-xs text-[#241B2F] shadow-[0_5px_0_rgba(190,24,93,0.12)]"
                 }
               >
-                <div className="mb-1 flex items-center gap-2 font-mono text-[11px] text-slate-400">
+                <div className="mb-1 flex items-center gap-2 font-mono text-[11px] text-[#7A6C83]">
                   {message.kind === "provider" ? (
-                    <span className="rounded bg-cyan-300/10 px-1 py-0.5 text-cyan-200">
+                    <span className="rounded-md bg-orange-400 px-2 py-0.5 font-bold text-white">
                       provider_output
                     </span>
                   ) : null}
@@ -407,9 +468,10 @@ function ProviderStreamPanel({ events, run }: { events: WebEvent[]; run: unknown
             ))}
           </ul>
         ) : (
-          <div className="font-mono text-xs leading-5 text-cyan-100">等待 provider 输出...</div>
+          <div className="font-mono text-xs font-semibold leading-5 text-[#7A6C83]">
+            等待 provider 输出...
+          </div>
         )}
-        <div ref={bottomRef} />
       </div>
     </section>
   );

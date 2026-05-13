@@ -20,7 +20,7 @@ export function NewTaskPanel({
 
   return (
     <form
-      className="rounded-xl border border-cyan-300/15 bg-white/[0.03] p-4 shadow-[0_0_35px_rgba(34,211,238,0.08)]"
+      className="rounded-lg border-2 border-indigo-200 bg-white p-4 shadow-[0_10px_0_rgba(79,70,229,0.10),0_18px_38px_rgba(79,70,229,0.16)]"
       onSubmit={(event) => {
         event.preventDefault();
         void onCreateTask({
@@ -32,37 +32,49 @@ export function NewTaskPanel({
         });
       }}
     >
-      <div className="mb-3 flex items-center justify-between">
-        <h2 className="text-lg font-semibold text-slate-100">Workspace</h2>
-        <span className="rounded-full border border-cyan-300/20 bg-cyan-300/10 px-3 py-1 text-xs text-cyan-100">
-          task input
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-black text-[#241B2F]">Workspace</h2>
+          <p className="mt-1 text-sm font-semibold text-[#5E516B]">
+            Describe the task, and Aria will split execution into inspectable nodes.
+          </p>
+        </div>
+        <span className="rounded-lg border-2 border-cyan-200 bg-cyan-100 px-3 py-1 text-xs font-black text-cyan-950">
+          guided prompt
         </span>
       </div>
-      <div className="grid gap-3">
-        <label className="text-xs font-semibold text-slate-400">
+      <div className="grid gap-4">
+        <label className="text-sm font-black text-[#241B2F]">
           任务请求
-          <input
+          <textarea
             aria-label="任务请求"
-            className="mt-1 w-full rounded-md border border-white/10 bg-black/35 px-2 py-2 text-sm text-slate-100 outline-none focus:border-cyan-300"
+            rows={4}
+            placeholder="例如：实现 Fibonacci square sum，并解释每一步验证结果"
+            className="mt-2 w-full resize-y rounded-lg border-2 border-indigo-200 bg-white px-4 py-3 text-base font-semibold leading-7 text-indigo-950 shadow-inner shadow-indigo-200/70 outline-none transition-colors placeholder:text-indigo-300 focus-visible:border-orange-400 focus-visible:ring-4 focus-visible:ring-orange-200"
             value={requestText}
             onChange={(event) => setRequestText(event.target.value)}
           />
         </label>
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 2xl:grid-cols-[minmax(12rem,1fr)_10rem_10rem_8rem_auto]">
-          <label className="text-xs font-semibold text-slate-400">
+        <fieldset
+          aria-label="Execution settings"
+          className="rounded-lg border-2 border-dashed border-indigo-200 bg-indigo-50/70 p-3"
+        >
+          <legend className="px-2 text-xs font-black uppercase text-[#8E2D60]">Execution settings</legend>
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 2xl:grid-cols-[minmax(12rem,1fr)_10rem_10rem_8rem_auto]">
+          <label className="text-xs font-black text-indigo-800">
             change id
             <input
               aria-label="change id"
-              className="mt-1 w-full rounded-md border border-white/10 bg-black/35 px-2 py-2 text-sm text-slate-100 outline-none focus:border-cyan-300"
+              className="mt-1 w-full rounded-lg border-2 border-indigo-100 bg-white px-3 py-2 text-sm font-semibold text-indigo-950 shadow-inner shadow-indigo-200/60 outline-none transition-colors placeholder:text-indigo-300 focus-visible:border-orange-400 focus-visible:ring-4 focus-visible:ring-orange-200"
               value={changeId}
               onChange={(event) => setChangeId(event.target.value)}
             />
           </label>
-          <label className="text-xs font-semibold text-slate-400">
+          <label className="text-xs font-black text-indigo-800">
             policy preset
             <select
               aria-label="policy preset"
-              className="mt-1 w-full rounded-md border border-white/10 bg-black/35 px-2 py-2 text-sm text-slate-100 outline-none focus:border-cyan-300"
+              className="mt-1 w-full rounded-lg border-2 border-indigo-100 bg-white px-3 py-2 text-sm font-semibold text-indigo-950 shadow-inner shadow-indigo-200/60 outline-none transition-colors focus-visible:border-orange-400 focus-visible:ring-4 focus-visible:ring-orange-200"
               value={policyPreset}
               onChange={(event) => setPolicyPreset(event.target.value)}
             >
@@ -73,11 +85,11 @@ export function NewTaskPanel({
               ))}
             </select>
           </label>
-          <label className="text-xs font-semibold text-slate-400">
+          <label className="text-xs font-black text-indigo-800">
             provider mode
             <select
               aria-label="provider mode"
-              className="mt-1 w-full rounded-md border border-white/10 bg-black/35 px-2 py-2 text-sm text-slate-100 outline-none focus:border-cyan-300"
+              className="mt-1 w-full rounded-lg border-2 border-indigo-100 bg-white px-3 py-2 text-sm font-semibold text-indigo-950 shadow-inner shadow-indigo-200/60 outline-none transition-colors focus-visible:border-orange-400 focus-visible:ring-4 focus-visible:ring-orange-200"
               value={providerMode}
               onChange={(event) => setProviderMode(event.target.value)}
             >
@@ -88,13 +100,13 @@ export function NewTaskPanel({
               ))}
             </select>
           </label>
-          <label className="text-xs font-semibold text-slate-400">
+          <label className="text-xs font-black text-indigo-800">
             timeout seconds
             <input
               aria-label="timeout seconds"
               type="number"
               min={1}
-              className="mt-1 w-full rounded-md border border-white/10 bg-black/35 px-2 py-2 text-sm text-slate-100 outline-none focus:border-cyan-300"
+              className="mt-1 w-full rounded-lg border-2 border-indigo-100 bg-white px-3 py-2 text-sm font-semibold text-indigo-950 shadow-inner shadow-indigo-200/60 outline-none transition-colors focus-visible:border-orange-400 focus-visible:ring-4 focus-visible:ring-orange-200"
               value={timeoutSecs}
               onChange={(event) => setTimeoutSecs(Number(event.target.value))}
             />
@@ -102,12 +114,13 @@ export function NewTaskPanel({
           <button
             type="submit"
             disabled={busy || requestText.trim() === "" || changeId.trim() === ""}
-            className="self-end inline-flex items-center justify-center rounded-md bg-cyan-300 px-3 py-2 text-sm font-semibold text-slate-950 shadow-lg shadow-cyan-500/20 disabled:opacity-50"
+            className="inline-flex items-center justify-center self-end rounded-lg border-2 border-orange-500 bg-orange-300 px-4 py-2 text-sm font-black text-orange-950 shadow-[0_5px_0_rgba(251,146,60,0.36)] transition-colors hover:bg-orange-200 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-orange-200 disabled:border-slate-300 disabled:bg-slate-200 disabled:text-slate-500 disabled:shadow-none"
           >
             <Plus className="mr-1 h-4 w-4" />
             新建任务
           </button>
         </div>
+        </fieldset>
       </div>
     </form>
   );

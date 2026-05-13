@@ -30,42 +30,38 @@ export function ActionComposer({
 
   if (!pendingStep) {
     return (
-      <section className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-slate-400">
+      <section className="rounded-lg border-2 border-dashed border-indigo-200 bg-indigo-50/80 px-4 py-3 text-sm font-semibold text-indigo-700">
         当前没有等待确认的 provider 节点。
       </section>
     );
   }
 
   return (
-    <section className="rounded-xl border border-cyan-300/15 bg-[#080f18] px-4 py-3 text-white shadow-[0_0_35px_rgba(20,184,166,0.08)]">
-      <div className="mb-2 flex items-center justify-between gap-4">
+    <section className="rounded-lg border-2 border-cyan-200 bg-cyan-50 px-4 py-3 text-indigo-950 shadow-[0_10px_0_rgba(6,182,212,0.16),0_18px_38px_rgba(14,116,144,0.14)]">
+      <div className="mb-3 flex flex-col justify-between gap-4 xl:flex-row xl:items-start">
         <div className="min-w-0">
-          <div className="text-sm font-semibold">
+          <div className="font-mono text-sm font-bold text-cyan-950">
             {pendingStep.node_id} · {pendingStep.provider_type}
           </div>
-          <div className="text-xs text-slate-300">scope: {scope}</div>
-          <div className="text-xs text-slate-300">
-            inputs: {pendingStep.canonical_input_refs.join(", ")}
-          </div>
-          <div className="text-xs text-slate-300">context: {pendingStep.context_files.join(", ")}</div>
-          <div className="text-xs text-slate-300">
-            forbidden: {pendingStep.forbidden_actions.join(", ")}
-          </div>
-          <div className="text-xs text-slate-300">
-            verify: {pendingStep.verification_commands.join(", ")}
+          <div className="mt-2 grid gap-1.5 text-xs font-semibold text-indigo-700 md:grid-cols-2">
+            <MetaLine label="scope" value={scope} />
+            <MetaLine label="inputs" value={pendingStep.canonical_input_refs.join(", ")} />
+            <MetaLine label="context" value={pendingStep.context_files.join(", ")} />
+            <MetaLine label="forbidden" value={pendingStep.forbidden_actions.join(", ")} />
+            <MetaLine label="verify" value={pendingStep.verification_commands.join(", ")} />
           </div>
         </div>
-        <div className="flex shrink-0 gap-2">
+        <div className="flex shrink-0 flex-wrap gap-2">
           <button
             type="button"
-            className="rounded-md border border-slate-600 px-3 py-2 text-sm hover:border-cyan-300/60"
+            className="inline-flex items-center rounded-lg border-2 border-orange-300 bg-white px-3 py-2 text-sm font-bold text-orange-800 shadow-[0_4px_0_rgba(251,146,60,0.20)] transition-colors hover:bg-orange-50 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-orange-200"
             onClick={() => onRollback(pendingStep.checkpoint_id)}
           >
             <RotateCcw className="mr-1 inline h-4 w-4" /> 回退
           </button>
           <button
             type="button"
-            className="rounded-md border border-slate-600 px-3 py-2 text-sm hover:border-cyan-300/60 disabled:opacity-50"
+            className="inline-flex items-center rounded-lg border-2 border-rose-300 bg-white px-3 py-2 text-sm font-bold text-rose-800 shadow-[0_4px_0_rgba(251,113,133,0.20)] transition-colors hover:bg-rose-50 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-rose-200 disabled:border-slate-200 disabled:text-slate-400 disabled:shadow-none"
             disabled={!running}
             onClick={onStop}
           >
@@ -73,7 +69,7 @@ export function ActionComposer({
           </button>
           <button
             type="button"
-            className="rounded-md bg-cyan-300 px-3 py-2 text-sm font-semibold text-slate-950 shadow-lg shadow-cyan-500/20"
+            className="inline-flex items-center rounded-lg border-2 border-emerald-600 bg-emerald-500 px-3 py-2 text-sm font-bold text-white shadow-[0_5px_0_rgba(6,95,70,0.38)] transition-colors hover:bg-emerald-400 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-emerald-200"
             onClick={() =>
               onConfirm({
                 checkpoint_id: pendingStep.checkpoint_id,
@@ -86,14 +82,14 @@ export function ActionComposer({
           </button>
         </div>
       </div>
-      <label className="block text-xs font-semibold text-slate-300" htmlFor="provider-prompt">
+      <label className="block text-xs font-bold text-indigo-800" htmlFor="provider-prompt">
         Provider prompt
       </label>
-      <label className="mt-2 block text-xs font-semibold text-slate-300">
+      <label className="mt-2 block text-xs font-bold text-indigo-800">
         Policy override
         <select
           aria-label="Policy override"
-          className="ml-2 rounded-md border border-slate-700 bg-[#151b20] px-2 py-1 text-slate-100"
+          className="ml-2 rounded-lg border-2 border-cyan-200 bg-white px-2 py-1 text-indigo-950 outline-none transition-colors hover:border-orange-300 focus-visible:border-orange-400 focus-visible:ring-4 focus-visible:ring-orange-200"
           value={policyOverride}
           onChange={(event) => setPolicyOverride(event.target.value)}
         >
@@ -106,10 +102,19 @@ export function ActionComposer({
       </label>
       <textarea
         id="provider-prompt"
-        className="mt-1 min-h-32 w-full rounded-md border border-slate-700 bg-[#151b20] p-3 font-mono text-sm text-white outline-none focus:border-cyan-300"
+        className="mt-1 min-h-32 w-full rounded-lg border-2 border-cyan-200 bg-white p-3 font-mono text-sm text-indigo-950 shadow-inner shadow-cyan-200/70 outline-none transition-colors focus-visible:border-orange-400 focus-visible:ring-4 focus-visible:ring-orange-200"
         value={prompt}
         onChange={(event) => setPrompt(event.target.value)}
       />
     </section>
+  );
+}
+
+function MetaLine({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0">
+      <span className="text-indigo-500">{label}: </span>
+      <span className="break-words font-mono text-indigo-950">{value || "none"}</span>
+    </div>
   );
 }

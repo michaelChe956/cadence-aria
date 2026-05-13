@@ -48,7 +48,18 @@ function installResizeObserverMock() {
   });
 }
 
-beforeEach(() => installResizeObserverMock());
+function installScrollToMock() {
+  Object.defineProperty(window, "scrollTo", {
+    configurable: true,
+    value: vi.fn(),
+  });
+}
+
+beforeEach(() => {
+  installResizeObserverMock();
+  installScrollToMock();
+});
 installResizeObserverMock();
+installScrollToMock();
 
 afterEach(() => cleanup());

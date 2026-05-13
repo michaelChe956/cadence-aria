@@ -35,4 +35,26 @@ describe("TopStatusBar", () => {
     expect(screen.getByText(/Archive worktask: failed/)).toBeInTheDocument();
     expect(screen.getByText(/cadence\/ write scope missing/)).toBeInTheDocument();
   });
+
+  it("exposes connection and running state as accessible status pills", () => {
+    render(
+      <TopStatusBar
+        projection={{
+          active_task_id: "task_0001",
+          overview: {
+            status: "running",
+            change_id: "aria-fibonacci-square",
+            current_node: "N16",
+          },
+          git_summary: { branch: "main", head: "abc1234", dirty: false },
+          sse_connected: true,
+          running_state: "running",
+        }}
+      />,
+    );
+
+    expect(screen.getByLabelText("SSE connected")).toHaveTextContent("connected");
+    expect(screen.getByLabelText("运行状态 running")).toHaveTextContent("running");
+    expect(screen.getByText("task_0001")).toBeInTheDocument();
+  });
 });
