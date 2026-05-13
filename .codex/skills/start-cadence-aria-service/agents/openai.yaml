@@ -1,0 +1,4 @@
+interface:
+  display_name: "Start Aria Service"
+  short_description: "Start Aria dev servers with HMR"
+  default_prompt: "Use $start-cadence-aria-service to start the Cadence Aria development services."
