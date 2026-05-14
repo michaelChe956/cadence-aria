@@ -89,3 +89,35 @@ pub struct RepositoryRecord {
     pub created_at: String,
     pub updated_at: String,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct IssueRecord {
+    pub id: String,
+    pub project_id: String,
+    pub repo_id: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub change_id: String,
+    pub phase: IssuePhase,
+    pub status: IssueStatus,
+    pub active_binding_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct IssueRuntimeBindingRecord {
+    pub id: String,
+    pub issue_id: String,
+    pub repo_id: String,
+    pub change_id: String,
+    pub task_id: Option<String>,
+    pub session_id: Option<String>,
+    pub runtime_root: PathBuf,
+    pub task_root: Option<PathBuf>,
+    pub status: RuntimeBindingStatus,
+    pub created_at: String,
+    pub updated_at: String,
+}
