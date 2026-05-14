@@ -51,12 +51,18 @@ pub fn rebuild_index_from_runtime(
     let binding_store = RuntimeBindingStore::new(input.app_paths.clone());
 
     for runtime_task in runtime_tasks {
-        let issue = match find_issue_by_change_id(
-            &input.app_paths,
+        let issues = list_issues(&input.app_paths, &project.id)?;
+        if has_existing_task_binding(
+            &binding_store,
             &project.id,
             &repository.id,
-            &runtime_task.change_id,
+            &runtime_task.task_id,
+            &issues,
         )? {
+            continue;
+        }
+
+        let issue = match find_issue_by_change_id(issues, &repository.id, &runtime_task.change_id) {
             Some(issue) => issue,
             None => {
                 summary.issues_created += 1;
@@ -131,16 +137,9 @@ fn find_project(
     app_paths: &ProductAppPaths,
     project_name: &str,
 ) -> Result<Option<ProjectRecord>, ProductStoreError> {
-    let projects = list_projects(app_paths)?;
-    if let Some(project) = projects
-        .iter()
-        .find(|project| project.name == project_name)
-        .cloned()
-    {
-        return Ok(Some(project));
-    }
-
-    Ok(projects.into_iter().next())
+    Ok(list_projects(app_paths)?
+        .into_iter()
+        .find(|project| project.name == project_name))
 }
 
 fn list_projects(app_paths: &ProductAppPaths) -> Result<Vec<ProjectRecord>, ProductStoreError> {
@@ -199,14 +198,32 @@ fn find_or_create_repository(
 }
 
 fn find_issue_by_change_id(
-    app_paths: &ProductAppPaths,
-    project_id: &str,
+    issues: Vec<IssueRecord>,
     repo_id: &str,
     change_id: &str,
-) -> Result<Option<IssueRecord>, ProductStoreError> {
-    Ok(list_issues(app_paths, project_id)?
+) -> Option<IssueRecord> {
+    issues
         .into_iter()
-        .find(|issue| issue.repo_id == repo_id && issue.change_id == change_id))
+        .find(|issue| issue.repo_id == repo_id && issue.change_id == change_id)
+}
+
+fn has_existing_task_binding(
+    binding_store: &RuntimeBindingStore,
+    project_id: &str,
+    repo_id: &str,
+    task_id: &str,
+    issues: &[IssueRecord],
+) -> Result<bool, ProductStoreError> {
+    for issue in issues.iter().filter(|issue| issue.repo_id == repo_id) {
+        if binding_store
+            .find_by_repo_and_task(project_id, &issue.id, repo_id, task_id)?
+            .is_some()
+        {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
 }
 
 fn list_issues(
