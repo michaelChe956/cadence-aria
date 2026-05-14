@@ -5,8 +5,9 @@ use crate::cross_cutting::document_ops::compute_sha256;
 use crate::cross_cutting::provider_adapter::{
     ProviderAdapter, ProviderAdapterError, STRUCTURED_OUTPUT_END, parse_last_structured_output,
 };
-use crate::protocol::contracts::{AdapterInput, AdapterOutput, TimeoutStatus};
+use crate::protocol::contracts::{AdapterInput, AdapterOutput, ProviderType, TimeoutStatus};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -20,10 +21,32 @@ use std::time::{Duration, Instant};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CliOutputChunk {
+    pub provider_type: ProviderType,
+    pub output_schema: String,
+    pub stream: String,
+    pub text: String,
+}
+
+pub type ProviderOutputSink = Arc<dyn Fn(CliOutputChunk) + Send + Sync + 'static>;
+
+#[derive(Clone)]
 pub struct CliAdapterConfig {
     pub compatibility: AdapterCompatibilityEntry,
     pub expected_artifact_kind: Option<String>,
+    pub output_sink: Option<ProviderOutputSink>,
+}
+
+impl fmt::Debug for CliAdapterConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CliAdapterConfig")
+            .field("compatibility", &self.compatibility)
+            .field("expected_artifact_kind", &self.expected_artifact_kind)
+            .field("output_sink", &self.output_sink.as_ref().map(|_| "<sink>"))
+            .finish()
+    }
 }
 
 pub struct CliProviderAdapter {
@@ -51,11 +74,21 @@ impl ProviderAdapter for CliProviderAdapter {
             None => BTreeMap::new(),
         };
 
-        let raw = run_command_capture(
+        let stream_context = self
+            .config
+            .output_sink
+            .as_ref()
+            .map(|sink| OutputStreamContext {
+                provider_type: input.provider_type.clone(),
+                output_schema: input.output_schema.clone(),
+                sink: Arc::clone(sink),
+            });
+        let raw = run_command_capture_with_stream(
             &command,
             worktree_path,
             Some(&input.prompt),
             Some(Duration::from_secs(input.timeout)),
+            stream_context,
         )
         .map_err(|error| self.classify_error(error))?;
 
@@ -160,6 +193,16 @@ pub fn run_command_capture(
     stdin_text: Option<&str>,
     timeout: Option<Duration>,
 ) -> Result<CapturedCommandOutput, ProviderAdapterError> {
+    run_command_capture_with_stream(command_spec, current_dir, stdin_text, timeout, None)
+}
+
+fn run_command_capture_with_stream(
+    command_spec: &CommandSpec,
+    current_dir: Option<&Path>,
+    stdin_text: Option<&str>,
+    timeout: Option<Duration>,
+    stream_context: Option<OutputStreamContext>,
+) -> Result<CapturedCommandOutput, ProviderAdapterError> {
     let started = Instant::now();
     let mut command = Command::new(&command_spec.program);
     command.args(&command_spec.args);
@@ -197,14 +240,13 @@ pub fn run_command_capture(
         provider_stream_path(current_dir, &command_spec.program, child.id(), "stdout");
     let stderr_stream_path =
         provider_stream_path(current_dir, &command_spec.program, child.id(), "stderr");
-    let stdout_reader = child
-        .stdout
-        .take()
-        .map(|reader| spawn_output_reader(reader, stdout_stream_path));
+    let stdout_reader = child.stdout.take().map(|reader| {
+        spawn_output_reader(reader, stdout_stream_path, "stdout", stream_context.clone())
+    });
     let stderr_reader = child
         .stderr
         .take()
-        .map(|reader| spawn_output_reader(reader, stderr_stream_path));
+        .map(|reader| spawn_output_reader(reader, stderr_stream_path, "stderr", stream_context));
 
     if let Some(stdin_text) = stdin_text
         && let Some(mut stdin) = child.stdin.take()
@@ -292,13 +334,25 @@ pub fn run_command_capture(
     })
 }
 
+#[derive(Clone)]
+struct OutputStreamContext {
+    provider_type: ProviderType,
+    output_schema: String,
+    sink: ProviderOutputSink,
+}
+
 struct OutputReader {
     buffer: Arc<Mutex<Vec<u8>>>,
     structured_output_complete: Arc<AtomicBool>,
     handle: JoinHandle<std::io::Result<()>>,
 }
 
-fn spawn_output_reader<R>(mut reader: R, stream_path: Option<PathBuf>) -> OutputReader
+fn spawn_output_reader<R>(
+    mut reader: R,
+    stream_path: Option<PathBuf>,
+    stream_name: &'static str,
+    stream_context: Option<OutputStreamContext>,
+) -> OutputReader
 where
     R: Read + Send + 'static,
 {
@@ -334,6 +388,14 @@ where
             }
             if let Some(file) = stream_file.as_mut() {
                 file.write_all(bytes)?;
+            }
+            if let Some(context) = stream_context.as_ref() {
+                (context.sink)(CliOutputChunk {
+                    provider_type: context.provider_type.clone(),
+                    output_schema: context.output_schema.clone(),
+                    stream: stream_name.to_string(),
+                    text: String::from_utf8_lossy(bytes).to_string(),
+                });
             }
             thread_buffer
                 .lock()

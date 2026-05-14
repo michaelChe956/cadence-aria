@@ -7,6 +7,49 @@ use crate::cross_cutting::provider_run::write_provider_run_record as persist_pro
 use crate::protocol::contracts::ProviderRunRecord;
 use crate::task_run::types::TaskRunError;
 
+pub fn allocate_next_task_id(workspace_root: &Path) -> Result<String, TaskRunError> {
+    let tasks_root = workspace_root.join(".aria/runtime/tasks");
+    let entries = match std::fs::read_dir(&tasks_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(format_task_id(1));
+        }
+        Err(error) => {
+            return Err(TaskRunError::new(
+                "task_id_allocation_failed",
+                format!("read {}: {error}", tasks_root.display()),
+            ));
+        }
+    };
+
+    let mut max_id = 0_u64;
+    for entry in entries {
+        let entry = entry
+            .map_err(|error| TaskRunError::new("task_id_allocation_failed", error.to_string()))?;
+        if !entry
+            .file_type()
+            .map_err(|error| TaskRunError::new("task_id_allocation_failed", error.to_string()))?
+            .is_dir()
+        {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some(number) = name
+            .strip_prefix("task_")
+            .and_then(|suffix| suffix.parse::<u64>().ok())
+        else {
+            continue;
+        };
+        max_id = max_id.max(number);
+    }
+
+    Ok(format_task_id(max_id + 1))
+}
+
+fn format_task_id(number: u64) -> String {
+    format!("task_{number:04}")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspacePreflight {
     pub workspace_root: PathBuf,

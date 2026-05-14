@@ -12,7 +12,7 @@ use crate::runtime_units::plan_dispatch::run_planning_full_chain;
 use crate::task_run::openspec_bootstrap::{
     bootstrap_task_openspec, build_initial_constraint_bundle,
 };
-use crate::task_run::store::{TaskRunStore, preflight_workspace};
+use crate::task_run::store::{TaskRunStore, allocate_next_task_id, preflight_workspace};
 use crate::task_run::types::{TaskRunError, TaskRunOutcome, TaskRunRequest, TaskRunStatus};
 
 pub struct TaskRunOrchestrator;
@@ -32,7 +32,10 @@ impl TaskRunOrchestrator {
         preflight_workspace(&request.workspace)?;
         let provider = TimeoutOverrideProvider::new(provider, request.timeout_secs);
 
-        let task_id = "task_0001".to_string();
+        let task_id = match request.task_id.clone() {
+            Some(task_id) => task_id,
+            None => allocate_next_task_id(&request.workspace)?,
+        };
         let session_id = format!("sess_{task_id}");
         let store = TaskRunStore::new(&request.workspace, &task_id);
         let task_state_path = store.write_task_state(&json!({
@@ -193,14 +196,15 @@ impl TaskRunOrchestrator {
             .iter()
             .flat_map(|work_package| work_package.traceability_refs.clone())
             .collect::<Vec<_>>();
-        let integration_report = integration_report_from_plan(&plan_projection);
+        let integration_report = integration_report_from_plan(&task_id, &plan_projection);
         let integration_report_path =
             store.write_json_report("integration-report.json", &integration_report)?;
-        canonical_artifact_refs.push("integration_report_task_0001_0001".to_string());
+        canonical_artifact_refs.push(format!("integration_report_{task_id}_0001"));
         let final_result = run_final_closure_chain(
             FinalClosureInput {
                 session_id,
                 task_id: task_id.clone(),
+                worktree_path: request.workspace.to_string_lossy().to_string(),
                 projection_refs: projection_refs.clone(),
                 constraint_bundle_ref: planning
                     .openspec_bundle_after_tasks
@@ -291,7 +295,7 @@ impl ProviderAdapter for TimeoutOverrideProvider<'_> {
     }
 }
 
-fn integration_report_from_plan(plan_projection: &PlanProjection) -> Value {
+fn integration_report_from_plan(task_id: &str, plan_projection: &PlanProjection) -> Value {
     let worktasks = plan_projection
         .work_packages
         .iter()
@@ -299,7 +303,7 @@ fn integration_report_from_plan(plan_projection: &PlanProjection) -> Value {
         .collect::<Vec<_>>();
     json!({
         "artifact_kind": "integration_report",
-        "artifact_ref": "integration_report_task_0001_0001",
+        "artifact_ref": format!("integration_report_{task_id}_0001"),
         "integrated_worktasks": worktasks,
         "status": "completed",
         "node_specific_fields": {

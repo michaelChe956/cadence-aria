@@ -4,7 +4,8 @@ use crate::cross_cutting::artifact_validate::{
 };
 use crate::cross_cutting::provider_adapter::{ProviderAdapter, ProviderAdapterError};
 use crate::cross_cutting::provider_context_builder::{
-    ProviderContextBuildError, ProviderContextBuilderInput, build_provider_context,
+    ProviderContextBuildError, ProviderContextBuildResult, ProviderContextBuilderInput,
+    build_provider_context,
 };
 use crate::cross_cutting::provider_router::ProviderRunRequest;
 use crate::cross_cutting::provider_run::{
@@ -12,14 +13,16 @@ use crate::cross_cutting::provider_run::{
 };
 use crate::cross_cutting::runtime_event_log::append_node_event;
 use crate::cross_cutting::traceability::{TraceabilityIndexes, normalize_traceability};
+use crate::interactive::controller::PendingProviderStep;
 use crate::protocol::artifacts::ArtifactKind;
-use crate::protocol::contracts::{ApprovalPolicy, ProviderRunRecord, SandboxMode};
+use crate::protocol::contracts::{AdapterInput, ApprovalPolicy, ProviderRunRecord, SandboxMode};
 use crate::protocol::loop_counters::{LoopCounterName, LoopCounterRegistry};
 use crate::protocol::projections::PlanProjection;
 use crate::runtime_units::{
     CanonicalNodeInput, DaemonContext, RuntimeProtocolStep, RuntimeStepStatus, RuntimeUnit,
     RuntimeUnitError, RuntimeUnitResult,
 };
+use crate::task_run::types::TaskRunError;
 use serde_json::{Value, json};
 use std::future::Future;
 use std::path::PathBuf;
@@ -134,11 +137,7 @@ pub fn run_worktask_execution_chain(
                 Err(ExecutionChainError::ProviderBlocked(_)) => return Ok(state.finish()),
                 Err(error) => return Err(error),
             };
-        if !testing_report
-            .get("tests_passed")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
+        if testing_report_requires_current_worktask_rework(&testing_report) {
             state.push_skill("systematic-debugging");
             let testing_report_ref = artifact_ref(&testing_report);
             if state.rework_or_hold(provider, &testing_report_ref)? {
@@ -249,7 +248,10 @@ impl ExecutionChainState {
         rework_source_ref: Option<&str>,
     ) -> Result<Value, ExecutionChainError> {
         let context = build_provider_context(self.builder_input(node_id))?;
+        let adapter_input = execution_adapter_input_for_node(&context)?;
         let request = provider_run_request(node_id, &context.context_package.context_package_id);
+        let _pending_step = pending_provider_step_for_context(node_id, &adapter_input)
+            .map_err(|error| ExecutionChainError::ProviderBlocked(error.message))?;
         append_node_event(
             &self.task_root(),
             &self.input.task_id,
@@ -259,14 +261,14 @@ impl ExecutionChainState {
             json!({
                 "provider_run_id": request.provider_run_id.clone(),
                 "context_package_ref": context.context_package.context_package_id.clone(),
-                "output_schema": context.adapter_input.output_schema.clone(),
+                "output_schema": adapter_input.output_schema.clone(),
             }),
         );
-        let output = match provider.run(&context.adapter_input) {
+        let output = match provider.run(&adapter_input) {
             Ok(output) => output,
             Err(error) => {
                 let record =
-                    failed_provider_run_record_from_error(&request, &context.adapter_input, &error);
+                    failed_provider_run_record_from_error(&request, &adapter_input, &error);
                 self.provider_run_records.push(record.clone());
                 append_node_event(
                     &self.task_root(),
@@ -288,7 +290,7 @@ impl ExecutionChainState {
                 return Err(ExecutionChainError::ProviderBlocked(node_id.to_string()));
             }
         };
-        let record = provider_run_record_from_output(&request, &context.adapter_input, &output);
+        let record = provider_run_record_from_output(&request, &adapter_input, &output);
         let mut artifact = output
             .structured_output
             .clone()
@@ -585,6 +587,19 @@ impl ExecutionChainState {
     }
 }
 
+pub(crate) fn execution_adapter_input_for_node(
+    context: &ProviderContextBuildResult,
+) -> Result<AdapterInput, ExecutionChainError> {
+    Ok(context.adapter_input.clone())
+}
+
+fn pending_provider_step_for_context(
+    node_id: &str,
+    adapter_input: &AdapterInput,
+) -> Result<PendingProviderStep, TaskRunError> {
+    crate::task_run::step_runner::provider_step_from_adapter_input(node_id, adapter_input)
+}
+
 fn provider_run_request(node_id: &str, context_package_ref: &str) -> ProviderRunRequest {
     let contract = crate::protocol::contracts::execution_contract_for_node(node_id)
         .expect("execution contract");
@@ -644,6 +659,38 @@ fn artifact_ref(artifact: &Value) -> String {
         .and_then(Value::as_str)
         .unwrap_or("artifact_ref_unknown")
         .to_string()
+}
+
+fn testing_report_requires_current_worktask_rework(testing_report: &Value) -> bool {
+    if testing_report
+        .get("tests_passed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    !testing_report_has_only_out_of_scope_acceptance_failures(testing_report)
+}
+
+fn testing_report_has_only_out_of_scope_acceptance_failures(testing_report: &Value) -> bool {
+    let scope_result = testing_report
+        .get("scope_result")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !scope_result.ends_with("_scoped_verification_passed") {
+        return false;
+    }
+
+    let Some(failures) = testing_report.get("failures").and_then(Value::as_array) else {
+        return false;
+    };
+    !failures.is_empty()
+        && failures.iter().all(|failure| {
+            failure
+                .get("failure_type")
+                .and_then(Value::as_str)
+                .is_some_and(|failure_type| failure_type == "out_of_scope_acceptance_failure")
+        })
 }
 
 fn ensure_artifact_ref(artifact: &mut Value, node_id: &str, worktask_id: &str) {

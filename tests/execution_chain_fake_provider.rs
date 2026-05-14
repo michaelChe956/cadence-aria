@@ -243,6 +243,33 @@ fn testing_failure_routes_to_rework_then_back_to_testing_and_review() {
 }
 
 #[test]
+fn testing_report_with_only_out_of_scope_failures_allows_current_worktask_to_continue() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let provider = ScriptedExecutionProvider::testing_has_only_out_of_scope_failure();
+
+    let result =
+        run_worktask_execution_chain(execution_worktask_input(workspace.path()), &provider)
+            .expect("execution chain should continue after scoped verification passed");
+
+    assert_eq!(
+        result
+            .protocol_steps
+            .iter()
+            .map(|step| step.node_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["N16", "N17", "N18"]
+    );
+    assert_eq!(result.rework_counter, 0);
+    assert_eq!(result.next_node, "M20");
+    assert!(
+        !result
+            .workflow_skills_activated
+            .contains(&"systematic-debugging".to_string()),
+        "out-of-scope acceptance failures must not trigger current worktask rework"
+    );
+}
+
+#[test]
 fn testing_node_inherits_latest_coding_report_commands_when_route_has_no_verification_commands() {
     let workspace = tempfile::tempdir().expect("workspace");
     let provider = ScriptedExecutionProvider::happy();
@@ -708,6 +735,7 @@ struct ScriptedExecutionProvider {
     review_decisions: Mutex<VecDeque<String>>,
     candidate_refs: Vec<String>,
     fail_testing_with_provider_error: bool,
+    testing_has_only_out_of_scope_failure: bool,
     testing_artifact_ref: Option<String>,
 }
 
@@ -718,6 +746,13 @@ impl ScriptedExecutionProvider {
 
     fn testing_fails_then_passes() -> Self {
         Self::new([false, true], ["pass"])
+    }
+
+    fn testing_has_only_out_of_scope_failure() -> Self {
+        Self {
+            testing_has_only_out_of_scope_failure: true,
+            ..Self::new([false], ["pass"])
+        }
     }
 
     fn review_revises_then_passes() -> Self {
@@ -754,6 +789,7 @@ impl ScriptedExecutionProvider {
             review_decisions: Mutex::new(reviews.into_iter().map(ToOwned::to_owned).collect()),
             candidate_refs: Vec::new(),
             fail_testing_with_provider_error: false,
+            testing_has_only_out_of_scope_failure: false,
             testing_artifact_ref: None,
         }
     }
@@ -816,8 +852,19 @@ impl ProviderAdapter for ScriptedExecutionProvider {
                     "tests_passed": passed,
                     "failures": if passed {
                         json!([])
+                    } else if self.testing_has_only_out_of_scope_failure {
+                        json!([{
+                            "test": "future_acceptance_target",
+                            "failure_type": "out_of_scope_acceptance_failure",
+                            "message": "完整测试失败在后续 worktask 的 acceptance target，当前 worktask 范围验证已通过。"
+                        }])
                     } else {
                         json!([{"test": "execution_chain", "message": "fixture failure"}])
+                    },
+                    "scope_result": if self.testing_has_only_out_of_scope_failure {
+                        json!("worktask_001_scoped_verification_passed")
+                    } else {
+                        json!(null)
                     },
                     "candidate_traceability_refs": []
                 })

@@ -64,9 +64,39 @@ where
             code: "task_run_requires_async".to_string(),
             message: "task run is only available through run_cli_async".to_string(),
         }),
+        [command, rest @ ..] if command == "tui" => {
+            let workspace = parse_workspace(rest)?;
+            let task_id = parse_task_id(rest)?;
+            if rest.iter().any(|item| item == "--check") {
+                crate::tui::app::check_tui_browse(&workspace, task_id.as_deref())
+                    .map_err(task_run_error)?;
+            }
+            Ok(CliOutput::Text(match task_id {
+                Some(task_id) => format!("tui_browse:{}:{task_id}", workspace.to_string_lossy()),
+                None => format!("tui_browse:{}", workspace.to_string_lossy()),
+            }))
+        }
+        [command, rest @ ..] if command == "web" => {
+            let options = parse_web_options(rest)?;
+            if options.check {
+                return Ok(CliOutput::Text(format!(
+                    "web_check_ok:{}:{}:{}",
+                    options.workspace.to_string_lossy(),
+                    options.host,
+                    options
+                        .port
+                        .map(|port| port.to_string())
+                        .unwrap_or_else(|| "auto".to_string())
+                )));
+            }
+            Err(CliError {
+                code: "web_requires_async".to_string(),
+                message: "web server is only available through run_cli_async".to_string(),
+            })
+        }
         _ => Err(CliError {
             code: "invalid_cli_args".to_string(),
-            message: "expected daemon status or repl command".to_string(),
+            message: "expected daemon status, repl, task run, tui, or web command".to_string(),
         }),
     }
 }
@@ -87,6 +117,7 @@ where
             let provider = real_routing_provider().map_err(task_run_error)?;
             let outcome = TaskRunOrchestrator::run_with_provider(
                 TaskRunRequest {
+                    task_id: None,
                     workspace: options.workspace,
                     request_text: options.request_text,
                     change_id,
@@ -135,8 +166,50 @@ where
             }
             Ok(CliOutput::Text(String::new()))
         }
+        [command, rest @ ..] if command == "web" => {
+            let options = parse_web_options(rest)?;
+            if options.check {
+                return run_cli(args);
+            }
+            crate::web::app::serve_web(options.workspace, options.host, options.port)
+                .await
+                .map_err(internal_error)?;
+            Ok(CliOutput::Text(String::new()))
+        }
         _ => run_cli(args),
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WebOptions {
+    workspace: PathBuf,
+    host: String,
+    port: Option<u16>,
+    check: bool,
+}
+
+fn parse_web_options(args: &[String]) -> Result<WebOptions, CliError> {
+    let workspace = parse_workspace(args)?;
+    let host = parse_value(args, "--host").unwrap_or_else(|| "127.0.0.1".to_string());
+    let port = parse_value(args, "--port")
+        .map(|value| value.parse::<u16>())
+        .transpose()
+        .map_err(|error| CliError {
+            code: "invalid_cli_args".to_string(),
+            message: format!("--port must be a u16: {error}"),
+        })?;
+    Ok(WebOptions {
+        workspace,
+        host,
+        port,
+        check: args.iter().any(|item| item == "--check"),
+    })
+}
+
+fn parse_value(args: &[String], flag: &str) -> Option<String> {
+    args.windows(2)
+        .find(|window| window[0] == flag)
+        .map(|window| window[1].clone())
 }
 
 fn parse_workspace(args: &[String]) -> Result<PathBuf, CliError> {
@@ -164,6 +237,21 @@ fn parse_socket(args: &[String]) -> Option<PathBuf> {
         index += 1;
     }
     None
+}
+
+fn parse_task_id(args: &[String]) -> Result<Option<String>, CliError> {
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] == "--task-id" {
+            let value = args.get(index + 1).ok_or_else(|| CliError {
+                code: "invalid_cli_args".to_string(),
+                message: "--task-id requires a value".to_string(),
+            })?;
+            return Ok(Some(value.clone()));
+        }
+        index += 1;
+    }
+    Ok(None)
 }
 
 fn internal_error(error: impl std::fmt::Display) -> CliError {

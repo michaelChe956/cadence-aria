@@ -24,6 +24,7 @@ pub struct TaskRunOptions {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskRunRequest {
+    pub task_id: Option<String>,
     pub workspace: PathBuf,
     pub request_text: String,
     pub change_id: String,

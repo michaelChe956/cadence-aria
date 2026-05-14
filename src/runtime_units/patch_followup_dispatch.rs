@@ -29,6 +29,7 @@ pub enum ApprovalDecision {
 pub struct FinalFollowupInput {
     pub session_id: String,
     pub task_id: String,
+    pub worktree_path: String,
     pub change_id: String,
     pub change_dir: PathBuf,
     pub projection_refs: Vec<String>,
@@ -211,6 +212,7 @@ fn closure_input(input: &FinalFollowupInput) -> FinalClosureInput {
     FinalClosureInput {
         session_id: input.session_id.clone(),
         task_id: input.task_id.clone(),
+        worktree_path: input.worktree_path.clone(),
         projection_refs: input.projection_refs.clone(),
         constraint_bundle_ref: input.constraint_bundle_ref.clone(),
         risk_registry_ref: input.risk_registry_ref.clone(),

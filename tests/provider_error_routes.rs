@@ -98,6 +98,7 @@ fn run_error(
     let adapter = CliProviderAdapter::new(CliAdapterConfig {
         compatibility,
         expected_artifact_kind: Some("clarification_record".to_string()),
+        output_sink: None,
     });
 
     adapter

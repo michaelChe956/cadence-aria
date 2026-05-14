@@ -69,6 +69,7 @@ fn final_input() -> FinalClosureInput {
     FinalClosureInput {
         session_id: "session_001".to_string(),
         task_id: "task_001".to_string(),
+        worktree_path: "tests/fixtures/repos/sample-worktree".to_string(),
         projection_refs: vec![
             "proj_spec_projection_001".to_string(),
             "proj_design_projection_001".to_string(),

@@ -117,6 +117,7 @@ fn phase1_smoke_runs_from_planning_dispatch_to_final_summary() {
         FinalClosureInput {
             session_id: "session_001".to_string(),
             task_id: "task_001".to_string(),
+            worktree_path: workspace.path().to_string_lossy().to_string(),
             projection_refs: vec![
                 planning.design_projection.projection_id.clone(),
                 planning.plan_projection.projection_id.clone(),

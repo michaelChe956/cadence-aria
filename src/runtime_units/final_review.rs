@@ -4,12 +4,13 @@ use crate::cross_cutting::artifact_validate::{
 };
 use crate::cross_cutting::provider_adapter::{ProviderAdapter, ProviderAdapterError};
 use crate::cross_cutting::provider_context_builder::{
-    ProviderContextBuildError, ProviderContextBuilderInput, build_provider_context,
+    ProviderContextBuildError, ProviderContextBuildResult, ProviderContextBuilderInput,
+    build_provider_context,
 };
 use crate::cross_cutting::provider_router::ProviderRunRequest;
 use crate::cross_cutting::provider_run::provider_run_record_from_output;
 use crate::protocol::artifacts::ArtifactKind;
-use crate::protocol::contracts::{ApprovalPolicy, ProviderRunRecord, SandboxMode};
+use crate::protocol::contracts::{AdapterInput, ApprovalPolicy, ProviderRunRecord, SandboxMode};
 use crate::runtime_units::{
     CanonicalNodeInput, DaemonContext, RuntimeProtocolStep, RuntimeStepStatus, RuntimeUnit,
     RuntimeUnitError, RuntimeUnitResult,
@@ -21,6 +22,7 @@ use std::future::Future;
 pub struct FinalClosureInput {
     pub session_id: String,
     pub task_id: String,
+    pub worktree_path: String,
     pub projection_refs: Vec<String>,
     pub constraint_bundle_ref: String,
     pub risk_registry_ref: String,
@@ -141,9 +143,10 @@ pub(crate) fn run_final_provider_node(
     provider_run_records: &mut Vec<ProviderRunRecord>,
 ) -> Result<Value, FinalClosureError> {
     let context = build_provider_context(builder_input(input, node_id))?;
-    let output = provider.run(&context.adapter_input)?;
+    let adapter_input = final_adapter_input_for_node(&context)?;
+    let output = provider.run(&adapter_input)?;
     let request = provider_run_request(node_id, &context.context_package.context_package_id);
-    let record = provider_run_record_from_output(&request, &context.adapter_input, &output);
+    let record = provider_run_record_from_output(&request, &adapter_input, &output);
     let artifact = output
         .structured_output
         .ok_or_else(|| FinalClosureError::StructuredOutputMissing(node_id.to_string()))?;
@@ -151,6 +154,12 @@ pub(crate) fn run_final_provider_node(
         .map_err(FinalClosureError::ArtifactValidate)?;
     provider_run_records.push(record);
     Ok(artifact)
+}
+
+pub(crate) fn final_adapter_input_for_node(
+    context: &ProviderContextBuildResult,
+) -> Result<AdapterInput, FinalClosureError> {
+    Ok(context.adapter_input.clone())
 }
 
 pub(crate) fn normalize_final_review_profile(
@@ -265,7 +274,7 @@ fn builder_input(input: &FinalClosureInput, node_id: &str) -> ProviderContextBui
         constraint_bundle_ref: input.constraint_bundle_ref.clone(),
         constraint_summary: "final closure constraints".to_string(),
         context_files: input.context_files.clone(),
-        worktree_path: None,
+        worktree_path: Some(input.worktree_path.clone()),
     }
 }
 

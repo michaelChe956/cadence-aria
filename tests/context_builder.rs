@@ -417,6 +417,15 @@ fn context_builder_renders_p4_provider_nodes_and_rejects_missing_required_inputs
         ProviderContextBuildError::MissingWorktreePath("N16".to_string())
     );
 
+    for node_id in ["N25", "N26", "N27"] {
+        let mut missing_worktree = p4_builder_input(node_id);
+        missing_worktree.worktree_path = None;
+        assert_eq!(
+            build_provider_context(missing_worktree).expect_err("final worktree required"),
+            ProviderContextBuildError::MissingWorktreePath(node_id.to_string())
+        );
+    }
+
     let mut missing_acceptance_targets = p4_builder_input("N16");
     missing_acceptance_targets.canonical_inputs["acceptance_targets"] = json!([]);
     assert_eq!(

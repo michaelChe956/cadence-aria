@@ -323,17 +323,39 @@ fn compile_requirement_constraints(
 }
 
 fn compile_design_constraints(model: &DocumentModel) -> Result<DesignConstraints, OpenSpecError> {
-    let design_decision_ids = ids_from_sections(
+    let design_decision_ids = ids_from_sections_or_synthetic(
         model,
         &["Decisions", "Design Decisions", "设计决策"],
         &["DD-", "DEC-"],
+        "DEC-",
+        &[
+            SyntheticIdSource::TableRows,
+            SyntheticIdSource::ChildHeadings,
+            SyntheticIdSource::ListItems,
+        ],
     );
-    let component_ids = ids_from_sections(
+    let component_ids = ids_from_sections_or_synthetic(
         model,
         &["Components", "Shared Components", "组件", "公共组件"],
         &["CMP-", "COMP-"],
+        "CMP-",
+        &[
+            SyntheticIdSource::ChildHeadings,
+            SyntheticIdSource::TableRows,
+            SyntheticIdSource::ListItems,
+        ],
     );
-    let risk_ids = ids_from_sections(model, &["Risks", "风险"], &["RISK-"]);
+    let risk_ids = ids_from_sections_or_synthetic(
+        model,
+        &["Risks", "风险"],
+        &["RISK-"],
+        "RISK-",
+        &[
+            SyntheticIdSource::ChildHeadings,
+            SyntheticIdSource::ListItems,
+            SyntheticIdSource::TableRows,
+        ],
+    );
 
     if design_decision_ids.is_empty() && component_ids.is_empty() {
         return Err(OpenSpecError::DesignConstraintsEmpty);
@@ -403,18 +425,7 @@ fn section_items(model: &DocumentModel, aliases: &[&str]) -> Vec<String> {
 }
 
 fn ids_from_sections(model: &DocumentModel, aliases: &[&str], prefixes: &[&str]) -> Vec<String> {
-    let root_paths = model
-        .sections
-        .iter()
-        .filter(|section| {
-            section.heading_path.last().is_some_and(|title| {
-                aliases
-                    .iter()
-                    .any(|alias| heading_matches_alias(title, alias))
-            })
-        })
-        .map(|section| section.heading_path.clone())
-        .collect::<Vec<_>>();
+    let root_paths = matching_section_paths(model, aliases);
 
     let ids = model
         .sections
@@ -434,6 +445,140 @@ fn ids_from_sections(model: &DocumentModel, aliases: &[&str], prefixes: &[&str])
         .flat_map(|item| ids_with_prefix(&item, prefixes))
         .collect();
     dedupe_preserve_order(ids)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyntheticIdSource {
+    TableRows,
+    ChildHeadings,
+    ListItems,
+}
+
+fn ids_from_sections_or_synthetic(
+    model: &DocumentModel,
+    aliases: &[&str],
+    prefixes: &[&str],
+    synthetic_prefix: &str,
+    sources: &[SyntheticIdSource],
+) -> Vec<String> {
+    let explicit_ids = ids_from_sections(model, aliases, prefixes);
+    if !explicit_ids.is_empty() {
+        return explicit_ids;
+    }
+
+    let root_paths = matching_section_paths(model, aliases);
+    for source in sources {
+        let ids = match source {
+            SyntheticIdSource::TableRows => {
+                synthetic_ids_from_table_rows(model, &root_paths, synthetic_prefix)
+            }
+            SyntheticIdSource::ChildHeadings => {
+                synthetic_ids_from_child_headings(model, &root_paths, synthetic_prefix)
+            }
+            SyntheticIdSource::ListItems => {
+                synthetic_ids_from_list_items(model, &root_paths, synthetic_prefix)
+            }
+        };
+        if !ids.is_empty() {
+            return ids;
+        }
+    }
+
+    Vec::new()
+}
+
+fn matching_section_paths(model: &DocumentModel, aliases: &[&str]) -> Vec<Vec<String>> {
+    model
+        .sections
+        .iter()
+        .filter(|section| {
+            section.heading_path.last().is_some_and(|title| {
+                aliases
+                    .iter()
+                    .any(|alias| heading_matches_alias(title, alias))
+            })
+        })
+        .map(|section| section.heading_path.clone())
+        .collect()
+}
+
+fn synthetic_ids_from_child_headings(
+    model: &DocumentModel,
+    root_paths: &[Vec<String>],
+    synthetic_prefix: &str,
+) -> Vec<String> {
+    let count = model
+        .sections
+        .iter()
+        .filter(|section| {
+            root_paths.iter().any(|root_path| {
+                section.heading_path.starts_with(root_path)
+                    && section.heading_path.len() == root_path.len() + 1
+            })
+        })
+        .filter(|section| {
+            section
+                .heading_path
+                .last()
+                .is_some_and(|heading| !normalized_heading(heading).trim().is_empty())
+        })
+        .count();
+    synthetic_ids(synthetic_prefix, count)
+}
+
+fn synthetic_ids_from_table_rows(
+    model: &DocumentModel,
+    root_paths: &[Vec<String>],
+    synthetic_prefix: &str,
+) -> Vec<String> {
+    let count = model
+        .sections
+        .iter()
+        .filter(|section| {
+            root_paths
+                .iter()
+                .any(|root_path| section.heading_path.starts_with(root_path))
+        })
+        .flat_map(|section| section.blocks.iter())
+        .filter_map(|block| match block {
+            DocumentBlock::Table { rows, .. } => Some(rows),
+            _ => None,
+        })
+        .flat_map(|rows| rows.iter())
+        .filter(|row| row.iter().any(|cell| !cell.trim().is_empty()))
+        .count();
+    synthetic_ids(synthetic_prefix, count)
+}
+
+fn synthetic_ids_from_list_items(
+    model: &DocumentModel,
+    root_paths: &[Vec<String>],
+    synthetic_prefix: &str,
+) -> Vec<String> {
+    let count = model
+        .sections
+        .iter()
+        .filter(|section| {
+            root_paths
+                .iter()
+                .any(|root_path| section.heading_path.starts_with(root_path))
+        })
+        .flat_map(|section| section.blocks.iter())
+        .flat_map(|block| match block {
+            DocumentBlock::BulletList(items) | DocumentBlock::OrderedList(items) => {
+                items.iter().collect::<Vec<_>>()
+            }
+            _ => Vec::new(),
+        })
+        .filter(|item| !item.trim().is_empty())
+        .count();
+    synthetic_ids(synthetic_prefix, count)
+}
+
+fn synthetic_ids(prefix: &str, count: usize) -> Vec<String> {
+    (1..=count)
+        .map(|index| format!("{prefix}{index:03}"))
+        .collect()
 }
 
 fn heading_matches_alias(heading: &str, alias: &str) -> bool {
