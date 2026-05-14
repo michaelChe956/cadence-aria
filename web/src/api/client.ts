@@ -9,6 +9,7 @@ import type {
   FileDiffResponse,
   Issue,
   IssueListResponse,
+  Project,
   RollbackPreviewResponse,
   StartIssueRequest,
   StartIssueResponse,
@@ -67,6 +68,20 @@ export function listWorkspaces(): Promise<WorkspaceListResponse> {
 
 export function createWorkspace(payload: CreateWorkspaceRequest): Promise<Workspace> {
   return requestJson<Workspace>("/api/workspaces", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function listProjects(): Promise<{ projects: Project[] }> {
+  return requestJson<{ projects: Project[] }>("/api/projects");
+}
+
+export function createProject(payload: {
+  name: string;
+  description?: string | null;
+}): Promise<Project> {
+  return requestJson<Project>("/api/projects", {
     method: "POST",
     body: JSON.stringify(payload),
   });

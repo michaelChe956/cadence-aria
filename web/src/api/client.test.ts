@@ -3,12 +3,14 @@ import {
   advanceTask,
   confirmTask,
   createIssue,
+  createProject,
   createTask,
   createWorkspace,
   getArtifactContent,
   getFileContent,
   getFileDiff,
   getProjection,
+  listProjects,
   listTasks,
   normalizeApiError,
   startIssue,
@@ -142,6 +144,35 @@ describe("api client", () => {
         body: JSON.stringify({ name: "Repo", path: "/tmp/repo" }),
       }),
     );
+  });
+
+  it("lists and creates product projects through the api", async () => {
+    const calls: Array<{ input: string; init?: RequestInit }> = [];
+    const responses = [
+      { projects: [] },
+      {
+        project_id: "project_0001",
+        name: "Aria",
+        description: null,
+        created_at: "2026-05-14T00:00:00Z",
+        updated_at: "2026-05-14T00:00:00Z",
+        last_opened_at: null,
+      },
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push({ input: String(input), init });
+        return new Response(JSON.stringify(responses[calls.length - 1]), { status: 200 });
+      }),
+    );
+
+    await listProjects();
+    await createProject({ name: "Aria", description: null });
+
+    expect(calls.map((call) => call.input)).toEqual(["/api/projects", "/api/projects"]);
+    expect(calls[1].init?.method).toBe("POST");
+    expect(calls[1].init?.body).toBe(JSON.stringify({ name: "Aria", description: null }));
   });
 
   it("creates and starts an issue through the api", async () => {

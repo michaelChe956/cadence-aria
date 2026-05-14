@@ -71,6 +71,35 @@ export type WebEvent = {
   payload: unknown;
 };
 
+export type Project = {
+  project_id: string;
+  name: string;
+  description: string | null;
+  created_at: string;
+  updated_at: string;
+  last_opened_at: string | null;
+};
+
+export type ProductIssue = {
+  issue_id: string;
+  project_id: string;
+  repo_id: string;
+  title: string;
+  description: string | null;
+  change_id: string;
+  phase: "clarification" | "development" | "acceptance";
+  status: "draft" | "in_progress" | "completed" | "blocked";
+  active_binding_id: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ProductWebEvent = WebEvent & {
+  project_id?: string | null;
+  issue_id?: string | null;
+  binding_id?: string | null;
+};
+
 export type TaskListResponse = {
   tasks: Array<{
     task_id: string;
