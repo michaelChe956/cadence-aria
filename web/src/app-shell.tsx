@@ -21,10 +21,10 @@ import { EvidencePanel } from "./components/evidence/EvidencePanel";
 import { FlowRail } from "./components/flow/FlowRail";
 import { LearningLabHero } from "./components/learning/LearningLabHero";
 import { NodeWorkspace } from "./components/node/NodeWorkspace";
+import { ProjectManagementWorkbench } from "./components/project/ProjectManagementWorkbench";
 import { TaskSwitcher } from "./components/shell/TaskSwitcher";
 import { TopStatusBar } from "./components/shell/TopStatusBar";
 import { NewTaskPanel } from "./components/task/NewTaskPanel";
-import { TaskManagementWorkbench } from "./components/task/TaskManagementWorkbench";
 import type { ExecutionContext } from "./components/task/TaskManagementWorkbench";
 import { RollbackDialog } from "./components/rollback/RollbackDialog";
 import { createWorkbenchStore } from "./state/workbench-store";
@@ -329,7 +329,7 @@ export function AppShell() {
   };
 
   if (!executionContext) {
-    return <TaskManagementWorkbench onOpenExecution={setExecutionContext} />;
+    return <ProjectManagementWorkbench onOpenExecution={setExecutionContext} />;
   }
 
   return (
@@ -363,7 +363,7 @@ export function AppShell() {
             }}
             className="rounded-lg border-2 border-slate-300 bg-white px-3 py-1.5 text-sm font-bold text-slate-800 shadow-[0_4px_0_rgba(15,23,42,0.10)] transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-orange-200"
           >
-            返回任务管理
+            返回项目管理
           </button>
         </div>
       </header>

@@ -8,12 +8,12 @@ describe("AppShell", () => {
     vi.unstubAllGlobals();
   });
 
-  it("renders task management as the default workbench", async () => {
+  it("renders project management as the default workbench", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
-        if (url === "/api/workspaces") return jsonResponse({ workspaces: [] });
+        if (url === "/api/projects") return jsonResponse({ projects: [] });
         if (url === "/api/issues") return jsonResponse({ issues: [] });
         return jsonResponse({});
       }),
@@ -21,9 +21,9 @@ describe("AppShell", () => {
 
     render(<AppShell />);
 
-    expect(await screen.findByRole("heading", { name: "任务管理" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Workspace 空间" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "新建 issue" })).toBeDisabled();
+    expect(await screen.findByRole("main", { name: "项目管理工作台" })).toBeInTheDocument();
+    expect(screen.getByText("项目工作台")).toBeInTheDocument();
+    expect(screen.getByText("暂无 Issue")).toBeInTheDocument();
   });
 
   it("resets page scroll to the top when the workbench loads", () => {
@@ -265,6 +265,7 @@ function stubEmptyManagementFetch() {
     "fetch",
     vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
+      if (url === "/api/projects") return jsonResponse({ projects: [] });
       if (url === "/api/workspaces") return jsonResponse({ workspaces: [] });
       if (url === "/api/issues") return jsonResponse({ issues: [] });
       return jsonResponse({});
@@ -289,6 +290,7 @@ function stubExecutionFetch(
 }
 
 function executionManagementResponse(url: string) {
+  if (url === "/api/projects") return jsonResponse({ projects: [projectFixture()] });
   if (url === "/api/workspaces") return jsonResponse({ workspaces: [workspaceFixture()] });
   if (url === "/api/issues") return jsonResponse({ issues: [issueFixture()] });
   if (url === "/api/issues/issue_0001/start") {
@@ -305,10 +307,19 @@ function executionManagementResponse(url: string) {
 
 async function openExecutionWorkbench() {
   render(<AppShell />);
-  await userEvent.click(await screen.findByRole("button", { name: "Start" }));
-  await userEvent.selectOptions(screen.getByLabelText("启动 workspace"), "workspace_0001");
-  await userEvent.click(screen.getByRole("button", { name: "确认 Start" }));
+  await userEvent.click(await screen.findByRole("button", { name: "打开执行" }));
   return screen.findByRole("main", { name: "Aria workbench" });
+}
+
+function projectFixture() {
+  return {
+    project_id: "project_0001",
+    name: "Aria 项目",
+    description: "项目管理工作台",
+    created_at: "2026-05-14T00:00:00Z",
+    updated_at: "2026-05-14T00:00:00Z",
+    last_opened_at: null,
+  };
 }
 
 function workspaceFixture() {
@@ -328,10 +339,10 @@ function issueFixture() {
     issue_id: "issue_0001",
     title: "Implement picker",
     description: "Select repo",
-    status: "draft",
-    workspace_id: null,
-    task_id: null,
-    session_id: null,
+    status: "in_progress",
+    workspace_id: "workspace_0001",
+    task_id: "task_0001",
+    session_id: "sess_task_0001",
     change_id: "implement-picker",
     created_at: "2026-05-14T00:00:00Z",
     updated_at: "2026-05-14T00:00:00Z",
