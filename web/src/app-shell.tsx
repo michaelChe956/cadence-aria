@@ -24,12 +24,15 @@ import { NodeWorkspace } from "./components/node/NodeWorkspace";
 import { TaskSwitcher } from "./components/shell/TaskSwitcher";
 import { TopStatusBar } from "./components/shell/TopStatusBar";
 import { NewTaskPanel } from "./components/task/NewTaskPanel";
+import { TaskManagementWorkbench } from "./components/task/TaskManagementWorkbench";
+import type { ExecutionContext } from "./components/task/TaskManagementWorkbench";
 import { RollbackDialog } from "./components/rollback/RollbackDialog";
 import { createWorkbenchStore } from "./state/workbench-store";
 import type { WorkbenchTab } from "./state/workbench-store";
 
 export function AppShell() {
   const [store] = useState(() => createWorkbenchStore());
+  const [executionContext, setExecutionContext] = useState<ExecutionContext | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [tasks, setTasks] = useState<TaskListResponse["tasks"]>([]);
@@ -40,7 +43,8 @@ export function AppShell() {
   const [sseConnected, setSseConnected] = useState(false);
   const [, setProjectionVersion] = useState(0);
   const projection = store.snapshot.projection;
-  const activeTaskId = projection?.active_task_id ?? null;
+  const workspaceId = executionContext?.workspaceId;
+  const activeTaskId = executionContext?.taskId ?? projection?.active_task_id ?? null;
 
   useEffect(() => {
     const previousScrollRestoration = window.history.scrollRestoration;
@@ -51,6 +55,45 @@ export function AppShell() {
       window.history.scrollRestoration = previousScrollRestoration;
     };
   }, []);
+
+  useEffect(() => {
+    if (!executionContext) {
+      return;
+    }
+    let cancelled = false;
+    setBusy(true);
+    setError(null);
+    void getProjection(executionContext.taskId, undefined, executionContext.workspaceId)
+      .then((nextProjection) => {
+        if (cancelled) {
+          return;
+        }
+        store.setProjection(nextProjection);
+        setLastCheckpointId(nextProjection.pending_provider_step?.checkpoint_id ?? null);
+        setTasks((current) => [
+          ...current.filter((task) => task.task_id !== executionContext.taskId),
+          {
+            task_id: executionContext.taskId,
+            change_id: nextProjection.overview.change_id as string | null,
+            phase: nextProjection.overview.status as string | null,
+          },
+        ]);
+        setProjectionVersion((version) => version + 1);
+      })
+      .catch((reason) => {
+        if (!cancelled) {
+          setError(reason instanceof Error ? reason.message : "load execution workbench failed");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setBusy(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [executionContext, store]);
 
   useEffect(() => {
     if (!activeTaskId || typeof EventSource === "undefined") {
@@ -86,7 +129,7 @@ export function AppShell() {
       setProjectionVersion((version) => version + 1);
       if (refreshEventTypes.has(event.event_type)) {
         const taskId = event.task_id ?? activeTaskId;
-        void getProjection(taskId, store.snapshot.selectedNodeId ?? undefined)
+        void getProjection(taskId, store.snapshot.selectedNodeId ?? undefined, workspaceId)
           .then((nextProjection) => {
             store.setProjection(nextProjection);
             setProjectionVersion((version) => version + 1);
@@ -104,14 +147,14 @@ export function AppShell() {
       eventSource.close();
       setSseConnected(false);
     };
-  }, [activeTaskId, store]);
+  }, [activeTaskId, store, workspaceId]);
 
   async function handleCreateTask(payload: CreateTaskRequest) {
     setBusy(true);
     setError(null);
     try {
       const created = await createTask(payload);
-      const projection = await getProjection(created.task_id);
+      const projection = await getProjection(created.task_id, undefined, workspaceId);
       store.setProjection(projection);
       setLastCheckpointId(projection.pending_provider_step?.checkpoint_id ?? null);
       setTasks((current) => [
@@ -133,7 +176,7 @@ export function AppShell() {
     setBusy(true);
     setError(null);
     try {
-      const projection = await getProjection(taskId);
+      const projection = await getProjection(taskId, undefined, workspaceId);
       store.setProjection(projection);
       setLastCheckpointId(projection.pending_provider_step?.checkpoint_id ?? null);
       setProjectionVersion((version) => version + 1);
@@ -152,7 +195,7 @@ export function AppShell() {
     }
     setError(null);
     try {
-      const nextProjection = await getProjection(activeTaskId, nodeId);
+      const nextProjection = await getProjection(activeTaskId, nodeId, workspaceId);
       store.setProjection(nextProjection);
       setLastCheckpointId(nextProjection.pending_provider_step?.checkpoint_id ?? lastCheckpointId);
       setProjectionVersion((version) => version + 1);
@@ -171,15 +214,15 @@ export function AppShell() {
     prompt: string;
     policy_override?: string | null;
   }) {
-    const taskId = projection?.active_task_id;
+    const taskId = projection?.active_task_id ?? executionContext?.taskId;
     if (!taskId) {
       return;
     }
     setBusy(true);
     setError(null);
     try {
-      const confirmed = await confirmTask(taskId, payload);
-      store.setProjection(await getProjection(taskId, confirmed.node_id));
+      const confirmed = await confirmTask(taskId, payload, workspaceId);
+      store.setProjection(await getProjection(taskId, confirmed.node_id, workspaceId));
       store.selectTab("run");
       setLastCheckpointId(payload.checkpoint_id);
       setProjectionVersion((version) => version + 1);
@@ -191,15 +234,17 @@ export function AppShell() {
   }
 
   async function handleStopTask() {
-    const taskId = projection?.active_task_id;
+    const taskId = projection?.active_task_id ?? executionContext?.taskId;
     if (!taskId) {
       return;
     }
     setBusy(true);
     setError(null);
     try {
-      await stopTask(taskId);
-      store.setProjection(await getProjection(taskId, store.snapshot.selectedNodeId ?? undefined));
+      await stopTask(taskId, workspaceId);
+      store.setProjection(
+        await getProjection(taskId, store.snapshot.selectedNodeId ?? undefined, workspaceId),
+      );
       setProjectionVersion((version) => version + 1);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "stop task failed");
@@ -209,15 +254,19 @@ export function AppShell() {
   }
 
   async function handleAdvanceTask() {
-    const taskId = projection?.active_task_id;
+    const taskId = projection?.active_task_id ?? executionContext?.taskId;
     if (!taskId) {
       return;
     }
     setBusy(true);
     setError(null);
     try {
-      await advanceTask(taskId);
-      const nextProjection = await getProjection(taskId, store.snapshot.selectedNodeId ?? undefined);
+      await advanceTask(taskId, workspaceId);
+      const nextProjection = await getProjection(
+        taskId,
+        store.snapshot.selectedNodeId ?? undefined,
+        workspaceId,
+      );
       store.setProjection(nextProjection);
       setLastCheckpointId(nextProjection.pending_provider_step?.checkpoint_id ?? lastCheckpointId);
       setProjectionVersion((version) => version + 1);
@@ -229,14 +278,14 @@ export function AppShell() {
   }
 
   async function handleRollbackPreview(checkpointId: string) {
-    const taskId = projection?.active_task_id;
+    const taskId = projection?.active_task_id ?? executionContext?.taskId;
     if (!taskId) {
       return;
     }
     setBusy(true);
     setError(null);
     try {
-      setRollbackPreviewState(await rollbackPreview(taskId, checkpointId));
+      setRollbackPreviewState(await rollbackPreview(taskId, checkpointId, workspaceId));
       setRollbackOpen(true);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "rollback preview failed");
@@ -249,15 +298,17 @@ export function AppShell() {
     checkpoint_id: string;
     force_when_dirty: boolean;
   }) {
-    const taskId = projection?.active_task_id;
+    const taskId = projection?.active_task_id ?? executionContext?.taskId;
     if (!taskId) {
       return;
     }
     setBusy(true);
     setError(null);
     try {
-      await rollbackTask(taskId, payload);
-      store.setProjection(await getProjection(taskId, store.snapshot.selectedNodeId ?? undefined));
+      await rollbackTask(taskId, payload, workspaceId);
+      store.setProjection(
+        await getProjection(taskId, store.snapshot.selectedNodeId ?? undefined, workspaceId),
+      );
       setRollbackOpen(false);
       setRollbackPreviewState(null);
       setProjectionVersion((version) => version + 1);
@@ -277,6 +328,10 @@ export function AppShell() {
     diffs: [],
   };
 
+  if (!executionContext) {
+    return <TaskManagementWorkbench onOpenExecution={setExecutionContext} />;
+  }
+
   return (
     <div className="min-h-screen text-[#241B2F]">
       <header
@@ -289,11 +344,28 @@ export function AppShell() {
             playful coding workbench
           </span>
         </div>
-        <TaskSwitcher
-          tasks={tasks}
-          activeTaskId={projection?.active_task_id ?? null}
-          onSelectTask={handleSelectTask}
-        />
+        <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
+          <span className="rounded-lg border-2 border-indigo-200 bg-indigo-50 px-3 py-1 font-mono text-xs font-bold text-indigo-950">
+            {executionContext.issueId}
+          </span>
+          <span className="rounded-lg border-2 border-cyan-200 bg-cyan-50 px-3 py-1 font-mono text-xs font-bold text-cyan-950">
+            {executionContext.workspaceId}
+          </span>
+          <TaskSwitcher tasks={tasks} activeTaskId={activeTaskId} onSelectTask={handleSelectTask} />
+          <button
+            type="button"
+            onClick={() => {
+              setExecutionContext(null);
+              setError(null);
+              setRollbackOpen(false);
+              setRollbackPreviewState(null);
+              setSseConnected(false);
+            }}
+            className="rounded-lg border-2 border-slate-300 bg-white px-3 py-1.5 text-sm font-bold text-slate-800 shadow-[0_4px_0_rgba(15,23,42,0.10)] transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-orange-200"
+          >
+            返回任务管理
+          </button>
+        </div>
       </header>
       <TopStatusBar
         projection={
