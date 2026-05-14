@@ -7,3 +7,4 @@ pub mod runtime_store;
 pub mod state;
 pub mod static_assets;
 pub mod types;
+pub mod workspace_registry;
