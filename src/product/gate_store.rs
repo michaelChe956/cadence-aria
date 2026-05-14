@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 use chrono::Utc;
 
 use crate::product::app_paths::ProductAppPaths;
-use crate::product::id::next_sequential_id;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::models::{GateRecord, GateStatus, GateType};
 
@@ -76,7 +75,7 @@ impl GateStore {
             return Ok(existing.clone());
         }
 
-        let id = next_sequential_id("gate", gates.len());
+        let id = next_available_gate_id(&gates);
         let now = Utc::now().to_rfc3339();
         let gate = GateRecord {
             id: id.clone(),
@@ -150,30 +149,34 @@ impl GateStore {
         comment: Option<String>,
         requested_change: Option<String>,
     ) -> Result<GateRecord, ProductStoreError> {
-        let project_id = self.find_project_id_for_gate(issue_id, gate_id)?;
-        self.resolve(
-            &project_id,
-            issue_id,
-            gate_id,
-            status,
-            comment,
-            requested_change,
-        )
+        let project_ids = self.project_ids_for_gate(issue_id, gate_id)?;
+        match project_ids.as_slice() {
+            [project_id] => self.resolve(
+                project_id,
+                issue_id,
+                gate_id,
+                status,
+                comment,
+                requested_change,
+            ),
+            [] => Err(ProductStoreError::NotFound {
+                kind: "gate",
+                id: gate_id.to_string(),
+            }),
+            _ => Err(ProductStoreError::Io("gate_ambiguous".to_string())),
+        }
     }
 
-    fn find_project_id_for_gate(
+    pub fn project_ids_for_gate(
         &self,
         issue_id: &str,
         gate_id: &str,
-    ) -> Result<String, ProductStoreError> {
+    ) -> Result<Vec<String>, ProductStoreError> {
         validate_relative_id(issue_id)?;
         validate_relative_id(gate_id)?;
         let projects_root = self.paths.projects_root();
         if !path_exists(&projects_root)? {
-            return Err(ProductStoreError::NotFound {
-                kind: "gate",
-                id: gate_id.to_string(),
-            });
+            return Ok(Vec::new());
         }
 
         let mut projects = Vec::new();
@@ -187,6 +190,7 @@ impl GateStore {
         }
         projects.sort();
 
+        let mut project_ids = Vec::new();
         for project_path in projects {
             let Some(project_id) = project_path
                 .file_name()
@@ -197,14 +201,11 @@ impl GateStore {
             };
             let gate_path = self.gate_path(&project_id, issue_id, gate_id);
             if path_exists(&gate_path)? {
-                return Ok(project_id);
+                project_ids.push(project_id);
             }
         }
 
-        Err(ProductStoreError::NotFound {
-            kind: "gate",
-            id: gate_id.to_string(),
-        })
+        Ok(project_ids)
     }
 
     fn gates_root(&self, project_id: &str, issue_id: &str) -> PathBuf {
@@ -220,4 +221,15 @@ impl GateStore {
 fn path_exists(path: &Path) -> Result<bool, ProductStoreError> {
     path.try_exists()
         .map_err(|error| ProductStoreError::Io(format!("try_exists {}: {error}", path.display())))
+}
+
+fn next_available_gate_id(gates: &[GateRecord]) -> String {
+    let mut index = 1;
+    loop {
+        let id = format!("gate_{index:04}");
+        if gates.iter().all(|gate| gate.id != id) {
+            return id;
+        }
+        index += 1;
+    }
 }

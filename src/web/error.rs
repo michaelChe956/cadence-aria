@@ -39,12 +39,14 @@ impl IntoResponse for ApiError {
             "invalid_task_request" => StatusCode::BAD_REQUEST,
             "checkpoint_unsafe_dirty_worktree" => StatusCode::CONFLICT,
             "artifact_not_found"
+            | "gate_not_found"
             | "interactive_task_missing"
             | "issue_not_found"
             | "project_not_found"
             | "workspace_not_found"
             | "task_workspace_not_found" => StatusCode::NOT_FOUND,
-            "invalid_file_path"
+            "gate_ambiguous"
+            | "invalid_file_path"
             | "invalid_project_id"
             | "issue_title_required"
             | "workspace_path_missing"

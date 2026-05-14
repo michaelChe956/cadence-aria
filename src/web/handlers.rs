@@ -54,6 +54,11 @@ pub struct WorkspaceQuery {
     pub workspace_id: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct GateResolveQuery {
+    pub project_id: Option<String>,
+}
+
 pub async fn health() -> Json<serde_json::Value> {
     Json(json!({"status":"ok"}))
 }
@@ -229,12 +234,14 @@ pub async fn start_issue(
 pub async fn confirm_gate(
     State(state): State<WebAppState>,
     Path((issue_id, gate_id)): Path<(String, String)>,
+    Query(query): Query<GateResolveQuery>,
     Json(request): Json<ResolveGateRequest>,
 ) -> ApiResult<Json<ResolveGateResponse>> {
     resolve_gate(
         &state,
         issue_id,
         gate_id,
+        query.project_id,
         GateStatus::Confirmed,
         "confirmed",
         request,
@@ -244,12 +251,14 @@ pub async fn confirm_gate(
 pub async fn request_gate_change(
     State(state): State<WebAppState>,
     Path((issue_id, gate_id)): Path<(String, String)>,
+    Query(query): Query<GateResolveQuery>,
     Json(request): Json<ResolveGateRequest>,
 ) -> ApiResult<Json<ResolveGateResponse>> {
     resolve_gate(
         &state,
         issue_id,
         gate_id,
+        query.project_id,
         GateStatus::ChangeRequested,
         "change_requested",
         request,
@@ -259,12 +268,14 @@ pub async fn request_gate_change(
 pub async fn terminate_gate(
     State(state): State<WebAppState>,
     Path((issue_id, gate_id)): Path<(String, String)>,
+    Query(query): Query<GateResolveQuery>,
     Json(request): Json<ResolveGateRequest>,
 ) -> ApiResult<Json<ResolveGateResponse>> {
     resolve_gate(
         &state,
         issue_id,
         gate_id,
+        query.project_id,
         GateStatus::Terminated,
         "terminated",
         request,
@@ -556,20 +567,58 @@ fn resolve_gate(
     state: &WebAppState,
     issue_id: String,
     gate_id: String,
+    project_id: Option<String>,
     status: GateStatus,
     decision: &str,
     request: ResolveGateRequest,
 ) -> ApiResult<Json<ResolveGateResponse>> {
     let store = GateStore::new(product_app_paths(state));
-    let gate = store
-        .resolve_by_issue(
-            &issue_id,
-            &gate_id,
-            status,
-            request.comment,
-            request.requested_change,
-        )
-        .map_err(product_store_api_error)?;
+    let ResolveGateRequest {
+        comment,
+        requested_change,
+    } = request;
+    let gate = match project_id {
+        Some(project_id) => store
+            .resolve(
+                &project_id,
+                &issue_id,
+                &gate_id,
+                status,
+                comment,
+                requested_change,
+            )
+            .map_err(product_store_api_error)?,
+        None => {
+            let project_ids = store
+                .project_ids_for_gate(&issue_id, &gate_id)
+                .map_err(product_store_api_error)?;
+            match project_ids.as_slice() {
+                [project_id] => store
+                    .resolve(
+                        project_id,
+                        &issue_id,
+                        &gate_id,
+                        status,
+                        comment,
+                        requested_change,
+                    )
+                    .map_err(product_store_api_error)?,
+                [] => {
+                    return Err(product_store_api_error(ProductStoreError::NotFound {
+                        kind: "gate",
+                        id: gate_id,
+                    }));
+                }
+                _ => {
+                    return Err(ApiError::runtime(
+                        "gate_ambiguous",
+                        "gate matches multiple projects",
+                        json!({}),
+                    ));
+                }
+            }
+        }
+    };
     Ok(Json(ResolveGateResponse {
         issue_id: gate.issue_id,
         gate_id: gate.id,
@@ -658,8 +707,13 @@ fn product_store_api_error(error: ProductStoreError) -> ApiError {
             kind: "project", ..
         } => ApiError::runtime("project_not_found", "project not found", json!({})),
         ProductStoreError::NotFound { kind: "gate", .. } => {
-            ApiError::runtime("issue_not_found", "gate not found", json!({}))
+            ApiError::runtime("gate_not_found", "gate not found", json!({}))
         }
+        ProductStoreError::Io(message) if message == "gate_ambiguous" => ApiError::runtime(
+            "gate_ambiguous",
+            "gate matches multiple projects",
+            json!({}),
+        ),
         ProductStoreError::PathEscape(_) => {
             ApiError::validation("invalid_project_id", "invalid project id")
         }
