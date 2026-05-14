@@ -351,6 +351,18 @@ pub async fn confirm_task(
         let workspace_root =
             resolve_workspace_root(&state.workspace_root, Some(workspace_id), Some(&task_id))?;
         let mut runtime = WebRuntime::new_fake(workspace_root);
+        let prepared = runtime.prepare_provider_input(&task_id, &request.prompt)?;
+        state.events.publish(
+            WebEventType::ProviderInputPrepared.as_str(),
+            Some(&task_id),
+            json!({
+                "node_id": prepared.node_id,
+                "input_ref": prepared.input_ref,
+                "input_summary": prepared.input_summary,
+                "redaction_applied": prepared.redaction_applied,
+                "workspace_id": workspace_id,
+            }),
+        );
         let response = runtime.confirm_task(&task_id, request)?;
         state.events.publish(
             WebEventType::NodeStarted.as_str(),
@@ -365,6 +377,17 @@ pub async fn confirm_task(
         return Ok(Json(response));
     }
     let mut runtime = state.runtime.lock().expect("runtime lock");
+    let prepared = runtime.prepare_provider_input(&task_id, &request.prompt)?;
+    state.events.publish(
+        WebEventType::ProviderInputPrepared.as_str(),
+        Some(&task_id),
+        json!({
+            "node_id": prepared.node_id,
+            "input_ref": prepared.input_ref,
+            "input_summary": prepared.input_summary,
+            "redaction_applied": prepared.redaction_applied,
+        }),
+    );
     let response = runtime.confirm_task(&task_id, request)?;
     state.events.publish(
         WebEventType::NodeStarted.as_str(),
@@ -574,9 +597,15 @@ pub async fn provider_input_content(
     validate_relative_id(task_id)
         .map_err(|_| ApiError::validation("invalid_task_id", "invalid task id"))?;
     let workspace = WorkspaceRegistry::new(state.workspace_root.clone()).get(workspace_id)?;
-    let runtime_tasks_root = workspace.path.join(".aria/runtime/tasks");
+    let workspace_root = canonical_provider_input_component(&workspace.path)?;
+    let runtime_tasks_root = workspace_root.join(".aria/runtime/tasks");
     let task_root = runtime_tasks_root.join(task_id);
-    let path = canonical_provider_input_path(&runtime_tasks_root, &task_root, &file_name)?;
+    let path = canonical_provider_input_path(
+        &workspace_root,
+        &runtime_tasks_root,
+        &task_root,
+        &file_name,
+    )?;
     let content = fs::read_to_string(path).map_err(|error| match error.kind() {
         std::io::ErrorKind::NotFound => {
             ApiError::runtime("artifact_not_found", "provider input not found", json!({}))
@@ -597,11 +626,16 @@ pub async fn provider_input_content(
 }
 
 fn canonical_provider_input_path(
+    workspace_root: &StdPath,
     runtime_tasks_root: &StdPath,
     task_root: &StdPath,
     file_name: &str,
 ) -> ApiResult<PathBuf> {
+    let workspace_root = canonical_provider_input_component(workspace_root)?;
     let runtime_tasks_root = canonical_provider_input_component(runtime_tasks_root)?;
+    if !runtime_tasks_root.starts_with(&workspace_root) {
+        return Err(provider_input_path_escape());
+    }
     let task_root = canonical_provider_input_component(task_root)?;
     if !task_root.starts_with(&runtime_tasks_root) {
         return Err(provider_input_path_escape());
@@ -646,9 +680,11 @@ pub async fn events(
     State(state): State<WebAppState>,
     Query(query): Query<EventsQuery>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let replay_stream = stream::iter(state.events.replay_after(query.cursor.unwrap_or(0)));
-    let live_stream = BroadcastStream::new(state.events.subscribe())
-        .filter_map(|event| async move { event.ok() });
+    let (replay_events, receiver) = state
+        .events
+        .subscribe_with_replay_after(query.cursor.unwrap_or(0));
+    let replay_stream = stream::iter(replay_events);
+    let live_stream = BroadcastStream::new(receiver).filter_map(|event| async move { event.ok() });
     let sse_stream = replay_stream
         .chain(live_stream)
         .map(|event| Ok::<Event, Infallible>(sse_event(event)));

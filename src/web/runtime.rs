@@ -26,12 +26,13 @@ use crate::task_run::store::allocate_next_task_id;
 use crate::task_run::types::TaskRunError;
 use crate::task_run::types::{ProviderMode, TaskRunRequest, TaskRunStatus};
 use crate::web::events::EventHub;
+use crate::web::redaction::redact_sensitive_lines;
 use crate::web::runtime_store::WebRuntimeStore;
 use crate::web::types::{
     AdvanceTaskResponse, ArtifactContentResponse, ConfirmTaskRequest, ConfirmTaskResponse,
     CreateTaskRequest, CreateTaskResponse, FileContentResponse, FileDiffResponse,
-    PendingProviderStepDto, ProviderOutputChunk, RollbackPreviewResponse, RollbackResponse,
-    StopTaskResponse, TaskListItem, TaskListResponse,
+    PendingProviderStepDto, ProviderInputPrepared, ProviderOutputChunk, RollbackPreviewResponse,
+    RollbackResponse, StopTaskResponse, TaskListItem, TaskListResponse,
 };
 use std::sync::Arc;
 
@@ -195,6 +196,51 @@ impl WebRuntime {
             return self.persist_real_provider_execution(&store, &state, request.prompt);
         }
         self.persist_provider_execution(task_id, &store, request.checkpoint_id, request.prompt)
+    }
+
+    pub fn prepare_provider_input(
+        &self,
+        task_id: &str,
+        prompt: &str,
+    ) -> Result<ProviderInputPrepared, TaskRunError> {
+        let store = WebRuntimeStore::new(&self.workspace_root, task_id);
+        let state = read_optional_json(&store.task_root().join("state.json"))?;
+        let pending = read_optional_json(&store.task_root().join("pending/provider-step.json"))?;
+        let node_id = pending
+            .get("node_id")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| {
+                state
+                    .get("current_node")
+                    .and_then(serde_json::Value::as_str)
+            })
+            .unwrap_or("N16");
+        let effective_prompt = if prompt.trim().is_empty() {
+            state
+                .get("request_text")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+        } else {
+            prompt
+        };
+        let input_ref = provider_input_ref_for_node(node_id);
+        let input_value = json!({
+            "node_id": node_id,
+            "prompt": effective_prompt,
+            "input_summary": {
+                "node_id": node_id,
+                "prompt_chars": effective_prompt.chars().count()
+            }
+        });
+        store.write_json(&format!("provider-inputs/{input_ref}.json"), &input_value)?;
+        let serialized = serde_json::to_string_pretty(&input_value)
+            .map_err(|error| TaskRunError::new("web_runtime_json", error.to_string()))?;
+        Ok(ProviderInputPrepared {
+            node_id: node_id.to_string(),
+            input_ref,
+            input_summary: input_value["input_summary"].clone(),
+            redaction_applied: redact_sensitive_lines(&serialized) != serialized,
+        })
     }
 
     pub fn provider_command_diagnostic(
@@ -608,6 +654,15 @@ fn provider_type_slug(provider_type: &ProviderType) -> &'static str {
         ProviderType::Codex => "codex",
         ProviderType::Fake => "fake",
     }
+}
+
+fn provider_input_ref_for_node(node_id: &str) -> String {
+    let normalized = node_id
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '_' || *ch == '-')
+        .map(|ch| ch.to_ascii_lowercase())
+        .collect::<String>();
+    format!("run_{normalized}_0001")
 }
 
 fn io_error(error: std::io::Error) -> TaskRunError {

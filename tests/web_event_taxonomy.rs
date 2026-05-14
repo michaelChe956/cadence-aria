@@ -9,6 +9,7 @@ fn event_taxonomy_contains_every_design_event_type() {
         "node_completed",
         "node_failed",
         "paused_for_approval",
+        "provider.input_prepared",
         "provider_output",
         "artifact_written",
         "gate_blocked",
@@ -31,7 +32,7 @@ fn event_hub_can_publish_all_design_event_types() {
         hub.publish(event_type.as_str(), Some("task_0001"), json!({"ok": true}));
     }
     let replay = hub.replay_after(0);
-    assert_eq!(replay.len(), 12);
+    assert_eq!(replay.len(), 13);
     assert_eq!(replay[0].event_type, "projection_updated");
-    assert_eq!(replay[11].event_type, "error");
+    assert_eq!(replay[12].event_type, "error");
 }

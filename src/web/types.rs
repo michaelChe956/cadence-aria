@@ -187,6 +187,15 @@ pub struct ProviderInputContentResponse {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub struct ProviderInputPrepared {
+    pub node_id: String,
+    pub input_ref: String,
+    pub input_summary: Value,
+    pub redaction_applied: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct ProviderOutputChunk {
     pub node_id: String,
     pub provider_run_id: String,
