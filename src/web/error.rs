@@ -46,9 +46,12 @@ impl IntoResponse for ApiError {
             | "workspace_not_found"
             | "task_workspace_not_found" => StatusCode::NOT_FOUND,
             "gate_ambiguous"
+            | "invalid_execution_record_id"
             | "invalid_file_path"
+            | "invalid_issue_id"
             | "invalid_project_id"
             | "invalid_task_id"
+            | "issue_rollback_missing_worktree"
             | "issue_title_required"
             | "provider_input_path_escape"
             | "workspace_path_missing"

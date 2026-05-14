@@ -120,6 +120,19 @@ pub struct RollbackRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub struct IssueRollbackPreviewRequest {
+    pub execution_record_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct IssueRollbackRequest {
+    pub execution_record_id: String,
+    pub force_when_dirty: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct RollbackResponse {
     pub status: String,
     pub checkpoint_id: String,

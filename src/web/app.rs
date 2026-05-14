@@ -35,6 +35,14 @@ pub fn build_web_router(state: WebAppState) -> Router {
         )
         .route("/api/issues/{issue_id}/start", post(handlers::start_issue))
         .route(
+            "/api/issues/{issue_id}/rollback/preview",
+            post(handlers::issue_rollback_preview),
+        )
+        .route(
+            "/api/issues/{issue_id}/rollback",
+            post(handlers::issue_rollback),
+        )
+        .route(
             "/api/issues/{issue_id}/provider-inputs/{input_ref}",
             get(handlers::provider_input_content),
         )

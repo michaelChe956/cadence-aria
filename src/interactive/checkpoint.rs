@@ -137,6 +137,28 @@ impl CheckpointService {
         Ok(())
     }
 
+    pub fn ensure_reset_target_is_not_repo_root(
+        &self,
+        reset_target: &Path,
+    ) -> Result<(), TaskRunError> {
+        let repo_root = self.workspace_root.canonicalize().map_err(|error| {
+            TaskRunError::new("checkpoint_io", format!("canonicalize workspace: {error}"))
+        })?;
+        let reset_target = reset_target.canonicalize().map_err(|error| {
+            TaskRunError::new(
+                "checkpoint_io",
+                format!("canonicalize reset target: {error}"),
+            )
+        })?;
+        if reset_target == repo_root {
+            return Err(TaskRunError::new(
+                "checkpoint_refuse_repo_root_reset",
+                "development rollback must target a work item worktree, not the repository root",
+            ));
+        }
+        Ok(())
+    }
+
     fn checkpoint_path(&self, checkpoint_id: &str) -> Result<PathBuf, TaskRunError> {
         validate_checkpoint_id(checkpoint_id)?;
         Ok(self

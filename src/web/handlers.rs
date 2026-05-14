@@ -25,10 +25,11 @@ use crate::web::types::{
     AdvanceTaskResponse, ArtifactContentResponse, ConfirmTaskRequest, ConfirmTaskResponse,
     CreateIssueRequest, CreateProjectRequest, CreateTaskRequest, CreateTaskResponse,
     CreateWorkspaceRequest, FileContentResponse, FileDiffResponse, IssueDto, IssueListResponse,
-    ProjectDto, ProjectListResponse, ProviderInputContentResponse, ResolveGateRequest,
-    ResolveGateResponse, RollbackPreviewRequest, RollbackPreviewResponse, RollbackRequest,
-    RollbackResponse, StartIssueRequest, StartIssueResponse, StopTaskResponse, TaskListResponse,
-    WebEvent, WorkspaceDto, WorkspaceListResponse,
+    IssueRollbackPreviewRequest, IssueRollbackRequest, ProjectDto, ProjectListResponse,
+    ProviderInputContentResponse, ResolveGateRequest, ResolveGateResponse, RollbackPreviewRequest,
+    RollbackPreviewResponse, RollbackRequest, RollbackResponse, StartIssueRequest,
+    StartIssueResponse, StopTaskResponse, TaskListResponse, WebEvent, WorkspaceDto,
+    WorkspaceListResponse,
 };
 use crate::web::workspace_registry::{CreateWorkspaceInput, WorkspaceRecord, WorkspaceRegistry};
 
@@ -511,6 +512,25 @@ pub async fn rollback_task(
     Ok(Json(response))
 }
 
+pub async fn issue_rollback_preview(
+    State(_state): State<WebAppState>,
+    Path(issue_id): Path<String>,
+    Json(request): Json<IssueRollbackPreviewRequest>,
+) -> ApiResult<Json<RollbackPreviewResponse>> {
+    validate_issue_rollback_ids(&issue_id, &request.execution_record_id)?;
+    Err(issue_rollback_missing_worktree())
+}
+
+pub async fn issue_rollback(
+    State(_state): State<WebAppState>,
+    Path(issue_id): Path<String>,
+    Json(request): Json<IssueRollbackRequest>,
+) -> ApiResult<Json<RollbackResponse>> {
+    validate_issue_rollback_ids(&issue_id, &request.execution_record_id)?;
+    let _force_when_dirty = request.force_when_dirty;
+    Err(issue_rollback_missing_worktree())
+}
+
 pub async fn projection(
     State(state): State<WebAppState>,
     Query(query): Query<ProjectionQuery>,
@@ -856,6 +876,22 @@ fn issue_status_text(status: &IssueStatus) -> &'static str {
 
 fn product_app_paths(state: &WebAppState) -> ProductAppPaths {
     ProductAppPaths::new(state.workspace_root.join(".aria"))
+}
+
+fn validate_issue_rollback_ids(issue_id: &str, execution_record_id: &str) -> ApiResult<()> {
+    validate_relative_id(issue_id)
+        .map_err(|_| ApiError::validation("invalid_issue_id", "invalid issue id"))?;
+    validate_relative_id(execution_record_id).map_err(|_| {
+        ApiError::validation("invalid_execution_record_id", "invalid execution record id")
+    })?;
+    Ok(())
+}
+
+fn issue_rollback_missing_worktree() -> ApiError {
+    ApiError::validation(
+        "issue_rollback_missing_worktree",
+        "issue rollback requires a work item worktree",
+    )
 }
 
 fn product_store_api_error(error: ProductStoreError) -> ApiError {
