@@ -66,6 +66,24 @@ pub enum AgentType {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum ExecutionMode {
+    Agent,
+    NeedsInfo,
+    Manual,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkItemStatus {
+    Pending,
+    Planning,
+    Coding,
+    Completed,
+    Blocked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct ProjectRecord {
     pub id: String,
     pub name: String,
@@ -153,4 +171,19 @@ pub struct ExecutionRecord {
     pub artifact_refs: Vec<String>,
     pub message: Option<String>,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkItemRecord {
+    pub id: String,
+    pub issue_id: String,
+    pub repo_id: String,
+    pub title: String,
+    pub allowed_write_scope: Vec<String>,
+    pub depends_on: Vec<String>,
+    pub execution_mode: ExecutionMode,
+    pub status: WorkItemStatus,
+    pub worktree_path: Option<PathBuf>,
+    pub worktree_branch: Option<String>,
 }

@@ -9,3 +9,5 @@ pub mod models;
 pub mod project_store;
 pub mod repository_store;
 pub mod runtime_binding_store;
+pub mod work_item_store;
+pub mod worktree_scheduler;
