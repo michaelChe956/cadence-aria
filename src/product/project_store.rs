@@ -26,7 +26,7 @@ impl ProjectStore {
 
     pub fn list(&self) -> Result<Vec<ProjectRecord>, ProductStoreError> {
         let projects_root = self.paths.projects_root();
-        if !projects_root.exists() {
+        if !path_exists(&projects_root)? {
             return Ok(Vec::new());
         }
 
@@ -38,7 +38,7 @@ impl ProjectStore {
                 ProductStoreError::Io(format!("read {} entry: {error}", projects_root.display()))
             })?;
             let project_path = entry.path().join("project.json");
-            if project_path.exists() {
+            if path_exists(&project_path)? {
                 project_files.push(project_path);
             }
         }
@@ -53,7 +53,15 @@ impl ProjectStore {
 
     pub fn get(&self, project_id: &str) -> Result<ProjectRecord, ProductStoreError> {
         validate_relative_id(project_id)?;
-        read_json(&self.project_path(project_id))
+        let project_path = self.project_path(project_id);
+        if !path_exists(&project_path)? {
+            return Err(ProductStoreError::NotFound {
+                kind: "project",
+                id: project_id.to_string(),
+            });
+        }
+
+        read_json(&project_path)
     }
 
     pub fn create(&self, input: CreateProjectInput) -> Result<ProjectRecord, ProductStoreError> {
@@ -90,7 +98,7 @@ impl ProjectStore {
 }
 
 fn count_entries(path: &Path) -> Result<usize, ProductStoreError> {
-    if !path.exists() {
+    if !path_exists(path)? {
         return Ok(0);
     }
 
@@ -101,4 +109,9 @@ fn count_entries(path: &Path) -> Result<usize, ProductStoreError> {
                 ProductStoreError::Io(format!("read {} entry: {error}", path.display()))
             })
         })
+}
+
+fn path_exists(path: &Path) -> Result<bool, ProductStoreError> {
+    path.try_exists()
+        .map_err(|error| ProductStoreError::Io(format!("try_exists {}: {error}", path.display())))
 }

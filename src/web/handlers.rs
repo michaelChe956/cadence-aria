@@ -579,5 +579,17 @@ fn product_app_paths(state: &WebAppState) -> ProductAppPaths {
 }
 
 fn product_store_api_error(error: ProductStoreError) -> ApiError {
-    ApiError::runtime("product_store_error", error.to_string(), json!({}))
+    match error {
+        ProductStoreError::NotFound {
+            kind: "project", ..
+        } => ApiError::runtime("project_not_found", "project not found", json!({})),
+        ProductStoreError::PathEscape(_) => {
+            ApiError::validation("invalid_project_id", "invalid project id")
+        }
+        _ => ApiError::runtime(
+            "product_store_error",
+            "product store operation failed",
+            json!({}),
+        ),
+    }
 }

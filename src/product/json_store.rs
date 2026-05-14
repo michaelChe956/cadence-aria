@@ -10,6 +10,8 @@ pub enum ProductStoreError {
     Io(String),
     #[error("product_store_json: {0}")]
     Json(String),
+    #[error("product_store_not_found: {kind} {id}")]
+    NotFound { kind: &'static str, id: String },
     #[error("product_store_path_escape: {0}")]
     PathEscape(String),
 }

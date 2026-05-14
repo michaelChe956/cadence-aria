@@ -41,9 +41,11 @@ impl IntoResponse for ApiError {
             "artifact_not_found"
             | "interactive_task_missing"
             | "issue_not_found"
+            | "project_not_found"
             | "workspace_not_found"
             | "task_workspace_not_found" => StatusCode::NOT_FOUND,
             "invalid_file_path"
+            | "invalid_project_id"
             | "issue_title_required"
             | "workspace_path_missing"
             | "workspace_path_not_directory"
