@@ -1,4 +1,6 @@
-use std::path::{Component, Path};
+use std::io::Write;
+use std::path::{Component, Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -20,14 +22,85 @@ pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T, ProductStoreErro
 
 pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), ProductStoreError> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| {
-            ProductStoreError::Io(format!("create {}: {error}", parent.display()))
-        })?;
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                ProductStoreError::Io(format!("create {}: {error}", parent.display()))
+            })?;
+        }
     }
-    let file = std::fs::File::create(path)
-        .map_err(|error| ProductStoreError::Io(format!("create {}: {error}", path.display())))?;
-    serde_json::to_writer_pretty(file, value)
-        .map_err(|error| ProductStoreError::Json(error.to_string()))
+
+    let temp_path = temp_path_for(path);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)
+        .map_err(|error| {
+            ProductStoreError::Io(format!("create {}: {error}", temp_path.display()))
+        })?;
+
+    serde_json::to_writer_pretty(&mut file, value).map_err(|error| {
+        ProductStoreError::Json(format!(
+            "write {} via {}: {error}",
+            path.display(),
+            temp_path.display()
+        ))
+    })?;
+    file.flush().map_err(|error| {
+        ProductStoreError::Io(format!("flush {}: {error}", temp_path.display()))
+    })?;
+    file.sync_all()
+        .map_err(|error| ProductStoreError::Io(format!("sync {}: {error}", temp_path.display())))?;
+    drop(file);
+
+    rename_temp_file(&temp_path, path)
+}
+
+fn temp_path_for(path: &Path) -> PathBuf {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .map(|value| value.to_string_lossy())
+        .unwrap_or_else(|| "product-store.json".into());
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+
+    parent.join(format!(
+        ".{file_name}.{}.{}.tmp",
+        std::process::id(),
+        timestamp
+    ))
+}
+
+fn rename_temp_file(temp_path: &Path, target_path: &Path) -> Result<(), ProductStoreError> {
+    match std::fs::rename(temp_path, target_path) {
+        Ok(()) => Ok(()),
+        Err(first_error) if target_path.exists() => {
+            std::fs::remove_file(target_path).map_err(|error| {
+                ProductStoreError::Io(format!(
+                    "remove {} after rename {} failed ({first_error}): {error}",
+                    target_path.display(),
+                    temp_path.display()
+                ))
+            })?;
+            std::fs::rename(temp_path, target_path).map_err(|error| {
+                ProductStoreError::Io(format!(
+                    "rename {} to {} after remove: {error}",
+                    temp_path.display(),
+                    target_path.display()
+                ))
+            })
+        }
+        Err(error) => Err(ProductStoreError::Io(format!(
+            "rename {} to {}: {error}",
+            temp_path.display(),
+            target_path.display()
+        ))),
+    }
 }
 
 pub fn validate_relative_id(value: &str) -> Result<(), ProductStoreError> {

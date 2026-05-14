@@ -1,6 +1,7 @@
 use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::id::repo_hash_for_path;
 use cadence_aria::product::issue_store::{CreateProductIssueInput, IssueStore};
+use cadence_aria::product::json_store::{read_json, write_json};
 use cadence_aria::product::models::{IssuePhase, IssueStatus, ProjectRecord};
 use cadence_aria::product::project_store::{CreateProjectInput, ProjectStore};
 use cadence_aria::product::repository_store::{CreateRepositoryInput, RepositoryStore};
@@ -141,14 +142,99 @@ fn creates_project_repository_issue_and_runtime_binding() {
         Some(repository.runtime_root.join("tasks/task_0001").as_path())
     );
 
-    let found_binding = RuntimeBindingStore::new(paths).find_by_repo_and_task(
+    let found_binding = RuntimeBindingStore::new(paths)
+        .find_by_repo_and_task(&project.id, &issue.id, &repository.id, "task_0001")
+        .expect("find binding");
+    assert_eq!(
+        found_binding.as_ref().map(|record| &record.id),
+        Some(&binding.id)
+    );
+}
+
+#[test]
+fn find_by_repo_and_task_returns_error_for_corrupt_binding_json() {
+    let app = tempdir().expect("app");
+    let repo = git_repo();
+    let paths = ProductAppPaths::new(app.path().join(".aria"));
+
+    let project = ProjectStore::new(paths.clone())
+        .create(CreateProjectInput {
+            name: "Aria".to_string(),
+            description: Some("Workbench".to_string()),
+        })
+        .expect("project");
+
+    let repository = RepositoryStore::new(paths.clone())
+        .create(CreateRepositoryInput {
+            project_id: project.id.clone(),
+            name: "cadence-aria".to_string(),
+            path: repo.path().to_path_buf(),
+            default_policy_preset: None,
+            default_provider_mode: None,
+        })
+        .expect("repository");
+
+    let issue = IssueStore::new(paths.clone())
+        .create(CreateProductIssueInput {
+            project_id: project.id.clone(),
+            repo_id: repository.id.clone(),
+            title: "Add project workbench".to_string(),
+            description: Some("Manage issues".to_string()),
+            change_id: None,
+        })
+        .expect("issue");
+
+    let binding = RuntimeBindingStore::new(paths.clone())
+        .create(CreateRuntimeBindingInput {
+            project_id: project.id.clone(),
+            issue_id: issue.id.clone(),
+            repo_id: repository.id.clone(),
+            change_id: issue.change_id.clone(),
+            task_id: Some("task_0001".to_string()),
+            session_id: Some("sess_task_0001".to_string()),
+            runtime_root: repository.runtime_root.clone(),
+        })
+        .expect("binding");
+
+    let corrupt_path = paths
+        .issue_root(&project.id, &issue.id)
+        .join("bindings")
+        .join("binding_9999.json");
+    std::fs::create_dir_all(corrupt_path.parent().expect("binding dir")).expect("create dir");
+    std::fs::write(&corrupt_path, "{not valid json").expect("write corrupt json");
+
+    let result = RuntimeBindingStore::new(paths).find_by_repo_and_task(
         &project.id,
         &issue.id,
         &repository.id,
         "task_0001",
     );
-    assert_eq!(
-        found_binding.as_ref().map(|record| &record.id),
-        Some(&binding.id)
-    );
+
+    assert!(result.is_err());
+    assert_eq!(binding.id, "binding_0001");
+}
+
+#[test]
+fn write_json_overwrites_existing_file_without_leftover_temp_files() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("value.json");
+
+    write_json(&path, &serde_json::json!({ "version": 1 })).expect("write initial");
+    write_json(&path, &serde_json::json!({ "version": 2 })).expect("overwrite");
+
+    let value: serde_json::Value = read_json(&path).expect("read overwritten");
+    assert_eq!(value["version"], 2);
+
+    let mut entries = std::fs::read_dir(dir.path())
+        .expect("dir entries")
+        .map(|entry| {
+            entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    entries.sort();
+    assert_eq!(entries, vec!["value.json".to_string()]);
 }

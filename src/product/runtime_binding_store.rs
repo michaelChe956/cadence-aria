@@ -94,14 +94,14 @@ impl RuntimeBindingStore {
         issue_id: &str,
         repo_id: &str,
         task_id: &str,
-    ) -> Option<IssueRuntimeBindingRecord> {
-        validate_relative_id(repo_id).ok()?;
-        self.list(project_id, issue_id)
-            .ok()?
+    ) -> Result<Option<IssueRuntimeBindingRecord>, ProductStoreError> {
+        validate_relative_id(repo_id)?;
+        Ok(self
+            .list(project_id, issue_id)?
             .into_iter()
             .find(|binding| {
                 binding.repo_id == repo_id && binding.task_id.as_deref() == Some(task_id)
-            })
+            }))
     }
 
     fn bindings_root(&self, project_id: &str, issue_id: &str) -> PathBuf {
