@@ -6,12 +6,13 @@ use serde::Deserialize;
 use serde_json::json;
 use std::convert::Infallible;
 use std::fs;
+use std::path::{Path as StdPath, PathBuf};
 use tokio_stream::wrappers::BroadcastStream;
 
 use crate::interactive::models::WebWorkspaceProjection;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::gate_store::GateStore;
-use crate::product::json_store::ProductStoreError;
+use crate::product::json_store::{ProductStoreError, validate_relative_id};
 use crate::product::models::{GateStatus, ProjectRecord};
 use crate::product::project_store::{CreateProjectInput, ProjectStore};
 use crate::web::error::{ApiError, ApiResult};
@@ -570,13 +571,12 @@ pub async fn provider_input_content(
             json!({}),
         )
     })?;
+    validate_relative_id(task_id)
+        .map_err(|_| ApiError::validation("invalid_task_id", "invalid task id"))?;
     let workspace = WorkspaceRegistry::new(state.workspace_root.clone()).get(workspace_id)?;
-    let path = workspace
-        .path
-        .join(".aria/runtime/tasks")
-        .join(task_id)
-        .join("provider-inputs")
-        .join(file_name);
+    let runtime_tasks_root = workspace.path.join(".aria/runtime/tasks");
+    let task_root = runtime_tasks_root.join(task_id);
+    let path = canonical_provider_input_path(&runtime_tasks_root, &task_root, &file_name)?;
     let content = fs::read_to_string(path).map_err(|error| match error.kind() {
         std::io::ErrorKind::NotFound => {
             ApiError::runtime("artifact_not_found", "provider input not found", json!({}))
@@ -594,6 +594,52 @@ pub async fn provider_input_content(
         redaction_applied: redacted != content,
         content: redacted,
     }))
+}
+
+fn canonical_provider_input_path(
+    runtime_tasks_root: &StdPath,
+    task_root: &StdPath,
+    file_name: &str,
+) -> ApiResult<PathBuf> {
+    let runtime_tasks_root = canonical_provider_input_component(runtime_tasks_root)?;
+    let task_root = canonical_provider_input_component(task_root)?;
+    if !task_root.starts_with(&runtime_tasks_root) {
+        return Err(provider_input_path_escape());
+    }
+
+    let provider_inputs_root = task_root.join("provider-inputs");
+    let provider_inputs_root = canonical_provider_input_component(&provider_inputs_root)?;
+    if !provider_inputs_root.starts_with(&task_root) {
+        return Err(provider_input_path_escape());
+    }
+
+    let candidate = provider_inputs_root.join(file_name);
+    let candidate = canonical_provider_input_component(&candidate)?;
+    if !candidate.starts_with(&provider_inputs_root) {
+        return Err(provider_input_path_escape());
+    }
+
+    Ok(candidate)
+}
+
+fn canonical_provider_input_component(path: &StdPath) -> ApiResult<PathBuf> {
+    fs::canonicalize(path).map_err(|error| match error.kind() {
+        std::io::ErrorKind::NotFound => {
+            ApiError::runtime("artifact_not_found", "provider input not found", json!({}))
+        }
+        _ => ApiError::runtime(
+            "provider_input_read_failed",
+            "provider input read failed",
+            json!({}),
+        ),
+    })
+}
+
+fn provider_input_path_escape() -> ApiError {
+    ApiError::validation(
+        "provider_input_path_escape",
+        "provider input path escapes task root",
+    )
 }
 
 pub async fn events(

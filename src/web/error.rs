@@ -48,7 +48,9 @@ impl IntoResponse for ApiError {
             "gate_ambiguous"
             | "invalid_file_path"
             | "invalid_project_id"
+            | "invalid_task_id"
             | "issue_title_required"
+            | "provider_input_path_escape"
             | "workspace_path_missing"
             | "workspace_path_not_directory"
             | "workspace_path_not_git_repo" => StatusCode::BAD_REQUEST,
