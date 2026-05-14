@@ -89,6 +89,28 @@ fn creates_project_repository_issue_and_runtime_binding() {
         })
         .expect("repository");
 
+    let repos_path = paths.project_root(&project.id).join("repos.json");
+    assert!(repos_path.exists());
+    assert!(
+        !paths
+            .project_root(&project.id)
+            .join(format!("repositories/{}.json", repository.id))
+            .exists()
+    );
+
+    let repositories = RepositoryStore::new(paths.clone())
+        .list(&project.id)
+        .expect("repositories");
+    assert_eq!(repositories, vec![repository.clone()]);
+
+    let found_repository = RepositoryStore::new(paths.clone())
+        .find_by_path(&project.id, repo.path())
+        .expect("find repository");
+    assert_eq!(
+        found_repository.as_ref().map(|record| &record.id),
+        Some(&repository.id)
+    );
+
     let issue = IssueStore::new(paths.clone())
         .create(CreateProductIssueInput {
             project_id: project.id.clone(),
@@ -99,7 +121,7 @@ fn creates_project_repository_issue_and_runtime_binding() {
         })
         .expect("issue");
 
-    let binding = RuntimeBindingStore::new(paths)
+    let binding = RuntimeBindingStore::new(paths.clone())
         .create(CreateRuntimeBindingInput {
             project_id: project.id.clone(),
             issue_id: issue.id.clone(),
@@ -117,5 +139,16 @@ fn creates_project_repository_issue_and_runtime_binding() {
     assert_eq!(
         binding.task_root.as_deref(),
         Some(repository.runtime_root.join("tasks/task_0001").as_path())
+    );
+
+    let found_binding = RuntimeBindingStore::new(paths).find_by_repo_and_task(
+        &project.id,
+        &issue.id,
+        &repository.id,
+        "task_0001",
+    );
+    assert_eq!(
+        found_binding.as_ref().map(|record| &record.id),
+        Some(&binding.id)
     );
 }
