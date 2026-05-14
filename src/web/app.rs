@@ -35,6 +35,10 @@ pub fn build_web_router(state: WebAppState) -> Router {
         )
         .route("/api/issues/{issue_id}/start", post(handlers::start_issue))
         .route(
+            "/api/issues/{issue_id}/provider-inputs/{input_ref}",
+            get(handlers::provider_input_content),
+        )
+        .route(
             "/api/issues/{issue_id}/gates/{gate_id}/confirm",
             post(handlers::confirm_gate),
         )

@@ -3,6 +3,7 @@ pub mod error;
 pub mod events;
 pub mod handlers;
 pub mod issue_registry;
+pub mod redaction;
 pub mod runtime;
 pub mod runtime_store;
 pub mod state;

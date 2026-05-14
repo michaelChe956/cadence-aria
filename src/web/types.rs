@@ -178,6 +178,15 @@ pub struct FileDiffResponse {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub struct ProviderInputContentResponse {
+    pub input_ref: String,
+    pub content_type: String,
+    pub content: String,
+    pub redaction_applied: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct ProviderOutputChunk {
     pub node_id: String,
     pub provider_run_id: String,

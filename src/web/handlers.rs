@@ -5,6 +5,7 @@ use futures_util::stream::{self, Stream, StreamExt};
 use serde::Deserialize;
 use serde_json::json;
 use std::convert::Infallible;
+use std::fs;
 use tokio_stream::wrappers::BroadcastStream;
 
 use crate::interactive::models::WebWorkspaceProjection;
@@ -16,16 +17,17 @@ use crate::product::project_store::{CreateProjectInput, ProjectStore};
 use crate::web::error::{ApiError, ApiResult};
 use crate::web::events::WebEventType;
 use crate::web::issue_registry::{CreateIssueInput, IssueRecord, IssueRegistry, IssueStatus};
+use crate::web::redaction::redact_sensitive_lines;
 use crate::web::runtime::WebRuntime;
 use crate::web::state::WebAppState;
 use crate::web::types::{
     AdvanceTaskResponse, ArtifactContentResponse, ConfirmTaskRequest, ConfirmTaskResponse,
     CreateIssueRequest, CreateProjectRequest, CreateTaskRequest, CreateTaskResponse,
     CreateWorkspaceRequest, FileContentResponse, FileDiffResponse, IssueDto, IssueListResponse,
-    ProjectDto, ProjectListResponse, ResolveGateRequest, ResolveGateResponse,
-    RollbackPreviewRequest, RollbackPreviewResponse, RollbackRequest, RollbackResponse,
-    StartIssueRequest, StartIssueResponse, StopTaskResponse, TaskListResponse, WebEvent,
-    WorkspaceDto, WorkspaceListResponse,
+    ProjectDto, ProjectListResponse, ProviderInputContentResponse, ResolveGateRequest,
+    ResolveGateResponse, RollbackPreviewRequest, RollbackPreviewResponse, RollbackRequest,
+    RollbackResponse, StartIssueRequest, StartIssueResponse, StopTaskResponse, TaskListResponse,
+    WebEvent, WorkspaceDto, WorkspaceListResponse,
 };
 use crate::web::workspace_registry::{CreateWorkspaceInput, WorkspaceRecord, WorkspaceRegistry};
 
@@ -57,6 +59,11 @@ pub struct WorkspaceQuery {
 #[derive(Debug, Deserialize)]
 pub struct GateResolveQuery {
     pub project_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EventsQuery {
+    pub cursor: Option<u64>,
 }
 
 pub async fn health() -> Json<serde_json::Value> {
@@ -543,10 +550,57 @@ pub async fn file_diff(
     ))
 }
 
+pub async fn provider_input_content(
+    State(state): State<WebAppState>,
+    Path((issue_id, input_ref)): Path<(String, String)>,
+) -> ApiResult<Json<ProviderInputContentResponse>> {
+    let file_name = provider_input_file_name(&input_ref)?;
+    let issue = IssueRegistry::new(state.workspace_root.clone()).get(&issue_id)?;
+    let workspace_id = issue.workspace_id.as_deref().ok_or_else(|| {
+        ApiError::runtime(
+            "task_workspace_not_found",
+            "issue has no active task binding",
+            json!({}),
+        )
+    })?;
+    let task_id = issue.task_id.as_deref().ok_or_else(|| {
+        ApiError::runtime(
+            "task_workspace_not_found",
+            "issue has no active task binding",
+            json!({}),
+        )
+    })?;
+    let workspace = WorkspaceRegistry::new(state.workspace_root.clone()).get(workspace_id)?;
+    let path = workspace
+        .path
+        .join(".aria/runtime/tasks")
+        .join(task_id)
+        .join("provider-inputs")
+        .join(file_name);
+    let content = fs::read_to_string(path).map_err(|error| match error.kind() {
+        std::io::ErrorKind::NotFound => {
+            ApiError::runtime("artifact_not_found", "provider input not found", json!({}))
+        }
+        _ => ApiError::runtime(
+            "provider_input_read_failed",
+            "provider input read failed",
+            json!({}),
+        ),
+    })?;
+    let redacted = redact_sensitive_lines(&content);
+    Ok(Json(ProviderInputContentResponse {
+        input_ref,
+        content_type: "application/json".to_string(),
+        redaction_applied: redacted != content,
+        content: redacted,
+    }))
+}
+
 pub async fn events(
     State(state): State<WebAppState>,
+    Query(query): Query<EventsQuery>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let replay_stream = stream::iter(state.events.replay_after(0));
+    let replay_stream = stream::iter(state.events.replay_after(query.cursor.unwrap_or(0)));
     let live_stream = BroadcastStream::new(state.events.subscribe())
         .filter_map(|event| async move { event.ok() });
     let sse_stream = replay_stream
@@ -647,6 +701,27 @@ fn resolve_workspace_root(
         }
     }
     Ok(app_root.to_path_buf())
+}
+
+fn provider_input_file_name(input_ref: &str) -> ApiResult<String> {
+    if input_ref.is_empty()
+        || input_ref.contains('/')
+        || input_ref.contains('\\')
+        || input_ref.contains("..")
+        || !input_ref
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+    {
+        return Err(ApiError::validation(
+            "invalid_file_path",
+            "invalid provider input ref",
+        ));
+    }
+    Ok(if input_ref.ends_with(".json") {
+        input_ref.to_string()
+    } else {
+        format!("{input_ref}.json")
+    })
 }
 
 fn workspace_dto(record: WorkspaceRecord) -> WorkspaceDto {
