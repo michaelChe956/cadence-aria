@@ -21,6 +21,15 @@ pub fn build_web_router(state: WebAppState) -> Router {
             get(handlers::list_workspaces).post(handlers::create_workspace),
         )
         .route(
+            "/api/projects",
+            get(handlers::list_projects).post(handlers::create_project),
+        )
+        .route("/api/projects/{project_id}", get(handlers::get_project))
+        .route(
+            "/api/projects/{project_id}/open",
+            post(handlers::open_project),
+        )
+        .route(
             "/api/issues",
             get(handlers::list_issues).post(handlers::create_issue),
         )

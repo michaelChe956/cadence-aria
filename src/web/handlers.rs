@@ -8,18 +8,22 @@ use std::convert::Infallible;
 use tokio_stream::wrappers::BroadcastStream;
 
 use crate::interactive::models::WebWorkspaceProjection;
-use crate::web::error::ApiResult;
+use crate::product::app_paths::ProductAppPaths;
+use crate::product::json_store::ProductStoreError;
+use crate::product::models::ProjectRecord;
+use crate::product::project_store::{CreateProjectInput, ProjectStore};
+use crate::web::error::{ApiError, ApiResult};
 use crate::web::events::WebEventType;
 use crate::web::issue_registry::{CreateIssueInput, IssueRecord, IssueRegistry, IssueStatus};
 use crate::web::runtime::WebRuntime;
 use crate::web::state::WebAppState;
 use crate::web::types::{
     AdvanceTaskResponse, ArtifactContentResponse, ConfirmTaskRequest, ConfirmTaskResponse,
-    CreateIssueRequest, CreateTaskRequest, CreateTaskResponse, CreateWorkspaceRequest,
-    FileContentResponse, FileDiffResponse, IssueDto, IssueListResponse, RollbackPreviewRequest,
-    RollbackPreviewResponse, RollbackRequest, RollbackResponse, StartIssueRequest,
-    StartIssueResponse, StopTaskResponse, TaskListResponse, WebEvent, WorkspaceDto,
-    WorkspaceListResponse,
+    CreateIssueRequest, CreateProjectRequest, CreateTaskRequest, CreateTaskResponse,
+    CreateWorkspaceRequest, FileContentResponse, FileDiffResponse, IssueDto, IssueListResponse,
+    ProjectDto, ProjectListResponse, RollbackPreviewRequest, RollbackPreviewResponse,
+    RollbackRequest, RollbackResponse, StartIssueRequest, StartIssueResponse, StopTaskResponse,
+    TaskListResponse, WebEvent, WorkspaceDto, WorkspaceListResponse,
 };
 use crate::web::workspace_registry::{CreateWorkspaceInput, WorkspaceRecord, WorkspaceRegistry};
 
@@ -93,6 +97,48 @@ pub async fn create_workspace(
         default_provider_mode: request.default_provider_mode,
     })?;
     Ok(Json(workspace_dto(workspace)))
+}
+
+pub async fn list_projects(
+    State(state): State<WebAppState>,
+) -> ApiResult<Json<ProjectListResponse>> {
+    let store = ProjectStore::new(product_app_paths(&state));
+    let projects = store.list().map_err(product_store_api_error)?;
+    Ok(Json(ProjectListResponse {
+        projects: projects.into_iter().map(project_dto).collect(),
+    }))
+}
+
+pub async fn create_project(
+    State(state): State<WebAppState>,
+    Json(request): Json<CreateProjectRequest>,
+) -> ApiResult<Json<ProjectDto>> {
+    let store = ProjectStore::new(product_app_paths(&state));
+    let project = store
+        .create(CreateProjectInput {
+            name: request.name,
+            description: request.description,
+        })
+        .map_err(product_store_api_error)?;
+    Ok(Json(project_dto(project)))
+}
+
+pub async fn get_project(
+    State(state): State<WebAppState>,
+    Path(project_id): Path<String>,
+) -> ApiResult<Json<ProjectDto>> {
+    let store = ProjectStore::new(product_app_paths(&state));
+    let project = store.get(&project_id).map_err(product_store_api_error)?;
+    Ok(Json(project_dto(project)))
+}
+
+pub async fn open_project(
+    State(state): State<WebAppState>,
+    Path(project_id): Path<String>,
+) -> ApiResult<Json<ProjectDto>> {
+    let store = ProjectStore::new(product_app_paths(&state));
+    let project = store.open(&project_id).map_err(product_store_api_error)?;
+    Ok(Json(project_dto(project)))
 }
 
 pub async fn list_issues(State(state): State<WebAppState>) -> ApiResult<Json<IssueListResponse>> {
@@ -492,6 +538,17 @@ fn workspace_dto(record: WorkspaceRecord) -> WorkspaceDto {
     }
 }
 
+fn project_dto(record: ProjectRecord) -> ProjectDto {
+    ProjectDto {
+        project_id: record.id,
+        name: record.name,
+        description: record.description,
+        created_at: record.created_at,
+        updated_at: record.updated_at,
+        last_opened_at: record.last_opened_at,
+    }
+}
+
 fn issue_dto(record: IssueRecord) -> IssueDto {
     IssueDto {
         issue_id: record.issue_id,
@@ -515,4 +572,12 @@ fn issue_status_text(status: &IssueStatus) -> &'static str {
         IssueStatus::Completed => "completed",
         IssueStatus::Blocked => "blocked",
     }
+}
+
+fn product_app_paths(state: &WebAppState) -> ProductAppPaths {
+    ProductAppPaths::new(state.workspace_root.join(".aria"))
+}
+
+fn product_store_api_error(error: ProductStoreError) -> ApiError {
+    ApiError::runtime("product_store_error", error.to_string(), json!({}))
 }
