@@ -79,27 +79,20 @@ fn temp_path_for(path: &Path) -> PathBuf {
 fn rename_temp_file(temp_path: &Path, target_path: &Path) -> Result<(), ProductStoreError> {
     match std::fs::rename(temp_path, target_path) {
         Ok(()) => Ok(()),
-        Err(first_error) if target_path.exists() => {
-            std::fs::remove_file(target_path).map_err(|error| {
-                ProductStoreError::Io(format!(
-                    "remove {} after rename {} failed ({first_error}): {error}",
-                    target_path.display(),
-                    temp_path.display()
-                ))
-            })?;
-            std::fs::rename(temp_path, target_path).map_err(|error| {
-                ProductStoreError::Io(format!(
-                    "rename {} to {} after remove: {error}",
-                    temp_path.display(),
-                    target_path.display()
-                ))
-            })
+        Err(error) => {
+            let cleanup_result = std::fs::remove_file(temp_path);
+            let cleanup_context = cleanup_result
+                .err()
+                .map(|cleanup_error| {
+                    format!("; cleanup {} failed: {cleanup_error}", temp_path.display())
+                })
+                .unwrap_or_default();
+            Err(ProductStoreError::Io(format!(
+                "rename {} to {}: {error}{cleanup_context}",
+                temp_path.display(),
+                target_path.display()
+            )))
         }
-        Err(error) => Err(ProductStoreError::Io(format!(
-            "rename {} to {}: {error}",
-            temp_path.display(),
-            target_path.display()
-        ))),
     }
 }
 

@@ -41,11 +41,18 @@ impl RuntimeBindingStore {
             return Ok(Vec::new());
         }
 
-        let mut entries = fs::read_dir(&path)
+        let mut entries = Vec::new();
+        for entry in fs::read_dir(&path)
             .map_err(|error| ProductStoreError::Io(format!("read {}: {error}", path.display())))?
-            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("json"))
-            .collect::<Vec<_>>();
+        {
+            let entry = entry.map_err(|error| {
+                ProductStoreError::Io(format!("read {} entry: {error}", path.display()))
+            })?;
+            let entry_path = entry.path();
+            if entry_path.extension().and_then(|value| value.to_str()) == Some("json") {
+                entries.push(entry_path);
+            }
+        }
         entries.sort();
 
         let mut bindings = Vec::with_capacity(entries.len());

@@ -238,3 +238,24 @@ fn write_json_overwrites_existing_file_without_leftover_temp_files() {
     entries.sort();
     assert_eq!(entries, vec!["value.json".to_string()]);
 }
+
+#[test]
+fn write_json_error_does_not_remove_existing_target_directory() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("value.json");
+    std::fs::create_dir(&path).expect("target dir");
+
+    let result = write_json(&path, &serde_json::json!({ "version": 1 }));
+
+    assert!(result.is_err());
+    assert!(path.is_dir());
+}
+
+#[test]
+fn product_store_error_paths_do_not_drop_iteration_errors_or_delete_targets() {
+    let runtime_binding_store = include_str!("../src/product/runtime_binding_store.rs");
+    assert!(!runtime_binding_store.contains("filter_map(|entry| entry.ok()"));
+
+    let json_store = include_str!("../src/product/json_store.rs");
+    assert!(!json_store.contains("remove_file(target_path)"));
+}
