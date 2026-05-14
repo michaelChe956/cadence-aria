@@ -110,6 +110,75 @@ async fn api_workspace_issue_start_contract() {
     assert_eq!(started["session_id"], "sess_task_0001");
 }
 
+#[tokio::test]
+async fn api_workspace_aware_execution_contract() {
+    let app_root = tempdir().expect("app root");
+    let workspace = git_repo();
+    let state = WebAppState::new(
+        app_root.path().to_path_buf(),
+        WebRuntime::new_fake(app_root.path().to_path_buf()),
+    );
+    let app = build_web_router(state);
+
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/workspaces",
+        json!({
+            "name": "Repo",
+            "path": workspace.path().display().to_string()
+        }),
+    )
+    .await;
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/issues",
+        json!({"title": "Execute in selected workspace"}),
+    )
+    .await;
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/issues/issue_0001/start",
+        json!({"workspace_id":"workspace_0001"}),
+    )
+    .await;
+
+    let projection = request_json(
+        app.clone(),
+        Method::GET,
+        "/api/projection?workspace_id=workspace_0001&task_id=task_0001",
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        projection["workspace_root"],
+        workspace
+            .path()
+            .canonicalize()
+            .expect("canonical workspace")
+            .display()
+            .to_string()
+    );
+    assert_eq!(projection["active_task_id"], "task_0001");
+
+    let advance = request_json(
+        app,
+        Method::POST,
+        "/api/tasks/task_0001/advance?workspace_id=workspace_0001",
+        json!({}),
+    )
+    .await;
+    assert_eq!(advance["status"], "paused_for_approval");
+    assert!(
+        workspace
+            .path()
+            .join(".aria/runtime/tasks/task_0001/pending/provider-step.json")
+            .exists()
+    );
+}
+
 async fn request_json(app: axum::Router, method: Method, uri: &str, body: Value) -> Value {
     let request = Request::builder()
         .method(method)

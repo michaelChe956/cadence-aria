@@ -151,7 +151,9 @@ fn validate_workspace_path(path: &Path) -> Result<PathBuf, WorkspaceRegistryErro
             &path.display().to_string(),
         ));
     }
-    Ok(PathBuf::from(String::from_utf8_lossy(&output.stdout).trim()))
+    Ok(PathBuf::from(
+        String::from_utf8_lossy(&output.stdout).trim(),
+    ))
 }
 
 fn registry_error(code: &'static str, value: &str) -> WorkspaceRegistryError {

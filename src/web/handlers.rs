@@ -21,25 +21,31 @@ use crate::web::types::{
     StartIssueResponse, StopTaskResponse, TaskListResponse, WebEvent, WorkspaceDto,
     WorkspaceListResponse,
 };
-use crate::web::workspace_registry::{
-    CreateWorkspaceInput, WorkspaceRecord, WorkspaceRegistry,
-};
+use crate::web::workspace_registry::{CreateWorkspaceInput, WorkspaceRecord, WorkspaceRegistry};
 
 #[derive(Debug, Deserialize)]
 pub struct ProjectionQuery {
+    pub workspace_id: Option<String>,
     pub task_id: Option<String>,
     pub node_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct FileContentQuery {
+    pub workspace_id: Option<String>,
     pub path: String,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct FileDiffQuery {
+    pub workspace_id: Option<String>,
     pub base_checkpoint: String,
     pub path: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WorkspaceQuery {
+    pub workspace_id: Option<String>,
 }
 
 pub async fn health() -> Json<serde_json::Value> {
@@ -175,7 +181,32 @@ pub async fn start_issue(
 pub async fn advance_task(
     State(state): State<WebAppState>,
     Path(task_id): Path<String>,
+    Query(query): Query<WorkspaceQuery>,
 ) -> ApiResult<Json<AdvanceTaskResponse>> {
+    if let Some(workspace_id) = query.workspace_id.as_deref() {
+        let workspace_root =
+            resolve_workspace_root(&state.workspace_root, Some(workspace_id), Some(&task_id))?;
+        let mut runtime = WebRuntime::new_fake(workspace_root);
+        let response = runtime.advance_task(&task_id)?;
+        if let AdvanceTaskResponse::PausedForApproval { pending_step } = &response {
+            state.events.publish(
+                WebEventType::CheckpointCreated.as_str(),
+                Some(&task_id),
+                json!({"checkpoint_id": pending_step.checkpoint_id, "workspace_id": workspace_id}),
+            );
+            state.events.publish(
+                WebEventType::PausedForApproval.as_str(),
+                Some(&task_id),
+                json!({"node_id": pending_step.node_id, "workspace_id": workspace_id}),
+            );
+        }
+        state.events.publish(
+            WebEventType::ProjectionUpdated.as_str(),
+            Some(&task_id),
+            json!({"workspace_id": workspace_id}),
+        );
+        return Ok(Json(response));
+    }
     let mut runtime = state.runtime.lock().expect("runtime lock");
     let response = runtime.advance_task(&task_id)?;
     if let AdvanceTaskResponse::PausedForApproval { pending_step } = &response {
@@ -201,8 +232,26 @@ pub async fn advance_task(
 pub async fn confirm_task(
     State(state): State<WebAppState>,
     Path(task_id): Path<String>,
+    Query(query): Query<WorkspaceQuery>,
     Json(request): Json<ConfirmTaskRequest>,
 ) -> ApiResult<Json<ConfirmTaskResponse>> {
+    if let Some(workspace_id) = query.workspace_id.as_deref() {
+        let workspace_root =
+            resolve_workspace_root(&state.workspace_root, Some(workspace_id), Some(&task_id))?;
+        let mut runtime = WebRuntime::new_fake(workspace_root);
+        let response = runtime.confirm_task(&task_id, request)?;
+        state.events.publish(
+            WebEventType::NodeStarted.as_str(),
+            Some(&task_id),
+            json!({"node_id": response.node_id, "workspace_id": workspace_id}),
+        );
+        state.events.publish(
+            WebEventType::ProjectionUpdated.as_str(),
+            Some(&task_id),
+            json!({"workspace_id": workspace_id}),
+        );
+        return Ok(Json(response));
+    }
     let mut runtime = state.runtime.lock().expect("runtime lock");
     let response = runtime.confirm_task(&task_id, request)?;
     state.events.publish(
@@ -236,7 +285,20 @@ pub async fn confirm_task(
 pub async fn stop_task(
     State(state): State<WebAppState>,
     Path(task_id): Path<String>,
+    Query(query): Query<WorkspaceQuery>,
 ) -> ApiResult<Json<StopTaskResponse>> {
+    if let Some(workspace_id) = query.workspace_id.as_deref() {
+        let workspace_root =
+            resolve_workspace_root(&state.workspace_root, Some(workspace_id), Some(&task_id))?;
+        let mut runtime = WebRuntime::new_fake(workspace_root);
+        let response = runtime.stop_task(&task_id)?;
+        state.events.publish(
+            WebEventType::ProjectionUpdated.as_str(),
+            Some(&task_id),
+            json!({ "reason": "stop_requested", "task_id": task_id, "workspace_id": workspace_id }),
+        );
+        return Ok(Json(response));
+    }
     let mut runtime = state.runtime.lock().expect("runtime lock");
     let response = runtime.stop_task(&task_id)?;
     state.events.publish(
@@ -250,8 +312,21 @@ pub async fn stop_task(
 pub async fn rollback_preview(
     State(state): State<WebAppState>,
     Path(task_id): Path<String>,
+    Query(query): Query<WorkspaceQuery>,
     Json(request): Json<RollbackPreviewRequest>,
 ) -> ApiResult<Json<RollbackPreviewResponse>> {
+    if let Some(workspace_id) = query.workspace_id.as_deref() {
+        let workspace_root =
+            resolve_workspace_root(&state.workspace_root, Some(workspace_id), Some(&task_id))?;
+        let runtime = WebRuntime::new_fake(workspace_root);
+        let response = runtime.rollback_preview(&task_id, &request.checkpoint_id)?;
+        state.events.publish(
+            WebEventType::RollbackPreviewed.as_str(),
+            Some(&task_id),
+            json!({ "checkpoint_id": response.checkpoint_id, "workspace_id": workspace_id }),
+        );
+        return Ok(Json(response));
+    }
     let runtime = state.runtime.lock().expect("runtime lock");
     let response = runtime.rollback_preview(&task_id, &request.checkpoint_id)?;
     state.events.publish(
@@ -265,8 +340,27 @@ pub async fn rollback_preview(
 pub async fn rollback_task(
     State(state): State<WebAppState>,
     Path(task_id): Path<String>,
+    Query(query): Query<WorkspaceQuery>,
     Json(request): Json<RollbackRequest>,
 ) -> ApiResult<Json<RollbackResponse>> {
+    if let Some(workspace_id) = query.workspace_id.as_deref() {
+        let workspace_root =
+            resolve_workspace_root(&state.workspace_root, Some(workspace_id), Some(&task_id))?;
+        let mut runtime = WebRuntime::new_fake(workspace_root);
+        let response =
+            runtime.rollback(&task_id, &request.checkpoint_id, request.force_when_dirty)?;
+        state.events.publish(
+            WebEventType::RollbackCompleted.as_str(),
+            Some(&task_id),
+            json!({ "checkpoint_id": response.checkpoint_id, "workspace_id": workspace_id }),
+        );
+        state.events.publish(
+            WebEventType::ProjectionUpdated.as_str(),
+            Some(&task_id),
+            json!({ "reason": "rollback_completed", "workspace_id": workspace_id }),
+        );
+        return Ok(Json(response));
+    }
     let mut runtime = state.runtime.lock().expect("runtime lock");
     let response = runtime.rollback(&task_id, &request.checkpoint_id, request.force_when_dirty)?;
     state.events.publish(
@@ -286,8 +380,13 @@ pub async fn projection(
     State(state): State<WebAppState>,
     Query(query): Query<ProjectionQuery>,
 ) -> ApiResult<Json<WebWorkspaceProjection>> {
-    Ok(Json(WebRuntime::projection_for_workspace(
+    let workspace_root = resolve_workspace_root(
         &state.workspace_root,
+        query.workspace_id.as_deref(),
+        query.task_id.as_deref(),
+    )?;
+    Ok(Json(WebRuntime::projection_for_workspace(
+        &workspace_root,
         query.task_id.as_deref(),
         query.node_id.as_deref(),
     )?))
@@ -296,7 +395,14 @@ pub async fn projection(
 pub async fn artifact_content(
     State(state): State<WebAppState>,
     Path(artifact_ref): Path<String>,
+    Query(query): Query<WorkspaceQuery>,
 ) -> ApiResult<Json<ArtifactContentResponse>> {
+    if let Some(workspace_id) = query.workspace_id.as_deref() {
+        let workspace_root =
+            resolve_workspace_root(&state.workspace_root, Some(workspace_id), None)?;
+        let runtime = WebRuntime::new_fake(workspace_root);
+        return Ok(Json(runtime.artifact_content(&artifact_ref)?));
+    }
     let runtime = state.runtime.lock().expect("runtime lock");
     Ok(Json(runtime.artifact_content(&artifact_ref)?))
 }
@@ -305,6 +411,12 @@ pub async fn file_content(
     State(state): State<WebAppState>,
     Query(query): Query<FileContentQuery>,
 ) -> ApiResult<Json<FileContentResponse>> {
+    if let Some(workspace_id) = query.workspace_id.as_deref() {
+        let workspace_root =
+            resolve_workspace_root(&state.workspace_root, Some(workspace_id), None)?;
+        let runtime = WebRuntime::new_fake(workspace_root);
+        return Ok(Json(runtime.file_content(&query.path)?));
+    }
     let runtime = state.runtime.lock().expect("runtime lock");
     Ok(Json(runtime.file_content(&query.path)?))
 }
@@ -313,6 +425,14 @@ pub async fn file_diff(
     State(state): State<WebAppState>,
     Query(query): Query<FileDiffQuery>,
 ) -> ApiResult<Json<FileDiffResponse>> {
+    if let Some(workspace_id) = query.workspace_id.as_deref() {
+        let workspace_root =
+            resolve_workspace_root(&state.workspace_root, Some(workspace_id), None)?;
+        let runtime = WebRuntime::new_fake(workspace_root);
+        return Ok(Json(
+            runtime.file_diff(&query.base_checkpoint, &query.path)?,
+        ));
+    }
     let runtime = state.runtime.lock().expect("runtime lock");
     Ok(Json(
         runtime.file_diff(&query.base_checkpoint, &query.path)?,
@@ -337,6 +457,22 @@ fn sse_event(event: WebEvent) -> Event {
         .event(event.event_type.clone())
         .json_data(event)
         .expect("serialize web event")
+}
+
+fn resolve_workspace_root(
+    app_root: &std::path::Path,
+    workspace_id: Option<&str>,
+    task_id: Option<&str>,
+) -> ApiResult<std::path::PathBuf> {
+    let workspace_registry = WorkspaceRegistry::new(app_root.to_path_buf());
+    if let Some(workspace_id) = workspace_id {
+        return Ok(workspace_registry.get(workspace_id)?.path);
+    }
+    if let Some(task_id) = task_id {
+        let link = IssueRegistry::new(app_root.to_path_buf()).find_by_task(task_id)?;
+        return Ok(workspace_registry.get(&link.workspace_id)?.path);
+    }
+    Ok(app_root.to_path_buf())
 }
 
 fn workspace_dto(record: WorkspaceRecord) -> WorkspaceDto {
