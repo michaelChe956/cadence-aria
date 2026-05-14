@@ -126,3 +126,62 @@ export type RollbackPreviewResponse = {
   artifacts_to_drop: number;
   files_may_change: string[];
 };
+
+export type Workspace = {
+  workspace_id: string;
+  name: string;
+  path: string;
+  default_policy_preset: string;
+  default_provider_mode: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type WorkspaceListResponse = {
+  workspaces: Workspace[];
+};
+
+export type CreateWorkspaceRequest = {
+  name: string;
+  path: string;
+  default_policy_preset?: string | null;
+  default_provider_mode?: string | null;
+};
+
+export type Issue = {
+  issue_id: string;
+  title: string;
+  description: string | null;
+  status: string;
+  workspace_id: string | null;
+  task_id: string | null;
+  session_id: string | null;
+  change_id: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type IssueListResponse = {
+  issues: Issue[];
+};
+
+export type CreateIssueRequest = {
+  title: string;
+  description?: string | null;
+  change_id?: string | null;
+};
+
+export type StartIssueRequest = {
+  workspace_id: string;
+  policy_preset?: string | null;
+  provider_mode?: string | null;
+  timeout_secs?: number | null;
+};
+
+export type StartIssueResponse = {
+  issue_id: string;
+  workspace_id: string;
+  task_id: string;
+  session_id: string;
+  status: string;
+};

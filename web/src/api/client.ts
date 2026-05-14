@@ -1,14 +1,22 @@
 import type {
   ApiError,
   ArtifactContentResponse,
+  CreateIssueRequest,
+  CreateWorkspaceRequest,
   CreateTaskRequest,
   CreateTaskResponse,
   FileContentResponse,
   FileDiffResponse,
+  Issue,
+  IssueListResponse,
   RollbackPreviewResponse,
+  StartIssueRequest,
+  StartIssueResponse,
   StopTaskResponse,
   TaskListResponse,
   WebWorkspaceProjection,
+  Workspace,
+  WorkspaceListResponse,
 } from "./types";
 
 export class ApiRequestError extends Error implements ApiError {
@@ -53,10 +61,47 @@ export function createTask(payload: CreateTaskRequest): Promise<CreateTaskRespon
   });
 }
 
-export function getProjection(taskId?: string, nodeId?: string): Promise<WebWorkspaceProjection> {
+export function listWorkspaces(): Promise<WorkspaceListResponse> {
+  return requestJson<WorkspaceListResponse>("/api/workspaces");
+}
+
+export function createWorkspace(payload: CreateWorkspaceRequest): Promise<Workspace> {
+  return requestJson<Workspace>("/api/workspaces", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function listIssues(): Promise<IssueListResponse> {
+  return requestJson<IssueListResponse>("/api/issues");
+}
+
+export function createIssue(payload: CreateIssueRequest): Promise<Issue> {
+  return requestJson<Issue>("/api/issues", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function startIssue(
+  issueId: string,
+  payload: StartIssueRequest,
+): Promise<StartIssueResponse> {
+  return requestJson<StartIssueResponse>(`/api/issues/${encodeURIComponent(issueId)}/start`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function getProjection(
+  taskId?: string,
+  nodeId?: string,
+  workspaceId?: string,
+): Promise<WebWorkspaceProjection> {
   const params = new URLSearchParams();
   if (taskId) params.set("task_id", taskId);
   if (nodeId) params.set("node_id", nodeId);
+  if (workspaceId) params.set("workspace_id", workspaceId);
   const query = params.toString();
   return requestJson<WebWorkspaceProjection>(`/api/projection${query ? `?${query}` : ""}`);
 }
@@ -65,22 +110,36 @@ export function listTasks(): Promise<TaskListResponse> {
   return requestJson<TaskListResponse>("/api/tasks");
 }
 
-export function getArtifactContent(artifactRef: string): Promise<ArtifactContentResponse> {
-  return requestJson<ArtifactContentResponse>(`/api/artifacts/${encodeURIComponent(artifactRef)}`);
+export function getArtifactContent(
+  artifactRef: string,
+  workspaceId?: string,
+): Promise<ArtifactContentResponse> {
+  const params = new URLSearchParams();
+  if (workspaceId) params.set("workspace_id", workspaceId);
+  const query = params.toString();
+  return requestJson<ArtifactContentResponse>(
+    `/api/artifacts/${encodeURIComponent(artifactRef)}${query ? `?${query}` : ""}`,
+  );
 }
 
-export function getFileContent(path: string): Promise<FileContentResponse> {
+export function getFileContent(path: string, workspaceId?: string): Promise<FileContentResponse> {
   const params = new URLSearchParams({ path });
+  if (workspaceId) params.set("workspace_id", workspaceId);
   return requestJson<FileContentResponse>(`/api/files/content?${params.toString()}`);
 }
 
-export function getFileDiff(baseCheckpoint: string, path: string): Promise<FileDiffResponse> {
+export function getFileDiff(
+  baseCheckpoint: string,
+  path: string,
+  workspaceId?: string,
+): Promise<FileDiffResponse> {
   const params = new URLSearchParams({ base_checkpoint: baseCheckpoint, path });
+  if (workspaceId) params.set("workspace_id", workspaceId);
   return requestJson<FileDiffResponse>(`/api/files/diff?${params.toString()}`);
 }
 
-export function stopTask(taskId: string): Promise<StopTaskResponse> {
-  return requestJson<StopTaskResponse>(`/api/tasks/${encodeURIComponent(taskId)}/stop`, {
+export function stopTask(taskId: string, workspaceId?: string): Promise<StopTaskResponse> {
+  return requestJson<StopTaskResponse>(taskActionPath(taskId, "stop", workspaceId), {
     method: "POST",
     body: JSON.stringify({}),
   });
@@ -89,9 +148,10 @@ export function stopTask(taskId: string): Promise<StopTaskResponse> {
 export function confirmTask(
   taskId: string,
   payload: { checkpoint_id: string; prompt: string; policy_override?: string | null },
+  workspaceId?: string,
 ) {
   return requestJson<{ status: string; node_id: string; turn_id: string }>(
-    `/api/tasks/${encodeURIComponent(taskId)}/confirm`,
+    taskActionPath(taskId, "confirm", workspaceId),
     {
       method: "POST",
       body: JSON.stringify(payload),
@@ -99,16 +159,16 @@ export function confirmTask(
   );
 }
 
-export function advanceTask(taskId: string) {
-  return requestJson<unknown>(`/api/tasks/${encodeURIComponent(taskId)}/advance`, {
+export function advanceTask(taskId: string, workspaceId?: string) {
+  return requestJson<unknown>(taskActionPath(taskId, "advance", workspaceId), {
     method: "POST",
     body: JSON.stringify({}),
   });
 }
 
-export function rollbackPreview(taskId: string, checkpointId: string) {
+export function rollbackPreview(taskId: string, checkpointId: string, workspaceId?: string) {
   return requestJson<RollbackPreviewResponse>(
-    `/api/tasks/${encodeURIComponent(taskId)}/rollback/preview`,
+    taskActionPath(taskId, "rollback/preview", workspaceId),
     {
       method: "POST",
       body: JSON.stringify({ checkpoint_id: checkpointId }),
@@ -119,12 +179,20 @@ export function rollbackPreview(taskId: string, checkpointId: string) {
 export function rollbackTask(
   taskId: string,
   payload: { checkpoint_id: string; force_when_dirty: boolean },
+  workspaceId?: string,
 ) {
   return requestJson<{ status: string; checkpoint_id: string }>(
-    `/api/tasks/${encodeURIComponent(taskId)}/rollback`,
+    taskActionPath(taskId, "rollback", workspaceId),
     {
       method: "POST",
       body: JSON.stringify(payload),
     },
   );
+}
+
+function taskActionPath(taskId: string, action: string, workspaceId?: string) {
+  const params = new URLSearchParams();
+  if (workspaceId) params.set("workspace_id", workspaceId);
+  const query = params.toString();
+  return `/api/tasks/${encodeURIComponent(taskId)}/${action}${query ? `?${query}` : ""}`;
 }
