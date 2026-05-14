@@ -469,8 +469,13 @@ fn resolve_workspace_root(
         return Ok(workspace_registry.get(workspace_id)?.path);
     }
     if let Some(task_id) = task_id {
-        let link = IssueRegistry::new(app_root.to_path_buf()).find_by_task(task_id)?;
-        return Ok(workspace_registry.get(&link.workspace_id)?.path);
+        match IssueRegistry::new(app_root.to_path_buf()).find_by_task(task_id) {
+            Ok(link) => return Ok(workspace_registry.get(&link.workspace_id)?.path),
+            Err(error) if error.code() == "task_workspace_not_found" => {
+                return Ok(app_root.to_path_buf());
+            }
+            Err(error) => return Err(error.into()),
+        }
     }
     Ok(app_root.to_path_buf())
 }
