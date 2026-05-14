@@ -133,3 +133,24 @@ fn creates_named_project_instead_of_reusing_unrelated_project() {
     assert!(other_repo.is_none());
     assert!(recovered_repo.is_some());
 }
+
+#[cfg(unix)]
+#[test]
+fn reports_tasks_root_metadata_error() {
+    let app = tempdir().expect("app");
+    let repo = git_repo();
+    let runtime_root = repo.path().join(".aria/runtime");
+    fs::create_dir_all(&runtime_root).expect("runtime root");
+    std::os::unix::fs::symlink("tasks", runtime_root.join("tasks")).expect("tasks symlink");
+
+    let error = rebuild_index_from_runtime(CompatibilityScanInput {
+        app_paths: ProductAppPaths::new(app.path().join(".aria")),
+        repo_path: repo.path().to_path_buf(),
+        project_name: "Recovered".to_string(),
+    })
+    .expect_err("scan should report path error");
+    let message = error.to_string();
+
+    assert!(message.contains("try_exists"));
+    assert!(message.contains(".aria/runtime/tasks"));
+}

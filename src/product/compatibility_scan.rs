@@ -30,7 +30,7 @@ pub fn rebuild_index_from_runtime(
     input: CompatibilityScanInput,
 ) -> Result<CompatibilityScanSummary, ProductStoreError> {
     let tasks_root = input.repo_path.join(".aria/runtime/tasks");
-    if !tasks_root.exists() {
+    if !path_exists(&tasks_root)? {
         return Ok(empty_summary());
     }
 
@@ -144,7 +144,7 @@ fn find_project(
 
 fn list_projects(app_paths: &ProductAppPaths) -> Result<Vec<ProjectRecord>, ProductStoreError> {
     let projects_root = app_paths.projects_root();
-    if !projects_root.exists() {
+    if !path_exists(&projects_root)? {
         return Ok(Vec::new());
     }
 
@@ -156,7 +156,7 @@ fn list_projects(app_paths: &ProductAppPaths) -> Result<Vec<ProjectRecord>, Prod
             ProductStoreError::Io(format!("read {} entry: {error}", projects_root.display()))
         })?;
         let project_path = entry.path().join("project.json");
-        if project_path.exists() {
+        if path_exists(&project_path)? {
             project_files.push(project_path);
         }
     }
@@ -231,7 +231,7 @@ fn list_issues(
     project_id: &str,
 ) -> Result<Vec<IssueRecord>, ProductStoreError> {
     let issues_root = app_paths.project_root(project_id).join("issues");
-    if !issues_root.exists() {
+    if !path_exists(&issues_root)? {
         return Ok(Vec::new());
     }
 
@@ -243,7 +243,7 @@ fn list_issues(
             ProductStoreError::Io(format!("read {} entry: {error}", issues_root.display()))
         })?;
         let issue_path = entry.path().join("issue.json");
-        if issue_path.exists() {
+        if path_exists(&issue_path)? {
             issue_files.push(issue_path);
         }
     }
@@ -279,7 +279,7 @@ fn read_runtime_tasks(tasks_root: &Path) -> Result<Vec<RuntimeTaskSnapshot>, Pro
     let mut runtime_tasks = Vec::new();
     for task_dir in task_dirs {
         let state_path = task_dir.join("state.json");
-        if !state_path.exists() {
+        if !path_exists(&state_path)? {
             continue;
         }
 
@@ -312,4 +312,9 @@ fn string_field(value: &Value, key: &str) -> Option<String> {
 fn canonicalize_path(path: &Path) -> Result<PathBuf, ProductStoreError> {
     fs::canonicalize(path)
         .map_err(|error| ProductStoreError::Io(format!("canonicalize {}: {error}", path.display())))
+}
+
+fn path_exists(path: &Path) -> Result<bool, ProductStoreError> {
+    path.try_exists()
+        .map_err(|error| ProductStoreError::Io(format!("try_exists {}: {error}", path.display())))
 }
