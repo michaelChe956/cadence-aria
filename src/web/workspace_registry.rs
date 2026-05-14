@@ -16,6 +16,10 @@ impl WorkspaceRegistryError {
     pub fn code(&self) -> &'static str {
         self.code
     }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

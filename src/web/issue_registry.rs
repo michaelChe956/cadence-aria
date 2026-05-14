@@ -15,6 +15,10 @@ impl IssueRegistryError {
     pub fn code(&self) -> &'static str {
         self.code
     }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,6 +100,13 @@ impl IssueRegistry {
         issues.push(issue.clone());
         self.write(&issues)?;
         Ok(issue)
+    }
+
+    pub fn get(&self, issue_id: &str) -> Result<IssueRecord, IssueRegistryError> {
+        self.list()?
+            .into_iter()
+            .find(|issue| issue.issue_id == issue_id)
+            .ok_or_else(|| registry_error("issue_not_found", issue_id))
     }
 
     pub fn mark_started(

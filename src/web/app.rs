@@ -16,6 +16,15 @@ pub fn build_web_router(state: WebAppState) -> Router {
             "/api/tasks",
             get(handlers::list_tasks).post(handlers::create_task),
         )
+        .route(
+            "/api/workspaces",
+            get(handlers::list_workspaces).post(handlers::create_workspace),
+        )
+        .route(
+            "/api/issues",
+            get(handlers::list_issues).post(handlers::create_issue),
+        )
+        .route("/api/issues/{issue_id}/start", post(handlers::start_issue))
         .route("/api/tasks/{task_id}/advance", post(handlers::advance_task))
         .route("/api/tasks/{task_id}/confirm", post(handlers::confirm_task))
         .route("/api/tasks/{task_id}/stop", post(handlers::stop_task))

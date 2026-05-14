@@ -38,8 +38,16 @@ impl IntoResponse for ApiError {
         let status = match self.code.as_str() {
             "invalid_task_request" => StatusCode::BAD_REQUEST,
             "checkpoint_unsafe_dirty_worktree" => StatusCode::CONFLICT,
-            "artifact_not_found" | "interactive_task_missing" => StatusCode::NOT_FOUND,
-            "invalid_file_path" => StatusCode::BAD_REQUEST,
+            "artifact_not_found"
+            | "interactive_task_missing"
+            | "issue_not_found"
+            | "workspace_not_found"
+            | "task_workspace_not_found" => StatusCode::NOT_FOUND,
+            "invalid_file_path"
+            | "issue_title_required"
+            | "workspace_path_missing"
+            | "workspace_path_not_directory"
+            | "workspace_path_not_git_repo" => StatusCode::BAD_REQUEST,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, Json(self)).into_response()
@@ -49,5 +57,17 @@ impl IntoResponse for ApiError {
 impl From<crate::task_run::types::TaskRunError> for ApiError {
     fn from(error: crate::task_run::types::TaskRunError) -> Self {
         ApiError::runtime(error.code, error.message, json!({}))
+    }
+}
+
+impl From<crate::web::workspace_registry::WorkspaceRegistryError> for ApiError {
+    fn from(error: crate::web::workspace_registry::WorkspaceRegistryError) -> Self {
+        ApiError::runtime(error.code(), error.message(), json!({}))
+    }
+}
+
+impl From<crate::web::issue_registry::IssueRegistryError> for ApiError {
+    fn from(error: crate::web::issue_registry::IssueRegistryError) -> Self {
+        ApiError::runtime(error.code(), error.message(), json!({}))
     }
 }
