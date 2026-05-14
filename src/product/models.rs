@@ -121,3 +121,36 @@ pub struct IssueRuntimeBindingRecord {
     pub created_at: String,
     pub updated_at: String,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct GateRecord {
+    pub id: String,
+    pub project_id: String,
+    pub issue_id: String,
+    pub binding_id: String,
+    pub node_id: String,
+    pub gate_type: GateType,
+    pub status: GateStatus,
+    pub artifact_refs: Vec<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub resolved_at: Option<String>,
+    pub comment: Option<String>,
+    pub requested_change: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ExecutionRecord {
+    pub id: String,
+    pub project_id: String,
+    pub issue_id: String,
+    pub binding_id: String,
+    pub node_id: String,
+    pub status: ExecutionStatus,
+    pub event_type: String,
+    pub artifact_refs: Vec<String>,
+    pub message: Option<String>,
+    pub created_at: String,
+}

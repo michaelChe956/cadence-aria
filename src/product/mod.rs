@@ -1,5 +1,7 @@
 pub mod app_paths;
 pub mod compatibility_scan;
+pub mod execution_record_store;
+pub mod gate_store;
 pub mod id;
 pub mod issue_store;
 pub mod json_store;

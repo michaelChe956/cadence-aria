@@ -293,3 +293,20 @@ pub struct StartIssueResponse {
     pub session_id: String,
     pub status: String,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ResolveGateRequest {
+    pub comment: Option<String>,
+    pub requested_change: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ResolveGateResponse {
+    pub issue_id: String,
+    pub gate_id: String,
+    pub node_id: String,
+    pub decision: String,
+    pub next_node: Option<String>,
+}

@@ -34,6 +34,18 @@ pub fn build_web_router(state: WebAppState) -> Router {
             get(handlers::list_issues).post(handlers::create_issue),
         )
         .route("/api/issues/{issue_id}/start", post(handlers::start_issue))
+        .route(
+            "/api/issues/{issue_id}/gates/{gate_id}/confirm",
+            post(handlers::confirm_gate),
+        )
+        .route(
+            "/api/issues/{issue_id}/gates/{gate_id}/request-change",
+            post(handlers::request_gate_change),
+        )
+        .route(
+            "/api/issues/{issue_id}/gates/{gate_id}/terminate",
+            post(handlers::terminate_gate),
+        )
         .route("/api/tasks/{task_id}/advance", post(handlers::advance_task))
         .route("/api/tasks/{task_id}/confirm", post(handlers::confirm_task))
         .route("/api/tasks/{task_id}/stop", post(handlers::stop_task))

@@ -9,8 +9,9 @@ use tokio_stream::wrappers::BroadcastStream;
 
 use crate::interactive::models::WebWorkspaceProjection;
 use crate::product::app_paths::ProductAppPaths;
+use crate::product::gate_store::GateStore;
 use crate::product::json_store::ProductStoreError;
-use crate::product::models::ProjectRecord;
+use crate::product::models::{GateStatus, ProjectRecord};
 use crate::product::project_store::{CreateProjectInput, ProjectStore};
 use crate::web::error::{ApiError, ApiResult};
 use crate::web::events::WebEventType;
@@ -21,9 +22,10 @@ use crate::web::types::{
     AdvanceTaskResponse, ArtifactContentResponse, ConfirmTaskRequest, ConfirmTaskResponse,
     CreateIssueRequest, CreateProjectRequest, CreateTaskRequest, CreateTaskResponse,
     CreateWorkspaceRequest, FileContentResponse, FileDiffResponse, IssueDto, IssueListResponse,
-    ProjectDto, ProjectListResponse, RollbackPreviewRequest, RollbackPreviewResponse,
-    RollbackRequest, RollbackResponse, StartIssueRequest, StartIssueResponse, StopTaskResponse,
-    TaskListResponse, WebEvent, WorkspaceDto, WorkspaceListResponse,
+    ProjectDto, ProjectListResponse, ResolveGateRequest, ResolveGateResponse,
+    RollbackPreviewRequest, RollbackPreviewResponse, RollbackRequest, RollbackResponse,
+    StartIssueRequest, StartIssueResponse, StopTaskResponse, TaskListResponse, WebEvent,
+    WorkspaceDto, WorkspaceListResponse,
 };
 use crate::web::workspace_registry::{CreateWorkspaceInput, WorkspaceRecord, WorkspaceRegistry};
 
@@ -222,6 +224,51 @@ pub async fn start_issue(
         session_id: created.session_id,
         status: issue_status_text(&started.status).to_string(),
     }))
+}
+
+pub async fn confirm_gate(
+    State(state): State<WebAppState>,
+    Path((issue_id, gate_id)): Path<(String, String)>,
+    Json(request): Json<ResolveGateRequest>,
+) -> ApiResult<Json<ResolveGateResponse>> {
+    resolve_gate(
+        &state,
+        issue_id,
+        gate_id,
+        GateStatus::Confirmed,
+        "confirmed",
+        request,
+    )
+}
+
+pub async fn request_gate_change(
+    State(state): State<WebAppState>,
+    Path((issue_id, gate_id)): Path<(String, String)>,
+    Json(request): Json<ResolveGateRequest>,
+) -> ApiResult<Json<ResolveGateResponse>> {
+    resolve_gate(
+        &state,
+        issue_id,
+        gate_id,
+        GateStatus::ChangeRequested,
+        "change_requested",
+        request,
+    )
+}
+
+pub async fn terminate_gate(
+    State(state): State<WebAppState>,
+    Path((issue_id, gate_id)): Path<(String, String)>,
+    Json(request): Json<ResolveGateRequest>,
+) -> ApiResult<Json<ResolveGateResponse>> {
+    resolve_gate(
+        &state,
+        issue_id,
+        gate_id,
+        GateStatus::Terminated,
+        "terminated",
+        request,
+    )
 }
 
 pub async fn advance_task(
@@ -505,6 +552,33 @@ fn sse_event(event: WebEvent) -> Event {
         .expect("serialize web event")
 }
 
+fn resolve_gate(
+    state: &WebAppState,
+    issue_id: String,
+    gate_id: String,
+    status: GateStatus,
+    decision: &str,
+    request: ResolveGateRequest,
+) -> ApiResult<Json<ResolveGateResponse>> {
+    let store = GateStore::new(product_app_paths(state));
+    let gate = store
+        .resolve_by_issue(
+            &issue_id,
+            &gate_id,
+            status,
+            request.comment,
+            request.requested_change,
+        )
+        .map_err(product_store_api_error)?;
+    Ok(Json(ResolveGateResponse {
+        issue_id: gate.issue_id,
+        gate_id: gate.id,
+        node_id: gate.node_id,
+        decision: decision.to_string(),
+        next_node: None,
+    }))
+}
+
 fn resolve_workspace_root(
     app_root: &std::path::Path,
     workspace_id: Option<&str>,
@@ -583,6 +657,9 @@ fn product_store_api_error(error: ProductStoreError) -> ApiError {
         ProductStoreError::NotFound {
             kind: "project", ..
         } => ApiError::runtime("project_not_found", "project not found", json!({})),
+        ProductStoreError::NotFound { kind: "gate", .. } => {
+            ApiError::runtime("issue_not_found", "gate not found", json!({}))
+        }
         ProductStoreError::PathEscape(_) => {
             ApiError::validation("invalid_project_id", "invalid project id")
         }
