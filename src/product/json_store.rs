@@ -23,12 +23,12 @@ pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T, ProductStoreErro
 }
 
 pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), ProductStoreError> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).map_err(|error| {
-                ProductStoreError::Io(format!("create {}: {error}", parent.display()))
-            })?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            ProductStoreError::Io(format!("create {}: {error}", parent.display()))
+        })?;
     }
 
     let temp_path = temp_path_for(path);
