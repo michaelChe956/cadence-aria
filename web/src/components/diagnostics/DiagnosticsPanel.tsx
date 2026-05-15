@@ -11,15 +11,21 @@ export function DiagnosticsPanel({ diagnostics }: { diagnostics: Array<Record<st
     group,
     items: diagnostics.filter((item) => item.category === group || item.code === group),
   }));
+  const unknown = diagnostics.filter(
+    (item) =>
+      !diagnosticGroups.some((group) => item.category === group || item.code === group),
+  );
+  const allGroups =
+    unknown.length > 0 ? [...grouped, { group: "unknown", items: unknown }] : grouped;
 
-  if (grouped.every(({ items }) => items.length === 0)) {
+  if (diagnostics.length === 0) {
     return null;
   }
 
   return (
     <section className="border-t border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-4 py-2 md:px-6 lg:px-8">
       <div className="flex flex-wrap gap-2 text-xs">
-        {grouped.map(({ group, items }) => (
+        {allGroups.map(({ group, items }) => (
           <span
             key={group}
             className={
