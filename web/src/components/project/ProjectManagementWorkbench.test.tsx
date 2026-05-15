@@ -104,6 +104,54 @@ describe("ProjectManagementWorkbench", () => {
     expect(within(gate).getByRole("button", { name: "终止" })).toBeInTheDocument();
   });
 
+  it("marks completed issues as acceptance in the phase rail", async () => {
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/projects") {
+        return jsonResponse({
+          projects: [
+            {
+              project_id: "project_0001",
+              name: "Aria 项目",
+              description: "项目管理工作台",
+              created_at: "2026-05-14T00:00:00Z",
+              updated_at: "2026-05-14T00:00:00Z",
+              last_opened_at: null,
+            },
+          ],
+        });
+      }
+      if (url === "/api/issues") {
+        return jsonResponse({
+          issues: [
+            {
+              issue_id: "issue_done_0001",
+              title: "完成验收",
+              description: "生命周期应进入验收阶段",
+              status: "completed",
+              workspace_id: "workspace_0001",
+              task_id: "task_0001",
+              session_id: "session_0001",
+              change_id: "acceptance-check",
+              created_at: "2026-05-14T00:00:00Z",
+              updated_at: "2026-05-14T00:00:00Z",
+            },
+          ],
+        });
+      }
+      return jsonResponse({});
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    render(<ProjectManagementWorkbench onOpenExecution={vi.fn()} />);
+
+    const phaseRail = await screen.findByRole("navigation", { name: "Issue 阶段" });
+    expect(within(phaseRail).getByText("Acceptance").closest("li")).toHaveAttribute(
+      "aria-current",
+      "step",
+    );
+  });
+
   it("loads projects and legacy issues then opens executable issue context", async () => {
     const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);

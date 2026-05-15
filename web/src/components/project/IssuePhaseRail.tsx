@@ -7,7 +7,7 @@ const PHASES = [
 ] as const;
 
 export function IssuePhaseRail({ status }: { status: string | null }) {
-  const activeIndex = status === "draft" ? 0 : 1;
+  const activeIndex = status === "completed" ? 2 : status === "draft" ? 0 : 1;
 
   return (
     <nav
@@ -28,6 +28,7 @@ export function IssuePhaseRail({ status }: { status: string | null }) {
           return (
             <li
               key={phase.id}
+              aria-current={active ? "step" : undefined}
               className={
                 active
                   ? "flex items-center gap-2 rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary-soft)] px-2 py-2 text-sm font-semibold text-[var(--aria-ink)]"
@@ -42,7 +43,7 @@ export function IssuePhaseRail({ status }: { status: string | null }) {
                 <Circle className="h-4 w-4 text-[var(--aria-ink-muted)]" />
               )}
               <span>{phase.label}</span>
-              {placeholder ? (
+              {placeholder && !active && !completed ? (
                 <span className="ml-auto text-[11px] font-medium text-[var(--aria-ink-muted)]">
                   pending
                 </span>
