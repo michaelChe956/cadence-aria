@@ -38,7 +38,7 @@ export function ArtifactContentRenderer({
             <a
               key={heading}
               href={`#${slug(heading)}`}
-              className="block rounded-lg px-2 py-1 font-semibold text-indigo-600 transition-colors hover:bg-indigo-50 hover:text-orange-700 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-orange-200"
+              className="block rounded-md px-2 py-1 font-medium text-[var(--aria-primary)] transition-colors hover:bg-[var(--aria-primary-soft)] hover:text-[var(--aria-ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
             >
               {heading}
             </a>
@@ -62,7 +62,7 @@ export function ArtifactContentRenderer({
   }
 
   return (
-    <pre className="max-h-[34rem] overflow-auto p-3 text-xs leading-5 text-indigo-900">
+    <pre className="max-h-[34rem] overflow-auto rounded-b-lg p-3 font-mono text-xs leading-5 text-[var(--aria-ink)]">
       {content}
     </pre>
   );
@@ -77,7 +77,7 @@ function JsonContent({ content }: { content: string }) {
     }
   }, [content]);
   return (
-    <div className="space-y-2 p-3 text-xs text-indigo-900">
+    <div className="space-y-2 p-3 text-xs text-[var(--aria-ink)]">
       {Object.entries(value).map(([key, item]) => (
         <JsonField key={key} name={key} value={item} />
       ))}
@@ -91,18 +91,18 @@ function JsonField({ name, value }: { name: string; value: unknown }) {
   const long = text.length > 120;
   return (
     <div>
-      <strong className="text-indigo-950">{name}</strong>
+      <strong className="font-semibold text-[var(--aria-ink)]">{name}</strong>
       {long && !open ? (
         <button
           type="button"
           aria-label={`展开 ${name}`}
-          className="ml-2 rounded-lg px-1 font-bold text-orange-700 hover:bg-orange-100 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-orange-200"
+          className="ml-2 rounded px-1 font-semibold text-[var(--aria-warning)] hover:bg-[var(--aria-warning-soft)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-warning)]"
           onClick={() => setOpen(true)}
         >
           展开
         </button>
       ) : null}
-      <pre className="mt-1 rounded-lg border-2 border-indigo-100 bg-indigo-50/80 p-2 text-indigo-900">
+      <pre className="mt-1 rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-2 text-[var(--aria-ink)]">
         {long && !open ? `${text.length} chars hidden` : text}
       </pre>
     </div>

@@ -60,7 +60,7 @@ describe("AppShell", () => {
     ).toBeTruthy();
   });
 
-  it("renders an illustrated AI coding workbench in the interaction window", async () => {
+  it("renders execution workbench as compact operations surface", async () => {
     stubExecutionFetch((url) => {
       if (url === "/api/projection?task_id=task_0001&workspace_id=workspace_0001") {
         return jsonResponse(projection(null));
@@ -68,19 +68,19 @@ describe("AppShell", () => {
       return null;
     });
 
-    await openExecutionWorkbench();
+    render(<AppShell />);
 
-    const interactionWindow = screen.getByRole("region", { name: "Interaction window" });
-    expect(
-      within(interactionWindow).getByRole("img", { name: "AI coding workbench illustration" }),
-    ).toBeInTheDocument();
-    expect(
-      within(interactionWindow).getByRole("group", { name: "AI coding workbench status" }),
-    ).toHaveTextContent("AI Coding Workbench");
-    expect(within(interactionWindow).getByTestId("workbench-visual")).toHaveAttribute(
-      "data-motion",
-      "ambient",
-    );
+    await openSeededExecutionWorkbench();
+
+    expect(screen.getByRole("banner")).toHaveTextContent("Aria Web");
+    expect(screen.getByRole("banner")).toHaveTextContent("issue_0001");
+    expect(screen.getByRole("banner")).toHaveTextContent("workspace_0001");
+    expect(screen.getByRole("main", { name: "Aria workbench" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Interaction window" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Provider stream" })).toBeInTheDocument();
+    expect(screen.getByRole("navigation", { name: "Workflow map" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Node workspace details" })).toBeInTheDocument();
+    expect(screen.queryByText("AI Coding Workbench")).not.toBeInTheDocument();
   });
 
   it("starts an issue with a workspace and opens the execution workbench", async () => {
@@ -94,8 +94,8 @@ describe("AppShell", () => {
     await openExecutionWorkbench();
 
     expect(await screen.findByRole("main", { name: "Aria workbench" })).toBeInTheDocument();
-    expect(screen.getByText("issue_0001")).toBeInTheDocument();
-    expect(screen.getByText("workspace_0001")).toBeInTheDocument();
+    expect(screen.getByRole("banner")).toHaveTextContent("issue_0001");
+    expect(screen.getByRole("banner")).toHaveTextContent("workspace_0001");
   });
 
   it("starts an issue then advances into provider confirmation", async () => {
@@ -307,6 +307,10 @@ function executionManagementResponse(url: string) {
 
 async function openExecutionWorkbench() {
   render(<AppShell />);
+  return openSeededExecutionWorkbench();
+}
+
+async function openSeededExecutionWorkbench() {
   await userEvent.click(await screen.findByRole("button", { name: "打开执行" }));
   return screen.findByRole("main", { name: "Aria workbench" });
 }

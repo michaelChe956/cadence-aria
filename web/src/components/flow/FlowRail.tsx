@@ -19,20 +19,18 @@ export function FlowRail({
   return (
     <nav
       aria-label="Workflow map"
-      className="relative overflow-hidden rounded-lg border-2 border-indigo-200 bg-gradient-to-br from-white via-indigo-50 to-cyan-50 p-4 shadow-[0_10px_0_rgba(79,70,229,0.10),0_18px_34px_rgba(79,70,229,0.16)]"
+      className="rounded-lg border border-[var(--aria-line)] bg-[var(--aria-panel)] p-4"
     >
-      <div className="pointer-events-none absolute -right-10 top-12 h-28 w-28 rounded-full bg-orange-200/45 blur-2xl" />
-      <div className="pointer-events-none absolute -left-12 bottom-8 h-28 w-28 rounded-full bg-cyan-200/45 blur-2xl" />
       <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
         <div>
-          <div className="text-xs font-bold uppercase text-indigo-600">
+          <div className="text-xs font-semibold uppercase text-[var(--aria-ink-muted)]">
             Workflow path
           </div>
-          <div className="mt-1 text-sm font-semibold text-indigo-950/70">
+          <div className="mt-1 text-sm font-medium text-[var(--aria-ink)]">
             节点上下文
           </div>
         </div>
-        <div className="rounded-lg border-2 border-indigo-200 bg-indigo-50 px-3 py-1 font-mono text-xs font-bold text-indigo-700">
+        <div className="rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-2 py-1 font-mono text-xs font-semibold text-[var(--aria-ink-muted)]">
           {nodes.length} nodes
         </div>
       </div>
@@ -41,11 +39,11 @@ export function FlowRail({
           <div
             data-testid="workflow-path-rail"
             data-motion="ambient"
-            className="relative grid gap-3 pl-7"
+            className="relative grid gap-2 pl-6"
           >
             <span
               aria-hidden="true"
-              className="aria-path-flow absolute bottom-4 left-[0.55rem] top-4 w-1 rounded-full bg-gradient-to-b from-orange-400 via-teal-300 to-rose-300"
+              className="absolute bottom-4 left-[0.45rem] top-4 w-px bg-[var(--aria-line-strong)]"
             />
             {nodes.map((item, index) => {
               const nodeId = String(item.node_id ?? `N${String(index).padStart(2, "0")}`);
@@ -56,8 +54,8 @@ export function FlowRail({
                     aria-hidden="true"
                     className={
                       selected
-                        ? "aria-selected-dot absolute -left-[1.95rem] top-4 h-5 w-5 rounded-lg border-2 border-indigo-700 bg-orange-400 shadow-[0_0_0_6px_rgba(249,115,22,0.18)]"
-                        : "absolute -left-[1.75rem] top-4 h-4 w-4 rounded-lg border-2 border-indigo-200 bg-white shadow-[0_3px_0_rgba(129,140,248,0.18)]"
+                        ? "absolute -left-[1.95rem] top-4 h-4 w-4 rounded border border-[var(--aria-primary)] bg-[var(--aria-primary)]"
+                        : "absolute -left-[1.8rem] top-4 h-3 w-3 rounded border border-[var(--aria-line-strong)] bg-[var(--aria-panel)]"
                     }
                   />
                   <WorkflowNodeButton
@@ -79,9 +77,9 @@ export function FlowRail({
           </div>
         </>
       ) : (
-        <div className="rounded-lg border-2 border-dashed border-indigo-200 bg-indigo-50/70 px-4 py-5">
-          <div className="text-sm font-bold text-indigo-950">暂无 workflow 节点</div>
-          <div className="mt-1 text-sm font-semibold text-indigo-950/65">
+        <div className="rounded-md border border-dashed border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-4 py-5">
+          <div className="text-sm font-semibold text-[var(--aria-ink)]">暂无 workflow 节点</div>
+          <div className="mt-1 text-sm font-medium text-[var(--aria-ink-muted)]">
             创建任务后，这里会显示执行节点和状态。
           </div>
         </div>
@@ -111,19 +109,19 @@ function WorkflowNodeButton({
       data-active={selected ? "true" : "false"}
       data-dropped={dropped ? "true" : "false"}
       onClick={() => onSelectNode(nodeId)}
-      className={`aria-pop-in w-full rounded-lg border-2 px-3 py-3 text-left transition-colors motion-reduce:transition-none ${accent}`}
+      className={`w-full rounded-md border px-3 py-2 text-left transition-colors motion-reduce:transition-none ${accent}`}
     >
       <span className="flex items-center justify-between gap-2">
         <span className="font-mono text-sm font-semibold">{nodeId}</span>
-        <span className="rounded-md bg-white/75 px-2 py-0.5 text-[10px] font-bold uppercase text-indigo-900">
+        <span className="rounded border border-current/20 bg-[var(--aria-panel)] px-1.5 py-0.5 text-[10px] font-semibold uppercase">
           {status}
         </span>
       </span>
       <span
         className={
           dropped
-            ? "mt-1 block text-xs font-medium text-indigo-950/45 line-through"
-            : "mt-1 block text-xs font-medium text-indigo-950/70"
+            ? "mt-1 block text-xs font-medium text-[var(--aria-ink-muted)] line-through"
+            : "mt-1 block text-xs font-medium text-[var(--aria-ink-muted)]"
         }
       >
         {provider || "internal"} attempt {String(item.attempt ?? 1)} rework{" "}
@@ -136,19 +134,19 @@ function WorkflowNodeButton({
 
 function colorForStatus(status: string, dropped: boolean, selected: boolean) {
   if (dropped) {
-    return "border-slate-300 bg-slate-100 text-slate-500 opacity-80";
+    return "border-[var(--aria-line)] bg-[var(--aria-panel-muted)] text-[var(--aria-ink-muted)] opacity-80";
   }
   if (selected) {
-    return "aria-selected-glow border-[#8E2D60] bg-[#8E2D60] text-white shadow-[0_8px_0_rgba(142,45,96,0.34)] hover:bg-[#A33A70] focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-orange-300";
+    return "border-[var(--aria-primary)] bg-[var(--aria-primary-soft)] text-[var(--aria-ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]";
   }
   if (status === "completed") {
-    return "border-emerald-300 bg-emerald-100 text-emerald-950 shadow-[0_6px_0_rgba(16,185,129,0.20)] hover:bg-emerald-50 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-emerald-200";
+    return "border-[var(--aria-success)] bg-[var(--aria-success-soft)] text-[var(--aria-ink)] hover:bg-[var(--aria-panel)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-success)]";
   }
   if (status === "running") {
-    return "border-cyan-300 bg-cyan-100 text-cyan-950 shadow-[0_6px_0_rgba(6,182,212,0.22)] hover:bg-cyan-50 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-cyan-200";
+    return "border-[var(--aria-primary)] bg-[var(--aria-primary-soft)] text-[var(--aria-ink)] hover:bg-[var(--aria-panel)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]";
   }
   if (status.includes("blocked") || status === "failed") {
-    return "border-orange-300 bg-orange-100 text-orange-950 shadow-[0_6px_0_rgba(249,115,22,0.22)] hover:bg-orange-50 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-orange-200";
+    return "border-[var(--aria-warning)] bg-[var(--aria-warning-soft)] text-[var(--aria-ink)] hover:bg-[var(--aria-panel)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-warning)]";
   }
-  return "border-indigo-200 bg-white text-indigo-950 shadow-[0_6px_0_rgba(129,140,248,0.22)] hover:bg-indigo-50 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-indigo-200";
+  return "border-[var(--aria-line)] bg-[var(--aria-panel)] text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]";
 }

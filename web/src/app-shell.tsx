@@ -19,11 +19,12 @@ import { AutoActionStatus } from "./components/action/AutoActionStatus";
 import { DiagnosticsPanel } from "./components/diagnostics/DiagnosticsPanel";
 import { EvidencePanel } from "./components/evidence/EvidencePanel";
 import { FlowRail } from "./components/flow/FlowRail";
-import { LearningLabHero } from "./components/learning/LearningLabHero";
 import { NodeWorkspace } from "./components/node/NodeWorkspace";
 import { ProjectManagementWorkbench } from "./components/project/ProjectManagementWorkbench";
+import { ExecutionSummaryStrip } from "./components/shell/ExecutionSummaryStrip";
 import { TaskSwitcher } from "./components/shell/TaskSwitcher";
 import { TopStatusBar } from "./components/shell/TopStatusBar";
+import { WorkbenchSurface } from "./components/shell/WorkbenchSurface";
 import { NewTaskPanel } from "./components/task/NewTaskPanel";
 import type { ExecutionContext } from "./components/task/TaskManagementWorkbench";
 import { RollbackDialog } from "./components/rollback/RollbackDialog";
@@ -332,140 +333,135 @@ export function AppShell() {
     return <ProjectManagementWorkbench onOpenExecution={setExecutionContext} />;
   }
 
+  const executionHeader = (
+    <div className="flex min-h-10 flex-wrap items-center justify-between gap-3">
+      <div className="min-w-0">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <strong className="text-base font-semibold text-[var(--aria-ink)]">Aria Web</strong>
+          <span className="rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-2 py-1 font-mono text-xs font-semibold text-[var(--aria-ink-muted)]">
+            Issue {executionContext.issueId}
+          </span>
+          <span className="rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-2 py-1 font-mono text-xs font-semibold text-[var(--aria-ink-muted)]">
+            Workspace {executionContext.workspaceId}
+          </span>
+        </div>
+      </div>
+      <div className="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-2">
+        <TaskSwitcher tasks={tasks} activeTaskId={activeTaskId} onSelectTask={handleSelectTask} />
+        <button
+          type="button"
+          onClick={() => {
+            setExecutionContext(null);
+            setError(null);
+            setRollbackOpen(false);
+            setRollbackPreviewState(null);
+            setSseConnected(false);
+          }}
+          className="inline-flex h-8 shrink-0 items-center justify-center rounded-md border border-[var(--aria-line-strong)] bg-[var(--aria-panel)] px-3 text-sm font-semibold text-[var(--aria-ink)] transition-colors hover:bg-[var(--aria-panel-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+        >
+          返回项目管理
+        </button>
+      </div>
+    </div>
+  );
+
   return (
-    <div className="min-h-screen text-[#241B2F]">
-      <header
-        role="banner"
-        className="sticky top-0 z-20 flex min-h-16 flex-wrap items-center justify-between gap-3 border-b-2 border-rose-200 bg-white/88 px-4 py-3 shadow-[0_10px_30px_rgba(249,115,22,0.12)] backdrop-blur md:px-6 lg:px-8"
-      >
-        <div>
-          <strong className="text-lg text-[#241B2F]">Aria Web</strong>
-          <span className="ml-3 hidden text-sm font-semibold text-[#5E516B] sm:inline">
-            playful coding workbench
-          </span>
-        </div>
-        <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
-          <span className="rounded-lg border-2 border-indigo-200 bg-indigo-50 px-3 py-1 font-mono text-xs font-bold text-indigo-950">
-            {executionContext.issueId}
-          </span>
-          <span className="rounded-lg border-2 border-cyan-200 bg-cyan-50 px-3 py-1 font-mono text-xs font-bold text-cyan-950">
-            {executionContext.workspaceId}
-          </span>
-          <TaskSwitcher tasks={tasks} activeTaskId={activeTaskId} onSelectTask={handleSelectTask} />
-          <button
-            type="button"
-            onClick={() => {
-              setExecutionContext(null);
-              setError(null);
-              setRollbackOpen(false);
-              setRollbackPreviewState(null);
-              setSseConnected(false);
-            }}
-            className="rounded-lg border-2 border-slate-300 bg-white px-3 py-1.5 text-sm font-bold text-slate-800 shadow-[0_4px_0_rgba(15,23,42,0.10)] transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-orange-200"
-          >
-            返回项目管理
-          </button>
-        </div>
-      </header>
-      <TopStatusBar
-        projection={
-          projection
-            ? { ...projection, sse_connected: sseConnected, running_state: busy ? "running" : "idle" }
-            : null
-        }
-      />
-      {error ? (
-        <div
-          role="alert"
-          className="border-b-2 border-rose-200 bg-rose-100 px-4 py-2 text-sm font-semibold text-rose-800 md:px-6 lg:px-8"
-        >
-          {error}
-        </div>
-      ) : null}
-      <main
-        aria-label="Aria workbench"
-        className="grid min-h-[calc(100vh-10rem)] grid-cols-1 gap-5 px-4 py-5 text-[#241B2F] md:px-6 lg:grid-cols-[minmax(0,1fr)_25rem] lg:px-8 xl:grid-cols-[minmax(0,1fr)_28rem]"
-      >
-        <section
-          role="region"
-          aria-label="Interaction window"
-          className="min-w-0 space-y-5 rounded-lg border-2 border-rose-200 bg-white/82 p-4 shadow-[0_12px_0_rgba(249,115,22,0.08),0_24px_50px_rgba(190,24,93,0.12)] md:p-5"
-        >
-          <LearningLabHero
-            activeTaskId={projection?.active_task_id ?? null}
-            nodeCount={projection?.timeline.length ?? 0}
-            artifactCount={projection?.artifact_index.length ?? 0}
-            eventCount={store.snapshot.events.length}
-            selectedNodeId={store.snapshot.selectedNodeId}
+    <>
+      <WorkbenchSurface
+        header={executionHeader}
+        statusBar={
+          <TopStatusBar
+            projection={
+              projection
+                ? {
+                    ...projection,
+                    sse_connected: sseConnected,
+                    running_state: busy ? "running" : "idle",
+                  }
+                : null
+            }
           />
-          <NewTaskPanel onCreateTask={handleCreateTask} busy={busy} />
-          {projection?.active_task_id && !projection.pending_provider_step ? (
-            <section className="rounded-lg border-2 border-orange-200 bg-orange-50 px-4 py-3 shadow-[0_8px_0_rgba(249,115,22,0.18)]">
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  className="rounded-lg border-2 border-orange-600 bg-orange-500 px-4 py-2 text-sm font-bold text-white shadow-[0_5px_0_rgba(154,52,18,0.45)] transition-colors hover:bg-orange-400 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-orange-200 disabled:border-slate-300 disabled:bg-slate-200 disabled:text-slate-500 disabled:shadow-none"
-                  disabled={busy}
-                  onClick={handleAdvanceTask}
-                >
-                  推进
-                </button>
-                {lastCheckpointId ? (
+        }
+        alert={error}
+        mainLabel="Aria workbench"
+        main={
+          <section role="region" aria-label="Interaction window" className="min-w-0 space-y-4">
+            <ExecutionSummaryStrip
+              activeTaskId={projection?.active_task_id ?? executionContext.taskId}
+              selectedNodeId={store.snapshot.selectedNodeId}
+              nodeCount={projection?.timeline.length ?? 0}
+              artifactCount={projection?.artifact_index.length ?? 0}
+              eventCount={store.snapshot.events.length}
+            />
+            <NewTaskPanel onCreateTask={handleCreateTask} busy={busy} />
+            {projection?.active_task_id && !projection.pending_provider_step ? (
+              <section className="rounded-lg border border-[var(--aria-line)] bg-[var(--aria-panel)] px-4 py-3">
+                <div className="flex flex-wrap gap-2">
                   <button
                     type="button"
-                    className="rounded-lg border-2 border-rose-300 bg-white px-4 py-2 text-sm font-bold text-[#8E2D60] shadow-[0_5px_0_rgba(190,24,93,0.16)] transition-colors hover:bg-rose-50 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-orange-200"
-                    onClick={() => void handleRollbackPreview(lastCheckpointId)}
+                    className="inline-flex h-9 items-center justify-center rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-4 text-sm font-semibold text-white transition-colors hover:bg-cyan-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] disabled:border-[var(--aria-line)] disabled:bg-[var(--aria-panel-muted)] disabled:text-[var(--aria-ink-muted)]"
+                    disabled={busy}
+                    onClick={handleAdvanceTask}
                   >
-                    回退
+                    推进
                   </button>
-                ) : null}
-              </div>
-            </section>
-          ) : null}
-          {projection?.pending_provider_step ? (
-            <ActionComposer
-              pendingStep={projection.pending_provider_step}
-              onConfirm={handleConfirmProvider}
-              onRollback={handleRollbackPreview}
-              onStop={handleStopTask}
-              running={busy}
+                  {lastCheckpointId ? (
+                    <button
+                      type="button"
+                      className="inline-flex h-9 items-center justify-center rounded-md border border-[var(--aria-line-strong)] bg-[var(--aria-panel)] px-4 text-sm font-semibold text-[var(--aria-ink)] transition-colors hover:bg-[var(--aria-panel-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+                      onClick={() => void handleRollbackPreview(lastCheckpointId)}
+                    >
+                      回退
+                    </button>
+                  ) : null}
+                </div>
+              </section>
+            ) : null}
+            {projection?.pending_provider_step ? (
+              <ActionComposer
+                pendingStep={projection.pending_provider_step}
+                onConfirm={handleConfirmProvider}
+                onRollback={handleRollbackPreview}
+                onStop={handleStopTask}
+                running={busy}
+              />
+            ) : busy ? (
+              <AutoActionStatus
+                currentAction="运行中"
+                events={store.snapshot.events}
+                onStop={handleStopTask}
+              />
+            ) : (
+              <ActionComposer
+                pendingStep={null}
+                onConfirm={handleConfirmProvider}
+                onRollback={handleRollbackPreview}
+                onStop={handleStopTask}
+                running={false}
+              />
+            )}
+            <ProviderStreamPanel events={store.snapshot.events} run={selectedNodeContext.run} />
+          </section>
+        }
+        aside={
+          <>
+            <FlowRail
+              timeline={projection?.timeline ?? []}
+              selectedNodeId={store.snapshot.selectedNodeId}
+              onSelectNode={(nodeId) => void handleSelectNode(nodeId)}
             />
-          ) : busy ? (
-            <AutoActionStatus
-              currentAction="运行中"
-              events={store.snapshot.events}
-              onStop={handleStopTask}
-            />
-          ) : (
-            <ActionComposer
-              pendingStep={null}
-              onConfirm={handleConfirmProvider}
-              onRollback={handleRollbackPreview}
-              onStop={handleStopTask}
-              running={false}
-            />
-          )}
-          <ProviderStreamPanel events={store.snapshot.events} run={selectedNodeContext.run} />
-        </section>
-        <aside className="space-y-5">
-          <FlowRail
-            timeline={projection?.timeline ?? []}
-            selectedNodeId={store.snapshot.selectedNodeId}
-            onSelectNode={(nodeId) => void handleSelectNode(nodeId)}
-          />
-          <div className="rounded-lg border-2 border-rose-200 bg-white/92 p-4 shadow-[0_10px_0_rgba(249,115,22,0.08),0_18px_34px_rgba(190,24,93,0.12)]">
             <NodeWorkspace
               context={selectedNodeContext}
               selectedTab={store.snapshot.selectedTab}
               onSelectTab={handleSelectTab}
             />
-          </div>
-          <EvidencePanel
-            artifacts={projection?.artifact_index ?? []}
-            diagnostics={projection?.diagnostics ?? []}
-          />
-        </aside>
-      </main>
+            <EvidencePanel
+              artifacts={projection?.artifact_index ?? []}
+              diagnostics={projection?.diagnostics ?? []}
+            />
+          </>
+        }
+      />
       <RollbackDialog
         open={rollbackOpen}
         preview={rollbackPreviewState}
@@ -473,7 +469,7 @@ export function AppShell() {
         onOpenChange={setRollbackOpen}
       />
       <DiagnosticsPanel diagnostics={projection?.diagnostics ?? []} />
-    </div>
+    </>
   );
 }
 
@@ -495,22 +491,22 @@ function ProviderStreamPanel({ events, run }: { events: WebEvent[]; run: unknown
     <section
       role="region"
       aria-label="Provider stream"
-      className="rounded-lg border-2 border-cyan-200 bg-white p-4 text-[#241B2F] shadow-[0_10px_0_rgba(6,182,212,0.12),0_18px_38px_rgba(15,118,110,0.14)]"
+      className="rounded-lg border border-[var(--aria-line)] bg-[var(--aria-panel)] p-4 text-[var(--aria-ink)]"
     >
       <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h2 className="text-xl font-black text-[#241B2F]">Interaction stream</h2>
-          <p className="mt-1 text-sm font-semibold text-[#5E516B]">
+          <h2 className="text-sm font-semibold text-[var(--aria-ink)]">Interaction stream</h2>
+          <p className="mt-1 text-xs font-medium text-[var(--aria-ink-muted)]">
             当前步骤：观察输出并确认下一步。
           </p>
         </div>
-        <span className="rounded-lg border-2 border-cyan-200 bg-cyan-100 px-3 py-1 text-xs font-bold text-cyan-900">
+        <span className="rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-2 py-1 text-xs font-semibold text-[var(--aria-ink-muted)]">
           live event log
         </span>
       </div>
       <div
         ref={scrollBoxRef}
-        className="min-h-[22rem] max-h-[34rem] overflow-auto rounded-lg border-2 border-rose-100 bg-rose-50/80 p-3 shadow-inner shadow-rose-200/70"
+        className="min-h-[22rem] max-h-[34rem] overflow-auto rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-3"
       >
         {messages.length > 0 ? (
           <ul aria-label="Provider output messages" aria-live="polite" className="space-y-2">
@@ -520,13 +516,13 @@ function ProviderStreamPanel({ events, run }: { events: WebEvent[]; run: unknown
                 aria-label={`${message.nodeId} ${message.stream}`}
                 className={
                   message.kind === "provider"
-                    ? "max-w-[92%] rounded-lg border-2 border-cyan-300 bg-cyan-100 px-3 py-2 text-xs text-cyan-950 shadow-[0_5px_0_rgba(6,182,212,0.16)]"
-                    : "max-w-[92%] rounded-lg border-2 border-rose-200 bg-white px-3 py-2 text-xs text-[#241B2F] shadow-[0_5px_0_rgba(190,24,93,0.12)]"
+                    ? "max-w-[92%] rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary-soft)] px-3 py-2 text-xs text-[var(--aria-ink)]"
+                    : "max-w-[92%] rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 py-2 text-xs text-[var(--aria-ink)]"
                 }
               >
-                <div className="mb-1 flex items-center gap-2 font-mono text-[11px] text-[#7A6C83]">
+                <div className="mb-1 flex items-center gap-2 font-mono text-[11px] text-[var(--aria-ink-muted)]">
                   {message.kind === "provider" ? (
-                    <span className="rounded-md bg-orange-400 px-2 py-0.5 font-bold text-white">
+                    <span className="rounded bg-[var(--aria-primary)] px-1.5 py-0.5 font-semibold text-white">
                       provider_output
                     </span>
                   ) : null}
@@ -540,7 +536,7 @@ function ProviderStreamPanel({ events, run }: { events: WebEvent[]; run: unknown
             ))}
           </ul>
         ) : (
-          <div className="font-mono text-xs font-semibold leading-5 text-[#7A6C83]">
+          <div className="font-mono text-xs font-medium leading-5 text-[var(--aria-ink-muted)]">
             等待 provider 输出...
           </div>
         )}

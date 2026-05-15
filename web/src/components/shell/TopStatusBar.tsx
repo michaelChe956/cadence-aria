@@ -23,7 +23,7 @@ export function TopStatusBar({ projection }: { projection: StatusProjection | nu
   const runningState = text(projection?.running_state, "idle");
 
   return (
-    <section className="border-b-2 border-indigo-100 bg-white/80 px-4 py-3 text-indigo-950 shadow-[0_12px_30px_rgba(79,70,229,0.12)] backdrop-blur md:px-6 lg:px-8">
+    <section className="text-[var(--aria-ink)]">
       <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
         <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-6">
           <StatusMetric label="Task" value={text(projection?.active_task_id, "no task")} />
@@ -34,17 +34,19 @@ export function TopStatusBar({ projection }: { projection: StatusProjection | nu
           <StatusMetric label="Provider" value={text(overview.provider_mode)} />
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <span className="rounded-lg border-2 border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-semibold text-indigo-900 shadow-[0_4px_0_rgba(129,140,248,0.18)]">
+          <span className="rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 py-2 text-xs font-semibold text-[var(--aria-ink-muted)]">
             Git{" "}
-            <strong className="font-mono font-bold text-indigo-950">
+            <strong className="font-mono font-semibold text-[var(--aria-ink)]">
               {text(git.branch, "detached")}
             </strong>{" "}
-            <span className="font-mono text-indigo-600">{text(git.head, "no head")}</span>
+            <span className="font-mono text-[var(--aria-ink-muted)]">
+              {text(git.head, "no head")}
+            </span>
             <span
               className={
                 git.dirty
-                  ? "ml-2 rounded-md bg-orange-200 px-1.5 py-0.5 text-orange-900"
-                  : "ml-2 rounded-md bg-emerald-200 px-1.5 py-0.5 text-emerald-900"
+                  ? "ml-2 rounded bg-[var(--aria-warning-soft)] px-1.5 py-0.5 text-[var(--aria-warning)]"
+                  : "ml-2 rounded bg-[var(--aria-success-soft)] px-1.5 py-0.5 text-[var(--aria-success)]"
               }
             >
               {git.dirty ? "dirty" : "clean"}
@@ -78,9 +80,13 @@ export function TopStatusBar({ projection }: { projection: StatusProjection | nu
 
 function StatusMetric({ label, value }: { label: string; value: string }) {
   return (
-    <div className="min-w-0 rounded-lg border-2 border-indigo-100 bg-white px-3 py-2 shadow-[0_4px_0_rgba(129,140,248,0.14)]">
-      <div className="text-[10px] font-bold uppercase text-indigo-500">{label}</div>
-      <div className="mt-1 truncate font-mono text-xs font-bold text-indigo-950">{value}</div>
+    <div className="min-w-0 rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 py-2">
+      <div className="text-[10px] font-semibold uppercase text-[var(--aria-ink-muted)]">
+        {label}
+      </div>
+      <div className="mt-1 truncate font-mono text-xs font-semibold text-[var(--aria-ink)]">
+        {value}
+      </div>
     </div>
   );
 }
@@ -96,14 +102,14 @@ function StatusPill({
 }) {
   const toneClass =
     tone === "good"
-      ? "border-emerald-300 bg-emerald-100 text-emerald-900"
+      ? "border-[var(--aria-success)] bg-[var(--aria-success-soft)] text-[var(--aria-success)]"
       : tone === "warn"
-        ? "border-orange-300 bg-orange-100 text-orange-900"
-        : "border-indigo-200 bg-indigo-50 text-indigo-700";
+        ? "border-[var(--aria-warning)] bg-[var(--aria-warning-soft)] text-[var(--aria-warning)]"
+        : "border-[var(--aria-line)] bg-[var(--aria-panel)] text-[var(--aria-ink-muted)]";
   return (
     <span
       aria-label={label}
-      className={`rounded-lg border-2 px-3 py-2 font-mono text-xs font-bold shadow-[0_4px_0_rgba(129,140,248,0.16)] ${toneClass}`}
+      className={`rounded-md border px-3 py-2 font-mono text-xs font-semibold ${toneClass}`}
     >
       {value}
     </span>
@@ -112,7 +118,7 @@ function StatusPill({
 
 function BlockedMetric({ label, value }: { label: string; value: string }) {
   return (
-    <span className="rounded-lg border-2 border-orange-200 bg-orange-100 px-3 py-2 font-semibold text-orange-900">
+    <span className="rounded-md border border-[var(--aria-warning)] bg-[var(--aria-warning-soft)] px-3 py-2 font-semibold text-[var(--aria-warning)]">
       {label}: {value}
     </span>
   );

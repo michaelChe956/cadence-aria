@@ -45,15 +45,18 @@ export function NodeWorkspace({
   const artifacts = numberText(context.overview.artifact_count, String(context.outputs.length));
 
   return (
-    <section aria-label="Node workspace details" className="min-w-0">
+    <section
+      aria-label="Node workspace details"
+      className="min-w-0 rounded-lg border border-[var(--aria-line)] bg-[var(--aria-panel)] p-4"
+    >
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h2 className="text-lg font-black text-[#241B2F]">当前节点</h2>
-          <p className="mt-1 text-sm font-semibold text-[#5E516B]">
+          <h2 className="text-sm font-semibold text-[var(--aria-ink)]">当前节点</h2>
+          <p className="mt-1 text-xs font-medium text-[var(--aria-ink-muted)]">
             当前选中节点的摘要与详细上下文。
           </p>
         </div>
-        <span className="rounded-lg border-2 border-indigo-200 bg-indigo-50 px-3 py-1 font-mono text-sm font-bold text-indigo-700">
+        <span className="rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-2 py-1 font-mono text-xs font-semibold text-[var(--aria-ink-muted)]">
           {context.node_id ?? "no node"}
         </span>
       </div>
@@ -70,7 +73,7 @@ export function NodeWorkspace({
       <div
         role="tablist"
         aria-label="Node context tabs"
-        className="mt-4 flex gap-1 overflow-x-auto border-b-2 border-indigo-100"
+        className="mt-4 flex gap-1 overflow-x-auto border-b border-[var(--aria-line)]"
       >
         {tabs.map((tab) => (
           <button
@@ -79,7 +82,7 @@ export function NodeWorkspace({
             role="tab"
             aria-selected={selectedTab === tab}
             onClick={() => onSelectTab(tab)}
-            className="rounded-t-lg border-2 border-b-0 border-transparent px-3 py-2 text-sm font-bold capitalize text-indigo-500 transition-colors hover:bg-indigo-50 hover:text-indigo-800 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-indigo-200 aria-selected:border-indigo-200 aria-selected:bg-indigo-100 aria-selected:text-indigo-900"
+            className="rounded-t-md border border-b-0 border-transparent px-3 py-2 text-sm font-semibold capitalize text-[var(--aria-ink-muted)] transition-colors hover:bg-[var(--aria-panel-muted)] hover:text-[var(--aria-ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] aria-selected:border-[var(--aria-line)] aria-selected:bg-[var(--aria-panel-muted)] aria-selected:text-[var(--aria-ink)]"
           >
             {tab === "diff" ? "Diff" : tab}
           </button>
@@ -88,7 +91,7 @@ export function NodeWorkspace({
       {selectedTab === "overview" ? (
         <OverviewCard value={context.overview} />
       ) : (
-        <pre className="mt-3 max-h-80 min-h-40 overflow-auto rounded-lg border-2 border-indigo-100 bg-indigo-50/80 p-3 text-xs leading-5 text-indigo-950 shadow-inner shadow-indigo-200/80">
+        <pre className="mt-3 max-h-80 min-h-40 overflow-auto rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-3 text-xs leading-5 text-[var(--aria-ink)]">
           {renderJson(tabItems[selectedTab])}
         </pre>
       )}
@@ -100,21 +103,23 @@ function OverviewCard({ value }: { value: Record<string, unknown> }) {
   const entries = Object.entries(value);
   if (entries.length === 0) {
     return (
-      <div className="mt-3 rounded-lg border-2 border-dashed border-indigo-100 bg-indigo-50/70 p-4 text-sm font-semibold text-indigo-600">
+      <div className="mt-3 rounded-md border border-dashed border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-4 text-sm font-medium text-[var(--aria-ink-muted)]">
         暂无节点概览
       </div>
     );
   }
 
   return (
-    <div className="mt-3 grid gap-2 rounded-lg border-2 border-indigo-100 bg-white p-3 shadow-inner shadow-indigo-100/80">
+    <div className="mt-3 grid gap-2 rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] p-3">
       {entries.map(([key, item]) => (
         <div
           key={key}
-          className="grid grid-cols-[7rem_minmax(0,1fr)] gap-2 rounded-lg bg-indigo-50/80 px-3 py-2 text-sm"
+          className="grid grid-cols-[7rem_minmax(0,1fr)] gap-2 rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-3 py-2 text-sm"
         >
-          <span className="font-black capitalize text-indigo-600">{key.replaceAll("_", " ")}</span>
-          <span className="break-words font-semibold text-indigo-950">{String(item)}</span>
+          <span className="font-semibold capitalize text-[var(--aria-ink-muted)]">
+            {key.replaceAll("_", " ")}
+          </span>
+          <span className="break-words font-medium text-[var(--aria-ink)]">{String(item)}</span>
         </div>
       ))}
     </div>
@@ -131,15 +136,15 @@ function SummaryTile({
   tone: "indigo" | "cyan" | "orange" | "emerald";
 }) {
   const toneClass = {
-    indigo: "border-indigo-200 bg-indigo-50 text-indigo-800",
-    cyan: "border-cyan-200 bg-cyan-50 text-cyan-800",
-    orange: "border-orange-200 bg-orange-50 text-orange-800",
-    emerald: "border-emerald-200 bg-emerald-50 text-emerald-800",
+    indigo: "border-[var(--aria-line)] bg-[var(--aria-panel-muted)] text-[var(--aria-ink)]",
+    cyan: "border-[var(--aria-primary)] bg-[var(--aria-primary-soft)] text-[var(--aria-ink)]",
+    orange: "border-[var(--aria-warning)] bg-[var(--aria-warning-soft)] text-[var(--aria-warning)]",
+    emerald: "border-[var(--aria-success)] bg-[var(--aria-success-soft)] text-[var(--aria-success)]",
   }[tone];
   return (
-    <div className={`min-w-0 rounded-lg border-2 px-3 py-2 ${toneClass}`}>
-      <div className="text-[10px] font-bold uppercase opacity-75">{label}</div>
-      <div className="mt-1 truncate font-mono text-sm font-bold">{value}</div>
+    <div className={`min-w-0 rounded-md border px-3 py-2 ${toneClass}`}>
+      <div className="text-[10px] font-semibold uppercase opacity-75">{label}</div>
+      <div className="mt-1 truncate font-mono text-sm font-semibold">{value}</div>
     </div>
   );
 }

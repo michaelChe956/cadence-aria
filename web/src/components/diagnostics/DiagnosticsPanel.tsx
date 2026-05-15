@@ -12,16 +12,20 @@ export function DiagnosticsPanel({ diagnostics }: { diagnostics: Array<Record<st
     items: diagnostics.filter((item) => item.category === group || item.code === group),
   }));
 
+  if (grouped.every(({ items }) => items.length === 0)) {
+    return null;
+  }
+
   return (
-    <section className="border-t-2 border-indigo-100 bg-white/75 px-4 py-2 backdrop-blur md:px-6 lg:px-8">
+    <section className="border-t border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-4 py-2 md:px-6 lg:px-8">
       <div className="flex flex-wrap gap-2 text-xs">
         {grouped.map(({ group, items }) => (
           <span
             key={group}
             className={
               items.length > 0
-                ? "rounded-lg border-2 border-rose-200 bg-rose-100 px-2 py-1 font-bold text-rose-900"
-                : "rounded-lg border-2 border-indigo-100 bg-indigo-50 px-2 py-1 font-bold text-indigo-500"
+                ? "rounded-md border border-[var(--aria-danger)] bg-[var(--aria-danger-soft)] px-2 py-1 font-semibold text-[var(--aria-danger)]"
+                : "rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] px-2 py-1 font-semibold text-[var(--aria-ink-muted)]"
             }
           >
             {group}: {items.length}
