@@ -113,7 +113,7 @@ pub struct RepositoryRecord {
 pub struct IssueRecord {
     pub id: String,
     pub project_id: String,
-    pub repo_id: String,
+    pub repo_id: Option<String>,
     pub title: String,
     pub description: Option<String>,
     pub change_id: String,

@@ -3,6 +3,9 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AppShell } from "./main";
 
+const EXECUTION_WORKSPACE_ID = "product:project_0001:repository_0001";
+const EXECUTION_WORKSPACE_QUERY = encodeURIComponent(EXECUTION_WORKSPACE_ID);
+
 describe("AppShell", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -14,16 +17,18 @@ describe("AppShell", () => {
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
         if (url === "/api/projects") return jsonResponse({ projects: [] });
-        if (url === "/api/issues") return jsonResponse({ issues: [] });
         return jsonResponse({});
       }),
     );
 
     render(<AppShell />);
 
-    expect(await screen.findByRole("main", { name: "项目管理工作台" })).toBeInTheDocument();
-    expect(screen.getByText("项目工作台")).toBeInTheDocument();
-    expect(screen.getByText("暂无 Issue")).toBeInTheDocument();
+    expect(await screen.findByRole("main", { name: "任务管理页面" })).toBeInTheDocument();
+    expect(screen.getByRole("navigation", { name: "Workspace 选择" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Issue 生命周期看板" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Issue 驱动 Workspace" })).toHaveTextContent(
+      "请选择一个 Issue",
+    );
   });
 
   it("resets page scroll to the top when the workbench loads", () => {
@@ -44,7 +49,7 @@ describe("AppShell", () => {
 
   it("places the interaction window before the workflow navigation", async () => {
     stubExecutionFetch((url) => {
-      if (url === "/api/projection?task_id=task_0001&workspace_id=workspace_0001") {
+      if (url === `/api/projection?task_id=task_0001&workspace_id=${EXECUTION_WORKSPACE_QUERY}`) {
         return jsonResponse(projection(null));
       }
       return null;
@@ -62,7 +67,7 @@ describe("AppShell", () => {
 
   it("renders execution workbench as compact operations surface", async () => {
     stubExecutionFetch((url) => {
-      if (url === "/api/projection?task_id=task_0001&workspace_id=workspace_0001") {
+      if (url === `/api/projection?task_id=task_0001&workspace_id=${EXECUTION_WORKSPACE_QUERY}`) {
         return jsonResponse(projection(null));
       }
       return null;
@@ -74,7 +79,7 @@ describe("AppShell", () => {
 
     expect(screen.getByRole("banner")).toHaveTextContent("Aria Web");
     expect(screen.getByRole("banner")).toHaveTextContent("issue_0001");
-    expect(screen.getByRole("banner")).toHaveTextContent("workspace_0001");
+    expect(screen.getByRole("banner")).toHaveTextContent(EXECUTION_WORKSPACE_ID);
     expect(screen.getByRole("main", { name: "Aria workbench" })).toBeInTheDocument();
     expect(screen.getByRole("region", { name: "Interaction window" })).toBeInTheDocument();
     expect(screen.getByRole("region", { name: "Provider stream" })).toBeInTheDocument();
@@ -85,7 +90,7 @@ describe("AppShell", () => {
 
   it("starts an issue with a workspace and opens the execution workbench", async () => {
     stubExecutionFetch((url) => {
-      if (url === "/api/projection?task_id=task_0001&workspace_id=workspace_0001") {
+      if (url === `/api/projection?task_id=task_0001&workspace_id=${EXECUTION_WORKSPACE_QUERY}`) {
         return jsonResponse(projection(null));
       }
       return null;
@@ -95,13 +100,13 @@ describe("AppShell", () => {
 
     expect(await screen.findByRole("main", { name: "Aria workbench" })).toBeInTheDocument();
     expect(screen.getByRole("banner")).toHaveTextContent("issue_0001");
-    expect(screen.getByRole("banner")).toHaveTextContent("workspace_0001");
+    expect(screen.getByRole("banner")).toHaveTextContent(EXECUTION_WORKSPACE_ID);
   });
 
   it("starts an issue then advances into provider confirmation", async () => {
     let advanced = false;
     stubExecutionFetch((url) => {
-      if (url === "/api/tasks/task_0001/advance?workspace_id=workspace_0001") {
+      if (url === `/api/tasks/task_0001/advance?workspace_id=${EXECUTION_WORKSPACE_QUERY}`) {
         advanced = true;
         return jsonResponse({ status: "paused_for_approval", pending_step: pendingStep() });
       }
@@ -122,15 +127,18 @@ describe("AppShell", () => {
     let advanced = false;
     let confirmed = false;
     stubExecutionFetch((url) => {
-      if (url === "/api/tasks/task_0001/advance?workspace_id=workspace_0001") {
+      if (url === `/api/tasks/task_0001/advance?workspace_id=${EXECUTION_WORKSPACE_QUERY}`) {
         advanced = true;
         return jsonResponse({ status: "paused_for_approval", pending_step: pendingStep() });
       }
-      if (url === "/api/tasks/task_0001/confirm?workspace_id=workspace_0001") {
+      if (url === `/api/tasks/task_0001/confirm?workspace_id=${EXECUTION_WORKSPACE_QUERY}`) {
         confirmed = true;
         return jsonResponse({ status: "provider_started", node_id: "N16", turn_id: "turn_0001" });
       }
-      if (url === "/api/projection?task_id=task_0001&node_id=N16&workspace_id=workspace_0001") {
+      if (
+        url ===
+        `/api/projection?task_id=task_0001&node_id=N16&workspace_id=${EXECUTION_WORKSPACE_QUERY}`
+      ) {
         return jsonResponse(projectionWithRunOutput());
       }
       if (url.startsWith("/api/projection")) {
@@ -150,7 +158,10 @@ describe("AppShell", () => {
 
   it("loads selected node context when a workflow node is clicked", async () => {
     const fetchSpy = stubExecutionFetch((url) => {
-      if (url === "/api/projection?task_id=task_0001&node_id=N17&workspace_id=workspace_0001") {
+      if (
+        url ===
+        `/api/projection?task_id=task_0001&node_id=N17&workspace_id=${EXECUTION_WORKSPACE_QUERY}`
+      ) {
         return jsonResponse(projectionWithSelectedNode("N17"));
       }
       if (url.startsWith("/api/projection")) {
@@ -167,7 +178,7 @@ describe("AppShell", () => {
     expect(within(summary).getByText("N17")).toBeInTheDocument();
     expect(within(summary).getByText("running")).toBeInTheDocument();
     expect(fetchSpy).toHaveBeenCalledWith(
-      "/api/projection?task_id=task_0001&node_id=N17&workspace_id=workspace_0001",
+      `/api/projection?task_id=task_0001&node_id=N17&workspace_id=${EXECUTION_WORKSPACE_QUERY}`,
       expect.objectContaining({
         headers: expect.objectContaining({ "content-type": "application/json" }),
       }),
@@ -187,7 +198,7 @@ describe("AppShell", () => {
       },
     );
     stubExecutionFetch((url) => {
-      if (url === "/api/projection?task_id=task_0001&workspace_id=workspace_0001") {
+      if (url === `/api/projection?task_id=task_0001&workspace_id=${EXECUTION_WORKSPACE_QUERY}`) {
         if (refreshed) {
           return jsonResponse(projectionWithRunOutput());
         }
@@ -217,7 +228,7 @@ describe("AppShell", () => {
   it("ignores SSE events for other tasks", async () => {
     const eventSources: MockEventSource[] = [];
     const fetchSpy = stubExecutionFetch((url) => {
-      if (url === "/api/projection?task_id=task_0001&workspace_id=workspace_0001") {
+      if (url === `/api/projection?task_id=task_0001&workspace_id=${EXECUTION_WORKSPACE_QUERY}`) {
         return jsonResponse(projection(pendingStep()));
       }
       if (url.startsWith("/api/projection?task_id=task_9999")) {
@@ -304,8 +315,6 @@ function stubEmptyManagementFetch() {
     vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url === "/api/projects") return jsonResponse({ projects: [] });
-      if (url === "/api/workspaces") return jsonResponse({ workspaces: [] });
-      if (url === "/api/issues") return jsonResponse({ issues: [] });
       return jsonResponse({});
     }),
   );
@@ -329,15 +338,21 @@ function stubExecutionFetch(
 
 function executionManagementResponse(url: string) {
   if (url === "/api/projects") return jsonResponse({ projects: [projectFixture()] });
-  if (url === "/api/workspaces") return jsonResponse({ workspaces: [workspaceFixture()] });
-  if (url === "/api/issues") return jsonResponse({ issues: [issueFixture()] });
-  if (url === "/api/issues/issue_0001/start") {
+  if (url === "/api/projects/project_0001/repositories") {
+    return jsonResponse({ repositories: [repositoryFixture()] });
+  }
+  if (url === "/api/projects/project_0001/issues") {
+    return jsonResponse({ issues: [issueFixture()] });
+  }
+  if (url === "/api/projects/project_0001/issues/issue_0001/start") {
     return jsonResponse({
       issue_id: "issue_0001",
-      workspace_id: "workspace_0001",
+      project_id: "project_0001",
+      repository_id: "repository_0001",
+      workspace_id: EXECUTION_WORKSPACE_ID,
       task_id: "task_0001",
       session_id: "sess_task_0001",
-      status: "started",
+      status: "in_progress",
     });
   }
   return null;
@@ -349,7 +364,9 @@ async function openExecutionWorkbench() {
 }
 
 async function openSeededExecutionWorkbench() {
-  await userEvent.click(await screen.findByRole("button", { name: "打开执行" }));
+  await userEvent.click(await screen.findByRole("button", { name: "运行 Issue" }));
+  const runDialog = await screen.findByRole("dialog", { name: "运行 Issue" });
+  await userEvent.click(within(runDialog).getByRole("button", { name: "开始运行" }));
   return screen.findByRole("main", { name: "Aria workbench" });
 }
 
@@ -364,11 +381,14 @@ function projectFixture() {
   };
 }
 
-function workspaceFixture() {
+function repositoryFixture() {
   return {
-    workspace_id: "workspace_0001",
+    repository_id: "repository_0001",
+    project_id: "project_0001",
     name: "Repo",
     path: "/tmp/repo",
+    repo_hash: "hash_repo",
+    runtime_root: "/tmp/repo/.aria/runtime",
     default_policy_preset: "manual-write",
     default_provider_mode: "fake",
     created_at: "2026-05-14T00:00:00Z",
@@ -379,13 +399,14 @@ function workspaceFixture() {
 function issueFixture() {
   return {
     issue_id: "issue_0001",
+    project_id: "project_0001",
+    repo_id: null,
     title: "Implement picker",
     description: "Select repo",
-    status: "in_progress",
-    workspace_id: "workspace_0001",
-    task_id: "task_0001",
-    session_id: "sess_task_0001",
     change_id: "implement-picker",
+    phase: "clarification",
+    status: "draft",
+    active_binding_id: null,
     created_at: "2026-05-14T00:00:00Z",
     updated_at: "2026-05-14T00:00:00Z",
   };

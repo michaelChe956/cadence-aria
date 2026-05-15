@@ -12,9 +12,15 @@ use tokio_stream::wrappers::BroadcastStream;
 use crate::interactive::models::WebWorkspaceProjection;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::gate_store::GateStore;
+use crate::product::issue_store::{CreateProductIssueInput, IssueStore, StartProductIssueInput};
 use crate::product::json_store::{ProductStoreError, validate_relative_id};
-use crate::product::models::{GateStatus, ProjectRecord};
+use crate::product::models::{
+    GateStatus, IssuePhase as ProductIssuePhase, IssueRecord as ProductIssueRecord,
+    IssueStatus as ProductIssueStatus, ProjectRecord, RepositoryRecord,
+};
 use crate::product::project_store::{CreateProjectInput, ProjectStore};
+use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
+use crate::product::runtime_binding_store::{CreateRuntimeBindingInput, RuntimeBindingStore};
 use crate::web::error::{ApiError, ApiResult};
 use crate::web::events::WebEventType;
 use crate::web::issue_registry::{CreateIssueInput, IssueRecord, IssueRegistry, IssueStatus};
@@ -23,13 +29,15 @@ use crate::web::runtime::WebRuntime;
 use crate::web::state::WebAppState;
 use crate::web::types::{
     AdvanceTaskResponse, ArtifactContentResponse, ConfirmTaskRequest, ConfirmTaskResponse,
-    CreateIssueRequest, CreateProjectRequest, CreateTaskRequest, CreateTaskResponse,
-    CreateWorkspaceRequest, FileContentResponse, FileDiffResponse, IssueDto, IssueListResponse,
-    IssueRollbackPreviewRequest, IssueRollbackRequest, ProjectDto, ProjectListResponse,
-    ProviderInputContentResponse, ResolveGateRequest, ResolveGateResponse, RollbackPreviewRequest,
-    RollbackPreviewResponse, RollbackRequest, RollbackResponse, StartIssueRequest,
-    StartIssueResponse, StopTaskResponse, TaskListResponse, WebEvent, WorkspaceDto,
-    WorkspaceListResponse,
+    CreateIssueRequest, CreateProductIssueRequest, CreateProjectRequest, CreateRepositoryRequest,
+    CreateTaskRequest, CreateTaskResponse, CreateWorkspaceRequest, FileContentResponse,
+    FileDiffResponse, IssueDto, IssueListResponse, IssueRollbackPreviewRequest,
+    IssueRollbackRequest, ProductIssueDto, ProductIssueListResponse, ProjectDto,
+    ProjectListResponse, ProviderInputContentResponse, RepositoryDto, RepositoryListResponse,
+    ResolveGateRequest, ResolveGateResponse, RollbackPreviewRequest, RollbackPreviewResponse,
+    RollbackRequest, RollbackResponse, StartIssueRequest, StartIssueResponse,
+    StartProductIssueRequest, StartProductIssueResponse, StopTaskResponse, TaskListResponse,
+    WebEvent, WorkspaceDto, WorkspaceListResponse,
 };
 use crate::web::workspace_registry::{CreateWorkspaceInput, WorkspaceRecord, WorkspaceRegistry};
 
@@ -155,6 +163,135 @@ pub async fn open_project(
     let store = ProjectStore::new(product_app_paths(&state));
     let project = store.open(&project_id).map_err(product_store_api_error)?;
     Ok(Json(project_dto(project)))
+}
+
+pub async fn list_repositories(
+    State(state): State<WebAppState>,
+    Path(project_id): Path<String>,
+) -> ApiResult<Json<RepositoryListResponse>> {
+    let store = RepositoryStore::new(product_app_paths(&state));
+    let repositories = store.list(&project_id).map_err(product_store_api_error)?;
+    Ok(Json(RepositoryListResponse {
+        repositories: repositories.into_iter().map(repository_dto).collect(),
+    }))
+}
+
+pub async fn create_repository(
+    State(state): State<WebAppState>,
+    Path(project_id): Path<String>,
+    Json(request): Json<CreateRepositoryRequest>,
+) -> ApiResult<Json<RepositoryDto>> {
+    let store = RepositoryStore::new(product_app_paths(&state));
+    let repository = store
+        .create(CreateRepositoryInput {
+            project_id,
+            name: request.name,
+            path: request.path.into(),
+            default_policy_preset: request.default_policy_preset,
+            default_provider_mode: request.default_provider_mode,
+        })
+        .map_err(product_store_api_error)?;
+    Ok(Json(repository_dto(repository)))
+}
+
+pub async fn list_product_issues(
+    State(state): State<WebAppState>,
+    Path(project_id): Path<String>,
+) -> ApiResult<Json<ProductIssueListResponse>> {
+    let store = IssueStore::new(product_app_paths(&state));
+    let issues = store.list(&project_id).map_err(product_store_api_error)?;
+    Ok(Json(ProductIssueListResponse {
+        issues: issues.into_iter().map(product_issue_dto).collect(),
+    }))
+}
+
+pub async fn create_product_issue(
+    State(state): State<WebAppState>,
+    Path(project_id): Path<String>,
+    Json(request): Json<CreateProductIssueRequest>,
+) -> ApiResult<Json<ProductIssueDto>> {
+    let store = IssueStore::new(product_app_paths(&state));
+    let issue = store
+        .create(CreateProductIssueInput {
+            project_id,
+            repo_id: None,
+            title: request.title,
+            description: request.description,
+            change_id: request.change_id,
+        })
+        .map_err(product_store_api_error)?;
+    Ok(Json(product_issue_dto(issue)))
+}
+
+pub async fn start_product_issue(
+    State(state): State<WebAppState>,
+    Path((project_id, issue_id)): Path<(String, String)>,
+    Json(request): Json<StartProductIssueRequest>,
+) -> ApiResult<Json<StartProductIssueResponse>> {
+    let app_paths = product_app_paths(&state);
+    let issue_store = IssueStore::new(app_paths.clone());
+    let repository = find_repository(&app_paths, &project_id, &request.repository_id)?;
+    let issue = issue_store
+        .get(&project_id, &issue_id)
+        .map_err(product_store_api_error)?;
+
+    let mut runtime = WebRuntime::new_fake(repository.path.clone());
+    let created = runtime.create_task(CreateTaskRequest {
+        request_text: issue
+            .description
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| issue.title.clone()),
+        change_id: issue.change_id.clone(),
+        policy_preset: request
+            .policy_preset
+            .unwrap_or_else(|| repository.default_policy_preset.clone()),
+        provider_mode: request
+            .provider_mode
+            .unwrap_or_else(|| repository.default_provider_mode.clone()),
+        timeout_secs: request.timeout_secs.unwrap_or(2400),
+    })?;
+
+    let binding = RuntimeBindingStore::new(app_paths.clone())
+        .create(CreateRuntimeBindingInput {
+            project_id: project_id.clone(),
+            issue_id: issue_id.clone(),
+            repo_id: repository.id.clone(),
+            change_id: issue.change_id,
+            task_id: Some(created.task_id.clone()),
+            session_id: Some(created.session_id.clone()),
+            runtime_root: repository.runtime_root.clone(),
+        })
+        .map_err(product_store_api_error)?;
+    let started = issue_store
+        .start(StartProductIssueInput {
+            project_id: project_id.clone(),
+            issue_id,
+            repo_id: repository.id.clone(),
+            active_binding_id: binding.id,
+        })
+        .map_err(product_store_api_error)?;
+    let workspace_id = product_execution_workspace_id(&project_id, &repository.id);
+    state.events.publish(
+        WebEventType::ProjectionUpdated.as_str(),
+        Some(&created.task_id),
+        json!({
+            "project_id": project_id,
+            "issue_id": started.id,
+            "repository_id": repository.id,
+            "workspace_id": workspace_id,
+            "phase": created.phase
+        }),
+    );
+    Ok(Json(StartProductIssueResponse {
+        issue_id: started.id,
+        project_id,
+        repository_id: repository.id,
+        workspace_id,
+        task_id: created.task_id,
+        session_id: created.session_id,
+        status: product_issue_status_text(&started.status).to_string(),
+    }))
 }
 
 pub async fn list_issues(State(state): State<WebAppState>) -> ApiResult<Json<IssueListResponse>> {
@@ -791,7 +928,19 @@ fn resolve_workspace_root(
 ) -> ApiResult<std::path::PathBuf> {
     let workspace_registry = WorkspaceRegistry::new(app_root.to_path_buf());
     if let Some(workspace_id) = workspace_id {
-        return Ok(workspace_registry.get(workspace_id)?.path);
+        match workspace_registry.get(workspace_id) {
+            Ok(workspace) => return Ok(workspace.path),
+            Err(error) if error.code() == "workspace_not_found" => {
+                if let Some((project_id, repository_id)) =
+                    parse_product_execution_workspace_id(workspace_id)
+                {
+                    let app_paths = ProductAppPaths::new(app_root.join(".aria"));
+                    return Ok(find_repository(&app_paths, project_id, repository_id)?.path);
+                }
+                return Err(error.into());
+            }
+            Err(error) => return Err(error.into()),
+        }
     }
     if let Some(task_id) = task_id {
         match IssueRegistry::new(app_root.to_path_buf()).find_by_task(task_id) {
@@ -849,6 +998,37 @@ fn project_dto(record: ProjectRecord) -> ProjectDto {
     }
 }
 
+fn repository_dto(record: RepositoryRecord) -> RepositoryDto {
+    RepositoryDto {
+        repository_id: record.id,
+        project_id: record.project_id,
+        name: record.name,
+        path: record.path.to_string_lossy().to_string(),
+        repo_hash: record.repo_hash,
+        runtime_root: record.runtime_root.to_string_lossy().to_string(),
+        default_policy_preset: record.default_policy_preset,
+        default_provider_mode: record.default_provider_mode,
+        created_at: record.created_at,
+        updated_at: record.updated_at,
+    }
+}
+
+fn product_issue_dto(record: ProductIssueRecord) -> ProductIssueDto {
+    ProductIssueDto {
+        issue_id: record.id,
+        project_id: record.project_id,
+        repo_id: record.repo_id,
+        title: record.title,
+        description: record.description,
+        change_id: record.change_id,
+        phase: product_issue_phase_text(&record.phase).to_string(),
+        status: product_issue_status_text(&record.status).to_string(),
+        active_binding_id: record.active_binding_id,
+        created_at: record.created_at,
+        updated_at: record.updated_at,
+    }
+}
+
 fn issue_dto(record: IssueRecord) -> IssueDto {
     IssueDto {
         issue_id: record.issue_id,
@@ -861,6 +1041,55 @@ fn issue_dto(record: IssueRecord) -> IssueDto {
         change_id: record.change_id,
         created_at: record.created_at.to_rfc3339(),
         updated_at: record.updated_at.to_rfc3339(),
+    }
+}
+
+fn find_repository(
+    app_paths: &ProductAppPaths,
+    project_id: &str,
+    repository_id: &str,
+) -> ApiResult<RepositoryRecord> {
+    RepositoryStore::new(app_paths.clone())
+        .list(project_id)
+        .map_err(product_store_api_error)?
+        .into_iter()
+        .find(|repository| repository.id == repository_id)
+        .ok_or_else(|| {
+            product_store_api_error(ProductStoreError::NotFound {
+                kind: "repository",
+                id: repository_id.to_string(),
+            })
+        })
+}
+
+fn product_execution_workspace_id(project_id: &str, repository_id: &str) -> String {
+    format!("product:{project_id}:{repository_id}")
+}
+
+fn parse_product_execution_workspace_id(value: &str) -> Option<(&str, &str)> {
+    let mut parts = value.split(':');
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some("product"), Some(project_id), Some(repository_id), None) => {
+            Some((project_id, repository_id))
+        }
+        _ => None,
+    }
+}
+
+fn product_issue_phase_text(phase: &ProductIssuePhase) -> &'static str {
+    match phase {
+        ProductIssuePhase::Clarification => "clarification",
+        ProductIssuePhase::Development => "development",
+        ProductIssuePhase::Acceptance => "acceptance",
+    }
+}
+
+fn product_issue_status_text(status: &ProductIssueStatus) -> &'static str {
+    match status {
+        ProductIssueStatus::Draft => "draft",
+        ProductIssueStatus::InProgress => "in_progress",
+        ProductIssueStatus::Completed => "completed",
+        ProductIssueStatus::Blocked => "blocked",
     }
 }
 
@@ -899,6 +1128,12 @@ fn product_store_api_error(error: ProductStoreError) -> ApiError {
         ProductStoreError::NotFound {
             kind: "project", ..
         } => ApiError::runtime("project_not_found", "project not found", json!({})),
+        ProductStoreError::NotFound {
+            kind: "repository", ..
+        } => ApiError::runtime("repository_not_found", "repository not found", json!({})),
+        ProductStoreError::NotFound { kind: "issue", .. } => {
+            ApiError::runtime("issue_not_found", "issue not found", json!({}))
+        }
         ProductStoreError::NotFound { kind: "gate", .. } => {
             ApiError::runtime("gate_not_found", "gate not found", json!({}))
         }

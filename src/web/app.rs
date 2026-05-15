@@ -30,6 +30,18 @@ pub fn build_web_router(state: WebAppState) -> Router {
             post(handlers::open_project),
         )
         .route(
+            "/api/projects/{project_id}/repositories",
+            get(handlers::list_repositories).post(handlers::create_repository),
+        )
+        .route(
+            "/api/projects/{project_id}/issues",
+            get(handlers::list_product_issues).post(handlers::create_product_issue),
+        )
+        .route(
+            "/api/projects/{project_id}/issues/{issue_id}/start",
+            post(handlers::start_product_issue),
+        )
+        .route(
             "/api/issues",
             get(handlers::list_issues).post(handlers::create_issue),
         )

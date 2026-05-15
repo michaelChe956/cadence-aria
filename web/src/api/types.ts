@@ -80,10 +80,34 @@ export type Project = {
   last_opened_at: string | null;
 };
 
+export type Repository = {
+  repository_id: string;
+  project_id: string;
+  name: string;
+  path: string;
+  repo_hash: string;
+  runtime_root: string;
+  default_policy_preset: string;
+  default_provider_mode: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type RepositoryListResponse = {
+  repositories: Repository[];
+};
+
+export type CreateRepositoryRequest = {
+  name: string;
+  path: string;
+  default_policy_preset?: string | null;
+  default_provider_mode?: string | null;
+};
+
 export type ProductIssue = {
   issue_id: string;
   project_id: string;
-  repo_id: string;
+  repo_id: string | null;
   title: string;
   description: string | null;
   change_id: string;
@@ -92,6 +116,33 @@ export type ProductIssue = {
   active_binding_id: string | null;
   created_at: string;
   updated_at: string;
+};
+
+export type ProductIssueListResponse = {
+  issues: ProductIssue[];
+};
+
+export type CreateProductIssueRequest = {
+  title: string;
+  description?: string | null;
+  change_id?: string | null;
+};
+
+export type StartProductIssueRequest = {
+  repository_id: string;
+  policy_preset?: string | null;
+  provider_mode?: string | null;
+  timeout_secs?: number | null;
+};
+
+export type StartProductIssueResponse = {
+  issue_id: string;
+  project_id: string;
+  repository_id: string;
+  workspace_id: string;
+  task_id: string;
+  session_id: string;
+  status: string;
 };
 
 export type ProductWebEvent = WebEvent & {

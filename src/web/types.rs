@@ -277,6 +277,87 @@ pub struct CreateProjectRequest {
     pub description: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RepositoryDto {
+    pub repository_id: String,
+    pub project_id: String,
+    pub name: String,
+    pub path: String,
+    pub repo_hash: String,
+    pub runtime_root: String,
+    pub default_policy_preset: String,
+    pub default_provider_mode: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RepositoryListResponse {
+    pub repositories: Vec<RepositoryDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct CreateRepositoryRequest {
+    pub name: String,
+    pub path: String,
+    pub default_policy_preset: Option<String>,
+    pub default_provider_mode: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ProductIssueDto {
+    pub issue_id: String,
+    pub project_id: String,
+    pub repo_id: Option<String>,
+    pub title: String,
+    pub description: Option<String>,
+    pub change_id: String,
+    pub phase: String,
+    pub status: String,
+    pub active_binding_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ProductIssueListResponse {
+    pub issues: Vec<ProductIssueDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct CreateProductIssueRequest {
+    pub title: String,
+    pub description: Option<String>,
+    pub change_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct StartProductIssueRequest {
+    pub repository_id: String,
+    pub policy_preset: Option<String>,
+    pub provider_mode: Option<String>,
+    pub timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct StartProductIssueResponse {
+    pub issue_id: String,
+    pub project_id: String,
+    pub repository_id: String,
+    pub workspace_id: String,
+    pub task_id: String,
+    pub session_id: String,
+    pub status: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct IssueListResponse {

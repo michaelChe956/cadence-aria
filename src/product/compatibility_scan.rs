@@ -68,7 +68,7 @@ pub fn rebuild_index_from_runtime(
                 summary.issues_created += 1;
                 issue_store.create(CreateProductIssueInput {
                     project_id: project.id.clone(),
-                    repo_id: repository.id.clone(),
+                    repo_id: Some(repository.id.clone()),
                     title: runtime_task.title.clone(),
                     description: None,
                     change_id: Some(runtime_task.change_id.clone()),
@@ -204,7 +204,7 @@ fn find_issue_by_change_id(
 ) -> Option<IssueRecord> {
     issues
         .into_iter()
-        .find(|issue| issue.repo_id == repo_id && issue.change_id == change_id)
+        .find(|issue| issue.repo_id.as_deref() == Some(repo_id) && issue.change_id == change_id)
 }
 
 fn has_existing_task_binding(
@@ -214,7 +214,10 @@ fn has_existing_task_binding(
     task_id: &str,
     issues: &[IssueRecord],
 ) -> Result<bool, ProductStoreError> {
-    for issue in issues.iter().filter(|issue| issue.repo_id == repo_id) {
+    for issue in issues
+        .iter()
+        .filter(|issue| issue.repo_id.as_deref() == Some(repo_id))
+    {
         if binding_store
             .find_by_repo_and_task(project_id, &issue.id, repo_id, task_id)?
             .is_some()

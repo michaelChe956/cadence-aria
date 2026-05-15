@@ -2,17 +2,25 @@ import type {
   ApiError,
   ArtifactContentResponse,
   CreateIssueRequest,
+  CreateProductIssueRequest,
   CreateWorkspaceRequest,
+  CreateRepositoryRequest,
   CreateTaskRequest,
   CreateTaskResponse,
   FileContentResponse,
   FileDiffResponse,
   Issue,
   IssueListResponse,
+  ProductIssue,
+  ProductIssueListResponse,
   Project,
+  Repository,
+  RepositoryListResponse,
   RollbackPreviewResponse,
   StartIssueRequest,
   StartIssueResponse,
+  StartProductIssueRequest,
+  StartProductIssueResponse,
   StopTaskResponse,
   TaskListResponse,
   WebWorkspaceProjection,
@@ -85,6 +93,52 @@ export function createProject(payload: {
     method: "POST",
     body: JSON.stringify(payload),
   });
+}
+
+export function listRepositories(projectId: string): Promise<RepositoryListResponse> {
+  return requestJson<RepositoryListResponse>(
+    `/api/projects/${encodeURIComponent(projectId)}/repositories`,
+  );
+}
+
+export function createRepository(
+  projectId: string,
+  payload: CreateRepositoryRequest,
+): Promise<Repository> {
+  return requestJson<Repository>(`/api/projects/${encodeURIComponent(projectId)}/repositories`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function listProductIssues(projectId: string): Promise<ProductIssueListResponse> {
+  return requestJson<ProductIssueListResponse>(
+    `/api/projects/${encodeURIComponent(projectId)}/issues`,
+  );
+}
+
+export function createProductIssue(
+  projectId: string,
+  payload: CreateProductIssueRequest,
+): Promise<ProductIssue> {
+  return requestJson<ProductIssue>(`/api/projects/${encodeURIComponent(projectId)}/issues`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function startProductIssue(
+  projectId: string,
+  issueId: string,
+  payload: StartProductIssueRequest,
+): Promise<StartProductIssueResponse> {
+  return requestJson<StartProductIssueResponse>(
+    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/start`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
 }
 
 export function listIssues(): Promise<IssueListResponse> {

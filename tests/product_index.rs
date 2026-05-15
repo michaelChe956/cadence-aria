@@ -115,7 +115,7 @@ fn creates_project_repository_issue_and_runtime_binding() {
     let issue = IssueStore::new(paths.clone())
         .create(CreateProductIssueInput {
             project_id: project.id.clone(),
-            repo_id: repository.id.clone(),
+            repo_id: Some(repository.id.clone()),
             title: "Add project workbench".to_string(),
             description: Some("Manage issues".to_string()),
             change_id: None,
@@ -135,7 +135,7 @@ fn creates_project_repository_issue_and_runtime_binding() {
         .expect("binding");
 
     assert_eq!(repository.project_id, project.id);
-    assert_eq!(issue.repo_id, repository.id);
+    assert_eq!(issue.repo_id.as_deref(), Some(repository.id.as_str()));
     assert_eq!(binding.issue_id, issue.id);
     assert_eq!(
         binding.task_root.as_deref(),
@@ -177,7 +177,7 @@ fn find_by_repo_and_task_returns_error_for_corrupt_binding_json() {
     let issue = IssueStore::new(paths.clone())
         .create(CreateProductIssueInput {
             project_id: project.id.clone(),
-            repo_id: repository.id.clone(),
+            repo_id: Some(repository.id.clone()),
             title: "Add project workbench".to_string(),
             description: Some("Manage issues".to_string()),
             change_id: None,

@@ -4,16 +4,21 @@ import {
   confirmTask,
   createIssue,
   createProject,
+  createProductIssue,
+  createRepository,
   createTask,
   createWorkspace,
   getArtifactContent,
   getFileContent,
   getFileDiff,
   getProjection,
+  listProductIssues,
   listProjects,
+  listRepositories,
   listTasks,
   normalizeApiError,
   startIssue,
+  startProductIssue,
   stopTask,
 } from "./client";
 
@@ -173,6 +178,63 @@ describe("api client", () => {
     expect(calls.map((call) => call.input)).toEqual(["/api/projects", "/api/projects"]);
     expect(calls[1].init?.method).toBe("POST");
     expect(calls[1].init?.body).toBe(JSON.stringify({ name: "Aria", description: null }));
+  });
+
+  it("calls product repository and issue endpoints with project scoped payloads", async () => {
+    const calls: Array<{ input: string; init?: RequestInit }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push({ input: String(input), init });
+        return new Response(JSON.stringify({ ok: true, repositories: [], issues: [] }), {
+          status: 200,
+        });
+      }),
+    );
+
+    await listRepositories("project/with space");
+    await createRepository("project/with space", {
+      name: "Aria Core",
+      path: "/tmp/aria-core",
+      default_policy_preset: null,
+      default_provider_mode: null,
+    });
+    await listProductIssues("project/with space");
+    await createProductIssue("project/with space", {
+      title: "新增计费设置",
+      description: "需要先确认 story spec",
+      change_id: null,
+    });
+    await startProductIssue("project/with space", "issue/with space", {
+      repository_id: "repository_0001",
+    });
+
+    expect(calls.map((call) => call.input)).toEqual([
+      "/api/projects/project%2Fwith%20space/repositories",
+      "/api/projects/project%2Fwith%20space/repositories",
+      "/api/projects/project%2Fwith%20space/issues",
+      "/api/projects/project%2Fwith%20space/issues",
+      "/api/projects/project%2Fwith%20space/issues/issue%2Fwith%20space/start",
+    ]);
+    expect(calls[1].init?.method).toBe("POST");
+    expect(calls[1].init?.body).toBe(
+      JSON.stringify({
+        name: "Aria Core",
+        path: "/tmp/aria-core",
+        default_policy_preset: null,
+        default_provider_mode: null,
+      }),
+    );
+    expect(calls[3].init?.method).toBe("POST");
+    expect(calls[3].init?.body).toBe(
+      JSON.stringify({
+        title: "新增计费设置",
+        description: "需要先确认 story spec",
+        change_id: null,
+      }),
+    );
+    expect(calls[4].init?.method).toBe("POST");
+    expect(calls[4].init?.body).toBe(JSON.stringify({ repository_id: "repository_0001" }));
   });
 
   it("creates and starts an issue through the api", async () => {
