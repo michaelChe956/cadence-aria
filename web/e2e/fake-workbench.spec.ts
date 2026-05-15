@@ -12,7 +12,7 @@ test("fake provider workbench opens a started issue, confirms, observes, rolls b
   await page.getByRole("button", { name: "打开执行" }).click();
 
   await expect(page.getByRole("navigation", { name: "Workflow map" })).toBeVisible();
-  await expect(page.getByRole("main")).toContainText("Workspace");
+  await expect(page.getByRole("main", { name: "Aria workbench" })).toContainText("Workspace");
   await expect(page.getByRole("region", { name: "Provider stream" })).toBeVisible();
 
   await page.getByRole("button", { name: /推进|Advance/ }).click();
@@ -29,7 +29,10 @@ test("fake provider workbench opens a started issue, confirms, observes, rolls b
   await page.getByRole("button", { name: "执行回退" }).click();
 
   await expect(
-    page.getByRole("navigation", { name: "Workflow map" }).getByRole("button", { name: /N16 dropped/ }).first(),
+    page
+      .getByRole("navigation", { name: "Workflow map" })
+      .getByRole("button", { name: /N16 dropped/ })
+      .first(),
   ).toBeVisible();
   await expect(page.getByLabel("Provider prompt")).toBeVisible();
 });
