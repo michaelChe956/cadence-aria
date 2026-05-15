@@ -1,5 +1,5 @@
 import * as Dialog from "@radix-ui/react-dialog";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { RollbackPreviewResponse } from "../../api/types";
 
 export function RollbackDialog({
@@ -15,6 +15,10 @@ export function RollbackDialog({
 }) {
   const [force, setForce] = useState(false);
   const disabled = !preview || (preview.dirty && !force);
+
+  useEffect(() => {
+    setForce(false);
+  }, [open, preview?.checkpoint_id]);
 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>

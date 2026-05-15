@@ -136,8 +136,22 @@ function formatSummary(value: unknown) {
     return value;
   }
   try {
-    return JSON.stringify(value);
+    return JSON.stringify(omitSensitiveInputFields(value));
   } catch {
     return String(value);
   }
+}
+
+function omitSensitiveInputFields(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(omitSensitiveInputFields);
+  }
+  if (typeof value === "object" && value !== null) {
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([key]) => key !== "prompt" && key !== "input_full")
+        .map(([key, entryValue]) => [key, omitSensitiveInputFields(entryValue)]),
+    );
+  }
+  return value;
 }

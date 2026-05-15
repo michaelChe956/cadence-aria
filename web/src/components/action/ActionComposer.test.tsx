@@ -14,7 +14,11 @@ describe("ActionComposer", () => {
           runtime_role: "executor",
           adapter_role: "executor",
           prompt: "实现函数",
-          input_summary: { worktask_id: "work_wt_001" },
+          input_summary: {
+            worktask_id: "work_wt_001",
+            prompt: "SECRET_PROMPT_SHOULD_NOT_RENDER",
+            nested: { input_full: "SECRET_INPUT_FULL_SHOULD_NOT_RENDER" },
+          },
           canonical_input_refs: ["plan_projection_task_0001_0001"],
           context_files: ["openspec/changes/aria-fibonacci-square/tasks.md"],
           output_schema: "schema://aria/artifacts/coding_report/v1",
@@ -32,6 +36,8 @@ describe("ActionComposer", () => {
 
     expect(screen.getByText("input summary")).toBeInTheDocument();
     expect(screen.getByText(/work_wt_001/)).toBeInTheDocument();
+    expect(screen.queryByText(/SECRET_PROMPT_SHOULD_NOT_RENDER/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/SECRET_INPUT_FULL_SHOULD_NOT_RENDER/)).not.toBeInTheDocument();
     expect(screen.getByText("input refs")).toBeInTheDocument();
     expect(screen.getByText(/plan_projection_task_0001_0001/)).toBeInTheDocument();
     expect(screen.getByText("allowed write scope")).toBeInTheDocument();
