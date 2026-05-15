@@ -2,7 +2,13 @@ import type { ReactNode } from "react";
 
 export type WorkbenchSurfaceProps = {
   header: ReactNode;
+  /**
+   * Plain status content. WorkbenchSurface owns the outer status semantics.
+   */
   statusBar?: ReactNode;
+  /**
+   * Plain alert content. WorkbenchSurface owns the outer alert semantics.
+   */
   alert?: ReactNode;
   main: ReactNode;
   aside?: ReactNode;
@@ -38,7 +44,7 @@ export function WorkbenchSurface({
       {alert ? (
         <div
           role="alert"
-          className="border-b border-red-200 bg-red-50 px-4 py-2 text-sm font-semibold text-red-800 md:px-6 lg:px-8"
+          className="border-b border-[var(--aria-danger)] bg-[var(--aria-danger-soft)] px-4 py-2 text-sm font-semibold text-[var(--aria-danger)] md:px-6 lg:px-8"
         >
           {alert}
         </div>
