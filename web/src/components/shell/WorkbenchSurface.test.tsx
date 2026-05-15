@@ -8,14 +8,14 @@ describe("WorkbenchSurface", () => {
       <WorkbenchSurface
         header={<span>Header content</span>}
         statusBar={<span>Status content</span>}
-        alert={<div role="alert">Recoverable error</div>}
+        alert={<div>Recoverable error</div>}
         main={<section aria-label="Primary panel">Main content</section>}
         aside={<section aria-label="Inspector panel">Aside content</section>}
       />,
     );
 
     expect(screen.getByRole("banner")).toHaveTextContent("Header content");
-    expect(screen.getByText("Status content")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("Status content");
     expect(screen.getByRole("alert")).toHaveTextContent("Recoverable error");
     expect(screen.getByRole("main", { name: "工作台主区域" })).toBeInTheDocument();
     expect(

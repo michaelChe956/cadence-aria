@@ -28,12 +28,18 @@ export function WorkbenchSurface({
         {header}
       </header>
       {statusBar ? (
-        <section className="border-b border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-4 py-2 md:px-6 lg:px-8">
+        <section
+          role="status"
+          className="border-b border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-4 py-2 md:px-6 lg:px-8"
+        >
           {statusBar}
         </section>
       ) : null}
       {alert ? (
-        <div className="border-b border-red-200 bg-red-50 px-4 py-2 text-sm font-semibold text-red-800 md:px-6 lg:px-8">
+        <div
+          role="alert"
+          className="border-b border-red-200 bg-red-50 px-4 py-2 text-sm font-semibold text-red-800 md:px-6 lg:px-8"
+        >
           {alert}
         </div>
       ) : null}
