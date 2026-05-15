@@ -1,4 +1,4 @@
-import { Bot, FileText, TerminalSquare } from "lucide-react";
+import { Bot, FileText } from "lucide-react";
 import type { WebEvent } from "../../api/types";
 
 export type ProviderExecutionPanelProps = {
@@ -11,8 +11,6 @@ type ProviderEventRow = {
   eventType: string;
   inputRef: string | null;
   summary: string | null;
-  outputText: string | null;
-  stream: string | null;
 };
 
 export function ProviderExecutionPanel({ events }: ProviderExecutionPanelProps) {
@@ -22,14 +20,16 @@ export function ProviderExecutionPanel({ events }: ProviderExecutionPanelProps) 
     <section
       role="region"
       aria-label="Provider execution panel"
-      className="rounded-lg border-2 border-cyan-200 bg-white p-4 shadow-[0_8px_0_rgba(6,182,212,0.10),0_18px_34px_rgba(15,118,110,0.12)]"
+      className="rounded-lg border border-[var(--aria-line)] bg-[var(--aria-panel)] p-4 shadow-sm"
     >
       <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h2 className="text-lg font-black text-[#241B2F]">Provider 执行</h2>
-          <p className="mt-1 text-sm font-semibold text-[#5E516B]">输入摘要与输出事件</p>
+          <h2 className="text-sm font-semibold text-[var(--aria-ink)]">Provider 执行</h2>
+          <p className="mt-0.5 text-xs font-medium text-[var(--aria-ink-muted)]">
+            输入引用与摘要
+          </p>
         </div>
-        <span className="inline-flex items-center gap-2 rounded-lg border-2 border-cyan-200 bg-cyan-50 px-3 py-1 text-xs font-black text-cyan-950">
+        <span className="inline-flex h-7 items-center gap-1.5 rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-2 font-mono text-xs font-semibold text-[var(--aria-ink-muted)]">
           <Bot className="h-4 w-4" />
           {rows.length}
         </span>
@@ -40,35 +40,28 @@ export function ProviderExecutionPanel({ events }: ProviderExecutionPanelProps) 
           {rows.map((row) => (
             <li
               key={row.id}
-              className="rounded-lg border-2 border-slate-200 bg-slate-50 px-3 py-3"
+              className="rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-3 py-3"
             >
-              <div className="flex flex-wrap items-center gap-2 font-mono text-[11px] font-bold text-slate-600">
+              <div className="flex flex-wrap items-center gap-2 font-mono text-[11px] font-medium text-[var(--aria-ink-muted)]">
                 <span>{row.nodeId}</span>
                 <span>{row.eventType}</span>
-                {row.stream ? <span>{row.stream}</span> : null}
               </div>
-              {row.inputRef && !row.outputText ? (
-                <p className="mt-2 flex min-w-0 items-center gap-2 text-xs font-bold text-slate-700">
-                  <FileText className="h-4 w-4 shrink-0 text-cyan-700" />
+              {row.inputRef ? (
+                <p className="mt-2 flex min-w-0 items-center gap-2 text-xs font-medium text-[var(--aria-ink)]">
+                  <FileText className="h-4 w-4 shrink-0 text-[var(--aria-primary)]" />
                   <span className="break-all">{row.inputRef}</span>
                 </p>
               ) : null}
               {row.summary ? (
-                <p className="mt-2 text-sm font-semibold leading-6 text-[#5E516B]">
+                <p className="mt-2 text-sm font-medium leading-6 text-[var(--aria-ink-muted)]">
                   {row.summary}
                 </p>
-              ) : null}
-              {row.outputText ? (
-                <pre className="mt-2 whitespace-pre-wrap break-words rounded-lg border-2 border-cyan-100 bg-white px-3 py-2 font-mono text-xs leading-5 text-slate-900">
-                  <TerminalSquare className="mr-1 inline h-4 w-4 align-[-0.2rem] text-cyan-700" />
-                  {row.outputText}
-                </pre>
               ) : null}
             </li>
           ))}
         </ul>
       ) : (
-        <div className="rounded-lg border-2 border-dashed border-slate-200 bg-slate-50 px-3 py-5 text-sm font-semibold text-slate-500">
+        <div className="rounded-md border border-dashed border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-3 py-5 text-sm font-medium text-[var(--aria-ink-muted)]">
           暂无 provider 事件
         </div>
       )}
@@ -81,7 +74,6 @@ function providerEventRow(event: WebEvent): ProviderEventRow | null {
     return null;
   }
   const payload = isRecord(event.payload) ? event.payload : {};
-  const outputText = readString(payload.text) ?? readString(payload.output_chunk);
   const summary = summaryText(payload.input_summary);
   const inputRef =
     readString(payload.input_ref) ??
@@ -89,7 +81,7 @@ function providerEventRow(event: WebEvent): ProviderEventRow | null {
     readFirstString(payload.input_refs) ??
     readFirstString(payload.canonical_input_refs);
 
-  if (!outputText && !summary && !inputRef) {
+  if (!summary && !inputRef) {
     return null;
   }
 
@@ -99,8 +91,6 @@ function providerEventRow(event: WebEvent): ProviderEventRow | null {
     eventType: event.event_type,
     inputRef,
     summary,
-    outputText,
-    stream: readString(payload.stream),
   };
 }
 

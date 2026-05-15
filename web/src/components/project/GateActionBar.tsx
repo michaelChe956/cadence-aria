@@ -21,14 +21,14 @@ export function GateActionBar({
     <section
       role="region"
       aria-label="Gate action bar"
-      className="rounded-lg border-2 border-amber-200 bg-amber-50 p-3 shadow-[0_6px_0_rgba(217,119,6,0.14)]"
+      className="rounded-lg border border-[var(--aria-warning)] bg-[var(--aria-warning-soft)] p-3"
     >
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="min-w-0">
-          <p className="text-xs font-black uppercase text-amber-900">
+          <p className="text-[11px] font-semibold uppercase text-[var(--aria-warning)]">
             gate checkpoint
           </p>
-          <div className="mt-1 flex flex-wrap gap-2 font-mono text-xs font-bold text-slate-700">
+          <div className="mt-1 flex flex-wrap gap-2 font-mono text-xs font-medium text-[var(--aria-ink)]">
             <span>{gate.node_id}</span>
             <span>{gate.status}</span>
             <span>{gate.gate_id}</span>
@@ -38,7 +38,7 @@ export function GateActionBar({
           <button
             type="button"
             onClick={onConfirm}
-            className="inline-flex items-center justify-center rounded-lg border-2 border-emerald-700 bg-emerald-600 px-3 py-2 text-sm font-black text-white shadow-[0_4px_0_rgba(4,120,87,0.35)] transition-colors hover:bg-emerald-500 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-emerald-200"
+            className="inline-flex h-9 items-center justify-center rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 text-sm font-semibold text-white transition-colors hover:bg-cyan-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
           >
             <CheckCircle2 className="mr-1 h-4 w-4" />
             确认继续
@@ -46,7 +46,7 @@ export function GateActionBar({
           <button
             type="button"
             onClick={onRequestChange}
-            className="inline-flex items-center justify-center rounded-lg border-2 border-sky-700 bg-sky-600 px-3 py-2 text-sm font-black text-white shadow-[0_4px_0_rgba(3,105,161,0.30)] transition-colors hover:bg-sky-500 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-sky-200"
+            className="inline-flex h-9 items-center justify-center rounded-md border border-[var(--aria-warning)] bg-[var(--aria-panel)] px-3 text-sm font-semibold text-[var(--aria-warning)] transition-colors hover:bg-[var(--aria-panel-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-warning)]"
           >
             <PencilLine className="mr-1 h-4 w-4" />
             要求修改
@@ -54,7 +54,7 @@ export function GateActionBar({
           <button
             type="button"
             onClick={onTerminate}
-            className="inline-flex items-center justify-center rounded-lg border-2 border-rose-700 bg-rose-600 px-3 py-2 text-sm font-black text-white shadow-[0_4px_0_rgba(190,18,60,0.30)] transition-colors hover:bg-rose-500 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-rose-200"
+            className="inline-flex h-9 items-center justify-center rounded-md border border-[var(--aria-danger)] bg-[var(--aria-panel)] px-3 text-sm font-semibold text-[var(--aria-danger)] transition-colors hover:bg-[var(--aria-danger-soft)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-danger)]"
           >
             <OctagonAlert className="mr-1 h-4 w-4" />
             终止

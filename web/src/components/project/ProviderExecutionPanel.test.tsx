@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { ProviderExecutionPanel } from "./ProviderExecutionPanel";
 
 describe("ProviderExecutionPanel", () => {
-  it("renders provider input refs summaries and output chunks without full prompts", () => {
+  it("renders provider input refs and summaries without full prompts or output chunks", () => {
     render(
       <ProviderExecutionPanel
         events={[
@@ -37,9 +37,11 @@ describe("ProviderExecutionPanel", () => {
     );
 
     const panel = screen.getByRole("region", { name: "Provider execution panel" });
-    expect(within(panel).getByText("input://task_0001/N16")).toBeInTheDocument();
+    expect(within(panel).getByText("provider_input")).toBeInTheDocument();
+    expect(within(panel).getAllByText("N16").length).toBeGreaterThan(0);
+    expect(within(panel).getAllByText("input://task_0001/N16").length).toBeGreaterThan(0);
     expect(within(panel).getByText("需要实现项目选择器")).toBeInTheDocument();
-    expect(within(panel).getByText("chunk: created picker")).toBeInTheDocument();
+    expect(panel).not.toHaveTextContent("chunk: created picker");
     expect(panel).not.toHaveTextContent("SECRET_INPUT_FULL_SHOULD_NOT_RENDER");
     expect(panel).not.toHaveTextContent("SECRET_FULL_PROMPT_SHOULD_NOT_RENDER");
   });

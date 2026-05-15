@@ -11,28 +11,47 @@ export function RepositoryManager({ project, issueCount }: RepositoryManagerProp
     <section
       role="region"
       aria-label="仓库面板"
-      className="rounded-lg border-2 border-slate-200 bg-white p-4 shadow-[0_8px_0_rgba(15,23,42,0.06),0_18px_34px_rgba(15,23,42,0.08)]"
+      className="rounded-lg border border-[var(--aria-line)] bg-[var(--aria-panel)] p-4 shadow-sm"
     >
       <div className="mb-3 flex items-center justify-between gap-3">
-        <h2 className="text-lg font-black text-[#241B2F]">仓库</h2>
-        <GitBranch className="h-5 w-5 text-slate-600" />
+        <h2 className="text-sm font-semibold text-[var(--aria-ink)]">仓库</h2>
+        <GitBranch className="h-4 w-4 text-[var(--aria-ink-muted)]" />
       </div>
       <dl className="grid gap-3 text-sm">
-        <div>
-          <dt className="text-xs font-black text-slate-500">当前项目</dt>
-          <dd className="mt-1 font-bold text-slate-950">{project?.name ?? "未选择"}</dd>
-        </div>
-        <div>
-          <dt className="text-xs font-black text-slate-500">项目 ID</dt>
-          <dd className="mt-1 break-all font-mono text-xs font-bold text-slate-700">
-            {project?.project_id ?? "-"}
-          </dd>
-        </div>
-        <div>
-          <dt className="text-xs font-black text-slate-500">Issue</dt>
-          <dd className="mt-1 font-mono text-xs font-bold text-slate-700">{issueCount}</dd>
-        </div>
+        <RepositoryRow label="当前项目" value={project?.name ?? "未选择"} />
+        <RepositoryRow label="项目 ID" value={project?.project_id ?? "-"} mono />
+        <RepositoryRow label="Repo path" value="未绑定仓库" mono />
+        <RepositoryRow label="Repo hash" value="-" mono />
+        <RepositoryRow label="Runtime root" value="-" mono />
+        <RepositoryRow label="Issue" value={String(issueCount)} mono />
       </dl>
     </section>
+  );
+}
+
+function RepositoryRow({
+  label,
+  value,
+  mono = false,
+}: {
+  label: string;
+  value: string;
+  mono?: boolean;
+}) {
+  return (
+    <div>
+      <dt className="text-[11px] font-semibold uppercase text-[var(--aria-ink-muted)]">
+        {label}
+      </dt>
+      <dd
+        className={
+          mono
+            ? "mt-1 break-all font-mono text-xs font-medium text-[var(--aria-ink)]"
+            : "mt-1 break-words text-sm font-medium text-[var(--aria-ink)]"
+        }
+      >
+        {value}
+      </dd>
+    </div>
   );
 }

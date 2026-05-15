@@ -14,14 +14,14 @@ export function ProjectSwitcher({
   onSelectProject,
 }: ProjectSwitcherProps) {
   return (
-    <label className="text-xs font-black text-slate-700">
-      项目
+    <label className="flex min-w-0 items-center gap-2 text-xs font-semibold text-[var(--aria-ink-muted)]">
+      <span className="shrink-0">项目</span>
       <select
         aria-label="选择项目"
         value={selectedProjectId ?? ""}
         disabled={disabled || projects.length === 0}
         onChange={(event) => onSelectProject(event.target.value)}
-        className="ml-2 h-9 min-w-48 rounded-lg border-2 border-slate-200 bg-white px-3 text-sm font-bold text-slate-950 shadow-inner shadow-slate-200/70 outline-none focus-visible:border-cyan-500 focus-visible:ring-4 focus-visible:ring-cyan-200 disabled:bg-slate-100 disabled:text-slate-500"
+        className="h-8 w-48 max-w-[52vw] rounded-md border border-[var(--aria-line-strong)] bg-[var(--aria-panel)] px-2 text-sm font-medium text-[var(--aria-ink)] outline-none focus-visible:border-[var(--aria-primary)] focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] disabled:bg-[var(--aria-panel-muted)] disabled:text-[var(--aria-ink-muted)]"
       >
         {projects.length === 0 ? <option value="">暂无项目</option> : null}
         {projects.map((project) => (

@@ -4,6 +4,106 @@ import { describe, expect, it, vi } from "vitest";
 import { ProjectManagementWorkbench } from "./ProjectManagementWorkbench";
 
 describe("ProjectManagementWorkbench", () => {
+  it("renders the project workbench as a dense three-zone tool surface", async () => {
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/projects") {
+        return jsonResponse({
+          projects: [
+            {
+              project_id: "project_0001",
+              name: "Aria 项目",
+              description: "项目管理工作台",
+              created_at: "2026-05-14T00:00:00Z",
+              updated_at: "2026-05-14T00:00:00Z",
+              last_opened_at: null,
+            },
+          ],
+        });
+      }
+      if (url === "/api/issues") {
+        return jsonResponse({
+          issues: [
+            {
+              issue_id: "issue_0001",
+              title: "实现项目切换",
+              description: "连接项目与 issue 队列",
+              status: "in_progress",
+              workspace_id: "workspace_0001",
+              task_id: "task_0001",
+              session_id: "session_0001",
+              change_id: "project-switcher",
+              created_at: "2026-05-14T00:00:00Z",
+              updated_at: "2026-05-14T00:00:00Z",
+            },
+          ],
+        });
+      }
+      return jsonResponse({});
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    render(<ProjectManagementWorkbench onOpenExecution={vi.fn()} />);
+
+    expect(await screen.findByRole("banner")).toHaveTextContent("Aria Web");
+    expect(screen.getByRole("main", { name: "项目管理工作台" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Issue 列表面板" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Issue 详情" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "仓库面板" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Provider execution panel" })).toBeInTheDocument();
+    expect(screen.getByText("Repo path")).toBeInTheDocument();
+    expect(screen.getByText("Repo hash")).toBeInTheDocument();
+    expect(screen.getByText("Runtime root")).toBeInTheDocument();
+    expect(screen.queryByText("playful coding workbench")).not.toBeInTheDocument();
+  });
+
+  it("surfaces gate actions under blocked issue detail", async () => {
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/projects") {
+        return jsonResponse({
+          projects: [
+            {
+              project_id: "project_0001",
+              name: "Aria 项目",
+              description: "项目管理工作台",
+              created_at: "2026-05-14T00:00:00Z",
+              updated_at: "2026-05-14T00:00:00Z",
+              last_opened_at: null,
+            },
+          ],
+        });
+      }
+      if (url === "/api/issues") {
+        return jsonResponse({
+          issues: [
+            {
+              issue_id: "issue_blocked_0001",
+              title: "等待人工确认",
+              description: "Provider gate 已暂停",
+              status: "blocked",
+              workspace_id: "workspace_0001",
+              task_id: "task_0001",
+              session_id: "session_0001",
+              change_id: "blocked-gate",
+              created_at: "2026-05-14T00:00:00Z",
+              updated_at: "2026-05-14T00:00:00Z",
+            },
+          ],
+        });
+      }
+      return jsonResponse({});
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    render(<ProjectManagementWorkbench onOpenExecution={vi.fn()} />);
+
+    const gate = await screen.findByRole("region", { name: "Gate action bar" });
+    expect(within(gate).getByRole("button", { name: "确认继续" })).toBeInTheDocument();
+    expect(within(gate).getByRole("button", { name: "要求修改" })).toBeInTheDocument();
+    expect(within(gate).getByRole("button", { name: "终止" })).toBeInTheDocument();
+  });
+
   it("loads projects and legacy issues then opens executable issue context", async () => {
     const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);

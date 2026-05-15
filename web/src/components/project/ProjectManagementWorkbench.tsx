@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { listIssues, listProjects } from "../../api/client";
 import type { Issue, ProductWebEvent, Project } from "../../api/types";
 import { createProjectWorkbenchStore } from "../../state/project-workbench-store";
+import { WorkbenchSurface } from "../shell/WorkbenchSurface";
 import type { ExecutionContext } from "../task/TaskManagementWorkbench";
 import { GateActionBar } from "./GateActionBar";
 import { IssueDetailPane } from "./IssueDetailPane";
@@ -86,56 +87,48 @@ export function ProjectManagementWorkbench({
   }
 
   return (
-    <div className="min-h-screen bg-[#F8FAFC] text-[#241B2F]">
-      <ProjectTopBar
-        projects={store.snapshot.projects}
-        selectedProjectId={selectedProject?.project_id ?? null}
-        issueCount={legacyIssues.length}
-        busy={busy}
-        onSelectProject={handleSelectProject}
-        onRefresh={refresh}
-      />
-
-      {error ? (
-        <div
-          role="alert"
-          className="border-b-2 border-rose-200 bg-rose-100 px-4 py-2 text-sm font-semibold text-rose-800 md:px-6 lg:px-8"
-        >
-          {error}
-        </div>
-      ) : null}
-
-      <main
-        aria-label="项目管理工作台"
-        className="grid min-h-[calc(100vh-4rem)] grid-cols-1 gap-5 px-4 py-5 md:px-6 lg:grid-cols-[19rem_minmax(0,1fr)_22rem] lg:px-8"
-      >
-        <aside className="space-y-5">
+    <WorkbenchSurface
+      mainLabel="项目管理工作台"
+      header={
+        <ProjectTopBar
+          projects={store.snapshot.projects}
+          selectedProjectId={selectedProject?.project_id ?? null}
+          issueCount={legacyIssues.length}
+          busy={busy}
+          onSelectProject={handleSelectProject}
+          onRefresh={refresh}
+        />
+      }
+      alert={error}
+      main={
+        <div className="grid gap-4 lg:grid-cols-[20rem_minmax(0,1fr)]">
           <IssueListPane
             issues={legacyIssues}
             selectedIssueId={selectedIssue?.issue_id ?? null}
             busy={busy}
             onSelectIssue={handleSelectIssue}
           />
-        </aside>
 
-        <section className="min-w-0 space-y-5" aria-label="Issue 工作区">
-          <IssueDetailPane issue={selectedIssue} onOpenExecution={onOpenExecution} />
-          {selectedIssue?.status === "blocked" ? (
-            <GateActionBar
-              gate={{ gate_id: "gate_preview", node_id: "N09", status: selectedIssue.status }}
-              onConfirm={() => undefined}
-              onRequestChange={() => undefined}
-              onTerminate={() => undefined}
-            />
-          ) : null}
-        </section>
-
-        <aside className="space-y-5">
+          <section className="min-w-0 space-y-4" aria-label="Issue 工作区">
+            <IssueDetailPane issue={selectedIssue} onOpenExecution={onOpenExecution} />
+            {selectedIssue?.status === "blocked" ? (
+              <GateActionBar
+                gate={{ gate_id: "gate_preview", node_id: "N09", status: selectedIssue.status }}
+                onConfirm={() => undefined}
+                onRequestChange={() => undefined}
+                onTerminate={() => undefined}
+              />
+            ) : null}
+          </section>
+        </div>
+      }
+      aside={
+        <>
           <RepositoryManager project={selectedProject} issueCount={legacyIssues.length} />
           <ProviderExecutionPanel events={store.snapshot.events} />
-        </aside>
-      </main>
-    </div>
+        </>
+      }
+    />
   );
 }
 
