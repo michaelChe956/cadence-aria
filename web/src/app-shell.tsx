@@ -126,6 +126,9 @@ export function AppShell() {
       if (!event) {
         return;
       }
+      if (event.task_id && event.task_id !== activeTaskId) {
+        return;
+      }
       store.pushEvent(event);
       setProjectionVersion((version) => version + 1);
       if (refreshEventTypes.has(event.event_type)) {

@@ -25,7 +25,9 @@ export function EvidencePanel({
         {artifacts.length === 0 ? (
           <EmptyState>暂无产物</EmptyState>
         ) : (
-          artifacts.map((artifact) => <ArtifactReportCard key={String(artifact.artifact_ref)} artifact={artifact} />)
+          artifacts.map((artifact) => (
+            <ArtifactReportCard key={String(artifact.artifact_ref)} artifact={artifact} />
+          ))
         )}
       </section>
       <section className="mt-4">
@@ -43,7 +45,7 @@ export function EvidencePanel({
           diagnostics.map((diagnostic, index) => (
             <div
               key={index}
-              className="mt-2 rounded-md border border-[var(--aria-warning)] bg-[var(--aria-warning-soft)] px-3 py-2 text-sm font-medium text-[var(--aria-ink)]"
+              className="mt-2 break-words rounded-md border border-[var(--aria-warning)] bg-[var(--aria-warning-soft)] px-3 py-2 text-sm font-medium text-[var(--aria-ink)]"
             >
               {String(diagnostic.message ?? diagnostic.code)}
             </div>
@@ -63,7 +65,7 @@ function ArtifactReportCard({ artifact }: { artifact: Record<string, unknown> })
       <ReportPreview />
       <span className="min-w-0">
         <span className="block text-sm font-semibold text-[var(--aria-ink)]">Artifact</span>
-        <span className="mt-1 block rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] px-2 py-1 font-mono text-xs text-[var(--aria-ink-muted)]">
+        <span className="mt-1 block break-all rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] px-2 py-1 font-mono text-xs leading-5 text-[var(--aria-ink-muted)]">
           {String(artifact.path)}
         </span>
         <span className="mt-2 inline-flex rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] px-2 py-0.5 text-[10px] font-semibold uppercase text-[var(--aria-ink-muted)]">

@@ -1,6 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { FlowRail } from "./FlowRail";
 
 describe("FlowRail", () => {
@@ -55,5 +55,29 @@ describe("FlowRail", () => {
 
     await userEvent.click(screen.getByRole("button", { name: /N17/ }));
     expect(selected).toEqual(["N17"]);
+  });
+
+  it("renders repeated node ids without duplicate key warnings", () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    render(
+      <FlowRail
+        timeline={[
+          { node_id: "N00", status: "completed" },
+          { node_id: "N00", status: "completed" },
+          { node_id: "N00", status: "running" },
+        ]}
+        selectedNodeId="N00"
+        onSelectNode={() => undefined}
+      />,
+    );
+
+    expect(screen.getAllByRole("button", { name: /N00/ })).toHaveLength(3);
+    expect(
+      consoleError.mock.calls.some((call) =>
+        call.some((entry) => String(entry).includes("Encountered two children with the same key")),
+      ),
+    ).toBe(false);
+    consoleError.mockRestore();
   });
 });

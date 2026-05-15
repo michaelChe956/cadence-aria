@@ -214,6 +214,44 @@ describe("AppShell", () => {
     expect(await within(stream).findByText(/done/)).toBeInTheDocument();
   });
 
+  it("ignores SSE events for other tasks", async () => {
+    const eventSources: MockEventSource[] = [];
+    const fetchSpy = stubExecutionFetch((url) => {
+      if (url === "/api/projection?task_id=task_0001&workspace_id=workspace_0001") {
+        return jsonResponse(projection(pendingStep()));
+      }
+      if (url.startsWith("/api/projection?task_id=task_9999")) {
+        return jsonResponse(projection(null));
+      }
+      return null;
+    });
+    vi.stubGlobal(
+      "EventSource",
+      class extends MockEventSource {
+        constructor(url: string) {
+          super(url);
+          eventSources.push(this);
+        }
+      },
+    );
+
+    await openExecutionWorkbench();
+    await waitFor(() => expect(eventSources).toHaveLength(1));
+
+    eventSources[0].emit("projection_updated", {
+      cursor: 3,
+      event_type: "projection_updated",
+      task_id: "task_9999",
+      payload: {},
+    });
+
+    expect(screen.getByLabelText("Provider prompt")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "确认执行" })).toBeInTheDocument();
+    expect(
+      fetchSpy.mock.calls.some(([input]) => String(input).includes("task_9999")),
+    ).toBe(false);
+  });
+
   it("appends provider output SSE chunks to the workspace stream", async () => {
     const eventSources: MockEventSource[] = [];
     vi.stubGlobal(

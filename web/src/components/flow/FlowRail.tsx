@@ -49,7 +49,7 @@ export function FlowRail({
               const nodeId = String(item.node_id ?? `N${String(index).padStart(2, "0")}`);
               const selected = selectedNodeId === nodeId;
               return (
-                <div key={nodeId} className="relative">
+                <div key={`${nodeId}-${index}`} className="relative">
                   <span
                     aria-hidden="true"
                     className={
@@ -68,9 +68,9 @@ export function FlowRail({
             })}
           </div>
           <div className="sr-only">
-            {edgesForMarkers.map((edge) => (
+            {edgesForMarkers.map((edge, index) => (
               <span
-                key={`${edge.source}-${edge.target}`}
+                key={`${edge.source}-${edge.target}-${index}`}
                 data-testid={`workflow-edge-${edge.source}-${edge.target}`}
               />
             ))}
