@@ -126,6 +126,21 @@ impl IssueStore {
         Ok(issue)
     }
 
+    pub fn delete(&self, project_id: &str, issue_id: &str) -> Result<(), ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        let issue_root = self.paths.issue_root(project_id, issue_id);
+        if !issue_root.exists() {
+            return Err(ProductStoreError::NotFound {
+                kind: "issue",
+                id: issue_id.to_string(),
+            });
+        }
+        fs::remove_dir_all(&issue_root).map_err(|error| {
+            ProductStoreError::Io(format!("remove {}: {error}", issue_root.display()))
+        })
+    }
+
     fn issue_path(&self, project_id: &str, issue_id: &str) -> std::path::PathBuf {
         self.paths
             .issue_root(project_id, issue_id)

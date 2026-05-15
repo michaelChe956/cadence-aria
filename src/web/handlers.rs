@@ -16,7 +16,7 @@ use crate::product::issue_store::{CreateProductIssueInput, IssueStore, StartProd
 use crate::product::json_store::{ProductStoreError, validate_relative_id};
 use crate::product::models::{
     GateStatus, IssuePhase as ProductIssuePhase, IssueRecord as ProductIssueRecord,
-    IssueStatus as ProductIssueStatus, ProjectRecord, RepositoryRecord,
+    IssueRuntimeBindingRecord, IssueStatus as ProductIssueStatus, ProjectRecord, RepositoryRecord,
 };
 use crate::product::project_store::{CreateProjectInput, ProjectStore};
 use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
@@ -32,12 +32,12 @@ use crate::web::types::{
     CreateIssueRequest, CreateProductIssueRequest, CreateProjectRequest, CreateRepositoryRequest,
     CreateTaskRequest, CreateTaskResponse, CreateWorkspaceRequest, FileContentResponse,
     FileDiffResponse, IssueDto, IssueListResponse, IssueRollbackPreviewRequest,
-    IssueRollbackRequest, ProductIssueDto, ProductIssueListResponse, ProjectDto,
-    ProjectListResponse, ProviderInputContentResponse, RepositoryDto, RepositoryListResponse,
-    ResolveGateRequest, ResolveGateResponse, RollbackPreviewRequest, RollbackPreviewResponse,
-    RollbackRequest, RollbackResponse, StartIssueRequest, StartIssueResponse,
-    StartProductIssueRequest, StartProductIssueResponse, StopTaskResponse, TaskListResponse,
-    WebEvent, WorkspaceDto, WorkspaceListResponse,
+    IssueRollbackRequest, ProductIssueArtifactDto, ProductIssueDto, ProductIssueListResponse,
+    ProjectDto, ProjectListResponse, ProviderInputContentResponse, RepositoryDto,
+    RepositoryListResponse, ResolveGateRequest, ResolveGateResponse, RollbackPreviewRequest,
+    RollbackPreviewResponse, RollbackRequest, RollbackResponse, StartIssueRequest,
+    StartIssueResponse, StartProductIssueRequest, StartProductIssueResponse, StopTaskResponse,
+    TaskListResponse, WebEvent, WorkspaceDto, WorkspaceListResponse,
 };
 use crate::web::workspace_registry::{CreateWorkspaceInput, WorkspaceRecord, WorkspaceRegistry};
 
@@ -123,6 +123,15 @@ pub async fn create_workspace(
     Ok(Json(workspace_dto(workspace)))
 }
 
+pub async fn delete_workspace(
+    State(state): State<WebAppState>,
+    Path(workspace_id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let registry = WorkspaceRegistry::new(state.workspace_root.clone());
+    registry.delete(&workspace_id)?;
+    Ok(Json(json!({"status":"deleted"})))
+}
+
 pub async fn list_projects(
     State(state): State<WebAppState>,
 ) -> ApiResult<Json<ProjectListResponse>> {
@@ -165,6 +174,15 @@ pub async fn open_project(
     Ok(Json(project_dto(project)))
 }
 
+pub async fn delete_project(
+    State(state): State<WebAppState>,
+    Path(project_id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let store = ProjectStore::new(product_app_paths(&state));
+    store.delete(&project_id).map_err(product_store_api_error)?;
+    Ok(Json(json!({"status":"deleted"})))
+}
+
 pub async fn list_repositories(
     State(state): State<WebAppState>,
     Path(project_id): Path<String>,
@@ -194,6 +212,17 @@ pub async fn create_repository(
     Ok(Json(repository_dto(repository)))
 }
 
+pub async fn delete_repository(
+    State(state): State<WebAppState>,
+    Path((project_id, repository_id)): Path<(String, String)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let store = RepositoryStore::new(product_app_paths(&state));
+    store
+        .delete(&project_id, &repository_id)
+        .map_err(product_store_api_error)?;
+    Ok(Json(json!({"status":"deleted"})))
+}
+
 pub async fn list_product_issues(
     State(state): State<WebAppState>,
     Path(project_id): Path<String>,
@@ -201,7 +230,10 @@ pub async fn list_product_issues(
     let store = IssueStore::new(product_app_paths(&state));
     let issues = store.list(&project_id).map_err(product_store_api_error)?;
     Ok(Json(ProductIssueListResponse {
-        issues: issues.into_iter().map(product_issue_dto).collect(),
+        issues: issues
+            .into_iter()
+            .map(|issue| product_issue_dto_with_binding(&product_app_paths(&state), issue))
+            .collect::<ApiResult<Vec<_>>>()?,
     }))
 }
 
@@ -220,7 +252,18 @@ pub async fn create_product_issue(
             change_id: request.change_id,
         })
         .map_err(product_store_api_error)?;
-    Ok(Json(product_issue_dto(issue)))
+    Ok(Json(product_issue_dto(issue, None)))
+}
+
+pub async fn delete_product_issue(
+    State(state): State<WebAppState>,
+    Path((project_id, issue_id)): Path<(String, String)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let store = IssueStore::new(product_app_paths(&state));
+    store
+        .delete(&project_id, &issue_id)
+        .map_err(product_store_api_error)?;
+    Ok(Json(json!({"status":"deleted"})))
 }
 
 pub async fn start_product_issue(
@@ -230,10 +273,27 @@ pub async fn start_product_issue(
 ) -> ApiResult<Json<StartProductIssueResponse>> {
     let app_paths = product_app_paths(&state);
     let issue_store = IssueStore::new(app_paths.clone());
-    let repository = find_repository(&app_paths, &project_id, &request.repository_id)?;
     let issue = issue_store
         .get(&project_id, &issue_id)
         .map_err(product_store_api_error)?;
+    if let Some(binding) = active_binding_for_issue(&app_paths, &project_id, &issue)? {
+        let workspace_id = product_execution_workspace_id(&project_id, &binding.repo_id);
+        return Ok(Json(StartProductIssueResponse {
+            issue_id: issue.id,
+            project_id,
+            repository_id: binding.repo_id,
+            workspace_id,
+            task_id: binding.task_id.unwrap_or_default(),
+            session_id: binding.session_id.unwrap_or_default(),
+            status: product_issue_status_text(&issue.status).to_string(),
+        }));
+    }
+    let workspace_repository_id = request
+        .workspace_id
+        .as_deref()
+        .or(request.repository_id.as_deref())
+        .ok_or_else(|| ApiError::validation("workspace_required", "workspace_id is required"))?;
+    let repository = find_repository(&app_paths, &project_id, workspace_repository_id)?;
 
     let mut runtime = WebRuntime::new_fake(repository.path.clone());
     let created = runtime.create_task(CreateTaskRequest {
@@ -313,6 +373,15 @@ pub async fn create_issue(
         change_id: request.change_id,
     })?;
     Ok(Json(issue_dto(issue)))
+}
+
+pub async fn delete_issue(
+    State(state): State<WebAppState>,
+    Path(issue_id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let registry = IssueRegistry::new(state.workspace_root.clone());
+    registry.delete(&issue_id)?;
+    Ok(Json(json!({"status":"deleted"})))
 }
 
 pub async fn start_issue(
@@ -1013,20 +1082,119 @@ fn repository_dto(record: RepositoryRecord) -> RepositoryDto {
     }
 }
 
-fn product_issue_dto(record: ProductIssueRecord) -> ProductIssueDto {
+fn product_issue_dto_with_binding(
+    app_paths: &ProductAppPaths,
+    record: ProductIssueRecord,
+) -> ApiResult<ProductIssueDto> {
+    let active_binding = active_binding_for_issue(app_paths, &record.project_id, &record)?;
+    Ok(product_issue_dto(record, active_binding))
+}
+
+fn product_issue_dto(
+    record: ProductIssueRecord,
+    active_binding: Option<IssueRuntimeBindingRecord>,
+) -> ProductIssueDto {
+    let workspace_id = active_binding
+        .as_ref()
+        .map(|binding| product_execution_workspace_id(&record.project_id, &binding.repo_id));
+    let task_id = active_binding
+        .as_ref()
+        .and_then(|binding| binding.task_id.clone());
+    let session_id = active_binding
+        .as_ref()
+        .and_then(|binding| binding.session_id.clone());
+    let artifacts = active_binding
+        .as_ref()
+        .map(product_issue_artifacts)
+        .unwrap_or_default();
     ProductIssueDto {
         issue_id: record.id,
         project_id: record.project_id,
         repo_id: record.repo_id,
+        workspace_id,
+        task_id,
+        session_id,
         title: record.title,
         description: record.description,
         change_id: record.change_id,
         phase: product_issue_phase_text(&record.phase).to_string(),
         status: product_issue_status_text(&record.status).to_string(),
         active_binding_id: record.active_binding_id,
+        artifacts,
         created_at: record.created_at,
         updated_at: record.updated_at,
     }
+}
+
+fn product_issue_artifacts(binding: &IssueRuntimeBindingRecord) -> Vec<ProductIssueArtifactDto> {
+    let Some(task_id) = binding.task_id.as_deref() else {
+        return Vec::new();
+    };
+    let Some(workspace_root) = workspace_root_for_binding(binding) else {
+        return Vec::new();
+    };
+    WebRuntime::projection_for_workspace(&workspace_root, Some(task_id), None)
+        .map(|projection| {
+            projection
+                .artifact_index
+                .into_iter()
+                .map(|artifact| ProductIssueArtifactDto {
+                    stage: artifact_stage(
+                        &artifact.artifact_kind,
+                        artifact.producer_node.as_deref(),
+                    )
+                    .to_string(),
+                    artifact_ref: artifact.artifact_ref,
+                    artifact_kind: artifact.artifact_kind,
+                    producer_node: artifact.producer_node,
+                    path: artifact.path,
+                    summary: artifact.summary,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn workspace_root_for_binding(binding: &IssueRuntimeBindingRecord) -> Option<PathBuf> {
+    binding.runtime_root.parent()?.parent().map(PathBuf::from)
+}
+
+fn artifact_stage(artifact_kind: &str, producer_node: Option<&str>) -> &'static str {
+    match producer_node {
+        Some("N04" | "N05" | "N06" | "N07") => return "story_spec",
+        Some("N08" | "N09" | "N10" | "N11" | "N12") => return "design_spec",
+        Some("N27") => return "done",
+        Some(_) => return "work_item",
+        None => {}
+    }
+    if artifact_kind.contains("clarification")
+        || artifact_kind == "spec"
+        || artifact_kind == "openspec_spec"
+        || artifact_kind == "openspec_proposal"
+    {
+        "story_spec"
+    } else if artifact_kind.contains("design") {
+        "design_spec"
+    } else if artifact_kind.contains("final") {
+        "done"
+    } else {
+        "work_item"
+    }
+}
+
+fn active_binding_for_issue(
+    app_paths: &ProductAppPaths,
+    project_id: &str,
+    issue: &ProductIssueRecord,
+) -> ApiResult<Option<IssueRuntimeBindingRecord>> {
+    let Some(active_binding_id) = issue.active_binding_id.as_deref() else {
+        return Ok(None);
+    };
+    Ok(RuntimeBindingStore::new(app_paths.clone())
+        .list(project_id, &issue.id)
+        .map_err(product_store_api_error)?
+        .into_iter()
+        .find(|binding| binding.id == active_binding_id))
 }
 
 fn issue_dto(record: IssueRecord) -> IssueDto {

@@ -81,6 +81,12 @@ export function createWorkspace(payload: CreateWorkspaceRequest): Promise<Worksp
   });
 }
 
+export function deleteWorkspace(workspaceId: string): Promise<{ status: string }> {
+  return requestJson<{ status: string }>(`/api/workspaces/${encodeURIComponent(workspaceId)}`, {
+    method: "DELETE",
+  });
+}
+
 export function listProjects(): Promise<{ projects: Project[] }> {
   return requestJson<{ projects: Project[] }>("/api/projects");
 }
@@ -92,6 +98,12 @@ export function createProject(payload: {
   return requestJson<Project>("/api/projects", {
     method: "POST",
     body: JSON.stringify(payload),
+  });
+}
+
+export function deleteProject(projectId: string): Promise<{ status: string }> {
+  return requestJson<{ status: string }>(`/api/projects/${encodeURIComponent(projectId)}`, {
+    method: "DELETE",
   });
 }
 
@@ -111,6 +123,18 @@ export function createRepository(
   });
 }
 
+export function deleteRepository(
+  projectId: string,
+  repositoryId: string,
+): Promise<{ status: string }> {
+  return requestJson<{ status: string }>(
+    `/api/projects/${encodeURIComponent(projectId)}/repositories/${encodeURIComponent(repositoryId)}`,
+    {
+      method: "DELETE",
+    },
+  );
+}
+
 export function listProductIssues(projectId: string): Promise<ProductIssueListResponse> {
   return requestJson<ProductIssueListResponse>(
     `/api/projects/${encodeURIComponent(projectId)}/issues`,
@@ -125,6 +149,18 @@ export function createProductIssue(
     method: "POST",
     body: JSON.stringify(payload),
   });
+}
+
+export function deleteProductIssue(
+  projectId: string,
+  issueId: string,
+): Promise<{ status: string }> {
+  return requestJson<{ status: string }>(
+    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}`,
+    {
+      method: "DELETE",
+    },
+  );
 }
 
 export function startProductIssue(
@@ -149,6 +185,12 @@ export function createIssue(payload: CreateIssueRequest): Promise<Issue> {
   return requestJson<Issue>("/api/issues", {
     method: "POST",
     body: JSON.stringify(payload),
+  });
+}
+
+export function deleteIssue(issueId: string): Promise<{ status: string }> {
+  return requestJson<{ status: string }>(`/api/issues/${encodeURIComponent(issueId)}`, {
+    method: "DELETE",
   });
 }
 
@@ -216,7 +258,12 @@ export function stopTask(taskId: string, workspaceId?: string): Promise<StopTask
 
 export function confirmTask(
   taskId: string,
-  payload: { checkpoint_id: string; prompt: string; policy_override?: string | null },
+  payload: {
+    checkpoint_id: string;
+    prompt: string;
+    policy_override?: string | null;
+    provider_type?: string | null;
+  },
   workspaceId?: string,
 ) {
   return requestJson<{ status: string; node_id: string; turn_id: string }>(

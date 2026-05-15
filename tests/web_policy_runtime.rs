@@ -58,6 +58,7 @@ fn single_node_policy_override_takes_precedence_for_confirmed_step() {
                 checkpoint_id: pending.checkpoint_id,
                 prompt: pending.prompt,
                 policy_override: Some("manual-all".to_string()),
+                provider_type: None,
             },
         )
         .expect("confirm");

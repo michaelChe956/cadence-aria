@@ -4,7 +4,7 @@
 
 **Goal:** 构建 `aria web --workspace <PATH>` 本地单机 Web 工作台，支持任务新建、继续、逐节点暂停确认、provider 执行观察、产物浏览、checkpoint 回退和编辑 prompt 后重跑。
 
-**Architecture:** 后端新增 Rust `web` 模块，使用 axum 暴露 HTTP API、SSE 事件流和静态资源托管，并复用 `interactive`、`task_run`、provider adapter 与 checkpoint 能力。前端新增 `web/` React/Vite/TypeScript SPA，第一屏就是高密度工作台，围绕 Flow Rail、Node Workspace、Evidence Panel、Action Composer 和 Rollback Dialog 展示 TUI 的全部信息域。逐节点闭环先用 fake/scripted provider 打通，再把规划、执行、最终收口 provider 节点接入可暂停 runner。
+**Architecture:** 后端新增 Rust `web` 模块，使用 axum 暴露 HTTP API、SSE 事件流和静态资源托管，并复用 `interactive`、`task_run`、provider adapter 与 checkpoint 能力。前端新增 `web/` React/Vite/TypeScript SPA，第一屏就是高密度工作台，围绕 Flow Rail、Node Workspace、Evidence Panel、Action Composer 和 Rollback Dialog 展示 Web Runtime 的全部信息域。逐节点闭环先用 fake/scripted provider 打通，再把规划、执行、最终收口 provider 节点接入可暂停 runner。
 
 **Tech Stack:** Rust 1.95、tokio、serde/serde_json、axum、tower-http、React、Vite、TypeScript、TanStack Router、Tailwind CSS、Radix UI primitives、lucide-react、Vitest、Testing Library、Playwright。
 
@@ -19,7 +19,7 @@
 1. 先定义 Web API 类型、错误模型和 projection 增量字段，让前后端共用稳定契约。
 2. 再补强 checkpoint preview、pending provider step 和事件流，使逐节点暂停、确认、回退具备可靠后端语义。
 3. 然后实现 axum API 与 `aria web` CLI 入口，先以 fake/scripted runner 完成端到端测试。
-4. 最后搭建前端工作台，把 TUI 的 Overview、Timeline、IO、Artifacts、Changes、Diagnostics、Action 输入完整搬到浏览器。
+4. 最后搭建前端工作台，把 Runtime 的 Overview、Timeline、IO、Artifacts、Changes、Diagnostics、Action 输入完整呈现在浏览器。
 
 执行计划时必须小步提交。当前工作区已存在与本计划无关的 staged 文件，提交时只 `git add` 每个任务列出的路径。
 
@@ -274,7 +274,6 @@ pub mod protocol;
 pub mod repl;
 pub mod runtime_units;
 pub mod task_run;
-pub mod tui;
 pub mod web;
 ```
 
@@ -1163,7 +1162,7 @@ fn count_provider_runs(root: &Path) -> Result<usize, TaskRunError> {
 }
 ```
 
-Tighten existing `CheckpointService::rollback` so it remains the single runtime boundary implementation used by both TUI and Web:
+Tighten existing `CheckpointService::rollback` so it remains the single runtime boundary implementation used by Web:
 
 - keep the dirty worktree guard and require `force_when_dirty=true` before any reset when dirty;
 - reset Git worktree to checkpoint `git_head`;
@@ -5617,7 +5616,7 @@ git commit -m "test: verify aria web workbench flow"
 ## Self-Review Checklist
 
 - [x] 设计规格覆盖：计划覆盖 `aria web --workspace`、单机单 workspace、默认自动端口选择、新建/继续任务、逐节点暂停确认、provider prompt 编辑确认、PendingProviderStep 全字段展示、单节点临时 policy override、节点 Overview/Inputs/Run/Outputs/Diff 数据填充、Timeline/Changes、OpenSpec 文档沉淀物、provider stdout/stderr、structured output、manual gate、retry、provider auth diagnostics、任务列表、artifact 内容、文件内容、checkpoint diff、完整 SSE 事件 taxonomy、实时事件流、回退预览、dropped 历史、URL search params 恢复、Fibonacci gate 诊断、policy preset 后端行为、内部节点自动执行和非交互回归。
-- [x] 页面覆盖 TUI 信息域：Overview、Timeline、IO、Artifacts、Changes、Diagnostics、Action 输入均落到 NewTaskPanel、TaskSwitcher、TopStatusBar、Flow Rail、Node Workspace、Evidence Panel、Diagnostics Panel、Action Composer、AutoActionStatus。
+- [x] 页面覆盖 Web Runtime 信息域：Overview、Timeline、IO、Artifacts、Changes、Diagnostics、Action 输入均落到 NewTaskPanel、TaskSwitcher、TopStatusBar、Flow Rail、Node Workspace、Evidence Panel、Diagnostics Panel、Action Composer、AutoActionStatus。
 - [x] vibe-kanban 参考范围受控：只采用 checkpoint/answer 回退交互语义，不照搬视觉。
 - [x] TDD 覆盖：每个后端和前端阶段都先写失败测试，再实现，再运行验证。
 - [x] 文件路径符合项目规则：计划文档位于 `cadence/plans/`，前端代码位于 `web/`，后端代码位于 `src/web/` 和既有 runtime 模块。

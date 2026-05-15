@@ -92,6 +92,30 @@ impl ProjectStore {
         Ok(project)
     }
 
+    pub fn delete(&self, project_id: &str) -> Result<(), ProductStoreError> {
+        validate_relative_id(project_id)?;
+        let project_root = self.paths.project_root(project_id);
+        if !path_exists(&project_root)? {
+            return Err(ProductStoreError::NotFound {
+                kind: "project",
+                id: project_id.to_string(),
+            });
+        }
+        fs::remove_dir_all(&project_root).map_err(|error| {
+            ProductStoreError::Io(format!("remove {}: {error}", project_root.display()))
+        })?;
+
+        let last_project_path = self.paths.last_project_path();
+        if path_exists(&last_project_path)?
+            && read_json::<String>(&last_project_path)? == project_id
+        {
+            fs::remove_file(&last_project_path).map_err(|error| {
+                ProductStoreError::Io(format!("remove {}: {error}", last_project_path.display()))
+            })?;
+        }
+        Ok(())
+    }
+
     fn project_path(&self, project_id: &str) -> std::path::PathBuf {
         self.paths.project_root(project_id).join("project.json")
     }

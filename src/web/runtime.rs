@@ -6,7 +6,7 @@ use std::str::FromStr;
 use serde_json::json;
 
 use crate::cross_cutting::cli_adapter::{CliOutputChunk, ProviderOutputSink};
-use crate::cross_cutting::provider_adapter::ProviderAdapter;
+use crate::cross_cutting::provider_adapter::{ProviderAdapter, ProviderAdapterError};
 use crate::interactive::checkpoint::{
     CheckpointService, RollbackPreviewRequest as CoreRollbackPreviewRequest,
     RollbackRequest as CoreRollbackRequest,
@@ -17,7 +17,7 @@ use crate::interactive::policy::{
 };
 use crate::interactive::projection::build_workspace_projection;
 use crate::interactive::web_projection::build_web_projection;
-use crate::protocol::contracts::ProviderType;
+use crate::protocol::contracts::{AdapterInput, ProviderType};
 use crate::task_run::orchestrator::TaskRunOrchestrator;
 use crate::task_run::provider_factory::{
     real_routing_provider, real_routing_provider_with_output_sink,
@@ -40,6 +40,22 @@ pub struct WebRuntime {
     workspace_root: PathBuf,
     next_projection_version: u64,
     real_provider: Option<Box<dyn ProviderAdapter + Send + Sync>>,
+}
+
+struct ProviderOverrideAdapter<'a> {
+    inner: &'a dyn ProviderAdapter,
+    provider_type: ProviderType,
+}
+
+impl ProviderAdapter for ProviderOverrideAdapter<'_> {
+    fn run(
+        &self,
+        input: &AdapterInput,
+    ) -> Result<crate::protocol::contracts::AdapterOutput, ProviderAdapterError> {
+        let mut input = input.clone();
+        input.provider_type = self.provider_type.clone();
+        self.inner.run(&input)
+    }
 }
 
 impl WebRuntime {
@@ -169,6 +185,7 @@ impl WebRuntime {
                     &store,
                     pending.checkpoint_id,
                     pending.prompt,
+                    &pending.provider_type,
                 )?;
                 Ok(AdvanceTaskResponse::Advanced {
                     projection_version: self.next_projection_version,
@@ -193,9 +210,25 @@ impl WebRuntime {
             .and_then(serde_json::Value::as_str)
             == Some("real")
         {
-            return self.persist_real_provider_execution(&store, &state, request.prompt);
+            let provider_type = request
+                .provider_type
+                .as_deref()
+                .map(parse_confirm_provider_type)
+                .transpose()?;
+            return self.persist_real_provider_execution(
+                &store,
+                &state,
+                request.prompt,
+                provider_type,
+            );
         }
-        self.persist_provider_execution(task_id, &store, request.checkpoint_id, request.prompt)
+        self.persist_provider_execution(
+            task_id,
+            &store,
+            request.checkpoint_id,
+            request.prompt,
+            request.provider_type.as_deref().unwrap_or("codex"),
+        )
     }
 
     pub fn prepare_provider_input(
@@ -313,6 +346,7 @@ impl WebRuntime {
         store: &WebRuntimeStore,
         state: &serde_json::Value,
         prompt: String,
+        selected_provider_type: Option<ProviderType>,
     ) -> Result<ConfirmTaskResponse, TaskRunError> {
         let provider = self.real_provider.as_ref().ok_or_else(|| {
             TaskRunError::new(
@@ -347,6 +381,15 @@ impl WebRuntime {
         if pending_path.exists() {
             fs::remove_file(pending_path).map_err(io_error)?;
         }
+        let override_provider =
+            selected_provider_type.map(|provider_type| ProviderOverrideAdapter {
+                inner: provider.as_ref(),
+                provider_type,
+            });
+        let provider_ref: &dyn ProviderAdapter = override_provider
+            .as_ref()
+            .map(|provider| provider as &dyn ProviderAdapter)
+            .unwrap_or(provider.as_ref());
         let outcome = TaskRunOrchestrator::run_with_provider(
             TaskRunRequest {
                 task_id: Some(task_id.clone()),
@@ -357,7 +400,7 @@ impl WebRuntime {
                 non_interactive: true,
                 timeout_secs,
             },
-            provider.as_ref(),
+            provider_ref,
         );
         preserve_web_task_metadata(store, state, &task_id, &change_id, timeout_secs)?;
         let outcome = outcome?;
@@ -375,6 +418,7 @@ impl WebRuntime {
         store: &WebRuntimeStore,
         checkpoint_id: String,
         prompt: String,
+        provider_type: &str,
     ) -> Result<ConfirmTaskResponse, TaskRunError> {
         store.append_event(
             "node_started",
@@ -402,7 +446,7 @@ impl WebRuntime {
                 "turn_id": "turn_0001",
                 "session_id": "sess_task_0001",
                 "node_id": "N16",
-                "provider_type": "codex",
+                "provider_type": provider_type,
                 "prompt_snapshot": prompt.clone(),
                 "input_summary": {"worktask_id":"work_wt_001"},
                 "checkpoint_before": checkpoint_id.clone(),
@@ -437,7 +481,7 @@ impl WebRuntime {
             "provider-runs/run_n16_0001/run.json",
             &json!({
                 "provider_run_id": "run_n16_0001",
-                "provider_type": "codex",
+                "provider_type": provider_type,
                 "status": "completed",
                 "prompt": prompt,
                 "dropped": false
@@ -458,7 +502,7 @@ impl WebRuntime {
             &json!({
                 "report_id": "provider-run-run_n16_0001",
                 "provider_run_id": "run_n16_0001",
-                "provider_type": "codex",
+                "provider_type": provider_type,
                 "status": "completed",
                 "dropped": false
             }),
@@ -653,6 +697,17 @@ fn provider_type_slug(provider_type: &ProviderType) -> &'static str {
         ProviderType::ClaudeCode => "claude",
         ProviderType::Codex => "codex",
         ProviderType::Fake => "fake",
+    }
+}
+
+fn parse_confirm_provider_type(value: &str) -> Result<ProviderType, TaskRunError> {
+    match value {
+        "claude_code" => Ok(ProviderType::ClaudeCode),
+        "codex" => Ok(ProviderType::Codex),
+        other => Err(TaskRunError::new(
+            "web_runtime_provider_type",
+            format!("unsupported provider_type: {other}"),
+        )),
     }
 }
 

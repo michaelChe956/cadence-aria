@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ActionComposer } from "./ActionComposer";
 
 describe("ActionComposer", () => {
-  it("shows codex-like prompt editor and sends confirmed prompt", async () => {
+  it("shows chat-style provider dialog and sends selected provider with confirmed prompt", async () => {
     const onConfirm = vi.fn();
     render(
       <ActionComposer
@@ -48,10 +48,14 @@ describe("ActionComposer", () => {
     expect(screen.getByText(/修改 cadence\/project-rules/)).toBeInTheDocument();
     expect(screen.getByText(/node --test/)).toBeInTheDocument();
     expect(screen.getByText("Provider prompt")).toBeInTheDocument();
+    expect(screen.getByLabelText("Provider")).toHaveDisplayValue("Codex");
+    expect(screen.getByRole("option", { name: "Claude Code" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "Fake" })).not.toBeInTheDocument();
     expect(screen.queryByText("完整 prompt 默认展开")).not.toBeInTheDocument();
     const textarea = screen.getByLabelText("Provider prompt");
     await userEvent.clear(textarea);
     await userEvent.type(textarea, "确认后的 prompt");
+    await userEvent.selectOptions(screen.getByLabelText("Provider"), "claude_code");
     await userEvent.selectOptions(screen.getByLabelText("Policy override"), "manual-all");
     await userEvent.click(screen.getByRole("button", { name: "确认执行" }));
 
@@ -59,6 +63,7 @@ describe("ActionComposer", () => {
       checkpoint_id: "ckpt_0001",
       prompt: "确认后的 prompt",
       policy_override: "manual-all",
+      provider_type: "claude_code",
     });
   });
 

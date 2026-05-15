@@ -22,6 +22,10 @@ describe("project workbench store", () => {
       phase: "clarification" as const,
       status: "draft" as const,
       active_binding_id: null,
+      workspace_id: null,
+      task_id: null,
+      session_id: null,
+      artifacts: [],
       created_at: "now",
       updated_at: "now",
     };

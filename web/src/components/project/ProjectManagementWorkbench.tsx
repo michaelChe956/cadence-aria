@@ -8,6 +8,8 @@ import {
   Plus,
   RefreshCw,
   Settings,
+  Trophy,
+  Trash2,
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
@@ -15,12 +17,15 @@ import {
   createProductIssue,
   createProject,
   createRepository,
+  deleteProductIssue,
+  deleteProject,
+  deleteRepository,
   listProductIssues,
   listProjects,
   listRepositories,
   startProductIssue,
 } from "../../api/client";
-import type { ProductIssue, Project, Repository } from "../../api/types";
+import type { ProductIssue, ProductIssueArtifact, Project, Repository } from "../../api/types";
 import { WorkbenchSurface } from "../shell/WorkbenchSurface";
 import type { ExecutionContext } from "../task/TaskManagementWorkbench";
 
@@ -70,7 +75,7 @@ export function ProjectManagementWorkbench({
   const [selectedIssueId, setSelectedIssueId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [workspaceDialogOpen, setWorkspaceDialogOpen] = useState(false);
+  const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [issueDialogOpen, setIssueDialogOpen] = useState(false);
   const [repositoryDialogOpen, setRepositoryDialogOpen] = useState(false);
   const [runIssue, setRunIssue] = useState<ProductIssue | null>(null);
@@ -89,19 +94,19 @@ export function ProjectManagementWorkbench({
       const nextProjectId = selectedProjectId ?? projectResponse.projects[0]?.project_id ?? null;
       setSelectedProjectId(nextProjectId);
       if (nextProjectId) {
-        await refreshWorkspace(nextProjectId);
+        await refreshProject(nextProjectId);
       } else {
         setRepositories([]);
         setIssues([]);
       }
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "load workspace workbench failed");
+      setError(reason instanceof Error ? reason.message : "load project workbench failed");
     } finally {
       setBusy(false);
     }
   }
 
-  async function refreshWorkspace(projectId: string) {
+  async function refreshProject(projectId: string) {
     const [repositoryResponse, issueResponse] = await Promise.all([
       listRepositories(projectId),
       listProductIssues(projectId),
@@ -123,15 +128,15 @@ export function ProjectManagementWorkbench({
     setBusy(true);
     setError(null);
     try {
-      await refreshWorkspace(projectId);
+      await refreshProject(projectId);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "load workspace failed");
+      setError(reason instanceof Error ? reason.message : "load project failed");
     } finally {
       setBusy(false);
     }
   }
 
-  async function handleCreateWorkspace(payload: { name: string; description: string | null }) {
+  async function handleCreateProject(payload: { name: string; description: string | null }) {
     setBusy(true);
     setError(null);
     try {
@@ -141,9 +146,9 @@ export function ProjectManagementWorkbench({
       setRepositories([]);
       setIssues([]);
       setSelectedIssueId(null);
-      setWorkspaceDialogOpen(false);
+      setProjectDialogOpen(false);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "create workspace failed");
+      setError(reason instanceof Error ? reason.message : "create project failed");
     } finally {
       setBusy(false);
     }
@@ -171,6 +176,24 @@ export function ProjectManagementWorkbench({
     }
   }
 
+  async function handleDeleteRepository(repositoryId: string) {
+    if (!selectedProjectId) {
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await deleteRepository(selectedProjectId, repositoryId);
+      setRepositories((current) =>
+        current.filter((repository) => repository.repository_id !== repositoryId),
+      );
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "delete repository failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function handleCreateIssue(payload: { title: string; description: string | null }) {
     if (!selectedProjectId) {
       return;
@@ -193,6 +216,54 @@ export function ProjectManagementWorkbench({
     }
   }
 
+  async function handleDeleteIssue(issueId: string) {
+    if (!selectedProjectId) {
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await deleteProductIssue(selectedProjectId, issueId);
+      setIssues((current) => current.filter((issue) => issue.issue_id !== issueId));
+      setSelectedIssueId((current) => (current === issueId ? null : current));
+      setRunIssue((current) => (current?.issue_id === issueId ? null : current));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "delete issue failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleDeleteProject(projectId: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      await deleteProject(projectId);
+      const remainingProjects = projects.filter((project) => project.project_id !== projectId);
+      const nextProjectId =
+        selectedProjectId === projectId
+          ? remainingProjects[0]?.project_id ?? null
+          : selectedProjectId;
+      setProjects(remainingProjects);
+      setSelectedProjectId(nextProjectId);
+      setRunIssue((current) =>
+        current && current.project_id === projectId ? null : current,
+      );
+      if (nextProjectId) {
+        await refreshProject(nextProjectId);
+      } else {
+        setRepositories([]);
+        setIssues([]);
+        setSelectedIssueId(null);
+      }
+      setProjectDialogOpen(false);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "delete project failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function handleStartIssue(repositoryId: string) {
     if (!selectedProjectId || !runIssue) {
       return;
@@ -201,7 +272,7 @@ export function ProjectManagementWorkbench({
     setError(null);
     try {
       const started = await startProductIssue(selectedProjectId, runIssue.issue_id, {
-        repository_id: repositoryId,
+        workspace_id: repositoryId,
       });
       setRunIssue(null);
       onOpenExecution({
@@ -220,6 +291,18 @@ export function ProjectManagementWorkbench({
   const selectedIssue =
     issues.find((issue) => issue.issue_id === selectedIssueId) ?? issues[0] ?? null;
   const issuesByStage = useMemo(() => groupIssuesByStage(issues), [issues]);
+
+  function handleRunIssue(issue: ProductIssue) {
+    if (issue.workspace_id && issue.task_id) {
+      onOpenExecution({
+        issueId: issue.issue_id,
+        workspaceId: issue.workspace_id,
+        taskId: issue.task_id,
+      });
+      return;
+    }
+    setRunIssue(issue);
+  }
 
   return (
     <>
@@ -253,8 +336,9 @@ export function ProjectManagementWorkbench({
               activeRepositoryCount={repositories.length}
               busy={busy}
               onSelectProject={handleSelectProject}
-              onManageWorkspace={() => setWorkspaceDialogOpen(true)}
+              onManageProject={() => setProjectDialogOpen(true)}
               onRefresh={refresh}
+              onDeleteProject={handleDeleteProject}
             />
             <IssueLifecycleBoard
               project={selectedProject}
@@ -263,6 +347,7 @@ export function ProjectManagementWorkbench({
               repositories={repositories}
               onCreateIssue={() => setIssueDialogOpen(true)}
               onSelectIssue={setSelectedIssueId}
+              onDeleteIssue={handleDeleteIssue}
             />
             <IssueWorkspaceDriver
               project={selectedProject}
@@ -270,18 +355,20 @@ export function ProjectManagementWorkbench({
               repositories={repositories}
               busy={busy}
               onAddRepository={() => setRepositoryDialogOpen(true)}
-              onRunIssue={setRunIssue}
+              onRunIssue={handleRunIssue}
+              onDeleteRepository={handleDeleteRepository}
             />
           </div>
         }
       />
-      {workspaceDialogOpen ? (
+      {projectDialogOpen ? (
         <WorkspaceManagementDialog
           projects={projects}
           selectedProjectId={selectedProjectId}
           busy={busy}
-          onClose={() => setWorkspaceDialogOpen(false)}
-          onCreateWorkspace={handleCreateWorkspace}
+          onClose={() => setProjectDialogOpen(false)}
+          onCreateWorkspace={handleCreateProject}
+          onDeleteProject={handleDeleteProject}
         />
       ) : null}
       {issueDialogOpen ? (
@@ -320,8 +407,9 @@ function WorkspaceRail({
   activeRepositoryCount,
   busy,
   onSelectProject,
-  onManageWorkspace,
+  onManageProject,
   onRefresh,
+  onDeleteProject,
 }: {
   projects: Project[];
   selectedProjectId: string | null;
@@ -329,20 +417,21 @@ function WorkspaceRail({
   activeRepositoryCount: number;
   busy: boolean;
   onSelectProject: (projectId: string) => Promise<void>;
-  onManageWorkspace: () => void;
+  onManageProject: () => void;
   onRefresh: () => Promise<void>;
+  onDeleteProject: (projectId: string) => void | Promise<void>;
 }) {
   return (
     <nav
-      aria-label="Workspace 选择"
+      aria-label="Project 选择"
       className="flex min-h-0 flex-col border-b border-[var(--aria-line)] bg-[var(--aria-panel-muted)] lg:border-b-0 lg:border-r"
     >
       <div className="border-b border-[var(--aria-line)] px-3 py-3">
         <div className="flex items-center justify-between gap-2">
           <div>
-            <h2 className="text-sm font-semibold text-[var(--aria-ink)]">Workspace</h2>
+            <h2 className="text-sm font-semibold text-[var(--aria-ink)]">Project</h2>
             <p className="mt-0.5 text-[11px] font-medium text-[var(--aria-ink-muted)]">
-              选择一个工作空间查看 Issue
+              选择一个 Project 查看 Issue
             </p>
           </div>
           <button
@@ -358,54 +447,65 @@ function WorkspaceRail({
         </div>
         <button
           type="button"
-          onClick={onManageWorkspace}
+          onClick={onManageProject}
           className="mt-3 inline-flex h-8 w-full items-center justify-center rounded-md border border-[var(--aria-line-strong)] bg-[var(--aria-panel)] px-3 text-xs font-semibold text-[var(--aria-ink)] transition-colors hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
         >
           <Settings className="mr-1.5 h-3.5 w-3.5" />
-          管理 Workspace
+          管理 Project
         </button>
       </div>
       <div className="min-h-0 flex-1 overflow-auto p-2">
         {projects.length > 0 ? (
-          <ul className="space-y-1.5" aria-label="Workspace 列表">
+          <ul className="space-y-1.5" aria-label="Project 列表">
             {projects.map((project) => {
               const active = project.project_id === selectedProjectId;
               return (
                 <li key={project.project_id}>
-                  <button
-                    type="button"
-                    aria-label={`切换到 ${project.name}`}
-                    aria-current={active ? "true" : undefined}
-                    onClick={() => void onSelectProject(project.project_id)}
-                    disabled={busy && !active}
-                    className={
-                      active
-                        ? "w-full rounded-md border border-[var(--aria-primary)] bg-[var(--aria-panel)] px-3 py-2.5 text-left outline-none ring-2 ring-[var(--aria-primary)]"
-                        : "w-full rounded-md border border-transparent px-3 py-2.5 text-left transition-colors hover:border-[var(--aria-line)] hover:bg-[var(--aria-panel)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] disabled:text-[var(--aria-ink-muted)]"
-                    }
-                  >
-                    <span className="block truncate text-sm font-semibold text-[var(--aria-ink)]">
-                      {project.name}
-                    </span>
-                    <span className="mt-1 block truncate text-[11px] font-medium text-[var(--aria-ink-muted)]">
-                      {project.description ?? project.project_id}
-                    </span>
-                    <span className="mt-2 flex flex-wrap gap-1.5 text-[11px] font-semibold text-[var(--aria-ink-muted)]">
-                      <span className="rounded border border-[var(--aria-line)] bg-[var(--aria-panel)] px-1.5 py-0.5">
-                        {active ? `${activeIssueCount} Issue` : "Issue"}
+                  <div className="flex items-stretch gap-2">
+                    <button
+                      type="button"
+                      aria-label={`切换到 ${project.name}`}
+                      aria-current={active ? "true" : undefined}
+                      onClick={() => void onSelectProject(project.project_id)}
+                      disabled={busy && !active}
+                      className={
+                        active
+                          ? "flex-1 rounded-md border border-[var(--aria-primary)] bg-[var(--aria-panel)] px-3 py-2.5 text-left outline-none ring-2 ring-[var(--aria-primary)]"
+                          : "flex-1 rounded-md border border-transparent px-3 py-2.5 text-left transition-colors hover:border-[var(--aria-line)] hover:bg-[var(--aria-panel)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] disabled:text-[var(--aria-ink-muted)]"
+                      }
+                    >
+                      <span className="block truncate text-sm font-semibold text-[var(--aria-ink)]">
+                        {project.name}
                       </span>
-                      <span className="rounded border border-[var(--aria-line)] bg-[var(--aria-panel)] px-1.5 py-0.5">
-                        {active ? `${activeRepositoryCount} Repo` : "Repo"}
+                      <span className="mt-1 block truncate text-[11px] font-medium text-[var(--aria-ink-muted)]">
+                        {project.description ?? project.project_id}
                       </span>
-                    </span>
-                  </button>
+                      <span className="mt-2 flex flex-wrap gap-1.5 text-[11px] font-semibold text-[var(--aria-ink-muted)]">
+                        <span className="rounded border border-[var(--aria-line)] bg-[var(--aria-panel)] px-1.5 py-0.5">
+                          {active ? `${activeIssueCount} Issue` : "Issue"}
+                        </span>
+                        <span className="rounded border border-[var(--aria-line)] bg-[var(--aria-panel)] px-1.5 py-0.5">
+                          {active ? `${activeRepositoryCount} 代码库` : "代码库"}
+                        </span>
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={`删除 Project ${project.name}`}
+                      disabled={busy}
+                      onClick={() => void onDeleteProject(project.project_id)}
+                      className="inline-flex w-9 shrink-0 items-center justify-center rounded-md border border-rose-200 bg-white text-rose-700 transition-colors hover:bg-rose-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-200 disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-400"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </div>
                 </li>
               );
             })}
           </ul>
         ) : (
           <div className="rounded-md border border-dashed border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 py-8 text-center text-sm font-medium text-[var(--aria-ink-muted)]">
-            暂无 Workspace
+            暂无 Project
           </div>
         )}
       </div>
@@ -420,6 +520,7 @@ function IssueLifecycleBoard({
   repositories,
   onCreateIssue,
   onSelectIssue,
+  onDeleteIssue,
 }: {
   project: Project | null;
   issuesByStage: Record<LifecycleStageId, ProductIssue[]>;
@@ -427,6 +528,7 @@ function IssueLifecycleBoard({
   repositories: Repository[];
   onCreateIssue: () => void;
   onSelectIssue: (issueId: string) => void;
+  onDeleteIssue: (issueId: string) => void | Promise<void>;
 }) {
   return (
     <section
@@ -438,7 +540,7 @@ function IssueLifecycleBoard({
         <div className="min-w-0">
           <h1 className="text-base font-semibold text-[var(--aria-ink)]">Issue 生命周期</h1>
           <p className="mt-0.5 truncate text-xs font-medium text-[var(--aria-ink-muted)]">
-            {project?.name ?? "未选择 Workspace"}
+            {project?.name ?? "未选择 Project"}
           </p>
         </div>
         <button
@@ -460,6 +562,7 @@ function IssueLifecycleBoard({
             selectedIssueId={selectedIssueId}
             repositories={repositories}
             onSelectIssue={onSelectIssue}
+            onDeleteIssue={onDeleteIssue}
           />
         ))}
       </div>
@@ -473,12 +576,14 @@ function LifecycleColumn({
   selectedIssueId,
   repositories,
   onSelectIssue,
+  onDeleteIssue,
 }: {
   stage: (typeof LIFECYCLE_STAGES)[number];
   issues: ProductIssue[];
   selectedIssueId: string | null;
   repositories: Repository[];
   onSelectIssue: (issueId: string) => void;
+  onDeleteIssue: (issueId: string) => void | Promise<void>;
 }) {
   return (
     <section
@@ -500,14 +605,15 @@ function LifecycleColumn({
       <ul className="space-y-2" aria-label={`${stage.label} Issue 卡片`}>
         {issues.map((issue) => (
           <li key={issue.issue_id}>
-            <IssueCard
-              issue={issue}
-              selected={issue.issue_id === selectedIssueId}
-              repositoryName={repoName(issue.repo_id, repositories)}
-              onSelect={() => onSelectIssue(issue.issue_id)}
-            />
-          </li>
-        ))}
+          <IssueCard
+            issue={issue}
+            selected={issue.issue_id === selectedIssueId}
+            repositoryName={repoName(issue.repo_id, repositories)}
+            onSelect={() => onSelectIssue(issue.issue_id)}
+            onDelete={() => void onDeleteIssue(issue.issue_id)}
+          />
+        </li>
+      ))}
       </ul>
     </section>
   );
@@ -518,39 +624,56 @@ function IssueCard({
   selected,
   repositoryName,
   onSelect,
+  onDelete,
 }: {
   issue: ProductIssue;
   selected: boolean;
   repositoryName: string | null;
   onSelect: () => void;
+  onDelete: () => void;
 }) {
   return (
-    <button
-      type="button"
-      aria-pressed={selected}
-      onClick={onSelect}
+    <div
       className={
         selected
-          ? "w-full rounded-md border border-[var(--aria-primary)] bg-[var(--aria-panel)] p-3 text-left outline-none ring-2 ring-[var(--aria-primary)]"
-          : "w-full rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] p-3 text-left transition-colors hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+          ? "rounded-md border border-[var(--aria-primary)] bg-[var(--aria-panel)] p-3 outline-none ring-2 ring-[var(--aria-primary)]"
+          : "rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] p-3"
       }
     >
-      <span className="block truncate text-sm font-semibold text-[var(--aria-ink)]">
-        {issue.title}
-      </span>
-      <span className="mt-1 flex flex-wrap items-center gap-1.5 font-mono text-[11px] font-medium text-[var(--aria-ink-muted)]">
-        <span>{issue.issue_id}</span>
-        <span className="rounded border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-1.5 py-0.5">
-          {issue.status}
-        </span>
-      </span>
-      <span className="mt-2 block text-xs font-medium leading-5 text-[var(--aria-ink-muted)]">
-        {artifactSummary(issue)}
-      </span>
-      <span className="mt-2 block truncate text-[11px] font-medium text-[var(--aria-ink-muted)]">
-        {repositoryName ?? "待选择代码库"}
-      </span>
-    </button>
+      <div className="flex items-start gap-2">
+        <button
+          type="button"
+          aria-label={issue.title}
+          aria-pressed={selected}
+          onClick={onSelect}
+          className="min-w-0 flex-1 text-left outline-none transition-colors hover:opacity-95 focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+        >
+          <span className="block truncate text-sm font-semibold text-[var(--aria-ink)]">
+            {issue.title}
+          </span>
+          <span className="mt-1 flex flex-wrap items-center gap-1.5 font-mono text-[11px] font-medium text-[var(--aria-ink-muted)]">
+            <span>{issue.issue_id}</span>
+            <span className="rounded border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-1.5 py-0.5">
+              {issue.status}
+            </span>
+          </span>
+          <span className="mt-2 block text-xs font-medium leading-5 text-[var(--aria-ink-muted)]">
+            {artifactSummary(issue)}
+          </span>
+          <span className="mt-2 block truncate text-[11px] font-medium text-[var(--aria-ink-muted)]">
+            {repositoryName ?? "待选择 Workspace"}
+          </span>
+        </button>
+        <button
+          type="button"
+          aria-label={`删除 Issue ${issue.title}`}
+          onClick={onDelete}
+          className="inline-flex h-8 shrink-0 items-center justify-center rounded-md border border-rose-200 bg-white px-2 text-rose-700 transition-colors hover:bg-rose-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-200"
+        >
+          <Trash2 className="h-4 w-4" />
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -561,6 +684,7 @@ function IssueWorkspaceDriver({
   busy,
   onAddRepository,
   onRunIssue,
+  onDeleteRepository,
 }: {
   project: Project | null;
   issue: ProductIssue | null;
@@ -568,19 +692,20 @@ function IssueWorkspaceDriver({
   busy: boolean;
   onAddRepository: () => void;
   onRunIssue: (issue: ProductIssue) => void;
+  onDeleteRepository: (repositoryId: string) => void | Promise<void>;
 }) {
   const issueRepositoryName = issue ? repoName(issue.repo_id, repositories) : null;
   const canRun = Boolean(issue && issue.status !== "completed" && repositories.length > 0);
   return (
     <section
       role="region"
-      aria-label="Issue 驱动 Workspace"
+      aria-label="Issue 执行 Workspace"
       className="min-w-0 bg-[var(--aria-panel)]"
     >
       <div className="border-b border-[var(--aria-line)] px-4 py-3">
-        <h2 className="text-sm font-semibold text-[var(--aria-ink)]">Issue 驱动 Workspace</h2>
+        <h2 className="text-sm font-semibold text-[var(--aria-ink)]">Issue 执行 Workspace</h2>
         <p className="mt-0.5 truncate text-xs font-medium text-[var(--aria-ink-muted)]">
-          {project?.name ?? "未选择 Workspace"}
+          {project?.name ?? "未选择 Project"}
         </p>
       </div>
       <div className="grid gap-4 p-4">
@@ -607,26 +732,36 @@ function IssueWorkspaceDriver({
               运行 Issue
             </button>
             <ArtifactBlock
-              title="Story Spec"
+              title="Story Spec 产物"
               icon={<FileText className="h-4 w-4" />}
               body={issue.description ?? `${issue.title} 的用户故事和成功标准待补齐。`}
               meta={issue.phase === "clarification" ? "当前需求澄清产物" : "已进入后续阶段"}
+              artifacts={artifactsForStage(issue, "story_spec")}
             />
             <ArtifactBlock
-              title="Design Spec"
+              title="Design Spec 产物"
               icon={<Layers3 className="h-4 w-4" />}
               body={`围绕 ${issue.change_id} 展示数据模型、接口契约、共享组件与风险约束。`}
               meta={issue.status === "draft" ? "等待 story spec 确认后生成" : "设计产物可审阅"}
+              artifacts={artifactsForStage(issue, "design_spec")}
             />
             <ArtifactBlock
-              title="Work Item"
+              title="Work Item 产物"
               icon={<GitBranch className="h-4 w-4" />}
               body={
                 issue.repo_id
                   ? `绑定 ${issueRepositoryName ?? issue.repo_id}，可进入计划、编码、测试和 review。`
-                  : "运行前需要从当前 Workspace 的代码库中选择唯一 repo。"
+                  : "运行前需要从当前 Project 的 Workspace 中选择唯一执行空间。"
               }
               meta={issue.active_binding_id ?? "暂无 active binding"}
+              artifacts={artifactsForStage(issue, "work_item")}
+            />
+            <ArtifactBlock
+              title="Done 产物"
+              icon={<Trophy className="h-4 w-4" />}
+              body="执行完成后的验收、最终 review 和 summary 产物会归档在这里。"
+              meta={issue.status === "completed" ? "已完成产物可审阅" : "等待完成"}
+              artifacts={artifactsForStage(issue, "done")}
             />
           </div>
         ) : (
@@ -637,9 +772,9 @@ function IssueWorkspaceDriver({
         <section className="grid gap-3 border-t border-[var(--aria-line)] pt-4">
           <div className="flex items-center justify-between gap-3">
             <div>
-              <h3 className="text-sm font-semibold text-[var(--aria-ink)]">Workspace 代码库</h3>
+              <h3 className="text-sm font-semibold text-[var(--aria-ink)]">Issue 执行 Workspace</h3>
               <p className="mt-0.5 text-xs font-medium text-[var(--aria-ink-muted)]">
-                Issue 运行时只从当前 Workspace 选择
+                Issue 运行时只从当前 Project 的 Workspace 中选择
               </p>
             </div>
             <button
@@ -653,19 +788,30 @@ function IssueWorkspaceDriver({
             </button>
           </div>
           {repositories.length > 0 ? (
-            <ul className="space-y-2" aria-label="Workspace 代码库列表">
+            <ul className="space-y-2" aria-label="Issue 执行 Workspace 列表">
               {repositories.map((repository) => (
                 <li
                   key={repository.repository_id}
                   className="rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-3 py-2"
                 >
                   <div className="flex items-center justify-between gap-2">
-                    <span className="truncate text-sm font-semibold text-[var(--aria-ink)]">
-                      {repository.name}
-                    </span>
-                    <span className="font-mono text-[11px] font-medium text-[var(--aria-ink-muted)]">
-                      {repository.repository_id}
-                    </span>
+                    <div className="min-w-0">
+                      <span className="block truncate text-sm font-semibold text-[var(--aria-ink)]">
+                        {repository.name}
+                      </span>
+                      <span className="block font-mono text-[11px] font-medium text-[var(--aria-ink-muted)]">
+                        {repository.repository_id}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      aria-label={`删除代码库 ${repository.name}`}
+                      disabled={busy}
+                      onClick={() => void onDeleteRepository(repository.repository_id)}
+                      className="inline-flex h-8 shrink-0 items-center justify-center rounded-md border border-rose-200 bg-white px-2 text-rose-700 transition-colors hover:bg-rose-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-200 disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-400"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
                   </div>
                   <p className="mt-1 truncate font-mono text-[11px] font-medium text-[var(--aria-ink-muted)]">
                     {repository.path}
@@ -675,7 +821,7 @@ function IssueWorkspaceDriver({
             </ul>
           ) : (
             <div className="rounded-md border border-dashed border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-3 py-6 text-center text-sm font-medium text-[var(--aria-ink-muted)]">
-              当前 Workspace 还没有代码库
+              当前 Project 还没有可执行 Workspace
             </div>
           )}
         </section>
@@ -722,11 +868,13 @@ function ArtifactBlock({
   icon,
   body,
   meta,
+  artifacts,
 }: {
   title: string;
   icon: ReactNode;
   body: string;
   meta: string;
+  artifacts: ProductIssueArtifact[];
 }) {
   return (
     <section className="rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-3">
@@ -740,6 +888,28 @@ function ArtifactBlock({
         </span>
       </div>
       <p className="text-sm font-medium leading-6 text-[var(--aria-ink-muted)]">{body}</p>
+      {artifacts.length > 0 ? (
+        <ul className="mt-2 grid gap-1.5" aria-label={`${title} 列表`}>
+          {artifacts.map((artifact) => (
+            <li
+              key={`${artifact.artifact_ref}:${artifact.path}`}
+              className="rounded border border-[var(--aria-line)] bg-[var(--aria-panel)] px-2 py-1.5"
+            >
+              <div className="flex min-w-0 items-center justify-between gap-2">
+                <span className="truncate font-mono text-[11px] font-semibold text-[var(--aria-ink)]">
+                  {artifact.artifact_ref}
+                </span>
+                <span className="shrink-0 rounded border border-[var(--aria-line)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--aria-ink-muted)]">
+                  {artifact.artifact_kind}
+                </span>
+              </div>
+              <p className="mt-1 truncate font-mono text-[10px] font-medium text-[var(--aria-ink-muted)]">
+                {artifact.path}
+              </p>
+            </li>
+          ))}
+        </ul>
+      ) : null}
       <p className="mt-2 font-mono text-[11px] font-medium text-[var(--aria-ink-muted)]">{meta}</p>
     </section>
   );
@@ -751,33 +921,50 @@ function WorkspaceManagementDialog({
   busy,
   onClose,
   onCreateWorkspace,
+  onDeleteProject,
 }: {
   projects: Project[];
   selectedProjectId: string | null;
   busy: boolean;
   onClose: () => void;
   onCreateWorkspace: (payload: { name: string; description: string | null }) => Promise<void>;
+  onDeleteProject: (projectId: string) => void | Promise<void>;
 }) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   return (
-    <DialogFrame title="Workspace 管理" onClose={onClose}>
+    <DialogFrame title="Project 管理" onClose={onClose}>
       <div className="grid gap-4">
-        <ul aria-label="Workspace 列表" className="max-h-48 space-y-2 overflow-auto">
+        <ul aria-label="Project 列表" className="max-h-48 space-y-2 overflow-auto">
           {projects.map((project) => (
             <li
               key={project.project_id}
               className="rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-3 py-2"
             >
               <div className="flex items-center justify-between gap-2">
-                <span className="text-sm font-semibold text-[var(--aria-ink)]">{project.name}</span>
-                {project.project_id === selectedProjectId ? (
-                  <span className="text-xs font-semibold text-[var(--aria-primary)]">active</span>
-                ) : null}
+                <div className="min-w-0">
+                  <span className="block truncate text-sm font-semibold text-[var(--aria-ink)]">
+                    {project.name}
+                  </span>
+                  <p className="font-mono text-[11px] text-[var(--aria-ink-muted)]">
+                    {project.project_id}
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  {project.project_id === selectedProjectId ? (
+                    <span className="text-xs font-semibold text-[var(--aria-primary)]">active</span>
+                  ) : null}
+                  <button
+                    type="button"
+                    disabled={busy}
+                    aria-label={`删除 Project ${project.name}`}
+                    onClick={() => void onDeleteProject(project.project_id)}
+                    className="inline-flex h-8 shrink-0 items-center justify-center rounded-md border border-rose-200 bg-white px-2 text-rose-700 transition-colors hover:bg-rose-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-200 disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-400"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                </div>
               </div>
-              <p className="font-mono text-[11px] text-[var(--aria-ink-muted)]">
-                {project.project_id}
-              </p>
             </li>
           ))}
         </ul>
@@ -794,7 +981,7 @@ function WorkspaceManagementDialog({
           }}
         >
           <label className="grid gap-1 text-xs font-semibold text-[var(--aria-ink-muted)]">
-            Workspace 名称
+            Project 名称
             <input
               value={name}
               onChange={(event) => setName(event.target.value)}
@@ -802,7 +989,7 @@ function WorkspaceManagementDialog({
             />
           </label>
           <label className="grid gap-1 text-xs font-semibold text-[var(--aria-ink-muted)]">
-            Workspace 描述
+            Project 描述
             <textarea
               rows={2}
               value={description}
@@ -815,7 +1002,7 @@ function WorkspaceManagementDialog({
             disabled={busy || !name.trim()}
             className="inline-flex h-9 items-center justify-center justify-self-start rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 text-sm font-semibold text-white disabled:border-[var(--aria-line)] disabled:bg-[var(--aria-panel-muted)] disabled:text-[var(--aria-ink-muted)]"
           >
-            创建 Workspace
+            创建 Project
           </button>
         </form>
       </div>
@@ -851,7 +1038,7 @@ function CreateIssueDialog({
         }}
       >
         <p className="text-sm font-medium text-[var(--aria-ink-muted)]">
-          创建到激活 Workspace：{workspaceName}
+          创建到激活 Project：{workspaceName}
         </p>
         <label className="grid gap-1 text-xs font-semibold text-[var(--aria-ink-muted)]">
           Issue 标题
@@ -909,7 +1096,7 @@ function CreateRepositoryDialog({
         }}
       >
         <p className="text-sm font-medium text-[var(--aria-ink-muted)]">
-          添加到 Workspace：{workspaceName}
+          添加到 Project：{workspaceName}
         </p>
         <label className="grid gap-1 text-xs font-semibold text-[var(--aria-ink-muted)]">
           代码库名称
@@ -970,9 +1157,9 @@ function RunIssueDialog({
       >
         <p className="text-sm font-medium text-[var(--aria-ink-muted)]">{issue.title}</p>
         <label className="grid gap-1 text-xs font-semibold text-[var(--aria-ink-muted)]">
-          运行代码库
+          运行 Workspace
           <select
-            aria-label="运行代码库"
+            aria-label="运行 Workspace"
             value={repositoryId}
             onChange={(event) => setRepositoryId(event.target.value)}
             className="h-9 rounded-md border border-[var(--aria-line-strong)] bg-[var(--aria-panel)] px-3 text-sm text-[var(--aria-ink)] outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
@@ -1052,6 +1239,13 @@ function stageForIssue(issue: ProductIssue): LifecycleStageId {
 }
 
 function artifactSummary(issue: ProductIssue) {
+  const artifacts = issueArtifacts(issue);
+  if (artifacts.length > 0) {
+    return `${artifacts.length} 个产物 · ${artifacts
+      .slice(0, 2)
+      .map((artifact) => artifact.artifact_kind)
+      .join(" / ")}`;
+  }
   const stage = stageForIssue(issue);
   if (stage === "story_spec") {
     return "Story Spec 待确认";
@@ -1063,6 +1257,17 @@ function artifactSummary(issue: ProductIssue) {
     return "Work Item 执行中";
   }
   return "代码开发已完成";
+}
+
+function artifactsForStage(
+  issue: ProductIssue,
+  stage: ProductIssueArtifact["stage"],
+): ProductIssueArtifact[] {
+  return issueArtifacts(issue).filter((artifact) => artifact.stage === stage);
+}
+
+function issueArtifacts(issue: ProductIssue): ProductIssueArtifact[] {
+  return issue.artifacts ?? [];
 }
 
 function repoName(repoId: string | null, repositories: Repository[]) {

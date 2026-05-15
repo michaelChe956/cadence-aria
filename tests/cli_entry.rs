@@ -35,6 +35,21 @@ fn repl_no_start_reports_daemon_not_found() {
 }
 
 #[test]
+fn tui_command_is_not_available() {
+    let workspace = tempdir().expect("temp workspace");
+
+    let error = run_cli([
+        "tui",
+        "--workspace",
+        workspace.path().to_str().expect("workspace path"),
+    ])
+    .expect_err("tui command should be removed");
+
+    assert_eq!(error.code, "invalid_cli_args");
+    assert!(!error.message.contains("tui"));
+}
+
+#[test]
 fn daemon_status_reports_stale_for_dead_lock() {
     let workspace = tempdir().expect("temp workspace");
     let socket_path = default_socket_path(workspace.path()).expect("socket path");

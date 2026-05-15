@@ -1,7 +1,9 @@
-import { FileText, Plus, Play, RefreshCw } from "lucide-react";
+import { FileText, Play, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import {
   createIssue,
+  deleteIssue,
+  deleteWorkspace,
   createWorkspace,
   listIssues,
   listWorkspaces,
@@ -70,6 +72,19 @@ export function TaskManagementWorkbench({
     }
   }
 
+  async function handleDeleteWorkspace(workspaceId: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      await deleteWorkspace(workspaceId);
+      setWorkspaces((current) => current.filter((workspace) => workspace.workspace_id !== workspaceId));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "delete workspace failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function handleCreateIssue() {
     if (title.trim() === "" || workspaces.length === 0) {
       return;
@@ -86,6 +101,20 @@ export function TaskManagementWorkbench({
       setDescription("");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "create issue failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleDeleteIssue(issueId: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      await deleteIssue(issueId);
+      setIssues((current) => current.filter((issue) => issue.issue_id !== issueId));
+      setStartingIssue((current) => (current?.issue_id === issueId ? null : current));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "delete issue failed");
     } finally {
       setBusy(false);
     }
@@ -222,9 +251,19 @@ export function TaskManagementWorkbench({
                     disabled={busy || workspaces.length === 0}
                     onClick={() => setStartingIssue(issue)}
                     className="inline-flex items-center justify-center rounded-lg border-2 border-orange-600 bg-orange-500 px-3 py-2 text-sm font-black text-white shadow-[0_5px_0_rgba(154,52,18,0.42)] transition-colors hover:bg-orange-400 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-orange-200 disabled:border-slate-300 disabled:bg-slate-200 disabled:text-slate-500 disabled:shadow-none"
+                    >
+                      <Play className="mr-1 h-4 w-4" />
+                      Start
+                    </button>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    aria-label={`删除 issue ${issue.title}`}
+                    onClick={() => void handleDeleteIssue(issue.issue_id)}
+                    className="inline-flex items-center justify-center rounded-lg border-2 border-rose-200 bg-white px-3 py-2 text-sm font-black text-rose-700 shadow-[0_3px_0_rgba(244,63,94,0.14)] transition-colors hover:bg-rose-50 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-rose-200 disabled:border-slate-300 disabled:bg-slate-200 disabled:text-slate-500 disabled:shadow-none"
                   >
-                    <Play className="mr-1 h-4 w-4" />
-                    Start
+                    <Trash2 className="mr-1 h-4 w-4" />
+                    删除
                   </button>
                 </div>
                 {issue.description ? (
@@ -242,6 +281,7 @@ export function TaskManagementWorkbench({
             workspaces={workspaces}
             busy={busy}
             onCreateWorkspace={handleCreateWorkspace}
+            onDeleteWorkspace={handleDeleteWorkspace}
           />
         </aside>
       </main>

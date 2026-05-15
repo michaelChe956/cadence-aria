@@ -84,7 +84,7 @@ impl CheckpointService {
                 &task_root.join("turns"),
                 checkpoint.turn_id.as_deref(),
             )?,
-            node_runs_to_drop: count_json_files_after_boundary(
+            node_runs_to_drop: count_node_runs_after_boundary(
                 &task_root.join("node-runs"),
                 checkpoint.node_run_boundary,
             )?,
@@ -125,7 +125,7 @@ impl CheckpointService {
             &task_root.join("projection.json"),
         )?;
         mark_turns_dropped(&task_root.join("turns"), checkpoint.turn_id.as_deref())?;
-        mark_json_files_dropped_after_boundary(
+        mark_node_runs_dropped_after_boundary(
             &task_root.join("node-runs"),
             checkpoint.node_run_boundary,
         )?;
@@ -297,33 +297,58 @@ fn count_turns_to_drop(root: &Path, turn_id: Option<&str>) -> Result<usize, Task
     Ok(files.len().saturating_sub(start))
 }
 
-fn mark_json_files_dropped_after_boundary(
-    root: &Path,
-    boundary: usize,
-) -> Result<(), TaskRunError> {
-    let files = json_files(root)?;
-    mark_json_paths_dropped(files.into_iter().skip(boundary))
+fn mark_node_runs_dropped_after_boundary(root: &Path, boundary: usize) -> Result<(), TaskRunError> {
+    let (files, adjusted_boundary) = droppable_node_run_files(root, boundary)?;
+    mark_json_paths_dropped(files.into_iter().skip(adjusted_boundary))
 }
 
-fn count_json_files_after_boundary(root: &Path, boundary: usize) -> Result<usize, TaskRunError> {
+fn count_node_runs_after_boundary(root: &Path, boundary: usize) -> Result<usize, TaskRunError> {
+    let (files, adjusted_boundary) = droppable_node_run_files(root, boundary)?;
+    Ok(files.len().saturating_sub(adjusted_boundary))
+}
+
+fn droppable_node_run_files(
+    root: &Path,
+    boundary: usize,
+) -> Result<(Vec<PathBuf>, usize), TaskRunError> {
     let files = json_files(root)?;
-    Ok(files.len().saturating_sub(boundary))
+    let internal_count = files
+        .iter()
+        .filter(|path| is_internal_bootstrap_node_run(path))
+        .count();
+    Ok((
+        files
+            .into_iter()
+            .filter(|path| !is_internal_bootstrap_node_run(path))
+            .collect(),
+        boundary.saturating_sub(internal_count),
+    ))
+}
+
+fn is_internal_bootstrap_node_run(path: &Path) -> bool {
+    let Ok(text) = fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+        return false;
+    };
+    value.get("node_id").and_then(Value::as_str) == Some("N00")
 }
 
 fn mark_runtime_artifacts_dropped_after_boundary(
     task_root: &Path,
     boundary: usize,
 ) -> Result<(), TaskRunError> {
-    let files = runtime_artifact_files(task_root)?;
-    mark_json_paths_dropped(files.into_iter().skip(boundary))
+    let (files, adjusted_boundary) = droppable_runtime_artifact_files(task_root, boundary)?;
+    mark_json_paths_dropped(files.into_iter().skip(adjusted_boundary))
 }
 
 fn count_runtime_artifacts_after_boundary(
     task_root: &Path,
     boundary: usize,
 ) -> Result<usize, TaskRunError> {
-    let files = runtime_artifact_files(task_root)?;
-    Ok(files.len().saturating_sub(boundary))
+    let (files, adjusted_boundary) = droppable_runtime_artifact_files(task_root, boundary)?;
+    Ok(files.len().saturating_sub(adjusted_boundary))
 }
 
 fn runtime_artifact_files(task_root: &Path) -> Result<Vec<PathBuf>, TaskRunError> {
@@ -331,6 +356,35 @@ fn runtime_artifact_files(task_root: &Path) -> Result<Vec<PathBuf>, TaskRunError
     files.extend(json_files(&task_root.join("reports"))?);
     sort_paths_by_modified_then_path(&mut files);
     Ok(files)
+}
+
+fn droppable_runtime_artifact_files(
+    task_root: &Path,
+    boundary: usize,
+) -> Result<(Vec<PathBuf>, usize), TaskRunError> {
+    let files = runtime_artifact_files(task_root)?;
+    let internal_count = files
+        .iter()
+        .filter(|path| is_internal_bootstrap_artifact(path))
+        .count();
+    Ok((
+        files
+            .into_iter()
+            .filter(|path| !is_internal_bootstrap_artifact(path))
+            .collect(),
+        boundary.saturating_sub(internal_count),
+    ))
+}
+
+fn is_internal_bootstrap_artifact(path: &Path) -> bool {
+    let Ok(text) = fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+        return false;
+    };
+    value.get("producer_node").and_then(Value::as_str) == Some("N00")
+        || value.get("artifact_kind").and_then(Value::as_str) == Some("internal_step")
 }
 
 fn mark_provider_runs_dropped_after_boundary(

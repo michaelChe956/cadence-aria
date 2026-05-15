@@ -34,6 +34,7 @@ fn advance_creates_checkpoint_and_confirm_persists_turn_node_run_provider_run_ar
                 checkpoint_id: pending.checkpoint_id,
                 prompt: "确认执行 N16".to_string(),
                 policy_override: None,
+                provider_type: None,
             },
         )
         .expect("confirm");

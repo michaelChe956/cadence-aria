@@ -217,6 +217,7 @@ export function AppShell() {
     checkpoint_id: string;
     prompt: string;
     policy_override?: string | null;
+    provider_type?: string | null;
   }) {
     const taskId = projection?.active_task_id ?? executionContext?.taskId;
     if (!taskId) {

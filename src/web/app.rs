@@ -1,5 +1,5 @@
 use axum::Router;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
 
@@ -21,10 +21,17 @@ pub fn build_web_router(state: WebAppState) -> Router {
             get(handlers::list_workspaces).post(handlers::create_workspace),
         )
         .route(
+            "/api/workspaces/{workspace_id}",
+            delete(handlers::delete_workspace),
+        )
+        .route(
             "/api/projects",
             get(handlers::list_projects).post(handlers::create_project),
         )
-        .route("/api/projects/{project_id}", get(handlers::get_project))
+        .route(
+            "/api/projects/{project_id}",
+            get(handlers::get_project).delete(handlers::delete_project),
+        )
         .route(
             "/api/projects/{project_id}/open",
             post(handlers::open_project),
@@ -34,8 +41,16 @@ pub fn build_web_router(state: WebAppState) -> Router {
             get(handlers::list_repositories).post(handlers::create_repository),
         )
         .route(
+            "/api/projects/{project_id}/repositories/{repository_id}",
+            delete(handlers::delete_repository),
+        )
+        .route(
             "/api/projects/{project_id}/issues",
             get(handlers::list_product_issues).post(handlers::create_product_issue),
+        )
+        .route(
+            "/api/projects/{project_id}/issues/{issue_id}",
+            delete(handlers::delete_product_issue),
         )
         .route(
             "/api/projects/{project_id}/issues/{issue_id}/start",
@@ -45,6 +60,7 @@ pub fn build_web_router(state: WebAppState) -> Router {
             "/api/issues",
             get(handlers::list_issues).post(handlers::create_issue),
         )
+        .route("/api/issues/{issue_id}", delete(handlers::delete_issue))
         .route("/api/issues/{issue_id}/start", post(handlers::start_issue))
         .route(
             "/api/issues/{issue_id}/rollback/preview",

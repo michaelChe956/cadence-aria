@@ -67,6 +67,7 @@ pub struct ConfirmTaskRequest {
     pub checkpoint_id: String,
     pub prompt: String,
     pub policy_override: Option<String>,
+    pub provider_type: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -313,14 +314,29 @@ pub struct ProductIssueDto {
     pub issue_id: String,
     pub project_id: String,
     pub repo_id: Option<String>,
+    pub workspace_id: Option<String>,
+    pub task_id: Option<String>,
+    pub session_id: Option<String>,
     pub title: String,
     pub description: Option<String>,
     pub change_id: String,
     pub phase: String,
     pub status: String,
     pub active_binding_id: Option<String>,
+    pub artifacts: Vec<ProductIssueArtifactDto>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ProductIssueArtifactDto {
+    pub artifact_ref: String,
+    pub artifact_kind: String,
+    pub producer_node: Option<String>,
+    pub path: String,
+    pub summary: String,
+    pub stage: String,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -340,7 +356,8 @@ pub struct CreateProductIssueRequest {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct StartProductIssueRequest {
-    pub repository_id: String,
+    pub workspace_id: Option<String>,
+    pub repository_id: Option<String>,
     pub policy_preset: Option<String>,
     pub provider_mode: Option<String>,
     pub timeout_secs: Option<u64>,

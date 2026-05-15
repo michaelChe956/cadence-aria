@@ -108,14 +108,27 @@ export type ProductIssue = {
   issue_id: string;
   project_id: string;
   repo_id: string | null;
+  workspace_id: string | null;
+  task_id: string | null;
+  session_id: string | null;
   title: string;
   description: string | null;
   change_id: string;
   phase: "clarification" | "development" | "acceptance";
   status: "draft" | "in_progress" | "completed" | "blocked";
   active_binding_id: string | null;
+  artifacts?: ProductIssueArtifact[];
   created_at: string;
   updated_at: string;
+};
+
+export type ProductIssueArtifact = {
+  artifact_ref: string;
+  artifact_kind: string;
+  producer_node: string | null;
+  path: string;
+  summary: string;
+  stage: "story_spec" | "design_spec" | "work_item" | "done";
 };
 
 export type ProductIssueListResponse = {
@@ -129,7 +142,8 @@ export type CreateProductIssueRequest = {
 };
 
 export type StartProductIssueRequest = {
-  repository_id: string;
+  workspace_id?: string | null;
+  repository_id?: string | null;
   policy_preset?: string | null;
   provider_mode?: string | null;
   timeout_secs?: number | null;

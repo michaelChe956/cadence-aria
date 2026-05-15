@@ -9,14 +9,11 @@
 - 目标命令：`aria web`
 - 第一版范围：本地单机、单 workspace、真实逐节点确认闭环
 - 后续演进：桌面端壳与多 workspace 管理
-- 相关背景文档：
-  - `cadence/designs/2026-05-07_技术方案_Aria_TUI工作台与可回退交互Runtime设计_v1.0.md`
-  - `cadence/analysis-docs/2026-05-07_状态记录_Aria_Fibonacci真实E2E_main本地Rust与TUI准备_v1.0.md`
 - 参考项目：`/Users/michaelche/Documents/git-folder/github-folder/vibe-kanban`
 
 ## 背景
 
-当前 Aria CLI 已具备 `daemon status/run`、`repl`、`task run --non-interactive` 和初步 `tui` 入口。TUI 设计与实现已经沉淀了 `interactive` core 的早期模型，包括 `WorkspaceProjection`、`TaskSession`、`InteractionTurn`、`NodeRun`、`RuntimeCheckpoint`、policy、checkpoint/rollback 和 provider step 暂停点。
+当前 Aria CLI 已具备 `daemon status/run`、`repl`、`task run --non-interactive` 和 `web` 入口。`interactive` core 沉淀了早期运行模型，包括 `WorkspaceProjection`、`TaskSession`、`InteractionTurn`、`NodeRun`、`RuntimeCheckpoint`、policy、checkpoint/rollback 和 provider step 暂停点。
 
 Fibonacci 真实 E2E 案例显示，仅靠 CLI 末尾报告不足以解释真实运行状态：整体状态为 `blocked_by_gate`，但业务源码和测试已经通过，最终阻塞来自归档 worktask 的 write scope contract 问题。Web 工作台需要把节点输入输出、使用过程、文档沉淀物、provider 运行、diff、测试结果、gate 诊断和回退点放在同一个可操作界面里。
 
@@ -32,7 +29,7 @@ Fibonacci 真实 E2E 案例显示，仅靠 CLI 末尾报告不足以解释真实
 ## 目标
 
 1. 新增 `aria web --workspace <PATH> [--host HOST] [--port PORT]`，启动本地 Web 服务并托管前端工作台。
-2. 页面包含 TUI 规划的全部信息域：Overview、Timeline、IO、Artifacts、Changes、Diagnostics、Action 输入。
+2. 页面包含 Web Runtime 的全部信息域：Overview、Timeline、IO、Artifacts、Changes、Diagnostics、Action 输入。
 3. 支持新建任务、继续已有任务、逐节点推进、provider 节点前暂停确认。
 4. 清晰展示每个节点的输入、输出、使用过程、文档沉淀物、provider run、stdout/stderr、结构化输出、报告和 diff。
 5. 支持 checkpoint 级回退：恢复 Git workspace 与 Aria runtime 边界，后续历史标记为 `dropped=true`。
@@ -199,7 +196,7 @@ Claude Code/Codex 节点暂停时出现 Codex-like 输入区：
 
 ### Policy Preset
 
-沿用 TUI 设计：
+沿用 interactive runtime 设计：
 
 | Preset | 行为 |
 |--------|------|
@@ -253,7 +250,7 @@ Claude Code/Codex 节点暂停时出现 Codex-like 输入区：
 
 ## 数据模型
 
-复用 TUI 设计的数据模型，并为 Web 补充字段。
+复用 interactive runtime 数据模型，并为 Web 补充字段。
 
 ### `WorkspaceProjection`
 
@@ -606,7 +603,7 @@ Web 必须把错误归类到 Diagnostics Panel，而不是只弹 toast。
 
 ## 实施顺序建议
 
-1. 扩展 interactive projection，使 Web 能完整浏览 TUI 所需信息。
+1. 扩展 interactive projection，使 Web 能完整浏览 Web 所需信息。
 2. 拆出真实 step runner seam，支持 provider 节点暂停与确认。
 3. 实现 checkpoint rollback preview，补足边界计数和 dirty preflight。
 4. 新增 `web` 后端模块和 `aria web` CLI 入口。

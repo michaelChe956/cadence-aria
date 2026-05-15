@@ -8,6 +8,10 @@ import {
   createRepository,
   createTask,
   createWorkspace,
+  deleteProductIssue,
+  deleteProject,
+  deleteRepository,
+  deleteWorkspace,
   getArtifactContent,
   getFileContent,
   getFileDiff,
@@ -235,6 +239,30 @@ describe("api client", () => {
     );
     expect(calls[4].init?.method).toBe("POST");
     expect(calls[4].init?.body).toBe(JSON.stringify({ repository_id: "repository_0001" }));
+  });
+
+  it("calls delete endpoints with encoded resource ids", async () => {
+    const calls: Array<{ input: string; init?: RequestInit }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push({ input: String(input), init });
+        return new Response(JSON.stringify({ status: "deleted" }), { status: 200 });
+      }),
+    );
+
+    await deleteWorkspace("workspace/with space");
+    await deleteProject("project/with space");
+    await deleteRepository("project/with space", "repository/with space");
+    await deleteProductIssue("project/with space", "issue/with space");
+
+    expect(calls.map((call) => call.input)).toEqual([
+      "/api/workspaces/workspace%2Fwith%20space",
+      "/api/projects/project%2Fwith%20space",
+      "/api/projects/project%2Fwith%20space/repositories/repository%2Fwith%20space",
+      "/api/projects/project%2Fwith%20space/issues/issue%2Fwith%20space",
+    ]);
+    expect(calls.every((call) => call.init?.method === "DELETE")).toBe(true);
   });
 
   it("creates and starts an issue through the api", async () => {

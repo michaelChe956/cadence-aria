@@ -7,5 +7,4 @@ pub mod protocol;
 pub mod repl;
 pub mod runtime_units;
 pub mod task_run;
-pub mod tui;
 pub mod web;

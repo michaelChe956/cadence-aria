@@ -90,6 +90,21 @@ impl RepositoryStore {
         }))
     }
 
+    pub fn delete(&self, project_id: &str, repository_id: &str) -> Result<(), ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(repository_id)?;
+        let mut repositories = self.list(project_id)?;
+        let initial_len = repositories.len();
+        repositories.retain(|record| record.id != repository_id);
+        if repositories.len() == initial_len {
+            return Err(ProductStoreError::NotFound {
+                kind: "repository",
+                id: repository_id.to_string(),
+            });
+        }
+        write_json(&self.repos_path(project_id), &repositories)
+    }
+
     fn repos_path(&self, project_id: &str) -> PathBuf {
         self.paths.project_root(project_id).join("repos.json")
     }

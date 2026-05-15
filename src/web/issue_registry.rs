@@ -147,6 +147,16 @@ impl IssueRegistry {
         })
     }
 
+    pub fn delete(&self, issue_id: &str) -> Result<(), IssueRegistryError> {
+        let mut issues = self.list()?;
+        let initial_len = issues.len();
+        issues.retain(|issue| issue.issue_id != issue_id);
+        if issues.len() == initial_len {
+            return Err(registry_error("issue_not_found", issue_id));
+        }
+        self.write(&issues)
+    }
+
     fn path(&self) -> PathBuf {
         self.app_root.join(".aria/runtime/web/issues.json")
     }

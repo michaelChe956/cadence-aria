@@ -2,7 +2,7 @@ use cadence_aria::cross_cutting::provider_adapter::{
     ProviderAdapter, ProviderAdapterError, STRUCTURED_OUTPUT_END, STRUCTURED_OUTPUT_START,
     parse_last_structured_output,
 };
-use cadence_aria::protocol::contracts::{AdapterInput, AdapterOutput, TimeoutStatus};
+use cadence_aria::protocol::contracts::{AdapterInput, AdapterOutput, ProviderType, TimeoutStatus};
 use cadence_aria::web::runtime::WebRuntime;
 use cadence_aria::web::types::{ConfirmTaskRequest, CreateTaskRequest};
 use serde_json::json;
@@ -14,7 +14,9 @@ use std::sync::{Arc, Mutex};
 fn web_runtime_real_mode_runs_task_orchestrator_provider_path() {
     let workspace = prepare_workspace();
     let seen_schemas = Arc::new(Mutex::new(Vec::new()));
-    let provider = ScriptedTaskRunProvider::happy(seen_schemas.clone());
+    let seen_provider_types = Arc::new(Mutex::new(Vec::new()));
+    let provider =
+        ScriptedTaskRunProvider::happy(seen_schemas.clone(), seen_provider_types.clone());
     let mut runtime =
         WebRuntime::new_with_provider(workspace.path().to_path_buf(), Box::new(provider));
 
@@ -43,6 +45,7 @@ fn web_runtime_real_mode_runs_task_orchestrator_provider_path() {
                 checkpoint_id: pending.checkpoint_id,
                 prompt: pending.prompt,
                 policy_override: None,
+                provider_type: Some("claude_code".to_string()),
             },
         )
         .expect("confirm real task");
@@ -68,6 +71,13 @@ fn web_runtime_real_mode_runs_task_orchestrator_provider_path() {
     assert!(seen_schemas.contains(&json!("schema://aria/artifacts/clarification_record/v1")));
     assert!(seen_schemas.contains(&json!("schema://aria/artifacts/coding_report/v1")));
     assert!(seen_schemas.contains(&json!("schema://aria/artifacts/final_summary/v1")));
+    let seen_provider_types = seen_provider_types.lock().expect("seen providers").clone();
+    assert!(!seen_provider_types.is_empty());
+    assert!(
+        seen_provider_types
+            .iter()
+            .all(|provider_type| *provider_type == ProviderType::ClaudeCode)
+    );
 }
 
 #[test]
@@ -100,6 +110,7 @@ fn web_runtime_real_mode_preserves_web_metadata_after_provider_failure() {
                 checkpoint_id: pending.checkpoint_id,
                 prompt: pending.prompt,
                 policy_override: None,
+                provider_type: None,
             },
         )
         .expect_err("design provider failure should fail the real run");
@@ -130,13 +141,18 @@ fn prepare_workspace() -> tempfile::TempDir {
 #[derive(Debug)]
 struct ScriptedTaskRunProvider {
     output_schemas: Arc<Mutex<Vec<serde_json::Value>>>,
+    provider_types: Arc<Mutex<Vec<ProviderType>>>,
     fail_at_design: bool,
 }
 
 impl ScriptedTaskRunProvider {
-    fn happy(output_schemas: Arc<Mutex<Vec<serde_json::Value>>>) -> Self {
+    fn happy(
+        output_schemas: Arc<Mutex<Vec<serde_json::Value>>>,
+        provider_types: Arc<Mutex<Vec<ProviderType>>>,
+    ) -> Self {
         Self {
             output_schemas,
+            provider_types,
             fail_at_design: false,
         }
     }
@@ -144,6 +160,7 @@ impl ScriptedTaskRunProvider {
     fn failing_at_design() -> Self {
         Self {
             output_schemas: Arc::new(Mutex::new(Vec::new())),
+            provider_types: Arc::new(Mutex::new(Vec::new())),
             fail_at_design: true,
         }
     }
@@ -151,6 +168,10 @@ impl ScriptedTaskRunProvider {
 
 impl ProviderAdapter for ScriptedTaskRunProvider {
     fn run(&self, input: &AdapterInput) -> Result<AdapterOutput, ProviderAdapterError> {
+        self.provider_types
+            .lock()
+            .expect("provider types")
+            .push(input.provider_type.clone());
         self.output_schemas
             .lock()
             .expect("schemas")

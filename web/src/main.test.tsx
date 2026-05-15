@@ -24,9 +24,9 @@ describe("AppShell", () => {
     render(<AppShell />);
 
     expect(await screen.findByRole("main", { name: "任务管理页面" })).toBeInTheDocument();
-    expect(screen.getByRole("navigation", { name: "Workspace 选择" })).toBeInTheDocument();
+    expect(screen.getByRole("navigation", { name: "Project 选择" })).toBeInTheDocument();
     expect(screen.getByRole("region", { name: "Issue 生命周期看板" })).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "Issue 驱动 Workspace" })).toHaveTextContent(
+    expect(screen.getByRole("region", { name: "Issue 执行 Workspace" })).toHaveTextContent(
       "请选择一个 Issue",
     );
   });
@@ -401,12 +401,16 @@ function issueFixture() {
     issue_id: "issue_0001",
     project_id: "project_0001",
     repo_id: null,
+    workspace_id: null,
+    task_id: null,
+    session_id: null,
     title: "Implement picker",
     description: "Select repo",
     change_id: "implement-picker",
     phase: "clarification",
     status: "draft",
     active_binding_id: null,
+    artifacts: [],
     created_at: "2026-05-14T00:00:00Z",
     updated_at: "2026-05-14T00:00:00Z",
   };

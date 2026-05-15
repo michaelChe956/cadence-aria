@@ -31,6 +31,7 @@ fn web_runtime_fake_create_advance_confirm_and_projection() {
                 checkpoint_id: pending.checkpoint_id,
                 prompt: "确认执行 N16".to_string(),
                 policy_override: None,
+                provider_type: None,
             },
         )
         .expect("confirm");
@@ -88,6 +89,7 @@ fn web_runtime_fake_rollback_preview_and_execute_restores_workspace_history() {
                 checkpoint_id: pending.checkpoint_id.clone(),
                 prompt: "确认执行 N16".to_string(),
                 policy_override: None,
+                provider_type: None,
             },
         )
         .expect("confirm");
