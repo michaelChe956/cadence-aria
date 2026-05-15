@@ -19,10 +19,10 @@ export function RollbackDialog({
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 bg-indigo-950/45 backdrop-blur-sm" />
-        <Dialog.Content className="fixed left-1/2 top-1/2 w-[calc(100vw-2rem)] max-w-[34rem] -translate-x-1/2 -translate-y-1/2 rounded-lg border-2 border-indigo-200 bg-white p-5 text-indigo-950 shadow-[0_18px_0_rgba(79,70,229,0.18),0_28px_70px_rgba(30,27,75,0.32)]">
-          <Dialog.Title className="text-lg font-bold">回退到 checkpoint</Dialog.Title>
-          <Dialog.Description className="mt-1 text-sm font-semibold text-indigo-600">
+        <Dialog.Overlay className="fixed inset-0 bg-slate-950/35 backdrop-blur-sm" />
+        <Dialog.Content className="fixed left-1/2 top-1/2 w-[calc(100vw-2rem)] max-w-[34rem] -translate-x-1/2 -translate-y-1/2 rounded-lg border border-[var(--aria-line)] bg-[var(--aria-panel)] p-5 text-[var(--aria-ink)] shadow-lg">
+          <Dialog.Title className="text-lg font-semibold">回退到 checkpoint</Dialog.Title>
+          <Dialog.Description className="mt-1 text-sm font-medium text-[var(--aria-ink-muted)]">
             确认本次回退会丢弃的运行记录、产物和文件变更。
           </Dialog.Description>
           {preview ? (
@@ -35,7 +35,7 @@ export function RollbackDialog({
               <PreviewLine label="Artifacts" value={String(preview.artifacts_to_drop)} />
               <PreviewLine label="Files" value={preview.files_may_change.join(", ")} />
               {preview.dirty ? (
-                <label className="flex items-center gap-2 rounded-lg border-2 border-rose-200 bg-rose-100 p-2 font-semibold text-rose-900">
+                <label className="flex items-center gap-2 rounded-md border border-[var(--aria-danger)] bg-[var(--aria-danger-soft)] p-2 font-semibold text-[var(--aria-danger)]">
                   <input
                     type="checkbox"
                     checked={force}
@@ -49,14 +49,14 @@ export function RollbackDialog({
           <div className="mt-4 flex justify-end gap-2">
             <button
               type="button"
-              className="rounded-lg border-2 border-indigo-200 bg-white px-3 py-2 font-bold text-indigo-700 shadow-[0_4px_0_rgba(129,140,248,0.16)] transition-colors hover:bg-indigo-50 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-indigo-200"
+              className="inline-flex h-9 items-center rounded-md border border-[var(--aria-line-strong)] bg-[var(--aria-panel)] px-3 text-sm font-semibold text-[var(--aria-ink)] transition-colors hover:bg-[var(--aria-panel-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
               onClick={() => onOpenChange(false)}
             >
               取消
             </button>
             <button
               type="button"
-              className="rounded-lg border-2 border-orange-600 bg-orange-500 px-3 py-2 font-bold text-white shadow-[0_5px_0_rgba(154,52,18,0.45)] transition-colors hover:bg-orange-400 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-orange-200 disabled:border-slate-300 disabled:bg-slate-200 disabled:text-slate-500 disabled:shadow-none"
+              className="inline-flex h-9 items-center rounded-md border border-red-600 bg-red-600 px-3 text-sm font-semibold text-white transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-danger)] disabled:border-[var(--aria-line)] disabled:bg-[var(--aria-panel-muted)] disabled:text-[var(--aria-ink-muted)]"
               disabled={disabled}
               onClick={() =>
                 preview &&
@@ -77,9 +77,9 @@ export function RollbackDialog({
 
 function PreviewLine({ label, value }: { label: string; value: string }) {
   return (
-    <div className="grid grid-cols-[8rem_minmax(0,1fr)] gap-3 rounded-lg border-2 border-indigo-100 bg-indigo-50/80 px-3 py-2">
-      <span className="font-semibold text-indigo-600">{label}</span>
-      <span className="break-words font-mono font-semibold text-indigo-950">{value || "none"}</span>
+    <div className="grid grid-cols-[8rem_minmax(0,1fr)] gap-3 rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-3 py-2">
+      <span className="font-semibold text-[var(--aria-ink-muted)]">{label}</span>
+      <span className="break-words font-mono font-medium text-[var(--aria-ink)]">{value || "none"}</span>
     </div>
   );
 }

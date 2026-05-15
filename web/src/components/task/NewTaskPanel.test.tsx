@@ -28,7 +28,9 @@ describe("NewTaskPanel", () => {
   it("preserves AI coding workbench terms in grouped execution settings", () => {
     render(<NewTaskPanel onCreateTask={() => undefined} busy={false} />);
 
-    expect(screen.getByRole("heading", { name: "Workspace" })).toHaveClass("text-[#241B2F]");
+    expect(screen.getByRole("heading", { name: "Workspace" })).toHaveClass(
+      "text-[var(--aria-ink)]",
+    );
     expect(screen.getByRole("group", { name: "Execution settings" })).toBeInTheDocument();
     expect(screen.getByText("任务请求")).toBeInTheDocument();
     expect(screen.getByText("change id")).toBeInTheDocument();

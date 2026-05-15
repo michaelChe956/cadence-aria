@@ -20,7 +20,7 @@ export function NewTaskPanel({
 
   return (
     <form
-      className="rounded-lg border-2 border-indigo-200 bg-white p-4 shadow-[0_10px_0_rgba(79,70,229,0.10),0_18px_38px_rgba(79,70,229,0.16)]"
+      className="rounded-lg border border-[var(--aria-line)] bg-[var(--aria-panel)] p-4 shadow-sm"
       onSubmit={(event) => {
         event.preventDefault();
         void onCreateTask({
@@ -34,92 +34,94 @@ export function NewTaskPanel({
     >
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h2 className="text-lg font-black text-[#241B2F]">Workspace</h2>
-          <p className="mt-1 text-sm font-semibold text-[#5E516B]">
+          <h2 className="text-lg font-semibold text-[var(--aria-ink)]">Workspace</h2>
+          <p className="mt-1 text-sm font-medium text-[var(--aria-ink-muted)]">
             Describe the task, and Aria will split execution into inspectable nodes.
           </p>
         </div>
-        <span className="rounded-lg border-2 border-cyan-200 bg-cyan-100 px-3 py-1 text-xs font-black text-cyan-950">
+        <span className="rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary-soft)] px-2 py-1 text-xs font-semibold text-[var(--aria-ink)]">
           guided prompt
         </span>
       </div>
       <div className="grid gap-4">
-        <label className="text-sm font-black text-[#241B2F]">
+        <label className="text-sm font-semibold text-[var(--aria-ink)]">
           任务请求
           <textarea
             aria-label="任务请求"
             rows={4}
             placeholder="例如：实现 Fibonacci square sum，并解释每一步验证结果"
-            className="mt-2 w-full resize-y rounded-lg border-2 border-indigo-200 bg-white px-4 py-3 text-base font-semibold leading-7 text-indigo-950 shadow-inner shadow-indigo-200/70 outline-none transition-colors placeholder:text-indigo-300 focus-visible:border-orange-400 focus-visible:ring-4 focus-visible:ring-orange-200"
+            className="mt-2 w-full resize-y rounded-md border border-[var(--aria-line-strong)] bg-[var(--aria-panel)] px-3 py-2 text-sm font-medium leading-6 text-[var(--aria-ink)] outline-none transition-colors placeholder:text-[var(--aria-ink-muted)] focus-visible:border-[var(--aria-primary)] focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
             value={requestText}
             onChange={(event) => setRequestText(event.target.value)}
           />
         </label>
         <fieldset
           aria-label="Execution settings"
-          className="rounded-lg border-2 border-dashed border-indigo-200 bg-indigo-50/70 p-3"
+          className="rounded-lg border border-dashed border-[var(--aria-line-strong)] bg-[var(--aria-panel-muted)] p-3"
         >
-          <legend className="px-2 text-xs font-black uppercase text-[#8E2D60]">Execution settings</legend>
+          <legend className="px-2 text-xs font-semibold uppercase text-[var(--aria-ink-muted)]">
+            Execution settings
+          </legend>
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2 2xl:grid-cols-[minmax(12rem,1fr)_10rem_10rem_8rem_auto]">
-          <label className="text-xs font-black text-indigo-800">
-            change id
-            <input
-              aria-label="change id"
-              className="mt-1 w-full rounded-lg border-2 border-indigo-100 bg-white px-3 py-2 text-sm font-semibold text-indigo-950 shadow-inner shadow-indigo-200/60 outline-none transition-colors placeholder:text-indigo-300 focus-visible:border-orange-400 focus-visible:ring-4 focus-visible:ring-orange-200"
-              value={changeId}
-              onChange={(event) => setChangeId(event.target.value)}
-            />
-          </label>
-          <label className="text-xs font-black text-indigo-800">
-            policy preset
-            <select
-              aria-label="policy preset"
-              className="mt-1 w-full rounded-lg border-2 border-indigo-100 bg-white px-3 py-2 text-sm font-semibold text-indigo-950 shadow-inner shadow-indigo-200/60 outline-none transition-colors focus-visible:border-orange-400 focus-visible:ring-4 focus-visible:ring-orange-200"
-              value={policyPreset}
-              onChange={(event) => setPolicyPreset(event.target.value)}
+            <label className="text-xs font-semibold text-[var(--aria-ink-muted)]">
+              change id
+              <input
+                aria-label="change id"
+                className="mt-1 h-9 w-full rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 text-sm font-medium text-[var(--aria-ink)] outline-none transition-colors placeholder:text-[var(--aria-ink-muted)] focus-visible:border-[var(--aria-primary)] focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+                value={changeId}
+                onChange={(event) => setChangeId(event.target.value)}
+              />
+            </label>
+            <label className="text-xs font-semibold text-[var(--aria-ink-muted)]">
+              policy preset
+              <select
+                aria-label="policy preset"
+                className="mt-1 h-9 w-full rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 text-sm font-medium text-[var(--aria-ink)] outline-none transition-colors focus-visible:border-[var(--aria-primary)] focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+                value={policyPreset}
+                onChange={(event) => setPolicyPreset(event.target.value)}
+              >
+                {policyPresets.map((preset) => (
+                  <option key={preset} value={preset}>
+                    {preset}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="text-xs font-semibold text-[var(--aria-ink-muted)]">
+              provider mode
+              <select
+                aria-label="provider mode"
+                className="mt-1 h-9 w-full rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 text-sm font-medium text-[var(--aria-ink)] outline-none transition-colors focus-visible:border-[var(--aria-primary)] focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+                value={providerMode}
+                onChange={(event) => setProviderMode(event.target.value)}
+              >
+                {providerModes.map((mode) => (
+                  <option key={mode} value={mode}>
+                    {mode}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="text-xs font-semibold text-[var(--aria-ink-muted)]">
+              timeout seconds
+              <input
+                aria-label="timeout seconds"
+                type="number"
+                min={1}
+                className="mt-1 h-9 w-full rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 text-sm font-medium text-[var(--aria-ink)] outline-none transition-colors focus-visible:border-[var(--aria-primary)] focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+                value={timeoutSecs}
+                onChange={(event) => setTimeoutSecs(Number(event.target.value))}
+              />
+            </label>
+            <button
+              type="submit"
+              disabled={busy || requestText.trim() === "" || changeId.trim() === ""}
+              className="inline-flex h-9 items-center justify-center self-end rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-4 text-sm font-semibold text-white transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] disabled:border-[var(--aria-line)] disabled:bg-[var(--aria-panel-muted)] disabled:text-[var(--aria-ink-muted)]"
             >
-              {policyPresets.map((preset) => (
-                <option key={preset} value={preset}>
-                  {preset}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="text-xs font-black text-indigo-800">
-            provider mode
-            <select
-              aria-label="provider mode"
-              className="mt-1 w-full rounded-lg border-2 border-indigo-100 bg-white px-3 py-2 text-sm font-semibold text-indigo-950 shadow-inner shadow-indigo-200/60 outline-none transition-colors focus-visible:border-orange-400 focus-visible:ring-4 focus-visible:ring-orange-200"
-              value={providerMode}
-              onChange={(event) => setProviderMode(event.target.value)}
-            >
-              {providerModes.map((mode) => (
-                <option key={mode} value={mode}>
-                  {mode}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="text-xs font-black text-indigo-800">
-            timeout seconds
-            <input
-              aria-label="timeout seconds"
-              type="number"
-              min={1}
-              className="mt-1 w-full rounded-lg border-2 border-indigo-100 bg-white px-3 py-2 text-sm font-semibold text-indigo-950 shadow-inner shadow-indigo-200/60 outline-none transition-colors focus-visible:border-orange-400 focus-visible:ring-4 focus-visible:ring-orange-200"
-              value={timeoutSecs}
-              onChange={(event) => setTimeoutSecs(Number(event.target.value))}
-            />
-          </label>
-          <button
-            type="submit"
-            disabled={busy || requestText.trim() === "" || changeId.trim() === ""}
-            className="inline-flex items-center justify-center self-end rounded-lg border-2 border-orange-500 bg-orange-300 px-4 py-2 text-sm font-black text-orange-950 shadow-[0_5px_0_rgba(251,146,60,0.36)] transition-colors hover:bg-orange-200 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-orange-200 disabled:border-slate-300 disabled:bg-slate-200 disabled:text-slate-500 disabled:shadow-none"
-          >
-            <Plus className="mr-1 h-4 w-4" />
-            新建任务
-          </button>
-        </div>
+              <Plus className="mr-1 h-4 w-4" />
+              新建任务
+            </button>
+          </div>
         </fieldset>
       </div>
     </form>

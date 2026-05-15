@@ -24,6 +24,8 @@ describe("RollbackDialog", () => {
       />,
     );
 
+    expect(screen.getByRole("dialog")).toHaveTextContent("ckpt_0001");
+    expect(screen.getByRole("button", { name: "执行回退" })).toHaveClass("bg-red-600");
     expect(screen.getByRole("button", { name: "执行回退" })).toBeDisabled();
     await userEvent.click(screen.getByLabelText("允许丢弃当前未提交变更"));
     await userEvent.click(screen.getByRole("button", { name: "执行回退" }));

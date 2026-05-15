@@ -21,7 +21,7 @@ export function GateActionBar({
     <section
       role="region"
       aria-label="Gate action bar"
-      className="rounded-lg border border-[var(--aria-warning)] bg-[var(--aria-warning-soft)] p-3"
+      className="rounded-lg border border-[var(--aria-warning)] bg-[var(--aria-warning-soft)] p-3 shadow-sm"
     >
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="min-w-0">
@@ -38,7 +38,7 @@ export function GateActionBar({
           <button
             type="button"
             onClick={onConfirm}
-            className="inline-flex h-9 items-center justify-center rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 text-sm font-semibold text-white transition-colors hover:bg-cyan-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+            className="inline-flex h-9 items-center justify-center rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 text-sm font-semibold text-white transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
           >
             <CheckCircle2 className="mr-1 h-4 w-4" />
             确认继续
@@ -54,7 +54,7 @@ export function GateActionBar({
           <button
             type="button"
             onClick={onTerminate}
-            className="inline-flex h-9 items-center justify-center rounded-md border border-[var(--aria-danger)] bg-[var(--aria-panel)] px-3 text-sm font-semibold text-[var(--aria-danger)] transition-colors hover:bg-[var(--aria-danger-soft)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-danger)]"
+            className="inline-flex h-9 items-center justify-center rounded-md border border-[var(--aria-danger)] bg-[var(--aria-danger)] px-3 text-sm font-semibold text-white transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-danger)]"
           >
             <OctagonAlert className="mr-1 h-4 w-4" />
             终止

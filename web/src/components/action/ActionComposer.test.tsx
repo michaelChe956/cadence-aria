@@ -34,6 +34,9 @@ describe("ActionComposer", () => {
     expect(screen.getByText(/openspec\/changes\/aria-fibonacci-square\/tasks.md/)).toBeInTheDocument();
     expect(screen.getByText(/修改 cadence\/project-rules/)).toBeInTheDocument();
     expect(screen.getByText(/node --test/)).toBeInTheDocument();
+    expect(screen.getByText("Provider prompt")).toBeInTheDocument();
+    expect(screen.getByText("input refs")).toBeInTheDocument();
+    expect(screen.queryByText("完整 prompt 默认展开")).not.toBeInTheDocument();
     const textarea = screen.getByLabelText("Provider prompt");
     await userEvent.clear(textarea);
     await userEvent.type(textarea, "确认后的 prompt");

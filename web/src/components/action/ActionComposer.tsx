@@ -30,38 +30,42 @@ export function ActionComposer({
 
   if (!pendingStep) {
     return (
-      <section className="rounded-lg border-2 border-dashed border-indigo-200 bg-indigo-50/80 px-4 py-3 text-sm font-semibold text-indigo-700">
+      <section className="rounded-lg border border-dashed border-[var(--aria-line-strong)] bg-[var(--aria-panel-muted)] px-4 py-3 text-sm font-medium text-[var(--aria-ink-muted)]">
         当前没有等待确认的 provider 节点。
       </section>
     );
   }
 
   return (
-    <section className="rounded-lg border-2 border-cyan-200 bg-cyan-50 px-4 py-3 text-indigo-950 shadow-[0_10px_0_rgba(6,182,212,0.16),0_18px_38px_rgba(14,116,144,0.14)]">
+    <section className="rounded-lg border border-[var(--aria-line)] bg-[var(--aria-panel)] px-4 py-3 text-[var(--aria-ink)] shadow-sm">
       <div className="mb-3 flex flex-col justify-between gap-4 xl:flex-row xl:items-start">
         <div className="min-w-0">
-          <div className="font-mono text-sm font-bold text-cyan-950">
+          <div className="font-mono text-sm font-semibold text-[var(--aria-ink)]">
             {pendingStep.node_id} · {pendingStep.provider_type}
           </div>
-          <div className="mt-2 grid gap-1.5 text-xs font-semibold text-indigo-700 md:grid-cols-2">
-            <MetaLine label="scope" value={scope} />
-            <MetaLine label="inputs" value={pendingStep.canonical_input_refs.join(", ")} />
-            <MetaLine label="context" value={pendingStep.context_files.join(", ")} />
-            <MetaLine label="forbidden" value={pendingStep.forbidden_actions.join(", ")} />
-            <MetaLine label="verify" value={pendingStep.verification_commands.join(", ")} />
+          <div className="mt-2 grid gap-1.5 text-xs font-medium md:grid-cols-2">
+            <MetaLine label="input summary" value={formatSummary(pendingStep.input_summary)} />
+            <MetaLine label="input refs" value={pendingStep.canonical_input_refs.join(", ")} />
+            <MetaLine label="allowed write scope" value={scope} />
+            <MetaLine
+              label="verification commands"
+              value={pendingStep.verification_commands.join(", ")}
+            />
+            <MetaLine label="context files" value={pendingStep.context_files.join(", ")} />
+            <MetaLine label="forbidden actions" value={pendingStep.forbidden_actions.join(", ")} />
           </div>
         </div>
         <div className="flex shrink-0 flex-wrap gap-2">
           <button
             type="button"
-            className="inline-flex items-center rounded-lg border-2 border-orange-300 bg-white px-3 py-2 text-sm font-bold text-orange-800 shadow-[0_4px_0_rgba(251,146,60,0.20)] transition-colors hover:bg-orange-50 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-orange-200"
+            className="inline-flex h-9 items-center rounded-md border border-[var(--aria-danger)] bg-[var(--aria-panel)] px-3 text-sm font-semibold text-[var(--aria-danger)] transition-colors hover:bg-[var(--aria-danger-soft)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-danger)]"
             onClick={() => onRollback(pendingStep.checkpoint_id)}
           >
             <RotateCcw className="mr-1 inline h-4 w-4" /> 回退
           </button>
           <button
             type="button"
-            className="inline-flex items-center rounded-lg border-2 border-rose-300 bg-white px-3 py-2 text-sm font-bold text-rose-800 shadow-[0_4px_0_rgba(251,113,133,0.20)] transition-colors hover:bg-rose-50 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-rose-200 disabled:border-slate-200 disabled:text-slate-400 disabled:shadow-none"
+            className="inline-flex h-9 items-center rounded-md border border-[var(--aria-danger)] bg-[var(--aria-panel)] px-3 text-sm font-semibold text-[var(--aria-danger)] transition-colors hover:bg-[var(--aria-danger-soft)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-danger)] disabled:border-[var(--aria-line)] disabled:bg-[var(--aria-panel-muted)] disabled:text-[var(--aria-ink-muted)]"
             disabled={!running}
             onClick={onStop}
           >
@@ -69,7 +73,7 @@ export function ActionComposer({
           </button>
           <button
             type="button"
-            className="inline-flex items-center rounded-lg border-2 border-emerald-600 bg-emerald-500 px-3 py-2 text-sm font-bold text-white shadow-[0_5px_0_rgba(6,95,70,0.38)] transition-colors hover:bg-emerald-400 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-emerald-200"
+            className="inline-flex h-9 items-center rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 text-sm font-semibold text-white transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
             onClick={() =>
               onConfirm({
                 checkpoint_id: pendingStep.checkpoint_id,
@@ -82,39 +86,58 @@ export function ActionComposer({
           </button>
         </div>
       </div>
-      <label className="block text-xs font-bold text-indigo-800" htmlFor="provider-prompt">
-        Provider prompt
-      </label>
-      <label className="mt-2 block text-xs font-bold text-indigo-800">
-        Policy override
-        <select
-          aria-label="Policy override"
-          className="ml-2 rounded-lg border-2 border-cyan-200 bg-white px-2 py-1 text-indigo-950 outline-none transition-colors hover:border-orange-300 focus-visible:border-orange-400 focus-visible:ring-4 focus-visible:ring-orange-200"
-          value={policyOverride}
-          onChange={(event) => setPolicyOverride(event.target.value)}
-        >
-          <option value="">inherit</option>
-          <option value="manual-all">manual-all</option>
-          <option value="manual-write">manual-write</option>
-          <option value="auto-review">auto-review</option>
-          <option value="non-interactive">non-interactive</option>
-        </select>
-      </label>
-      <textarea
-        id="provider-prompt"
-        className="mt-1 min-h-32 w-full rounded-lg border-2 border-cyan-200 bg-white p-3 font-mono text-sm text-indigo-950 shadow-inner shadow-cyan-200/70 outline-none transition-colors focus-visible:border-orange-400 focus-visible:ring-4 focus-visible:ring-orange-200"
-        value={prompt}
-        onChange={(event) => setPrompt(event.target.value)}
-      />
+      <div className="rounded-lg border border-dashed border-[var(--aria-line-strong)] bg-[var(--aria-panel-muted)] p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <label className="text-xs font-semibold text-[var(--aria-ink)]" htmlFor="provider-prompt">
+            Provider prompt
+          </label>
+          <label className="text-xs font-semibold text-[var(--aria-ink-muted)]">
+            Policy override
+            <select
+              aria-label="Policy override"
+              className="ml-2 h-8 rounded-md border border-[var(--aria-line-strong)] bg-[var(--aria-panel)] px-2 text-[var(--aria-ink)] outline-none transition-colors focus-visible:border-[var(--aria-primary)] focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+              value={policyOverride}
+              onChange={(event) => setPolicyOverride(event.target.value)}
+            >
+              <option value="">inherit</option>
+              <option value="manual-all">manual-all</option>
+              <option value="manual-write">manual-write</option>
+              <option value="auto-review">auto-review</option>
+              <option value="non-interactive">non-interactive</option>
+            </select>
+          </label>
+        </div>
+        <textarea
+          id="provider-prompt"
+          className="mt-2 min-h-28 w-full rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] p-3 font-mono text-sm leading-6 text-[var(--aria-ink)] outline-none transition-colors focus-visible:border-[var(--aria-primary)] focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+          value={prompt}
+          onChange={(event) => setPrompt(event.target.value)}
+        />
+      </div>
     </section>
   );
 }
 
 function MetaLine({ label, value }: { label: string; value: string }) {
   return (
-    <div className="min-w-0">
-      <span className="text-indigo-500">{label}: </span>
-      <span className="break-words font-mono text-indigo-950">{value || "none"}</span>
+    <div className="min-w-0 rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-2 py-1">
+      <span className="text-[var(--aria-ink-muted)]">{label}</span>
+      <span className="text-[var(--aria-ink-muted)]">: </span>
+      <span className="break-words font-mono text-[var(--aria-ink)]">{value || "none"}</span>
     </div>
   );
+}
+
+function formatSummary(value: unknown) {
+  if (value === null || value === undefined) {
+    return "";
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
 }

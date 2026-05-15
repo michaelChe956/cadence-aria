@@ -29,29 +29,29 @@ export function StartIssueDialog({
     <section
       role="dialog"
       aria-label="选择 workspace"
-      className="fixed inset-x-4 top-24 z-30 mx-auto max-w-xl rounded-lg border-2 border-orange-300 bg-white p-4 shadow-[0_18px_0_rgba(249,115,22,0.14),0_28px_60px_rgba(36,27,47,0.24)]"
+      className="fixed inset-x-4 top-24 z-30 mx-auto max-w-xl rounded-lg border border-[var(--aria-line)] bg-[var(--aria-panel)] p-4 text-[var(--aria-ink)] shadow-lg"
     >
       <div className="mb-4 flex items-start justify-between gap-4">
         <div>
-          <h2 className="text-lg font-black text-[#241B2F]">选择 workspace</h2>
-          <p className="mt-1 font-mono text-xs font-bold text-[#7A6C83]">{issue.issue_id}</p>
+          <h2 className="text-lg font-semibold text-[var(--aria-ink)]">选择 workspace</h2>
+          <p className="mt-1 font-mono text-xs font-medium text-[var(--aria-ink-muted)]">{issue.issue_id}</p>
         </div>
         <button
           type="button"
           aria-label="关闭 Start"
           onClick={onCancel}
-          className="inline-flex h-9 w-9 items-center justify-center rounded-lg border-2 border-rose-200 bg-white text-rose-800 shadow-[0_4px_0_rgba(190,24,93,0.12)] transition-colors hover:bg-rose-50 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-rose-200"
+          className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-[var(--aria-line-strong)] bg-[var(--aria-panel)] text-[var(--aria-ink-muted)] transition-colors hover:bg-[var(--aria-panel-muted)] hover:text-[var(--aria-ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
         >
           <X className="h-4 w-4" />
         </button>
       </div>
 
       <div className="grid gap-3">
-        <label className="text-xs font-black text-orange-900">
+        <label className="text-xs font-semibold text-[var(--aria-ink-muted)]">
           启动 workspace
           <select
             aria-label="启动 workspace"
-            className="mt-1 w-full rounded-lg border-2 border-orange-100 bg-white px-3 py-2 text-sm font-semibold text-orange-950 shadow-inner shadow-orange-200/60 outline-none transition-colors focus-visible:border-orange-400 focus-visible:ring-4 focus-visible:ring-orange-200"
+            className="mt-1 h-9 w-full rounded-md border border-[var(--aria-line-strong)] bg-[var(--aria-panel)] px-3 text-sm font-medium text-[var(--aria-ink)] outline-none transition-colors focus-visible:border-[var(--aria-primary)] focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
             value={workspaceId}
             onChange={(event) => setWorkspaceId(event.target.value)}
           >
@@ -66,7 +66,7 @@ export function StartIssueDialog({
           type="button"
           disabled={busy || workspaceId === ""}
           onClick={() => void onConfirm(workspaceId)}
-          className="inline-flex items-center justify-center rounded-lg border-2 border-orange-600 bg-orange-500 px-4 py-2 text-sm font-black text-white shadow-[0_5px_0_rgba(154,52,18,0.42)] transition-colors hover:bg-orange-400 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-orange-200 disabled:border-slate-300 disabled:bg-slate-200 disabled:text-slate-500 disabled:shadow-none"
+          className="inline-flex h-9 items-center justify-center rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-4 text-sm font-semibold text-white transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] disabled:border-[var(--aria-line)] disabled:bg-[var(--aria-panel-muted)] disabled:text-[var(--aria-ink-muted)]"
         >
           <Play className="mr-1 h-4 w-4" />
           确认 Start
