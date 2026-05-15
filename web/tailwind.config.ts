@@ -5,12 +5,14 @@ export default {
   theme: {
     extend: {
       colors: {
-        ink: "#101418",
-        panel: "#f6f8f9",
-        line: "#d8e0e6",
-        signal: "#14b8a6",
-        caution: "#f59e0b",
-        danger: "#dc2626",
+        ink: "#17202A",
+        panel: "#FFFFFF",
+        panelMuted: "#FBFCFE",
+        line: "#DDE5EC",
+        signal: "#0891B2",
+        caution: "#D97706",
+        danger: "#DC2626",
+        success: "#059669",
       },
     },
   },
