@@ -30,12 +30,18 @@ describe("ActionComposer", () => {
       />,
     );
 
+    expect(screen.getByText("input summary")).toBeInTheDocument();
+    expect(screen.getByText(/work_wt_001/)).toBeInTheDocument();
+    expect(screen.getByText("input refs")).toBeInTheDocument();
     expect(screen.getByText(/plan_projection_task_0001_0001/)).toBeInTheDocument();
+    expect(screen.getByText("allowed write scope")).toBeInTheDocument();
+    expect(screen.getByText(/src/, { exact: false })).toBeInTheDocument();
+    expect(screen.getByText(/tests/, { exact: false })).toBeInTheDocument();
+    expect(screen.getByText("verification commands")).toBeInTheDocument();
     expect(screen.getByText(/openspec\/changes\/aria-fibonacci-square\/tasks.md/)).toBeInTheDocument();
     expect(screen.getByText(/修改 cadence\/project-rules/)).toBeInTheDocument();
     expect(screen.getByText(/node --test/)).toBeInTheDocument();
     expect(screen.getByText("Provider prompt")).toBeInTheDocument();
-    expect(screen.getByText("input refs")).toBeInTheDocument();
     expect(screen.queryByText("完整 prompt 默认展开")).not.toBeInTheDocument();
     const textarea = screen.getByLabelText("Provider prompt");
     await userEvent.clear(textarea);

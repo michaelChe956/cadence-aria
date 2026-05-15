@@ -21,6 +21,7 @@ describe("GateActionBar", () => {
 
     expect(screen.getByText("N16")).toBeInTheDocument();
     expect(screen.getByText("blocked")).toBeInTheDocument();
+    expect(screen.getByText("gate_0001")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "确认继续" }));
     await user.click(screen.getByRole("button", { name: "要求修改" }));
