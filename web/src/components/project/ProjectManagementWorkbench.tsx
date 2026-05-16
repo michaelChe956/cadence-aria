@@ -194,7 +194,11 @@ export function ProjectManagementWorkbench({
     }
   }
 
-  async function handleCreateIssue(payload: { title: string; description: string | null }) {
+  async function handleCreateIssue(payload: {
+    title: string;
+    description: string | null;
+    repository_id: string;
+  }) {
     if (!selectedProjectId) {
       return;
     }
@@ -205,6 +209,7 @@ export function ProjectManagementWorkbench({
         title: payload.title,
         description: payload.description,
         change_id: null,
+        repository_id: payload.repository_id,
       });
       setIssues((current) => [issue, ...current]);
       setSelectedIssueId(issue.issue_id);
@@ -375,6 +380,7 @@ export function ProjectManagementWorkbench({
         <CreateIssueDialog
           busy={busy}
           workspaceName={selectedProject?.name ?? ""}
+          repositories={repositories}
           onClose={() => setIssueDialogOpen(false)}
           onCreateIssue={handleCreateIssue}
         />
@@ -1012,27 +1018,42 @@ function WorkspaceManagementDialog({
 
 function CreateIssueDialog({
   workspaceName,
+  repositories,
   busy,
   onClose,
   onCreateIssue,
 }: {
   workspaceName: string;
+  repositories: Repository[];
   busy: boolean;
   onClose: () => void;
-  onCreateIssue: (payload: { title: string; description: string | null }) => Promise<void>;
+  onCreateIssue: (payload: {
+    title: string;
+    description: string | null;
+    repository_id: string;
+  }) => Promise<void>;
 }) {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
+  const [repositoryId, setRepositoryId] = useState(repositories[0]?.repository_id ?? "");
+
+  useEffect(() => {
+    if (!repositoryId || !repositories.some((repository) => repository.repository_id === repositoryId)) {
+      setRepositoryId(repositories[0]?.repository_id ?? "");
+    }
+  }, [repositories, repositoryId]);
+
   return (
     <DialogFrame title="新建 Issue" onClose={onClose}>
       <form
         className="grid gap-3"
         onSubmit={(event) => {
           event.preventDefault();
-          if (title.trim()) {
+          if (title.trim() && repositoryId) {
             void onCreateIssue({
               title: title.trim(),
               description: description.trim() || null,
+              repository_id: repositoryId,
             });
           }
         }}
@@ -1040,6 +1061,22 @@ function CreateIssueDialog({
         <p className="text-sm font-medium text-[var(--aria-ink-muted)]">
           创建到激活 Project：{workspaceName}
         </p>
+        <label className="grid gap-1 text-xs font-semibold text-[var(--aria-ink-muted)]">
+          代码库
+          <select
+            aria-label="代码库"
+            value={repositoryId}
+            onChange={(event) => setRepositoryId(event.target.value)}
+            className="h-9 rounded-md border border-[var(--aria-line-strong)] bg-[var(--aria-panel)] px-3 text-sm text-[var(--aria-ink)] outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+          >
+            {repositories.length === 0 ? <option value="">请选择代码库</option> : null}
+            {repositories.map((repository) => (
+              <option key={repository.repository_id} value={repository.repository_id}>
+                {repository.name} · {repository.repository_id}
+              </option>
+            ))}
+          </select>
+        </label>
         <label className="grid gap-1 text-xs font-semibold text-[var(--aria-ink-muted)]">
           Issue 标题
           <input
@@ -1061,7 +1098,7 @@ function CreateIssueDialog({
         </label>
         <button
           type="submit"
-          disabled={busy || !title.trim()}
+          disabled={busy || !title.trim() || !repositoryId}
           className="inline-flex h-9 items-center justify-center justify-self-start rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 text-sm font-semibold text-white disabled:border-[var(--aria-line)] disabled:bg-[var(--aria-panel-muted)] disabled:text-[var(--aria-ink-muted)]"
         >
           创建

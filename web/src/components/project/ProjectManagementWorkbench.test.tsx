@@ -77,6 +77,9 @@ describe("ProjectManagementWorkbench", () => {
     await screen.findByRole("navigation", { name: "Project 选择" });
     await user.click(screen.getByRole("button", { name: "新建 Issue" }));
     const createDialog = screen.getByRole("dialog", { name: "新建 Issue" });
+    expect(within(createDialog).getByLabelText("代码库")).toHaveDisplayValue(
+      "Aria Core · repository_0001",
+    );
     await user.type(within(createDialog).getByLabelText("Issue 标题"), "新增计费设置");
     await user.type(within(createDialog).getByLabelText("Issue 描述"), "需要先确认 story spec");
     await user.click(within(createDialog).getByRole("button", { name: "创建" }));
@@ -90,6 +93,7 @@ describe("ProjectManagementWorkbench", () => {
             title: "新增计费设置",
             description: "需要先确认 story spec",
             change_id: null,
+            repository_id: "repository_0001",
           }),
         }),
       ),
