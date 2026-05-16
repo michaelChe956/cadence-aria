@@ -238,6 +238,16 @@ fn list_helpers_ignore_json_directories() {
         .expect("stories");
     assert_eq!(stories.len(), 1);
     assert_eq!(stories[0].id, "story_spec_0001");
+
+    let next_story = store
+        .create_story_spec(CreateStorySpecInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            title: "Next real story".to_string(),
+        })
+        .expect("next story");
+    assert_eq!(next_story.id, "story_spec_0002");
 }
 
 #[test]
@@ -271,7 +281,21 @@ fn workspace_session_ids_are_unique_across_issues() {
             openspec_enabled: false,
         })
         .expect("second session");
+    let third = store
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0002".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "story_spec_0003".to_string(),
+            workspace_type: WorkspaceType::Story,
+            author_provider: ProviderName::Codex,
+            reviewer_provider: ProviderName::ClaudeCode,
+            review_rounds: 1,
+            superpowers_enabled: true,
+            openspec_enabled: false,
+        })
+        .expect("third session");
 
     assert_eq!(first.id, "workspace_session_0001");
     assert_eq!(second.id, "workspace_session_0002");
+    assert_eq!(third.id, "workspace_session_0003");
 }
