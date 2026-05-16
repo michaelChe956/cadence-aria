@@ -8,6 +8,7 @@ pub mod json_store;
 pub mod lifecycle_store;
 pub mod models;
 pub mod project_store;
+pub mod provider_workspace_runner;
 pub mod repository_store;
 pub mod runtime_binding_store;
 pub mod work_item_store;

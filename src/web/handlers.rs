@@ -9,6 +9,9 @@ use std::fs;
 use std::path::{Path as StdPath, PathBuf};
 use tokio_stream::wrappers::BroadcastStream;
 
+use crate::cross_cutting::provider_adapter::{
+    FakeProviderAdapter, STRUCTURED_OUTPUT_END, STRUCTURED_OUTPUT_START,
+};
 use crate::interactive::models::WebWorkspaceProjection;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::gate_store::GateStore;
@@ -28,6 +31,9 @@ use crate::product::models::{
     WorkspaceType,
 };
 use crate::product::project_store::{CreateProjectInput, ProjectStore};
+use crate::product::provider_workspace_runner::{
+    ProviderWorkspaceRunner, WorkspaceProviderRunInput,
+};
 use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
 use crate::product::runtime_binding_store::{CreateRuntimeBindingInput, RuntimeBindingStore};
 use crate::web::error::{ApiError, ApiResult};
@@ -378,10 +384,28 @@ pub async fn workspace_session_run_next(
     State(state): State<WebAppState>,
     Path(session_id): Path<String>,
 ) -> ApiResult<Json<WorkspaceSessionDto>> {
-    let session = LifecycleStore::new(product_app_paths(&state))
-        .update_workspace_session_status(&session_id, WorkspaceSessionStatus::WaitingForHuman)
+    let paths = product_app_paths(&state);
+    LifecycleStore::new(paths.clone())
+        .get_workspace_session(&session_id)
         .map_err(product_store_api_error)?;
-    Ok(Json(workspace_session_dto(session)))
+
+    let runner = ProviderWorkspaceRunner::new(paths);
+    let output = runner
+        .run_next(
+            WorkspaceProviderRunInput {
+                session_id,
+                user_prompt: provider_workspace_prompt(),
+            },
+            &FakeProviderAdapter,
+        )
+        .map_err(|error| {
+            ApiError::runtime(
+                "provider_workspace_run_failed",
+                "provider workspace run failed",
+                json!({"details": error.details}),
+            )
+        })?;
+    Ok(Json(workspace_session_dto(output.session)))
 }
 
 pub async fn workspace_session_confirm(
@@ -1557,6 +1581,17 @@ fn validate_workspace_message(request: &WorkspaceSessionMessageRequest) -> ApiRe
         ));
     }
     Ok(())
+}
+
+fn provider_workspace_prompt() -> String {
+    let structured = json!({
+        "markdown": "# Provider Workspace\n\nProvider workspace step completed.",
+        "review_result": "review completed",
+        "revision_result": "revision completed"
+    });
+    format!(
+        "run next provider workspace step\n{STRUCTURED_OUTPUT_START}\n{structured}\n{STRUCTURED_OUTPUT_END}"
+    )
 }
 
 fn validate_issue_rollback_ids(issue_id: &str, execution_record_id: &str) -> ApiResult<()> {

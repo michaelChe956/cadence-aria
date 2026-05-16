@@ -92,4 +92,37 @@ describe("ProviderWorkspaceDialog", () => {
     expect(flow).toHaveTextContent("review");
     expect(flow).toHaveTextContent("final");
   });
+
+  it("shows action errors without leaking rejected promises", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <ProviderWorkspaceDialog
+        open
+        title="Story Workspace"
+        session={{
+          workspace_session_id: "workspace_session_0001",
+          issue_id: "issue_0001",
+          entity_id: "story_spec_0001",
+          workspace_type: "story",
+          status: "waiting_for_human",
+          author_provider: "codex",
+          reviewer_provider: "claude_code",
+          review_rounds: 2,
+          superpowers_enabled: true,
+          openspec_enabled: true,
+          messages: [],
+        }}
+        onClose={vi.fn()}
+        onMessage={vi.fn()}
+        onRunNext={vi.fn().mockRejectedValue(new Error("run failed"))}
+        onConfirm={vi.fn()}
+        onRequestChange={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "下一步" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("run failed");
+  });
 });

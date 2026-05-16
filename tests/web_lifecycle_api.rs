@@ -249,6 +249,27 @@ async fn workspace_session_message_run_and_confirm_update_session_state() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(running["status"], "waiting_for_human");
+    let version: Value = serde_json::from_str(
+        &fs::read_to_string(root.path().join(
+            ".aria/projects/project_0001/issues/issue_0001/versions/story_spec_0001/version_0001.json",
+        ))
+        .expect("version file"),
+    )
+    .expect("version json");
+    assert!(
+        version["markdown"]
+            .as_str()
+            .unwrap()
+            .contains("Provider Workspace")
+    );
+    let review_round: Value = serde_json::from_str(
+        &fs::read_to_string(root.path().join(
+            ".aria/projects/project_0001/issues/issue_0001/provider-review-rounds/review_round_0001.json",
+        ))
+        .expect("review round file"),
+    )
+    .expect("review round json");
+    assert_eq!(review_round["round_index"], 1);
 
     let (status, confirmed) = request_json(
         app,

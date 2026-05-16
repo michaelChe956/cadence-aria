@@ -38,6 +38,22 @@ export function WorkspaceConversation({
     }
   }
 
+  async function handleAction(action: () => void | Promise<void>) {
+    if (busy) {
+      return;
+    }
+
+    setBusy(true);
+    setError(null);
+    try {
+      await action();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "操作失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <section
       role="region"
@@ -86,7 +102,8 @@ export function WorkspaceConversation({
           <div className="flex flex-wrap gap-2">
             <button
               type="button"
-              onClick={() => void onRunNext()}
+              disabled={busy}
+              onClick={() => void handleAction(onRunNext)}
               className="inline-flex h-8 items-center rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 text-xs font-semibold text-[var(--aria-ink)]"
             >
               <Play className="mr-1 h-4 w-4" />
@@ -94,7 +111,8 @@ export function WorkspaceConversation({
             </button>
             <button
               type="button"
-              onClick={() => void onConfirm()}
+              disabled={busy}
+              onClick={() => void handleAction(onConfirm)}
               className="inline-flex h-8 items-center rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 text-xs font-semibold text-[var(--aria-ink)]"
             >
               <Check className="mr-1 h-4 w-4" />
@@ -102,7 +120,8 @@ export function WorkspaceConversation({
             </button>
             <button
               type="button"
-              onClick={() => void onRequestChange()}
+              disabled={busy}
+              onClick={() => void handleAction(onRequestChange)}
               className="inline-flex h-8 items-center rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 text-xs font-semibold text-[var(--aria-ink)]"
             >
               <RotateCcw className="mr-1 h-4 w-4" />

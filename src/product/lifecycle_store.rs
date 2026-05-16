@@ -10,9 +10,9 @@ use crate::product::id::next_sequential_id;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::models::{
     DesignKind, DesignSpecRecord, LifecycleConfirmationStatus, LifecycleWorkItemRecord,
-    ProjectProviderDefaultsRecord, ProviderName, SpecVersionRecord, StorySpecRecord,
-    WorkItemPlanStatus, WorkItemStatus, WorkspaceMessageRecord, WorkspaceSessionRecord,
-    WorkspaceSessionStatus, WorkspaceType,
+    ProjectProviderDefaultsRecord, ProviderName, ProviderReviewRoundRecord, SpecVersionRecord,
+    StorySpecRecord, WorkItemPlanStatus, WorkItemStatus, WorkspaceMessageRecord,
+    WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +51,18 @@ pub struct AppendSpecVersionInput {
     pub provider_run_refs: Vec<String>,
     pub review_refs: Vec<String>,
     pub confirmed_by: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppendProviderReviewRoundInput {
+    pub project_id: String,
+    pub issue_id: String,
+    pub session_id: String,
+    pub round_index: u32,
+    pub author_provider: ProviderName,
+    pub reviewer_provider: ProviderName,
+    pub review_result: String,
+    pub revision_result: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -263,6 +275,35 @@ impl LifecycleStore {
         validate_relative_id(issue_id)?;
         validate_relative_id(entity_id)?;
         list_json_records(&self.versions_root(project_id, issue_id, entity_id))
+    }
+
+    pub fn append_provider_review_round(
+        &self,
+        input: AppendProviderReviewRoundInput,
+    ) -> Result<ProviderReviewRoundRecord, ProductStoreError> {
+        validate_relative_id(&input.project_id)?;
+        validate_relative_id(&input.issue_id)?;
+        validate_relative_id(&input.session_id)?;
+
+        let root = self.provider_review_rounds_root(&input.project_id, &input.issue_id);
+        let id = next_sequential_id("review_round", count_json_files(&root)?);
+        let record = ProviderReviewRoundRecord {
+            id: id.clone(),
+            project_id: input.project_id,
+            issue_id: input.issue_id,
+            session_id: input.session_id,
+            round_index: input.round_index,
+            author_provider: input.author_provider,
+            reviewer_provider: input.reviewer_provider,
+            review_result: input.review_result,
+            revision_result: input.revision_result,
+            created_at: Utc::now().to_rfc3339(),
+        };
+
+        let target_path = root.join(format!("{id}.json"));
+        ensure_target_absent(&target_path)?;
+        write_json(&target_path, &record)?;
+        Ok(record)
     }
 
     pub fn create_workspace_session(
@@ -499,6 +540,12 @@ impl LifecycleStore {
         self.paths
             .issue_lifecycle_root(project_id, issue_id)
             .join("workspace-sessions")
+    }
+
+    fn provider_review_rounds_root(&self, project_id: &str, issue_id: &str) -> PathBuf {
+        self.paths
+            .issue_lifecycle_root(project_id, issue_id)
+            .join("provider-review-rounds")
     }
 }
 
