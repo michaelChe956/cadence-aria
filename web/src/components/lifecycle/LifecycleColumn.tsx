@@ -5,13 +5,13 @@ export function LifecycleColumn({
   title,
   ariaLabel,
   cards,
-  selectedId,
+  selectedKey,
   onSelect,
 }: {
   title: string;
   ariaLabel: string;
   cards: LifecycleCardData[];
-  selectedId: string | null;
+  selectedKey: string | null;
   onSelect: (card: LifecycleCardData) => void;
 }) {
   return (
@@ -31,7 +31,7 @@ export function LifecycleColumn({
           <li key={`${card.kind}:${card.id}`}>
             <LifecycleCard
               card={card}
-              selected={selectedId === card.id}
+              selected={selectedKey === `${card.kind}:${card.id}`}
               onSelect={() => onSelect(card)}
             />
           </li>

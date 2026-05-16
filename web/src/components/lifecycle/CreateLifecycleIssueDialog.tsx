@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useRef, useState, type FormEvent } from "react";
 import type { Repository } from "../../api/types";
 
 export type CreateLifecycleIssuePayload = {
@@ -20,24 +20,36 @@ export function CreateLifecycleIssueDialog({
   const [description, setDescription] = useState("");
   const [repositoryId, setRepositoryId] = useState("");
   const [repositoryError, setRepositoryError] = useState<string | null>(null);
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const submittingRef = useRef(false);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!repositoryId) {
-      setRepositoryError("请选择代码库");
+    if (submittingRef.current) {
       return;
     }
 
+    if (!repositoryId) {
+      setRepositoryError("请选择代码库");
+      setSubmitError(null);
+      return;
+    }
+
+    submittingRef.current = true;
     setSubmitting(true);
     setRepositoryError(null);
+    setSubmitError(null);
     try {
       await onCreate({
         title: title.trim(),
         description: description.trim() ? description.trim() : null,
         repository_id: repositoryId,
       });
+    } catch (reason) {
+      setSubmitError(reason instanceof Error ? reason.message : "创建 Issue 失败");
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
   }
@@ -66,7 +78,10 @@ export function CreateLifecycleIssueDialog({
             Issue 标题
             <input
               value={title}
-              onChange={(event) => setTitle(event.target.value)}
+              onChange={(event) => {
+                setTitle(event.target.value);
+                setSubmitError(null);
+              }}
               className="mt-1 block w-full rounded-md border border-[var(--aria-line)] bg-white px-3 py-2 text-sm font-normal text-[var(--aria-ink)]"
             />
           </label>
@@ -74,7 +89,10 @@ export function CreateLifecycleIssueDialog({
             Issue 描述
             <textarea
               value={description}
-              onChange={(event) => setDescription(event.target.value)}
+              onChange={(event) => {
+                setDescription(event.target.value);
+                setSubmitError(null);
+              }}
               className="mt-1 block min-h-24 w-full rounded-md border border-[var(--aria-line)] bg-white px-3 py-2 text-sm font-normal text-[var(--aria-ink)]"
             />
           </label>
@@ -86,6 +104,7 @@ export function CreateLifecycleIssueDialog({
               onChange={(event) => {
                 setRepositoryId(event.target.value);
                 setRepositoryError(null);
+                setSubmitError(null);
               }}
               className="mt-1 block w-full rounded-md border border-[var(--aria-line)] bg-white px-3 py-2 text-sm font-normal text-[var(--aria-ink)]"
             >
@@ -99,6 +118,11 @@ export function CreateLifecycleIssueDialog({
           </label>
           {repositoryError ? (
             <p className="text-sm font-semibold text-[var(--aria-danger)]">{repositoryError}</p>
+          ) : null}
+          {submitError ? (
+            <p role="alert" className="text-sm font-semibold text-[var(--aria-danger)]">
+              {submitError}
+            </p>
           ) : null}
         </div>
         <div className="mt-4 flex justify-end gap-2">

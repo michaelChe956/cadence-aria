@@ -1,5 +1,5 @@
 import { Plus, RefreshCw } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   createProductIssue,
   getIssueLifecycle,
@@ -31,10 +31,11 @@ export function IssueLifecycleWorkbench() {
   const [lifecycles, setLifecycles] = useState<IssueLifecycleResponse[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [focusedIssueId, setFocusedIssueId] = useState<string | null>(null);
-  const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
+  const [selectedCardKey, setSelectedCardKey] = useState<string | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const refreshRequestId = useRef(0);
 
   useEffect(() => {
     void refresh();
@@ -42,10 +43,17 @@ export function IssueLifecycleWorkbench() {
   }, []);
 
   async function refresh() {
+    const requestId = refreshRequestId.current + 1;
+    refreshRequestId.current = requestId;
+
     setBusy(true);
     setError(null);
     try {
       const projectResponse = await listProjects();
+      if (!isLatestRefresh(requestId)) {
+        return;
+      }
+
       const projectId = selectedProjectId ?? projectResponse.projects[0]?.project_id ?? null;
       setProjects(projectResponse.projects);
       setSelectedProjectId(projectId);
@@ -60,18 +68,34 @@ export function IssueLifecycleWorkbench() {
         listRepositories(projectId),
         listProductIssues(projectId),
       ]);
-      setRepositories(repositoryResponse.repositories ?? []);
+      if (!isLatestRefresh(requestId)) {
+        return;
+      }
+
       const lifecycleResponses = await Promise.all(
         (issueResponse.issues ?? []).map(async (issue) =>
           normalizeLifecycleResponse(await getIssueLifecycle(issue.issue_id, projectId), issue),
         ),
       );
+      if (!isLatestRefresh(requestId)) {
+        return;
+      }
+
+      setRepositories(repositoryResponse.repositories ?? []);
       setLifecycles(lifecycleResponses);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "load lifecycle workbench failed");
+      if (isLatestRefresh(requestId)) {
+        setError(reason instanceof Error ? reason.message : "load lifecycle workbench failed");
+      }
     } finally {
-      setBusy(false);
+      if (isLatestRefresh(requestId)) {
+        setBusy(false);
+      }
     }
+  }
+
+  function isLatestRefresh(requestId: number) {
+    return requestId === refreshRequestId.current;
   }
 
   const columns = useMemo(
@@ -81,7 +105,7 @@ export function IssueLifecycleWorkbench() {
   const selectedProject = projects.find((project) => project.project_id === selectedProjectId);
 
   function handleSelectCard(card: LifecycleCardData) {
-    setSelectedCardId(card.id);
+    setSelectedCardKey(lifecycleCardKey(card));
     if (card.kind === "issue") {
       setFocusedIssueId(card.issueId);
     }
@@ -158,28 +182,28 @@ export function IssueLifecycleWorkbench() {
               title="Issue"
               ariaLabel="Issue 列"
               cards={columns.issue}
-              selectedId={selectedCardId}
+              selectedKey={selectedCardKey}
               onSelect={handleSelectCard}
             />
             <LifecycleColumn
               title="Story Spec"
               ariaLabel="Story Spec 列"
               cards={columns.story_spec}
-              selectedId={selectedCardId}
+              selectedKey={selectedCardKey}
               onSelect={handleSelectCard}
             />
             <LifecycleColumn
               title="Design Spec"
               ariaLabel="Design Spec 列"
               cards={columns.design_spec}
-              selectedId={selectedCardId}
+              selectedKey={selectedCardKey}
               onSelect={handleSelectCard}
             />
             <LifecycleColumn
               title="Work Item"
               ariaLabel="Work Item 列"
               cards={columns.work_item}
-              selectedId={selectedCardId}
+              selectedKey={selectedCardKey}
               onSelect={handleSelectCard}
             />
           </div>
@@ -197,17 +221,27 @@ export function IssueLifecycleWorkbench() {
 }
 
 function normalizeLifecycleResponse(
-  lifecycle: IssueLifecycleResponse,
+  lifecycle: unknown,
   issue: ProductIssue,
 ): IssueLifecycleResponse {
-  if (lifecycle.issue) {
-    return lifecycle;
+  if (
+    !isRecord(lifecycle) ||
+    !isRecord(lifecycle.issue) ||
+    lifecycle.issue.issue_id !== issue.issue_id ||
+    !Array.isArray(lifecycle.story_specs) ||
+    !Array.isArray(lifecycle.design_specs) ||
+    !Array.isArray(lifecycle.work_items)
+  ) {
+    throw new Error("invalid lifecycle response");
   }
 
-  return {
-    issue,
-    story_specs: [],
-    design_specs: [],
-    work_items: [],
-  };
+  return lifecycle as IssueLifecycleResponse;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function lifecycleCardKey(card: LifecycleCardData) {
+  return `${card.kind}:${card.id}`;
 }
