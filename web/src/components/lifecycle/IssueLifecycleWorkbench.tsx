@@ -1,6 +1,7 @@
 import { Plus, RefreshCw } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  createProject,
   createProductIssue,
   confirmWorkspaceSession,
   getIssueLifecycle,
@@ -23,11 +24,13 @@ import {
   type LifecycleCard as LifecycleCardData,
 } from "../../state/lifecycle-workbench-store";
 import { WorkbenchSurface } from "../shell/WorkbenchSurface";
+import { CreateProjectDialog, type CreateProjectPayload } from "./CreateProjectDialog";
 import {
   CreateLifecycleIssueDialog,
   type CreateLifecycleIssuePayload,
 } from "./CreateLifecycleIssueDialog";
 import { LifecycleColumn } from "./LifecycleColumn";
+import { ProjectSidebar } from "./ProjectSidebar";
 import { ProviderWorkspaceDialog } from "../workspace/ProviderWorkspaceDialog";
 
 export function IssueLifecycleWorkbench() {
@@ -39,6 +42,7 @@ export function IssueLifecycleWorkbench() {
   const [selectedCardKey, setSelectedCardKey] = useState<string | null>(null);
   const [workspaceSession, setWorkspaceSession] = useState<WorkspaceSession | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const refreshRequestId = useRef(0);
@@ -48,7 +52,7 @@ export function IssueLifecycleWorkbench() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function refresh() {
+  async function refresh(projectIdOverride?: string | null) {
     const requestId = refreshRequestId.current + 1;
     refreshRequestId.current = requestId;
 
@@ -60,13 +64,23 @@ export function IssueLifecycleWorkbench() {
         return;
       }
 
-      const projectId = selectedProjectId ?? projectResponse.projects[0]?.project_id ?? null;
+      const projectId =
+        projectIdOverride ??
+        (selectedProjectId &&
+        projectResponse.projects.some((project) => project.project_id === selectedProjectId)
+          ? selectedProjectId
+          : projectResponse.projects[0]?.project_id) ??
+        null;
+      const projectChanged = projectId !== selectedProjectId;
       setProjects(projectResponse.projects);
       setSelectedProjectId(projectId);
 
       if (!projectId) {
         setRepositories([]);
         setLifecycles([]);
+        setFocusedIssueId(null);
+        setSelectedCardKey(null);
+        setWorkspaceSession(null);
         return;
       }
 
@@ -89,6 +103,11 @@ export function IssueLifecycleWorkbench() {
 
       setRepositories(repositoryResponse.repositories ?? []);
       setLifecycles(lifecycleResponses);
+      if (projectChanged) {
+        setFocusedIssueId(null);
+        setSelectedCardKey(null);
+        setWorkspaceSession(null);
+      }
     } catch (reason) {
       if (isLatestRefresh(requestId)) {
         setError(reason instanceof Error ? reason.message : "load lifecycle workbench failed");
@@ -109,6 +128,15 @@ export function IssueLifecycleWorkbench() {
     [lifecycles, focusedIssueId],
   );
   const selectedProject = projects.find((project) => project.project_id === selectedProjectId);
+  const issueCount = columns.issue.length;
+
+  async function handleSelectProject(projectId: string) {
+    if (projectId === selectedProjectId) {
+      return;
+    }
+    setSelectedProjectId(projectId);
+    await refresh(projectId);
+  }
 
   function handleSelectCard(card: LifecycleCardData) {
     setSelectedCardKey(lifecycleCardKey(card));
@@ -143,88 +171,111 @@ export function IssueLifecycleWorkbench() {
     await refresh();
   }
 
+  async function handleCreateProject(payload: CreateProjectPayload) {
+    const project = await createProject(payload);
+    setProjectDialogOpen(false);
+    await refresh(project.project_id);
+  }
+
   return (
     <>
-      <WorkbenchSurface
-        mainLabel="Issue 生命周期工作台"
-        statusBar={
-          busy ? (
-            <span className="text-xs font-semibold text-[var(--aria-ink-muted)]">加载中</span>
-          ) : null
-        }
-        alert={error}
-        header={
-          <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
-            <div className="min-w-0">
-              <h1 className="truncate text-base font-semibold text-[var(--aria-ink)]">
-                Issue 生命周期工作台
-              </h1>
-              <p className="truncate text-xs text-[var(--aria-ink-muted)]">
-                {selectedProject?.name ?? "未选择 Project"}
-              </p>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              {focusedIssueId ? (
+      <div className="grid min-h-screen bg-[var(--aria-bg)] text-[var(--aria-ink)] lg:grid-cols-[17rem_minmax(0,1fr)]">
+        <ProjectSidebar
+          projects={projects}
+          selectedProjectId={selectedProjectId}
+          issueCount={issueCount}
+          busy={busy}
+          onSelectProject={(projectId) => void handleSelectProject(projectId)}
+          onCreateProject={() => setProjectDialogOpen(true)}
+        />
+        <WorkbenchSurface
+          mainLabel="Issue 生命周期工作台"
+          statusBar={
+            busy ? (
+              <span className="text-xs font-semibold text-[var(--aria-ink-muted)]">加载中</span>
+            ) : null
+          }
+          alert={error}
+          header={
+            <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
+              <div className="min-w-0">
+                <h1 className="truncate text-base font-semibold text-[var(--aria-ink)]">
+                  Issue 生命周期工作台
+                </h1>
+                <p className="truncate text-xs text-[var(--aria-ink-muted)]">
+                  {selectedProject?.name ?? "未选择 Project"}
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                {focusedIssueId ? (
+                  <button
+                    type="button"
+                    onClick={() => setFocusedIssueId(null)}
+                    className="inline-flex h-8 items-center rounded-md border border-[var(--aria-line)] px-3 text-xs font-semibold text-[var(--aria-ink)]"
+                  >
+                    显示全部
+                  </button>
+                ) : null}
                 <button
                   type="button"
-                  onClick={() => setFocusedIssueId(null)}
-                  className="inline-flex h-8 items-center rounded-md border border-[var(--aria-line)] px-3 text-xs font-semibold text-[var(--aria-ink)]"
+                  aria-label="刷新"
+                  onClick={() => void refresh()}
+                  className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-[var(--aria-line)] text-[var(--aria-ink-muted)]"
                 >
-                  显示全部
+                  <RefreshCw className="h-4 w-4" />
                 </button>
-              ) : null}
-              <button
-                type="button"
-                aria-label="刷新"
-                onClick={() => void refresh()}
-                className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-[var(--aria-line)] text-[var(--aria-ink-muted)]"
-              >
-                <RefreshCw className="h-4 w-4" />
-              </button>
-              <button
-                type="button"
-                onClick={() => setDialogOpen(true)}
-                className="inline-flex h-8 items-center rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 text-xs font-semibold text-white"
-              >
-                <Plus className="mr-1 h-4 w-4" />
-                新建 Issue
-              </button>
+                <button
+                  type="button"
+                  disabled={!selectedProjectId}
+                  onClick={() => setDialogOpen(true)}
+                  className="inline-flex h-8 items-center rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 text-xs font-semibold text-white disabled:border-[var(--aria-line)] disabled:bg-[var(--aria-panel-muted)] disabled:text-[var(--aria-ink-muted)]"
+                >
+                  <Plus className="mr-1 h-4 w-4" />
+                  新建 Issue
+                </button>
+              </div>
             </div>
-          </div>
-        }
-        main={
-          <div className="grid min-h-[calc(100vh-6rem)] gap-3 overflow-auto rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] p-3 xl:grid-cols-4">
-            <LifecycleColumn
-              title="Issue"
-              ariaLabel="Issue 列"
-              cards={columns.issue}
-              selectedKey={selectedCardKey}
-              onSelect={handleSelectCard}
-            />
-            <LifecycleColumn
-              title="Story Spec"
-              ariaLabel="Story Spec 列"
-              cards={columns.story_spec}
-              selectedKey={selectedCardKey}
-              onSelect={handleSelectCard}
-            />
-            <LifecycleColumn
-              title="Design Spec"
-              ariaLabel="Design Spec 列"
-              cards={columns.design_spec}
-              selectedKey={selectedCardKey}
-              onSelect={handleSelectCard}
-            />
-            <LifecycleColumn
-              title="Work Item"
-              ariaLabel="Work Item 列"
-              cards={columns.work_item}
-              selectedKey={selectedCardKey}
-              onSelect={handleSelectCard}
-            />
-          </div>
-        }
-      />
+          }
+          main={
+            <div className="grid min-h-[calc(100vh-6rem)] gap-3 overflow-auto rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] p-3 xl:grid-cols-4">
+              <LifecycleColumn
+                title="Issue"
+                ariaLabel="Issue 列"
+                cards={columns.issue}
+                selectedKey={selectedCardKey}
+                onSelect={handleSelectCard}
+              />
+              <LifecycleColumn
+                title="Story Spec"
+                ariaLabel="Story Spec 列"
+                cards={columns.story_spec}
+                selectedKey={selectedCardKey}
+                onSelect={handleSelectCard}
+              />
+              <LifecycleColumn
+                title="Design Spec"
+                ariaLabel="Design Spec 列"
+                cards={columns.design_spec}
+                selectedKey={selectedCardKey}
+                onSelect={handleSelectCard}
+              />
+              <LifecycleColumn
+                title="Work Item"
+                ariaLabel="Work Item 列"
+                cards={columns.work_item}
+                selectedKey={selectedCardKey}
+                onSelect={handleSelectCard}
+              />
+            </div>
+          }
+        />
+      </div>
+      {projectDialogOpen ? (
+        <CreateProjectDialog
+          onCreate={handleCreateProject}
+          onClose={() => setProjectDialogOpen(false)}
+        />
+      ) : null}
       {dialogOpen ? (
         <CreateLifecycleIssueDialog
           repositories={repositories}

@@ -11,6 +11,9 @@ describe("IssueLifecycleWorkbench", () => {
 
     render(<IssueLifecycleWorkbench />);
 
+    expect(await screen.findByRole("navigation", { name: "Project 切换" })).toHaveTextContent(
+      "Aria",
+    );
     expect(await screen.findByRole("region", { name: "Issue 列" })).toBeInTheDocument();
     expect(screen.getByRole("region", { name: "Story Spec 列" })).toHaveTextContent(
       "会话过期提示",
@@ -33,6 +36,58 @@ describe("IssueLifecycleWorkbench", () => {
     );
     expect(screen.getByRole("region", { name: "Work Item 列" })).toHaveTextContent(
       "实现提示组件",
+    );
+  });
+
+  it("switches project from the left sidebar", async () => {
+    const fetchMock = lifecycleFetch({
+      projects: [projectRecord("project_0001", "Aria"), projectRecord("project_0002", "Mobile")],
+      issueTitlesByProject: {
+        project_0001: "登录会话过期",
+        project_0002: "移动端刷新",
+      },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+
+    expect(await screen.findByRole("button", { name: "登录会话过期" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Mobile" }));
+
+    expect(await screen.findByRole("button", { name: "移动端刷新" })).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/project_0002/issues",
+      expect.objectContaining({
+        headers: expect.objectContaining({ "content-type": "application/json" }),
+      }),
+    );
+  });
+
+  it("creates project from the left sidebar and selects it", async () => {
+    const fetchMock = lifecycleFetch({ projects: [] });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+
+    expect(await screen.findByText("还没有 Project")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "新建 Project" }));
+    const dialog = screen.getByRole("dialog", { name: "新建 Project" });
+    await user.type(within(dialog).getByLabelText("Project 名称"), "New Project");
+    await user.type(within(dialog).getByLabelText("Project 描述"), "新的生命周期项目");
+    await user.click(within(dialog).getByRole("button", { name: "创建 Project" }));
+
+    expect(await screen.findByRole("button", { name: "New Project" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ name: "New Project", description: "新的生命周期项目" }),
+      }),
     );
   });
 
@@ -163,20 +218,35 @@ function lifecycleFetch(options?: {
   duplicateCardIds?: boolean;
   invalidLifecycle?: boolean;
   issueTitles?: string[];
+  issueTitlesByProject?: Record<string, string>;
+  projects?: Array<ReturnType<typeof projectRecord>>;
   projectResponses?: Array<Promise<Response>>;
 }) {
+  const projects = [...(options?.projects ?? [projectRecord("project_0001", "Aria")])];
   let projectCall = 0;
-  let issueCall = 0;
+  const issueCallsByProject = new Map<string, number>();
+  const latestIssueTitlesByProject = new Map<string, string>();
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
+    if (url === "/api/projects" && init?.method === "POST") {
+      const payload = JSON.parse(String(init.body)) as { name: string; description?: string | null };
+      const project = projectRecord(
+        `project_${String(projects.length + 1).padStart(4, "0")}`,
+        payload.name,
+        payload.description ?? null,
+      );
+      projects.push(project);
+      return jsonResponse(project);
+    }
     if (url === "/api/projects") {
       const response = options?.projectResponses?.[projectCall];
       projectCall += 1;
-      return response ?? jsonResponse(projectsBody());
+      return response ?? jsonResponse({ projects });
     }
-    if (url === "/api/projects/project_0001/repositories") {
+    const repositoryMatch = url.match(/^\/api\/projects\/([^/]+)\/repositories$/);
+    if (repositoryMatch) {
       return jsonResponse({
-        repositories: [repositoryRecord()],
+        repositories: repositoryMatch[1] === "project_0001" ? [repositoryRecord()] : [],
       });
     }
     if (url === "/api/projects/project_0001/issues" && init?.method === "POST") {
@@ -210,9 +280,41 @@ function lifecycleFetch(options?: {
         ],
       });
     }
-    if (url === "/api/projects/project_0001/issues") {
-      const title = options?.issueTitles?.[issueCall] ?? "登录会话过期";
-      issueCall += 1;
+    const issuesMatch = url.match(/^\/api\/projects\/([^/]+)\/issues$/);
+    if (issuesMatch) {
+      const projectId = issuesMatch[1];
+      const issueCall = issueCallsByProject.get(projectId) ?? 0;
+      const title =
+        options?.issueTitlesByProject?.[projectId] ??
+        options?.issueTitles?.[issueCall] ??
+        "登录会话过期";
+      latestIssueTitlesByProject.set(projectId, title);
+      issueCallsByProject.set(projectId, issueCall + 1);
+      if (projectId !== "project_0001") {
+        return jsonResponse({
+          issues: title
+            ? [
+                {
+                  issue_id: "issue_0002",
+                  project_id: projectId,
+                  repo_id: null,
+                  workspace_id: null,
+                  task_id: null,
+                  session_id: null,
+                  title,
+                  description: "描述",
+                  change_id: "mobile-refresh",
+                  phase: "clarification",
+                  status: "draft",
+                  active_binding_id: null,
+                  artifacts: [],
+                  created_at: "2026-05-16T00:00:00Z",
+                  updated_at: "2026-05-16T00:00:00Z",
+                },
+              ]
+            : [],
+        });
+      }
       return jsonResponse({
         issues: [
           {
@@ -235,18 +337,45 @@ function lifecycleFetch(options?: {
         ],
       });
     }
-    if (
-      url === "/api/issues/issue_0001/lifecycle?project_id=project_0001" ||
-      url === "/api/issues/shared_id/lifecycle?project_id=project_0001"
-    ) {
+    const lifecycleMatch = url.match(/^\/api\/issues\/([^/]+)\/lifecycle\?project_id=([^&]+)$/);
+    if (lifecycleMatch) {
       if (options?.invalidLifecycle) {
         return jsonResponse({});
       }
       const duplicate = options?.duplicateCardIds ?? false;
-      const issueId = duplicate ? "shared_id" : "issue_0001";
+      const requestIssueId = lifecycleMatch[1];
+      const projectId = lifecycleMatch[2];
+      const issueId = duplicate ? "shared_id" : requestIssueId;
       const issueTitle = duplicate
         ? "重复 ID Issue"
-        : (options?.issueTitles?.[issueCall - 1] ?? "登录会话过期");
+        : (latestIssueTitlesByProject.get(projectId) ??
+          options?.issueTitlesByProject?.[projectId] ??
+          "登录会话过期");
+      if (projectId !== "project_0001") {
+        return jsonResponse({
+          issue: {
+            issue_id: issueId,
+            project_id: projectId,
+            repo_id: null,
+            workspace_id: null,
+            task_id: null,
+            session_id: null,
+            title: issueTitle,
+            description: "描述",
+            change_id: "mobile-refresh",
+            phase: "clarification",
+            status: "draft",
+            active_binding_id: null,
+            artifacts: [],
+            created_at: "2026-05-16T00:00:00Z",
+            updated_at: "2026-05-16T00:00:00Z",
+          },
+          story_specs: [],
+          design_specs: [],
+          work_items: [],
+          workspace_sessions: [],
+        });
+      }
       const storyId = duplicate ? "shared_id" : "story_spec_0001";
       return jsonResponse({
         issue: {
@@ -324,16 +453,18 @@ function jsonResponseValue(body: unknown) {
 
 function projectsBody() {
   return {
-    projects: [
-      {
-        project_id: "project_0001",
-        name: "Aria",
-        description: null,
-        created_at: "2026-05-16T00:00:00Z",
-        updated_at: "2026-05-16T00:00:00Z",
-        last_opened_at: null,
-      },
-    ],
+    projects: [projectRecord("project_0001", "Aria")],
+  };
+}
+
+function projectRecord(projectId: string, name: string, description: string | null = null) {
+  return {
+    project_id: projectId,
+    name,
+    description,
+    created_at: "2026-05-16T00:00:00Z",
+    updated_at: "2026-05-16T00:00:00Z",
+    last_opened_at: null,
   };
 }
 
