@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   advanceTask,
   confirmTask,
+  confirmWorkspaceSession,
   createIssue,
   createProject,
   createProductIssue,
@@ -15,12 +16,16 @@ import {
   getArtifactContent,
   getFileContent,
   getFileDiff,
+  getIssueLifecycle,
   getProjection,
+  generateStorySpecs,
   listProductIssues,
   listProjects,
   listRepositories,
   listTasks,
   normalizeApiError,
+  runWorkspaceSessionNext,
+  sendWorkspaceSessionMessage,
   startIssue,
   startProductIssue,
   stopTask,
@@ -208,6 +213,7 @@ describe("api client", () => {
       title: "新增计费设置",
       description: "需要先确认 story spec",
       change_id: null,
+      repository_id: "repository_0001",
     });
     await startProductIssue("project/with space", "issue/with space", {
       repository_id: "repository_0001",
@@ -235,10 +241,48 @@ describe("api client", () => {
         title: "新增计费设置",
         description: "需要先确认 story spec",
         change_id: null,
+        repository_id: "repository_0001",
       }),
     );
     expect(calls[4].init?.method).toBe("POST");
     expect(calls[4].init?.body).toBe(JSON.stringify({ repository_id: "repository_0001" }));
+  });
+
+  it("calls lifecycle generation and workspace session endpoints with encoded ids", async () => {
+    const calls: Array<{ input: string; init?: RequestInit }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push({ input: String(input), init });
+        return new Response(JSON.stringify({ ok: true, story_specs: [], messages: [] }), {
+          status: 200,
+        });
+      }),
+    );
+
+    await getIssueLifecycle("issue/with space", "project/with space");
+    await generateStorySpecs("project/with space", "issue/with space", { title: "Story" });
+    await sendWorkspaceSessionMessage("workspace/session 1", {
+      role: "user",
+      content: "hello",
+    });
+    await runWorkspaceSessionNext("workspace/session 1");
+    await confirmWorkspaceSession("workspace/session 1", { confirmed_by: "human" });
+
+    expect(calls.map((call) => call.input)).toEqual([
+      "/api/issues/issue%2Fwith%20space/lifecycle?project_id=project%2Fwith%20space",
+      "/api/projects/project%2Fwith%20space/issues/issue%2Fwith%20space/story-specs:generate",
+      "/api/workspace-sessions/workspace%2Fsession%201/message",
+      "/api/workspace-sessions/workspace%2Fsession%201/run-next",
+      "/api/workspace-sessions/workspace%2Fsession%201/confirm",
+    ]);
+    expect(calls[1].init?.method).toBe("POST");
+    expect(calls[1].init?.body).toBe(JSON.stringify({ title: "Story" }));
+    expect(calls[2].init?.method).toBe("POST");
+    expect(calls[2].init?.body).toBe(JSON.stringify({ role: "user", content: "hello" }));
+    expect(calls[3].init?.method).toBe("POST");
+    expect(calls[4].init?.method).toBe("POST");
+    expect(calls[4].init?.body).toBe(JSON.stringify({ confirmed_by: "human" }));
   });
 
   it("calls delete endpoints with encoded resource ids", async () => {

@@ -99,17 +99,39 @@ describe("lifecycle workbench store", () => {
     expect(grouped.work_item).toHaveLength(0);
   });
 
-  it("filters cards by focused issue", () => {
-    const grouped = visibleLifecycle(groupLifecycleCards([lifecycle, otherLifecycle]), "issue_0001");
-    expect(grouped.issue.map((card) => card.id)).toEqual(["issue_0001", "issue_0002"]);
-    expect(grouped.story_spec.map((card) => card.id)).toEqual(["story_spec_0001"]);
-    expect(grouped.design_spec.map((card) => card.id)).toEqual(["design_spec_0001"]);
-    expect(grouped.work_item).toHaveLength(0);
+  it("copies design spec source ids from lifecycle story spec ids", () => {
+    const grouped = groupLifecycleCards([lifecycle]);
+
+    grouped.design_spec[0].sourceIds.push("story_spec_mutated");
+
+    expect(lifecycle.design_specs[0].story_spec_ids).toEqual(["story_spec_0001"]);
   });
 
-  it("returns original columns when no issue is focused", () => {
+  it("filters cards by focused issue", () => {
+    const grouped = groupLifecycleCards([lifecycle, otherLifecycle]);
+    const visible = visibleLifecycle(grouped, "issue_0001");
+
+    expect(visible).not.toBe(grouped);
+    expect(visible.issue).not.toBe(grouped.issue);
+    expect(visible.story_spec).not.toBe(grouped.story_spec);
+    expect(visible.design_spec).not.toBe(grouped.design_spec);
+    expect(visible.work_item).not.toBe(grouped.work_item);
+    expect(visible.issue.map((card) => card.id)).toEqual(["issue_0001", "issue_0002"]);
+    expect(visible.story_spec.map((card) => card.id)).toEqual(["story_spec_0001"]);
+    expect(visible.design_spec.map((card) => card.id)).toEqual(["design_spec_0001"]);
+    expect(visible.work_item).toHaveLength(0);
+  });
+
+  it("returns copied columns when no issue is focused", () => {
     const grouped = groupLifecycleCards([lifecycle]);
-    expect(visibleLifecycle(grouped, null)).toBe(grouped);
+    const visible = visibleLifecycle(grouped, null);
+
+    expect(visible).toEqual(grouped);
+    expect(visible).not.toBe(grouped);
+    expect(visible.issue).not.toBe(grouped.issue);
+    expect(visible.story_spec).not.toBe(grouped.story_spec);
+    expect(visible.design_spec).not.toBe(grouped.design_spec);
+    expect(visible.work_item).not.toBe(grouped.work_item);
   });
 
   it("blocks work item generation until design is confirmed", () => {

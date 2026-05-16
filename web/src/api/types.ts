@@ -139,7 +139,7 @@ export type CreateProductIssueRequest = {
   title: string;
   description?: string | null;
   change_id?: string | null;
-  repository_id?: string | null;
+  repository_id: string;
 };
 
 export type LifecycleConfirmationStatus =

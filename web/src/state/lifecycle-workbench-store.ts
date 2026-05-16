@@ -85,7 +85,7 @@ export function groupLifecycleCards(lifecycles: IssueLifecycleResponse[]): Lifec
           issueId: design.issue_id,
           title: design.title,
           status: design.confirmation_status,
-          sourceIds: design.story_spec_ids,
+          sourceIds: [...design.story_spec_ids],
           raw: design,
         });
       });
@@ -113,11 +113,16 @@ export function visibleLifecycle(
   focusedIssueId: string | null,
 ): LifecycleColumns {
   if (!focusedIssueId) {
-    return columns;
+    return {
+      issue: [...columns.issue],
+      story_spec: [...columns.story_spec],
+      design_spec: [...columns.design_spec],
+      work_item: [...columns.work_item],
+    };
   }
 
   return {
-    issue: columns.issue,
+    issue: [...columns.issue],
     story_spec: columns.story_spec.filter((card) => card.issueId === focusedIssueId),
     design_spec: columns.design_spec.filter((card) => card.issueId === focusedIssueId),
     work_item: columns.work_item.filter((card) => card.issueId === focusedIssueId),
