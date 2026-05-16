@@ -361,6 +361,7 @@ pub struct IssueLifecycleResponse {
     pub story_specs: Vec<StorySpecDto>,
     pub design_specs: Vec<DesignSpecDto>,
     pub work_items: Vec<LifecycleWorkItemDto>,
+    pub workspace_sessions: Vec<WorkspaceSessionDto>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

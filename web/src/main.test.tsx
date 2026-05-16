@@ -11,7 +11,7 @@ describe("AppShell", () => {
     vi.unstubAllGlobals();
   });
 
-  it("renders project management as the default workbench", async () => {
+  it("renders issue lifecycle as the default workbench", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
@@ -23,12 +23,15 @@ describe("AppShell", () => {
 
     render(<AppShell />);
 
-    expect(await screen.findByRole("main", { name: "任务管理页面" })).toBeInTheDocument();
-    expect(screen.getByRole("navigation", { name: "Project 选择" })).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "Issue 生命周期看板" })).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "Issue 执行 Workspace" })).toHaveTextContent(
-      "请选择一个 Issue",
-    );
+    expect(
+      await screen.findByRole("main", { name: "Issue 生命周期工作台" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Issue 列" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Story Spec 列" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Design Spec 列" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Work Item 列" })).toBeInTheDocument();
+    expect(screen.queryByText("AI Coding Workbench")).not.toBeInTheDocument();
+    expect(screen.queryByText("Issue 执行 Workspace")).not.toBeInTheDocument();
   });
 
   it("resets page scroll to the top when the workbench loads", () => {
@@ -65,7 +68,7 @@ describe("AppShell", () => {
     ).toBeTruthy();
   });
 
-  it("renders execution workbench as compact operations surface", async () => {
+  it("renders legacy execution workbench as compact operations surface", async () => {
     stubExecutionFetch((url) => {
       if (url === `/api/projection?task_id=task_0001&workspace_id=${EXECUTION_WORKSPACE_QUERY}`) {
         return jsonResponse(projection(null));
@@ -73,9 +76,7 @@ describe("AppShell", () => {
       return null;
     });
 
-    render(<AppShell />);
-
-    await openSeededExecutionWorkbench();
+    await openExecutionWorkbench();
 
     expect(screen.getByRole("banner")).toHaveTextContent("Aria Web");
     expect(screen.getByRole("banner")).toHaveTextContent("issue_0001");
@@ -88,7 +89,7 @@ describe("AppShell", () => {
     expect(screen.queryByText("AI Coding Workbench")).not.toBeInTheDocument();
   });
 
-  it("starts an issue with a workspace and opens the execution workbench", async () => {
+  it("opens the legacy execution workbench with an explicit execution context", async () => {
     stubExecutionFetch((url) => {
       if (url === `/api/projection?task_id=task_0001&workspace_id=${EXECUTION_WORKSPACE_QUERY}`) {
         return jsonResponse(projection(null));
@@ -359,14 +360,15 @@ function executionManagementResponse(url: string) {
 }
 
 async function openExecutionWorkbench() {
-  render(<AppShell />);
-  return openSeededExecutionWorkbench();
-}
-
-async function openSeededExecutionWorkbench() {
-  await userEvent.click(await screen.findByRole("button", { name: "运行 Issue" }));
-  const runDialog = await screen.findByRole("dialog", { name: "运行 Issue" });
-  await userEvent.click(within(runDialog).getByRole("button", { name: "开始运行" }));
+  render(
+    <AppShell
+      initialExecutionContext={{
+        issueId: "issue_0001",
+        workspaceId: EXECUTION_WORKSPACE_ID,
+        taskId: "task_0001",
+      }}
+    />,
+  );
   return screen.findByRole("main", { name: "Aria workbench" });
 }
 

@@ -134,6 +134,7 @@ function lifecycleFetch() {
             execution_status: "planning",
           },
         ],
+        workspace_sessions: [],
       });
     }
     return jsonResponse({});

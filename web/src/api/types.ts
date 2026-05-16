@@ -184,6 +184,7 @@ export type IssueLifecycleResponse = {
   story_specs: StorySpec[];
   design_specs: DesignSpec[];
   work_items: LifecycleWorkItem[];
+  workspace_sessions: WorkspaceSession[];
 };
 
 export type WorkspaceMessage = {

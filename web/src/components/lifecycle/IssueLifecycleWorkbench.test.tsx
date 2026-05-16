@@ -97,6 +97,40 @@ describe("IssueLifecycleWorkbench", () => {
       "false",
     );
   });
+
+  it("opens provider workspace sessions from derived lifecycle cards", async () => {
+    const fetchMock = lifecycleFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+
+    await user.click(await screen.findByRole("button", { name: "会话过期提示" }));
+
+    expect(await screen.findByRole("dialog", { name: "Story Workspace" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Workspace 产物" })).toHaveTextContent(
+      "workspace_session_story_0001",
+    );
+
+    await user.type(screen.getByLabelText("补充指令"), "请补充验收标准");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/workspace-sessions/workspace_session_story_0001/message",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ role: "user", content: "请补充验收标准" }),
+      }),
+    );
+
+    await user.click(screen.getByRole("button", { name: "关闭" }));
+    await user.click(screen.getByRole("button", { name: "实现提示组件" }));
+
+    expect(await screen.findByRole("dialog", { name: "Work Item Workspace" })).toBeInTheDocument();
+    expect(screen.getByRole("navigation", { name: "Workspace 流程" })).toHaveTextContent(
+      "author plan",
+    );
+  });
 });
 
 describe("CreateLifecycleIssueDialog", () => {
@@ -164,6 +198,18 @@ function lifecycleFetch(options?: {
         updated_at: "2026-05-16T00:00:00Z",
       });
     }
+    if (url === "/api/workspace-sessions/workspace_session_story_0001/message") {
+      return jsonResponse({
+        ...workspaceSessionRecord("story", "story_spec_0001", "workspace_session_story_0001"),
+        messages: [
+          {
+            role: "user",
+            content: "请补充验收标准",
+            created_at: "2026-05-16T00:00:00Z",
+          },
+        ],
+      });
+    }
     if (url === "/api/projects/project_0001/issues") {
       const title = options?.issueTitles?.[issueCall] ?? "登录会话过期";
       issueCall += 1;
@@ -198,7 +244,10 @@ function lifecycleFetch(options?: {
       }
       const duplicate = options?.duplicateCardIds ?? false;
       const issueId = duplicate ? "shared_id" : "issue_0001";
-      const issueTitle = duplicate ? "重复 ID Issue" : (options?.issueTitles?.[issueCall - 1] ?? "登录会话过期");
+      const issueTitle = duplicate
+        ? "重复 ID Issue"
+        : (options?.issueTitles?.[issueCall - 1] ?? "登录会话过期");
+      const storyId = duplicate ? "shared_id" : "story_spec_0001";
       return jsonResponse({
         issue: {
           issue_id: issueId,
@@ -219,7 +268,7 @@ function lifecycleFetch(options?: {
         },
         story_specs: [
           {
-            story_spec_id: duplicate ? "shared_id" : "story_spec_0001",
+            story_spec_id: storyId,
             issue_id: issueId,
             repository_id: "repository_0001",
             title: duplicate ? "重复 ID Story" : "会话过期提示",
@@ -249,6 +298,15 @@ function lifecycleFetch(options?: {
             plan_status: "draft",
             execution_status: "planning",
           },
+        ],
+        workspace_sessions: [
+          workspaceSessionRecord("story", storyId, "workspace_session_story_0001"),
+          workspaceSessionRecord("design", "design_spec_0001", "workspace_session_design_0001"),
+          workspaceSessionRecord(
+            "work_item",
+            "work_item_0001",
+            "workspace_session_work_item_0001",
+          ),
         ],
       });
     }
@@ -291,6 +349,26 @@ function repositoryRecord() {
     default_provider_mode: "fake",
     created_at: "2026-05-16T00:00:00Z",
     updated_at: "2026-05-16T00:00:00Z",
+  };
+}
+
+function workspaceSessionRecord(
+  workspaceType: "story" | "design" | "work_item",
+  entityId: string,
+  sessionId: string,
+) {
+  return {
+    workspace_session_id: sessionId,
+    issue_id: "issue_0001",
+    entity_id: entityId,
+    workspace_type: workspaceType,
+    status: "waiting_for_human",
+    author_provider: "codex",
+    reviewer_provider: "claude_code",
+    review_rounds: 2,
+    superpowers_enabled: true,
+    openspec_enabled: true,
+    messages: [],
   };
 }
 

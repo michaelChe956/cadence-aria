@@ -46,6 +46,7 @@ const lifecycle: IssueLifecycleResponse = {
     },
   ],
   work_items: [],
+  workspace_sessions: [],
 };
 
 const otherLifecycle: IssueLifecycleResponse = {

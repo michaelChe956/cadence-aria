@@ -2,16 +2,20 @@ import { Plus, RefreshCw } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   createProductIssue,
+  confirmWorkspaceSession,
   getIssueLifecycle,
   listProductIssues,
   listProjects,
   listRepositories,
+  runWorkspaceSessionNext,
+  sendWorkspaceSessionMessage,
 } from "../../api/client";
 import type {
   IssueLifecycleResponse,
   ProductIssue,
   Project,
   Repository,
+  WorkspaceSession,
 } from "../../api/types";
 import {
   groupLifecycleCards,
@@ -24,6 +28,7 @@ import {
   type CreateLifecycleIssuePayload,
 } from "./CreateLifecycleIssueDialog";
 import { LifecycleColumn } from "./LifecycleColumn";
+import { ProviderWorkspaceDialog } from "../workspace/ProviderWorkspaceDialog";
 
 export function IssueLifecycleWorkbench() {
   const [projects, setProjects] = useState<Project[]>([]);
@@ -32,6 +37,7 @@ export function IssueLifecycleWorkbench() {
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [focusedIssueId, setFocusedIssueId] = useState<string | null>(null);
   const [selectedCardKey, setSelectedCardKey] = useState<string | null>(null);
+  const [workspaceSession, setWorkspaceSession] = useState<WorkspaceSession | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -108,7 +114,17 @@ export function IssueLifecycleWorkbench() {
     setSelectedCardKey(lifecycleCardKey(card));
     if (card.kind === "issue") {
       setFocusedIssueId(card.issueId);
+      setWorkspaceSession(null);
+      return;
     }
+
+    const session = findWorkspaceSession(lifecycles, card);
+    if (!session) {
+      setError("缺少 Workspace Session");
+      return;
+    }
+    setError(null);
+    setWorkspaceSession(session);
   }
 
   async function handleCreateIssue(payload: CreateLifecycleIssuePayload) {
@@ -216,6 +232,42 @@ export function IssueLifecycleWorkbench() {
           onClose={() => setDialogOpen(false)}
         />
       ) : null}
+      {workspaceSession ? (
+        <ProviderWorkspaceDialog
+          open
+          title={workspaceDialogTitle(workspaceSession.workspace_type)}
+          session={workspaceSession}
+          onClose={() => setWorkspaceSession(null)}
+          onMessage={async (content) => {
+            setWorkspaceSession(
+              await sendWorkspaceSessionMessage(workspaceSession.workspace_session_id, {
+                role: "user",
+                content,
+              }),
+            );
+          }}
+          onRunNext={async () => {
+            setWorkspaceSession(
+              await runWorkspaceSessionNext(workspaceSession.workspace_session_id),
+            );
+          }}
+          onConfirm={async () => {
+            setWorkspaceSession(
+              await confirmWorkspaceSession(workspaceSession.workspace_session_id, {
+                confirmed_by: "human",
+              }),
+            );
+          }}
+          onRequestChange={async () => {
+            setWorkspaceSession(
+              await sendWorkspaceSessionMessage(workspaceSession.workspace_session_id, {
+                role: "user",
+                content: "要求修改",
+              }),
+            );
+          }}
+        />
+      ) : null}
     </>
   );
 }
@@ -230,7 +282,8 @@ function normalizeLifecycleResponse(
     lifecycle.issue.issue_id !== issue.issue_id ||
     !Array.isArray(lifecycle.story_specs) ||
     !Array.isArray(lifecycle.design_specs) ||
-    !Array.isArray(lifecycle.work_items)
+    !Array.isArray(lifecycle.work_items) ||
+    !Array.isArray(lifecycle.workspace_sessions)
   ) {
     throw new Error("invalid lifecycle response");
   }
@@ -244,4 +297,47 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function lifecycleCardKey(card: LifecycleCardData) {
   return `${card.kind}:${card.id}`;
+}
+
+function findWorkspaceSession(
+  lifecycles: IssueLifecycleResponse[],
+  card: LifecycleCardData,
+): WorkspaceSession | null {
+  const workspaceType = workspaceTypeForCard(card);
+  if (!workspaceType) {
+    return null;
+  }
+
+  return (
+    lifecycles
+      .find((lifecycle) => lifecycle.issue.issue_id === card.issueId)
+      ?.workspace_sessions.find(
+        (session) => session.entity_id === card.id && session.workspace_type === workspaceType,
+      ) ?? null
+  );
+}
+
+function workspaceTypeForCard(
+  card: LifecycleCardData,
+): WorkspaceSession["workspace_type"] | null {
+  if (card.kind === "story_spec") {
+    return "story";
+  }
+  if (card.kind === "design_spec") {
+    return "design";
+  }
+  if (card.kind === "work_item") {
+    return "work_item";
+  }
+  return null;
+}
+
+function workspaceDialogTitle(workspaceType: WorkspaceSession["workspace_type"]) {
+  if (workspaceType === "story") {
+    return "Story Workspace";
+  }
+  if (workspaceType === "design") {
+    return "Design Workspace";
+  }
+  return "Work Item Workspace";
 }

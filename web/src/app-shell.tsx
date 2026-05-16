@@ -31,9 +31,14 @@ import { RollbackDialog } from "./components/rollback/RollbackDialog";
 import { createWorkbenchStore } from "./state/workbench-store";
 import type { WorkbenchTab } from "./state/workbench-store";
 
-export function AppShell() {
+export function AppShell({
+  initialExecutionContext = null,
+}: {
+  initialExecutionContext?: ExecutionContext | null;
+}) {
   const [store] = useState(() => createWorkbenchStore());
-  const [executionContext, setExecutionContext] = useState<ExecutionContext | null>(null);
+  const [executionContext, setExecutionContext] =
+    useState<ExecutionContext | null>(initialExecutionContext);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [tasks, setTasks] = useState<TaskListResponse["tasks"]>([]);

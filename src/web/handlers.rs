@@ -303,12 +303,19 @@ pub async fn issue_lifecycle(
         .into_iter()
         .map(lifecycle_work_item_dto)
         .collect();
+    let workspace_sessions = lifecycle
+        .list_workspace_sessions(&project_id, &issue_id)
+        .map_err(product_store_api_error)?
+        .into_iter()
+        .map(workspace_session_dto)
+        .collect();
 
     Ok(Json(IssueLifecycleResponse {
         issue: product_issue_dto_with_binding(&app_paths, issue)?,
         story_specs,
         design_specs,
         work_items,
+        workspace_sessions,
     }))
 }
 

@@ -68,6 +68,7 @@ async fn issue_creation_requires_repository_and_lifecycle_lists_cards() {
     assert_eq!(lifecycle["story_specs"].as_array().unwrap().len(), 0);
     assert_eq!(lifecycle["design_specs"].as_array().unwrap().len(), 0);
     assert_eq!(lifecycle["work_items"].as_array().unwrap().len(), 0);
+    assert_eq!(lifecycle["workspace_sessions"].as_array().unwrap().len(), 0);
 }
 
 #[tokio::test]
@@ -127,6 +128,15 @@ async fn generate_endpoints_create_workspace_sessions_and_first_cards() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(lifecycle["story_specs"].as_array().unwrap().len(), 1);
+    assert_eq!(lifecycle["workspace_sessions"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        lifecycle["workspace_sessions"][0]["workspace_session_id"],
+        "workspace_session_0001"
+    );
+    assert_eq!(
+        lifecycle["workspace_sessions"][0]["entity_id"],
+        "story_spec_0001"
+    );
 }
 
 #[tokio::test]
