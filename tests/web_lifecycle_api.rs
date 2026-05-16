@@ -251,6 +251,65 @@ async fn workspace_session_message_run_and_confirm_update_session_state() {
     assert_eq!(confirmed["status"], "confirmed");
 }
 
+#[tokio::test]
+async fn workspace_session_missing_message_and_run_next_return_not_found() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects",
+        json!({"name":"Lifecycle","description":null}),
+    )
+    .await;
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/repositories",
+        json!({"name":"Repo","path":repo.path()}),
+    )
+    .await;
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues",
+        json!({"title":"登录会话过期","description":"描述","repository_id":"repository_0001"}),
+    )
+    .await;
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/story-specs:generate",
+        json!({"title":"登录会话过期提示"}),
+    )
+    .await;
+
+    let (status, message_error) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/workspace-sessions/workspace_session_missing/message",
+        json!({"role":"user","content":"请强调重新登录按钮"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(message_error["code"], "workspace_session_not_found");
+
+    let (status, run_next_error) = request_json(
+        app,
+        Method::POST,
+        "/api/workspace-sessions/workspace_session_missing/run-next",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(run_next_error["code"], "workspace_session_not_found");
+}
+
 async fn request_json(
     app: axum::Router,
     method: Method,
