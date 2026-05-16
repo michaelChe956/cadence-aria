@@ -1,17 +1,29 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import { ProjectManagementWorkbench } from "./ProjectManagementWorkbench";
+import { IssueLifecycleWorkbench } from "./IssueLifecycleWorkbench";
 
-describe("ProjectManagementWorkbench", () => {
-  it("renders the issue lifecycle workbench wrapper", async () => {
+describe("IssueLifecycleWorkbench", () => {
+  it("renders four lifecycle columns and focuses derived cards by issue", async () => {
     vi.stubGlobal("fetch", lifecycleFetch());
+    const user = userEvent.setup();
 
-    render(<ProjectManagementWorkbench onOpenExecution={vi.fn()} />);
+    render(<IssueLifecycleWorkbench />);
 
-    expect(
-      await screen.findByRole("main", { name: "Issue 生命周期工作台" }),
-    ).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "Issue 列" })).toBeInTheDocument();
+    expect(await screen.findByRole("region", { name: "Issue 列" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Story Spec 列" })).toHaveTextContent(
+      "会话过期提示",
+    );
+    expect(screen.getByRole("region", { name: "Design Spec 列" })).toHaveTextContent(
+      "前端提示设计",
+    );
+    expect(screen.getByRole("region", { name: "Work Item 列" })).toHaveTextContent(
+      "实现提示组件",
+    );
+
+    await user.click(screen.getByRole("button", { name: "登录会话过期" }));
+
+    expect(screen.getByRole("button", { name: "显示全部" })).toBeInTheDocument();
     expect(screen.getByRole("region", { name: "Story Spec 列" })).toHaveTextContent(
       "会话过期提示",
     );
@@ -22,10 +34,25 @@ describe("ProjectManagementWorkbench", () => {
       "实现提示组件",
     );
   });
+
+  it("requires repository when creating issue", async () => {
+    vi.stubGlobal("fetch", lifecycleFetch());
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+
+    await screen.findByRole("region", { name: "Issue 列" });
+    await user.click(screen.getByRole("button", { name: "新建 Issue" }));
+    const dialog = screen.getByRole("dialog", { name: "新建 Issue" });
+    await user.type(within(dialog).getByLabelText("Issue 标题"), "新增安全提示");
+    await user.click(within(dialog).getByRole("button", { name: "创建 Issue" }));
+
+    expect(within(dialog).getByText("请选择代码库")).toBeInTheDocument();
+  });
 });
 
 function lifecycleFetch() {
-  return vi.fn(async (input: RequestInfo | URL) => {
+  return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     if (url === "/api/projects") {
       return jsonResponse({
@@ -57,6 +84,25 @@ function lifecycleFetch() {
             updated_at: "2026-05-16T00:00:00Z",
           },
         ],
+      });
+    }
+    if (url === "/api/projects/project_0001/issues" && init?.method === "POST") {
+      return jsonResponse({
+        issue_id: "issue_0002",
+        project_id: "project_0001",
+        repo_id: "repository_0001",
+        workspace_id: null,
+        task_id: null,
+        session_id: null,
+        title: "新增安全提示",
+        description: null,
+        change_id: "new-security-hint",
+        phase: "clarification",
+        status: "draft",
+        active_binding_id: null,
+        artifacts: [],
+        created_at: "2026-05-16T00:00:00Z",
+        updated_at: "2026-05-16T00:00:00Z",
       });
     }
     if (url === "/api/projects/project_0001/issues") {
