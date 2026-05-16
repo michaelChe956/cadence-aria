@@ -299,3 +299,54 @@ fn workspace_session_ids_are_unique_across_issues() {
     assert_eq!(second.id, "workspace_session_0002");
     assert_eq!(third.id, "workspace_session_0003");
 }
+
+#[test]
+fn workspace_session_lookup_ignores_unrelated_json_files() {
+    let root = tempdir().expect("tempdir");
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let store = LifecycleStore::new(paths.clone());
+
+    store
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "story_spec_0001".to_string(),
+            workspace_type: WorkspaceType::Story,
+            author_provider: ProviderName::Codex,
+            reviewer_provider: ProviderName::ClaudeCode,
+            review_rounds: 1,
+            superpowers_enabled: true,
+            openspec_enabled: false,
+        })
+        .expect("first session");
+
+    let workspace_sessions_root = paths
+        .issue_lifecycle_root("project_0001", "issue_0001")
+        .join("workspace-sessions");
+    std::fs::write(
+        workspace_sessions_root.join("notes.json"),
+        r#"{ "not": "a session" }"#,
+    )
+    .expect("write unrelated json");
+
+    let session = store
+        .get_workspace_session("workspace_session_0001")
+        .expect("session lookup");
+    assert_eq!(session.id, "workspace_session_0001");
+
+    let second = store
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0002".to_string(),
+            entity_id: "story_spec_0002".to_string(),
+            workspace_type: WorkspaceType::Story,
+            author_provider: ProviderName::Codex,
+            reviewer_provider: ProviderName::ClaudeCode,
+            review_rounds: 1,
+            superpowers_enabled: true,
+            openspec_enabled: false,
+        })
+        .expect("second session");
+
+    assert_eq!(second.id, "workspace_session_0002");
+}

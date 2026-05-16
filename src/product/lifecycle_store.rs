@@ -306,7 +306,7 @@ impl LifecycleStore {
     ) -> Result<Vec<WorkspaceSessionRecord>, ProductStoreError> {
         validate_relative_id(project_id)?;
         validate_relative_id(issue_id)?;
-        list_json_records(&self.workspace_sessions_root(project_id, issue_id))
+        list_workspace_session_records(&self.workspace_sessions_root(project_id, issue_id))
     }
 
     pub fn get_workspace_session(
@@ -447,8 +447,10 @@ impl LifecycleStore {
             let issues_root = project_path.join("issues");
             for issue_path in child_directories(&issues_root)? {
                 let workspace_sessions_root = issue_path.join("workspace-sessions");
-                for session_path in json_file_paths(&workspace_sessions_root)? {
-                    let session: WorkspaceSessionRecord = read_json(&session_path)?;
+                for session_path in workspace_session_file_paths(&workspace_sessions_root)? {
+                    let Some(session) = read_workspace_session_record(&session_path)? else {
+                        continue;
+                    };
                     if session.id != session_id {
                         continue;
                     }
@@ -543,6 +545,50 @@ fn json_file_paths(path: &Path) -> Result<Vec<PathBuf>, ProductStoreError> {
     Ok(entries)
 }
 
+fn list_workspace_session_records(
+    path: &Path,
+) -> Result<Vec<WorkspaceSessionRecord>, ProductStoreError> {
+    let entries = workspace_session_file_paths(path)?;
+
+    let mut records = Vec::with_capacity(entries.len());
+    for entry in entries {
+        if let Some(record) = read_workspace_session_record(&entry)? {
+            records.push(record);
+        }
+    }
+    Ok(records)
+}
+
+fn workspace_session_file_paths(path: &Path) -> Result<Vec<PathBuf>, ProductStoreError> {
+    Ok(json_file_paths(path)?
+        .into_iter()
+        .filter(|path| workspace_session_file_stem(path).is_some())
+        .collect())
+}
+
+fn read_workspace_session_record(
+    path: &Path,
+) -> Result<Option<WorkspaceSessionRecord>, ProductStoreError> {
+    let Some(file_id) = workspace_session_file_stem(path) else {
+        return Ok(None);
+    };
+    let session: WorkspaceSessionRecord = read_json(path)?;
+    if session.id == file_id {
+        Ok(Some(session))
+    } else {
+        Ok(None)
+    }
+}
+
+fn workspace_session_file_stem(path: &Path) -> Option<&str> {
+    let stem = path.file_stem()?.to_str()?;
+    let suffix = stem.strip_prefix("workspace_session_")?;
+    if suffix.is_empty() {
+        return None;
+    }
+    Some(stem)
+}
+
 fn child_directories(path: &Path) -> Result<Vec<PathBuf>, ProductStoreError> {
     if !path_exists(path)? {
         return Ok(Vec::new());
@@ -585,8 +631,10 @@ fn max_workspace_session_sequence(projects_root: &Path) -> Result<usize, Product
         let issues_root = project_path.join("issues");
         for issue_path in child_directories(&issues_root)? {
             let workspace_sessions_root = issue_path.join("workspace-sessions");
-            for session_path in json_file_paths(&workspace_sessions_root)? {
-                let session: WorkspaceSessionRecord = read_json(&session_path)?;
+            for session_path in workspace_session_file_paths(&workspace_sessions_root)? {
+                let Some(session) = read_workspace_session_record(&session_path)? else {
+                    continue;
+                };
                 if let Some(sequence) = parse_sequential_id(&session.id, "workspace_session") {
                     max_sequence = max_sequence.max(sequence);
                 }

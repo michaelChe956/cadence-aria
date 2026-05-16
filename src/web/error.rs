@@ -37,7 +37,9 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = match self.code.as_str() {
             "invalid_task_request" => StatusCode::BAD_REQUEST,
-            "checkpoint_unsafe_dirty_worktree" => StatusCode::CONFLICT,
+            "checkpoint_unsafe_dirty_worktree" | "workspace_session_ambiguous" => {
+                StatusCode::CONFLICT
+            }
             "artifact_not_found"
             | "gate_not_found"
             | "interactive_task_missing"
@@ -52,6 +54,7 @@ impl IntoResponse for ApiError {
             | "invalid_file_path"
             | "invalid_issue_id"
             | "invalid_project_id"
+            | "invalid_workspace_message"
             | "invalid_task_id"
             | "issue_rollback_missing_worktree"
             | "issue_title_required"

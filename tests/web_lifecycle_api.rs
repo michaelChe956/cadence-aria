@@ -4,7 +4,7 @@ use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::runtime::WebRuntime;
 use cadence_aria::web::state::WebAppState;
 use serde_json::{Value, json};
-use std::process::Command;
+use std::{fs, process::Command};
 use tempfile::tempdir;
 use tower::ServiceExt;
 
@@ -308,6 +308,132 @@ async fn workspace_session_missing_message_and_run_next_return_not_found() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(run_next_error["code"], "workspace_session_not_found");
+}
+
+#[tokio::test]
+async fn workspace_session_ambiguous_returns_conflict() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects",
+        json!({"name":"Lifecycle","description":null}),
+    )
+    .await;
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/repositories",
+        json!({"name":"Repo","path":repo.path()}),
+    )
+    .await;
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues",
+        json!({"title":"登录会话过期","description":"描述","repository_id":"repository_0001"}),
+    )
+    .await;
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/story-specs:generate",
+        json!({"title":"登录会话过期提示"}),
+    )
+    .await;
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues",
+        json!({"title":"重复会话","description":"描述","repository_id":"repository_0001"}),
+    )
+    .await;
+
+    let first_session_path = root
+        .path()
+        .join(".aria/projects/project_0001/issues/issue_0001/workspace-sessions/workspace_session_0001.json");
+    let duplicate_root = root
+        .path()
+        .join(".aria/projects/project_0001/issues/issue_0002/workspace-sessions");
+    fs::create_dir_all(&duplicate_root).expect("duplicate workspace sessions root");
+    fs::copy(
+        first_session_path,
+        duplicate_root.join("workspace_session_0001.json"),
+    )
+    .expect("duplicate workspace session");
+
+    let (status, error) = request_json(
+        app,
+        Method::POST,
+        "/api/workspace-sessions/workspace_session_0001/message",
+        json!({"role":"user","content":"请强调重新登录按钮"}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(error["code"], "workspace_session_ambiguous");
+}
+
+#[tokio::test]
+async fn workspace_session_message_rejects_invalid_role_and_empty_content() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects",
+        json!({"name":"Lifecycle","description":null}),
+    )
+    .await;
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/repositories",
+        json!({"name":"Repo","path":repo.path()}),
+    )
+    .await;
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues",
+        json!({"title":"登录会话过期","description":"描述","repository_id":"repository_0001"}),
+    )
+    .await;
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/story-specs:generate",
+        json!({"title":"登录会话过期提示"}),
+    )
+    .await;
+
+    for body in [
+        json!({"role":"","content":"请强调重新登录按钮"}),
+        json!({"role":"unknown","content":"请强调重新登录按钮"}),
+        json!({"role":"user","content":"   "}),
+    ] {
+        let (status, error) = request_json(
+            app.clone(),
+            Method::POST,
+            "/api/workspace-sessions/workspace_session_0001/message",
+            body,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(error["code"], "invalid_workspace_message");
+    }
 }
 
 async fn request_json(

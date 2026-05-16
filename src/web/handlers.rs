@@ -360,6 +360,7 @@ pub async fn workspace_session_message(
     Path(session_id): Path<String>,
     Json(request): Json<WorkspaceSessionMessageRequest>,
 ) -> ApiResult<Json<WorkspaceSessionDto>> {
+    validate_workspace_message(&request)?;
     let session = LifecycleStore::new(product_app_paths(&state))
         .append_workspace_message(&session_id, request.role, request.content)
         .map_err(product_store_api_error)?;
@@ -1535,6 +1536,20 @@ fn issue_status_text(status: &IssueStatus) -> &'static str {
 
 fn product_app_paths(state: &WebAppState) -> ProductAppPaths {
     ProductAppPaths::new(state.workspace_root.join(".aria"))
+}
+
+fn validate_workspace_message(request: &WorkspaceSessionMessageRequest) -> ApiResult<()> {
+    if !matches!(
+        request.role.as_str(),
+        "user" | "assistant" | "system" | "provider" | "reviewer"
+    ) || request.content.trim().is_empty()
+    {
+        return Err(ApiError::validation(
+            "invalid_workspace_message",
+            "workspace message role/content is invalid",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_issue_rollback_ids(issue_id: &str, execution_record_id: &str) -> ApiResult<()> {
