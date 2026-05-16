@@ -1,5 +1,6 @@
 use axum::Json;
 use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures_util::stream::{self, Stream, StreamExt};
 use serde::Deserialize;
@@ -14,9 +15,15 @@ use crate::product::app_paths::ProductAppPaths;
 use crate::product::gate_store::GateStore;
 use crate::product::issue_store::{CreateProductIssueInput, IssueStore, StartProductIssueInput};
 use crate::product::json_store::{ProductStoreError, validate_relative_id};
+use crate::product::lifecycle_store::{
+    CreateStorySpecInput, CreateWorkspaceSessionInput, LifecycleStore,
+};
 use crate::product::models::{
-    GateStatus, IssuePhase as ProductIssuePhase, IssueRecord as ProductIssueRecord,
-    IssueRuntimeBindingRecord, IssueStatus as ProductIssueStatus, ProjectRecord, RepositoryRecord,
+    DesignKind, DesignSpecRecord, GateStatus, IssuePhase as ProductIssuePhase,
+    IssueRecord as ProductIssueRecord, IssueRuntimeBindingRecord,
+    IssueStatus as ProductIssueStatus, LifecycleConfirmationStatus, LifecycleWorkItemRecord,
+    ProjectRecord, ProviderName, RepositoryRecord, StorySpecRecord, WorkItemPlanStatus,
+    WorkItemStatus, WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType,
 };
 use crate::product::project_store::{CreateProjectInput, ProjectStore};
 use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
@@ -30,14 +37,16 @@ use crate::web::state::WebAppState;
 use crate::web::types::{
     AdvanceTaskResponse, ArtifactContentResponse, ConfirmTaskRequest, ConfirmTaskResponse,
     CreateIssueRequest, CreateProductIssueRequest, CreateProjectRequest, CreateRepositoryRequest,
-    CreateTaskRequest, CreateTaskResponse, CreateWorkspaceRequest, FileContentResponse,
-    FileDiffResponse, IssueDto, IssueListResponse, IssueRollbackPreviewRequest,
-    IssueRollbackRequest, ProductIssueArtifactDto, ProductIssueDto, ProductIssueListResponse,
-    ProjectDto, ProjectListResponse, ProviderInputContentResponse, RepositoryDto,
-    RepositoryListResponse, ResolveGateRequest, ResolveGateResponse, RollbackPreviewRequest,
-    RollbackPreviewResponse, RollbackRequest, RollbackResponse, StartIssueRequest,
-    StartIssueResponse, StartProductIssueRequest, StartProductIssueResponse, StopTaskResponse,
-    TaskListResponse, WebEvent, WorkspaceDto, WorkspaceListResponse,
+    CreateTaskRequest, CreateTaskResponse, CreateWorkspaceRequest, DesignSpecDto,
+    FileContentResponse, FileDiffResponse, GenerateStorySpecsRequest, GenerateStorySpecsResponse,
+    IssueDto, IssueLifecycleResponse, IssueListResponse, IssueRollbackPreviewRequest,
+    IssueRollbackRequest, LifecycleWorkItemDto, ProductIssueArtifactDto, ProductIssueDto,
+    ProductIssueListResponse, ProjectDto, ProjectListResponse, ProviderInputContentResponse,
+    RepositoryDto, RepositoryListResponse, ResolveGateRequest, ResolveGateResponse,
+    RollbackPreviewRequest, RollbackPreviewResponse, RollbackRequest, RollbackResponse,
+    StartIssueRequest, StartIssueResponse, StartProductIssueRequest, StartProductIssueResponse,
+    StopTaskResponse, StorySpecDto, TaskListResponse, WebEvent, WorkspaceDto,
+    WorkspaceListResponse, WorkspaceSessionDto,
 };
 use crate::web::workspace_registry::{CreateWorkspaceInput, WorkspaceRecord, WorkspaceRegistry};
 
@@ -75,6 +84,8 @@ pub struct GateResolveQuery {
 pub struct EventsQuery {
     pub cursor: Option<u64>,
 }
+
+type ApiJsonResponse<T> = Result<Json<T>, (StatusCode, Json<ApiError>)>;
 
 pub async fn health() -> Json<serde_json::Value> {
     Json(json!({"status":"ok"}))
@@ -241,18 +252,117 @@ pub async fn create_product_issue(
     State(state): State<WebAppState>,
     Path(project_id): Path<String>,
     Json(request): Json<CreateProductIssueRequest>,
-) -> ApiResult<Json<ProductIssueDto>> {
-    let store = IssueStore::new(product_app_paths(&state));
+) -> ApiJsonResponse<ProductIssueDto> {
+    let repository_id = request
+        .repository_id
+        .ok_or_else(|| api_error_response(repository_required_error()))?;
+    let app_paths = product_app_paths(&state);
+    let _repository =
+        find_repository(&app_paths, &project_id, &repository_id).map_err(api_error_response)?;
+    let store = IssueStore::new(app_paths);
     let issue = store
-        .create(CreateProductIssueInput {
+        .create_with_repository(CreateProductIssueInput {
             project_id,
-            repo_id: None,
+            repo_id: Some(repository_id),
             title: request.title,
             description: request.description,
             change_id: request.change_id,
         })
-        .map_err(product_store_api_error)?;
+        .map_err(product_store_api_error)
+        .map_err(api_error_response)?;
     Ok(Json(product_issue_dto(issue, None)))
+}
+
+pub async fn issue_lifecycle(
+    State(state): State<WebAppState>,
+    Path(issue_id): Path<String>,
+    Query(query): Query<GateResolveQuery>,
+) -> ApiJsonResponse<IssueLifecycleResponse> {
+    let project_id = query.project_id.ok_or_else(|| {
+        api_error_response(ApiError::validation(
+            "project_required",
+            "project_id is required",
+        ))
+    })?;
+    let app_paths = product_app_paths(&state);
+    let issue = IssueStore::new(app_paths.clone())
+        .get(&project_id, &issue_id)
+        .map_err(product_store_api_error)
+        .map_err(api_error_response)?;
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    let story_specs = lifecycle
+        .list_story_specs(&project_id, &issue_id)
+        .map_err(product_store_api_error)
+        .map_err(api_error_response)?
+        .into_iter()
+        .map(story_spec_dto)
+        .collect();
+    let design_specs = lifecycle
+        .list_design_specs(&project_id, &issue_id)
+        .map_err(product_store_api_error)
+        .map_err(api_error_response)?
+        .into_iter()
+        .map(design_spec_dto)
+        .collect();
+    let work_items = lifecycle
+        .list_work_items(&project_id, &issue_id)
+        .map_err(product_store_api_error)
+        .map_err(api_error_response)?
+        .into_iter()
+        .map(lifecycle_work_item_dto)
+        .collect();
+
+    Ok(Json(IssueLifecycleResponse {
+        issue: product_issue_dto_with_binding(&app_paths, issue).map_err(api_error_response)?,
+        story_specs,
+        design_specs,
+        work_items,
+    }))
+}
+
+pub async fn generate_story_specs(
+    State(state): State<WebAppState>,
+    Path((project_id, issue_id)): Path<(String, String)>,
+    Json(request): Json<GenerateStorySpecsRequest>,
+) -> ApiJsonResponse<GenerateStorySpecsResponse> {
+    let app_paths = product_app_paths(&state);
+    let issue = IssueStore::new(app_paths.clone())
+        .get(&project_id, &issue_id)
+        .map_err(product_store_api_error)
+        .map_err(api_error_response)?;
+    let repository_id = issue
+        .repo_id
+        .clone()
+        .ok_or_else(|| api_error_response(repository_required_error()))?;
+    let lifecycle = LifecycleStore::new(app_paths);
+    let story = lifecycle
+        .create_story_spec(CreateStorySpecInput {
+            project_id: project_id.clone(),
+            issue_id: issue_id.clone(),
+            repository_id,
+            title: request.title,
+        })
+        .map_err(product_store_api_error)
+        .map_err(api_error_response)?;
+    let session = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id,
+            issue_id,
+            entity_id: story.id.clone(),
+            workspace_type: WorkspaceType::Story,
+            author_provider: ProviderName::Codex,
+            reviewer_provider: ProviderName::ClaudeCode,
+            review_rounds: 1,
+            superpowers_enabled: true,
+            openspec_enabled: true,
+        })
+        .map_err(product_store_api_error)
+        .map_err(api_error_response)?;
+
+    Ok(Json(GenerateStorySpecsResponse {
+        story_specs: vec![story_spec_dto(story)],
+        workspace_session: workspace_session_dto(session),
+    }))
 }
 
 pub async fn delete_product_issue(
@@ -1126,6 +1236,59 @@ fn product_issue_dto(
     }
 }
 
+fn story_spec_dto(record: StorySpecRecord) -> StorySpecDto {
+    StorySpecDto {
+        story_spec_id: record.id,
+        issue_id: record.issue_id,
+        repository_id: record.repository_id,
+        title: record.title,
+        current_version: record.current_version,
+        confirmation_status: lifecycle_confirmation_status_text(&record.confirmation_status)
+            .to_string(),
+    }
+}
+
+fn design_spec_dto(record: DesignSpecRecord) -> DesignSpecDto {
+    DesignSpecDto {
+        design_spec_id: record.id,
+        issue_id: record.issue_id,
+        story_spec_ids: record.story_spec_ids,
+        design_kind: design_kind_text(&record.design_kind).to_string(),
+        title: record.title,
+        current_version: record.current_version,
+        confirmation_status: lifecycle_confirmation_status_text(&record.confirmation_status)
+            .to_string(),
+    }
+}
+
+fn lifecycle_work_item_dto(record: LifecycleWorkItemRecord) -> LifecycleWorkItemDto {
+    LifecycleWorkItemDto {
+        work_item_id: record.id,
+        issue_id: record.issue_id,
+        repository_id: record.repository_id,
+        story_spec_ids: record.story_spec_ids,
+        design_spec_ids: record.design_spec_ids,
+        title: record.title,
+        plan_status: work_item_plan_status_text(&record.plan_status).to_string(),
+        execution_status: work_item_status_text(&record.execution_status).to_string(),
+    }
+}
+
+fn workspace_session_dto(record: WorkspaceSessionRecord) -> WorkspaceSessionDto {
+    WorkspaceSessionDto {
+        workspace_session_id: record.id,
+        issue_id: record.issue_id,
+        entity_id: record.entity_id,
+        workspace_type: workspace_type_text(&record.workspace_type).to_string(),
+        status: workspace_session_status_text(&record.status).to_string(),
+        author_provider: provider_name_text(&record.author_provider).to_string(),
+        reviewer_provider: provider_name_text(&record.reviewer_provider).to_string(),
+        review_rounds: record.review_rounds,
+        superpowers_enabled: record.superpowers_enabled,
+        openspec_enabled: record.openspec_enabled,
+    }
+}
+
 fn product_issue_artifacts(binding: &IssueRuntimeBindingRecord) -> Vec<ProductIssueArtifactDto> {
     let Some(task_id) = binding.task_id.as_deref() else {
         return Vec::new();
@@ -1261,6 +1424,70 @@ fn product_issue_status_text(status: &ProductIssueStatus) -> &'static str {
     }
 }
 
+fn lifecycle_confirmation_status_text(status: &LifecycleConfirmationStatus) -> &'static str {
+    match status {
+        LifecycleConfirmationStatus::Draft => "draft",
+        LifecycleConfirmationStatus::InReview => "in_review",
+        LifecycleConfirmationStatus::Confirmed => "confirmed",
+        LifecycleConfirmationStatus::ChangeRequested => "change_requested",
+        LifecycleConfirmationStatus::Blocked => "blocked",
+    }
+}
+
+fn design_kind_text(kind: &DesignKind) -> &'static str {
+    match kind {
+        DesignKind::Frontend => "frontend",
+        DesignKind::Backend => "backend",
+    }
+}
+
+fn work_item_plan_status_text(status: &WorkItemPlanStatus) -> &'static str {
+    match status {
+        WorkItemPlanStatus::NotStarted => "not_started",
+        WorkItemPlanStatus::Draft => "draft",
+        WorkItemPlanStatus::Confirmed => "confirmed",
+        WorkItemPlanStatus::ChangeRequested => "change_requested",
+    }
+}
+
+fn work_item_status_text(status: &WorkItemStatus) -> &'static str {
+    match status {
+        WorkItemStatus::Pending => "pending",
+        WorkItemStatus::Planning => "planning",
+        WorkItemStatus::Coding => "coding",
+        WorkItemStatus::Completed => "completed",
+        WorkItemStatus::Blocked => "blocked",
+    }
+}
+
+fn workspace_type_text(workspace_type: &WorkspaceType) -> &'static str {
+    match workspace_type {
+        WorkspaceType::Story => "story",
+        WorkspaceType::Design => "design",
+        WorkspaceType::WorkItem => "work_item",
+    }
+}
+
+fn workspace_session_status_text(status: &WorkspaceSessionStatus) -> &'static str {
+    match status {
+        WorkspaceSessionStatus::Open => "open",
+        WorkspaceSessionStatus::Running => "running",
+        WorkspaceSessionStatus::WaitingForHuman => "waiting_for_human",
+        WorkspaceSessionStatus::Confirmed => "confirmed",
+        WorkspaceSessionStatus::ChangeRequested => "change_requested",
+        WorkspaceSessionStatus::BlockedProviderUnavailable => "blocked_provider_unavailable",
+        WorkspaceSessionStatus::Terminated => "terminated",
+    }
+}
+
+fn provider_name_text(provider: &ProviderName) -> &'static str {
+    match provider {
+        ProviderName::ClaudeCode => "claude_code",
+        ProviderName::Codex => "codex",
+        ProviderName::Fake => "fake",
+    }
+}
+
 fn issue_status_text(status: &IssueStatus) -> &'static str {
     match status {
         IssueStatus::Draft => "draft",
@@ -1291,6 +1518,23 @@ fn issue_rollback_missing_worktree() -> ApiError {
     )
 }
 
+fn repository_required_error() -> ApiError {
+    ApiError::validation("repository_required", "repository_id is required")
+}
+
+fn api_error_response(error: ApiError) -> (StatusCode, Json<ApiError>) {
+    let status = match error.code.as_str() {
+        "project_required" | "repository_required" | "invalid_project_id" => {
+            StatusCode::BAD_REQUEST
+        }
+        "gate_not_found" | "issue_not_found" | "project_not_found" | "repository_not_found" => {
+            StatusCode::NOT_FOUND
+        }
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (status, Json(error))
+}
+
 fn product_store_api_error(error: ProductStoreError) -> ApiError {
     match error {
         ProductStoreError::NotFound {
@@ -1310,6 +1554,9 @@ fn product_store_api_error(error: ProductStoreError) -> ApiError {
             "gate matches multiple projects",
             json!({}),
         ),
+        ProductStoreError::Io(message) if message == "repository_required" => {
+            repository_required_error()
+        }
         ProductStoreError::PathEscape(_) => {
             ApiError::validation("invalid_project_id", "invalid project id")
         }

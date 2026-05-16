@@ -111,6 +111,17 @@ impl IssueStore {
         Ok(issue)
     }
 
+    pub fn create_with_repository(
+        &self,
+        input: CreateProductIssueInput,
+    ) -> Result<IssueRecord, ProductStoreError> {
+        if input.repo_id.is_none() {
+            return Err(ProductStoreError::Io("repository_required".to_string()));
+        }
+
+        self.create(input)
+    }
+
     pub fn start(&self, input: StartProductIssueInput) -> Result<IssueRecord, ProductStoreError> {
         validate_relative_id(&input.project_id)?;
         validate_relative_id(&input.issue_id)?;

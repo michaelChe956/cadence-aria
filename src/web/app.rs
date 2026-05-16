@@ -57,6 +57,14 @@ pub fn build_web_router(state: WebAppState) -> Router {
             post(handlers::start_product_issue),
         )
         .route(
+            "/api/issues/{issue_id}/lifecycle",
+            get(handlers::issue_lifecycle),
+        )
+        .route(
+            "/api/projects/{project_id}/issues/{issue_id}/story-specs:generate",
+            post(handlers::generate_story_specs),
+        )
+        .route(
             "/api/issues",
             get(handlers::list_issues).post(handlers::create_issue),
         )

@@ -351,6 +351,80 @@ pub struct CreateProductIssueRequest {
     pub title: String,
     pub description: Option<String>,
     pub change_id: Option<String>,
+    pub repository_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct IssueLifecycleResponse {
+    pub issue: ProductIssueDto,
+    pub story_specs: Vec<StorySpecDto>,
+    pub design_specs: Vec<DesignSpecDto>,
+    pub work_items: Vec<LifecycleWorkItemDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct StorySpecDto {
+    pub story_spec_id: String,
+    pub issue_id: String,
+    pub repository_id: String,
+    pub title: String,
+    pub current_version: Option<u32>,
+    pub confirmation_status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct DesignSpecDto {
+    pub design_spec_id: String,
+    pub issue_id: String,
+    pub story_spec_ids: Vec<String>,
+    pub design_kind: String,
+    pub title: String,
+    pub current_version: Option<u32>,
+    pub confirmation_status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct LifecycleWorkItemDto {
+    pub work_item_id: String,
+    pub issue_id: String,
+    pub repository_id: String,
+    pub story_spec_ids: Vec<String>,
+    pub design_spec_ids: Vec<String>,
+    pub title: String,
+    pub plan_status: String,
+    pub execution_status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct GenerateStorySpecsRequest {
+    pub title: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct GenerateStorySpecsResponse {
+    pub story_specs: Vec<StorySpecDto>,
+    pub workspace_session: WorkspaceSessionDto,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkspaceSessionDto {
+    pub workspace_session_id: String,
+    pub issue_id: String,
+    pub entity_id: String,
+    pub workspace_type: String,
+    pub status: String,
+    pub author_provider: String,
+    pub reviewer_provider: String,
+    pub review_rounds: u32,
+    pub superpowers_enabled: bool,
+    pub openspec_enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
