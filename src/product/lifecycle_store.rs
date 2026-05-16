@@ -11,8 +11,8 @@ use crate::product::json_store::{ProductStoreError, read_json, validate_relative
 use crate::product::models::{
     DesignKind, DesignSpecRecord, LifecycleConfirmationStatus, LifecycleWorkItemRecord,
     ProjectProviderDefaultsRecord, ProviderName, SpecVersionRecord, StorySpecRecord,
-    WorkItemPlanStatus, WorkItemStatus, WorkspaceSessionRecord, WorkspaceSessionStatus,
-    WorkspaceType,
+    WorkItemPlanStatus, WorkItemStatus, WorkspaceMessageRecord, WorkspaceSessionRecord,
+    WorkspaceSessionStatus, WorkspaceType,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -309,6 +309,48 @@ impl LifecycleStore {
         list_json_records(&self.workspace_sessions_root(project_id, issue_id))
     }
 
+    pub fn get_workspace_session(
+        &self,
+        session_id: &str,
+    ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
+        validate_relative_id(session_id)?;
+        read_json(&self.find_workspace_session_path(session_id)?)
+    }
+
+    pub fn append_workspace_message(
+        &self,
+        session_id: &str,
+        role: String,
+        content: String,
+    ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
+        validate_relative_id(session_id)?;
+        let session_path = self.find_workspace_session_path(session_id)?;
+        let mut session: WorkspaceSessionRecord = read_json(&session_path)?;
+        let now = Utc::now().to_rfc3339();
+        session.messages.push(WorkspaceMessageRecord {
+            role,
+            content,
+            created_at: now.clone(),
+        });
+        session.updated_at = now;
+        write_json(&session_path, &session)?;
+        Ok(session)
+    }
+
+    pub fn update_workspace_session_status(
+        &self,
+        session_id: &str,
+        status: WorkspaceSessionStatus,
+    ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
+        validate_relative_id(session_id)?;
+        let session_path = self.find_workspace_session_path(session_id)?;
+        let mut session: WorkspaceSessionRecord = read_json(&session_path)?;
+        session.status = status;
+        session.updated_at = Utc::now().to_rfc3339();
+        write_json(&session_path, &session)?;
+        Ok(session)
+    }
+
     pub fn upsert_project_provider_defaults(
         &self,
         input: CreateProjectProviderDefaultsInput,
@@ -397,6 +439,33 @@ impl LifecycleStore {
     fn next_workspace_session_id(&self) -> Result<String, ProductStoreError> {
         let max_sequence = max_workspace_session_sequence(&self.paths.projects_root())?;
         Ok(next_sequential_id("workspace_session", max_sequence))
+    }
+
+    fn find_workspace_session_path(&self, session_id: &str) -> Result<PathBuf, ProductStoreError> {
+        let mut matched_path = None;
+        for project_path in child_directories(&self.paths.projects_root())? {
+            let issues_root = project_path.join("issues");
+            for issue_path in child_directories(&issues_root)? {
+                let workspace_sessions_root = issue_path.join("workspace-sessions");
+                for session_path in json_file_paths(&workspace_sessions_root)? {
+                    let session: WorkspaceSessionRecord = read_json(&session_path)?;
+                    if session.id != session_id {
+                        continue;
+                    }
+                    if matched_path.is_some() {
+                        return Err(ProductStoreError::Io(
+                            "workspace_session_ambiguous".to_string(),
+                        ));
+                    }
+                    matched_path = Some(session_path);
+                }
+            }
+        }
+
+        matched_path.ok_or_else(|| ProductStoreError::NotFound {
+            kind: "workspace_session",
+            id: session_id.to_string(),
+        })
     }
 
     fn story_specs_root(&self, project_id: &str, issue_id: &str) -> PathBuf {

@@ -24,7 +24,8 @@ use crate::product::models::{
     IssueRecord as ProductIssueRecord, IssueRuntimeBindingRecord,
     IssueStatus as ProductIssueStatus, LifecycleConfirmationStatus, LifecycleWorkItemRecord,
     ProjectRecord, ProviderName, RepositoryRecord, StorySpecRecord, WorkItemPlanStatus,
-    WorkItemStatus, WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType,
+    WorkItemStatus, WorkspaceMessageRecord, WorkspaceSessionRecord, WorkspaceSessionStatus,
+    WorkspaceType,
 };
 use crate::product::project_store::{CreateProjectInput, ProjectStore};
 use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
@@ -47,7 +48,8 @@ use crate::web::types::{
     RollbackPreviewRequest, RollbackPreviewResponse, RollbackRequest, RollbackResponse,
     StartIssueRequest, StartIssueResponse, StartProductIssueRequest, StartProductIssueResponse,
     StopTaskResponse, StorySpecDto, TaskListResponse, WebEvent, WorkspaceDto,
-    WorkspaceListResponse, WorkspaceSessionDto,
+    WorkspaceListResponse, WorkspaceMessageDto, WorkspaceSessionConfirmRequest,
+    WorkspaceSessionDto, WorkspaceSessionMessageRequest,
 };
 use crate::web::workspace_registry::{CreateWorkspaceInput, WorkspaceRecord, WorkspaceRegistry};
 
@@ -351,6 +353,38 @@ pub async fn generate_story_specs(
         story_specs: vec![story_spec_dto(story)],
         workspace_session: workspace_session_dto(session),
     }))
+}
+
+pub async fn workspace_session_message(
+    State(state): State<WebAppState>,
+    Path(session_id): Path<String>,
+    Json(request): Json<WorkspaceSessionMessageRequest>,
+) -> ApiResult<Json<WorkspaceSessionDto>> {
+    let session = LifecycleStore::new(product_app_paths(&state))
+        .append_workspace_message(&session_id, request.role, request.content)
+        .map_err(product_store_api_error)?;
+    Ok(Json(workspace_session_dto(session)))
+}
+
+pub async fn workspace_session_run_next(
+    State(state): State<WebAppState>,
+    Path(session_id): Path<String>,
+) -> ApiResult<Json<WorkspaceSessionDto>> {
+    let session = LifecycleStore::new(product_app_paths(&state))
+        .update_workspace_session_status(&session_id, WorkspaceSessionStatus::WaitingForHuman)
+        .map_err(product_store_api_error)?;
+    Ok(Json(workspace_session_dto(session)))
+}
+
+pub async fn workspace_session_confirm(
+    State(state): State<WebAppState>,
+    Path(session_id): Path<String>,
+    Json(_request): Json<WorkspaceSessionConfirmRequest>,
+) -> ApiResult<Json<WorkspaceSessionDto>> {
+    let session = LifecycleStore::new(product_app_paths(&state))
+        .update_workspace_session_status(&session_id, WorkspaceSessionStatus::Confirmed)
+        .map_err(product_store_api_error)?;
+    Ok(Json(workspace_session_dto(session)))
 }
 
 pub async fn delete_product_issue(
@@ -1274,6 +1308,19 @@ fn workspace_session_dto(record: WorkspaceSessionRecord) -> WorkspaceSessionDto 
         review_rounds: record.review_rounds,
         superpowers_enabled: record.superpowers_enabled,
         openspec_enabled: record.openspec_enabled,
+        messages: record
+            .messages
+            .into_iter()
+            .map(workspace_message_dto)
+            .collect(),
+    }
+}
+
+fn workspace_message_dto(record: WorkspaceMessageRecord) -> WorkspaceMessageDto {
+    WorkspaceMessageDto {
+        role: record.role,
+        content: record.content,
+        created_at: record.created_at,
     }
 }
 
@@ -1517,8 +1564,23 @@ fn product_store_api_error(error: ProductStoreError) -> ApiError {
         ProductStoreError::NotFound { kind: "issue", .. } => {
             ApiError::runtime("issue_not_found", "issue not found", json!({}))
         }
+        ProductStoreError::NotFound {
+            kind: "workspace_session",
+            ..
+        } => ApiError::runtime(
+            "workspace_session_not_found",
+            "workspace session not found",
+            json!({}),
+        ),
         ProductStoreError::NotFound { kind: "gate", .. } => {
             ApiError::runtime("gate_not_found", "gate not found", json!({}))
+        }
+        ProductStoreError::Io(message) if message == "workspace_session_ambiguous" => {
+            ApiError::runtime(
+                "workspace_session_ambiguous",
+                "workspace session matches multiple files",
+                json!({}),
+            )
         }
         ProductStoreError::Io(message) if message == "gate_ambiguous" => ApiError::runtime(
             "gate_ambiguous",

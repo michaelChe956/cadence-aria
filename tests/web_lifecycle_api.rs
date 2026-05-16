@@ -182,6 +182,75 @@ async fn generating_story_specs_returns_404_when_bound_repository_was_deleted() 
     assert_eq!(error["code"], "repository_not_found");
 }
 
+#[tokio::test]
+async fn workspace_session_message_run_and_confirm_update_session_state() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects",
+        json!({"name":"Lifecycle","description":null}),
+    )
+    .await;
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/repositories",
+        json!({"name":"Repo","path":repo.path()}),
+    )
+    .await;
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues",
+        json!({"title":"登录会话过期","description":"描述","repository_id":"repository_0001"}),
+    )
+    .await;
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/story-specs:generate",
+        json!({"title":"登录会话过期提示"}),
+    )
+    .await;
+
+    let (status, message) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/workspace-sessions/workspace_session_0001/message",
+        json!({"role":"user","content":"请强调重新登录按钮"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(message["messages"][0]["content"], "请强调重新登录按钮");
+
+    let (status, running) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/workspace-sessions/workspace_session_0001/run-next",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(running["status"], "waiting_for_human");
+
+    let (status, confirmed) = request_json(
+        app,
+        Method::POST,
+        "/api/workspace-sessions/workspace_session_0001/confirm",
+        json!({"confirmed_by":"human"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(confirmed["status"], "confirmed");
+}
+
 async fn request_json(
     app: axum::Router,
     method: Method,

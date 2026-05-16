@@ -65,6 +65,18 @@ pub fn build_web_router(state: WebAppState) -> Router {
             post(handlers::generate_story_specs),
         )
         .route(
+            "/api/workspace-sessions/{session_id}/message",
+            post(handlers::workspace_session_message),
+        )
+        .route(
+            "/api/workspace-sessions/{session_id}/run-next",
+            post(handlers::workspace_session_run_next),
+        )
+        .route(
+            "/api/workspace-sessions/{session_id}/confirm",
+            post(handlers::workspace_session_confirm),
+        )
+        .route(
             "/api/issues",
             get(handlers::list_issues).post(handlers::create_issue),
         )
