@@ -18,6 +18,15 @@ pub struct CreateProductIssueInput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateProductIssueWithRepositoryInput {
+    pub project_id: String,
+    pub repo_id: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub change_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartProductIssueInput {
     pub project_id: String,
     pub issue_id: String,
@@ -113,13 +122,15 @@ impl IssueStore {
 
     pub fn create_with_repository(
         &self,
-        input: CreateProductIssueInput,
+        input: CreateProductIssueWithRepositoryInput,
     ) -> Result<IssueRecord, ProductStoreError> {
-        if input.repo_id.is_none() {
-            return Err(ProductStoreError::Io("repository_required".to_string()));
-        }
-
-        self.create(input)
+        self.create(CreateProductIssueInput {
+            project_id: input.project_id,
+            repo_id: Some(input.repo_id),
+            title: input.title,
+            description: input.description,
+            change_id: input.change_id,
+        })
     }
 
     pub fn start(&self, input: StartProductIssueInput) -> Result<IssueRecord, ProductStoreError> {

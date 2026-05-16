@@ -129,6 +129,59 @@ async fn generate_endpoints_create_workspace_sessions_and_first_cards() {
     assert_eq!(lifecycle["story_specs"].as_array().unwrap().len(), 1);
 }
 
+#[tokio::test]
+async fn generating_story_specs_returns_404_when_bound_repository_was_deleted() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects",
+        json!({"name":"Lifecycle","description":null}),
+    )
+    .await;
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/repositories",
+        json!({"name":"Repo","path":repo.path()}),
+    )
+    .await;
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues",
+        json!({
+            "title":"登录会话过期",
+            "description":"描述",
+            "repository_id":"repository_0001"
+        }),
+    )
+    .await;
+    request_json(
+        app.clone(),
+        Method::DELETE,
+        "/api/projects/project_0001/repositories/repository_0001",
+        json!({}),
+    )
+    .await;
+
+    let (status, error) = request_json(
+        app,
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/story-specs:generate",
+        json!({"title":"登录会话过期提示"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(error["code"], "repository_not_found");
+}
+
 async fn request_json(
     app: axum::Router,
     method: Method,

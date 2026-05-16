@@ -1,6 +1,5 @@
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures_util::stream::{self, Stream, StreamExt};
 use serde::Deserialize;
@@ -13,7 +12,9 @@ use tokio_stream::wrappers::BroadcastStream;
 use crate::interactive::models::WebWorkspaceProjection;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::gate_store::GateStore;
-use crate::product::issue_store::{CreateProductIssueInput, IssueStore, StartProductIssueInput};
+use crate::product::issue_store::{
+    CreateProductIssueWithRepositoryInput, IssueStore, StartProductIssueInput,
+};
 use crate::product::json_store::{ProductStoreError, validate_relative_id};
 use crate::product::lifecycle_store::{
     CreateStorySpecInput, CreateWorkspaceSessionInput, LifecycleStore,
@@ -84,8 +85,6 @@ pub struct GateResolveQuery {
 pub struct EventsQuery {
     pub cursor: Option<u64>,
 }
-
-type ApiJsonResponse<T> = Result<Json<T>, (StatusCode, Json<ApiError>)>;
 
 pub async fn health() -> Json<serde_json::Value> {
     Json(json!({"status":"ok"}))
@@ -252,24 +251,22 @@ pub async fn create_product_issue(
     State(state): State<WebAppState>,
     Path(project_id): Path<String>,
     Json(request): Json<CreateProductIssueRequest>,
-) -> ApiJsonResponse<ProductIssueDto> {
+) -> ApiResult<Json<ProductIssueDto>> {
     let repository_id = request
         .repository_id
-        .ok_or_else(|| api_error_response(repository_required_error()))?;
+        .ok_or_else(|| ApiError::validation("repository_required", "repository_id is required"))?;
     let app_paths = product_app_paths(&state);
-    let _repository =
-        find_repository(&app_paths, &project_id, &repository_id).map_err(api_error_response)?;
+    let _repository = find_repository(&app_paths, &project_id, &repository_id)?;
     let store = IssueStore::new(app_paths);
     let issue = store
-        .create_with_repository(CreateProductIssueInput {
+        .create_with_repository(CreateProductIssueWithRepositoryInput {
             project_id,
-            repo_id: Some(repository_id),
+            repo_id: repository_id,
             title: request.title,
             description: request.description,
             change_id: request.change_id,
         })
-        .map_err(product_store_api_error)
-        .map_err(api_error_response)?;
+        .map_err(product_store_api_error)?;
     Ok(Json(product_issue_dto(issue, None)))
 }
 
@@ -277,43 +274,36 @@ pub async fn issue_lifecycle(
     State(state): State<WebAppState>,
     Path(issue_id): Path<String>,
     Query(query): Query<GateResolveQuery>,
-) -> ApiJsonResponse<IssueLifecycleResponse> {
-    let project_id = query.project_id.ok_or_else(|| {
-        api_error_response(ApiError::validation(
-            "project_required",
-            "project_id is required",
-        ))
-    })?;
+) -> ApiResult<Json<IssueLifecycleResponse>> {
+    let project_id = query
+        .project_id
+        .ok_or_else(|| ApiError::validation("project_required", "project_id is required"))?;
     let app_paths = product_app_paths(&state);
     let issue = IssueStore::new(app_paths.clone())
         .get(&project_id, &issue_id)
-        .map_err(product_store_api_error)
-        .map_err(api_error_response)?;
+        .map_err(product_store_api_error)?;
     let lifecycle = LifecycleStore::new(app_paths.clone());
     let story_specs = lifecycle
         .list_story_specs(&project_id, &issue_id)
-        .map_err(product_store_api_error)
-        .map_err(api_error_response)?
+        .map_err(product_store_api_error)?
         .into_iter()
         .map(story_spec_dto)
         .collect();
     let design_specs = lifecycle
         .list_design_specs(&project_id, &issue_id)
-        .map_err(product_store_api_error)
-        .map_err(api_error_response)?
+        .map_err(product_store_api_error)?
         .into_iter()
         .map(design_spec_dto)
         .collect();
     let work_items = lifecycle
         .list_work_items(&project_id, &issue_id)
-        .map_err(product_store_api_error)
-        .map_err(api_error_response)?
+        .map_err(product_store_api_error)?
         .into_iter()
         .map(lifecycle_work_item_dto)
         .collect();
 
     Ok(Json(IssueLifecycleResponse {
-        issue: product_issue_dto_with_binding(&app_paths, issue).map_err(api_error_response)?,
+        issue: product_issue_dto_with_binding(&app_paths, issue)?,
         story_specs,
         design_specs,
         work_items,
@@ -324,16 +314,16 @@ pub async fn generate_story_specs(
     State(state): State<WebAppState>,
     Path((project_id, issue_id)): Path<(String, String)>,
     Json(request): Json<GenerateStorySpecsRequest>,
-) -> ApiJsonResponse<GenerateStorySpecsResponse> {
+) -> ApiResult<Json<GenerateStorySpecsResponse>> {
     let app_paths = product_app_paths(&state);
     let issue = IssueStore::new(app_paths.clone())
         .get(&project_id, &issue_id)
-        .map_err(product_store_api_error)
-        .map_err(api_error_response)?;
+        .map_err(product_store_api_error)?;
     let repository_id = issue
         .repo_id
         .clone()
-        .ok_or_else(|| api_error_response(repository_required_error()))?;
+        .ok_or_else(|| ApiError::validation("repository_required", "repository_id is required"))?;
+    find_repository(&app_paths, &project_id, &repository_id)?;
     let lifecycle = LifecycleStore::new(app_paths);
     let story = lifecycle
         .create_story_spec(CreateStorySpecInput {
@@ -342,8 +332,7 @@ pub async fn generate_story_specs(
             repository_id,
             title: request.title,
         })
-        .map_err(product_store_api_error)
-        .map_err(api_error_response)?;
+        .map_err(product_store_api_error)?;
     let session = lifecycle
         .create_workspace_session(CreateWorkspaceSessionInput {
             project_id,
@@ -356,8 +345,7 @@ pub async fn generate_story_specs(
             superpowers_enabled: true,
             openspec_enabled: true,
         })
-        .map_err(product_store_api_error)
-        .map_err(api_error_response)?;
+        .map_err(product_store_api_error)?;
 
     Ok(Json(GenerateStorySpecsResponse {
         story_specs: vec![story_spec_dto(story)],
@@ -1518,23 +1506,6 @@ fn issue_rollback_missing_worktree() -> ApiError {
     )
 }
 
-fn repository_required_error() -> ApiError {
-    ApiError::validation("repository_required", "repository_id is required")
-}
-
-fn api_error_response(error: ApiError) -> (StatusCode, Json<ApiError>) {
-    let status = match error.code.as_str() {
-        "project_required" | "repository_required" | "invalid_project_id" => {
-            StatusCode::BAD_REQUEST
-        }
-        "gate_not_found" | "issue_not_found" | "project_not_found" | "repository_not_found" => {
-            StatusCode::NOT_FOUND
-        }
-        _ => StatusCode::INTERNAL_SERVER_ERROR,
-    };
-    (status, Json(error))
-}
-
 fn product_store_api_error(error: ProductStoreError) -> ApiError {
     match error {
         ProductStoreError::NotFound {
@@ -1554,9 +1525,6 @@ fn product_store_api_error(error: ProductStoreError) -> ApiError {
             "gate matches multiple projects",
             json!({}),
         ),
-        ProductStoreError::Io(message) if message == "repository_required" => {
-            repository_required_error()
-        }
         ProductStoreError::PathEscape(_) => {
             ApiError::validation("invalid_project_id", "invalid project id")
         }

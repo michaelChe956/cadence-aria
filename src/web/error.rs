@@ -43,6 +43,7 @@ impl IntoResponse for ApiError {
             | "interactive_task_missing"
             | "issue_not_found"
             | "project_not_found"
+            | "repository_not_found"
             | "workspace_not_found"
             | "task_workspace_not_found" => StatusCode::NOT_FOUND,
             "gate_ambiguous"
@@ -53,7 +54,9 @@ impl IntoResponse for ApiError {
             | "invalid_task_id"
             | "issue_rollback_missing_worktree"
             | "issue_title_required"
+            | "project_required"
             | "provider_input_path_escape"
+            | "repository_required"
             | "workspace_path_missing"
             | "workspace_path_not_directory"
             | "workspace_path_not_git_repo" => StatusCode::BAD_REQUEST,

@@ -147,14 +147,15 @@ async fn manages_workspace_repositories_and_runs_issue_in_selected_repository() 
         "/api/projects/project_0001/issues",
         json!({
             "title":"优化任务管理页面",
-            "description":"展示 story spec、design spec、work item 和完成状态"
+            "description":"展示 story spec、design spec、work item 和完成状态",
+            "repository_id":"repository_0002"
         }),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(issue["issue_id"], "issue_0001");
     assert_eq!(issue["project_id"], "project_0001");
-    assert!(issue["repo_id"].is_null());
+    assert_eq!(issue["repo_id"], "repository_0002");
     assert_eq!(issue["phase"], "clarification");
     assert_eq!(issue["status"], "draft");
 
@@ -271,7 +272,11 @@ async fn starting_product_issue_again_reuses_existing_execution_workspace() {
         app.clone(),
         Method::POST,
         "/api/projects/project_0001/issues",
-        json!({"title":"执行一次即可","description":"再次点击应该跳转"}),
+        json!({
+            "title":"执行一次即可",
+            "description":"再次点击应该跳转",
+            "repository_id":"repository_0001"
+        }),
     )
     .await;
 
@@ -376,7 +381,11 @@ async fn deletes_workspace_project_repository_and_issue_records() {
         app.clone(),
         Method::POST,
         "/api/projects/project_0001/issues",
-        json!({"title":"Issue to delete","description":null}),
+        json!({
+            "title":"Issue to delete",
+            "description":null,
+            "repository_id":"repository_0001"
+        }),
     )
     .await;
 
