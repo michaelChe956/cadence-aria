@@ -187,3 +187,183 @@ pub struct WorkItemRecord {
     pub worktree_path: Option<PathBuf>,
     pub worktree_branch: Option<String>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LifecycleConfirmationStatus {
+    Draft,
+    InReview,
+    Confirmed,
+    ChangeRequested,
+    Blocked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesignKind {
+    Frontend,
+    Backend,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderName {
+    ClaudeCode,
+    Codex,
+    Fake,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceType {
+    Story,
+    Design,
+    WorkItem,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceSessionStatus {
+    Open,
+    Running,
+    WaitingForHuman,
+    Confirmed,
+    ChangeRequested,
+    BlockedProviderUnavailable,
+    Terminated,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkItemPlanStatus {
+    NotStarted,
+    Draft,
+    Confirmed,
+    ChangeRequested,
+}
+
+impl WorkItemPlanStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            WorkItemPlanStatus::NotStarted => "not_started",
+            WorkItemPlanStatus::Draft => "draft",
+            WorkItemPlanStatus::Confirmed => "confirmed",
+            WorkItemPlanStatus::ChangeRequested => "change_requested",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct StorySpecRecord {
+    pub id: String,
+    pub project_id: String,
+    pub issue_id: String,
+    pub repository_id: String,
+    pub title: String,
+    pub current_version: Option<u32>,
+    pub confirmation_status: LifecycleConfirmationStatus,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct DesignSpecRecord {
+    pub id: String,
+    pub project_id: String,
+    pub issue_id: String,
+    pub story_spec_ids: Vec<String>,
+    pub design_kind: DesignKind,
+    pub title: String,
+    pub current_version: Option<u32>,
+    pub confirmation_status: LifecycleConfirmationStatus,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct LifecycleWorkItemRecord {
+    pub id: String,
+    pub project_id: String,
+    pub issue_id: String,
+    pub repository_id: String,
+    pub story_spec_ids: Vec<String>,
+    pub design_spec_ids: Vec<String>,
+    pub title: String,
+    pub plan_status: WorkItemPlanStatus,
+    pub execution_status: WorkItemStatus,
+    pub worktree_path: Option<PathBuf>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SpecVersionRecord {
+    pub id: String,
+    pub project_id: String,
+    pub issue_id: String,
+    pub entity_id: String,
+    pub version: u32,
+    pub markdown: String,
+    pub provider_run_refs: Vec<String>,
+    pub review_refs: Vec<String>,
+    pub confirmed_by: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkspaceSessionRecord {
+    pub id: String,
+    pub project_id: String,
+    pub issue_id: String,
+    pub entity_id: String,
+    pub workspace_type: WorkspaceType,
+    pub status: WorkspaceSessionStatus,
+    pub author_provider: ProviderName,
+    pub reviewer_provider: ProviderName,
+    pub review_rounds: u32,
+    pub superpowers_enabled: bool,
+    pub openspec_enabled: bool,
+    pub messages: Vec<WorkspaceMessageRecord>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkspaceMessageRecord {
+    pub role: String,
+    pub content: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ProviderReviewRoundRecord {
+    pub id: String,
+    pub project_id: String,
+    pub issue_id: String,
+    pub session_id: String,
+    pub round_index: u32,
+    pub author_provider: ProviderName,
+    pub reviewer_provider: ProviderName,
+    pub review_result: String,
+    pub revision_result: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ProjectProviderDefaultsRecord {
+    pub project_id: String,
+    pub author_provider: ProviderName,
+    pub reviewer_provider: ProviderName,
+    pub review_rounds: u32,
+    pub superpowers_enabled: bool,
+    pub openspec_enabled: bool,
+    pub updated_at: String,
+}

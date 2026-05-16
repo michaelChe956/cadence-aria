@@ -33,4 +33,12 @@ impl ProductAppPaths {
     pub fn issue_root(&self, project_id: &str, issue_id: &str) -> PathBuf {
         self.project_root(project_id).join("issues").join(issue_id)
     }
+
+    pub fn issue_lifecycle_root(&self, project_id: &str, issue_id: &str) -> PathBuf {
+        self.issue_root(project_id, issue_id)
+    }
+
+    pub fn project_provider_defaults_path(&self, project_id: &str) -> PathBuf {
+        self.project_root(project_id).join("provider-defaults.json")
+    }
 }
