@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
@@ -78,6 +79,17 @@ pub struct CreateProjectProviderDefaultsInput {
 #[derive(Debug, Clone)]
 pub struct LifecycleStore {
     paths: ProductAppPaths,
+}
+
+enum ExistingSpecRecord {
+    Story {
+        path: PathBuf,
+        record: StorySpecRecord,
+    },
+    Design {
+        path: PathBuf,
+        record: DesignSpecRecord,
+    },
 }
 
 impl LifecycleStore {
@@ -210,10 +222,16 @@ impl LifecycleStore {
         validate_relative_id(&input.issue_id)?;
         validate_relative_id(&input.entity_id)?;
 
+        let spec = self.load_existing_spec(&input.project_id, &input.issue_id, &input.entity_id)?;
         let root = self.versions_root(&input.project_id, &input.issue_id, &input.entity_id);
-        let existing_len = count_json_files(&root)?;
-        let id = next_sequential_id("version", existing_len);
-        let version = existing_len as u32 + 1;
+        let versions: Vec<SpecVersionRecord> = list_json_records(&root)?;
+        let version = next_version_number(&versions)?;
+        let id = next_sequential_id(
+            "version",
+            usize::try_from(version - 1).map_err(|_| {
+                ProductStoreError::Io(format!("version sequence overflow: {version}"))
+            })?,
+        );
         let now = Utc::now().to_rfc3339();
         let record = SpecVersionRecord {
             id: id.clone(),
@@ -228,14 +246,10 @@ impl LifecycleStore {
             created_at: now.clone(),
         };
 
-        write_json(&root.join(format!("{id}.json")), &record)?;
-        self.update_spec_current_version(
-            &record.project_id,
-            &record.issue_id,
-            &record.entity_id,
-            version,
-            now,
-        )?;
+        let target_path = root.join(format!("{id}.json"));
+        ensure_target_absent(&target_path)?;
+        write_json(&target_path, &record)?;
+        self.update_spec_current_version(spec, version, now)?;
         Ok(record)
     }
 
@@ -260,7 +274,7 @@ impl LifecycleStore {
         validate_relative_id(&input.entity_id)?;
 
         let root = self.workspace_sessions_root(&input.project_id, &input.issue_id);
-        let id = next_sequential_id("workspace_session", count_json_files(&root)?);
+        let id = self.next_workspace_session_id()?;
         let now = Utc::now().to_rfc3339();
         let session = WorkspaceSessionRecord {
             id: id.clone(),
@@ -279,7 +293,9 @@ impl LifecycleStore {
             updated_at: now,
         };
 
-        write_json(&root.join(format!("{id}.json")), &session)?;
+        let target_path = root.join(format!("{id}.json"));
+        ensure_target_absent(&target_path)?;
+        write_json(&target_path, &session)?;
         Ok(session)
     }
 
@@ -318,35 +334,69 @@ impl LifecycleStore {
         Ok(defaults)
     }
 
-    fn update_spec_current_version(
+    fn load_existing_spec(
         &self,
         project_id: &str,
         issue_id: &str,
         entity_id: &str,
-        version: u32,
-        updated_at: String,
-    ) -> Result<(), ProductStoreError> {
+    ) -> Result<ExistingSpecRecord, ProductStoreError> {
         let story_path = self
             .story_specs_root(project_id, issue_id)
             .join(format!("{entity_id}.json"));
-        if path_exists(&story_path)? {
-            let mut story: StorySpecRecord = read_json(&story_path)?;
-            story.current_version = Some(version);
-            story.updated_at = updated_at;
-            return write_json(&story_path, &story);
+        if path_is_regular_file(&story_path)? {
+            let record = read_json(&story_path)?;
+            return Ok(ExistingSpecRecord::Story {
+                path: story_path,
+                record,
+            });
         }
 
         let design_path = self
             .design_specs_root(project_id, issue_id)
             .join(format!("{entity_id}.json"));
-        if path_exists(&design_path)? {
-            let mut design: DesignSpecRecord = read_json(&design_path)?;
-            design.current_version = Some(version);
-            design.updated_at = updated_at;
-            return write_json(&design_path, &design);
+        if path_is_regular_file(&design_path)? {
+            let record = read_json(&design_path)?;
+            return Ok(ExistingSpecRecord::Design {
+                path: design_path,
+                record,
+            });
         }
 
-        Ok(())
+        Err(ProductStoreError::NotFound {
+            kind: "spec",
+            id: entity_id.to_string(),
+        })
+    }
+
+    fn update_spec_current_version(
+        &self,
+        spec: ExistingSpecRecord,
+        version: u32,
+        updated_at: String,
+    ) -> Result<(), ProductStoreError> {
+        match spec {
+            ExistingSpecRecord::Story {
+                path,
+                record: mut story,
+            } => {
+                story.current_version = Some(version);
+                story.updated_at = updated_at;
+                write_json(&path, &story)
+            }
+            ExistingSpecRecord::Design {
+                path,
+                record: mut design,
+            } => {
+                design.current_version = Some(version);
+                design.updated_at = updated_at;
+                write_json(&path, &design)
+            }
+        }
+    }
+
+    fn next_workspace_session_id(&self) -> Result<String, ProductStoreError> {
+        let max_sequence = max_workspace_session_sequence(&self.paths.projects_root())?;
+        Ok(next_sequential_id("workspace_session", max_sequence))
     }
 
     fn story_specs_root(&self, project_id: &str, issue_id: &str) -> PathBuf {
@@ -382,6 +432,20 @@ impl LifecycleStore {
 }
 
 fn list_json_records<T: DeserializeOwned>(path: &Path) -> Result<Vec<T>, ProductStoreError> {
+    let entries = json_file_paths(path)?;
+
+    let mut records = Vec::with_capacity(entries.len());
+    for entry in entries {
+        records.push(read_json(&entry)?);
+    }
+    Ok(records)
+}
+
+fn count_json_files(path: &Path) -> Result<usize, ProductStoreError> {
+    Ok(json_file_paths(path)?.len())
+}
+
+fn json_file_paths(path: &Path) -> Result<Vec<PathBuf>, ProductStoreError> {
     if !path_exists(path)? {
         return Ok(Vec::new());
     }
@@ -393,34 +457,102 @@ fn list_json_records<T: DeserializeOwned>(path: &Path) -> Result<Vec<T>, Product
         let entry = entry.map_err(|error| {
             ProductStoreError::Io(format!("read {} entry: {error}", path.display()))
         })?;
+        let file_type = entry.file_type().map_err(|error| {
+            ProductStoreError::Io(format!(
+                "read {} entry type: {error}",
+                entry.path().display()
+            ))
+        })?;
         let entry_path = entry.path();
-        if entry_path.extension().and_then(|value| value.to_str()) == Some("json") {
+        if file_type.is_file()
+            && entry_path.extension().and_then(|value| value.to_str()) == Some("json")
+        {
             entries.push(entry_path);
         }
     }
     entries.sort();
-
-    let mut records = Vec::with_capacity(entries.len());
-    for entry in entries {
-        records.push(read_json(&entry)?);
-    }
-    Ok(records)
+    Ok(entries)
 }
 
-fn count_json_files(path: &Path) -> Result<usize, ProductStoreError> {
+fn child_directories(path: &Path) -> Result<Vec<PathBuf>, ProductStoreError> {
     if !path_exists(path)? {
-        return Ok(0);
+        return Ok(Vec::new());
     }
 
-    fs::read_dir(path)
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(path)
         .map_err(|error| ProductStoreError::Io(format!("read {}: {error}", path.display())))?
-        .try_fold(0usize, |count, entry| {
-            let entry = entry.map_err(|error| {
-                ProductStoreError::Io(format!("read {} entry: {error}", path.display()))
-            })?;
-            let is_json = entry.path().extension().and_then(|value| value.to_str()) == Some("json");
-            Ok(if is_json { count + 1 } else { count })
-        })
+    {
+        let entry = entry.map_err(|error| {
+            ProductStoreError::Io(format!("read {} entry: {error}", path.display()))
+        })?;
+        let file_type = entry.file_type().map_err(|error| {
+            ProductStoreError::Io(format!(
+                "read {} entry type: {error}",
+                entry.path().display()
+            ))
+        })?;
+        if file_type.is_dir() {
+            entries.push(entry.path());
+        }
+    }
+    entries.sort();
+    Ok(entries)
+}
+
+fn next_version_number(records: &[SpecVersionRecord]) -> Result<u32, ProductStoreError> {
+    records
+        .iter()
+        .map(|record| record.version)
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or_else(|| ProductStoreError::Io("version sequence overflow".to_string()))
+}
+
+fn max_workspace_session_sequence(projects_root: &Path) -> Result<usize, ProductStoreError> {
+    let mut max_sequence = 0usize;
+    for project_path in child_directories(projects_root)? {
+        let issues_root = project_path.join("issues");
+        for issue_path in child_directories(&issues_root)? {
+            let workspace_sessions_root = issue_path.join("workspace-sessions");
+            for session_path in json_file_paths(&workspace_sessions_root)? {
+                let session: WorkspaceSessionRecord = read_json(&session_path)?;
+                if let Some(sequence) = parse_sequential_id(&session.id, "workspace_session") {
+                    max_sequence = max_sequence.max(sequence);
+                }
+            }
+        }
+    }
+    Ok(max_sequence)
+}
+
+fn parse_sequential_id(value: &str, prefix: &str) -> Option<usize> {
+    value
+        .strip_prefix(prefix)
+        .and_then(|suffix| suffix.strip_prefix('_'))
+        .and_then(|suffix| suffix.parse().ok())
+}
+
+fn ensure_target_absent(path: &Path) -> Result<(), ProductStoreError> {
+    if path_exists(path)? {
+        return Err(ProductStoreError::Io(format!(
+            "refuse to overwrite {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn path_is_regular_file(path: &Path) -> Result<bool, ProductStoreError> {
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(metadata.is_file()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(ProductStoreError::Io(format!(
+            "metadata {}: {error}",
+            path.display()
+        ))),
+    }
 }
 
 fn validate_relative_ids(values: &[String]) -> Result<(), ProductStoreError> {
