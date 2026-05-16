@@ -4,7 +4,8 @@ use crate::product::lifecycle_store::{
     AppendProviderReviewRoundInput, AppendSpecVersionInput, LifecycleStore,
 };
 use crate::product::models::{
-    ProviderReviewRoundRecord, SpecVersionRecord, WorkspaceSessionRecord, WorkspaceSessionStatus,
+    ProviderName, ProviderReviewRoundRecord, SpecVersionRecord, WorkspaceSessionRecord,
+    WorkspaceSessionStatus,
 };
 use crate::protocol::contracts::{AdapterInput, AdapterRole, ProviderType};
 
@@ -18,7 +19,7 @@ pub struct WorkspaceProviderRunInput {
 pub struct WorkspaceProviderRunOutput {
     pub session: WorkspaceSessionRecord,
     pub version: SpecVersionRecord,
-    pub review_round: ProviderReviewRoundRecord,
+    pub review_rounds: Vec<ProviderReviewRoundRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -41,7 +42,7 @@ impl ProviderWorkspaceRunner {
             .get_workspace_session(&input.session_id)
             .map_err(store_error)?;
         let adapter_input = AdapterInput {
-            provider_type: ProviderType::Fake,
+            provider_type: provider_type_for_name(&session.author_provider),
             role: AdapterRole::Orchestrator,
             worktree_path: None,
             prompt: input.user_prompt,
@@ -68,28 +69,43 @@ impl ProviderWorkspaceRunner {
             .unwrap_or("revision completed")
             .to_string();
 
-        let review_round = store
-            .append_provider_review_round(AppendProviderReviewRoundInput {
-                project_id: session.project_id.clone(),
-                issue_id: session.issue_id.clone(),
-                session_id: session.id.clone(),
-                round_index: 1,
-                author_provider: session.author_provider.clone(),
-                reviewer_provider: session.reviewer_provider.clone(),
-                review_result,
-                revision_result,
-            })
-            .map_err(store_error)?;
+        let mut review_rounds = Vec::new();
+        for round_index in 1..=session.review_rounds.max(1) {
+            review_rounds.push(
+                store
+                    .append_provider_review_round(AppendProviderReviewRoundInput {
+                        project_id: session.project_id.clone(),
+                        issue_id: session.issue_id.clone(),
+                        session_id: session.id.clone(),
+                        round_index,
+                        author_provider: session.author_provider.clone(),
+                        reviewer_provider: session.reviewer_provider.clone(),
+                        review_result: review_result.clone(),
+                        revision_result: revision_result.clone(),
+                    })
+                    .map_err(store_error)?,
+            );
+        }
         let version = store
             .append_version(AppendSpecVersionInput {
                 project_id: session.project_id.clone(),
                 issue_id: session.issue_id.clone(),
                 entity_id: session.entity_id.clone(),
-                markdown,
+                markdown: markdown.clone(),
                 provider_run_refs: vec![format!("provider_run_{}", session.id)],
-                review_refs: vec![review_round.id.clone()],
+                review_refs: review_rounds.iter().map(|round| round.id.clone()).collect(),
                 confirmed_by: None,
             })
+            .map_err(store_error)?;
+        store
+            .append_workspace_message(&session.id, "provider".to_string(), markdown)
+            .map_err(store_error)?;
+        store
+            .append_workspace_message(
+                &session.id,
+                "reviewer".to_string(),
+                format!("{review_result}\n\n{revision_result}"),
+            )
             .map_err(store_error)?;
         let session = store
             .update_workspace_session_status(&session.id, WorkspaceSessionStatus::WaitingForHuman)
@@ -98,8 +114,16 @@ impl ProviderWorkspaceRunner {
         Ok(WorkspaceProviderRunOutput {
             session,
             version,
-            review_round,
+            review_rounds,
         })
+    }
+}
+
+fn provider_type_for_name(provider: &ProviderName) -> ProviderType {
+    match provider {
+        ProviderName::ClaudeCode => ProviderType::ClaudeCode,
+        ProviderName::Codex => ProviderType::Codex,
+        ProviderName::Fake => ProviderType::Fake,
     }
 }
 

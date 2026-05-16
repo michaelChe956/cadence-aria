@@ -9,6 +9,12 @@ import type {
   CreateTaskResponse,
   FileContentResponse,
   FileDiffResponse,
+  GenerateDesignSpecsRequest,
+  GenerateDesignSpecsResponse,
+  GenerateStorySpecsRequest,
+  GenerateStorySpecsResponse,
+  GenerateWorkItemsRequest,
+  GenerateWorkItemsResponse,
   IssueLifecycleResponse,
   Issue,
   IssueListResponse,
@@ -23,12 +29,10 @@ import type {
   StartProductIssueRequest,
   StartProductIssueResponse,
   StopTaskResponse,
-  StorySpec,
   TaskListResponse,
   WebWorkspaceProjection,
   Workspace,
   WorkspaceListResponse,
-  WorkspaceSession,
 } from "./types";
 
 export class ApiRequestError extends Error implements ApiError {
@@ -192,9 +196,9 @@ export function getIssueLifecycle(
 export function generateStorySpecs(
   projectId: string,
   issueId: string,
-  payload: { title: string },
-): Promise<{ story_specs: StorySpec[]; workspace_session: WorkspaceSession }> {
-  return requestJson<{ story_specs: StorySpec[]; workspace_session: WorkspaceSession }>(
+  payload: GenerateStorySpecsRequest,
+): Promise<GenerateStorySpecsResponse> {
+  return requestJson<GenerateStorySpecsResponse>(
     `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/story-specs:generate`,
     {
       method: "POST",
@@ -203,12 +207,13 @@ export function generateStorySpecs(
   );
 }
 
-export function sendWorkspaceSessionMessage(
-  sessionId: string,
-  payload: { role: string; content: string },
-): Promise<WorkspaceSession> {
-  return requestJson<WorkspaceSession>(
-    `/api/workspace-sessions/${encodeURIComponent(sessionId)}/message`,
+export function generateDesignSpecs(
+  projectId: string,
+  issueId: string,
+  payload: GenerateDesignSpecsRequest,
+): Promise<GenerateDesignSpecsResponse> {
+  return requestJson<GenerateDesignSpecsResponse>(
+    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/design-specs:generate`,
     {
       method: "POST",
       body: JSON.stringify(payload),
@@ -216,21 +221,13 @@ export function sendWorkspaceSessionMessage(
   );
 }
 
-export function runWorkspaceSessionNext(sessionId: string): Promise<WorkspaceSession> {
-  return requestJson<WorkspaceSession>(
-    `/api/workspace-sessions/${encodeURIComponent(sessionId)}/run-next`,
-    {
-      method: "POST",
-    },
-  );
-}
-
-export function confirmWorkspaceSession(
-  sessionId: string,
-  payload: { confirmed_by: string },
-): Promise<WorkspaceSession> {
-  return requestJson<WorkspaceSession>(
-    `/api/workspace-sessions/${encodeURIComponent(sessionId)}/confirm`,
+export function generateWorkItems(
+  projectId: string,
+  issueId: string,
+  payload: GenerateWorkItemsRequest,
+): Promise<GenerateWorkItemsResponse> {
+  return requestJson<GenerateWorkItemsResponse>(
+    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/work-items:generate`,
     {
       method: "POST",
       body: JSON.stringify(payload),

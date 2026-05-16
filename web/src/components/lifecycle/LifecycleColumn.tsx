@@ -7,12 +7,14 @@ export function LifecycleColumn({
   cards,
   selectedKey,
   onSelect,
+  onDeleteIssue,
 }: {
   title: string;
   ariaLabel: string;
   cards: LifecycleCardData[];
   selectedKey: string | null;
   onSelect: (card: LifecycleCardData) => void;
+  onDeleteIssue?: (issueId: string) => void;
 }) {
   return (
     <section
@@ -33,6 +35,9 @@ export function LifecycleColumn({
               card={card}
               selected={selectedKey === `${card.kind}:${card.id}`}
               onSelect={() => onSelect(card)}
+              onDeleteIssue={
+                card.kind === "issue" && onDeleteIssue ? () => onDeleteIssue(card.id) : undefined
+              }
             />
           </li>
         ))}

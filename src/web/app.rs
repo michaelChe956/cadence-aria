@@ -6,6 +6,7 @@ use tokio::net::TcpListener;
 use crate::web::events::EventHub;
 use crate::web::handlers;
 use crate::web::state::WebAppState;
+use crate::web::workspace_ws_handler;
 
 pub fn build_web_router(state: WebAppState) -> Router {
     Router::new()
@@ -63,6 +64,14 @@ pub fn build_web_router(state: WebAppState) -> Router {
         .route(
             "/api/projects/{project_id}/issues/{issue_id}/story-specs:generate",
             post(handlers::generate_story_specs),
+        )
+        .route(
+            "/api/projects/{project_id}/issues/{issue_id}/design-specs:generate",
+            post(handlers::generate_design_specs),
+        )
+        .route(
+            "/api/projects/{project_id}/issues/{issue_id}/work-items:generate",
+            post(handlers::generate_work_items),
         )
         .route(
             "/api/workspace-sessions/{session_id}/message",
@@ -123,6 +132,14 @@ pub fn build_web_router(state: WebAppState) -> Router {
         )
         .route("/api/files/content", get(handlers::file_content))
         .route("/api/files/diff", get(handlers::file_diff))
+        .route(
+            "/api/workspace-sessions/{session_id}/ws",
+            get(workspace_ws_handler::workspace_ws),
+        )
+        .route(
+            "/api/ws/workspace/{session_id}",
+            get(workspace_ws_handler::workspace_ws),
+        )
         .with_state(state)
 }
 

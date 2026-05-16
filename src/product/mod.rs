@@ -1,4 +1,5 @@
 pub mod app_paths;
+pub mod checkpoint_store;
 pub mod compatibility_scan;
 pub mod execution_record_store;
 pub mod gate_store;
@@ -12,4 +13,5 @@ pub mod provider_workspace_runner;
 pub mod repository_store;
 pub mod runtime_binding_store;
 pub mod work_item_store;
+pub mod workspace_engine;
 pub mod worktree_scheduler;

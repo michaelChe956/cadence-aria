@@ -392,6 +392,99 @@ impl LifecycleStore {
         Ok(session)
     }
 
+    pub fn update_workspace_session_providers(
+        &self,
+        session_id: &str,
+        author_provider: ProviderName,
+        reviewer_provider: ProviderName,
+    ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
+        validate_relative_id(session_id)?;
+        let session_path = self.find_workspace_session_path(session_id)?;
+        let mut session: WorkspaceSessionRecord = read_json(&session_path)?;
+        session.author_provider = author_provider;
+        session.reviewer_provider = reviewer_provider;
+        session.updated_at = Utc::now().to_rfc3339();
+        write_json(&session_path, &session)?;
+        Ok(session)
+    }
+
+    pub fn truncate_workspace_session_messages(
+        &self,
+        session_id: &str,
+        keep_count: usize,
+        status: WorkspaceSessionStatus,
+    ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
+        validate_relative_id(session_id)?;
+        let session_path = self.find_workspace_session_path(session_id)?;
+        let mut session: WorkspaceSessionRecord = read_json(&session_path)?;
+        session.messages.truncate(keep_count);
+        session.status = status;
+        session.updated_at = Utc::now().to_rfc3339();
+        write_json(&session_path, &session)?;
+        Ok(session)
+    }
+
+    pub fn update_spec_confirmation_status(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        entity_id: &str,
+        status: LifecycleConfirmationStatus,
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(entity_id)?;
+
+        let spec = self.load_existing_spec(project_id, issue_id, entity_id)?;
+        let updated_at = Utc::now().to_rfc3339();
+        match spec {
+            ExistingSpecRecord::Story {
+                path,
+                record: mut story,
+            } => {
+                story.confirmation_status = status;
+                story.updated_at = updated_at;
+                write_json(&path, &story)
+            }
+            ExistingSpecRecord::Design {
+                path,
+                record: mut design,
+            } => {
+                design.confirmation_status = status;
+                design.updated_at = updated_at;
+                write_json(&path, &design)
+            }
+        }
+    }
+
+    pub fn update_work_item_plan_status(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        work_item_id: &str,
+        plan_status: WorkItemPlanStatus,
+    ) -> Result<LifecycleWorkItemRecord, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(work_item_id)?;
+
+        let path = self
+            .work_items_root(project_id, issue_id)
+            .join(format!("{work_item_id}.json"));
+        if !path_is_regular_file(&path)? {
+            return Err(ProductStoreError::NotFound {
+                kind: "work_item",
+                id: work_item_id.to_string(),
+            });
+        }
+
+        let mut record: LifecycleWorkItemRecord = read_json(&path)?;
+        record.plan_status = plan_status;
+        record.updated_at = Utc::now().to_rfc3339();
+        write_json(&path, &record)?;
+        Ok(record)
+    }
+
     pub fn upsert_project_provider_defaults(
         &self,
         input: CreateProjectProviderDefaultsInput,

@@ -14,7 +14,8 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.102"
-axum = "0.8"
+async-trait = "0.1"
+axum = { version = "0.8", features = ["ws"] }
 chrono = { version = "0.4.44", features = ["clock", "serde"] }
 futures-util = "0.3"
 hex = "0.4.3"
@@ -27,10 +28,12 @@ sha2 = "0.10.9"
 thiserror = "2.0.18"
 tokio = { version = "1.52.1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-util = "0.7"
 tower-http = { version = "0.6", features = ["fs", "trace"] }
 uuid = { version = "1.23.1", features = ["v4"] }
 
 [dev-dependencies]
 serde_yaml = "0.9.34"
 tempfile = "3.27.0"
+tokio-tungstenite = "0.29"
 tower = { version = "0.5", features = ["util"] }

@@ -404,6 +404,11 @@ pub struct LifecycleWorkItemDto {
 #[serde(rename_all = "snake_case")]
 pub struct GenerateStorySpecsRequest {
     pub title: String,
+    pub author_provider: Option<String>,
+    pub reviewer_provider: Option<String>,
+    pub review_rounds: Option<u32>,
+    pub superpowers_enabled: Option<bool>,
+    pub openspec_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -415,9 +420,55 @@ pub struct GenerateStorySpecsResponse {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub struct GenerateDesignSpecsRequest {
+    pub title: String,
+    pub story_spec_ids: Vec<String>,
+    pub design_kind: String,
+    pub author_provider: Option<String>,
+    pub reviewer_provider: Option<String>,
+    pub review_rounds: Option<u32>,
+    pub superpowers_enabled: Option<bool>,
+    pub openspec_enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct GenerateDesignSpecsResponse {
+    pub design_specs: Vec<DesignSpecDto>,
+    pub workspace_session: WorkspaceSessionDto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct GenerateWorkItemsRequest {
+    pub title: String,
+    pub story_spec_ids: Vec<String>,
+    pub design_spec_ids: Vec<String>,
+    pub author_provider: Option<String>,
+    pub reviewer_provider: Option<String>,
+    pub review_rounds: Option<u32>,
+    pub superpowers_enabled: Option<bool>,
+    pub openspec_enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct GenerateWorkItemsResponse {
+    pub work_items: Vec<LifecycleWorkItemDto>,
+    pub workspace_session: WorkspaceSessionDto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct WorkspaceSessionMessageRequest {
     pub role: String,
     pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkspaceSessionRunNextRequest {
+    pub user_prompt: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

@@ -106,7 +106,14 @@ async fn generate_endpoints_create_workspace_sessions_and_first_cards() {
         app.clone(),
         Method::POST,
         "/api/projects/project_0001/issues/issue_0001/story-specs:generate",
-        json!({"title":"登录会话过期提示"}),
+        json!({
+            "title":"登录会话过期提示",
+            "author_provider":"fake",
+            "reviewer_provider":"codex",
+            "review_rounds":3,
+            "superpowers_enabled":false,
+            "openspec_enabled":true
+        }),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -117,6 +124,19 @@ async fn generate_endpoints_create_workspace_sessions_and_first_cards() {
     assert_eq!(
         story_response["workspace_session"]["workspace_type"],
         "story"
+    );
+    assert_eq!(
+        story_response["workspace_session"]["author_provider"],
+        "fake"
+    );
+    assert_eq!(
+        story_response["workspace_session"]["reviewer_provider"],
+        "codex"
+    );
+    assert_eq!(story_response["workspace_session"]["review_rounds"], 3);
+    assert_eq!(
+        story_response["workspace_session"]["superpowers_enabled"],
+        false
     );
 
     let (status, lifecycle) = request_json(
@@ -137,6 +157,140 @@ async fn generate_endpoints_create_workspace_sessions_and_first_cards() {
         lifecycle["workspace_sessions"][0]["entity_id"],
         "story_spec_0001"
     );
+}
+
+#[tokio::test]
+async fn confirmed_story_and_design_can_generate_design_and_work_item_workspaces() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects",
+        json!({"name":"Lifecycle","description":null}),
+    )
+    .await;
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/repositories",
+        json!({"name":"Repo","path":repo.path()}),
+    )
+    .await;
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues",
+        json!({"title":"登录会话过期","description":"描述","repository_id":"repository_0001"}),
+    )
+    .await;
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/story-specs:generate",
+        json!({"title":"登录会话过期提示"}),
+    )
+    .await;
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/workspace-sessions/workspace_session_0001/confirm",
+        json!({"confirmed_by":"human"}),
+    )
+    .await;
+
+    let (status, design_response) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/design-specs:generate",
+        json!({
+            "title":"会话过期后端设计",
+            "story_spec_ids":["story_spec_0001"],
+            "design_kind":"backend",
+            "author_provider":"codex",
+            "reviewer_provider":"claude_code",
+            "review_rounds":2,
+            "superpowers_enabled":true,
+            "openspec_enabled":true
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        design_response["design_specs"][0]["design_spec_id"],
+        "design_spec_0001"
+    );
+    assert_eq!(
+        design_response["design_specs"][0]["story_spec_ids"],
+        json!(["story_spec_0001"])
+    );
+    assert_eq!(design_response["design_specs"][0]["design_kind"], "backend");
+    assert_eq!(
+        design_response["workspace_session"]["workspace_type"],
+        "design"
+    );
+
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/workspace-sessions/workspace_session_0002/confirm",
+        json!({"confirmed_by":"human"}),
+    )
+    .await;
+
+    let (status, work_item_response) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items:generate",
+        json!({
+            "title":"实现会话过期提示",
+            "story_spec_ids":["story_spec_0001"],
+            "design_spec_ids":["design_spec_0001"],
+            "author_provider":"codex",
+            "reviewer_provider":"fake",
+            "review_rounds":1,
+            "superpowers_enabled":true,
+            "openspec_enabled":false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        work_item_response["work_items"][0]["work_item_id"],
+        "work_item_0001"
+    );
+    assert_eq!(
+        work_item_response["workspace_session"]["workspace_type"],
+        "work_item"
+    );
+    assert_eq!(
+        work_item_response["workspace_session"]["reviewer_provider"],
+        "fake"
+    );
+
+    let (status, lifecycle) = request_json(
+        app,
+        Method::GET,
+        "/api/issues/issue_0001/lifecycle?project_id=project_0001",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        lifecycle["story_specs"][0]["confirmation_status"],
+        "confirmed"
+    );
+    assert_eq!(
+        lifecycle["design_specs"][0]["confirmation_status"],
+        "confirmed"
+    );
+    assert_eq!(lifecycle["work_items"].as_array().unwrap().len(), 1);
+    assert_eq!(lifecycle["workspace_sessions"].as_array().unwrap().len(), 3);
 }
 
 #[tokio::test]
@@ -244,11 +398,37 @@ async fn workspace_session_message_run_and_confirm_update_session_state() {
         app.clone(),
         Method::POST,
         "/api/workspace-sessions/workspace_session_0001/run-next",
-        json!({}),
+        json!({"user_prompt":"请生成带验收标准的 Story Spec"}),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(running["status"], "waiting_for_human");
+    assert!(
+        running["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["role"] == "user"
+                && message["content"] == "请生成带验收标准的 Story Spec")
+    );
+    assert!(
+        running["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["role"] == "provider"
+                && message["content"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Provider Workspace"))
+    );
+    assert!(
+        running["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["role"] == "reviewer")
+    );
     let version: Value = serde_json::from_str(
         &fs::read_to_string(root.path().join(
             ".aria/projects/project_0001/issues/issue_0001/versions/story_spec_0001/version_0001.json",
@@ -280,6 +460,17 @@ async fn workspace_session_message_run_and_confirm_update_session_state() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(confirmed["status"], "confirmed");
+    assert!(
+        confirmed["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["role"] == "system"
+                && message["content"]
+                    .as_str()
+                    .unwrap()
+                    .contains("已由 human 确认"))
+    );
 }
 
 #[tokio::test]

@@ -10,6 +10,7 @@ export function CreateRepositoryDialog({
 }) {
   const [name, setName] = useState("");
   const [path, setPath] = useState("");
+  const [policyPreset, setPolicyPreset] = useState("manual-write");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const submittingRef = useRef(false);
@@ -38,8 +39,7 @@ export function CreateRepositoryDialog({
       await onCreate({
         name: trimmedName,
         path: trimmedPath,
-        default_policy_preset: "manual-write",
-        default_provider_mode: "fake",
+        default_policy_preset: policyPreset,
       });
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "添加代码库失败");
@@ -91,16 +91,22 @@ export function CreateRepositoryDialog({
               className="mt-1 block w-full rounded-md border border-[var(--aria-line)] bg-white px-3 py-2 font-mono text-sm font-normal text-[var(--aria-ink)]"
             />
           </label>
-          <dl className="grid gap-1 rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-2 font-mono text-[11px] text-[var(--aria-ink-muted)]">
-            <div>
-              <dt className="inline">policy</dt>
-              <dd className="ml-2 inline text-[var(--aria-ink)]">manual-write</dd>
-            </div>
-            <div>
-              <dt className="inline">provider</dt>
-              <dd className="ml-2 inline text-[var(--aria-ink)]">fake</dd>
-            </div>
-          </dl>
+          <label className="block text-sm font-semibold text-[var(--aria-ink)]">
+            Policy
+            <select
+              value={policyPreset}
+              onChange={(event) => {
+                setPolicyPreset(event.target.value);
+                setError(null);
+              }}
+              className="mt-1 block w-full rounded-md border border-[var(--aria-line)] bg-white px-3 py-2 text-sm font-normal text-[var(--aria-ink)]"
+            >
+              <option value="manual-write">manual-write</option>
+              <option value="manual-all">manual-all</option>
+              <option value="auto-review">auto-review</option>
+              <option value="non-interactive">non-interactive</option>
+            </select>
+          </label>
           {error ? (
             <p role="alert" className="text-sm font-semibold text-[var(--aria-danger)]">
               {error}

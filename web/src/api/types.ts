@@ -179,6 +179,18 @@ export type LifecycleWorkItem = {
   execution_status: "pending" | "planning" | "coding" | "completed" | "blocked";
 };
 
+export type WorkspaceProviderName = "claude_code" | "codex" | "fake";
+
+export type ProviderWorkspaceConfig = {
+  author_provider: WorkspaceProviderName;
+  reviewer_provider: WorkspaceProviderName;
+  review_rounds: number;
+  superpowers_enabled: boolean;
+  openspec_enabled: boolean;
+};
+
+export type ProviderWorkspaceConfigInput = Partial<ProviderWorkspaceConfig>;
+
 export type IssueLifecycleResponse = {
   issue: ProductIssue;
   story_specs: StorySpec[];
@@ -212,6 +224,37 @@ export type WorkspaceSession = {
   superpowers_enabled: boolean;
   openspec_enabled: boolean;
   messages: WorkspaceMessage[];
+};
+
+export type GenerateStorySpecsRequest = ProviderWorkspaceConfigInput & {
+  title: string;
+};
+
+export type GenerateStorySpecsResponse = {
+  story_specs: StorySpec[];
+  workspace_session: WorkspaceSession;
+};
+
+export type GenerateDesignSpecsRequest = ProviderWorkspaceConfigInput & {
+  title: string;
+  story_spec_ids: string[];
+  design_kind: "frontend" | "backend";
+};
+
+export type GenerateDesignSpecsResponse = {
+  design_specs: DesignSpec[];
+  workspace_session: WorkspaceSession;
+};
+
+export type GenerateWorkItemsRequest = ProviderWorkspaceConfigInput & {
+  title: string;
+  story_spec_ids: string[];
+  design_spec_ids: string[];
+};
+
+export type GenerateWorkItemsResponse = {
+  work_items: LifecycleWorkItem[];
+  workspace_session: WorkspaceSession;
 };
 
 export type StartProductIssueRequest = {

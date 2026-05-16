@@ -20,7 +20,8 @@ use crate::product::issue_store::{
 };
 use crate::product::json_store::{ProductStoreError, validate_relative_id};
 use crate::product::lifecycle_store::{
-    CreateStorySpecInput, CreateWorkspaceSessionInput, LifecycleStore,
+    CreateDesignSpecInput, CreateStorySpecInput, CreateWorkItemInput, CreateWorkspaceSessionInput,
+    LifecycleStore,
 };
 use crate::product::models::{
     DesignKind, DesignSpecRecord, GateStatus, IssuePhase as ProductIssuePhase,
@@ -46,16 +47,18 @@ use crate::web::types::{
     AdvanceTaskResponse, ArtifactContentResponse, ConfirmTaskRequest, ConfirmTaskResponse,
     CreateIssueRequest, CreateProductIssueRequest, CreateProjectRequest, CreateRepositoryRequest,
     CreateTaskRequest, CreateTaskResponse, CreateWorkspaceRequest, DesignSpecDto,
-    FileContentResponse, FileDiffResponse, GenerateStorySpecsRequest, GenerateStorySpecsResponse,
-    IssueDto, IssueLifecycleResponse, IssueListResponse, IssueRollbackPreviewRequest,
-    IssueRollbackRequest, LifecycleWorkItemDto, ProductIssueArtifactDto, ProductIssueDto,
-    ProductIssueListResponse, ProjectDto, ProjectListResponse, ProviderInputContentResponse,
-    RepositoryDto, RepositoryListResponse, ResolveGateRequest, ResolveGateResponse,
-    RollbackPreviewRequest, RollbackPreviewResponse, RollbackRequest, RollbackResponse,
-    StartIssueRequest, StartIssueResponse, StartProductIssueRequest, StartProductIssueResponse,
-    StopTaskResponse, StorySpecDto, TaskListResponse, WebEvent, WorkspaceDto,
-    WorkspaceListResponse, WorkspaceMessageDto, WorkspaceSessionConfirmRequest,
-    WorkspaceSessionDto, WorkspaceSessionMessageRequest,
+    FileContentResponse, FileDiffResponse, GenerateDesignSpecsRequest, GenerateDesignSpecsResponse,
+    GenerateStorySpecsRequest, GenerateStorySpecsResponse, GenerateWorkItemsRequest,
+    GenerateWorkItemsResponse, IssueDto, IssueLifecycleResponse, IssueListResponse,
+    IssueRollbackPreviewRequest, IssueRollbackRequest, LifecycleWorkItemDto,
+    ProductIssueArtifactDto, ProductIssueDto, ProductIssueListResponse, ProjectDto,
+    ProjectListResponse, ProviderInputContentResponse, RepositoryDto, RepositoryListResponse,
+    ResolveGateRequest, ResolveGateResponse, RollbackPreviewRequest, RollbackPreviewResponse,
+    RollbackRequest, RollbackResponse, StartIssueRequest, StartIssueResponse,
+    StartProductIssueRequest, StartProductIssueResponse, StopTaskResponse, StorySpecDto,
+    TaskListResponse, WebEvent, WorkspaceDto, WorkspaceListResponse, WorkspaceMessageDto,
+    WorkspaceSessionConfirmRequest, WorkspaceSessionDto, WorkspaceSessionMessageRequest,
+    WorkspaceSessionRunNextRequest,
 };
 use crate::web::workspace_registry::{CreateWorkspaceInput, WorkspaceRecord, WorkspaceRegistry};
 
@@ -92,6 +95,15 @@ pub struct GateResolveQuery {
 #[derive(Debug, Deserialize)]
 pub struct EventsQuery {
     pub cursor: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct ProviderWorkspaceConfig {
+    author_provider: ProviderName,
+    reviewer_provider: ProviderName,
+    review_rounds: u32,
+    superpowers_enabled: bool,
+    openspec_enabled: bool,
 }
 
 pub async fn health() -> Json<serde_json::Value> {
@@ -330,6 +342,13 @@ pub async fn generate_story_specs(
     Path((project_id, issue_id)): Path<(String, String)>,
     Json(request): Json<GenerateStorySpecsRequest>,
 ) -> ApiResult<Json<GenerateStorySpecsResponse>> {
+    let workspace_config = provider_workspace_config(
+        request.author_provider.as_deref(),
+        request.reviewer_provider.as_deref(),
+        request.review_rounds,
+        request.superpowers_enabled,
+        request.openspec_enabled,
+    )?;
     let app_paths = product_app_paths(&state);
     let issue = IssueStore::new(app_paths.clone())
         .get(&project_id, &issue_id)
@@ -354,16 +373,118 @@ pub async fn generate_story_specs(
             issue_id,
             entity_id: story.id.clone(),
             workspace_type: WorkspaceType::Story,
-            author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
-            review_rounds: 1,
-            superpowers_enabled: true,
-            openspec_enabled: true,
+            author_provider: workspace_config.author_provider,
+            reviewer_provider: workspace_config.reviewer_provider,
+            review_rounds: workspace_config.review_rounds,
+            superpowers_enabled: workspace_config.superpowers_enabled,
+            openspec_enabled: workspace_config.openspec_enabled,
         })
         .map_err(product_store_api_error)?;
 
     Ok(Json(GenerateStorySpecsResponse {
         story_specs: vec![story_spec_dto(story)],
+        workspace_session: workspace_session_dto(session),
+    }))
+}
+
+pub async fn generate_design_specs(
+    State(state): State<WebAppState>,
+    Path((project_id, issue_id)): Path<(String, String)>,
+    Json(request): Json<GenerateDesignSpecsRequest>,
+) -> ApiResult<Json<GenerateDesignSpecsResponse>> {
+    let workspace_config = provider_workspace_config(
+        request.author_provider.as_deref(),
+        request.reviewer_provider.as_deref(),
+        request.review_rounds,
+        request.superpowers_enabled,
+        request.openspec_enabled,
+    )?;
+    let app_paths = product_app_paths(&state);
+    IssueStore::new(app_paths.clone())
+        .get(&project_id, &issue_id)
+        .map_err(product_store_api_error)?;
+    let lifecycle = LifecycleStore::new(app_paths);
+    validate_confirmed_story_specs(&lifecycle, &project_id, &issue_id, &request.story_spec_ids)?;
+    let design_kind = parse_design_kind(&request.design_kind)?;
+    let design = lifecycle
+        .create_design_spec(CreateDesignSpecInput {
+            project_id: project_id.clone(),
+            issue_id: issue_id.clone(),
+            story_spec_ids: request.story_spec_ids,
+            design_kind,
+            title: request.title,
+        })
+        .map_err(product_store_api_error)?;
+    let session = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id,
+            issue_id,
+            entity_id: design.id.clone(),
+            workspace_type: WorkspaceType::Design,
+            author_provider: workspace_config.author_provider,
+            reviewer_provider: workspace_config.reviewer_provider,
+            review_rounds: workspace_config.review_rounds,
+            superpowers_enabled: workspace_config.superpowers_enabled,
+            openspec_enabled: workspace_config.openspec_enabled,
+        })
+        .map_err(product_store_api_error)?;
+
+    Ok(Json(GenerateDesignSpecsResponse {
+        design_specs: vec![design_spec_dto(design)],
+        workspace_session: workspace_session_dto(session),
+    }))
+}
+
+pub async fn generate_work_items(
+    State(state): State<WebAppState>,
+    Path((project_id, issue_id)): Path<(String, String)>,
+    Json(request): Json<GenerateWorkItemsRequest>,
+) -> ApiResult<Json<GenerateWorkItemsResponse>> {
+    let workspace_config = provider_workspace_config(
+        request.author_provider.as_deref(),
+        request.reviewer_provider.as_deref(),
+        request.review_rounds,
+        request.superpowers_enabled,
+        request.openspec_enabled,
+    )?;
+    let app_paths = product_app_paths(&state);
+    let issue = IssueStore::new(app_paths.clone())
+        .get(&project_id, &issue_id)
+        .map_err(product_store_api_error)?;
+    let repository_id = issue
+        .repo_id
+        .clone()
+        .ok_or_else(|| ApiError::validation("repository_required", "repository_id is required"))?;
+    find_repository(&app_paths, &project_id, &repository_id)?;
+    let lifecycle = LifecycleStore::new(app_paths);
+    validate_confirmed_story_specs(&lifecycle, &project_id, &issue_id, &request.story_spec_ids)?;
+    validate_confirmed_design_specs(&lifecycle, &project_id, &issue_id, &request.design_spec_ids)?;
+    let work_item = lifecycle
+        .create_work_item(CreateWorkItemInput {
+            project_id: project_id.clone(),
+            issue_id: issue_id.clone(),
+            repository_id,
+            story_spec_ids: request.story_spec_ids,
+            design_spec_ids: request.design_spec_ids,
+            title: request.title,
+        })
+        .map_err(product_store_api_error)?;
+    let session = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id,
+            issue_id,
+            entity_id: work_item.id.clone(),
+            workspace_type: WorkspaceType::WorkItem,
+            author_provider: workspace_config.author_provider,
+            reviewer_provider: workspace_config.reviewer_provider,
+            review_rounds: workspace_config.review_rounds,
+            superpowers_enabled: workspace_config.superpowers_enabled,
+            openspec_enabled: workspace_config.openspec_enabled,
+        })
+        .map_err(product_store_api_error)?;
+
+    Ok(Json(GenerateWorkItemsResponse {
+        work_items: vec![lifecycle_work_item_dto(work_item)],
         workspace_session: workspace_session_dto(session),
     }))
 }
@@ -383,10 +504,16 @@ pub async fn workspace_session_message(
 pub async fn workspace_session_run_next(
     State(state): State<WebAppState>,
     Path(session_id): Path<String>,
+    Json(request): Json<WorkspaceSessionRunNextRequest>,
 ) -> ApiResult<Json<WorkspaceSessionDto>> {
     let paths = product_app_paths(&state);
-    LifecycleStore::new(paths.clone())
+    let lifecycle = LifecycleStore::new(paths.clone());
+    lifecycle
         .get_workspace_session(&session_id)
+        .map_err(product_store_api_error)?;
+    let user_prompt = workspace_user_prompt(request.user_prompt);
+    lifecycle
+        .append_workspace_message(&session_id, "user".to_string(), user_prompt.clone())
         .map_err(product_store_api_error)?;
 
     let runner = ProviderWorkspaceRunner::new(paths);
@@ -394,7 +521,7 @@ pub async fn workspace_session_run_next(
         .run_next(
             WorkspaceProviderRunInput {
                 session_id,
-                user_prompt: provider_workspace_prompt(),
+                user_prompt: provider_workspace_prompt(user_prompt),
             },
             &FakeProviderAdapter,
         )
@@ -411,10 +538,19 @@ pub async fn workspace_session_run_next(
 pub async fn workspace_session_confirm(
     State(state): State<WebAppState>,
     Path(session_id): Path<String>,
-    Json(_request): Json<WorkspaceSessionConfirmRequest>,
+    Json(request): Json<WorkspaceSessionConfirmRequest>,
 ) -> ApiResult<Json<WorkspaceSessionDto>> {
-    let session = LifecycleStore::new(product_app_paths(&state))
+    let lifecycle = LifecycleStore::new(product_app_paths(&state));
+    let session = lifecycle
         .update_workspace_session_status(&session_id, WorkspaceSessionStatus::Confirmed)
+        .map_err(product_store_api_error)?;
+    confirm_workspace_entity(&lifecycle, &session)?;
+    let session = lifecycle
+        .append_workspace_message(
+            &session_id,
+            "system".to_string(),
+            format!("已由 {} 确认当前 Workspace 产物。", request.confirmed_by),
+        )
         .map_err(product_store_api_error)?;
     Ok(Json(workspace_session_dto(session)))
 }
@@ -1569,6 +1705,146 @@ fn product_app_paths(state: &WebAppState) -> ProductAppPaths {
     ProductAppPaths::new(state.workspace_root.join(".aria"))
 }
 
+fn provider_workspace_config(
+    author_provider: Option<&str>,
+    reviewer_provider: Option<&str>,
+    review_rounds: Option<u32>,
+    superpowers_enabled: Option<bool>,
+    openspec_enabled: Option<bool>,
+) -> ApiResult<ProviderWorkspaceConfig> {
+    let review_rounds = review_rounds.unwrap_or(1);
+    if !(1..=5).contains(&review_rounds) {
+        return Err(ApiError::validation(
+            "invalid_review_rounds",
+            "review_rounds must be between 1 and 5",
+        ));
+    }
+
+    Ok(ProviderWorkspaceConfig {
+        author_provider: parse_provider_name(author_provider.unwrap_or("codex"))?,
+        reviewer_provider: parse_provider_name(reviewer_provider.unwrap_or("claude_code"))?,
+        review_rounds,
+        superpowers_enabled: superpowers_enabled.unwrap_or(true),
+        openspec_enabled: openspec_enabled.unwrap_or(true),
+    })
+}
+
+fn parse_provider_name(value: &str) -> ApiResult<ProviderName> {
+    match value {
+        "claude_code" => Ok(ProviderName::ClaudeCode),
+        "codex" => Ok(ProviderName::Codex),
+        "fake" => Ok(ProviderName::Fake),
+        _ => Err(ApiError::validation(
+            "invalid_provider",
+            "provider must be claude_code, codex, or fake",
+        )),
+    }
+}
+
+fn parse_design_kind(value: &str) -> ApiResult<DesignKind> {
+    match value {
+        "frontend" => Ok(DesignKind::Frontend),
+        "backend" => Ok(DesignKind::Backend),
+        _ => Err(ApiError::validation(
+            "invalid_design_kind",
+            "design_kind must be frontend or backend",
+        )),
+    }
+}
+
+fn validate_confirmed_story_specs(
+    lifecycle: &LifecycleStore,
+    project_id: &str,
+    issue_id: &str,
+    story_spec_ids: &[String],
+) -> ApiResult<()> {
+    if story_spec_ids.is_empty() {
+        return Err(ApiError::validation(
+            "story_spec_required",
+            "story_spec_ids is required",
+        ));
+    }
+
+    let stories = lifecycle
+        .list_story_specs(project_id, issue_id)
+        .map_err(product_store_api_error)?;
+    for story_id in story_spec_ids {
+        let Some(story) = stories.iter().find(|story| story.id == *story_id) else {
+            return Err(ApiError::runtime(
+                "story_spec_not_found",
+                "story spec not found",
+                json!({}),
+            ));
+        };
+        if story.confirmation_status != LifecycleConfirmationStatus::Confirmed {
+            return Err(ApiError::validation(
+                "story_spec_not_confirmed",
+                "story spec must be confirmed before generating downstream artifacts",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_confirmed_design_specs(
+    lifecycle: &LifecycleStore,
+    project_id: &str,
+    issue_id: &str,
+    design_spec_ids: &[String],
+) -> ApiResult<()> {
+    if design_spec_ids.is_empty() {
+        return Err(ApiError::validation(
+            "design_spec_required",
+            "design_spec_ids is required",
+        ));
+    }
+
+    let designs = lifecycle
+        .list_design_specs(project_id, issue_id)
+        .map_err(product_store_api_error)?;
+    for design_id in design_spec_ids {
+        let Some(design) = designs.iter().find(|design| design.id == *design_id) else {
+            return Err(ApiError::runtime(
+                "design_spec_not_found",
+                "design spec not found",
+                json!({}),
+            ));
+        };
+        if design.confirmation_status != LifecycleConfirmationStatus::Confirmed {
+            return Err(ApiError::validation(
+                "design_spec_not_confirmed",
+                "design spec must be confirmed before generating work items",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn confirm_workspace_entity(
+    lifecycle: &LifecycleStore,
+    session: &WorkspaceSessionRecord,
+) -> ApiResult<()> {
+    match session.workspace_type {
+        WorkspaceType::Story | WorkspaceType::Design => lifecycle
+            .update_spec_confirmation_status(
+                &session.project_id,
+                &session.issue_id,
+                &session.entity_id,
+                LifecycleConfirmationStatus::Confirmed,
+            )
+            .map_err(product_store_api_error),
+        WorkspaceType::WorkItem => lifecycle
+            .update_work_item_plan_status(
+                &session.project_id,
+                &session.issue_id,
+                &session.entity_id,
+                WorkItemPlanStatus::Confirmed,
+            )
+            .map(|_| ())
+            .map_err(product_store_api_error),
+    }
+}
+
 fn validate_workspace_message(request: &WorkspaceSessionMessageRequest) -> ApiResult<()> {
     if !matches!(
         request.role.as_str(),
@@ -1583,15 +1859,20 @@ fn validate_workspace_message(request: &WorkspaceSessionMessageRequest) -> ApiRe
     Ok(())
 }
 
-fn provider_workspace_prompt() -> String {
+fn workspace_user_prompt(user_prompt: Option<String>) -> String {
+    user_prompt
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "请基于当前 Issue 上下文生成或修订 Workspace 产物。".to_string())
+}
+
+fn provider_workspace_prompt(prompt: String) -> String {
     let structured = json!({
-        "markdown": "# Provider Workspace\n\nProvider workspace step completed.",
+        "markdown": format!("# Provider Workspace\n\n{prompt}"),
         "review_result": "review completed",
         "revision_result": "revision completed"
     });
-    format!(
-        "run next provider workspace step\n{STRUCTURED_OUTPUT_START}\n{structured}\n{STRUCTURED_OUTPUT_END}"
-    )
+    format!("{prompt}\n\n{STRUCTURED_OUTPUT_START}\n{structured}\n{STRUCTURED_OUTPUT_END}")
 }
 
 fn validate_issue_rollback_ids(issue_id: &str, execution_record_id: &str) -> ApiResult<()> {

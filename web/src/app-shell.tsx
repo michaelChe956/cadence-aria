@@ -33,8 +33,10 @@ import type { WorkbenchTab } from "./state/workbench-store";
 
 export function AppShell({
   initialExecutionContext = null,
+  onOpenWorkspace,
 }: {
   initialExecutionContext?: ExecutionContext | null;
+  onOpenWorkspace?: (sessionId: string) => void;
 }) {
   const [store] = useState(() => createWorkbenchStore());
   const [executionContext, setExecutionContext] =
@@ -339,7 +341,12 @@ export function AppShell({
   };
 
   if (!executionContext) {
-    return <ProjectManagementWorkbench onOpenExecution={setExecutionContext} />;
+    return (
+      <ProjectManagementWorkbench
+        onOpenExecution={setExecutionContext}
+        onOpenWorkspace={onOpenWorkspace}
+      />
+    );
   }
 
   const executionHeader = (

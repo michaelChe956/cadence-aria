@@ -10,3 +10,5 @@ pub mod state;
 pub mod static_assets;
 pub mod types;
 pub mod workspace_registry;
+pub mod workspace_ws_handler;
+pub mod workspace_ws_types;

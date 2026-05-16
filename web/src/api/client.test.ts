@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from "vitest";
 import {
   advanceTask,
   confirmTask,
-  confirmWorkspaceSession,
   createIssue,
   createProject,
   createProductIssue,
@@ -24,8 +23,6 @@ import {
   listRepositories,
   listTasks,
   normalizeApiError,
-  runWorkspaceSessionNext,
-  sendWorkspaceSessionMessage,
   startIssue,
   startProductIssue,
   stopTask,
@@ -248,7 +245,7 @@ describe("api client", () => {
     expect(calls[4].init?.body).toBe(JSON.stringify({ repository_id: "repository_0001" }));
   });
 
-  it("calls lifecycle generation and workspace session endpoints with encoded ids", async () => {
+  it("calls lifecycle generation endpoints with encoded ids", async () => {
     const calls: Array<{ input: string; init?: RequestInit }> = [];
     vi.stubGlobal(
       "fetch",
@@ -262,27 +259,13 @@ describe("api client", () => {
 
     await getIssueLifecycle("issue/with space", "project/with space");
     await generateStorySpecs("project/with space", "issue/with space", { title: "Story" });
-    await sendWorkspaceSessionMessage("workspace/session 1", {
-      role: "user",
-      content: "hello",
-    });
-    await runWorkspaceSessionNext("workspace/session 1");
-    await confirmWorkspaceSession("workspace/session 1", { confirmed_by: "human" });
 
     expect(calls.map((call) => call.input)).toEqual([
       "/api/issues/issue%2Fwith%20space/lifecycle?project_id=project%2Fwith%20space",
       "/api/projects/project%2Fwith%20space/issues/issue%2Fwith%20space/story-specs:generate",
-      "/api/workspace-sessions/workspace%2Fsession%201/message",
-      "/api/workspace-sessions/workspace%2Fsession%201/run-next",
-      "/api/workspace-sessions/workspace%2Fsession%201/confirm",
     ]);
     expect(calls[1].init?.method).toBe("POST");
     expect(calls[1].init?.body).toBe(JSON.stringify({ title: "Story" }));
-    expect(calls[2].init?.method).toBe("POST");
-    expect(calls[2].init?.body).toBe(JSON.stringify({ role: "user", content: "hello" }));
-    expect(calls[3].init?.method).toBe("POST");
-    expect(calls[4].init?.method).toBe("POST");
-    expect(calls[4].init?.body).toBe(JSON.stringify({ confirmed_by: "human" }));
   });
 
   it("calls delete endpoints with encoded resource ids", async () => {

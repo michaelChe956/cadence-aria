@@ -4,13 +4,16 @@ import {
   createProject,
   createProductIssue,
   createRepository,
-  confirmWorkspaceSession,
+  deleteProductIssue,
+  deleteProject,
+  deleteRepository,
+  generateDesignSpecs,
+  generateStorySpecs,
+  generateWorkItems,
   getIssueLifecycle,
   listProductIssues,
   listProjects,
   listRepositories,
-  runWorkspaceSessionNext,
-  sendWorkspaceSessionMessage,
 } from "../../api/client";
 import type {
   IssueLifecycleResponse,
@@ -34,16 +37,19 @@ import {
 } from "./CreateLifecycleIssueDialog";
 import { LifecycleColumn } from "./LifecycleColumn";
 import { ProjectSidebar } from "./ProjectSidebar";
-import { ProviderWorkspaceDialog } from "../workspace/ProviderWorkspaceDialog";
+type ProviderWorkspaceLaunchTarget = "story" | "design" | "work_item";
 
-export function IssueLifecycleWorkbench() {
+export function IssueLifecycleWorkbench({
+  onOpenWorkspace = defaultOpenWorkspace,
+}: {
+  onOpenWorkspace?: (sessionId: string) => void;
+}) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [repositories, setRepositories] = useState<Repository[]>([]);
   const [lifecycles, setLifecycles] = useState<IssueLifecycleResponse[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [focusedIssueId, setFocusedIssueId] = useState<string | null>(null);
   const [selectedCardKey, setSelectedCardKey] = useState<string | null>(null);
-  const [workspaceSession, setWorkspaceSession] = useState<WorkspaceSession | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [repositoryDialogOpen, setRepositoryDialogOpen] = useState(false);
@@ -84,7 +90,6 @@ export function IssueLifecycleWorkbench() {
         setLifecycles([]);
         setFocusedIssueId(null);
         setSelectedCardKey(null);
-        setWorkspaceSession(null);
         return;
       }
 
@@ -110,7 +115,6 @@ export function IssueLifecycleWorkbench() {
       if (projectChanged) {
         setFocusedIssueId(null);
         setSelectedCardKey(null);
-        setWorkspaceSession(null);
       }
     } catch (reason) {
       if (isLatestRefresh(requestId)) {
@@ -131,6 +135,10 @@ export function IssueLifecycleWorkbench() {
     () => visibleLifecycle(groupLifecycleCards(lifecycles), focusedIssueId),
     [lifecycles, focusedIssueId],
   );
+  const selectedCard = useMemo(
+    () => findSelectedCard(columns, selectedCardKey),
+    [columns, selectedCardKey],
+  );
   const selectedProject = projects.find((project) => project.project_id === selectedProjectId);
   const issueCount = columns.issue.length;
 
@@ -146,7 +154,6 @@ export function IssueLifecycleWorkbench() {
     setSelectedCardKey(lifecycleCardKey(card));
     if (card.kind === "issue") {
       setFocusedIssueId(card.issueId);
-      setWorkspaceSession(null);
       return;
     }
 
@@ -156,7 +163,7 @@ export function IssueLifecycleWorkbench() {
       return;
     }
     setError(null);
-    setWorkspaceSession(session);
+    onOpenWorkspace(session.workspace_session_id);
   }
 
   async function handleCreateIssue(payload: CreateLifecycleIssuePayload) {
@@ -192,6 +199,93 @@ export function IssueLifecycleWorkbench() {
     await refresh(selectedProjectId);
   }
 
+  async function handleDeleteProject(projectId: string) {
+    setError(null);
+    await deleteProject(projectId);
+    if (projectId === selectedProjectId) {
+      setSelectedProjectId(null);
+      setFocusedIssueId(null);
+      setSelectedCardKey(null);
+    }
+    await refresh(null);
+  }
+
+  async function handleDeleteRepository(repositoryId: string) {
+    if (!selectedProjectId) {
+      setError("缺少 Project");
+      return;
+    }
+
+    setError(null);
+    await deleteRepository(selectedProjectId, repositoryId);
+    setSelectedCardKey(null);
+    await refresh(selectedProjectId);
+  }
+
+  async function handleDeleteIssue(issueId: string) {
+    if (!selectedProjectId) {
+      setError("缺少 Project");
+      return;
+    }
+
+    setError(null);
+    await deleteProductIssue(selectedProjectId, issueId);
+    if (focusedIssueId === issueId) {
+      setFocusedIssueId(null);
+    }
+    setSelectedCardKey(null);
+    await refresh(selectedProjectId);
+  }
+
+  async function handleLaunchWorkspace(target: ProviderWorkspaceLaunchTarget, card: LifecycleCardData) {
+    if (!selectedProjectId) {
+      setError("缺少 Project 或生命周期卡片");
+      return;
+    }
+
+    if (target === "story") {
+      const response = await generateStorySpecs(selectedProjectId, card.issueId, {
+        title: defaultLaunchTitle({ target, card }),
+      });
+      setSelectedCardKey(`story_spec:${response.story_specs[0]?.story_spec_id ?? ""}`);
+      await refresh(selectedProjectId);
+      if (response.workspace_session) {
+        onOpenWorkspace(response.workspace_session.workspace_session_id);
+      }
+      return;
+    }
+
+    if (target === "design" && card.kind === "story_spec") {
+      const response = await generateDesignSpecs(selectedProjectId, card.issueId, {
+        title: defaultLaunchTitle({ target, card }),
+        story_spec_ids: [card.id],
+        design_kind: "frontend",
+      });
+      setSelectedCardKey(`design_spec:${response.design_specs[0]?.design_spec_id ?? ""}`);
+      await refresh(selectedProjectId);
+      if (response.workspace_session) {
+        onOpenWorkspace(response.workspace_session.workspace_session_id);
+      }
+      return;
+    }
+
+    if (target === "work_item" && card.kind === "design_spec") {
+      const response = await generateWorkItems(selectedProjectId, card.issueId, {
+        title: defaultLaunchTitle({ target, card }),
+        story_spec_ids: card.raw.story_spec_ids,
+        design_spec_ids: [card.id],
+      });
+      setSelectedCardKey(`work_item:${response.work_items[0]?.work_item_id ?? ""}`);
+      await refresh(selectedProjectId);
+      if (response.workspace_session) {
+        onOpenWorkspace(response.workspace_session.workspace_session_id);
+      }
+      return;
+    }
+
+    setError("当前卡片不能启动该 Workspace");
+  }
+
   return (
     <>
       <div className="grid min-h-screen bg-[var(--aria-bg)] text-[var(--aria-ink)] lg:grid-cols-[17rem_minmax(0,1fr)]">
@@ -204,6 +298,8 @@ export function IssueLifecycleWorkbench() {
           onSelectProject={(projectId) => void handleSelectProject(projectId)}
           onCreateProject={() => setProjectDialogOpen(true)}
           onCreateRepository={() => setRepositoryDialogOpen(true)}
+          onDeleteProject={(projectId) => void handleDeleteProject(projectId)}
+          onDeleteRepository={(repositoryId) => void handleDeleteRepository(repositoryId)}
         />
         <WorkbenchSurface
           mainLabel="Issue 生命周期工作台"
@@ -224,6 +320,12 @@ export function IssueLifecycleWorkbench() {
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
+                {selectedCard ? (
+                  <LifecycleActionButton
+                    card={selectedCard}
+                    onLaunch={(target) => void handleLaunchWorkspace(target, selectedCard)}
+                  />
+                ) : null}
                 {focusedIssueId ? (
                   <button
                     type="button"
@@ -261,6 +363,7 @@ export function IssueLifecycleWorkbench() {
                 cards={columns.issue}
                 selectedKey={selectedCardKey}
                 onSelect={handleSelectCard}
+                onDeleteIssue={(issueId) => void handleDeleteIssue(issueId)}
               />
               <LifecycleColumn
                 title="Story Spec"
@@ -306,44 +409,12 @@ export function IssueLifecycleWorkbench() {
           onClose={() => setDialogOpen(false)}
         />
       ) : null}
-      {workspaceSession ? (
-        <ProviderWorkspaceDialog
-          open
-          title={workspaceDialogTitle(workspaceSession.workspace_type)}
-          session={workspaceSession}
-          onClose={() => setWorkspaceSession(null)}
-          onMessage={async (content) => {
-            setWorkspaceSession(
-              await sendWorkspaceSessionMessage(workspaceSession.workspace_session_id, {
-                role: "user",
-                content,
-              }),
-            );
-          }}
-          onRunNext={async () => {
-            setWorkspaceSession(
-              await runWorkspaceSessionNext(workspaceSession.workspace_session_id),
-            );
-          }}
-          onConfirm={async () => {
-            setWorkspaceSession(
-              await confirmWorkspaceSession(workspaceSession.workspace_session_id, {
-                confirmed_by: "human",
-              }),
-            );
-          }}
-          onRequestChange={async () => {
-            setWorkspaceSession(
-              await sendWorkspaceSessionMessage(workspaceSession.workspace_session_id, {
-                role: "user",
-                content: "要求修改",
-              }),
-            );
-          }}
-        />
-      ) : null}
     </>
   );
+}
+
+function defaultOpenWorkspace(sessionId: string) {
+  window.location.assign(`/workbench/workspace/${encodeURIComponent(sessionId)}`);
 }
 
 function normalizeLifecycleResponse(
@@ -371,6 +442,70 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function lifecycleCardKey(card: LifecycleCardData) {
   return `${card.kind}:${card.id}`;
+}
+
+function findSelectedCard(columns: ReturnType<typeof visibleLifecycle>, selectedKey: string | null) {
+  if (!selectedKey) {
+    return null;
+  }
+
+  return (
+    [...columns.issue, ...columns.story_spec, ...columns.design_spec, ...columns.work_item].find(
+      (card) => lifecycleCardKey(card) === selectedKey,
+    ) ?? null
+  );
+}
+
+function LifecycleActionButton({
+  card,
+  onLaunch,
+}: {
+  card: LifecycleCardData;
+  onLaunch: (target: ProviderWorkspaceLaunchTarget) => void;
+}) {
+  const action = lifecycleAction(card);
+  if (!action) {
+    return null;
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={() => onLaunch(action.target)}
+      className="inline-flex h-8 items-center rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 text-xs font-semibold text-white"
+    >
+      {action.label}
+    </button>
+  );
+}
+
+function lifecycleAction(card: LifecycleCardData): {
+  label: string;
+  target: ProviderWorkspaceLaunchTarget;
+} | null {
+  if (card.kind === "issue") {
+    return { label: "生成 Story Spec", target: "story" };
+  }
+  if (card.kind === "story_spec" && card.raw.confirmation_status === "confirmed") {
+    return { label: "生成 Design Spec", target: "design" };
+  }
+  if (card.kind === "design_spec" && card.raw.confirmation_status === "confirmed") {
+    return { label: "生成 Work Item", target: "work_item" };
+  }
+  return null;
+}
+
+function defaultLaunchTitle(launchTarget: {
+  target: ProviderWorkspaceLaunchTarget;
+  card: LifecycleCardData;
+}) {
+  if (launchTarget.target === "story") {
+    return `${launchTarget.card.title} Story Spec`;
+  }
+  if (launchTarget.target === "design") {
+    return `${launchTarget.card.title} Design Spec`;
+  }
+  return `${launchTarget.card.title} Work Item`;
 }
 
 function findWorkspaceSession(
@@ -404,14 +539,4 @@ function workspaceTypeForCard(
     return "work_item";
   }
   return null;
-}
-
-function workspaceDialogTitle(workspaceType: WorkspaceSession["workspace_type"]) {
-  if (workspaceType === "story") {
-    return "Story Workspace";
-  }
-  if (workspaceType === "design") {
-    return "Design Workspace";
-  }
-  return "Work Item Workspace";
 }
