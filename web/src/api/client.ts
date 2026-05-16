@@ -9,6 +9,7 @@ import type {
   CreateTaskResponse,
   FileContentResponse,
   FileDiffResponse,
+  IssueLifecycleResponse,
   Issue,
   IssueListResponse,
   ProductIssue,
@@ -22,10 +23,12 @@ import type {
   StartProductIssueRequest,
   StartProductIssueResponse,
   StopTaskResponse,
+  StorySpec,
   TaskListResponse,
   WebWorkspaceProjection,
   Workspace,
   WorkspaceListResponse,
+  WorkspaceSession,
 } from "./types";
 
 export class ApiRequestError extends Error implements ApiError {
@@ -170,6 +173,64 @@ export function startProductIssue(
 ): Promise<StartProductIssueResponse> {
   return requestJson<StartProductIssueResponse>(
     `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/start`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export function getIssueLifecycle(
+  issueId: string,
+  projectId: string,
+): Promise<IssueLifecycleResponse> {
+  return requestJson<IssueLifecycleResponse>(
+    `/api/issues/${encodeURIComponent(issueId)}/lifecycle?project_id=${encodeURIComponent(projectId)}`,
+  );
+}
+
+export function generateStorySpecs(
+  projectId: string,
+  issueId: string,
+  payload: { title: string },
+): Promise<{ story_specs: StorySpec[]; workspace_session: WorkspaceSession }> {
+  return requestJson<{ story_specs: StorySpec[]; workspace_session: WorkspaceSession }>(
+    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/story-specs:generate`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export function sendWorkspaceSessionMessage(
+  sessionId: string,
+  payload: { role: string; content: string },
+): Promise<WorkspaceSession> {
+  return requestJson<WorkspaceSession>(
+    `/api/workspace-sessions/${encodeURIComponent(sessionId)}/message`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export function runWorkspaceSessionNext(sessionId: string): Promise<WorkspaceSession> {
+  return requestJson<WorkspaceSession>(
+    `/api/workspace-sessions/${encodeURIComponent(sessionId)}/run-next`,
+    {
+      method: "POST",
+    },
+  );
+}
+
+export function confirmWorkspaceSession(
+  sessionId: string,
+  payload: { confirmed_by: string },
+): Promise<WorkspaceSession> {
+  return requestJson<WorkspaceSession>(
+    `/api/workspace-sessions/${encodeURIComponent(sessionId)}/confirm`,
     {
       method: "POST",
       body: JSON.stringify(payload),

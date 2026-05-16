@@ -139,6 +139,78 @@ export type CreateProductIssueRequest = {
   title: string;
   description?: string | null;
   change_id?: string | null;
+  repository_id?: string | null;
+};
+
+export type LifecycleConfirmationStatus =
+  | "draft"
+  | "in_review"
+  | "confirmed"
+  | "change_requested"
+  | "blocked";
+
+export type StorySpec = {
+  story_spec_id: string;
+  issue_id: string;
+  repository_id: string;
+  title: string;
+  current_version: number | null;
+  confirmation_status: LifecycleConfirmationStatus;
+};
+
+export type DesignSpec = {
+  design_spec_id: string;
+  issue_id: string;
+  story_spec_ids: string[];
+  design_kind: "frontend" | "backend";
+  title: string;
+  current_version: number | null;
+  confirmation_status: LifecycleConfirmationStatus;
+};
+
+export type LifecycleWorkItem = {
+  work_item_id: string;
+  issue_id: string;
+  repository_id: string;
+  story_spec_ids: string[];
+  design_spec_ids: string[];
+  title: string;
+  plan_status: "not_started" | "draft" | "confirmed" | "change_requested";
+  execution_status: "pending" | "planning" | "coding" | "completed" | "blocked";
+};
+
+export type IssueLifecycleResponse = {
+  issue: ProductIssue;
+  story_specs: StorySpec[];
+  design_specs: DesignSpec[];
+  work_items: LifecycleWorkItem[];
+};
+
+export type WorkspaceMessage = {
+  role: string;
+  content: string;
+  created_at: string;
+};
+
+export type WorkspaceSession = {
+  workspace_session_id: string;
+  issue_id: string;
+  entity_id: string;
+  workspace_type: "story" | "design" | "work_item";
+  status:
+    | "open"
+    | "running"
+    | "waiting_for_human"
+    | "confirmed"
+    | "change_requested"
+    | "blocked_provider_unavailable"
+    | "terminated";
+  author_provider: "claude_code" | "codex" | "fake";
+  reviewer_provider: "claude_code" | "codex" | "fake";
+  review_rounds: number;
+  superpowers_enabled: boolean;
+  openspec_enabled: boolean;
+  messages: WorkspaceMessage[];
 };
 
 export type StartProductIssueRequest = {
