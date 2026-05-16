@@ -91,6 +91,50 @@ describe("IssueLifecycleWorkbench", () => {
     );
   });
 
+  it("shows project repositories in the left sidebar", async () => {
+    vi.stubGlobal("fetch", lifecycleFetch());
+
+    render(<IssueLifecycleWorkbench />);
+
+    const sidebar = await screen.findByRole("navigation", { name: "Project 切换" });
+    expect(sidebar).toHaveTextContent("Aria Repo");
+    expect(sidebar).toHaveTextContent("/tmp/aria");
+  });
+
+  it("creates repository from the left sidebar and enables issue creation", async () => {
+    const fetchMock = lifecycleFetch({
+      repositoriesByProject: { project_0001: [] },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+
+    await screen.findByText("还没有代码库");
+    expect(screen.getByRole("button", { name: "新建 Issue" })).toBeDisabled();
+
+    await user.click(screen.getByRole("button", { name: "添加代码库" }));
+    const dialog = screen.getByRole("dialog", { name: "添加代码库" });
+    await user.type(within(dialog).getByLabelText("代码库名称"), "New Repo");
+    await user.type(within(dialog).getByLabelText("本地路径"), "/tmp/new-repo");
+    await user.click(within(dialog).getByRole("button", { name: "添加代码库" }));
+
+    expect(await screen.findByText("New Repo")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "新建 Issue" })).toBeEnabled();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/project_0001/repositories",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          name: "New Repo",
+          path: "/tmp/new-repo",
+          default_policy_preset: "manual-write",
+          default_provider_mode: "fake",
+        }),
+      }),
+    );
+  });
+
   it("requires repository when creating issue", async () => {
     vi.stubGlobal("fetch", lifecycleFetch());
     const user = userEvent.setup();
@@ -220,9 +264,13 @@ function lifecycleFetch(options?: {
   issueTitles?: string[];
   issueTitlesByProject?: Record<string, string>;
   projects?: Array<ReturnType<typeof projectRecord>>;
+  repositoriesByProject?: Record<string, ReturnType<typeof repositoryRecord>[]>;
   projectResponses?: Array<Promise<Response>>;
 }) {
   const projects = [...(options?.projects ?? [projectRecord("project_0001", "Aria")])];
+  const repositoriesByProject = new Map<string, ReturnType<typeof repositoryRecord>[]>(
+    Object.entries(options?.repositoriesByProject ?? { project_0001: [repositoryRecord()] }),
+  );
   let projectCall = 0;
   const issueCallsByProject = new Map<string, number>();
   const latestIssueTitlesByProject = new Map<string, string>();
@@ -245,8 +293,28 @@ function lifecycleFetch(options?: {
     }
     const repositoryMatch = url.match(/^\/api\/projects\/([^/]+)\/repositories$/);
     if (repositoryMatch) {
+      const projectId = repositoryMatch[1];
+      if (init?.method === "POST") {
+        const payload = JSON.parse(String(init.body)) as {
+          name: string;
+          path: string;
+          default_policy_preset?: string | null;
+          default_provider_mode?: string | null;
+        };
+        const repositories = repositoriesByProject.get(projectId) ?? [];
+        const repository = repositoryRecord({
+          repository_id: `repository_${String(repositories.length + 1).padStart(4, "0")}`,
+          project_id: projectId,
+          name: payload.name,
+          path: payload.path,
+          default_policy_preset: payload.default_policy_preset ?? "manual-write",
+          default_provider_mode: payload.default_provider_mode ?? "fake",
+        });
+        repositoriesByProject.set(projectId, [...repositories, repository]);
+        return jsonResponse(repository);
+      }
       return jsonResponse({
-        repositories: repositoryMatch[1] === "project_0001" ? [repositoryRecord()] : [],
+        repositories: repositoriesByProject.get(projectId) ?? [],
       });
     }
     if (url === "/api/projects/project_0001/issues" && init?.method === "POST") {
@@ -468,7 +536,14 @@ function projectRecord(projectId: string, name: string, description: string | nu
   };
 }
 
-function repositoryRecord() {
+function repositoryRecord(overrides?: Partial<ReturnType<typeof repositoryRecordShape>>) {
+  return {
+    ...repositoryRecordShape(),
+    ...(overrides ?? {}),
+  };
+}
+
+function repositoryRecordShape() {
   return {
     repository_id: "repository_0001",
     project_id: "project_0001",

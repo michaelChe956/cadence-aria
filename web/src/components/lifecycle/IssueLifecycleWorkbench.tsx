@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   createProject,
   createProductIssue,
+  createRepository,
   confirmWorkspaceSession,
   getIssueLifecycle,
   listProductIssues,
@@ -16,6 +17,7 @@ import type {
   ProductIssue,
   Project,
   Repository,
+  CreateRepositoryRequest,
   WorkspaceSession,
 } from "../../api/types";
 import {
@@ -25,6 +27,7 @@ import {
 } from "../../state/lifecycle-workbench-store";
 import { WorkbenchSurface } from "../shell/WorkbenchSurface";
 import { CreateProjectDialog, type CreateProjectPayload } from "./CreateProjectDialog";
+import { CreateRepositoryDialog } from "./CreateRepositoryDialog";
 import {
   CreateLifecycleIssueDialog,
   type CreateLifecycleIssuePayload,
@@ -43,6 +46,7 @@ export function IssueLifecycleWorkbench() {
   const [workspaceSession, setWorkspaceSession] = useState<WorkspaceSession | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
+  const [repositoryDialogOpen, setRepositoryDialogOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const refreshRequestId = useRef(0);
@@ -177,16 +181,29 @@ export function IssueLifecycleWorkbench() {
     await refresh(project.project_id);
   }
 
+  async function handleCreateRepository(payload: CreateRepositoryRequest) {
+    if (!selectedProjectId) {
+      setError("缺少 Project");
+      return;
+    }
+
+    await createRepository(selectedProjectId, payload);
+    setRepositoryDialogOpen(false);
+    await refresh(selectedProjectId);
+  }
+
   return (
     <>
       <div className="grid min-h-screen bg-[var(--aria-bg)] text-[var(--aria-ink)] lg:grid-cols-[17rem_minmax(0,1fr)]">
         <ProjectSidebar
           projects={projects}
+          repositories={repositories}
           selectedProjectId={selectedProjectId}
           issueCount={issueCount}
           busy={busy}
           onSelectProject={(projectId) => void handleSelectProject(projectId)}
           onCreateProject={() => setProjectDialogOpen(true)}
+          onCreateRepository={() => setRepositoryDialogOpen(true)}
         />
         <WorkbenchSurface
           mainLabel="Issue 生命周期工作台"
@@ -226,7 +243,7 @@ export function IssueLifecycleWorkbench() {
                 </button>
                 <button
                   type="button"
-                  disabled={!selectedProjectId}
+                  disabled={!selectedProjectId || repositories.length === 0}
                   onClick={() => setDialogOpen(true)}
                   className="inline-flex h-8 items-center rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 text-xs font-semibold text-white disabled:border-[var(--aria-line)] disabled:bg-[var(--aria-panel-muted)] disabled:text-[var(--aria-ink-muted)]"
                 >
@@ -274,6 +291,12 @@ export function IssueLifecycleWorkbench() {
         <CreateProjectDialog
           onCreate={handleCreateProject}
           onClose={() => setProjectDialogOpen(false)}
+        />
+      ) : null}
+      {repositoryDialogOpen ? (
+        <CreateRepositoryDialog
+          onCreate={handleCreateRepository}
+          onClose={() => setRepositoryDialogOpen(false)}
         />
       ) : null}
       {dialogOpen ? (
