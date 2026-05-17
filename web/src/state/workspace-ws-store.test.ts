@@ -23,4 +23,79 @@ describe("workspace ws store", () => {
 
     expect(useWorkspaceStore.getState().streamingContent).toBe("partial output");
   });
+
+  it("tracks and resolves pending permission requests", () => {
+    const store = useWorkspaceStore.getState();
+    store.addPermissionRequest({
+      id: "perm_001",
+      tool_name: "bash",
+      description: "Run cargo test",
+      risk_level: "medium",
+    });
+
+    expect(useWorkspaceStore.getState().pendingPermissions).toHaveLength(1);
+
+    store.resolvePermissionRequest("perm_001");
+
+    expect(useWorkspaceStore.getState().pendingPermissions).toHaveLength(0);
+  });
+
+  it("deduplicates pending permission requests by id", () => {
+    const store = useWorkspaceStore.getState();
+
+    store.addPermissionRequest({
+      id: "perm_001",
+      tool_name: "bash",
+      description: "Run cargo test",
+      risk_level: "medium",
+    });
+    store.addPermissionRequest({
+      id: "perm_001",
+      tool_name: "bash",
+      description: "Run cargo clippy",
+      risk_level: "high",
+    });
+
+    expect(useWorkspaceStore.getState().pendingPermissions).toEqual([
+      {
+        id: "perm_001",
+        tool_name: "bash",
+        description: "Run cargo clippy",
+        risk_level: "high",
+      },
+    ]);
+  });
+
+  it("updates provider status independently from workspace stage", () => {
+    const store = useWorkspaceStore.getState();
+
+    store.setProviderStatus("waiting_approval");
+
+    expect(useWorkspaceStore.getState().providerStatus).toBe("waiting_approval");
+    expect(useWorkspaceStore.getState().stage).toBe("prepare_context");
+  });
+
+  it("clears permission state when a session snapshot is applied", () => {
+    const store = useWorkspaceStore.getState();
+    store.addPermissionRequest({
+      id: "perm_001",
+      tool_name: "bash",
+      description: "Run cargo test",
+      risk_level: "medium",
+    });
+    store.setProviderStatus("waiting_approval");
+
+    store.setSessionState({
+      session_id: "session_002",
+      workspace_type: "documentation",
+      stage: "prepare_context",
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "fake", reviewer: null },
+    });
+
+    expect(useWorkspaceStore.getState().pendingPermissions).toHaveLength(0);
+    expect(useWorkspaceStore.getState().providerStatus).toBe("starting");
+  });
 });

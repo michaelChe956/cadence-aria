@@ -1,12 +1,18 @@
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
+use cadence_aria::cross_cutting::claude_code_provider::ClaudeCodeProvider;
+use cadence_aria::cross_cutting::provider_registry::ProviderRegistry;
+use cadence_aria::cross_cutting::streaming_provider::FakeStreamingProvider;
+use cadence_aria::product::models::ProviderName;
 use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::runtime::WebRuntime;
 use cadence_aria::web::state::WebAppState;
 use cadence_aria::web::workspace_ws_types::{WsInMessage, WsOutMessage};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
+use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Arc;
 use tempfile::{TempDir, tempdir};
 use tokio::net::TcpListener;
 use tokio::time::{Duration, timeout};
@@ -385,7 +391,72 @@ async fn workspace_ws_abort_discards_partial_stream_without_completion() {
     panic!("abort did not return workspace to prepare_context");
 }
 
+#[tokio::test]
+async fn workspace_ws_supervised_permission_allows_real_stream_to_complete() {
+    let root = tempdir().expect("root");
+    let _repo = create_workspace_session_fixture_with_author(&root, "claude_code").await;
+    let mut registry = ProviderRegistry::new();
+    registry.register(ProviderName::Fake, Arc::new(FakeStreamingProvider));
+    registry.register(
+        ProviderName::ClaudeCode,
+        Arc::new(ClaudeCodeProvider::new(executable_fixture(
+            "tests/fixtures/provider/claude_stream_json_fixture.sh",
+        ))),
+    );
+
+    let app = build_web_router(WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        registry,
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(
+        &mut ws,
+        &WsInMessage::UserMessage {
+            content: "run supervised provider".to_string(),
+        },
+    )
+    .await;
+
+    let permission = recv_until_permission_request(&mut ws).await;
+    assert_eq!(permission.tool_name, "Bash");
+
+    send_json(
+        &mut ws,
+        &WsInMessage::PermissionResponse {
+            id: permission.id,
+            approved: true,
+            reason: None,
+        },
+    )
+    .await;
+
+    let checkpoint = recv_until_message_complete(&mut ws).await;
+    assert!(checkpoint.starts_with("cp_"));
+    let stage = recv_until_stage(&mut ws, "human_confirm").await;
+    assert_eq!(stage, "human_confirm");
+
+    drop(ws);
+    server.abort();
+}
+
 async fn create_workspace_session_fixture(root: &TempDir) -> TempDir {
+    create_workspace_session_fixture_with_author(root, "fake").await
+}
+
+async fn create_workspace_session_fixture_with_author(
+    root: &TempDir,
+    author_provider: &str,
+) -> TempDir {
     let repo = git_repo();
     let app = build_web_router(WebAppState::new(
         root.path().to_path_buf(),
@@ -419,7 +490,7 @@ async fn create_workspace_session_fixture(root: &TempDir) -> TempDir {
         "/api/projects/project_0001/issues/issue_0001/story-specs:generate",
         json!({
             "title":"登录会话过期提示",
-            "author_provider":"fake",
+            "author_provider":author_provider,
             "reviewer_provider":"codex",
             "review_rounds":1,
             "superpowers_enabled":true,
@@ -562,11 +633,49 @@ async fn recv_until_stream_chunk(
     panic!("stream_chunk not received");
 }
 
+#[derive(Debug)]
+struct PermissionRequestSeen {
+    id: String,
+    tool_name: String,
+}
+
+async fn recv_until_permission_request(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> PermissionRequestSeen {
+    for _ in 0..40 {
+        match recv_json(ws).await {
+            WsOutMessage::PermissionRequest { id, tool_name, .. } => {
+                return PermissionRequestSeen { id, tool_name };
+            }
+            WsOutMessage::Error { message } => panic!("ws error: {message}"),
+            _ => {}
+        }
+    }
+    panic!("permission_request not received");
+}
+
 fn long_message(token: &str) -> String {
     (0..80)
         .map(|idx| format!("{token}_{idx}"))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn executable_fixture(relative_path: &str) -> PathBuf {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative_path);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let metadata = std::fs::metadata(&path)
+            .unwrap_or_else(|error| panic!("fixture metadata {}: {error}", path.display()));
+        let mut permissions = metadata.permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions)
+            .unwrap_or_else(|error| panic!("chmod fixture {}: {error}", path.display()));
+    }
+    path
 }
 
 fn git_repo() -> TempDir {

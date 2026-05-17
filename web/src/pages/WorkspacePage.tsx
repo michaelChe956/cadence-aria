@@ -1,4 +1,14 @@
-import { ArrowLeft, Check, RotateCcw, Send, Settings, Square, Wifi, WifiOff } from "lucide-react";
+import {
+  ArrowLeft,
+  Check,
+  RotateCcw,
+  Send,
+  Settings,
+  Square,
+  Wifi,
+  WifiOff,
+  X,
+} from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
 import { useWorkspaceStore } from "../state/workspace-ws-store";
@@ -24,8 +34,15 @@ export function WorkspacePage({
   sessionId: string;
   onBack: () => void;
 }) {
-  const { sendMessage, rollback, confirm, abort, selectProvider, connectionStatus } =
-    useWorkspaceWs(sessionId);
+  const {
+    sendMessage,
+    rollback,
+    confirm,
+    abort,
+    selectProvider,
+    respondPermission,
+    connectionStatus,
+  } = useWorkspaceWs(sessionId);
   const {
     stage,
     messages,
@@ -35,6 +52,7 @@ export function WorkspacePage({
     error,
     workspaceType,
     providers,
+    pendingPermissions,
   } = useWorkspaceStore();
 
   const [draft, setDraft] = useState("");
@@ -144,6 +162,36 @@ export function WorkspacePage({
                 </div>
               </div>
             ) : null}
+            {pendingPermissions.map((permission) => (
+              <div
+                key={permission.id}
+                className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm"
+              >
+                <div className="font-semibold text-amber-900">{permission.tool_name}</div>
+                <div className="mt-1 text-amber-800">{permission.description}</div>
+                <div className="mt-2 flex items-center gap-2">
+                  <span className="rounded border border-amber-300 px-2 py-0.5 text-xs text-amber-800">
+                    {permission.risk_level}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => respondPermission(permission.id, false, undefined)}
+                    className="inline-flex h-7 items-center gap-1 rounded-md border border-red-300 bg-red-50 px-2 text-xs font-semibold text-red-700 hover:bg-red-100"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                    拒绝
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => respondPermission(permission.id, true, undefined)}
+                    className="inline-flex h-7 items-center gap-1 rounded-md border border-green-500 bg-green-50 px-2 text-xs font-semibold text-green-700 hover:bg-green-100"
+                  >
+                    <Check className="h-3.5 w-3.5" />
+                    允许
+                  </button>
+                </div>
+              </div>
+            ))}
             {error ? (
               <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
                 {error}

@@ -17,6 +17,9 @@ anyhow = "1.0.102"
 async-trait = "0.1"
 axum = { version = "0.8", features = ["ws"] }
 chrono = { version = "0.4.44", features = ["clock", "serde"] }
+codex-app-server-protocol = { git = "https://github.com/openai/codex.git", package = "codex-app-server-protocol", tag = "rust-v0.124.0" }
+codex-protocol = { git = "https://github.com/openai/codex.git", package = "codex-protocol", tag = "rust-v0.124.0" }
+command-group = { version = "5.0", features = ["with-tokio"] }
 futures-util = "0.3"
 hex = "0.4.3"
 libc = "0.2.177"

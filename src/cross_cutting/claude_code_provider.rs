@@ -1,0 +1,714 @@
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::process::ExitStatus;
+use std::sync::Arc;
+
+use serde_json::{Value, json};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::ChildStdin;
+use tokio::sync::{Mutex, mpsc};
+use tokio_util::sync::CancellationToken;
+
+use crate::cross_cutting::approval_bridge::ApprovalBridge;
+use crate::cross_cutting::process_manager::ProcessManager;
+use crate::cross_cutting::provider_adapter::ProviderAdapterError;
+use crate::cross_cutting::streaming_provider::{
+    ProviderEvent, ProviderPermissionMode, ProviderSession, ProviderStatus, RiskLevel, StreamChunk,
+    StreamingProviderAdapter, StreamingProviderInput,
+};
+use crate::protocol::contracts::AdapterInput;
+
+#[derive(Debug, Clone)]
+struct ClaudePermissionRequest {
+    request_id: String,
+    tool_name: String,
+    description: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ClaudeCodeProvider {
+    command: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaudeStreamOutcome {
+    TerminalEventEmitted,
+    Aborted,
+    EofWithoutResult,
+}
+
+impl ClaudeCodeProvider {
+    pub fn new(command: PathBuf) -> Self {
+        Self { command }
+    }
+
+    fn build_args(&self, mode: ProviderPermissionMode) -> Vec<String> {
+        let mut args = vec![
+            "-p".to_string(),
+            "--verbose".to_string(),
+            "--output-format=stream-json".to_string(),
+            "--input-format=stream-json".to_string(),
+            "--include-partial-messages".to_string(),
+            "--replay-user-messages".to_string(),
+        ];
+
+        if mode == ProviderPermissionMode::Supervised {
+            args.push("--permission-prompt-tool=stdio".to_string());
+        }
+
+        args
+    }
+
+    fn parse_text_delta(value: &Value) -> Option<String> {
+        if value.get("type")?.as_str()? != "assistant" {
+            return None;
+        }
+
+        let content = value.get("message")?.get("content")?.as_array()?;
+        let text = content
+            .iter()
+            .filter(|item| item.get("type").and_then(Value::as_str) == Some("text"))
+            .filter_map(|item| item.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("");
+
+        if text.is_empty() { None } else { Some(text) }
+    }
+
+    fn parse_control_request(value: &Value) -> Option<ClaudePermissionRequest> {
+        if value.get("type")?.as_str()? != "control_request" {
+            return None;
+        }
+
+        let request = value.get("request")?;
+        if request.get("subtype")?.as_str()? != "can_use_tool" {
+            return None;
+        }
+
+        let input = request.get("input").unwrap_or(&Value::Null);
+        let command = input.get("command").and_then(Value::as_str);
+        let description = input
+            .get("description")
+            .and_then(Value::as_str)
+            .or(command)
+            .unwrap_or("Claude Code tool request");
+
+        Some(ClaudePermissionRequest {
+            request_id: value.get("request_id")?.as_str()?.to_string(),
+            tool_name: request
+                .get("tool_name")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string(),
+            description: description.to_string(),
+        })
+    }
+
+    async fn write_control_response(
+        stdin: &Arc<Mutex<ChildStdin>>,
+        request_id: &str,
+        approved: bool,
+        reason: Option<String>,
+    ) -> Result<(), ProviderAdapterError> {
+        let behavior = if approved { "allow" } else { "deny" };
+        let payload = json!({
+            "type": "control_response",
+            "request_id": request_id,
+            "response": {
+                "behavior": behavior,
+                "message": reason,
+            }
+        });
+        write_json_line(stdin, &payload).await
+    }
+
+    async fn write_initial_messages(
+        stdin: &Arc<Mutex<ChildStdin>>,
+        input: &StreamingProviderInput,
+    ) -> Result<(), ProviderAdapterError> {
+        write_json_line(
+            stdin,
+            &json!({
+                "type": "control_request",
+                "request": {
+                    "subtype": "initialize",
+                },
+            }),
+        )
+        .await?;
+        write_json_line(
+            stdin,
+            &json!({
+                "type": "control_request",
+                "request": {
+                    "subtype": "set_permission_mode",
+                    "mode": match input.permission_mode {
+                        ProviderPermissionMode::Auto => "auto",
+                        ProviderPermissionMode::Supervised => "supervised",
+                    },
+                },
+            }),
+        )
+        .await?;
+        write_json_line(
+            stdin,
+            &json!({
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": input.prompt,
+                },
+            }),
+        )
+        .await
+    }
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for ClaudeCodeProvider {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let args = self.build_args(input.permission_mode.clone());
+        let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+        let command = self.command.to_string_lossy().to_string();
+        let process = ProcessManager::spawn(
+            &command,
+            &arg_refs,
+            &input.working_dir,
+            &input.env_vars,
+            cancel.clone(),
+        )
+        .await?;
+
+        let stdin = Arc::new(Mutex::new(process.stdin));
+        let stdout = process.stdout;
+        let stderr = process.stderr;
+        let mut child = process.child;
+        let (event_tx, event_rx) = mpsc::channel(32);
+        let bridge = ApprovalBridge::new(input.permission_mode.clone(), event_tx.clone());
+        let commands = bridge.command_sender();
+
+        let _ = event_tx
+            .send(ProviderEvent::StatusChanged(ProviderStatus::Starting))
+            .await;
+
+        tokio::spawn(async move {
+            let stderr_output = Arc::new(Mutex::new(String::new()));
+            let stderr_output_for_task = Arc::clone(&stderr_output);
+            let stderr_task = tokio::spawn(async move {
+                let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let mut output = stderr_output_for_task.lock().await;
+                    if !output.is_empty() {
+                        output.push('\n');
+                    }
+                    output.push_str(&line);
+                }
+            });
+
+            if let Err(error) = Self::write_initial_messages(&stdin, &input).await {
+                let status = child.wait().await;
+                let _ = stderr_task.await;
+                let stderr = combine_stderr(stderr_output.lock().await.clone(), error.stderr);
+                let _ = event_tx
+                    .send(ProviderEvent::Failed {
+                        message: format_exit_failure(status, stderr),
+                    })
+                    .await;
+                return;
+            }
+
+            let result = read_claude_stream(stdout, stdin, bridge, event_tx.clone(), cancel).await;
+            match result {
+                Ok(outcome) => {
+                    let status = child.wait().await;
+                    let _ = stderr_task.await;
+                    if outcome == ClaudeStreamOutcome::EofWithoutResult {
+                        let stderr = stderr_output.lock().await.clone();
+                        let _ = event_tx
+                            .send(ProviderEvent::Failed {
+                                message: format_exit_failure(status, stderr),
+                            })
+                            .await;
+                    }
+                }
+                Err(error) => {
+                    let _ = event_tx
+                        .send(ProviderEvent::Failed {
+                            message: error.details,
+                        })
+                        .await;
+                    let _ = child.wait().await;
+                    let _ = stderr_task.await;
+                }
+            }
+        });
+
+        Ok(ProviderSession {
+            events: event_rx,
+            commands,
+        })
+    }
+
+    async fn run_streaming(
+        &self,
+        input: &AdapterInput,
+        cancel: CancellationToken,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+        let working_dir = input.worktree_path.as_ref().map(PathBuf::from).unwrap_or(
+            std::env::current_dir().map_err(|error| {
+                ProviderAdapterError::execution_failed(None, String::new(), error.to_string(), 0)
+            })?,
+        );
+        let provider_input = StreamingProviderInput {
+            provider_type: input.provider_type.clone(),
+            role: input.role.clone(),
+            prompt: input.prompt.clone(),
+            working_dir,
+            session_id: None,
+            permission_mode: ProviderPermissionMode::Auto,
+            env_vars: BTreeMap::new(),
+            timeout_secs: input.timeout,
+        };
+        let bridge_cancel = cancel.clone();
+        let mut session = self.start(provider_input, cancel).await?;
+        let (tx, rx) = mpsc::channel(32);
+
+        tokio::spawn(async move {
+            let _commands = session.commands;
+            loop {
+                let event = tokio::select! {
+                    _ = bridge_cancel.cancelled() => return,
+                    event = session.events.recv() => match event {
+                        Some(event) => event,
+                        None => return,
+                    },
+                };
+                let chunk = match event {
+                    ProviderEvent::TextDelta { content } => StreamChunk::Text(content),
+                    ProviderEvent::Completed { full_output, .. } => {
+                        StreamChunk::Done { full_output }
+                    }
+                    ProviderEvent::Failed { message } => StreamChunk::Error(message),
+                    ProviderEvent::PermissionRequest(_) | ProviderEvent::StatusChanged(_) => {
+                        continue;
+                    }
+                };
+                tokio::select! {
+                    _ = bridge_cancel.cancelled() => return,
+                    send_result = tx.send(chunk) => {
+                        if send_result.is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok(rx)
+    }
+}
+
+async fn read_claude_stream(
+    stdout: tokio::process::ChildStdout,
+    stdin: Arc<Mutex<ChildStdin>>,
+    bridge: ApprovalBridge,
+    event_tx: mpsc::Sender<ProviderEvent>,
+    cancel: CancellationToken,
+) -> Result<ClaudeStreamOutcome, ProviderAdapterError> {
+    let mut lines = BufReader::new(stdout).lines();
+
+    loop {
+        let line = tokio::select! {
+            _ = cancel.cancelled() => {
+                let _ = event_tx
+                    .send(ProviderEvent::StatusChanged(ProviderStatus::Aborted))
+                    .await;
+                return Ok(ClaudeStreamOutcome::Aborted);
+            }
+            line = lines.next_line() => line.map_err(|error| {
+                ProviderAdapterError::execution_failed(None, String::new(), error.to_string(), 0)
+            })?,
+        };
+        let Some(line) = line else {
+            return Ok(ClaudeStreamOutcome::EofWithoutResult);
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let value = serde_json::from_str::<Value>(&line).map_err(|error| {
+            ProviderAdapterError::parse_error(
+                format!("invalid Claude stream JSON: {error}"),
+                line.clone(),
+                String::new(),
+            )
+        })?;
+
+        if let Some(content) = ClaudeCodeProvider::parse_text_delta(&value) {
+            send_provider_event(&event_tx, ProviderEvent::TextDelta { content }, &cancel).await?;
+            continue;
+        }
+
+        if let Some(request) = ClaudeCodeProvider::parse_control_request(&value) {
+            let decision = bridge
+                .request_tool(
+                    &request.tool_name,
+                    &request.description,
+                    RiskLevel::High,
+                    cancel.clone(),
+                )
+                .await?;
+            ClaudeCodeProvider::write_control_response(
+                &stdin,
+                &request.request_id,
+                decision.approved,
+                decision.reason,
+            )
+            .await?;
+            continue;
+        }
+
+        if value.get("type").and_then(Value::as_str) == Some("result") {
+            let is_error = value
+                .get("is_error")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if is_error {
+                send_provider_event(
+                    &event_tx,
+                    ProviderEvent::Failed {
+                        message: value
+                            .get("result")
+                            .and_then(Value::as_str)
+                            .unwrap_or("Claude Code provider failed")
+                            .to_string(),
+                    },
+                    &cancel,
+                )
+                .await?;
+                return Ok(ClaudeStreamOutcome::TerminalEventEmitted);
+            }
+
+            let full_output = value
+                .get("result")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let provider_session_id = value
+                .get("session_id")
+                .and_then(Value::as_str)
+                .map(ToString::to_string);
+            send_provider_event(
+                &event_tx,
+                ProviderEvent::Completed {
+                    full_output,
+                    provider_session_id,
+                },
+                &cancel,
+            )
+            .await?;
+            return Ok(ClaudeStreamOutcome::TerminalEventEmitted);
+        }
+    }
+}
+
+fn combine_stderr(process_stderr: String, write_stderr: String) -> String {
+    match (process_stderr.trim(), write_stderr.trim()) {
+        ("", "") => String::new(),
+        (process, "") => process.to_string(),
+        ("", write_error) => write_error.to_string(),
+        (process, write_error) => format!("{process}\n{write_error}"),
+    }
+}
+
+fn format_exit_failure(status: Result<ExitStatus, std::io::Error>, stderr: String) -> String {
+    let status_text = match status {
+        Ok(status) => format!("exit status: {status}"),
+        Err(error) => format!("failed to wait for process: {error}"),
+    };
+    if stderr.trim().is_empty() {
+        format!("Claude Code provider exited without result ({status_text})")
+    } else {
+        format!(
+            "Claude Code provider exited without result ({status_text}); stderr: {}",
+            stderr.trim()
+        )
+    }
+}
+
+async fn write_json_line(
+    stdin: &Arc<Mutex<ChildStdin>>,
+    value: &Value,
+) -> Result<(), ProviderAdapterError> {
+    let mut stdin = stdin.lock().await;
+    let line = serde_json::to_string(value).map_err(|error| {
+        ProviderAdapterError::parse_error(
+            format!("invalid Claude control JSON: {error}"),
+            String::new(),
+            String::new(),
+        )
+    })?;
+    stdin.write_all(line.as_bytes()).await.map_err(|error| {
+        ProviderAdapterError::execution_failed(None, String::new(), error.to_string(), 0)
+    })?;
+    stdin.write_all(b"\n").await.map_err(|error| {
+        ProviderAdapterError::execution_failed(None, String::new(), error.to_string(), 0)
+    })?;
+    stdin.flush().await.map_err(|error| {
+        ProviderAdapterError::execution_failed(None, String::new(), error.to_string(), 0)
+    })
+}
+
+async fn send_provider_event(
+    event_tx: &mpsc::Sender<ProviderEvent>,
+    event: ProviderEvent,
+    cancel: &CancellationToken,
+) -> Result<(), ProviderAdapterError> {
+    tokio::select! {
+        _ = cancel.cancelled() => Err(ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "Claude Code provider cancelled",
+            0,
+        )),
+        result = event_tx.send(event) => result.map_err(|_| {
+            ProviderAdapterError::execution_failed(
+                None,
+                String::new(),
+                "provider event receiver closed",
+                0,
+            )
+        }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
+
+    use crate::cross_cutting::streaming_provider::{
+        ProviderCommand, ProviderEvent, ProviderPermissionMode, ProviderSession, ProviderStatus,
+        StreamingProviderAdapter, StreamingProviderInput,
+    };
+    use crate::protocol::contracts::{AdapterInput, AdapterRole, ProviderType};
+
+    use super::ClaudeCodeProvider;
+
+    const TEST_TIMEOUT: Duration = Duration::from_secs(2);
+
+    fn executable_fixture(relative_path: &str) -> PathBuf {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative_path);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut permissions = std::fs::metadata(&path)
+                .unwrap_or_else(|error| panic!("fixture metadata {}: {error}", path.display()))
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&path, permissions)
+                .unwrap_or_else(|error| panic!("chmod fixture {}: {error}", path.display()));
+        }
+        path
+    }
+
+    fn streaming_input(
+        provider_type: ProviderType,
+        permission_mode: ProviderPermissionMode,
+    ) -> StreamingProviderInput {
+        StreamingProviderInput {
+            provider_type,
+            role: AdapterRole::Orchestrator,
+            prompt: "Run the fixture provider".to_string(),
+            working_dir: std::env::current_dir().unwrap(),
+            session_id: None,
+            permission_mode,
+            env_vars: BTreeMap::new(),
+            timeout_secs: 60,
+        }
+    }
+
+    async fn recv_completed(events: &mut mpsc::Receiver<ProviderEvent>) -> String {
+        loop {
+            match tokio::time::timeout(TEST_TIMEOUT, events.recv())
+                .await
+                .expect("provider should emit completion")
+                .expect("provider event channel should stay open")
+            {
+                ProviderEvent::Completed { full_output, .. } => return full_output,
+                ProviderEvent::StatusChanged(_)
+                | ProviderEvent::TextDelta { .. }
+                | ProviderEvent::PermissionRequest(_) => {}
+                ProviderEvent::Failed { message } => panic!("provider failed: {message}"),
+            }
+        }
+    }
+
+    async fn wait_for_receiver_closed<T>(rx: &mpsc::Receiver<T>) {
+        for _ in 0..200 {
+            if rx.is_closed() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("receiver did not close after cancellation");
+    }
+
+    fn adapter_input(prompt: &str) -> AdapterInput {
+        AdapterInput {
+            provider_type: ProviderType::ClaudeCode,
+            role: AdapterRole::Orchestrator,
+            worktree_path: Some(
+                std::env::current_dir()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string(),
+            ),
+            prompt: prompt.to_string(),
+            context_files: Vec::new(),
+            output_schema: String::new(),
+            timeout: 60,
+            max_retries: 0,
+        }
+    }
+
+    fn write_fixture(relative_path: &str, body: &str) -> PathBuf {
+        let path = tempfile::tempdir()
+            .expect("fixture dir")
+            .keep()
+            .join(relative_path);
+        std::fs::write(&path, body).expect("write fixture");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&path, permissions).expect("chmod fixture");
+        }
+        path
+    }
+
+    #[tokio::test]
+    async fn claude_provider_bridges_permission_and_completes() {
+        let fixture = executable_fixture("tests/fixtures/provider/claude_stream_json_fixture.sh");
+        let provider = ClaudeCodeProvider::new(fixture);
+        let input = streaming_input(ProviderType::ClaudeCode, ProviderPermissionMode::Supervised);
+
+        let mut session: ProviderSession = provider
+            .start(input, CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            session.events.recv().await.unwrap(),
+            ProviderEvent::StatusChanged(ProviderStatus::Starting)
+        ));
+
+        let mut saw_text = false;
+        let permission_id = loop {
+            match session.events.recv().await.unwrap() {
+                ProviderEvent::TextDelta { content } => {
+                    saw_text = content.contains("Claude fixture chunk");
+                }
+                ProviderEvent::PermissionRequest(data) => break data.id,
+                other => panic!("unexpected event before permission: {other:?}"),
+            }
+        };
+        assert!(saw_text);
+
+        session
+            .commands
+            .send(ProviderCommand::PermissionResponse {
+                id: permission_id,
+                approved: true,
+                reason: None,
+            })
+            .await
+            .unwrap();
+
+        let completed = recv_completed(&mut session.events).await;
+        assert_eq!(completed, "Claude fixture chunk done");
+    }
+
+    #[tokio::test]
+    async fn claude_provider_reports_failure_when_process_exits_without_result() {
+        let fixture = write_fixture(
+            "claude_fail_fixture.sh",
+            "#!/usr/bin/env bash\nset -euo pipefail\nexec 0<&-\necho 'not authenticated' >&2\nexit 7\n",
+        );
+        let provider = ClaudeCodeProvider::new(fixture);
+        let input = streaming_input(ProviderType::ClaudeCode, ProviderPermissionMode::Auto);
+
+        let mut session = provider
+            .start(input, CancellationToken::new())
+            .await
+            .expect("start provider");
+
+        let mut failed = None;
+        while let Some(event) = tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+            .await
+            .expect("provider should emit failure")
+        {
+            if let ProviderEvent::Failed { message } = event {
+                failed = Some(message);
+                break;
+            }
+        }
+
+        let failed = failed.expect("provider should emit failed event");
+        assert!(
+            failed.contains("exited without result") || failed.contains("exit status"),
+            "unexpected failure message: {failed}"
+        );
+        assert!(
+            failed.contains("not authenticated"),
+            "unexpected failure message: {failed}"
+        );
+    }
+
+    #[tokio::test]
+    async fn claude_provider_run_streaming_cancel_closes_backpressured_bridge() {
+        let mut body = String::from("#!/usr/bin/env bash\nset -euo pipefail\n");
+        body.push_str("while IFS= read -r line; do\n");
+        body.push_str("  if [[ \"$line\" == *'\"user\"'* ]]; then\n");
+        for index in 0..80 {
+            body.push_str(&format!(
+                "    echo '{{\"type\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"chunk {index}\"}}]}},\"session_id\":\"backpressure\"}}'\n"
+            ));
+        }
+        body.push_str("    sleep 5\n");
+        body.push_str("  fi\n");
+        body.push_str("done\n");
+
+        let fixture = write_fixture("claude_backpressure_fixture.sh", &body);
+        let provider = ClaudeCodeProvider::new(fixture);
+        let cancel = CancellationToken::new();
+        let rx = provider
+            .run_streaming(&adapter_input("trigger backpressure"), cancel.clone())
+            .await
+            .expect("run streaming");
+
+        for _ in 0..200 {
+            if rx.len() >= 32 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(rx.len() >= 32, "stream receiver should be backpressured");
+
+        cancel.cancel();
+        tokio::time::timeout(TEST_TIMEOUT, wait_for_receiver_closed(&rx))
+            .await
+            .expect("stream receiver should close after cancellation");
+    }
+}

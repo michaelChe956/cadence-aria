@@ -7,13 +7,15 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 
-use crate::cross_cutting::streaming_provider::FakeStreamingProvider;
+use crate::cross_cutting::streaming_provider::{ProviderCommand, ProviderStatus, RiskLevel};
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::checkpoint_store::CheckpointStore;
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::workspace_engine::{EngineEvent, WorkspaceEngine, WorkspaceSession};
 use crate::web::state::WebAppState;
-use crate::web::workspace_ws_types::{WsInMessage, WsOutMessage};
+use crate::web::workspace_ws_types::{
+    WsInMessage, WsOutMessage, WsPermissionRiskLevel, WsProviderStatus,
+};
 
 pub async fn workspace_ws(
     ws: WebSocketUpgrade,
@@ -93,6 +95,20 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                     markdown,
                     diff: None,
                 },
+                EngineEvent::PermissionRequest {
+                    id,
+                    tool_name,
+                    description,
+                    risk_level,
+                } => WsOutMessage::PermissionRequest {
+                    id,
+                    tool_name,
+                    description,
+                    risk_level: ws_permission_risk_level(risk_level),
+                },
+                EngineEvent::ProviderStatus { status } => WsOutMessage::ProviderStatus {
+                    status: ws_provider_status(status),
+                },
                 EngineEvent::Error { message } => WsOutMessage::Error { message },
             };
             if let Ok(json) = serde_json::to_string(&ws_msg)
@@ -103,7 +119,6 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
         }
     });
 
-    let provider = Arc::new(FakeStreamingProvider);
     let current_run: Arc<Mutex<Option<ActiveRun>>> = Arc::new(Mutex::new(None));
     let next_run_id: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
 
@@ -129,11 +144,25 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
 
         match in_msg {
             WsInMessage::UserMessage { content } => {
-                if let Some(run) = current_run.lock().await.take() {
+                let active = { current_run.lock().await.take() };
+                if let Some(run) = active {
+                    let _ = run.command_tx.send(ProviderCommand::Abort).await;
                     run.cancel.cancel();
                 }
+                let provider_name = {
+                    let engine = engine.lock().await;
+                    engine.session().author_provider.clone()
+                };
+                let Some(provider_for_run) = state.provider_registry.get(&provider_name) else {
+                    let err = WsOutMessage::Error {
+                        message: format!("provider unavailable: {provider_name:?}"),
+                    };
+                    if let Ok(json) = serde_json::to_string(&err) {
+                        let _ = outbound_tx.send(json).await;
+                    }
+                    continue;
+                };
                 let engine_for_run = engine.clone();
-                let provider_for_run = provider.clone();
                 let current_run_for_task = current_run.clone();
                 let run_id = {
                     let mut next = next_run_id.lock().await;
@@ -141,15 +170,17 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                     *next
                 };
                 let run_cancel = CancellationToken::new();
+                let (command_tx, command_rx) = mpsc::channel(8);
                 *current_run.lock().await = Some(ActiveRun {
                     id: run_id,
                     cancel: run_cancel.clone(),
+                    command_tx,
                 });
                 tokio::spawn(async move {
                     let mut engine = engine_for_run.lock().await;
                     engine.use_run_token(run_cancel);
                     engine
-                        .handle_user_message(content, provider_for_run.as_ref())
+                        .handle_user_message(content, provider_for_run, command_rx)
                         .await;
                     let mut current = current_run_for_task.lock().await;
                     if current.as_ref().is_some_and(|active| active.id == run_id) {
@@ -158,7 +189,9 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                 });
             }
             WsInMessage::Rollback { checkpoint_id } => {
-                if let Some(run) = current_run.lock().await.take() {
+                let active = { current_run.lock().await.take() };
+                if let Some(run) = active {
+                    let _ = run.command_tx.send(ProviderCommand::Abort).await;
                     run.cancel.cancel();
                 }
                 let mut engine = engine.lock().await;
@@ -192,15 +225,41 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                     }
                 }
             }
+            WsInMessage::PermissionResponse {
+                id,
+                approved,
+                reason,
+            } => {
+                let command_tx = {
+                    current_run
+                        .lock()
+                        .await
+                        .as_ref()
+                        .map(|run| run.command_tx.clone())
+                };
+                if let Some(command_tx) = command_tx {
+                    let _ = command_tx
+                        .send(ProviderCommand::PermissionResponse {
+                            id,
+                            approved,
+                            reason,
+                        })
+                        .await;
+                }
+            }
             WsInMessage::Abort => {
-                if let Some(run) = current_run.lock().await.take() {
+                let active = { current_run.lock().await.take() };
+                if let Some(run) = active {
+                    let _ = run.command_tx.send(ProviderCommand::Abort).await;
                     run.cancel.cancel();
                 }
             }
         }
     }
 
-    if let Some(run) = current_run.lock().await.take() {
+    let active = { current_run.lock().await.take() };
+    if let Some(run) = active {
+        let _ = run.command_tx.send(ProviderCommand::Abort).await;
         run.cancel.cancel();
     }
     drop(outbound_tx);
@@ -214,4 +273,24 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
 struct ActiveRun {
     id: u64,
     cancel: CancellationToken,
+    command_tx: mpsc::Sender<ProviderCommand>,
+}
+
+fn ws_permission_risk_level(risk_level: RiskLevel) -> WsPermissionRiskLevel {
+    match risk_level {
+        RiskLevel::Low => WsPermissionRiskLevel::Low,
+        RiskLevel::Medium => WsPermissionRiskLevel::Medium,
+        RiskLevel::High => WsPermissionRiskLevel::High,
+    }
+}
+
+fn ws_provider_status(status: ProviderStatus) -> WsProviderStatus {
+    match status {
+        ProviderStatus::Starting => WsProviderStatus::Starting,
+        ProviderStatus::Running => WsProviderStatus::Running,
+        ProviderStatus::WaitingApproval => WsProviderStatus::WaitingApproval,
+        ProviderStatus::Completed => WsProviderStatus::Completed,
+        ProviderStatus::Failed => WsProviderStatus::Failed,
+        ProviderStatus::Aborted => WsProviderStatus::Aborted,
+    }
 }

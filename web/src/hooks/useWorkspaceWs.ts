@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef } from "react";
-import { useWorkspaceStore } from "../state/workspace-ws-store";
+import { useWorkspaceStore, type ProviderStatus } from "../state/workspace-ws-store";
 
 interface WsOutMessage {
   type: string;
@@ -8,15 +8,15 @@ interface WsOutMessage {
 
 export function useWorkspaceWs(sessionId: string | null) {
   const wsRef = useRef<WebSocket | null>(null);
-  const store = useWorkspaceStore();
+  const connectionStatus = useWorkspaceStore((state) => state.connectionStatus);
 
   useEffect(() => {
     if (!sessionId) {
-      store.reset();
+      useWorkspaceStore.getState().reset();
       return;
     }
 
-    store.setConnectionStatus("connecting");
+    useWorkspaceStore.getState().setConnectionStatus("connecting");
 
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const url = `${protocol}//${window.location.host}/api/workspace-sessions/${sessionId}/ws`;
@@ -24,15 +24,17 @@ export function useWorkspaceWs(sessionId: string | null) {
     wsRef.current = ws;
 
     ws.onopen = () => {
+      const store = useWorkspaceStore.getState();
       store.setConnectionStatus("connected");
       store.setError(null);
     };
 
     ws.onclose = () => {
-      store.setConnectionStatus("disconnected");
+      useWorkspaceStore.getState().setConnectionStatus("disconnected");
     };
 
     ws.onerror = () => {
+      const store = useWorkspaceStore.getState();
       store.setConnectionStatus("error");
       store.setError("WebSocket 连接失败");
     };
@@ -53,6 +55,7 @@ export function useWorkspaceWs(sessionId: string | null) {
   }, [sessionId]);
 
   function handleMessage(msg: WsOutMessage) {
+    const store = useWorkspaceStore.getState();
     switch (msg.type) {
       case "session_state":
         store.setSessionState(msg as never);
@@ -69,6 +72,17 @@ export function useWorkspaceWs(sessionId: string | null) {
       case "artifact_update":
         store.setArtifact(msg.markdown as string);
         break;
+      case "permission_request":
+        store.addPermissionRequest({
+          id: msg.id as string,
+          tool_name: msg.tool_name as string,
+          description: msg.description as string,
+          risk_level: msg.risk_level as "low" | "medium" | "high",
+        });
+        break;
+      case "provider_status":
+        store.setProviderStatus(msg.status as ProviderStatus);
+        break;
       case "error":
         store.setError(msg.message as string);
         break;
@@ -80,7 +94,7 @@ export function useWorkspaceWs(sessionId: string | null) {
       const ws = wsRef.current;
       if (ws?.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "user_message", content }));
-        store.setError(null);
+        useWorkspaceStore.getState().setError(null);
         const userMsg = {
           id: `msg_${Date.now()}`,
           role: "user",
@@ -130,12 +144,32 @@ export function useWorkspaceWs(sessionId: string | null) {
     [],
   );
 
+  const respondPermission = useCallback(
+    (id: string, approved: boolean, reason?: string) => {
+      const ws = wsRef.current;
+      if (ws?.readyState === WebSocket.OPEN) {
+        const trimmedReason = reason?.trim();
+        ws.send(
+          JSON.stringify({
+            type: "permission_response",
+            id,
+            approved,
+            reason: trimmedReason ? trimmedReason : null,
+          }),
+        );
+        useWorkspaceStore.getState().resolvePermissionRequest(id);
+      }
+    },
+    [],
+  );
+
   return {
     sendMessage,
     rollback,
     confirm,
     abort,
     selectProvider,
-    connectionStatus: store.connectionStatus,
+    respondPermission,
+    connectionStatus,
   };
 }

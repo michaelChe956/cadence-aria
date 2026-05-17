@@ -1,16 +1,20 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::cross_cutting::streaming_provider::{StreamChunk, StreamingProviderAdapter};
+use crate::cross_cutting::streaming_provider::{
+    ProviderCommand, ProviderEvent, ProviderPermissionMode, ProviderSession, ProviderStatus,
+    RiskLevel, StreamingProviderAdapter, StreamingProviderInput,
+};
 use crate::product::checkpoint_store::CheckpointStore;
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::models::{
     LifecycleConfirmationStatus, ProviderName, WorkItemPlanStatus, WorkspaceMessageRecord,
     WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType,
 };
-use crate::protocol::contracts::{AdapterInput, ProviderType};
+use crate::protocol::contracts::{AdapterRole, ProviderType};
 use crate::web::workspace_ws_types::{
     WsCheckpointDto, WsMessageDto, WsOutMessage, WsProviderConfig,
 };
@@ -130,6 +134,15 @@ pub enum EngineEvent {
         version: u32,
         markdown: String,
     },
+    PermissionRequest {
+        id: String,
+        tool_name: String,
+        description: String,
+        risk_level: RiskLevel,
+    },
+    ProviderStatus {
+        status: ProviderStatus,
+    },
     Error {
         message: String,
     },
@@ -193,7 +206,8 @@ impl WorkspaceEngine {
     pub async fn handle_user_message(
         &mut self,
         content: String,
-        provider: &dyn StreamingProviderAdapter,
+        provider: Arc<dyn StreamingProviderAdapter>,
+        command_rx: mpsc::Receiver<ProviderCommand>,
     ) {
         let msg_id = format!("msg_{:03}", self.session.messages.len() + 1);
         let now = chrono::Utc::now().to_rfc3339();
@@ -222,26 +236,34 @@ impl WorkspaceEngine {
             self.transition_stage(WorkspaceStage::Running).await;
         }
 
-        let prompt = self.build_prompt(&content);
-        let input = AdapterInput {
-            prompt,
-            provider_type: provider_type_for_name(&self.session.author_provider),
-            role: crate::protocol::contracts::AdapterRole::Orchestrator,
-            worktree_path: None,
-            context_files: Vec::new(),
-            output_schema: String::new(),
-            timeout: 300,
-            max_retries: 0,
+        let input = match self.build_streaming_input(&content) {
+            Ok(input) => input,
+            Err(message) => {
+                let _ = self.event_tx.send(EngineEvent::Error { message }).await;
+                self.finish_failed_run().await;
+                return;
+            }
         };
 
-        let rx_result = provider.run_streaming(&input, self.cancel.clone()).await;
-        let mut rx = match rx_result {
-            Ok(rx) => rx,
-            Err(e) => {
+        let session = provider.start(input, self.cancel.clone()).await;
+        self.drive_provider_session(session, command_rx).await;
+    }
+
+    async fn drive_provider_session(
+        &mut self,
+        session: Result<
+            ProviderSession,
+            crate::cross_cutting::provider_adapter::ProviderAdapterError,
+        >,
+        mut command_rx: mpsc::Receiver<ProviderCommand>,
+    ) {
+        let mut session = match session {
+            Ok(session) => session,
+            Err(error) => {
                 let _ = self
                     .event_tx
                     .send(EngineEvent::Error {
-                        message: e.details.clone(),
+                        message: error.details.clone(),
                     })
                     .await;
                 self.finish_failed_run().await;
@@ -251,44 +273,104 @@ impl WorkspaceEngine {
 
         let assistant_msg_id = format!("msg_{:03}", self.session.messages.len() + 1);
         let mut full_content = String::new();
-        let mut completed = false;
+        let cancel = self.cancel.clone();
+        let mut events_open = true;
+        let mut commands_open = true;
 
-        while let Some(chunk) = rx.recv().await {
-            match chunk {
-                StreamChunk::Text(text) => {
-                    full_content.push_str(&text);
-                    let _ = self
-                        .event_tx
-                        .send(EngineEvent::StreamChunk {
-                            role: "assistant".to_string(),
-                            content: text,
-                        })
-                        .await;
-                }
-                StreamChunk::Done { full_output } => {
-                    full_content = full_output;
-                    completed = true;
-                    break;
-                }
-                StreamChunk::Error(err) => {
-                    let _ = self
-                        .event_tx
-                        .send(EngineEvent::Error { message: err })
-                        .await;
+        while events_open {
+            tokio::select! {
+                _ = cancel.cancelled() => {
                     self.finish_failed_run().await;
                     return;
+                }
+                command = command_rx.recv(), if commands_open => {
+                    match command {
+                        Some(ProviderCommand::Abort) => {
+                            let _ = session.commands.send(ProviderCommand::Abort).await;
+                            cancel.cancel();
+                            self.finish_failed_run().await;
+                            return;
+                        }
+                        Some(command) => {
+                            if session.commands.send(command).await.is_err() {
+                                commands_open = false;
+                            }
+                        }
+                        None => commands_open = false,
+                    }
+                }
+                event = session.events.recv() => {
+                    let Some(event) = event else {
+                        events_open = false;
+                        continue;
+                    };
+
+                    match event {
+                        ProviderEvent::TextDelta { content } => {
+                            full_content.push_str(&content);
+                            let _ = self
+                                .event_tx
+                                .send(EngineEvent::StreamChunk {
+                                    role: "assistant".to_string(),
+                                    content,
+                                })
+                                .await;
+                        }
+                        ProviderEvent::PermissionRequest(request) => {
+                            let _ = self
+                                .event_tx
+                                .send(EngineEvent::PermissionRequest {
+                                    id: request.id,
+                                    tool_name: request.tool_name,
+                                    description: request.description,
+                                    risk_level: request.risk_level,
+                                })
+                                .await;
+                        }
+                        ProviderEvent::StatusChanged(status) => {
+                            let _ = self
+                                .event_tx
+                                .send(EngineEvent::ProviderStatus { status })
+                                .await;
+                        }
+                        ProviderEvent::Completed { full_output, .. } => {
+                            self.complete_assistant_message(assistant_msg_id, full_output).await;
+                            return;
+                        }
+                        ProviderEvent::Failed { message } => {
+                            let _ = self
+                                .event_tx
+                                .send(EngineEvent::Error { message })
+                                .await;
+                            self.finish_failed_run().await;
+                            return;
+                        }
+                    }
                 }
             }
         }
 
-        if self.cancel.is_cancelled() || !completed {
-            if let Some(store) = &self.lifecycle_store {
-                let _ = store.update_workspace_session_status(
-                    &self.session.session_id,
-                    WorkspaceSessionStatus::Open,
-                );
-            }
-            self.transition_stage(WorkspaceStage::PrepareContext).await;
+        if cancel.is_cancelled() {
+            self.finish_failed_run().await;
+            return;
+        }
+
+        if full_content.is_empty() {
+            self.finish_failed_run().await;
+        } else {
+            self.complete_assistant_message(assistant_msg_id, full_content)
+                .await;
+        }
+    }
+
+    async fn complete_assistant_message(&mut self, assistant_msg_id: String, full_content: String) {
+        if self.cancel.is_cancelled() {
+            self.finish_failed_run().await;
+            return;
+        }
+
+        if full_content.is_empty() {
+            self.finish_failed_run().await;
             return;
         }
 
@@ -357,6 +439,22 @@ impl WorkspaceEngine {
                 WorkspaceSessionStatus::WaitingForHuman,
             );
         }
+    }
+
+    fn build_streaming_input(&self, user_content: &str) -> Result<StreamingProviderInput, String> {
+        let working_dir =
+            std::env::current_dir().map_err(|error| format!("working directory error: {error}"))?;
+
+        Ok(StreamingProviderInput {
+            provider_type: provider_type_for_name(&self.session.author_provider),
+            role: AdapterRole::Orchestrator,
+            prompt: self.build_prompt(user_content),
+            working_dir,
+            session_id: None,
+            permission_mode: ProviderPermissionMode::Supervised,
+            env_vars: BTreeMap::new(),
+            timeout_secs: 300,
+        })
     }
 
     pub async fn handle_rollback(&mut self, checkpoint_id: &str) -> Result<(), String> {
@@ -592,8 +690,9 @@ fn latest_artifact_from_messages(messages: &[WorkspaceMessageRecord]) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cross_cutting::streaming_provider::FakeStreamingProvider;
-    use crate::protocol::contracts::ProviderType;
+    use crate::cross_cutting::provider_adapter::ProviderAdapterError;
+    use crate::cross_cutting::streaming_provider::{FakeStreamingProvider, StreamChunk};
+    use crate::protocol::contracts::{AdapterInput, ProviderType};
     use std::sync::Mutex;
     use tempfile::TempDir;
 
@@ -618,6 +717,11 @@ mod tests {
         }
     }
 
+    fn empty_provider_commands() -> mpsc::Receiver<ProviderCommand> {
+        let (_tx, rx) = mpsc::channel(8);
+        rx
+    }
+
     #[tokio::test]
     async fn handle_user_message_transitions_from_prepare_to_running() {
         let (_tmp, store) = setup();
@@ -625,9 +729,12 @@ mod tests {
         let session = make_session("sess_001");
         let mut engine = WorkspaceEngine::new(store, tx, session);
 
-        let provider = FakeStreamingProvider;
         engine
-            .handle_user_message("hello world".to_string(), &provider)
+            .handle_user_message(
+                "hello world".to_string(),
+                Arc::new(FakeStreamingProvider),
+                empty_provider_commands(),
+            )
             .await;
 
         let mut saw_running = false;
@@ -651,12 +758,19 @@ mod tests {
         let session = make_session("sess_002");
         let mut engine = WorkspaceEngine::new(store, tx, session);
 
-        let provider = FakeStreamingProvider;
         engine
-            .handle_user_message("first".to_string(), &provider)
+            .handle_user_message(
+                "first".to_string(),
+                Arc::new(FakeStreamingProvider),
+                empty_provider_commands(),
+            )
             .await;
         engine
-            .handle_user_message("second".to_string(), &provider)
+            .handle_user_message(
+                "second".to_string(),
+                Arc::new(FakeStreamingProvider),
+                empty_provider_commands(),
+            )
             .await;
 
         assert_eq!(engine.session().messages.len(), 4);
@@ -732,25 +846,44 @@ mod tests {
 
     #[async_trait::async_trait]
     impl StreamingProviderAdapter for RecordingStreamingProvider {
-        async fn run_streaming(
+        async fn start(
             &self,
-            input: &AdapterInput,
+            input: StreamingProviderInput,
             _cancel: CancellationToken,
-        ) -> Result<
-            mpsc::Receiver<StreamChunk>,
-            crate::cross_cutting::provider_adapter::ProviderAdapterError,
-        > {
+        ) -> Result<ProviderSession, ProviderAdapterError> {
             *self.provider_type.lock().unwrap() = Some(input.provider_type.clone());
-            let (tx, rx) = mpsc::channel(8);
+            let (event_tx, event_rx) = mpsc::channel(8);
+            let (command_tx, _command_rx) = mpsc::channel(8);
             tokio::spawn(async move {
-                let _ = tx.send(StreamChunk::Text("# Draft".to_string())).await;
-                let _ = tx
-                    .send(StreamChunk::Done {
+                let _ = event_tx
+                    .send(ProviderEvent::TextDelta {
+                        content: "# Draft".to_string(),
+                    })
+                    .await;
+                let _ = event_tx
+                    .send(ProviderEvent::Completed {
                         full_output: "# Draft".to_string(),
+                        provider_session_id: None,
                     })
                     .await;
             });
-            Ok(rx)
+            Ok(ProviderSession {
+                events: event_rx,
+                commands: command_tx,
+            })
+        }
+
+        async fn run_streaming(
+            &self,
+            _input: &AdapterInput,
+            _cancel: CancellationToken,
+        ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+            Err(ProviderAdapterError::execution_failed(
+                None,
+                String::new(),
+                "run_streaming is not used by WorkspaceEngine",
+                0,
+            ))
         }
     }
 
@@ -767,7 +900,11 @@ mod tests {
         };
 
         engine
-            .handle_user_message("start".to_string(), &provider)
+            .handle_user_message(
+                "start".to_string(),
+                Arc::new(provider),
+                empty_provider_commands(),
+            )
             .await;
 
         assert_eq!(*provider_type.lock().unwrap(), Some(ProviderType::Codex));
@@ -804,10 +941,12 @@ mod tests {
         let mut session = make_session("sess_007");
         session.stage = WorkspaceStage::HumanConfirm;
         let mut engine = WorkspaceEngine::new(store, tx, session);
-        let provider = FakeStreamingProvider;
-
         engine
-            .handle_user_message("revise".to_string(), &provider)
+            .handle_user_message(
+                "revise".to_string(),
+                Arc::new(FakeStreamingProvider),
+                empty_provider_commands(),
+            )
             .await;
 
         let mut saw_running = false;
@@ -827,21 +966,37 @@ mod tests {
 
     #[async_trait::async_trait]
     impl StreamingProviderAdapter for ErrorStreamingProvider {
+        async fn start(
+            &self,
+            _input: StreamingProviderInput,
+            _cancel: CancellationToken,
+        ) -> Result<ProviderSession, ProviderAdapterError> {
+            let (event_tx, event_rx) = mpsc::channel(8);
+            let (command_tx, _command_rx) = mpsc::channel(8);
+            tokio::spawn(async move {
+                let _ = event_tx
+                    .send(ProviderEvent::Failed {
+                        message: "provider unavailable".to_string(),
+                    })
+                    .await;
+            });
+            Ok(ProviderSession {
+                events: event_rx,
+                commands: command_tx,
+            })
+        }
+
         async fn run_streaming(
             &self,
             _input: &AdapterInput,
             _cancel: CancellationToken,
-        ) -> Result<
-            mpsc::Receiver<StreamChunk>,
-            crate::cross_cutting::provider_adapter::ProviderAdapterError,
-        > {
-            let (tx, rx) = mpsc::channel(8);
-            tokio::spawn(async move {
-                let _ = tx
-                    .send(StreamChunk::Error("provider unavailable".to_string()))
-                    .await;
-            });
-            Ok(rx)
+        ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+            Err(ProviderAdapterError::execution_failed(
+                None,
+                String::new(),
+                "run_streaming is not used by WorkspaceEngine",
+                0,
+            ))
         }
     }
 
@@ -853,7 +1008,11 @@ mod tests {
         let mut engine = WorkspaceEngine::new(store, tx, session);
 
         engine
-            .handle_user_message("start".to_string(), &ErrorStreamingProvider)
+            .handle_user_message(
+                "start".to_string(),
+                Arc::new(ErrorStreamingProvider),
+                empty_provider_commands(),
+            )
             .await;
 
         let mut saw_error = false;
