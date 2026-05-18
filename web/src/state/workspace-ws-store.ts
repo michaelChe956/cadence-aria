@@ -60,6 +60,7 @@ export interface WorkspaceWsState {
   sessionId: string | null;
   workspaceType: string | null;
   stage: string;
+  visitedStages: string[];
   messages: WsMessage[];
   checkpoints: WsCheckpoint[];
   artifact: string | null;
@@ -101,6 +102,7 @@ const initialState: WorkspaceWsState = {
   sessionId: null,
   workspaceType: null,
   stage: "prepare_context",
+  visitedStages: ["prepare_context"],
   messages: [],
   checkpoints: [],
   artifact: null,
@@ -121,6 +123,7 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
       sessionId: state.session_id,
       workspaceType: state.workspace_type,
       stage: state.stage,
+      visitedStages: visitedStagesFor(state.stage),
       messages: state.messages,
       checkpoints: state.checkpoints,
       artifact: state.artifact,
@@ -162,6 +165,7 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
   setStage: (stage) =>
     set((prev) => ({
       stage,
+      visitedStages: mergeVisitedStages(prev.visitedStages, stage),
       streamingContent:
         stage === "running" || stage === "cross_review" ? prev.streamingContent : "",
     })),
@@ -206,3 +210,23 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
 
   reset: () => set(initialState),
 }));
+
+const STAGE_ORDER = [
+  "prepare_context",
+  "running",
+  "cross_review",
+  "human_confirm",
+  "completed",
+];
+
+function visitedStagesFor(stage: string) {
+  const index = STAGE_ORDER.indexOf(stage);
+  if (index === -1) {
+    return [stage];
+  }
+  return STAGE_ORDER.slice(0, index + 1);
+}
+
+function mergeVisitedStages(current: string[], stage: string) {
+  return Array.from(new Set([...current, ...visitedStagesFor(stage)]));
+}

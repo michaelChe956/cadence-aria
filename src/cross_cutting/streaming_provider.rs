@@ -237,22 +237,17 @@ impl StreamingProviderAdapter for FakeStreamingProvider {
     ) -> Result<ProviderSession, ProviderAdapterError> {
         let (event_tx, event_rx) = mpsc::channel(32);
         let (command_tx, mut command_rx) = mpsc::channel(8);
-        let prompt = input.prompt;
+        let output = fake_workspace_markdown(&input.prompt);
 
         tokio::spawn(async move {
-            let words: Vec<&str> = prompt.split_whitespace().collect();
+            let chunks = fake_stream_chunks(&output);
             let mut commands_open = true;
 
-            for (i, word) in words.iter().enumerate() {
+            for content in chunks {
                 if fake_streaming_should_stop(&cancel, &mut command_rx, &mut commands_open).await {
                     return;
                 }
 
-                let content = if i == 0 {
-                    word.to_string()
-                } else {
-                    format!(" {word}")
-                };
                 if !fake_streaming_send_event(
                     &event_tx,
                     ProviderEvent::TextDelta { content },
@@ -272,7 +267,7 @@ impl StreamingProviderAdapter for FakeStreamingProvider {
             let _ = fake_streaming_send_event(
                 &event_tx,
                 ProviderEvent::Completed {
-                    full_output: prompt,
+                    full_output: output,
                     provider_session_id: None,
                 },
                 &cancel,
@@ -351,6 +346,117 @@ impl StreamingProviderAdapter for FakeStreamingProvider {
     }
 }
 
+fn fake_workspace_markdown(prompt: &str) -> String {
+    let issue = extract_prompt_field(prompt, "Issue")
+        .or_else(|| extract_prompt_field(prompt, "Issue 描述"))
+        .unwrap_or_else(|| "当前 Issue".to_string());
+    let user_intent = latest_user_message(prompt)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "开始生成".to_string());
+
+    if prompt.contains("Workspace 类型: Design Spec") {
+        return format!(
+            "# Design Spec\n\n\
+             ## 设计范围\n\n\
+             面向 {issue} 生成候选设计，响应用户指令：{user_intent}。\n\n\
+             ## 关键决策\n\n\
+             [DEC-001] 采用最小可验证实现，保持实现与测试边界清晰。\n\n\
+             ## 组件/API/数据模型\n\n\
+             [CMP-001] 在现有代码结构中增加必要模块，不引入无关依赖。\n\n\
+             ## 风险\n\n\
+             [RISK-001] 需求边界不完整时，在待确认项中保留人工确认入口。\n\n\
+             ## 追踪关系\n\n\
+             - 覆盖关联 Story Spec 与 Issue 约束。"
+        );
+    }
+
+    if prompt.contains("Workspace 类型: Work Item") {
+        return format!(
+            "# Work Item\n\n\
+             ## 目标\n\n\
+             为 {issue} 拆分可执行任务，响应用户指令：{user_intent}。\n\n\
+             ## 范围\n\n\
+             覆盖实现、测试与验证命令。\n\n\
+             ## 任务拆分\n\n\
+             [TASK-001] 实现核心逻辑。\n\
+             [TASK-002] 补充自动化测试。\n\n\
+             ## 依赖\n\n\
+             依赖已确认 Story Spec 与 Design Spec。\n\n\
+             ## 验证命令\n\n\
+             - 运行项目现有测试命令。\n\n\
+             ## 风险\n\n\
+             输入约束变化时需重新确认计划。\n\n\
+             ## 追踪关系\n\n\
+             - 绑定来源 Story/Design。"
+        );
+    }
+
+    format!(
+        "# Story Spec\n\n\
+         ## 范围\n\n\
+         覆盖 {issue} 的候选 Story Spec，响应用户指令：{user_intent}。\n\n\
+         ## 用户故事\n\n\
+         作为使用者，我希望系统能清晰解决该问题并提供可运行验证。\n\n\
+         ## 功能需求\n\n\
+         [REQ-001] 程序必须计算爬到第 n 步的走法数量，每次可走 1 或 2 步。\n\
+         [REQ-002] 实现必须保持 O(n) 时间复杂度，并包含自动化测试用例。\n\n\
+         ## 成功标准\n\n\
+         [AC-001] n=1、n=2、n=3 等基础输入返回正确走法数量。\n\
+         [AC-002] 测试覆盖边界输入和常规输入。\n\n\
+         ## 待确认项\n\n\
+         无。\n\n\
+         ## 非功能需求\n\n\
+         [NFR-001] 代码应保持可读、无额外运行时依赖。\n\n\
+         ## 输入摘要\n\n\
+         {user_intent}"
+    )
+}
+
+fn extract_prompt_field(prompt: &str, field: &str) -> Option<String> {
+    let prefix = format!("{field}:");
+    prompt
+        .lines()
+        .find_map(|line| line.trim().strip_prefix(&prefix).map(str::trim))
+        .filter(|value| !value.is_empty())
+        .map(|value| value.split(" (").next().unwrap_or(value).trim().to_string())
+}
+
+fn latest_user_message(prompt: &str) -> Option<String> {
+    prompt
+        .lines()
+        .rev()
+        .find_map(|line| line.trim().strip_prefix("[user]:").map(str::trim))
+        .map(ToString::to_string)
+}
+
+fn fake_stream_chunks(output: &str) -> Vec<String> {
+    const MAX_PARTS_PER_CHUNK: usize = 16;
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    let mut part_count = 0usize;
+    let mut current_is_whitespace = None;
+
+    for ch in output.chars() {
+        let is_whitespace = ch.is_whitespace();
+        if current_is_whitespace.is_some_and(|previous| previous != is_whitespace)
+            && !current.is_empty()
+        {
+            part_count += 1;
+            if part_count >= MAX_PARTS_PER_CHUNK && !is_whitespace {
+                chunks.push(std::mem::take(&mut current));
+                part_count = 0;
+            }
+        }
+        current_is_whitespace = Some(is_whitespace);
+        current.push(ch);
+    }
+
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -418,16 +524,16 @@ mod tests {
     async fn fake_streaming_provider_emits_chunks_then_done() {
         let provider = FakeStreamingProvider;
         let cancel = CancellationToken::new();
-        let input = make_input("hello world foo");
+        let input = make_input("Workspace 类型: Story Spec\nIssue: 爬楼梯问题\n[user]: 开始生成");
 
         let mut rx = provider.run_streaming(&input, cancel).await.unwrap();
 
-        let mut texts = Vec::new();
+        let mut output = String::new();
         let mut done_output = None;
 
         while let Some(chunk) = rx.recv().await {
             match chunk {
-                StreamChunk::Text(t) => texts.push(t),
+                StreamChunk::Text(t) => output.push_str(&t),
                 StreamChunk::Done { full_output } => {
                     done_output = Some(full_output);
                     break;
@@ -436,15 +542,29 @@ mod tests {
             }
         }
 
-        assert_eq!(texts, vec!["hello", " world", " foo"]);
-        assert_eq!(done_output.unwrap(), "hello world foo");
+        let done_output = done_output.unwrap();
+        assert_eq!(output, done_output);
+        assert!(done_output.contains("## 范围"));
+        assert!(done_output.contains("## 用户故事"));
+        assert!(done_output.contains("## 功能需求"));
+        assert!(done_output.contains("[REQ-001]"));
+        assert!(done_output.contains("## 成功标准"));
+        assert!(done_output.contains("[AC-001]"));
+        assert!(done_output.contains("## 待确认项"));
+        assert!(done_output.contains("## 非功能需求"));
+        assert!(
+            !done_output.contains("[system]"),
+            "fake provider should generate a candidate artifact instead of echoing full prompt"
+        );
     }
 
     #[tokio::test]
     async fn fake_streaming_provider_session_emits_text_and_completed() {
         let provider = FakeStreamingProvider;
         let cancel = CancellationToken::new();
-        let input = make_provider_input("hello real stream");
+        let input = make_provider_input(
+            "[system]\nWorkspace 类型: Story Spec\nIssue: 爬楼梯问题\n[user]: 开始生成",
+        );
 
         let mut session = provider.start(input, cancel).await.unwrap();
         let mut output = String::new();
@@ -452,29 +572,27 @@ mod tests {
             match event {
                 ProviderEvent::TextDelta { content } => output.push_str(&content),
                 ProviderEvent::Completed { full_output, .. } => {
-                    assert_eq!(full_output, "hello real stream");
+                    assert_eq!(full_output, output);
                     break;
                 }
                 other => panic!("unexpected provider event: {other:?}"),
             }
         }
-        assert_eq!(output, "hello real stream");
+        assert!(output.contains("## 范围"));
+        assert!(output.contains("[REQ-001]"));
+        assert!(output.contains("[AC-001]"));
+        assert!(!output.contains("[system]"));
     }
 
     #[tokio::test]
     async fn fake_streaming_provider_abort_after_final_text_suppresses_completed() {
         let provider = FakeStreamingProvider;
         let cancel = CancellationToken::new();
-        let input = make_provider_input("final");
+        let input = make_provider_input("Issue: final");
 
         let mut session = provider.start(input, cancel).await.unwrap();
         let first = session.events.recv().await.unwrap();
-        assert_eq!(
-            first,
-            ProviderEvent::TextDelta {
-                content: "final".to_string()
-            }
-        );
+        assert!(matches!(first, ProviderEvent::TextDelta { .. }));
 
         let _ = session.commands.send(ProviderCommand::Abort).await;
 
@@ -482,12 +600,8 @@ mod tests {
             .await
             .expect("provider should close after abort")
         {
-            assert_ne!(
-                event,
-                ProviderEvent::Completed {
-                    full_output: "final".to_string(),
-                    provider_session_id: None,
-                },
+            assert!(
+                !matches!(event, ProviderEvent::Completed { .. }),
                 "abort after the final text delta should suppress completion"
             );
         }
@@ -503,7 +617,7 @@ mod tests {
             .await
             .unwrap();
 
-        wait_for_buffer_len(&session.events, 32).await;
+        wait_for_buffer_len(&session.events, 6).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
         cancel.cancel();
 
@@ -526,7 +640,7 @@ mod tests {
             .await
             .unwrap();
 
-        wait_for_buffer_len(&rx, 32).await;
+        wait_for_buffer_len(&rx, 6).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
         cancel.cancel();
 

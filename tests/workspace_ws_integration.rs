@@ -245,9 +245,14 @@ async fn workspace_ws_streams_persistent_session_and_confirms_lifecycle_entity()
     }
 
     assert!(stream_chunks.contains("Story Spec"));
-    assert!(stream_chunks.contains("using-superpowers"));
-    assert!(stream_chunks.contains("OpenSpec"));
+    assert!(stream_chunks.contains("## 范围"));
+    assert!(stream_chunks.contains("## 功能需求"));
     assert!(stream_chunks.contains("REQ-001"));
+    assert!(stream_chunks.contains("AC-001"));
+    assert!(
+        !stream_chunks.contains("[system]"),
+        "workspace output should be generated artifact markdown, not the raw prompt"
+    );
     assert!(saw_artifact);
     assert!(checkpoint_id.is_some());
     assert!(saw_human_confirm);
@@ -261,6 +266,20 @@ async fn workspace_ws_streams_persistent_session_and_confirms_lifecycle_entity()
     assert_eq!(
         lifecycle["story_specs"][0]["confirmation_status"],
         "confirmed"
+    );
+    assert_eq!(lifecycle["story_specs"][0]["current_version"], 1);
+    let version_path = root.path().join(
+        ".aria/projects/project_0001/issues/issue_0001/versions/story_spec_0001/version_0001.json",
+    );
+    let version: Value =
+        serde_json::from_str(&fs::read_to_string(version_path).expect("story version file"))
+            .expect("story version json");
+    assert_eq!(version["version"], 1);
+    assert!(
+        version["markdown"]
+            .as_str()
+            .expect("version markdown")
+            .contains("Story Spec")
     );
 
     drop(ws);

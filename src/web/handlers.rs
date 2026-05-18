@@ -18,8 +18,8 @@ use crate::product::gate_store::GateStore;
 use crate::product::issue_store::{CreateProductIssueWithRepositoryInput, IssueStore};
 use crate::product::json_store::{ProductStoreError, validate_relative_id};
 use crate::product::lifecycle_store::{
-    CreateDesignSpecInput, CreateStorySpecInput, CreateWorkItemInput, CreateWorkspaceSessionInput,
-    LifecycleStore,
+    AppendSpecVersionInput, CreateDesignSpecInput, CreateStorySpecInput, CreateWorkItemInput,
+    CreateWorkspaceSessionInput, LifecycleStore,
 };
 use crate::product::models::{
     DesignKind, DesignSpecRecord, GateStatus, IssuePhase as ProductIssuePhase,
@@ -300,27 +300,29 @@ pub async fn issue_lifecycle(
         .get(&project_id, &issue_id)
         .map_err(product_store_api_error)?;
     let lifecycle = LifecycleStore::new(app_paths.clone());
+    backfill_legacy_spec_versions(&lifecycle, &project_id, &issue_id)?;
+    let workspace_sessions = lifecycle
+        .list_workspace_sessions(&project_id, &issue_id)
+        .map_err(product_store_api_error)?;
     let story_specs = lifecycle
         .list_story_specs(&project_id, &issue_id)
         .map_err(product_store_api_error)?
         .into_iter()
-        .map(story_spec_dto)
-        .collect();
+        .map(|story| story_spec_dto(&lifecycle, &story))
+        .collect::<ApiResult<Vec<_>>>()?;
     let design_specs = lifecycle
         .list_design_specs(&project_id, &issue_id)
         .map_err(product_store_api_error)?
         .into_iter()
-        .map(design_spec_dto)
-        .collect();
+        .map(|design| design_spec_dto(&lifecycle, &design))
+        .collect::<ApiResult<Vec<_>>>()?;
     let work_items = lifecycle
         .list_work_items(&project_id, &issue_id)
         .map_err(product_store_api_error)?
         .into_iter()
         .map(lifecycle_work_item_dto)
         .collect();
-    let workspace_sessions = lifecycle
-        .list_workspace_sessions(&project_id, &issue_id)
-        .map_err(product_store_api_error)?
+    let workspace_sessions = workspace_sessions
         .into_iter()
         .map(workspace_session_dto)
         .collect();
@@ -381,7 +383,7 @@ pub async fn generate_story_specs(
         .map_err(product_store_api_error)?;
 
     Ok(Json(GenerateStorySpecsResponse {
-        story_specs: vec![story_spec_dto(story)],
+        story_specs: vec![story_spec_dto(&lifecycle, &story)?],
         workspace_session: workspace_session_dto(session),
     }))
 }
@@ -431,7 +433,7 @@ pub async fn generate_design_specs(
         .map_err(product_store_api_error)?;
 
     Ok(Json(GenerateDesignSpecsResponse {
-        design_specs: vec![design_spec_dto(design)],
+        design_specs: vec![design_spec_dto(&lifecycle, &design)?],
         workspace_session: workspace_session_dto(session),
     }))
 }
@@ -1279,29 +1281,189 @@ fn product_issue_dto(
     }
 }
 
-fn story_spec_dto(record: StorySpecRecord) -> StorySpecDto {
-    StorySpecDto {
-        story_spec_id: record.id,
-        issue_id: record.issue_id,
-        repository_id: record.repository_id,
-        title: record.title,
+fn backfill_legacy_spec_versions(
+    lifecycle: &LifecycleStore,
+    project_id: &str,
+    issue_id: &str,
+) -> ApiResult<()> {
+    let sessions = lifecycle
+        .list_workspace_sessions(project_id, issue_id)
+        .map_err(product_store_api_error)?;
+    for story in lifecycle
+        .list_story_specs(project_id, issue_id)
+        .map_err(product_store_api_error)?
+        .into_iter()
+        .filter(|story| story.current_version.is_none())
+    {
+        if lifecycle
+            .list_versions(project_id, issue_id, &story.id)
+            .map_err(product_store_api_error)?
+            .is_empty()
+            && let Some(markdown) =
+                latest_workspace_artifact_markdown(&sessions, WorkspaceType::Story, &story.id)
+        {
+            lifecycle
+                .append_version(AppendSpecVersionInput {
+                    project_id: project_id.to_string(),
+                    issue_id: issue_id.to_string(),
+                    entity_id: story.id,
+                    markdown,
+                    provider_run_refs: Vec::new(),
+                    review_refs: Vec::new(),
+                    confirmed_by: None,
+                })
+                .map_err(product_store_api_error)?;
+        }
+    }
+
+    for design in lifecycle
+        .list_design_specs(project_id, issue_id)
+        .map_err(product_store_api_error)?
+        .into_iter()
+        .filter(|design| design.current_version.is_none())
+    {
+        if lifecycle
+            .list_versions(project_id, issue_id, &design.id)
+            .map_err(product_store_api_error)?
+            .is_empty()
+            && let Some(markdown) =
+                latest_workspace_artifact_markdown(&sessions, WorkspaceType::Design, &design.id)
+        {
+            lifecycle
+                .append_version(AppendSpecVersionInput {
+                    project_id: project_id.to_string(),
+                    issue_id: issue_id.to_string(),
+                    entity_id: design.id,
+                    markdown,
+                    provider_run_refs: Vec::new(),
+                    review_refs: Vec::new(),
+                    confirmed_by: None,
+                })
+                .map_err(product_store_api_error)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn latest_workspace_artifact_markdown(
+    sessions: &[WorkspaceSessionRecord],
+    workspace_type: WorkspaceType,
+    entity_id: &str,
+) -> Option<String> {
+    sessions
+        .iter()
+        .filter(|session| {
+            session.workspace_type == workspace_type && session.entity_id == entity_id
+        })
+        .flat_map(|session| session.messages.iter())
+        .rev()
+        .find(|message| matches!(message.role.as_str(), "assistant" | "provider"))
+        .map(|message| message.content.clone())
+        .filter(|content| !content.trim().is_empty())
+}
+
+fn story_spec_dto(lifecycle: &LifecycleStore, record: &StorySpecRecord) -> ApiResult<StorySpecDto> {
+    Ok(StorySpecDto {
+        story_spec_id: record.id.clone(),
+        issue_id: record.issue_id.clone(),
+        repository_id: record.repository_id.clone(),
+        title: record.title.clone(),
         current_version: record.current_version,
+        current_markdown_preview: current_markdown_preview(lifecycle, record)?,
         confirmation_status: lifecycle_confirmation_status_text(&record.confirmation_status)
             .to_string(),
+    })
+}
+
+fn design_spec_dto(
+    lifecycle: &LifecycleStore,
+    record: &DesignSpecRecord,
+) -> ApiResult<DesignSpecDto> {
+    Ok(DesignSpecDto {
+        design_spec_id: record.id.clone(),
+        issue_id: record.issue_id.clone(),
+        story_spec_ids: record.story_spec_ids.clone(),
+        design_kind: design_kind_text(&record.design_kind).to_string(),
+        title: record.title.clone(),
+        current_version: record.current_version,
+        current_markdown_preview: current_markdown_preview(lifecycle, record)?,
+        confirmation_status: lifecycle_confirmation_status_text(&record.confirmation_status)
+            .to_string(),
+    })
+}
+
+trait SpecDtoSource {
+    fn project_id(&self) -> &str;
+    fn issue_id(&self) -> &str;
+    fn entity_id(&self) -> &str;
+    fn current_version(&self) -> Option<u32>;
+}
+
+impl SpecDtoSource for StorySpecRecord {
+    fn project_id(&self) -> &str {
+        &self.project_id
+    }
+
+    fn issue_id(&self) -> &str {
+        &self.issue_id
+    }
+
+    fn entity_id(&self) -> &str {
+        &self.id
+    }
+
+    fn current_version(&self) -> Option<u32> {
+        self.current_version
     }
 }
 
-fn design_spec_dto(record: DesignSpecRecord) -> DesignSpecDto {
-    DesignSpecDto {
-        design_spec_id: record.id,
-        issue_id: record.issue_id,
-        story_spec_ids: record.story_spec_ids,
-        design_kind: design_kind_text(&record.design_kind).to_string(),
-        title: record.title,
-        current_version: record.current_version,
-        confirmation_status: lifecycle_confirmation_status_text(&record.confirmation_status)
-            .to_string(),
+impl SpecDtoSource for DesignSpecRecord {
+    fn project_id(&self) -> &str {
+        &self.project_id
     }
+
+    fn issue_id(&self) -> &str {
+        &self.issue_id
+    }
+
+    fn entity_id(&self) -> &str {
+        &self.id
+    }
+
+    fn current_version(&self) -> Option<u32> {
+        self.current_version
+    }
+}
+
+fn current_markdown_preview(
+    lifecycle: &LifecycleStore,
+    record: &impl SpecDtoSource,
+) -> ApiResult<Option<String>> {
+    let Some(current_version) = record.current_version() else {
+        return Ok(None);
+    };
+    let versions = lifecycle
+        .list_versions(record.project_id(), record.issue_id(), record.entity_id())
+        .map_err(product_store_api_error)?;
+    Ok(versions
+        .into_iter()
+        .find(|version| version.version == current_version)
+        .map(|version| markdown_preview(&version.markdown)))
+}
+
+fn markdown_preview(markdown: &str) -> String {
+    let preview = markdown
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    const MAX_PREVIEW_CHARS: usize = 240;
+    if preview.chars().count() <= MAX_PREVIEW_CHARS {
+        return preview;
+    }
+    preview.chars().take(MAX_PREVIEW_CHARS).collect()
 }
 
 fn lifecycle_work_item_dto(record: LifecycleWorkItemRecord) -> LifecycleWorkItemDto {

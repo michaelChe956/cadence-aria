@@ -372,6 +372,7 @@ pub struct StorySpecDto {
     pub repository_id: String,
     pub title: String,
     pub current_version: Option<u32>,
+    pub current_markdown_preview: Option<String>,
     pub confirmation_status: String,
 }
 
@@ -384,6 +385,7 @@ pub struct DesignSpecDto {
     pub design_kind: String,
     pub title: String,
     pub current_version: Option<u32>,
+    pub current_markdown_preview: Option<String>,
     pub confirmation_status: String,
 }
 

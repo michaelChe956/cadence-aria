@@ -88,6 +88,7 @@ export type StorySpec = {
   repository_id: string;
   title: string;
   current_version: number | null;
+  current_markdown_preview: string | null;
   confirmation_status: LifecycleConfirmationStatus;
 };
 
@@ -98,6 +99,7 @@ export type DesignSpec = {
   design_kind: "frontend" | "backend";
   title: string;
   current_version: number | null;
+  current_markdown_preview: string | null;
   confirmation_status: LifecycleConfirmationStatus;
 };
 

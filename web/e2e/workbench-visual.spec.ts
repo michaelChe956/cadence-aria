@@ -22,7 +22,7 @@ test("lifecycle and workspace surfaces stay compact across desktop and mobile", 
   await expect(page.getByText("AI Coding Workbench")).toHaveCount(0);
   await expectNoHorizontalOverflow(page);
 
-  await page.getByRole("button", { name: seeded.storyTitle }).click();
+  await page.getByRole("button", { name: `打开 Workspace ${seeded.storyTitle}` }).click();
   await expect(page.getByText("Story Spec").first()).toBeVisible();
   await expect(page.getByText("Author: fake | Reviewer: codex")).toBeVisible();
   await expect(page.getByText("AI Coding Workbench")).toHaveCount(0);

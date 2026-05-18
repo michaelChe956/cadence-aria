@@ -13,6 +13,8 @@ export type LifecycleCard =
       issueId: string;
       title: string;
       status: string;
+      version: number | null;
+      preview: string | null;
       sourceIds: string[];
       raw: ProductIssue;
     }
@@ -22,6 +24,8 @@ export type LifecycleCard =
       issueId: string;
       title: string;
       status: string;
+      version: number | null;
+      preview: string | null;
       sourceIds: string[];
       raw: StorySpec;
     }
@@ -31,6 +35,8 @@ export type LifecycleCard =
       issueId: string;
       title: string;
       status: string;
+      version: number | null;
+      preview: string | null;
       sourceIds: string[];
       raw: DesignSpec;
     }
@@ -40,6 +46,8 @@ export type LifecycleCard =
       issueId: string;
       title: string;
       status: string;
+      version: number | null;
+      preview: string | null;
       sourceIds: string[];
       raw: LifecycleWorkItem;
     };
@@ -62,6 +70,8 @@ export function groupLifecycleCards(lifecycles: IssueLifecycleResponse[]): Lifec
         issueId: lifecycle.issue.issue_id,
         title: lifecycle.issue.title,
         status: lifecycle.issue.status,
+        version: null,
+        preview: lifecycle.issue.description,
         sourceIds: [],
         raw: lifecycle.issue,
       });
@@ -73,6 +83,8 @@ export function groupLifecycleCards(lifecycles: IssueLifecycleResponse[]): Lifec
           issueId: story.issue_id,
           title: story.title,
           status: story.confirmation_status,
+          version: story.current_version,
+          preview: story.current_markdown_preview,
           sourceIds: [story.issue_id],
           raw: story,
         });
@@ -85,6 +97,8 @@ export function groupLifecycleCards(lifecycles: IssueLifecycleResponse[]): Lifec
           issueId: design.issue_id,
           title: design.title,
           status: design.confirmation_status,
+          version: design.current_version,
+          preview: design.current_markdown_preview,
           sourceIds: [...design.story_spec_ids],
           raw: design,
         });
@@ -97,6 +111,8 @@ export function groupLifecycleCards(lifecycles: IssueLifecycleResponse[]): Lifec
           issueId: item.issue_id,
           title: item.title,
           status: item.execution_status,
+          version: null,
+          preview: null,
           sourceIds: [...item.story_spec_ids, ...item.design_spec_ids],
           raw: item,
         });

@@ -154,9 +154,10 @@ export function IssueLifecycleWorkbench({
     setSelectedCardKey(lifecycleCardKey(card));
     if (card.kind === "issue") {
       setFocusedIssueId(card.issueId);
-      return;
     }
+  }
 
+  function handleOpenWorkspace(card: LifecycleCardData) {
     const session = findWorkspaceSession(lifecycles, card);
     if (!session) {
       setError("缺少 Workspace Session");
@@ -363,6 +364,7 @@ export function IssueLifecycleWorkbench({
                 cards={columns.issue}
                 selectedKey={selectedCardKey}
                 onSelect={handleSelectCard}
+                onOpenWorkspace={handleOpenWorkspace}
                 onDeleteIssue={(issueId) => void handleDeleteIssue(issueId)}
               />
               <LifecycleColumn
@@ -371,6 +373,7 @@ export function IssueLifecycleWorkbench({
                 cards={columns.story_spec}
                 selectedKey={selectedCardKey}
                 onSelect={handleSelectCard}
+                onOpenWorkspace={handleOpenWorkspace}
               />
               <LifecycleColumn
                 title="Design Spec"
@@ -378,6 +381,7 @@ export function IssueLifecycleWorkbench({
                 cards={columns.design_spec}
                 selectedKey={selectedCardKey}
                 onSelect={handleSelectCard}
+                onOpenWorkspace={handleOpenWorkspace}
               />
               <LifecycleColumn
                 title="Work Item"
@@ -385,6 +389,7 @@ export function IssueLifecycleWorkbench({
                 cards={columns.work_item}
                 selectedKey={selectedCardKey}
                 onSelect={handleSelectCard}
+                onOpenWorkspace={handleOpenWorkspace}
               />
             </div>
           }

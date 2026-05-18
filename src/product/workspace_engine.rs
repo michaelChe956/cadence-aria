@@ -11,7 +11,7 @@ use crate::cross_cutting::streaming_provider::{
     RiskLevel, StreamingProviderAdapter, StreamingProviderInput,
 };
 use crate::product::checkpoint_store::CheckpointStore;
-use crate::product::lifecycle_store::LifecycleStore;
+use crate::product::lifecycle_store::{AppendSpecVersionInput, LifecycleStore};
 use crate::product::models::{
     LifecycleConfirmationStatus, ProviderName, WorkItemPlanStatus, WorkspaceMessageRecord,
     WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType,
@@ -421,6 +421,20 @@ impl WorkspaceEngine {
                 "assistant".to_string(),
                 full_content.clone(),
             );
+            if matches!(
+                self.session.workspace_type,
+                WorkspaceType::Story | WorkspaceType::Design
+            ) {
+                let _ = store.append_version(AppendSpecVersionInput {
+                    project_id: self.session.project_id.clone(),
+                    issue_id: self.session.issue_id.clone(),
+                    entity_id: self.session.entity_id.clone(),
+                    markdown: full_content.clone(),
+                    provider_run_refs: Vec::new(),
+                    review_refs: Vec::new(),
+                    confirmed_by: None,
+                });
+            }
         }
         let artifact_markdown = self
             .session

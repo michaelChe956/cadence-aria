@@ -166,6 +166,20 @@ describe("useWorkspaceWs", () => {
     expect(useWorkspaceStore.getState().pendingPermissions).toHaveLength(0);
   });
 
+  it("sends a default start generation message when connected", () => {
+    const harness = renderWorkspaceHook();
+
+    act(() => {
+      harness.ws.open();
+      harness.api.startGeneration();
+    });
+
+    expect(harness.ws.sent).toEqual([
+      JSON.stringify({ type: "user_message", content: "开始生成" }),
+    ]);
+    expect(useWorkspaceStore.getState().messages.at(-1)?.content).toBe("开始生成");
+  });
+
   it("keeps pending permission requests when the socket is not open", () => {
     const harness = renderWorkspaceHook();
     useWorkspaceStore.getState().addPermissionRequest({

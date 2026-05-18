@@ -293,17 +293,51 @@ describe("IssueLifecycleWorkbench", () => {
 
     render(<IssueLifecycleWorkbench onOpenWorkspace={onOpenWorkspace} />);
 
-    await user.click(await screen.findByRole("button", { name: "会话过期提示" }));
+    await screen.findByRole("button", { name: "会话过期提示" });
+    await user.click(screen.getByRole("button", { name: "打开 Workspace 会话过期提示" }));
 
     expect(onOpenWorkspace).toHaveBeenCalledWith("workspace_session_story_0001");
 
-    await user.click(screen.getByRole("button", { name: "实现提示组件" }));
+    await user.click(screen.getByRole("button", { name: "打开 Workspace 实现提示组件" }));
 
     expect(onOpenWorkspace).toHaveBeenLastCalledWith("workspace_session_work_item_0001");
     expect(fetchMock).not.toHaveBeenCalledWith(
       expect.stringMatching(/^\/api\/workspace-sessions\/.+\/(?:run-next|message|confirm)$/),
       expect.anything(),
     );
+  });
+
+  it("selects confirmed story cards so downstream design generation is reachable", async () => {
+    const fetchMock = lifecycleFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    const onOpenWorkspace = vi.fn();
+
+    render(<IssueLifecycleWorkbench onOpenWorkspace={onOpenWorkspace} />);
+
+    await user.click(await screen.findByRole("button", { name: "会话过期提示" }));
+
+    expect(onOpenWorkspace).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "生成 Design Spec" })).toBeInTheDocument();
+  });
+
+  it("shows spec version badges on lifecycle cards when generated content exists", async () => {
+    vi.stubGlobal("fetch", lifecycleFetch());
+
+    render(<IssueLifecycleWorkbench />);
+
+    const storyColumn = await screen.findByRole("region", { name: "Story Spec 列" });
+
+    expect(storyColumn).toHaveTextContent("v1");
+  });
+
+  it("shows generated spec markdown previews on lifecycle cards", async () => {
+    vi.stubGlobal("fetch", lifecycleFetch());
+
+    render(<IssueLifecycleWorkbench />);
+
+    const storyColumn = await screen.findByRole("region", { name: "Story Spec 列" });
+    expect(storyColumn).toHaveTextContent("[REQ-001] 显示会话过期提示");
   });
 
   it("generates story design and work item workspaces then opens full screen sessions", async () => {
@@ -604,6 +638,7 @@ function lifecycleFetch(options?: {
         repository_id: "repository_0001",
         title: payload.title,
         current_version: null,
+        current_markdown_preview: null,
         confirmation_status: "confirmed",
       };
       const session = workspaceSessionRecord("story", "story_spec_0001", "workspace_session_story_0001", {
@@ -641,6 +676,7 @@ function lifecycleFetch(options?: {
         design_kind: payload.design_kind,
         title: payload.title,
         current_version: null,
+        current_markdown_preview: null,
         confirmation_status: "confirmed",
       };
       const session = workspaceSessionRecord(
@@ -937,6 +973,7 @@ function initialLifecycleData(
         repository_id: "repository_0001",
         title: duplicate ? "重复 ID Story" : "会话过期提示",
         current_version: 1,
+        current_markdown_preview: "## 功能需求\n\n[REQ-001] 显示会话过期提示。",
         confirmation_status: "confirmed",
       },
     ],
@@ -948,6 +985,7 @@ function initialLifecycleData(
         design_kind: "frontend",
         title: "前端提示设计",
         current_version: 1,
+        current_markdown_preview: "## 关键决策\n\n[DEC-001] 使用全局提示条。",
         confirmation_status: "confirmed",
       },
     ],

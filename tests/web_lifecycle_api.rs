@@ -510,6 +510,107 @@ async fn workspace_session_message_run_and_confirm_update_session_state() {
 }
 
 #[tokio::test]
+async fn issue_lifecycle_backfills_legacy_spec_versions_and_returns_markdown_preview() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects",
+        json!({"name":"Lifecycle","description":null}),
+    )
+    .await;
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/repositories",
+        json!({"name":"Repo","path":repo.path()}),
+    )
+    .await;
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues",
+        json!({"title":"爬楼梯问题","description":"写个 Python 程序解决爬楼梯","repository_id":"repository_0001"}),
+    )
+    .await;
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/story-specs:generate",
+        json!({"title":"爬楼梯问题 Story Spec"}),
+    )
+    .await;
+
+    let story_path = root
+        .path()
+        .join(".aria/projects/project_0001/issues/issue_0001/story-specs/story_spec_0001.json");
+    let mut story: Value =
+        serde_json::from_str(&fs::read_to_string(&story_path).expect("story file"))
+            .expect("story json");
+    story["current_version"] = Value::Null;
+    fs::write(
+        &story_path,
+        serde_json::to_string_pretty(&story).expect("story json text"),
+    )
+    .expect("write story");
+
+    let markdown = "## 范围\n\n覆盖爬楼梯问题。\n\n## 功能需求\n\n[REQ-001] 使用 O(n) 时间复杂度。";
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/workspace-sessions/workspace_session_0001/message",
+        json!({"role":"provider","content":markdown}),
+    )
+    .await;
+
+    let (status, lifecycle) = request_json(
+        app.clone(),
+        Method::GET,
+        "/api/issues/issue_0001/lifecycle?project_id=project_0001",
+        json!({}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(lifecycle["story_specs"][0]["current_version"], 1);
+    assert!(
+        lifecycle["story_specs"][0]["current_markdown_preview"]
+            .as_str()
+            .expect("markdown preview")
+            .contains("[REQ-001] 使用 O(n) 时间复杂度")
+    );
+
+    let version_path = root.path().join(
+        ".aria/projects/project_0001/issues/issue_0001/versions/story_spec_0001/version_0001.json",
+    );
+    let version: Value =
+        serde_json::from_str(&fs::read_to_string(version_path).expect("version file"))
+            .expect("version json");
+    assert_eq!(version["markdown"], markdown);
+
+    let (status, lifecycle_again) = request_json(
+        app,
+        Method::GET,
+        "/api/issues/issue_0001/lifecycle?project_id=project_0001",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(lifecycle_again["story_specs"][0]["current_version"], 1);
+    let versions_root = root
+        .path()
+        .join(".aria/projects/project_0001/issues/issue_0001/versions/story_spec_0001");
+    let version_count = fs::read_dir(versions_root).expect("versions root").count();
+    assert_eq!(version_count, 1);
+}
+
+#[tokio::test]
 async fn workspace_session_missing_message_and_run_next_return_not_found() {
     let root = tempdir().expect("root");
     let repo = git_repo();

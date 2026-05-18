@@ -24,6 +24,21 @@ describe("workspace ws store", () => {
     expect(useWorkspaceStore.getState().streamingContent).toBe("partial output");
   });
 
+  it("tracks stages visited by fast websocket transitions", () => {
+    const store = useWorkspaceStore.getState();
+
+    store.setStage("running");
+    store.setStage("cross_review");
+    store.setStage("human_confirm");
+
+    expect(useWorkspaceStore.getState().visitedStages).toEqual([
+      "prepare_context",
+      "running",
+      "cross_review",
+      "human_confirm",
+    ]);
+  });
+
   it("tracks and resolves pending permission requests", () => {
     const store = useWorkspaceStore.getState();
     store.addPermissionRequest({
@@ -140,7 +155,7 @@ describe("workspace ws store", () => {
     store.setSessionState({
       session_id: "session_002",
       workspace_type: "documentation",
-      stage: "prepare_context",
+      stage: "human_confirm",
       messages: [],
       checkpoints: [],
       artifact: null,
@@ -150,5 +165,11 @@ describe("workspace ws store", () => {
     expect(useWorkspaceStore.getState().pendingPermissions).toHaveLength(0);
     expect(useWorkspaceStore.getState().providerStatus).toBe("starting");
     expect(useWorkspaceStore.getState().executionEvents).toHaveLength(0);
+    expect(useWorkspaceStore.getState().visitedStages).toEqual([
+      "prepare_context",
+      "running",
+      "cross_review",
+      "human_confirm",
+    ]);
   });
 });

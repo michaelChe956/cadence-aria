@@ -7,6 +7,7 @@ export function LifecycleColumn({
   cards,
   selectedKey,
   onSelect,
+  onOpenWorkspace,
   onDeleteIssue,
 }: {
   title: string;
@@ -14,6 +15,7 @@ export function LifecycleColumn({
   cards: LifecycleCardData[];
   selectedKey: string | null;
   onSelect: (card: LifecycleCardData) => void;
+  onOpenWorkspace?: (card: LifecycleCardData) => void;
   onDeleteIssue?: (issueId: string) => void;
 }) {
   return (
@@ -35,6 +37,9 @@ export function LifecycleColumn({
               card={card}
               selected={selectedKey === `${card.kind}:${card.id}`}
               onSelect={() => onSelect(card)}
+              onOpenWorkspace={
+                card.kind === "issue" || !onOpenWorkspace ? undefined : () => onOpenWorkspace(card)
+              }
               onDeleteIssue={
                 card.kind === "issue" && onDeleteIssue ? () => onDeleteIssue(card.id) : undefined
               }

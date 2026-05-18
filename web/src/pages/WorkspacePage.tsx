@@ -65,6 +65,7 @@ export function WorkspacePage({
 }) {
   const {
     sendMessage,
+    startGeneration,
     rollback,
     confirm,
     abort,
@@ -84,6 +85,7 @@ export function WorkspacePage({
     pendingPermissions,
     providerStatus,
     executionEvents,
+    visitedStages,
   } = useWorkspaceStore();
 
   const [draft, setDraft] = useState("");
@@ -107,21 +109,22 @@ export function WorkspacePage({
 
   const isConnected = connectionStatus === "connected";
   const isCompleted = stage === "completed";
+  const canStartGeneration = stage === "prepare_context" && isConnected && !streamingContent;
 
   return (
-    <div className="flex h-screen flex-col bg-[var(--aria-bg)]">
+    <div className="flex h-screen min-w-0 flex-col overflow-hidden bg-[var(--aria-bg)]">
       {/* Top Bar */}
-      <header className="flex h-12 shrink-0 items-center justify-between border-b border-[var(--aria-line)] bg-[var(--aria-panel)] px-4">
-        <div className="flex items-center gap-3">
+      <header className="flex h-12 min-w-0 shrink-0 items-center justify-between gap-2 border-b border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 sm:px-4">
+        <div className="flex min-w-0 items-center gap-2 sm:gap-3">
           <button
             type="button"
             onClick={onBack}
-            className="inline-flex h-8 items-center gap-1 rounded-md px-2 text-sm text-[var(--aria-ink-muted)] hover:bg-[var(--aria-panel-muted)]"
+            className="inline-flex h-8 shrink-0 items-center gap-1 rounded-md px-2 text-sm text-[var(--aria-ink-muted)] hover:bg-[var(--aria-panel-muted)]"
           >
             <ArrowLeft className="h-4 w-4" />
-            返回
+            <span className="hidden sm:inline">返回</span>
           </button>
-          <span className="text-sm font-semibold text-[var(--aria-ink)]">
+          <span className="truncate text-sm font-semibold text-[var(--aria-ink)]">
             {workspaceType === "story"
               ? "Story Spec"
               : workspaceType === "design"
@@ -131,8 +134,8 @@ export function WorkspacePage({
                   : "Workspace"}
           </span>
         </div>
-        <div className="flex items-center gap-3">
-          <span className="rounded-full border border-[var(--aria-line)] px-2.5 py-0.5 text-xs font-medium text-[var(--aria-ink-muted)]">
+        <div className="flex min-w-0 shrink-0 items-center gap-2 sm:gap-3">
+          <span className="max-w-24 truncate rounded-full border border-[var(--aria-line)] px-2 py-0.5 text-xs font-medium text-[var(--aria-ink-muted)] sm:max-w-none sm:px-2.5">
             {STAGE_LABELS[stage] ?? stage}
           </span>
           <button
@@ -152,9 +155,9 @@ export function WorkspacePage({
       </header>
 
       {/* Main Content: Chat + Artifact */}
-      <div className="flex min-h-0 flex-1">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col lg:flex-row">
         {/* Chat Panel */}
-        <div className="flex min-h-0 w-1/2 flex-col border-r border-[var(--aria-line)]">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col border-b border-[var(--aria-line)] lg:w-1/2 lg:border-b-0 lg:border-r">
           {/* Messages */}
           <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto p-4 space-y-3">
             {messages.map((msg, idx) => (
@@ -163,7 +166,7 @@ export function WorkspacePage({
                 className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
               >
                 <div
-                  className={`max-w-[80%] rounded-lg px-3 py-2 text-sm ${
+                  className={`max-w-[min(100%,44rem)] rounded-lg px-3 py-2 text-sm ${
                     msg.role === "user"
                       ? "bg-[var(--aria-primary)] text-white"
                       : "border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] text-[var(--aria-ink)]"
@@ -186,7 +189,7 @@ export function WorkspacePage({
             ))}
             {streamingContent ? (
               <div className="flex justify-start">
-                <div className="max-w-[80%] rounded-lg border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-3 py-2 text-sm text-[var(--aria-ink)]">
+                <div className="max-w-[min(100%,44rem)] rounded-lg border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-3 py-2 text-sm text-[var(--aria-ink)]">
                   <pre className="whitespace-pre-wrap break-words font-sans">
                     {streamingContent}
                     <span className="animate-pulse">▊</span>
@@ -234,6 +237,16 @@ export function WorkspacePage({
           {/* Input Area */}
           <div className="shrink-0 border-t border-[var(--aria-line)] bg-[var(--aria-panel)] p-3">
             <div className="mb-2 flex gap-2">
+              {canStartGeneration ? (
+                <button
+                  type="button"
+                  onClick={startGeneration}
+                  className="inline-flex h-8 items-center gap-1 rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 text-xs font-semibold text-white disabled:opacity-50"
+                >
+                  <Send className="h-3.5 w-3.5" />
+                  开始生成
+                </button>
+              ) : null}
               {stage === "human_confirm" ? (
                 <button
                   type="button"
@@ -277,9 +290,9 @@ export function WorkspacePage({
         </div>
 
         {/* Artifact / Execution Panel */}
-        <div className="flex min-h-0 w-1/2 flex-col">
-          <div className="flex h-10 shrink-0 items-center justify-between border-b border-[var(--aria-line)] bg-[var(--aria-panel)] px-4">
-            <div className="inline-flex items-center gap-1 rounded-md border border-[var(--aria-line)] bg-white p-0.5">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col lg:w-1/2">
+          <div className="flex h-10 min-w-0 shrink-0 items-center justify-between gap-2 border-b border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 sm:px-4">
+            <div className="inline-flex shrink-0 items-center gap-1 rounded-md border border-[var(--aria-line)] bg-white p-0.5">
               <button
                 type="button"
                 onClick={() => setActiveRightTab("artifact")}
@@ -308,7 +321,7 @@ export function WorkspacePage({
               </button>
             </div>
             {providers ? (
-              <span className="text-xs text-[var(--aria-ink-muted)]">
+              <span className="min-w-0 truncate text-xs text-[var(--aria-ink-muted)]">
                 Author: {providers.author} | Reviewer: {providers.reviewer ?? "无"}
               </span>
             ) : null}
@@ -364,19 +377,26 @@ export function WorkspacePage({
       </div>
 
       {/* Flow Rail (bottom) */}
-      <footer className="flex h-10 shrink-0 items-center gap-2 border-t border-[var(--aria-line)] bg-[var(--aria-panel)] px-4">
-        {Object.entries(STAGE_LABELS).map(([key, label]) => (
-          <span
-            key={key}
-            className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${
-              key === stage
-                ? "bg-[var(--aria-primary)] text-white"
-                : "bg-[var(--aria-panel-muted)] text-[var(--aria-ink-muted)]"
-            }`}
-          >
-            {label}
-          </span>
-        ))}
+      <footer className="flex h-10 min-w-0 shrink-0 items-center gap-2 overflow-x-auto border-t border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 sm:px-4">
+        {Object.entries(STAGE_LABELS).map(([key, label]) => {
+          const isCurrent = key === stage;
+          const visited = visitedStages.includes(key);
+          return (
+            <span
+              key={key}
+              aria-label={`${label} ${isCurrent ? "当前阶段" : visited ? "已经过" : "未开始"}`}
+              className={`shrink-0 rounded-full px-2.5 py-0.5 text-xs font-medium ${
+                isCurrent
+                  ? "bg-[var(--aria-primary)] text-white"
+                  : visited
+                    ? "bg-green-50 text-green-700"
+                    : "bg-[var(--aria-panel-muted)] text-[var(--aria-ink-muted)]"
+              }`}
+            >
+              {label}
+            </span>
+          );
+        })}
       </footer>
     </div>
   );

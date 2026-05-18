@@ -1,15 +1,17 @@
-import { GitBranch, Layers3, ListChecks, ScrollText, Trash2 } from "lucide-react";
+import { ExternalLink, GitBranch, Layers3, ListChecks, ScrollText, Trash2 } from "lucide-react";
 import type { LifecycleCard as LifecycleCardData } from "../../state/lifecycle-workbench-store";
 
 export function LifecycleCard({
   card,
   selected,
   onSelect,
+  onOpenWorkspace,
   onDeleteIssue,
 }: {
   card: LifecycleCardData;
   selected: boolean;
   onSelect: () => void;
+  onOpenWorkspace?: () => void;
   onDeleteIssue?: () => void;
 }) {
   const Icon =
@@ -42,15 +44,35 @@ export function LifecycleCard({
             <span className="block truncate text-sm font-semibold text-[var(--aria-ink)]">
               {card.title}
             </span>
+            {card.preview ? (
+              <span className="mt-1 line-clamp-2 block whitespace-pre-wrap break-words text-xs leading-5 text-[var(--aria-ink-muted)]">
+                {card.preview}
+              </span>
+            ) : null}
             <span className="mt-1 flex flex-wrap gap-1.5 font-mono text-[11px] text-[var(--aria-ink-muted)]">
               <span>{card.id}</span>
               <span className="rounded border border-[var(--aria-line)] px-1.5 py-0.5">
                 {card.status}
               </span>
+              {card.version ? (
+                <span className="rounded border border-[var(--aria-line)] px-1.5 py-0.5">
+                  v{card.version}
+                </span>
+              ) : null}
             </span>
           </span>
         </span>
       </button>
+      {onOpenWorkspace ? (
+        <button
+          type="button"
+          aria-label={`打开 Workspace ${card.title}`}
+          onClick={onOpenWorkspace}
+          className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-[var(--aria-line)] text-[var(--aria-ink-muted)] hover:border-[var(--aria-primary)] hover:text-[var(--aria-primary)]"
+        >
+          <ExternalLink className="h-3.5 w-3.5" />
+        </button>
+      ) : null}
       {onDeleteIssue ? (
         <button
           type="button"

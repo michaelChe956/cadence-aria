@@ -31,6 +31,7 @@ const lifecycle: IssueLifecycleResponse = {
       repository_id: "repository_0001",
       title: "会话过期提示",
       current_version: 1,
+      current_markdown_preview: "## 功能需求\n\n[REQ-001] 显示会话过期提示。",
       confirmation_status: "confirmed",
     },
   ],
@@ -42,6 +43,7 @@ const lifecycle: IssueLifecycleResponse = {
       design_kind: "frontend",
       title: "前端提示设计",
       current_version: 1,
+      current_markdown_preview: "## 关键决策\n\n[DEC-001] 使用全局提示条。",
       confirmation_status: "draft",
     },
   ],
@@ -63,6 +65,7 @@ const otherLifecycle: IssueLifecycleResponse = {
       repository_id: "repository_0001",
       title: "验证码提示",
       current_version: 1,
+      current_markdown_preview: "## 功能需求\n\n[REQ-001] 显示验证码提示。",
       confirmation_status: "confirmed",
     },
   ],
@@ -74,6 +77,7 @@ const otherLifecycle: IssueLifecycleResponse = {
       design_kind: "backend",
       title: "验证码服务设计",
       current_version: 1,
+      current_markdown_preview: "## 关键决策\n\n[DEC-001] 提供验证码 API。",
       confirmation_status: "confirmed",
     },
   ],
@@ -98,6 +102,8 @@ describe("lifecycle workbench store", () => {
     expect(grouped.story_spec).toHaveLength(1);
     expect(grouped.design_spec).toHaveLength(1);
     expect(grouped.work_item).toHaveLength(0);
+    expect(grouped.story_spec[0].preview).toContain("[REQ-001]");
+    expect(grouped.design_spec[0].preview).toContain("[DEC-001]");
   });
 
   it("copies design spec source ids from lifecycle story spec ids", () => {

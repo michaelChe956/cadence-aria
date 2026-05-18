@@ -14,6 +14,7 @@ type WorkspaceWsApi = ReturnType<typeof useWorkspaceWs>;
 function mockWorkspaceWs(overrides: Partial<WorkspaceWsApi> = {}) {
   const api: WorkspaceWsApi = {
     sendMessage: vi.fn(),
+    startGeneration: vi.fn(),
     rollback: vi.fn(),
     confirm: vi.fn(),
     abort: vi.fn(),
@@ -81,5 +82,42 @@ describe("WorkspacePage", () => {
     expect(screen.getByText("pwd")).toBeInTheDocument();
     expect(screen.getByText("/tmp/repo")).toBeInTheDocument();
     expect(screen.getByText(/exit code 0/)).toBeInTheDocument();
+  });
+
+  it("starts generation from a prepared workspace without requiring typed input", async () => {
+    const api = mockWorkspaceWs();
+    useWorkspaceStore.setState({
+      stage: "prepare_context",
+      messages: [
+        {
+          id: "msg_001",
+          role: "system",
+          content: "Workspace 生成任务已准备",
+          checkpoint_id: null,
+          created_at: "2026-05-18T00:00:00Z",
+        },
+      ],
+    });
+
+    render(<WorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "开始生成" }));
+
+    expect(api.startGeneration).toHaveBeenCalledTimes(1);
+    expect(api.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("marks fast intermediate stages as visited in the flow rail", () => {
+    mockWorkspaceWs();
+    useWorkspaceStore.setState({
+      stage: "human_confirm",
+      visitedStages: ["prepare_context", "running", "cross_review", "human_confirm"],
+    });
+
+    render(<WorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+
+    expect(screen.getByLabelText("运行中 已经过")).toBeInTheDocument();
+    expect(screen.getByLabelText("交叉审查 已经过")).toBeInTheDocument();
+    expect(screen.getByLabelText("人工确认 当前阶段")).toBeInTheDocument();
   });
 });

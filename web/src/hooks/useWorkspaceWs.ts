@@ -120,6 +120,10 @@ export function useWorkspaceWs(sessionId: string | null) {
     [],
   );
 
+  const startGeneration = useCallback(() => {
+    sendMessage("开始生成");
+  }, [sendMessage]);
+
   const rollback = useCallback(
     (checkpointId: string) => {
       const ws = wsRef.current;
@@ -175,6 +179,7 @@ export function useWorkspaceWs(sessionId: string | null) {
 
   return {
     sendMessage,
+    startGeneration,
     rollback,
     confirm,
     abort,
