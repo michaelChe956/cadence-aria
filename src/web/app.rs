@@ -54,10 +54,6 @@ pub fn build_web_router(state: WebAppState) -> Router {
             delete(handlers::delete_product_issue),
         )
         .route(
-            "/api/projects/{project_id}/issues/{issue_id}/start",
-            post(handlers::start_product_issue),
-        )
-        .route(
             "/api/issues/{issue_id}/lifecycle",
             get(handlers::issue_lifecycle),
         )
@@ -90,7 +86,6 @@ pub fn build_web_router(state: WebAppState) -> Router {
             get(handlers::list_issues).post(handlers::create_issue),
         )
         .route("/api/issues/{issue_id}", delete(handlers::delete_issue))
-        .route("/api/issues/{issue_id}/start", post(handlers::start_issue))
         .route(
             "/api/issues/{issue_id}/rollback/preview",
             post(handlers::issue_rollback_preview),

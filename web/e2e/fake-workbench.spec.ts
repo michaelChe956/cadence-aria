@@ -1,71 +1,95 @@
 import { expect, test, type Page } from "@playwright/test";
 
-test("fake provider workbench opens a started issue, confirms, observes, rolls back and reruns", async ({
+test("fake provider workspace streams a story spec and confirms lifecycle state", async ({
   page,
 }) => {
-  await seedStartedIssue(page);
+  const seeded = await seedStoryWorkspace(page, "Aria E2E");
 
-  await page.goto("/");
-  await expect(page.getByRole("banner")).toContainText("Aria Web");
-  await expect(page.getByRole("main", { name: "项目管理工作台" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "打开执行" })).toBeVisible();
-  await page.getByRole("button", { name: "打开执行" }).click();
+  await page.goto(`/workbench/workspace/${seeded.sessionId}`);
 
-  await expect(page.getByRole("navigation", { name: "Workflow map" })).toBeVisible();
-  await expect(page.getByRole("main", { name: "Aria workbench" })).toContainText("Workspace");
-  await expect(page.getByRole("region", { name: "Provider stream" })).toBeVisible();
+  await expect(page.getByText("Story Spec").first()).toBeVisible();
+  await expect(page.getByText("Author: fake | Reviewer: codex")).toBeVisible();
 
-  await page.getByRole("button", { name: /推进|Advance/ }).click();
-  await expect(page.getByLabel("Provider prompt")).toBeVisible();
-  await page.getByLabel("Provider prompt").fill("确认后的 fake provider prompt");
-  await page.getByLabel("Policy override").selectOption("manual-all");
-  await page.getByRole("button", { name: "确认执行" }).click();
+  const prompt = page.getByPlaceholder("输入消息...");
+  await expect(prompt).toBeEnabled();
+  await prompt.fill("请生成 Story Spec 和验收标准");
+  await prompt.press("Enter");
 
-  const providerStream = page.getByRole("region", { name: "Provider stream" });
-  await expect(providerStream.getByText("provider_output", { exact: true })).not.toHaveCount(0);
-  await expect(page.getByRole("button", { name: /coding_report/ })).toBeVisible();
-  await page.getByRole("button", { name: /回退/ }).click();
-  await expect(page.getByRole("dialog")).toContainText(/checkpoint|Checkpoint/);
-  await page.getByRole("button", { name: "执行回退" }).click();
+  await expect(page.getByText("请生成 Story Spec 和验收标准").first()).toBeVisible();
+  await expect(page.getByRole("button", { name: "确认通过" })).toBeVisible();
+  await page.getByRole("button", { name: "确认通过" }).click();
 
-  await expect(
-    page
-      .getByRole("navigation", { name: "Workflow map" })
-      .getByRole("button", { name: /N16 dropped/ })
-      .first(),
-  ).toBeVisible();
-  await expect(page.getByLabel("Provider prompt")).toBeVisible();
+  await expect(page.getByPlaceholder("会话已完成")).toBeDisabled();
+
+  await page.getByRole("button", { name: "返回" }).click();
+  const projectButton = page.getByRole("button", { name: seeded.projectName, exact: true });
+  await expect(projectButton).toBeEnabled();
+  await projectButton.click();
+  const storyColumn = page.getByRole("region", { name: "Story Spec 列" });
+  await expect(storyColumn).toContainText(seeded.storyTitle);
+  await expect(storyColumn).toContainText("confirmed");
 });
 
-async function seedStartedIssue(page: Page) {
-  await expect(
-    page.request.post("/api/projects", {
-      data: { name: "Aria E2E", description: "Project workbench E2E" },
-    }),
-  ).resolves.toBeOK();
+async function seedStoryWorkspace(page: Page, projectName: string) {
+  const uniqueProjectName = `${projectName} ${Date.now()}`;
+  const projectResponse = await page.request.post("/api/projects", {
+    data: { name: uniqueProjectName, description: "Lifecycle workspace E2E" },
+  });
+  expect(projectResponse).toBeOK();
+  const project = await projectResponse.json();
 
   const workspacesResponse = await page.request.get("/api/workspaces");
   expect(workspacesResponse).toBeOK();
   const workspacesBody = await workspacesResponse.json();
-  const workspaceId = workspacesBody.workspaces[0].workspace_id;
+  const workspacePath = workspacesBody.workspaces[0].path;
 
-  const issueResponse = await page.request.post("/api/issues", {
+  const repositoryResponse = await page.request.post(
+    `/api/projects/${project.project_id}/repositories`,
+    {
+      data: {
+        name: `${projectName} Repo`,
+        path: workspacePath,
+        default_policy_preset: "manual-write",
+        default_provider_mode: "fake",
+      },
+    },
+  );
+  expect(repositoryResponse).toBeOK();
+  const repository = await repositoryResponse.json();
+
+  const issueTitle = `${projectName} Story ${Date.now()}`;
+  const issueResponse = await page.request.post(`/api/projects/${project.project_id}/issues`, {
     data: {
-      title: "实现 Fibonacci square sum",
-      description: "实现 Fibonacci square sum",
-      change_id: "aria-fibonacci-square",
+      title: issueTitle,
+      description: "验证 Issue 生命周期 Workspace",
+      repository_id: repository.repository_id,
     },
   });
   expect(issueResponse).toBeOK();
   const issue = await issueResponse.json();
 
-  const startResponse = await page.request.post(`/api/issues/${issue.issue_id}/start`, {
-    data: {
-      workspace_id: workspaceId,
-      policy_preset: "manual-write",
-      provider_mode: "fake",
-      timeout_secs: 2400,
+  const storyTitle = `${issueTitle} Story Spec`;
+  const storyResponse = await page.request.post(
+    `/api/projects/${project.project_id}/issues/${issue.issue_id}/story-specs:generate`,
+    {
+      data: {
+        title: storyTitle,
+        author_provider: "fake",
+        reviewer_provider: "codex",
+        review_rounds: 1,
+        superpowers_enabled: false,
+        openspec_enabled: true,
+      },
     },
-  });
-  expect(startResponse).toBeOK();
+  );
+  expect(storyResponse).toBeOK();
+  const story = await storyResponse.json();
+
+  return {
+    projectId: project.project_id as string,
+    issueId: issue.issue_id as string,
+    projectName: uniqueProjectName,
+    sessionId: story.workspace_session.workspace_session_id as string,
+    storyTitle,
+  };
 }

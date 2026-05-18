@@ -501,28 +501,6 @@ pub struct WorkspaceSessionDto {
     pub messages: Vec<WorkspaceMessageDto>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct StartProductIssueRequest {
-    pub workspace_id: Option<String>,
-    pub repository_id: Option<String>,
-    pub policy_preset: Option<String>,
-    pub provider_mode: Option<String>,
-    pub timeout_secs: Option<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct StartProductIssueResponse {
-    pub issue_id: String,
-    pub project_id: String,
-    pub repository_id: String,
-    pub workspace_id: String,
-    pub task_id: String,
-    pub session_id: String,
-    pub status: String,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct IssueListResponse {
@@ -550,25 +528,6 @@ pub struct CreateIssueRequest {
     pub title: String,
     pub description: Option<String>,
     pub change_id: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct StartIssueRequest {
-    pub workspace_id: String,
-    pub policy_preset: Option<String>,
-    pub provider_mode: Option<String>,
-    pub timeout_secs: Option<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct StartIssueResponse {
-    pub issue_id: String,
-    pub workspace_id: String,
-    pub task_id: String,
-    pub session_id: String,
-    pub status: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

@@ -62,7 +62,7 @@ async fn api_create_advance_confirm_projection_contract() {
 }
 
 #[tokio::test]
-async fn api_workspace_issue_start_contract() {
+async fn api_issue_start_endpoint_is_removed() {
     let app_root = tempdir().expect("app root");
     let workspace = git_repo();
     let state = WebAppState::new(
@@ -97,21 +97,18 @@ async fn api_workspace_issue_start_contract() {
     assert_eq!(created_issue["issue_id"], "issue_0001");
     assert_eq!(created_issue["status"], "draft");
 
-    let started = request_json(
+    let status = request_status(
         app,
         Method::POST,
         "/api/issues/issue_0001/start",
         json!({"workspace_id":"workspace_0001"}),
     )
     .await;
-    assert_eq!(started["issue_id"], "issue_0001");
-    assert_eq!(started["workspace_id"], "workspace_0001");
-    assert_eq!(started["task_id"], "task_0001");
-    assert_eq!(started["session_id"], "sess_task_0001");
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
-async fn api_workspace_aware_execution_contract() {
+async fn api_workspace_start_no_longer_creates_task_runtime() {
     let app_root = tempdir().expect("app root");
     let workspace = git_repo();
     let state = WebAppState::new(
@@ -137,44 +134,19 @@ async fn api_workspace_aware_execution_contract() {
         json!({"title": "Execute in selected workspace"}),
     )
     .await;
-    request_json(
+
+    let status = request_status(
         app.clone(),
         Method::POST,
         "/api/issues/issue_0001/start",
         json!({"workspace_id":"workspace_0001"}),
     )
     .await;
-
-    let projection = request_json(
-        app.clone(),
-        Method::GET,
-        "/api/projection?workspace_id=workspace_0001&task_id=task_0001",
-        json!({}),
-    )
-    .await;
-    assert_eq!(
-        projection["workspace_root"],
-        workspace
-            .path()
-            .canonicalize()
-            .expect("canonical workspace")
-            .display()
-            .to_string()
-    );
-    assert_eq!(projection["active_task_id"], "task_0001");
-
-    let advance = request_json(
-        app,
-        Method::POST,
-        "/api/tasks/task_0001/advance?workspace_id=workspace_0001",
-        json!({}),
-    )
-    .await;
-    assert_eq!(advance["status"], "paused_for_approval");
+    assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(
-        workspace
+        !workspace
             .path()
-            .join(".aria/runtime/tasks/task_0001/pending/provider-step.json")
+            .join(".aria/runtime/tasks/task_0001")
             .exists()
     );
 }
@@ -192,6 +164,16 @@ async fn request_json(app: axum::Router, method: Method, uri: &str, body: Value)
         .await
         .expect("body");
     serde_json::from_slice(&bytes).expect("json")
+}
+
+async fn request_status(app: axum::Router, method: Method, uri: &str, body: Value) -> StatusCode {
+    let request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .expect("request");
+    app.oneshot(request).await.expect("response").status()
 }
 
 fn git_repo() -> tempfile::TempDir {

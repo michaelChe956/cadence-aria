@@ -13,8 +13,9 @@ use crate::cross_cutting::json_rpc_peer::JsonRpcPeer;
 use crate::cross_cutting::process_manager::ProcessManager;
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
-    ProviderEvent, ProviderPermissionMode, ProviderSession, RiskLevel, StreamChunk,
-    StreamingProviderAdapter, StreamingProviderInput,
+    ProviderEvent, ProviderExecutionEvent, ProviderExecutionEventKind,
+    ProviderExecutionEventStatus, ProviderPermissionMode, ProviderSession, ProviderStatus,
+    RiskLevel, StreamChunk, StreamingProviderAdapter, StreamingProviderInput,
 };
 use crate::protocol::contracts::AdapterInput;
 
@@ -58,6 +59,22 @@ impl StreamingProviderAdapter for CodexProvider {
         let (event_tx, event_rx) = mpsc::channel(32);
         let bridge = ApprovalBridge::new(input.permission_mode.clone(), event_tx.clone());
         let commands = bridge.command_sender();
+        let _ = event_tx
+            .send(ProviderEvent::StatusChanged(ProviderStatus::Starting))
+            .await;
+        let _ = event_tx
+            .send(ProviderEvent::Execution(ProviderExecutionEvent {
+                event_id: "provider".to_string(),
+                kind: ProviderExecutionEventKind::Provider,
+                status: ProviderExecutionEventStatus::Started,
+                title: "Codex provider started".to_string(),
+                detail: None,
+                command: None,
+                cwd: Some(input.working_dir.display().to_string()),
+                output: None,
+                exit_code: None,
+            }))
+            .await;
 
         tokio::spawn(async move {
             let stderr_output = Arc::new(Mutex::new(String::new()));
@@ -79,6 +96,26 @@ impl StreamingProviderAdapter for CodexProvider {
             let _ = stderr_task.await;
             if let Err(error) = result {
                 let stderr = combine_stderr(stderr_output.lock().await.clone(), error.stderr);
+                let _ = event_tx
+                    .send(ProviderEvent::StatusChanged(ProviderStatus::Failed))
+                    .await;
+                let _ = event_tx
+                    .send(ProviderEvent::Execution(ProviderExecutionEvent {
+                        event_id: "provider".to_string(),
+                        kind: ProviderExecutionEventKind::Provider,
+                        status: ProviderExecutionEventStatus::Failed,
+                        title: "Codex provider failed".to_string(),
+                        detail: Some(error.details.clone()),
+                        command: None,
+                        cwd: None,
+                        output: if stderr.trim().is_empty() {
+                            None
+                        } else {
+                            Some(stderr.clone())
+                        },
+                        exit_code: None,
+                    }))
+                    .await;
                 let _ = event_tx
                     .send(ProviderEvent::Failed {
                         message: format_codex_failure(error.details, status, stderr),
@@ -133,7 +170,9 @@ impl StreamingProviderAdapter for CodexProvider {
                         StreamChunk::Done { full_output }
                     }
                     ProviderEvent::Failed { message } => StreamChunk::Error(message),
-                    ProviderEvent::PermissionRequest(_) | ProviderEvent::StatusChanged(_) => {
+                    ProviderEvent::PermissionRequest(_)
+                    | ProviderEvent::StatusChanged(_)
+                    | ProviderEvent::Execution(_) => {
                         continue;
                     }
                 };
@@ -173,7 +212,12 @@ where
         .request(json!({
             "jsonrpc": "2.0",
             "method": "initialize",
-            "params": {},
+            "params": {
+                "clientInfo": {
+                    "name": "cadence-aria",
+                    "version": env!("CARGO_PKG_VERSION"),
+                },
+            },
         }))
         .await?;
     peer.send(json!({
@@ -190,8 +234,8 @@ where
             "params": {
                 "cwd": input.working_dir,
                 "approvalPolicy": match input.permission_mode {
-                    ProviderPermissionMode::Auto => "Never",
-                    ProviderPermissionMode::Supervised => "OnRequest",
+                    ProviderPermissionMode::Auto => "never",
+                    ProviderPermissionMode::Supervised => "on-request",
                 },
                 "ephemeral": true,
             },
@@ -203,7 +247,7 @@ where
         .map(ToString::to_string);
     let turn_thread_id = thread_id.clone().unwrap_or_default();
 
-    let _ = peer
+    let turn_response = peer
         .request(json!({
             "jsonrpc": "2.0",
             "method": "turn/start",
@@ -212,12 +256,39 @@ where
                 "input": [
                     {
                         "type": "text",
-                        "text": input.prompt,
+                        "text": input.prompt.clone(),
                     }
                 ],
             },
         }))
         .await?;
+    let turn_id = turn_response
+        .pointer("/turn/id")
+        .and_then(Value::as_str)
+        .unwrap_or("turn")
+        .to_string();
+    send_provider_event(
+        &event_tx,
+        ProviderEvent::StatusChanged(ProviderStatus::Running),
+        &cancel,
+    )
+    .await?;
+    send_provider_event(
+        &event_tx,
+        ProviderEvent::Execution(ProviderExecutionEvent {
+            event_id: format!("turn_{turn_id}"),
+            kind: ProviderExecutionEventKind::Turn,
+            status: ProviderExecutionEventStatus::Started,
+            title: "Turn started".to_string(),
+            detail: None,
+            command: None,
+            cwd: Some(input.working_dir.display().to_string()),
+            output: None,
+            exit_code: None,
+        }),
+        &cancel,
+    )
+    .await?;
 
     let mut full_output = String::new();
     loop {
@@ -233,6 +304,11 @@ where
         if let Some(content) = parse_text_delta(&incoming) {
             full_output.push_str(&content);
             send_provider_event(&event_tx, ProviderEvent::TextDelta { content }, &cancel).await?;
+            continue;
+        }
+
+        if let Some(event) = parse_execution_event(&incoming) {
+            send_provider_event(&event_tx, ProviderEvent::Execution(event), &cancel).await?;
             continue;
         }
 
@@ -252,6 +328,28 @@ where
         if is_turn_completed(&incoming) {
             send_provider_event(
                 &event_tx,
+                ProviderEvent::Execution(ProviderExecutionEvent {
+                    event_id: format!("turn_{turn_id}"),
+                    kind: ProviderExecutionEventKind::Turn,
+                    status: ProviderExecutionEventStatus::Completed,
+                    title: "Turn completed".to_string(),
+                    detail: None,
+                    command: None,
+                    cwd: Some(input.working_dir.display().to_string()),
+                    output: None,
+                    exit_code: None,
+                }),
+                &cancel,
+            )
+            .await?;
+            send_provider_event(
+                &event_tx,
+                ProviderEvent::StatusChanged(ProviderStatus::Completed),
+                &cancel,
+            )
+            .await?;
+            send_provider_event(
+                &event_tx,
                 ProviderEvent::Completed {
                     full_output,
                     provider_session_id: thread_id,
@@ -269,6 +367,14 @@ where
 }
 
 fn parse_text_delta(value: &Value) -> Option<String> {
+    if value.get("method")?.as_str()? == "item/agentMessage/delta" {
+        return value
+            .pointer("/params/delta")
+            .and_then(Value::as_str)
+            .filter(|content| !content.is_empty())
+            .map(ToString::to_string);
+    }
+
     if value.get("method")?.as_str()? != "codex/event" {
         return None;
     }
@@ -294,6 +400,81 @@ fn parse_text_delta(value: &Value) -> Option<String> {
     } else {
         Some(content)
     }
+}
+
+fn parse_execution_event(value: &Value) -> Option<ProviderExecutionEvent> {
+    let method = value.get("method")?.as_str()?;
+    if method != "item/started" && method != "item/completed" {
+        return None;
+    }
+
+    let item = value.pointer("/params/item")?;
+    if !is_command_execution_item(item) {
+        return None;
+    }
+
+    let item_id = item.get("id").and_then(Value::as_str).unwrap_or("command");
+    let command = command_description(item);
+    let cwd = item
+        .get("cwd")
+        .and_then(Value::as_str)
+        .or_else(|| value.pointer("/params/cwd").and_then(Value::as_str))
+        .map(ToString::to_string);
+    let exit_code = item
+        .get("exitCode")
+        .or_else(|| item.get("exit_code"))
+        .and_then(Value::as_i64)
+        .and_then(|code| i32::try_from(code).ok());
+    let output = command_output(item);
+
+    if method == "item/started" {
+        return Some(ProviderExecutionEvent {
+            event_id: format!("command_{item_id}"),
+            kind: ProviderExecutionEventKind::Command,
+            status: ProviderExecutionEventStatus::Started,
+            title: "Command started".to_string(),
+            detail: None,
+            command,
+            cwd,
+            output: None,
+            exit_code: None,
+        });
+    }
+
+    Some(ProviderExecutionEvent {
+        event_id: format!("command_{item_id}"),
+        kind: ProviderExecutionEventKind::Command,
+        status: if exit_code.is_some_and(|code| code != 0) {
+            ProviderExecutionEventStatus::Failed
+        } else {
+            ProviderExecutionEventStatus::Completed
+        },
+        title: if exit_code.is_some_and(|code| code != 0) {
+            "Command failed".to_string()
+        } else {
+            "Command completed".to_string()
+        },
+        detail: exit_code.map(|code| format!("exit code {code}")),
+        command,
+        cwd,
+        output,
+        exit_code,
+    })
+}
+
+fn is_command_execution_item(item: &Value) -> bool {
+    matches!(
+        item.get("type").and_then(Value::as_str),
+        Some("commandExecution" | "command_execution")
+    )
+}
+
+fn command_output(item: &Value) -> Option<String> {
+    ["aggregatedOutput", "aggregated_output", "output", "stdout"]
+        .iter()
+        .find_map(|field| item.get(field).and_then(Value::as_str))
+        .filter(|output| !output.is_empty())
+        .map(ToString::to_string)
 }
 
 fn parse_approval_request(value: &Value) -> Option<CodexApprovalRequest> {
@@ -439,8 +620,8 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use crate::cross_cutting::streaming_provider::{
-        ProviderCommand, ProviderEvent, ProviderPermissionMode, StreamingProviderAdapter,
-        StreamingProviderInput,
+        ProviderCommand, ProviderEvent, ProviderExecutionEventKind, ProviderExecutionEventStatus,
+        ProviderPermissionMode, StreamingProviderAdapter, StreamingProviderInput,
     };
     use crate::protocol::contracts::{AdapterRole, ProviderType};
 
@@ -489,6 +670,7 @@ mod tests {
             {
                 ProviderEvent::Completed { full_output, .. } => return full_output,
                 ProviderEvent::StatusChanged(_)
+                | ProviderEvent::Execution(_)
                 | ProviderEvent::TextDelta { .. }
                 | ProviderEvent::PermissionRequest(_) => {}
                 ProviderEvent::Failed { message } => panic!("provider failed: {message}"),
@@ -513,6 +695,7 @@ mod tests {
                     saw_text = content.contains("Codex fixture chunk");
                 }
                 ProviderEvent::PermissionRequest(data) => break data.id,
+                ProviderEvent::StatusChanged(_) | ProviderEvent::Execution(_) => {}
                 other => panic!("unexpected event before permission: {other:?}"),
             }
         };
@@ -530,5 +713,69 @@ mod tests {
 
         let completed = recv_completed(&mut session.events).await;
         assert_eq!(completed, "Codex fixture chunk");
+    }
+
+    #[tokio::test]
+    async fn codex_provider_handles_current_app_server_protocol_and_agent_message_delta() {
+        let fixture =
+            executable_fixture("tests/fixtures/provider/codex_app_server_current_fixture.sh");
+        let provider = CodexProvider::new(fixture);
+        let input = streaming_input(ProviderType::Codex, ProviderPermissionMode::Auto);
+        let mut session = provider
+            .start(input, CancellationToken::new())
+            .await
+            .unwrap();
+
+        let completed = recv_completed(&mut session.events).await;
+
+        assert_eq!(completed, "Codex current chunk");
+    }
+
+    #[tokio::test]
+    async fn codex_provider_emits_command_execution_events_from_current_protocol() {
+        let fixture =
+            executable_fixture("tests/fixtures/provider/codex_app_server_current_fixture.sh");
+        let provider = CodexProvider::new(fixture);
+        let input = streaming_input(ProviderType::Codex, ProviderPermissionMode::Auto);
+        let mut session = provider
+            .start(input, CancellationToken::new())
+            .await
+            .unwrap();
+
+        let mut saw_started = false;
+        let mut saw_completed = false;
+        for _ in 0..20 {
+            match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+                .await
+                .expect("provider should emit execution events")
+                .expect("provider event channel should stay open")
+            {
+                ProviderEvent::Execution(event)
+                    if event.kind == ProviderExecutionEventKind::Command
+                        && event.status == ProviderExecutionEventStatus::Started =>
+                {
+                    assert_eq!(event.event_id, "command_cmd_001");
+                    assert_eq!(event.command.as_deref(), Some("pwd"));
+                    assert!(event.cwd.is_some());
+                    saw_started = true;
+                }
+                ProviderEvent::Execution(event)
+                    if event.kind == ProviderExecutionEventKind::Command
+                        && event.status == ProviderExecutionEventStatus::Completed =>
+                {
+                    assert_eq!(event.event_id, "command_cmd_001");
+                    assert_eq!(event.command.as_deref(), Some("pwd"));
+                    assert_eq!(event.exit_code, Some(0));
+                    assert!(event.output.as_deref().unwrap_or_default().contains('/'));
+                    saw_completed = true;
+                }
+                ProviderEvent::Completed { .. } if saw_started && saw_completed => return,
+                ProviderEvent::Failed { message } => panic!("provider failed: {message}"),
+                _ => {}
+            }
+        }
+
+        assert!(saw_started, "command started event was not emitted");
+        assert!(saw_completed, "command completed event was not emitted");
     }
 }

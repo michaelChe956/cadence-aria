@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useRef } from "react";
-import { useWorkspaceStore, type ProviderStatus } from "../state/workspace-ws-store";
+import {
+  useWorkspaceStore,
+  type ExecutionEvent,
+  type ProviderStatus,
+} from "../state/workspace-ws-store";
 
 interface WsOutMessage {
   type: string;
@@ -83,6 +87,9 @@ export function useWorkspaceWs(sessionId: string | null) {
       case "provider_status":
         store.setProviderStatus(msg.status as ProviderStatus);
         break;
+      case "execution_event":
+        store.upsertExecutionEvent(msg.event as ExecutionEvent);
+        break;
       case "error":
         store.setError(msg.message as string);
         break;
@@ -94,7 +101,10 @@ export function useWorkspaceWs(sessionId: string | null) {
       const ws = wsRef.current;
       if (ws?.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "user_message", content }));
-        useWorkspaceStore.getState().setError(null);
+        const store = useWorkspaceStore.getState();
+        store.setError(null);
+        store.clearExecutionEvents();
+        store.setProviderStatus("running");
         const userMsg = {
           id: `msg_${Date.now()}`,
           role: "user",

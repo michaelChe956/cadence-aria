@@ -1,11 +1,13 @@
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::cross_cutting::streaming_provider::{
-    ProviderCommand, ProviderEvent, ProviderPermissionMode, ProviderSession, ProviderStatus,
+    ProviderCommand, ProviderEvent, ProviderExecutionEvent, ProviderExecutionEventKind,
+    ProviderExecutionEventStatus, ProviderPermissionMode, ProviderSession, ProviderStatus,
     RiskLevel, StreamingProviderAdapter, StreamingProviderInput,
 };
 use crate::product::checkpoint_store::CheckpointStore;
@@ -71,6 +73,7 @@ pub struct WorkspaceSession {
     pub artifact: Option<String>,
     pub author_provider: ProviderName,
     pub reviewer_provider: Option<ProviderName>,
+    pub repository_path: Option<PathBuf>,
 }
 
 impl WorkspaceSession {
@@ -98,6 +101,7 @@ impl WorkspaceSession {
             artifact,
             author_provider: record.author_provider,
             reviewer_provider: Some(record.reviewer_provider),
+            repository_path: None,
         }
     }
 
@@ -142,6 +146,9 @@ pub enum EngineEvent {
     },
     ProviderStatus {
         status: ProviderStatus,
+    },
+    ExecutionEvent {
+        event: ProviderExecutionEvent,
     },
     Error {
         message: String,
@@ -319,6 +326,26 @@ impl WorkspaceEngine {
                         ProviderEvent::PermissionRequest(request) => {
                             let _ = self
                                 .event_tx
+                                .send(EngineEvent::ExecutionEvent {
+                                    event: ProviderExecutionEvent {
+                                        event_id: format!("permission_{}", request.id),
+                                        kind: ProviderExecutionEventKind::Command,
+                                        status: ProviderExecutionEventStatus::WaitingApproval,
+                                        title: "Waiting for permission".to_string(),
+                                        detail: Some(request.description.clone()),
+                                        command: Some(request.tool_name.clone()),
+                                        cwd: self
+                                            .session
+                                            .repository_path
+                                            .as_ref()
+                                            .map(|path| path.display().to_string()),
+                                        output: None,
+                                        exit_code: None,
+                                    },
+                                })
+                                .await;
+                            let _ = self
+                                .event_tx
                                 .send(EngineEvent::PermissionRequest {
                                     id: request.id,
                                     tool_name: request.tool_name,
@@ -331,6 +358,12 @@ impl WorkspaceEngine {
                             let _ = self
                                 .event_tx
                                 .send(EngineEvent::ProviderStatus { status })
+                                .await;
+                        }
+                        ProviderEvent::Execution(event) => {
+                            let _ = self
+                                .event_tx
+                                .send(EngineEvent::ExecutionEvent { event })
                                 .await;
                         }
                         ProviderEvent::Completed { full_output, .. } => {
@@ -442,8 +475,11 @@ impl WorkspaceEngine {
     }
 
     fn build_streaming_input(&self, user_content: &str) -> Result<StreamingProviderInput, String> {
-        let working_dir =
-            std::env::current_dir().map_err(|error| format!("working directory error: {error}"))?;
+        let working_dir = match &self.session.repository_path {
+            Some(path) => path.clone(),
+            None => std::env::current_dir()
+                .map_err(|error| format!("working directory error: {error}"))?,
+        };
 
         Ok(StreamingProviderInput {
             provider_type: provider_type_for_name(&self.session.author_provider),
@@ -691,7 +727,10 @@ fn latest_artifact_from_messages(messages: &[WorkspaceMessageRecord]) -> Option<
 mod tests {
     use super::*;
     use crate::cross_cutting::provider_adapter::ProviderAdapterError;
-    use crate::cross_cutting::streaming_provider::{FakeStreamingProvider, StreamChunk};
+    use crate::cross_cutting::streaming_provider::{
+        FakeStreamingProvider, ProviderExecutionEvent, ProviderExecutionEventKind,
+        ProviderExecutionEventStatus, StreamChunk,
+    };
     use crate::protocol::contracts::{AdapterInput, ProviderType};
     use std::sync::Mutex;
     use tempfile::TempDir;
@@ -714,6 +753,7 @@ mod tests {
             artifact: None,
             author_provider: ProviderName::ClaudeCode,
             reviewer_provider: Some(ProviderName::Codex),
+            repository_path: None,
         }
     }
 
@@ -931,6 +971,91 @@ mod tests {
         assert!(
             saw_human_confirm,
             "provider completion should unlock human confirmation"
+        );
+    }
+
+    struct ExecutionEventStreamingProvider;
+
+    #[async_trait::async_trait]
+    impl StreamingProviderAdapter for ExecutionEventStreamingProvider {
+        async fn start(
+            &self,
+            _input: StreamingProviderInput,
+            _cancel: CancellationToken,
+        ) -> Result<ProviderSession, ProviderAdapterError> {
+            let (event_tx, event_rx) = mpsc::channel(8);
+            let (command_tx, _command_rx) = mpsc::channel(8);
+            tokio::spawn(async move {
+                let _ = event_tx
+                    .send(ProviderEvent::Execution(ProviderExecutionEvent {
+                        event_id: "command_cmd_001".to_string(),
+                        kind: ProviderExecutionEventKind::Command,
+                        status: ProviderExecutionEventStatus::Completed,
+                        title: "Command completed".to_string(),
+                        detail: Some("exit code 0".to_string()),
+                        command: Some("pwd".to_string()),
+                        cwd: Some("/tmp/repo".to_string()),
+                        output: Some("/tmp/repo\n".to_string()),
+                        exit_code: Some(0),
+                    }))
+                    .await;
+                let _ = event_tx
+                    .send(ProviderEvent::Completed {
+                        full_output: "# Draft".to_string(),
+                        provider_session_id: None,
+                    })
+                    .await;
+            });
+            Ok(ProviderSession {
+                events: event_rx,
+                commands: command_tx,
+            })
+        }
+
+        async fn run_streaming(
+            &self,
+            _input: &AdapterInput,
+            _cancel: CancellationToken,
+        ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+            Err(ProviderAdapterError::execution_failed(
+                None,
+                String::new(),
+                "run_streaming is not used by WorkspaceEngine",
+                0,
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_user_message_forwards_provider_execution_events() {
+        let (_tmp, store) = setup();
+        let (tx, mut rx) = mpsc::channel(64);
+        let session = make_session("sess_007_exec");
+        let mut engine = WorkspaceEngine::new(store, tx, session);
+
+        engine
+            .handle_user_message(
+                "start".to_string(),
+                Arc::new(ExecutionEventStreamingProvider),
+                empty_provider_commands(),
+            )
+            .await;
+
+        let mut saw_execution_event = false;
+        while let Ok(event) = rx.try_recv() {
+            if let EngineEvent::ExecutionEvent { event } = event {
+                assert_eq!(event.event_id, "command_cmd_001");
+                assert_eq!(event.kind, ProviderExecutionEventKind::Command);
+                assert_eq!(event.status, ProviderExecutionEventStatus::Completed);
+                assert_eq!(event.command.as_deref(), Some("pwd"));
+                assert_eq!(event.output.as_deref(), Some("/tmp/repo\n"));
+                saw_execution_event = true;
+            }
+        }
+
+        assert!(
+            saw_execution_event,
+            "provider execution events should be forwarded to websocket layer"
         );
     }
 

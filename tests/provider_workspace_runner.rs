@@ -1,12 +1,15 @@
 use cadence_aria::cross_cutting::provider_adapter::{ProviderAdapter, ProviderAdapterError};
 use cadence_aria::product::app_paths::ProductAppPaths;
+use cadence_aria::product::issue_store::{CreateProductIssueInput, IssueStore};
 use cadence_aria::product::lifecycle_store::{
     CreateStorySpecInput, CreateWorkspaceSessionInput, LifecycleStore,
 };
 use cadence_aria::product::models::{ProviderName, WorkspaceSessionStatus, WorkspaceType};
+use cadence_aria::product::project_store::{CreateProjectInput, ProjectStore};
 use cadence_aria::product::provider_workspace_runner::{
     ProviderWorkspaceRunner, WorkspaceProviderRunInput,
 };
+use cadence_aria::product::repository_store::{CreateRepositoryInput, RepositoryStore};
 use cadence_aria::protocol::contracts::{AdapterInput, AdapterOutput, ProviderType, TimeoutStatus};
 use serde_json::json;
 use tempfile::tempdir;
@@ -14,20 +17,45 @@ use tempfile::tempdir;
 #[test]
 fn workspace_runner_calls_provider_and_records_configured_review_rounds() {
     let root = tempdir().expect("root");
+    let repo_root = tempdir().expect("repo root");
     let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let project = ProjectStore::new(paths.clone())
+        .create(CreateProjectInput {
+            name: "Project".to_string(),
+            description: None,
+        })
+        .expect("project");
+    let repository = RepositoryStore::new(paths.clone())
+        .create(CreateRepositoryInput {
+            project_id: project.id.clone(),
+            name: "Repo".to_string(),
+            path: repo_root.path().to_path_buf(),
+            default_policy_preset: None,
+            default_provider_mode: None,
+        })
+        .expect("repository");
+    let issue = IssueStore::new(paths.clone())
+        .create(CreateProductIssueInput {
+            project_id: project.id.clone(),
+            repo_id: Some(repository.id.clone()),
+            title: "会话过期".to_string(),
+            description: Some("描述".to_string()),
+            change_id: None,
+        })
+        .expect("issue");
     let store = LifecycleStore::new(paths.clone());
     let story = store
         .create_story_spec(CreateStorySpecInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            repository_id: "repository_0001".to_string(),
+            project_id: project.id.clone(),
+            issue_id: issue.id.clone(),
+            repository_id: repository.id.clone(),
             title: "会话过期提示".to_string(),
         })
         .expect("story");
     let session = store
         .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
+            project_id: project.id.clone(),
+            issue_id: issue.id.clone(),
             entity_id: story.id.clone(),
             workspace_type: WorkspaceType::Story,
             author_provider: ProviderName::Codex,
@@ -37,6 +65,14 @@ fn workspace_runner_calls_provider_and_records_configured_review_rounds() {
             openspec_enabled: true,
         })
         .expect("session");
+    store
+        .append_workspace_message(
+            &session.id,
+            "system".to_string(),
+            "[workflow_discipline]\n必须遵守 using-superpowers 与 brainstorming。\n[completion_or_failure]\n不要直接修改 OpenSpec。"
+                .to_string(),
+        )
+        .expect("context message");
 
     let runner = ProviderWorkspaceRunner::new(paths);
     let output = runner
@@ -45,7 +81,9 @@ fn workspace_runner_calls_provider_and_records_configured_review_rounds() {
                 session_id: session.id.clone(),
                 user_prompt: "生成 Story Spec".to_string(),
             },
-            &RecordingProvider,
+            &RecordingProvider {
+                expected_worktree_path: repository.path.to_string_lossy().to_string(),
+            },
         )
         .expect("run next");
 
@@ -93,11 +131,19 @@ fn workspace_runner_calls_provider_and_records_configured_review_rounds() {
     );
 }
 
-struct RecordingProvider;
+struct RecordingProvider {
+    expected_worktree_path: String,
+}
 
 impl ProviderAdapter for RecordingProvider {
     fn run(&self, input: &AdapterInput) -> Result<AdapterOutput, ProviderAdapterError> {
         assert!(input.prompt.contains("生成 Story Spec"));
+        assert!(input.prompt.contains("using-superpowers"));
+        assert!(input.prompt.contains("不要直接修改 OpenSpec"));
+        assert_eq!(
+            input.worktree_path.as_deref(),
+            Some(self.expected_worktree_path.as_str())
+        );
         assert_eq!(input.provider_type, ProviderType::Codex);
         Ok(AdapterOutput {
             exit_code: Some(0),

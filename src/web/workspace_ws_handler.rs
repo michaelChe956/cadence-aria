@@ -7,14 +7,20 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 
-use crate::cross_cutting::streaming_provider::{ProviderCommand, ProviderStatus, RiskLevel};
+use crate::cross_cutting::streaming_provider::{
+    ProviderCommand, ProviderExecutionEvent, ProviderExecutionEventKind,
+    ProviderExecutionEventStatus, ProviderStatus, RiskLevel,
+};
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::checkpoint_store::CheckpointStore;
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::workspace_engine::{EngineEvent, WorkspaceEngine, WorkspaceSession};
+use crate::product::workspace_repository::workspace_repository_for_session;
 use crate::web::state::WebAppState;
+use crate::web::workspace_context::ensure_workspace_context_message;
 use crate::web::workspace_ws_types::{
-    WsInMessage, WsOutMessage, WsPermissionRiskLevel, WsProviderStatus,
+    WsExecutionEvent, WsExecutionEventKind, WsExecutionEventStatus, WsInMessage, WsOutMessage,
+    WsPermissionRiskLevel, WsProviderStatus,
 };
 
 pub async fn workspace_ws(
@@ -42,6 +48,33 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
             return;
         }
     };
+    let session_record =
+        match ensure_workspace_context_message(&app_paths, &lifecycle, session_record) {
+            Ok(session) => session,
+            Err(error) => {
+                let err = WsOutMessage::Error {
+                    message: format!("workspace context unavailable: {error}"),
+                };
+                if let Ok(json) = serde_json::to_string(&err) {
+                    let _ = ws_sender.send(Message::Text(json.into())).await;
+                }
+                return;
+            }
+        };
+
+    let repository = match workspace_repository_for_session(&app_paths, &lifecycle, &session_record)
+    {
+        Ok(repository) => repository,
+        Err(error) => {
+            let err = WsOutMessage::Error {
+                message: format!("workspace repository unavailable: {error}"),
+            };
+            if let Ok(json) = serde_json::to_string(&err) {
+                let _ = ws_sender.send(Message::Text(json.into())).await;
+            }
+            return;
+        }
+    };
 
     let checkpoint_store = Arc::new(CheckpointStore::new(
         app_paths.issue_lifecycle_root(&session_record.project_id, &session_record.issue_id),
@@ -50,6 +83,7 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
     let (engine_tx, mut engine_rx) = mpsc::channel::<EngineEvent>(64);
 
     let mut session = WorkspaceSession::from_record(session_record);
+    session.repository_path = Some(repository.path);
     if let Ok(checkpoints) = checkpoint_store.list_checkpoints(&session.session_id) {
         session.restore_checkpoint_ids(&checkpoints);
     }
@@ -108,6 +142,9 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                 },
                 EngineEvent::ProviderStatus { status } => WsOutMessage::ProviderStatus {
                     status: ws_provider_status(status),
+                },
+                EngineEvent::ExecutionEvent { event } => WsOutMessage::ExecutionEvent {
+                    event: ws_execution_event(event),
                 },
                 EngineEvent::Error { message } => WsOutMessage::Error { message },
             };
@@ -292,5 +329,40 @@ fn ws_provider_status(status: ProviderStatus) -> WsProviderStatus {
         ProviderStatus::Completed => WsProviderStatus::Completed,
         ProviderStatus::Failed => WsProviderStatus::Failed,
         ProviderStatus::Aborted => WsProviderStatus::Aborted,
+    }
+}
+
+fn ws_execution_event(event: ProviderExecutionEvent) -> WsExecutionEvent {
+    WsExecutionEvent {
+        event_id: event.event_id,
+        kind: ws_execution_event_kind(event.kind),
+        status: ws_execution_event_status(event.status),
+        title: event.title,
+        detail: event.detail,
+        command: event.command,
+        cwd: event.cwd,
+        output: event.output,
+        exit_code: event.exit_code,
+    }
+}
+
+fn ws_execution_event_kind(kind: ProviderExecutionEventKind) -> WsExecutionEventKind {
+    match kind {
+        ProviderExecutionEventKind::Provider => WsExecutionEventKind::Provider,
+        ProviderExecutionEventKind::Turn => WsExecutionEventKind::Turn,
+        ProviderExecutionEventKind::Command => WsExecutionEventKind::Command,
+        ProviderExecutionEventKind::Output => WsExecutionEventKind::Output,
+        ProviderExecutionEventKind::Artifact => WsExecutionEventKind::Artifact,
+    }
+}
+
+fn ws_execution_event_status(status: ProviderExecutionEventStatus) -> WsExecutionEventStatus {
+    match status {
+        ProviderExecutionEventStatus::Started => WsExecutionEventStatus::Started,
+        ProviderExecutionEventStatus::Running => WsExecutionEventStatus::Running,
+        ProviderExecutionEventStatus::WaitingApproval => WsExecutionEventStatus::WaitingApproval,
+        ProviderExecutionEventStatus::Completed => WsExecutionEventStatus::Completed,
+        ProviderExecutionEventStatus::Failed => WsExecutionEventStatus::Failed,
+        ProviderExecutionEventStatus::Aborted => WsExecutionEventStatus::Aborted,
     }
 }

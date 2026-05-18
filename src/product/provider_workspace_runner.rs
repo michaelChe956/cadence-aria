@@ -7,6 +7,7 @@ use crate::product::models::{
     ProviderName, ProviderReviewRoundRecord, SpecVersionRecord, WorkspaceSessionRecord,
     WorkspaceSessionStatus,
 };
+use crate::product::workspace_repository::workspace_repository_for_session;
 use crate::protocol::contracts::{AdapterInput, AdapterRole, ProviderType};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,11 +42,14 @@ impl ProviderWorkspaceRunner {
         let session = store
             .get_workspace_session(&input.session_id)
             .map_err(store_error)?;
+        let repository =
+            workspace_repository_for_session(&self.paths, &store, &session).map_err(store_error)?;
+        let prompt = build_prompt(&session, &input.user_prompt);
         let adapter_input = AdapterInput {
             provider_type: provider_type_for_name(&session.author_provider),
             role: AdapterRole::Orchestrator,
-            worktree_path: None,
-            prompt: input.user_prompt,
+            worktree_path: Some(repository.path.to_string_lossy().to_string()),
+            prompt,
             context_files: Vec::new(),
             output_schema: "provider_workspace_markdown".to_string(),
             timeout: 2400,
@@ -125,6 +129,15 @@ fn provider_type_for_name(provider: &ProviderName) -> ProviderType {
         ProviderName::Codex => ProviderType::Codex,
         ProviderName::Fake => ProviderType::Fake,
     }
+}
+
+fn build_prompt(session: &WorkspaceSessionRecord, user_prompt: &str) -> String {
+    let mut prompt = String::new();
+    for message in &session.messages {
+        prompt.push_str(&format!("[{}]: {}\n", message.role, message.content));
+    }
+    prompt.push_str(user_prompt);
+    prompt
 }
 
 fn store_error(error: impl std::fmt::Display) -> ProviderAdapterError {

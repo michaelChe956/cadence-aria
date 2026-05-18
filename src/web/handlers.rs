@@ -15,9 +15,7 @@ use crate::cross_cutting::provider_adapter::{
 use crate::interactive::models::WebWorkspaceProjection;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::gate_store::GateStore;
-use crate::product::issue_store::{
-    CreateProductIssueWithRepositoryInput, IssueStore, StartProductIssueInput,
-};
+use crate::product::issue_store::{CreateProductIssueWithRepositoryInput, IssueStore};
 use crate::product::json_store::{ProductStoreError, validate_relative_id};
 use crate::product::lifecycle_store::{
     CreateDesignSpecInput, CreateStorySpecInput, CreateWorkItemInput, CreateWorkspaceSessionInput,
@@ -36,7 +34,7 @@ use crate::product::provider_workspace_runner::{
     ProviderWorkspaceRunner, WorkspaceProviderRunInput,
 };
 use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
-use crate::product::runtime_binding_store::{CreateRuntimeBindingInput, RuntimeBindingStore};
+use crate::product::runtime_binding_store::RuntimeBindingStore;
 use crate::web::error::{ApiError, ApiResult};
 use crate::web::events::WebEventType;
 use crate::web::issue_registry::{CreateIssueInput, IssueRecord, IssueRegistry, IssueStatus};
@@ -54,12 +52,11 @@ use crate::web::types::{
     ProductIssueArtifactDto, ProductIssueDto, ProductIssueListResponse, ProjectDto,
     ProjectListResponse, ProviderInputContentResponse, RepositoryDto, RepositoryListResponse,
     ResolveGateRequest, ResolveGateResponse, RollbackPreviewRequest, RollbackPreviewResponse,
-    RollbackRequest, RollbackResponse, StartIssueRequest, StartIssueResponse,
-    StartProductIssueRequest, StartProductIssueResponse, StopTaskResponse, StorySpecDto,
-    TaskListResponse, WebEvent, WorkspaceDto, WorkspaceListResponse, WorkspaceMessageDto,
-    WorkspaceSessionConfirmRequest, WorkspaceSessionDto, WorkspaceSessionMessageRequest,
-    WorkspaceSessionRunNextRequest,
+    RollbackRequest, RollbackResponse, StopTaskResponse, StorySpecDto, TaskListResponse, WebEvent,
+    WorkspaceDto, WorkspaceListResponse, WorkspaceMessageDto, WorkspaceSessionConfirmRequest,
+    WorkspaceSessionDto, WorkspaceSessionMessageRequest, WorkspaceSessionRunNextRequest,
 };
+use crate::web::workspace_context::ensure_workspace_context_message;
 use crate::web::workspace_registry::{CreateWorkspaceInput, WorkspaceRecord, WorkspaceRegistry};
 
 #[derive(Debug, Deserialize)]
@@ -358,7 +355,7 @@ pub async fn generate_story_specs(
         .clone()
         .ok_or_else(|| ApiError::validation("repository_required", "repository_id is required"))?;
     find_repository(&app_paths, &project_id, &repository_id)?;
-    let lifecycle = LifecycleStore::new(app_paths);
+    let lifecycle = LifecycleStore::new(app_paths.clone());
     let story = lifecycle
         .create_story_spec(CreateStorySpecInput {
             project_id: project_id.clone(),
@@ -379,6 +376,8 @@ pub async fn generate_story_specs(
             superpowers_enabled: workspace_config.superpowers_enabled,
             openspec_enabled: workspace_config.openspec_enabled,
         })
+        .map_err(product_store_api_error)?;
+    let session = ensure_workspace_context_message(&app_paths, &lifecycle, session)
         .map_err(product_store_api_error)?;
 
     Ok(Json(GenerateStorySpecsResponse {
@@ -403,7 +402,7 @@ pub async fn generate_design_specs(
     IssueStore::new(app_paths.clone())
         .get(&project_id, &issue_id)
         .map_err(product_store_api_error)?;
-    let lifecycle = LifecycleStore::new(app_paths);
+    let lifecycle = LifecycleStore::new(app_paths.clone());
     validate_confirmed_story_specs(&lifecycle, &project_id, &issue_id, &request.story_spec_ids)?;
     let design_kind = parse_design_kind(&request.design_kind)?;
     let design = lifecycle
@@ -427,6 +426,8 @@ pub async fn generate_design_specs(
             superpowers_enabled: workspace_config.superpowers_enabled,
             openspec_enabled: workspace_config.openspec_enabled,
         })
+        .map_err(product_store_api_error)?;
+    let session = ensure_workspace_context_message(&app_paths, &lifecycle, session)
         .map_err(product_store_api_error)?;
 
     Ok(Json(GenerateDesignSpecsResponse {
@@ -456,7 +457,7 @@ pub async fn generate_work_items(
         .clone()
         .ok_or_else(|| ApiError::validation("repository_required", "repository_id is required"))?;
     find_repository(&app_paths, &project_id, &repository_id)?;
-    let lifecycle = LifecycleStore::new(app_paths);
+    let lifecycle = LifecycleStore::new(app_paths.clone());
     validate_confirmed_story_specs(&lifecycle, &project_id, &issue_id, &request.story_spec_ids)?;
     validate_confirmed_design_specs(&lifecycle, &project_id, &issue_id, &request.design_spec_ids)?;
     let work_item = lifecycle
@@ -481,6 +482,8 @@ pub async fn generate_work_items(
             superpowers_enabled: workspace_config.superpowers_enabled,
             openspec_enabled: workspace_config.openspec_enabled,
         })
+        .map_err(product_store_api_error)?;
+    let session = ensure_workspace_context_message(&app_paths, &lifecycle, session)
         .map_err(product_store_api_error)?;
 
     Ok(Json(GenerateWorkItemsResponse {
@@ -566,94 +569,6 @@ pub async fn delete_product_issue(
     Ok(Json(json!({"status":"deleted"})))
 }
 
-pub async fn start_product_issue(
-    State(state): State<WebAppState>,
-    Path((project_id, issue_id)): Path<(String, String)>,
-    Json(request): Json<StartProductIssueRequest>,
-) -> ApiResult<Json<StartProductIssueResponse>> {
-    let app_paths = product_app_paths(&state);
-    let issue_store = IssueStore::new(app_paths.clone());
-    let issue = issue_store
-        .get(&project_id, &issue_id)
-        .map_err(product_store_api_error)?;
-    if let Some(binding) = active_binding_for_issue(&app_paths, &project_id, &issue)? {
-        let workspace_id = product_execution_workspace_id(&project_id, &binding.repo_id);
-        return Ok(Json(StartProductIssueResponse {
-            issue_id: issue.id,
-            project_id,
-            repository_id: binding.repo_id,
-            workspace_id,
-            task_id: binding.task_id.unwrap_or_default(),
-            session_id: binding.session_id.unwrap_or_default(),
-            status: product_issue_status_text(&issue.status).to_string(),
-        }));
-    }
-    let workspace_repository_id = request
-        .workspace_id
-        .as_deref()
-        .or(request.repository_id.as_deref())
-        .ok_or_else(|| ApiError::validation("workspace_required", "workspace_id is required"))?;
-    let repository = find_repository(&app_paths, &project_id, workspace_repository_id)?;
-
-    let mut runtime = WebRuntime::new_fake(repository.path.clone());
-    let created = runtime.create_task(CreateTaskRequest {
-        request_text: issue
-            .description
-            .clone()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| issue.title.clone()),
-        change_id: issue.change_id.clone(),
-        policy_preset: request
-            .policy_preset
-            .unwrap_or_else(|| repository.default_policy_preset.clone()),
-        provider_mode: request
-            .provider_mode
-            .unwrap_or_else(|| repository.default_provider_mode.clone()),
-        timeout_secs: request.timeout_secs.unwrap_or(2400),
-    })?;
-
-    let binding = RuntimeBindingStore::new(app_paths.clone())
-        .create(CreateRuntimeBindingInput {
-            project_id: project_id.clone(),
-            issue_id: issue_id.clone(),
-            repo_id: repository.id.clone(),
-            change_id: issue.change_id,
-            task_id: Some(created.task_id.clone()),
-            session_id: Some(created.session_id.clone()),
-            runtime_root: repository.runtime_root.clone(),
-        })
-        .map_err(product_store_api_error)?;
-    let started = issue_store
-        .start(StartProductIssueInput {
-            project_id: project_id.clone(),
-            issue_id,
-            repo_id: repository.id.clone(),
-            active_binding_id: binding.id,
-        })
-        .map_err(product_store_api_error)?;
-    let workspace_id = product_execution_workspace_id(&project_id, &repository.id);
-    state.events.publish(
-        WebEventType::ProjectionUpdated.as_str(),
-        Some(&created.task_id),
-        json!({
-            "project_id": project_id,
-            "issue_id": started.id,
-            "repository_id": repository.id,
-            "workspace_id": workspace_id,
-            "phase": created.phase
-        }),
-    );
-    Ok(Json(StartProductIssueResponse {
-        issue_id: started.id,
-        project_id,
-        repository_id: repository.id,
-        workspace_id,
-        task_id: created.task_id,
-        session_id: created.session_id,
-        status: product_issue_status_text(&started.status).to_string(),
-    }))
-}
-
 pub async fn list_issues(State(state): State<WebAppState>) -> ApiResult<Json<IssueListResponse>> {
     let registry = IssueRegistry::new(state.workspace_root.clone());
     let issues = registry.list()?;
@@ -682,68 +597,6 @@ pub async fn delete_issue(
     let registry = IssueRegistry::new(state.workspace_root.clone());
     registry.delete(&issue_id)?;
     Ok(Json(json!({"status":"deleted"})))
-}
-
-pub async fn start_issue(
-    State(state): State<WebAppState>,
-    Path(issue_id): Path<String>,
-    Json(request): Json<StartIssueRequest>,
-) -> ApiResult<Json<StartIssueResponse>> {
-    let issue_registry = IssueRegistry::new(state.workspace_root.clone());
-    let workspace_registry = WorkspaceRegistry::new(state.workspace_root.clone());
-    let issue = issue_registry.get(&issue_id)?;
-    if let (Some(workspace_id), Some(task_id), Some(session_id)) = (
-        issue.workspace_id.clone(),
-        issue.task_id.clone(),
-        issue.session_id.clone(),
-    ) {
-        return Ok(Json(StartIssueResponse {
-            issue_id,
-            workspace_id,
-            task_id,
-            session_id,
-            status: "started".to_string(),
-        }));
-    }
-    let workspace = workspace_registry.get(&request.workspace_id)?;
-    let mut runtime = WebRuntime::new_fake(workspace.path.clone());
-    let created = runtime.create_task(CreateTaskRequest {
-        request_text: issue
-            .description
-            .clone()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| issue.title.clone()),
-        change_id: issue.change_id.clone(),
-        policy_preset: request
-            .policy_preset
-            .unwrap_or_else(|| workspace.default_policy_preset.clone()),
-        provider_mode: request
-            .provider_mode
-            .unwrap_or_else(|| workspace.default_provider_mode.clone()),
-        timeout_secs: request.timeout_secs.unwrap_or(2400),
-    })?;
-    let started = issue_registry.mark_started(
-        &issue_id,
-        &workspace.workspace_id,
-        &created.task_id,
-        &created.session_id,
-    )?;
-    state.events.publish(
-        WebEventType::ProjectionUpdated.as_str(),
-        Some(&created.task_id),
-        json!({
-            "issue_id": started.issue_id,
-            "workspace_id": workspace.workspace_id,
-            "phase": created.phase
-        }),
-    );
-    Ok(Json(StartIssueResponse {
-        issue_id: started.issue_id,
-        workspace_id: workspace.workspace_id,
-        task_id: created.task_id,
-        session_id: created.session_id,
-        status: issue_status_text(&started.status).to_string(),
-    }))
 }
 
 pub async fn confirm_gate(

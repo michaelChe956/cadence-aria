@@ -378,6 +378,20 @@ impl LifecycleStore {
         Ok(session)
     }
 
+    pub fn replace_workspace_messages(
+        &self,
+        session_id: &str,
+        messages: Vec<WorkspaceMessageRecord>,
+    ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
+        validate_relative_id(session_id)?;
+        let session_path = self.find_workspace_session_path(session_id)?;
+        let mut session: WorkspaceSessionRecord = read_json(&session_path)?;
+        session.messages = messages;
+        session.updated_at = Utc::now().to_rfc3339();
+        write_json(&session_path, &session)?;
+        Ok(session)
+    }
+
     pub fn update_workspace_session_status(
         &self,
         session_id: &str,

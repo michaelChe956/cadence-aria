@@ -106,6 +106,41 @@ describe("useWorkspaceWs", () => {
     expect(useWorkspaceStore.getState().providerStatus).toBe("waiting_approval");
   });
 
+  it("stores execution events from websocket messages", () => {
+    const harness = renderWorkspaceHook();
+
+    act(() => {
+      harness.ws.receive({
+        type: "execution_event",
+        event: {
+          event_id: "command_cmd_001",
+          kind: "command",
+          status: "completed",
+          title: "Command completed",
+          detail: "exit code 0",
+          command: "pwd",
+          cwd: "/tmp/repo",
+          output: "/tmp/repo\n",
+          exit_code: 0,
+        },
+      });
+    });
+
+    expect(useWorkspaceStore.getState().executionEvents).toEqual([
+      {
+        event_id: "command_cmd_001",
+        kind: "command",
+        status: "completed",
+        title: "Command completed",
+        detail: "exit code 0",
+        command: "pwd",
+        cwd: "/tmp/repo",
+        output: "/tmp/repo\n",
+        exit_code: 0,
+      },
+    ]);
+  });
+
   it("sends permission responses and resolves the pending request when connected", () => {
     const harness = renderWorkspaceHook();
     useWorkspaceStore.getState().addPermissionRequest({

@@ -138,6 +138,34 @@ async fn generate_endpoints_create_workspace_sessions_and_first_cards() {
         story_response["workspace_session"]["superpowers_enabled"],
         false
     );
+    let context_messages = story_response["workspace_session"]["messages"]
+        .as_array()
+        .expect("workspace context messages");
+    assert_eq!(context_messages.len(), 1);
+    assert_eq!(context_messages[0]["role"], "system");
+    let context = context_messages[0]["content"]
+        .as_str()
+        .expect("context content");
+    assert!(context.contains("登录会话过期"));
+    assert!(context.contains("描述"));
+    assert!(context.contains("Repo"));
+    assert!(context.contains(&repo.path().display().to_string()));
+    assert!(context.contains("登录会话过期提示"));
+    assert!(context.contains("[system]"));
+    assert!(context.contains("候选 spec 生成器"));
+    assert!(context.contains("[constraint_summary]"));
+    assert!(context.contains("OpenSpec"));
+    assert!(context.contains("不要直接修改 OpenSpec"));
+    assert!(context.contains("## 范围"));
+    assert!(context.contains("## 用户故事"));
+    assert!(context.contains("## 功能需求"));
+    assert!(context.contains("## 成功标准"));
+    assert!(context.contains("[REQ-001]"));
+    assert!(context.contains("[AC-001]"));
+    assert!(
+        !context.contains("必须遵守 using-superpowers"),
+        "explicitly disabled superpowers should not be advertised as enabled"
+    );
 
     let (status, lifecycle) = request_json(
         app,
@@ -392,7 +420,15 @@ async fn workspace_session_message_run_and_confirm_update_session_state() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(message["messages"][0]["content"], "请强调重新登录按钮");
+    assert!(
+        message["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| {
+                message["role"] == "user" && message["content"] == "请强调重新登录按钮"
+            })
+    );
 
     let (status, running) = request_json(
         app.clone(),

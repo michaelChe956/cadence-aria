@@ -1,24 +1,167 @@
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use cadence_aria::cross_cutting::claude_code_provider::ClaudeCodeProvider;
+use cadence_aria::cross_cutting::codex_provider::CodexProvider;
+use cadence_aria::cross_cutting::provider_adapter::ProviderAdapterError;
 use cadence_aria::cross_cutting::provider_registry::ProviderRegistry;
-use cadence_aria::cross_cutting::streaming_provider::FakeStreamingProvider;
+use cadence_aria::cross_cutting::streaming_provider::{
+    FakeStreamingProvider, ProviderCommand, ProviderEvent, ProviderSession,
+    StreamingProviderAdapter, StreamingProviderInput,
+};
 use cadence_aria::product::models::ProviderName;
+use cadence_aria::protocol::contracts::AdapterInput;
 use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::runtime::WebRuntime;
 use cadence_aria::web::state::WebAppState;
 use cadence_aria::web::workspace_ws_types::{WsInMessage, WsOutMessage};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
+use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tempfile::{TempDir, tempdir};
 use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 use tokio::time::{Duration, timeout};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
+
+#[tokio::test]
+async fn workspace_ws_hydrates_context_for_existing_empty_session() {
+    let root = tempdir().expect("root");
+    let repo = create_workspace_session_fixture(&root).await;
+    clear_workspace_session_messages(root.path());
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+
+    let initial = recv_json(&mut ws).await;
+    match initial {
+        WsOutMessage::SessionState { messages, .. } => {
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].role, "system");
+            assert!(messages[0].content.contains("登录会话过期"));
+            assert!(messages[0].content.contains("描述"));
+            assert!(messages[0].content.contains("Repo"));
+            assert!(
+                messages[0]
+                    .content
+                    .contains(&repo.path().display().to_string())
+            );
+            assert!(messages[0].content.contains("登录会话过期提示"));
+            assert!(messages[0].content.contains("候选 spec 生成器"));
+            assert!(messages[0].content.contains("OpenSpec"));
+            assert!(messages[0].content.contains("必须遵守 using-superpowers"));
+            assert!(messages[0].content.contains("[REQ-001]"));
+        }
+        other => panic!("expected session_state, got {other:?}"),
+    }
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+#[tokio::test]
+async fn workspace_ws_replaces_legacy_context_with_generation_brief() {
+    let root = tempdir().expect("root");
+    create_workspace_session_fixture(&root).await;
+    replace_workspace_session_messages(
+        root.path(),
+        json!([{
+            "role": "system",
+            "content": "Workspace 上下文已准备\n\nWorkspace 类型: Story Spec\nIssue: 登录会话过期",
+            "created_at": "2026-05-18T00:00:00Z"
+        }]),
+    );
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+
+    let initial = recv_json(&mut ws).await;
+    match initial {
+        WsOutMessage::SessionState { messages, .. } => {
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].role, "system");
+            assert!(messages[0].content.contains("Workspace 生成任务已准备"));
+            assert!(messages[0].content.contains("候选 spec 生成器"));
+            assert!(messages[0].content.contains("OpenSpec"));
+            assert!(messages[0].content.contains("必须遵守 using-superpowers"));
+            assert!(messages[0].content.contains("不要直接修改 OpenSpec"));
+            assert!(!messages[0].content.contains("Workspace 上下文已准备"));
+        }
+        other => panic!("expected session_state, got {other:?}"),
+    }
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+#[tokio::test]
+async fn workspace_ws_runs_provider_from_repository_path() {
+    let root = tempdir().expect("root");
+    let repo = create_workspace_session_fixture(&root).await;
+    let observed_working_dir = Arc::new(Mutex::new(None));
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Fake,
+        Arc::new(WorkingDirRecordingStreamingProvider {
+            observed_working_dir: observed_working_dir.clone(),
+        }),
+    );
+    let app = build_web_router(WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        registry,
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(
+        &mut ws,
+        &WsInMessage::UserMessage {
+            content: "check repository cwd".to_string(),
+        },
+    )
+    .await;
+
+    let checkpoint = recv_until_message_complete(&mut ws).await;
+    assert!(checkpoint.starts_with("cp_"));
+    assert_eq!(
+        observed_working_dir.lock().unwrap().as_ref(),
+        Some(&repo.path().canonicalize().expect("repo canonical path"))
+    );
+
+    drop(ws);
+    server.abort();
+}
 
 #[tokio::test]
 async fn workspace_ws_streams_persistent_session_and_confirms_lifecycle_entity() {
@@ -43,6 +186,7 @@ async fn workspace_ws_streams_persistent_session_and_confirms_lifecycle_entity()
             session_id,
             workspace_type,
             stage,
+            messages,
             providers,
             ..
         } => {
@@ -56,6 +200,15 @@ async fn workspace_ws_streams_persistent_session_and_confirms_lifecycle_entity()
                 serde_json::to_value(providers.author).unwrap(),
                 json!("fake")
             );
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].role, "system");
+            assert!(messages[0].content.contains("候选 spec 生成器"));
+            assert!(messages[0].content.contains("必须遵守 using-superpowers"));
+            assert!(messages[0].content.contains("brainstorming"));
+            assert!(messages[0].content.contains("OpenSpec"));
+            assert!(messages[0].content.contains("不要直接修改 OpenSpec"));
+            assert!(messages[0].content.contains("## 功能需求"));
+            assert!(messages[0].content.contains("[REQ-001]"));
         }
         other => panic!("expected session_state, got {other:?}"),
     }
@@ -72,7 +225,7 @@ async fn workspace_ws_streams_persistent_session_and_confirms_lifecycle_entity()
     let mut checkpoint_id = None;
     let mut saw_artifact = false;
     let mut saw_human_confirm = false;
-    for _ in 0..40 {
+    for _ in 0..220 {
         match recv_json(&mut ws).await {
             WsOutMessage::StreamChunk { content, .. } => stream_chunks.push_str(&content),
             WsOutMessage::ArtifactUpdate { markdown, .. } => {
@@ -92,6 +245,9 @@ async fn workspace_ws_streams_persistent_session_and_confirms_lifecycle_entity()
     }
 
     assert!(stream_chunks.contains("Story Spec"));
+    assert!(stream_chunks.contains("using-superpowers"));
+    assert!(stream_chunks.contains("OpenSpec"));
+    assert!(stream_chunks.contains("REQ-001"));
     assert!(saw_artifact);
     assert!(checkpoint_id.is_some());
     assert!(saw_human_confirm);
@@ -163,7 +319,8 @@ async fn workspace_ws_rollback_truncates_persistent_messages() {
             messages, stage, ..
         } => {
             assert_eq!(stage, "human_confirm");
-            assert_eq!(messages.len(), 2);
+            assert_eq!(messages.len(), 3);
+            assert!(messages.iter().any(|message| message.role == "system"));
             assert!(messages.iter().any(|message| message.content == "first"));
             assert!(!messages.iter().any(|message| message.content == "second"));
         }
@@ -174,7 +331,8 @@ async fn workspace_ws_rollback_truncates_persistent_messages() {
     let messages = lifecycle["workspace_sessions"][0]["messages"]
         .as_array()
         .expect("messages");
-    assert_eq!(messages.len(), 2);
+    assert_eq!(messages.len(), 3);
+    assert!(messages.iter().any(|message| message["role"] == "system"));
     assert!(
         !messages
             .iter()
@@ -375,8 +533,12 @@ async fn workspace_ws_abort_discards_partial_stream_without_completion() {
                 let messages = lifecycle["workspace_sessions"][0]["messages"]
                     .as_array()
                     .expect("messages");
-                assert_eq!(messages.len(), 1);
-                assert_eq!(messages[0]["content"], long_message("abort_instruction"));
+                assert_eq!(messages.len(), 2);
+                assert!(messages.iter().any(|message| message["role"] == "system"));
+                assert!(messages.iter().any(|message| {
+                    message["role"] == "user"
+                        && message["content"] == long_message("abort_instruction")
+                }));
                 drop(ws);
                 server.abort();
                 return;
@@ -449,6 +611,166 @@ async fn workspace_ws_supervised_permission_allows_real_stream_to_complete() {
     server.abort();
 }
 
+#[tokio::test]
+async fn workspace_ws_codex_current_protocol_completes_from_repository_path() {
+    let root = tempdir().expect("root");
+    let repo = create_workspace_session_fixture_with_author(&root, "codex").await;
+    let mut registry = ProviderRegistry::new();
+    registry.register(ProviderName::Fake, Arc::new(FakeStreamingProvider));
+    registry.register(
+        ProviderName::Codex,
+        Arc::new(CodexProvider::new(executable_fixture(
+            "tests/fixtures/provider/codex_app_server_current_fixture.sh",
+        ))),
+    );
+
+    let app = build_web_router(WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        registry,
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let initial = recv_json(&mut ws).await;
+    match initial {
+        WsOutMessage::SessionState { messages, .. } => {
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].role, "system");
+            assert!(messages[0].content.contains("Workspace 生成任务已准备"));
+            assert!(messages[0].content.contains("OpenSpec"));
+            assert!(messages[0].content.contains("using-superpowers"));
+            assert!(messages[0].content.contains("Repository 路径"));
+            assert!(
+                messages[0]
+                    .content
+                    .contains(&repo.path().display().to_string())
+            );
+        }
+        other => panic!("expected session_state, got {other:?}"),
+    }
+
+    send_json(
+        &mut ws,
+        &WsInMessage::UserMessage {
+            content: "run codex current protocol".to_string(),
+        },
+    )
+    .await;
+
+    let expected_repo_path = repo
+        .path()
+        .canonicalize()
+        .expect("repo canonical")
+        .to_string_lossy()
+        .to_string();
+    let mut checkpoint = None;
+    let mut saw_command_started = false;
+    let mut saw_command_completed = false;
+    for _ in 0..600 {
+        match recv_json(&mut ws).await {
+            WsOutMessage::ExecutionEvent { event } if event.event_id == "command_cmd_001" => {
+                assert_eq!(serde_json::to_value(&event.kind).unwrap(), json!("command"));
+                assert_eq!(event.command.as_deref(), Some("pwd"));
+                assert_eq!(event.cwd.as_deref(), Some(expected_repo_path.as_str()));
+                match serde_json::to_value(&event.status).unwrap() {
+                    value if value == json!("started") => saw_command_started = true,
+                    value if value == json!("completed") => {
+                        assert_eq!(event.exit_code, Some(0));
+                        assert!(
+                            event
+                                .output
+                                .as_deref()
+                                .unwrap_or_default()
+                                .contains(expected_repo_path.as_str())
+                        );
+                        saw_command_completed = true;
+                    }
+                    other => panic!("unexpected command status: {other}"),
+                }
+            }
+            WsOutMessage::MessageComplete {
+                checkpoint_id: next_checkpoint,
+                ..
+            } => {
+                checkpoint = Some(next_checkpoint);
+                break;
+            }
+            WsOutMessage::Error { message } => panic!("ws error: {message}"),
+            _ => {}
+        }
+    }
+    assert!(
+        saw_command_started,
+        "websocket did not emit command started"
+    );
+    assert!(
+        saw_command_completed,
+        "websocket did not emit command completed"
+    );
+    assert!(checkpoint.as_deref().unwrap_or_default().starts_with("cp_"));
+    let stage = recv_until_stage(&mut ws, "human_confirm").await;
+    assert_eq!(stage, "human_confirm");
+
+    drop(ws);
+    server.abort();
+}
+
+struct WorkingDirRecordingStreamingProvider {
+    observed_working_dir: Arc<Mutex<Option<PathBuf>>>,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for WorkingDirRecordingStreamingProvider {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        *self.observed_working_dir.lock().unwrap() = Some(input.working_dir);
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let (command_tx, _command_rx) = mpsc::channel::<ProviderCommand>(8);
+        tokio::spawn(async move {
+            let _ = event_tx
+                .send(ProviderEvent::TextDelta {
+                    content: "# Draft".to_string(),
+                })
+                .await;
+            let _ = event_tx
+                .send(ProviderEvent::Completed {
+                    full_output: "# Draft".to_string(),
+                    provider_session_id: None,
+                })
+                .await;
+        });
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+
+    async fn run_streaming(
+        &self,
+        _input: &AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<
+        mpsc::Receiver<cadence_aria::cross_cutting::streaming_provider::StreamChunk>,
+        ProviderAdapterError,
+    > {
+        Err(ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "run_streaming is not used by workspace websocket",
+            0,
+        ))
+    }
+}
+
 async fn create_workspace_session_fixture(root: &TempDir) -> TempDir {
     create_workspace_session_fixture_with_author(root, "fake").await
 }
@@ -504,6 +826,25 @@ async fn create_workspace_session_fixture_with_author(
         "workspace_session_0001"
     );
     repo
+}
+
+fn clear_workspace_session_messages(root: &std::path::Path) {
+    replace_workspace_session_messages(root, json!([]));
+}
+
+fn replace_workspace_session_messages(root: &std::path::Path, messages: Value) {
+    let session_path = root.join(
+        ".aria/projects/project_0001/issues/issue_0001/workspace-sessions/workspace_session_0001.json",
+    );
+    let mut session: Value =
+        serde_json::from_str(&fs::read_to_string(&session_path).expect("workspace session json"))
+            .expect("workspace session value");
+    session["messages"] = messages;
+    fs::write(
+        &session_path,
+        serde_json::to_string_pretty(&session).expect("workspace session json"),
+    )
+    .expect("write workspace session");
 }
 
 async fn request_json(
@@ -577,7 +918,7 @@ async fn recv_until_message_complete(
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
 ) -> String {
-    for _ in 0..40 {
+    for _ in 0..600 {
         match recv_json(ws).await {
             WsOutMessage::MessageComplete { checkpoint_id, .. } => return checkpoint_id,
             WsOutMessage::Error { message } => panic!("ws error: {message}"),

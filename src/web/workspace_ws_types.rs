@@ -58,6 +58,9 @@ pub enum WsOutMessage {
     ProviderStatus {
         status: WsProviderStatus,
     },
+    ExecutionEvent {
+        event: WsExecutionEvent,
+    },
     SessionState {
         session_id: String,
         workspace_type: WorkspaceType,
@@ -113,6 +116,40 @@ pub enum WsProviderStatus {
     Aborted,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WsExecutionEventKind {
+    Provider,
+    Turn,
+    Command,
+    Output,
+    Artifact,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WsExecutionEventStatus {
+    Started,
+    Running,
+    WaitingApproval,
+    Completed,
+    Failed,
+    Aborted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WsExecutionEvent {
+    pub event_id: String,
+    pub kind: WsExecutionEventKind,
+    pub status: WsExecutionEventStatus,
+    pub title: String,
+    pub detail: Option<String>,
+    pub command: Option<String>,
+    pub cwd: Option<String>,
+    pub output: Option<String>,
+    pub exit_code: Option<i32>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderDefaults {
     pub reviewer: ProviderName,
@@ -143,7 +180,10 @@ pub struct WsProviderConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::{WsInMessage, WsOutMessage, WsPermissionRiskLevel, WsProviderStatus};
+    use super::{
+        WsExecutionEvent, WsExecutionEventKind, WsExecutionEventStatus, WsInMessage, WsOutMessage,
+        WsPermissionRiskLevel, WsProviderStatus,
+    };
 
     #[test]
     fn permission_messages_use_snake_case_type_tags() {
@@ -194,5 +234,29 @@ mod tests {
             "status": "ready"
         }));
         assert!(invalid_status.is_err());
+    }
+
+    #[test]
+    fn execution_event_messages_use_snake_case_type_tags() {
+        let out = WsOutMessage::ExecutionEvent {
+            event: WsExecutionEvent {
+                event_id: "command_cmd_001".to_string(),
+                kind: WsExecutionEventKind::Command,
+                status: WsExecutionEventStatus::Completed,
+                title: "Command completed".to_string(),
+                detail: Some("exit code 0".to_string()),
+                command: Some("pwd".to_string()),
+                cwd: Some("/tmp/repo".to_string()),
+                output: Some("/tmp/repo\n".to_string()),
+                exit_code: Some(0),
+            },
+        };
+
+        let value = serde_json::to_value(out).unwrap();
+        assert_eq!(value["type"], "execution_event");
+        assert_eq!(value["event"]["kind"], "command");
+        assert_eq!(value["event"]["status"], "completed");
+        assert_eq!(value["event"]["command"], "pwd");
+        assert_eq!(value["event"]["cwd"], "/tmp/repo");
     }
 }

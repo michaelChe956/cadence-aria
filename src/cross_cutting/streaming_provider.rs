@@ -64,12 +64,45 @@ pub enum ProviderStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderExecutionEventKind {
+    Provider,
+    Turn,
+    Command,
+    Output,
+    Artifact,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderExecutionEventStatus {
+    Started,
+    Running,
+    WaitingApproval,
+    Completed,
+    Failed,
+    Aborted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderExecutionEvent {
+    pub event_id: String,
+    pub kind: ProviderExecutionEventKind,
+    pub status: ProviderExecutionEventStatus,
+    pub title: String,
+    pub detail: Option<String>,
+    pub command: Option<String>,
+    pub cwd: Option<String>,
+    pub output: Option<String>,
+    pub exit_code: Option<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderEvent {
     TextDelta {
         content: String,
     },
     PermissionRequest(PermissionRequestData),
     StatusChanged(ProviderStatus),
+    Execution(ProviderExecutionEvent),
     Completed {
         full_output: String,
         provider_session_id: Option<String>,
@@ -297,7 +330,9 @@ impl StreamingProviderAdapter for FakeStreamingProvider {
                         StreamChunk::Done { full_output }
                     }
                     ProviderEvent::Failed { message } => StreamChunk::Error(message),
-                    ProviderEvent::PermissionRequest(_) | ProviderEvent::StatusChanged(_) => {
+                    ProviderEvent::PermissionRequest(_)
+                    | ProviderEvent::StatusChanged(_)
+                    | ProviderEvent::Execution(_) => {
                         continue;
                     }
                 };

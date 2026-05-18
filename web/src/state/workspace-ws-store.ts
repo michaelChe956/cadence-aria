@@ -8,12 +8,32 @@ export type ProviderStatus =
   | "completed"
   | "failed"
   | "aborted";
+export type ExecutionEventKind = "provider" | "turn" | "command" | "output" | "artifact";
+export type ExecutionEventStatus =
+  | "started"
+  | "running"
+  | "waiting_approval"
+  | "completed"
+  | "failed"
+  | "aborted";
 
 export interface PermissionRequest {
   id: string;
   tool_name: string;
   description: string;
   risk_level: "low" | "medium" | "high";
+}
+
+export interface ExecutionEvent {
+  event_id: string;
+  kind: ExecutionEventKind;
+  status: ExecutionEventStatus;
+  title: string;
+  detail?: string | null;
+  command?: string | null;
+  cwd?: string | null;
+  output?: string | null;
+  exit_code?: number | null;
 }
 
 export interface WsMessage {
@@ -48,6 +68,7 @@ export interface WorkspaceWsState {
   streamingContent: string;
   pendingPermissions: PermissionRequest[];
   providerStatus: ProviderStatus;
+  executionEvents: ExecutionEvent[];
   error: string | null;
 }
 
@@ -69,6 +90,8 @@ export interface WorkspaceWsActions {
   addPermissionRequest: (request: PermissionRequest) => void;
   resolvePermissionRequest: (id: string) => void;
   setProviderStatus: (status: ProviderStatus) => void;
+  upsertExecutionEvent: (event: ExecutionEvent) => void;
+  clearExecutionEvents: () => void;
   setError: (error: string | null) => void;
   clearStreaming: () => void;
   reset: () => void;
@@ -86,6 +109,7 @@ const initialState: WorkspaceWsState = {
   streamingContent: "",
   pendingPermissions: [],
   providerStatus: "starting",
+  executionEvents: [],
   error: null,
 };
 
@@ -104,6 +128,7 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
       streamingContent: "",
       pendingPermissions: [],
       providerStatus: "starting",
+      executionEvents: [],
       error: null,
     }),
 
@@ -159,6 +184,21 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
     })),
 
   setProviderStatus: (status) => set({ providerStatus: status }),
+
+  upsertExecutionEvent: (event) =>
+    set((prev) => {
+      const index = prev.executionEvents.findIndex(
+        (existing) => existing.event_id === event.event_id,
+      );
+      if (index === -1) {
+        return { executionEvents: [...prev.executionEvents, event] };
+      }
+      const next = [...prev.executionEvents];
+      next[index] = { ...next[index], ...event };
+      return { executionEvents: next };
+    }),
+
+  clearExecutionEvents: () => set({ executionEvents: [] }),
 
   setError: (error) => set({ error }),
 

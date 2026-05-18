@@ -13,8 +13,9 @@ use crate::cross_cutting::approval_bridge::ApprovalBridge;
 use crate::cross_cutting::process_manager::ProcessManager;
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
-    ProviderEvent, ProviderPermissionMode, ProviderSession, ProviderStatus, RiskLevel, StreamChunk,
-    StreamingProviderAdapter, StreamingProviderInput,
+    ProviderEvent, ProviderExecutionEvent, ProviderExecutionEventKind,
+    ProviderExecutionEventStatus, ProviderPermissionMode, ProviderSession, ProviderStatus,
+    RiskLevel, StreamChunk, StreamingProviderAdapter, StreamingProviderInput,
 };
 use crate::protocol::contracts::AdapterInput;
 
@@ -194,6 +195,19 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
         let _ = event_tx
             .send(ProviderEvent::StatusChanged(ProviderStatus::Starting))
             .await;
+        let _ = event_tx
+            .send(ProviderEvent::Execution(ProviderExecutionEvent {
+                event_id: "provider".to_string(),
+                kind: ProviderExecutionEventKind::Provider,
+                status: ProviderExecutionEventStatus::Started,
+                title: "Claude Code provider started".to_string(),
+                detail: None,
+                command: None,
+                cwd: Some(input.working_dir.display().to_string()),
+                output: None,
+                exit_code: None,
+            }))
+            .await;
 
         tokio::spawn(async move {
             let stderr_output = Arc::new(Mutex::new(String::new()));
@@ -214,12 +228,48 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
                 let _ = stderr_task.await;
                 let stderr = combine_stderr(stderr_output.lock().await.clone(), error.stderr);
                 let _ = event_tx
+                    .send(ProviderEvent::StatusChanged(ProviderStatus::Failed))
+                    .await;
+                let _ = event_tx
+                    .send(ProviderEvent::Execution(ProviderExecutionEvent {
+                        event_id: "provider".to_string(),
+                        kind: ProviderExecutionEventKind::Provider,
+                        status: ProviderExecutionEventStatus::Failed,
+                        title: "Claude Code provider failed".to_string(),
+                        detail: Some(error.details),
+                        command: None,
+                        cwd: None,
+                        output: if stderr.trim().is_empty() {
+                            None
+                        } else {
+                            Some(stderr.clone())
+                        },
+                        exit_code: None,
+                    }))
+                    .await;
+                let _ = event_tx
                     .send(ProviderEvent::Failed {
                         message: format_exit_failure(status, stderr),
                     })
                     .await;
                 return;
             }
+            let _ = event_tx
+                .send(ProviderEvent::StatusChanged(ProviderStatus::Running))
+                .await;
+            let _ = event_tx
+                .send(ProviderEvent::Execution(ProviderExecutionEvent {
+                    event_id: "turn".to_string(),
+                    kind: ProviderExecutionEventKind::Turn,
+                    status: ProviderExecutionEventStatus::Started,
+                    title: "Turn started".to_string(),
+                    detail: None,
+                    command: None,
+                    cwd: Some(input.working_dir.display().to_string()),
+                    output: None,
+                    exit_code: None,
+                }))
+                .await;
 
             let result = read_claude_stream(stdout, stdin, bridge, event_tx.clone(), cancel).await;
             match result {
@@ -229,6 +279,26 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
                     if outcome == ClaudeStreamOutcome::EofWithoutResult {
                         let stderr = stderr_output.lock().await.clone();
                         let _ = event_tx
+                            .send(ProviderEvent::StatusChanged(ProviderStatus::Failed))
+                            .await;
+                        let _ = event_tx
+                            .send(ProviderEvent::Execution(ProviderExecutionEvent {
+                                event_id: "provider".to_string(),
+                                kind: ProviderExecutionEventKind::Provider,
+                                status: ProviderExecutionEventStatus::Failed,
+                                title: "Claude Code provider failed".to_string(),
+                                detail: Some("exited without result".to_string()),
+                                command: None,
+                                cwd: None,
+                                output: if stderr.trim().is_empty() {
+                                    None
+                                } else {
+                                    Some(stderr.clone())
+                                },
+                                exit_code: None,
+                            }))
+                            .await;
+                        let _ = event_tx
                             .send(ProviderEvent::Failed {
                                 message: format_exit_failure(status, stderr),
                             })
@@ -236,6 +306,22 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
                     }
                 }
                 Err(error) => {
+                    let _ = event_tx
+                        .send(ProviderEvent::StatusChanged(ProviderStatus::Failed))
+                        .await;
+                    let _ = event_tx
+                        .send(ProviderEvent::Execution(ProviderExecutionEvent {
+                            event_id: "provider".to_string(),
+                            kind: ProviderExecutionEventKind::Provider,
+                            status: ProviderExecutionEventStatus::Failed,
+                            title: "Claude Code provider failed".to_string(),
+                            detail: Some(error.details.clone()),
+                            command: None,
+                            cwd: None,
+                            output: None,
+                            exit_code: None,
+                        }))
+                        .await;
                     let _ = event_tx
                         .send(ProviderEvent::Failed {
                             message: error.details,
@@ -293,7 +379,9 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
                         StreamChunk::Done { full_output }
                     }
                     ProviderEvent::Failed { message } => StreamChunk::Error(message),
-                    ProviderEvent::PermissionRequest(_) | ProviderEvent::StatusChanged(_) => {
+                    ProviderEvent::PermissionRequest(_)
+                    | ProviderEvent::StatusChanged(_)
+                    | ProviderEvent::Execution(_) => {
                         continue;
                     }
                 };
@@ -402,6 +490,28 @@ async fn read_claude_stream(
                 .get("session_id")
                 .and_then(Value::as_str)
                 .map(ToString::to_string);
+            send_provider_event(
+                &event_tx,
+                ProviderEvent::Execution(ProviderExecutionEvent {
+                    event_id: "turn".to_string(),
+                    kind: ProviderExecutionEventKind::Turn,
+                    status: ProviderExecutionEventStatus::Completed,
+                    title: "Turn completed".to_string(),
+                    detail: None,
+                    command: None,
+                    cwd: None,
+                    output: None,
+                    exit_code: None,
+                }),
+                &cancel,
+            )
+            .await?;
+            send_provider_event(
+                &event_tx,
+                ProviderEvent::StatusChanged(ProviderStatus::Completed),
+                &cancel,
+            )
+            .await?;
             send_provider_event(
                 &event_tx,
                 ProviderEvent::Completed {
@@ -546,6 +656,7 @@ mod tests {
             {
                 ProviderEvent::Completed { full_output, .. } => return full_output,
                 ProviderEvent::StatusChanged(_)
+                | ProviderEvent::Execution(_)
                 | ProviderEvent::TextDelta { .. }
                 | ProviderEvent::PermissionRequest(_) => {}
                 ProviderEvent::Failed { message } => panic!("provider failed: {message}"),
@@ -561,6 +672,19 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         panic!("receiver did not close after cancellation");
+    }
+
+    async fn wait_for_buffer_len<T>(rx: &mpsc::Receiver<T>, expected_len: usize) {
+        for _ in 0..1000 {
+            if rx.len() >= expected_len {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!(
+            "receiver buffer did not reach {expected_len} items; actual len is {}",
+            rx.len()
+        );
     }
 
     fn adapter_input(prompt: &str) -> AdapterInput {
@@ -621,6 +745,7 @@ mod tests {
                     saw_text = content.contains("Claude fixture chunk");
                 }
                 ProviderEvent::PermissionRequest(data) => break data.id,
+                ProviderEvent::StatusChanged(_) | ProviderEvent::Execution(_) => {}
                 other => panic!("unexpected event before permission: {other:?}"),
             }
         };
@@ -698,14 +823,8 @@ mod tests {
             .await
             .expect("run streaming");
 
-        for _ in 0..200 {
-            if rx.len() >= 32 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        assert!(rx.len() >= 32, "stream receiver should be backpressured");
-
+        wait_for_buffer_len(&rx, 32).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
         cancel.cancel();
         tokio::time::timeout(TEST_TIMEOUT, wait_for_receiver_closed(&rx))
             .await

@@ -5,7 +5,6 @@ use cadence_aria::web::events::EventHub;
 use cadence_aria::web::runtime::WebRuntime;
 use cadence_aria::web::state::WebAppState;
 use serde_json::{Value, json};
-use std::fs;
 use std::process::Command;
 use tempfile::tempdir;
 use tower::ServiceExt;
@@ -82,7 +81,7 @@ async fn creates_project_repository_and_issue_via_product_api() {
 }
 
 #[tokio::test]
-async fn manages_workspace_repositories_and_runs_issue_in_selected_repository() {
+async fn manages_workspace_repositories_and_keeps_issue_on_lifecycle_flow() {
     let root = tempdir().expect("root");
     let repo_a = git_repo();
     let repo_b = git_repo();
@@ -159,62 +158,14 @@ async fn manages_workspace_repositories_and_runs_issue_in_selected_repository() 
     assert_eq!(issue["phase"], "clarification");
     assert_eq!(issue["status"], "draft");
 
-    let (status, started) = request_json(
+    let (status, _) = request_json(
         app.clone(),
         Method::POST,
         "/api/projects/project_0001/issues/issue_0001/start",
         json!({"repository_id":"repository_0002","provider_mode":"fake"}),
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(started["issue_id"], "issue_0001");
-    assert_eq!(started["repository_id"], "repository_0002");
-    assert_eq!(
-        started["workspace_id"],
-        "product:project_0001:repository_0002"
-    );
-    assert!(
-        started["task_id"]
-            .as_str()
-            .unwrap_or_default()
-            .starts_with("task_")
-    );
-
-    let projection_uri = format!(
-        "/api/projection?workspace_id={}&task_id={}",
-        started["workspace_id"].as_str().expect("workspace id"),
-        started["task_id"].as_str().expect("task id")
-    );
-    let projection = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri(projection_uri)
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("projection");
-    assert_eq!(projection.status(), StatusCode::OK);
-
-    let task_id = started["task_id"].as_str().expect("task id");
-    let artifact_dir = repo_b
-        .path()
-        .join(".aria/runtime/tasks")
-        .join(task_id)
-        .join("artifacts/spec");
-    fs::create_dir_all(&artifact_dir).expect("artifact dir");
-    fs::write(
-        artifact_dir.join("story.json"),
-        json!({
-            "artifact_ref": "spec_story_0001",
-            "artifact_kind": "spec",
-            "producer_node": "N05",
-            "markdown": "# Spec\n\nStory spec content"
-        })
-        .to_string(),
-    )
-    .expect("artifact");
+    assert_eq!(status, StatusCode::NOT_FOUND);
 
     let (status, issues) = request_json(
         app,
@@ -227,15 +178,18 @@ async fn manages_workspace_repositories_and_runs_issue_in_selected_repository() 
     let issues = issues["issues"].as_array().expect("issues");
     assert_eq!(issues.len(), 1);
     assert_eq!(issues[0]["repo_id"], "repository_0002");
-    assert_eq!(issues[0]["phase"], "development");
-    assert_eq!(issues[0]["status"], "in_progress");
-    assert_eq!(issues[0]["active_binding_id"], "binding_0001");
-    assert_eq!(issues[0]["artifacts"][0]["artifact_ref"], "spec_story_0001");
-    assert_eq!(issues[0]["artifacts"][0]["stage"], "story_spec");
+    assert_eq!(issues[0]["phase"], "clarification");
+    assert_eq!(issues[0]["status"], "draft");
+    assert_eq!(issues[0]["active_binding_id"], Value::Null);
+    assert_eq!(
+        issues[0]["artifacts"].as_array().expect("artifacts").len(),
+        0
+    );
+    assert!(!repo_b.path().join(".aria/runtime/tasks/task_0001").exists());
 }
 
 #[tokio::test]
-async fn starting_product_issue_again_reuses_existing_execution_workspace() {
+async fn product_issue_start_endpoint_is_removed() {
     let root = tempdir().expect("root");
     let repo_a = git_repo();
     let repo_b = git_repo();
@@ -280,32 +234,23 @@ async fn starting_product_issue_again_reuses_existing_execution_workspace() {
     )
     .await;
 
-    let (status, first) = request_json(
+    let (status, _) = request_json(
         app.clone(),
         Method::POST,
         "/api/projects/project_0001/issues/issue_0001/start",
         json!({"workspace_id":"repository_0001","provider_mode":"fake"}),
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        first["workspace_id"],
-        "product:project_0001:repository_0001"
-    );
-    assert_eq!(first["repository_id"], "repository_0001");
+    assert_eq!(status, StatusCode::NOT_FOUND);
 
-    let (status, second) = request_json(
+    let (status, _) = request_json(
         app.clone(),
         Method::POST,
         "/api/projects/project_0001/issues/issue_0001/start",
         json!({"workspace_id":"repository_0002","provider_mode":"fake"}),
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(second["workspace_id"], first["workspace_id"]);
-    assert_eq!(second["repository_id"], "repository_0001");
-    assert_eq!(second["task_id"], first["task_id"]);
-    assert_eq!(second["session_id"], first["session_id"]);
+    assert_eq!(status, StatusCode::NOT_FOUND);
 
     let (status, issues) = request_json(
         app,
@@ -315,9 +260,9 @@ async fn starting_product_issue_again_reuses_existing_execution_workspace() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(issues["issues"][0]["workspace_id"], first["workspace_id"]);
-    assert_eq!(issues["issues"][0]["task_id"], first["task_id"]);
-    assert_eq!(issues["issues"][0]["session_id"], first["session_id"]);
+    assert_eq!(issues["issues"][0]["workspace_id"], Value::Null);
+    assert_eq!(issues["issues"][0]["task_id"], Value::Null);
+    assert_eq!(issues["issues"][0]["session_id"], Value::Null);
 }
 
 #[tokio::test]

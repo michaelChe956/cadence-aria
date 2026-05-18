@@ -54,4 +54,32 @@ describe("WorkspacePage", () => {
 
     expect(api.respondPermission).toHaveBeenCalledWith("perm_001", true, undefined);
   });
+
+  it("shows provider command progress in the execution tab", async () => {
+    mockWorkspaceWs();
+    useWorkspaceStore.setState({
+      providerStatus: "running",
+      executionEvents: [
+        {
+          event_id: "command_cmd_001",
+          kind: "command",
+          status: "completed",
+          title: "Command completed",
+          detail: "exit code 0",
+          command: "pwd",
+          cwd: "/tmp/repo",
+          output: "/tmp/repo\n",
+          exit_code: 0,
+        },
+      ],
+    });
+
+    render(<WorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: "执行" }));
+
+    expect(screen.getByText("运行中")).toBeInTheDocument();
+    expect(screen.getByText("pwd")).toBeInTheDocument();
+    expect(screen.getByText("/tmp/repo")).toBeInTheDocument();
+    expect(screen.getByText(/exit code 0/)).toBeInTheDocument();
+  });
 });

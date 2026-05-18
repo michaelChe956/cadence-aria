@@ -14,4 +14,5 @@ pub mod repository_store;
 pub mod runtime_binding_store;
 pub mod work_item_store;
 pub mod workspace_engine;
+pub mod workspace_repository;
 pub mod worktree_scheduler;

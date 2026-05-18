@@ -26,14 +26,6 @@ pub struct CreateProductIssueWithRepositoryInput {
     pub change_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StartProductIssueInput {
-    pub project_id: String,
-    pub issue_id: String,
-    pub repo_id: String,
-    pub active_binding_id: String,
-}
-
 #[derive(Debug, Clone)]
 pub struct IssueStore {
     paths: ProductAppPaths,
@@ -131,21 +123,6 @@ impl IssueStore {
             description: input.description,
             change_id: input.change_id,
         })
-    }
-
-    pub fn start(&self, input: StartProductIssueInput) -> Result<IssueRecord, ProductStoreError> {
-        validate_relative_id(&input.project_id)?;
-        validate_relative_id(&input.issue_id)?;
-        validate_relative_id(&input.repo_id)?;
-        validate_relative_id(&input.active_binding_id)?;
-        let mut issue = self.get(&input.project_id, &input.issue_id)?;
-        issue.repo_id = Some(input.repo_id);
-        issue.phase = IssuePhase::Development;
-        issue.status = IssueStatus::InProgress;
-        issue.active_binding_id = Some(input.active_binding_id);
-        issue.updated_at = Utc::now().to_rfc3339();
-        write_json(&self.issue_path(&input.project_id, &input.issue_id), &issue)?;
-        Ok(issue)
     }
 
     pub fn delete(&self, project_id: &str, issue_id: &str) -> Result<(), ProductStoreError> {

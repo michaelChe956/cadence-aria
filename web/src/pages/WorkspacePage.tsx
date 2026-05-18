@@ -1,17 +1,20 @@
 import {
+  Activity,
   ArrowLeft,
   Check,
+  FileText,
   RotateCcw,
   Send,
   Settings,
   Square,
+  Terminal,
   Wifi,
   WifiOff,
   X,
 } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
-import { useWorkspaceStore } from "../state/workspace-ws-store";
+import { useWorkspaceStore, type ExecutionEvent } from "../state/workspace-ws-store";
 
 const STAGE_LABELS: Record<string, string> = {
   prepare_context: "准备上下文",
@@ -26,6 +29,32 @@ const PROVIDER_OPTIONS = [
   { value: "codex", label: "Codex" },
   { value: "fake", label: "Fake (测试)" },
 ];
+
+const PROVIDER_STATUS_LABELS: Record<string, string> = {
+  starting: "启动中",
+  running: "运行中",
+  waiting_approval: "等待权限",
+  completed: "已完成",
+  failed: "失败",
+  aborted: "已中止",
+};
+
+const EXECUTION_STATUS_LABELS: Record<string, string> = {
+  started: "开始",
+  running: "运行中",
+  waiting_approval: "等待权限",
+  completed: "完成",
+  failed: "失败",
+  aborted: "中止",
+};
+
+const EXECUTION_KIND_LABELS: Record<string, string> = {
+  provider: "Provider",
+  turn: "Turn",
+  command: "Command",
+  output: "Output",
+  artifact: "Artifact",
+};
 
 export function WorkspacePage({
   sessionId,
@@ -53,10 +82,13 @@ export function WorkspacePage({
     workspaceType,
     providers,
     pendingPermissions,
+    providerStatus,
+    executionEvents,
   } = useWorkspaceStore();
 
   const [draft, setDraft] = useState("");
   const [showProviderPanel, setShowProviderPanel] = useState(false);
+  const [activeRightTab, setActiveRightTab] = useState<"artifact" | "execution">("execution");
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -244,12 +276,37 @@ export function WorkspacePage({
           </div>
         </div>
 
-        {/* Artifact Panel */}
+        {/* Artifact / Execution Panel */}
         <div className="flex min-h-0 w-1/2 flex-col">
           <div className="flex h-10 shrink-0 items-center justify-between border-b border-[var(--aria-line)] bg-[var(--aria-panel)] px-4">
-            <span className="text-xs font-semibold uppercase text-[var(--aria-ink-muted)]">
-              Artifact
-            </span>
+            <div className="inline-flex items-center gap-1 rounded-md border border-[var(--aria-line)] bg-white p-0.5">
+              <button
+                type="button"
+                onClick={() => setActiveRightTab("artifact")}
+                aria-pressed={activeRightTab === "artifact"}
+                className={`inline-flex h-7 items-center gap-1 rounded px-2 text-xs font-semibold ${
+                  activeRightTab === "artifact"
+                    ? "bg-[var(--aria-panel-muted)] text-[var(--aria-ink)]"
+                    : "text-[var(--aria-ink-muted)] hover:text-[var(--aria-ink)]"
+                }`}
+              >
+                <FileText className="h-3.5 w-3.5" />
+                Artifact
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveRightTab("execution")}
+                aria-pressed={activeRightTab === "execution"}
+                className={`inline-flex h-7 items-center gap-1 rounded px-2 text-xs font-semibold ${
+                  activeRightTab === "execution"
+                    ? "bg-[var(--aria-panel-muted)] text-[var(--aria-ink)]"
+                    : "text-[var(--aria-ink-muted)] hover:text-[var(--aria-ink)]"
+                }`}
+              >
+                <Terminal className="h-3.5 w-3.5" />
+                执行
+              </button>
+            </div>
             {providers ? (
               <span className="text-xs text-[var(--aria-ink-muted)]">
                 Author: {providers.author} | Reviewer: {providers.reviewer ?? "无"}
@@ -284,17 +341,25 @@ export function WorkspacePage({
               </div>
             </div>
           ) : null}
-          <div className="min-h-0 flex-1 overflow-auto p-4">
-            {artifact ? (
-              <pre className="whitespace-pre-wrap break-words font-mono text-sm text-[var(--aria-ink)]">
-                {artifact}
-              </pre>
-            ) : (
-              <p className="text-sm text-[var(--aria-ink-muted)]">
-                等待生成...
-              </p>
-            )}
-          </div>
+          {activeRightTab === "artifact" ? (
+            <div className="min-h-0 flex-1 overflow-auto p-4">
+              {artifact ? (
+                <pre className="whitespace-pre-wrap break-words font-mono text-sm text-[var(--aria-ink)]">
+                  {artifact}
+                </pre>
+              ) : (
+                <p className="text-sm text-[var(--aria-ink-muted)]">
+                  等待生成...
+                </p>
+              )}
+            </div>
+          ) : (
+            <ExecutionPanel
+              providerStatus={providerStatus}
+              executionEvents={executionEvents}
+              pendingPermissions={pendingPermissions}
+            />
+          )}
         </div>
       </div>
 
@@ -315,4 +380,106 @@ export function WorkspacePage({
       </footer>
     </div>
   );
+}
+
+function ExecutionPanel({
+  providerStatus,
+  executionEvents,
+  pendingPermissions,
+}: {
+  providerStatus: string;
+  executionEvents: ExecutionEvent[];
+  pendingPermissions: Array<{
+    id: string;
+    tool_name: string;
+    description: string;
+    risk_level: "low" | "medium" | "high";
+  }>;
+}) {
+  return (
+    <div className="min-h-0 flex-1 overflow-auto">
+      <div className="flex h-11 items-center justify-between border-b border-[var(--aria-line)] px-4">
+        <div className="inline-flex items-center gap-2 text-sm font-medium text-[var(--aria-ink)]">
+          <Activity className="h-4 w-4 text-[var(--aria-primary)]" />
+          Provider: {PROVIDER_STATUS_LABELS[providerStatus] ?? providerStatus}
+        </div>
+        {pendingPermissions.length > 0 ? (
+          <span className="rounded border border-amber-300 bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-800">
+            等待权限 {pendingPermissions.length}
+          </span>
+        ) : null}
+      </div>
+      {executionEvents.length === 0 ? (
+        <div className="p-4 text-sm text-[var(--aria-ink-muted)]">
+          等待 provider 执行事件...
+        </div>
+      ) : (
+        <div>
+          {executionEvents.map((event) => (
+            <ExecutionEventRow key={event.event_id} event={event} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ExecutionEventRow({ event }: { event: ExecutionEvent }) {
+  const isCommand = event.kind === "command";
+  return (
+    <div className="border-b border-[var(--aria-line)] px-4 py-3">
+      <div className="flex items-start gap-3">
+        <div
+          className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md border ${statusClass(event.status)}`}
+        >
+          {isCommand ? <Terminal className="h-3.5 w-3.5" /> : <Activity className="h-3.5 w-3.5" />}
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm font-semibold text-[var(--aria-ink)]">
+              {event.title}
+            </span>
+            <span className="rounded border border-[var(--aria-line)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--aria-ink-muted)]">
+              {EXECUTION_KIND_LABELS[event.kind] ?? event.kind}
+            </span>
+            <span className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${statusBadgeClass(event.status)}`}>
+              {EXECUTION_STATUS_LABELS[event.status] ?? event.status}
+            </span>
+          </div>
+          {event.detail ? (
+            <div className="mt-1 text-xs text-[var(--aria-ink-muted)]">{event.detail}</div>
+          ) : null}
+          {event.command ? (
+            <pre className="mt-2 whitespace-pre-wrap break-words rounded-md bg-[var(--aria-panel-muted)] px-2 py-1.5 font-mono text-xs text-[var(--aria-ink)]">
+              {event.command}
+            </pre>
+          ) : null}
+          {event.cwd ? (
+            <div className="mt-1 break-all font-mono text-[11px] text-[var(--aria-ink-muted)]">
+              {event.cwd}
+            </div>
+          ) : null}
+          {event.output ? (
+            <pre className="mt-2 max-h-44 overflow-auto whitespace-pre-wrap break-words rounded-md border border-[var(--aria-line)] bg-white px-2 py-1.5 font-mono text-xs text-[var(--aria-ink)]">
+              stdout: {event.output}
+            </pre>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function statusClass(status: string) {
+  if (status === "completed") return "border-green-200 bg-green-50 text-green-700";
+  if (status === "failed" || status === "aborted") return "border-red-200 bg-red-50 text-red-700";
+  if (status === "waiting_approval") return "border-amber-300 bg-amber-50 text-amber-700";
+  return "border-blue-200 bg-blue-50 text-blue-700";
+}
+
+function statusBadgeClass(status: string) {
+  if (status === "completed") return "bg-green-50 text-green-700";
+  if (status === "failed" || status === "aborted") return "bg-red-50 text-red-700";
+  if (status === "waiting_approval") return "bg-amber-50 text-amber-700";
+  return "bg-blue-50 text-blue-700";
 }
