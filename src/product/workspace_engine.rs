@@ -1063,6 +1063,8 @@ impl WorkspaceEngine {
     pub async fn handle_confirm(&mut self) {
         match self.session.stage {
             WorkspaceStage::HumanConfirm => {
+                self.complete_active_node(Some("已确认通过".to_string()))
+                    .await;
                 self.mark_latest_artifact_confirmed(Some("human".to_string()));
                 if let Some(store) = &self.lifecycle_store {
                     let _ = store.update_workspace_session_status(
@@ -1519,6 +1521,13 @@ fn initial_timeline(session: &WorkspaceSession) -> (Vec<TimelineNode>, Option<St
 }
 
 fn active_timeline_node_id(nodes: &[TimelineNode]) -> Option<String> {
+    if let Some(node) = nodes.last()
+        && node.node_type == TimelineNodeType::Completed
+        && node.status == TimelineNodeStatus::Completed
+    {
+        return Some(node.node_id.clone());
+    }
+
     nodes
         .iter()
         .rev()
@@ -2093,6 +2102,97 @@ mod tests {
 
         engine.handle_confirm().await;
         assert_eq!(engine.session().stage, WorkspaceStage::Completed);
+    }
+
+    #[tokio::test]
+    async fn handle_confirm_completes_human_confirm_node_before_completed_node() {
+        let (_tmp, store) = setup();
+        let (tx, _) = mpsc::channel(64);
+        let mut session = make_session("sess_confirm_timeline");
+        session.reviewer_provider = Some(ProviderName::Fake);
+        let mut engine = WorkspaceEngine::new(store, tx, session);
+
+        engine
+            .handle_user_message(
+                "start".to_string(),
+                Arc::new(FakeStreamingProvider),
+                empty_provider_commands(),
+            )
+            .await;
+        assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
+
+        engine.handle_confirm().await;
+
+        match engine.build_session_state() {
+            WsOutMessage::SessionState {
+                timeline_nodes,
+                active_node_id,
+                stage,
+                ..
+            } => {
+                assert_eq!(stage, "completed");
+                assert!(timeline_nodes.iter().any(|node| {
+                    node.node_type == TimelineNodeType::HumanConfirm
+                        && node.status == TimelineNodeStatus::Completed
+                }));
+                let active = timeline_nodes
+                    .iter()
+                    .find(|node| Some(&node.node_id) == active_node_id.as_ref())
+                    .expect("active completed node");
+                assert_eq!(active.node_type, TimelineNodeType::Completed);
+                assert_eq!(active.status, TimelineNodeStatus::Completed);
+                assert_eq!(
+                    active_timeline_node_id(&timeline_nodes).as_deref(),
+                    active_node_id.as_deref()
+                );
+            }
+            _ => panic!("expected SessionState"),
+        }
+    }
+
+    #[test]
+    fn active_timeline_node_id_prefers_terminal_completed_node_over_stale_active_node() {
+        let session = make_session("sess_stale_timeline");
+        let provider_config_snapshot = ProviderConfigSnapshot {
+            author: session.author_provider.clone(),
+            reviewer: session.reviewer_provider.clone(),
+            review_rounds: session.review_rounds,
+        };
+        let stale_human_confirm = TimelineNode {
+            node_id: "timeline_node_001".to_string(),
+            node_type: TimelineNodeType::HumanConfirm,
+            agent: None,
+            stage: WsWorkspaceStage::HumanConfirm,
+            round: None,
+            status: TimelineNodeStatus::Active,
+            title: "人工确认".to_string(),
+            summary: Some("等待人工确认".to_string()),
+            started_at: "2026-05-19T00:00:00Z".to_string(),
+            completed_at: None,
+            duration_ms: None,
+            artifact_ref: Some("artifact_current".to_string()),
+            provider_config_snapshot: provider_config_snapshot.clone(),
+        };
+        let completed = TimelineNode {
+            node_id: "timeline_node_002".to_string(),
+            node_type: TimelineNodeType::Completed,
+            agent: None,
+            stage: WsWorkspaceStage::Completed,
+            round: None,
+            status: TimelineNodeStatus::Completed,
+            title: "流程完成".to_string(),
+            summary: Some("已确认通过".to_string()),
+            started_at: "2026-05-19T00:01:00Z".to_string(),
+            completed_at: None,
+            duration_ms: None,
+            artifact_ref: Some("artifact_current".to_string()),
+            provider_config_snapshot,
+        };
+
+        assert_eq!(
+            active_timeline_node_id(&[stale_human_confirm, completed]).as_deref(),
+            Some("timeline_node_002")
+        );
     }
 
     #[tokio::test]
