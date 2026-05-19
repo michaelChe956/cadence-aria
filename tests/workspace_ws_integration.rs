@@ -13,9 +13,10 @@ use cadence_aria::protocol::contracts::AdapterInput;
 use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::runtime::WebRuntime;
 use cadence_aria::web::state::WebAppState;
-use cadence_aria::web::workspace_ws_types::{WsInMessage, WsOutMessage};
+use cadence_aria::web::workspace_ws_types::{TimelineNodeType, WsInMessage, WsOutMessage};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
+use std::collections::VecDeque;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -281,6 +282,173 @@ async fn workspace_ws_streams_persistent_session_and_confirms_lifecycle_entity()
             .expect("version markdown")
             .contains("Story Spec")
     );
+
+    drop(ws);
+    server.abort();
+}
+
+#[tokio::test]
+async fn workspace_ws_reconnect_restores_timeline_and_artifact_versions() {
+    let root = tempdir().expect("root");
+    create_workspace_session_fixture(&root).await;
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+    let (mut ws, _) = connect_async(url.clone()).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(
+        &mut ws,
+        &WsInMessage::UserMessage {
+            content: "请生成 Story Spec".to_string(),
+        },
+    )
+    .await;
+    let stage = recv_until_stage(&mut ws, "human_confirm").await;
+    assert_eq!(stage, "human_confirm");
+    drop(ws);
+
+    let (mut reconnected, _) = connect_async(url).await.expect("reconnect ws");
+    match recv_json(&mut reconnected).await {
+        WsOutMessage::SessionState {
+            timeline_nodes,
+            artifact_versions,
+            ..
+        } => {
+            assert!(timeline_nodes.iter().any(|node| {
+                node.node_type == TimelineNodeType::Generation
+                    && node.summary.as_deref() == Some("生成完成")
+            }));
+            assert!(timeline_nodes.iter().any(|node| {
+                node.node_type == TimelineNodeType::Review
+                    && node.summary.as_deref() == Some("未执行真实 review（Fake 快速路径）")
+            }));
+            assert_eq!(artifact_versions.len(), 1);
+            assert_eq!(artifact_versions[0].generated_by, ProviderName::Fake);
+            assert_eq!(artifact_versions[0].reviewed_by, Some(ProviderName::Fake));
+        }
+        other => panic!("expected session_state, got {other:?}"),
+    }
+
+    drop(reconnected);
+    server.abort();
+}
+
+#[tokio::test]
+async fn workspace_ws_review_decision_continue_runs_revision_and_second_review() {
+    let root = tempdir().expect("root");
+    create_workspace_session_fixture_with_providers(&root, "fake", "codex", 2).await;
+    let author_prompts = Arc::new(Mutex::new(Vec::new()));
+    let reviewer_prompts = Arc::new(Mutex::new(Vec::new()));
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Fake,
+        Arc::new(ScriptedStreamingProvider::new(
+            ["# Initial Story Spec", "# Revised Story Spec"],
+            author_prompts.clone(),
+        )),
+    );
+    registry.register(
+        ProviderName::Codex,
+        Arc::new(ScriptedStreamingProvider::new(
+            [
+                "需要补充失败路径。\n\n```json\n{\"verdict\":\"revise\",\"summary\":\"补充失败路径\"}\n```",
+                "审核通过。\n\n```json\n{\"verdict\":\"pass\",\"summary\":\"可以确认\"}\n```",
+            ],
+            reviewer_prompts.clone(),
+        )),
+    );
+    let app = build_web_router(WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        registry,
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(
+        &mut ws,
+        &WsInMessage::UserMessage {
+            content: "生成 Story Spec".to_string(),
+        },
+    )
+    .await;
+
+    let mut decision_required = false;
+    for _ in 0..600 {
+        match recv_json(&mut ws).await {
+            WsOutMessage::ReviewDecisionRequired { options, .. } => {
+                assert!(options.contains(&"continue_with_context".to_string()));
+                decision_required = true;
+                break;
+            }
+            WsOutMessage::Error { message } => panic!("ws error: {message}"),
+            _ => {}
+        }
+    }
+    assert!(decision_required, "review decision should be required");
+
+    send_json(
+        &mut ws,
+        &WsInMessage::ReviewDecisionResponse {
+            decision: "continue_with_context".to_string(),
+            extra_context: Some("补充登录错误码".to_string()),
+        },
+    )
+    .await;
+
+    let mut saw_revision_stream = false;
+    let mut saw_review_pass = false;
+    let mut saw_human_confirm = false;
+    for _ in 0..600 {
+        match recv_json(&mut ws).await {
+            WsOutMessage::StreamChunk { content, .. }
+                if content.contains("# Revised Story Spec") =>
+            {
+                saw_revision_stream = true;
+            }
+            WsOutMessage::ReviewComplete { summary, .. } if summary == "可以确认" => {
+                saw_review_pass = true;
+            }
+            WsOutMessage::StageChange { stage } if stage == "human_confirm" => {
+                saw_human_confirm = true;
+                break;
+            }
+            WsOutMessage::Error { message } => panic!("ws error: {message}"),
+            _ => {}
+        }
+    }
+
+    assert!(
+        saw_revision_stream,
+        "revision output should stream to websocket"
+    );
+    assert!(saw_review_pass, "second review should pass");
+    assert!(
+        saw_human_confirm,
+        "second review pass should enter human confirm"
+    );
+    let prompts = author_prompts.lock().unwrap();
+    let revision_prompt = prompts.get(1).expect("revision author prompt");
+    assert!(revision_prompt.contains("需要补充失败路径"));
+    assert!(revision_prompt.contains("补充登录错误码"));
+    assert!(revision_prompt.contains("请根据以上审核意见修改产物"));
+    assert_eq!(reviewer_prompts.lock().unwrap().len(), 2);
 
     drop(ws);
     server.abort();
@@ -740,6 +908,97 @@ async fn workspace_ws_codex_current_protocol_completes_from_repository_path() {
     server.abort();
 }
 
+#[tokio::test]
+async fn workspace_ws_reconnect_during_review_decision_can_still_run_revision() {
+    let root = tempdir().expect("root");
+    create_workspace_session_fixture_with_providers(&root, "fake", "codex", 2).await;
+    let author_prompts = Arc::new(Mutex::new(Vec::new()));
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Fake,
+        Arc::new(ScriptedStreamingProvider::new(
+            ["# Initial Story Spec", "# Revised After Reconnect"],
+            author_prompts.clone(),
+        )),
+    );
+    registry.register(
+        ProviderName::Codex,
+        Arc::new(ScriptedStreamingProvider::new(
+            [
+                "需要补充失败路径。\n\n```json\n{\"verdict\":\"revise\",\"summary\":\"补充失败路径\"}\n```",
+                "审核通过。\n\n```json\n{\"verdict\":\"pass\",\"summary\":\"可以确认\"}\n```",
+            ],
+            Arc::new(Mutex::new(Vec::new())),
+        )),
+    );
+    let app = build_web_router(WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        registry,
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+    let (mut ws, _) = connect_async(url.clone()).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+    send_json(
+        &mut ws,
+        &WsInMessage::UserMessage {
+            content: "生成 Story Spec".to_string(),
+        },
+    )
+    .await;
+    for _ in 0..600 {
+        match recv_json(&mut ws).await {
+            WsOutMessage::ReviewDecisionRequired { .. } => break,
+            WsOutMessage::Error { message } => panic!("ws error: {message}"),
+            _ => {}
+        }
+    }
+    drop(ws);
+
+    let (mut reconnected, _) = connect_async(url).await.expect("reconnect ws");
+    let _state = recv_json(&mut reconnected).await;
+    send_json(
+        &mut reconnected,
+        &WsInMessage::ReviewDecisionResponse {
+            decision: "continue_with_context".to_string(),
+            extra_context: Some("重连后补充".to_string()),
+        },
+    )
+    .await;
+
+    let mut saw_revision = false;
+    let mut saw_human_confirm = false;
+    for _ in 0..600 {
+        match recv_json(&mut reconnected).await {
+            WsOutMessage::StreamChunk { content, .. }
+                if content.contains("# Revised After Reconnect") =>
+            {
+                saw_revision = true;
+            }
+            WsOutMessage::StageChange { stage } if stage == "human_confirm" => {
+                saw_human_confirm = true;
+                break;
+            }
+            WsOutMessage::Error { message } => panic!("ws error: {message}"),
+            _ => {}
+        }
+    }
+    assert!(saw_revision);
+    assert!(saw_human_confirm);
+    let prompts = author_prompts.lock().unwrap();
+    assert!(prompts[1].contains("需要补充失败路径"));
+    assert!(prompts[1].contains("重连后补充"));
+
+    drop(reconnected);
+    server.abort();
+}
+
 struct WorkingDirRecordingStreamingProvider {
     observed_working_dir: Arc<Mutex<Option<PathBuf>>>,
 }
@@ -790,6 +1049,72 @@ impl StreamingProviderAdapter for WorkingDirRecordingStreamingProvider {
     }
 }
 
+struct ScriptedStreamingProvider {
+    outputs: Mutex<VecDeque<String>>,
+    prompts: Arc<Mutex<Vec<String>>>,
+}
+
+impl ScriptedStreamingProvider {
+    fn new<const N: usize>(outputs: [&str; N], prompts: Arc<Mutex<Vec<String>>>) -> Self {
+        Self {
+            outputs: Mutex::new(outputs.into_iter().map(ToOwned::to_owned).collect()),
+            prompts,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for ScriptedStreamingProvider {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.prompts.lock().unwrap().push(input.prompt);
+        let output = self
+            .outputs
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("scripted provider output");
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let (command_tx, _command_rx) = mpsc::channel::<ProviderCommand>(8);
+        tokio::spawn(async move {
+            let _ = event_tx
+                .send(ProviderEvent::TextDelta {
+                    content: output.clone(),
+                })
+                .await;
+            let _ = event_tx
+                .send(ProviderEvent::Completed {
+                    full_output: output,
+                    provider_session_id: None,
+                })
+                .await;
+        });
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+
+    async fn run_streaming(
+        &self,
+        _input: &AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<
+        mpsc::Receiver<cadence_aria::cross_cutting::streaming_provider::StreamChunk>,
+        ProviderAdapterError,
+    > {
+        Err(ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "run_streaming is not used by workspace websocket",
+            0,
+        ))
+    }
+}
+
 async fn create_workspace_session_fixture(root: &TempDir) -> TempDir {
     create_workspace_session_fixture_with_author(root, "fake").await
 }
@@ -797,6 +1122,15 @@ async fn create_workspace_session_fixture(root: &TempDir) -> TempDir {
 async fn create_workspace_session_fixture_with_author(
     root: &TempDir,
     author_provider: &str,
+) -> TempDir {
+    create_workspace_session_fixture_with_providers(root, author_provider, "fake", 1).await
+}
+
+async fn create_workspace_session_fixture_with_providers(
+    root: &TempDir,
+    author_provider: &str,
+    reviewer_provider: &str,
+    review_rounds: u32,
 ) -> TempDir {
     let repo = git_repo();
     let app = build_web_router(WebAppState::new(
@@ -832,8 +1166,8 @@ async fn create_workspace_session_fixture_with_author(
         json!({
             "title":"登录会话过期提示",
             "author_provider":author_provider,
-            "reviewer_provider":"codex",
-            "review_rounds":1,
+            "reviewer_provider":reviewer_provider,
+            "review_rounds":review_rounds,
             "superpowers_enabled":true,
             "openspec_enabled":true
         }),

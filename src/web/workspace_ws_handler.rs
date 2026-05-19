@@ -14,7 +14,10 @@ use crate::cross_cutting::streaming_provider::{
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::checkpoint_store::CheckpointStore;
 use crate::product::lifecycle_store::LifecycleStore;
-use crate::product::workspace_engine::{EngineEvent, WorkspaceEngine, WorkspaceSession};
+use crate::product::models::ProviderName;
+use crate::product::workspace_engine::{
+    EngineEvent, ReviewDecisionOutcome, WorkspaceEngine, WorkspaceSession, WorkspaceStage,
+};
 use crate::product::workspace_repository::workspace_repository_for_session;
 use crate::web::state::WebAppState;
 use crate::web::workspace_context::ensure_workspace_context_message;
@@ -113,15 +116,23 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
     let event_forward_task = tokio::spawn(async move {
         while let Some(event) = engine_rx.recv().await {
             let ws_msg = match event {
-                EngineEvent::StreamChunk { role, content } => {
-                    WsOutMessage::StreamChunk { role, content }
-                }
+                EngineEvent::StreamChunk {
+                    role,
+                    content,
+                    node_id,
+                } => WsOutMessage::StreamChunk {
+                    role,
+                    content,
+                    node_id,
+                },
                 EngineEvent::MessageComplete {
                     message_id,
                     checkpoint_id,
+                    node_id,
                 } => WsOutMessage::MessageComplete {
                     message_id,
                     checkpoint_id,
+                    node_id,
                 },
                 EngineEvent::StageChange { stage } => WsOutMessage::StageChange { stage },
                 EngineEvent::ArtifactUpdate { version, markdown } => WsOutMessage::ArtifactUpdate {
@@ -143,8 +154,48 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                 EngineEvent::ProviderStatus { status } => WsOutMessage::ProviderStatus {
                     status: ws_provider_status(status),
                 },
-                EngineEvent::ExecutionEvent { event } => WsOutMessage::ExecutionEvent {
-                    event: ws_execution_event(event),
+                EngineEvent::ExecutionEvent {
+                    event,
+                    node_id,
+                    agent,
+                } => WsOutMessage::ExecutionEvent {
+                    event: ws_execution_event(event, node_id, agent),
+                },
+                EngineEvent::TimelineNodeCreated { node } => {
+                    WsOutMessage::TimelineNodeCreated { node }
+                }
+                EngineEvent::TimelineNodeUpdated {
+                    node_id,
+                    status,
+                    summary,
+                    completed_at,
+                } => WsOutMessage::TimelineNodeUpdated {
+                    node_id,
+                    status,
+                    summary,
+                    completed_at,
+                },
+                EngineEvent::ReviewComplete {
+                    node_id,
+                    round,
+                    verdict,
+                    comments,
+                    summary,
+                } => WsOutMessage::ReviewComplete {
+                    node_id,
+                    round,
+                    verdict,
+                    comments,
+                    summary,
+                },
+                EngineEvent::ReviewDecisionRequired {
+                    node_id,
+                    round,
+                    options,
+                } => WsOutMessage::ReviewDecisionRequired {
+                    node_id,
+                    round,
+                    options,
                 },
                 EngineEvent::Error { message } => WsOutMessage::Error { message },
             };
@@ -201,6 +252,7 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                 };
                 let engine_for_run = engine.clone();
                 let current_run_for_task = current_run.clone();
+                let provider_registry_for_run = state.provider_registry.clone();
                 let run_id = {
                     let mut next = next_run_id.lock().await;
                     *next += 1;
@@ -215,10 +267,34 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                 });
                 tokio::spawn(async move {
                     let mut engine = engine_for_run.lock().await;
-                    engine.use_run_token(run_cancel);
+                    engine.use_run_token(run_cancel.clone());
                     engine
                         .handle_user_message(content, provider_for_run, command_rx)
                         .await;
+                    while engine.session().stage == WorkspaceStage::CrossReview {
+                        let reviewer_name = engine
+                            .session()
+                            .reviewer_provider
+                            .clone()
+                            .unwrap_or(crate::product::models::ProviderName::Codex);
+                        let Some(provider_for_review) =
+                            provider_registry_for_run.get(&reviewer_name)
+                        else {
+                            break;
+                        };
+                        let (review_command_tx, review_command_rx) = mpsc::channel(8);
+                        {
+                            let mut current = current_run_for_task.lock().await;
+                            if let Some(active) = current.as_mut()
+                                && active.id == run_id
+                            {
+                                active.command_tx = review_command_tx;
+                            }
+                        }
+                        engine
+                            .drive_review_session(provider_for_review, review_command_rx)
+                            .await;
+                    }
                     let mut current = current_run_for_task.lock().await;
                     if current.as_ref().is_some_and(|active| active.id == run_id) {
                         *current = None;
@@ -284,6 +360,98 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                         .await;
                 }
             }
+            WsInMessage::ReviewDecisionResponse {
+                decision,
+                extra_context,
+            } => {
+                let active = { current_run.lock().await.take() };
+                if let Some(run) = active {
+                    let _ = run.command_tx.send(ProviderCommand::Abort).await;
+                    run.cancel.cancel();
+                }
+
+                let outcome = {
+                    let mut engine = engine.lock().await;
+                    engine.handle_review_decision(decision, extra_context).await
+                };
+
+                match outcome {
+                    Ok(ReviewDecisionOutcome::HumanConfirm) => {}
+                    Ok(ReviewDecisionOutcome::StartRevision) => {
+                        let provider_name = {
+                            let engine = engine.lock().await;
+                            engine.session().author_provider.clone()
+                        };
+                        let Some(provider_for_revision) =
+                            state.provider_registry.get(&provider_name)
+                        else {
+                            let err = WsOutMessage::Error {
+                                message: format!("provider unavailable: {provider_name:?}"),
+                            };
+                            if let Ok(json) = serde_json::to_string(&err) {
+                                let _ = outbound_tx.send(json).await;
+                            }
+                            continue;
+                        };
+                        let engine_for_run = engine.clone();
+                        let current_run_for_task = current_run.clone();
+                        let provider_registry_for_run = state.provider_registry.clone();
+                        let run_id = {
+                            let mut next = next_run_id.lock().await;
+                            *next += 1;
+                            *next
+                        };
+                        let run_cancel = CancellationToken::new();
+                        let (command_tx, command_rx) = mpsc::channel(8);
+                        *current_run.lock().await = Some(ActiveRun {
+                            id: run_id,
+                            cancel: run_cancel.clone(),
+                            command_tx,
+                        });
+                        tokio::spawn(async move {
+                            let mut engine = engine_for_run.lock().await;
+                            engine.use_run_token(run_cancel.clone());
+                            engine
+                                .drive_revision_session(provider_for_revision, command_rx)
+                                .await;
+                            while engine.session().stage == WorkspaceStage::CrossReview {
+                                let reviewer_name = engine
+                                    .session()
+                                    .reviewer_provider
+                                    .clone()
+                                    .unwrap_or(ProviderName::Codex);
+                                let Some(provider_for_review) =
+                                    provider_registry_for_run.get(&reviewer_name)
+                                else {
+                                    break;
+                                };
+                                let (review_command_tx, review_command_rx) = mpsc::channel(8);
+                                {
+                                    let mut current = current_run_for_task.lock().await;
+                                    if let Some(active) = current.as_mut()
+                                        && active.id == run_id
+                                    {
+                                        active.command_tx = review_command_tx;
+                                    }
+                                }
+                                engine
+                                    .drive_review_session(provider_for_review, review_command_rx)
+                                    .await;
+                            }
+                            let mut current = current_run_for_task.lock().await;
+                            if current.as_ref().is_some_and(|active| active.id == run_id) {
+                                *current = None;
+                            }
+                        });
+                    }
+                    Err(message) => {
+                        let err = WsOutMessage::Error { message };
+                        if let Ok(json) = serde_json::to_string(&err) {
+                            let _ = outbound_tx.send(json).await;
+                        }
+                    }
+                }
+            }
             WsInMessage::Abort => {
                 let active = { current_run.lock().await.take() };
                 if let Some(run) = active {
@@ -332,9 +500,15 @@ fn ws_provider_status(status: ProviderStatus) -> WsProviderStatus {
     }
 }
 
-fn ws_execution_event(event: ProviderExecutionEvent) -> WsExecutionEvent {
+fn ws_execution_event(
+    event: ProviderExecutionEvent,
+    node_id: Option<String>,
+    agent: Option<crate::product::models::ProviderName>,
+) -> WsExecutionEvent {
     WsExecutionEvent {
         event_id: event.event_id,
+        node_id,
+        agent,
         kind: ws_execution_event_kind(event.kind),
         status: ws_execution_event_status(event.status),
         title: event.title,

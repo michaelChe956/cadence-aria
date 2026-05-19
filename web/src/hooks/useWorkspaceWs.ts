@@ -3,6 +3,9 @@ import {
   useWorkspaceStore,
   type ExecutionEvent,
   type ProviderStatus,
+  type ReviewVerdict,
+  type TimelineNode,
+  type TimelineNodeStatus,
 } from "../state/workspace-ws-store";
 
 interface WsOutMessage {
@@ -65,10 +68,14 @@ export function useWorkspaceWs(sessionId: string | null) {
         store.setSessionState(msg as never);
         break;
       case "stream_chunk":
-        store.appendStreamChunk(msg.content as string);
+        store.appendStreamChunk(msg.content as string, msg.node_id as string | null | undefined);
         break;
       case "message_complete":
-        store.completeMessage(msg.message_id as string, msg.checkpoint_id as string);
+        store.completeMessage(
+          msg.message_id as string,
+          msg.checkpoint_id as string,
+          msg.node_id as string | null | undefined,
+        );
         break;
       case "stage_change":
         store.setStage(msg.stage as string);
@@ -89,6 +96,31 @@ export function useWorkspaceWs(sessionId: string | null) {
         break;
       case "execution_event":
         store.upsertExecutionEvent(msg.event as ExecutionEvent);
+        break;
+      case "timeline_node_created":
+        store.addTimelineNode(msg.node as TimelineNode);
+        break;
+      case "timeline_node_updated":
+        store.updateTimelineNode(
+          msg.node_id as string,
+          msg.status as TimelineNodeStatus,
+          msg.summary as string | null | undefined,
+          msg.completed_at as string | null | undefined,
+        );
+        break;
+      case "review_complete":
+        store.setNodeVerdict(msg.node_id as string, {
+          verdict: msg.verdict,
+          comments: msg.comments,
+          summary: msg.summary,
+        } as ReviewVerdict);
+        break;
+      case "review_decision_required":
+        store.setPendingDecision({
+          node_id: msg.node_id as string,
+          round: msg.round as number,
+          options: msg.options as string[],
+        });
         break;
       case "error":
         store.setError(msg.message as string);
@@ -158,6 +190,20 @@ export function useWorkspaceWs(sessionId: string | null) {
     [],
   );
 
+  const sendReviewDecision = useCallback((decision: string, extraContext?: string) => {
+    const ws = wsRef.current;
+    if (ws?.readyState === WebSocket.OPEN) {
+      const trimmedContext = extraContext?.trim();
+      ws.send(
+        JSON.stringify({
+          type: "review_decision_response",
+          decision,
+          extra_context: trimmedContext ? trimmedContext : null,
+        }),
+      );
+    }
+  }, []);
+
   const respondPermission = useCallback(
     (id: string, approved: boolean, reason?: string) => {
       const ws = wsRef.current;
@@ -184,6 +230,7 @@ export function useWorkspaceWs(sessionId: string | null) {
     confirm,
     abort,
     selectProvider,
+    sendReviewDecision,
     respondPermission,
     connectionStatus,
   };

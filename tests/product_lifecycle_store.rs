@@ -7,6 +7,10 @@ use cadence_aria::product::lifecycle_store::{
 use cadence_aria::product::models::{
     DesignKind, LifecycleConfirmationStatus, ProviderName, WorkspaceSessionStatus, WorkspaceType,
 };
+use cadence_aria::web::workspace_ws_types::{
+    ArtifactVersion, ProviderConfigSnapshot, TimelineNode, TimelineNodeStatus, TimelineNodeType,
+    WorkspaceStage,
+};
 use tempfile::tempdir;
 
 #[test]
@@ -106,6 +110,67 @@ fn persists_workspace_session_and_project_provider_defaults() {
             .unwrap()
             .len(),
         1
+    );
+}
+
+#[test]
+fn persists_workspace_timeline_nodes_and_artifact_versions() {
+    let root = tempdir().expect("tempdir");
+    let store = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let session = store
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "story_spec_0001".to_string(),
+            workspace_type: WorkspaceType::Story,
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: ProviderName::Codex,
+            review_rounds: 2,
+            superpowers_enabled: true,
+            openspec_enabled: true,
+        })
+        .expect("session");
+    let node = TimelineNode {
+        node_id: "timeline_node_001".to_string(),
+        node_type: TimelineNodeType::Generation,
+        agent: Some(ProviderName::ClaudeCode),
+        stage: WorkspaceStage::Running,
+        round: None,
+        status: TimelineNodeStatus::Completed,
+        title: "Story Spec 生成".to_string(),
+        summary: Some("生成完成".to_string()),
+        started_at: "2026-05-19T00:00:00Z".to_string(),
+        completed_at: Some("2026-05-19T00:01:00Z".to_string()),
+        duration_ms: None,
+        artifact_ref: Some("artifact_current".to_string()),
+        provider_config_snapshot: ProviderConfigSnapshot {
+            author: ProviderName::ClaudeCode,
+            reviewer: Some(ProviderName::Codex),
+            review_rounds: 2,
+        },
+    };
+    let version = ArtifactVersion {
+        version: 1,
+        markdown: "# Story Spec".to_string(),
+        generated_by: ProviderName::ClaudeCode,
+        reviewed_by: Some(ProviderName::Codex),
+        review_verdict: None,
+        confirmed_by: None,
+        created_at: "2026-05-19T00:01:00Z".to_string(),
+        source_node_id: "timeline_node_001".to_string(),
+    };
+
+    store
+        .save_timeline_nodes(&session.id, std::slice::from_ref(&node))
+        .expect("save timeline");
+    store
+        .append_artifact_version(&session.id, version.clone())
+        .expect("append artifact version");
+
+    assert_eq!(store.load_timeline_nodes(&session.id).unwrap(), vec![node]);
+    assert_eq!(
+        store.list_artifact_versions(&session.id).unwrap(),
+        vec![version]
     );
 }
 

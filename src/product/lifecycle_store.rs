@@ -14,6 +14,7 @@ use crate::product::models::{
     StorySpecRecord, WorkItemPlanStatus, WorkItemStatus, WorkspaceMessageRecord,
     WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType,
 };
+use crate::web::workspace_ws_types::{ArtifactVersion, TimelineNode};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateStorySpecInput {
@@ -438,6 +439,68 @@ impl LifecycleStore {
         Ok(session)
     }
 
+    pub fn save_timeline_nodes(
+        &self,
+        session_id: &str,
+        nodes: &[TimelineNode],
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(session_id)?;
+        let path = self
+            .workspace_timeline_root_for_session(session_id)?
+            .join("timeline_nodes.json");
+        write_json(&path, &nodes)
+    }
+
+    pub fn load_timeline_nodes(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<TimelineNode>, ProductStoreError> {
+        validate_relative_id(session_id)?;
+        let path = self
+            .workspace_timeline_root_for_session(session_id)?
+            .join("timeline_nodes.json");
+        if !path_exists(&path)? {
+            return Ok(Vec::new());
+        }
+        read_json(&path)
+    }
+
+    pub fn append_artifact_version(
+        &self,
+        session_id: &str,
+        version: ArtifactVersion,
+    ) -> Result<(), ProductStoreError> {
+        let mut versions = self.list_artifact_versions(session_id)?;
+        versions.push(version);
+        self.save_artifact_versions(session_id, &versions)
+    }
+
+    pub fn list_artifact_versions(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<ArtifactVersion>, ProductStoreError> {
+        validate_relative_id(session_id)?;
+        let path = self
+            .workspace_timeline_root_for_session(session_id)?
+            .join("artifact_versions.json");
+        if !path_exists(&path)? {
+            return Ok(Vec::new());
+        }
+        read_json(&path)
+    }
+
+    pub fn save_artifact_versions(
+        &self,
+        session_id: &str,
+        versions: &[ArtifactVersion],
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(session_id)?;
+        let path = self
+            .workspace_timeline_root_for_session(session_id)?
+            .join("artifact_versions.json");
+        write_json(&path, &versions)
+    }
+
     pub fn update_spec_confirmation_status(
         &self,
         project_id: &str,
@@ -616,6 +679,26 @@ impl LifecycleStore {
             kind: "workspace_session",
             id: session_id.to_string(),
         })
+    }
+
+    fn workspace_timeline_root_for_session(
+        &self,
+        session_id: &str,
+    ) -> Result<PathBuf, ProductStoreError> {
+        let session_path = self.find_workspace_session_path(session_id)?;
+        let sessions_root = session_path.parent().ok_or_else(|| {
+            ProductStoreError::Io(format!(
+                "workspace session path has no parent: {}",
+                session_path.display()
+            ))
+        })?;
+        let issue_root = sessions_root.parent().ok_or_else(|| {
+            ProductStoreError::Io(format!(
+                "workspace sessions path has no issue parent: {}",
+                sessions_root.display()
+            ))
+        })?;
+        Ok(issue_root.join("workspace-timelines").join(session_id))
     }
 
     fn story_specs_root(&self, project_id: &str, issue_id: &str) -> PathBuf {

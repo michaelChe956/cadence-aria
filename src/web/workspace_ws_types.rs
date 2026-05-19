@@ -8,6 +8,8 @@ pub enum WorkspaceStage {
     PrepareContext,
     Running,
     CrossReview,
+    ReviewDecision,
+    Revision,
     HumanConfirm,
     Completed,
 }
@@ -32,10 +34,12 @@ pub enum WsOutMessage {
     StreamChunk {
         role: String,
         content: String,
+        node_id: Option<String>,
     },
     MessageComplete {
         message_id: String,
         checkpoint_id: String,
+        node_id: Option<String>,
     },
     StageChange {
         stage: String,
@@ -61,6 +65,27 @@ pub enum WsOutMessage {
     ExecutionEvent {
         event: WsExecutionEvent,
     },
+    TimelineNodeCreated {
+        node: TimelineNode,
+    },
+    TimelineNodeUpdated {
+        node_id: String,
+        status: TimelineNodeStatus,
+        summary: Option<String>,
+        completed_at: Option<String>,
+    },
+    ReviewComplete {
+        node_id: String,
+        round: u32,
+        verdict: ReviewVerdictType,
+        comments: String,
+        summary: String,
+    },
+    ReviewDecisionRequired {
+        node_id: String,
+        round: u32,
+        options: Vec<String>,
+    },
     SessionState {
         session_id: String,
         workspace_type: WorkspaceType,
@@ -69,6 +94,9 @@ pub enum WsOutMessage {
         checkpoints: Vec<WsCheckpointDto>,
         artifact: Option<String>,
         providers: WsProviderConfig,
+        timeline_nodes: Vec<TimelineNode>,
+        active_node_id: Option<String>,
+        artifact_versions: Vec<ArtifactVersion>,
     },
     Error {
         message: String,
@@ -93,6 +121,10 @@ pub enum WsInMessage {
         id: String,
         approved: bool,
         reason: Option<String>,
+    },
+    ReviewDecisionResponse {
+        decision: String,
+        extra_context: Option<String>,
     },
     Abort,
 }
@@ -140,6 +172,8 @@ pub enum WsExecutionEventStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WsExecutionEvent {
     pub event_id: String,
+    pub node_id: Option<String>,
+    pub agent: Option<ProviderName>,
     pub kind: WsExecutionEventKind,
     pub status: WsExecutionEventStatus,
     pub title: String,
@@ -178,12 +212,94 @@ pub struct WsProviderConfig {
     pub reviewer: Option<ProviderName>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimelineNodeType {
+    PrepareContext,
+    Generation,
+    Review,
+    ReviewDecision,
+    Revision,
+    HumanConfirm,
+    Completed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimelineNodeStatus {
+    Active,
+    Paused,
+    Completed,
+    Failed,
+    Skipped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderConfigSnapshot {
+    pub author: ProviderName,
+    pub reviewer: Option<ProviderName>,
+    pub review_rounds: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelineNode {
+    pub node_id: String,
+    pub node_type: TimelineNodeType,
+    pub agent: Option<ProviderName>,
+    pub stage: WorkspaceStage,
+    pub round: Option<u32>,
+    pub status: TimelineNodeStatus,
+    pub title: String,
+    pub summary: Option<String>,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+    pub duration_ms: Option<u64>,
+    pub artifact_ref: Option<String>,
+    pub provider_config_snapshot: ProviderConfigSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewVerdictType {
+    Pass,
+    Revise,
+    NeedsHuman,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewVerdict {
+    pub verdict: ReviewVerdictType,
+    pub comments: String,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserDecision {
+    pub decision: String,
+    pub extra_context: Option<String>,
+    pub decided_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactVersion {
+    pub version: u32,
+    pub markdown: String,
+    pub generated_by: ProviderName,
+    pub reviewed_by: Option<ProviderName>,
+    pub review_verdict: Option<ReviewVerdictType>,
+    pub confirmed_by: Option<String>,
+    pub created_at: String,
+    pub source_node_id: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        WsExecutionEvent, WsExecutionEventKind, WsExecutionEventStatus, WsInMessage, WsOutMessage,
-        WsPermissionRiskLevel, WsProviderStatus,
+        ProviderConfigSnapshot, ReviewVerdict, ReviewVerdictType, TimelineNode, TimelineNodeStatus,
+        TimelineNodeType, WorkspaceStage, WsExecutionEvent, WsExecutionEventKind,
+        WsExecutionEventStatus, WsInMessage, WsOutMessage, WsPermissionRiskLevel, WsProviderStatus,
     };
+    use crate::product::models::{ProviderName, WorkspaceType};
 
     #[test]
     fn permission_messages_use_snake_case_type_tags() {
@@ -241,6 +357,8 @@ mod tests {
         let out = WsOutMessage::ExecutionEvent {
             event: WsExecutionEvent {
                 event_id: "command_cmd_001".to_string(),
+                node_id: Some("node_generation_001".to_string()),
+                agent: Some(ProviderName::ClaudeCode),
                 kind: WsExecutionEventKind::Command,
                 status: WsExecutionEventStatus::Completed,
                 title: "Command completed".to_string(),
@@ -256,7 +374,121 @@ mod tests {
         assert_eq!(value["type"], "execution_event");
         assert_eq!(value["event"]["kind"], "command");
         assert_eq!(value["event"]["status"], "completed");
+        assert_eq!(value["event"]["node_id"], "node_generation_001");
+        assert_eq!(value["event"]["agent"], "claude_code");
         assert_eq!(value["event"]["command"], "pwd");
         assert_eq!(value["event"]["cwd"], "/tmp/repo");
+    }
+
+    #[test]
+    fn workspace_stage_supports_review_decision_and_revision() {
+        let decision = serde_json::to_value(WorkspaceStage::ReviewDecision).unwrap();
+        let revision = serde_json::to_value(WorkspaceStage::Revision).unwrap();
+
+        assert_eq!(decision, "review_decision");
+        assert_eq!(revision, "revision");
+    }
+
+    #[test]
+    fn timeline_messages_include_node_identity() {
+        let node = TimelineNode {
+            node_id: "node_review_001".to_string(),
+            node_type: TimelineNodeType::Review,
+            agent: Some(ProviderName::Codex),
+            stage: WorkspaceStage::CrossReview,
+            round: Some(1),
+            status: TimelineNodeStatus::Active,
+            title: "Review Round 1".to_string(),
+            summary: None,
+            started_at: "2026-05-19T00:00:00Z".to_string(),
+            completed_at: None,
+            duration_ms: None,
+            artifact_ref: Some("version_0001".to_string()),
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::Codex),
+                review_rounds: 2,
+            },
+        };
+
+        let created =
+            serde_json::to_value(WsOutMessage::TimelineNodeCreated { node: node.clone() }).unwrap();
+        assert_eq!(created["type"], "timeline_node_created");
+        assert_eq!(created["node"]["node_type"], "review");
+        assert_eq!(created["node"]["status"], "active");
+        assert_eq!(created["node"]["agent"], "codex");
+
+        let chunk = serde_json::to_value(WsOutMessage::StreamChunk {
+            role: "assistant".to_string(),
+            content: "reviewing".to_string(),
+            node_id: Some("node_review_001".to_string()),
+        })
+        .unwrap();
+        assert_eq!(chunk["type"], "stream_chunk");
+        assert_eq!(chunk["node_id"], "node_review_001");
+
+        let complete = serde_json::to_value(WsOutMessage::MessageComplete {
+            message_id: "msg_002".to_string(),
+            checkpoint_id: "checkpoint_001".to_string(),
+            node_id: Some("node_review_001".to_string()),
+        })
+        .unwrap();
+        assert_eq!(complete["type"], "message_complete");
+        assert_eq!(complete["node_id"], "node_review_001");
+    }
+
+    #[test]
+    fn review_messages_and_session_state_serialize_as_contract() {
+        let verdict = ReviewVerdict {
+            verdict: ReviewVerdictType::Revise,
+            comments: "需要补充验收标准".to_string(),
+            summary: "补充验收标准后返修".to_string(),
+        };
+
+        let review_complete = serde_json::to_value(WsOutMessage::ReviewComplete {
+            node_id: "node_review_001".to_string(),
+            round: 1,
+            verdict: verdict.verdict.clone(),
+            comments: verdict.comments.clone(),
+            summary: verdict.summary.clone(),
+        })
+        .unwrap();
+        assert_eq!(review_complete["type"], "review_complete");
+        assert_eq!(review_complete["verdict"], "revise");
+
+        let input: WsInMessage = serde_json::from_value(serde_json::json!({
+            "type": "review_decision_response",
+            "decision": "continue_with_context",
+            "extra_context": "请补充边界条件"
+        }))
+        .unwrap();
+        assert!(matches!(
+            input,
+            WsInMessage::ReviewDecisionResponse {
+                decision,
+                extra_context: Some(_),
+            } if decision == "continue_with_context"
+        ));
+
+        let state = serde_json::to_value(WsOutMessage::SessionState {
+            session_id: "workspace_session_0001".to_string(),
+            workspace_type: WorkspaceType::Story,
+            stage: "review_decision".to_string(),
+            messages: Vec::new(),
+            checkpoints: Vec::new(),
+            artifact: Some("# Story".to_string()),
+            providers: super::WsProviderConfig {
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::Codex),
+            },
+            timeline_nodes: Vec::new(),
+            active_node_id: Some("node_review_decision_001".to_string()),
+            artifact_versions: Vec::new(),
+        })
+        .unwrap();
+        assert_eq!(state["type"], "session_state");
+        assert_eq!(state["active_node_id"], "node_review_decision_001");
+        assert_eq!(state["timeline_nodes"].as_array().unwrap().len(), 0);
+        assert_eq!(state["artifact_versions"].as_array().unwrap().len(), 0);
     }
 }

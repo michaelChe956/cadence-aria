@@ -141,6 +141,71 @@ describe("useWorkspaceWs", () => {
     ]);
   });
 
+  it("stores timeline websocket messages by node", () => {
+    const harness = renderWorkspaceHook();
+
+    act(() => {
+      harness.ws.receive({
+        type: "timeline_node_created",
+        node: {
+          node_id: "timeline_node_001",
+          node_type: "review",
+          agent: "codex",
+          stage: "cross_review",
+          round: 1,
+          status: "active",
+          title: "Review Round 1",
+          summary: null,
+          started_at: "2026-05-19T00:00:00Z",
+          completed_at: null,
+          duration_ms: null,
+          artifact_ref: "artifact_current",
+          provider_config_snapshot: {
+            author: "claude_code",
+            reviewer: "codex",
+            review_rounds: 2,
+          },
+        },
+      });
+      harness.ws.receive({
+        type: "stream_chunk",
+        role: "reviewer",
+        content: "review output",
+        node_id: "timeline_node_001",
+      });
+      harness.ws.receive({
+        type: "review_complete",
+        node_id: "timeline_node_001",
+        round: 1,
+        verdict: "pass",
+        comments: "审核通过",
+        summary: "可以确认",
+      });
+    });
+
+    const state = useWorkspaceStore.getState();
+    expect(state.selectedNodeId).toBe("timeline_node_001");
+    expect(state.nodeDetails.timeline_node_001.streamingContent).toBe("review output");
+    expect(state.nodeDetails.timeline_node_001.verdict?.summary).toBe("可以确认");
+  });
+
+  it("sends review decision responses when connected", () => {
+    const harness = renderWorkspaceHook();
+
+    act(() => {
+      harness.ws.open();
+      harness.api.sendReviewDecision("continue_with_context", " 补充边界条件 ");
+    });
+
+    expect(harness.ws.sent).toEqual([
+      JSON.stringify({
+        type: "review_decision_response",
+        decision: "continue_with_context",
+        extra_context: "补充边界条件",
+      }),
+    ]);
+  });
+
   it("sends permission responses and resolves the pending request when connected", () => {
     const harness = renderWorkspaceHook();
     useWorkspaceStore.getState().addPermissionRequest({

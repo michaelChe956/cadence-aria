@@ -16,7 +16,17 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
 import { useWorkspaceStore, type ExecutionEvent } from "../state/workspace-ws-store";
 
-const STAGE_LABELS: Record<string, string> = {
+const WORKSPACE_STAGE_LABELS: Record<string, string> = {
+  prepare_context: "准备上下文",
+  running: "运行中",
+  cross_review: "交叉审查",
+  review_decision: "等待返修决策",
+  revision: "返修中",
+  human_confirm: "人工确认",
+  completed: "已完成",
+};
+
+const FLOW_STAGE_LABELS: Record<string, string> = {
   prepare_context: "准备上下文",
   running: "运行中",
   cross_review: "交叉审查",
@@ -67,12 +77,13 @@ export function WorkspacePage({
     sendMessage,
     startGeneration,
     rollback,
-    confirm,
-    abort,
-    selectProvider,
-    respondPermission,
-    connectionStatus,
-  } = useWorkspaceWs(sessionId);
+	    confirm,
+	    abort,
+	    selectProvider,
+	    sendReviewDecision,
+	    respondPermission,
+	    connectionStatus,
+	  } = useWorkspaceWs(sessionId);
   const {
     stage,
     messages,
@@ -86,11 +97,18 @@ export function WorkspacePage({
     providerStatus,
     executionEvents,
     visitedStages,
-  } = useWorkspaceStore();
+	    timelineNodes,
+	    selectedNodeId,
+	    nodeDetails,
+	    pendingDecision,
+	    setSelectedNode,
+	  } = useWorkspaceStore();
 
-  const [draft, setDraft] = useState("");
-  const [showProviderPanel, setShowProviderPanel] = useState(false);
-  const [activeRightTab, setActiveRightTab] = useState<"artifact" | "execution">("execution");
+	  const [draft, setDraft] = useState("");
+	  const [reviewContextDraft, setReviewContextDraft] = useState("");
+	  const [showReviewContext, setShowReviewContext] = useState(false);
+	  const [showProviderPanel, setShowProviderPanel] = useState(false);
+	  const [activeRightTab, setActiveRightTab] = useState<"artifact" | "execution">("execution");
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -108,8 +126,14 @@ export function WorkspacePage({
   }
 
   const isConnected = connectionStatus === "connected";
-  const isCompleted = stage === "completed";
-  const canStartGeneration = stage === "prepare_context" && isConnected && !streamingContent;
+	  const isCompleted = stage === "completed";
+	  const canStartGeneration = stage === "prepare_context" && isConnected && !streamingContent;
+	  const providerLocked = stage !== "prepare_context";
+	  const currentFlowStage = flowStageFor(stage);
+	  const canAbort = ["running", "cross_review", "revision"].includes(stage) || Boolean(streamingContent);
+	  const selectedNode =
+	    timelineNodes.find((node) => node.node_id === selectedNodeId) ?? timelineNodes.at(-1) ?? null;
+	  const selectedDetail = selectedNode ? nodeDetails[selectedNode.node_id] : null;
 
   return (
     <div className="flex h-screen min-w-0 flex-col overflow-hidden bg-[var(--aria-bg)]">
@@ -135,9 +159,9 @@ export function WorkspacePage({
           </span>
         </div>
         <div className="flex min-w-0 shrink-0 items-center gap-2 sm:gap-3">
-          <span className="max-w-24 truncate rounded-full border border-[var(--aria-line)] px-2 py-0.5 text-xs font-medium text-[var(--aria-ink-muted)] sm:max-w-none sm:px-2.5">
-            {STAGE_LABELS[stage] ?? stage}
-          </span>
+	          <span className="max-w-24 truncate rounded-full border border-[var(--aria-line)] px-2 py-0.5 text-xs font-medium text-[var(--aria-ink-muted)] sm:max-w-none sm:px-2.5">
+	            {WORKSPACE_STAGE_LABELS[stage] ?? stage}
+	          </span>
           <button
             type="button"
             onClick={() => setShowProviderPanel((v) => !v)}
@@ -158,9 +182,43 @@ export function WorkspacePage({
       <div className="flex min-h-0 min-w-0 flex-1 flex-col lg:flex-row">
         {/* Chat Panel */}
         <div className="flex min-h-0 min-w-0 flex-1 flex-col border-b border-[var(--aria-line)] lg:w-1/2 lg:border-b-0 lg:border-r">
-          {/* Messages */}
+          {/* Timeline / Messages */}
           <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto p-4 space-y-3">
-            {messages.map((msg, idx) => (
+            {timelineNodes.length > 0 ? (
+              <div className="space-y-2">
+                {timelineNodes.map((node) => (
+                  <button
+                    key={node.node_id}
+                    type="button"
+                    onClick={() => setSelectedNode(node.node_id)}
+                    className={`block w-full rounded-md border px-3 py-2 text-left ${
+                      node.node_id === selectedNode?.node_id
+                        ? "border-[var(--aria-primary)] bg-blue-50"
+                        : "border-[var(--aria-line)] bg-white hover:bg-[var(--aria-panel-muted)]"
+                    }`}
+                  >
+                    <div className="flex min-w-0 items-center justify-between gap-2">
+                      <span className="truncate text-sm font-semibold text-[var(--aria-ink)]">
+                        {node.title}
+                      </span>
+                      <span className={`shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium ${timelineStatusClass(node.status)}`}>
+                        {timelineStatusLabel(node.status)}
+                      </span>
+                    </div>
+                    <div className="mt-1 flex min-w-0 items-center gap-2">
+                      <span className={`rounded px-1.5 py-0.5 text-[11px] font-semibold ${agentBadgeClass(node.agent)}`}>
+                        {providerLabel(node.agent ?? "system")}
+                      </span>
+                      {node.summary ? (
+                        <span className="truncate text-xs text-[var(--aria-ink-muted)]">
+                          {node.summary}
+                        </span>
+                      ) : null}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            ) : messages.map((msg, idx) => (
               <div
                 key={msg.id || idx}
                 className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
@@ -235,10 +293,10 @@ export function WorkspacePage({
           </div>
 
           {/* Input Area */}
-          <div className="shrink-0 border-t border-[var(--aria-line)] bg-[var(--aria-panel)] p-3">
-            <div className="mb-2 flex gap-2">
-              {canStartGeneration ? (
-                <button
+	          <div className="shrink-0 border-t border-[var(--aria-line)] bg-[var(--aria-panel)] p-3">
+	            <div className="mb-2 flex flex-wrap gap-2">
+	              {canStartGeneration ? (
+	                <button
                   type="button"
                   onClick={startGeneration}
                   className="inline-flex h-8 items-center gap-1 rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 text-xs font-semibold text-white disabled:opacity-50"
@@ -255,21 +313,79 @@ export function WorkspacePage({
                   className="inline-flex h-8 items-center gap-1 rounded-md border border-green-500 bg-green-50 px-3 text-xs font-semibold text-green-700 hover:bg-green-100 disabled:opacity-50"
                 >
                   <Check className="h-3.5 w-3.5" />
-                  确认通过
-                </button>
-              ) : null}
-              {streamingContent ? (
-                <button
-                  type="button"
+	                  确认通过
+	                </button>
+	              ) : null}
+	              {stage === "review_decision" && pendingDecision ? (
+	                <>
+	                  <button
+	                    type="button"
+	                    onClick={() => sendReviewDecision("continue", undefined)}
+	                    disabled={!isConnected}
+	                    className="inline-flex h-8 items-center gap-1 rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 text-xs font-semibold text-white disabled:opacity-50"
+	                  >
+	                    <RotateCcw className="h-3.5 w-3.5" />
+	                    直接返修
+	                  </button>
+	                  <button
+	                    type="button"
+	                    onClick={() => setShowReviewContext((value) => !value)}
+	                    disabled={!isConnected}
+	                    className="inline-flex h-8 items-center gap-1 rounded-md border border-[var(--aria-line)] bg-white px-3 text-xs font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)] disabled:opacity-50"
+	                  >
+	                    <FileText className="h-3.5 w-3.5" />
+	                    补充信息后返修
+	                  </button>
+	                  <button
+	                    type="button"
+	                    onClick={() => sendReviewDecision("human_intervene", undefined)}
+	                    disabled={!isConnected}
+	                    className="inline-flex h-8 items-center gap-1 rounded-md border border-amber-300 bg-amber-50 px-3 text-xs font-semibold text-amber-700 hover:bg-amber-100 disabled:opacity-50"
+	                  >
+	                    <Check className="h-3.5 w-3.5" />
+	                    人工介入
+	                  </button>
+	                </>
+	              ) : null}
+	              {canAbort ? (
+	                <button
+	                  type="button"
                   onClick={abort}
                   className="inline-flex h-8 items-center gap-1 rounded-md border border-red-300 bg-red-50 px-3 text-xs font-semibold text-red-600 hover:bg-red-100"
                 >
                   <Square className="h-3.5 w-3.5" />
-                  中止
-                </button>
-              ) : null}
-            </div>
-            <form onSubmit={handleSubmit} className="flex gap-2">
+	                  中止
+	                </button>
+	              ) : null}
+	            </div>
+	            {stage === "review_decision" && pendingDecision && showReviewContext ? (
+	              <div className="mb-2 rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-2">
+	                <label
+	                  htmlFor="workspace-review-context"
+	                  className="mb-1 block text-xs font-medium text-[var(--aria-ink-muted)]"
+	                >
+	                  返修补充信息
+	                </label>
+	                <textarea
+	                  id="workspace-review-context"
+	                  value={reviewContextDraft}
+	                  onChange={(event) => setReviewContextDraft(event.target.value)}
+	                  className="min-h-20 w-full resize-y rounded-md border border-[var(--aria-line)] bg-white px-2 py-1.5 text-sm text-[var(--aria-ink)]"
+	                />
+	                <div className="mt-2 flex justify-end">
+	                  <button
+	                    type="button"
+	                    onClick={() => sendReviewDecision("continue_with_context", reviewContextDraft)}
+	                    disabled={!isConnected || !reviewContextDraft.trim()}
+	                    className="inline-flex h-8 items-center gap-1 rounded-md bg-[var(--aria-primary)] px-3 text-xs font-semibold text-white disabled:opacity-50"
+	                  >
+	                    <Send className="h-3.5 w-3.5" />
+	                    提交返修
+	                  </button>
+	                </div>
+	              </div>
+	            ) : null}
+	            <form onSubmit={handleSubmit} className="flex gap-2">
               <input
                 type="text"
                 value={draft}
@@ -329,10 +445,12 @@ export function WorkspacePage({
           {showProviderPanel ? (
             <div className="shrink-0 border-b border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-3 space-y-2">
               <div className="flex items-center gap-2">
-                <label className="text-xs font-medium text-[var(--aria-ink-muted)] w-16">Author</label>
+                <label htmlFor="workspace-author-provider" className="text-xs font-medium text-[var(--aria-ink-muted)] w-16">Author</label>
                 <select
+                  id="workspace-author-provider"
                   value={providers?.author ?? "claude_code"}
                   onChange={(e) => selectProvider("author", e.target.value)}
+                  disabled={providerLocked}
                   className="rounded-md border border-[var(--aria-line)] bg-white px-2 py-1 text-xs text-[var(--aria-ink)]"
                 >
                   {PROVIDER_OPTIONS.map((opt) => (
@@ -341,10 +459,12 @@ export function WorkspacePage({
                 </select>
               </div>
               <div className="flex items-center gap-2">
-                <label className="text-xs font-medium text-[var(--aria-ink-muted)] w-16">Reviewer</label>
+                <label htmlFor="workspace-reviewer-provider" className="text-xs font-medium text-[var(--aria-ink-muted)] w-16">Reviewer</label>
                 <select
+                  id="workspace-reviewer-provider"
                   value={providers?.reviewer ?? "codex"}
                   onChange={(e) => selectProvider("reviewer", e.target.value)}
+                  disabled={providerLocked}
                   className="rounded-md border border-[var(--aria-line)] bg-white px-2 py-1 text-xs text-[var(--aria-ink)]"
                 >
                   {PROVIDER_OPTIONS.map((opt) => (
@@ -354,7 +474,15 @@ export function WorkspacePage({
               </div>
             </div>
           ) : null}
-          {activeRightTab === "artifact" ? (
+          {selectedNode ? (
+            <TimelineDetailPanel
+              node={selectedNode}
+              detail={selectedDetail}
+              artifact={artifact}
+              providerStatus={providerStatus}
+              pendingPermissions={pendingPermissions}
+            />
+          ) : activeRightTab === "artifact" ? (
             <div className="min-h-0 flex-1 overflow-auto p-4">
               {artifact ? (
                 <pre className="whitespace-pre-wrap break-words font-mono text-sm text-[var(--aria-ink)]">
@@ -376,10 +504,10 @@ export function WorkspacePage({
         </div>
       </div>
 
-      {/* Flow Rail (bottom) */}
-      <footer className="flex h-10 min-w-0 shrink-0 items-center gap-2 overflow-x-auto border-t border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 sm:px-4">
-        {Object.entries(STAGE_LABELS).map(([key, label]) => {
-          const isCurrent = key === stage;
+	      {/* Flow Rail (bottom) */}
+	      <footer className="flex h-10 min-w-0 shrink-0 items-center gap-2 overflow-x-auto border-t border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 sm:px-4">
+	        {Object.entries(FLOW_STAGE_LABELS).map(([key, label]) => {
+	          const isCurrent = key === currentFlowStage;
           const visited = visitedStages.includes(key);
           return (
             <span
@@ -398,6 +526,87 @@ export function WorkspacePage({
           );
         })}
       </footer>
+    </div>
+  );
+}
+
+function flowStageFor(stage: string) {
+  if (stage === "review_decision" || stage === "revision") return "cross_review";
+  return stage;
+}
+
+function TimelineDetailPanel({
+  node,
+  detail,
+  artifact,
+  providerStatus,
+  pendingPermissions,
+}: {
+  node: {
+    node_id: string;
+    node_type: string;
+    title: string;
+    agent?: string | null;
+    summary?: string | null;
+  };
+  detail:
+    | {
+        messages: Array<{ id: string; content: string; role: string }>;
+        streamingContent: string;
+        executionEvents: ExecutionEvent[];
+        verdict?: { verdict: string; comments: string; summary: string } | null;
+      }
+    | undefined
+    | null;
+  artifact: string | null;
+  providerStatus: string;
+  pendingPermissions: Array<{
+    id: string;
+    tool_name: string;
+    description: string;
+    risk_level: "low" | "medium" | "high";
+  }>;
+}) {
+  const content = detail?.streamingContent || detail?.messages.at(-1)?.content || "";
+  return (
+    <div className="min-h-0 flex-1 overflow-auto">
+      <div className="border-b border-[var(--aria-line)] px-4 py-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className={`rounded px-1.5 py-0.5 text-[11px] font-semibold ${agentBadgeClass(node.agent)}`}>
+            {providerLabel(node.agent ?? "system")}
+          </span>
+          <h2 className="text-sm font-semibold text-[var(--aria-ink)]">{node.title}</h2>
+        </div>
+        {node.summary ? (
+          <p className="mt-1 text-xs text-[var(--aria-ink-muted)]">{node.summary}</p>
+        ) : null}
+      </div>
+      {content ? (
+        <pre className="whitespace-pre-wrap break-words border-b border-[var(--aria-line)] p-4 font-sans text-sm text-[var(--aria-ink)]">
+          {content}
+        </pre>
+      ) : node.node_type === "human_confirm" || node.node_type === "completed" ? (
+        <pre className="whitespace-pre-wrap break-words border-b border-[var(--aria-line)] p-4 font-mono text-sm text-[var(--aria-ink)]">
+          {artifact ?? "等待生成..."}
+        </pre>
+      ) : (
+        <div className="border-b border-[var(--aria-line)] p-4 text-sm text-[var(--aria-ink-muted)]">
+          等待节点输出...
+        </div>
+      )}
+      {detail?.verdict ? (
+        <div className="border-b border-[var(--aria-line)] p-4 text-sm">
+          <div className="font-semibold text-[var(--aria-ink)]">{detail.verdict.summary}</div>
+          <pre className="mt-2 whitespace-pre-wrap break-words text-[var(--aria-ink-muted)]">
+            {detail.verdict.comments}
+          </pre>
+        </div>
+      ) : null}
+      <ExecutionPanel
+        providerStatus={providerStatus}
+        executionEvents={detail?.executionEvents ?? []}
+        pendingPermissions={pendingPermissions}
+      />
     </div>
   );
 }
@@ -462,10 +671,15 @@ function ExecutionEventRow({ event }: { event: ExecutionEvent }) {
             <span className="rounded border border-[var(--aria-line)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--aria-ink-muted)]">
               {EXECUTION_KIND_LABELS[event.kind] ?? event.kind}
             </span>
-            <span className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${statusBadgeClass(event.status)}`}>
-              {EXECUTION_STATUS_LABELS[event.status] ?? event.status}
-            </span>
-          </div>
+	            <span className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${statusBadgeClass(event.status)}`}>
+	              {EXECUTION_STATUS_LABELS[event.status] ?? event.status}
+	            </span>
+	            {event.agent ? (
+	              <span className={`rounded px-1.5 py-0.5 text-[11px] font-semibold ${agentBadgeClass(event.agent)}`}>
+	                {providerLabel(event.agent)}
+	              </span>
+	            ) : null}
+	          </div>
           {event.detail ? (
             <div className="mt-1 text-xs text-[var(--aria-ink-muted)]">{event.detail}</div>
           ) : null}
@@ -488,6 +702,37 @@ function ExecutionEventRow({ event }: { event: ExecutionEvent }) {
       </div>
     </div>
   );
+}
+
+function providerLabel(provider: string) {
+  if (provider === "claude_code") return "Claude Code";
+  if (provider === "codex") return "Codex";
+  if (provider === "fake") return "Fake";
+  return "System";
+}
+
+function agentBadgeClass(agent?: string | null) {
+  if (agent === "claude_code") return "bg-blue-50 text-blue-700";
+  if (agent === "codex") return "bg-violet-50 text-violet-700";
+  if (agent === "fake") return "bg-slate-100 text-slate-600";
+  return "bg-[var(--aria-panel-muted)] text-[var(--aria-ink-muted)]";
+}
+
+function timelineStatusLabel(status: string) {
+  if (status === "active") return "运行中";
+  if (status === "paused") return "等待决策";
+  if (status === "completed") return "完成";
+  if (status === "failed") return "失败";
+  if (status === "skipped") return "跳过";
+  return status;
+}
+
+function timelineStatusClass(status: string) {
+  if (status === "completed") return "bg-green-50 text-green-700";
+  if (status === "failed") return "bg-red-50 text-red-700";
+  if (status === "paused") return "bg-amber-50 text-amber-700";
+  if (status === "skipped") return "bg-slate-100 text-slate-600";
+  return "bg-blue-50 text-blue-700";
 }
 
 function statusClass(status: string) {

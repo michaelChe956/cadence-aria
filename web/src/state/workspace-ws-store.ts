@@ -16,6 +16,16 @@ export type ExecutionEventStatus =
   | "completed"
   | "failed"
   | "aborted";
+export type TimelineNodeType =
+  | "prepare_context"
+  | "generation"
+  | "review"
+  | "review_decision"
+  | "revision"
+  | "human_confirm"
+  | "completed";
+export type TimelineNodeStatus = "active" | "paused" | "completed" | "failed" | "skipped";
+export type ReviewVerdictType = "pass" | "revise" | "needs_human";
 
 export interface PermissionRequest {
   id: string;
@@ -26,6 +36,8 @@ export interface PermissionRequest {
 
 export interface ExecutionEvent {
   event_id: string;
+  node_id?: string | null;
+  agent?: string | null;
   kind: ExecutionEventKind;
   status: ExecutionEventStatus;
   title: string;
@@ -56,6 +68,59 @@ export interface WsProviderConfig {
   reviewer?: string | null;
 }
 
+export interface ProviderConfigSnapshot {
+  author: string;
+  reviewer?: string | null;
+  review_rounds: number;
+}
+
+export interface TimelineNode {
+  node_id: string;
+  node_type: TimelineNodeType;
+  agent?: string | null;
+  stage: string;
+  round?: number | null;
+  status: TimelineNodeStatus;
+  title: string;
+  summary?: string | null;
+  started_at: string;
+  completed_at?: string | null;
+  duration_ms?: number | null;
+  artifact_ref?: string | null;
+  provider_config_snapshot: ProviderConfigSnapshot;
+}
+
+export interface ReviewVerdict {
+  verdict: ReviewVerdictType;
+  comments: string;
+  summary: string;
+}
+
+export interface ArtifactVersion {
+  version: number;
+  markdown: string;
+  generated_by: string;
+  reviewed_by?: string | null;
+  review_verdict?: ReviewVerdictType | null;
+  confirmed_by?: string | null;
+  created_at: string;
+  source_node_id: string;
+}
+
+export interface TimelineNodeDetail {
+  nodeId: string;
+  messages: WsMessage[];
+  streamingContent: string;
+  executionEvents: ExecutionEvent[];
+  verdict?: ReviewVerdict | null;
+}
+
+export interface ReviewDecisionRequired {
+  node_id: string;
+  round: number;
+  options: string[];
+}
+
 export interface WorkspaceWsState {
   sessionId: string | null;
   workspaceType: string | null;
@@ -70,6 +135,12 @@ export interface WorkspaceWsState {
   pendingPermissions: PermissionRequest[];
   providerStatus: ProviderStatus;
   executionEvents: ExecutionEvent[];
+  timelineNodes: TimelineNode[];
+  activeNodeId: string | null;
+  selectedNodeId: string | null;
+  nodeDetails: Record<string, TimelineNodeDetail>;
+  artifactVersions: ArtifactVersion[];
+  pendingDecision: ReviewDecisionRequired | null;
   error: string | null;
 }
 
@@ -82,11 +153,24 @@ export interface WorkspaceWsActions {
     checkpoints: WsCheckpoint[];
     artifact: string | null;
     providers: WsProviderConfig;
+    timeline_nodes?: TimelineNode[];
+    active_node_id?: string | null;
+    artifact_versions?: ArtifactVersion[];
   }) => void;
-  appendStreamChunk: (content: string) => void;
-  completeMessage: (messageId: string, checkpointId: string) => void;
+  appendStreamChunk: (content: string, nodeId?: string | null) => void;
+  completeMessage: (messageId: string, checkpointId: string, nodeId?: string | null) => void;
   setStage: (stage: string) => void;
   setArtifact: (markdown: string) => void;
+  addTimelineNode: (node: TimelineNode) => void;
+  updateTimelineNode: (
+    nodeId: string,
+    status: TimelineNodeStatus,
+    summary?: string | null,
+    completedAt?: string | null,
+  ) => void;
+  setSelectedNode: (nodeId: string | null) => void;
+  setNodeVerdict: (nodeId: string, verdict: ReviewVerdict) => void;
+  setPendingDecision: (decision: ReviewDecisionRequired | null) => void;
   setConnectionStatus: (status: WsConnectionStatus) => void;
   addPermissionRequest: (request: PermissionRequest) => void;
   resolvePermissionRequest: (id: string) => void;
@@ -112,6 +196,12 @@ const initialState: WorkspaceWsState = {
   pendingPermissions: [],
   providerStatus: "starting",
   executionEvents: [],
+  timelineNodes: [],
+  activeNodeId: null,
+  selectedNodeId: null,
+  nodeDetails: {},
+  artifactVersions: [],
+  pendingDecision: null,
   error: null,
 };
 
@@ -132,14 +222,54 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
       pendingPermissions: [],
       providerStatus: "starting",
       executionEvents: [],
+      timelineNodes: state.timeline_nodes ?? [],
+      activeNodeId: state.active_node_id ?? null,
+      selectedNodeId:
+        state.active_node_id ?? state.timeline_nodes?.[state.timeline_nodes.length - 1]?.node_id ?? null,
+      nodeDetails: detailsForTimelineNodes(state.timeline_nodes ?? []),
+      artifactVersions: state.artifact_versions ?? [],
+      pendingDecision: null,
       error: null,
     }),
 
-  appendStreamChunk: (content) =>
-    set((prev) => ({ streamingContent: prev.streamingContent + content })),
-
-  completeMessage: (messageId, checkpointId) =>
+  appendStreamChunk: (content, nodeId) =>
     set((prev) => {
+      if (!nodeId) {
+        return { streamingContent: prev.streamingContent + content };
+      }
+      const details = { ...prev.nodeDetails };
+      const detail = ensureNodeDetail(details, nodeId);
+      detail.streamingContent += content;
+      return { nodeDetails: details };
+    }),
+
+  completeMessage: (messageId, checkpointId, nodeId) =>
+    set((prev) => {
+      if (nodeId) {
+        const details = { ...prev.nodeDetails };
+        const detail = ensureNodeDetail(details, nodeId);
+        const newMessage: WsMessage = {
+          id: messageId,
+          role: "assistant",
+          content: detail.streamingContent,
+          checkpoint_id: checkpointId,
+          created_at: new Date().toISOString(),
+        };
+        detail.messages = [...detail.messages, newMessage];
+        detail.streamingContent = "";
+        return {
+          nodeDetails: details,
+          checkpoints: [
+            ...prev.checkpoints,
+            {
+              id: checkpointId,
+              message_index: prev.messages.length + detail.messages.length,
+              stage: prev.stage,
+              created_at: new Date().toISOString(),
+            },
+          ],
+        };
+      }
       const newMessage: WsMessage = {
         id: messageId,
         role: "assistant",
@@ -166,11 +296,47 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
     set((prev) => ({
       stage,
       visitedStages: mergeVisitedStages(prev.visitedStages, stage),
-      streamingContent:
-        stage === "running" || stage === "cross_review" ? prev.streamingContent : "",
+      streamingContent: STREAMING_STAGES.has(stage) ? prev.streamingContent : "",
     })),
 
   setArtifact: (markdown) => set({ artifact: markdown }),
+
+  addTimelineNode: (node) =>
+    set((prev) => ({
+      timelineNodes: [...prev.timelineNodes, node],
+      activeNodeId: node.node_id,
+      selectedNodeId: node.node_id,
+      nodeDetails: {
+        ...prev.nodeDetails,
+        [node.node_id]: prev.nodeDetails[node.node_id] ?? emptyNodeDetail(node.node_id),
+      },
+    })),
+
+  updateTimelineNode: (nodeId, status, summary, completedAt) =>
+    set((prev) => ({
+      timelineNodes: prev.timelineNodes.map((node) =>
+        node.node_id === nodeId
+          ? {
+              ...node,
+              status,
+              summary: summary ?? node.summary,
+              completed_at: completedAt ?? node.completed_at,
+            }
+          : node,
+      ),
+    })),
+
+  setSelectedNode: (nodeId) => set({ selectedNodeId: nodeId }),
+
+  setNodeVerdict: (nodeId, verdict) =>
+    set((prev) => {
+      const details = { ...prev.nodeDetails };
+      const detail = ensureNodeDetail(details, nodeId);
+      detail.verdict = verdict;
+      return { nodeDetails: details };
+    }),
+
+  setPendingDecision: (decision) => set({ pendingDecision: decision }),
 
   setConnectionStatus: (status) => set({ connectionStatus: status }),
 
@@ -191,6 +357,12 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
 
   upsertExecutionEvent: (event) =>
     set((prev) => {
+      if (event.node_id) {
+        const details = { ...prev.nodeDetails };
+        const detail = ensureNodeDetail(details, event.node_id);
+        detail.executionEvents = upsertEvent(detail.executionEvents, event);
+        return { nodeDetails: details };
+      }
       const index = prev.executionEvents.findIndex(
         (existing) => existing.event_id === event.event_id,
       );
@@ -218,9 +390,10 @@ const STAGE_ORDER = [
   "human_confirm",
   "completed",
 ];
+const STREAMING_STAGES = new Set(["running", "cross_review", "revision"]);
 
 function visitedStagesFor(stage: string) {
-  const index = STAGE_ORDER.indexOf(stage);
+  const index = STAGE_ORDER.indexOf(flowStageFor(stage));
   if (index === -1) {
     return [stage];
   }
@@ -229,4 +402,50 @@ function visitedStagesFor(stage: string) {
 
 function mergeVisitedStages(current: string[], stage: string) {
   return Array.from(new Set([...current, ...visitedStagesFor(stage)]));
+}
+
+function flowStageFor(stage: string) {
+  if (stage === "review_decision" || stage === "revision") {
+    return "cross_review";
+  }
+  return stage;
+}
+
+function detailsForTimelineNodes(nodes: TimelineNode[]) {
+  return nodes.reduce<Record<string, TimelineNodeDetail>>((details, node) => {
+    details[node.node_id] = emptyNodeDetail(node.node_id);
+    return details;
+  }, {});
+}
+
+function emptyNodeDetail(nodeId: string): TimelineNodeDetail {
+  return {
+    nodeId,
+    messages: [],
+    streamingContent: "",
+    executionEvents: [],
+    verdict: null,
+  };
+}
+
+function ensureNodeDetail(details: Record<string, TimelineNodeDetail>, nodeId: string) {
+  const existing = details[nodeId];
+  details[nodeId] = existing
+    ? {
+        ...existing,
+        messages: [...existing.messages],
+        executionEvents: [...existing.executionEvents],
+      }
+    : emptyNodeDetail(nodeId);
+  return details[nodeId];
+}
+
+function upsertEvent(events: ExecutionEvent[], event: ExecutionEvent) {
+  const index = events.findIndex((existing) => existing.event_id === event.event_id);
+  if (index === -1) {
+    return [...events, event];
+  }
+  const next = [...events];
+  next[index] = { ...next[index], ...event };
+  return next;
 }

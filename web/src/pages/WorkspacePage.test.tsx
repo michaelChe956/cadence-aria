@@ -19,6 +19,7 @@ function mockWorkspaceWs(overrides: Partial<WorkspaceWsApi> = {}) {
     confirm: vi.fn(),
     abort: vi.fn(),
     selectProvider: vi.fn(),
+    sendReviewDecision: vi.fn(),
     respondPermission: vi.fn(),
     connectionStatus: "connected",
     ...overrides,
@@ -63,6 +64,7 @@ describe("WorkspacePage", () => {
       executionEvents: [
         {
           event_id: "command_cmd_001",
+          agent: "codex",
           kind: "command",
           status: "completed",
           title: "Command completed",
@@ -82,6 +84,7 @@ describe("WorkspacePage", () => {
     expect(screen.getByText("pwd")).toBeInTheDocument();
     expect(screen.getByText("/tmp/repo")).toBeInTheDocument();
     expect(screen.getByText(/exit code 0/)).toBeInTheDocument();
+    expect(screen.getByText("Codex")).toBeInTheDocument();
   });
 
   it("starts generation from a prepared workspace without requiring typed input", async () => {
@@ -119,5 +122,93 @@ describe("WorkspacePage", () => {
     expect(screen.getByLabelText("运行中 已经过")).toBeInTheDocument();
     expect(screen.getByLabelText("交叉审查 已经过")).toBeInTheDocument();
     expect(screen.getByLabelText("人工确认 当前阶段")).toBeInTheDocument();
+  });
+
+  it("renders timeline nodes with agent badge and selected node detail", () => {
+    mockWorkspaceWs();
+    useWorkspaceStore.setState({
+      timelineNodes: [
+        {
+          node_id: "timeline_node_001",
+          node_type: "review",
+          agent: "codex",
+          stage: "cross_review",
+          round: 1,
+          status: "active",
+          title: "Review Round 1",
+          summary: "正在审核",
+          started_at: "2026-05-19T00:00:00Z",
+          completed_at: null,
+          duration_ms: null,
+          artifact_ref: "artifact_current",
+          provider_config_snapshot: {
+            author: "claude_code",
+            reviewer: "codex",
+            review_rounds: 2,
+          },
+        },
+      ],
+      selectedNodeId: "timeline_node_001",
+      activeNodeId: "timeline_node_001",
+      nodeDetails: {
+        timeline_node_001: {
+          nodeId: "timeline_node_001",
+          messages: [],
+          streamingContent: "review output",
+          executionEvents: [],
+          verdict: null,
+        },
+      },
+    });
+
+    render(<WorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+
+    expect(screen.getAllByText("Review Round 1").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Codex").length).toBeGreaterThan(0);
+    expect(screen.getByText("review output")).toBeInTheDocument();
+  });
+
+  it("locks provider selects after generation starts", async () => {
+    mockWorkspaceWs();
+    useWorkspaceStore.setState({
+      stage: "running",
+      providers: { author: "claude_code", reviewer: "codex" },
+    });
+
+    render(<WorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    await userEvent.click(screen.getByTitle("Provider 配置"));
+
+    expect(screen.getByLabelText("Author")).toBeDisabled();
+    expect(screen.getByLabelText("Reviewer")).toBeDisabled();
+  });
+
+  it("renders review decision actions and sends the selected decision", async () => {
+    const api = mockWorkspaceWs();
+    useWorkspaceStore.setState({
+      stage: "review_decision",
+      visitedStages: ["prepare_context", "running", "cross_review"],
+      pendingDecision: {
+        node_id: "timeline_node_004",
+        round: 1,
+        options: ["continue", "continue_with_context", "human_intervene"],
+      },
+    });
+
+    render(<WorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+
+    expect(screen.getByLabelText("交叉审查 当前阶段")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "直接返修" }));
+    expect(api.sendReviewDecision).toHaveBeenCalledWith("continue", undefined);
+
+    await userEvent.click(screen.getByRole("button", { name: "补充信息后返修" }));
+    await userEvent.type(screen.getByLabelText("返修补充信息"), "补充登录错误码");
+    await userEvent.click(screen.getByRole("button", { name: "提交返修" }));
+    expect(api.sendReviewDecision).toHaveBeenCalledWith(
+      "continue_with_context",
+      "补充登录错误码",
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "人工介入" }));
+    expect(api.sendReviewDecision).toHaveBeenCalledWith("human_intervene", undefined);
   });
 });
