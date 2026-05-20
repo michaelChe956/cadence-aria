@@ -416,17 +416,36 @@ impl WorkspaceEngine {
         &mut self,
         last_active_run_id: String,
     ) -> Result<TimelineNode, String> {
+        if let Some(node_id) = self.active_node_id.clone() {
+            self.update_timeline_node(
+                &node_id,
+                TimelineNodeStatus::Failed,
+                Some("连接断开，运行已中止".to_string()),
+            )
+            .await;
+        }
         self.active_run_id = None;
         Ok(self
             .append_completed_timeline_event(
                 TimelineNodeType::AbortedByDisconnect,
-                self.session.stage.clone(),
+                WorkspaceStage::PrepareContext,
                 "运行因断开中止".to_string(),
                 Some(format!("last_active_run_id: {last_active_run_id}")),
                 TimelineNodeStatus::Failed,
-                false,
+                true,
             )
             .await)
+    }
+
+    pub async fn transition_to_prepare_context_after_disconnect(&mut self) {
+        self.active_run_id = None;
+        if let Some(store) = &self.lifecycle_store {
+            let _ = store.update_workspace_session_status(
+                &self.session.session_id,
+                WorkspaceSessionStatus::Open,
+            );
+        }
+        self.transition_stage(WorkspaceStage::PrepareContext).await;
     }
 
     pub async fn buffer_stream_chunk(

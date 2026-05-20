@@ -475,8 +475,20 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
 
     let active = { current_run.lock().await.take() };
     if let Some(run) = active {
+        let last_active_run_id = format!("run-{}", run.id);
         let _ = run.command_tx.send(ProviderCommand::Abort).await;
         run.cancel.cancel();
+        let mut engine = engine.lock().await;
+        let _ = engine
+            .append_aborted_by_disconnect(last_active_run_id)
+            .await;
+        engine
+            .transition_to_prepare_context_after_disconnect()
+            .await;
+        let state_msg = engine.build_session_state();
+        if let Ok(json) = serde_json::to_string(&state_msg) {
+            let _ = outbound_tx.send(json).await;
+        }
     }
     drop(outbound_tx);
     event_forward_task.abort();

@@ -13,7 +13,9 @@ use cadence_aria::protocol::contracts::AdapterInput;
 use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::runtime::WebRuntime;
 use cadence_aria::web::state::WebAppState;
-use cadence_aria::web::workspace_ws_types::{TimelineNodeType, WsInMessage, WsOutMessage};
+use cadence_aria::web::workspace_ws_types::{
+    TimelineNodeStatus, TimelineNodeType, WsInMessage, WsOutMessage,
+};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::collections::VecDeque;
@@ -738,6 +740,61 @@ async fn workspace_ws_abort_discards_partial_stream_without_completion() {
         }
     }
     panic!("abort did not return workspace to prepare_context");
+}
+
+#[tokio::test]
+async fn workspace_ws_disconnect_during_active_run_writes_aborted_by_disconnect() {
+    let root = tempdir().expect("root");
+    let _repo = create_workspace_session_fixture(&root).await;
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+    let (mut ws, _) = connect_async(url.clone()).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(
+        &mut ws,
+        &WsInMessage::UserMessage {
+            content: long_message("disconnect_instruction"),
+        },
+    )
+    .await;
+    let _first_chunk = recv_until_stream_chunk(&mut ws).await;
+    drop(ws);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let (mut reconnected, _) = connect_async(url).await.expect("reconnect ws");
+    match recv_json(&mut reconnected).await {
+        WsOutMessage::SessionState {
+            stage,
+            timeline_nodes,
+            active_run_id,
+            ..
+        } => {
+            let last = timeline_nodes.last().expect("timeline node");
+            assert_eq!(stage, "prepare_context");
+            assert_eq!(active_run_id, None);
+            assert_eq!(last.node_type, TimelineNodeType::AbortedByDisconnect);
+            assert_eq!(last.status, TimelineNodeStatus::Failed);
+            assert!(
+                last.summary
+                    .as_deref()
+                    .is_some_and(|summary| summary.contains("run-1"))
+            );
+        }
+        other => panic!("expected session_state, got {other:?}"),
+    }
+
+    drop(reconnected);
+    server.abort();
 }
 
 #[tokio::test]
