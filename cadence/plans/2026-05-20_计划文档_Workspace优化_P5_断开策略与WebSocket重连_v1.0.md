@@ -21,11 +21,17 @@
 | `web/src/hooks/useWorkspaceWsReconnect.ts` | 新建 | 退避重连 + jitter + hidden 暂停 |
 | `web/src/components/workspace/DisconnectBanner.tsx` | 新建 | 重连 banner / 断开提示 banner |
 | `src/web/workspace_ws_handler.rs` | 修改 | socket close handler 写 aborted_by_disconnect + hello/ping/pong |
-| `src/product/workspace_engine.rs` | 修改 | 暴露 `append_aborted_by_disconnect_node` API |
+| `src/product/workspace_engine.rs` | 修改 | 暴露 `append_aborted_by_disconnect` / `transition_to_prepare_context_after_disconnect` API |
 | `web/src/hooks/useWorkspaceWs.ts` | 修改 | 接入重连 hook、发 hello/ping |
 | `web/src/state/workspace-ws-store.ts` | 修改 | reconnect banner 状态 |
 
 ---
+
+## 修订约束（必须优先遵守）
+
+1. `ActiveRun` 的 abort handle 当前只存在于 `workspace_ws_handler.rs` 局部 `current_run`；P5 socket close 清理必须从该局部变量 `take()`，不得调用 engine 上不存在的 active-run API。
+2. `WorkspaceEngine` 只新增断开审计和状态切回 API：`append_aborted_by_disconnect(last_active_run_id)`、`transition_to_prepare_context_after_disconnect()`；后者内部复用现有 stage/session 持久化方法。
+3. 服务端 idle timeout 不发送业务 sentinel 给前端 store；send loop 内部用本地 enum 区分 `Text(String)` 与 `CloseDueToIdleTimeout`，收到 close 控制消息后调用 `ws_sender.close().await`。
 
 ### Task 1: useUnloadGuard hook
 
@@ -528,41 +534,43 @@ Expected: 编译失败 — handle_socket_close / set_active_run 未定义
             },
         };
         self.timeline_nodes.push(node.clone());
-        self.lifecycle_store.save_timeline_nodes(
-            &self.session.session_id,
-            &self.timeline_nodes,
-        )?;
+        if let Some(store) = &self.lifecycle_store {
+            store.save_timeline_nodes(
+                &self.session.session_id,
+                &self.timeline_nodes,
+            )?;
+        }
         Ok(node)
+    }
+
+    pub async fn transition_to_prepare_context_after_disconnect(&mut self) {
+        self.transition_stage(WorkspaceStage::PrepareContext).await;
+        self.clear_active_run_id();
     }
 ```
 
 - [ ] **Step 3: 在 workspace_ws_handler.rs 修改 socket close 处理**
 
-找到 `on_socket_close` 或 socket drop 处理逻辑。如果当前没有显式的 close handler，在 `handle_workspace_socket` 函数的 drop 处添加：
+当前 `handle_workspace_socket` 末尾已经有局部 `current_run` 清理逻辑。将该清理扩展为断开审计，不新增 engine 上的 active-run take API：
 
 ```rust
-    // 在 handle_workspace_socket 末尾或 socket 断开时
-    let close_result = async {
-        // 等待 socket 结束
-        while let Some(msg) = socket_recv.next().await {
-            // ... 现有消息处理 ...
-        }
-        
-        // socket 断开后的清理
-        if let Some(session_id) = &session_id {
-            if let Some(engine) = state.engines.get(session_id).await {
-                let mut engine = engine.lock().await;
-                if let Some(active_run) = engine.take_active_run() {
-                    active_run.abort().await;
-                    let _ = engine.append_aborted_by_disconnect(active_run.id).await;
-                    let _ = engine.transition_to_prepare_context().await;
-                }
-            }
-        }
-    }.await;
-```
+    // handle_workspace_socket 末尾：while receive loop 退出后
+    let active = { current_run.lock().await.take() };
+    if let Some(run) = active {
+        let last_active_run_id = run.id.to_string();
+        let _ = run.command_tx.send(ProviderCommand::Abort).await;
+        run.cancel.cancel();
 
-注意：需要确认 `engine.take_active_run()` 和 `transition_to_prepare_context()` 是否存在。
+        let mut engine = engine.lock().await;
+        let _ = engine.append_aborted_by_disconnect(last_active_run_id).await;
+        engine.transition_to_prepare_context_after_disconnect().await;
+
+        let state_msg = engine.build_session_state();
+        if let Ok(json) = serde_json::to_string(&state_msg) {
+            let _ = outbound_tx.send(json).await;
+        }
+    }
+```
 
 - [ ] **Step 4: 跑测试确认通过**
 
@@ -600,6 +608,11 @@ git commit -m "feat(ws): write aborted_by_disconnect node on socket close"
 在 socket receive loop 中维护 `last_client_message_at`，每次收到任意合法客户端消息都刷新；另起 task 每 5s 检查一次，超过 90s 后发送 close，触发 §6 的 socket close 清理路径：
 
 ```rust
+enum OutboundControl {
+    Text(String),
+    CloseDueToIdleTimeout,
+}
+
 let last_client_message_at = Arc::new(Mutex::new(tokio::time::Instant::now()));
 let last_seen_for_timeout = last_client_message_at.clone();
 let close_tx = outbound_tx.clone();
@@ -609,14 +622,14 @@ tokio::spawn(async move {
         interval.tick().await;
         let last_seen = *last_seen_for_timeout.lock().await;
         if last_seen.elapsed() > std::time::Duration::from_secs(90) {
-            let _ = close_tx.send("__close_due_to_idle_timeout__".to_string()).await;
+            let _ = close_tx.send(OutboundControl::CloseDueToIdleTimeout).await;
             break;
         }
     }
 });
 ```
 
-发送任务收到 sentinel 后调用 `ws_sender.close().await`，不要序列化为业务消息。收到 `Ping` 时刷新 `last_client_message_at` 并回 `Pong`。
+发送任务收到 `OutboundControl::CloseDueToIdleTimeout` 后调用 `ws_sender.close().await`，不要序列化为业务消息。普通业务消息走 `OutboundControl::Text(json)`。收到 `Ping` 时刷新 `last_client_message_at` 并回 `Pong`。
 
 - [ ] **Step 2: 跑测试确认通过**
 
@@ -813,8 +826,8 @@ git commit -am "fix: adjust tests for disconnect + reconnect features"
 | §8.4 snapshot 全量替换 | Task 5 (hello 回送 SessionState) |
 | §8.6 心跳与超时 | Task 6 (25s ping) |
 
-**2. Placeholder scan:**
-- 无 TBD/TODO
+**2. Implementation constraints:**
+- 没有待定占位项
 
 **3. Type consistency:**
 - `acknowledgedAbortedNodes` 在 store 中用 string[]，并同步到 localStorage key `aria.workspace.aborted_ack_nodes`

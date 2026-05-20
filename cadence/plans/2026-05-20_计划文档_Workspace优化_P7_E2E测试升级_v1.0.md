@@ -28,33 +28,123 @@
 
 ---
 
-### Task 1: E2E 基础设施（fake provider 配置 + 通用 helpers）
+## 修订约束（必须优先遵守）
+
+1. E2E 不得硬编码 issue/story/design id。所有用例必须通过 API 动态 seed project / repository / issue / story workspace，复用或提取 `web/e2e/fake-workbench.spec.ts` 中的 seed 流程。
+2. `web/e2e/start-api.mjs` 当前只初始化临时 git workspace；P7 必须显式新增 `ARIA_PROVIDER_MODE=fake` 和 `ARIA_E2E_TEST_CONTROLS=1`。
+3. Permission 用例不能假设默认 fake provider 会触发 permission request；必须新增 permission 专用 fake provider 模式或 test control fixture。
+4. P2-P6 中声明的 `data-testid` 必须在对应实现中落地后，P7 才能引用。
+
+### Task 1: E2E 基础设施（fake provider 配置 + 动态 seed helpers）
 
 **Files:**
 - 修改: `web/e2e/start-api.mjs`
 - 新建: `web/e2e/helpers/workspace.ts`
 
-- [ ] **Step 1: 确认 fake provider 环境变量**
+- [ ] **Step 1: 修改 start-api.mjs，显式启用 fake provider 与 E2E controls**
 
-`start-api.mjs` 中应包含：
+`web/e2e/start-api.mjs` 在 spawn cargo 前追加：
 
 ```javascript
 process.env.ARIA_PROVIDER_MODE = "fake";
+process.env.ARIA_E2E_TEST_CONTROLS = "1";
 ```
 
-- [ ] **Step 2: 新建 E2E helper**
+- [ ] **Step 2: 新建 E2E helper，复用 API 动态 seed**
 
 ```typescript
 // web/e2e/helpers/workspace.ts
 import { expect, type Page } from "@playwright/test";
 
-export async function createWorkspaceSession(page: Page, issueId: string): Promise<string> {
-  // 通过 API 或直接操作 UI 创建 Workspace session
-  await page.goto(`/workbench?focus=${issueId}`);
-  await page.getByText(/打开 Workspace/i).click();
+export interface SeededWorkspace {
+  projectId: string;
+  repositoryId: string;
+  issueId: string;
+  storyId: string;
+  sessionId: string;
+  projectName: string;
+  storyTitle: string;
+}
+
+export async function seedStoryWorkspace(page: Page, projectName = "Aria E2E"): Promise<SeededWorkspace> {
+  const uniqueProjectName = `${projectName} ${Date.now()}`;
+  const projectResponse = await page.request.post("/api/projects", {
+    data: { name: uniqueProjectName, description: "Lifecycle workspace E2E" },
+  });
+  expect(projectResponse).toBeOK();
+  const project = await projectResponse.json();
+
+  const workspacesResponse = await page.request.get("/api/workspaces");
+  expect(workspacesResponse).toBeOK();
+  const workspacePath = (await workspacesResponse.json()).workspaces[0].path;
+
+  const repositoryResponse = await page.request.post(`/api/projects/${project.project_id}/repositories`, {
+    data: {
+      name: `${uniqueProjectName} Repo`,
+      path: workspacePath,
+      default_policy_preset: "manual-write",
+      default_provider_mode: "fake",
+    },
+  });
+  expect(repositoryResponse).toBeOK();
+  const repository = await repositoryResponse.json();
+
+  const issueResponse = await page.request.post(`/api/projects/${project.project_id}/issues`, {
+    data: {
+      title: `${uniqueProjectName} Issue`,
+      description: "验证 Issue 生命周期 Workspace",
+      repository_id: repository.repository_id,
+    },
+  });
+  expect(issueResponse).toBeOK();
+  const issue = await issueResponse.json();
+
+  const storyTitle = `${uniqueProjectName} Story Spec`;
+  const storyResponse = await page.request.post(
+    `/api/projects/${project.project_id}/issues/${issue.issue_id}/story-specs:generate`,
+    {
+      data: {
+        title: storyTitle,
+        author_provider: "fake",
+        reviewer_provider: "codex",
+        review_rounds: 1,
+        superpowers_enabled: false,
+        openspec_enabled: true,
+      },
+    },
+  );
+  expect(storyResponse).toBeOK();
+  const story = await storyResponse.json();
+
+  return {
+    projectId: project.project_id,
+    repositoryId: repository.repository_id,
+    issueId: issue.issue_id,
+    storyId: story.story_specs[0].story_spec_id,
+    sessionId: story.workspace_session.workspace_session_id,
+    projectName: uniqueProjectName,
+    storyTitle,
+  };
+}
+
+export async function openWorkspaceSession(page: Page, sessionId: string): Promise<string> {
+  await page.goto(`/workbench/workspace/${sessionId}`);
   await page.waitForURL(/\/workbench\/workspace\//);
-  const url = page.url();
-  return url.split("/workbench/workspace/")[1];
+  return sessionId;
+}
+
+export async function openDrawerForStory(page: Page, seeded: SeededWorkspace) {
+  await page.goto(`/workbench?focus=${seeded.storyId}`);
+  await page.waitForSelector('[data-testid="lifecycle-card-drawer"]');
+}
+
+export async function seedConfirmedStoryWorkspace(page: Page): Promise<SeededWorkspace> {
+  const seeded = await seedStoryWorkspace(page);
+  const confirmResponse = await page.request.post(`/api/workspace-sessions/${seeded.sessionId}/confirm`, {
+    data: { confirmed_by: "e2e" },
+  });
+  expect(confirmResponse).toBeOK();
+  return seeded;
 }
 
 export async function waitForStage(page: Page, stage: string, timeout = 30000) {
@@ -102,17 +192,22 @@ export async function dropWorkspaceSocketFromServer(page: Page, sessionId: strin
   const response = await page.request.post(`/api/test/workspace-sessions/${sessionId}/ws/drop`);
   expect(response).toBeOK();
 }
+
+export async function enablePermissionFixture(page: Page, sessionId: string) {
+  const response = await page.request.post(`/api/test/workspace-sessions/${sessionId}/permission-fixture`, {
+    data: { mode: "single-request" },
+  });
+  expect(response).toBeOK();
+}
 ```
 
-- [ ] **Step 3: 增加 E2E 专用 WebSocket 控制接口**
+- [ ] **Step 3: 增加 E2E 专用 WebSocket / Permission 控制接口**
 
-仅在 `ARIA_E2E_TEST_CONTROLS=1` 时启用 `/api/test/workspace-sessions/:session_id/ws/drop`，由服务端主动断开对应 session 的当前 WebSocket。测试必须通过这个接口模拟异常断开；不要在浏览器端调用 `ws.close(1006)`，因为 1006 是保留 close code，浏览器不允许发送。
+仅在 `ARIA_E2E_TEST_CONTROLS=1` 时启用以下接口：
 
-`start-api.mjs` 追加：
-
-```javascript
-process.env.ARIA_E2E_TEST_CONTROLS = "1";
-```
+- `/api/test/workspace-sessions/:session_id/ws/drop`：服务端主动断开对应 session 的当前 WebSocket。测试必须通过这个接口模拟异常断开；不要在浏览器端调用 `ws.close(1006)`，因为 1006 是保留 close code，浏览器不允许发送。
+- `/api/test/workspace-sessions/:session_id/permission-fixture`：把该 session 的 fake provider 切成 permission fixture 模式，使下一次 run 必定发出一个 `PermissionRequest`。
+- `/api/test/permission-timeout`：仅 E2E 中把 permission timeout 缩短到毫秒级。
 
 后端接口验收：
 
@@ -148,18 +243,19 @@ git commit -m "test(e2e): add workspace E2E helpers"
 
 ```typescript
 import { test, expect } from "@playwright/test";
-import { createWorkspaceSession, sendContextNote, clickStartGeneration, waitForTimelineNode, waitForStage, sendRawWorkspaceMessage } from "./helpers/workspace";
+import { seedStoryWorkspace, openWorkspaceSession, clickStartGeneration, waitForStage, enablePermissionFixture } from "./helpers/workspace";
+import { seedStoryWorkspace, openWorkspaceSession, sendContextNote, clickStartGeneration, waitForTimelineNode, waitForStage, sendRawWorkspaceMessage } from "./helpers/workspace";
 
 test.describe("A. 输入语义解耦", () => {
   test("A1. context_note 不触发 Provider", async ({ page }) => {
-    await createWorkspaceSession(page, "issue-1");
+    await openWorkspaceSession(page, (await seedStoryWorkspace(page)).sessionId);
     await sendContextNote(page, "需要支持空查询参数");
     await waitForTimelineNode(page, "context_note");
     await expect(page.getByText(/准备中/i)).toBeVisible();
   });
 
   test("A2. 连续 3 条 context_note 不启动 Provider", async ({ page }) => {
-    await createWorkspaceSession(page, "issue-1");
+    await openWorkspaceSession(page, (await seedStoryWorkspace(page)).sessionId);
     await sendContextNote(page, "第一条");
     await sendContextNote(page, "第二条");
     await sendContextNote(page, "第三条");
@@ -168,14 +264,14 @@ test.describe("A. 输入语义解耦", () => {
   });
 
   test("A3. 开始生成锁定 Provider 并切 Running", async ({ page }) => {
-    await createWorkspaceSession(page, "issue-1");
+    await openWorkspaceSession(page, (await seedStoryWorkspace(page)).sessionId);
     await clickStartGeneration(page);
     await waitForStage(page, "运行中");
     await expect(page.getByText(/🔒/i)).toBeVisible();
   });
 
 	  test("A4. Running 阶段发 context_note 收到 protocol_error", async ({ page }) => {
-	    const sessionId = await createWorkspaceSession(page, "issue-1");
+	    const sessionId = await openWorkspaceSession(page, (await seedStoryWorkspace(page)).sessionId);
 	    await clickStartGeneration(page);
 	    await waitForStage(page, "运行中");
 	    await sendRawWorkspaceMessage(page, sessionId, { type: "context_note", content: "test" });
@@ -205,7 +301,7 @@ import { test, expect } from "@playwright/test";
 
 test.describe("B. Timeline 审计 + 会话恢复", () => {
   test("B1. 流式中刷新后 snapshot 含 streaming 累积和 aborted_by_disconnect", async ({ page }) => {
-    await createWorkspaceSession(page, "issue-1");
+    await openWorkspaceSession(page, (await seedStoryWorkspace(page)).sessionId);
     await clickStartGeneration(page);
     await waitForStage(page, "运行中");
     // 等待部分 stream
@@ -220,10 +316,12 @@ test.describe("B. Timeline 审计 + 会话恢复", () => {
   });
 
   test("B2. permission_request 未应答时刷新 snapshot 含 pending", async ({ page }) => {
-    await createWorkspaceSession(page, "issue-1");
+    const seeded = await seedStoryWorkspace(page);
+    await enablePermissionFixture(page, seeded.sessionId);
+    await openWorkspaceSession(page, seeded.sessionId);
     await clickStartGeneration(page);
     await waitForStage(page, "运行中");
-    // 等待 permission_request（fake provider 触发）
+    // 等待 permission_request（由 E2E permission fixture 触发）
     await page.waitForSelector('[data-testid="permission-request"]', { timeout: 30000 });
     // 刷新
     await page.reload();
@@ -232,7 +330,7 @@ test.describe("B. Timeline 审计 + 会话恢复", () => {
   });
 
 	  test("B3. reviewer verdict 完成后刷新 snapshot 完整", async ({ page }) => {
-	    await createWorkspaceSession(page, "issue-1");
+	    await openWorkspaceSession(page, (await seedStoryWorkspace(page)).sessionId);
 	    await clickStartGeneration(page);
 	    await waitForStage(page, "审核结论待处理", 60000);
 	    await page.reload();
@@ -241,7 +339,7 @@ test.describe("B. Timeline 审计 + 会话恢复", () => {
 	  });
 
 	  test("B4. 多版本 revision 后刷新两个 author_run 完整", async ({ page }) => {
-	    await createWorkspaceSession(page, "issue-1");
+	    await openWorkspaceSession(page, (await seedStoryWorkspace(page)).sessionId);
 	    await clickStartGeneration(page);
 	    await waitForStage(page, "审核结论待处理", 60000);
 	    await page.getByLabel(/直接返修/i).check();
@@ -252,7 +350,7 @@ test.describe("B. Timeline 审计 + 会话恢复", () => {
 	  });
 
   test("B5. 100+ 节点写入/读取性能", async ({ page }) => {
-    await createWorkspaceSession(page, "issue-1");
+    await openWorkspaceSession(page, (await seedStoryWorkspace(page)).sessionId);
     // 发送 100 条 context_note
     for (let i = 0; i < 100; i++) {
       await sendContextNote(page, `note-${i}`);
@@ -284,23 +382,25 @@ git commit -m "test(e2e): add timeline audit + recovery cases (B1-B5)"
 
 ```typescript
 import { test, expect } from "@playwright/test";
+import { seedStoryWorkspace, seedConfirmedStoryWorkspace, openDrawerForStory } from "./helpers/workspace";
 
 test.describe("C. 看板侧滑详情", () => {
   test("C1. 卡片点击打开 Drawer", async ({ page }) => {
+    const seeded = await seedStoryWorkspace(page);
     await page.goto("/workbench");
-    await page.getByText(/某个 Story Spec/i).click();
+    await page.getByText(seeded.storyTitle).click();
     await expect(page.locator('[data-testid="lifecycle-card-drawer"]')).toBeVisible();
     await expect(page).toHaveURL(/focus=/);
   });
 
   test("C2. 关闭 Drawer URL 清除", async ({ page }) => {
-    await page.goto("/workbench?focus=story-12");
+    await openDrawerForStory(page, await seedStoryWorkspace(page));
     await page.getByLabel(/关闭/i).click();
     await expect(page).not.toHaveURL(/focus=/);
   });
 
   test("C3. Story confirmed 生成 Design Spec", async ({ page }) => {
-    await page.goto("/workbench?focus=story-12");
+    await openDrawerForStory(page, await seedConfirmedStoryWorkspace(page));
     await page.getByText(/生成 Design Spec/i).click();
     await expect(page.locator('[data-testid="lifecycle-card-drawer"]')).toContainText("Design Spec");
     await expect(page).toHaveURL(/\/workbench\?focus=design/);
@@ -309,18 +409,18 @@ test.describe("C. 看板侧滑详情", () => {
   });
 
 	  test("C4. Drawer 内打开 Workspace", async ({ page }) => {
-	    await page.goto("/workbench?focus=story-12");
+	    await openDrawerForStory(page, await seedStoryWorkspace(page));
 	    await page.getByText(/打开 Workspace/i).click();
 	    await page.waitForURL(/\/workbench\/workspace\//);
 	  });
 
   test("C5. URL 直接访问 focus 自动打开 Drawer", async ({ page }) => {
-    await page.goto("/workbench?focus=story-12");
+    await openDrawerForStory(page, await seedStoryWorkspace(page));
     await expect(page.locator('[data-testid="lifecycle-card-drawer"]')).toBeVisible();
   });
 
   test("C6. handleLaunchWorkspace race fix", async ({ page }) => {
-    await page.goto("/workbench?focus=story-12");
+    await openDrawerForStory(page, await seedStoryWorkspace(page));
     await page.getByText(/打开 Workspace/i).click();
     // 不应出现白屏或错误
     await expect(page.getByText(/准备中/i)).toBeVisible({ timeout: 5000 });
@@ -349,7 +449,7 @@ import { test, expect } from "@playwright/test";
 
 test.describe("D. 阶段化 UI + 节点 tab", () => {
   test("D1. 节点详情 5 tab 切换", async ({ page }) => {
-    await createWorkspaceSession(page, "issue-1");
+    await openWorkspaceSession(page, (await seedStoryWorkspace(page)).sessionId);
     await clickStartGeneration(page);
     await waitForStage(page, "运行中");
     await page.getByText(/流式输出/i).click();
@@ -361,7 +461,7 @@ test.describe("D. 阶段化 UI + 节点 tab", () => {
   });
 
   test("D2. Header Provider snapshot 锁定状态", async ({ page }) => {
-    await createWorkspaceSession(page, "issue-1");
+    await openWorkspaceSession(page, (await seedStoryWorkspace(page)).sessionId);
     await clickStartGeneration(page);
     await waitForStage(page, "运行中");
     await expect(page.getByText(/🔒/i)).toBeVisible();
@@ -369,7 +469,7 @@ test.describe("D. 阶段化 UI + 节点 tab", () => {
   });
 
   test("D3. ReviewDecision 三路径选择", async ({ page }) => {
-    await createWorkspaceSession(page, "issue-1");
+    await openWorkspaceSession(page, (await seedStoryWorkspace(page)).sessionId);
     await clickStartGeneration(page);
     await waitForStage(page, "审核结论待处理", 60000);
     await page.getByText(/直接返修/i).click();
@@ -378,7 +478,7 @@ test.describe("D. 阶段化 UI + 节点 tab", () => {
   });
 
   test("D4. HumanConfirm 显示 reviewer 摘要 + diff", async ({ page }) => {
-    await createWorkspaceSession(page, "issue-1");
+    await openWorkspaceSession(page, (await seedStoryWorkspace(page)).sessionId);
     // 运行到 HumanConfirm
     await waitForStage(page, "等待确认", 120000);
     await expect(page.getByText(/审核摘要/i)).toBeVisible();
@@ -386,7 +486,7 @@ test.describe("D. 阶段化 UI + 节点 tab", () => {
   });
 
   test("D5. HumanConfirm 要求修改走结构化反馈", async ({ page }) => {
-    await createWorkspaceSession(page, "issue-1");
+    await openWorkspaceSession(page, (await seedStoryWorkspace(page)).sessionId);
     await waitForStage(page, "等待确认", 120000);
     await page.getByText(/要求修改/i).click();
     await page.getByLabelText(/内容缺失/i).check();
@@ -418,7 +518,7 @@ import { test, expect } from "@playwright/test";
 
 test.describe("E. 断开策略", () => {
   test("E1. Running 时刷新 beforeunload 拦截", async ({ page }) => {
-    await createWorkspaceSession(page, "issue-1");
+    await openWorkspaceSession(page, (await seedStoryWorkspace(page)).sessionId);
     await clickStartGeneration(page);
     await waitForStage(page, "运行中");
     page.on("dialog", async (dialog) => {
@@ -430,7 +530,7 @@ test.describe("E. 断开策略", () => {
   });
 
   test("E2. 重连 banner 可关闭", async ({ page }) => {
-    await createWorkspaceSession(page, "issue-1");
+    await openWorkspaceSession(page, (await seedStoryWorkspace(page)).sessionId);
     await clickStartGeneration(page);
     await waitForStage(page, "运行中");
     // 刷新并接受 beforeunload
@@ -441,7 +541,7 @@ test.describe("E. 断开策略", () => {
   });
 
   test("E3. PrepareContext 刷新不拦截", async ({ page }) => {
-    await createWorkspaceSession(page, "issue-1");
+    await openWorkspaceSession(page, (await seedStoryWorkspace(page)).sessionId);
     let dialogShown = false;
     page.on("dialog", () => { dialogShown = true; });
     await page.reload();
@@ -449,7 +549,7 @@ test.describe("E. 断开策略", () => {
   });
 
   test("E4. HumanConfirm 刷新不拦截", async ({ page }) => {
-    await createWorkspaceSession(page, "issue-1");
+    await openWorkspaceSession(page, (await seedStoryWorkspace(page)).sessionId);
     // 运行到 HumanConfirm
     await waitForStage(page, "等待确认", 120000);
     let dialogShown = false;
@@ -459,7 +559,7 @@ test.describe("E. 断开策略", () => {
   });
 
   test("E5. 主动中止不产生 aborted_by_disconnect", async ({ page }) => {
-    await createWorkspaceSession(page, "issue-1");
+    await openWorkspaceSession(page, (await seedStoryWorkspace(page)).sessionId);
     await clickStartGeneration(page);
     await waitForStage(page, "运行中");
     await page.getByText(/中止/i).click();
@@ -487,11 +587,11 @@ git commit -m "test(e2e): add disconnect strategy cases (E1-E5)"
 
 ```typescript
 import { test, expect } from "@playwright/test";
-import { createWorkspaceSession, clickStartGeneration, waitForStage, dropWorkspaceSocketFromServer } from "./helpers/workspace";
+import { seedStoryWorkspace, openWorkspaceSession, clickStartGeneration, waitForStage, dropWorkspaceSocketFromServer } from "./helpers/workspace";
 
 test.describe("F. 自动重连", () => {
   test("F1. 服务端主动 drop socket 后自动重连", async ({ page }) => {
-    const sessionId = await createWorkspaceSession(page, "issue-1");
+    const sessionId = await openWorkspaceSession(page, (await seedStoryWorkspace(page)).sessionId);
     await clickStartGeneration(page);
     await waitForStage(page, "运行中");
     await dropWorkspaceSocketFromServer(page, sessionId);
@@ -502,7 +602,7 @@ test.describe("F. 自动重连", () => {
   });
 
   test("F2. 多次失败显示进度 banner", async ({ page }) => {
-    const sessionId = await createWorkspaceSession(page, "issue-1");
+    const sessionId = await openWorkspaceSession(page, (await seedStoryWorkspace(page)).sessionId);
     // 连续从服务端 drop 多次
     for (let i = 0; i < 3; i++) {
       await dropWorkspaceSocketFromServer(page, sessionId);
@@ -512,7 +612,7 @@ test.describe("F. 自动重连", () => {
   });
 
   test("F3. hidden 暂停恢复", async ({ page }) => {
-    await createWorkspaceSession(page, "issue-1");
+    await openWorkspaceSession(page, (await seedStoryWorkspace(page)).sessionId);
     await page.evaluate(() => {
       Object.defineProperty(document, "hidden", { value: true, writable: true });
       document.dispatchEvent(new Event("visibilitychange"));
@@ -527,7 +627,7 @@ test.describe("F. 自动重连", () => {
   });
 
   test("F4. 客户端无消息超时后主动 close 并重连", async ({ page }) => {
-    const sessionId = await createWorkspaceSession(page, "issue-1");
+    const sessionId = await openWorkspaceSession(page, (await seedStoryWorkspace(page)).sessionId);
     await page.request.post("/api/test/ws-timeout", {
       data: { client_idle_timeout_ms: 5000, suppress_server_messages: true },
     });
@@ -540,7 +640,7 @@ test.describe("F. 自动重连", () => {
 
   test("F5. 服务端 90s 无消息触发 close", async ({ page }) => {
     // E2E 环境把服务端 idle timeout 调小到 5s
-    await createWorkspaceSession(page, "issue-1");
+    await openWorkspaceSession(page, (await seedStoryWorkspace(page)).sessionId);
     let closed = false;
     page.on("websocket", (ws) => {
       ws.on("close", () => { closed = true; });
@@ -570,11 +670,13 @@ git commit -m "test(e2e): add websocket reconnect cases (F1-F5)"
 
 ```typescript
 import { test, expect } from "@playwright/test";
-import { createWorkspaceSession, clickStartGeneration, waitForStage, sendRawWorkspaceMessage } from "./helpers/workspace";
+import { seedStoryWorkspace, openWorkspaceSession, clickStartGeneration, waitForStage, sendRawWorkspaceMessage, enablePermissionFixture } from "./helpers/workspace";
 
 test.describe("G. Permission 链路", () => {
   test("G1. 正常 approve 继续 run", async ({ page }) => {
-    await createWorkspaceSession(page, "issue-1");
+    const seeded = await seedStoryWorkspace(page);
+    await enablePermissionFixture(page, seeded.sessionId);
+    await openWorkspaceSession(page, seeded.sessionId);
     await clickStartGeneration(page);
     await waitForStage(page, "运行中");
     await page.waitForSelector('[data-testid="permission-request"]', { timeout: 30000 });
@@ -583,7 +685,9 @@ test.describe("G. Permission 链路", () => {
   });
 
   test("G2. 正常 deny 中止 run", async ({ page }) => {
-    await createWorkspaceSession(page, "issue-1");
+    const seeded = await seedStoryWorkspace(page);
+    await enablePermissionFixture(page, seeded.sessionId);
+    await openWorkspaceSession(page, seeded.sessionId);
     await clickStartGeneration(page);
     await waitForStage(page, "运行中");
     await page.waitForSelector('[data-testid="permission-request"]', { timeout: 30000 });
@@ -592,7 +696,7 @@ test.describe("G. Permission 链路", () => {
   });
 
   test("G3. unmatched id 展示 protocol_error", async ({ page }) => {
-    const sessionId = await createWorkspaceSession(page, "issue-1");
+    const sessionId = await openWorkspaceSession(page, (await seedStoryWorkspace(page)).sessionId);
     await sendRawWorkspaceMessage(page, sessionId, {
       type: "permission_response",
       id: "nonexistent-id",
@@ -602,7 +706,9 @@ test.describe("G. Permission 链路", () => {
   });
 
   test("G4. 15min 超时清理", async ({ page }) => {
-	    await createWorkspaceSession(page, "issue-1");
+	    const seeded = await seedStoryWorkspace(page);
+	    await enablePermissionFixture(page, seeded.sessionId);
+	    await openWorkspaceSession(page, seeded.sessionId);
 	    await page.request.post("/api/test/permission-timeout", { data: { timeout_ms: 5000 } });
 	    await clickStartGeneration(page);
 	    await waitForStage(page, "运行中");
@@ -615,7 +721,9 @@ test.describe("G. Permission 链路", () => {
   test("G5. 全链路 trace log", async ({ page }) => {
     const logs: string[] = [];
     page.on("console", (msg) => logs.push(msg.text()));
-    await createWorkspaceSession(page, "issue-1");
+    const seeded = await seedStoryWorkspace(page);
+    await enablePermissionFixture(page, seeded.sessionId);
+    await openWorkspaceSession(page, seeded.sessionId);
     await clickStartGeneration(page);
     await waitForStage(page, "运行中");
     await page.waitForSelector('[data-testid="permission-request"]', { timeout: 30000 });
@@ -691,13 +799,14 @@ git commit -am "fix(e2e): stabilize E2E cases for P1-P6"
 | F. 自动重连 | `websocket-reconnect.spec.ts` |
 | G. Permission 链路 | `permission-link.spec.ts` |
 
-**2. Placeholder scan:**
-- 无 TBD/TODO
+**2. Implementation constraints:**
+- 没有待定占位项
 
 **3. 时间敏感用例:**
 - B5 性能断言：100 节点 < 200ms
 - F4/F5 心跳/超时：E2E test controls 将服务端超时调小到 5s；浏览器端不使用非法 close code
 - G4 15min 超时：测试环境应调小为 5s
+- G1/G2/G4/G5：先调用 `enablePermissionFixture`，不得依赖普通 fake provider 产生权限请求
 
 ---
 

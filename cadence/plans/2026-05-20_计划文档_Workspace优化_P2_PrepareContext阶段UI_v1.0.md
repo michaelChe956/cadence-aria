@@ -4,7 +4,7 @@
 
 **Goal:** 把 PrepareContext 阶段的"统一输入框 → 触发 guess intent"改为"显式 context_note 输入 + 显式开始生成按钮 + Provider 常驻配置 + Reviewer 默认勾选"，让 Stage 切换前用户心智清晰。
 
-**Architecture:** 从 WorkspacePage 中拆出 PrepareContextPanel（含 context_note 输入、Provider 常驻配置、Reviewer 推荐）、重构 Provider 配置区为常驻展开、新增 useStageUI hook 按 stage 决定右侧面板内容。
+**Architecture:** 从 WorkspacePage 中拆出 PrepareContextPanel（含 context_note 输入、Provider 常驻配置、Reviewer 推荐）、重构 Provider 配置区为常驻展开、新增 useStageUI hook 按 stage 决定右侧面板内容。context note 列表只能由 P1 的 `timelineNodes + nodeDetails` 派生，不能在前端本地乐观追加。
 
 **Tech Stack:** React + TypeScript + Tailwind CSS + Zustand + vitest
 
@@ -21,10 +21,16 @@
 | `web/src/components/workspace/ProviderConfigPanel.tsx` | 新建 | Provider 常驻配置（author + reviewer + rounds + 旗标） |
 | `web/src/hooks/useStageUI.ts` | 新建 | 按 stage 返回应渲染的子面板 |
 | `web/src/pages/WorkspacePage.tsx` | 修改 | 拆出输入区、接入 useStageUI、移除旧输入逻辑 |
-| `web/src/state/workspace-ws-store.ts` | 修改 | 追加 context_notes 列表状态 |
+| `web/src/state/workspace-ws-store.ts` | 修改 | 追加 PrepareContext 派生 selector（从 Timeline 事实源读 context_note） |
 | `web/src/components/workspace/PrepareContextPanel.test.tsx` | 新建 | 面板交互测试 |
 
 ---
+
+## 修订约束（必须优先遵守）
+
+1. Timeline / SessionState snapshot 是 context note 的唯一事实源。P2 不新增可变 context note 状态，不实现本地追加/清空 action，发送后等待 `timeline_node_created` 或 snapshot 回填。
+2. `protocol_error` 表示后端拒绝本次动作；UI 不得提前展示失败的 context note。
+3. E2E 依赖的稳定选择器必须随本阶段补齐：`stage-badge`、`prepare-context-panel`、`context-note-input`、`send-context-note`、`start-generation`、`timeline-node-context_note`。
 
 ### Task 1: useStageUI hook
 
@@ -457,7 +463,7 @@ export function PrepareContextPanel({
   const expanded = contextNotes.length <= 3;
 
   return (
-    <div className="flex flex-col gap-4">
+    <div data-testid="prepare-context-panel" className="flex flex-col gap-4">
       <div className="space-y-2">
         <h3 className="text-sm font-medium">已补充上下文 {contextNotes.length} 条</h3>
         {contextNotes.length > 0 && (
@@ -476,6 +482,7 @@ export function PrepareContextPanel({
 
       <form onSubmit={handleSubmit} className="flex gap-2">
         <textarea
+          data-testid="context-note-input"
           value={input}
           onChange={(e) => setInput(e.target.value)}
           placeholder="补充上下文（回车换行，点击发送按钮提交）"
@@ -484,6 +491,7 @@ export function PrepareContextPanel({
           className="flex-1 resize-y rounded border px-2 py-1 text-sm disabled:bg-slate-100"
         />
         <button
+          data-testid="send-context-note"
           type="submit"
           disabled={disabled || !input.trim()}
           className="self-end rounded bg-slate-200 px-3 py-1.5 text-sm hover:bg-slate-300 disabled:opacity-50"
@@ -493,6 +501,7 @@ export function PrepareContextPanel({
       </form>
 
       <button
+        data-testid="start-generation"
         onClick={onStartGeneration}
         disabled={disabled}
         className="w-full rounded bg-blue-600 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
@@ -518,57 +527,63 @@ git commit -m "feat(ui): add PrepareContextPanel with context_note input + start
 
 ---
 
-### Task 4: 前端 store 追加 context_notes 状态
+### Task 4: 前端 store 追加 PrepareContext context note 派生 selector
 
 **Files:**
 - 修改: `web/src/state/workspace-ws-store.ts`
 - 测试: `web/src/state/workspace-ws-store.test.ts`
 
-- [ ] **Step 1: 写 failing 测试**
+- [ ] **Step 1: 写 failing 测试 — context note 从 Timeline 事实源派生**
 
 ```typescript
-  it("adds context_note to list", () => {
+  it("derives context notes from timeline node details", () => {
     const store = useWorkspaceStore.getState();
-    store.addContextNote("第一条");
-    store.addContextNote("第二条");
-    expect(useWorkspaceStore.getState().contextNotes).toEqual(["第一条", "第二条"]);
+    store.setSessionState({
+      type: "session_state",
+      session_id: "sess-1",
+      workspace_type: "story",
+      stage: "prepare_context",
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "claude_code", reviewer: "codex" },
+      timeline_nodes: [
+        { node_id: "note-1", node_type: "context_note", status: "completed", title: "补充上下文", started_at: "2026-05-20T00:00:00Z" },
+        { node_id: "note-2", node_type: "context_note", status: "completed", title: "补充上下文", started_at: "2026-05-20T00:00:01Z" },
+      ],
+      active_node_id: null,
+      artifact_versions: [],
+      timeline_node_details: {
+        "note-1": { node_id: "note-1", streaming_content: "第一条" } as NodeDetail,
+        "note-2": { node_id: "note-2", streaming_content: "第二条" } as NodeDetail,
+      },
+      active_run_id: null,
+    });
+
+    expect(selectPrepareContextNotes(useWorkspaceStore.getState())).toEqual(["第一条", "第二条"]);
   });
 
-  it("clears context notes on start_generation", () => {
+  it("does not show context note before backend ack", () => {
     const store = useWorkspaceStore.getState();
-    store.addContextNote("第一条");
-    store.clearContextNotes();
-    expect(useWorkspaceStore.getState().contextNotes).toEqual([]);
+    expect(selectPrepareContextNotes(store)).toEqual([]);
   });
 ```
 
 Run: `pnpm --filter web test -- workspace-ws-store`
-Expected: 失败 — addContextNote / clearContextNotes 未定义
+Expected: 失败 — `selectPrepareContextNotes` 未定义或没有按 Timeline 派生。
 
-- [ ] **Step 2: 在 store 中追加**
+- [ ] **Step 2: 在 store 中追加 selector，不追加可变 contextNotes 状态**
 
 ```typescript
-export interface WorkspaceWsState {
-  // ... 现有字段 ...
-  contextNotes: string[];
-}
-
-export interface WorkspaceWsActions {
-  // ... 现有 actions ...
-  addContextNote: (content: string) => void;
-  clearContextNotes: () => void;
+export function selectPrepareContextNotes(state: WorkspaceWsState): string[] {
+  return state.timelineNodes
+    .filter((node) => node.node_type === "context_note")
+    .map((node) => state.nodeDetails[node.node_id]?.streaming_content ?? node.summary ?? "")
+    .filter((content) => content.trim().length > 0);
 }
 ```
 
-实现：
-
-```typescript
-  addContextNote: (content) =>
-    set((prev) => ({ contextNotes: [...prev.contextNotes, content] })),
-  clearContextNotes: () => set({ contextNotes: [] }),
-```
-
-初始值：`contextNotes: []`
+`handleMessage("timeline_node_created")` 按 P1 追加节点；`handleMessage("session_state")` 替换式灌入 `timeline_nodes` 和 `timeline_node_details`。发送 `context_note` 时只调用 `sendContextNote(content)`，等待后端 ack 后 selector 自然更新。
 
 - [ ] **Step 3: 跑测试确认通过**
 
@@ -579,7 +594,7 @@ Expected: PASS
 
 ```bash
 git add web/src/state/workspace-ws-store.ts web/src/state/workspace-ws-store.test.ts
-git commit -m "feat(store): add contextNotes state for PrepareContext stage"
+git commit -m "feat(store): derive PrepareContext notes from timeline"
 ```
 
 ---
@@ -608,12 +623,14 @@ grep -n "handleSubmit\|input\|textarea\|startGeneration\|showProviderPanel" web/
 import { useStageUI } from "../../hooks/useStageUI";
 import { PrepareContextPanel } from "../../components/workspace/PrepareContextPanel";
 import { ProviderConfigPanel } from "../../components/workspace/ProviderConfigPanel";
+import { selectPrepareContextNotes } from "../../state/workspace-ws-store";
 
 // ...
 function WorkspacePage({ sessionId, ... }: WorkspacePageProps) {
   const { sendContextNote, sendStartGeneration, selectProvider } = useWorkspaceWs(sessionId);
   const store = useWorkspaceStore();
   const stageConfig = useStageUI(store.stage);
+  const contextNotes = selectPrepareContextNotes(store);
   // ...
 
   // 主区右侧面板
@@ -630,10 +647,7 @@ function WorkspacePage({ sessionId, ... }: WorkspacePageProps) {
               onToggleReviewer={(enabled) => useWorkspaceStore.setState({ reviewerEnabled: enabled })}
             />
             <PrepareContextPanel
-              onSendContextNote={(content) => {
-                sendContextNote(content);
-                store.addContextNote(content);
-              }}
+              onSendContextNote={(content) => sendContextNote(content)}
               onStartGeneration={() => {
                 // 构造 Provider snapshot
                 const snapshot: ProviderConfigSnapshot = {
@@ -642,9 +656,8 @@ function WorkspacePage({ sessionId, ... }: WorkspacePageProps) {
                   review_rounds: store.reviewRounds ?? 1,
                 };
                 sendStartGeneration(snapshot, store.reviewerEnabled ?? true);
-                store.clearContextNotes();
               }}
-              contextNotes={store.contextNotes}
+              contextNotes={contextNotes}
             />
           </div>
         );
@@ -710,13 +723,14 @@ git commit -am "fix: update tests for PrepareContext UI refactor"
 | §4.2 Provider 配置区（常驻展开） | Task 2 (ProviderConfigPanel) |
 | §4.2 Reviewer 默认勾选 + 取消提示 | Task 2 (reviewerEnabled + onToggleReviewer) |
 | §4.2 开始生成按钮（唯一入口） | Task 3 (onStartGeneration) |
-| §4.3 Timeline 增强（context_note 节点） | Task 7 (P1) + store contextNotes |
+| §4.3 Timeline 增强（context_note 节点） | P1 `timeline_node_created` / snapshot + Task 4 selector |
 | §4.4 状态机视角 | Task 1 (useStageUI) |
 
-**2. Placeholder scan:**
-- 没有 TBD/TODO
+**2. Implementation constraints:**
+- 没有待定占位项
 - `store.reviewerEnabled` / `store.reviewRounds` 需要在 store 中定义
 - `ProviderConfigSnapshot` 类型需要从 api/types.ts 导入
+- `selectPrepareContextNotes` 必须只读 `timelineNodes + nodeDetails`，不得引入本地乐观 context note 状态
 
 **3. Type consistency:**
 - `sendStartGeneration` 签名与 P1 一致：(snapshot, reviewerEnabled)
@@ -728,7 +742,9 @@ git commit -am "fix: update tests for PrepareContext UI refactor"
 
 - [ ] PrepareContext 阶段显示 ProviderConfigPanel（常驻展开）+ PrepareContextPanel
 - [ ] 发送 context_note 后 Timeline 追加节点，Provider 未启动
+- [ ] 后端返回 `protocol_error` 时 context note 不出现在 UI 列表
 - [ ] 点击"开始生成"后发送 start_generation，Provider 锁定，阶段切 Running
 - [ ] Reviewer 默认勾选，取消时显示警告
 - [ ] Running 阶段 ProviderConfigPanel 锁定，输入区隐藏
+- [ ] E2E 稳定选择器存在：`stage-badge`、`prepare-context-panel`、`context-note-input`、`send-context-note`、`start-generation`、`timeline-node-context_note`
 - [ ] `pnpm --filter web test` PASS

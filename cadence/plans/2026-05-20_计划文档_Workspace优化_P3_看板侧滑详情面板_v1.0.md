@@ -23,6 +23,56 @@
 | `web/src/components/lifecycle/IssueLifecycleWorkbench.tsx` | 修改 | 卡片 onClick → openDrawer |
 | `web/src/components/lifecycle/LifecycleCard.tsx` | 修改 | 移除"打开 Workspace"按钮 |
 | `web/src/api/client.ts` | 确认/复用 | 复用现有 generateStorySpecs / generateDesignSpecs / generateWorkItems API，只创建下一阶段实体和 Workspace session |
+| `src/web/types.rs` / `src/web/handlers.rs` | 修改 | Story/Design lifecycle DTO 补齐 artifact_versions |
+| `web/src/api/types.ts` / `web/src/state/lifecycle-workbench-store.ts` | 修改 | 前端 lifecycle 类型和卡片数据透传 artifact_versions |
+
+---
+
+## 修订约束（必须优先遵守）
+
+1. Drawer 展示版本历史前，必须先补齐 lifecycle API DTO 的 `artifact_versions` 来源；前端不得假设 `DrawerEntity.artifact_versions` 已存在。
+2. `handleGenerateNext` 只创建下一阶段实体和 PrepareContext session，刷新看板数据并切换 Drawer focus；禁止打开 Workspace、禁止发送 `start_generation`、禁止启动 Provider。
+3. URL 同步必须先在当前 `web/src/router.tsx` 的 `/workbench` route 增加 search schema / validateSearch，再使用对应 route id 调用 `useSearch` / `useNavigate`。
+
+### Task 0: lifecycle API DTO 补齐 artifact_versions
+
+**Files:**
+- 修改: `src/web/types.rs`
+- 修改: `src/web/handlers.rs`
+- 修改: `web/src/api/types.ts`
+- 修改: `web/src/state/lifecycle-workbench-store.ts`
+
+- [ ] **Step 1: 写 failing 测试 — Story/Design DTO 返回版本历史**
+
+在 web handler 或 API 集成测试中创建带 artifact version 的 story/design，断言 lifecycle response 中包含 `artifact_versions`：
+
+```rust
+assert_eq!(story_spec.artifact_versions.len(), 1);
+assert_eq!(story_spec.artifact_versions[0].version, 1);
+assert!(story_spec.artifact_versions[0].markdown.contains("功能需求"));
+```
+
+Run: `cargo test lifecycle_returns_artifact_versions -- --nocapture`
+Expected: 编译失败或断言失败 — `StorySpecDto` / `DesignSpecDto` 未暴露 `artifact_versions`。
+
+- [ ] **Step 2: 扩展 DTO 并从 LifecycleStore 填充**
+
+在 `StorySpecDto` / `DesignSpecDto` 中追加：
+
+```rust
+pub artifact_versions: Vec<ArtifactVersionDto>,
+```
+
+在 `story_spec_dto` / `design_spec_dto` 中通过 `LifecycleStore::list_artifact_versions(workspace_session_id)` 读取版本历史，并按当前实体关联的 session 过滤。保留现有 `current_version` / `current_markdown_preview` 字段，避免破坏列表摘要。
+
+- [ ] **Step 3: 前端类型与 store 透传**
+
+在 `web/src/api/types.ts` 的 `StorySpec` / `DesignSpec` 追加 `artifact_versions: ArtifactVersion[]`；在 `lifecycle-workbench-store.ts` 构造 `LifecycleCardData` 时原样透传到卡片数据。
+
+- [ ] **Step 4: 跑测试确认通过**
+
+Run: `cargo test lifecycle_returns_artifact_versions -- --nocapture && pnpm --filter web test -- lifecycle-workbench-store`
+Expected: PASS
 
 ---
 
@@ -41,14 +91,14 @@ import { useLifecycleWorkbenchStore } from "./lifecycle-workbench-store";
 describe("drawer state", () => {
   it("opens drawer with entity id", () => {
     const store = useLifecycleWorkbenchStore.getState();
-    store.openDrawer("story-12");
-    expect(store.focusedEntityId).toBe("story-12");
+    store.openDrawer("story-id");
+    expect(store.focusedEntityId).toBe("story-id");
     expect(store.isDrawerOpen).toBe(true);
   });
 
   it("closes drawer and clears focus", () => {
     const store = useLifecycleWorkbenchStore.getState();
-    store.openDrawer("story-12");
+    store.openDrawer("story-id");
     store.closeDrawer();
     expect(store.focusedEntityId).toBeNull();
     expect(store.isDrawerOpen).toBe(false);
@@ -87,7 +137,24 @@ export interface LifecycleWorkbenchActions {
 
 - [ ] **Step 3: URL query param 双向同步**
 
-在 `IssueLifecycleWorkbench.tsx` 中使用 `@tanstack/react-router` 的 `useSearch`：
+先在 `web/src/router.tsx` 为 `/workbench` route 增加 search schema：
+
+```typescript
+type WorkbenchSearch = {
+  focus?: string;
+};
+
+const workbenchRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/workbench",
+  validateSearch: (search: Record<string, unknown>): WorkbenchSearch => ({
+    focus: typeof search.focus === "string" ? search.focus : undefined,
+  }),
+  component: WorkbenchRouteComponent,
+});
+```
+
+再在 `IssueLifecycleWorkbench.tsx` 中使用同一个 route id：
 
 ```typescript
 import { useSearch, useNavigate } from "@tanstack/react-router";
@@ -106,9 +173,9 @@ useEffect(() => {
 // store → URL
 useEffect(() => {
   if (store.isDrawerOpen && store.focusedEntityId) {
-    navigate({ search: { focus: store.focusedEntityId } });
+    navigate({ search: (prev) => ({ ...prev, focus: store.focusedEntityId }) });
   } else {
-    navigate({ search: {} });
+    navigate({ search: (prev) => ({ ...prev, focus: undefined }) });
   }
 }, [store.isDrawerOpen, store.focusedEntityId]);
 ```
@@ -145,7 +212,7 @@ describe("LifecycleCardDrawer", () => {
     render(
       <LifecycleCardDrawer
         entity={{
-          id: "story-12",
+          id: "story-id",
           kind: "story_spec",
           title: "用户认证模块",
           status: "confirmed",
@@ -167,7 +234,7 @@ describe("LifecycleCardDrawer", () => {
     const onClose = vi.fn();
     render(
       <LifecycleCardDrawer
-        entity={{ id: "story-12", kind: "story_spec", title: "测试", status: "confirmed" }}
+        entity={{ id: "story-id", kind: "story_spec", title: "测试", status: "confirmed" }}
         onClose={onClose}
         onOpenWorkspace={vi.fn()}
         onGenerateNext={vi.fn()}
@@ -204,6 +271,7 @@ interface DrawerEntity {
   title: string;
   status: string;
   version?: number;
+  workspace_session_id?: string | null;
   artifact_versions?: ArtifactVersion[];
 }
 
@@ -235,7 +303,7 @@ export function LifecycleCardDrawer({
   };
 
   return (
-    <div className="flex h-full flex-col border-l bg-white">
+    <div data-testid="lifecycle-card-drawer" className="flex h-full flex-col border-l bg-white">
       {/* 头部 */}
       <div className="flex items-center justify-between border-b px-4 py-3">
         <div>
@@ -298,6 +366,7 @@ export function LifecycleCardDrawer({
       {/* 操作区 */}
       <div className="border-t px-4 py-3 space-y-2">
         <button
+          data-testid="drawer-open-workspace"
           onClick={onOpenWorkspace}
           className="w-full rounded bg-slate-800 py-2 text-sm font-medium text-white hover:bg-slate-900"
         >
@@ -306,6 +375,7 @@ export function LifecycleCardDrawer({
 
         {entity.status === "confirmed" && nextActionLabel[entity.kind] && onGenerateNext && (
           <button
+            data-testid="drawer-generate-next"
             onClick={onGenerateNext}
             className="w-full rounded border border-blue-600 py-2 text-sm font-medium text-blue-600 hover:bg-blue-50"
           >
@@ -317,6 +387,8 @@ export function LifecycleCardDrawer({
   );
 }
 ```
+
+`entity.artifact_versions` 必须来自 Task 0 扩展后的 lifecycle API DTO；没有版本历史时只隐藏版本历史和 Artifact 预览，不做前端假数据兜底。
 
 - [ ] **Step 3: 跑测试确认通过**
 
@@ -391,7 +463,7 @@ const focusedEntity = useMemo(() => {
 
 - [ ] **Step 1.5: 实现 handleGenerateNext，严格按"只创建不执行"流程**
 
-`handleGenerateNext` 只调用已有创建 API、刷新数据、切换 Drawer focus；不得调用 `onOpenWorkspace`，不得发送 `start_generation` 或旧 `message/run-next`。
+`handleGenerateNext` 只调用已有创建 API、刷新数据、切换 Drawer focus；不得调用 `onOpenWorkspace`，不得发送 `start_generation` 或旧 `message/run-next`。生成 API 的验收标准是返回下一阶段实体和 `workspace_session_id`，但 session 必须停留在 PrepareContext。
 
 ```tsx
 async function handleGenerateNext(entityId: string, kind: DrawerEntity["kind"]) {
@@ -508,8 +580,8 @@ git commit -am "fix: adjust tests for drawer integration"
 | §5.6 Drawer URL / 路由 | Task 1 (URL 双向同步) |
 | §5.7 焦点过滤 | Task 3 (卡片高亮可后续追加) |
 
-**2. Placeholder scan:**
-- 无 TBD/TODO
+**2. Implementation constraints:**
+- 没有待定占位项
 - `handleGenerateNext` 必须复用现有创建 API，但只创建下一阶段实体和 Workspace session；禁止调用 `onOpenWorkspace` 或触发 Provider
 
 **3. Type consistency:**
@@ -522,9 +594,10 @@ git commit -am "fix: adjust tests for drawer integration"
 
 - [ ] 卡片点击打开 Drawer（480px，右侧滑出）
 - [ ] Drawer 关闭后 URL 清除 `?focus=`
-- [ ] 直接访问 `?focus=story-12` 自动打开 Drawer
+- [ ] 直接访问 `?focus=<seeded-story-id>` 自动打开 Drawer
 - [ ] Story confirmed 后 Drawer 显示"生成 Design Spec"按钮
 - [ ] 点击"生成 Design Spec"只创建 Design 实体 + PrepareContext session，Drawer 切到 Design，不自动打开 Workspace，不启动 Provider
+- [ ] lifecycle API 的 Story/Design DTO 返回 `artifact_versions`，Drawer 版本历史来自 DTO
 - [ ] Drawer 内"打开 Workspace"进入全屏 Workspace
 - [ ] 看板不灰化，允许并行操作
 - [ ] `pnpm --filter web test` PASS

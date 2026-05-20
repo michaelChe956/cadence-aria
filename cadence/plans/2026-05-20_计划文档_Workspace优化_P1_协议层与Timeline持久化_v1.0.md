@@ -12,7 +12,7 @@
 
 **后续 plan 消费点:**
 - P2 消费 `sendContextNote` / `sendStartGeneration` / `provider_locked` 事件
-- P4 消费 `selectNodeDetail` selector + 节点级 5 tab
+- P4 消费 `selectNodeDetail` selector + 节点级 5 tab + `sendSelectRevisionPath` / `sendRequestRevision` / `sendHumanConfirm`
 - P5 消费 `WsInMessage::Hello` / `WsOutMessage::Pong` + `aborted_by_disconnect` 节点写入
 - P6 消费 `NodeDetail.permission_events` 字段
 
@@ -33,6 +33,14 @@
 | `web/src/state/workspace-ws-store.test.ts` | 修改 | snapshot 应用测试 |
 
 ---
+
+## 修订约束（必须优先遵守）
+
+1. `ActiveRun` 的 `command_tx/cancel` 当前定义在 `src/web/workspace_ws_handler.rs` 的单个 WebSocket handler 内，不迁入 `WorkspaceEngine`。P1 只在 `WorkspaceEngine` 增加 `active_run_id: Option<String>` 镜像字段，并暴露 `mark_active_run_started(run_id)` / `mark_active_run_finished(run_id)` / `active_run_id()`；P5 的 socket close 清理仍从 handler 局部 `current_run` 取真实 abort handle。
+2. `build_session_state` 读取 `timeline_node_details` 时必须处理 `lifecycle_store: Option<LifecycleStore>`；内存 engine 没有 store 时返回空 map。
+3. 前端 snapshot 应用必须是替换式：`activeRunId: state.active_run_id`。当后端返回 `null` 时必须清空旧值，不能使用 `?? prev.activeRunId`。
+4. P1 必须补齐方案动作 `select_revision_path`、`request_revision`、`human_confirm`。旧 `review_decision_response` / `confirm` 只保留兼容，统一转入新动作处理。
+5. `NodeDetail` 写入 stream chunk 必须实现方案 §3.4 的节流：200ms 或累计 4KB flush，节点结束时立即 flush；permission / execution / verdict / artifact_ref 仍立即写入。
 
 ### Task 1: 扩展后端协议类型（WsInMessage / WsOutMessage）
 
@@ -140,7 +148,45 @@ Expected: 编译失败 — ContextNote / StartGeneration / ProtocolError / Provi
         session_id: String,
         last_seen_node_id: Option<String>,
     },
+    SelectRevisionPath {
+        path: RevisionPath,
+        extra_context: Option<String>,
+    },
+    RequestRevision {
+        feedback: StructuredFeedback,
+    },
+    HumanConfirm {
+        decision: HumanConfirmDecision,
+        payload: Option<serde_json::Value>,
+    },
     Ping,
+```
+
+新增配套 enum / struct（同文件）：
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RevisionPath {
+    Revise,
+    ReviseWithContext,
+    SkipToHuman,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HumanConfirmDecision {
+    Confirm,
+    RequestChange,
+    Terminate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StructuredFeedback {
+    pub feedback_types: Vec<String>,
+    pub description: String,
+    pub target_artifact_version: Option<u32>,
+}
 ```
 
 - [ ] **Step 4: 在 WsOutMessage 追加变体**
@@ -229,9 +275,7 @@ grep -rn "TimelineNodeType::Generation" src/ --include="*.rs"
 grep -rn "TimelineNodeType::Review" src/ --include="*.rs"
 ```
 
-逐文件替换 `TimelineNodeType::Generation` → `TimelineNodeType::AuthorRun`，`TimelineNodeType::Review` → `TimelineNodeType::ReviewerRun`。`serde(rename_all = "snake_case")` 会自动处理序列化名称，但 `Generation` 的旧 JSON 值 `generation` 需要确认：
-
-如果前端已有持久化的旧 timeline_nodes.json，添加 serde alias：
+逐文件替换 `TimelineNodeType::Generation` → `TimelineNodeType::AuthorRun`，`TimelineNodeType::Review` → `TimelineNodeType::ReviewerRun`。`serde(rename_all = "snake_case")` 会自动处理新序列化名称；为兼容本地已经持久化的旧 `timeline_nodes.json`，必须添加 serde alias：
 
 ```rust
     #[serde(alias = "generation")]
@@ -591,23 +635,25 @@ Expected: 编译失败 — SessionState 变体没有 timeline_node_details / act
     pub fn build_session_state(&self) -> WsOutMessage {
         // ... 现有代码（messages, checkpoints）保持不变 ...
 
-        let timeline_node_details = if let Ok(ids) = self
+        let timeline_node_details = self
             .lifecycle_store
-            .list_node_detail_ids(&self.session.session_id)
-        {
-            ids.into_iter()
-                .filter_map(|id| {
-                    self.lifecycle_store
-                        .load_node_detail(&self.session.session_id, &id)
-                        .ok()
-                        .map(|detail| (id, detail))
-                })
-                .collect()
-        } else {
-            HashMap::new()
-        };
+            .as_ref()
+            .and_then(|store| {
+                let ids = store.list_node_detail_ids(&self.session.session_id).ok()?;
+                Some(
+                    ids.into_iter()
+                        .filter_map(|id| {
+                            store
+                                .load_node_detail(&self.session.session_id, &id)
+                                .ok()
+                                .map(|detail| (id, detail))
+                        })
+                        .collect::<HashMap<_, _>>(),
+                )
+            })
+            .unwrap_or_default();
 
-        let active_run_id = self.active_run.as_ref().map(|run| run.id.clone());
+        let active_run_id = self.active_run_id.clone();
 
         WsOutMessage::SessionState {
             // ... 现有字段 ...
@@ -617,7 +663,28 @@ Expected: 编译失败 — SessionState 变体没有 timeline_node_details / act
     }
 ```
 
-需要确认 `WorkspaceEngine` 是否有 `lifecycle_store` 和 `active_run` 字段。如果没有，需要添加。
+同时在 `WorkspaceEngine` 增加镜像字段和方法（不保存 command sender）：
+
+```rust
+pub struct WorkspaceEngine {
+    // ... 现有字段 ...
+    active_run_id: Option<String>,
+}
+
+pub fn mark_active_run_started(&mut self, run_id: impl Into<String>) {
+    self.active_run_id = Some(run_id.into());
+}
+
+pub fn mark_active_run_finished(&mut self, run_id: &str) {
+    if self.active_run_id.as_deref() == Some(run_id) {
+        self.active_run_id = None;
+    }
+}
+
+pub fn active_run_id(&self) -> Option<&str> {
+    self.active_run_id.as_deref()
+}
+```
 
 - [ ] **Step 4: 跑测试确认通过**
 
@@ -705,16 +772,21 @@ fn is_message_valid_for_stage(msg: &WsInMessage, stage: &WorkspaceStage) -> bool
 }
 ```
 
-注意：`WsInMessage::SelectRevisionPath` 和 `WsInMessage::RequestRevision` 可能还没定义。如果当前 enum 用的是 `ReviewDecisionResponse` 和 `Rollback`，需要先做映射：
+注意：本任务必须先定义 `WsInMessage::SelectRevisionPath` 和 `WsInMessage::RequestRevision`。旧 enum 中的 `ReviewDecisionResponse` / `Confirm` 只作为兼容入口映射到新动作：
 - `WsInMessage::ReviewDecisionResponse { decision, extra_context }` 对应 "选择处理路径"
-- `WsInMessage::Rollback { checkpoint_id }` 对应 "要求返修"
+- `WsInMessage::Confirm` 对应 `HumanConfirm { decision: Confirm, payload: None }`
+- `WsInMessage::RequestRevision { feedback }` 对应 HumanConfirm 阶段的"要求修改"，不是 checkpoint rollback
 
 如果现有 enum 没有这两个变体，先用现有变体做映射：
 
 ```rust
         WorkspaceStage::ReviewDecision => matches!(
             msg,
-            WsInMessage::ReviewDecisionResponse { .. } | WsInMessage::Rollback { .. }
+            WsInMessage::SelectRevisionPath { .. } | WsInMessage::ReviewDecisionResponse { .. }
+        ),
+        WorkspaceStage::HumanConfirm => matches!(
+            msg,
+            WsInMessage::HumanConfirm { .. } | WsInMessage::RequestRevision { .. } | WsInMessage::Confirm
         ),
 ```
 
@@ -730,8 +802,8 @@ fn is_message_valid_for_stage(msg: &WsInMessage, stage: &WorkspaceStage) -> bool
             }
         };
 
-        // 阶段校验
-        let stage = engine.current_stage().await; // 需要 engine 暴露此方法
+        // 阶段校验；current_stage() 在 Task 7 与其他 engine helper 一起新增
+        let stage = engine.current_stage();
         if !is_message_valid_for_stage(&in_msg, &stage) {
             let err = WsOutMessage::ProtocolError {
                 code: "INVALID_MESSAGE_FOR_STAGE".to_string(),
@@ -743,16 +815,7 @@ fn is_message_valid_for_stage(msg: &WsInMessage, stage: &WorkspaceStage) -> bool
         }
 ```
 
-需要确认 `engine.current_stage()` 是否存在。如果不存在，改为：
-
-```rust
-        let stage = match engine.get_state_snapshot() {
-            Some(state) => state.stage,
-            None => WorkspaceStage::PrepareContext,
-        };
-```
-
-或者更简单：从 session 中读 stage（需要看 engine 如何暴露 session 状态）。
+`WorkspaceEngine::current_stage()` 的实现必须只读返回 `self.session.stage.clone()`，不得通过 `build_session_state()` 反向解析 stage，避免阶段校验依赖 WebSocket DTO。
 
 - [ ] **Step 4: 处理 ContextNote / StartGeneration / Hello / Ping**
 
@@ -775,6 +838,13 @@ fn is_message_valid_for_stage(msg: &WsInMessage, stage: &WorkspaceStage) -> bool
                     Ok((node, locked)) => {
                         let _ = socket.send(Message::Text(serde_json::to_string(&WsOutMessage::TimelineNodeCreated { node }).unwrap())).await;
                         let _ = socket.send(Message::Text(serde_json::to_string(&locked).unwrap())).await;
+                        // 从现有 UserMessage 分支抽取 provider run 启动 helper：
+                        // - abort 旧 current_run
+                        // - 创建 CancellationToken + command channel
+                        // - 写入 handler 局部 current_run
+                        // - 调用 engine.handle_user_message / drive_review_session
+                        // - 调用 engine.mark_active_run_started/finished 同步 active_run_id 镜像
+                        spawn_provider_run_from_handler(&state, &engine, &current_run, &next_run_id, String::new()).await;
                     }
                     Err(e) => {
                         let err = WsOutMessage::Error { message: e.to_string() };
@@ -790,9 +860,41 @@ fn is_message_valid_for_stage(msg: &WsInMessage, stage: &WorkspaceStage) -> bool
             WsInMessage::Ping => {
                 let _ = socket.send(Message::Text(serde_json::to_string(&WsOutMessage::Pong).unwrap())).await;
             }
+            WsInMessage::SelectRevisionPath { path, extra_context } => {
+                let (decision, extra_context) = map_revision_path(path, extra_context);
+                match engine.handle_review_decision(decision, extra_context).await {
+                    Ok(ReviewDecisionOutcome::StartRevision) => start_revision_run(...).await,
+                    Ok(ReviewDecisionOutcome::HumanConfirm) => {}
+                    Err(message) => send_protocol_error("INVALID_REVISION_PATH", message).await,
+                }
+            }
+            WsInMessage::RequestRevision { feedback } => {
+                match engine.handle_human_request_revision(feedback).await {
+                    Ok(()) => {}
+                    Err(message) => send_protocol_error("INVALID_HUMAN_CONFIRM_ACTION", message).await,
+                }
+            }
+            WsInMessage::HumanConfirm { decision, payload } => {
+                match engine.handle_human_confirm(decision, payload).await {
+                    Ok(()) => {}
+                    Err(message) => send_protocol_error("INVALID_HUMAN_CONFIRM_ACTION", message).await,
+                }
+            }
 ```
 
-需要确认 `engine.append_context_note` 和 `engine.start_generation` 是否存在。如果不存在，需要先在 `workspace_engine.rs` 中实现（见 Task 7）。
+路径映射必须固定，避免 P4 与后端内部值漂移：
+
+```rust
+fn map_revision_path(path: RevisionPath, extra_context: Option<String>) -> (String, Option<String>) {
+    match path {
+        RevisionPath::Revise => ("continue".to_string(), None),
+        RevisionPath::ReviseWithContext => ("continue_with_context".to_string(), extra_context),
+        RevisionPath::SkipToHuman => ("human_intervene".to_string(), None),
+    }
+}
+```
+
+`engine.append_context_note` 和 `engine.start_generation` 由 Task 7 新增；本步骤只负责 handler 路由与错误映射。
 
 - [ ] **Step 5: 跑测试确认通过**
 
@@ -912,9 +1014,8 @@ Expected: 编译失败 — 方法未定义
             locked_at: now_iso(),
         };
 
-        // 启动 author run（现有逻辑）
+        // 只完成 Provider 锁定和 stage 切换；真实 ActiveRun 仍由 workspace_ws_handler.rs 局部 current_run 持有。
         self.transition_stage(WorkspaceStage::Running).await;
-        self.start_author_run().await?;
 
         Ok((node, locked))
     }
@@ -985,27 +1086,41 @@ git commit -m "feat(engine): add append_context_note, start_generation, append_a
 
 > 本任务补齐方案 §3.4 的真实落地点。只定义 `NodeDetail` 和 `save_node_detail` 不够；所有运行时证据必须在事件发生时写入 `timeline_node_details/<node_id>.json`，否则刷新恢复仍然会丢失 streaming / execution / permission / verdict / artifact_ref。
 
-- [ ] **Step 1: 写 failing 测试 — stream chunk 会追加到 active author_run 的 NodeDetail**
+- [ ] **Step 1: 写 failing 测试 — stream chunk 按节流策略写入 active author_run 的 NodeDetail**
 
 ```rust
 #[tokio::test]
-async fn stream_chunk_is_persisted_to_active_node_detail() {
+async fn stream_chunk_flushes_after_4kb_or_node_end() {
     let mut engine = create_test_engine().await;
     let node_id = engine.create_test_author_run_node().await;
 
-    engine.persist_stream_chunk(&node_id, "hello ".to_string()).await.unwrap();
-    engine.persist_stream_chunk(&node_id, "world".to_string()).await.unwrap();
+    engine.buffer_stream_chunk(&node_id, "hello ".to_string()).await.unwrap();
+    engine.buffer_stream_chunk(&node_id, "world".to_string()).await.unwrap();
+    assert!(engine
+        .lifecycle_store()
+        .load_node_detail(&engine.session().session_id, &node_id)
+        .is_err());
+
+    engine.flush_stream_buffer(&node_id).await.unwrap();
 
     let detail = engine
         .lifecycle_store()
         .load_node_detail(&engine.session().session_id, &node_id)
         .unwrap();
     assert_eq!(detail.streaming_content, "hello world");
+
+    let large = "x".repeat(4096);
+    engine.buffer_stream_chunk(&node_id, large.clone()).await.unwrap();
+    let detail = engine
+        .lifecycle_store()
+        .load_node_detail(&engine.session().session_id, &node_id)
+        .unwrap();
+    assert!(detail.streaming_content.ends_with(&large));
 }
 ```
 
-Run: `cargo test stream_chunk_is_persisted_to_active_node_detail -- --nocapture`
-Expected: 编译失败 — `persist_stream_chunk` / `create_test_author_run_node` / `lifecycle_store()` 未定义或 NodeDetail 未写入。
+Run: `cargo test stream_chunk_flushes_after_4kb_or_node_end -- --nocapture`
+Expected: 编译失败 — `buffer_stream_chunk` / `flush_stream_buffer` / `create_test_author_run_node` / `lifecycle_store()` 未定义或 NodeDetail 未按节流写入。
 
 - [ ] **Step 2: 写 failing 测试 — permission request / response 会配对写入 NodeDetail**
 
@@ -1141,10 +1256,9 @@ where
 在 `handle_user_message` / `drive_revision_session` / `drive_review_session` 中把以下事件写入 NodeDetail：
 
 ```rust
-// stream chunk
-self.update_node_detail(&node_id, |detail| {
-    detail.streaming_content.push_str(&content);
-}).await?;
+// stream chunk：必须先进入 buffer，满足 200ms 或累计 4KB 时才落盘；
+// node 完成、失败、abort、socket disconnect 时必须调用 flush_stream_buffer(&node_id)。
+self.buffer_stream_chunk(&node_id, content).await?;
 
 // execution event
 self.update_node_detail(&node_id, |detail| {
@@ -1190,9 +1304,39 @@ self.update_node_detail(&node_id, |detail| {
 }).await?;
 ```
 
+stream buffer 的实现要求：
+
+```rust
+struct PendingStreamBuffer {
+    content: String,
+    last_flush_at: std::time::Instant,
+}
+
+async fn buffer_stream_chunk(&mut self, node_id: &str, content: String) -> Result<(), String> {
+    let buffer = self.stream_buffers.entry(node_id.to_string()).or_default();
+    buffer.content.push_str(&content);
+    if buffer.content.len() >= 4096 || buffer.last_flush_at.elapsed() >= Duration::from_millis(200) {
+        self.flush_stream_buffer(node_id).await?;
+    }
+    Ok(())
+}
+
+async fn flush_stream_buffer(&mut self, node_id: &str) -> Result<(), String> {
+    let Some(buffer) = self.stream_buffers.remove(node_id) else {
+        return Ok(());
+    };
+    if buffer.content.is_empty() {
+        return Ok(());
+    }
+    self.update_node_detail(node_id, |detail| {
+        detail.streaming_content.push_str(&buffer.content);
+    }).await
+}
+```
+
 - [ ] **Step 6: 跑测试确认通过**
 
-Run: `cargo test stream_chunk_is_persisted_to_active_node_detail permission_request_and_response_are_persisted_to_node_detail verdict_and_artifact_ref_are_persisted_to_node_detail -- --nocapture`
+Run: `cargo test stream_chunk_flushes_after_4kb_or_node_end permission_request_and_response_are_persisted_to_node_detail verdict_and_artifact_ref_are_persisted_to_node_detail -- --nocapture`
 Expected: PASS。
 
 - [ ] **Step 7: Commit**
@@ -1482,6 +1626,42 @@ Expected: 编译/运行失败 — sendContextNote / sendStartGeneration / sendHe
     }
   }, []);
 
+  const sendSelectRevisionPath = useCallback(
+    (path: "revise" | "revise-with-context" | "skip-to-human", extraContext?: string) => {
+      const ws = wsRef.current;
+      if (ws?.readyState === WebSocket.OPEN) {
+        ws.send(
+          JSON.stringify({
+            type: "select_revision_path",
+            path,
+            extra_context: extraContext?.trim() ? extraContext.trim() : null,
+          }),
+        );
+      }
+    },
+    [],
+  );
+
+  const sendRequestRevision = useCallback(
+    (feedback: { feedback_types: string[]; description: string; target_artifact_version?: number }) => {
+      const ws = wsRef.current;
+      if (ws?.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "request_revision", feedback }));
+      }
+    },
+    [],
+  );
+
+  const sendHumanConfirm = useCallback(
+    (decision: "confirm" | "request-change" | "terminate", payload?: unknown) => {
+      const ws = wsRef.current;
+      if (ws?.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "human_confirm", decision, payload: payload ?? null }));
+      }
+    },
+    [],
+  );
+
   // 兼容旧接口（过渡期内保留，但废弃）
   const sendMessage = useCallback(
     (content: string) => {
@@ -1507,13 +1687,15 @@ Expected: 编译/运行失败 — sendContextNote / sendStartGeneration / sendHe
     sendMessage,
     sendContextNote,
     sendStartGeneration,
+    sendSelectRevisionPath,
+    sendRequestRevision,
+    sendHumanConfirm,
     sendHello,
     sendPing,
     startGeneration,
     rollback,
     confirm,
     sendPermissionResponse,
-    sendReviewDecision,
     abort,
     sendProviderSelect,
     connectionStatus,
@@ -1635,8 +1817,8 @@ Expected: 运行失败 — setSessionState 不处理 timeline_node_details
       timelineNodes: state.timeline_nodes,
       activeNodeId: state.active_node_id,
       artifactVersions: state.artifact_versions,
-      nodeDetails: state.timeline_node_details || prev.nodeDetails,
-      activeRunId: state.active_run_id ?? prev.activeRunId,
+      nodeDetails: state.timeline_node_details ?? {},
+      activeRunId: state.active_run_id,
       // 连接成功时清错误
       connectionStatus: prev.connectionStatus === "connecting" ? "connected" : prev.connectionStatus,
     })),
@@ -1806,10 +1988,10 @@ git commit -am "fix: adjust tests for protocol v2 compatibility"
 | §2.5 SessionState snapshot 扩展 | Task 5 (build_session_state) |
 | §2.6 前端 store 改造 | Task 10 (setSessionState 灌 nodeDetails) |
 
-**2. Placeholder scan:**
-- `generate_id()` / `now_iso()` 可能需要替换为项目已有工具函数
-- `engine.current_stage()` 如果不存在，改用 engine 公开的其他方式
-- `start_author_run()` 调用在 Task 7 中——需要确认 engine 已有此方法
+**2. Implementation constraints:**
+- ID / 时间生成优先复用项目已有 helper；项目内没有统一 helper 时，在当前模块新增私有 `generate_id()` / `now_iso()` 并补单测覆盖序列化稳定性。
+- `WorkspaceEngine::current_stage()` 必须在 Task 7 新增，返回 `self.session.stage.clone()`。
+- Provider run 启动逻辑从 `workspace_ws_handler.rs` 现有 `UserMessage` 分支抽取为 handler helper；`WorkspaceEngine` 不持有 `ActiveRun.command_tx/cancel`。
 
 **3. Type consistency:**
 - `ProviderConfigSnapshot` 在 WsInMessage::StartGeneration 和 WsOutMessage::ProviderLocked 和 TimelineNode.provider_config_snapshot 中一致
@@ -1825,11 +2007,14 @@ git commit -am "fix: adjust tests for protocol v2 compatibility"
 - [ ] `pnpm --filter web test:e2e` 既有用例不破坏
 - [ ] `WsInMessage::ContextNote` 序列化/反序列化正确
 - [ ] `WsInMessage::StartGeneration` 序列化/反序列化正确
+- [ ] `WsInMessage::SelectRevisionPath` / `RequestRevision` / `HumanConfirm` 序列化/反序列化正确
 - [ ] `WsOutMessage::ProtocolError` 阶段校验触发正确
 - [ ] `WsOutMessage::ProviderLocked` 包含 snapshot + locked_at
 - [ ] `NodeDetail` 写入 `timeline_node_details/<node_id>.json` 并可读取
-- [ ] stream / execution / permission / verdict / artifact_ref 发生时立即或按节流策略写入对应 `NodeDetail`
+- [ ] stream chunk 按 200ms 或 4KB 节流写入，node 完成/失败/abort/disconnect 时立即 flush；execution / permission / verdict / artifact_ref 发生时立即写入对应 `NodeDetail`
 - [ ] `SessionState` snapshot 包含 `timeline_node_details` 和 `active_run_id`
+- [ ] `active_run_id` 在 run 结束、abort、socket close 后随 snapshot 清空，前端不得保留旧值
 - [ ] 前端 `sendContextNote` / `sendStartGeneration` / `sendHello` / `sendPing` 发送正确 JSON
+- [ ] 前端 `sendSelectRevisionPath` / `sendRequestRevision` / `sendHumanConfirm` 发送正确 JSON
 - [ ] 前端 store 收到 snapshot 时 `nodeDetails` 被正确填充
 - [ ] 前端 store 收到 `protocol_error` 时状态更新

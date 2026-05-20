@@ -29,6 +29,12 @@
 
 ---
 
+## 修订约束（必须优先遵守）
+
+1. ReviewDecision 三路径必须调用 P1 新增的 `sendSelectRevisionPath(path, extraContext?)`，路径值固定为 `revise` / `revise-with-context` / `skip-to-human`。
+2. HumanConfirm 的确认/终止调用 `sendHumanConfirm("confirm" | "terminate")`；“要求修改”调用 P1 新增的 `sendRequestRevision(feedback)`，不得复用旧审核决策发送函数。
+3. 本阶段新增 UI 必须补齐 P7 所需 test id：`node-detail-panel`、`tab-overview`、`tab-streaming`、`tab-execution`、`tab-permission`、`tab-artifact`、`stage-actions-bar`、`review-decision-panel`、`human-confirm-panel`、`streaming-content`。
+
 ### Task 1: 扩展 useStageUI 补全所有阶段
 
 **Files:**
@@ -394,11 +400,12 @@ export function NodeDetailPanel({ node, detail, artifactVersions }: NodeDetailPa
     : null;
 
   return (
-    <div className="flex h-full flex-col"
-      <div className="flex border-b"
+    <div data-testid="node-detail-panel" className="flex h-full flex-col">
+      <div className="flex border-b">
         {TABS.map((tab) => (
           <button
             key={tab.key}
+            data-testid={`tab-${tab.key}`}
             onClick={() => setActiveTab(tab.key)}
             className={`flex-1 px-2 py-2 text-xs font-medium ${
               activeTab === tab.key
@@ -411,31 +418,31 @@ export function NodeDetailPanel({ node, detail, artifactVersions }: NodeDetailPa
         ))}
       </div>
 
-      <div className="flex-1 overflow-y-auto p-3"
+      <div className="flex-1 overflow-y-auto p-3">
         {activeTab === "overview" && (
-          <div className="space-y-2 text-sm"
-            <div className="flex justify-between"
+          <div className="space-y-2 text-sm">
+            <div className="flex justify-between">
               <span className="text-[var(--aria-ink-muted)]">类型</span>
               <span>{node.node_type}</span>
             </div>
-            <div className="flex justify-between"
+            <div className="flex justify-between">
               <span className="text-[var(--aria-ink-muted)]">状态</span>
               <span>{node.status}</span>
             </div>
             {detail?.provider && (
-              <div className="flex justify-between"
+              <div className="flex justify-between">
                 <span className="text-[var(--aria-ink-muted)]">Provider</span>
                 <span>{detail.provider.name}</span>
               </div>
             )}
             {detail?.artifact_ref && (
-              <div className="flex justify-between"
+              <div className="flex justify-between">
                 <span className="text-[var(--aria-ink-muted)]">Artifact</span>
                 <span>v{detail.artifact_ref.version}</span>
               </div>
             )}
             {detail?.is_revision && (
-              <div className="text-amber-600 text-xs"
+              <div className="text-amber-600 text-xs">
                 🔁 修订版本
               </div>
             )}
@@ -443,18 +450,18 @@ export function NodeDetailPanel({ node, detail, artifactVersions }: NodeDetailPa
         )}
 
         {activeTab === "streaming" && (
-          <pre className="whitespace-pre-wrap text-xs"
+          <pre data-testid="streaming-content" className="whitespace-pre-wrap text-xs">
             {detail?.streaming_content || "无流式输出"}
           </pre>
         )}
 
         {activeTab === "execution" && (
-          <div className="space-y-1"
+          <div className="space-y-1">
             {detail?.execution_events.length === 0 && (
               <div className="text-sm text-[var(--aria-ink-muted)]">无执行事件</div>
             )}
             {detail?.execution_events.map((ev, i) => (
-              <div key={i} className="rounded bg-slate-50 px-2 py-1 text-xs"
+              <div key={i} className="rounded bg-slate-50 px-2 py-1 text-xs">
                 {JSON.stringify(ev)}
               </div>
             ))}
@@ -462,7 +469,7 @@ export function NodeDetailPanel({ node, detail, artifactVersions }: NodeDetailPa
         )}
 
         {activeTab === "permission" && (
-          <div className="space-y-2"
+          <div className="space-y-2">
             {detail?.permission_events.length === 0 && (
               <div className="text-sm text-[var(--aria-ink-muted)]">无权限事件</div>
             )}
@@ -473,10 +480,10 @@ export function NodeDetailPanel({ node, detail, artifactVersions }: NodeDetailPa
                   pe.response ? "bg-green-50" : "bg-amber-50"
                 }`}
               >
-                <div className="font-medium"
+                <div className="font-medium">
                   {pe.request_id}
                 </div>
-                <div className="text-[var(--aria-ink-muted)]"
+                <div className="text-[var(--aria-ink-muted)]">
                   {pe.response ? `已${pe.response.approved ? "批准" : "拒绝"}` : "待应答"}
                 </div>
               </div>
@@ -485,9 +492,9 @@ export function NodeDetailPanel({ node, detail, artifactVersions }: NodeDetailPa
         )}
 
         {activeTab === "artifact" && (
-          <div className="space-y-2"
+          <div className="space-y-2">
             {artifact ? (
-              <pre className="whitespace-pre-wrap text-xs"
+              <pre className="whitespace-pre-wrap text-xs">
                 {artifact.markdown}
               </pre>
             ) : (
@@ -588,7 +595,7 @@ export function StageActionsBar({
   onSelectRevisionPath,
 }: StageActionsBarProps) {
   return (
-    <div className="flex items-center justify-end gap-2 border-t px-4 py-2"
+    <div data-testid="stage-actions-bar" className="flex items-center justify-end gap-2 border-t px-4 py-2">
       {stage === "prepare_context" && onStartGeneration && (
         <button
           onClick={onStartGeneration}
@@ -746,7 +753,7 @@ interface ReviewDecisionStagePanelProps {
   reviewer: string;
   verdict: string;
   summary: string;
-  onSelectPath: (path: string, extraContext?: string) => void;
+  onSelectPath: (path: "revise" | "revise-with-context" | "skip-to-human", extraContext?: string) => void;
 }
 
 const PATHS = [
@@ -773,25 +780,26 @@ export function ReviewDecisionStagePanel({
   summary,
   onSelectPath,
 }: ReviewDecisionStagePanelProps) {
-  const [selectedPath, setSelectedPath] = useState("revise");
+  const [selectedPath, setSelectedPath] =
+    useState<"revise" | "revise-with-context" | "skip-to-human">("revise");
   const [extraContext, setExtraContext] = useState("");
 
   return (
-    <div className="space-y-4 p-4"
-      <div className="rounded bg-slate-50 p-3"
-        <div className="text-sm font-medium"
+    <div data-testid="review-decision-panel" className="space-y-4 p-4">
+      <div className="rounded bg-slate-50 p-3">
+        <div className="text-sm font-medium">
           审核结论：{verdict === "revise" ? "建议返修" : verdict}
         </div>
-        <div className="text-xs text-[var(--aria-ink-muted)]"
+        <div className="text-xs text-[var(--aria-ink-muted)]">
           Reviewer: {reviewer} · Verdict: {verdict}
         </div>
-        <div className="mt-1 text-sm"
+        <div className="mt-1 text-sm">
           {summary}
         </div>
       </div>
 
-      <div className="space-y-2"
-        <div className="text-sm font-medium"
+      <div className="space-y-2">
+        <div className="text-sm font-medium">
           请选择处理路径：
         </div>
         {PATHS.map((path) => (
@@ -806,13 +814,13 @@ export function ReviewDecisionStagePanel({
               name="revision-path"
               value={path.key}
               checked={selectedPath === path.key}
-              onChange={() => setSelectedPath(path.key)}
+              onChange={() => setSelectedPath(path.key as "revise" | "revise-with-context" | "skip-to-human")}
             />
-            <div className="text-sm"
-              <div className="font-medium"
+            <div className="text-sm">
+              <div className="font-medium">
                 {path.label}
               </div>
-              <div className="text-xs text-[var(--aria-ink-muted)]"
+              <div className="text-xs text-[var(--aria-ink-muted)]">
                 {path.description}
               </div>
             </div>
@@ -830,7 +838,7 @@ export function ReviewDecisionStagePanel({
         />
       )}
 
-      <div className="flex gap-2"
+      <div className="flex gap-2">
         <button
           onClick={() =>
             onSelectPath(
@@ -963,20 +971,20 @@ export function HumanConfirmStagePanel({
   const [feedbackDesc, setFeedbackDesc] = useState("");
 
   return (
-    <div className="space-y-4 p-4"
-      <div className="text-sm font-medium"
+    <div data-testid="human-confirm-panel" className="space-y-4 p-4">
+      <div className="text-sm font-medium">
         待人工确认
       </div>
 
       {/* 审核摘要 */}
-      <div className="rounded bg-slate-50 p-3"
-        <div className="text-xs text-[var(--aria-ink-muted)]"
+      <div className="rounded bg-slate-50 p-3">
+        <div className="text-xs text-[var(--aria-ink-muted)]">
           📊 审核摘要
         </div>
-        <div className="mt-1 text-sm"
+        <div className="mt-1 text-sm">
           Verdict: {reviewerSummary.verdict}
         </div>
-        <ul className="mt-1 list-inside list-disc text-xs"
+        <ul className="mt-1 list-inside list-disc text-xs">
           {reviewerSummary.points.map((p, i) => (
             <li key={i}>{p}</li>
           ))}
@@ -985,29 +993,29 @@ export function HumanConfirmStagePanel({
 
       {/* 行级 diff */}
       {prevVersion && (
-        <div className="rounded bg-slate-50 p-3"
-          <div className="text-xs text-[var(--aria-ink-muted)]"
+        <div className="rounded bg-slate-50 p-3">
+          <div className="text-xs text-[var(--aria-ink-muted)]">
             📄 与上一版本对比
           </div>
-          <div className="mt-1 text-sm font-medium"
+          <div className="mt-1 text-sm font-medium">
             [v{prevVersion.version} → v{artifactVersion.version}] {lineDiff(prevVersion.markdown, artifactVersion.markdown)}
           </div>
         </div>
       )}
 
       {/* Artifact 预览 */}
-      <div className="rounded border p-3"
-        <div className="text-xs text-[var(--aria-ink-muted)] mb-1"
+      <div className="rounded border p-3">
+        <div className="text-xs text-[var(--aria-ink-muted)] mb-1">
           📝 Artifact 预览（v{artifactVersion.version}）
         </div>
-        <pre className="max-h-40 overflow-y-auto whitespace-pre-wrap text-xs"
+        <pre className="max-h-40 overflow-y-auto whitespace-pre-wrap text-xs">
           {artifactVersion.markdown}
         </pre>
       </div>
 
       {/* 决策 */}
       {!showFeedback && (
-        <div className="flex gap-2"
+        <div className="flex gap-2">
           <button
             onClick={onConfirm}
             className="rounded bg-green-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-green-700"
@@ -1031,13 +1039,13 @@ export function HumanConfirmStagePanel({
 
       {/* 结构化反馈 */}
       {showFeedback && (
-        <div className="space-y-3 rounded border p-3"
-          <div className="text-sm font-medium"
+        <div className="space-y-3 rounded border p-3">
+          <div className="text-sm font-medium">
             反馈类型（可多选）：
           </div>
-          <div className="flex flex-wrap gap-2"
+          <div className="flex flex-wrap gap-2">
             {FEEDBACK_TYPES.map((type) => (
-              <label key={type} className="flex items-center gap-1 text-sm"
+              <label key={type} className="flex items-center gap-1 text-sm">
                 <input
                   type="checkbox"
                   checked={feedbackTypes.includes(type)}
@@ -1060,7 +1068,7 @@ export function HumanConfirmStagePanel({
             rows={3}
             className="w-full rounded border px-2 py-1 text-sm"
           />
-          <div className="flex gap-2"
+          <div className="flex gap-2">
             <button
               onClick={() => {
                 onRequestChange({ types: feedbackTypes, description: feedbackDesc });
@@ -1116,12 +1124,21 @@ import { NodeDetailPanel } from "../components/workspace/NodeDetailPanel";
 import { StageActionsBar } from "../components/workspace/StageActionsBar";
 import { ReviewDecisionStagePanel } from "../components/workspace/stages/ReviewDecisionStagePanel";
 import { HumanConfirmStagePanel } from "../components/workspace/stages/HumanConfirmStagePanel";
+import { selectPrepareContextNotes } from "../state/workspace-ws-store";
 
 // ...
 function WorkspacePage({ sessionId }: WorkspacePageProps) {
   const store = useWorkspaceStore();
   const stageConfig = useStageUI(store.stage);
-  const { sendContextNote, sendStartGeneration, abort, sendReviewDecision, sendHumanConfirm } = useWorkspaceWs(sessionId);
+  const contextNotes = selectPrepareContextNotes(store);
+  const {
+    sendContextNote,
+    sendStartGeneration,
+    abort,
+    sendSelectRevisionPath,
+    sendRequestRevision,
+    sendHumanConfirm,
+  } = useWorkspaceWs(sessionId);
 
   // 选中的 Timeline 节点
   const selectedNode = store.timelineNodes.find((n) => n.node_id === store.activeNodeId) ?? store.timelineNodes[store.timelineNodes.length - 1];
@@ -1133,7 +1150,7 @@ function WorkspacePage({ sessionId }: WorkspacePageProps) {
       case "PrepareContextPanel":
         return (
           <PrepareContextPanel
-            onSendContextNote={(c) => { sendContextNote(c); store.addContextNote(c); }}
+            onSendContextNote={(c) => sendContextNote(c)}
             onStartGeneration={() => {
               const snapshot = {
                 author: store.providers?.author ?? "claude_code",
@@ -1141,9 +1158,8 @@ function WorkspacePage({ sessionId }: WorkspacePageProps) {
                 review_rounds: store.reviewRounds ?? 1,
               };
               sendStartGeneration(snapshot, store.reviewerEnabled ?? true);
-              store.clearContextNotes();
             }}
-            contextNotes={store.contextNotes}
+            contextNotes={contextNotes}
           />
         );
       case "RunningPanel":
@@ -1156,7 +1172,7 @@ function WorkspacePage({ sessionId }: WorkspacePageProps) {
             reviewer={store.providers?.reviewer ?? "codex"}
             verdict={store.pendingReviewDecision?.verdict ?? "revise"}
             summary={store.pendingReviewDecision?.summary ?? ""}
-            onSelectPath={(path, ctx) => sendReviewDecision(path, ctx)}
+            onSelectPath={(path, ctx) => sendSelectRevisionPath(path, ctx)}
           />
         );
       case "RevisionPanel":
@@ -1168,7 +1184,7 @@ function WorkspacePage({ sessionId }: WorkspacePageProps) {
             reviewerSummary={store.pendingReviewerSummary ?? { verdict: "pass", points: [] }}
             prevVersion={store.artifactVersions[store.artifactVersions.length - 2]}
             onConfirm={() => sendHumanConfirm("confirm")}
-            onRequestChange={(fb) => sendHumanConfirm("request-change", fb)}
+            onRequestChange={(fb) => sendRequestRevision(fb)}
             onTerminate={() => sendHumanConfirm("terminate")}
           />
         );
@@ -1180,7 +1196,7 @@ function WorkspacePage({ sessionId }: WorkspacePageProps) {
   })();
 
   return (
-    <div className="flex h-full flex-col"
+    <div className="flex h-full flex-col">
       <WorkspaceHeader
         entityType={store.workspaceType ?? "Workspace"}
         entityId={store.sessionId ?? ""}
@@ -1192,20 +1208,20 @@ function WorkspacePage({ sessionId }: WorkspacePageProps) {
         lockedAt={store.providerSnapshot?.locked_at}
       />
 
-      <div className="flex flex-1 overflow-hidden"
+      <div className="flex flex-1 overflow-hidden">
         {/* 左侧 Timeline */}
-        <div className="w-1/2 overflow-y-auto border-r"
+        <div className="w-1/2 overflow-y-auto border-r">
           {/* ... 现有 Timeline 渲染 ... */}
         </div>
 
         {/* 右侧：阶段面板 + 节点详情 */}
-        <div className="flex w-1/2 flex-col"
-          <div className="flex-1 overflow-y-auto"
+        <div className="flex w-1/2 flex-col">
+          <div className="flex-1 overflow-y-auto">
             {stagePanel}
           </div>
 
           {/* 节点详情面板（固定高度） */}
-          <div className="h-1/2 border-t"
+          <div className="h-1/2 border-t">
             {selectedNode && (
               <NodeDetailPanel
                 node={selectedNode}
@@ -1286,12 +1302,12 @@ git commit -am "fix: update tests for stage UI refactor"
 | §6.4 底部操作区矩阵 | Task 4 (StageActionsBar) |
 | §6.5 代码触达点 | Task 7 (WorkspacePage 重构) |
 
-**2. Placeholder scan:**
-- 无 TBD/TODO
-- `sendReviewDecision` / `sendHumanConfirm` 签名需与 useWorkspaceWs 一致
+**2. Implementation constraints:**
+- 没有待定占位项
+- `sendSelectRevisionPath` / `sendRequestRevision` / `sendHumanConfirm` 签名需与 P1 `useWorkspaceWs` 一致
 
 **3. Type consistency:**
-- `ReviewDecisionStagePanel` 的 `onSelectPath` 签名与 `sendReviewDecision` 匹配
+- `ReviewDecisionStagePanel` 的 `onSelectPath` 签名与 `sendSelectRevisionPath` 匹配
 - `HumanConfirmStagePanel` 的 `onRequestChange` 签名与 store 中的反馈类型一致
 
 ---

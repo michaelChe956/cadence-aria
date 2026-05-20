@@ -63,12 +63,14 @@ P7 E2E 测试升级（依赖 P1-P6 全部完成，作为收尾验收）
 
 后端 Rust 类型：
 - `WsInMessage` 新增：`ContextNote { content }`、`StartGeneration { provider_config, reviewer_enabled }`、`Hello { session_id, last_seen_node_id }`、`Ping`
+- `WsInMessage` 同步补齐方案动作：`SelectRevisionPath { path, extra_context }`、`RequestRevision { feedback }`、`HumanConfirm { decision, payload }`；旧 `ReviewDecisionResponse` / `Confirm` 仅作为兼容入口，统一映射到新动作
 - `WsOutMessage` 新增：`ProtocolError { code, message, context }`、`ProviderLocked { snapshot, locked_at }`、`Pong`
 - `TimelineNodeType` 新增：`ContextNote`、`StartGeneration`、`AuthorRun`（替代 `Generation`）、`ReviewerRun`（替代 `Review`）、`AbortedByDisconnect`、`ProtocolError`
-- `NodeDetail` 结构 + `SessionState.timeline_node_details: HashMap<String, NodeDetail>` + `SessionState.active_run_id: Option<String>`
+- `WorkspaceEngine.active_run_id: Option<String>` 仅镜像当前运行 id；`ActiveRun` 的 `command_tx/cancel` 仍归 `workspace_ws_handler` 管理
+- `NodeDetail` 结构 + `SessionState.timeline_node_details: HashMap<String, NodeDetail>` + `SessionState.active_run_id: Option<String>`；snapshot 应用必须替换旧值，不能用旧 `activeRunId` 兜底
 
 前端 TS：
-- `useWorkspaceWs.sendContextNote(content)` / `sendStartGeneration(snapshot, reviewerEnabled)` / `sendHello(sessionId, lastSeenNodeId)` / `sendPing()`
+- `useWorkspaceWs.sendContextNote(content)` / `sendStartGeneration(snapshot, reviewerEnabled)` / `sendSelectRevisionPath(path, extraContext)` / `sendRequestRevision(feedback)` / `sendHumanConfirm(decision, payload)` / `sendHello(sessionId, lastSeenNodeId)` / `sendPing()`
 - `workspace-ws-store` snapshot 应用时灌入 `nodeDetails[node_id] = snapshot.timeline_node_details[node_id]`
 - 新增 selector `selectNodeDetail(nodeId)`
 
@@ -80,9 +82,11 @@ P7 E2E 测试升级（依赖 P1-P6 全部完成，作为收尾验收）
 ### P4 消费 P1 + P2
 - 使用 `selectNodeDetail` 渲染 5 tab
 - 复用 P2 `useStageUI` hook
+- `ReviewDecisionStagePanel` 发送 `select_revision_path`，path 使用方案值 `revise | revise-with-context | skip-to-human`；P1 后端负责映射到当前 engine 内部值
+- `HumanConfirmStagePanel` 发送 `human_confirm`，不得继续依赖旧 `confirm` 单动作
 
 ### P5 消费 P1
-- 后端 socket close handler 调 `engine.append_aborted_by_disconnect_node`（P1 已暴露）
+- 后端 socket close handler 从 handler 局部 `current_run` 取 run id，调用 `engine.append_aborted_by_disconnect` 并把 stage/status 切回 PrepareContext/Open；不得引用 engine 上不存在的 active-run take API
 - 前端处理 `ws.send({ type: "hello", ... })`（P1 已定义）
 
 ### P6 弱依赖 P1
@@ -92,6 +96,8 @@ P7 E2E 测试升级（依赖 P1-P6 全部完成，作为收尾验收）
 
 ### P7 消费 P1-P6
 - 利用 P1 新协议、P2/P4 新 UI、P5 自动重连 + 断开拦截、P6 Permission 修复路径写 7 闭环 E2E 用例
+- E2E 必须通过 API 动态 seed project/repository/issue/workspace，不得硬编码固定 issue/story id
+- E2E 需要的 `data-testid` 与 test controls 必须在对应 P2-P6 产物或 P7 基础设施中明确加入
 
 ## Plan 内格式约定
 
@@ -118,7 +124,7 @@ pnpm --filter web test:e2e
 ## 风险与重要提示
 
 - **P1 是地基**：任何对协议、Timeline 类型、SessionState、NodeDetail 的改动必须在 P1 内完成。后续 plan **不得**新增 WsInMessage / WsOutMessage 变体，否则会破坏独立性
-- **P3 完全独立**：lifecycle 看板与 Workspace 共享 store，但本轮 P3 只动 `lifecycle-workbench-store.ts` 中新增字段（不动 workspace-ws-store）
+- **P3 独立但需要 API 补齐**：P3 不依赖 P1，但为了满足 Drawer 版本历史，允许同步扩展 lifecycle API DTO（StorySpec/DesignSpec 附带 `artifact_versions`）以及 `web/src/api/types.ts`；P3 不改 workspace-ws-store
 - **路由决策**：Workspace 路由沿用当前实现 `/workbench/workspace/$sessionId`；计划中的 `/workspace/<session_id>` 只作为简称，不作为本轮路由迁移要求
 - **Drawer 流程决策**：Drawer 内"生成下一阶段"只创建下一阶段实体和 PrepareContext session，并把 Drawer 切到新实体；不得自动打开 Workspace，也不得自动启动 Provider
 - **过渡期兼容**：P1 内 `user_message` 保留软兼容（按 context_note 语义处理 + warning log），帮助 P2/P4 在切换期不破坏既有 E2E
