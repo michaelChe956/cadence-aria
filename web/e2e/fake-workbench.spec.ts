@@ -8,7 +8,7 @@ test("fake provider workspace streams a story spec and confirms lifecycle state"
   await page.goto(`/workbench/workspace/${seeded.sessionId}`);
 
   await expect(page.getByText("Story Spec").first()).toBeVisible();
-  await expect(page.getByText("Author: fake | Reviewer: codex")).toBeVisible();
+  await expect(page.getByText("Author: fake | Reviewer: fake")).toBeVisible();
 
   const prompt = page.getByPlaceholder("输入消息...");
   await expect(prompt).toBeEnabled();
@@ -16,6 +16,7 @@ test("fake provider workspace streams a story spec and confirms lifecycle state"
   await prompt.press("Enter");
 
   await expect(page.getByText("请生成 Story Spec 和验收标准").first()).toBeVisible();
+  await page.getByRole("button", { name: "开始生成" }).click();
   await expect(page.getByRole("button", { name: "确认通过" })).toBeVisible();
   await page.getByRole("button", { name: "确认通过" }).click();
 
@@ -75,7 +76,7 @@ async function seedStoryWorkspace(page: Page, projectName: string) {
       data: {
         title: storyTitle,
         author_provider: "fake",
-        reviewer_provider: "codex",
+        reviewer_provider: "fake",
         review_rounds: 1,
         superpowers_enabled: false,
         openspec_enabled: true,

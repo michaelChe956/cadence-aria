@@ -99,6 +99,7 @@ describe("WorkspacePage", () => {
     const api = mockWorkspaceWs();
     useWorkspaceStore.setState({
       stage: "prepare_context",
+      providers: { author: "fake", reviewer: "codex" },
       messages: [
         {
           id: "msg_001",
@@ -114,8 +115,26 @@ describe("WorkspacePage", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "开始生成" }));
 
-    expect(api.startGeneration).toHaveBeenCalledTimes(1);
+    expect(api.sendStartGeneration).toHaveBeenCalledWith(
+      { author: "fake", reviewer: "codex", review_rounds: 1 },
+      true,
+    );
+    expect(api.startGeneration).not.toHaveBeenCalled();
     expect(api.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("sends human confirmation through protocol v2", async () => {
+    const api = mockWorkspaceWs();
+    useWorkspaceStore.setState({
+      stage: "human_confirm",
+    });
+
+    render(<WorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "确认通过" }));
+
+    expect(api.sendHumanConfirm).toHaveBeenCalledWith("confirm");
+    expect(api.confirm).not.toHaveBeenCalled();
   });
 
   it("marks fast intermediate stages as visited in the flow rail", () => {
@@ -217,17 +236,18 @@ describe("WorkspacePage", () => {
 
     expect(screen.getByLabelText("交叉审查 当前阶段")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "直接返修" }));
-    expect(api.sendReviewDecision).toHaveBeenCalledWith("continue", undefined);
+    expect(api.sendSelectRevisionPath).toHaveBeenCalledWith("revise", undefined);
 
     await userEvent.click(screen.getByRole("button", { name: "补充信息后返修" }));
     await userEvent.type(screen.getByLabelText("返修补充信息"), "补充登录错误码");
     await userEvent.click(screen.getByRole("button", { name: "提交返修" }));
-    expect(api.sendReviewDecision).toHaveBeenCalledWith(
-      "continue_with_context",
+    expect(api.sendSelectRevisionPath).toHaveBeenCalledWith(
+      "revise-with-context",
       "补充登录错误码",
     );
 
     await userEvent.click(screen.getByRole("button", { name: "人工介入" }));
-    expect(api.sendReviewDecision).toHaveBeenCalledWith("human_intervene", undefined);
+    expect(api.sendSelectRevisionPath).toHaveBeenCalledWith("skip-to-human", undefined);
+    expect(api.sendReviewDecision).not.toHaveBeenCalled();
   });
 });

@@ -13,6 +13,7 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import type { ProviderConfigSnapshot, WorkspaceProviderName } from "../api/types";
 import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
 import { useWorkspaceStore, type ExecutionEvent } from "../state/workspace-ws-store";
 
@@ -75,12 +76,12 @@ export function WorkspacePage({
 }) {
   const {
     sendMessage,
-    startGeneration,
+    sendStartGeneration,
+    sendSelectRevisionPath,
+    sendHumanConfirm,
     rollback,
-	    confirm,
 	    abort,
 	    selectProvider,
-	    sendReviewDecision,
 	    respondPermission,
 	    connectionStatus,
 	  } = useWorkspaceWs(sessionId);
@@ -123,6 +124,11 @@ export function WorkspacePage({
     if (!content) return;
     sendMessage(content);
     setDraft("");
+  }
+
+  function handleStartGeneration() {
+    const providerConfig = providerConfigFor(providers);
+    sendStartGeneration(providerConfig, Boolean(providerConfig.reviewer));
   }
 
   const isConnected = connectionStatus === "connected";
@@ -298,7 +304,7 @@ export function WorkspacePage({
 	              {canStartGeneration ? (
 	                <button
                   type="button"
-                  onClick={startGeneration}
+                  onClick={handleStartGeneration}
                   className="inline-flex h-8 items-center gap-1 rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 text-xs font-semibold text-white disabled:opacity-50"
                 >
                   <Send className="h-3.5 w-3.5" />
@@ -308,7 +314,7 @@ export function WorkspacePage({
               {stage === "human_confirm" ? (
                 <button
                   type="button"
-                  onClick={confirm}
+                  onClick={() => sendHumanConfirm("confirm")}
                   disabled={!isConnected}
                   className="inline-flex h-8 items-center gap-1 rounded-md border border-green-500 bg-green-50 px-3 text-xs font-semibold text-green-700 hover:bg-green-100 disabled:opacity-50"
                 >
@@ -320,7 +326,7 @@ export function WorkspacePage({
 	                <>
 	                  <button
 	                    type="button"
-	                    onClick={() => sendReviewDecision("continue", undefined)}
+	                    onClick={() => sendSelectRevisionPath("revise", undefined)}
 	                    disabled={!isConnected}
 	                    className="inline-flex h-8 items-center gap-1 rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 text-xs font-semibold text-white disabled:opacity-50"
 	                  >
@@ -338,7 +344,7 @@ export function WorkspacePage({
 	                  </button>
 	                  <button
 	                    type="button"
-	                    onClick={() => sendReviewDecision("human_intervene", undefined)}
+	                    onClick={() => sendSelectRevisionPath("skip-to-human", undefined)}
 	                    disabled={!isConnected}
 	                    className="inline-flex h-8 items-center gap-1 rounded-md border border-amber-300 bg-amber-50 px-3 text-xs font-semibold text-amber-700 hover:bg-amber-100 disabled:opacity-50"
 	                  >
@@ -375,7 +381,7 @@ export function WorkspacePage({
 	                <div className="mt-2 flex justify-end">
 	                  <button
 	                    type="button"
-	                    onClick={() => sendReviewDecision("continue_with_context", reviewContextDraft)}
+	                    onClick={() => sendSelectRevisionPath("revise-with-context", reviewContextDraft)}
 	                    disabled={!isConnected || !reviewContextDraft.trim()}
 	                    className="inline-flex h-8 items-center gap-1 rounded-md bg-[var(--aria-primary)] px-3 text-xs font-semibold text-white disabled:opacity-50"
 	                  >
@@ -533,6 +539,28 @@ export function WorkspacePage({
 function flowStageFor(stage: string) {
   if (stage === "review_decision" || stage === "revision") return "cross_review";
   return stage;
+}
+
+function providerConfigFor(
+  providers: { author: string; reviewer?: string | null } | null,
+): ProviderConfigSnapshot {
+  const reviewer =
+    providers?.reviewer === null ? null : providerNameFor(providers?.reviewer, "codex");
+  return {
+    author: providerNameFor(providers?.author, "claude_code"),
+    reviewer,
+    review_rounds: reviewer ? 1 : 0,
+  };
+}
+
+function providerNameFor(
+  value: string | null | undefined,
+  fallback: WorkspaceProviderName,
+): WorkspaceProviderName {
+  if (value === "claude_code" || value === "codex" || value === "fake") {
+    return value;
+  }
+  return fallback;
 }
 
 function TimelineDetailPanel({

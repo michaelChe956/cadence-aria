@@ -24,7 +24,7 @@ test("lifecycle and workspace surfaces stay compact across desktop and mobile", 
 
   await page.getByRole("button", { name: `打开 Workspace ${seeded.storyTitle}` }).click();
   await expect(page.getByText("Story Spec").first()).toBeVisible();
-  await expect(page.getByText("Author: fake | Reviewer: codex")).toBeVisible();
+  await expect(page.getByText("Author: fake | Reviewer: fake")).toBeVisible();
   await expect(page.getByText("AI Coding Workbench")).toHaveCount(0);
   await expectNoHorizontalOverflow(page);
 
@@ -32,6 +32,7 @@ test("lifecycle and workspace surfaces stay compact across desktop and mobile", 
   await expect(prompt).toBeEnabled();
   await prompt.fill("视觉检查 fake provider prompt");
   await prompt.press("Enter");
+  await page.getByRole("button", { name: "开始生成" }).click();
   await expect(page.getByRole("button", { name: "确认通过" })).toBeVisible();
   await expectNoHorizontalOverflow(page);
 
@@ -94,7 +95,7 @@ async function seedStoryWorkspace(page: Page, projectName: string) {
       data: {
         title: storyTitle,
         author_provider: "fake",
-        reviewer_provider: "codex",
+        reviewer_provider: "fake",
         review_rounds: 1,
         superpowers_enabled: false,
         openspec_enabled: true,
