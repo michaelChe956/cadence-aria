@@ -459,6 +459,31 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                     run.cancel.cancel();
                 }
             }
+            WsInMessage::Ping => {
+                if let Ok(json) = serde_json::to_string(&WsOutMessage::Pong) {
+                    let _ = outbound_tx.send(json).await;
+                }
+            }
+            WsInMessage::Hello { .. } => {
+                let state_msg = engine.lock().await.build_session_state();
+                if let Ok(json) = serde_json::to_string(&state_msg) {
+                    let _ = outbound_tx.send(json).await;
+                }
+            }
+            WsInMessage::ContextNote { .. }
+            | WsInMessage::StartGeneration { .. }
+            | WsInMessage::SelectRevisionPath { .. }
+            | WsInMessage::RequestRevision { .. }
+            | WsInMessage::HumanConfirm { .. } => {
+                let err = WsOutMessage::ProtocolError {
+                    code: "MESSAGE_NOT_ROUTED".to_string(),
+                    message: "message type is defined but not routed yet".to_string(),
+                    context: None,
+                };
+                if let Ok(json) = serde_json::to_string(&err) {
+                    let _ = outbound_tx.send(json).await;
+                }
+            }
         }
     }
 

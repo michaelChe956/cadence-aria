@@ -28,7 +28,7 @@ pub enum CodingWorkspaceStage {
     Completed,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WsOutMessage {
     StreamChunk {
@@ -101,13 +101,34 @@ pub enum WsOutMessage {
     Error {
         message: String,
     },
+    ProtocolError {
+        code: String,
+        message: String,
+        context: Option<serde_json::Value>,
+    },
+    ProviderLocked {
+        snapshot: ProviderConfigSnapshot,
+        locked_at: String,
+    },
+    Pong,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WsInMessage {
     UserMessage {
         content: String,
+    },
+    ContextNote {
+        content: String,
+    },
+    StartGeneration {
+        provider_config: ProviderConfigSnapshot,
+        reviewer_enabled: bool,
+    },
+    Hello {
+        session_id: String,
+        last_seen_node_id: Option<String>,
     },
     Rollback {
         checkpoint_id: String,
@@ -126,7 +147,42 @@ pub enum WsInMessage {
         decision: String,
         extra_context: Option<String>,
     },
+    SelectRevisionPath {
+        path: RevisionPath,
+        extra_context: Option<String>,
+    },
+    RequestRevision {
+        feedback: StructuredFeedback,
+    },
+    HumanConfirm {
+        decision: HumanConfirmDecision,
+        payload: Option<serde_json::Value>,
+    },
     Abort,
+    Ping,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RevisionPath {
+    Revise,
+    ReviseWithContext,
+    SkipToHuman,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HumanConfirmDecision {
+    Confirm,
+    RequestChange,
+    Terminate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StructuredFeedback {
+    pub feedback_types: Vec<String>,
+    pub description: String,
+    pub target_artifact_version: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -184,12 +240,12 @@ pub struct WsExecutionEvent {
     pub exit_code: Option<i32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderDefaults {
     pub reviewer: ProviderName,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WsMessageDto {
     pub id: String,
     pub role: String,
@@ -198,7 +254,7 @@ pub struct WsMessageDto {
     pub created_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WsCheckpointDto {
     pub id: String,
     pub message_index: u32,
@@ -206,7 +262,7 @@ pub struct WsCheckpointDto {
     pub created_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WsProviderConfig {
     pub author: ProviderName,
     pub reviewer: Option<ProviderName>,
@@ -216,11 +272,17 @@ pub struct WsProviderConfig {
 #[serde(rename_all = "snake_case")]
 pub enum TimelineNodeType {
     PrepareContext,
+    ContextNote,
+    StartGeneration,
+    AuthorRun,
+    ReviewerRun,
     Generation,
     Review,
     ReviewDecision,
     Revision,
     HumanConfirm,
+    AbortedByDisconnect,
+    ProtocolError,
     Completed,
 }
 
@@ -490,5 +552,90 @@ mod tests {
         assert_eq!(state["active_node_id"], "node_review_decision_001");
         assert_eq!(state["timeline_nodes"].as_array().unwrap().len(), 0);
         assert_eq!(state["artifact_versions"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn context_note_roundtrip() {
+        let msg = WsInMessage::ContextNote {
+            content: "需要支持空查询参数兜底".to_string(),
+        };
+
+        let json = serde_json::to_value(&msg).unwrap();
+
+        assert_eq!(json["type"], "context_note");
+        assert_eq!(json["content"], "需要支持空查询参数兜底");
+        let back: WsInMessage = serde_json::from_value(json).unwrap();
+        assert_eq!(back, msg);
+    }
+
+    #[test]
+    fn start_generation_roundtrip() {
+        let snapshot = ProviderConfigSnapshot {
+            author: ProviderName::ClaudeCode,
+            reviewer: Some(ProviderName::Codex),
+            review_rounds: 1,
+        };
+        let msg = WsInMessage::StartGeneration {
+            provider_config: snapshot,
+            reviewer_enabled: true,
+        };
+
+        let json = serde_json::to_value(&msg).unwrap();
+
+        assert_eq!(json["type"], "start_generation");
+        assert_eq!(json["reviewer_enabled"], true);
+        let back: WsInMessage = serde_json::from_value(json).unwrap();
+        assert_eq!(back, msg);
+    }
+
+    #[test]
+    fn protocol_error_outbound_roundtrip() {
+        let msg = WsOutMessage::ProtocolError {
+            code: "INVALID_MESSAGE_FOR_STAGE".to_string(),
+            message: "context_note not allowed in Running".to_string(),
+            context: Some(serde_json::json!({"stage": "Running"})),
+        };
+
+        let json = serde_json::to_value(&msg).unwrap();
+
+        assert_eq!(json["type"], "protocol_error");
+        let back: WsOutMessage = serde_json::from_value(json).unwrap();
+        assert_eq!(back, msg);
+    }
+
+    #[test]
+    fn provider_locked_roundtrip() {
+        let msg = WsOutMessage::ProviderLocked {
+            snapshot: ProviderConfigSnapshot {
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::Codex),
+                review_rounds: 1,
+            },
+            locked_at: "2026-05-20T14:35:00Z".to_string(),
+        };
+
+        let json = serde_json::to_value(&msg).unwrap();
+
+        assert_eq!(json["type"], "provider_locked");
+        let back: WsOutMessage = serde_json::from_value(json).unwrap();
+        assert_eq!(back, msg);
+    }
+
+    #[test]
+    fn hello_ping_roundtrip() {
+        let hello = WsInMessage::Hello {
+            session_id: "sess-1".to_string(),
+            last_seen_node_id: Some("node-1".to_string()),
+        };
+
+        let json = serde_json::to_value(&hello).unwrap();
+
+        assert_eq!(json["type"], "hello");
+        let back: WsInMessage = serde_json::from_value(json).unwrap();
+        assert_eq!(back, hello);
+
+        let ping = WsInMessage::Ping;
+        let json = serde_json::to_value(&ping).unwrap();
+        assert_eq!(json["type"], "ping");
     }
 }
