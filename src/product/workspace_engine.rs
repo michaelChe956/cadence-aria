@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -11,10 +12,12 @@ use crate::cross_cutting::streaming_provider::{
     RiskLevel, StreamingProviderAdapter, StreamingProviderInput,
 };
 use crate::product::checkpoint_store::CheckpointStore;
+use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::{AppendSpecVersionInput, LifecycleStore};
 use crate::product::models::{
-    LifecycleConfirmationStatus, ProviderName, WorkItemPlanStatus, WorkspaceMessageRecord,
-    WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType,
+    AgentRole, ArtifactRef, LifecycleConfirmationStatus, NodeDetail, PermissionEvent, ProviderName,
+    ProviderSnapshot, WorkItemPlanStatus, WorkspaceMessageRecord, WorkspaceSessionRecord,
+    WorkspaceSessionStatus, WorkspaceType,
 };
 use crate::protocol::contracts::{AdapterRole, ProviderType};
 use crate::web::workspace_ws_types::{
@@ -209,6 +212,21 @@ pub struct WorkspaceEngine {
     latest_review_verdict: Option<ReviewVerdict>,
     pending_revision_context: Option<String>,
     active_run_id: Option<String>,
+    stream_buffers: HashMap<String, PendingStreamBuffer>,
+}
+
+struct PendingStreamBuffer {
+    content: String,
+    last_flush_at: Instant,
+}
+
+impl Default for PendingStreamBuffer {
+    fn default() -> Self {
+        Self {
+            content: String::new(),
+            last_flush_at: Instant::now(),
+        }
+    }
 }
 
 struct TimelineNodeDraft {
@@ -240,6 +258,7 @@ impl WorkspaceEngine {
             latest_review_verdict: None,
             pending_revision_context: None,
             active_run_id: None,
+            stream_buffers: HashMap::new(),
         }
     }
 
@@ -285,6 +304,7 @@ impl WorkspaceEngine {
             latest_review_verdict,
             pending_revision_context: None,
             active_run_id: None,
+            stream_buffers: HashMap::new(),
         }
     }
 
@@ -409,6 +429,104 @@ impl WorkspaceEngine {
             .await)
     }
 
+    pub async fn buffer_stream_chunk(
+        &mut self,
+        node_id: &str,
+        content: String,
+    ) -> Result<(), String> {
+        let should_flush = {
+            let buffer = self.stream_buffers.entry(node_id.to_string()).or_default();
+            buffer.content.push_str(&content);
+            buffer.content.len() >= 4096
+                || buffer.last_flush_at.elapsed() >= Duration::from_millis(200)
+        };
+
+        if should_flush {
+            self.flush_stream_buffer(node_id).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn flush_stream_buffer(&mut self, node_id: &str) -> Result<(), String> {
+        let Some(buffer) = self.stream_buffers.remove(node_id) else {
+            return Ok(());
+        };
+        if buffer.content.is_empty() {
+            return Ok(());
+        }
+
+        self.update_node_detail(node_id, |detail| {
+            detail.streaming_content.push_str(&buffer.content);
+        })
+        .await
+    }
+
+    pub async fn persist_permission_request(
+        &mut self,
+        node_id: &str,
+        request_id: String,
+        request: serde_json::Value,
+    ) -> Result<(), String> {
+        self.update_node_detail(node_id, |detail| {
+            if let Some(event) = detail
+                .permission_events
+                .iter_mut()
+                .find(|event| event.request_id == request_id)
+            {
+                event.request = request;
+                return;
+            }
+
+            detail.permission_events.push(PermissionEvent {
+                request_id,
+                request,
+                response: None,
+                ts: chrono::Utc::now().to_rfc3339(),
+            });
+        })
+        .await
+    }
+
+    pub async fn persist_permission_response(
+        &mut self,
+        node_id: &str,
+        request_id: String,
+        response: serde_json::Value,
+    ) -> Result<(), String> {
+        self.update_node_detail(node_id, |detail| {
+            if let Some(event) = detail
+                .permission_events
+                .iter_mut()
+                .find(|event| event.request_id == request_id)
+            {
+                event.response = Some(response);
+            }
+        })
+        .await
+    }
+
+    pub async fn persist_review_verdict(
+        &mut self,
+        node_id: &str,
+        verdict: serde_json::Value,
+    ) -> Result<(), String> {
+        self.update_node_detail(node_id, |detail| {
+            detail.verdict = Some(verdict);
+        })
+        .await
+    }
+
+    pub async fn persist_artifact_ref(
+        &mut self,
+        node_id: &str,
+        artifact_ref: ArtifactRef,
+    ) -> Result<(), String> {
+        self.update_node_detail(node_id, |detail| {
+            detail.artifact_ref = Some(artifact_ref);
+        })
+        .await
+    }
+
     pub async fn handle_user_message(
         &mut self,
         content: String,
@@ -511,6 +629,9 @@ impl WorkspaceEngine {
         while events_open {
             tokio::select! {
                 _ = cancel.cancelled() => {
+                    if let Some(node_id) = node_id.as_deref() {
+                        let _ = self.flush_stream_buffer(node_id).await;
+                    }
                     self.finish_failed_run().await;
                     return;
                 }
@@ -519,11 +640,34 @@ impl WorkspaceEngine {
                         Some(ProviderCommand::Abort) => {
                             let _ = session.commands.send(ProviderCommand::Abort).await;
                             cancel.cancel();
+                            if let Some(node_id) = node_id.as_deref() {
+                                let _ = self.flush_stream_buffer(node_id).await;
+                            }
                             self.finish_failed_run().await;
                             return;
                         }
-                        Some(command) => {
-                            if session.commands.send(command).await.is_err() {
+                        Some(ProviderCommand::PermissionResponse {
+                            id,
+                            approved,
+                            reason,
+                        }) => {
+                            if let Some(node_id) = node_id.as_deref() {
+                                let _ = self
+                                    .persist_permission_response(
+                                        node_id,
+                                        id.clone(),
+                                        serde_json::json!({
+                                            "approved": approved,
+                                            "reason": reason.clone(),
+                                        }),
+                                    )
+                                    .await;
+                            }
+                            if session.commands.send(ProviderCommand::PermissionResponse {
+                                id,
+                                approved,
+                                reason,
+                            }).await.is_err() {
                                 commands_open = false;
                             }
                         }
@@ -538,6 +682,9 @@ impl WorkspaceEngine {
 
                     match event {
                         ProviderEvent::TextDelta { content } => {
+                            if let Some(node_id) = node_id.as_deref() {
+                                let _ = self.buffer_stream_chunk(node_id, content.clone()).await;
+                            }
                             full_content.push_str(&content);
                             let _ = self
                                 .event_tx
@@ -549,6 +696,19 @@ impl WorkspaceEngine {
                                 .await;
                         }
                         ProviderEvent::PermissionRequest(request) => {
+                            if let Some(node_id) = node_id.as_deref() {
+                                let _ = self
+                                    .persist_permission_request(
+                                        node_id,
+                                        request.id.clone(),
+                                        serde_json::json!({
+                                            "tool_name": request.tool_name.clone(),
+                                            "description": request.description.clone(),
+                                            "risk_level": risk_level_text(&request.risk_level),
+                                        }),
+                                    )
+                                    .await;
+                            }
                             let _ = self
                                 .event_tx
                                 .send(EngineEvent::ExecutionEvent {
@@ -588,6 +748,14 @@ impl WorkspaceEngine {
                                 .await;
                         }
                         ProviderEvent::Execution(event) => {
+                            if let Some(node_id) = node_id.as_deref() {
+                                let event_json = execution_event_json(&event);
+                                let _ = self
+                                    .update_node_detail(node_id, |detail| {
+                                        detail.execution_events.push(event_json);
+                                    })
+                                    .await;
+                            }
                             let _ = self
                                 .event_tx
                                 .send(EngineEvent::ExecutionEvent {
@@ -598,6 +766,9 @@ impl WorkspaceEngine {
                                 .await;
                         }
                         ProviderEvent::Completed { full_output, .. } => {
+                            if let Some(node_id) = node_id.as_deref() {
+                                let _ = self.flush_stream_buffer(node_id).await;
+                            }
                             self.complete_assistant_message(assistant_msg_id, full_output).await;
                             return;
                         }
@@ -606,6 +777,9 @@ impl WorkspaceEngine {
                                 .event_tx
                                 .send(EngineEvent::Error { message })
                                 .await;
+                            if let Some(node_id) = node_id.as_deref() {
+                                let _ = self.flush_stream_buffer(node_id).await;
+                            }
                             self.finish_failed_run().await;
                             return;
                         }
@@ -615,13 +789,22 @@ impl WorkspaceEngine {
         }
 
         if cancel.is_cancelled() {
+            if let Some(node_id) = node_id.as_deref() {
+                let _ = self.flush_stream_buffer(node_id).await;
+            }
             self.finish_failed_run().await;
             return;
         }
 
         if full_content.is_empty() {
+            if let Some(node_id) = node_id.as_deref() {
+                let _ = self.flush_stream_buffer(node_id).await;
+            }
             self.finish_failed_run().await;
         } else {
+            if let Some(node_id) = node_id.as_deref() {
+                let _ = self.flush_stream_buffer(node_id).await;
+            }
             self.complete_assistant_message(assistant_msg_id, full_content)
                 .await;
         }
@@ -702,6 +885,9 @@ impl WorkspaceEngine {
         while events_open {
             tokio::select! {
                 _ = cancel.cancelled() => {
+                    if let Some(node_id) = node_id.as_deref() {
+                        let _ = self.flush_stream_buffer(node_id).await;
+                    }
                     self.finish_failed_run().await;
                     return;
                 }
@@ -710,11 +896,39 @@ impl WorkspaceEngine {
                         Some(ProviderCommand::Abort) => {
                             let _ = session.commands.send(ProviderCommand::Abort).await;
                             cancel.cancel();
+                            if let Some(node_id) = node_id.as_deref() {
+                                let _ = self.flush_stream_buffer(node_id).await;
+                            }
                             self.finish_failed_run().await;
                             return;
                         }
-                        Some(command) => {
-                            if session.commands.send(command).await.is_err() {
+                        Some(ProviderCommand::PermissionResponse {
+                            id,
+                            approved,
+                            reason,
+                        }) => {
+                            if let Some(node_id) = node_id.as_deref() {
+                                let _ = self
+                                    .persist_permission_response(
+                                        node_id,
+                                        id.clone(),
+                                        serde_json::json!({
+                                            "approved": approved,
+                                            "reason": reason.clone(),
+                                        }),
+                                    )
+                                    .await;
+                            }
+                            if session
+                                .commands
+                                .send(ProviderCommand::PermissionResponse {
+                                    id,
+                                    approved,
+                                    reason,
+                                })
+                                .await
+                                .is_err()
+                            {
                                 commands_open = false;
                             }
                         }
@@ -729,6 +943,9 @@ impl WorkspaceEngine {
 
                     match event {
                         ProviderEvent::TextDelta { content } => {
+                            if let Some(node_id) = node_id.as_deref() {
+                                let _ = self.buffer_stream_chunk(node_id, content.clone()).await;
+                            }
                             full_content.push_str(&content);
                             let _ = self
                                 .event_tx
@@ -740,6 +957,19 @@ impl WorkspaceEngine {
                                 .await;
                         }
                         ProviderEvent::PermissionRequest(request) => {
+                            if let Some(node_id) = node_id.as_deref() {
+                                let _ = self
+                                    .persist_permission_request(
+                                        node_id,
+                                        request.id.clone(),
+                                        serde_json::json!({
+                                            "tool_name": request.tool_name.clone(),
+                                            "description": request.description.clone(),
+                                            "risk_level": risk_level_text(&request.risk_level),
+                                        }),
+                                    )
+                                    .await;
+                            }
                             let _ = self
                                 .event_tx
                                 .send(EngineEvent::ExecutionEvent {
@@ -779,6 +1009,14 @@ impl WorkspaceEngine {
                                 .await;
                         }
                         ProviderEvent::Execution(event) => {
+                            if let Some(node_id) = node_id.as_deref() {
+                                let event_json = execution_event_json(&event);
+                                let _ = self
+                                    .update_node_detail(node_id, |detail| {
+                                        detail.execution_events.push(event_json);
+                                    })
+                                    .await;
+                            }
                             let _ = self
                                 .event_tx
                                 .send(EngineEvent::ExecutionEvent {
@@ -789,6 +1027,9 @@ impl WorkspaceEngine {
                                 .await;
                         }
                         ProviderEvent::Completed { full_output, .. } => {
+                            if let Some(node_id) = node_id.as_deref() {
+                                let _ = self.flush_stream_buffer(node_id).await;
+                            }
                             self.complete_review(full_output).await;
                             return;
                         }
@@ -797,6 +1038,9 @@ impl WorkspaceEngine {
                                 .event_tx
                                 .send(EngineEvent::Error { message })
                                 .await;
+                            if let Some(node_id) = node_id.as_deref() {
+                                let _ = self.flush_stream_buffer(node_id).await;
+                            }
                             self.finish_failed_run().await;
                             return;
                         }
@@ -806,8 +1050,14 @@ impl WorkspaceEngine {
         }
 
         if cancel.is_cancelled() || full_content.is_empty() {
+            if let Some(node_id) = node_id.as_deref() {
+                let _ = self.flush_stream_buffer(node_id).await;
+            }
             self.finish_failed_run().await;
         } else {
+            if let Some(node_id) = node_id.as_deref() {
+                let _ = self.flush_stream_buffer(node_id).await;
+            }
             self.complete_review(full_content).await;
         }
     }
@@ -824,6 +1074,16 @@ impl WorkspaceEngine {
         let reviewer = self
             .active_node_agent()
             .or_else(|| self.session.reviewer_provider.clone());
+        let _ = self
+            .persist_review_verdict(
+                &node_id,
+                serde_json::json!({
+                    "verdict": verdict.verdict.clone(),
+                    "comments": verdict.comments.clone(),
+                    "summary": verdict.summary.clone(),
+                }),
+            )
+            .await;
         let _ = self
             .event_tx
             .send(EngineEvent::ReviewComplete {
@@ -1348,6 +1608,20 @@ impl WorkspaceEngine {
             source_node_id,
         });
         self.persist_artifact_versions();
+        let source_node_id = self
+            .artifact_versions
+            .last()
+            .map(|version| version.source_node_id.clone())
+            .unwrap_or_else(|| "timeline_node_unknown".to_string());
+        let _ = self
+            .persist_artifact_ref(
+                &source_node_id,
+                ArtifactRef {
+                    artifact_id: format!("artifact_version_{version:03}"),
+                    version,
+                },
+            )
+            .await;
         let _ = self
             .event_tx
             .send(EngineEvent::ArtifactUpdate {
@@ -1590,6 +1864,64 @@ impl WorkspaceEngine {
         node
     }
 
+    fn empty_node_detail_for(&self, node: &TimelineNode) -> NodeDetail {
+        NodeDetail {
+            node_id: node.node_id.clone(),
+            session_id: self.session.session_id.clone(),
+            node_type: node.node_type.clone(),
+            status: node.status.clone(),
+            agent_role: match node.node_type {
+                TimelineNodeType::AuthorRun => Some(AgentRole::Author),
+                TimelineNodeType::ReviewerRun => Some(AgentRole::Reviewer),
+                _ => None,
+            },
+            provider: node.agent.as_ref().map(|provider| ProviderSnapshot {
+                name: provider_name_text(provider).to_string(),
+                model: provider_name_text(provider).to_string(),
+            }),
+            messages: Vec::new(),
+            streaming_content: String::new(),
+            execution_events: Vec::new(),
+            permission_events: Vec::new(),
+            verdict: None,
+            artifact_ref: None,
+            is_revision: node.node_type == TimelineNodeType::AuthorRun
+                && node.stage == WsWorkspaceStage::Revision,
+            base_artifact_ref: None,
+            started_at: node.started_at.clone(),
+            ended_at: node.completed_at.clone(),
+        }
+    }
+
+    async fn update_node_detail<F>(&mut self, node_id: &str, update: F) -> Result<(), String>
+    where
+        F: FnOnce(&mut NodeDetail),
+    {
+        let Some(node) = self
+            .timeline_nodes
+            .iter()
+            .find(|node| node.node_id == node_id)
+            .cloned()
+        else {
+            return Err(format!("timeline node not found: {node_id}"));
+        };
+
+        let Some(store) = &self.lifecycle_store else {
+            return Ok(());
+        };
+
+        let mut detail = match store.load_node_detail(&self.session.session_id, node_id) {
+            Ok(detail) => detail,
+            Err(ProductStoreError::NotFound { .. }) => self.empty_node_detail_for(&node),
+            Err(error) => return Err(format!("load node detail failed: {error}")),
+        };
+        update(&mut detail);
+        store
+            .save_node_detail(&self.session.session_id, node_id, &detail)
+            .map_err(|error| format!("save node detail failed: {error}"))?;
+        Ok(())
+    }
+
     async fn complete_active_node(&mut self, summary: Option<String>) {
         let Some(node_id) = self.active_node_id.clone() else {
             return;
@@ -1629,6 +1961,16 @@ impl WorkspaceEngine {
             }
         }
         self.persist_timeline_nodes();
+        let detail_status = status.clone();
+        let detail_completed_at = completed_at.clone();
+        let _ = self
+            .update_node_detail(node_id, |detail| {
+                detail.status = detail_status;
+                if detail_completed_at.is_some() {
+                    detail.ended_at = detail_completed_at;
+                }
+            })
+            .await;
 
         let _ = self
             .event_tx
@@ -1890,6 +2232,57 @@ fn provider_type_for_name(provider: &ProviderName) -> ProviderType {
     }
 }
 
+fn provider_name_text(provider: &ProviderName) -> &'static str {
+    match provider {
+        ProviderName::ClaudeCode => "claude_code",
+        ProviderName::Codex => "codex",
+        ProviderName::Fake => "fake",
+    }
+}
+
+fn risk_level_text(risk_level: &RiskLevel) -> &'static str {
+    match risk_level {
+        RiskLevel::Low => "low",
+        RiskLevel::Medium => "medium",
+        RiskLevel::High => "high",
+    }
+}
+
+fn execution_event_json(event: &ProviderExecutionEvent) -> serde_json::Value {
+    serde_json::json!({
+        "event_id": event.event_id,
+        "kind": execution_event_kind_text(&event.kind),
+        "status": execution_event_status_text(&event.status),
+        "title": event.title,
+        "detail": event.detail,
+        "command": event.command,
+        "cwd": event.cwd,
+        "output": event.output,
+        "exit_code": event.exit_code,
+    })
+}
+
+fn execution_event_kind_text(kind: &ProviderExecutionEventKind) -> &'static str {
+    match kind {
+        ProviderExecutionEventKind::Provider => "provider",
+        ProviderExecutionEventKind::Turn => "turn",
+        ProviderExecutionEventKind::Command => "command",
+        ProviderExecutionEventKind::Output => "output",
+        ProviderExecutionEventKind::Artifact => "artifact",
+    }
+}
+
+fn execution_event_status_text(status: &ProviderExecutionEventStatus) -> &'static str {
+    match status {
+        ProviderExecutionEventStatus::Started => "started",
+        ProviderExecutionEventStatus::Running => "running",
+        ProviderExecutionEventStatus::WaitingApproval => "waiting_approval",
+        ProviderExecutionEventStatus::Completed => "completed",
+        ProviderExecutionEventStatus::Failed => "failed",
+        ProviderExecutionEventStatus::Aborted => "aborted",
+    }
+}
+
 fn workspace_stage_for_status(status: &WorkspaceSessionStatus) -> WorkspaceStage {
     match status {
         WorkspaceSessionStatus::Open => WorkspaceStage::PrepareContext,
@@ -1968,6 +2361,158 @@ mod tests {
     fn empty_provider_commands() -> mpsc::Receiver<ProviderCommand> {
         let (_tx, rx) = mpsc::channel(8);
         rx
+    }
+
+    fn persistent_test_engine() -> (TempDir, LifecycleStore, WorkspaceEngine) {
+        let (tmp, checkpoint_store) = setup();
+        let lifecycle_store = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
+        let (tx, _) = mpsc::channel(64);
+        let session_record = lifecycle_store
+            .create_workspace_session(CreateWorkspaceSessionInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                entity_id: "story_spec_0001".to_string(),
+                workspace_type: WorkspaceType::Story,
+                author_provider: ProviderName::ClaudeCode,
+                reviewer_provider: ProviderName::Codex,
+                review_rounds: 2,
+                superpowers_enabled: true,
+                openspec_enabled: true,
+            })
+            .unwrap();
+        let session = WorkspaceSession::from_record(session_record);
+        let engine =
+            WorkspaceEngine::new_persistent(checkpoint_store, lifecycle_store.clone(), tx, session);
+        (tmp, lifecycle_store, engine)
+    }
+
+    async fn create_author_run_node(engine: &mut WorkspaceEngine) -> String {
+        engine
+            .create_timeline_node(TimelineNodeDraft {
+                node_type: TimelineNodeType::AuthorRun,
+                agent: Some(ProviderName::ClaudeCode),
+                stage: WorkspaceStage::Running,
+                round: None,
+                title: "Story 生成".to_string(),
+                summary: None,
+                status: TimelineNodeStatus::Active,
+            })
+            .await
+    }
+
+    async fn create_reviewer_run_node(engine: &mut WorkspaceEngine) -> String {
+        engine
+            .create_timeline_node(TimelineNodeDraft {
+                node_type: TimelineNodeType::ReviewerRun,
+                agent: Some(ProviderName::Codex),
+                stage: WorkspaceStage::CrossReview,
+                round: Some(1),
+                title: "交叉审核 Round 1".to_string(),
+                summary: None,
+                status: TimelineNodeStatus::Active,
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn stream_chunk_flushes_after_4kb_or_node_end() {
+        let (_tmp, lifecycle_store, mut engine) = persistent_test_engine();
+        let node_id = create_author_run_node(&mut engine).await;
+
+        engine
+            .buffer_stream_chunk(&node_id, "hello ".to_string())
+            .await
+            .unwrap();
+        engine
+            .buffer_stream_chunk(&node_id, "world".to_string())
+            .await
+            .unwrap();
+        assert!(
+            lifecycle_store
+                .load_node_detail(&engine.session().session_id, &node_id)
+                .is_err(),
+            "small chunks should stay buffered before explicit flush"
+        );
+
+        engine.flush_stream_buffer(&node_id).await.unwrap();
+
+        let detail = lifecycle_store
+            .load_node_detail(&engine.session().session_id, &node_id)
+            .unwrap();
+        assert_eq!(detail.streaming_content, "hello world");
+
+        let large = "x".repeat(4096);
+        engine
+            .buffer_stream_chunk(&node_id, large.clone())
+            .await
+            .unwrap();
+        let detail = lifecycle_store
+            .load_node_detail(&engine.session().session_id, &node_id)
+            .unwrap();
+        assert!(detail.streaming_content.ends_with(&large));
+    }
+
+    #[tokio::test]
+    async fn permission_request_and_response_are_persisted_to_node_detail() {
+        let (_tmp, lifecycle_store, mut engine) = persistent_test_engine();
+        let node_id = create_author_run_node(&mut engine).await;
+
+        engine
+            .persist_permission_request(
+                &node_id,
+                "permission_1".to_string(),
+                serde_json::json!({"tool_name": "shell", "description": "cargo test"}),
+            )
+            .await
+            .unwrap();
+        engine
+            .persist_permission_response(
+                &node_id,
+                "permission_1".to_string(),
+                serde_json::json!({"approved": true, "reason": null}),
+            )
+            .await
+            .unwrap();
+
+        let detail = lifecycle_store
+            .load_node_detail(&engine.session().session_id, &node_id)
+            .unwrap();
+        assert_eq!(detail.permission_events.len(), 1);
+        assert_eq!(detail.permission_events[0].request_id, "permission_1");
+        assert_eq!(
+            detail.permission_events[0].response.as_ref().unwrap()["approved"],
+            true
+        );
+    }
+
+    #[tokio::test]
+    async fn verdict_and_artifact_ref_are_persisted_to_node_detail() {
+        let (_tmp, lifecycle_store, mut engine) = persistent_test_engine();
+        let node_id = create_reviewer_run_node(&mut engine).await;
+
+        engine
+            .persist_review_verdict(
+                &node_id,
+                serde_json::json!({"verdict": "pass", "summary": "ok"}),
+            )
+            .await
+            .unwrap();
+        engine
+            .persist_artifact_ref(
+                &node_id,
+                ArtifactRef {
+                    artifact_id: "artifact_story_spec_0001".to_string(),
+                    version: 2,
+                },
+            )
+            .await
+            .unwrap();
+
+        let detail = lifecycle_store
+            .load_node_detail(&engine.session().session_id, &node_id)
+            .unwrap();
+        assert_eq!(detail.verdict.as_ref().unwrap()["verdict"], "pass");
+        assert_eq!(detail.artifact_ref.as_ref().unwrap().version, 2);
     }
 
     #[tokio::test]
