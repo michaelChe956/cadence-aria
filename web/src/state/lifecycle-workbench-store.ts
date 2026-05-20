@@ -1,3 +1,4 @@
+import { create } from "zustand";
 import type {
   ArtifactVersion,
   DesignSpec,
@@ -177,3 +178,22 @@ export function lifecycleBlockedReason(
 
   return null;
 }
+
+export interface LifecycleWorkbenchState {
+  focusedEntityId: string | null;
+  isDrawerOpen: boolean;
+}
+
+export interface LifecycleWorkbenchActions {
+  openDrawer: (entityId: string) => void;
+  closeDrawer: () => void;
+}
+
+export const useLifecycleWorkbenchStore = create<
+  LifecycleWorkbenchState & LifecycleWorkbenchActions
+>((set) => ({
+  focusedEntityId: null,
+  isDrawerOpen: false,
+  openDrawer: (entityId) => set({ focusedEntityId: entityId, isDrawerOpen: true }),
+  closeDrawer: () => set({ focusedEntityId: null, isDrawerOpen: false }),
+}));

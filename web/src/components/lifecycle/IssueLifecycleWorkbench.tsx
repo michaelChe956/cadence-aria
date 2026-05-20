@@ -25,6 +25,7 @@ import type {
 } from "../../api/types";
 import {
   groupLifecycleCards,
+  useLifecycleWorkbenchStore,
   visibleLifecycle,
   type LifecycleCard as LifecycleCardData,
 } from "../../state/lifecycle-workbench-store";
@@ -40,8 +41,12 @@ import { ProjectSidebar } from "./ProjectSidebar";
 type ProviderWorkspaceLaunchTarget = "story" | "design" | "work_item";
 
 export function IssueLifecycleWorkbench({
+  focusEntityId,
+  onDrawerFocusChange,
   onOpenWorkspace = defaultOpenWorkspace,
 }: {
+  focusEntityId?: string | null;
+  onDrawerFocusChange?: (entityId: string | null) => void;
   onOpenWorkspace?: (sessionId: string) => void;
 }) {
   const [projects, setProjects] = useState<Project[]>([]);
@@ -56,11 +61,33 @@ export function IssueLifecycleWorkbench({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const refreshRequestId = useRef(0);
+  const drawerFocusedEntityId = useLifecycleWorkbenchStore((state) => state.focusedEntityId);
+  const isDrawerOpen = useLifecycleWorkbenchStore((state) => state.isDrawerOpen);
+  const openDrawer = useLifecycleWorkbenchStore((state) => state.openDrawer);
+  const closeDrawer = useLifecycleWorkbenchStore((state) => state.closeDrawer);
 
   useEffect(() => {
     void refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (focusEntityId === undefined) {
+      return;
+    }
+    if (focusEntityId) {
+      openDrawer(focusEntityId);
+      return;
+    }
+    closeDrawer();
+  }, [closeDrawer, focusEntityId, openDrawer]);
+
+  useEffect(() => {
+    if (!onDrawerFocusChange) {
+      return;
+    }
+    onDrawerFocusChange(isDrawerOpen ? drawerFocusedEntityId : null);
+  }, [drawerFocusedEntityId, isDrawerOpen, onDrawerFocusChange]);
 
   async function refresh(projectIdOverride?: string | null) {
     const requestId = refreshRequestId.current + 1;

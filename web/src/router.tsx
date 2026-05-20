@@ -7,7 +7,9 @@ import {
   Navigate,
   useNavigate,
   useParams,
+  useSearch,
 } from "@tanstack/react-router";
+import { useCallback } from "react";
 import { AppShell } from "./app-shell";
 import { WorkspacePage } from "./pages/WorkspacePage";
 
@@ -19,10 +21,26 @@ const indexRoute = createRoute({
   component: () => <Navigate to="/workbench" />,
 });
 
+type WorkbenchSearch = {
+  focus?: string;
+};
+
 function WorkbenchRouteComponent() {
-  const navigate = useNavigate();
+  const search = useSearch({ from: "/workbench" });
+  const navigate = useNavigate({ from: "/workbench" });
+  const syncDrawerFocus = useCallback(
+    (entityId: string | null) => {
+      void navigate({
+        search: (prev: WorkbenchSearch) => ({ ...prev, focus: entityId ?? undefined }),
+        replace: true,
+      });
+    },
+    [navigate],
+  );
   return (
     <AppShell
+      focusEntityId={search.focus ?? null}
+      onDrawerFocusChange={syncDrawerFocus}
       onOpenWorkspace={(sessionId) =>
         void navigate({ to: "/workbench/workspace/$sessionId", params: { sessionId } })
       }
@@ -33,6 +51,9 @@ function WorkbenchRouteComponent() {
 const workbenchRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/workbench",
+  validateSearch: (search: Record<string, unknown>): WorkbenchSearch => ({
+    focus: typeof search.focus === "string" ? search.focus : undefined,
+  }),
   component: WorkbenchRouteComponent,
 });
 

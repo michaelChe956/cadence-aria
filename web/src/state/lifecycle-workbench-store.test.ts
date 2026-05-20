@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import type { IssueLifecycleResponse } from "../api/types";
 import {
   groupLifecycleCards,
   lifecycleBlockedReason,
+  useLifecycleWorkbenchStore,
   visibleLifecycle,
 } from "./lifecycle-workbench-store";
 
@@ -199,5 +200,33 @@ describe("lifecycle workbench store", () => {
     };
 
     expect(lifecycleBlockedReason("work_item", confirmedDesign)).toBeNull();
+  });
+});
+
+describe("drawer state", () => {
+  beforeEach(() => {
+    useLifecycleWorkbenchStore.setState({
+      focusedEntityId: null,
+      isDrawerOpen: false,
+    });
+  });
+
+  it("opens drawer with entity id", () => {
+    const store = useLifecycleWorkbenchStore.getState();
+
+    store.openDrawer("story-id");
+
+    expect(useLifecycleWorkbenchStore.getState().focusedEntityId).toBe("story-id");
+    expect(useLifecycleWorkbenchStore.getState().isDrawerOpen).toBe(true);
+  });
+
+  it("closes drawer and clears focus", () => {
+    const store = useLifecycleWorkbenchStore.getState();
+
+    store.openDrawer("story-id");
+    store.closeDrawer();
+
+    expect(useLifecycleWorkbenchStore.getState().focusedEntityId).toBeNull();
+    expect(useLifecycleWorkbenchStore.getState().isDrawerOpen).toBe(false);
   });
 });

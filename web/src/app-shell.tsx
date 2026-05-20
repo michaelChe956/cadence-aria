@@ -2,8 +2,12 @@ import { useEffect } from "react";
 import { IssueLifecycleWorkbench } from "./components/lifecycle/IssueLifecycleWorkbench";
 
 export function AppShell({
+  focusEntityId,
+  onDrawerFocusChange,
   onOpenWorkspace,
 }: {
+  focusEntityId?: string | null;
+  onDrawerFocusChange?: (entityId: string | null) => void;
   onOpenWorkspace?: (sessionId: string) => void;
 }) {
   useEffect(() => {
@@ -16,5 +20,11 @@ export function AppShell({
     };
   }, []);
 
-  return <IssueLifecycleWorkbench onOpenWorkspace={onOpenWorkspace} />;
+  return (
+    <IssueLifecycleWorkbench
+      focusEntityId={focusEntityId}
+      onDrawerFocusChange={onDrawerFocusChange}
+      onOpenWorkspace={onOpenWorkspace}
+    />
+  );
 }

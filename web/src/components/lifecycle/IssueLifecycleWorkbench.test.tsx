@@ -1,7 +1,8 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceSession } from "../../api/types";
+import { useLifecycleWorkbenchStore } from "../../state/lifecycle-workbench-store";
 import { CreateLifecycleIssueDialog } from "./CreateLifecycleIssueDialog";
 import { IssueLifecycleWorkbench } from "./IssueLifecycleWorkbench";
 
@@ -13,6 +14,13 @@ type MockLifecycleData = {
 };
 
 describe("IssueLifecycleWorkbench", () => {
+  beforeEach(() => {
+    useLifecycleWorkbenchStore.setState({
+      focusedEntityId: null,
+      isDrawerOpen: false,
+    });
+  });
+
   it("renders four lifecycle columns and focuses derived cards by issue", async () => {
     vi.stubGlobal("fetch", lifecycleFetch());
     const user = userEvent.setup();
@@ -45,6 +53,37 @@ describe("IssueLifecycleWorkbench", () => {
     expect(screen.getByRole("region", { name: "Work Item 列" })).toHaveTextContent(
       "实现提示组件",
     );
+  });
+
+  it("syncs controlled URL focus with drawer state", async () => {
+    vi.stubGlobal("fetch", lifecycleFetch());
+    const onDrawerFocusChange = vi.fn();
+
+    const view = render(
+      <IssueLifecycleWorkbench
+        focusEntityId="story_spec_0001"
+        onDrawerFocusChange={onDrawerFocusChange}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(useLifecycleWorkbenchStore.getState().focusedEntityId).toBe("story_spec_0001"),
+    );
+    expect(useLifecycleWorkbenchStore.getState().isDrawerOpen).toBe(true);
+    await waitFor(() => expect(onDrawerFocusChange).toHaveBeenCalledWith("story_spec_0001"));
+
+    view.rerender(
+      <IssueLifecycleWorkbench focusEntityId={null} onDrawerFocusChange={onDrawerFocusChange} />,
+    );
+
+    await waitFor(() => expect(useLifecycleWorkbenchStore.getState().focusedEntityId).toBeNull());
+    expect(useLifecycleWorkbenchStore.getState().isDrawerOpen).toBe(false);
+
+    act(() => {
+      useLifecycleWorkbenchStore.getState().openDrawer("design_spec_0001");
+    });
+
+    await waitFor(() => expect(onDrawerFocusChange).toHaveBeenCalledWith("design_spec_0001"));
   });
 
   it("switches project from the left sidebar", async () => {
