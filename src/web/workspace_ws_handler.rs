@@ -35,6 +35,43 @@ pub async fn workspace_ws(
     ws.on_upgrade(move |socket| handle_workspace_socket(socket, session_id, state))
 }
 
+#[derive(Debug)]
+enum OutboundControl {
+    Text(String),
+    CloseDueToIdleTimeout,
+}
+
+async fn send_json_outbound<T: serde::Serialize>(
+    outbound_tx: &mpsc::Sender<OutboundControl>,
+    message: &T,
+) -> bool {
+    match serde_json::to_string(message) {
+        Ok(json) => outbound_tx.send(OutboundControl::Text(json)).await.is_ok(),
+        Err(_) => false,
+    }
+}
+
+fn spawn_idle_timeout_task(
+    last_client_message_at: Arc<Mutex<tokio::time::Instant>>,
+    outbound_tx: mpsc::Sender<OutboundControl>,
+    timeout_after: std::time::Duration,
+    tick_every: std::time::Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tick_every);
+        loop {
+            interval.tick().await;
+            let last_seen = *last_client_message_at.lock().await;
+            if last_seen.elapsed() > timeout_after {
+                let _ = outbound_tx
+                    .send(OutboundControl::CloseDueToIdleTimeout)
+                    .await;
+                break;
+            }
+        }
+    })
+}
+
 async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: WebAppState) {
     let (mut ws_sender, mut ws_receiver) = socket.split();
 
@@ -103,12 +140,20 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
         let _ = ws_sender.send(Message::Text(json.into())).await;
     }
 
-    let (outbound_tx, mut outbound_rx) = mpsc::channel::<String>(64);
+    let (outbound_tx, mut outbound_rx) = mpsc::channel::<OutboundControl>(64);
 
     let send_task = tokio::spawn(async move {
-        while let Some(msg) = outbound_rx.recv().await {
-            if ws_sender.send(Message::Text(msg.into())).await.is_err() {
-                break;
+        while let Some(control) = outbound_rx.recv().await {
+            match control {
+                OutboundControl::Text(msg) => {
+                    if ws_sender.send(Message::Text(msg.into())).await.is_err() {
+                        break;
+                    }
+                }
+                OutboundControl::CloseDueToIdleTimeout => {
+                    let _ = ws_sender.close().await;
+                    break;
+                }
             }
         }
     });
@@ -200,9 +245,7 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                 },
                 EngineEvent::Error { message } => WsOutMessage::Error { message },
             };
-            if let Ok(json) = serde_json::to_string(&ws_msg)
-                && outbound_for_events.send(json).await.is_err()
-            {
+            if !send_json_outbound(&outbound_for_events, &ws_msg).await {
                 break;
             }
         }
@@ -210,6 +253,13 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
 
     let current_run: Arc<Mutex<Option<ActiveRun>>> = Arc::new(Mutex::new(None));
     let next_run_id: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
+    let last_client_message_at = Arc::new(Mutex::new(tokio::time::Instant::now()));
+    let idle_timeout_task = spawn_idle_timeout_task(
+        last_client_message_at.clone(),
+        outbound_tx.clone(),
+        std::time::Duration::from_secs(90),
+        std::time::Duration::from_secs(5),
+    );
 
     while let Some(Ok(msg)) = ws_receiver.next().await {
         let text = match msg {
@@ -224,12 +274,11 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                 let err = WsOutMessage::Error {
                     message: format!("invalid message: {e}"),
                 };
-                if let Ok(json) = serde_json::to_string(&err) {
-                    let _ = outbound_tx.send(json).await;
-                }
+                let _ = send_json_outbound(&outbound_tx, &err).await;
                 continue;
             }
         };
+        *last_client_message_at.lock().await = tokio::time::Instant::now();
 
         let stage = if requires_stage_validation(&in_msg) {
             Some({
@@ -254,9 +303,7 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                     "received": message_type(&in_msg),
                 })),
             };
-            if let Ok(json) = serde_json::to_string(&err) {
-                let _ = outbound_tx.send(json).await;
-            }
+            let _ = send_json_outbound(&outbound_tx, &err).await;
             continue;
         }
 
@@ -272,9 +319,7 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                 .await
                 {
                     let err = WsOutMessage::Error { message };
-                    if let Ok(json) = serde_json::to_string(&err) {
-                        let _ = outbound_tx.send(json).await;
-                    }
+                    let _ = send_json_outbound(&outbound_tx, &err).await;
                 }
             }
             WsInMessage::Rollback { checkpoint_id } => {
@@ -286,14 +331,10 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                 let mut engine = engine.lock().await;
                 if let Err(e) = engine.handle_rollback(&checkpoint_id).await {
                     let err = WsOutMessage::Error { message: e };
-                    if let Ok(json) = serde_json::to_string(&err) {
-                        let _ = outbound_tx.send(json).await;
-                    }
+                    let _ = send_json_outbound(&outbound_tx, &err).await;
                 } else {
                     let state_msg = engine.build_session_state();
-                    if let Ok(json) = serde_json::to_string(&state_msg) {
-                        let _ = outbound_tx.send(json).await;
-                    }
+                    let _ = send_json_outbound(&outbound_tx, &state_msg).await;
                 }
             }
             WsInMessage::Confirm => {
@@ -312,14 +353,10 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                 let mut engine = engine.lock().await;
                 if let Err(e) = engine.set_provider(&role, provider) {
                     let err = WsOutMessage::Error { message: e };
-                    if let Ok(json) = serde_json::to_string(&err) {
-                        let _ = outbound_tx.send(json).await;
-                    }
+                    let _ = send_json_outbound(&outbound_tx, &err).await;
                 } else {
                     let state_msg = engine.build_session_state();
-                    if let Ok(json) = serde_json::to_string(&state_msg) {
-                        let _ = outbound_tx.send(json).await;
-                    }
+                    let _ = send_json_outbound(&outbound_tx, &state_msg).await;
                 }
             }
             WsInMessage::PermissionResponse {
@@ -367,15 +404,11 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                 }
             }
             WsInMessage::Ping => {
-                if let Ok(json) = serde_json::to_string(&WsOutMessage::Pong) {
-                    let _ = outbound_tx.send(json).await;
-                }
+                let _ = send_json_outbound(&outbound_tx, &WsOutMessage::Pong).await;
             }
             WsInMessage::Hello { .. } => {
                 let state_msg = engine.lock().await.build_session_state();
-                if let Ok(json) = serde_json::to_string(&state_msg) {
-                    let _ = outbound_tx.send(json).await;
-                }
+                let _ = send_json_outbound(&outbound_tx, &state_msg).await;
             }
             WsInMessage::ContextNote { content } => {
                 let result = {
@@ -384,9 +417,7 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                 };
                 if let Err(message) = result {
                     let err = WsOutMessage::Error { message };
-                    if let Ok(json) = serde_json::to_string(&err) {
-                        let _ = outbound_tx.send(json).await;
-                    }
+                    let _ = send_json_outbound(&outbound_tx, &err).await;
                 }
             }
             WsInMessage::StartGeneration {
@@ -401,9 +432,7 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                 };
                 match result {
                     Ok((_node, locked)) => {
-                        if let Ok(json) = serde_json::to_string(&locked) {
-                            let _ = outbound_tx.send(json).await;
-                        }
+                        let _ = send_json_outbound(&outbound_tx, &locked).await;
                         if let Err(message) = spawn_provider_run_from_handler(
                             state.provider_registry.clone(),
                             engine.clone(),
@@ -416,16 +445,12 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                         .await
                         {
                             let err = WsOutMessage::Error { message };
-                            if let Ok(json) = serde_json::to_string(&err) {
-                                let _ = outbound_tx.send(json).await;
-                            }
+                            let _ = send_json_outbound(&outbound_tx, &err).await;
                         }
                     }
                     Err(message) => {
                         let err = WsOutMessage::Error { message };
-                        if let Ok(json) = serde_json::to_string(&err) {
-                            let _ = outbound_tx.send(json).await;
-                        }
+                        let _ = send_json_outbound(&outbound_tx, &err).await;
                     }
                 }
             }
@@ -486,11 +511,10 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
             .transition_to_prepare_context_after_disconnect()
             .await;
         let state_msg = engine.build_session_state();
-        if let Ok(json) = serde_json::to_string(&state_msg) {
-            let _ = outbound_tx.send(json).await;
-        }
+        let _ = send_json_outbound(&outbound_tx, &state_msg).await;
     }
     drop(outbound_tx);
+    idle_timeout_task.abort();
     event_forward_task.abort();
     send_task.abort();
     let _ = event_forward_task.await;
@@ -502,7 +526,7 @@ async fn handle_review_decision_from_handler(
     engine: Arc<Mutex<WorkspaceEngine>>,
     current_run: Arc<Mutex<Option<ActiveRun>>>,
     next_run_id: Arc<Mutex<u64>>,
-    outbound_tx: mpsc::Sender<String>,
+    outbound_tx: mpsc::Sender<OutboundControl>,
     decision: String,
     extra_context: Option<String>,
 ) {
@@ -524,16 +548,12 @@ async fn handle_review_decision_from_handler(
             .await
             {
                 let err = WsOutMessage::Error { message };
-                if let Ok(json) = serde_json::to_string(&err) {
-                    let _ = outbound_tx.send(json).await;
-                }
+                let _ = send_json_outbound(&outbound_tx, &err).await;
             }
         }
         Err(message) => {
             let err = WsOutMessage::Error { message };
-            if let Ok(json) = serde_json::to_string(&err) {
-                let _ = outbound_tx.send(json).await;
-            }
+            let _ = send_json_outbound(&outbound_tx, &err).await;
         }
     }
 }
@@ -543,7 +563,7 @@ async fn handle_human_confirm_from_handler(
     engine: Arc<Mutex<WorkspaceEngine>>,
     current_run: Arc<Mutex<Option<ActiveRun>>>,
     next_run_id: Arc<Mutex<u64>>,
-    outbound_tx: mpsc::Sender<String>,
+    outbound_tx: mpsc::Sender<OutboundControl>,
     decision: HumanConfirmDecision,
     payload: Option<serde_json::Value>,
 ) {
@@ -565,9 +585,7 @@ async fn handle_human_confirm_from_handler(
             .await
             {
                 let err = WsOutMessage::Error { message };
-                if let Ok(json) = serde_json::to_string(&err) {
-                    let _ = outbound_tx.send(json).await;
-                }
+                let _ = send_json_outbound(&outbound_tx, &err).await;
             }
         }
         Err(message) => {
@@ -576,9 +594,7 @@ async fn handle_human_confirm_from_handler(
                 message,
                 context: None,
             };
-            if let Ok(json) = serde_json::to_string(&err) {
-                let _ = outbound_tx.send(json).await;
-            }
+            let _ = send_json_outbound(&outbound_tx, &err).await;
         }
     }
 }
@@ -711,6 +727,27 @@ mod tests {
             assert!(is_message_valid_for_stage(&hello, &stage));
             assert!(is_message_valid_for_stage(&ping, &stage));
         }
+    }
+
+    #[tokio::test]
+    async fn idle_timeout_sends_close_control_after_client_quiet() {
+        let last_client_message_at = Arc::new(Mutex::new(tokio::time::Instant::now()));
+        let (tx, mut rx) = mpsc::channel(1);
+
+        let task = spawn_idle_timeout_task(
+            last_client_message_at,
+            tx,
+            std::time::Duration::from_millis(5),
+            std::time::Duration::from_millis(1),
+        );
+
+        let control = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
+            .await
+            .expect("idle timeout control")
+            .expect("close control");
+        assert!(matches!(control, OutboundControl::CloseDueToIdleTimeout));
+
+        task.abort();
     }
 
     #[test]
