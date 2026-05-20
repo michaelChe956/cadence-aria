@@ -552,8 +552,8 @@ function TimelineDetailPanel({
   detail:
     | {
         messages: Array<{ id: string; content: string; role: string }>;
-        streamingContent: string;
-        executionEvents: ExecutionEvent[];
+        streaming_content: string;
+        execution_events: ExecutionEvent[];
         verdict?: { verdict: string; comments: string; summary: string } | null;
       }
     | undefined
@@ -567,7 +567,7 @@ function TimelineDetailPanel({
     risk_level: "low" | "medium" | "high";
   }>;
 }) {
-  const content = detail?.streamingContent || detail?.messages.at(-1)?.content || "";
+  const content = detail?.streaming_content || detail?.messages.at(-1)?.content || "";
   return (
     <div className="min-h-0 flex-1 overflow-auto">
       <div className="border-b border-[var(--aria-line)] px-4 py-3">
@@ -604,7 +604,7 @@ function TimelineDetailPanel({
       ) : null}
       <ExecutionPanel
         providerStatus={providerStatus}
-        executionEvents={detail?.executionEvents ?? []}
+        executionEvents={detail?.execution_events ?? []}
         pendingPermissions={pendingPermissions}
       />
     </div>

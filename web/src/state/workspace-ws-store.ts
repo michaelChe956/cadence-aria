@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import type { NodeDetail } from "../api/types";
 
 export type WsConnectionStatus = "disconnected" | "connecting" | "connected" | "error";
 export type ProviderStatus =
@@ -18,11 +19,15 @@ export type ExecutionEventStatus =
   | "aborted";
 export type TimelineNodeType =
   | "prepare_context"
-  | "generation"
-  | "review"
+  | "context_note"
+  | "start_generation"
+  | "author_run"
+  | "reviewer_run"
   | "review_decision"
   | "revision"
   | "human_confirm"
+  | "aborted_by_disconnect"
+  | "protocol_error"
   | "completed";
 export type TimelineNodeStatus = "active" | "paused" | "completed" | "failed" | "skipped";
 export type ReviewVerdictType = "pass" | "revise" | "needs_human";
@@ -107,13 +112,7 @@ export interface ArtifactVersion {
   source_node_id: string;
 }
 
-export interface TimelineNodeDetail {
-  nodeId: string;
-  messages: WsMessage[];
-  streamingContent: string;
-  executionEvents: ExecutionEvent[];
-  verdict?: ReviewVerdict | null;
-}
+export type TimelineNodeDetail = NodeDetail;
 
 export interface ReviewDecisionRequired {
   node_id: string;
@@ -142,6 +141,7 @@ export interface WorkspaceWsState {
   artifactVersions: ArtifactVersion[];
   pendingDecision: ReviewDecisionRequired | null;
   error: string | null;
+  activeRunId: string | null;
 }
 
 export interface WorkspaceWsActions {
@@ -156,6 +156,8 @@ export interface WorkspaceWsActions {
     timeline_nodes?: TimelineNode[];
     active_node_id?: string | null;
     artifact_versions?: ArtifactVersion[];
+    timeline_node_details?: Record<string, TimelineNodeDetail>;
+    active_run_id?: string | null;
   }) => void;
   appendStreamChunk: (content: string, nodeId?: string | null) => void;
   completeMessage: (messageId: string, checkpointId: string, nodeId?: string | null) => void;
@@ -179,6 +181,7 @@ export interface WorkspaceWsActions {
   clearExecutionEvents: () => void;
   setError: (error: string | null) => void;
   clearStreaming: () => void;
+  selectNodeDetail: (nodeId: string | null | undefined) => TimelineNodeDetail | null;
   reset: () => void;
 }
 
@@ -203,9 +206,10 @@ const initialState: WorkspaceWsState = {
   artifactVersions: [],
   pendingDecision: null,
   error: null,
+  activeRunId: null,
 };
 
-export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((set) => ({
+export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((set, get) => ({
   ...initialState,
 
   setSessionState: (state) =>
@@ -226,10 +230,13 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
       activeNodeId: state.active_node_id ?? null,
       selectedNodeId:
         state.active_node_id ?? state.timeline_nodes?.[state.timeline_nodes.length - 1]?.node_id ?? null,
-      nodeDetails: detailsForTimelineNodes(state.timeline_nodes ?? []),
+      nodeDetails:
+        state.timeline_node_details ??
+        detailsForTimelineNodes(state.timeline_nodes ?? [], state.session_id),
       artifactVersions: state.artifact_versions ?? [],
       pendingDecision: null,
       error: null,
+      activeRunId: state.active_run_id ?? null,
     }),
 
   appendStreamChunk: (content, nodeId) =>
@@ -239,7 +246,7 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
       }
       const details = { ...prev.nodeDetails };
       const detail = ensureNodeDetail(details, nodeId);
-      detail.streamingContent += content;
+      detail.streaming_content += content;
       return { nodeDetails: details };
     }),
 
@@ -251,12 +258,12 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
         const newMessage: WsMessage = {
           id: messageId,
           role: "assistant",
-          content: detail.streamingContent,
+          content: detail.streaming_content,
           checkpoint_id: checkpointId,
           created_at: new Date().toISOString(),
         };
         detail.messages = [...detail.messages, newMessage];
-        detail.streamingContent = "";
+        detail.streaming_content = "";
         return {
           nodeDetails: details,
           checkpoints: [
@@ -308,7 +315,9 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
       selectedNodeId: node.node_id,
       nodeDetails: {
         ...prev.nodeDetails,
-        [node.node_id]: prev.nodeDetails[node.node_id] ?? emptyNodeDetail(node.node_id),
+        [node.node_id]:
+          prev.nodeDetails[node.node_id] ??
+          emptyNodeDetail(node.node_id, { sessionId: prev.sessionId, node }),
       },
     })),
 
@@ -360,7 +369,7 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
       if (event.node_id) {
         const details = { ...prev.nodeDetails };
         const detail = ensureNodeDetail(details, event.node_id);
-        detail.executionEvents = upsertEvent(detail.executionEvents, event);
+        detail.execution_events = upsertEvent(detail.execution_events, event);
         return { nodeDetails: details };
       }
       const index = prev.executionEvents.findIndex(
@@ -379,6 +388,13 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
   setError: (error) => set({ error }),
 
   clearStreaming: () => set({ streamingContent: "" }),
+
+  selectNodeDetail: (nodeId) => {
+    if (!nodeId) {
+      return null;
+    }
+    return get().nodeDetails[nodeId] ?? null;
+  },
 
   reset: () => set(initialState),
 }));
@@ -411,20 +427,35 @@ function flowStageFor(stage: string) {
   return stage;
 }
 
-function detailsForTimelineNodes(nodes: TimelineNode[]) {
+function detailsForTimelineNodes(nodes: TimelineNode[], sessionId: string) {
   return nodes.reduce<Record<string, TimelineNodeDetail>>((details, node) => {
-    details[node.node_id] = emptyNodeDetail(node.node_id);
+    details[node.node_id] = emptyNodeDetail(node.node_id, { sessionId, node });
     return details;
   }, {});
 }
 
-function emptyNodeDetail(nodeId: string): TimelineNodeDetail {
+function emptyNodeDetail(
+  nodeId: string,
+  options: { sessionId?: string | null; node?: TimelineNode } = {},
+): TimelineNodeDetail {
+  const node = options.node;
   return {
-    nodeId,
+    node_id: nodeId,
+    session_id: options.sessionId ?? "",
+    node_type: node?.node_type ?? "author_run",
+    status: node?.status ?? "active",
+    agent_role: agentRoleFor(node),
+    provider: node?.agent ? { name: node.agent, model: "" } : null,
     messages: [],
-    streamingContent: "",
-    executionEvents: [],
+    streaming_content: "",
+    execution_events: [],
+    permission_events: [],
     verdict: null,
+    artifact_ref: null,
+    is_revision: node?.node_type === "revision",
+    base_artifact_ref: null,
+    started_at: node?.started_at ?? "",
+    ended_at: node?.completed_at ?? null,
   };
 }
 
@@ -434,10 +465,21 @@ function ensureNodeDetail(details: Record<string, TimelineNodeDetail>, nodeId: s
     ? {
         ...existing,
         messages: [...existing.messages],
-        executionEvents: [...existing.executionEvents],
+        execution_events: [...existing.execution_events],
+        permission_events: [...existing.permission_events],
       }
     : emptyNodeDetail(nodeId);
   return details[nodeId];
+}
+
+function agentRoleFor(node?: TimelineNode): "author" | "reviewer" | null {
+  if (node?.node_type === "author_run") {
+    return "author";
+  }
+  if (node?.node_type === "reviewer_run") {
+    return "reviewer";
+  }
+  return null;
 }
 
 function upsertEvent(events: ExecutionEvent[], event: ExecutionEvent) {

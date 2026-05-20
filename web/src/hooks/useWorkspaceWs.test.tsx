@@ -150,7 +150,7 @@ describe("useWorkspaceWs", () => {
         type: "timeline_node_created",
         node: {
           node_id: "timeline_node_001",
-          node_type: "review",
+          node_type: "reviewer_run",
           agent: "codex",
           stage: "cross_review",
           round: 1,
@@ -186,7 +186,7 @@ describe("useWorkspaceWs", () => {
 
     const state = useWorkspaceStore.getState();
     expect(state.selectedNodeId).toBe("timeline_node_001");
-    expect(state.nodeDetails.timeline_node_001.streamingContent).toBe("review output");
+    expect(state.nodeDetails.timeline_node_001.streaming_content).toBe("review output");
     expect(state.nodeDetails.timeline_node_001.verdict?.summary).toBe("可以确认");
   });
 

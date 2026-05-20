@@ -138,7 +138,7 @@ describe("WorkspacePage", () => {
       timelineNodes: [
         {
           node_id: "timeline_node_001",
-          node_type: "review",
+          node_type: "reviewer_run",
           agent: "codex",
           stage: "cross_review",
           round: 1,
@@ -160,11 +160,22 @@ describe("WorkspacePage", () => {
       activeNodeId: "timeline_node_001",
       nodeDetails: {
         timeline_node_001: {
-          nodeId: "timeline_node_001",
+          node_id: "timeline_node_001",
+          session_id: "session_001",
+          node_type: "reviewer_run",
+          status: "active",
+          agent_role: "reviewer",
+          provider: { name: "codex", model: "gpt-5" },
           messages: [],
-          streamingContent: "review output",
-          executionEvents: [],
+          streaming_content: "review output",
+          execution_events: [],
+          permission_events: [],
           verdict: null,
+          artifact_ref: null,
+          is_revision: false,
+          base_artifact_ref: null,
+          started_at: "2026-05-19T00:00:00Z",
+          ended_at: null,
         },
       },
     });

@@ -1,5 +1,28 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import type { NodeDetail } from "../api/types";
 import { useWorkspaceStore } from "./workspace-ws-store";
+
+function makeNodeDetail(overrides: Partial<NodeDetail> = {}): NodeDetail {
+  return {
+    node_id: "timeline_node_001",
+    session_id: "session_001",
+    node_type: "author_run",
+    status: "completed",
+    agent_role: "author",
+    provider: { name: "claude_code", model: "claude-opus-4" },
+    messages: [],
+    streaming_content: "",
+    execution_events: [],
+    permission_events: [],
+    verdict: null,
+    artifact_ref: null,
+    is_revision: false,
+    base_artifact_ref: null,
+    started_at: "2026-05-20T14:30:00Z",
+    ended_at: null,
+    ...overrides,
+  };
+}
 
 describe("workspace ws store", () => {
   beforeEach(() => {
@@ -202,7 +225,7 @@ describe("workspace ws store", () => {
       timeline_nodes: [
         {
           node_id: "timeline_node_001",
-          node_type: "generation",
+          node_type: "author_run",
           agent: "claude_code",
           stage: "running",
           round: null,
@@ -229,11 +252,127 @@ describe("workspace ws store", () => {
     expect(useWorkspaceStore.getState().selectedNodeId).toBe("timeline_node_001");
   });
 
+  it("applies timeline node details and active run id from a session snapshot", () => {
+    const store = useWorkspaceStore.getState();
+    const detail = makeNodeDetail({
+      node_id: "timeline_node_001",
+      streaming_content: "输出内容",
+    });
+
+    store.setSessionState({
+      session_id: "session_004",
+      workspace_type: "story",
+      stage: "running",
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "claude_code", reviewer: null },
+      timeline_nodes: [
+        {
+          node_id: "timeline_node_001",
+          node_type: "author_run",
+          agent: "claude_code",
+          stage: "running",
+          round: null,
+          status: "active",
+          title: "Story Spec 生成",
+          summary: null,
+          started_at: "2026-05-20T14:30:00Z",
+          completed_at: null,
+          duration_ms: null,
+          artifact_ref: null,
+          provider_config_snapshot: {
+            author: "claude_code",
+            reviewer: null,
+            review_rounds: 0,
+          },
+        },
+      ],
+      active_node_id: "timeline_node_001",
+      artifact_versions: [],
+      timeline_node_details: {
+        timeline_node_001: detail,
+      },
+      active_run_id: "run-1",
+    });
+
+    const state = useWorkspaceStore.getState();
+    expect(state.nodeDetails.timeline_node_001.streaming_content).toBe("输出内容");
+    expect(state.activeRunId).toBe("run-1");
+  });
+
+  it("replaces stale node details and clears stale active run id from snapshots", () => {
+    const store = useWorkspaceStore.getState();
+    store.setSessionState({
+      session_id: "session_005",
+      workspace_type: "story",
+      stage: "running",
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "claude_code", reviewer: null },
+      timeline_nodes: [],
+      active_node_id: null,
+      artifact_versions: [],
+      timeline_node_details: {
+        stale_node: makeNodeDetail({ node_id: "stale_node", streaming_content: "旧输出" }),
+      },
+      active_run_id: "run-stale",
+    });
+
+    store.setSessionState({
+      session_id: "session_005",
+      workspace_type: "story",
+      stage: "prepare_context",
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "claude_code", reviewer: null },
+      timeline_nodes: [],
+      active_node_id: null,
+      artifact_versions: [],
+      timeline_node_details: {},
+      active_run_id: null,
+    });
+
+    const state = useWorkspaceStore.getState();
+    expect(state.nodeDetails.stale_node).toBeUndefined();
+    expect(state.activeRunId).toBeNull();
+  });
+
+  it("selectNodeDetail returns the requested snapshot detail", () => {
+    const store = useWorkspaceStore.getState();
+    const detail = makeNodeDetail({
+      node_id: "timeline_node_006",
+      streaming_content: "selector 输出",
+    });
+
+    store.setSessionState({
+      session_id: "session_006",
+      workspace_type: "story",
+      stage: "running",
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "claude_code", reviewer: null },
+      timeline_nodes: [],
+      active_node_id: null,
+      artifact_versions: [],
+      timeline_node_details: {
+        timeline_node_006: detail,
+      },
+      active_run_id: null,
+    });
+
+    expect(store.selectNodeDetail("timeline_node_006")?.streaming_content).toBe("selector 输出");
+    expect(store.selectNodeDetail("missing")).toBeNull();
+  });
+
   it("groups stream chunks and execution events by timeline node", () => {
     const store = useWorkspaceStore.getState();
     store.addTimelineNode({
       node_id: "timeline_node_002",
-      node_type: "review",
+      node_type: "reviewer_run",
       agent: "codex",
       stage: "cross_review",
       round: 1,
@@ -268,7 +407,7 @@ describe("workspace ws store", () => {
     store.completeMessage("msg_002", "checkpoint_002", "timeline_node_002");
 
     const detail = useWorkspaceStore.getState().nodeDetails.timeline_node_002;
-    expect(detail.streamingContent).toBe("");
+    expect(detail.streaming_content).toBe("");
     expect(detail.messages).toEqual([
       expect.objectContaining({
         id: "msg_002",
@@ -276,7 +415,7 @@ describe("workspace ws store", () => {
         content: "review output",
       }),
     ]);
-    expect(detail.executionEvents).toHaveLength(1);
+    expect(detail.execution_events).toHaveLength(1);
     expect(useWorkspaceStore.getState().streamingContent).toBe("");
   });
 
