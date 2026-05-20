@@ -190,6 +190,36 @@ describe("useWorkspaceWs", () => {
     expect(state.nodeDetails.timeline_node_001.verdict?.summary).toBe("可以确认");
   });
 
+  it("stores protocol errors and provider lock events from websocket messages", () => {
+    const harness = renderWorkspaceHook();
+
+    act(() => {
+      harness.ws.receive({
+        type: "protocol_error",
+        code: "INVALID_MESSAGE_FOR_STAGE",
+        message: "阶段不允许",
+      });
+      harness.ws.receive({
+        type: "provider_locked",
+        snapshot: { author: "claude_code", reviewer: "codex", review_rounds: 1 },
+        locked_at: "2026-05-20T14:35:00Z",
+      });
+      harness.ws.receive({ type: "pong" });
+    });
+
+    const state = useWorkspaceStore.getState();
+    expect(state.protocolError).toEqual({
+      code: "INVALID_MESSAGE_FOR_STAGE",
+      message: "阶段不允许",
+    });
+    expect(state.providerLocked).toBe(true);
+    expect(state.providerSnapshot).toEqual({
+      author: "claude_code",
+      reviewer: "codex",
+      review_rounds: 1,
+    });
+  });
+
   it("sends review decision responses when connected", () => {
     const harness = renderWorkspaceHook();
 

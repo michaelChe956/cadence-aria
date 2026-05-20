@@ -135,6 +135,20 @@ export function useWorkspaceWs(sessionId: string | null) {
       case "error":
         store.setError(msg.message as string);
         break;
+      case "protocol_error":
+        store.setProtocolError({
+          code: msg.code as string,
+          message: msg.message as string,
+        });
+        break;
+      case "provider_locked":
+        store.setProviderLocked({
+          snapshot: msg.snapshot as ProviderConfigSnapshot,
+          locked_at: msg.locked_at as string,
+        });
+        break;
+      case "pong":
+        break;
     }
   }
 

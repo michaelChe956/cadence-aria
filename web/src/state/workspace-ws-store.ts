@@ -120,6 +120,11 @@ export interface ReviewDecisionRequired {
   options: string[];
 }
 
+export interface ProtocolErrorState {
+  code: string;
+  message: string;
+}
+
 export interface WorkspaceWsState {
   sessionId: string | null;
   workspaceType: string | null;
@@ -142,6 +147,9 @@ export interface WorkspaceWsState {
   pendingDecision: ReviewDecisionRequired | null;
   error: string | null;
   activeRunId: string | null;
+  protocolError: ProtocolErrorState | null;
+  providerLocked: boolean;
+  providerSnapshot: ProviderConfigSnapshot | null;
 }
 
 export interface WorkspaceWsActions {
@@ -182,6 +190,10 @@ export interface WorkspaceWsActions {
   setError: (error: string | null) => void;
   clearStreaming: () => void;
   selectNodeDetail: (nodeId: string | null | undefined) => TimelineNodeDetail | null;
+  setProtocolError: (error: ProtocolErrorState | null) => void;
+  setProviderLocked: (
+    payload: { snapshot: ProviderConfigSnapshot; locked_at: string } | null,
+  ) => void;
   reset: () => void;
 }
 
@@ -207,6 +219,9 @@ const initialState: WorkspaceWsState = {
   pendingDecision: null,
   error: null,
   activeRunId: null,
+  protocolError: null,
+  providerLocked: false,
+  providerSnapshot: null,
 };
 
 export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((set, get) => ({
@@ -395,6 +410,14 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
     }
     return get().nodeDetails[nodeId] ?? null;
   },
+
+  setProtocolError: (error) => set({ protocolError: error }),
+
+  setProviderLocked: (payload) =>
+    set({
+      providerLocked: payload !== null,
+      providerSnapshot: payload?.snapshot ?? null,
+    }),
 
   reset: () => set(initialState),
 }));

@@ -439,4 +439,40 @@ describe("workspace ws store", () => {
     });
     expect(useWorkspaceStore.getState().pendingDecision?.node_id).toBe("timeline_node_004");
   });
+
+  it("stores and clears protocol errors", () => {
+    const store = useWorkspaceStore.getState();
+
+    store.setProtocolError({ code: "INVALID_MESSAGE_FOR_STAGE", message: "阶段不允许" });
+
+    expect(useWorkspaceStore.getState().protocolError).toEqual({
+      code: "INVALID_MESSAGE_FOR_STAGE",
+      message: "阶段不允许",
+    });
+
+    store.setProtocolError(null);
+
+    expect(useWorkspaceStore.getState().protocolError).toBeNull();
+  });
+
+  it("stores and clears provider locked snapshots", () => {
+    const store = useWorkspaceStore.getState();
+
+    store.setProviderLocked({
+      snapshot: { author: "claude_code", reviewer: "codex", review_rounds: 1 },
+      locked_at: "2026-05-20T14:35:00Z",
+    });
+
+    expect(useWorkspaceStore.getState().providerLocked).toBe(true);
+    expect(useWorkspaceStore.getState().providerSnapshot).toEqual({
+      author: "claude_code",
+      reviewer: "codex",
+      review_rounds: 1,
+    });
+
+    store.setProviderLocked(null);
+
+    expect(useWorkspaceStore.getState().providerLocked).toBe(false);
+    expect(useWorkspaceStore.getState().providerSnapshot).toBeNull();
+  });
 });
