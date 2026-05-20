@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type { NodeDetail } from "../api/types";
-import { useWorkspaceStore } from "./workspace-ws-store";
+import { selectPrepareContextNotes, useWorkspaceStore } from "./workspace-ws-store";
 
 function makeNodeDetail(overrides: Partial<NodeDetail> = {}): NodeDetail {
   return {
@@ -366,6 +366,81 @@ describe("workspace ws store", () => {
 
     expect(store.selectNodeDetail("timeline_node_006")?.streaming_content).toBe("selector 输出");
     expect(store.selectNodeDetail("missing")).toBeNull();
+  });
+
+  it("derives context notes from timeline node details", () => {
+    const store = useWorkspaceStore.getState();
+
+    store.setSessionState({
+      session_id: "session_context_notes",
+      workspace_type: "story",
+      stage: "prepare_context",
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "claude_code", reviewer: "codex" },
+      timeline_nodes: [
+        {
+          node_id: "note-1",
+          node_type: "context_note",
+          agent: null,
+          stage: "prepare_context",
+          round: null,
+          status: "completed",
+          title: "补充上下文",
+          summary: null,
+          started_at: "2026-05-20T00:00:00Z",
+          completed_at: null,
+          duration_ms: null,
+          artifact_ref: null,
+          provider_config_snapshot: {
+            author: "claude_code",
+            reviewer: "codex",
+            review_rounds: 1,
+          },
+        },
+        {
+          node_id: "note-2",
+          node_type: "context_note",
+          agent: null,
+          stage: "prepare_context",
+          round: null,
+          status: "completed",
+          title: "补充上下文",
+          summary: "第二条 fallback",
+          started_at: "2026-05-20T00:00:01Z",
+          completed_at: null,
+          duration_ms: null,
+          artifact_ref: null,
+          provider_config_snapshot: {
+            author: "claude_code",
+            reviewer: "codex",
+            review_rounds: 1,
+          },
+        },
+      ],
+      active_node_id: null,
+      artifact_versions: [],
+      timeline_node_details: {
+        "note-1": makeNodeDetail({
+          node_id: "note-1",
+          node_type: "context_note",
+          agent_role: null,
+          provider: null,
+          streaming_content: "第一条",
+        }),
+      },
+      active_run_id: null,
+    });
+
+    expect(selectPrepareContextNotes(useWorkspaceStore.getState())).toEqual([
+      "第一条",
+      "第二条 fallback",
+    ]);
+  });
+
+  it("does not show a context note before backend acknowledgement", () => {
+    expect(selectPrepareContextNotes(useWorkspaceStore.getState())).toEqual([]);
   });
 
   it("groups stream chunks and execution events by timeline node", () => {

@@ -422,6 +422,13 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
   reset: () => set(initialState),
 }));
 
+export function selectPrepareContextNotes(state: WorkspaceWsState) {
+  return state.timelineNodes
+    .filter((node) => node.node_type === "context_note")
+    .map((node) => state.nodeDetails[node.node_id]?.streaming_content ?? node.summary ?? "")
+    .filter((content) => content.trim().length > 0);
+}
+
 const STAGE_ORDER = [
   "prepare_context",
   "running",
