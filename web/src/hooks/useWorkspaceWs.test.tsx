@@ -75,6 +75,7 @@ describe("useWorkspaceWs", () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
 
@@ -231,7 +232,124 @@ describe("useWorkspaceWs", () => {
     expect(useWorkspaceStore.getState().pendingPermissions).toHaveLength(0);
   });
 
-  it("sends a default start generation message when connected", () => {
+  it("sends context notes when connected", () => {
+    const harness = renderWorkspaceHook();
+
+    act(() => {
+      harness.ws.open();
+      harness.api.sendContextNote("补充上下文");
+    });
+
+    expect(harness.ws.sent).toEqual([
+      JSON.stringify({ type: "context_note", content: "补充上下文" }),
+    ]);
+  });
+
+  it("sends start generation with provider snapshot when connected", () => {
+    const harness = renderWorkspaceHook();
+
+    act(() => {
+      harness.ws.open();
+      harness.api.sendStartGeneration(
+        { author: "claude_code", reviewer: "codex", review_rounds: 1 },
+        true,
+      );
+    });
+
+    expect(harness.ws.sent).toEqual([
+      JSON.stringify({
+        type: "start_generation",
+        provider_config: { author: "claude_code", reviewer: "codex", review_rounds: 1 },
+        reviewer_enabled: true,
+      }),
+    ]);
+    expect(useWorkspaceStore.getState().providerStatus).toBe("running");
+  });
+
+  it("sends hello and ping lifecycle messages when connected", () => {
+    const harness = renderWorkspaceHook();
+
+    act(() => {
+      harness.ws.open();
+      harness.api.sendHello("session_001", "timeline_node_001");
+      harness.api.sendPing();
+    });
+
+    expect(harness.ws.sent).toEqual([
+      JSON.stringify({
+        type: "hello",
+        session_id: "session_001",
+        last_seen_node_id: "timeline_node_001",
+      }),
+      JSON.stringify({ type: "ping" }),
+    ]);
+  });
+
+  it("sends revision path decisions with trimmed optional context", () => {
+    const harness = renderWorkspaceHook();
+
+    act(() => {
+      harness.ws.open();
+      harness.api.sendSelectRevisionPath("revise-with-context", " 补充边界条件 ");
+      harness.api.sendSelectRevisionPath("skip-to-human", "   ");
+    });
+
+    expect(harness.ws.sent).toEqual([
+      JSON.stringify({
+        type: "select_revision_path",
+        path: "revise-with-context",
+        extra_context: "补充边界条件",
+      }),
+      JSON.stringify({
+        type: "select_revision_path",
+        path: "skip-to-human",
+        extra_context: null,
+      }),
+    ]);
+  });
+
+  it("sends human confirm decisions with nullable payload", () => {
+    const harness = renderWorkspaceHook();
+
+    act(() => {
+      harness.ws.open();
+      harness.api.sendHumanConfirm("request-change", { reason: "需要补充" });
+      harness.api.sendHumanConfirm("confirm");
+    });
+
+    expect(harness.ws.sent).toEqual([
+      JSON.stringify({
+        type: "human_confirm",
+        decision: "request-change",
+        payload: { reason: "需要补充" },
+      }),
+      JSON.stringify({
+        type: "human_confirm",
+        decision: "confirm",
+        payload: null,
+      }),
+    ]);
+  });
+
+  it("keeps deprecated sendMessage as a context note sender", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const harness = renderWorkspaceHook();
+
+    act(() => {
+      harness.ws.open();
+      harness.api.sendMessage("旧入口上下文");
+    });
+
+    expect(harness.ws.sent).toEqual([
+      JSON.stringify({ type: "context_note", content: "旧入口上下文" }),
+    ]);
+    expect(warn).toHaveBeenCalledWith(
+      "sendMessage is deprecated, use sendContextNote or sendStartGeneration",
+    );
+  });
+
+  it("keeps deprecated startGeneration as a warning-only no-op", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const harness = renderWorkspaceHook();
 
     act(() => {
@@ -239,10 +357,8 @@ describe("useWorkspaceWs", () => {
       harness.api.startGeneration();
     });
 
-    expect(harness.ws.sent).toEqual([
-      JSON.stringify({ type: "user_message", content: "开始生成" }),
-    ]);
-    expect(useWorkspaceStore.getState().messages.at(-1)?.content).toBe("开始生成");
+    expect(harness.ws.sent).toHaveLength(0);
+    expect(warn).toHaveBeenCalledWith("startGeneration() without args is deprecated");
   });
 
   it("keeps pending permission requests when the socket is not open", () => {

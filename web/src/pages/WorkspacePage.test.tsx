@@ -14,13 +14,21 @@ type WorkspaceWsApi = ReturnType<typeof useWorkspaceWs>;
 function mockWorkspaceWs(overrides: Partial<WorkspaceWsApi> = {}) {
   const api: WorkspaceWsApi = {
     sendMessage: vi.fn(),
+    sendContextNote: vi.fn(),
+    sendStartGeneration: vi.fn(),
+    sendSelectRevisionPath: vi.fn(),
+    sendHumanConfirm: vi.fn(),
+    sendHello: vi.fn(),
+    sendPing: vi.fn(),
     startGeneration: vi.fn(),
     rollback: vi.fn(),
     confirm: vi.fn(),
     abort: vi.fn(),
     selectProvider: vi.fn(),
+    sendProviderSelect: vi.fn(),
     sendReviewDecision: vi.fn(),
     respondPermission: vi.fn(),
+    sendPermissionResponse: vi.fn(),
     connectionStatus: "connected",
     ...overrides,
   };

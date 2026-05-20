@@ -1,4 +1,10 @@
 import { useCallback, useEffect, useRef } from "react";
+import type {
+  HumanConfirmDecision,
+  ProviderConfigSnapshot,
+  RevisionPath,
+  WsInMessage,
+} from "../api/types";
 import {
   useWorkspaceStore,
   type ExecutionEvent,
@@ -8,10 +14,14 @@ import {
   type TimelineNodeStatus,
 } from "../state/workspace-ws-store";
 
-interface WsOutMessage {
+interface WsServerMessage {
   type: string;
   [key: string]: unknown;
 }
+
+type WorkspaceWsSendMessage =
+  | WsInMessage
+  | { type: "provider_select"; role: string; provider: string };
 
 export function useWorkspaceWs(sessionId: string | null) {
   const wsRef = useRef<WebSocket | null>(null);
@@ -48,7 +58,7 @@ export function useWorkspaceWs(sessionId: string | null) {
 
     ws.onmessage = (event) => {
       try {
-        const msg = JSON.parse(event.data) as WsOutMessage;
+        const msg = JSON.parse(event.data) as WsServerMessage;
         handleMessage(msg);
       } catch {
         // ignore malformed messages
@@ -61,7 +71,7 @@ export function useWorkspaceWs(sessionId: string | null) {
     };
   }, [sessionId]);
 
-  function handleMessage(msg: WsOutMessage) {
+  function handleMessage(msg: WsServerMessage) {
     const store = useWorkspaceStore.getState();
     switch (msg.type) {
       case "session_state":
@@ -128,110 +138,156 @@ export function useWorkspaceWs(sessionId: string | null) {
     }
   }
 
-  const sendMessage = useCallback(
+  const sendJson = useCallback((message: WorkspaceWsSendMessage) => {
+    const ws = wsRef.current;
+    if (ws?.readyState !== WebSocket.OPEN) {
+      return false;
+    }
+    ws.send(JSON.stringify(message));
+    return true;
+  }, []);
+
+  const sendContextNote = useCallback(
     (content: string) => {
-      const ws = wsRef.current;
-      if (ws?.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "user_message", content }));
+      if (sendJson({ type: "context_note", content })) {
+        useWorkspaceStore.getState().setError(null);
+      }
+    },
+    [sendJson],
+  );
+
+  const sendStartGeneration = useCallback(
+    (providerConfig: ProviderConfigSnapshot, reviewerEnabled: boolean) => {
+      if (
+        sendJson({
+          type: "start_generation",
+          provider_config: providerConfig,
+          reviewer_enabled: reviewerEnabled,
+        })
+      ) {
         const store = useWorkspaceStore.getState();
         store.setError(null);
         store.clearExecutionEvents();
         store.setProviderStatus("running");
-        const userMsg = {
-          id: `msg_${Date.now()}`,
-          role: "user",
-          content,
-          checkpoint_id: null,
-          created_at: new Date().toISOString(),
-        };
-        useWorkspaceStore.setState((prev) => ({
-          messages: [...prev.messages, userMsg],
-        }));
       }
     },
-    [],
+    [sendJson],
+  );
+
+  const sendHello = useCallback(
+    (targetSessionId: string, lastSeenNodeId?: string | null) => {
+      sendJson({
+        type: "hello",
+        session_id: targetSessionId,
+        last_seen_node_id: lastSeenNodeId ?? null,
+      });
+    },
+    [sendJson],
+  );
+
+  const sendPing = useCallback(() => {
+    sendJson({ type: "ping" });
+  }, [sendJson]);
+
+  const sendSelectRevisionPath = useCallback(
+    (path: RevisionPath, extraContext?: string) => {
+      const trimmedContext = extraContext?.trim();
+      sendJson({
+        type: "select_revision_path",
+        path,
+        extra_context: trimmedContext ? trimmedContext : null,
+      });
+    },
+    [sendJson],
+  );
+
+  const sendHumanConfirm = useCallback(
+    (decision: HumanConfirmDecision, payload?: unknown) => {
+      sendJson({ type: "human_confirm", decision, payload: payload ?? null });
+    },
+    [sendJson],
+  );
+
+  const sendMessage = useCallback(
+    (content: string) => {
+      console.warn("sendMessage is deprecated, use sendContextNote or sendStartGeneration");
+      sendContextNote(content);
+    },
+    [sendContextNote],
   );
 
   const startGeneration = useCallback(() => {
-    sendMessage("开始生成");
-  }, [sendMessage]);
+    console.warn("startGeneration() without args is deprecated");
+  }, []);
 
   const rollback = useCallback(
     (checkpointId: string) => {
-      const ws = wsRef.current;
-      if (ws?.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "rollback", checkpoint_id: checkpointId }));
-      }
+      sendJson({ type: "rollback", checkpoint_id: checkpointId });
     },
-    [],
+    [sendJson],
   );
 
   const confirm = useCallback(() => {
-    const ws = wsRef.current;
-    if (ws?.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "confirm" }));
-    }
-  }, []);
+    sendJson({ type: "confirm" });
+  }, [sendJson]);
 
   const abort = useCallback(() => {
-    const ws = wsRef.current;
-    if (ws?.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "abort" }));
-    }
-  }, []);
+    sendJson({ type: "abort" });
+  }, [sendJson]);
 
   const selectProvider = useCallback(
     (role: string, provider: string) => {
-      const ws = wsRef.current;
-      if (ws?.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "provider_select", role, provider }));
-      }
+      sendJson({ type: "provider_select", role, provider });
     },
-    [],
+    [sendJson],
   );
 
   const sendReviewDecision = useCallback((decision: string, extraContext?: string) => {
-    const ws = wsRef.current;
-    if (ws?.readyState === WebSocket.OPEN) {
-      const trimmedContext = extraContext?.trim();
-      ws.send(
-        JSON.stringify({
-          type: "review_decision_response",
-          decision,
-          extra_context: trimmedContext ? trimmedContext : null,
-        }),
-      );
-    }
-  }, []);
+    const trimmedContext = extraContext?.trim();
+    sendJson({
+      type: "review_decision_response",
+      decision,
+      extra_context: trimmedContext ? trimmedContext : null,
+    });
+  }, [sendJson]);
 
   const respondPermission = useCallback(
     (id: string, approved: boolean, reason?: string) => {
-      const ws = wsRef.current;
-      if (ws?.readyState === WebSocket.OPEN) {
-        const trimmedReason = reason?.trim();
-        ws.send(
-          JSON.stringify({
-            type: "permission_response",
-            id,
-            approved,
-            reason: trimmedReason ? trimmedReason : null,
-          }),
-        );
+      const trimmedReason = reason?.trim();
+      if (
+        sendJson({
+          type: "permission_response",
+          id,
+          approved,
+          reason: trimmedReason ? trimmedReason : null,
+        })
+      ) {
         useWorkspaceStore.getState().resolvePermissionRequest(id);
       }
     },
-    [],
+    [sendJson],
   );
+
+  const sendProviderSelect = selectProvider;
+  const sendPermissionResponse = respondPermission;
 
   return {
     sendMessage,
+    sendContextNote,
+    sendStartGeneration,
+    sendSelectRevisionPath,
+    sendHumanConfirm,
+    sendHello,
+    sendPing,
     startGeneration,
     rollback,
     confirm,
     abort,
     selectProvider,
+    sendProviderSelect,
     sendReviewDecision,
     respondPermission,
+    sendPermissionResponse,
     connectionStatus,
   };
 }
