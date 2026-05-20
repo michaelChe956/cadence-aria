@@ -33,6 +33,7 @@ tokio = { version = "1.52.1", features = ["fs", "io-util", "macros", "net", "pro
 tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-util = "0.7"
 tower-http = { version = "0.6", features = ["fs", "trace"] }
+tracing = "0.1"
 uuid = { version = "1.23.1", features = ["v4"] }
 
 [dev-dependencies]

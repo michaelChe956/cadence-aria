@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -18,7 +19,17 @@ pub struct PermissionDecision {
     pub reason: Option<String>,
 }
 
-type PendingPermissions = Arc<Mutex<HashMap<String, oneshot::Sender<PermissionDecision>>>>;
+type PendingPermissions =
+    Arc<Mutex<HashMap<String, (oneshot::Sender<PermissionDecision>, Instant)>>>;
+
+#[cfg(not(test))]
+const PERMISSION_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
+#[cfg(test)]
+const PERMISSION_CLEANUP_INTERVAL: Duration = Duration::from_millis(10);
+#[cfg(not(test))]
+const PERMISSION_TIMEOUT: Duration = Duration::from_secs(900);
+#[cfg(test)]
+const PERMISSION_TIMEOUT: Duration = Duration::from_millis(30);
 
 struct PendingPermissionGuard {
     id: Option<String>,
@@ -71,6 +82,11 @@ impl ApprovalBridge {
         tokio::spawn(listen_for_permission_commands(
             command_rx,
             Arc::clone(&pending),
+            event_tx.clone(),
+        ));
+        tokio::spawn(cleanup_pending_permissions(
+            Arc::clone(&pending),
+            event_tx.clone(),
         ));
 
         Self {
@@ -101,7 +117,10 @@ impl ApprovalBridge {
 
         let id = next_permission_id();
         let (decision_tx, decision_rx) = oneshot::channel();
-        self.pending.lock().await.insert(id.clone(), decision_tx);
+        self.pending
+            .lock()
+            .await
+            .insert(id.clone(), (decision_tx, Instant::now()));
         let mut pending_guard = PendingPermissionGuard::new(id.clone(), Arc::clone(&self.pending));
 
         let request = ProviderEvent::PermissionRequest(PermissionRequestData {
@@ -146,6 +165,7 @@ impl ApprovalBridge {
 async fn listen_for_permission_commands(
     mut command_rx: mpsc::Receiver<ProviderCommand>,
     pending: PendingPermissions,
+    event_tx: mpsc::Sender<ProviderEvent>,
 ) {
     while let Some(command) = command_rx.recv().await {
         match command {
@@ -154,19 +174,66 @@ async fn listen_for_permission_commands(
                 approved,
                 reason,
             } => {
-                if let Some(decision_tx) = pending.lock().await.remove(&id) {
+                tracing::info!(permission_id = %id, approved, "bridge received permission response");
+                if let Some((decision_tx, _created_at)) = pending.lock().await.remove(&id) {
+                    tracing::info!(permission_id = %id, "bridge dispatched decision to pending");
                     let _ = decision_tx.send(PermissionDecision { approved, reason });
+                } else {
+                    tracing::warn!(permission_id = %id, "bridge: no pending entry for id");
+                    let _ = event_tx
+                        .send(ProviderEvent::ProtocolError {
+                            code: "PERMISSION_ID_UNMATCHED".to_string(),
+                            message: format!("PermissionResponse id={id} not found in pending"),
+                            context: Some(serde_json::json!({ "permission_id": id })),
+                        })
+                        .await;
                 }
             }
             ProviderCommand::Abort => {
                 let mut pending = pending.lock().await;
-                for (_, decision_tx) in pending.drain() {
+                for (_, (decision_tx, _created_at)) in pending.drain() {
                     let _ = decision_tx.send(PermissionDecision {
                         approved: false,
                         reason: Some("aborted".to_string()),
                     });
                 }
             }
+        }
+    }
+}
+
+async fn cleanup_pending_permissions(
+    pending: PendingPermissions,
+    event_tx: mpsc::Sender<ProviderEvent>,
+) {
+    loop {
+        tokio::time::sleep(PERMISSION_CLEANUP_INTERVAL).await;
+        let now = Instant::now();
+        let expired_ids: Vec<String> = {
+            let guard = pending.lock().await;
+            guard
+                .iter()
+                .filter(|(_, (_, created_at))| now.duration_since(*created_at) > PERMISSION_TIMEOUT)
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+        let timed_out_ids: Vec<String> = {
+            let mut guard = pending.lock().await;
+            expired_ids
+                .into_iter()
+                .filter_map(|id| {
+                    guard.remove(&id).map(|(decision_tx, _created_at)| {
+                        drop(decision_tx);
+                        id
+                    })
+                })
+                .collect()
+        };
+
+        for id in timed_out_ids {
+            let _ = event_tx
+                .send(ProviderEvent::PermissionTimeout { permission_id: id })
+                .await;
         }
     }
 }
@@ -186,7 +253,7 @@ mod tests {
     use std::future::Future;
     use std::sync::Arc;
     use std::task::Poll;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use futures_util::task::noop_waker_ref;
     use tokio::sync::{Mutex, mpsc, oneshot};
@@ -424,6 +491,23 @@ mod tests {
             })
             .await
             .unwrap();
+        match tokio::time::timeout(TEST_TIMEOUT, event_rx.recv())
+            .await
+            .expect("unmatched response should emit protocol_error")
+            .expect("event channel should stay open")
+        {
+            ProviderEvent::ProtocolError { code, context, .. } => {
+                assert_eq!(code, "PERMISSION_ID_UNMATCHED");
+                assert_eq!(
+                    context
+                        .as_ref()
+                        .and_then(|value| value.get("permission_id"))
+                        .and_then(|value| value.as_str()),
+                    Some("permission_not_pending")
+                );
+            }
+            other => panic!("unexpected provider event: {other:?}"),
+        }
         command_tx
             .send(ProviderCommand::PermissionResponse {
                 id: request_id,
@@ -439,6 +523,47 @@ mod tests {
             .expect("permission request task should not panic");
         assert!(!decision.approved);
         assert_eq!(decision.reason.as_deref(), Some("matched request"));
+        wait_for_pending_len(&bridge, 0).await;
+    }
+
+    #[tokio::test]
+    async fn approval_bridge_times_out_pending_permission_without_denying_provider() {
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let bridge = Arc::new(ApprovalBridge::new(
+            ProviderPermissionMode::Supervised,
+            event_tx,
+        ));
+        let wait_bridge = Arc::clone(&bridge);
+
+        let decision_task = tokio::spawn(async move {
+            wait_bridge
+                .request_tool(
+                    "bash",
+                    "Run cargo test",
+                    RiskLevel::Medium,
+                    CancellationToken::new(),
+                )
+                .await
+        });
+
+        let request_id = receive_permission_request(&mut event_rx).await;
+
+        match tokio::time::timeout(TEST_TIMEOUT, event_rx.recv())
+            .await
+            .expect("timeout event should be emitted")
+            .expect("event channel should stay open")
+        {
+            ProviderEvent::PermissionTimeout { permission_id } => {
+                assert_eq!(permission_id, request_id);
+            }
+            other => panic!("unexpected provider event: {other:?}"),
+        }
+
+        let decision = tokio::time::timeout(TEST_TIMEOUT, decision_task)
+            .await
+            .expect("permission request should finish after timeout")
+            .expect("permission request task should not panic");
+        assert!(decision.is_err());
         wait_for_pending_len(&bridge, 0).await;
     }
 
@@ -479,7 +604,7 @@ mod tests {
         pending
             .lock()
             .await
-            .insert("permission_test".to_string(), decision_tx);
+            .insert("permission_test".to_string(), (decision_tx, Instant::now()));
         let pending_lock = pending.lock().await;
         let mut guard =
             PendingPermissionGuard::new("permission_test".to_string(), Arc::clone(&pending));

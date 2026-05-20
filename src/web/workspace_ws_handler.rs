@@ -244,6 +244,26 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                     options,
                 },
                 EngineEvent::Error { message } => WsOutMessage::Error { message },
+                EngineEvent::ProtocolError {
+                    code,
+                    message,
+                    context,
+                } => WsOutMessage::ProtocolError {
+                    code,
+                    message,
+                    context,
+                },
+                EngineEvent::PermissionTimeout {
+                    permission_id,
+                    node_id,
+                } => WsOutMessage::ProtocolError {
+                    code: "PERMISSION_TIMEOUT".to_string(),
+                    message: format!("Permission request {permission_id} timed out"),
+                    context: Some(serde_json::json!({
+                        "permission_id": permission_id,
+                        "node_id": node_id,
+                    })),
+                },
             };
             if !send_json_outbound(&outbound_for_events, &ws_msg).await {
                 break;
@@ -364,6 +384,7 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                 approved,
                 reason,
             } => {
+                tracing::info!(permission_id = %id, approved, "ws inbound permission response");
                 let command_tx = {
                     current_run
                         .lock()

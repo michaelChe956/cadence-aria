@@ -379,6 +379,10 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
                         StreamChunk::Done { full_output }
                     }
                     ProviderEvent::Failed { message } => StreamChunk::Error(message),
+                    ProviderEvent::ProtocolError { message, .. } => StreamChunk::Error(message),
+                    ProviderEvent::PermissionTimeout { permission_id } => {
+                        StreamChunk::Error(format!("Permission request {permission_id} timed out"))
+                    }
                     ProviderEvent::PermissionRequest(_)
                     | ProviderEvent::StatusChanged(_)
                     | ProviderEvent::Execution(_) => {
@@ -660,6 +664,12 @@ mod tests {
                 | ProviderEvent::TextDelta { .. }
                 | ProviderEvent::PermissionRequest(_) => {}
                 ProviderEvent::Failed { message } => panic!("provider failed: {message}"),
+                ProviderEvent::ProtocolError { message, .. } => {
+                    panic!("provider protocol error: {message}")
+                }
+                ProviderEvent::PermissionTimeout { permission_id } => {
+                    panic!("provider permission timed out: {permission_id}")
+                }
             }
         }
     }

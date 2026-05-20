@@ -192,6 +192,15 @@ pub enum EngineEvent {
     Error {
         message: String,
     },
+    ProtocolError {
+        code: String,
+        message: String,
+        context: Option<serde_json::Value>,
+    },
+    PermissionTimeout {
+        permission_id: String,
+        node_id: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -524,6 +533,19 @@ impl WorkspaceEngine {
         .await
     }
 
+    pub async fn persist_permission_timeout(
+        &mut self,
+        node_id: &str,
+        request_id: String,
+    ) -> Result<(), String> {
+        self.persist_permission_response(
+            node_id,
+            request_id,
+            serde_json::json!({ "status": "timeout" }),
+        )
+        .await
+    }
+
     pub async fn persist_review_verdict(
         &mut self,
         node_id: &str,
@@ -670,6 +692,7 @@ impl WorkspaceEngine {
                             approved,
                             reason,
                         }) => {
+                            tracing::info!(permission_id = %id, "engine forwarding permission response");
                             if let Some(node_id) = node_id.as_deref() {
                                 let _ = self
                                     .persist_permission_response(
@@ -802,6 +825,25 @@ impl WorkspaceEngine {
                             self.finish_failed_run().await;
                             return;
                         }
+                        ProviderEvent::ProtocolError {
+                            code,
+                            message,
+                            context,
+                        } => {
+                            let _ = self
+                                .event_tx
+                                .send(EngineEvent::ProtocolError {
+                                    code,
+                                    message,
+                                    context,
+                                })
+                                .await;
+                        }
+                        ProviderEvent::PermissionTimeout { permission_id } => {
+                            self.handle_permission_timeout(permission_id, node_id.clone())
+                                .await;
+                            return;
+                        }
                     }
                 }
             }
@@ -926,6 +968,7 @@ impl WorkspaceEngine {
                             approved,
                             reason,
                         }) => {
+                            tracing::info!(permission_id = %id, "engine forwarding permission response");
                             if let Some(node_id) = node_id.as_deref() {
                                 let _ = self
                                     .persist_permission_response(
@@ -1061,6 +1104,25 @@ impl WorkspaceEngine {
                                 let _ = self.flush_stream_buffer(node_id).await;
                             }
                             self.finish_failed_run().await;
+                            return;
+                        }
+                        ProviderEvent::ProtocolError {
+                            code,
+                            message,
+                            context,
+                        } => {
+                            let _ = self
+                                .event_tx
+                                .send(EngineEvent::ProtocolError {
+                                    code,
+                                    message,
+                                    context,
+                                })
+                                .await;
+                        }
+                        ProviderEvent::PermissionTimeout { permission_id } => {
+                            self.handle_permission_timeout(permission_id, node_id.clone())
+                                .await;
                             return;
                         }
                     }
@@ -1668,6 +1730,32 @@ impl WorkspaceEngine {
             );
         }
         self.transition_stage(WorkspaceStage::PrepareContext).await;
+    }
+
+    async fn handle_permission_timeout(&mut self, permission_id: String, node_id: Option<String>) {
+        tracing::warn!(permission_id = %permission_id, "permission timed out; aborting active run");
+        if let Some(node_id) = node_id.as_deref() {
+            let _ = self
+                .persist_permission_timeout(node_id, permission_id.clone())
+                .await;
+            let _ = self.flush_stream_buffer(node_id).await;
+            self.update_timeline_node(
+                node_id,
+                TimelineNodeStatus::Failed,
+                Some("权限请求超时，运行已中止".to_string()),
+            )
+            .await;
+        }
+        self.active_run_id = None;
+        self.cancel.cancel();
+        let _ = self
+            .event_tx
+            .send(EngineEvent::PermissionTimeout {
+                permission_id,
+                node_id,
+            })
+            .await;
+        self.finish_failed_run().await;
     }
 
     fn build_prompt(&self, user_content: &str) -> String {
@@ -2502,6 +2590,93 @@ mod tests {
             detail.permission_events[0].response.as_ref().unwrap()["approved"],
             true
         );
+    }
+
+    #[tokio::test]
+    async fn permission_timeout_marks_node_detail_and_returns_to_prepare_context() {
+        let (tmp, checkpoint_store) = setup();
+        let lifecycle_store = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
+        let (engine_tx, mut engine_rx) = mpsc::channel(64);
+        let session_record = lifecycle_store
+            .create_workspace_session(CreateWorkspaceSessionInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                entity_id: "story_spec_0001".to_string(),
+                workspace_type: WorkspaceType::Story,
+                author_provider: ProviderName::ClaudeCode,
+                reviewer_provider: ProviderName::Codex,
+                review_rounds: 2,
+                superpowers_enabled: true,
+                openspec_enabled: true,
+            })
+            .unwrap();
+        let session = WorkspaceSession::from_record(session_record);
+        let mut engine = WorkspaceEngine::new_persistent(
+            checkpoint_store,
+            lifecycle_store.clone(),
+            engine_tx,
+            session,
+        );
+        let node_id = create_author_run_node(&mut engine).await;
+        engine.mark_active_run_started("run-1");
+        engine
+            .persist_permission_request(
+                &node_id,
+                "permission_1".to_string(),
+                serde_json::json!({"tool_name": "shell", "description": "cargo test"}),
+            )
+            .await
+            .unwrap();
+
+        let (provider_event_tx, provider_event_rx) = mpsc::channel(8);
+        let (provider_command_tx, _provider_command_rx) = mpsc::channel(8);
+        provider_event_tx
+            .send(ProviderEvent::PermissionTimeout {
+                permission_id: "permission_1".to_string(),
+            })
+            .await
+            .unwrap();
+        drop(provider_event_tx);
+
+        engine
+            .drive_provider_session(
+                Ok(ProviderSession {
+                    events: provider_event_rx,
+                    commands: provider_command_tx,
+                }),
+                empty_provider_commands(),
+                Some(node_id.clone()),
+                Some(ProviderName::ClaudeCode),
+            )
+            .await;
+
+        let detail = lifecycle_store
+            .load_node_detail(&engine.session().session_id, &node_id)
+            .unwrap();
+        assert_eq!(
+            detail.permission_events[0]
+                .response
+                .as_ref()
+                .and_then(|value| value.get("status"))
+                .and_then(|value| value.as_str()),
+            Some("timeout")
+        );
+        assert_eq!(detail.status, TimelineNodeStatus::Failed);
+        assert_eq!(engine.current_stage(), WorkspaceStage::PrepareContext);
+        assert_eq!(engine.active_run_id(), None);
+
+        let mut saw_timeout_event = false;
+        while let Ok(event) = engine_rx.try_recv() {
+            if let EngineEvent::PermissionTimeout {
+                permission_id,
+                node_id: event_node_id,
+            } = event
+            {
+                saw_timeout_event = permission_id == "permission_1"
+                    && event_node_id.as_deref() == Some(node_id.as_str());
+            }
+        }
+        assert!(saw_timeout_event);
     }
 
     #[tokio::test]

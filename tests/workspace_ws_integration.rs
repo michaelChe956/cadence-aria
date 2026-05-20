@@ -856,6 +856,84 @@ async fn workspace_ws_supervised_permission_allows_real_stream_to_complete() {
 }
 
 #[tokio::test]
+async fn workspace_ws_unmatched_permission_response_returns_protocol_error() {
+    let root = tempdir().expect("root");
+    let _repo = create_workspace_session_fixture_with_author(&root, "claude_code").await;
+    let mut registry = ProviderRegistry::new();
+    registry.register(ProviderName::Fake, Arc::new(FakeStreamingProvider));
+    registry.register(
+        ProviderName::ClaudeCode,
+        Arc::new(ClaudeCodeProvider::new(executable_fixture(
+            "tests/fixtures/provider/claude_stream_json_fixture.sh",
+        ))),
+    );
+
+    let app = build_web_router(WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        registry,
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(
+        &mut ws,
+        &WsInMessage::UserMessage {
+            content: "run supervised provider".to_string(),
+        },
+    )
+    .await;
+
+    let permission = recv_until_permission_request(&mut ws).await;
+    send_json(
+        &mut ws,
+        &WsInMessage::PermissionResponse {
+            id: "permission_not_pending".to_string(),
+            approved: true,
+            reason: Some("wrong request".to_string()),
+        },
+    )
+    .await;
+
+    match recv_until_protocol_error(&mut ws).await {
+        WsOutMessage::ProtocolError { code, context, .. } => {
+            assert_eq!(code, "PERMISSION_ID_UNMATCHED");
+            assert_eq!(
+                context
+                    .as_ref()
+                    .and_then(|value| value.get("permission_id"))
+                    .and_then(|value| value.as_str()),
+                Some("permission_not_pending")
+            );
+        }
+        other => panic!("expected protocol_error, got {other:?}"),
+    }
+
+    send_json(
+        &mut ws,
+        &WsInMessage::PermissionResponse {
+            id: permission.id,
+            approved: true,
+            reason: None,
+        },
+    )
+    .await;
+
+    let checkpoint = recv_until_message_complete(&mut ws).await;
+    assert!(checkpoint.starts_with("cp_"));
+
+    drop(ws);
+    server.abort();
+}
+
+#[tokio::test]
 async fn workspace_ws_codex_current_protocol_completes_from_repository_path() {
     let root = tempdir().expect("root");
     let repo = create_workspace_session_fixture_with_author(&root, "codex").await;
@@ -1405,6 +1483,21 @@ async fn recv_until_permission_request(
         }
     }
     panic!("permission_request not received");
+}
+
+async fn recv_until_protocol_error(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> WsOutMessage {
+    for _ in 0..40 {
+        match recv_json(ws).await {
+            event @ WsOutMessage::ProtocolError { .. } => return event,
+            WsOutMessage::Error { message } => panic!("ws error: {message}"),
+            _ => {}
+        }
+    }
+    panic!("protocol_error not received");
 }
 
 fn long_message(token: &str) -> String {

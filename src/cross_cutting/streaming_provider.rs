@@ -110,6 +110,14 @@ pub enum ProviderEvent {
     Failed {
         message: String,
     },
+    ProtocolError {
+        code: String,
+        message: String,
+        context: Option<serde_json::Value>,
+    },
+    PermissionTimeout {
+        permission_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -325,6 +333,10 @@ impl StreamingProviderAdapter for FakeStreamingProvider {
                         StreamChunk::Done { full_output }
                     }
                     ProviderEvent::Failed { message } => StreamChunk::Error(message),
+                    ProviderEvent::ProtocolError { message, .. } => StreamChunk::Error(message),
+                    ProviderEvent::PermissionTimeout { permission_id } => {
+                        StreamChunk::Error(format!("Permission request {permission_id} timed out"))
+                    }
                     ProviderEvent::PermissionRequest(_)
                     | ProviderEvent::StatusChanged(_)
                     | ProviderEvent::Execution(_) => {
