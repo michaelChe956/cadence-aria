@@ -151,7 +151,7 @@ export function useWorkspaceWs(sessionId: string | null) {
         store.setStage(msg.stage as string);
         break;
       case "artifact_update":
-        store.setArtifact(msg.markdown as string);
+        store.setArtifact(msg.markdown as string, msg.version as number | undefined);
         break;
       case "permission_request":
         store.addPermissionRequest({

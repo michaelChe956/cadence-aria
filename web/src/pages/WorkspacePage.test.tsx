@@ -137,6 +137,23 @@ describe("WorkspacePage", () => {
     expect(screen.getByLabelText("Reviewer")).toBeDisabled();
   });
 
+  it("passes provider locked timestamp to the header", () => {
+    mockWorkspaceWs();
+    useWorkspaceStore.setState({
+      stage: "running",
+      providerLocked: true,
+      providerLockedAt: "2026-05-20T14:35:00Z",
+      providers: { author: "claude_code", reviewer: "codex" },
+    });
+
+    render(<WorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+
+    expect(screen.getByLabelText("Provider 已锁定")).toHaveAttribute(
+      "data-locked-at",
+      "2026-05-20T14:35:00Z",
+    );
+  });
+
   it("sends review decision paths through protocol v2", async () => {
     const api = mockWorkspaceWs();
     useWorkspaceStore.setState({

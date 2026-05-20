@@ -13,7 +13,7 @@ use crate::cross_cutting::streaming_provider::{
     FakeStreamingProvider, PermissionRequestData, ProviderCommand, ProviderEvent, ProviderSession,
     RiskLevel, StreamChunk, StreamingProviderAdapter, StreamingProviderInput,
 };
-use crate::protocol::contracts::AdapterInput;
+use crate::protocol::contracts::{AdapterInput, AdapterRole};
 use crate::web::state::WebAppState;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +30,7 @@ pub struct TestControls {
 struct TestControlsInner {
     workspace_sockets: Mutex<HashMap<String, Vec<mpsc::Sender<WorkspaceSocketControl>>>>,
     permission_fixture_sessions: Mutex<HashSet<String>>,
+    review_fixture_sessions: Mutex<HashMap<String, ReviewFixture>>,
     permission_timeout: Mutex<Option<Duration>>,
     server_idle_timeout: Mutex<Option<Duration>>,
 }
@@ -41,6 +42,13 @@ pub fn test_controls_enabled() -> bool {
 #[derive(Debug, Deserialize)]
 pub struct PermissionFixtureRequest {
     pub mode: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReviewFixture {
+    pub verdict: String,
+    pub summary: String,
+    pub comments: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -73,6 +81,18 @@ pub async fn enable_permission_fixture(
     state
         .test_controls
         .enable_permission_fixture(session_id)
+        .await;
+    Json(json!({"status": "ok"}))
+}
+
+pub async fn enable_review_fixture(
+    State(state): State<WebAppState>,
+    Path(session_id): Path<String>,
+    Json(request): Json<ReviewFixture>,
+) -> Json<serde_json::Value> {
+    state
+        .test_controls
+        .enable_review_fixture(session_id, request)
         .await;
     Json(json!({"status": "ok"}))
 }
@@ -151,11 +171,27 @@ impl TestControls {
             .insert(session_id);
     }
 
+    pub async fn enable_review_fixture(&self, session_id: String, fixture: ReviewFixture) {
+        self.inner
+            .review_fixture_sessions
+            .lock()
+            .expect("test controls review fixture lock")
+            .insert(session_id, fixture);
+    }
+
     pub async fn consume_permission_fixture(&self, session_id: &str) -> bool {
         self.inner
             .permission_fixture_sessions
             .lock()
             .expect("test controls permission fixture lock")
+            .remove(session_id)
+    }
+
+    pub async fn consume_review_fixture(&self, session_id: &str) -> Option<ReviewFixture> {
+        self.inner
+            .review_fixture_sessions
+            .lock()
+            .expect("test controls review fixture lock")
             .remove(session_id)
     }
 
@@ -213,6 +249,13 @@ impl StreamingProviderAdapter for TestControlledFakeStreamingProvider {
         input: StreamingProviderInput,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
+        if input.role == AdapterRole::Reviewer
+            && let Some(session_id) = input.session_id.as_deref()
+            && let Some(fixture) = self.controls.consume_review_fixture(session_id).await
+        {
+            return Ok(start_review_fixture_session(fixture, cancel));
+        }
+
         let use_fixture = match input.session_id.as_deref() {
             Some(session_id) => self.controls.consume_permission_fixture(session_id).await,
             None => false,
@@ -234,6 +277,48 @@ impl StreamingProviderAdapter for TestControlledFakeStreamingProvider {
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
         self.fallback.run_streaming(input, cancel).await
+    }
+}
+
+fn start_review_fixture_session(
+    fixture: ReviewFixture,
+    cancel: tokio_util::sync::CancellationToken,
+) -> ProviderSession {
+    let (event_tx, event_rx) = mpsc::channel(8);
+    let (command_tx, _command_rx) = mpsc::channel(8);
+
+    tokio::spawn(async move {
+        let contract = json!({
+            "verdict": fixture.verdict,
+            "summary": fixture.summary,
+        });
+        let output = format!("{}\n\n```json\n{}\n```", fixture.comments, contract);
+        if cancel.is_cancelled() {
+            return;
+        }
+        if event_tx
+            .send(ProviderEvent::TextDelta {
+                content: output.clone(),
+            })
+            .await
+            .is_err()
+        {
+            return;
+        }
+        if cancel.is_cancelled() {
+            return;
+        }
+        let _ = event_tx
+            .send(ProviderEvent::Completed {
+                full_output: output,
+                provider_session_id: None,
+            })
+            .await;
+    });
+
+    ProviderSession {
+        events: event_rx,
+        commands: command_tx,
     }
 }
 
@@ -345,7 +430,7 @@ mod tests {
     use crate::protocol::contracts::{AdapterRole, ProviderType};
 
     use super::{
-        TestControlledFakeStreamingProvider, TestControls, WorkspaceSocketControl,
+        ReviewFixture, TestControlledFakeStreamingProvider, TestControls, WorkspaceSocketControl,
         test_controls_enabled,
     };
 
@@ -420,6 +505,49 @@ mod tests {
             !controls
                 .consume_permission_fixture("workspace_session_2")
                 .await
+        );
+    }
+
+    #[tokio::test]
+    async fn review_fixture_is_session_scoped_and_consumed_once() {
+        let controls = TestControls::default();
+
+        assert!(
+            controls
+                .consume_review_fixture("workspace_session_1")
+                .await
+                .is_none()
+        );
+
+        controls
+            .enable_review_fixture(
+                "workspace_session_1".to_string(),
+                ReviewFixture {
+                    verdict: "revise".to_string(),
+                    summary: "补充异常路径".to_string(),
+                    comments: "需要补充失败路径。".to_string(),
+                },
+            )
+            .await;
+
+        let fixture = controls
+            .consume_review_fixture("workspace_session_1")
+            .await
+            .expect("review fixture");
+
+        assert_eq!(fixture.verdict, "revise");
+        assert_eq!(fixture.summary, "补充异常路径");
+        assert!(
+            controls
+                .consume_review_fixture("workspace_session_1")
+                .await
+                .is_none()
+        );
+        assert!(
+            controls
+                .consume_review_fixture("workspace_session_2")
+                .await
+                .is_none()
         );
     }
 
@@ -508,6 +636,54 @@ mod tests {
             }
         }
         panic!("permission fixture did not complete");
+    }
+
+    #[tokio::test]
+    async fn review_fixture_fake_provider_emits_json_contract_for_reviewer() {
+        let controls = TestControls::default();
+        controls
+            .enable_review_fixture(
+                "workspace_session_1".to_string(),
+                ReviewFixture {
+                    verdict: "revise".to_string(),
+                    summary: "补充异常路径".to_string(),
+                    comments: "需要补充失败路径。".to_string(),
+                },
+            )
+            .await;
+        let provider = TestControlledFakeStreamingProvider::new(controls);
+        let mut session = provider
+            .start(
+                StreamingProviderInput {
+                    provider_type: ProviderType::Codex,
+                    role: AdapterRole::Reviewer,
+                    prompt: "请作为 reviewer 审核当前 Workspace 产物。".to_string(),
+                    working_dir: std::env::current_dir().expect("current dir"),
+                    session_id: Some("workspace_session_1".to_string()),
+                    permission_mode: ProviderPermissionMode::Supervised,
+                    env_vars: Default::default(),
+                    timeout_secs: 60,
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .expect("review fixture provider session");
+
+        let mut output = String::new();
+        while let Some(event) = session.events.recv().await {
+            match event {
+                ProviderEvent::TextDelta { content } => output.push_str(&content),
+                ProviderEvent::Completed { full_output, .. } => {
+                    output.push_str(&full_output);
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(output.contains("需要补充失败路径。"));
+        assert!(output.contains("\"verdict\":\"revise\""));
+        assert!(output.contains("\"summary\":\"补充异常路径\""));
     }
 
     #[tokio::test]

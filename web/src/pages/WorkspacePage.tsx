@@ -146,6 +146,7 @@ export function WorkspacePage({
         rounds={store.reviewRounds}
         stage={store.stage}
         providerLocked={store.providerLocked}
+        lockedAt={store.providerLockedAt}
       />
 
       {store.protocolError ? (

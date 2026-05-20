@@ -544,10 +544,39 @@ describe("workspace ws store", () => {
       reviewer: "codex",
       review_rounds: 1,
     });
+    expect(useWorkspaceStore.getState().providerLockedAt).toBe("2026-05-20T14:35:00Z");
 
     store.setProviderLocked(null);
 
     expect(useWorkspaceStore.getState().providerLocked).toBe(false);
     expect(useWorkspaceStore.getState().providerSnapshot).toBeNull();
+    expect(useWorkspaceStore.getState().providerLockedAt).toBeNull();
+  });
+
+  it("records live artifact updates as artifact versions", () => {
+    const store = useWorkspaceStore.getState();
+    useWorkspaceStore.setState({
+      providers: { author: "fake", reviewer: "codex" },
+      activeNodeId: "node-author-1",
+    });
+
+    store.setArtifact("# Draft v1", 1);
+    store.setArtifact("# Draft v2", 2);
+
+    expect(useWorkspaceStore.getState().artifact).toBe("# Draft v2");
+    expect(useWorkspaceStore.getState().artifactVersions).toMatchObject([
+      {
+        version: 1,
+        markdown: "# Draft v1",
+        generated_by: "fake",
+        source_node_id: "node-author-1",
+      },
+      {
+        version: 2,
+        markdown: "# Draft v2",
+        generated_by: "fake",
+        source_node_id: "node-author-1",
+      },
+    ]);
   });
 });

@@ -148,13 +148,14 @@ pub fn build_web_router(state: WebAppState) -> Router {
                 post(test_controls::enable_permission_fixture),
             )
             .route(
+                "/api/test/workspace-sessions/{session_id}/review-fixture",
+                post(test_controls::enable_review_fixture),
+            )
+            .route(
                 "/api/test/permission-timeout",
                 post(test_controls::set_permission_timeout),
             )
-            .route(
-                "/api/test/ws-timeout",
-                post(test_controls::set_ws_timeout),
-            )
+            .route("/api/test/ws-timeout", post(test_controls::set_ws_timeout))
     } else {
         router
     };

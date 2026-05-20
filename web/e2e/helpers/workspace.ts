@@ -218,6 +218,24 @@ export async function enablePermissionFixture(page: Page, sessionId: string) {
   expect(response).toBeOK();
 }
 
+export async function enableReviewFixture(
+  page: Page,
+  sessionId: string,
+  fixture = {
+    verdict: "revise",
+    summary: "补充异常路径",
+    comments: "需要补充失败路径。",
+  },
+) {
+  const response = await page.request.post(
+    `/api/test/workspace-sessions/${sessionId}/review-fixture`,
+    {
+      data: fixture,
+    },
+  );
+  expect(response).toBeOK();
+}
+
 export async function setPermissionTimeout(page: Page, timeoutMs: number) {
   const response = await page.request.post("/api/test/permission-timeout", {
     data: { timeout_ms: timeoutMs },

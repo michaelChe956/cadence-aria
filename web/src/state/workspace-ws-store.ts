@@ -150,6 +150,7 @@ export interface WorkspaceWsState {
   protocolError: ProtocolErrorState | null;
   providerLocked: boolean;
   providerSnapshot: ProviderConfigSnapshot | null;
+  providerLockedAt: string | null;
   acknowledgedAbortedNodes: string[];
   reviewerEnabled: boolean;
   reviewRounds: number;
@@ -175,7 +176,7 @@ export interface WorkspaceWsActions {
   appendStreamChunk: (content: string, nodeId?: string | null) => void;
   completeMessage: (messageId: string, checkpointId: string, nodeId?: string | null) => void;
   setStage: (stage: string) => void;
-  setArtifact: (markdown: string) => void;
+  setArtifact: (markdown: string, version?: number) => void;
   addTimelineNode: (node: TimelineNode) => void;
   updateTimelineNode: (
     nodeId: string,
@@ -228,6 +229,7 @@ const initialState: WorkspaceWsState = {
   protocolError: null,
   providerLocked: false,
   providerSnapshot: null,
+  providerLockedAt: null,
   acknowledgedAbortedNodes: [],
   reviewerEnabled: true,
   reviewRounds: 1,
@@ -334,7 +336,32 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
       streamingContent: STREAMING_STAGES.has(stage) ? prev.streamingContent : "",
     })),
 
-  setArtifact: (markdown) => set({ artifact: markdown }),
+  setArtifact: (markdown, version) =>
+    set((prev) => {
+      if (version === undefined) {
+        return { artifact: markdown };
+      }
+
+      const existing = prev.artifactVersions.find((artifact) => artifact.version === version);
+      const nextVersion: ArtifactVersion = {
+        version,
+        markdown,
+        generated_by: existing?.generated_by ?? prev.providers?.author ?? "fake",
+        reviewed_by: existing?.reviewed_by ?? null,
+        review_verdict: existing?.review_verdict ?? null,
+        confirmed_by: existing?.confirmed_by ?? null,
+        created_at: existing?.created_at ?? new Date().toISOString(),
+        source_node_id: existing?.source_node_id ?? prev.activeNodeId ?? "",
+      };
+
+      return {
+        artifact: markdown,
+        artifactVersions: [
+          ...prev.artifactVersions.filter((artifact) => artifact.version !== version),
+          nextVersion,
+        ].sort((left, right) => left.version - right.version),
+      };
+    }),
 
   addTimelineNode: (node) =>
     set((prev) => ({
@@ -453,6 +480,7 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
     set({
       providerLocked: payload !== null,
       providerSnapshot: payload?.snapshot ?? null,
+      providerLockedAt: payload?.locked_at ?? null,
     }),
 
   setAcknowledgedAbortedNodes: (nodeIds) =>
