@@ -221,9 +221,9 @@ export function IssueLifecycleWorkbench({
       return;
     }
     setError(null);
+    closeDrawer();
     await refresh(selectedProjectId);
     onOpenWorkspace(session.workspace_session_id);
-    closeDrawer();
   }
 
   async function handleGenerateNext(card: LifecycleCardData) {

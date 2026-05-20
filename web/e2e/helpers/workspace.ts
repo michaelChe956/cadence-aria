@@ -97,9 +97,13 @@ export async function openWorkspaceSession(page: Page, sessionId: string): Promi
 }
 
 export async function openDrawerForStory(page: Page, seeded: SeededWorkspace) {
-  await page.goto(`/workbench?focus=${seeded.storyId}`);
-  await expect(page.getByTestId("lifecycle-card-drawer")).toBeVisible();
-  await expect(page.getByText(seeded.storyTitle)).toBeVisible();
+  await page.goto("/workbench");
+  await page.getByRole("button", { name: seeded.projectName, exact: true }).click();
+  await expect(page.getByRole("region", { name: "Story Spec 列" })).toContainText(
+    seeded.storyTitle,
+  );
+  await page.getByText(seeded.storyTitle).click();
+  await expect(page.getByTestId("lifecycle-card-drawer")).toContainText(seeded.storyTitle);
 }
 
 export async function seedConfirmedStoryWorkspace(page: Page): Promise<SeededWorkspace> {
