@@ -18,9 +18,10 @@ use crate::product::models::{
 };
 use crate::protocol::contracts::{AdapterRole, ProviderType};
 use crate::web::workspace_ws_types::{
-    ArtifactVersion, ProviderConfigSnapshot, ReviewVerdict, ReviewVerdictType, TimelineNode,
-    TimelineNodeStatus, TimelineNodeType, WorkspaceStage as WsWorkspaceStage, WsCheckpointDto,
-    WsMessageDto, WsOutMessage, WsProviderConfig,
+    ArtifactVersion, HumanConfirmDecision, ProviderConfigSnapshot, ReviewVerdict,
+    ReviewVerdictType, TimelineNode, TimelineNodeStatus, TimelineNodeType,
+    WorkspaceStage as WsWorkspaceStage, WsCheckpointDto, WsMessageDto, WsOutMessage,
+    WsProviderConfig,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -291,6 +292,10 @@ impl WorkspaceEngine {
         &self.session
     }
 
+    pub fn current_stage(&self) -> WorkspaceStage {
+        self.session.stage.clone()
+    }
+
     pub fn cancel_token(&self) -> CancellationToken {
         self.cancel.clone()
     }
@@ -316,6 +321,92 @@ impl WorkspaceEngine {
 
     pub fn active_run_id(&self) -> Option<&str> {
         self.active_run_id.as_deref()
+    }
+
+    pub async fn append_context_note(&mut self, content: String) -> Result<TimelineNode, String> {
+        Ok(self
+            .append_completed_timeline_event(
+                TimelineNodeType::ContextNote,
+                WorkspaceStage::PrepareContext,
+                "上下文补充".to_string(),
+                Some(content),
+                TimelineNodeStatus::Completed,
+                false,
+            )
+            .await)
+    }
+
+    pub async fn start_generation(
+        &mut self,
+        provider_config: ProviderConfigSnapshot,
+        reviewer_enabled: bool,
+    ) -> Result<(TimelineNode, WsOutMessage), String> {
+        let mut locked_snapshot = provider_config;
+        if !reviewer_enabled {
+            locked_snapshot.reviewer = None;
+            locked_snapshot.review_rounds = 0;
+        }
+
+        self.session.author_provider = locked_snapshot.author.clone();
+        self.session.reviewer_provider = locked_snapshot.reviewer.clone();
+        self.session.review_rounds = locked_snapshot.review_rounds;
+
+        if let Some(store) = &self.lifecycle_store {
+            let reviewer_provider = locked_snapshot
+                .reviewer
+                .clone()
+                .unwrap_or_else(|| locked_snapshot.author.clone());
+            store
+                .update_workspace_session_providers(
+                    &self.session.session_id,
+                    locked_snapshot.author.clone(),
+                    reviewer_provider,
+                )
+                .map_err(|error| format!("persist provider lock failed: {error}"))?;
+            store
+                .update_workspace_session_status(
+                    &self.session.session_id,
+                    WorkspaceSessionStatus::Running,
+                )
+                .map_err(|error| format!("persist workspace status failed: {error}"))?;
+        }
+
+        self.complete_active_node(Some("上下文已确认".to_string()))
+            .await;
+        let node = self
+            .append_completed_timeline_event(
+                TimelineNodeType::StartGeneration,
+                WorkspaceStage::PrepareContext,
+                "开始生成".to_string(),
+                None,
+                TimelineNodeStatus::Completed,
+                true,
+            )
+            .await;
+        self.transition_stage(WorkspaceStage::Running).await;
+
+        let locked = WsOutMessage::ProviderLocked {
+            snapshot: locked_snapshot,
+            locked_at: chrono::Utc::now().to_rfc3339(),
+        };
+        Ok((node, locked))
+    }
+
+    pub async fn append_aborted_by_disconnect(
+        &mut self,
+        last_active_run_id: String,
+    ) -> Result<TimelineNode, String> {
+        self.active_run_id = None;
+        Ok(self
+            .append_completed_timeline_event(
+                TimelineNodeType::AbortedByDisconnect,
+                self.session.stage.clone(),
+                "运行因断开中止".to_string(),
+                Some(format!("last_active_run_id: {last_active_run_id}")),
+                TimelineNodeStatus::Failed,
+                false,
+            )
+            .await)
     }
 
     pub async fn handle_user_message(
@@ -847,6 +938,79 @@ impl WorkspaceEngine {
         }
     }
 
+    pub async fn handle_human_confirm(
+        &mut self,
+        decision: HumanConfirmDecision,
+        payload: Option<serde_json::Value>,
+    ) -> Result<ReviewDecisionOutcome, String> {
+        if self.session.stage != WorkspaceStage::HumanConfirm {
+            return Err("human confirm is only available during human_confirm stage".to_string());
+        }
+
+        match decision {
+            HumanConfirmDecision::Confirm => {
+                self.handle_confirm().await;
+                Ok(ReviewDecisionOutcome::HumanConfirm)
+            }
+            HumanConfirmDecision::RequestChange => {
+                let context = human_confirm_payload_description(payload);
+                if self.latest_review_verdict.is_none() {
+                    self.latest_review_verdict = Some(ReviewVerdict {
+                        verdict: ReviewVerdictType::Revise,
+                        comments: context
+                            .clone()
+                            .unwrap_or_else(|| "人工请求修改".to_string()),
+                        summary: "人工请求修改".to_string(),
+                    });
+                }
+                self.pending_revision_context = context;
+                self.complete_active_node(Some("已请求修改".to_string()))
+                    .await;
+                self.transition_stage(WorkspaceStage::Revision).await;
+                let round = (self
+                    .timeline_nodes
+                    .iter()
+                    .filter(|node| node.node_type == TimelineNodeType::ReviewerRun)
+                    .count() as u32)
+                    .max(1);
+                let _ = self
+                    .create_timeline_node(TimelineNodeDraft {
+                        node_type: TimelineNodeType::Revision,
+                        agent: Some(self.session.author_provider.clone()),
+                        stage: WorkspaceStage::Revision,
+                        round: Some(round),
+                        title: format!("返修 Round {round}"),
+                        summary: Some("根据人工反馈返修".to_string()),
+                        status: TimelineNodeStatus::Active,
+                    })
+                    .await;
+                Ok(ReviewDecisionOutcome::StartRevision)
+            }
+            HumanConfirmDecision::Terminate => {
+                self.complete_active_node(Some("已终止".to_string())).await;
+                if let Some(store) = &self.lifecycle_store {
+                    let _ = store.update_workspace_session_status(
+                        &self.session.session_id,
+                        WorkspaceSessionStatus::Terminated,
+                    );
+                }
+                self.transition_stage(WorkspaceStage::Completed).await;
+                let _ = self
+                    .create_timeline_node(TimelineNodeDraft {
+                        node_type: TimelineNodeType::Completed,
+                        agent: None,
+                        stage: WorkspaceStage::Completed,
+                        round: None,
+                        title: "流程终止".to_string(),
+                        summary: Some("已终止".to_string()),
+                        status: TimelineNodeStatus::Completed,
+                    })
+                    .await;
+                Ok(ReviewDecisionOutcome::HumanConfirm)
+            }
+        }
+    }
+
     async fn complete_assistant_message(&mut self, assistant_msg_id: String, full_content: String) {
         if self.cancel.is_cancelled() {
             self.finish_failed_run().await;
@@ -1294,6 +1458,12 @@ impl WorkspaceEngine {
     }
 
     async fn start_review_or_skip(&mut self) {
+        if self.session.review_rounds == 0 || self.session.reviewer_provider.is_none() {
+            self.enter_human_confirm(Some("未启用交叉审核，等待人工确认".to_string()))
+                .await;
+            return;
+        }
+
         self.transition_stage(WorkspaceStage::CrossReview).await;
         let round = self.next_review_round();
         let reviewer = self
@@ -1376,6 +1546,48 @@ impl WorkspaceEngine {
             .send(EngineEvent::TimelineNodeCreated { node })
             .await;
         node_id
+    }
+
+    async fn append_completed_timeline_event(
+        &mut self,
+        node_type: TimelineNodeType,
+        stage: WorkspaceStage,
+        title: String,
+        summary: Option<String>,
+        status: TimelineNodeStatus,
+        make_active: bool,
+    ) -> TimelineNode {
+        let now = chrono::Utc::now().to_rfc3339();
+        let node_id = format!("timeline_node_{:03}", self.timeline_nodes.len() + 1);
+        let node = TimelineNode {
+            node_id: node_id.clone(),
+            node_type,
+            agent: None,
+            stage: ws_stage(&stage),
+            round: None,
+            status,
+            title,
+            summary,
+            started_at: now.clone(),
+            completed_at: Some(now),
+            duration_ms: Some(0),
+            artifact_ref: self
+                .session
+                .artifact
+                .as_ref()
+                .map(|_| "artifact_current".to_string()),
+            provider_config_snapshot: self.provider_config_snapshot(),
+        };
+        self.timeline_nodes.push(node.clone());
+        if make_active {
+            self.active_node_id = Some(node_id);
+        }
+        self.persist_timeline_nodes();
+        let _ = self
+            .event_tx
+            .send(EngineEvent::TimelineNodeCreated { node: node.clone() })
+            .await;
+        node
     }
 
     async fn complete_active_node(&mut self, summary: Option<String>) {
@@ -1632,6 +1844,22 @@ fn parse_review_json(json: &str) -> Option<(ReviewVerdictType, String)> {
         })
         .to_string();
     Some((verdict, summary))
+}
+
+fn human_confirm_payload_description(payload: Option<serde_json::Value>) -> Option<String> {
+    let payload = payload?;
+    let description = payload.as_str().map(ToString::to_string).or_else(|| {
+        payload
+            .get("description")
+            .and_then(|value| value.as_str())
+            .map(ToString::to_string)
+    })?;
+    let trimmed = description.trim().to_string();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
 }
 
 fn workspace_type_title(workspace_type: &WorkspaceType) -> &'static str {
@@ -2355,6 +2583,141 @@ mod tests {
             }
             _ => panic!("expected SessionState"),
         }
+    }
+
+    #[tokio::test]
+    async fn append_context_note_creates_timeline_node() {
+        let (_tmp, store) = setup();
+        let (tx, _) = mpsc::channel(64);
+        let session = make_session("sess_context_note");
+        let mut engine = WorkspaceEngine::new(store, tx, session);
+
+        let node = engine
+            .append_context_note("补充上下文".to_string())
+            .await
+            .unwrap();
+
+        assert_eq!(node.node_type, TimelineNodeType::ContextNote);
+        assert_eq!(node.status, TimelineNodeStatus::Completed);
+        assert_eq!(node.summary.as_deref(), Some("补充上下文"));
+        assert!(
+            engine
+                .timeline_nodes
+                .iter()
+                .any(|candidate| candidate.node_id == node.node_id)
+        );
+    }
+
+    #[tokio::test]
+    async fn start_generation_locks_provider_and_creates_node() {
+        let (_tmp, store) = setup();
+        let (tx, _) = mpsc::channel(64);
+        let session = make_session("sess_start_generation");
+        let mut engine = WorkspaceEngine::new(store, tx, session);
+        let snapshot = ProviderConfigSnapshot {
+            author: ProviderName::Codex,
+            reviewer: Some(ProviderName::ClaudeCode),
+            review_rounds: 1,
+        };
+
+        let (node, locked) = engine
+            .start_generation(snapshot.clone(), true)
+            .await
+            .unwrap();
+
+        assert_eq!(node.node_type, TimelineNodeType::StartGeneration);
+        assert_eq!(node.status, TimelineNodeStatus::Completed);
+        assert_eq!(engine.session().stage, WorkspaceStage::Running);
+        assert_eq!(engine.session().author_provider, ProviderName::Codex);
+        assert_eq!(
+            engine.session().reviewer_provider,
+            Some(ProviderName::ClaudeCode)
+        );
+        assert_eq!(engine.session().review_rounds, 1);
+        match locked {
+            WsOutMessage::ProviderLocked {
+                snapshot: locked_snapshot,
+                locked_at,
+            } => {
+                assert_eq!(locked_snapshot, snapshot);
+                assert!(!locked_at.is_empty());
+            }
+            _ => panic!("expected ProviderLocked"),
+        }
+    }
+
+    #[tokio::test]
+    async fn reviewer_disabled_enters_human_confirm_without_review_node() {
+        let (_tmp, store) = setup();
+        let (tx, _) = mpsc::channel(64);
+        let mut session = make_session("sess_reviewer_disabled");
+        session.stage = WorkspaceStage::Running;
+        session.reviewer_provider = None;
+        session.review_rounds = 0;
+        let mut engine = WorkspaceEngine::new(store, tx, session);
+
+        engine.start_review_or_skip().await;
+
+        assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
+        assert!(
+            !engine
+                .timeline_nodes
+                .iter()
+                .any(|node| node.node_type == TimelineNodeType::ReviewerRun)
+        );
+    }
+
+    #[tokio::test]
+    async fn append_aborted_by_disconnect_creates_node() {
+        let (_tmp, store) = setup();
+        let (tx, _) = mpsc::channel(64);
+        let session = make_session("sess_disconnect_abort");
+        let mut engine = WorkspaceEngine::new(store, tx, session);
+
+        let node = engine
+            .append_aborted_by_disconnect("run-1".to_string())
+            .await
+            .unwrap();
+
+        assert_eq!(node.node_type, TimelineNodeType::AbortedByDisconnect);
+        assert_eq!(node.status, TimelineNodeStatus::Failed);
+        assert!(
+            node.summary
+                .as_deref()
+                .is_some_and(|summary| summary.contains("run-1"))
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_human_confirm_request_change_starts_revision() {
+        let (_tmp, store) = setup();
+        let (tx, _) = mpsc::channel(64);
+        let session = make_session("sess_human_request_change");
+        let mut engine = WorkspaceEngine::new(store, tx, session);
+        engine.latest_review_verdict = Some(ReviewVerdict {
+            verdict: ReviewVerdictType::NeedsHuman,
+            comments: "需要人工判断".to_string(),
+            summary: "等待人工确认".to_string(),
+        });
+        engine
+            .enter_human_confirm(Some("等待人工确认".to_string()))
+            .await;
+
+        let outcome = engine
+            .handle_human_confirm(
+                HumanConfirmDecision::RequestChange,
+                Some(serde_json::json!({"description": "补充边界条件"})),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, ReviewDecisionOutcome::StartRevision);
+        assert_eq!(engine.session().stage, WorkspaceStage::Revision);
+        assert!(engine.timeline_nodes.iter().any(|node| {
+            node.node_type == TimelineNodeType::Revision
+                && node.status == TimelineNodeStatus::Active
+                && node.summary.as_deref() == Some("根据人工反馈返修")
+        }));
     }
 
     #[tokio::test]
