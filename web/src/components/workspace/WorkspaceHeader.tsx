@@ -94,6 +94,7 @@ export function WorkspaceHeader({
           </div>
         </div>
         <span
+          data-testid="stage-badge"
           className={`shrink-0 rounded-md border px-2 py-1 text-xs font-semibold ${badge.className}`}
         >
           {badge.text}

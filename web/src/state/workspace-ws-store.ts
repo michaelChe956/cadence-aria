@@ -82,7 +82,7 @@ export interface ProviderConfigSnapshot {
 export interface TimelineNode {
   node_id: string;
   node_type: TimelineNodeType;
-  agent?: string | null;
+  agent?: WorkspaceProviderName | null;
   stage: string;
   round?: number | null;
   status: TimelineNodeStatus;
@@ -104,8 +104,8 @@ export interface ReviewVerdict {
 export interface ArtifactVersion {
   version: number;
   markdown: string;
-  generated_by: string;
-  reviewed_by?: string | null;
+  generated_by: WorkspaceProviderName;
+  reviewed_by?: WorkspaceProviderName | null;
   review_verdict?: ReviewVerdictType | null;
   confirmed_by?: string | null;
   created_at: string;
@@ -152,6 +152,8 @@ export interface WorkspaceWsState {
   providerSnapshot: ProviderConfigSnapshot | null;
   reviewerEnabled: boolean;
   reviewRounds: number;
+  pendingReviewDecision: { verdict: string; summary: string } | null;
+  pendingReviewerSummary: { verdict: string; points: string[] } | null;
 }
 
 export interface WorkspaceWsActions {
@@ -226,6 +228,8 @@ const initialState: WorkspaceWsState = {
   providerSnapshot: null,
   reviewerEnabled: true,
   reviewRounds: 1,
+  pendingReviewDecision: null,
+  pendingReviewerSummary: null,
 };
 
 export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((set, get) => ({
@@ -254,6 +258,8 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
         detailsForTimelineNodes(state.timeline_nodes ?? [], state.session_id),
       artifactVersions: state.artifact_versions ?? [],
       pendingDecision: null,
+      pendingReviewDecision: null,
+      pendingReviewerSummary: null,
       error: null,
       activeRunId: state.active_run_id ?? null,
     }),
@@ -361,10 +367,33 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
       const details = { ...prev.nodeDetails };
       const detail = ensureNodeDetail(details, nodeId);
       detail.verdict = verdict;
-      return { nodeDetails: details };
+      return {
+        nodeDetails: details,
+        pendingReviewDecision: {
+          verdict: verdict.verdict,
+          summary: verdict.summary,
+        },
+        pendingReviewerSummary: {
+          verdict: verdict.verdict,
+          points: [verdict.summary, verdict.comments].filter((point) => point.trim().length > 0),
+        },
+      };
     }),
 
-  setPendingDecision: (decision) => set({ pendingDecision: decision }),
+  setPendingDecision: (decision) =>
+    set((prev) => {
+      if (!decision) {
+        return { pendingDecision: null, pendingReviewDecision: null };
+      }
+      const verdict = prev.nodeDetails[decision.node_id]?.verdict;
+      return {
+        pendingDecision: decision,
+        pendingReviewDecision: {
+          verdict: verdict?.verdict ?? "revise",
+          summary: verdict?.summary ?? "",
+        },
+      };
+    }),
 
   setConnectionStatus: (status) => set({ connectionStatus: status }),
 
