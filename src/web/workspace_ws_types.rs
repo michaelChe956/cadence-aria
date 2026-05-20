@@ -274,10 +274,10 @@ pub enum TimelineNodeType {
     PrepareContext,
     ContextNote,
     StartGeneration,
+    #[serde(alias = "generation")]
     AuthorRun,
+    #[serde(alias = "review")]
     ReviewerRun,
-    Generation,
-    Review,
     ReviewDecision,
     Revision,
     HumanConfirm,
@@ -455,7 +455,7 @@ mod tests {
     fn timeline_messages_include_node_identity() {
         let node = TimelineNode {
             node_id: "node_review_001".to_string(),
-            node_type: TimelineNodeType::Review,
+            node_type: TimelineNodeType::ReviewerRun,
             agent: Some(ProviderName::Codex),
             stage: WorkspaceStage::CrossReview,
             round: Some(1),
@@ -476,7 +476,7 @@ mod tests {
         let created =
             serde_json::to_value(WsOutMessage::TimelineNodeCreated { node: node.clone() }).unwrap();
         assert_eq!(created["type"], "timeline_node_created");
-        assert_eq!(created["node"]["node_type"], "review");
+        assert_eq!(created["node"]["node_type"], "reviewer_run");
         assert_eq!(created["node"]["status"], "active");
         assert_eq!(created["node"]["agent"], "codex");
 
@@ -637,5 +637,22 @@ mod tests {
         let ping = WsInMessage::Ping;
         let json = serde_json::to_value(&ping).unwrap();
         assert_eq!(json["type"], "ping");
+    }
+
+    #[test]
+    fn timeline_node_type_rename_keeps_legacy_deserialization_aliases() {
+        let author = TimelineNodeType::AuthorRun;
+        let json = serde_json::to_value(&author).unwrap();
+        assert_eq!(json, "author_run");
+        let legacy: TimelineNodeType = serde_json::from_value(serde_json::json!("generation"))
+            .expect("legacy generation value should deserialize");
+        assert_eq!(legacy, TimelineNodeType::AuthorRun);
+
+        let reviewer = TimelineNodeType::ReviewerRun;
+        let json = serde_json::to_value(&reviewer).unwrap();
+        assert_eq!(json, "reviewer_run");
+        let legacy: TimelineNodeType = serde_json::from_value(serde_json::json!("review"))
+            .expect("legacy review value should deserialize");
+        assert_eq!(legacy, TimelineNodeType::ReviewerRun);
     }
 }

@@ -132,7 +132,7 @@ fn persists_workspace_timeline_nodes_and_artifact_versions() {
         .expect("session");
     let node = TimelineNode {
         node_id: "timeline_node_001".to_string(),
-        node_type: TimelineNodeType::Generation,
+        node_type: TimelineNodeType::AuthorRun,
         agent: Some(ProviderName::ClaudeCode),
         stage: WorkspaceStage::Running,
         round: None,

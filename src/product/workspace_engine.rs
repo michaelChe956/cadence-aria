@@ -338,7 +338,7 @@ impl WorkspaceEngine {
 
         let generation_node_id = self
             .create_timeline_node(TimelineNodeDraft {
-                node_type: TimelineNodeType::Generation,
+                node_type: TimelineNodeType::AuthorRun,
                 agent: Some(self.session.author_provider.clone()),
                 stage: WorkspaceStage::Running,
                 round: None,
@@ -1266,7 +1266,7 @@ impl WorkspaceEngine {
             .unwrap_or(ProviderName::Codex);
         let review_node_id = self
             .create_timeline_node(TimelineNodeDraft {
-                node_type: TimelineNodeType::Review,
+                node_type: TimelineNodeType::ReviewerRun,
                 agent: Some(reviewer.clone()),
                 stage: WorkspaceStage::CrossReview,
                 round: Some(round),
@@ -1403,7 +1403,7 @@ impl WorkspaceEngine {
     fn next_review_round(&self) -> u32 {
         self.timeline_nodes
             .iter()
-            .filter(|node| node.node_type == TimelineNodeType::Review)
+            .filter(|node| node.node_type == TimelineNodeType::ReviewerRun)
             .count() as u32
             + 1
     }
@@ -1736,7 +1736,7 @@ mod tests {
             } => {
                 assert!(
                     timeline_nodes.iter().any(|node| {
-                        node.node_type == TimelineNodeType::Generation
+                        node.node_type == TimelineNodeType::AuthorRun
                             && node.status == TimelineNodeStatus::Completed
                     }),
                     "generation node should be completed"
@@ -1746,7 +1746,7 @@ mod tests {
                     .iter()
                     .find(|node| node.node_id == active_id)
                     .expect("active timeline node");
-                assert_eq!(active.node_type, TimelineNodeType::Review);
+                assert_eq!(active.node_type, TimelineNodeType::ReviewerRun);
                 assert_eq!(active.agent, Some(ProviderName::Codex));
                 assert_eq!(active.status, TimelineNodeStatus::Active);
             }
@@ -1774,7 +1774,7 @@ mod tests {
         match engine.build_session_state() {
             WsOutMessage::SessionState { timeline_nodes, .. } => {
                 assert!(timeline_nodes.iter().any(|node| {
-                    node.node_type == TimelineNodeType::Review
+                    node.node_type == TimelineNodeType::ReviewerRun
                         && node.status == TimelineNodeStatus::Skipped
                         && node.summary.as_deref() == Some("未执行真实 review（Fake 快速路径）")
                 }));
@@ -1898,7 +1898,7 @@ mod tests {
         match engine.build_session_state() {
             WsOutMessage::SessionState { timeline_nodes, .. } => {
                 assert!(timeline_nodes.iter().any(|node| {
-                    node.node_type == TimelineNodeType::Review
+                    node.node_type == TimelineNodeType::ReviewerRun
                         && node.status == TimelineNodeStatus::Completed
                         && node.summary.as_deref() == Some("可以确认")
                 }));
@@ -2055,7 +2055,7 @@ mod tests {
                     .iter()
                     .find(|node| Some(&node.node_id) == active_node_id.as_ref())
                     .expect("active review node");
-                assert_eq!(active.node_type, TimelineNodeType::Review);
+                assert_eq!(active.node_type, TimelineNodeType::ReviewerRun);
                 assert_eq!(active.round, Some(2));
             }
             _ => panic!("expected SessionState"),

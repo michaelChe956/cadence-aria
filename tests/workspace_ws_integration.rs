@@ -324,11 +324,11 @@ async fn workspace_ws_reconnect_restores_timeline_and_artifact_versions() {
             ..
         } => {
             assert!(timeline_nodes.iter().any(|node| {
-                node.node_type == TimelineNodeType::Generation
+                node.node_type == TimelineNodeType::AuthorRun
                     && node.summary.as_deref() == Some("生成完成")
             }));
             assert!(timeline_nodes.iter().any(|node| {
-                node.node_type == TimelineNodeType::Review
+                node.node_type == TimelineNodeType::ReviewerRun
                     && node.summary.as_deref() == Some("未执行真实 review（Fake 快速路径）")
             }));
             assert_eq!(artifact_versions.len(), 1);
