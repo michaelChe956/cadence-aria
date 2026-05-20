@@ -1,6 +1,8 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
-use crate::product::models::{ProviderName, WorkspaceType};
+use crate::product::models::{NodeDetail, ProviderName, WorkspaceType};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -97,6 +99,8 @@ pub enum WsOutMessage {
         timeline_nodes: Vec<TimelineNode>,
         active_node_id: Option<String>,
         artifact_versions: Vec<ArtifactVersion>,
+        timeline_node_details: HashMap<String, NodeDetail>,
+        active_run_id: Option<String>,
     },
     Error {
         message: String,
@@ -546,6 +550,8 @@ mod tests {
             timeline_nodes: Vec::new(),
             active_node_id: Some("node_review_decision_001".to_string()),
             artifact_versions: Vec::new(),
+            timeline_node_details: std::collections::HashMap::new(),
+            active_run_id: None,
         })
         .unwrap();
         assert_eq!(state["type"], "session_state");

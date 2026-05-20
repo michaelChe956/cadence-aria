@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -207,6 +207,7 @@ pub struct WorkspaceEngine {
     artifact_versions: Vec<ArtifactVersion>,
     latest_review_verdict: Option<ReviewVerdict>,
     pending_revision_context: Option<String>,
+    active_run_id: Option<String>,
 }
 
 struct TimelineNodeDraft {
@@ -237,6 +238,7 @@ impl WorkspaceEngine {
             artifact_versions: Vec::new(),
             latest_review_verdict: None,
             pending_revision_context: None,
+            active_run_id: None,
         }
     }
 
@@ -281,6 +283,7 @@ impl WorkspaceEngine {
             artifact_versions: persisted_artifact_versions,
             latest_review_verdict,
             pending_revision_context: None,
+            active_run_id: None,
         }
     }
 
@@ -299,6 +302,20 @@ impl WorkspaceEngine {
 
     pub fn use_run_token(&mut self, cancel: CancellationToken) {
         self.cancel = cancel;
+    }
+
+    pub fn mark_active_run_started(&mut self, run_id: impl Into<String>) {
+        self.active_run_id = Some(run_id.into());
+    }
+
+    pub fn mark_active_run_finished(&mut self, run_id: &str) {
+        if self.active_run_id.as_deref() == Some(run_id) {
+            self.active_run_id = None;
+        }
+    }
+
+    pub fn active_run_id(&self) -> Option<&str> {
+        self.active_run_id.as_deref()
     }
 
     pub async fn handle_user_message(
@@ -1239,6 +1256,24 @@ impl WorkspaceEngine {
             })
             .collect();
 
+        let timeline_node_details = self
+            .lifecycle_store
+            .as_ref()
+            .and_then(|store| {
+                let ids = store.list_node_detail_ids(&self.session.session_id).ok()?;
+                Some(
+                    ids.into_iter()
+                        .filter_map(|id| {
+                            store
+                                .load_node_detail(&self.session.session_id, &id)
+                                .ok()
+                                .map(|detail| (id, detail))
+                        })
+                        .collect::<HashMap<_, _>>(),
+                )
+            })
+            .unwrap_or_default();
+
         WsOutMessage::SessionState {
             session_id: self.session.session_id.clone(),
             workspace_type: self.session.workspace_type.clone(),
@@ -1253,6 +1288,8 @@ impl WorkspaceEngine {
             timeline_nodes: self.timeline_nodes.clone(),
             active_node_id: self.active_node_id.clone(),
             artifact_versions: self.artifact_versions.clone(),
+            timeline_node_details,
+            active_run_id: self.active_run_id.clone(),
         }
     }
 
@@ -1666,6 +1703,11 @@ mod tests {
     use crate::cross_cutting::streaming_provider::{
         FakeStreamingProvider, ProviderExecutionEvent, ProviderExecutionEventKind,
         ProviderExecutionEventStatus, StreamChunk,
+    };
+    use crate::product::app_paths::ProductAppPaths;
+    use crate::product::lifecycle_store::CreateWorkspaceSessionInput;
+    use crate::product::models::{
+        AgentRole, ArtifactRef, NodeDetail, PermissionEvent, ProviderSnapshot,
     };
     use crate::protocol::contracts::{AdapterInput, ProviderType};
     use crate::web::workspace_ws_types::{ReviewVerdictType, TimelineNodeStatus, TimelineNodeType};
@@ -2209,6 +2251,107 @@ mod tests {
             } => {
                 assert_eq!(session_id, "sess_004");
                 assert_eq!(stage, "prepare_context");
+            }
+            _ => panic!("expected SessionState"),
+        }
+    }
+
+    #[tokio::test]
+    async fn build_session_state_includes_node_details_and_active_run_id() {
+        let (tmp, checkpoint_store) = setup();
+        let lifecycle_store = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
+        let (tx, _) = mpsc::channel(64);
+        let session_record = lifecycle_store
+            .create_workspace_session(CreateWorkspaceSessionInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                entity_id: "story_spec_0001".to_string(),
+                workspace_type: WorkspaceType::Story,
+                author_provider: ProviderName::ClaudeCode,
+                reviewer_provider: ProviderName::Codex,
+                review_rounds: 2,
+                superpowers_enabled: true,
+                openspec_enabled: true,
+            })
+            .unwrap();
+        let session = WorkspaceSession::from_record(session_record);
+        let session_id = session.session_id.clone();
+        let mut engine =
+            WorkspaceEngine::new_persistent(checkpoint_store, lifecycle_store.clone(), tx, session);
+        engine.timeline_nodes.push(TimelineNode {
+            node_id: "node-1".to_string(),
+            node_type: TimelineNodeType::AuthorRun,
+            agent: Some(ProviderName::ClaudeCode),
+            stage: WsWorkspaceStage::Completed,
+            round: None,
+            status: TimelineNodeStatus::Completed,
+            title: "生成".to_string(),
+            summary: None,
+            started_at: "2026-05-20T14:30:00Z".to_string(),
+            completed_at: Some("2026-05-20T14:35:00Z".to_string()),
+            duration_ms: Some(300000),
+            artifact_ref: None,
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::ClaudeCode,
+                reviewer: None,
+                review_rounds: 0,
+            },
+        });
+        let detail = NodeDetail {
+            node_id: "node-1".to_string(),
+            session_id: session_id.clone(),
+            node_type: TimelineNodeType::AuthorRun,
+            status: TimelineNodeStatus::Completed,
+            agent_role: Some(AgentRole::Author),
+            provider: Some(ProviderSnapshot {
+                name: "claude_code".to_string(),
+                model: "claude-opus-4-7".to_string(),
+            }),
+            messages: vec![],
+            streaming_content: "生成内容".to_string(),
+            execution_events: vec![],
+            permission_events: vec![PermissionEvent {
+                request_id: "perm-1".to_string(),
+                request: serde_json::json!({"tool": "shell"}),
+                response: Some(serde_json::json!({"approved": true})),
+                ts: "2026-05-20T14:31:00Z".to_string(),
+            }],
+            verdict: None,
+            artifact_ref: Some(ArtifactRef {
+                artifact_id: "artifact-1".to_string(),
+                version: 2,
+            }),
+            is_revision: false,
+            base_artifact_ref: None,
+            started_at: "2026-05-20T14:30:00Z".to_string(),
+            ended_at: Some("2026-05-20T14:35:00Z".to_string()),
+        };
+        lifecycle_store
+            .save_node_detail(&session_id, "node-1", &detail)
+            .unwrap();
+        engine.mark_active_run_started("run-1");
+
+        let state = engine.build_session_state();
+        match state {
+            WsOutMessage::SessionState {
+                timeline_node_details,
+                active_run_id,
+                ..
+            } => {
+                assert_eq!(
+                    timeline_node_details
+                        .get("node-1")
+                        .map(|detail| detail.streaming_content.as_str()),
+                    Some("生成内容")
+                );
+                assert_eq!(
+                    timeline_node_details
+                        .get("node-1")
+                        .and_then(|detail| detail.artifact_ref.as_ref())
+                        .map(|artifact| artifact.version),
+                    Some(2)
+                );
+                assert_eq!(active_run_id.as_deref(), Some("run-1"));
             }
             _ => panic!("expected SessionState"),
         }
