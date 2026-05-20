@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { NodeDetail } from "../api/types";
+import type { NodeDetail, WorkspaceProviderName } from "../api/types";
 
 export type WsConnectionStatus = "disconnected" | "connecting" | "connected" | "error";
 export type ProviderStatus =
@@ -69,13 +69,13 @@ export interface WsCheckpoint {
 }
 
 export interface WsProviderConfig {
-  author: string;
-  reviewer?: string | null;
+  author: WorkspaceProviderName;
+  reviewer?: WorkspaceProviderName | null;
 }
 
 export interface ProviderConfigSnapshot {
-  author: string;
-  reviewer?: string | null;
+  author: WorkspaceProviderName;
+  reviewer?: WorkspaceProviderName | null;
   review_rounds: number;
 }
 
@@ -150,6 +150,8 @@ export interface WorkspaceWsState {
   protocolError: ProtocolErrorState | null;
   providerLocked: boolean;
   providerSnapshot: ProviderConfigSnapshot | null;
+  reviewerEnabled: boolean;
+  reviewRounds: number;
 }
 
 export interface WorkspaceWsActions {
@@ -222,6 +224,8 @@ const initialState: WorkspaceWsState = {
   protocolError: null,
   providerLocked: false,
   providerSnapshot: null,
+  reviewerEnabled: true,
+  reviewRounds: 1,
 };
 
 export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((set, get) => ({

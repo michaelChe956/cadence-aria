@@ -5,17 +5,23 @@ import {
   FileText,
   RotateCcw,
   Send,
-  Settings,
   Square,
   Terminal,
   Wifi,
   WifiOff,
   X,
 } from "lucide-react";
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ProviderConfigSnapshot, WorkspaceProviderName } from "../api/types";
+import { PrepareContextPanel } from "../components/workspace/PrepareContextPanel";
+import { ProviderConfigPanel } from "../components/workspace/ProviderConfigPanel";
+import { useStageUI } from "../hooks/useStageUI";
 import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
-import { useWorkspaceStore, type ExecutionEvent } from "../state/workspace-ws-store";
+import {
+  selectPrepareContextNotes,
+  useWorkspaceStore,
+  type ExecutionEvent,
+} from "../state/workspace-ws-store";
 
 const WORKSPACE_STAGE_LABELS: Record<string, string> = {
   prepare_context: "准备上下文",
@@ -34,12 +40,6 @@ const FLOW_STAGE_LABELS: Record<string, string> = {
   human_confirm: "人工确认",
   completed: "已完成",
 };
-
-const PROVIDER_OPTIONS = [
-  { value: "claude_code", label: "Claude Code" },
-  { value: "codex", label: "Codex" },
-  { value: "fake", label: "Fake (测试)" },
-];
 
 const PROVIDER_STATUS_LABELS: Record<string, string> = {
   starting: "启动中",
@@ -75,7 +75,7 @@ export function WorkspacePage({
   onBack: () => void;
 }) {
   const {
-    sendMessage,
+    sendContextNote,
     sendStartGeneration,
     sendSelectRevisionPath,
     sendHumanConfirm,
@@ -85,6 +85,7 @@ export function WorkspacePage({
 	    respondPermission,
 	    connectionStatus,
 	  } = useWorkspaceWs(sessionId);
+  const store = useWorkspaceStore();
   const {
     stage,
     messages,
@@ -102,15 +103,17 @@ export function WorkspacePage({
 	    selectedNodeId,
 	    nodeDetails,
 	    pendingDecision,
+    reviewerEnabled,
+    reviewRounds,
 	    setSelectedNode,
-	  } = useWorkspaceStore();
+	  } = store;
 
-	  const [draft, setDraft] = useState("");
 	  const [reviewContextDraft, setReviewContextDraft] = useState("");
 	  const [showReviewContext, setShowReviewContext] = useState(false);
-	  const [showProviderPanel, setShowProviderPanel] = useState(false);
 	  const [activeRightTab, setActiveRightTab] = useState<"artifact" | "execution">("execution");
   const scrollRef = useRef<HTMLDivElement>(null);
+  const stageConfig = useStageUI(stage);
+  const contextNotes = selectPrepareContextNotes(store);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -118,28 +121,34 @@ export function WorkspacePage({
     }
   }, [messages.length, streamingContent]);
 
-  function handleSubmit(e: FormEvent) {
-    e.preventDefault();
-    const content = draft.trim();
-    if (!content) return;
-    sendMessage(content);
-    setDraft("");
-  }
-
   function handleStartGeneration() {
-    const providerConfig = providerConfigFor(providers);
-    sendStartGeneration(providerConfig, Boolean(providerConfig.reviewer));
+    const providerConfig = providerConfigFor(providers, reviewerEnabled, reviewRounds);
+    sendStartGeneration(providerConfig, reviewerEnabled);
   }
 
   const isConnected = connectionStatus === "connected";
 	  const isCompleted = stage === "completed";
 	  const canStartGeneration = stage === "prepare_context" && isConnected && !streamingContent;
-	  const providerLocked = stage !== "prepare_context";
 	  const currentFlowStage = flowStageFor(stage);
 	  const canAbort = ["running", "cross_review", "revision"].includes(stage) || Boolean(streamingContent);
 	  const selectedNode =
 	    timelineNodes.find((node) => node.node_id === selectedNodeId) ?? timelineNodes.at(-1) ?? null;
 	  const selectedDetail = selectedNode ? nodeDetails[selectedNode.node_id] : null;
+  const providerPanel = (
+    <ProviderConfigPanel
+      providers={providers}
+      editable={stageConfig.providerEditable}
+      onSelectProvider={(role, provider) => selectProvider(role, provider)}
+      reviewerEnabled={reviewerEnabled}
+      onToggleReviewer={(enabled) => {
+        useWorkspaceStore.setState({ reviewerEnabled: enabled });
+      }}
+      rounds={reviewRounds}
+      onChangeRounds={(rounds) => {
+        useWorkspaceStore.setState({ reviewRounds: clampReviewRounds(rounds) });
+      }}
+    />
+  );
 
   return (
     <div className="flex h-screen min-w-0 flex-col overflow-hidden bg-[var(--aria-bg)]">
@@ -165,17 +174,12 @@ export function WorkspacePage({
           </span>
         </div>
         <div className="flex min-w-0 shrink-0 items-center gap-2 sm:gap-3">
-	          <span className="max-w-24 truncate rounded-full border border-[var(--aria-line)] px-2 py-0.5 text-xs font-medium text-[var(--aria-ink-muted)] sm:max-w-none sm:px-2.5">
-	            {WORKSPACE_STAGE_LABELS[stage] ?? stage}
+	          <span
+              data-testid="stage-badge"
+              className="max-w-24 truncate rounded-full border border-[var(--aria-line)] px-2 py-0.5 text-xs font-medium text-[var(--aria-ink-muted)] sm:max-w-none sm:px-2.5"
+            >
+	            {stageConfig.headerBadge || WORKSPACE_STAGE_LABELS[stage] || stage}
 	          </span>
-          <button
-            type="button"
-            onClick={() => setShowProviderPanel((v) => !v)}
-            className="inline-flex h-7 w-7 items-center justify-center rounded-md text-[var(--aria-ink-muted)] hover:bg-[var(--aria-panel-muted)]"
-            title="Provider 配置"
-          >
-            <Settings className="h-4 w-4" />
-          </button>
           {isConnected ? (
             <Wifi className="h-4 w-4 text-green-500" />
           ) : (
@@ -196,6 +200,7 @@ export function WorkspacePage({
                   <button
                     key={node.node_id}
                     type="button"
+                    data-testid={`timeline-node-${node.node_type}`}
                     onClick={() => setSelectedNode(node.node_id)}
                     className={`block w-full rounded-md border px-3 py-2 text-left ${
                       node.node_id === selectedNode?.node_id
@@ -300,8 +305,19 @@ export function WorkspacePage({
 
           {/* Input Area */}
 	          <div className="shrink-0 border-t border-[var(--aria-line)] bg-[var(--aria-panel)] p-3">
+              {stageConfig.panel === "PrepareContextPanel" ? (
+                <div className="mb-3 space-y-4">
+                  {providerPanel}
+                  <PrepareContextPanel
+                    onSendContextNote={sendContextNote}
+                    onStartGeneration={handleStartGeneration}
+                    contextNotes={contextNotes}
+                    disabled={!isConnected}
+                  />
+                </div>
+              ) : null}
 	            <div className="mb-2 flex flex-wrap gap-2">
-	              {canStartGeneration ? (
+	              {canStartGeneration && stageConfig.panel !== "PrepareContextPanel" ? (
 	                <button
                   type="button"
                   onClick={handleStartGeneration}
@@ -391,23 +407,6 @@ export function WorkspacePage({
 	                </div>
 	              </div>
 	            ) : null}
-	            <form onSubmit={handleSubmit} className="flex gap-2">
-              <input
-                type="text"
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                placeholder={isCompleted ? "会话已完成" : "输入消息..."}
-                disabled={!isConnected || isCompleted}
-                className="min-w-0 flex-1 rounded-md border border-[var(--aria-line)] bg-white px-3 py-2 text-sm text-[var(--aria-ink)] placeholder:text-[var(--aria-ink-muted)] disabled:opacity-50"
-              />
-              <button
-                type="submit"
-                disabled={!isConnected || !draft.trim() || isCompleted}
-                className="inline-flex h-9 items-center gap-1 rounded-md bg-[var(--aria-primary)] px-3 text-sm font-semibold text-white disabled:opacity-50"
-              >
-                <Send className="h-4 w-4" />
-              </button>
-            </form>
           </div>
         </div>
 
@@ -448,36 +447,9 @@ export function WorkspacePage({
               </span>
             ) : null}
           </div>
-          {showProviderPanel ? (
-            <div className="shrink-0 border-b border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-3 space-y-2">
-              <div className="flex items-center gap-2">
-                <label htmlFor="workspace-author-provider" className="text-xs font-medium text-[var(--aria-ink-muted)] w-16">Author</label>
-                <select
-                  id="workspace-author-provider"
-                  value={providers?.author ?? "claude_code"}
-                  onChange={(e) => selectProvider("author", e.target.value)}
-                  disabled={providerLocked}
-                  className="rounded-md border border-[var(--aria-line)] bg-white px-2 py-1 text-xs text-[var(--aria-ink)]"
-                >
-                  {PROVIDER_OPTIONS.map((opt) => (
-                    <option key={opt.value} value={opt.value}>{opt.label}</option>
-                  ))}
-                </select>
-              </div>
-              <div className="flex items-center gap-2">
-                <label htmlFor="workspace-reviewer-provider" className="text-xs font-medium text-[var(--aria-ink-muted)] w-16">Reviewer</label>
-                <select
-                  id="workspace-reviewer-provider"
-                  value={providers?.reviewer ?? "codex"}
-                  onChange={(e) => selectProvider("reviewer", e.target.value)}
-                  disabled={providerLocked}
-                  className="rounded-md border border-[var(--aria-line)] bg-white px-2 py-1 text-xs text-[var(--aria-ink)]"
-                >
-                  {PROVIDER_OPTIONS.map((opt) => (
-                    <option key={opt.value} value={opt.value}>{opt.label}</option>
-                  ))}
-                </select>
-              </div>
+          {stageConfig.panel !== "PrepareContextPanel" ? (
+            <div className="shrink-0 border-b border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-3">
+              {providerPanel}
             </div>
           ) : null}
           {selectedNode ? (
@@ -543,14 +515,20 @@ function flowStageFor(stage: string) {
 
 function providerConfigFor(
   providers: { author: string; reviewer?: string | null } | null,
+  reviewerEnabled: boolean,
+  reviewRounds: number,
 ): ProviderConfigSnapshot {
-  const reviewer =
-    providers?.reviewer === null ? null : providerNameFor(providers?.reviewer, "codex");
+  const reviewer = reviewerEnabled ? providerNameFor(providers?.reviewer, "codex") : null;
   return {
     author: providerNameFor(providers?.author, "claude_code"),
     reviewer,
-    review_rounds: reviewer ? 1 : 0,
+    review_rounds: reviewer ? clampReviewRounds(reviewRounds) : 0,
   };
+}
+
+function clampReviewRounds(value: number) {
+  if (!Number.isFinite(value)) return 1;
+  return Math.min(3, Math.max(1, Math.trunc(value)));
 }
 
 function providerNameFor(
