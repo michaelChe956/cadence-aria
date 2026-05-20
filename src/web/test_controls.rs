@@ -70,7 +70,10 @@ pub async fn enable_permission_fixture(
     Json(request): Json<PermissionFixtureRequest>,
 ) -> Json<serde_json::Value> {
     let _mode = request.mode.as_deref().unwrap_or("single-request");
-    state.test_controls.enable_permission_fixture(session_id).await;
+    state
+        .test_controls
+        .enable_permission_fixture(session_id)
+        .await;
     Json(json!({"status": "ok"}))
 }
 
@@ -244,6 +247,16 @@ fn start_permission_fixture_session(
     tokio::spawn(async move {
         let permission_id = "e2e_permission_1".to_string();
         if event_tx
+            .send(ProviderEvent::TextDelta {
+                content: "E2E permission fixture stream\n".to_string(),
+            })
+            .await
+            .is_err()
+        {
+            return;
+        }
+
+        if event_tx
             .send(ProviderEvent::PermissionRequest(PermissionRequestData {
                 id: permission_id.clone(),
                 tool_name: "Bash".to_string(),
@@ -383,15 +396,31 @@ mod tests {
     async fn permission_fixture_is_session_scoped_and_consumed_once() {
         let controls = TestControls::default();
 
-        assert!(!controls.consume_permission_fixture("workspace_session_1").await);
+        assert!(
+            !controls
+                .consume_permission_fixture("workspace_session_1")
+                .await
+        );
 
         controls
             .enable_permission_fixture("workspace_session_1".to_string())
             .await;
 
-        assert!(controls.consume_permission_fixture("workspace_session_1").await);
-        assert!(!controls.consume_permission_fixture("workspace_session_1").await);
-        assert!(!controls.consume_permission_fixture("workspace_session_2").await);
+        assert!(
+            controls
+                .consume_permission_fixture("workspace_session_1")
+                .await
+        );
+        assert!(
+            !controls
+                .consume_permission_fixture("workspace_session_1")
+                .await
+        );
+        assert!(
+            !controls
+                .consume_permission_fixture("workspace_session_2")
+                .await
+        );
     }
 
     #[tokio::test]
@@ -428,9 +457,23 @@ mod tests {
             .await;
         let provider = TestControlledFakeStreamingProvider::new(controls);
         let mut session = provider
-            .start(streaming_input("workspace_session_1"), CancellationToken::new())
+            .start(
+                streaming_input("workspace_session_1"),
+                CancellationToken::new(),
+            )
             .await
             .expect("provider session");
+
+        match tokio::time::timeout(Duration::from_secs(1), session.events.recv())
+            .await
+            .expect("stream event")
+            .expect("text delta")
+        {
+            ProviderEvent::TextDelta { content } => {
+                assert!(content.contains("E2E permission fixture stream"));
+            }
+            other => panic!("unexpected provider event: {other:?}"),
+        }
 
         let request_id = match tokio::time::timeout(Duration::from_secs(1), session.events.recv())
             .await
@@ -478,9 +521,23 @@ mod tests {
             .await;
         let provider = TestControlledFakeStreamingProvider::new(controls);
         let mut session = provider
-            .start(streaming_input("workspace_session_1"), CancellationToken::new())
+            .start(
+                streaming_input("workspace_session_1"),
+                CancellationToken::new(),
+            )
             .await
             .expect("provider session");
+
+        match tokio::time::timeout(Duration::from_secs(1), session.events.recv())
+            .await
+            .expect("stream event")
+            .expect("text delta")
+        {
+            ProviderEvent::TextDelta { content } => {
+                assert!(content.contains("E2E permission fixture stream"));
+            }
+            other => panic!("unexpected provider event: {other:?}"),
+        }
 
         let request_id = match tokio::time::timeout(Duration::from_secs(1), session.events.recv())
             .await
@@ -496,7 +553,9 @@ mod tests {
             .expect("timeout event")
             .expect("permission timeout")
         {
-            ProviderEvent::PermissionTimeout { permission_id } => assert_eq!(permission_id, request_id),
+            ProviderEvent::PermissionTimeout { permission_id } => {
+                assert_eq!(permission_id, request_id)
+            }
             other => panic!("unexpected provider event: {other:?}"),
         }
     }
