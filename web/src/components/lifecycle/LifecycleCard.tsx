@@ -1,17 +1,21 @@
-import { ExternalLink, GitBranch, Layers3, ListChecks, ScrollText, Trash2 } from "lucide-react";
+import {
+  GitBranch,
+  Layers3,
+  ListChecks,
+  ScrollText,
+  Trash2,
+} from "lucide-react";
 import type { LifecycleCard as LifecycleCardData } from "../../state/lifecycle-workbench-store";
 
 export function LifecycleCard({
   card,
   selected,
   onSelect,
-  onOpenWorkspace,
   onDeleteIssue,
 }: {
   card: LifecycleCardData;
   selected: boolean;
   onSelect: () => void;
-  onOpenWorkspace?: () => void;
   onDeleteIssue?: () => void;
 }) {
   const Icon =
@@ -63,16 +67,6 @@ export function LifecycleCard({
           </span>
         </span>
       </button>
-      {onOpenWorkspace ? (
-        <button
-          type="button"
-          aria-label={`打开 Workspace ${card.title}`}
-          onClick={onOpenWorkspace}
-          className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-[var(--aria-line)] text-[var(--aria-ink-muted)] hover:border-[var(--aria-primary)] hover:text-[var(--aria-primary)]"
-        >
-          <ExternalLink className="h-3.5 w-3.5" />
-        </button>
-      ) : null}
       {onDeleteIssue ? (
         <button
           type="button"

@@ -7,7 +7,6 @@ export function LifecycleColumn({
   cards,
   selectedKey,
   onSelect,
-  onOpenWorkspace,
   onDeleteIssue,
 }: {
   title: string;
@@ -15,7 +14,6 @@ export function LifecycleColumn({
   cards: LifecycleCardData[];
   selectedKey: string | null;
   onSelect: (card: LifecycleCardData) => void;
-  onOpenWorkspace?: (card: LifecycleCardData) => void;
   onDeleteIssue?: (issueId: string) => void;
 }) {
   return (
@@ -25,7 +23,9 @@ export function LifecycleColumn({
       className="min-h-96 rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-2"
     >
       <div className="mb-3 flex items-center justify-between gap-2">
-        <h2 className="text-sm font-semibold text-[var(--aria-ink)]">{title}</h2>
+        <h2 className="text-sm font-semibold text-[var(--aria-ink)]">
+          {title}
+        </h2>
         <span className="rounded border border-[var(--aria-line)] bg-[var(--aria-panel)] px-2 py-0.5 font-mono text-[11px] text-[var(--aria-ink-muted)]">
           {cards.length}
         </span>
@@ -37,11 +37,10 @@ export function LifecycleColumn({
               card={card}
               selected={selectedKey === `${card.kind}:${card.id}`}
               onSelect={() => onSelect(card)}
-              onOpenWorkspace={
-                card.kind === "issue" || !onOpenWorkspace ? undefined : () => onOpenWorkspace(card)
-              }
               onDeleteIssue={
-                card.kind === "issue" && onDeleteIssue ? () => onDeleteIssue(card.id) : undefined
+                card.kind === "issue" && onDeleteIssue
+                  ? () => onDeleteIssue(card.id)
+                  : undefined
               }
             />
           </li>

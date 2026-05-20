@@ -30,12 +30,16 @@ import {
   type LifecycleCard as LifecycleCardData,
 } from "../../state/lifecycle-workbench-store";
 import { WorkbenchSurface } from "../shell/WorkbenchSurface";
-import { CreateProjectDialog, type CreateProjectPayload } from "./CreateProjectDialog";
+import {
+  CreateProjectDialog,
+  type CreateProjectPayload,
+} from "./CreateProjectDialog";
 import { CreateRepositoryDialog } from "./CreateRepositoryDialog";
 import {
   CreateLifecycleIssueDialog,
   type CreateLifecycleIssuePayload,
 } from "./CreateLifecycleIssueDialog";
+import { LifecycleCardDrawer } from "./LifecycleCardDrawer";
 import { LifecycleColumn } from "./LifecycleColumn";
 import { ProjectSidebar } from "./ProjectSidebar";
 type ProviderWorkspaceLaunchTarget = "story" | "design" | "work_item";
@@ -52,7 +56,9 @@ export function IssueLifecycleWorkbench({
   const [projects, setProjects] = useState<Project[]>([]);
   const [repositories, setRepositories] = useState<Repository[]>([]);
   const [lifecycles, setLifecycles] = useState<IssueLifecycleResponse[]>([]);
-  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(
+    null,
+  );
   const [focusedIssueId, setFocusedIssueId] = useState<string | null>(null);
   const [selectedCardKey, setSelectedCardKey] = useState<string | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -61,8 +67,12 @@ export function IssueLifecycleWorkbench({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const refreshRequestId = useRef(0);
-  const drawerFocusedEntityId = useLifecycleWorkbenchStore((state) => state.focusedEntityId);
-  const isDrawerOpen = useLifecycleWorkbenchStore((state) => state.isDrawerOpen);
+  const drawerFocusedEntityId = useLifecycleWorkbenchStore(
+    (state) => state.focusedEntityId,
+  );
+  const isDrawerOpen = useLifecycleWorkbenchStore(
+    (state) => state.isDrawerOpen,
+  );
   const openDrawer = useLifecycleWorkbenchStore((state) => state.openDrawer);
   const closeDrawer = useLifecycleWorkbenchStore((state) => state.closeDrawer);
 
@@ -104,7 +114,9 @@ export function IssueLifecycleWorkbench({
       const projectId =
         projectIdOverride ??
         (selectedProjectId &&
-        projectResponse.projects.some((project) => project.project_id === selectedProjectId)
+        projectResponse.projects.some(
+          (project) => project.project_id === selectedProjectId,
+        )
           ? selectedProjectId
           : projectResponse.projects[0]?.project_id) ??
         null;
@@ -130,7 +142,10 @@ export function IssueLifecycleWorkbench({
 
       const lifecycleResponses = await Promise.all(
         (issueResponse.issues ?? []).map(async (issue) =>
-          normalizeLifecycleResponse(await getIssueLifecycle(issue.issue_id, projectId), issue),
+          normalizeLifecycleResponse(
+            await getIssueLifecycle(issue.issue_id, projectId),
+            issue,
+          ),
         ),
       );
       if (!isLatestRefresh(requestId)) {
@@ -145,7 +160,11 @@ export function IssueLifecycleWorkbench({
       }
     } catch (reason) {
       if (isLatestRefresh(requestId)) {
-        setError(reason instanceof Error ? reason.message : "load lifecycle workbench failed");
+        setError(
+          reason instanceof Error
+            ? reason.message
+            : "load lifecycle workbench failed",
+        );
       }
     } finally {
       if (isLatestRefresh(requestId)) {
@@ -158,15 +177,25 @@ export function IssueLifecycleWorkbench({
     return requestId === refreshRequestId.current;
   }
 
+  const allColumns = useMemo(
+    () => groupLifecycleCards(lifecycles),
+    [lifecycles],
+  );
   const columns = useMemo(
-    () => visibleLifecycle(groupLifecycleCards(lifecycles), focusedIssueId),
-    [lifecycles, focusedIssueId],
+    () => visibleLifecycle(allColumns, focusedIssueId),
+    [allColumns, focusedIssueId],
   );
   const selectedCard = useMemo(
     () => findSelectedCard(columns, selectedCardKey),
     [columns, selectedCardKey],
   );
-  const selectedProject = projects.find((project) => project.project_id === selectedProjectId);
+  const focusedEntity = useMemo(
+    () => findCardInColumns(allColumns, drawerFocusedEntityId),
+    [allColumns, drawerFocusedEntityId],
+  );
+  const selectedProject = projects.find(
+    (project) => project.project_id === selectedProjectId,
+  );
   const issueCount = columns.issue.length;
 
   async function handleSelectProject(projectId: string) {
@@ -179,19 +208,69 @@ export function IssueLifecycleWorkbench({
 
   function handleSelectCard(card: LifecycleCardData) {
     setSelectedCardKey(lifecycleCardKey(card));
+    openDrawer(card.id);
     if (card.kind === "issue") {
       setFocusedIssueId(card.issueId);
     }
   }
 
-  function handleOpenWorkspace(card: LifecycleCardData) {
+  async function handleOpenWorkspaceFromDrawer(card: LifecycleCardData) {
     const session = findWorkspaceSession(lifecycles, card);
     if (!session) {
       setError("缺少 Workspace Session");
       return;
     }
     setError(null);
+    await refresh(selectedProjectId);
     onOpenWorkspace(session.workspace_session_id);
+    closeDrawer();
+  }
+
+  async function handleGenerateNext(card: LifecycleCardData) {
+    if (!selectedProjectId) {
+      setError("缺少 Project 或生命周期实体");
+      return;
+    }
+
+    if (card.kind === "story_spec") {
+      const response = await generateDesignSpecs(
+        selectedProjectId,
+        card.issueId,
+        {
+          title: defaultLaunchTitle({ target: "design", card }),
+          story_spec_ids: [card.id],
+          design_kind: "frontend",
+        },
+      );
+      const nextId = response.design_specs[0]?.design_spec_id;
+      await refresh(selectedProjectId);
+      if (nextId) {
+        setSelectedCardKey(`design_spec:${nextId}`);
+        openDrawer(nextId);
+      }
+      return;
+    }
+
+    if (card.kind === "design_spec") {
+      const response = await generateWorkItems(
+        selectedProjectId,
+        card.issueId,
+        {
+          title: defaultLaunchTitle({ target: "work_item", card }),
+          story_spec_ids: card.raw.story_spec_ids,
+          design_spec_ids: [card.id],
+        },
+      );
+      const nextId = response.work_items[0]?.work_item_id;
+      await refresh(selectedProjectId);
+      if (nextId) {
+        setSelectedCardKey(`work_item:${nextId}`);
+        openDrawer(nextId);
+      }
+      return;
+    }
+
+    setError("当前实体不支持生成下一阶段");
   }
 
   async function handleCreateIssue(payload: CreateLifecycleIssuePayload) {
@@ -265,17 +344,26 @@ export function IssueLifecycleWorkbench({
     await refresh(selectedProjectId);
   }
 
-  async function handleLaunchWorkspace(target: ProviderWorkspaceLaunchTarget, card: LifecycleCardData) {
+  async function handleLaunchWorkspace(
+    target: ProviderWorkspaceLaunchTarget,
+    card: LifecycleCardData,
+  ) {
     if (!selectedProjectId) {
       setError("缺少 Project 或生命周期卡片");
       return;
     }
 
     if (target === "story") {
-      const response = await generateStorySpecs(selectedProjectId, card.issueId, {
-        title: defaultLaunchTitle({ target, card }),
-      });
-      setSelectedCardKey(`story_spec:${response.story_specs[0]?.story_spec_id ?? ""}`);
+      const response = await generateStorySpecs(
+        selectedProjectId,
+        card.issueId,
+        {
+          title: defaultLaunchTitle({ target, card }),
+        },
+      );
+      setSelectedCardKey(
+        `story_spec:${response.story_specs[0]?.story_spec_id ?? ""}`,
+      );
       await refresh(selectedProjectId);
       if (response.workspace_session) {
         onOpenWorkspace(response.workspace_session.workspace_session_id);
@@ -284,12 +372,18 @@ export function IssueLifecycleWorkbench({
     }
 
     if (target === "design" && card.kind === "story_spec") {
-      const response = await generateDesignSpecs(selectedProjectId, card.issueId, {
-        title: defaultLaunchTitle({ target, card }),
-        story_spec_ids: [card.id],
-        design_kind: "frontend",
-      });
-      setSelectedCardKey(`design_spec:${response.design_specs[0]?.design_spec_id ?? ""}`);
+      const response = await generateDesignSpecs(
+        selectedProjectId,
+        card.issueId,
+        {
+          title: defaultLaunchTitle({ target, card }),
+          story_spec_ids: [card.id],
+          design_kind: "frontend",
+        },
+      );
+      setSelectedCardKey(
+        `design_spec:${response.design_specs[0]?.design_spec_id ?? ""}`,
+      );
       await refresh(selectedProjectId);
       if (response.workspace_session) {
         onOpenWorkspace(response.workspace_session.workspace_session_id);
@@ -298,12 +392,18 @@ export function IssueLifecycleWorkbench({
     }
 
     if (target === "work_item" && card.kind === "design_spec") {
-      const response = await generateWorkItems(selectedProjectId, card.issueId, {
-        title: defaultLaunchTitle({ target, card }),
-        story_spec_ids: card.raw.story_spec_ids,
-        design_spec_ids: [card.id],
-      });
-      setSelectedCardKey(`work_item:${response.work_items[0]?.work_item_id ?? ""}`);
+      const response = await generateWorkItems(
+        selectedProjectId,
+        card.issueId,
+        {
+          title: defaultLaunchTitle({ target, card }),
+          story_spec_ids: card.raw.story_spec_ids,
+          design_spec_ids: [card.id],
+        },
+      );
+      setSelectedCardKey(
+        `work_item:${response.work_items[0]?.work_item_id ?? ""}`,
+      );
       await refresh(selectedProjectId);
       if (response.workspace_session) {
         onOpenWorkspace(response.workspace_session.workspace_session_id);
@@ -327,13 +427,17 @@ export function IssueLifecycleWorkbench({
           onCreateProject={() => setProjectDialogOpen(true)}
           onCreateRepository={() => setRepositoryDialogOpen(true)}
           onDeleteProject={(projectId) => void handleDeleteProject(projectId)}
-          onDeleteRepository={(repositoryId) => void handleDeleteRepository(repositoryId)}
+          onDeleteRepository={(repositoryId) =>
+            void handleDeleteRepository(repositoryId)
+          }
         />
         <WorkbenchSurface
           mainLabel="Issue 生命周期工作台"
           statusBar={
             busy ? (
-              <span className="text-xs font-semibold text-[var(--aria-ink-muted)]">加载中</span>
+              <span className="text-xs font-semibold text-[var(--aria-ink-muted)]">
+                加载中
+              </span>
             ) : null
           }
           alert={error}
@@ -351,7 +455,9 @@ export function IssueLifecycleWorkbench({
                 {selectedCard ? (
                   <LifecycleActionButton
                     card={selectedCard}
-                    onLaunch={(target) => void handleLaunchWorkspace(target, selectedCard)}
+                    onLaunch={(target) =>
+                      void handleLaunchWorkspace(target, selectedCard)
+                    }
                   />
                 ) : null}
                 {focusedIssueId ? (
@@ -391,7 +497,6 @@ export function IssueLifecycleWorkbench({
                 cards={columns.issue}
                 selectedKey={selectedCardKey}
                 onSelect={handleSelectCard}
-                onOpenWorkspace={handleOpenWorkspace}
                 onDeleteIssue={(issueId) => void handleDeleteIssue(issueId)}
               />
               <LifecycleColumn
@@ -400,7 +505,6 @@ export function IssueLifecycleWorkbench({
                 cards={columns.story_spec}
                 selectedKey={selectedCardKey}
                 onSelect={handleSelectCard}
-                onOpenWorkspace={handleOpenWorkspace}
               />
               <LifecycleColumn
                 title="Design Spec"
@@ -408,7 +512,6 @@ export function IssueLifecycleWorkbench({
                 cards={columns.design_spec}
                 selectedKey={selectedCardKey}
                 onSelect={handleSelectCard}
-                onOpenWorkspace={handleOpenWorkspace}
               />
               <LifecycleColumn
                 title="Work Item"
@@ -416,12 +519,29 @@ export function IssueLifecycleWorkbench({
                 cards={columns.work_item}
                 selectedKey={selectedCardKey}
                 onSelect={handleSelectCard}
-                onOpenWorkspace={handleOpenWorkspace}
               />
             </div>
           }
         />
       </div>
+      {isDrawerOpen && focusedEntity ? (
+        <div className="fixed right-0 top-0 z-50 h-full w-[min(480px,100vw)] shadow-xl">
+          <LifecycleCardDrawer
+            entity={focusedEntity}
+            onClose={closeDrawer}
+            onOpenWorkspace={() =>
+              void handleOpenWorkspaceFromDrawer(focusedEntity)
+            }
+            onGenerateNext={
+              focusedEntity.status === "confirmed" &&
+              (focusedEntity.kind === "story_spec" ||
+                focusedEntity.kind === "design_spec")
+                ? () => void handleGenerateNext(focusedEntity)
+                : undefined
+            }
+          />
+        </div>
+      ) : null}
       {projectDialogOpen ? (
         <CreateProjectDialog
           onCreate={handleCreateProject}
@@ -446,7 +566,9 @@ export function IssueLifecycleWorkbench({
 }
 
 function defaultOpenWorkspace(sessionId: string) {
-  window.location.assign(`/workbench/workspace/${encodeURIComponent(sessionId)}`);
+  window.location.assign(
+    `/workbench/workspace/${encodeURIComponent(sessionId)}`,
+  );
 }
 
 function normalizeLifecycleResponse(
@@ -476,15 +598,39 @@ function lifecycleCardKey(card: LifecycleCardData) {
   return `${card.kind}:${card.id}`;
 }
 
-function findSelectedCard(columns: ReturnType<typeof visibleLifecycle>, selectedKey: string | null) {
+function findSelectedCard(
+  columns: ReturnType<typeof visibleLifecycle>,
+  selectedKey: string | null,
+) {
   if (!selectedKey) {
     return null;
   }
 
   return (
-    [...columns.issue, ...columns.story_spec, ...columns.design_spec, ...columns.work_item].find(
-      (card) => lifecycleCardKey(card) === selectedKey,
-    ) ?? null
+    [
+      ...columns.issue,
+      ...columns.story_spec,
+      ...columns.design_spec,
+      ...columns.work_item,
+    ].find((card) => lifecycleCardKey(card) === selectedKey) ?? null
+  );
+}
+
+function findCardInColumns(
+  columns: ReturnType<typeof visibleLifecycle>,
+  entityId: string | null,
+): LifecycleCardData | null {
+  if (!entityId) {
+    return null;
+  }
+
+  return (
+    [
+      ...columns.issue,
+      ...columns.story_spec,
+      ...columns.design_spec,
+      ...columns.work_item,
+    ].find((card) => card.id === entityId) ?? null
   );
 }
 
@@ -518,12 +664,6 @@ function lifecycleAction(card: LifecycleCardData): {
   if (card.kind === "issue") {
     return { label: "生成 Story Spec", target: "story" };
   }
-  if (card.kind === "story_spec" && card.raw.confirmation_status === "confirmed") {
-    return { label: "生成 Design Spec", target: "design" };
-  }
-  if (card.kind === "design_spec" && card.raw.confirmation_status === "confirmed") {
-    return { label: "生成 Work Item", target: "work_item" };
-  }
   return null;
 }
 
@@ -553,7 +693,9 @@ function findWorkspaceSession(
     lifecycles
       .find((lifecycle) => lifecycle.issue.issue_id === card.issueId)
       ?.workspace_sessions.find(
-        (session) => session.entity_id === card.id && session.workspace_type === workspaceType,
+        (session) =>
+          session.entity_id === card.id &&
+          session.workspace_type === workspaceType,
       ) ?? null
   );
 }
