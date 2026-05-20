@@ -90,6 +90,7 @@ export type StorySpec = {
   current_version: number | null;
   current_markdown_preview: string | null;
   confirmation_status: LifecycleConfirmationStatus;
+  artifact_versions: ArtifactVersion[];
 };
 
 export type DesignSpec = {
@@ -101,6 +102,7 @@ export type DesignSpec = {
   current_version: number | null;
   current_markdown_preview: string | null;
   confirmation_status: LifecycleConfirmationStatus;
+  artifact_versions: ArtifactVersion[];
 };
 
 export type LifecycleWorkItem = {

@@ -33,6 +33,18 @@ const lifecycle: IssueLifecycleResponse = {
       current_version: 1,
       current_markdown_preview: "## 功能需求\n\n[REQ-001] 显示会话过期提示。",
       confirmation_status: "confirmed",
+      artifact_versions: [
+        {
+          version: 1,
+          markdown: "## 功能需求\n\n[REQ-001] 显示会话过期提示。",
+          generated_by: "claude_code",
+          reviewed_by: "codex",
+          review_verdict: "pass",
+          confirmed_by: "human",
+          created_at: "2026-05-20T00:00:00Z",
+          source_node_id: "timeline_node_story_001",
+        },
+      ],
     },
   ],
   design_specs: [
@@ -45,6 +57,18 @@ const lifecycle: IssueLifecycleResponse = {
       current_version: 1,
       current_markdown_preview: "## 关键决策\n\n[DEC-001] 使用全局提示条。",
       confirmation_status: "draft",
+      artifact_versions: [
+        {
+          version: 1,
+          markdown: "## 关键决策\n\n[DEC-001] 使用全局提示条。",
+          generated_by: "claude_code",
+          reviewed_by: "codex",
+          review_verdict: "revise",
+          confirmed_by: null,
+          created_at: "2026-05-20T00:01:00Z",
+          source_node_id: "timeline_node_design_001",
+        },
+      ],
     },
   ],
   work_items: [],
@@ -67,6 +91,7 @@ const otherLifecycle: IssueLifecycleResponse = {
       current_version: 1,
       current_markdown_preview: "## 功能需求\n\n[REQ-001] 显示验证码提示。",
       confirmation_status: "confirmed",
+      artifact_versions: [],
     },
   ],
   design_specs: [
@@ -79,6 +104,7 @@ const otherLifecycle: IssueLifecycleResponse = {
       current_version: 1,
       current_markdown_preview: "## 关键决策\n\n[DEC-001] 提供验证码 API。",
       confirmation_status: "confirmed",
+      artifact_versions: [],
     },
   ],
   work_items: [
@@ -112,6 +138,20 @@ describe("lifecycle workbench store", () => {
     grouped.design_spec[0].sourceIds.push("story_spec_mutated");
 
     expect(lifecycle.design_specs[0].story_spec_ids).toEqual(["story_spec_0001"]);
+  });
+
+  it("passes story and design artifact versions through card data", () => {
+    const grouped = groupLifecycleCards([lifecycle]);
+    const storyCard = grouped.story_spec[0];
+    const designCard = grouped.design_spec[0];
+
+    expect(storyCard.kind).toBe("story_spec");
+    expect(designCard.kind).toBe("design_spec");
+    if (storyCard.kind !== "story_spec" || designCard.kind !== "design_spec") {
+      throw new Error("unexpected card kind");
+    }
+    expect(storyCard.artifactVersions).toEqual(lifecycle.story_specs[0].artifact_versions);
+    expect(designCard.artifactVersions).toEqual(lifecycle.design_specs[0].artifact_versions);
   });
 
   it("filters cards by focused issue", () => {

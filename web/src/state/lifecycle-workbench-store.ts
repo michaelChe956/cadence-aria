@@ -1,4 +1,5 @@
 import type {
+  ArtifactVersion,
   DesignSpec,
   IssueLifecycleResponse,
   LifecycleWorkItem,
@@ -27,6 +28,7 @@ export type LifecycleCard =
       version: number | null;
       preview: string | null;
       sourceIds: string[];
+      artifactVersions: ArtifactVersion[];
       raw: StorySpec;
     }
   | {
@@ -38,6 +40,7 @@ export type LifecycleCard =
       version: number | null;
       preview: string | null;
       sourceIds: string[];
+      artifactVersions: ArtifactVersion[];
       raw: DesignSpec;
     }
   | {
@@ -86,6 +89,7 @@ export function groupLifecycleCards(lifecycles: IssueLifecycleResponse[]): Lifec
           version: story.current_version,
           preview: story.current_markdown_preview,
           sourceIds: [story.issue_id],
+          artifactVersions: story.artifact_versions,
           raw: story,
         });
       });
@@ -100,6 +104,7 @@ export function groupLifecycleCards(lifecycles: IssueLifecycleResponse[]): Lifec
           version: design.current_version,
           preview: design.current_markdown_preview,
           sourceIds: [...design.story_spec_ids],
+          artifactVersions: design.artifact_versions,
           raw: design,
         });
       });

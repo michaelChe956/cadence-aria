@@ -1,8 +1,12 @@
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
+use cadence_aria::product::app_paths::ProductAppPaths;
+use cadence_aria::product::lifecycle_store::LifecycleStore;
+use cadence_aria::product::models::ProviderName;
 use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::runtime::WebRuntime;
 use cadence_aria::web::state::WebAppState;
+use cadence_aria::web::workspace_ws_types::ArtifactVersion;
 use serde_json::{Value, json};
 use std::{fs, process::Command};
 use tempfile::tempdir;
@@ -608,6 +612,129 @@ async fn issue_lifecycle_backfills_legacy_spec_versions_and_returns_markdown_pre
         .join(".aria/projects/project_0001/issues/issue_0001/versions/story_spec_0001");
     let version_count = fs::read_dir(versions_root).expect("versions root").count();
     assert_eq!(version_count, 1);
+}
+
+#[tokio::test]
+async fn lifecycle_returns_artifact_versions() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects",
+        json!({"name":"Lifecycle","description":null}),
+    )
+    .await;
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/repositories",
+        json!({"name":"Repo","path":repo.path()}),
+    )
+    .await;
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues",
+        json!({"title":"爬楼梯问题","description":"写个 Python 程序解决爬楼梯","repository_id":"repository_0001"}),
+    )
+    .await;
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/story-specs:generate",
+        json!({"title":"爬楼梯问题 Story Spec"}),
+    )
+    .await;
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/workspace-sessions/workspace_session_0001/confirm",
+        json!({"confirmed_by":"human"}),
+    )
+    .await;
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/design-specs:generate",
+        json!({
+            "title":"爬楼梯问题 Design Spec",
+            "story_spec_ids":["story_spec_0001"],
+            "design_kind":"backend"
+        }),
+    )
+    .await;
+
+    let lifecycle = LifecycleStore::new(app_paths);
+    lifecycle
+        .append_artifact_version(
+            "workspace_session_0001",
+            ArtifactVersion {
+                version: 1,
+                markdown: "## 功能需求\n\n[REQ-001] 计算爬楼梯方案数。".to_string(),
+                generated_by: ProviderName::Fake,
+                reviewed_by: Some(ProviderName::Fake),
+                review_verdict: None,
+                confirmed_by: Some("human".to_string()),
+                created_at: "2026-05-20T00:00:00Z".to_string(),
+                source_node_id: "timeline_node_story_001".to_string(),
+            },
+        )
+        .expect("append story artifact version");
+    lifecycle
+        .append_artifact_version(
+            "workspace_session_0002",
+            ArtifactVersion {
+                version: 1,
+                markdown: "## 关键决策\n\n[DEC-001] 使用动态规划。".to_string(),
+                generated_by: ProviderName::Fake,
+                reviewed_by: Some(ProviderName::Fake),
+                review_verdict: None,
+                confirmed_by: None,
+                created_at: "2026-05-20T00:01:00Z".to_string(),
+                source_node_id: "timeline_node_design_001".to_string(),
+            },
+        )
+        .expect("append design artifact version");
+
+    let (status, response) = request_json(
+        app,
+        Method::GET,
+        "/api/issues/issue_0001/lifecycle?project_id=project_0001",
+        json!({}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let story_versions = response["story_specs"][0]["artifact_versions"]
+        .as_array()
+        .expect("story artifact_versions");
+    assert_eq!(story_versions.len(), 1);
+    assert_eq!(story_versions[0]["version"], 1);
+    assert!(
+        story_versions[0]["markdown"]
+            .as_str()
+            .expect("story markdown")
+            .contains("功能需求")
+    );
+
+    let design_versions = response["design_specs"][0]["artifact_versions"]
+        .as_array()
+        .expect("design artifact_versions");
+    assert_eq!(design_versions.len(), 1);
+    assert_eq!(design_versions[0]["version"], 1);
+    assert!(
+        design_versions[0]["markdown"]
+            .as_str()
+            .expect("design markdown")
+            .contains("关键决策")
+    );
 }
 
 #[tokio::test]

@@ -366,6 +366,19 @@ pub struct IssueLifecycleResponse {
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub struct ArtifactVersionDto {
+    pub version: u32,
+    pub markdown: String,
+    pub generated_by: String,
+    pub reviewed_by: Option<String>,
+    pub review_verdict: Option<String>,
+    pub confirmed_by: Option<String>,
+    pub created_at: String,
+    pub source_node_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct StorySpecDto {
     pub story_spec_id: String,
     pub issue_id: String,
@@ -374,6 +387,7 @@ pub struct StorySpecDto {
     pub current_version: Option<u32>,
     pub current_markdown_preview: Option<String>,
     pub confirmation_status: String,
+    pub artifact_versions: Vec<ArtifactVersionDto>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -387,6 +401,7 @@ pub struct DesignSpecDto {
     pub current_version: Option<u32>,
     pub current_markdown_preview: Option<String>,
     pub confirmation_status: String,
+    pub artifact_versions: Vec<ArtifactVersionDto>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

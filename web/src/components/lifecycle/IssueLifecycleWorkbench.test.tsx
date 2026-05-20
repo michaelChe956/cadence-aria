@@ -640,6 +640,7 @@ function lifecycleFetch(options?: {
         current_version: null,
         current_markdown_preview: null,
         confirmation_status: "confirmed",
+        artifact_versions: [],
       };
       const session = workspaceSessionRecord("story", "story_spec_0001", "workspace_session_story_0001", {
         author_provider: payload.author_provider,
@@ -678,6 +679,7 @@ function lifecycleFetch(options?: {
         current_version: null,
         current_markdown_preview: null,
         confirmation_status: "confirmed",
+        artifact_versions: [],
       };
       const session = workspaceSessionRecord(
         "design",
@@ -975,6 +977,7 @@ function initialLifecycleData(
         current_version: 1,
         current_markdown_preview: "## 功能需求\n\n[REQ-001] 显示会话过期提示。",
         confirmation_status: "confirmed",
+        artifact_versions: [],
       },
     ],
     design_specs: [
@@ -987,6 +990,7 @@ function initialLifecycleData(
         current_version: 1,
         current_markdown_preview: "## 关键决策\n\n[DEC-001] 使用全局提示条。",
         confirmation_status: "confirmed",
+        artifact_versions: [],
       },
     ],
     work_items: [

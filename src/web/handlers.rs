@@ -42,13 +42,13 @@ use crate::web::redaction::redact_sensitive_lines;
 use crate::web::runtime::WebRuntime;
 use crate::web::state::WebAppState;
 use crate::web::types::{
-    AdvanceTaskResponse, ArtifactContentResponse, ConfirmTaskRequest, ConfirmTaskResponse,
-    CreateIssueRequest, CreateProductIssueRequest, CreateProjectRequest, CreateRepositoryRequest,
-    CreateTaskRequest, CreateTaskResponse, CreateWorkspaceRequest, DesignSpecDto,
-    FileContentResponse, FileDiffResponse, GenerateDesignSpecsRequest, GenerateDesignSpecsResponse,
-    GenerateStorySpecsRequest, GenerateStorySpecsResponse, GenerateWorkItemsRequest,
-    GenerateWorkItemsResponse, IssueDto, IssueLifecycleResponse, IssueListResponse,
-    IssueRollbackPreviewRequest, IssueRollbackRequest, LifecycleWorkItemDto,
+    AdvanceTaskResponse, ArtifactContentResponse, ArtifactVersionDto, ConfirmTaskRequest,
+    ConfirmTaskResponse, CreateIssueRequest, CreateProductIssueRequest, CreateProjectRequest,
+    CreateRepositoryRequest, CreateTaskRequest, CreateTaskResponse, CreateWorkspaceRequest,
+    DesignSpecDto, FileContentResponse, FileDiffResponse, GenerateDesignSpecsRequest,
+    GenerateDesignSpecsResponse, GenerateStorySpecsRequest, GenerateStorySpecsResponse,
+    GenerateWorkItemsRequest, GenerateWorkItemsResponse, IssueDto, IssueLifecycleResponse,
+    IssueListResponse, IssueRollbackPreviewRequest, IssueRollbackRequest, LifecycleWorkItemDto,
     ProductIssueArtifactDto, ProductIssueDto, ProductIssueListResponse, ProjectDto,
     ProjectListResponse, ProviderInputContentResponse, RepositoryDto, RepositoryListResponse,
     ResolveGateRequest, ResolveGateResponse, RollbackPreviewRequest, RollbackPreviewResponse,
@@ -58,6 +58,7 @@ use crate::web::types::{
 };
 use crate::web::workspace_context::ensure_workspace_context_message;
 use crate::web::workspace_registry::{CreateWorkspaceInput, WorkspaceRecord, WorkspaceRegistry};
+use crate::web::workspace_ws_types::{ArtifactVersion, ReviewVerdictType};
 
 #[derive(Debug, Deserialize)]
 pub struct ProjectionQuery {
@@ -308,13 +309,24 @@ pub async fn issue_lifecycle(
         .list_story_specs(&project_id, &issue_id)
         .map_err(product_store_api_error)?
         .into_iter()
-        .map(|story| story_spec_dto(&lifecycle, &story))
+        .map(|story| {
+            let session =
+                workspace_session_for_entity(&workspace_sessions, &story.id, &WorkspaceType::Story);
+            story_spec_dto(&lifecycle, &story, session)
+        })
         .collect::<ApiResult<Vec<_>>>()?;
     let design_specs = lifecycle
         .list_design_specs(&project_id, &issue_id)
         .map_err(product_store_api_error)?
         .into_iter()
-        .map(|design| design_spec_dto(&lifecycle, &design))
+        .map(|design| {
+            let session = workspace_session_for_entity(
+                &workspace_sessions,
+                &design.id,
+                &WorkspaceType::Design,
+            );
+            design_spec_dto(&lifecycle, &design, session)
+        })
         .collect::<ApiResult<Vec<_>>>()?;
     let work_items = lifecycle
         .list_work_items(&project_id, &issue_id)
@@ -382,8 +394,9 @@ pub async fn generate_story_specs(
     let session = ensure_workspace_context_message(&app_paths, &lifecycle, session)
         .map_err(product_store_api_error)?;
 
+    let story_dto = story_spec_dto(&lifecycle, &story, Some(&session))?;
     Ok(Json(GenerateStorySpecsResponse {
-        story_specs: vec![story_spec_dto(&lifecycle, &story)?],
+        story_specs: vec![story_dto],
         workspace_session: workspace_session_dto(session),
     }))
 }
@@ -432,8 +445,9 @@ pub async fn generate_design_specs(
     let session = ensure_workspace_context_message(&app_paths, &lifecycle, session)
         .map_err(product_store_api_error)?;
 
+    let design_dto = design_spec_dto(&lifecycle, &design, Some(&session))?;
     Ok(Json(GenerateDesignSpecsResponse {
-        design_specs: vec![design_spec_dto(&lifecycle, &design)?],
+        design_specs: vec![design_dto],
         workspace_session: workspace_session_dto(session),
     }))
 }
@@ -1363,7 +1377,11 @@ fn latest_workspace_artifact_markdown(
         .filter(|content| !content.trim().is_empty())
 }
 
-fn story_spec_dto(lifecycle: &LifecycleStore, record: &StorySpecRecord) -> ApiResult<StorySpecDto> {
+fn story_spec_dto(
+    lifecycle: &LifecycleStore,
+    record: &StorySpecRecord,
+    session: Option<&WorkspaceSessionRecord>,
+) -> ApiResult<StorySpecDto> {
     Ok(StorySpecDto {
         story_spec_id: record.id.clone(),
         issue_id: record.issue_id.clone(),
@@ -1373,12 +1391,14 @@ fn story_spec_dto(lifecycle: &LifecycleStore, record: &StorySpecRecord) -> ApiRe
         current_markdown_preview: current_markdown_preview(lifecycle, record)?,
         confirmation_status: lifecycle_confirmation_status_text(&record.confirmation_status)
             .to_string(),
+        artifact_versions: artifact_version_dtos(lifecycle, session)?,
     })
 }
 
 fn design_spec_dto(
     lifecycle: &LifecycleStore,
     record: &DesignSpecRecord,
+    session: Option<&WorkspaceSessionRecord>,
 ) -> ApiResult<DesignSpecDto> {
     Ok(DesignSpecDto {
         design_spec_id: record.id.clone(),
@@ -1390,7 +1410,53 @@ fn design_spec_dto(
         current_markdown_preview: current_markdown_preview(lifecycle, record)?,
         confirmation_status: lifecycle_confirmation_status_text(&record.confirmation_status)
             .to_string(),
+        artifact_versions: artifact_version_dtos(lifecycle, session)?,
     })
+}
+
+fn workspace_session_for_entity<'a>(
+    sessions: &'a [WorkspaceSessionRecord],
+    entity_id: &str,
+    workspace_type: &WorkspaceType,
+) -> Option<&'a WorkspaceSessionRecord> {
+    sessions
+        .iter()
+        .rev()
+        .find(|session| session.entity_id == entity_id && &session.workspace_type == workspace_type)
+}
+
+fn artifact_version_dtos(
+    lifecycle: &LifecycleStore,
+    session: Option<&WorkspaceSessionRecord>,
+) -> ApiResult<Vec<ArtifactVersionDto>> {
+    let Some(session) = session else {
+        return Ok(Vec::new());
+    };
+    lifecycle
+        .list_artifact_versions(&session.id)
+        .map_err(product_store_api_error)
+        .map(|versions| versions.into_iter().map(artifact_version_dto).collect())
+}
+
+fn artifact_version_dto(version: ArtifactVersion) -> ArtifactVersionDto {
+    ArtifactVersionDto {
+        version: version.version,
+        markdown: version.markdown,
+        generated_by: provider_name_text(&version.generated_by).to_string(),
+        reviewed_by: version
+            .reviewed_by
+            .as_ref()
+            .map(provider_name_text)
+            .map(str::to_string),
+        review_verdict: version
+            .review_verdict
+            .as_ref()
+            .map(review_verdict_text)
+            .map(str::to_string),
+        confirmed_by: version.confirmed_by,
+        created_at: version.created_at,
+        source_node_id: version.source_node_id,
+    }
 }
 
 trait SpecDtoSource {
@@ -1703,6 +1769,14 @@ fn provider_name_text(provider: &ProviderName) -> &'static str {
         ProviderName::ClaudeCode => "claude_code",
         ProviderName::Codex => "codex",
         ProviderName::Fake => "fake",
+    }
+}
+
+fn review_verdict_text(verdict: &ReviewVerdictType) -> &'static str {
+    match verdict {
+        ReviewVerdictType::Pass => "pass",
+        ReviewVerdictType::Revise => "revise",
+        ReviewVerdictType::NeedsHuman => "needs_human",
     }
 }
 
