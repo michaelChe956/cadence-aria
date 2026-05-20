@@ -843,6 +843,12 @@ impl WorkspaceEngine {
                                 .await;
                             if let Some(node_id) = node_id.as_deref() {
                                 let _ = self.flush_stream_buffer(node_id).await;
+                                self.update_timeline_node(
+                                    node_id,
+                                    TimelineNodeStatus::Failed,
+                                    Some("Provider 运行失败".to_string()),
+                                )
+                                .await;
                             }
                             self.finish_failed_run().await;
                             return;
@@ -1124,6 +1130,12 @@ impl WorkspaceEngine {
                                 .await;
                             if let Some(node_id) = node_id.as_deref() {
                                 let _ = self.flush_stream_buffer(node_id).await;
+                                self.update_timeline_node(
+                                    node_id,
+                                    TimelineNodeStatus::Failed,
+                                    Some("Provider 运行失败".to_string()),
+                                )
+                                .await;
                             }
                             self.finish_failed_run().await;
                             return;
