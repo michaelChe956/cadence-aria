@@ -23,6 +23,9 @@ writeFileSync(join(workspace, ".gitignore"), ".aria/\n");
 run("git", ["add", "README.md", ".gitignore"]);
 run("git", ["commit", "-m", "initial workspace"]);
 
+process.env.ARIA_PROVIDER_MODE = "fake";
+process.env.ARIA_E2E_TEST_CONTROLS = "1";
+
 const child = spawn(
   "cargo",
   [

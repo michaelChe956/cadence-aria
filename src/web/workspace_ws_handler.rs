@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use axum::extract::ws::{Message, WebSocket};
+use axum::extract::ws::{CloseFrame, Message, WebSocket, close_code};
 use axum::extract::{Path, State, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
@@ -21,6 +21,7 @@ use crate::product::workspace_engine::{
 };
 use crate::product::workspace_repository::workspace_repository_for_session;
 use crate::web::state::WebAppState;
+use crate::web::test_controls::WorkspaceSocketControl;
 use crate::web::workspace_context::ensure_workspace_context_message;
 use crate::web::workspace_ws_types::{
     HumanConfirmDecision, RevisionPath, WsExecutionEvent, WsExecutionEventKind,
@@ -39,6 +40,7 @@ pub async fn workspace_ws(
 enum OutboundControl {
     Text(String),
     CloseDueToIdleTimeout,
+    CloseForTestDrop,
 }
 
 async fn send_json_outbound<T: serde::Serialize>(
@@ -141,6 +143,11 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
     }
 
     let (outbound_tx, mut outbound_rx) = mpsc::channel::<OutboundControl>(64);
+    let (socket_control_tx, mut socket_control_rx) = mpsc::channel::<WorkspaceSocketControl>(4);
+    state
+        .test_controls
+        .register_workspace_socket(session_id.clone(), socket_control_tx)
+        .await;
 
     let send_task = tokio::spawn(async move {
         while let Some(control) = outbound_rx.recv().await {
@@ -152,6 +159,29 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                 }
                 OutboundControl::CloseDueToIdleTimeout => {
                     let _ = ws_sender.close().await;
+                    break;
+                }
+                OutboundControl::CloseForTestDrop => {
+                    let _ = ws_sender
+                        .send(Message::Close(Some(CloseFrame {
+                            code: close_code::AWAY,
+                            reason: "test drop".into(),
+                        })))
+                        .await;
+                    break;
+                }
+            }
+        }
+    });
+
+    let outbound_for_socket_controls = outbound_tx.clone();
+    let socket_control_task = tokio::spawn(async move {
+        while let Some(control) = socket_control_rx.recv().await {
+            match control {
+                WorkspaceSocketControl::CloseForTestDrop => {
+                    let _ = outbound_for_socket_controls
+                        .send(OutboundControl::CloseForTestDrop)
+                        .await;
                     break;
                 }
             }
@@ -277,7 +307,7 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
     let idle_timeout_task = spawn_idle_timeout_task(
         last_client_message_at.clone(),
         outbound_tx.clone(),
-        std::time::Duration::from_secs(90),
+        state.test_controls.server_idle_timeout(),
         std::time::Duration::from_secs(5),
     );
 
@@ -536,8 +566,10 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
     }
     drop(outbound_tx);
     idle_timeout_task.abort();
+    socket_control_task.abort();
     event_forward_task.abort();
     send_task.abort();
+    let _ = socket_control_task.await;
     let _ = event_forward_task.await;
     let _ = send_task.await;
 }

@@ -798,6 +798,43 @@ async fn workspace_ws_disconnect_during_active_run_writes_aborted_by_disconnect(
 }
 
 #[tokio::test]
+async fn workspace_ws_test_control_drop_closes_registered_socket() {
+    let root = tempdir().expect("root");
+    let _repo = create_workspace_session_fixture(&root).await;
+    let state = WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    );
+    let controls = state.test_controls.clone();
+    let app = build_web_router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    assert!(
+        controls
+            .drop_workspace_socket("workspace_session_0001")
+            .await
+    );
+
+    let closed = timeout(Duration::from_secs(3), ws.next())
+        .await
+        .expect("socket close timeout")
+        .expect("socket close frame")
+        .expect("valid close frame");
+    assert!(matches!(closed, Message::Close(_)));
+
+    drop(ws);
+    server.abort();
+}
+
+#[tokio::test]
 async fn workspace_ws_supervised_permission_allows_real_stream_to_complete() {
     let root = tempdir().expect("root");
     let _repo = create_workspace_session_fixture_with_author(&root, "claude_code").await;
@@ -850,6 +887,87 @@ async fn workspace_ws_supervised_permission_allows_real_stream_to_complete() {
     assert!(checkpoint.starts_with("cp_"));
     let stage = recv_until_stage(&mut ws, "human_confirm").await;
     assert_eq!(stage, "human_confirm");
+
+    drop(ws);
+    server.abort();
+}
+
+#[tokio::test]
+async fn workspace_ws_test_permission_fixture_emits_permission_request_for_fake_provider() {
+    let root = tempdir().expect("root");
+    let _repo = create_workspace_session_fixture(&root).await;
+    let state = WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    );
+    state
+        .test_controls
+        .enable_permission_fixture("workspace_session_0001".to_string())
+        .await;
+    let app = build_web_router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(
+        &mut ws,
+        &WsInMessage::UserMessage {
+            content: "run permission fixture".to_string(),
+        },
+    )
+    .await;
+
+    let permission = recv_until_permission_request(&mut ws).await;
+    assert_eq!(permission.tool_name, "Bash");
+    assert_eq!(permission.description, "E2E permission fixture request");
+
+    drop(ws);
+    server.abort();
+}
+
+#[tokio::test]
+async fn workspace_ws_human_confirm_v2_completes_workspace() {
+    let root = tempdir().expect("root");
+    let _repo = create_workspace_session_fixture(&root).await;
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(
+        &mut ws,
+        &WsInMessage::UserMessage {
+            content: "confirm with v2 message".to_string(),
+        },
+    )
+    .await;
+    assert_eq!(recv_until_stage(&mut ws, "human_confirm").await, "human_confirm");
+
+    send_json(
+        &mut ws,
+        &WsInMessage::HumanConfirm {
+            decision: cadence_aria::web::workspace_ws_types::HumanConfirmDecision::Confirm,
+            payload: None,
+        },
+    )
+    .await;
+
+    assert_eq!(recv_until_stage(&mut ws, "completed").await, "completed");
 
     drop(ws);
     server.abort();
@@ -1466,6 +1584,7 @@ async fn recv_until_stream_chunk(
 struct PermissionRequestSeen {
     id: String,
     tool_name: String,
+    description: String,
 }
 
 async fn recv_until_permission_request(
@@ -1475,8 +1594,17 @@ async fn recv_until_permission_request(
 ) -> PermissionRequestSeen {
     for _ in 0..40 {
         match recv_json(ws).await {
-            WsOutMessage::PermissionRequest { id, tool_name, .. } => {
-                return PermissionRequestSeen { id, tool_name };
+            WsOutMessage::PermissionRequest {
+                id,
+                tool_name,
+                description,
+                ..
+            } => {
+                return PermissionRequestSeen {
+                    id,
+                    tool_name,
+                    description,
+                };
             }
             WsOutMessage::Error { message } => panic!("ws error: {message}"),
             _ => {}

@@ -4,10 +4,10 @@ use std::sync::{Arc, Mutex};
 use crate::cross_cutting::claude_code_provider::ClaudeCodeProvider;
 use crate::cross_cutting::codex_provider::CodexProvider;
 use crate::cross_cutting::provider_registry::ProviderRegistry;
-use crate::cross_cutting::streaming_provider::FakeStreamingProvider;
 use crate::product::models::ProviderName;
 use crate::web::events::EventHub;
 use crate::web::runtime::WebRuntime;
+use crate::web::test_controls::{TestControlledFakeStreamingProvider, TestControls};
 
 #[derive(Clone)]
 pub struct WebAppState {
@@ -15,6 +15,7 @@ pub struct WebAppState {
     pub runtime: Arc<Mutex<WebRuntime>>,
     pub events: EventHub,
     pub provider_registry: Arc<ProviderRegistry>,
+    pub test_controls: TestControls,
 }
 
 impl WebAppState {
@@ -23,12 +24,14 @@ impl WebAppState {
     }
 
     pub fn with_events(workspace_root: PathBuf, runtime: WebRuntime, events: EventHub) -> Self {
-        Self::with_events_and_provider_registry(
+        let test_controls = TestControls::default();
+        Self {
             workspace_root,
-            runtime,
+            runtime: Arc::new(Mutex::new(runtime)),
             events,
-            default_provider_registry(),
-        )
+            provider_registry: default_provider_registry(test_controls.clone()),
+            test_controls,
+        }
     }
 
     pub fn with_provider_registry(
@@ -55,13 +58,17 @@ impl WebAppState {
             runtime: Arc::new(Mutex::new(runtime)),
             events,
             provider_registry,
+            test_controls: TestControls::default(),
         }
     }
 }
 
-fn default_provider_registry() -> Arc<ProviderRegistry> {
+fn default_provider_registry(test_controls: TestControls) -> Arc<ProviderRegistry> {
     let mut registry = ProviderRegistry::new();
-    registry.register(ProviderName::Fake, Arc::new(FakeStreamingProvider));
+    registry.register(
+        ProviderName::Fake,
+        Arc::new(TestControlledFakeStreamingProvider::new(test_controls)),
+    );
     registry.register(
         ProviderName::ClaudeCode,
         Arc::new(ClaudeCodeProvider::new(PathBuf::from("claude"))),

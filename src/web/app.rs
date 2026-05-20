@@ -6,10 +6,11 @@ use tokio::net::TcpListener;
 use crate::web::events::EventHub;
 use crate::web::handlers;
 use crate::web::state::WebAppState;
+use crate::web::test_controls;
 use crate::web::workspace_ws_handler;
 
 pub fn build_web_router(state: WebAppState) -> Router {
-    Router::new()
+    let router = Router::new()
         .route("/api/health", get(handlers::health))
         .route("/api/events", get(handlers::events))
         .route("/api/projection", get(handlers::projection))
@@ -134,8 +135,31 @@ pub fn build_web_router(state: WebAppState) -> Router {
         .route(
             "/api/ws/workspace/{session_id}",
             get(workspace_ws_handler::workspace_ws),
-        )
-        .with_state(state)
+        );
+
+    let router = if test_controls::test_controls_enabled() {
+        router
+            .route(
+                "/api/test/workspace-sessions/{session_id}/ws/drop",
+                post(test_controls::drop_workspace_socket),
+            )
+            .route(
+                "/api/test/workspace-sessions/{session_id}/permission-fixture",
+                post(test_controls::enable_permission_fixture),
+            )
+            .route(
+                "/api/test/permission-timeout",
+                post(test_controls::set_permission_timeout),
+            )
+            .route(
+                "/api/test/ws-timeout",
+                post(test_controls::set_ws_timeout),
+            )
+    } else {
+        router
+    };
+
+    router.with_state(state)
 }
 
 pub async fn serve_web(
