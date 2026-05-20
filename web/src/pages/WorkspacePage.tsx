@@ -1,6 +1,10 @@
 import { ArrowLeft, Check, Wifi, WifiOff, X } from "lucide-react";
-import type { ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
 import type { ArtifactVersion, ProviderConfigSnapshot, WorkspaceProviderName } from "../api/types";
+import {
+  DisconnectBanner,
+  loadAcknowledgedAbortedNodes,
+} from "../components/workspace/DisconnectBanner";
 import { NodeDetailPanel } from "../components/workspace/NodeDetailPanel";
 import { PrepareContextPanel } from "../components/workspace/PrepareContextPanel";
 import { ProviderConfigPanel } from "../components/workspace/ProviderConfigPanel";
@@ -9,6 +13,7 @@ import { WorkspaceHeader } from "../components/workspace/WorkspaceHeader";
 import { HumanConfirmStagePanel } from "../components/workspace/stages/HumanConfirmStagePanel";
 import { ReviewDecisionStagePanel } from "../components/workspace/stages/ReviewDecisionStagePanel";
 import { useStageUI } from "../hooks/useStageUI";
+import { useUnloadGuard } from "../hooks/useUnloadGuard";
 import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
 import {
   selectPrepareContextNotes,
@@ -25,6 +30,8 @@ const STAGE_EMPTY_TEXT: Record<string, string> = {
   revision: "修订中，等待 author 输出",
   completed: "已完成",
 };
+const UNLOAD_GUARDED_STAGES = new Set(["running", "cross_review", "revision"]);
+const UNLOAD_GUARD_MESSAGE = "运行中。刷新/关闭将中止当前 Provider 运行，是否继续？";
 
 export function WorkspacePage({
   sessionId,
@@ -42,6 +49,9 @@ export function WorkspacePage({
     selectProvider,
     respondPermission,
     connectionStatus,
+    isReconnecting,
+    reconnectAttemptCount,
+    retryNow,
   } = useWorkspaceWs(sessionId);
   const store = useWorkspaceStore();
   const stageConfig = useStageUI(store.stage);
@@ -50,6 +60,22 @@ export function WorkspacePage({
   const selectedNodeDetail = selectedNode ? store.nodeDetails[selectedNode.node_id] ?? null : null;
   const latestArtifact = latestArtifactVersion(store.artifactVersions, store.artifact);
   const previousArtifact = previousArtifactVersion(store.artifactVersions);
+  const abortedByDisconnectNode = latestUnacknowledgedAbortedNode(
+    store.timelineNodes,
+    store.acknowledgedAbortedNodes,
+  );
+
+  useEffect(() => {
+    const acknowledgedNodes = loadAcknowledgedAbortedNodes();
+    if (acknowledgedNodes.length > 0) {
+      useWorkspaceStore.getState().setAcknowledgedAbortedNodes(acknowledgedNodes);
+    }
+  }, []);
+
+  useUnloadGuard({
+    enabled: UNLOAD_GUARDED_STAGES.has(store.stage),
+    message: UNLOAD_GUARD_MESSAGE,
+  });
 
   function handleStartGeneration() {
     sendStartGeneration(
@@ -89,6 +115,28 @@ export function WorkspacePage({
           <WifiOff className="h-4 w-4 text-red-600" />
         )}
       </div>
+
+      <DisconnectBanner
+        isReconnecting={isReconnecting}
+        attemptCount={reconnectAttemptCount}
+        onManualReconnect={retryNow}
+        abortedByDisconnect={
+          abortedByDisconnectNode
+            ? {
+                nodeId: abortedByDisconnectNode.node_id,
+                ts: abortedByDisconnectNode.completed_at ?? abortedByDisconnectNode.started_at,
+              }
+            : null
+        }
+        onAcknowledge={(nodeIds) =>
+          useWorkspaceStore.getState().setAcknowledgedAbortedNodes(nodeIds)
+        }
+        onViewTimeline={
+          abortedByDisconnectNode
+            ? () => useWorkspaceStore.getState().setSelectedNode(abortedByDisconnectNode.node_id)
+            : undefined
+        }
+      />
 
       <WorkspaceHeader
         entityType={entityTypeLabel(store.workspaceType)}
@@ -351,6 +399,15 @@ function selectTimelineNode(
     nodes.at(-1) ??
     null
   );
+}
+
+function latestUnacknowledgedAbortedNode(nodes: TimelineNode[], acknowledgedNodeIds: string[]) {
+  const acknowledged = new Set(acknowledgedNodeIds);
+  const latest = nodes.at(-1);
+  if (latest?.node_type !== "aborted_by_disconnect") {
+    return null;
+  }
+  return acknowledged.has(latest.node_id) ? null : latest;
 }
 
 function providerConfigFor(

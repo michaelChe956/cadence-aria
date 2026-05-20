@@ -1,6 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { useUnloadGuard } from "../hooks/useUnloadGuard";
 import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
 import {
   useWorkspaceStore,
@@ -11,6 +12,10 @@ import { WorkspacePage } from "./WorkspacePage";
 
 vi.mock("../hooks/useWorkspaceWs", () => ({
   useWorkspaceWs: vi.fn(),
+}));
+
+vi.mock("../hooks/useUnloadGuard", () => ({
+  useUnloadGuard: vi.fn(),
 }));
 
 type WorkspaceWsApi = ReturnType<typeof useWorkspaceWs>;
@@ -34,6 +39,9 @@ function mockWorkspaceWs(overrides: Partial<WorkspaceWsApi> = {}) {
     respondPermission: vi.fn(),
     sendPermissionResponse: vi.fn(),
     connectionStatus: "connected",
+    isReconnecting: false,
+    reconnectAttemptCount: 0,
+    retryNow: vi.fn(),
     ...overrides,
   };
   vi.mocked(useWorkspaceWs).mockReturnValue(api);
@@ -42,6 +50,7 @@ function mockWorkspaceWs(overrides: Partial<WorkspaceWsApi> = {}) {
 
 describe("WorkspacePage", () => {
   beforeEach(() => {
+    window.localStorage.clear();
     useWorkspaceStore.getState().reset();
     vi.clearAllMocks();
   });
@@ -205,6 +214,55 @@ describe("WorkspacePage", () => {
     await userEvent.click(screen.getByRole("button", { name: "中止" }));
 
     expect(api.abort).toHaveBeenCalled();
+  });
+
+  it("enables unload guard while provider work is running", () => {
+    mockWorkspaceWs();
+    useWorkspaceStore.setState({ stage: "running" });
+
+    render(<WorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+
+    expect(useUnloadGuard).toHaveBeenCalledWith({
+      enabled: true,
+      message: "运行中。刷新/关闭将中止当前 Provider 运行，是否继续？",
+    });
+  });
+
+  it("renders reconnect progress banner and retries manually", async () => {
+    const retryNow = vi.fn();
+    mockWorkspaceWs({
+      isReconnecting: true,
+      reconnectAttemptCount: 2,
+      retryNow,
+    });
+
+    render(<WorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+
+    expect(screen.getByText(/重连中/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "手动重连" }));
+    expect(retryNow).toHaveBeenCalled();
+  });
+
+  it("renders aborted-by-disconnect banner and stores acknowledgement", async () => {
+    mockWorkspaceWs();
+    useWorkspaceStore.setState({
+      timelineNodes: [
+        {
+          ...timelineNode(),
+          node_id: "node-aborted-1",
+          node_type: "aborted_by_disconnect",
+          status: "failed",
+          title: "运行因断开中止",
+        },
+      ],
+    });
+
+    render(<WorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+
+    expect(screen.getByText(/上次运行因断开被中止/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "我知道了" }));
+
+    expect(useWorkspaceStore.getState().acknowledgedAbortedNodes).toEqual(["node-aborted-1"]);
   });
 });
 

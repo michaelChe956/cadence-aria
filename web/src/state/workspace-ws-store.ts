@@ -150,6 +150,7 @@ export interface WorkspaceWsState {
   protocolError: ProtocolErrorState | null;
   providerLocked: boolean;
   providerSnapshot: ProviderConfigSnapshot | null;
+  acknowledgedAbortedNodes: string[];
   reviewerEnabled: boolean;
   reviewRounds: number;
   pendingReviewDecision: { verdict: string; summary: string } | null;
@@ -198,6 +199,7 @@ export interface WorkspaceWsActions {
   setProviderLocked: (
     payload: { snapshot: ProviderConfigSnapshot; locked_at: string } | null,
   ) => void;
+  setAcknowledgedAbortedNodes: (nodeIds: string[]) => void;
   reset: () => void;
 }
 
@@ -226,6 +228,7 @@ const initialState: WorkspaceWsState = {
   protocolError: null,
   providerLocked: false,
   providerSnapshot: null,
+  acknowledgedAbortedNodes: [],
   reviewerEnabled: true,
   reviewRounds: 1,
   pendingReviewDecision: null,
@@ -451,6 +454,9 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
       providerLocked: payload !== null,
       providerSnapshot: payload?.snapshot ?? null,
     }),
+
+  setAcknowledgedAbortedNodes: (nodeIds) =>
+    set({ acknowledgedAbortedNodes: Array.from(new Set(nodeIds)) }),
 
   reset: () => set(initialState),
 }));

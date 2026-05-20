@@ -27,9 +27,9 @@ class MockWebSocket {
     this.sent.push(data);
   }
 
-  close() {
+  close(code = 1000) {
     this.readyState = MockWebSocket.CLOSED;
-    this.onclose?.(new CloseEvent("close"));
+    this.onclose?.(new CloseEvent("close", { code }));
   }
 
   open() {
@@ -75,6 +75,7 @@ describe("useWorkspaceWs", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
@@ -225,6 +226,7 @@ describe("useWorkspaceWs", () => {
 
     act(() => {
       harness.ws.open();
+      harness.ws.sent.length = 0;
       harness.api.sendReviewDecision("continue_with_context", " 补充边界条件 ");
     });
 
@@ -248,6 +250,7 @@ describe("useWorkspaceWs", () => {
 
     act(() => {
       harness.ws.open();
+      harness.ws.sent.length = 0;
       harness.api.respondPermission("perm_001", true, " approved ");
     });
 
@@ -267,6 +270,7 @@ describe("useWorkspaceWs", () => {
 
     act(() => {
       harness.ws.open();
+      harness.ws.sent.length = 0;
       harness.api.sendContextNote("补充上下文");
     });
 
@@ -280,6 +284,7 @@ describe("useWorkspaceWs", () => {
 
     act(() => {
       harness.ws.open();
+      harness.ws.sent.length = 0;
       harness.api.sendStartGeneration(
         { author: "claude_code", reviewer: "codex", review_rounds: 1 },
         true,
@@ -301,6 +306,7 @@ describe("useWorkspaceWs", () => {
 
     act(() => {
       harness.ws.open();
+      harness.ws.sent.length = 0;
       harness.api.sendHello("session_001", "timeline_node_001");
       harness.api.sendPing();
     });
@@ -320,6 +326,7 @@ describe("useWorkspaceWs", () => {
 
     act(() => {
       harness.ws.open();
+      harness.ws.sent.length = 0;
       harness.api.sendSelectRevisionPath("revise-with-context", " 补充边界条件 ");
       harness.api.sendSelectRevisionPath("skip-to-human", "   ");
     });
@@ -343,6 +350,7 @@ describe("useWorkspaceWs", () => {
 
     act(() => {
       harness.ws.open();
+      harness.ws.sent.length = 0;
       harness.api.sendHumanConfirm("request-change", { reason: "需要补充" });
       harness.api.sendHumanConfirm("confirm");
     });
@@ -367,6 +375,7 @@ describe("useWorkspaceWs", () => {
 
     act(() => {
       harness.ws.open();
+      harness.ws.sent.length = 0;
       harness.api.sendMessage("旧入口上下文");
     });
 
@@ -384,11 +393,74 @@ describe("useWorkspaceWs", () => {
 
     act(() => {
       harness.ws.open();
+      harness.ws.sent.length = 0;
       harness.api.startGeneration();
     });
 
     expect(harness.ws.sent).toHaveLength(0);
     expect(warn).toHaveBeenCalledWith("startGeneration() without args is deprecated");
+  });
+
+  it("sends hello automatically with the last active node when connected", () => {
+    useWorkspaceStore.setState({ activeNodeId: "timeline_node_001" });
+    const harness = renderWorkspaceHook("session_001");
+
+    act(() => {
+      harness.ws.open();
+    });
+
+    expect(harness.ws.sent).toEqual([
+      JSON.stringify({
+        type: "hello",
+        session_id: "session_001",
+        last_seen_node_id: "timeline_node_001",
+      }),
+    ]);
+  });
+
+  it("sends ping every 25 seconds while connected", () => {
+    vi.useFakeTimers();
+    const harness = renderWorkspaceHook("session_001");
+
+    act(() => {
+      harness.ws.open();
+    });
+    act(() => {
+      vi.advanceTimersByTime(25_000);
+    });
+
+    expect(harness.ws.sent).toContain(JSON.stringify({ type: "ping" }));
+  });
+
+  it("closes stale sockets after 60 seconds without any server message", () => {
+    vi.useFakeTimers();
+    const harness = renderWorkspaceHook("session_001");
+
+    act(() => {
+      harness.ws.open();
+    });
+    act(() => {
+      vi.advanceTimersByTime(75_000);
+    });
+
+    expect(harness.ws.readyState).toBe(MockWebSocket.CLOSED);
+    expect(useWorkspaceStore.getState().connectionStatus).toBe("disconnected");
+  });
+
+  it("opens a replacement websocket after an abnormal close", () => {
+    vi.useFakeTimers();
+    const harness = renderWorkspaceHook("session_001");
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.close(1006);
+    });
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+
+    expect(MockWebSocket.instances).toHaveLength(2);
+    expect(MockWebSocket.instances[1].url).toBe(harness.ws.url);
   });
 
   it("keeps pending permission requests when the socket is not open", () => {

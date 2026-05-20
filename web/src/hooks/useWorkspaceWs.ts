@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   HumanConfirmDecision,
   ProviderConfigSnapshot,
   RevisionPath,
   WsInMessage,
 } from "../api/types";
+import { useWorkspaceWsReconnect } from "./useWorkspaceWsReconnect";
 import {
   useWorkspaceStore,
   type ExecutionEvent,
@@ -23,16 +24,29 @@ type WorkspaceWsSendMessage =
   | WsInMessage
   | { type: "provider_select"; role: string; provider: string };
 
+const PING_INTERVAL_MS = 25_000;
+const SERVER_SILENCE_TIMEOUT_MS = 60_000;
+const STALE_SOCKET_CLOSE_CODE = 4000;
+const SERVER_SILENCE_CHECK_INTERVAL_MS = 15_000;
+
 export function useWorkspaceWs(sessionId: string | null) {
   const wsRef = useRef<WebSocket | null>(null);
+  const lastMessageAtRef = useRef(Date.now());
+  const [closeCode, setCloseCode] = useState<number | undefined>();
   const connectionStatus = useWorkspaceStore((state) => state.connectionStatus);
 
-  useEffect(() => {
-    if (!sessionId) {
-      useWorkspaceStore.getState().reset();
+  const connect = useCallback(() => {
+    if (!sessionId) return;
+
+    const current = wsRef.current;
+    if (
+      current &&
+      (current.readyState === WebSocket.CONNECTING || current.readyState === WebSocket.OPEN)
+    ) {
       return;
     }
 
+    setCloseCode(undefined);
     useWorkspaceStore.getState().setConnectionStatus("connecting");
 
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -41,22 +55,37 @@ export function useWorkspaceWs(sessionId: string | null) {
     wsRef.current = ws;
 
     ws.onopen = () => {
+      if (wsRef.current !== ws) return;
       const store = useWorkspaceStore.getState();
+      lastMessageAtRef.current = Date.now();
       store.setConnectionStatus("connected");
       store.setError(null);
+      setCloseCode(undefined);
+      ws.send(
+        JSON.stringify({
+          type: "hello",
+          session_id: sessionId,
+          last_seen_node_id: store.activeNodeId ?? store.timelineNodes.at(-1)?.node_id ?? null,
+        }),
+      );
     };
 
-    ws.onclose = () => {
+    ws.onclose = (event) => {
+      if (wsRef.current !== ws) return;
+      wsRef.current = null;
+      setCloseCode(event.code);
       useWorkspaceStore.getState().setConnectionStatus("disconnected");
     };
 
     ws.onerror = () => {
+      if (wsRef.current !== ws) return;
       const store = useWorkspaceStore.getState();
       store.setConnectionStatus("error");
       store.setError("WebSocket 连接失败");
     };
 
     ws.onmessage = (event) => {
+      lastMessageAtRef.current = Date.now();
       try {
         const msg = JSON.parse(event.data) as WsServerMessage;
         handleMessage(msg);
@@ -64,12 +93,43 @@ export function useWorkspaceWs(sessionId: string | null) {
         // ignore malformed messages
       }
     };
+  }, [sessionId]);
+
+  const {
+    isReconnecting,
+    attemptCount: reconnectAttemptCount,
+    retryNow,
+    reset: resetReconnect,
+  } = useWorkspaceWsReconnect({
+    enabled:
+      Boolean(sessionId) &&
+      connectionStatus === "disconnected" &&
+      closeCode !== undefined &&
+      closeCode !== 1000,
+    closeCode,
+    onReconnect: connect,
+  });
+
+  useEffect(() => {
+    if (!sessionId) {
+      useWorkspaceStore.getState().reset();
+      return;
+    }
+
+    connect();
 
     return () => {
-      ws.close();
+      const ws = wsRef.current;
       wsRef.current = null;
+      ws?.close(1000);
     };
-  }, [sessionId]);
+  }, [connect, sessionId]);
+
+  useEffect(() => {
+    if (connectionStatus === "connected") {
+      resetReconnect();
+    }
+  }, [connectionStatus, resetReconnect]);
 
   function handleMessage(msg: WsServerMessage) {
     const store = useWorkspaceStore.getState();
@@ -203,6 +263,32 @@ export function useWorkspaceWs(sessionId: string | null) {
     sendJson({ type: "ping" });
   }, [sendJson]);
 
+  useEffect(() => {
+    if (connectionStatus !== "connected") return;
+
+    const interval = window.setInterval(() => {
+      sendPing();
+    }, PING_INTERVAL_MS);
+
+    return () => window.clearInterval(interval);
+  }, [connectionStatus, sendPing]);
+
+  useEffect(() => {
+    if (connectionStatus !== "connected") return;
+
+    const interval = window.setInterval(() => {
+      const ws = wsRef.current;
+      if (
+        ws?.readyState === WebSocket.OPEN &&
+        Date.now() - lastMessageAtRef.current >= SERVER_SILENCE_TIMEOUT_MS
+      ) {
+        ws.close(STALE_SOCKET_CLOSE_CODE);
+      }
+    }, SERVER_SILENCE_CHECK_INTERVAL_MS);
+
+    return () => window.clearInterval(interval);
+  }, [connectionStatus]);
+
   const sendSelectRevisionPath = useCallback(
     (path: RevisionPath, extraContext?: string) => {
       const trimmedContext = extraContext?.trim();
@@ -303,5 +389,8 @@ export function useWorkspaceWs(sessionId: string | null) {
     respondPermission,
     sendPermissionResponse,
     connectionStatus,
+    isReconnecting,
+    reconnectAttemptCount,
+    retryNow,
   };
 }
