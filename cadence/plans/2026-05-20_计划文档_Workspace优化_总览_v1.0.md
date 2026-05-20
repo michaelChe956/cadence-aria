@@ -23,7 +23,7 @@ P1 协议层 + Timeline 持久化 ─┼─→ P4 Running/审核/确认 UI
 （基础设施，必须最先）         │
                           ├─→ P5 断开策略 + WebSocket 重连
                           │
-                          └─→ P6 Permission 链路修复（弱依赖：仅用 NodeDetail.permission_events 字段）
+                          └─→ P6 Permission 链路修复（后端链路依赖 P1，权限 tab 展示依赖 P4 NodeDetailPanel）
 
 P3 看板侧滑详情面板（完全独立，可与任意 plan 并行）
 
@@ -39,7 +39,7 @@ P7 E2E 测试升级（依赖 P1-P6 全部完成，作为收尾验收）
 | P3 | `2026-05-20_计划文档_Workspace优化_P3_看板侧滑详情面板_v1.0.md` | §4 | — | ~12 |
 | P4 | `2026-05-20_计划文档_Workspace优化_P4_Running审核确认UI_v1.0.md` | §5 | P1, P2 | ~14 |
 | P5 | `2026-05-20_计划文档_Workspace优化_P5_断开策略与WebSocket重连_v1.0.md` | §6 + §7 | P1 | ~12 |
-| P6 | `2026-05-20_计划文档_Workspace优化_P6_Permission链路修复_v1.0.md` | §8 | 弱依赖 P1 | ~10 |
+| P6 | `2026-05-20_计划文档_Workspace优化_P6_Permission链路修复_v1.0.md` | §8 | P1, P4 | ~10 |
 | P7 | `2026-05-20_计划文档_Workspace优化_P7_E2E测试升级_v1.0.md` | §9 | P1-P6 | ~14 |
 
 ## 推荐执行顺序
@@ -47,14 +47,15 @@ P7 E2E 测试升级（依赖 P1-P6 全部完成，作为收尾验收）
 ```
 1. P1（基础设施）            必须最先
    ↓
-2. P3（看板侧滑）            可与 P2/P5/P6 并行
+2. P3（看板侧滑）            可与 P2/P5 并行
    P2（PrepareContext UI）   
    P5（断开+重连）           
-   P6（Permission 修复）     
    ↓
 3. P4（Running/审核/确认 UI）需要 P1+P2 完成
    ↓
-4. P7（E2E 测试升级）        收尾
+4. P6（Permission 修复）      需要 P1+P4 完成（后端链路可先做，权限 tab 依赖 P4）
+   ↓
+5. P7（E2E 测试升级）        收尾
 ```
 
 ## 串联交付物（plan 间契约）
@@ -63,14 +64,14 @@ P7 E2E 测试升级（依赖 P1-P6 全部完成，作为收尾验收）
 
 后端 Rust 类型：
 - `WsInMessage` 新增：`ContextNote { content }`、`StartGeneration { provider_config, reviewer_enabled }`、`Hello { session_id, last_seen_node_id }`、`Ping`
-- `WsInMessage` 同步补齐方案动作：`SelectRevisionPath { path, extra_context }`、`RequestRevision { feedback }`、`HumanConfirm { decision, payload }`；旧 `ReviewDecisionResponse` / `Confirm` 仅作为兼容入口，统一映射到新动作
+- `WsInMessage` 同步补齐方案动作：`SelectRevisionPath { path, extra_context }`、`HumanConfirm { decision, payload }`；`RequestRevision { feedback }` 仅作为兼容别名保留，统一映射为 `HumanConfirm { decision: RequestChange, payload: feedback }`
 - `WsOutMessage` 新增：`ProtocolError { code, message, context }`、`ProviderLocked { snapshot, locked_at }`、`Pong`
 - `TimelineNodeType` 新增：`ContextNote`、`StartGeneration`、`AuthorRun`（替代 `Generation`）、`ReviewerRun`（替代 `Review`）、`AbortedByDisconnect`、`ProtocolError`
 - `WorkspaceEngine.active_run_id: Option<String>` 仅镜像当前运行 id；`ActiveRun` 的 `command_tx/cancel` 仍归 `workspace_ws_handler` 管理
 - `NodeDetail` 结构 + `SessionState.timeline_node_details: HashMap<String, NodeDetail>` + `SessionState.active_run_id: Option<String>`；snapshot 应用必须替换旧值，不能用旧 `activeRunId` 兜底
 
 前端 TS：
-- `useWorkspaceWs.sendContextNote(content)` / `sendStartGeneration(snapshot, reviewerEnabled)` / `sendSelectRevisionPath(path, extraContext)` / `sendRequestRevision(feedback)` / `sendHumanConfirm(decision, payload)` / `sendHello(sessionId, lastSeenNodeId)` / `sendPing()`
+- `useWorkspaceWs.sendContextNote(content)` / `sendStartGeneration(snapshot, reviewerEnabled)` / `sendSelectRevisionPath(path, extraContext)` / `sendHumanConfirm(decision, payload)` / `sendHello(sessionId, lastSeenNodeId)` / `sendPing()`
 - `workspace-ws-store` snapshot 应用时灌入 `nodeDetails[node_id] = snapshot.timeline_node_details[node_id]`
 - 新增 selector `selectNodeDetail(nodeId)`
 
@@ -83,15 +84,16 @@ P7 E2E 测试升级（依赖 P1-P6 全部完成，作为收尾验收）
 - 使用 `selectNodeDetail` 渲染 5 tab
 - 复用 P2 `useStageUI` hook
 - `ReviewDecisionStagePanel` 发送 `select_revision_path`，path 使用方案值 `revise | revise-with-context | skip-to-human`；P1 后端负责映射到当前 engine 内部值
-- `HumanConfirmStagePanel` 发送 `human_confirm`，不得继续依赖旧 `confirm` 单动作
+- `HumanConfirmStagePanel` 确认 / 要求修改 / 终止均发送 `human_confirm`，其中要求修改使用 `decision: "request-change"` + 结构化 feedback payload；不得继续依赖旧 `confirm` 单动作或新增前端 `request_revision` 路径
 
 ### P5 消费 P1
 - 后端 socket close handler 从 handler 局部 `current_run` 取 run id，调用 `engine.append_aborted_by_disconnect` 并把 stage/status 切回 PrepareContext/Open；不得引用 engine 上不存在的 active-run take API
-- 前端处理 `ws.send({ type: "hello", ... })`（P1 已定义）
+- 前端处理 `ws.send(JSON.stringify({ type: "hello", session_id }))`（P1 已定义）
 
-### P6 弱依赖 P1
+### P6 消费 P1 + P4
 - `NodeDetail.permission_events` 字段在 P1 已定义
-- 防御性修复主要在 `src/cross_cutting/approval_bridge.rs`，不依赖 P1 协议变更
+- `NodeDetailPanel` 在 P4 已创建；P6 的权限 tab 展示必须在 P4 完成后修改
+- 防御性修复主要在 `src/cross_cutting/approval_bridge.rs`，依赖 P1 的 protocol_error/NodeDetail 基础类型，但不新增 WebSocket 消息变体
 - Permission timeout 是独立审计状态，不等同用户拒绝；超时后清理 pending、写 `timeout` 事件并中止当前 run，不能向 provider 伪造 `approved=false`
 
 ### P7 消费 P1-P6
@@ -117,8 +119,8 @@ P7 E2E 测试升级（依赖 P1-P6 全部完成，作为收尾验收）
 
 ```bash
 cargo test --locked -j 1
-pnpm --filter web test
-pnpm --filter web test:e2e
+pnpm --dir web test
+pnpm --dir web test:e2e
 ```
 
 ## 风险与重要提示

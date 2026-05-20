@@ -71,7 +71,7 @@ pub artifact_versions: Vec<ArtifactVersionDto>,
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Run: `cargo test lifecycle_returns_artifact_versions -- --nocapture && pnpm --filter web test -- lifecycle-workbench-store`
+Run: `cargo test lifecycle_returns_artifact_versions -- --nocapture && pnpm --dir web test -- lifecycle-workbench-store`
 Expected: PASS
 
 ---
@@ -106,34 +106,35 @@ describe("drawer state", () => {
 });
 ```
 
-Run: `pnpm --filter web test -- lifecycle-workbench-store`
+Run: `pnpm --dir web test -- lifecycle-workbench-store`
 Expected: 失败 — openDrawer / closeDrawer 未定义
 
 - [ ] **Step 2: 在 store 中追加状态**
 
 ```typescript
+import { create } from "zustand";
+
 export interface LifecycleWorkbenchState {
-  // ... 现有字段 ...
   focusedEntityId: string | null;
   isDrawerOpen: boolean;
 }
 
 export interface LifecycleWorkbenchActions {
-  // ... 现有 actions ...
   openDrawer: (entityId: string) => void;
   closeDrawer: () => void;
 }
-```
 
-实现：
-
-```typescript
+export const useLifecycleWorkbenchStore = create<
+  LifecycleWorkbenchState & LifecycleWorkbenchActions
+>((set) => ({
   focusedEntityId: null,
   isDrawerOpen: false,
-  // ...
   openDrawer: (entityId) => set({ focusedEntityId: entityId, isDrawerOpen: true }),
   closeDrawer: () => set({ focusedEntityId: null, isDrawerOpen: false }),
+}));
 ```
+
+将上述代码追加到 `web/src/state/lifecycle-workbench-store.ts` 的 import 区和文件末尾；保留同文件里的 `groupLifecycleCards` / `visibleLifecycle` / `lifecycleBlockedReason` 纯函数导出。
 
 - [ ] **Step 3: URL query param 双向同步**
 
@@ -182,7 +183,7 @@ useEffect(() => {
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Run: `pnpm --filter web test -- lifecycle-workbench-store`
+Run: `pnpm --dir web test -- lifecycle-workbench-store`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -218,7 +219,7 @@ describe("LifecycleCardDrawer", () => {
           status: "confirmed",
           version: 2,
           artifact_versions: [
-            { version: 2, markdown: "# v2", generated_by: "claude-code", created_at: "2026-05-20T14:30:00Z", source_node_id: "node-1" },
+            { version: 2, markdown: "# v2", generated_by: "claude_code", created_at: "2026-05-20T14:30:00Z", source_node_id: "node-1" },
           ],
         }}
         onClose={vi.fn()}
@@ -246,7 +247,7 @@ describe("LifecycleCardDrawer", () => {
 });
 ```
 
-Run: `pnpm --filter web test -- LifecycleCardDrawer`
+Run: `pnpm --dir web test -- LifecycleCardDrawer`
 Expected: 编译失败 — LifecycleCardDrawer 未定义
 
 - [ ] **Step 2: 实现 LifecycleCardDrawer**
@@ -304,7 +305,6 @@ export function LifecycleCardDrawer({
 
   return (
     <div data-testid="lifecycle-card-drawer" className="flex h-full flex-col border-l bg-white">
-      {/* 头部 */}
       <div className="flex items-center justify-between border-b px-4 py-3">
         <div>
           <span className="text-xs text-[var(--aria-ink-muted)] uppercase">{entity.kind}</span>
@@ -320,7 +320,6 @@ export function LifecycleCardDrawer({
         </button>
       </div>
 
-      {/* 版本历史 */}
       {entity.artifact_versions && entity.artifact_versions.length > 0 && (
         <div className="border-b px-4 py-3">
           <h3 className="mb-2 text-sm font-medium">版本历史</h3>
@@ -350,7 +349,6 @@ export function LifecycleCardDrawer({
         </div>
       )}
 
-      {/* Artifact 预览 */}
       {entity.artifact_versions && entity.artifact_versions[0] && (
         <div className="flex-1 overflow-y-auto px-4 py-3">
           <h3 className="mb-2 text-sm font-medium">最新版本预览</h3>
@@ -363,7 +361,6 @@ export function LifecycleCardDrawer({
         </div>
       )}
 
-      {/* 操作区 */}
       <div className="border-t px-4 py-3 space-y-2">
         <button
           data-testid="drawer-open-workspace"
@@ -392,7 +389,7 @@ export function LifecycleCardDrawer({
 
 - [ ] **Step 3: 跑测试确认通过**
 
-Run: `pnpm --filter web test -- LifecycleCardDrawer`
+Run: `pnpm --dir web test -- LifecycleCardDrawer`
 Expected: PASS
 
 - [ ] **Step 4: Commit**
@@ -522,11 +519,26 @@ Drawer 切到新实体后显示二级 CTA：
 
 在 `LifecycleCard.tsx` 中：
 
+删除 `LifecycleCard.tsx` 中接收和渲染 `onOpenWorkspace` 的代码，只保留卡片根元素的 `onSelect(card.id)`：
+
 ```tsx
-// 删除或隐藏"打开 Workspace"按钮
-// 原来：
-// <button onClick={onOpenWorkspace} ...>打开</button>
-// 改为：只保留 onSelect（打开 Drawer）
+type LifecycleCardProps = {
+  card: LifecycleCard;
+  onSelect: (cardId: string) => void;
+};
+
+export function LifecycleCard({ card, onSelect }: LifecycleCardProps) {
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(card.id)}
+      className="w-full rounded-md border border-[var(--aria-line)] bg-white p-3 text-left hover:bg-[var(--aria-panel-muted)]"
+    >
+      <div className="truncate text-sm font-medium text-[var(--aria-ink)]">{card.title}</div>
+      <div className="mt-1 text-xs text-[var(--aria-ink-muted)]">{card.status}</div>
+    </button>
+  );
+}
 ```
 
 - [ ] **Step 3: 修复 handleLaunchWorkspace race**
@@ -540,8 +552,8 @@ async function handleLaunchWorkspace(entityId: string) {
 
 - [ ] **Step 4: 跑 IssueLifecycleWorkbench 测试**
 
-Run: `pnpm --filter web test -- IssueLifecycleWorkbench`
-Expected: 可能部分用例需要调整（onClick 行为变化），但核心通过
+Run: `pnpm --dir web test -- IssueLifecycleWorkbench`
+Expected: PASS；旧的卡片点击后打开 Workspace 断言必须改为 `openDrawer(card.id)`，URL 断言必须改为 `?focus=<entity_id>`
 
 - [ ] **Step 5: Commit**
 
@@ -556,7 +568,7 @@ git commit -m "feat(ui): integrate LifecycleCardDrawer into workbench"
 
 - [ ] **Step 1: 跑前端单元测试**
 
-Run: `pnpm --filter web test`
+Run: `pnpm --dir web test`
 Expected: PASS
 
 - [ ] **Step 2: Commit（如有修复）**
@@ -581,7 +593,7 @@ git commit -am "fix: adjust tests for drawer integration"
 | §5.7 焦点过滤 | Task 3 (卡片高亮可后续追加) |
 
 **2. Implementation constraints:**
-- 没有待定占位项
+- 没有未决占位项
 - `handleGenerateNext` 必须复用现有创建 API，但只创建下一阶段实体和 Workspace session；禁止调用 `onOpenWorkspace` 或触发 Provider
 
 **3. Type consistency:**
@@ -600,4 +612,4 @@ git commit -am "fix: adjust tests for drawer integration"
 - [ ] lifecycle API 的 Story/Design DTO 返回 `artifact_versions`，Drawer 版本历史来自 DTO
 - [ ] Drawer 内"打开 Workspace"进入全屏 Workspace
 - [ ] 看板不灰化，允许并行操作
-- [ ] `pnpm --filter web test` PASS
+- [ ] `pnpm --dir web test` PASS

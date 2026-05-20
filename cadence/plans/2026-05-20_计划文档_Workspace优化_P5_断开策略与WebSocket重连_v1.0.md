@@ -76,7 +76,7 @@ describe("useUnloadGuard", () => {
 });
 ```
 
-Run: `pnpm --filter web test -- useUnloadGuard`
+Run: `pnpm --dir web test -- useUnloadGuard`
 Expected: 编译失败 — useUnloadGuard 未定义
 
 - [ ] **Step 2: 实现 useUnloadGuard**
@@ -140,7 +140,7 @@ export function useUnloadGuard({ enabled, message }: UseUnloadGuardOptions) {
 
 - [ ] **Step 3: 跑测试确认通过**
 
-Run: `pnpm --filter web test -- useUnloadGuard`
+Run: `pnpm --dir web test -- useUnloadGuard`
 Expected: PASS
 
 - [ ] **Step 4: Commit**
@@ -207,7 +207,7 @@ describe("useWorkspaceWsReconnect", () => {
 });
 ```
 
-Run: `pnpm --filter web test -- useWorkspaceWsReconnect`
+Run: `pnpm --dir web test -- useWorkspaceWsReconnect`
 Expected: 编译失败 — useWorkspaceWsReconnect 未定义
 
 - [ ] **Step 2: 实现 useWorkspaceWsReconnect**
@@ -321,7 +321,7 @@ export function useWorkspaceWsReconnect({
 
 - [ ] **Step 3: 跑测试确认通过**
 
-Run: `pnpm --filter web test -- useWorkspaceWsReconnect`
+Run: `pnpm --dir web test -- useWorkspaceWsReconnect`
 Expected: PASS
 
 - [ ] **Step 4: Commit**
@@ -374,7 +374,7 @@ describe("DisconnectBanner", () => {
 });
 ```
 
-Run: `pnpm --filter web test -- DisconnectBanner`
+Run: `pnpm --dir web test -- DisconnectBanner`
 Expected: 编译失败 — DisconnectBanner 未定义
 
 - [ ] **Step 2: 实现 DisconnectBanner**
@@ -467,7 +467,7 @@ export function saveAcknowledgedAbortedNode(nodeId: string) {
 
 - [ ] **Step 3: 跑测试确认通过**
 
-Run: `pnpm --filter web test -- DisconnectBanner`
+Run: `pnpm --dir web test -- DisconnectBanner`
 Expected: PASS
 
 - [ ] **Step 4: Commit**
@@ -593,13 +593,22 @@ git commit -m "feat(ws): write aborted_by_disconnect node on socket close"
 
 - [ ] **Step 1: 在 handle_message 中追加 hello/ping 处理**
 
+本 task 的最终形态需要先将现有 `mpsc::channel::<String>` 出站通道迁移为 Step 1.5 的 `OutboundControl`；下面代码按迁移后的 `outbound_tx.send(OutboundControl::Text(serialized_json))` 写。
+
 ```rust
             WsInMessage::Hello { session_id, last_seen_node_id } => {
-                let state = engine.build_session_state();
-                let _ = socket.send(Message::Text(serde_json::to_string(&state).unwrap())).await;
+                let state = {
+                    let engine = engine.lock().await;
+                    engine.build_session_state()
+                };
+                let _ = outbound_tx
+                    .send(OutboundControl::Text(serde_json::to_string(&state).unwrap()))
+                    .await;
             }
             WsInMessage::Ping => {
-                let _ = socket.send(Message::Text(serde_json::to_string(&WsOutMessage::Pong).unwrap())).await;
+                let _ = outbound_tx
+                    .send(OutboundControl::Text(serde_json::to_string(&WsOutMessage::Pong).unwrap()))
+                    .await;
             }
 ```
 
@@ -660,7 +669,8 @@ export function useWorkspaceWs(sessionId: string | null) {
   const wsRef = useRef<WebSocket | null>(null);
   const lastMessageAtRef = useRef(Date.now());
   const [closeCode, setCloseCode] = useState<number | undefined>();
-  // ...
+  const connectionStatus = useWorkspaceStore((state) => state.connectionStatus);
+  const store = useWorkspaceStore.getState();
 
   const { isReconnecting, attemptCount, retryNow, reset: resetReconnect } = useWorkspaceWsReconnect({
     enabled: connectionStatus === "disconnected" && !!sessionId,
@@ -696,7 +706,6 @@ export function useWorkspaceWs(sessionId: string | null) {
       setCloseCode(e.code);
       store.setConnectionStatus("disconnected");
     };
-    // ...
   }
 
   // 心跳
@@ -712,17 +721,26 @@ export function useWorkspaceWs(sessionId: string | null) {
     return () => clearInterval(interval);
   }, [connectionStatus]);
 
-  // ...
-	  return {
-	    // ...
-	    isReconnecting,
-	    reconnectAttemptCount: attemptCount,
-	    retryNow,
-	  };
+  return {
+    sendMessage,
+    startGeneration,
+    rollback,
+    confirm,
+    abort,
+    selectProvider,
+    sendReviewDecision,
+    respondPermission,
+    connectionStatus,
+    isReconnecting,
+    reconnectAttemptCount: attemptCount,
+    retryNow,
+  };
 }
 ```
 
 - [ ] **Step 2: 在 WorkspacePage.tsx 接入 useUnloadGuard + DisconnectBanner**
+
+在 P4 已形成的 `WorkspacePage` 中新增下面 import、hook 调用和 banner 插入；这是插入式修改，保留 P4 的 `WorkspaceHeader`、Timeline、stage panel、`NodeDetailPanel`、`StageActionsBar` 布局。
 
 ```tsx
 import { useUnloadGuard } from "../hooks/useUnloadGuard";
@@ -730,7 +748,7 @@ import { DisconnectBanner } from "../components/workspace/DisconnectBanner";
 
 function WorkspacePage({ sessionId }: WorkspacePageProps) {
   const store = useWorkspaceStore();
-	  const { isReconnecting, reconnectAttemptCount, retryNow } = useWorkspaceWs(sessionId);
+  const { isReconnecting, reconnectAttemptCount, retryNow } = useWorkspaceWs(sessionId);
 
   useUnloadGuard({
     enabled: ["running", "cross_review", "revision"].includes(store.stage),
@@ -743,33 +761,55 @@ function WorkspacePage({ sessionId }: WorkspacePageProps) {
     lastNode?.node_type === "aborted_by_disconnect" &&
     !store.acknowledgedAbortedNodes?.includes(lastNode.node_id);
 
-  return (
-    <div className="flex h-full flex-col">
-      <DisconnectBanner
-        isReconnecting={isReconnecting}
-        attemptCount={reconnectAttemptCount}
-	        onManualReconnect={retryNow}
-        abortedByDisconnect={
-          showAbortedBanner
-            ? { ts: lastNode.started_at }
-            : undefined
-        }
-        onAcknowledge={() => {
-	          const acknowledged = saveAcknowledgedAbortedNode(lastNode.node_id);
-	          useWorkspaceStore.setState({ acknowledgedAbortedNodes: acknowledged });
-	        }}
-      />
-      {/* ... 其余布局 ... */}
-    </div>
+  const disconnectBanner = (
+    <DisconnectBanner
+      isReconnecting={isReconnecting}
+      attemptCount={reconnectAttemptCount}
+      onManualReconnect={retryNow}
+      abortedByDisconnect={showAbortedBanner ? { ts: lastNode.started_at } : undefined}
+      onAcknowledge={() => {
+        const acknowledged = saveAcknowledgedAbortedNode(lastNode.node_id);
+        useWorkspaceStore.setState({ acknowledgedAbortedNodes: acknowledged });
+      }}
+    />
   );
 }
 ```
+
+把 `{disconnectBanner}` 放在 `return <div className="flex h-full flex-col">` 的第一个子节点位置，位于 `WorkspaceHeader` 之前。
 
 - [ ] **Step 3: 在 store 中追加 acknowledgedAbortedNodes**
 
 ```typescript
 export interface WorkspaceWsState {
-  // ... 现有 ...
+  sessionId: string | null;
+  workspaceType: string | null;
+  stage: string;
+  visitedStages: string[];
+  messages: WsMessage[];
+  checkpoints: WsCheckpoint[];
+  artifact: string | null;
+  providers: WsProviderConfig | null;
+  connectionStatus: WsConnectionStatus;
+  streamingContent: string;
+  pendingPermissions: PermissionRequest[];
+  providerStatus: ProviderStatus;
+  executionEvents: ExecutionEvent[];
+  timelineNodes: TimelineNode[];
+  activeNodeId: string | null;
+  selectedNodeId: string | null;
+  nodeDetails: Record<string, TimelineNodeDetail>;
+  artifactVersions: ArtifactVersion[];
+  pendingDecision: ReviewDecisionRequired | null;
+  error: string | null;
+  activeRunId: string | null;
+  protocolError: { code: string; message: string } | null;
+  providerLocked: boolean;
+  providerSnapshot: ProviderConfigSnapshot | null;
+  reviewerEnabled: boolean;
+  reviewRounds: number;
+  pendingReviewDecision: { verdict: string; summary: string } | null;
+  pendingReviewerSummary: { verdict: string; points: string[] } | null;
   acknowledgedAbortedNodes: string[];
 }
 ```
@@ -778,7 +818,7 @@ export interface WorkspaceWsState {
 
 - [ ] **Step 4: 跑前端测试确认通过**
 
-Run: `pnpm --filter web test -- WorkspacePage`
+Run: `pnpm --dir web test -- WorkspacePage`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -799,7 +839,7 @@ Expected: PASS
 
 - [ ] **Step 2: 跑前端测试**
 
-Run: `pnpm --filter web test`
+Run: `pnpm --dir web test`
 Expected: PASS
 
 - [ ] **Step 3: Commit（如有修复）**
@@ -827,7 +867,7 @@ git commit -am "fix: adjust tests for disconnect + reconnect features"
 | §8.6 心跳与超时 | Task 6 (25s ping) |
 
 **2. Implementation constraints:**
-- 没有待定占位项
+- 没有未决占位项
 
 **3. Type consistency:**
 - `acknowledgedAbortedNodes` 在 store 中用 string[]，并同步到 localStorage key `aria.workspace.aborted_ack_nodes`
@@ -847,4 +887,4 @@ git commit -am "fix: adjust tests for disconnect + reconnect features"
 - [ ] 客户端 60s 无消息主动 close 并进入重连
 - [ ] 服务端 90s 无客户端消息主动 close 并触发断开中止路径
 - [ ] `cargo test --locked -j 1` PASS
-- [ ] `pnpm --filter web test` PASS
+- [ ] `pnpm --dir web test` PASS

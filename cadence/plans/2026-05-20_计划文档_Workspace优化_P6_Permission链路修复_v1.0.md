@@ -4,11 +4,11 @@
 
 **Goal:** 给 Permission 链路加全链路 trace log，让 unmatched id 显式报错（protocol_error），PendingPermissions 加 15min 超时清理；timeout 作为独立审计状态并中止当前 run，不伪装成用户拒绝；前端权限 tab 展示 permission_events 列表。
 
-**Architecture:** 在 workspace_ws_handler → engine → approval_bridge 三个点各加 trace log；bridge unmatched id / timeout 通过 `ProviderEvent` 上报诊断，engine 在 provider event loop 中转成 `EngineEvent::ProtocolError` / `EngineEvent::PermissionTimeout` 并中止当前 run；前端 NodeDetailPanel 权限 tab 渲染 events。
+**Architecture:** 在 workspace_ws_handler → engine → approval_bridge 三个点各加 trace log；bridge unmatched id / timeout 通过 `ProviderEvent` 上报诊断，engine 在 provider event loop 中转成 `EngineEvent::ProtocolError` / `EngineEvent::PermissionTimeout` 并中止当前 run；前端基于 P4 已创建的 NodeDetailPanel 增强权限 tab，渲染 permission_events。
 
 **Tech Stack:** Rust (tokio + tracing + serde_json) + TypeScript (React)
 
-**前置依赖:** 弱依赖 P1（NodeDetail.permission_events 字段定义）
+**前置依赖:** P1（NodeDetail.permission_events / protocol_error 基础类型）+ P4（NodeDetailPanel 组件）
 
 **后续 plan 消费点:**
 - P7 E2E 消费 Permission 链路用例（G1-G5）
@@ -31,6 +31,7 @@
 1. `ApprovalBridge::new` 当前只持有 `mpsc::Sender<ProviderEvent>`，不能直接发送 `EngineEvent`。P6 采用扩展 `ProviderEvent` 的方案：bridge 发送 `ProviderEvent::ProtocolError` / `ProviderEvent::PermissionTimeout`，engine 消费后再转成 `EngineEvent`。
 2. `EngineEvent::ProtocolError` / `EngineEvent::PermissionTimeout` 由 P1/P6 补齐；WebSocket handler 只负责映射到 `WsOutMessage::ProtocolError` 或状态更新。
 3. timeout 不伪装成用户拒绝，不向 provider 发送 `PermissionDecision { approved: false }`；必须移除 pending、写审计事件并中止当前 run。
+4. `web/src/components/workspace/NodeDetailPanel.tsx` 由 P4 创建；若 P6 后端链路先行实现，Task 4 必须等待 P4 合并后执行，不能在 P6 中重新创建另一个权限面板。
 
 ### Task 1: 全链路 trace log
 
@@ -87,7 +88,13 @@ async fn listen_for_permission_commands(
                 }
             }
             ProviderCommand::Abort => {
-                // ... 现有逻辑 ...
+                let mut pending = pending.lock().await;
+                for (_, decision_tx) in pending.drain() {
+                    let _ = decision_tx.send(PermissionDecision {
+                        approved: false,
+                        reason: Some("aborted".to_string()),
+                    });
+                }
             }
         }
     }
@@ -141,7 +148,19 @@ git commit -m "feat(permission): add full-trace logging across ws-handler, engin
 
 ```rust
 pub enum ProviderEvent {
-    // ... existing variants ...
+    TextDelta {
+        content: String,
+    },
+    PermissionRequest(PermissionRequestData),
+    StatusChanged(ProviderStatus),
+    Execution(ProviderExecutionEvent),
+    Completed {
+        full_output: String,
+        provider_session_id: Option<String>,
+    },
+    Failed {
+        message: String,
+    },
     ProtocolError {
         code: String,
         message: String,
@@ -157,7 +176,61 @@ pub enum ProviderEvent {
 
 ```rust
 pub enum EngineEvent {
-    // ... existing variants ...
+    StreamChunk {
+        role: String,
+        content: String,
+        node_id: Option<String>,
+    },
+    MessageComplete {
+        message_id: String,
+        checkpoint_id: String,
+        node_id: Option<String>,
+    },
+    StageChange {
+        stage: String,
+    },
+    ArtifactUpdate {
+        version: u32,
+        markdown: String,
+    },
+    PermissionRequest {
+        id: String,
+        tool_name: String,
+        description: String,
+        risk_level: RiskLevel,
+    },
+    ProviderStatus {
+        status: ProviderStatus,
+    },
+    ExecutionEvent {
+        event: ProviderExecutionEvent,
+        node_id: Option<String>,
+        agent: Option<ProviderName>,
+    },
+    TimelineNodeCreated {
+        node: TimelineNode,
+    },
+    TimelineNodeUpdated {
+        node_id: String,
+        status: TimelineNodeStatus,
+        summary: Option<String>,
+        completed_at: Option<String>,
+    },
+    ReviewComplete {
+        node_id: String,
+        round: u32,
+        verdict: ReviewVerdictType,
+        comments: String,
+        summary: String,
+    },
+    ReviewDecisionRequired {
+        node_id: String,
+        round: u32,
+        options: Vec<String>,
+    },
+    Error {
+        message: String,
+    },
     ProtocolError {
         code: String,
         message: String,
@@ -179,17 +252,19 @@ engine 消费 `ProviderEvent::ProtocolError` 时转发 `EngineEvent::ProtocolErr
 ```rust
             ProviderCommand::PermissionResponse { id, approved, reason } => {
                 tracing::info!(permission_id = %id, approved, "bridge received permission response");
-                let mut pending_guard = pending.lock().await;
-                if let Some(decision_tx) = pending_guard.remove(&id) {
+                let maybe_decision_tx = pending.lock().await.remove(&id);
+                if let Some(decision_tx) = maybe_decision_tx {
                     tracing::info!(permission_id = %id, "bridge dispatched decision to pending");
                     let _ = decision_tx.send(PermissionDecision { approved, reason });
                 } else {
                     tracing::warn!(permission_id = %id, "bridge: no pending entry for id");
-                    let _ = event_tx.send(ProviderEvent::ProtocolError {
-                        code: "PERMISSION_ID_UNMATCHED".to_string(),
-                        message: format!("PermissionResponse id={} not found in pending", id),
-                        context: Some(serde_json::json!({"permission_id": id})),
-                    }).await;
+                    let _ = event_tx
+                        .send(ProviderEvent::ProtocolError {
+                            code: "PERMISSION_ID_UNMATCHED".to_string(),
+                            message: format!("PermissionResponse id={} not found in pending", id),
+                            context: Some(serde_json::json!({"permission_id": id})),
+                        })
+                        .await;
                 }
             }
 ```
@@ -202,14 +277,35 @@ async fn listen_for_permission_commands(
     pending: PendingPermissions,
     event_tx: mpsc::Sender<ProviderEvent>,
 ) {
-    // ...
-    } else {
-        tracing::warn!(permission_id = %id, "bridge: no pending entry for id");
-        let _ = event_tx.send(ProviderEvent::ProtocolError {
-            code: "PERMISSION_ID_UNMATCHED".to_string(),
-            message: format!("PermissionResponse id={} not found in pending", id),
-            context: Some(serde_json::json!({"permission_id": id})),
-        }).await;
+    while let Some(command) = command_rx.recv().await {
+        match command {
+            ProviderCommand::PermissionResponse { id, approved, reason } => {
+                tracing::info!(permission_id = %id, approved, "bridge received permission response");
+                let maybe_decision_tx = pending.lock().await.remove(&id);
+                if let Some(decision_tx) = maybe_decision_tx {
+                    tracing::info!(permission_id = %id, "bridge dispatched decision to pending");
+                    let _ = decision_tx.send(PermissionDecision { approved, reason });
+                } else {
+                    tracing::warn!(permission_id = %id, "bridge: no pending entry for id");
+                    let _ = event_tx
+                        .send(ProviderEvent::ProtocolError {
+                            code: "PERMISSION_ID_UNMATCHED".to_string(),
+                            message: format!("PermissionResponse id={} not found in pending", id),
+                            context: Some(serde_json::json!({"permission_id": id})),
+                        })
+                        .await;
+                }
+            }
+            ProviderCommand::Abort => {
+                let mut pending = pending.lock().await;
+                for (_, decision_tx) in pending.drain() {
+                    let _ = decision_tx.send(PermissionDecision {
+                        approved: false,
+                        reason: Some("aborted".to_string()),
+                    });
+                }
+            }
+        }
     }
 }
 ```
@@ -235,24 +331,104 @@ git commit -am "feat(permission): send protocol_error on unmatched permission id
 - [ ] **Step 1: 修改 PendingPermissions 存储时间戳**
 
 ```rust
+use std::time::{Duration, Instant};
+
 type PendingPermissions = Arc<Mutex<HashMap<String, (oneshot::Sender<PermissionDecision>, Instant)>>>;
 ```
 
 - [ ] **Step 2: insert 时记录时间**
 
 ```rust
-    pub async fn request_permission(
+    pub async fn request_tool(
         &self,
-        request: PermissionRequestData,
+        tool_name: &str,
+        description: &str,
+        risk_level: RiskLevel,
+        cancel: CancellationToken,
     ) -> Result<PermissionDecision, ProviderAdapterError> {
-        let id = format!("permission_{}", self.next_permission_id.fetch_add(1, Ordering::SeqCst));
+        if self.mode == ProviderPermissionMode::Auto {
+            return Ok(PermissionDecision {
+                approved: true,
+                reason: None,
+            });
+        }
+
+        let id = next_permission_id();
         let (decision_tx, decision_rx) = oneshot::channel();
         self.pending.lock().await.insert(id.clone(), (decision_tx, Instant::now()));
-        // ...
+        let mut pending_guard = PendingPermissionGuard::new(id.clone(), Arc::clone(&self.pending));
+
+        let request = ProviderEvent::PermissionRequest(PermissionRequestData {
+            id: id.clone(),
+            tool_name: tool_name.to_string(),
+            description: description.to_string(),
+            risk_level,
+        });
+
+        let send_result = tokio::select! {
+            _ = cancel.cancelled() => {
+                pending_guard.remove_now().await;
+                return Err(permission_bridge_error("permission request cancelled"));
+            }
+            result = self.event_tx.send(request) => result,
+        };
+
+        if send_result.is_err() {
+            pending_guard.remove_now().await;
+            return Err(permission_bridge_error("permission request event receiver closed"));
+        }
+
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                pending_guard.remove_now().await;
+                Err(permission_bridge_error("permission request cancelled"))
+            }
+            _ = self.event_tx.closed() => {
+                pending_guard.remove_now().await;
+                Err(permission_bridge_error("permission request event receiver closed"))
+            }
+            decision = decision_rx => {
+                pending_guard.remove_now().await;
+                decision.map_err(|_| permission_bridge_error("permission response channel closed"))
+            }
+        }
     }
 ```
 
-- [ ] **Step 3: 新增超时清理后台任务**
+- [ ] **Step 3: 调整 command listener 的 tuple 解构**
+
+`PendingPermissions` 改成 `(oneshot::Sender<PermissionDecision>, Instant)` 后，同步修改 response / abort 分支：
+
+```rust
+            ProviderCommand::PermissionResponse { id, approved, reason } => {
+                tracing::info!(permission_id = %id, approved, "bridge received permission response");
+                let maybe_pending = pending.lock().await.remove(&id);
+                if let Some((decision_tx, _created_at)) = maybe_pending {
+                    tracing::info!(permission_id = %id, "bridge dispatched decision to pending");
+                    let _ = decision_tx.send(PermissionDecision { approved, reason });
+                } else {
+                    tracing::warn!(permission_id = %id, "bridge: no pending entry for id");
+                    let _ = event_tx
+                        .send(ProviderEvent::ProtocolError {
+                            code: "PERMISSION_ID_UNMATCHED".to_string(),
+                            message: format!("PermissionResponse id={} not found in pending", id),
+                            context: Some(serde_json::json!({"permission_id": id})),
+                        })
+                        .await;
+                }
+            }
+            ProviderCommand::Abort => {
+                let mut pending = pending.lock().await;
+                for (_, (decision_tx, _created_at)) in pending.drain() {
+                    let _ = decision_tx.send(PermissionDecision {
+                        approved: false,
+                        reason: Some("aborted".to_string()),
+                    });
+                }
+            }
+```
+
+- [ ] **Step 4: 新增超时清理后台任务**
 
 ```rust
     pub fn new(mode: ProviderPermissionMode, event_tx: mpsc::Sender<ProviderEvent>) -> Self {
@@ -281,19 +457,32 @@ async fn cleanup_pending_permissions(
     loop {
         tokio::time::sleep(CLEANUP_INTERVAL).await;
         let now = Instant::now();
-        let mut guard = pending.lock().await;
-        let expired: Vec<String> = guard
-            .iter()
-            .filter(|(_, (_, ts))| now.duration_since(*ts) > TIMEOUT)
-            .map(|(id, _)| id.clone())
-            .collect();
-        for id in expired {
-            if let Some((decision_tx, _)) = guard.remove(&id) {
-                drop(decision_tx);
-                let _ = event_tx.send(ProviderEvent::PermissionTimeout {
+        let expired: Vec<String> = {
+            let guard = pending.lock().await;
+            guard
+                .iter()
+                .filter(|(_, (_, ts))| now.duration_since(*ts) > TIMEOUT)
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+        let timed_out: Vec<String> = {
+            let mut guard = pending.lock().await;
+            expired
+                .into_iter()
+                .filter_map(|id| {
+                    guard.remove(&id).map(|(decision_tx, _)| {
+                        drop(decision_tx);
+                        id
+                    })
+                })
+                .collect()
+        };
+        for id in timed_out {
+            let _ = event_tx
+                .send(ProviderEvent::PermissionTimeout {
                     permission_id: id,
-                }).await;
-            }
+                })
+                .await;
         }
     }
 }
@@ -307,12 +496,12 @@ async fn cleanup_pending_permissions(
 4. `NodeDetail.permission_events` 中对应事件写入 `response: {"status":"timeout"}`。
 5. 用户之后若再响应同一个 id，走 `PERMISSION_ID_UNMATCHED`。
 
-- [ ] **Step 4: 跑测试确认编译通过**
+- [ ] **Step 5: 跑测试确认编译通过**
 
 Run: `cargo check --locked`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add src/cross_cutting/approval_bridge.rs
@@ -371,7 +560,7 @@ git commit -m "feat(permission): add 15min timeout cleanup for PendingPermission
 
 - [ ] **Step 2: 跑测试确认通过**
 
-Run: `pnpm --filter web test -- NodeDetailPanel`
+Run: `pnpm --dir web test -- NodeDetailPanel`
 Expected: PASS
 
 - [ ] **Step 3: Commit**
@@ -421,7 +610,7 @@ Expected: PASS
 
 - [ ] **Step 2: 跑前端测试**
 
-Run: `pnpm --filter web test`
+Run: `pnpm --dir web test`
 Expected: PASS
 
 - [ ] **Step 3: Commit（如有修复）**
@@ -442,12 +631,12 @@ git commit -am "fix: permission link tests and types"
 | §9.2 排查清单 | Task 1 (trace log 覆盖 1-6) |
 | §9.3.1 全链路 trace log | Task 1 |
 | §9.3.2 unmatched id protocol_error | Task 2 |
-| §9.3.3 permission_events 持久化 | P1 (NodeDetail) + Task 4 (前端展示) |
+| §9.3.3 permission_events 持久化 | P1 (NodeDetail) + P4 (NodeDetailPanel) + Task 4 (前端展示) |
 | §9.3.4 PendingPermissions 超时 | Task 3 |
 | §9.4 前端配套 | Task 4 + Task 5 |
 
 **2. Implementation constraints:**
-- 没有待定占位项
+- 没有未决占位项
 
 **3. Type consistency:**
 - `PermissionEvent` 结构在 Rust (NodeDetail) 和 TS (api/types.ts) 中对齐
@@ -464,4 +653,4 @@ git commit -am "fix: permission link tests and types"
 - [ ] 权限 tab 展示 pending / approved / denied / timeout 状态
 - [ ] 前端发送 permission_response 时 console.info 记录 id
 - [ ] `cargo test --locked -j 1` PASS
-- [ ] `pnpm --filter web test` PASS
+- [ ] `pnpm --dir web test` PASS

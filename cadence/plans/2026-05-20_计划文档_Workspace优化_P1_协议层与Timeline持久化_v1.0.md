@@ -12,7 +12,7 @@
 
 **后续 plan 消费点:**
 - P2 消费 `sendContextNote` / `sendStartGeneration` / `provider_locked` 事件
-- P4 消费 `selectNodeDetail` selector + 节点级 5 tab + `sendSelectRevisionPath` / `sendRequestRevision` / `sendHumanConfirm`
+- P4 消费 `selectNodeDetail` selector + 节点级 5 tab + `sendSelectRevisionPath` / `sendHumanConfirm`
 - P5 消费 `WsInMessage::Hello` / `WsOutMessage::Pong` + `aborted_by_disconnect` 节点写入
 - P6 消费 `NodeDetail.permission_events` 字段
 
@@ -39,7 +39,7 @@
 1. `ActiveRun` 的 `command_tx/cancel` 当前定义在 `src/web/workspace_ws_handler.rs` 的单个 WebSocket handler 内，不迁入 `WorkspaceEngine`。P1 只在 `WorkspaceEngine` 增加 `active_run_id: Option<String>` 镜像字段，并暴露 `mark_active_run_started(run_id)` / `mark_active_run_finished(run_id)` / `active_run_id()`；P5 的 socket close 清理仍从 handler 局部 `current_run` 取真实 abort handle。
 2. `build_session_state` 读取 `timeline_node_details` 时必须处理 `lifecycle_store: Option<LifecycleStore>`；内存 engine 没有 store 时返回空 map。
 3. 前端 snapshot 应用必须是替换式：`activeRunId: state.active_run_id`。当后端返回 `null` 时必须清空旧值，不能使用 `?? prev.activeRunId`。
-4. P1 必须补齐方案动作 `select_revision_path`、`request_revision`、`human_confirm`。旧 `review_decision_response` / `confirm` 只保留兼容，统一转入新动作处理。
+4. P1 必须补齐方案动作 `select_revision_path`、`human_confirm`。`request_revision` 仅作为兼容别名保留，不作为新前端调用路径；旧 `review_decision_response` / `confirm` / `request_revision` 统一转入新动作处理。
 5. `NodeDetail` 写入 stream chunk 必须实现方案 §3.4 的节流：200ms 或累计 4KB flush，节点结束时立即 flush；permission / execution / verdict / artifact_ref 仍立即写入。
 
 ### Task 1: 扩展后端协议类型（WsInMessage / WsOutMessage）
@@ -152,6 +152,8 @@ Expected: 编译失败 — ContextNote / StartGeneration / ProtocolError / Provi
         path: RevisionPath,
         extra_context: Option<String>,
     },
+    // 兼容别名：新前端不得发送 request_revision；收到后映射为
+    // HumanConfirm { decision: RequestChange, payload: feedback }。
     RequestRevision {
         feedback: StructuredFeedback,
     },
@@ -321,7 +323,7 @@ mod tests {
             status: TimelineNodeStatus::Completed,
             agent_role: Some(AgentRole::Author),
             provider: Some(ProviderSnapshot {
-                name: "claude-code".to_string(),
+                name: "claude_code".to_string(),
                 model: "claude-opus-4-7".to_string(),
             }),
             messages: vec![],
@@ -442,7 +444,7 @@ fn save_and_load_node_detail() {
         status: TimelineNodeStatus::Completed,
         agent_role: Some(AgentRole::Author),
         provider: Some(ProviderSnapshot {
-            name: "claude-code".to_string(),
+            name: "claude_code".to_string(),
             model: "claude-opus-4-7".to_string(),
         }),
         messages: vec![],
@@ -633,7 +635,31 @@ Expected: 编译失败 — SessionState 变体没有 timeline_node_details / act
 
 ```rust
     pub fn build_session_state(&self) -> WsOutMessage {
-        // ... 现有代码（messages, checkpoints）保持不变 ...
+        let messages: Vec<WsMessageDto> = self
+            .session
+            .messages
+            .iter()
+            .map(|m| WsMessageDto {
+                id: m.id.clone(),
+                role: m.role.clone(),
+                content: m.content.clone(),
+                checkpoint_id: m.checkpoint_id.clone(),
+                created_at: m.created_at.clone(),
+            })
+            .collect();
+
+        let checkpoints: Vec<WsCheckpointDto> = self
+            .checkpoint_store
+            .list_checkpoints(&self.session.session_id)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|cp| WsCheckpointDto {
+                id: cp.id,
+                message_index: cp.message_index,
+                stage: cp.stage,
+                created_at: cp.created_at,
+            })
+            .collect();
 
         let timeline_node_details = self
             .lifecycle_store
@@ -656,7 +682,19 @@ Expected: 编译失败 — SessionState 变体没有 timeline_node_details / act
         let active_run_id = self.active_run_id.clone();
 
         WsOutMessage::SessionState {
-            // ... 现有字段 ...
+            session_id: self.session.session_id.clone(),
+            workspace_type: self.session.workspace_type.clone(),
+            stage: self.session.stage.as_str().to_string(),
+            messages,
+            checkpoints,
+            artifact: self.session.artifact.clone(),
+            providers: WsProviderConfig {
+                author: self.session.author_provider.clone(),
+                reviewer: self.session.reviewer_provider.clone(),
+            },
+            timeline_nodes: self.timeline_nodes.clone(),
+            active_node_id: self.active_node_id.clone(),
+            artifact_versions: self.artifact_versions.clone(),
             timeline_node_details,
             active_run_id,
         }
@@ -667,7 +705,16 @@ Expected: 编译失败 — SessionState 变体没有 timeline_node_details / act
 
 ```rust
 pub struct WorkspaceEngine {
-    // ... 现有字段 ...
+    checkpoint_store: Arc<CheckpointStore>,
+    lifecycle_store: Option<LifecycleStore>,
+    event_tx: mpsc::Sender<EngineEvent>,
+    session: WorkspaceSession,
+    cancel: CancellationToken,
+    timeline_nodes: Vec<TimelineNode>,
+    active_node_id: Option<String>,
+    artifact_versions: Vec<ArtifactVersion>,
+    latest_review_verdict: Option<ReviewVerdict>,
+    pending_revision_context: Option<String>,
     active_run_id: Option<String>,
 }
 
@@ -760,22 +807,22 @@ fn is_message_valid_for_stage(msg: &WsInMessage, stage: &WorkspaceStage) -> bool
         WorkspaceStage::CrossReview => matches!(msg, WsInMessage::Abort),
         WorkspaceStage::ReviewDecision => matches!(
             msg,
-            WsInMessage::SelectRevisionPath { .. } | WsInMessage::RequestRevision { .. }
+            WsInMessage::SelectRevisionPath { .. }
         ),
         WorkspaceStage::Revision => matches!(msg, WsInMessage::Abort),
         WorkspaceStage::HumanConfirm => matches!(
             msg,
-            WsInMessage::HumanConfirm { .. }
+            WsInMessage::HumanConfirm { .. } | WsInMessage::RequestRevision { .. }
         ),
         WorkspaceStage::Completed => false,
     }
 }
 ```
 
-注意：本任务必须先定义 `WsInMessage::SelectRevisionPath` 和 `WsInMessage::RequestRevision`。旧 enum 中的 `ReviewDecisionResponse` / `Confirm` 只作为兼容入口映射到新动作：
+注意：本任务必须先定义 `WsInMessage::SelectRevisionPath` 和 `WsInMessage::HumanConfirm`。旧 enum 中的 `ReviewDecisionResponse` / `Confirm` / `RequestRevision` 只作为兼容入口映射到新动作：
 - `WsInMessage::ReviewDecisionResponse { decision, extra_context }` 对应 "选择处理路径"
 - `WsInMessage::Confirm` 对应 `HumanConfirm { decision: Confirm, payload: None }`
-- `WsInMessage::RequestRevision { feedback }` 对应 HumanConfirm 阶段的"要求修改"，不是 checkpoint rollback
+- `WsInMessage::RequestRevision { feedback }` 仅为 HumanConfirm 阶段的兼容别名，对应 `HumanConfirm { decision: RequestChange, payload: feedback }`；P4 新前端不得发送该消息
 
 如果现有 enum 没有这两个变体，先用现有变体做映射：
 
@@ -798,19 +845,29 @@ fn is_message_valid_for_stage(msg: &WsInMessage, stage: &WorkspaceStage) -> bool
         let in_msg: WsInMessage = match serde_json::from_str(&text) {
             Ok(msg) => msg,
             Err(e) => {
-                // ... 现有错误处理 ...
+                let err = WsOutMessage::Error {
+                    message: format!("invalid message: {e}"),
+                };
+                if let Ok(json) = serde_json::to_string(&err) {
+                    let _ = outbound_tx.send(json).await;
+                }
+                continue;
             }
         };
 
-        // 阶段校验；current_stage() 在 Task 7 与其他 engine helper 一起新增
-        let stage = engine.current_stage();
+        // 阶段校验；engine 是 Arc<Mutex<WorkspaceEngine>>，current_stage()
+        // 在 Task 7 与其他 engine helper 一起新增。
+        let stage = {
+            let engine = engine.lock().await;
+            engine.current_stage()
+        };
         if !is_message_valid_for_stage(&in_msg, &stage) {
             let err = WsOutMessage::ProtocolError {
                 code: "INVALID_MESSAGE_FOR_STAGE".to_string(),
                 message: format!("Message {:?} not allowed in stage {:?}", in_msg, stage),
                 context: Some(serde_json::json!({"stage": stage, "received": in_msg})),
             };
-            let _ = socket.send(Message::Text(serde_json::to_string(&err).unwrap())).await;
+            let _ = outbound_tx.send(serde_json::to_string(&err).unwrap()).await;
             continue;
         }
 ```
@@ -823,21 +880,31 @@ fn is_message_valid_for_stage(msg: &WsInMessage, stage: &WorkspaceStage) -> bool
 
 ```rust
             WsInMessage::ContextNote { content } => {
-                match engine.append_context_note(content).await {
+                let result = {
+                    let mut engine = engine.lock().await;
+                    engine.append_context_note(content).await
+                };
+                match result {
                     Ok(node) => {
-                        let _ = socket.send(Message::Text(serde_json::to_string(&WsOutMessage::TimelineNodeCreated { node }).unwrap())).await;
+                        let msg = WsOutMessage::TimelineNodeCreated { node };
+                        let _ = outbound_tx.send(serde_json::to_string(&msg).unwrap()).await;
                     }
                     Err(e) => {
                         let err = WsOutMessage::Error { message: e.to_string() };
-                        let _ = socket.send(Message::Text(serde_json::to_string(&err).unwrap())).await;
+                        let _ = outbound_tx.send(serde_json::to_string(&err).unwrap()).await;
                     }
                 }
             }
             WsInMessage::StartGeneration { provider_config, reviewer_enabled } => {
-                match engine.start_generation(provider_config, reviewer_enabled).await {
+                let result = {
+                    let mut engine = engine.lock().await;
+                    engine.start_generation(provider_config, reviewer_enabled).await
+                };
+                match result {
                     Ok((node, locked)) => {
-                        let _ = socket.send(Message::Text(serde_json::to_string(&WsOutMessage::TimelineNodeCreated { node }).unwrap())).await;
-                        let _ = socket.send(Message::Text(serde_json::to_string(&locked).unwrap())).await;
+                        let node_msg = WsOutMessage::TimelineNodeCreated { node };
+                        let _ = outbound_tx.send(serde_json::to_string(&node_msg).unwrap()).await;
+                        let _ = outbound_tx.send(serde_json::to_string(&locked).unwrap()).await;
                         // 从现有 UserMessage 分支抽取 provider run 启动 helper：
                         // - abort 旧 current_run
                         // - 创建 CancellationToken + command channel
@@ -848,34 +915,57 @@ fn is_message_valid_for_stage(msg: &WsInMessage, stage: &WorkspaceStage) -> bool
                     }
                     Err(e) => {
                         let err = WsOutMessage::Error { message: e.to_string() };
-                        let _ = socket.send(Message::Text(serde_json::to_string(&err).unwrap())).await;
+                        let _ = outbound_tx.send(serde_json::to_string(&err).unwrap()).await;
                     }
                 }
             }
             WsInMessage::Hello { session_id, last_seen_node_id } => {
                 // 重连握手：回送完整 SessionState
-                let state = engine.build_session_state();
-                let _ = socket.send(Message::Text(serde_json::to_string(&state).unwrap())).await;
+                let state = {
+                    let engine = engine.lock().await;
+                    engine.build_session_state()
+                };
+                let _ = outbound_tx.send(serde_json::to_string(&state).unwrap()).await;
             }
             WsInMessage::Ping => {
-                let _ = socket.send(Message::Text(serde_json::to_string(&WsOutMessage::Pong).unwrap())).await;
+                let _ = outbound_tx.send(serde_json::to_string(&WsOutMessage::Pong).unwrap()).await;
             }
             WsInMessage::SelectRevisionPath { path, extra_context } => {
                 let (decision, extra_context) = map_revision_path(path, extra_context);
-                match engine.handle_review_decision(decision, extra_context).await {
-                    Ok(ReviewDecisionOutcome::StartRevision) => start_revision_run(...).await,
+                let outcome = {
+                    let mut engine = engine.lock().await;
+                    engine.handle_review_decision(decision, extra_context).await
+                };
+                match outcome {
+                    Ok(ReviewDecisionOutcome::StartRevision) => {
+                        spawn_revision_run_from_handler(&state, &engine, &current_run, &next_run_id).await;
+                    }
                     Ok(ReviewDecisionOutcome::HumanConfirm) => {}
                     Err(message) => send_protocol_error("INVALID_REVISION_PATH", message).await,
                 }
             }
             WsInMessage::RequestRevision { feedback } => {
-                match engine.handle_human_request_revision(feedback).await {
+                // 兼容旧 request_revision；新前端统一发送 human_confirm request-change。
+                let outcome = {
+                    let mut engine = engine.lock().await;
+                    engine
+                        .handle_human_confirm(
+                            HumanConfirmDecision::RequestChange,
+                            Some(serde_json::to_value(feedback).unwrap_or(serde_json::Value::Null)),
+                        )
+                        .await
+                };
+                match outcome {
                     Ok(()) => {}
                     Err(message) => send_protocol_error("INVALID_HUMAN_CONFIRM_ACTION", message).await,
                 }
             }
             WsInMessage::HumanConfirm { decision, payload } => {
-                match engine.handle_human_confirm(decision, payload).await {
+                let outcome = {
+                    let mut engine = engine.lock().await;
+                    engine.handle_human_confirm(decision, payload).await
+                };
+                match outcome {
                     Ok(()) => {}
                     Err(message) => send_protocol_error("INVALID_HUMAN_CONFIRM_ACTION", message).await,
                 }
@@ -895,6 +985,7 @@ fn map_revision_path(path: RevisionPath, extra_context: Option<String>) -> (Stri
 ```
 
 `engine.append_context_note` 和 `engine.start_generation` 由 Task 7 新增；本步骤只负责 handler 路由与错误映射。
+`spawn_provider_run_from_handler` 与 `spawn_revision_run_from_handler` 不是新业务 API，而是从当前 `UserMessage` 分支和 `ReviewDecisionResponse::StartRevision` 分支抽出的 handler 私有 helper；两者继续维护 handler 局部 `current_run` 的 `command_tx/cancel`，并调用 P1 新增的 `mark_active_run_started/finished` 同步 `active_run_id` 镜像。
 
 - [ ] **Step 5: 跑测试确认通过**
 
@@ -1379,7 +1470,7 @@ describe("protocol types", () => {
 });
 ```
 
-Run: `pnpm --filter web test -- api/types`
+Run: `pnpm --dir web test -- api/types`
 Expected: 编译失败 — type 定义中缺少 context_note / protocol_error / provider_locked 等
 
 - [ ] **Step 2: 扩展 api/types.ts**
@@ -1396,6 +1487,10 @@ export type WsInMessage =
   | { type: "provider_select"; role: string; provider: string }
   | { type: "permission_response"; id: string; approved: boolean; reason?: string }
   | { type: "review_decision_response"; decision: string; extra_context?: string }
+  | { type: "select_revision_path"; path: "revise" | "revise-with-context" | "skip-to-human"; extra_context?: string | null }
+  // 兼容别名；新前端不得发送 request_revision，HumanConfirm 要求修改统一走 human_confirm request-change。
+  | { type: "request_revision"; feedback: StructuredFeedback }
+  | { type: "human_confirm"; decision: "confirm" | "request-change" | "terminate"; payload?: unknown }
   | { type: "abort" }
   | { type: "hello"; session_id: string; last_seen_node_id?: string }
   | { type: "ping" };
@@ -1413,7 +1508,7 @@ export type WsOutMessage =
   | { type: "timeline_node_updated"; node_id: string; status: string; summary?: string; completed_at?: string }
   | { type: "review_complete"; node_id: string; round: number; verdict: string; comments: string; summary: string }
   | { type: "review_decision_required"; node_id: string; round: number; options: string[] }
-  | { type: "session_state"
+  | { type: "session_state";
       session_id: string;
       workspace_type: string;
       stage: string;
@@ -1456,6 +1551,12 @@ export interface PermissionEvent {
   ts: string;
 }
 
+export interface StructuredFeedback {
+  feedback_types: string[];
+  description: string;
+  target_artifact_version?: number;
+}
+
 export interface ProviderSnapshot {
   name: string;
   model: string;
@@ -1488,7 +1589,7 @@ export interface NodeDetail {
 
 - [ ] **Step 3: 跑测试确认通过**
 
-Run: `pnpm --filter web test -- api/types`
+Run: `pnpm --dir web test -- api/types`
 Expected: PASS
 
 - [ ] **Step 4: Commit**
@@ -1538,7 +1639,7 @@ describe("useWorkspaceWs send functions", () => {
     const { result } = renderHook(() => useWorkspaceWs("sess-1"));
     act(() => {
       result.current.sendStartGeneration(
-        { author: "claude-code", reviewer: "codex", review_rounds: 1 },
+        { author: "claude_code", reviewer: "codex", review_rounds: 1 },
         true
       );
     });
@@ -1564,7 +1665,7 @@ describe("useWorkspaceWs send functions", () => {
 });
 ```
 
-Run: `pnpm --filter web test -- useWorkspaceWs`
+Run: `pnpm --dir web test -- useWorkspaceWs`
 Expected: 编译/运行失败 — sendContextNote / sendStartGeneration / sendHello 未定义
 
 - [ ] **Step 2: 在 useWorkspaceWs.ts 实现发送函数**
@@ -1642,16 +1743,6 @@ Expected: 编译/运行失败 — sendContextNote / sendStartGeneration / sendHe
     [],
   );
 
-  const sendRequestRevision = useCallback(
-    (feedback: { feedback_types: string[]; description: string; target_artifact_version?: number }) => {
-      const ws = wsRef.current;
-      if (ws?.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "request_revision", feedback }));
-      }
-    },
-    [],
-  );
-
   const sendHumanConfirm = useCallback(
     (decision: "confirm" | "request-change" | "terminate", payload?: unknown) => {
       const ws = wsRef.current;
@@ -1688,7 +1779,6 @@ Expected: 编译/运行失败 — sendContextNote / sendStartGeneration / sendHe
     sendContextNote,
     sendStartGeneration,
     sendSelectRevisionPath,
-    sendRequestRevision,
     sendHumanConfirm,
     sendHello,
     sendPing,
@@ -1704,7 +1794,7 @@ Expected: 编译/运行失败 — sendContextNote / sendStartGeneration / sendHe
 
 - [ ] **Step 3: 跑测试确认通过**
 
-Run: `pnpm --filter web test -- useWorkspaceWs`
+Run: `pnpm --dir web test -- useWorkspaceWs`
 Expected: PASS
 
 - [ ] **Step 4: Commit**
@@ -1740,7 +1830,7 @@ describe("workspace-ws-store node details", () => {
       messages: [],
       checkpoints: [],
       artifact: null,
-      providers: { author: "claude-code", reviewer: null },
+      providers: { author: "claude_code", reviewer: null },
       timeline_nodes: [{ node_id: "node-1", node_type: "author_run", status: "completed", title: "生成" }],
       active_node_id: "node-1",
       artifact_versions: [],
@@ -1751,7 +1841,7 @@ describe("workspace-ws-store node details", () => {
           node_type: "author_run",
           status: "completed",
           agent_role: "author",
-          provider: { name: "claude-code", model: "opus-4-7" },
+          provider: { name: "claude_code", model: "opus-4-7" },
           messages: [],
           streaming_content: "输出内容",
           execution_events: [],
@@ -1780,7 +1870,7 @@ describe("workspace-ws-store node details", () => {
       messages: [],
       checkpoints: [],
       artifact: null,
-      providers: { author: "claude-code", reviewer: null },
+      providers: { author: "claude_code", reviewer: null },
       timeline_nodes: [],
       active_node_id: null,
       artifact_versions: [],
@@ -1796,7 +1886,7 @@ describe("workspace-ws-store node details", () => {
 });
 ```
 
-Run: `pnpm --filter web test -- workspace-ws-store`
+Run: `pnpm --dir web test -- workspace-ws-store`
 Expected: 运行失败 — setSessionState 不处理 timeline_node_details
 
 - [ ] **Step 2: 修改 workspace-ws-store.ts**
@@ -1828,7 +1918,26 @@ Expected: 运行失败 — setSessionState 不处理 timeline_node_details
 
 ```typescript
 export interface WorkspaceWsState {
-  // ... 现有字段 ...
+  sessionId: string | null;
+  workspaceType: string | null;
+  stage: string;
+  visitedStages: string[];
+  messages: WsMessage[];
+  checkpoints: WsCheckpoint[];
+  artifact: string | null;
+  providers: WsProviderConfig | null;
+  connectionStatus: WsConnectionStatus;
+  streamingContent: string;
+  pendingPermissions: PermissionRequest[];
+  providerStatus: ProviderStatus;
+  executionEvents: ExecutionEvent[];
+  timelineNodes: TimelineNode[];
+  activeNodeId: string | null;
+  selectedNodeId: string | null;
+  nodeDetails: Record<string, TimelineNodeDetail>;
+  artifactVersions: ArtifactVersion[];
+  pendingDecision: ReviewDecisionRequired | null;
+  error: string | null;
   activeRunId: string | null;
 }
 ```
@@ -1837,14 +1946,33 @@ export interface WorkspaceWsState {
 
 ```typescript
 const initialState: WorkspaceWsState = {
-  // ...
+  sessionId: null,
+  workspaceType: null,
+  stage: "prepare_context",
+  visitedStages: ["prepare_context"],
+  messages: [],
+  checkpoints: [],
+  artifact: null,
+  providers: null,
+  connectionStatus: "disconnected",
+  streamingContent: "",
+  pendingPermissions: [],
+  providerStatus: "starting",
+  executionEvents: [],
+  timelineNodes: [],
+  activeNodeId: null,
+  selectedNodeId: null,
+  nodeDetails: {},
+  artifactVersions: [],
+  pendingDecision: null,
+  error: null,
   activeRunId: null,
 };
 ```
 
 - [ ] **Step 3: 跑测试确认通过**
 
-Run: `pnpm --filter web test -- workspace-ws-store`
+Run: `pnpm --dir web test -- workspace-ws-store`
 Expected: PASS
 
 - [ ] **Step 4: Commit**
@@ -1875,26 +2003,82 @@ git commit -m "feat(store): apply timeline_node_details from snapshot + activeRu
 
   it("handles provider_locked", () => {
     const store = useWorkspaceStore.getState();
-    store.setProviderLocked({ snapshot: { author: "claude-code", reviewer: null, review_rounds: 0 }, locked_at: "2026-05-20T14:35:00Z" });
+    store.setProviderLocked({ snapshot: { author: "claude_code", reviewer: null, review_rounds: 0 }, locked_at: "2026-05-20T14:35:00Z" });
     expect(useWorkspaceStore.getState().providerLocked).toBe(true);
   });
 ```
 
-Run: `pnpm --filter web test -- workspace-ws-store`
+Run: `pnpm --dir web test -- workspace-ws-store`
 Expected: 失败 — setProtocolError / setProviderLocked 未定义
 
 - [ ] **Step 2: 在 store 中追加状态和 actions**
 
 ```typescript
 export interface WorkspaceWsState {
-  // ... 现有字段 ...
+  sessionId: string | null;
+  workspaceType: string | null;
+  stage: string;
+  visitedStages: string[];
+  messages: WsMessage[];
+  checkpoints: WsCheckpoint[];
+  artifact: string | null;
+  providers: WsProviderConfig | null;
+  connectionStatus: WsConnectionStatus;
+  streamingContent: string;
+  pendingPermissions: PermissionRequest[];
+  providerStatus: ProviderStatus;
+  executionEvents: ExecutionEvent[];
+  timelineNodes: TimelineNode[];
+  activeNodeId: string | null;
+  selectedNodeId: string | null;
+  nodeDetails: Record<string, TimelineNodeDetail>;
+  artifactVersions: ArtifactVersion[];
+  pendingDecision: ReviewDecisionRequired | null;
+  error: string | null;
+  activeRunId: string | null;
   protocolError: { code: string; message: string } | null;
   providerLocked: boolean;
   providerSnapshot: ProviderConfigSnapshot | null;
 }
 
 export interface WorkspaceWsActions {
-  // ... 现有 actions ...
+  setSessionState: (state: {
+    session_id: string;
+    workspace_type: string;
+    stage: string;
+    messages: WsMessage[];
+    checkpoints: WsCheckpoint[];
+    artifact: string | null;
+    providers: WsProviderConfig;
+    timeline_nodes?: TimelineNode[];
+    active_node_id?: string | null;
+    artifact_versions?: ArtifactVersion[];
+    timeline_node_details?: Record<string, TimelineNodeDetail>;
+    active_run_id?: string | null;
+  }) => void;
+  appendStreamChunk: (content: string, nodeId?: string | null) => void;
+  completeMessage: (messageId: string, checkpointId: string, nodeId?: string | null) => void;
+  setStage: (stage: string) => void;
+  setArtifact: (markdown: string) => void;
+  addTimelineNode: (node: TimelineNode) => void;
+  updateTimelineNode: (
+    nodeId: string,
+    status: TimelineNodeStatus,
+    summary?: string | null,
+    completedAt?: string | null,
+  ) => void;
+  setSelectedNode: (nodeId: string | null) => void;
+  setNodeVerdict: (nodeId: string, verdict: ReviewVerdict) => void;
+  setPendingDecision: (decision: ReviewDecisionRequired | null) => void;
+  setConnectionStatus: (status: WsConnectionStatus) => void;
+  addPermissionRequest: (request: PermissionRequest) => void;
+  resolvePermissionRequest: (id: string) => void;
+  setProviderStatus: (status: ProviderStatus) => void;
+  upsertExecutionEvent: (event: ExecutionEvent) => void;
+  clearExecutionEvents: () => void;
+  setError: (error: string | null) => void;
+  clearStreaming: () => void;
+  reset: () => void;
   setProtocolError: (error: { code: string; message: string } | null) => void;
   setProviderLocked: (payload: { snapshot: ProviderConfigSnapshot; locked_at: string } | null) => void;
 }
@@ -1935,7 +2119,7 @@ export interface WorkspaceWsActions {
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Run: `pnpm --filter web test -- workspace-ws-store`
+Run: `pnpm --dir web test -- workspace-ws-store`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -1956,13 +2140,13 @@ Expected: PASS
 
 - [ ] **Step 2: 跑前端单元测试**
 
-Run: `pnpm --filter web test`
+Run: `pnpm --dir web test`
 Expected: PASS
 
 - [ ] **Step 3: 跑 E2E 回归（确保协议兼容期不破坏既有用例）**
 
-Run: `pnpm --filter web test:e2e`
-Expected: 可能部分 user_message 用例需要适配，但不应有 core break
+Run: `pnpm --dir web test:e2e`
+Expected: PASS；不得保留依赖 `user_message` 启动生成的断言，新断言必须覆盖 `context_note` / `start_generation` / `select_revision_path` / `human_confirm`
 
 - [ ] **Step 4: Commit（如有修复）**
 
@@ -2003,8 +2187,8 @@ git commit -am "fix: adjust tests for protocol v2 compatibility"
 ## 本 plan 验收清单
 
 - [ ] `cargo test --locked -j 1` PASS
-- [ ] `pnpm --filter web test` PASS
-- [ ] `pnpm --filter web test:e2e` 既有用例不破坏
+- [ ] `pnpm --dir web test` PASS
+- [ ] `pnpm --dir web test:e2e` 既有用例不破坏
 - [ ] `WsInMessage::ContextNote` 序列化/反序列化正确
 - [ ] `WsInMessage::StartGeneration` 序列化/反序列化正确
 - [ ] `WsInMessage::SelectRevisionPath` / `RequestRevision` / `HumanConfirm` 序列化/反序列化正确
@@ -2015,6 +2199,6 @@ git commit -am "fix: adjust tests for protocol v2 compatibility"
 - [ ] `SessionState` snapshot 包含 `timeline_node_details` 和 `active_run_id`
 - [ ] `active_run_id` 在 run 结束、abort、socket close 后随 snapshot 清空，前端不得保留旧值
 - [ ] 前端 `sendContextNote` / `sendStartGeneration` / `sendHello` / `sendPing` 发送正确 JSON
-- [ ] 前端 `sendSelectRevisionPath` / `sendRequestRevision` / `sendHumanConfirm` 发送正确 JSON
+- [ ] 前端 `sendSelectRevisionPath` / `sendHumanConfirm` 发送正确 JSON；不得新增 `sendRequestRevision`
 - [ ] 前端 store 收到 snapshot 时 `nodeDetails` 被正确填充
 - [ ] 前端 store 收到 `protocol_error` 时状态更新

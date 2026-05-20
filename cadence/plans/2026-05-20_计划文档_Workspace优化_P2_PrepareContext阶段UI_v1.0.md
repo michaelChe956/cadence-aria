@@ -66,7 +66,7 @@ describe("useStageUI", () => {
 });
 ```
 
-Run: `pnpm --filter web test -- useStageUI`
+Run: `pnpm --dir web test -- useStageUI`
 Expected: 编译失败 — useStageUI 未定义
 
 - [ ] **Step 2: 实现 useStageUI**
@@ -156,7 +156,7 @@ export function useStageUI(stage: string): StageUIConfig {
 
 - [ ] **Step 3: 跑测试确认通过**
 
-Run: `pnpm --filter web test -- useStageUI`
+Run: `pnpm --dir web test -- useStageUI`
 Expected: PASS
 
 - [ ] **Step 4: Commit**
@@ -225,7 +225,7 @@ describe("ProviderConfigPanel", () => {
 });
 ```
 
-Run: `pnpm --filter web test -- ProviderConfigPanel`
+Run: `pnpm --dir web test -- ProviderConfigPanel`
 Expected: 编译失败 — ProviderConfigPanel 未定义
 
 - [ ] **Step 2: 实现 ProviderConfigPanel**
@@ -357,7 +357,7 @@ export function ProviderConfigPanel({
 
 - [ ] **Step 3: 跑测试确认通过**
 
-Run: `pnpm --filter web test -- ProviderConfigPanel`
+Run: `pnpm --dir web test -- ProviderConfigPanel`
 Expected: PASS
 
 - [ ] **Step 4: Commit**
@@ -429,7 +429,7 @@ describe("PrepareContextPanel", () => {
 });
 ```
 
-Run: `pnpm --filter web test -- PrepareContextPanel`
+Run: `pnpm --dir web test -- PrepareContextPanel`
 Expected: 编译失败 — PrepareContextPanel 未定义
 
 - [ ] **Step 2: 实现 PrepareContextPanel**
@@ -515,7 +515,7 @@ export function PrepareContextPanel({
 
 - [ ] **Step 3: 跑测试确认通过**
 
-Run: `pnpm --filter web test -- PrepareContextPanel`
+Run: `pnpm --dir web test -- PrepareContextPanel`
 Expected: PASS
 
 - [ ] **Step 4: Commit**
@@ -569,7 +569,7 @@ git commit -m "feat(ui): add PrepareContextPanel with context_note input + start
   });
 ```
 
-Run: `pnpm --filter web test -- workspace-ws-store`
+Run: `pnpm --dir web test -- workspace-ws-store`
 Expected: 失败 — `selectPrepareContextNotes` 未定义或没有按 Timeline 派生。
 
 - [ ] **Step 2: 在 store 中追加 selector，不追加可变 contextNotes 状态**
@@ -587,7 +587,7 @@ export function selectPrepareContextNotes(state: WorkspaceWsState): string[] {
 
 - [ ] **Step 3: 跑测试确认通过**
 
-Run: `pnpm --filter web test -- workspace-ws-store`
+Run: `pnpm --dir web test -- workspace-ws-store`
 Expected: PASS
 
 - [ ] **Step 4: Commit**
@@ -610,7 +610,7 @@ git commit -m "feat(store): derive PrepareContext notes from timeline"
 grep -n "handleSubmit\|input\|textarea\|startGeneration\|showProviderPanel" web/src/pages/WorkspacePage.tsx
 ```
 
-现有逻辑：
+当前基线输入区：
 - `handleSubmit` (line 120): 通过 `sendMessage` 发送统一输入 → 后端 guess intent
 - `startGeneration` (line 155): 调用 `sendMessage("开始生成")`
 - `showProviderPanel` toggle (line 110): Provider 配置折叠面板
@@ -620,18 +620,26 @@ grep -n "handleSubmit\|input\|textarea\|startGeneration\|showProviderPanel" web/
 从 WorkspacePage 中删除旧输入区，改为根据 stage 渲染不同面板：
 
 ```tsx
-import { useStageUI } from "../../hooks/useStageUI";
-import { PrepareContextPanel } from "../../components/workspace/PrepareContextPanel";
-import { ProviderConfigPanel } from "../../components/workspace/ProviderConfigPanel";
-import { selectPrepareContextNotes } from "../../state/workspace-ws-store";
+import { useStageUI } from "../hooks/useStageUI";
+import { PrepareContextPanel } from "../components/workspace/PrepareContextPanel";
+import { ProviderConfigPanel } from "../components/workspace/ProviderConfigPanel";
+import {
+  selectPrepareContextNotes,
+  useWorkspaceStore,
+  type ProviderConfigSnapshot,
+} from "../state/workspace-ws-store";
 
-// ...
-function WorkspacePage({ sessionId, ... }: WorkspacePageProps) {
+export function WorkspacePage({
+  sessionId,
+  onBack,
+}: {
+  sessionId: string;
+  onBack: () => void;
+}) {
   const { sendContextNote, sendStartGeneration, selectProvider } = useWorkspaceWs(sessionId);
   const store = useWorkspaceStore();
   const stageConfig = useStageUI(store.stage);
   const contextNotes = selectPrepareContextNotes(store);
-  // ...
 
   // 主区右侧面板
   const rightPanel = (() => {
@@ -661,13 +669,45 @@ function WorkspacePage({ sessionId, ... }: WorkspacePageProps) {
             />
           </div>
         );
-      // P4 会追加其他 case
       default:
-        return <div>待实现面板: {stageConfig.panel}</div>;
+        return <div>当前阶段暂无操作面板: {stageConfig.panel}</div>;
     }
   })();
 
-  // ...
+  return (
+    <div className="flex h-screen min-w-0 flex-col overflow-hidden bg-[var(--aria-bg)]">
+      <header className="flex h-12 min-w-0 shrink-0 items-center justify-between gap-2 border-b border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 sm:px-4">
+        <button
+          type="button"
+          onClick={onBack}
+          className="inline-flex h-8 shrink-0 items-center gap-1 rounded-md px-2 text-sm text-[var(--aria-ink-muted)] hover:bg-[var(--aria-panel-muted)]"
+        >
+          返回
+        </button>
+        <span className="truncate text-sm font-semibold text-[var(--aria-ink)]">
+          {store.workspaceType ?? "Workspace"}
+        </span>
+      </header>
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col lg:flex-row">
+        <div className="min-h-0 min-w-0 flex-1 overflow-auto p-4">
+          {store.timelineNodes.map((node) => (
+            <button
+              key={node.node_id}
+              type="button"
+              onClick={() => store.setSelectedNode(node.node_id)}
+              className="mb-2 block w-full rounded-md border border-[var(--aria-line)] bg-white px-3 py-2 text-left text-sm hover:bg-[var(--aria-panel-muted)]"
+            >
+              <span className="font-medium text-[var(--aria-ink)]">{node.title}</span>
+              <span className="ml-2 text-xs text-[var(--aria-ink-muted)]">{node.status}</span>
+            </button>
+          ))}
+        </div>
+        <aside className="min-h-0 border-t border-[var(--aria-line)] bg-[var(--aria-panel)] lg:w-[26rem] lg:border-l lg:border-t-0">
+          {rightPanel}
+        </aside>
+      </div>
+    </div>
+  );
 }
 ```
 
@@ -675,7 +715,30 @@ function WorkspacePage({ sessionId, ... }: WorkspacePageProps) {
 
 ```typescript
 export interface WorkspaceWsState {
-  // ...
+  sessionId: string | null;
+  workspaceType: string | null;
+  stage: string;
+  visitedStages: string[];
+  messages: WsMessage[];
+  checkpoints: WsCheckpoint[];
+  artifact: string | null;
+  providers: WsProviderConfig | null;
+  connectionStatus: WsConnectionStatus;
+  streamingContent: string;
+  pendingPermissions: PermissionRequest[];
+  providerStatus: ProviderStatus;
+  executionEvents: ExecutionEvent[];
+  timelineNodes: TimelineNode[];
+  activeNodeId: string | null;
+  selectedNodeId: string | null;
+  nodeDetails: Record<string, TimelineNodeDetail>;
+  artifactVersions: ArtifactVersion[];
+  pendingDecision: ReviewDecisionRequired | null;
+  error: string | null;
+  activeRunId: string | null;
+  protocolError: { code: string; message: string } | null;
+  providerLocked: boolean;
+  providerSnapshot: ProviderConfigSnapshot | null;
   reviewerEnabled: boolean;
   reviewRounds: number;
 }
@@ -685,8 +748,8 @@ export interface WorkspaceWsState {
 
 - [ ] **Step 4: 跑 WorkspacePage 测试确认不破坏**
 
-Run: `pnpm --filter web test -- WorkspacePage`
-Expected: 可能部分用例需要调整（sendMessage 改为 sendContextNote），但核心流程通过
+Run: `pnpm --dir web test -- WorkspacePage`
+Expected: PASS；旧的 `sendMessage("开始生成")` 断言必须改为 `sendStartGeneration(snapshot, reviewerEnabled)`，上下文输入断言必须改为 `sendContextNote(content)`
 
 - [ ] **Step 5: Commit**
 
@@ -701,7 +764,7 @@ git commit -m "feat(ui): integrate PrepareContextPanel + ProviderConfigPanel int
 
 - [ ] **Step 1: 跑前端单元测试**
 
-Run: `pnpm --filter web test`
+Run: `pnpm --dir web test`
 Expected: PASS（如有 user_message 相关旧用例失败，更新为 context_note）
 
 - [ ] **Step 2: Commit（如有修复）**
@@ -727,7 +790,7 @@ git commit -am "fix: update tests for PrepareContext UI refactor"
 | §4.4 状态机视角 | Task 1 (useStageUI) |
 
 **2. Implementation constraints:**
-- 没有待定占位项
+- 没有未决占位项
 - `store.reviewerEnabled` / `store.reviewRounds` 需要在 store 中定义
 - `ProviderConfigSnapshot` 类型需要从 api/types.ts 导入
 - `selectPrepareContextNotes` 必须只读 `timelineNodes + nodeDetails`，不得引入本地乐观 context note 状态
@@ -747,4 +810,4 @@ git commit -am "fix: update tests for PrepareContext UI refactor"
 - [ ] Reviewer 默认勾选，取消时显示警告
 - [ ] Running 阶段 ProviderConfigPanel 锁定，输入区隐藏
 - [ ] E2E 稳定选择器存在：`stage-badge`、`prepare-context-panel`、`context-note-input`、`send-context-note`、`start-generation`、`timeline-node-context_note`
-- [ ] `pnpm --filter web test` PASS
+- [ ] `pnpm --dir web test` PASS

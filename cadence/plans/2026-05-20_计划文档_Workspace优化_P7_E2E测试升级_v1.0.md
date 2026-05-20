@@ -774,7 +774,7 @@ git commit -m "test(e2e): migrate existing E2E to protocol v2"
 
 - [ ] **Step 1: 跑全量 E2E**
 
-Run: `pnpm --filter web test:e2e`
+Run: `pnpm --dir web test:e2e`
 Expected: 全部 PASS（可能需要多次运行稳定化）
 
 - [ ] **Step 2: Commit（如有修复）**
@@ -800,7 +800,7 @@ git commit -am "fix(e2e): stabilize E2E cases for P1-P6"
 | G. Permission 链路 | `permission-link.spec.ts` |
 
 **2. Implementation constraints:**
-- 没有待定占位项
+- 没有未决占位项
 
 **3. 时间敏感用例:**
 - B5 性能断言：100 节点 < 200ms
@@ -820,6 +820,6 @@ git commit -am "fix(e2e): stabilize E2E cases for P1-P6"
 - [ ] F1-F5 全部 PASS
 - [ ] G1-G5 全部 PASS
 - [ ] 既有 E2E 不破坏
-- [ ] `pnpm --filter web test:e2e` 全量 PASS
+- [ ] `pnpm --dir web test:e2e` 全量 PASS
 - [ ] `cargo test --locked -j 1` PASS
-- [ ] `pnpm --filter web test` PASS
+- [ ] `pnpm --dir web test` PASS

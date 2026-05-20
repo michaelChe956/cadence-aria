@@ -32,7 +32,7 @@
 ## 修订约束（必须优先遵守）
 
 1. ReviewDecision 三路径必须调用 P1 新增的 `sendSelectRevisionPath(path, extraContext?)`，路径值固定为 `revise` / `revise-with-context` / `skip-to-human`。
-2. HumanConfirm 的确认/终止调用 `sendHumanConfirm("confirm" | "terminate")`；“要求修改”调用 P1 新增的 `sendRequestRevision(feedback)`，不得复用旧审核决策发送函数。
+2. HumanConfirm 的确认/要求修改/终止都调用 P1 新增的 `sendHumanConfirm`；“要求修改”使用 `sendHumanConfirm("request-change", feedback)`，不得复用旧审核决策发送函数，也不得新增前端 `sendRequestRevision` 路径。
 3. 本阶段新增 UI 必须补齐 P7 所需 test id：`node-detail-panel`、`tab-overview`、`tab-streaming`、`tab-execution`、`tab-permission`、`tab-artifact`、`stage-actions-bar`、`review-decision-panel`、`human-confirm-panel`、`streaming-content`。
 
 ### Task 1: 扩展 useStageUI 补全所有阶段
@@ -64,7 +64,7 @@
   });
 ```
 
-Run: `pnpm --filter web test -- useStageUI`
+Run: `pnpm --dir web test -- useStageUI`
 Expected: 部分失败 — RunningPanel / CrossReviewPanel 等配置未定义
 
 - [ ] **Step 2: 在 useStageUI.ts 补全 STAGE_CONFIG_MAP**
@@ -118,7 +118,7 @@ Expected: 部分失败 — RunningPanel / CrossReviewPanel 等配置未定义
 
 - [ ] **Step 3: 跑测试确认通过**
 
-Run: `pnpm --filter web test -- useStageUI`
+Run: `pnpm --dir web test -- useStageUI`
 Expected: PASS
 
 - [ ] **Step 4: Commit**
@@ -150,7 +150,7 @@ describe("WorkspaceHeader", () => {
         entityType="Story Spec"
         entityId="SP-12"
         version={2}
-        author="claude-code"
+        author="claude_code"
         reviewer="codex"
         rounds={1}
         stage="running"
@@ -170,7 +170,7 @@ describe("WorkspaceHeader", () => {
         entityType="Story Spec"
         entityId="SP-12"
         version={2}
-        author="claude-code"
+        author="claude_code"
         reviewer={null}
         rounds={0}
         stage="prepare_context"
@@ -182,7 +182,7 @@ describe("WorkspaceHeader", () => {
 });
 ```
 
-Run: `pnpm --filter web test -- WorkspaceHeader`
+Run: `pnpm --dir web test -- WorkspaceHeader`
 Expected: 编译失败 — WorkspaceHeader 未定义
 
 - [ ] **Step 2: 实现 WorkspaceHeader**
@@ -270,7 +270,7 @@ export function WorkspaceHeader({
 
 - [ ] **Step 3: 跑测试确认通过**
 
-Run: `pnpm --filter web test -- WorkspaceHeader`
+Run: `pnpm --dir web test -- WorkspaceHeader`
 Expected: PASS
 
 - [ ] **Step 4: Commit**
@@ -311,7 +311,7 @@ describe("NodeDetailPanel", () => {
           node_type: "author_run",
           status: "completed",
           agent_role: "author",
-          provider: { name: "claude-code", model: "opus-4-7" },
+          provider: { name: "claude_code", model: "opus-4-7" },
           messages: [],
           streaming_content: "输出内容",
           execution_events: [],
@@ -348,7 +348,7 @@ describe("NodeDetailPanel", () => {
           node_type: "author_run",
           status: "completed",
           agent_role: "author",
-          provider: { name: "claude-code", model: "opus-4-7" },
+          provider: { name: "claude_code", model: "opus-4-7" },
           messages: [],
           streaming_content: "输出内容",
           execution_events: [],
@@ -369,7 +369,7 @@ describe("NodeDetailPanel", () => {
 });
 ```
 
-Run: `pnpm --filter web test -- NodeDetailPanel`
+Run: `pnpm --dir web test -- NodeDetailPanel`
 Expected: 编译失败 — NodeDetailPanel 未定义
 
 - [ ] **Step 2: 实现 NodeDetailPanel**
@@ -510,7 +510,7 @@ export function NodeDetailPanel({ node, detail, artifactVersions }: NodeDetailPa
 
 - [ ] **Step 3: 跑测试确认通过**
 
-Run: `pnpm --filter web test -- NodeDetailPanel`
+Run: `pnpm --dir web test -- NodeDetailPanel`
 Expected: PASS
 
 - [ ] **Step 4: Commit**
@@ -569,7 +569,7 @@ describe("StageActionsBar", () => {
 });
 ```
 
-Run: `pnpm --filter web test -- StageActionsBar`
+Run: `pnpm --dir web test -- StageActionsBar`
 Expected: 编译失败 — StageActionsBar 未定义
 
 - [ ] **Step 2: 实现 StageActionsBar**
@@ -684,7 +684,7 @@ export function StageActionsBar({
 
 - [ ] **Step 3: 跑测试确认通过**
 
-Run: `pnpm --filter web test -- StageActionsBar`
+Run: `pnpm --dir web test -- StageActionsBar`
 Expected: PASS
 
 - [ ] **Step 4: Commit**
@@ -741,7 +741,7 @@ describe("ReviewDecisionStagePanel", () => {
 });
 ```
 
-Run: `pnpm --filter web test -- ReviewDecisionStagePanel`
+Run: `pnpm --dir web test -- ReviewDecisionStagePanel`
 Expected: 编译失败 — ReviewDecisionStagePanel 未定义
 
 - [ ] **Step 2: 实现 ReviewDecisionStagePanel**
@@ -858,7 +858,7 @@ export function ReviewDecisionStagePanel({
 
 - [ ] **Step 3: 跑测试确认通过**
 
-Run: `pnpm --filter web test -- ReviewDecisionStagePanel`
+Run: `pnpm --dir web test -- ReviewDecisionStagePanel`
 Expected: PASS
 
 - [ ] **Step 4: Commit**
@@ -921,7 +921,7 @@ describe("HumanConfirmStagePanel", () => {
 });
 ```
 
-Run: `pnpm --filter web test -- HumanConfirmStagePanel`
+Run: `pnpm --dir web test -- HumanConfirmStagePanel`
 Expected: 编译失败 — HumanConfirmStagePanel 未定义
 
 - [ ] **Step 2: 实现 HumanConfirmStagePanel**
@@ -976,7 +976,6 @@ export function HumanConfirmStagePanel({
         待人工确认
       </div>
 
-      {/* 审核摘要 */}
       <div className="rounded bg-slate-50 p-3">
         <div className="text-xs text-[var(--aria-ink-muted)]">
           📊 审核摘要
@@ -991,7 +990,6 @@ export function HumanConfirmStagePanel({
         </ul>
       </div>
 
-      {/* 行级 diff */}
       {prevVersion && (
         <div className="rounded bg-slate-50 p-3">
           <div className="text-xs text-[var(--aria-ink-muted)]">
@@ -1003,7 +1001,6 @@ export function HumanConfirmStagePanel({
         </div>
       )}
 
-      {/* Artifact 预览 */}
       <div className="rounded border p-3">
         <div className="text-xs text-[var(--aria-ink-muted)] mb-1">
           📝 Artifact 预览（v{artifactVersion.version}）
@@ -1013,7 +1010,6 @@ export function HumanConfirmStagePanel({
         </pre>
       </div>
 
-      {/* 决策 */}
       {!showFeedback && (
         <div className="flex gap-2">
           <button
@@ -1037,7 +1033,6 @@ export function HumanConfirmStagePanel({
         </div>
       )}
 
-      {/* 结构化反馈 */}
       {showFeedback && (
         <div className="space-y-3 rounded border p-3">
           <div className="text-sm font-medium">
@@ -1094,7 +1089,7 @@ export function HumanConfirmStagePanel({
 
 - [ ] **Step 3: 跑测试确认通过**
 
-Run: `pnpm --filter web test -- HumanConfirmStagePanel`
+Run: `pnpm --dir web test -- HumanConfirmStagePanel`
 Expected: PASS
 
 - [ ] **Step 4: Commit**
@@ -1126,7 +1121,6 @@ import { ReviewDecisionStagePanel } from "../components/workspace/stages/ReviewD
 import { HumanConfirmStagePanel } from "../components/workspace/stages/HumanConfirmStagePanel";
 import { selectPrepareContextNotes } from "../state/workspace-ws-store";
 
-// ...
 function WorkspacePage({ sessionId }: WorkspacePageProps) {
   const store = useWorkspaceStore();
   const stageConfig = useStageUI(store.stage);
@@ -1136,7 +1130,6 @@ function WorkspacePage({ sessionId }: WorkspacePageProps) {
     sendStartGeneration,
     abort,
     sendSelectRevisionPath,
-    sendRequestRevision,
     sendHumanConfirm,
   } = useWorkspaceWs(sessionId);
 
@@ -1184,7 +1177,7 @@ function WorkspacePage({ sessionId }: WorkspacePageProps) {
             reviewerSummary={store.pendingReviewerSummary ?? { verdict: "pass", points: [] }}
             prevVersion={store.artifactVersions[store.artifactVersions.length - 2]}
             onConfirm={() => sendHumanConfirm("confirm")}
-            onRequestChange={(fb) => sendRequestRevision(fb)}
+            onRequestChange={(fb) => sendHumanConfirm("request-change", fb)}
             onTerminate={() => sendHumanConfirm("terminate")}
           />
         );
@@ -1194,6 +1187,8 @@ function WorkspacePage({ sessionId }: WorkspacePageProps) {
         return null;
     }
   })();
+
+  const ignoreStageAction = () => undefined;
 
   return (
     <div className="flex h-full flex-col">
@@ -1209,18 +1204,46 @@ function WorkspacePage({ sessionId }: WorkspacePageProps) {
       />
 
       <div className="flex flex-1 overflow-hidden">
-        {/* 左侧 Timeline */}
         <div className="w-1/2 overflow-y-auto border-r">
-          {/* ... 现有 Timeline 渲染 ... */}
+          {store.timelineNodes.length > 0 ? (
+            <div className="space-y-2 p-4">
+              {store.timelineNodes.map((node) => (
+                <button
+                  key={node.node_id}
+                  type="button"
+                  onClick={() => store.setSelectedNode(node.node_id)}
+                  className={`block w-full rounded-md border px-3 py-2 text-left ${
+                    node.node_id === selectedNode?.node_id
+                      ? "border-[var(--aria-primary)] bg-blue-50"
+                      : "border-[var(--aria-line)] bg-white hover:bg-[var(--aria-panel-muted)]"
+                  }`}
+                >
+                  <div className="flex min-w-0 items-center justify-between gap-2">
+                    <span className="truncate text-sm font-semibold text-[var(--aria-ink)]">
+                      {node.title}
+                    </span>
+                    <span className="shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium text-[var(--aria-ink-muted)]">
+                      {node.status}
+                    </span>
+                  </div>
+                  {node.summary ? (
+                    <p className="mt-1 truncate text-xs text-[var(--aria-ink-muted)]">
+                      {node.summary}
+                    </p>
+                  ) : null}
+                </button>
+              ))}
+            </div>
+          ) : (
+            <div className="p-4 text-sm text-[var(--aria-ink-muted)]">暂无 Timeline 节点</div>
+          )}
         </div>
 
-        {/* 右侧：阶段面板 + 节点详情 */}
         <div className="flex w-1/2 flex-col">
           <div className="flex-1 overflow-y-auto">
             {stagePanel}
           </div>
 
-          {/* 节点详情面板（固定高度） */}
           <div className="h-1/2 border-t">
             {selectedNode && (
               <NodeDetailPanel
@@ -1235,10 +1258,10 @@ function WorkspacePage({ sessionId }: WorkspacePageProps) {
 
       <StageActionsBar
         stage={store.stage}
-        onStartGeneration={() => { /* 已在 PrepareContextPanel 中处理 */ }}
+        onStartGeneration={ignoreStageAction}
         onAbort={abort}
         onConfirm={() => sendHumanConfirm("confirm")}
-        onRequestChange={() => { /* HumanConfirmStagePanel 内部处理 */ }}
+        onRequestChange={ignoreStageAction}
         onTerminate={() => sendHumanConfirm("terminate")}
       />
     </div>
@@ -1250,7 +1273,32 @@ function WorkspacePage({ sessionId }: WorkspacePageProps) {
 
 ```typescript
 export interface WorkspaceWsState {
-  // ... 现有 ...
+  sessionId: string | null;
+  workspaceType: string | null;
+  stage: string;
+  visitedStages: string[];
+  messages: WsMessage[];
+  checkpoints: WsCheckpoint[];
+  artifact: string | null;
+  providers: WsProviderConfig | null;
+  connectionStatus: WsConnectionStatus;
+  streamingContent: string;
+  pendingPermissions: PermissionRequest[];
+  providerStatus: ProviderStatus;
+  executionEvents: ExecutionEvent[];
+  timelineNodes: TimelineNode[];
+  activeNodeId: string | null;
+  selectedNodeId: string | null;
+  nodeDetails: Record<string, TimelineNodeDetail>;
+  artifactVersions: ArtifactVersion[];
+  pendingDecision: ReviewDecisionRequired | null;
+  error: string | null;
+  activeRunId: string | null;
+  protocolError: { code: string; message: string } | null;
+  providerLocked: boolean;
+  providerSnapshot: ProviderConfigSnapshot | null;
+  reviewerEnabled: boolean;
+  reviewRounds: number;
   pendingReviewDecision: { verdict: string; summary: string } | null;
   pendingReviewerSummary: { verdict: string; points: string[] } | null;
 }
@@ -1260,8 +1308,8 @@ export interface WorkspaceWsState {
 
 - [ ] **Step 3: 跑 WorkspacePage 测试确认通过**
 
-Run: `pnpm --filter web test -- WorkspacePage`
-Expected: 可能部分断言需要调整（Tab 移除），但核心通过
+Run: `pnpm --dir web test -- WorkspacePage`
+Expected: PASS；旧的右侧 Tab 断言必须改为 `WorkspaceHeader`、Timeline 列表、`NodeDetailPanel` 和当前 stage panel 的渲染断言
 
 - [ ] **Step 4: Commit**
 
@@ -1276,7 +1324,7 @@ git commit -m "feat(ui): refactor WorkspacePage with Header + NodeDetailPanel + 
 
 - [ ] **Step 1: 跑前端单元测试**
 
-Run: `pnpm --filter web test`
+Run: `pnpm --dir web test`
 Expected: PASS
 
 - [ ] **Step 2: Commit（如有修复）**
@@ -1303,8 +1351,8 @@ git commit -am "fix: update tests for stage UI refactor"
 | §6.5 代码触达点 | Task 7 (WorkspacePage 重构) |
 
 **2. Implementation constraints:**
-- 没有待定占位项
-- `sendSelectRevisionPath` / `sendRequestRevision` / `sendHumanConfirm` 签名需与 P1 `useWorkspaceWs` 一致
+- 没有未决占位项
+- `sendSelectRevisionPath` / `sendHumanConfirm` 签名需与 P1 `useWorkspaceWs` 一致；P4 不新增 `sendRequestRevision`
 
 **3. Type consistency:**
 - `ReviewDecisionStagePanel` 的 `onSelectPath` 签名与 `sendSelectRevisionPath` 匹配
@@ -1320,4 +1368,4 @@ git commit -am "fix: update tests for stage UI refactor"
 - [ ] ReviewDecision 三路径都能选 → 进入正确下一阶段
 - [ ] HumanConfirm 显示 reviewer 摘要 + 行级 diff + artifact 预览
 - [ ] HumanConfirm "要求修改" → 结构化反馈（多选）→ 提交后回 ReviewDecision
-- [ ] `pnpm --filter web test` PASS
+- [ ] `pnpm --dir web test` PASS
