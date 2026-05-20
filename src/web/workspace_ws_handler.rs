@@ -137,7 +137,11 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
         session,
     )));
 
-    let session_state = engine.lock().await.build_session_state();
+    let session_state = {
+        let mut engine = engine.lock().await;
+        engine.recover_stale_active_run_after_disconnect().await;
+        engine.build_session_state()
+    };
     if let Ok(json) = serde_json::to_string(&session_state) {
         let _ = ws_sender.send(Message::Text(json.into())).await;
     }

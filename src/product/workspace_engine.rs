@@ -457,6 +457,28 @@ impl WorkspaceEngine {
         self.transition_stage(WorkspaceStage::PrepareContext).await;
     }
 
+    pub async fn recover_stale_active_run_after_disconnect(&mut self) {
+        if !matches!(
+            self.session.stage,
+            WorkspaceStage::Running | WorkspaceStage::CrossReview | WorkspaceStage::Revision
+        ) {
+            return;
+        }
+
+        let already_recorded = self
+            .timeline_nodes
+            .last()
+            .is_some_and(|node| node.node_type == TimelineNodeType::AbortedByDisconnect);
+        if !already_recorded {
+            let run_id = self
+                .active_run_id
+                .clone()
+                .unwrap_or_else(|| "stale-connection".to_string());
+            let _ = self.append_aborted_by_disconnect(run_id).await;
+        }
+        self.transition_to_prepare_context_after_disconnect().await;
+    }
+
     pub async fn buffer_stream_chunk(
         &mut self,
         node_id: &str,
@@ -673,7 +695,7 @@ impl WorkspaceEngine {
                     if let Some(node_id) = node_id.as_deref() {
                         let _ = self.flush_stream_buffer(node_id).await;
                     }
-                    self.finish_failed_run().await;
+                    self.finish_aborted_run().await;
                     return;
                 }
                 command = command_rx.recv(), if commands_open => {
@@ -684,7 +706,7 @@ impl WorkspaceEngine {
                             if let Some(node_id) = node_id.as_deref() {
                                 let _ = self.flush_stream_buffer(node_id).await;
                             }
-                            self.finish_failed_run().await;
+                            self.finish_aborted_run().await;
                             return;
                         }
                         Some(ProviderCommand::PermissionResponse {
@@ -853,7 +875,7 @@ impl WorkspaceEngine {
             if let Some(node_id) = node_id.as_deref() {
                 let _ = self.flush_stream_buffer(node_id).await;
             }
-            self.finish_failed_run().await;
+            self.finish_aborted_run().await;
             return;
         }
 
@@ -949,7 +971,7 @@ impl WorkspaceEngine {
                     if let Some(node_id) = node_id.as_deref() {
                         let _ = self.flush_stream_buffer(node_id).await;
                     }
-                    self.finish_failed_run().await;
+                    self.finish_aborted_run().await;
                     return;
                 }
                 command = command_rx.recv(), if commands_open => {
@@ -960,7 +982,7 @@ impl WorkspaceEngine {
                             if let Some(node_id) = node_id.as_deref() {
                                 let _ = self.flush_stream_buffer(node_id).await;
                             }
-                            self.finish_failed_run().await;
+                            self.finish_aborted_run().await;
                             return;
                         }
                         Some(ProviderCommand::PermissionResponse {
@@ -1130,7 +1152,12 @@ impl WorkspaceEngine {
             }
         }
 
-        if cancel.is_cancelled() || full_content.is_empty() {
+        if cancel.is_cancelled() {
+            if let Some(node_id) = node_id.as_deref() {
+                let _ = self.flush_stream_buffer(node_id).await;
+            }
+            self.finish_aborted_run().await;
+        } else if full_content.is_empty() {
             if let Some(node_id) = node_id.as_deref() {
                 let _ = self.flush_stream_buffer(node_id).await;
             }
@@ -1354,7 +1381,7 @@ impl WorkspaceEngine {
 
     async fn complete_assistant_message(&mut self, assistant_msg_id: String, full_content: String) {
         if self.cancel.is_cancelled() {
-            self.finish_failed_run().await;
+            self.finish_aborted_run().await;
             return;
         }
 
@@ -1730,6 +1757,18 @@ impl WorkspaceEngine {
             );
         }
         self.transition_stage(WorkspaceStage::PrepareContext).await;
+    }
+
+    async fn finish_aborted_run(&mut self) {
+        if let Some(node_id) = self.active_node_id.clone() {
+            self.update_timeline_node(
+                &node_id,
+                TimelineNodeStatus::Failed,
+                Some("运行已中止".to_string()),
+            )
+            .await;
+        }
+        self.finish_failed_run().await;
     }
 
     async fn handle_permission_timeout(&mut self, permission_id: String, node_id: Option<String>) {
