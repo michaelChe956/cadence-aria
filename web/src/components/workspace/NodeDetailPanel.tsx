@@ -190,6 +190,9 @@ function permissionStatus(event: PermissionEvent) {
   if (response.approved === false) {
     return "已拒绝";
   }
+  if (response.status === "timeout") {
+    return "超时";
+  }
   return "已应答";
 }
 

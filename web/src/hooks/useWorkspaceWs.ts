@@ -362,6 +362,7 @@ export function useWorkspaceWs(sessionId: string | null) {
           reason: trimmedReason ? trimmedReason : null,
         })
       ) {
+        console.info("[permission] sending response", { id, approved });
         useWorkspaceStore.getState().resolvePermissionRequest(id);
       }
     },

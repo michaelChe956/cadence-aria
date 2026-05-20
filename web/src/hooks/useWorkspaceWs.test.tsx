@@ -240,6 +240,7 @@ describe("useWorkspaceWs", () => {
   });
 
   it("sends permission responses and resolves the pending request when connected", () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
     const harness = renderWorkspaceHook();
     useWorkspaceStore.getState().addPermissionRequest({
       id: "perm_001",
@@ -262,6 +263,10 @@ describe("useWorkspaceWs", () => {
         reason: "approved",
       }),
     ]);
+    expect(info).toHaveBeenCalledWith("[permission] sending response", {
+      id: "perm_001",
+      approved: true,
+    });
     expect(useWorkspaceStore.getState().pendingPermissions).toHaveLength(0);
   });
 

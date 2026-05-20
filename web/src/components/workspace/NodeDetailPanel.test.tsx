@@ -65,6 +65,51 @@ describe("NodeDetailPanel", () => {
     fireEvent.click(screen.getByTestId("tab-artifact"));
     expect(screen.getByText("# Artifact 内容")).toBeInTheDocument();
   });
+
+  it("renders permission event response statuses including timeout", () => {
+    render(
+      <NodeDetailPanel
+        node={node()}
+        detail={detail({
+          permission_events: [
+            {
+              request_id: "perm-pending",
+              request: { tool_name: "bash" },
+              response: null,
+              ts: "2026-05-20T14:31:00Z",
+            },
+            {
+              request_id: "perm-approved",
+              request: { tool_name: "bash" },
+              response: { approved: true },
+              ts: "2026-05-20T14:32:00Z",
+            },
+            {
+              request_id: "perm-denied",
+              request: { tool_name: "bash" },
+              response: { approved: false },
+              ts: "2026-05-20T14:33:00Z",
+            },
+            {
+              request_id: "perm-timeout",
+              request: { tool_name: "bash" },
+              response: { status: "timeout" },
+              ts: "2026-05-20T14:34:00Z",
+            },
+          ],
+        })}
+        artifactVersions={[]}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("tab-permission"));
+
+    expect(screen.getByText("perm-pending")).toBeInTheDocument();
+    expect(screen.getByText("待应答")).toBeInTheDocument();
+    expect(screen.getByText("已批准")).toBeInTheDocument();
+    expect(screen.getByText("已拒绝")).toBeInTheDocument();
+    expect(screen.getByText("超时")).toBeInTheDocument();
+  });
 });
 
 function node(overrides?: Partial<TimelineNode>): TimelineNode {
