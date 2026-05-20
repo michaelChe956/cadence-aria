@@ -150,6 +150,55 @@ export async function sendRawWorkspaceMessage(page: Page, sessionId: string, pay
   );
 }
 
+export async function installWorkspaceSocketProbe(page: Page) {
+  await page.addInitScript(() => {
+    const trackedWindow = window as Window & { __ariaWorkspaceSockets?: WebSocket[] };
+    if (trackedWindow.__ariaWorkspaceSockets) {
+      return;
+    }
+
+    const OriginalWebSocket = window.WebSocket;
+    const sockets: WebSocket[] = [];
+    Object.defineProperty(trackedWindow, "__ariaWorkspaceSockets", {
+      configurable: true,
+      value: sockets,
+    });
+
+    const WrappedWebSocket = function (url: string | URL, protocols?: string | string[]) {
+      const socket =
+        protocols === undefined
+          ? new OriginalWebSocket(url)
+          : new OriginalWebSocket(url, protocols);
+      if (String(url).includes("/api/workspace-sessions/") && String(url).endsWith("/ws")) {
+        sockets.push(socket);
+      }
+      return socket;
+    };
+    WrappedWebSocket.prototype = OriginalWebSocket.prototype;
+    Object.setPrototypeOf(WrappedWebSocket, OriginalWebSocket);
+    window.WebSocket = WrappedWebSocket as unknown as typeof WebSocket;
+  });
+}
+
+export async function sendWorkspaceSocketMessage(page: Page, payload: unknown) {
+  await page.waitForFunction(() => {
+    const trackedWindow = window as Window & { __ariaWorkspaceSockets?: WebSocket[] };
+    return trackedWindow.__ariaWorkspaceSockets?.some(
+      (socket) => socket.readyState === WebSocket.OPEN,
+    );
+  });
+  await page.evaluate((payload) => {
+    const trackedWindow = window as Window & { __ariaWorkspaceSockets?: WebSocket[] };
+    const socket = trackedWindow.__ariaWorkspaceSockets?.find(
+      (candidate) => candidate.readyState === WebSocket.OPEN,
+    );
+    if (!socket) {
+      throw new Error("workspace websocket probe did not find an open socket");
+    }
+    socket.send(JSON.stringify(payload));
+  }, payload);
+}
+
 export async function dropWorkspaceSocketFromServer(page: Page, sessionId: string) {
   const response = await page.request.post(`/api/test/workspace-sessions/${sessionId}/ws/drop`);
   expect(response).toBeOK();

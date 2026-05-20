@@ -264,6 +264,21 @@ describe("WorkspacePage", () => {
 
     expect(useWorkspaceStore.getState().acknowledgedAbortedNodes).toEqual(["node-aborted-1"]);
   });
+
+  it("renders protocol errors from workspace websocket", () => {
+    mockWorkspaceWs();
+    useWorkspaceStore.setState({
+      protocolError: {
+        code: "INVALID_MESSAGE_FOR_STAGE",
+        message: "message context_note not allowed in stage running",
+      },
+    });
+
+    render(<WorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent("INVALID_MESSAGE_FOR_STAGE");
+    expect(screen.getByRole("alert")).toHaveTextContent("context_note");
+  });
 });
 
 function timelineNode(): TimelineNode {

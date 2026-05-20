@@ -1,4 +1,4 @@
-import { ArrowLeft, Check, Wifi, WifiOff, X } from "lucide-react";
+import { ArrowLeft, Check, TriangleAlert, Wifi, WifiOff, X } from "lucide-react";
 import { useEffect, type ReactNode } from "react";
 import type { ArtifactVersion, ProviderConfigSnapshot, WorkspaceProviderName } from "../api/types";
 import {
@@ -147,6 +147,21 @@ export function WorkspacePage({
         stage={store.stage}
         providerLocked={store.providerLocked}
       />
+
+      {store.protocolError ? (
+        <div
+          role="alert"
+          data-testid="protocol-error-alert"
+          className="flex min-h-10 min-w-0 items-start gap-2 border-b border-red-200 bg-red-50 px-4 py-2 text-sm text-red-800"
+        >
+          <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
+          <div className="min-w-0 break-words">
+            <span className="font-mono text-xs font-semibold">{store.protocolError.code}</span>
+            <span className="mx-2 text-red-300">/</span>
+            <span>{store.protocolError.message}</span>
+          </div>
+        </div>
+      ) : null}
 
       <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[minmax(18rem,0.9fr)_minmax(0,1.1fr)]">
         <section className="min-h-0 border-b border-[var(--aria-line)] bg-[var(--aria-panel-muted)] lg:border-b-0 lg:border-r">
