@@ -4,7 +4,7 @@
 
 **Goal:** 把看板卡片点击从"直接进全屏 Workspace"改为"侧滑详情面板（Drawer）"，解决 Story confirmed 后无法触发 Design 的问题，同时让看板上下文不丢失。
 
-**Architecture:** 新增 LifecycleCardDrawer 组件（480px 固定宽，不灰化看板），看板状态新增 `focusedEntityId` 与 `isDrawerOpen`，URL query param `?focus=` 双向同步，卡片 onClick 改为打开 Drawer。
+**Architecture:** 新增 LifecycleCardDrawer 组件（480px 固定宽，不灰化看板），看板状态新增 `focusedEntityId` 与 `isDrawerOpen`，URL query param `?focus=` 双向同步，卡片 onClick 改为打开 Drawer。Workspace 路由沿用当前 `/workbench/workspace/$sessionId`；Drawer 内"生成下一阶段"只创建实体和 PrepareContext session，然后把 Drawer 切到新实体，不自动打开 Workspace、不自动启动 Provider。
 
 **Tech Stack:** React + TypeScript + Tailwind CSS + Zustand + @tanstack/react-router + vitest
 
@@ -22,6 +22,7 @@
 | `web/src/state/lifecycle-workbench-store.ts` | 修改 | 新增 focusedEntityId / isDrawerOpen / queryParam 同步 |
 | `web/src/components/lifecycle/IssueLifecycleWorkbench.tsx` | 修改 | 卡片 onClick → openDrawer |
 | `web/src/components/lifecycle/LifecycleCard.tsx` | 修改 | 移除"打开 Workspace"按钮 |
+| `web/src/api/client.ts` | 确认/复用 | 复用现有 generateStorySpecs / generateDesignSpecs / generateWorkItems API，只创建下一阶段实体和 Workspace session |
 
 ---
 
@@ -372,7 +373,10 @@ const focusedEntity = useMemo(() => {
       entity={focusedEntity}
       onClose={closeDrawer}
       onOpenWorkspace={() => {
-        handleLaunchWorkspace(focusedEntity.id);
+        const sessionId = workspaceSessionIdForEntity(focusedEntity);
+        if (sessionId) {
+          onOpenWorkspace(sessionId);
+        }
         closeDrawer();
       }}
       onGenerateNext={
@@ -383,6 +387,63 @@ const focusedEntity = useMemo(() => {
     />
   </div>
 )}
+```
+
+- [ ] **Step 1.5: 实现 handleGenerateNext，严格按"只创建不执行"流程**
+
+`handleGenerateNext` 只调用已有创建 API、刷新数据、切换 Drawer focus；不得调用 `onOpenWorkspace`，不得发送 `start_generation` 或旧 `message/run-next`。
+
+```tsx
+async function handleGenerateNext(entityId: string, kind: DrawerEntity["kind"]) {
+  if (!selectedProjectId || !focusedEntity) {
+    setError("缺少 Project 或生命周期实体");
+    return;
+  }
+
+  if (kind === "story_spec") {
+    const response = await generateDesignSpecs(selectedProjectId, focusedEntity.issueId, {
+      title: defaultLaunchTitle({ target: "design", card: focusedEntity }),
+      story_spec_ids: [entityId],
+      design_kind: "frontend",
+    });
+    const nextId = response.design_specs[0]?.design_spec_id;
+    await refresh(selectedProjectId);
+    if (nextId) {
+      openDrawer(nextId);
+    }
+    return;
+  }
+
+  if (kind === "design_spec") {
+    const response = await generateWorkItems(selectedProjectId, focusedEntity.issueId, {
+      title: defaultLaunchTitle({ target: "work_item", card: focusedEntity }),
+      story_spec_ids: focusedEntity.raw.story_spec_ids,
+      design_spec_ids: [entityId],
+    });
+    const nextId = response.work_items[0]?.work_item_id;
+    await refresh(selectedProjectId);
+    if (nextId) {
+      openDrawer(nextId);
+    }
+    return;
+  }
+
+  setError("当前实体不支持生成下一阶段");
+}
+```
+
+Drawer 切到新实体后显示二级 CTA：
+
+```tsx
+{focusedEntity.workspace_session_id && focusedEntity.status === "draft" ? (
+  <button
+    type="button"
+    onClick={() => onOpenWorkspace(focusedEntity.workspace_session_id)}
+    className="w-full rounded bg-slate-800 py-2 text-sm font-medium text-white hover:bg-slate-900"
+  >
+    打开 Workspace 配置 Provider 并开始生成
+  </button>
+) : null}
 ```
 
 - [ ] **Step 2: 修改 LifecycleCard 移除"打开 Workspace"按钮**
@@ -401,7 +462,7 @@ const focusedEntity = useMemo(() => {
 ```tsx
 async function handleLaunchWorkspace(entityId: string) {
   await refresh(); // 确保数据最新
-  navigate({ to: "/workspace/$sessionId", params: { sessionId: entityId } });
+  navigate({ to: "/workbench/workspace/$sessionId", params: { sessionId: entityId } });
 }
 ```
 
@@ -443,13 +504,13 @@ git commit -am "fix: adjust tests for drawer integration"
 | §5.1 卡片点击 → Drawer | Task 3 (handleCardClick) |
 | §5.2 Drawer 内容分区 | Task 2 (LifecycleCardDrawer) |
 | §5.3 操作按钮矩阵 | Task 2 (onOpenWorkspace + onGenerateNext) |
-| §5.4 生成下一阶段按钮 | Task 2 (nextActionLabel) |
+| §5.4 生成下一阶段按钮 | Task 3 Step 1.5 (只创建下一阶段实体和 PrepareContext session，Drawer 切换到新实体，不自动打开 Workspace，不启动 Provider) |
 | §5.6 Drawer URL / 路由 | Task 1 (URL 双向同步) |
 | §5.7 焦点过滤 | Task 3 (卡片高亮可后续追加) |
 
 **2. Placeholder scan:**
 - 无 TBD/TODO
-- `handleGenerateNext` 需要在 IssueLifecycleWorkbench 中实现（调用后端 API 创建下一阶段实体）
+- `handleGenerateNext` 必须复用现有创建 API，但只创建下一阶段实体和 Workspace session；禁止调用 `onOpenWorkspace` 或触发 Provider
 
 **3. Type consistency:**
 - `DrawerEntity` 与 `LifecycleCardData` 兼容
@@ -463,6 +524,7 @@ git commit -am "fix: adjust tests for drawer integration"
 - [ ] Drawer 关闭后 URL 清除 `?focus=`
 - [ ] 直接访问 `?focus=story-12` 自动打开 Drawer
 - [ ] Story confirmed 后 Drawer 显示"生成 Design Spec"按钮
+- [ ] 点击"生成 Design Spec"只创建 Design 实体 + PrepareContext session，Drawer 切到 Design，不自动打开 Workspace，不启动 Provider
 - [ ] Drawer 内"打开 Workspace"进入全屏 Workspace
 - [ ] 看板不灰化，允许并行操作
 - [ ] `pnpm --filter web test` PASS

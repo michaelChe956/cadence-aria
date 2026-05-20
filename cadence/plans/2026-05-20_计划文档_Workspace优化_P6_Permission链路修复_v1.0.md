@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 给 Permission 链路加全链路 trace log，让 unmatched id 显式报错（protocol_error），PendingPermissions 加 15min 超时清理；前端权限 tab 展示 permission_events 列表。
+**Goal:** 给 Permission 链路加全链路 trace log，让 unmatched id 显式报错（protocol_error），PendingPermissions 加 15min 超时清理；timeout 作为独立审计状态并中止当前 run，不伪装成用户拒绝；前端权限 tab 展示 permission_events 列表。
 
-**Architecture:** 在 workspace_ws_handler → engine → approval_bridge 三个点各加 trace log；bridge  unmatched id 时通过 event_tx 发 ProtocolError；新增后台任务扫 PendingPermissions 超时报；前端 NodeDetailPanel 权限 tab 渲染 events。
+**Architecture:** 在 workspace_ws_handler → engine → approval_bridge 三个点各加 trace log；bridge unmatched id 时通过 event_tx 发 ProtocolError；新增后台任务扫 PendingPermissions 超时报 PermissionTimeout，engine 收到后把当前 run 标记为 permission_timeout 并中止；前端 NodeDetailPanel 权限 tab 渲染 events。
 
 **Tech Stack:** Rust (tokio + tracing + serde_json) + TypeScript (React)
 
@@ -89,7 +89,27 @@ async fn listen_for_permission_commands(
 
 - [ ] **Step 4: 跑测试确认编译通过**
 
-Run: `cargo check --workspace`
+在 `workspace_engine.rs` / `workspace_ws_handler.rs` 的事件转发处增加 `PermissionTimeout` 处理：
+
+```rust
+EngineEvent::PermissionTimeout { permission_id } => {
+    tracing::warn!(permission_id = %permission_id, "permission timed out; aborting active run");
+    self.mark_permission_timeout(&permission_id).await;
+    self.finish_failed_run().await;
+}
+```
+
+WebSocket 出站映射为：
+
+```rust
+WsOutMessage::ProtocolError {
+    code: "PERMISSION_TIMEOUT".to_string(),
+    message: format!("Permission request {permission_id} timed out"),
+    context: Some(serde_json::json!({ "permission_id": permission_id })),
+}
+```
+
+Run: `cargo check --locked`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -160,7 +180,7 @@ async fn listen_for_permission_commands(
 
 - [ ] **Step 2: 跑测试确认编译通过**
 
-Run: `cargo check --workspace`
+Run: `cargo check --locked`
 Expected: PASS
 
 - [ ] **Step 3: Commit**
@@ -228,22 +248,26 @@ async fn cleanup_pending_permissions(
             .collect();
         for id in expired {
             if let Some((decision_tx, _)) = guard.remove(&id) {
-                let _ = decision_tx.send(PermissionDecision {
-                    approved: false,
-                    reason: Some("timeout".to_string()),
-                });
-                let _ = event_tx.send(EngineEvent::PermissionTimeout {
-                    permission_id: id,
-                }).await;
-            }
-        }
+	                let _ = event_tx.send(EngineEvent::PermissionTimeout {
+	                    permission_id: id,
+	                }).await;
+	            }
+	        }
     }
 }
 ```
 
+注意：timeout 不等同用户点击"拒绝"。本任务不得向 provider 发送 `PermissionDecision { approved: false, reason: "timeout" }`。正确行为是：
+
+1. 从 pending 表移除该 permission。
+2. 发送 `EngineEvent::PermissionTimeout { permission_id }`；engine 根据当前 active run / active node 绑定 node_id。
+3. engine 将当前 run 标记为失败/中止，失败原因写 `permission_timeout`。
+4. `NodeDetail.permission_events` 中对应事件写入 `response: {"status":"timeout"}`。
+5. 用户之后若再响应同一个 id，走 `PERMISSION_ID_UNMATCHED`。
+
 - [ ] **Step 4: 跑测试确认编译通过**
 
-Run: `cargo check --workspace`
+Run: `cargo check --locked`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -350,7 +374,7 @@ git commit -m "feat(ui): log permission response id on send"
 
 - [ ] **Step 1: 跑后端测试**
 
-Run: `cargo test --workspace`
+Run: `cargo test --locked -j 1`
 Expected: PASS
 
 - [ ] **Step 2: 跑前端测试**
@@ -393,8 +417,9 @@ git commit -am "fix: permission link tests and types"
 
 - [ ] 全链路 trace log 4 个点（ws-handler / engine / bridge receive / bridge dispatch）都有 permission_id
 - [ ] unmatched id 时后端发 protocol_error，前端展示
-- [ ] 15min 超时后 pending 清理，decision_tx 发送 timeout
+- [ ] 15min 超时后 pending 清理，发送 `PermissionTimeout`，不向 provider 伪造 deny
+- [ ] timeout 后当前 run 以 `permission_timeout` 原因中止，Timeline / NodeDetail 写 timeout 审计事件
 - [ ] 权限 tab 展示 pending / approved / denied / timeout 状态
 - [ ] 前端发送 permission_response 时 console.info 记录 id
-- [ ] `cargo test --workspace` PASS
+- [ ] `cargo test --locked -j 1` PASS
 - [ ] `pnpm --filter web test` PASS

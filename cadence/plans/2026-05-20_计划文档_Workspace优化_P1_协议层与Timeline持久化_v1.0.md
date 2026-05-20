@@ -242,7 +242,7 @@ grep -rn "TimelineNodeType::Review" src/ --include="*.rs"
 
 - [ ] **Step 3: 跑测试确认通过**
 
-Run: `cargo test --workspace`
+Run: `cargo test --locked -j 1`
 Expected: PASS（确保没有漏掉的引用）
 
 - [ ] **Step 4: Commit**
@@ -443,7 +443,7 @@ Expected: 编译失败 — `save_node_detail` / `load_node_detail` 未定义
         validate_relative_id(node_id)?;
         let path = self
             .workspace_timeline_root_for_session(session_id)?
-            .join("node_details")
+            .join("timeline_node_details")
             .join(format!("{}.json", node_id));
         write_json(&path, detail)
     }
@@ -457,7 +457,7 @@ Expected: 编译失败 — `save_node_detail` / `load_node_detail` 未定义
         validate_relative_id(node_id)?;
         let path = self
             .workspace_timeline_root_for_session(session_id)?
-            .join("node_details")
+            .join("timeline_node_details")
             .join(format!("{}.json", node_id));
         if !path_exists(&path)? {
             return Err(ProductStoreError::NotFound {
@@ -475,7 +475,7 @@ Expected: 编译失败 — `save_node_detail` / `load_node_detail` 未定义
         validate_relative_id(session_id)?;
         let dir = self
             .workspace_timeline_root_for_session(session_id)?
-            .join("node_details");
+            .join("timeline_node_details");
         if !path_exists(&dir)? {
             return Ok(Vec::new());
         }
@@ -674,6 +674,11 @@ Expected: 编译失败 — `is_message_valid_for_stage` 未定义
 
 ```rust
 fn is_message_valid_for_stage(msg: &WsInMessage, stage: &WorkspaceStage) -> bool {
+    // hello / ping 是连接层消息，所有阶段都合法；否则 P5 重连握手和心跳会被阶段矩阵误杀。
+    if matches!(msg, WsInMessage::Hello { .. } | WsInMessage::Ping) {
+        return true;
+    }
+
     match stage {
         WorkspaceStage::PrepareContext => matches!(
             msg,
@@ -967,6 +972,234 @@ Expected: PASS
 ```bash
 git add src/product/workspace_engine.rs
 git commit -m "feat(engine): add append_context_note, start_generation, append_aborted_by_disconnect"
+```
+
+---
+
+### Task 7.5: NodeDetail 运行时写入闭环（阻塞项，必须在前端消费前完成）
+
+**Files:**
+- 修改: `src/product/workspace_engine.rs`
+- 修改: `src/product/lifecycle_store.rs`
+- 测试: `src/product/workspace_engine.rs`
+
+> 本任务补齐方案 §3.4 的真实落地点。只定义 `NodeDetail` 和 `save_node_detail` 不够；所有运行时证据必须在事件发生时写入 `timeline_node_details/<node_id>.json`，否则刷新恢复仍然会丢失 streaming / execution / permission / verdict / artifact_ref。
+
+- [ ] **Step 1: 写 failing 测试 — stream chunk 会追加到 active author_run 的 NodeDetail**
+
+```rust
+#[tokio::test]
+async fn stream_chunk_is_persisted_to_active_node_detail() {
+    let mut engine = create_test_engine().await;
+    let node_id = engine.create_test_author_run_node().await;
+
+    engine.persist_stream_chunk(&node_id, "hello ".to_string()).await.unwrap();
+    engine.persist_stream_chunk(&node_id, "world".to_string()).await.unwrap();
+
+    let detail = engine
+        .lifecycle_store()
+        .load_node_detail(&engine.session().session_id, &node_id)
+        .unwrap();
+    assert_eq!(detail.streaming_content, "hello world");
+}
+```
+
+Run: `cargo test stream_chunk_is_persisted_to_active_node_detail -- --nocapture`
+Expected: 编译失败 — `persist_stream_chunk` / `create_test_author_run_node` / `lifecycle_store()` 未定义或 NodeDetail 未写入。
+
+- [ ] **Step 2: 写 failing 测试 — permission request / response 会配对写入 NodeDetail**
+
+```rust
+#[tokio::test]
+async fn permission_request_and_response_are_persisted_to_node_detail() {
+    let mut engine = create_test_engine().await;
+    let node_id = engine.create_test_author_run_node().await;
+
+    engine
+        .persist_permission_request(
+            &node_id,
+            "permission_1".to_string(),
+            serde_json::json!({"tool_name": "shell", "description": "cargo test"}),
+        )
+        .await
+        .unwrap();
+    engine
+        .persist_permission_response(
+            &node_id,
+            "permission_1".to_string(),
+            serde_json::json!({"approved": true, "reason": null}),
+        )
+        .await
+        .unwrap();
+
+    let detail = engine
+        .lifecycle_store()
+        .load_node_detail(&engine.session().session_id, &node_id)
+        .unwrap();
+    assert_eq!(detail.permission_events.len(), 1);
+    assert_eq!(detail.permission_events[0].request_id, "permission_1");
+    assert_eq!(detail.permission_events[0].response.as_ref().unwrap()["approved"], true);
+}
+```
+
+Run: `cargo test permission_request_and_response_are_persisted_to_node_detail -- --nocapture`
+Expected: 编译失败 — permission 持久化 API 未定义。
+
+- [ ] **Step 3: 写 failing 测试 — reviewer verdict 与 artifact_ref 会立即写入 NodeDetail**
+
+```rust
+#[tokio::test]
+async fn verdict_and_artifact_ref_are_persisted_to_node_detail() {
+    let mut engine = create_test_engine().await;
+    let node_id = engine.create_test_reviewer_run_node().await;
+
+    engine
+        .persist_review_verdict(
+            &node_id,
+            serde_json::json!({"verdict": "pass", "summary": "ok"}),
+        )
+        .await
+        .unwrap();
+    engine
+        .persist_artifact_ref(
+            &node_id,
+            ArtifactRef {
+                artifact_id: "artifact_story_spec_0001".to_string(),
+                version: 2,
+            },
+        )
+        .await
+        .unwrap();
+
+    let detail = engine
+        .lifecycle_store()
+        .load_node_detail(&engine.session().session_id, &node_id)
+        .unwrap();
+    assert_eq!(detail.verdict.as_ref().unwrap()["verdict"], "pass");
+    assert_eq!(detail.artifact_ref.as_ref().unwrap().version, 2);
+}
+```
+
+Run: `cargo test verdict_and_artifact_ref_are_persisted_to_node_detail -- --nocapture`
+Expected: 编译失败 — verdict / artifact_ref 持久化 API 未定义。
+
+- [ ] **Step 4: 实现 NodeDetail upsert helper**
+
+在 `WorkspaceEngine` 中新增统一 helper，所有写入路径都通过它加载、修改、保存 `timeline_node_details/<node_id>.json`：
+
+```rust
+fn empty_node_detail_for(&self, node: &TimelineNode) -> NodeDetail {
+    NodeDetail {
+        node_id: node.node_id.clone(),
+        session_id: self.session.session_id.clone(),
+        node_type: node.node_type.clone(),
+        status: node.status.clone(),
+        agent_role: match node.node_type {
+            TimelineNodeType::AuthorRun => Some(AgentRole::Author),
+            TimelineNodeType::ReviewerRun => Some(AgentRole::Reviewer),
+            _ => None,
+        },
+        provider: node.agent.as_ref().map(|provider| ProviderSnapshot {
+            name: provider.to_string(),
+            model: provider.to_string(),
+        }),
+        messages: Vec::new(),
+        streaming_content: String::new(),
+        execution_events: Vec::new(),
+        permission_events: Vec::new(),
+        verdict: None,
+        artifact_ref: None,
+        is_revision: node.node_type == TimelineNodeType::AuthorRun
+            && node.stage == WorkspaceStage::Revision,
+        base_artifact_ref: None,
+        started_at: node.started_at.clone(),
+        ended_at: node.completed_at.clone(),
+    }
+}
+
+async fn update_node_detail<F>(&mut self, node_id: &str, update: F) -> Result<(), String>
+where
+    F: FnOnce(&mut NodeDetail),
+{
+    let Some(node) = self.timeline_nodes.iter().find(|node| node.node_id == node_id).cloned() else {
+        return Err(format!("timeline node not found: {node_id}"));
+    };
+    let mut detail = self
+        .lifecycle_store
+        .load_node_detail(&self.session.session_id, node_id)
+        .unwrap_or_else(|_| self.empty_node_detail_for(&node));
+    update(&mut detail);
+    self.lifecycle_store
+        .save_node_detail(&self.session.session_id, node_id, &detail)
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+```
+
+- [ ] **Step 5: 将运行事件接入 helper**
+
+在 `handle_user_message` / `drive_revision_session` / `drive_review_session` 中把以下事件写入 NodeDetail：
+
+```rust
+// stream chunk
+self.update_node_detail(&node_id, |detail| {
+    detail.streaming_content.push_str(&content);
+}).await?;
+
+// execution event
+self.update_node_detail(&node_id, |detail| {
+    detail.execution_events.push(serde_json::to_value(&event).unwrap_or(serde_json::Value::Null));
+}).await?;
+
+// permission request
+self.update_node_detail(&node_id, |detail| {
+    detail.permission_events.push(PermissionEvent {
+        request_id: id.clone(),
+        request: serde_json::json!({
+            "tool_name": tool_name,
+            "description": description,
+            "risk_level": risk_level,
+        }),
+        response: None,
+        ts: chrono::Utc::now().to_rfc3339(),
+    });
+}).await?;
+
+// permission response
+self.update_node_detail(&node_id, |detail| {
+    if let Some(event) = detail.permission_events.iter_mut().find(|event| event.request_id == id) {
+        event.response = Some(serde_json::json!({"approved": approved, "reason": reason}));
+    }
+}).await?;
+
+// review verdict
+self.update_node_detail(&node_id, |detail| {
+    detail.verdict = Some(serde_json::json!({
+        "verdict": verdict.verdict,
+        "comments": verdict.comments,
+        "summary": verdict.summary,
+    }));
+}).await?;
+
+// artifact ref
+self.update_node_detail(&node_id, |detail| {
+    detail.artifact_ref = Some(ArtifactRef {
+        artifact_id: artifact_id.clone(),
+        version,
+    });
+}).await?;
+```
+
+- [ ] **Step 6: 跑测试确认通过**
+
+Run: `cargo test stream_chunk_is_persisted_to_active_node_detail permission_request_and_response_are_persisted_to_node_detail verdict_and_artifact_ref_are_persisted_to_node_detail -- --nocapture`
+Expected: PASS。
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/product/workspace_engine.rs src/product/lifecycle_store.rs
+git commit -m "feat(timeline): persist runtime node details for recovery"
 ```
 
 ---
@@ -1536,7 +1769,7 @@ git commit -m "feat(store): handle protocol_error, provider_locked, pong message
 
 - [ ] **Step 1: 跑后端全量测试**
 
-Run: `cargo test --workspace`
+Run: `cargo test --locked -j 1`
 Expected: PASS
 
 - [ ] **Step 2: 跑前端单元测试**
@@ -1569,6 +1802,7 @@ git commit -am "fix: adjust tests for protocol v2 compatibility"
 | §2.1 Timeline 节点类型枚举 | Task 1 (TimelineNodeType) |
 | §2.2 节点详情数据结构 | Task 3 (NodeDetail) |
 | §2.3 按节点分文件持久化 | Task 4 (save_node_detail / load_node_detail) |
+| §2.4 写入时机 | Task 7.5 (stream / execution / permission / verdict / artifact_ref 运行时写入) |
 | §2.5 SessionState snapshot 扩展 | Task 5 (build_session_state) |
 | §2.6 前端 store 改造 | Task 10 (setSessionState 灌 nodeDetails) |
 
@@ -1586,7 +1820,7 @@ git commit -am "fix: adjust tests for protocol v2 compatibility"
 
 ## 本 plan 验收清单
 
-- [ ] `cargo test --workspace` PASS
+- [ ] `cargo test --locked -j 1` PASS
 - [ ] `pnpm --filter web test` PASS
 - [ ] `pnpm --filter web test:e2e` 既有用例不破坏
 - [ ] `WsInMessage::ContextNote` 序列化/反序列化正确
@@ -1594,6 +1828,7 @@ git commit -am "fix: adjust tests for protocol v2 compatibility"
 - [ ] `WsOutMessage::ProtocolError` 阶段校验触发正确
 - [ ] `WsOutMessage::ProviderLocked` 包含 snapshot + locked_at
 - [ ] `NodeDetail` 写入 `timeline_node_details/<node_id>.json` 并可读取
+- [ ] stream / execution / permission / verdict / artifact_ref 发生时立即或按节流策略写入对应 `NodeDetail`
 - [ ] `SessionState` snapshot 包含 `timeline_node_details` 和 `active_run_id`
 - [ ] 前端 `sendContextNote` / `sendStartGeneration` / `sendHello` / `sendPing` 发送正确 JSON
 - [ ] 前端 store 收到 snapshot 时 `nodeDetails` 被正确填充

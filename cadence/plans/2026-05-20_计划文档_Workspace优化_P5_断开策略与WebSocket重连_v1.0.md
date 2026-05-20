@@ -299,9 +299,15 @@ export function useWorkspaceWsReconnect({
     clearReconnectTimeout();
   }, [clearReconnectTimeout]);
 
+  const retryNow = useCallback(() => {
+    delayRef.current = INITIAL_DELAY_MS;
+    scheduleReconnect();
+  }, [scheduleReconnect]);
+
   return {
     isReconnecting,
     attemptCount,
+    retryNow,
     reset,
   };
 }
@@ -431,6 +437,25 @@ export function DisconnectBanner({
   }
 
   return null;
+}
+```
+
+`onAcknowledge` 必须写入 localStorage，key 固定为 `aria.workspace.aborted_ack_nodes`，避免刷新后重复弹出同一条断开中止提示：
+
+```typescript
+export function loadAcknowledgedAbortedNodes(): string[] {
+  try {
+    const raw = window.localStorage.getItem("aria.workspace.aborted_ack_nodes");
+    return raw ? (JSON.parse(raw) as string[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveAcknowledgedAbortedNode(nodeId: string) {
+  const next = Array.from(new Set([...loadAcknowledgedAbortedNodes(), nodeId]));
+  window.localStorage.setItem("aria.workspace.aborted_ack_nodes", JSON.stringify(next));
+  return next;
 }
 ```
 
@@ -570,9 +595,32 @@ git commit -m "feat(ws): write aborted_by_disconnect node on socket close"
             }
 ```
 
+- [ ] **Step 1.5: 服务端 90s 无客户端消息主动 close**
+
+在 socket receive loop 中维护 `last_client_message_at`，每次收到任意合法客户端消息都刷新；另起 task 每 5s 检查一次，超过 90s 后发送 close，触发 §6 的 socket close 清理路径：
+
+```rust
+let last_client_message_at = Arc::new(Mutex::new(tokio::time::Instant::now()));
+let last_seen_for_timeout = last_client_message_at.clone();
+let close_tx = outbound_tx.clone();
+tokio::spawn(async move {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+    loop {
+        interval.tick().await;
+        let last_seen = *last_seen_for_timeout.lock().await;
+        if last_seen.elapsed() > std::time::Duration::from_secs(90) {
+            let _ = close_tx.send("__close_due_to_idle_timeout__".to_string()).await;
+            break;
+        }
+    }
+});
+```
+
+发送任务收到 sentinel 后调用 `ws_sender.close().await`，不要序列化为业务消息。收到 `Ping` 时刷新 `last_client_message_at` 并回 `Pong`。
+
 - [ ] **Step 2: 跑测试确认通过**
 
-Run: `cargo test --workspace`
+Run: `cargo test --locked -j 1`
 Expected: PASS
 
 - [ ] **Step 3: Commit**
@@ -597,10 +645,11 @@ import { useWorkspaceWsReconnect } from "./useWorkspaceWsReconnect";
 
 export function useWorkspaceWs(sessionId: string | null) {
   const wsRef = useRef<WebSocket | null>(null);
+  const lastMessageAtRef = useRef(Date.now());
   const [closeCode, setCloseCode] = useState<number | undefined>();
   // ...
 
-  const { isReconnecting, attemptCount, reset: resetReconnect } = useWorkspaceWsReconnect({
+  const { isReconnecting, attemptCount, retryNow, reset: resetReconnect } = useWorkspaceWsReconnect({
     enabled: connectionStatus === "disconnected" && !!sessionId,
     onReconnect: () => {
       connect(); // 重新连接
@@ -616,12 +665,18 @@ export function useWorkspaceWs(sessionId: string | null) {
 
     ws.onopen = () => {
       store.setConnectionStatus("connected");
+      lastMessageAtRef.current = Date.now();
       resetReconnect();
       // 发送 hello
       ws.send(JSON.stringify({
         type: "hello",
         session_id: sessionId,
       }));
+    };
+
+    ws.onmessage = (event) => {
+      lastMessageAtRef.current = Date.now();
+      handleRawMessage(event);
     };
 
     ws.onclose = (e) => {
@@ -635,17 +690,22 @@ export function useWorkspaceWs(sessionId: string | null) {
   useEffect(() => {
     if (connectionStatus !== "connected") return;
     const interval = setInterval(() => {
+      if (Date.now() - lastMessageAtRef.current > 60000) {
+        wsRef.current?.close();
+        return;
+      }
       sendPing();
     }, 25000);
     return () => clearInterval(interval);
   }, [connectionStatus]);
 
   // ...
-  return {
-    // ...
-    isReconnecting,
-    reconnectAttemptCount: attemptCount,
-  };
+	  return {
+	    // ...
+	    isReconnecting,
+	    reconnectAttemptCount: attemptCount,
+	    retryNow,
+	  };
 }
 ```
 
@@ -657,7 +717,7 @@ import { DisconnectBanner } from "../components/workspace/DisconnectBanner";
 
 function WorkspacePage({ sessionId }: WorkspacePageProps) {
   const store = useWorkspaceStore();
-  const { isReconnecting, reconnectAttemptCount } = useWorkspaceWs(sessionId);
+	  const { isReconnecting, reconnectAttemptCount, retryNow } = useWorkspaceWs(sessionId);
 
   useUnloadGuard({
     enabled: ["running", "cross_review", "revision"].includes(store.stage),
@@ -675,20 +735,16 @@ function WorkspacePage({ sessionId }: WorkspacePageProps) {
       <DisconnectBanner
         isReconnecting={isReconnecting}
         attemptCount={reconnectAttemptCount}
-        onManualReconnect={() => { /* 触发重连 */ }}
+	        onManualReconnect={retryNow}
         abortedByDisconnect={
           showAbortedBanner
             ? { ts: lastNode.started_at }
             : undefined
         }
         onAcknowledge={() => {
-          useWorkspaceStore.setState((prev) => ({
-            acknowledgedAbortedNodes: [
-              ...(prev.acknowledgedAbortedNodes ?? []),
-              lastNode.node_id,
-            ],
-          }));
-        }}
+	          const acknowledged = saveAcknowledgedAbortedNode(lastNode.node_id);
+	          useWorkspaceStore.setState({ acknowledgedAbortedNodes: acknowledged });
+	        }}
       />
       {/* ... 其余布局 ... */}
     </div>
@@ -725,7 +781,7 @@ git commit -m "feat(ui): integrate unload guard + reconnect + disconnect banners
 
 - [ ] **Step 1: 跑后端测试**
 
-Run: `cargo test --workspace`
+Run: `cargo test --locked -j 1`
 Expected: PASS
 
 - [ ] **Step 2: 跑前端测试**
@@ -761,7 +817,7 @@ git commit -am "fix: adjust tests for disconnect + reconnect features"
 - 无 TBD/TODO
 
 **3. Type consistency:**
-- `acknowledgedAbortedNodes` 在 store 中用 string[]，localStorage 持久化可后续追加（P5 内只做内存）
+- `acknowledgedAbortedNodes` 在 store 中用 string[]，并同步到 localStorage key `aria.workspace.aborted_ack_nodes`
 
 ---
 
@@ -775,5 +831,7 @@ git commit -am "fix: adjust tests for disconnect + reconnect features"
 - [ ] WebSocket 断开后 1s 开始自动重连，退避递增
 - [ ] 重连失败 >1 次显示进度 banner + 手动重连按钮
 - [ ] 心跳每 25s 发送 ping
-- [ ] `cargo test --workspace` PASS
+- [ ] 客户端 60s 无消息主动 close 并进入重连
+- [ ] 服务端 90s 无客户端消息主动 close 并触发断开中止路径
+- [ ] `cargo test --locked -j 1` PASS
 - [ ] `pnpm --filter web test` PASS

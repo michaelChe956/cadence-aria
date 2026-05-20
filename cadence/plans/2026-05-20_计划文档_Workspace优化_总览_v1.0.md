@@ -88,6 +88,7 @@ P7 E2E 测试升级（依赖 P1-P6 全部完成，作为收尾验收）
 ### P6 弱依赖 P1
 - `NodeDetail.permission_events` 字段在 P1 已定义
 - 防御性修复主要在 `src/cross_cutting/approval_bridge.rs`，不依赖 P1 协议变更
+- Permission timeout 是独立审计状态，不等同用户拒绝；超时后清理 pending、写 `timeout` 事件并中止当前 run，不能向 provider 伪造 `approved=false`
 
 ### P7 消费 P1-P6
 - 利用 P1 新协议、P2/P4 新 UI、P5 自动重连 + 断开拦截、P6 Permission 修复路径写 7 闭环 E2E 用例
@@ -109,7 +110,7 @@ P7 E2E 测试升级（依赖 P1-P6 全部完成，作为收尾验收）
 - 回归基线：
 
 ```bash
-cargo test --workspace
+cargo test --locked -j 1
 pnpm --filter web test
 pnpm --filter web test:e2e
 ```
@@ -118,6 +119,8 @@ pnpm --filter web test:e2e
 
 - **P1 是地基**：任何对协议、Timeline 类型、SessionState、NodeDetail 的改动必须在 P1 内完成。后续 plan **不得**新增 WsInMessage / WsOutMessage 变体，否则会破坏独立性
 - **P3 完全独立**：lifecycle 看板与 Workspace 共享 store，但本轮 P3 只动 `lifecycle-workbench-store.ts` 中新增字段（不动 workspace-ws-store）
+- **路由决策**：Workspace 路由沿用当前实现 `/workbench/workspace/$sessionId`；计划中的 `/workspace/<session_id>` 只作为简称，不作为本轮路由迁移要求
+- **Drawer 流程决策**：Drawer 内"生成下一阶段"只创建下一阶段实体和 PrepareContext session，并把 Drawer 切到新实体；不得自动打开 Workspace，也不得自动启动 Provider
 - **过渡期兼容**：P1 内 `user_message` 保留软兼容（按 context_note 语义处理 + warning log），帮助 P2/P4 在切换期不破坏既有 E2E
 - **冲突区**：P2 / P4 都会改 `WorkspacePage.tsx`。建议顺序执行（P2 先把"输入区+按钮"拆出去，P4 再重构 Header + 节点详情 + 阶段面板）
 
