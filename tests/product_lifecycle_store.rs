@@ -5,7 +5,8 @@ use cadence_aria::product::lifecycle_store::{
     CreateStorySpecInput, CreateWorkItemInput, CreateWorkspaceSessionInput, LifecycleStore,
 };
 use cadence_aria::product::models::{
-    DesignKind, LifecycleConfirmationStatus, ProviderName, WorkspaceSessionStatus, WorkspaceType,
+    AgentRole, DesignKind, LifecycleConfirmationStatus, NodeDetail, ProviderName, ProviderSnapshot,
+    WorkspaceSessionStatus, WorkspaceType,
 };
 use cadence_aria::web::workspace_ws_types::{
     ArtifactVersion, ProviderConfigSnapshot, TimelineNode, TimelineNodeStatus, TimelineNodeType,
@@ -172,6 +173,85 @@ fn persists_workspace_timeline_nodes_and_artifact_versions() {
         store.list_artifact_versions(&session.id).unwrap(),
         vec![version]
     );
+}
+
+#[test]
+fn save_and_load_node_detail() {
+    let root = tempdir().expect("tempdir");
+    let store = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let session = store
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "story_spec_0001".to_string(),
+            workspace_type: WorkspaceType::Story,
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: ProviderName::Codex,
+            review_rounds: 1,
+            superpowers_enabled: true,
+            openspec_enabled: true,
+        })
+        .expect("session");
+    let detail = NodeDetail {
+        node_id: "node-1".to_string(),
+        session_id: session.id.clone(),
+        node_type: TimelineNodeType::AuthorRun,
+        status: TimelineNodeStatus::Completed,
+        agent_role: Some(AgentRole::Author),
+        provider: Some(ProviderSnapshot {
+            name: "claude_code".to_string(),
+            model: "claude-opus-4-7".to_string(),
+        }),
+        messages: vec![],
+        streaming_content: "streaming".to_string(),
+        execution_events: vec![],
+        permission_events: vec![],
+        verdict: None,
+        artifact_ref: None,
+        is_revision: false,
+        base_artifact_ref: None,
+        started_at: "2026-05-20T14:30:00Z".to_string(),
+        ended_at: None,
+    };
+
+    store
+        .save_node_detail(&session.id, "node-1", &detail)
+        .expect("save node detail");
+    let loaded = store
+        .load_node_detail(&session.id, "node-1")
+        .expect("load node detail");
+
+    assert_eq!(loaded.node_id, "node-1");
+    assert_eq!(loaded.streaming_content, "streaming");
+    assert_eq!(
+        store
+            .list_node_detail_ids(&session.id)
+            .expect("list node detail ids"),
+        vec!["node-1".to_string()]
+    );
+}
+
+#[test]
+fn load_missing_node_detail_returns_not_found() {
+    let root = tempdir().expect("tempdir");
+    let store = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let session = store
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "story_spec_0001".to_string(),
+            workspace_type: WorkspaceType::Story,
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: ProviderName::Codex,
+            review_rounds: 1,
+            superpowers_enabled: true,
+            openspec_enabled: true,
+        })
+        .expect("session");
+
+    let err = store.load_node_detail(&session.id, "node-x").unwrap_err();
+
+    assert!(matches!(err, ProductStoreError::NotFound { .. }));
 }
 
 #[test]

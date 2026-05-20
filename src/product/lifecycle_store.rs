@@ -9,7 +9,7 @@ use crate::product::app_paths::ProductAppPaths;
 use crate::product::id::next_sequential_id;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::models::{
-    DesignKind, DesignSpecRecord, LifecycleConfirmationStatus, LifecycleWorkItemRecord,
+    DesignKind, DesignSpecRecord, LifecycleConfirmationStatus, LifecycleWorkItemRecord, NodeDetail,
     ProjectProviderDefaultsRecord, ProviderName, ProviderReviewRoundRecord, SpecVersionRecord,
     StorySpecRecord, WorkItemPlanStatus, WorkItemStatus, WorkspaceMessageRecord,
     WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType,
@@ -463,6 +463,56 @@ impl LifecycleStore {
             return Ok(Vec::new());
         }
         read_json(&path)
+    }
+
+    pub fn save_node_detail(
+        &self,
+        session_id: &str,
+        node_id: &str,
+        detail: &NodeDetail,
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(session_id)?;
+        validate_relative_id(node_id)?;
+        let path = self
+            .workspace_timeline_root_for_session(session_id)?
+            .join("timeline_node_details")
+            .join(format!("{node_id}.json"));
+        write_json(&path, detail)
+    }
+
+    pub fn load_node_detail(
+        &self,
+        session_id: &str,
+        node_id: &str,
+    ) -> Result<NodeDetail, ProductStoreError> {
+        validate_relative_id(session_id)?;
+        validate_relative_id(node_id)?;
+        let path = self
+            .workspace_timeline_root_for_session(session_id)?
+            .join("timeline_node_details")
+            .join(format!("{node_id}.json"));
+        if !path_exists(&path)? {
+            return Err(ProductStoreError::NotFound {
+                kind: "node_detail",
+                id: format!("{session_id}/{node_id}"),
+            });
+        }
+        read_json(&path)
+    }
+
+    pub fn list_node_detail_ids(&self, session_id: &str) -> Result<Vec<String>, ProductStoreError> {
+        validate_relative_id(session_id)?;
+        let dir = self
+            .workspace_timeline_root_for_session(session_id)?
+            .join("timeline_node_details");
+        let entries = json_file_paths(&dir)?;
+        let mut ids = Vec::with_capacity(entries.len());
+        for entry in entries {
+            if let Some(stem) = entry.file_stem() {
+                ids.push(stem.to_string_lossy().to_string());
+            }
+        }
+        Ok(ids)
     }
 
     pub fn append_artifact_version(
