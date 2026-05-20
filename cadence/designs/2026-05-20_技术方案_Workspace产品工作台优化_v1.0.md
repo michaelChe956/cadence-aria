@@ -427,7 +427,7 @@ Summary: "缺少边界场景说明，第 3 节流程图与正文不符"
 [ 确定 ] [ ⏹ 中止 ]
 ```
 
-选 ② 时弹出补充上下文输入区，仅这一轮 context 进入 revision_run 的输入。
+选 ② 时弹出补充上下文输入区，仅这一轮 context 进入本轮 `author_run (is_revision: true)` 的输入。
 
 **Revision**：Timeline 追加 `author_run` 节点（`is_revision: true`），节点旁标 "🔁 v2 修订自 v1"；Header 徽章 `🔴 修订中`。
 
