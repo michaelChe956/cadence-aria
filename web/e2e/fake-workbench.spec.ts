@@ -10,17 +10,19 @@ test("fake provider workspace streams a story spec and confirms lifecycle state"
   await expect(page.getByText("Story Spec").first()).toBeVisible();
   await expect(page.getByText("Author: fake | Reviewer: fake")).toBeVisible();
 
-  const prompt = page.getByPlaceholder("输入消息...");
-  await expect(prompt).toBeEnabled();
-  await prompt.fill("请生成 Story Spec 和验收标准");
-  await prompt.press("Enter");
+  await expect(page.getByTestId("prepare-context-panel")).toBeVisible();
+  const contextInput = page.getByTestId("context-note-input");
+  await expect(contextInput).toBeEnabled();
+  await contextInput.fill("请生成 Story Spec 和验收标准");
+  await page.getByTestId("send-context-note").click();
 
   await expect(page.getByText("请生成 Story Spec 和验收标准").first()).toBeVisible();
-  await page.getByRole("button", { name: "开始生成" }).click();
+  await expect(page.getByTestId("timeline-node-context_note")).toBeVisible();
+  await page.getByTestId("start-generation").click();
   await expect(page.getByRole("button", { name: "确认通过" })).toBeVisible();
   await page.getByRole("button", { name: "确认通过" }).click();
 
-  await expect(page.getByPlaceholder("会话已完成")).toBeDisabled();
+  await expect(page.getByTestId("stage-badge")).toContainText("已完成");
 
   await page.getByRole("button", { name: "返回" }).click();
   const projectButton = page.getByRole("button", { name: seeded.projectName, exact: true });

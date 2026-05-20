@@ -28,11 +28,13 @@ test("lifecycle and workspace surfaces stay compact across desktop and mobile", 
   await expect(page.getByText("AI Coding Workbench")).toHaveCount(0);
   await expectNoHorizontalOverflow(page);
 
-  const prompt = page.getByPlaceholder("输入消息...");
-  await expect(prompt).toBeEnabled();
-  await prompt.fill("视觉检查 fake provider prompt");
-  await prompt.press("Enter");
-  await page.getByRole("button", { name: "开始生成" }).click();
+  await expect(page.getByTestId("prepare-context-panel")).toBeVisible();
+  const contextInput = page.getByTestId("context-note-input");
+  await expect(contextInput).toBeEnabled();
+  await contextInput.fill("视觉检查 fake provider prompt");
+  await page.getByTestId("send-context-note").click();
+  await expect(page.getByTestId("timeline-node-context_note")).toBeVisible();
+  await page.getByTestId("start-generation").click();
   await expect(page.getByRole("button", { name: "确认通过" })).toBeVisible();
   await expectNoHorizontalOverflow(page);
 
