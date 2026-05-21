@@ -11,7 +11,7 @@ import {
 } from "@tanstack/react-router";
 import { useCallback } from "react";
 import { AppShell } from "./app-shell";
-import { WorkspacePage } from "./pages/WorkspacePage";
+import { ChatWorkspacePage } from "./pages/ChatWorkspacePage";
 
 const rootRoute = createRootRoute({ component: Outlet });
 
@@ -61,7 +61,7 @@ function WorkspaceRouteComponent() {
   const { sessionId } = useParams({ from: "/workbench/workspace/$sessionId" });
   const navigate = useNavigate();
   return (
-    <WorkspacePage
+    <ChatWorkspacePage
       sessionId={sessionId}
       onBack={() => void navigate({ to: "/workbench" })}
     />

@@ -23,11 +23,8 @@ test.describe("B. Timeline 审计 + 会话恢复", () => {
     await waitForStage(page, "运行中");
     await waitForTimelineNode(page, "author_run");
     await page.getByTestId("timeline-node-author_run").click();
-    await page.getByTestId("tab-streaming").click();
-    await expect(page.getByTestId("streaming-content")).toContainText(
-      "E2E permission fixture stream",
-    );
-    const streamingBefore = await page.getByTestId("streaming-content").textContent();
+    const streamingEntry = page.locator('[data-entry-id$=":stream"]').first();
+    await expect(streamingEntry).toContainText("E2E permission fixture stream");
 
     await dropWorkspaceSocketFromServer(page, seeded.sessionId);
     await waitForStage(page, "准备中");
@@ -37,10 +34,8 @@ test.describe("B. Timeline 审计 + 会话恢复", () => {
     await waitForStage(page, "准备中");
     await waitForTimelineNode(page, "aborted_by_disconnect");
     await page.getByTestId("timeline-node-author_run").click();
-    await page.getByTestId("tab-streaming").click();
-    const streamingAfter = await page.getByTestId("streaming-content").textContent();
-    expect((streamingAfter ?? "").length).toBeGreaterThanOrEqual(
-      (streamingBefore ?? "").length,
+    await expect(page.locator('[data-entry-id$=":stream"]').first()).toContainText(
+      "E2E permission fixture stream",
     );
   });
 
@@ -52,7 +47,7 @@ test.describe("B. Timeline 审计 + 会话恢复", () => {
     await openWorkspaceSession(page, seeded.sessionId);
     await clickStartGeneration(page);
     await waitForStage(page, "运行中");
-    await expect(page.getByText("E2E permission fixture request")).toBeVisible();
+    await expect(page.getByTestId("permission-request-entry")).toBeVisible();
 
     await dropWorkspaceSocketFromServer(page, seeded.sessionId);
     await waitForStage(page, "准备中");
@@ -62,9 +57,10 @@ test.describe("B. Timeline 审计 + 会话恢复", () => {
     await waitForStage(page, "准备中");
     await waitForTimelineNode(page, "aborted_by_disconnect");
     await page.getByTestId("timeline-node-author_run").click();
-    await page.getByTestId("tab-permission").click();
-    await expect(page.getByTestId("node-detail-panel")).toContainText("e2e_permission_1");
-    await expect(page.getByTestId("node-detail-panel")).toContainText("待应答");
+    await expect(page.getByTestId("permission-request-entry")).toContainText(
+      "E2E permission fixture request",
+    );
+    await expect(page.getByRole("button", { name: "允许" })).toBeVisible();
   });
 
   test("B3. reviewer verdict 完成后刷新 snapshot 完整", async ({ page }) => {
@@ -82,7 +78,7 @@ test.describe("B. Timeline 审计 + 会话恢复", () => {
     await waitForStage(page, "等待确认", 60_000);
     await waitForTimelineNode(page, "reviewer_run");
     await page.getByTestId("timeline-node-reviewer_run").click();
-    await expect(page.getByTestId("node-detail-panel")).toContainText("审核结论");
+    await expect(page.getByTestId("review-verdict-entry")).toBeVisible();
   });
 
   test("B4. 多版本 revision 后刷新 snapshot 完整", async ({ page }) => {
@@ -92,11 +88,8 @@ test.describe("B. Timeline 审计 + 会话恢复", () => {
     await clickStartGeneration(page);
     await waitForStage(page, "等待确认", 60_000);
 
-    const humanConfirmPanel = page.getByTestId("human-confirm-panel");
-    await humanConfirmPanel.getByRole("button", { name: "要求修改" }).click();
-    await humanConfirmPanel.getByLabel("内容缺失").check();
-    await humanConfirmPanel.getByLabel("具体描述").fill("补充异常路径和边界场景");
-    await humanConfirmPanel.getByRole("button", { name: "提交" }).click();
+    await page.getByTestId("context-note-input").fill("补充异常路径和边界场景");
+    await page.getByTestId("send-human-decision").click();
     await waitForTimelineNode(page, "revision");
     await waitForStage(page, "等待确认", 60_000);
 
@@ -105,7 +98,10 @@ test.describe("B. Timeline 审计 + 会话恢复", () => {
     await waitForStage(page, "等待确认", 60_000);
     await expect(page.getByTestId("timeline-node-author_run")).toHaveCount(1);
     await expect(page.getByTestId("timeline-node-revision")).toHaveCount(1);
-    await expect(page.getByTestId("human-confirm-panel")).toContainText("v1 → v2");
+    await expect(page.getByTestId("gate-prompt-entry")).toBeVisible();
+    await expect(page.getByLabel("Artifact 版本")).toHaveValue("2");
+    await page.getByRole("button", { name: "显示 Diff" }).click();
+    await expect(page.getByTestId("artifact-diff")).toBeVisible();
   });
 
   test("B5. 100+ 节点写入后刷新仍可恢复完整 Timeline", async ({ page }) => {

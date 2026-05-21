@@ -15,7 +15,7 @@ test.describe("E. 断开策略", () => {
     await openWorkspaceSession(page, seeded.sessionId);
     await clickStartGeneration(page);
     await waitForStage(page, "运行中");
-    await expect(page.getByText("E2E permission fixture request")).toBeVisible({
+    await expect(page.getByTestId("permission-request-entry")).toBeVisible({
       timeout: 30_000,
     });
 
@@ -37,7 +37,7 @@ test.describe("E. 断开策略", () => {
     await openWorkspaceSession(page, seeded.sessionId);
     await clickStartGeneration(page);
     await waitForStage(page, "运行中");
-    await expect(page.getByText("E2E permission fixture request")).toBeVisible({
+    await expect(page.getByTestId("permission-request-entry")).toBeVisible({
       timeout: 30_000,
     });
 
@@ -87,7 +87,7 @@ test.describe("E. 断开策略", () => {
     await openWorkspaceSession(page, seeded.sessionId);
     await clickStartGeneration(page);
     await waitForStage(page, "运行中");
-    await expect(page.getByText("E2E permission fixture request")).toBeVisible({
+    await expect(page.getByTestId("permission-request-entry")).toBeVisible({
       timeout: 30_000,
     });
 

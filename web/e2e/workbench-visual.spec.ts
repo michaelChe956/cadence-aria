@@ -29,23 +29,27 @@ test("lifecycle and workspace surfaces stay compact across desktop and mobile", 
   await expect(page.getByText("Author: Fake")).toBeVisible();
   await expect(page.getByText("Reviewer: Fake")).toBeVisible();
   await expect(page.getByText("AI Coding Workbench")).toHaveCount(0);
+  await expect(page.getByTestId("timeline-node-list")).toBeVisible();
+  await expect(page.getByTestId("chat-entry-list")).toBeVisible();
+  await expect(page.getByTestId("artifact-pane")).toBeVisible();
   await expectNoHorizontalOverflow(page);
 
-  await expect(page.getByTestId("prepare-context-panel")).toBeVisible();
+  await expect(page.getByTestId("chat-input-bar")).toBeVisible();
   const contextInput = page.getByTestId("context-note-input");
   await expect(contextInput).toBeEnabled();
   await contextInput.fill("视觉检查 fake provider prompt");
   await page.getByTestId("send-context-note").click();
   await expect(page.getByTestId("timeline-node-context_note")).toBeVisible();
   await page.getByTestId("start-generation").click();
-  await expect(
-    page.getByTestId("human-confirm-panel").getByRole("button", { name: "确认" }),
-  ).toBeVisible();
+  await expect(page.getByTestId("gate-prompt-entry")).toBeVisible();
   await expectNoHorizontalOverflow(page);
 
   await page.setViewportSize({ width: 375, height: 844 });
   await expect(page.getByRole("banner")).toBeVisible();
   await expect(page.getByText("Story Spec").first()).toBeVisible();
+  await expect(page.getByTestId("artifact-pane")).toBeHidden();
+  await expect(page.getByTestId("timeline-node-list")).toBeVisible();
+  await expect(page.getByTestId("chat-input-bar")).toBeVisible();
   await expectNoHorizontalOverflow(page);
 });
 

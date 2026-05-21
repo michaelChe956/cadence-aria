@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type { NodeDetail, WorkspaceProviderName } from "../api/types";
+import type { ChatEntry, ChatEntryRole } from "./chat-entries";
 
 export type WsConnectionStatus = "disconnected" | "connecting" | "connected" | "error";
 export type ProviderStatus =
@@ -134,10 +135,12 @@ export interface WorkspaceWsState {
   visitedStages: string[];
   messages: WsMessage[];
   checkpoints: WsCheckpoint[];
+  chatEntries: ChatEntry[];
   artifact: string | null;
   providers: WsProviderConfig | null;
   connectionStatus: WsConnectionStatus;
   streamingContent: string;
+  activeStreamEntryId: string | null;
   pendingPermissions: PermissionRequest[];
   providerStatus: ProviderStatus;
   executionEvents: ExecutionEvent[];
@@ -179,6 +182,10 @@ export interface WorkspaceWsActions {
   }) => void;
   appendStreamChunk: (content: string, nodeId?: string | null) => void;
   completeMessage: (messageId: string, checkpointId: string, nodeId?: string | null) => void;
+  appendChatEntry: (entry: ChatEntry) => void;
+  updateStreamingEntry: (entryId: string, content: string) => void;
+  finalizeStreamingEntry: (entryId: string) => void;
+  rebuildChatEntries: () => void;
   setStage: (stage: string) => void;
   setArtifact: (markdown: string, version?: number) => void;
   addTimelineNode: (node: TimelineNode) => void;
@@ -217,10 +224,12 @@ const initialState: WorkspaceWsState = {
   visitedStages: ["prepare_context"],
   messages: [],
   checkpoints: [],
+  chatEntries: [],
   artifact: null,
   providers: null,
   connectionStatus: "disconnected",
   streamingContent: "",
+  activeStreamEntryId: null,
   pendingPermissions: [],
   providerStatus: "starting",
   executionEvents: [],
@@ -265,9 +274,11 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
         visitedStages: visitedStagesFor(state.stage),
         messages: state.messages,
         checkpoints: state.checkpoints,
+        chatEntries: [],
         artifact: state.artifact,
         providers: state.providers,
         streamingContent: "",
+        activeStreamEntryId: null,
         pendingPermissions: [],
         providerStatus: "starting",
         executionEvents: [],
@@ -346,6 +357,63 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
         streamingContent: "",
       };
     }),
+
+  appendChatEntry: (entry) =>
+    set((prev) => {
+      const index = prev.chatEntries.findIndex((existing) => existing.id === entry.id);
+      const next = index === -1 ? [...prev.chatEntries, entry] : [...prev.chatEntries];
+      if (index !== -1) {
+        next[index] = entry;
+      }
+      return {
+        chatEntries: next,
+        activeStreamEntryId: entry.type === "provider_stream" ? entry.id : prev.activeStreamEntryId,
+      };
+    }),
+
+  updateStreamingEntry: (entryId, content) =>
+    set((prev) => {
+      const index = prev.chatEntries.findIndex((entry) => entry.id === entryId);
+      if (index === -1) {
+        return {
+          chatEntries: [
+            ...prev.chatEntries,
+            {
+              id: entryId,
+              type: "provider_stream",
+              role: "author",
+              content,
+              timestamp: new Date().toISOString(),
+            },
+          ],
+          activeStreamEntryId: entryId,
+        };
+      }
+
+      const next = [...prev.chatEntries];
+      const current = next[index];
+      next[index] = {
+        ...current,
+        content: `${current.content}${content}`,
+      };
+      return {
+        chatEntries: next,
+        activeStreamEntryId: entryId,
+      };
+    }),
+
+  finalizeStreamingEntry: (entryId) =>
+    set((prev) =>
+      prev.activeStreamEntryId === entryId
+        ? { activeStreamEntryId: null }
+        : { activeStreamEntryId: prev.activeStreamEntryId },
+    ),
+
+  rebuildChatEntries: () =>
+    set((prev) => ({
+      chatEntries: buildChatEntries(prev),
+      activeStreamEntryId: null,
+    })),
 
   setStage: (stage) =>
     set((prev) => ({
@@ -483,7 +551,7 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
 
   setError: (error) => set({ error }),
 
-  clearStreaming: () => set({ streamingContent: "" }),
+  clearStreaming: () => set({ streamingContent: "", activeStreamEntryId: null }),
 
   selectNodeDetail: (nodeId) => {
     if (!nodeId) {
@@ -611,4 +679,245 @@ function upsertEvent(events: ExecutionEvent[], event: ExecutionEvent) {
   const next = [...events];
   next[index] = { ...next[index], ...event };
   return next;
+}
+
+function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
+  const entries: ChatEntry[] = [];
+
+  for (const node of state.timelineNodes) {
+    const detail = state.nodeDetails[node.node_id];
+    if (!detail) {
+      continue;
+    }
+
+    if (node.node_type === "context_note") {
+      const content = textFromSources([
+        detail.streaming_content,
+        node.summary,
+        detail.messages.map((message) => message.content).join("\n"),
+      ]);
+      if (content) {
+        entries.push({
+          id: chatEntryId(node.node_id, "context"),
+          type: "context_note",
+          role: "user",
+          content,
+          timestamp: detail.started_at || node.started_at,
+          node_id: node.node_id,
+        });
+      }
+      continue;
+    }
+
+    if (node.node_type !== "author_run" && node.node_type !== "reviewer_run") {
+      continue;
+    }
+
+    const role: ChatEntryRole = node.node_type === "author_run" ? "author" : "reviewer";
+    const streamContent = textFromSources([
+      detail.streaming_content,
+      detail.messages.map((message) => message.content).join("\n"),
+    ]);
+    if (streamContent) {
+      entries.push({
+        id: chatEntryId(node.node_id, "stream"),
+        type: "provider_stream",
+        role,
+        content: streamContent,
+        timestamp: detail.started_at || node.started_at,
+        node_id: node.node_id,
+      });
+    }
+
+    for (const event of detail.execution_events) {
+      const timestamp = detail.started_at || node.started_at;
+      entries.push({
+        id: chatEntryId(node.node_id, `execution-${event.event_id}`),
+        type: "execution_event",
+        role: "system",
+        content: event.detail ? `${event.title} · ${event.detail}` : event.title,
+        timestamp,
+        node_id: node.node_id,
+        metadata: { ...event },
+      });
+    }
+
+    for (const permission of detail.permission_events) {
+      const request = permission.request;
+      const requestToolName = stringField(request, "tool_name") ?? "权限请求";
+      const requestDescription = stringField(request, "description") ?? "";
+      const requestRiskLevel = stringField(request, "risk_level") ?? null;
+      const response = permission.response;
+
+      entries.push({
+        id: chatEntryId(node.node_id, `permission-request-${permission.request_id}`),
+        type: "permission_request",
+        role: "system",
+        content: requestDescription
+          ? `${requestToolName} · ${requestDescription}`
+          : requestToolName,
+        timestamp: permission.ts,
+        node_id: node.node_id,
+        metadata: {
+          request_id: permission.request_id,
+          request,
+          response,
+          risk_level: requestRiskLevel,
+          ts: permission.ts,
+        },
+      });
+
+      if (response) {
+        entries.push({
+          id: chatEntryId(node.node_id, `permission-response-${permission.request_id}`),
+          type: "permission_response",
+          role: "user",
+          content: permissionResponseLabel(requestToolName, response),
+          timestamp: permission.ts,
+          node_id: node.node_id,
+          metadata: {
+            request_id: permission.request_id,
+            request,
+            response,
+            ts: permission.ts,
+          },
+        });
+      }
+    }
+
+    const artifactVersions = state.artifactVersions
+      .filter((artifact) => artifact.source_node_id === node.node_id)
+      .sort((left, right) => left.version - right.version);
+    for (const artifact of artifactVersions) {
+      entries.push({
+        id: chatEntryId(node.node_id, `artifact-${artifact.version}`),
+        type: "artifact_update",
+        role: "system",
+        content: `产物已更新 -> v${artifact.version}`,
+        timestamp: artifact.created_at,
+        node_id: node.node_id,
+        metadata: {
+          version: artifact.version,
+          markdown: artifact.markdown,
+          generated_by: artifact.generated_by,
+          reviewed_by: artifact.reviewed_by ?? null,
+          review_verdict: artifact.review_verdict ?? null,
+          confirmed_by: artifact.confirmed_by ?? null,
+          source_node_id: artifact.source_node_id,
+        },
+      });
+    }
+
+    if (detail.verdict) {
+      const verdictSummary = getStringField(detail.verdict, "summary") ?? "审核结论";
+      const verdictValue = getStringField(detail.verdict, "verdict") ?? "revise";
+      const verdictComments = getStringField(detail.verdict, "comments") ?? "";
+      entries.push({
+        id: chatEntryId(node.node_id, "review-verdict"),
+        type: "review_verdict",
+        role: "reviewer",
+        content: verdictSummary,
+        timestamp: detail.ended_at ?? detail.started_at,
+        node_id: node.node_id,
+        metadata: {
+          verdict: verdictValue,
+          comments: verdictComments,
+          summary: verdictSummary,
+        },
+      });
+    }
+  }
+
+  const gatePrompt = buildGatePromptEntry(state, entries);
+  if (gatePrompt) {
+    entries.push(gatePrompt);
+  }
+
+  return entries;
+}
+
+function buildGatePromptEntry(
+  state: WorkspaceWsState,
+  entries = state.chatEntries,
+): ChatEntry | null {
+  if (state.stage !== "human_confirm") {
+    return null;
+  }
+
+  const gatePromptNode =
+    findLatestNodeOfType(state.timelineNodes, "human_confirm") ?? state.timelineNodes.at(-1);
+  const summary =
+    entries
+      .filter((entry) => entry.type === "review_verdict")
+      .at(-1)
+      ?.metadata?.summary?.toString() ?? "";
+  return {
+    id: chatEntryId(gatePromptNode?.node_id ?? "human_confirm", "gate-prompt"),
+    type: "gate_prompt",
+    role: "system",
+    content: "等待人工确认",
+    timestamp: gatePromptNode?.completed_at ?? gatePromptNode?.started_at ?? new Date().toISOString(),
+    node_id: gatePromptNode?.node_id,
+    metadata: summary ? { summary } : undefined,
+  };
+}
+
+function findLatestNodeOfType(nodes: TimelineNode[], type: TimelineNodeType) {
+  for (let index = nodes.length - 1; index >= 0; index -= 1) {
+    if (nodes[index].node_type === type) {
+      return nodes[index];
+    }
+  }
+  return null;
+}
+
+function chatEntryId(nodeId: string, suffix: string) {
+  return `${nodeId}:${suffix}`;
+}
+
+function textFromSources(sources: Array<string | null | undefined>) {
+  for (const source of sources) {
+    const trimmed = source?.trim();
+    if (trimmed) {
+      return trimmed;
+    }
+  }
+  return "";
+}
+
+function stringField(value: unknown, key: string) {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const field = value[key];
+  return typeof field === "string" ? field : null;
+}
+
+function permissionResponseLabel(toolName: string, response: unknown) {
+  if (!isRecord(response)) {
+    return `权限响应 ${toolName}`;
+  }
+
+  if (response.approved === true) {
+    return `已允许 ${toolName}`;
+  }
+  if (response.approved === false) {
+    return `已拒绝 ${toolName}`;
+  }
+  if (response.status === "timeout") {
+    return `权限超时 ${toolName}`;
+  }
+  return `权限响应 ${toolName}`;
+}
+
+function getStringField(value: unknown, key: string) {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const field = value[key];
+  return typeof field === "string" ? field : null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }

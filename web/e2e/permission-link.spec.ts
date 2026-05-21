@@ -17,7 +17,7 @@ test.describe("G. Permission 链路", () => {
     await openWorkspaceSession(page, seeded.sessionId);
     await clickStartGeneration(page);
     await waitForStage(page, "运行中");
-    await expect(page.getByText("E2E permission fixture request")).toBeVisible();
+    await expect(page.getByTestId("permission-request-entry")).toBeVisible();
 
     await page.getByRole("button", { name: "允许" }).click();
 
@@ -30,7 +30,7 @@ test.describe("G. Permission 链路", () => {
     await openWorkspaceSession(page, seeded.sessionId);
     await clickStartGeneration(page);
     await waitForStage(page, "运行中");
-    await expect(page.getByText("E2E permission fixture request")).toBeVisible();
+    await expect(page.getByTestId("permission-request-entry")).toBeVisible();
 
     await page.getByRole("button", { name: "拒绝" }).click();
 
@@ -47,7 +47,7 @@ test.describe("G. Permission 链路", () => {
     await openWorkspaceSession(page, seeded.sessionId);
     await clickStartGeneration(page);
     await waitForStage(page, "运行中");
-    await expect(page.getByText("E2E permission fixture request")).toBeVisible();
+    await expect(page.getByTestId("permission-request-entry")).toBeVisible();
 
     await sendWorkspaceSocketMessage(page, {
       type: "permission_response",
@@ -66,7 +66,7 @@ test.describe("G. Permission 链路", () => {
       await openWorkspaceSession(page, seeded.sessionId);
       await clickStartGeneration(page);
       await waitForStage(page, "运行中");
-      await expect(page.getByText("E2E permission fixture request")).toBeVisible();
+      await expect(page.getByTestId("permission-request-entry")).toBeVisible();
 
       await expect(page.getByRole("alert")).toContainText("PERMISSION_TIMEOUT", {
         timeout: 10_000,
@@ -85,7 +85,7 @@ test.describe("G. Permission 链路", () => {
     await openWorkspaceSession(page, seeded.sessionId);
     await clickStartGeneration(page);
     await waitForStage(page, "运行中");
-    await expect(page.getByText("E2E permission fixture request")).toBeVisible();
+    await expect(page.getByTestId("permission-request-entry")).toBeVisible();
 
     await page.getByRole("button", { name: "允许" }).click();
 

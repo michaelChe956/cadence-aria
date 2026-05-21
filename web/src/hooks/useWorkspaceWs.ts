@@ -5,6 +5,7 @@ import type {
   RevisionPath,
   WsInMessage,
 } from "../api/types";
+import type { ChatEntry, ChatEntryRole } from "../state/chat-entries";
 import { useWorkspaceWsReconnect } from "./useWorkspaceWsReconnect";
 import {
   useWorkspaceStore,
@@ -161,9 +162,11 @@ export function useWorkspaceWs(sessionId: string | null) {
     switch (msg.type) {
       case "session_state":
         store.setSessionState(msg as never);
+        store.rebuildChatEntries();
         break;
       case "stream_chunk":
         store.appendStreamChunk(msg.content as string, msg.node_id as string | null | undefined);
+        handleStreamChunk(store, msg as never);
         break;
       case "message_complete":
         store.completeMessage(
@@ -171,12 +174,38 @@ export function useWorkspaceWs(sessionId: string | null) {
           msg.checkpoint_id as string,
           msg.node_id as string | null | undefined,
         );
+        store.finalizeStreamingEntry(resolveStreamEntryId(store, msg.node_id as string | null | undefined));
         break;
       case "stage_change":
         store.setStage(msg.stage as string);
+        store.appendChatEntry({
+          id: chatEntryId("stage_change", `${msg.stage as string}:${store.chatEntries.length}`),
+          type: "stage_change",
+          role: "system",
+          content: `阶段变更 -> ${msg.stage as string}`,
+          timestamp: new Date().toISOString(),
+        });
+        if (msg.stage === "human_confirm") {
+          const gatePrompt = gatePromptEntryForState(useWorkspaceStore.getState());
+          if (gatePrompt) {
+            store.appendChatEntry(gatePrompt);
+          }
+        }
         break;
       case "artifact_update":
         store.setArtifact(msg.markdown as string, msg.version as number | undefined);
+        store.appendChatEntry({
+          id: chatEntryId("artifact_update", String(msg.version as number | undefined)),
+          type: "artifact_update",
+          role: "system",
+          content: `产物已更新 -> v${msg.version as number | undefined}`,
+          timestamp: new Date().toISOString(),
+          metadata: {
+            version: msg.version as number | undefined,
+            markdown: msg.markdown as string,
+            diff: (msg as { diff?: string | null }).diff ?? null,
+          },
+        });
         break;
       case "permission_request":
         store.addPermissionRequest({
@@ -185,12 +214,38 @@ export function useWorkspaceWs(sessionId: string | null) {
           description: msg.description as string,
           risk_level: msg.risk_level as "low" | "medium" | "high",
         });
+        store.appendChatEntry({
+          id: chatEntryId("permission_request", msg.id as string),
+          type: "permission_request",
+          role: "system",
+          content: permissionRequestContent({
+            tool_name: msg.tool_name as string,
+            description: msg.description as string,
+          }),
+          timestamp: new Date().toISOString(),
+          node_id: store.activeNodeId ?? undefined,
+          metadata: {
+            request_id: msg.id as string,
+            tool_name: msg.tool_name as string,
+            description: msg.description as string,
+            risk_level: msg.risk_level as "low" | "medium" | "high",
+          },
+        });
         break;
       case "provider_status":
         store.setProviderStatus(msg.status as ProviderStatus);
         break;
       case "execution_event":
         store.upsertExecutionEvent(msg.event as ExecutionEvent);
+        store.appendChatEntry({
+          id: chatEntryId("execution_event", (msg.event as ExecutionEvent).event_id),
+          type: "execution_event",
+          role: "system",
+          content: executionEventContent(msg.event as ExecutionEvent),
+          timestamp: new Date().toISOString(),
+          node_id: (msg.event as ExecutionEvent).node_id ?? undefined,
+          metadata: { ...(msg.event as ExecutionEvent) },
+        });
         break;
       case "timeline_node_created":
         store.addTimelineNode(msg.node as TimelineNode);
@@ -209,6 +264,20 @@ export function useWorkspaceWs(sessionId: string | null) {
           comments: msg.comments,
           summary: msg.summary,
         } as ReviewVerdict);
+        store.appendChatEntry({
+          id: chatEntryId("review_verdict", msg.node_id as string),
+          type: "review_verdict",
+          role: "reviewer",
+          content: msg.summary as string,
+          timestamp: new Date().toISOString(),
+          node_id: msg.node_id as string,
+          metadata: {
+            verdict: msg.verdict as string,
+            comments: msg.comments as string,
+            summary: msg.summary as string,
+            round: msg.round as number,
+          },
+        });
         break;
       case "review_decision_required":
         store.setPendingDecision({
@@ -219,17 +288,49 @@ export function useWorkspaceWs(sessionId: string | null) {
         break;
       case "error":
         store.setError(msg.message as string);
+        store.appendChatEntry({
+          id: chatEntryId("error", msg.message as string),
+          type: "error",
+          role: "system",
+          content: msg.message as string,
+          timestamp: new Date().toISOString(),
+          metadata: {
+            message: msg.message as string,
+          },
+        });
         break;
       case "protocol_error":
         store.setProtocolError({
           code: msg.code as string,
           message: msg.message as string,
         });
+        store.appendChatEntry({
+          id: chatEntryId("protocol_error", `${msg.code as string}:${msg.message as string}`),
+          type: "error",
+          role: "system",
+          content: `${msg.code as string} · ${msg.message as string}`,
+          timestamp: new Date().toISOString(),
+          metadata: {
+            code: msg.code as string,
+            message: msg.message as string,
+          },
+        });
         break;
       case "provider_locked":
         store.setProviderLocked({
           snapshot: msg.snapshot as ProviderConfigSnapshot,
           locked_at: msg.locked_at as string,
+        });
+        store.appendChatEntry({
+          id: chatEntryId("start_generation", msg.locked_at as string),
+          type: "start_generation",
+          role: "system",
+          content: "开始生成",
+          timestamp: msg.locked_at as string,
+          metadata: {
+            snapshot: msg.snapshot as ProviderConfigSnapshot,
+            locked_at: msg.locked_at as string,
+          },
         });
         break;
       case "pong":
@@ -418,5 +519,80 @@ export function useWorkspaceWs(sessionId: string | null) {
     isReconnecting,
     reconnectAttemptCount,
     retryNow,
+  };
+}
+
+function handleStreamChunk(store: ReturnType<typeof useWorkspaceStore.getState>, msg: WsServerMessage) {
+  const nodeId = resolveStreamEntryNodeId(store, msg.node_id as string | null | undefined);
+  const entryId = streamEntryId(nodeId);
+  const role = chatEntryRole((msg.role as string | undefined) ?? "author");
+  if (!store.chatEntries.some((entry) => entry.id === entryId)) {
+    store.appendChatEntry({
+      id: entryId,
+      type: "provider_stream",
+      role,
+      content: "",
+      timestamp: new Date().toISOString(),
+      node_id: nodeId === "global" ? undefined : nodeId,
+    });
+  }
+  store.updateStreamingEntry(entryId, msg.content as string);
+}
+
+function chatEntryRole(role: string): ChatEntryRole {
+  return role === "reviewer" ? "reviewer" : "author";
+}
+
+function resolveStreamEntryId(
+  store: ReturnType<typeof useWorkspaceStore.getState>,
+  nodeId?: string | null,
+) {
+  return streamEntryId(resolveStreamEntryNodeId(store, nodeId));
+}
+
+function resolveStreamEntryNodeId(
+  store: ReturnType<typeof useWorkspaceStore.getState>,
+  nodeId?: string | null,
+) {
+  return nodeId ?? store.activeNodeId ?? "global";
+}
+
+function streamEntryId(nodeId: string | null | undefined) {
+  return `${nodeId ?? "global"}:stream`;
+}
+
+function chatEntryId(kind: string, suffix: string) {
+  return `${kind}:${suffix}`;
+}
+
+function permissionRequestContent(request: { tool_name: string; description: string }) {
+  return request.description ? `${request.tool_name} · ${request.description}` : request.tool_name;
+}
+
+function executionEventContent(event: ExecutionEvent) {
+  return event.detail ? `${event.title} · ${event.detail}` : event.title;
+}
+
+function gatePromptEntryForState(state: ReturnType<typeof useWorkspaceStore.getState>): ChatEntry | null {
+  if (state.stage !== "human_confirm") {
+    return null;
+  }
+
+  const gatePromptNode =
+    [...state.timelineNodes].reverse().find((node) => node.node_type === "human_confirm") ??
+    state.timelineNodes.at(-1);
+  const summary =
+    state.chatEntries
+      .filter((entry) => entry.type === "review_verdict")
+      .at(-1)
+      ?.metadata?.summary?.toString() ?? "";
+  return {
+    id: `${gatePromptNode?.node_id ?? "human_confirm"}:gate-prompt`,
+    type: "gate_prompt",
+    role: "system",
+    content: "等待人工确认",
+    timestamp: gatePromptNode?.completed_at ?? gatePromptNode?.started_at ?? new Date().toISOString(),
+    node_id: gatePromptNode?.node_id,
+    metadata: summary ? { summary } : undefined,
   };
 }

@@ -12,7 +12,7 @@ test("fake provider workspace streams a story spec and confirms lifecycle state"
   await expect(page.getByText("Author: Fake")).toBeVisible();
   await expect(page.getByText("Reviewer: Fake")).toBeVisible();
 
-  await expect(page.getByTestId("prepare-context-panel")).toBeVisible();
+  await expect(page.getByTestId("chat-input-bar")).toBeVisible();
   const contextInput = page.getByTestId("context-note-input");
   await expect(contextInput).toBeEnabled();
   await contextInput.fill("请生成 Story Spec 和验收标准");
@@ -21,12 +21,13 @@ test("fake provider workspace streams a story spec and confirms lifecycle state"
   await expect(page.getByText("请生成 Story Spec 和验收标准").first()).toBeVisible();
   await expect(page.getByTestId("timeline-node-context_note")).toBeVisible();
   await page.getByTestId("start-generation").click();
-  await waitForStage(page, "等待确认");
-  const humanConfirmPanel = page.getByTestId("human-confirm-panel");
-  await expect(humanConfirmPanel.getByRole("button", { name: "确认" })).toBeVisible();
-  await humanConfirmPanel.getByRole("button", { name: "确认" }).click();
+  await waitForStage(page, "等待确认", 60_000);
+  const gatePrompt = page.getByTestId("gate-prompt-entry");
+  await expect(gatePrompt).toBeVisible();
+  await expect(gatePrompt.getByRole("button", { name: "确认" })).toBeVisible();
+  await gatePrompt.getByRole("button", { name: "确认" }).click();
 
-  await expect(page.getByTestId("stage-badge")).toContainText("已完成");
+  await expect(page.getByTestId("stage-badge")).toContainText("已完成", { timeout: 60_000 });
 
   await page.getByRole("button", { name: "返回" }).click();
   const projectButton = page.getByRole("button", { name: seeded.projectName, exact: true });
