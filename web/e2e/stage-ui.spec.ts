@@ -44,8 +44,10 @@ test.describe("D. 阶段化 UI + 节点 tab", () => {
 
     await enableReviewFixture(page, seeded.sessionId);
     await openWorkspaceSession(page, seeded.sessionId);
+    await page.getByRole("button", { name: "Provider 配置" }).click();
     await page.getByRole("button", { name: "高级配置" }).click();
     await page.getByLabel("审核轮次").fill("2");
+    await page.getByRole("button", { name: "关闭 Provider 配置" }).click();
     await clickStartGeneration(page);
     await waitForStage(page, "审核结论待处理", 60_000);
     await expect(page.getByTestId("review-decision-panel")).toBeVisible();

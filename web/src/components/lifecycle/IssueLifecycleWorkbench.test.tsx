@@ -461,7 +461,7 @@ describe("IssueLifecycleWorkbench", () => {
     expect(storyColumn).toHaveTextContent("[REQ-001] 显示会话过期提示");
   });
 
-  it("generates story workspace from the issue action and opens the story session", async () => {
+  it("generates story workspace from the issue card action and opens the story session", async () => {
     const fetchMock = lifecycleFetch({ emptyLifecycle: true });
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
@@ -469,9 +469,7 @@ describe("IssueLifecycleWorkbench", () => {
 
     render(<IssueLifecycleWorkbench onOpenWorkspace={onOpenWorkspace} />);
 
-    await user.click(
-      await screen.findByRole("button", { name: "登录会话过期" }),
-    );
+    await screen.findByRole("button", { name: "登录会话过期" });
     await user.click(screen.getByRole("button", { name: "生成 Story Spec" }));
 
     expect(
@@ -489,6 +487,25 @@ describe("IssueLifecycleWorkbench", () => {
         }),
       }),
     );
+  });
+
+  it("does not expose the story generation action as a global header action", async () => {
+    vi.stubGlobal("fetch", lifecycleFetch({ emptyLifecycle: true }));
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "登录会话过期" }),
+    );
+
+    const header = screen.getAllByRole("banner")[0];
+    expect(
+      within(header).queryByRole("button", { name: "生成 Story Spec" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "生成 Story Spec" }),
+    ).toBeInTheDocument();
   });
 
   it("generates next lifecycle entities from the drawer without opening workspace or running providers", async () => {

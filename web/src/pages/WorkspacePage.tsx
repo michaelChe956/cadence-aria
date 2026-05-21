@@ -1,5 +1,5 @@
-import { ArrowLeft, Check, TriangleAlert, Wifi, WifiOff, X } from "lucide-react";
-import { useEffect, type ReactNode } from "react";
+import { ArrowLeft, Check, Settings, TriangleAlert, Wifi, WifiOff, X } from "lucide-react";
+import { useEffect, useState, type ComponentProps, type ReactNode } from "react";
 import type { ArtifactVersion, ProviderConfigSnapshot, WorkspaceProviderName } from "../api/types";
 import {
   DisconnectBanner,
@@ -86,7 +86,7 @@ export function WorkspacePage({
   }
 
   const providerPanel = (
-    <ProviderConfigPanel
+    <ProviderConfigDialogButton
       providers={store.providers}
       editable={stageConfig.providerEditable}
       onSelectProvider={(role, provider) => selectProvider(role, provider)}
@@ -234,6 +234,60 @@ export function WorkspacePage({
         onTerminate={() => sendHumanConfirm("terminate")}
         onSelectRevisionPath={(path) => sendSelectRevisionPath(path, undefined)}
       />
+    </div>
+  );
+}
+
+type ProviderConfigDialogButtonProps = ComponentProps<typeof ProviderConfigPanel>;
+
+function ProviderConfigDialogButton(props: ProviderConfigDialogButtonProps) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div className="flex items-center justify-between gap-2">
+      <button
+        type="button"
+        aria-label="Provider 配置"
+        onClick={() => setOpen(true)}
+        className="inline-flex h-8 items-center gap-2 rounded-md border border-[var(--aria-line)] bg-white px-3 text-xs font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)]"
+      >
+        <Settings className="h-4 w-4 text-[var(--aria-primary)]" />
+        Provider 配置
+        <span
+          aria-hidden="true"
+          className="rounded border border-[var(--aria-line)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--aria-ink-muted)]"
+        >
+          {props.editable ? "可编辑" : "已锁定"}
+        </span>
+      </button>
+
+      {open ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Provider 配置"
+            className="w-full max-w-md rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] shadow-xl"
+          >
+            <div className="flex items-center justify-between gap-3 border-b border-[var(--aria-line)] px-4 py-3">
+              <h2 className="text-sm font-semibold text-[var(--aria-ink)]">
+                Provider 配置
+              </h2>
+              <button
+                type="button"
+                aria-label="关闭 Provider 配置"
+                onClick={() => setOpen(false)}
+                className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-[var(--aria-line)] text-[var(--aria-ink-muted)] hover:text-[var(--aria-ink)]"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="p-4">
+              <ProviderConfigPanel {...props} />
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

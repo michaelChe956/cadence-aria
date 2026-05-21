@@ -139,7 +139,7 @@ describe("WorkspacePage", () => {
     expect(api.sendStartGeneration).not.toHaveBeenCalled();
   });
 
-  it("keeps provider config visible and disables controls outside prepare context", () => {
+  it("opens provider config from a button dialog and disables controls outside prepare context", async () => {
     mockWorkspaceWs();
     useWorkspaceStore.setState({
       stage: "running",
@@ -148,7 +148,10 @@ describe("WorkspacePage", () => {
 
     render(<WorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
 
-    expect(screen.getByLabelText("Provider 配置")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Author")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Provider 配置" }));
+
+    expect(screen.getByRole("dialog", { name: "Provider 配置" })).toBeInTheDocument();
     expect(screen.getByLabelText("Author")).toBeDisabled();
     expect(screen.getByLabelText("Reviewer")).toBeDisabled();
   });

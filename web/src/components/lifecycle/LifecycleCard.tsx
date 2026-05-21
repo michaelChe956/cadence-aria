@@ -2,6 +2,7 @@ import {
   GitBranch,
   Layers3,
   ListChecks,
+  Sparkles,
   ScrollText,
   Trash2,
 } from "lucide-react";
@@ -11,11 +12,13 @@ export function LifecycleCard({
   card,
   selected,
   onSelect,
+  onGenerateStorySpec,
   onDeleteIssue,
 }: {
   card: LifecycleCardData;
   selected: boolean;
   onSelect: () => void;
+  onGenerateStorySpec?: () => void;
   onDeleteIssue?: () => void;
 }) {
   const Icon =
@@ -67,6 +70,16 @@ export function LifecycleCard({
           </span>
         </span>
       </button>
+      {card.kind === "issue" && onGenerateStorySpec ? (
+        <button
+          type="button"
+          onClick={onGenerateStorySpec}
+          className="inline-flex h-7 shrink-0 items-center gap-1 rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-2 text-xs font-semibold text-white hover:opacity-90"
+        >
+          <Sparkles className="h-3.5 w-3.5" />
+          生成 Story Spec
+        </button>
+      ) : null}
       {onDeleteIssue ? (
         <button
           type="button"

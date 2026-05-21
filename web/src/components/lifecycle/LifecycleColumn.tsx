@@ -7,6 +7,7 @@ export function LifecycleColumn({
   cards,
   selectedKey,
   onSelect,
+  onGenerateStorySpec,
   onDeleteIssue,
 }: {
   title: string;
@@ -14,6 +15,7 @@ export function LifecycleColumn({
   cards: LifecycleCardData[];
   selectedKey: string | null;
   onSelect: (card: LifecycleCardData) => void;
+  onGenerateStorySpec?: (card: LifecycleCardData) => void;
   onDeleteIssue?: (issueId: string) => void;
 }) {
   return (
@@ -37,6 +39,11 @@ export function LifecycleColumn({
               card={card}
               selected={selectedKey === `${card.kind}:${card.id}`}
               onSelect={() => onSelect(card)}
+              onGenerateStorySpec={
+                card.kind === "issue" && onGenerateStorySpec
+                  ? () => onGenerateStorySpec(card)
+                  : undefined
+              }
               onDeleteIssue={
                 card.kind === "issue" && onDeleteIssue
                   ? () => onDeleteIssue(card.id)

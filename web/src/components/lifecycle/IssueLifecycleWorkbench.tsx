@@ -185,10 +185,6 @@ export function IssueLifecycleWorkbench({
     () => visibleLifecycle(allColumns, focusedIssueId),
     [allColumns, focusedIssueId],
   );
-  const selectedCard = useMemo(
-    () => findSelectedCard(columns, selectedCardKey),
-    [columns, selectedCardKey],
-  );
   const focusedEntity = useMemo(
     () => findCardInColumns(allColumns, drawerFocusedEntityId),
     [allColumns, drawerFocusedEntityId],
@@ -452,14 +448,6 @@ export function IssueLifecycleWorkbench({
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
-                {selectedCard ? (
-                  <LifecycleActionButton
-                    card={selectedCard}
-                    onLaunch={(target) =>
-                      void handleLaunchWorkspace(target, selectedCard)
-                    }
-                  />
-                ) : null}
                 {focusedIssueId ? (
                   <button
                     type="button"
@@ -497,6 +485,9 @@ export function IssueLifecycleWorkbench({
                 cards={columns.issue}
                 selectedKey={selectedCardKey}
                 onSelect={handleSelectCard}
+                onGenerateStorySpec={(card) =>
+                  void handleLaunchWorkspace("story", card)
+                }
                 onDeleteIssue={(issueId) => void handleDeleteIssue(issueId)}
               />
               <LifecycleColumn
@@ -598,24 +589,6 @@ function lifecycleCardKey(card: LifecycleCardData) {
   return `${card.kind}:${card.id}`;
 }
 
-function findSelectedCard(
-  columns: ReturnType<typeof visibleLifecycle>,
-  selectedKey: string | null,
-) {
-  if (!selectedKey) {
-    return null;
-  }
-
-  return (
-    [
-      ...columns.issue,
-      ...columns.story_spec,
-      ...columns.design_spec,
-      ...columns.work_item,
-    ].find((card) => lifecycleCardKey(card) === selectedKey) ?? null
-  );
-}
-
 function findCardInColumns(
   columns: ReturnType<typeof visibleLifecycle>,
   entityId: string | null,
@@ -632,39 +605,6 @@ function findCardInColumns(
       ...columns.work_item,
     ].find((card) => card.id === entityId) ?? null
   );
-}
-
-function LifecycleActionButton({
-  card,
-  onLaunch,
-}: {
-  card: LifecycleCardData;
-  onLaunch: (target: ProviderWorkspaceLaunchTarget) => void;
-}) {
-  const action = lifecycleAction(card);
-  if (!action) {
-    return null;
-  }
-
-  return (
-    <button
-      type="button"
-      onClick={() => onLaunch(action.target)}
-      className="inline-flex h-8 items-center rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 text-xs font-semibold text-white"
-    >
-      {action.label}
-    </button>
-  );
-}
-
-function lifecycleAction(card: LifecycleCardData): {
-  label: string;
-  target: ProviderWorkspaceLaunchTarget;
-} | null {
-  if (card.kind === "issue") {
-    return { label: "生成 Story Spec", target: "story" };
-  }
-  return null;
 }
 
 function defaultLaunchTitle(launchTarget: {
