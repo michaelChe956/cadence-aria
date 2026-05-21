@@ -357,6 +357,7 @@ export type NodeDetail = {
   status: TimelineNodeStatus;
   agent_role: "author" | "reviewer" | null;
   provider: ProviderSnapshot | null;
+  prompt?: string | null;
   messages: WsMessage[];
   streaming_content: string;
   execution_events: ExecutionEvent[];
@@ -411,6 +412,8 @@ export type WsOutMessage =
       session_id: string;
       workspace_type: string;
       stage: string;
+      superpowers_enabled: boolean;
+      openspec_enabled: boolean;
       messages: WsMessage[];
       checkpoints: WsCheckpoint[];
       artifact: string | null;

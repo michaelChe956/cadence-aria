@@ -13,10 +13,11 @@ interface NodeDetailPanelProps {
   artifactVersions: ArtifactVersion[];
 }
 
-type TabKey = "overview" | "streaming" | "execution" | "permission" | "artifact";
+type TabKey = "overview" | "prompt" | "streaming" | "execution" | "permission" | "artifact";
 
 const TABS: Array<{ key: TabKey; label: string; testId: string }> = [
   { key: "overview", label: "概览", testId: "tab-overview" },
+  { key: "prompt", label: "Prompt", testId: "tab-prompt" },
   { key: "streaming", label: "流式输出", testId: "tab-streaming" },
   { key: "execution", label: "执行事件", testId: "tab-execution" },
   { key: "permission", label: "权限", testId: "tab-permission" },
@@ -32,7 +33,7 @@ export function NodeDetailPanel({ node, detail, artifactVersions }: NodeDetailPa
       data-testid="node-detail-panel"
       className="flex min-h-0 flex-col rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)]"
     >
-      <div className="grid grid-cols-5 border-b border-[var(--aria-line)]">
+      <div className="grid grid-cols-6 border-b border-[var(--aria-line)]">
         {TABS.map((tab) => (
           <button
             key={tab.key}
@@ -53,6 +54,7 @@ export function NodeDetailPanel({ node, detail, artifactVersions }: NodeDetailPa
 
       <div className="min-h-0 flex-1 overflow-auto p-3">
         {activeTab === "overview" ? <OverviewTab node={node} detail={detail} /> : null}
+        {activeTab === "prompt" ? <PromptTab detail={detail} /> : null}
         {activeTab === "streaming" ? <StreamingTab detail={detail} /> : null}
         {activeTab === "execution" ? <ExecutionTab events={detail?.execution_events ?? []} /> : null}
         {activeTab === "permission" ? (
@@ -78,6 +80,17 @@ function OverviewTab({ node, detail }: { node: TimelineNode; detail: NodeDetail 
       {detail?.artifact_ref ? <InfoRow label="Artifact" value={`v${detail.artifact_ref.version}`} /> : null}
       {detail?.is_revision ? <InfoRow label="修订" value="是" /> : null}
     </dl>
+  );
+}
+
+function PromptTab({ detail }: { detail: NodeDetail | null }) {
+  return (
+    <pre
+      data-testid="prompt-snapshot"
+      className="min-h-32 whitespace-pre-wrap rounded-md border border-[var(--aria-line)] bg-white p-3 font-mono text-xs text-[var(--aria-ink)]"
+    >
+      {detail?.prompt || "无 Prompt 快照"}
+    </pre>
   );
 }
 

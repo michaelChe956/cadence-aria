@@ -92,6 +92,8 @@ pub enum WsOutMessage {
         session_id: String,
         workspace_type: WorkspaceType,
         stage: String,
+        superpowers_enabled: bool,
+        openspec_enabled: bool,
         messages: Vec<WsMessageDto>,
         checkpoints: Vec<WsCheckpointDto>,
         artifact: Option<String>,
@@ -540,6 +542,8 @@ mod tests {
             session_id: "workspace_session_0001".to_string(),
             workspace_type: WorkspaceType::Story,
             stage: "review_decision".to_string(),
+            superpowers_enabled: true,
+            openspec_enabled: true,
             messages: Vec::new(),
             checkpoints: Vec::new(),
             artifact: Some("# Story".to_string()),
@@ -556,6 +560,8 @@ mod tests {
         .unwrap();
         assert_eq!(state["type"], "session_state");
         assert_eq!(state["active_node_id"], "node_review_decision_001");
+        assert_eq!(state["superpowers_enabled"], true);
+        assert_eq!(state["openspec_enabled"], true);
         assert_eq!(state["timeline_nodes"].as_array().unwrap().len(), 0);
         assert_eq!(state["artifact_versions"].as_array().unwrap().len(), 0);
     }

@@ -129,6 +129,8 @@ export interface WorkspaceWsState {
   sessionId: string | null;
   workspaceType: string | null;
   stage: string;
+  superpowersEnabled: boolean;
+  openSpecEnabled: boolean;
   visitedStages: string[];
   messages: WsMessage[];
   checkpoints: WsCheckpoint[];
@@ -163,6 +165,8 @@ export interface WorkspaceWsActions {
     session_id: string;
     workspace_type: string;
     stage: string;
+    superpowers_enabled?: boolean;
+    openspec_enabled?: boolean;
     messages: WsMessage[];
     checkpoints: WsCheckpoint[];
     artifact: string | null;
@@ -208,6 +212,8 @@ const initialState: WorkspaceWsState = {
   sessionId: null,
   workspaceType: null,
   stage: "prepare_context",
+  superpowersEnabled: false,
+  openSpecEnabled: false,
   visitedStages: ["prepare_context"],
   messages: [],
   checkpoints: [],
@@ -254,6 +260,8 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
         sessionId: state.session_id,
         workspaceType: state.workspace_type,
         stage: state.stage,
+        superpowersEnabled: state.superpowers_enabled ?? false,
+        openSpecEnabled: state.openspec_enabled ?? false,
         visitedStages: visitedStagesFor(state.stage),
         messages: state.messages,
         checkpoints: state.checkpoints,
@@ -558,6 +566,7 @@ function emptyNodeDetail(
     status: node?.status ?? "active",
     agent_role: agentRoleFor(node),
     provider: node?.agent ? { name: node.agent, model: "" } : null,
+    prompt: null,
     messages: [],
     streaming_content: "",
     execution_events: [],

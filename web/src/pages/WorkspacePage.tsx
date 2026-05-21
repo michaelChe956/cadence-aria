@@ -148,6 +148,8 @@ export function WorkspacePage({
         stage={store.stage}
         providerLocked={store.providerLocked}
         lockedAt={store.providerLockedAt}
+        superpowers={store.superpowersEnabled}
+        openSpec={store.openSpecEnabled}
       />
 
       {store.protocolError ? (

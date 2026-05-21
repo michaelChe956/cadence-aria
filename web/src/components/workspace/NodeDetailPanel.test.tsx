@@ -4,11 +4,12 @@ import type { NodeDetail, TimelineNode } from "../../api/types";
 import { NodeDetailPanel } from "./NodeDetailPanel";
 
 describe("NodeDetailPanel", () => {
-  it("renders 5 node-level tabs", () => {
+  it("renders node-level tabs including the provider prompt", () => {
     render(<NodeDetailPanel node={node()} detail={detail()} artifactVersions={[]} />);
 
     expect(screen.getByTestId("node-detail-panel")).toBeInTheDocument();
     expect(screen.getByTestId("tab-overview")).toHaveTextContent("概览");
+    expect(screen.getByTestId("tab-prompt")).toHaveTextContent("Prompt");
     expect(screen.getByTestId("tab-streaming")).toHaveTextContent("流式输出");
     expect(screen.getByTestId("tab-execution")).toHaveTextContent("执行事件");
     expect(screen.getByTestId("tab-permission")).toHaveTextContent("权限");
@@ -64,6 +65,28 @@ describe("NodeDetailPanel", () => {
 
     fireEvent.click(screen.getByTestId("tab-artifact"));
     expect(screen.getByText("# Artifact 内容")).toBeInTheDocument();
+  });
+
+  it("shows the provider prompt snapshot for audit", () => {
+    render(
+      <NodeDetailPanel
+        node={node()}
+        detail={
+          {
+            ...detail(),
+            prompt: "Workspace 类型: Story Spec\nIssue: 爬楼梯",
+          } as never
+        }
+        artifactVersions={[]}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("tab-prompt"));
+
+    expect(screen.getByTestId("prompt-snapshot")).toHaveTextContent(
+      "Workspace 类型: Story Spec",
+    );
+    expect(screen.getByTestId("prompt-snapshot")).toHaveTextContent("Issue: 爬楼梯");
   });
 
   it("renders permission event response statuses including timeout", () => {

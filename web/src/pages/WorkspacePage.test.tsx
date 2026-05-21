@@ -170,6 +170,26 @@ describe("WorkspacePage", () => {
     );
   });
 
+  it("renders workspace discipline flags from the hydrated session snapshot", () => {
+    mockWorkspaceWs();
+    useWorkspaceStore.getState().setSessionState({
+      session_id: "workspace_session_0001",
+      workspace_type: "story",
+      stage: "prepare_context",
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "codex", reviewer: "claude_code" },
+      superpowers_enabled: true,
+      openspec_enabled: true,
+    } as never);
+
+    render(<WorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+
+    expect(screen.getByText("Superpowers: on")).toBeInTheDocument();
+    expect(screen.getByText("OpenSpec: on")).toBeInTheDocument();
+  });
+
   it("sends review decision paths through protocol v2", async () => {
     const api = mockWorkspaceWs();
     useWorkspaceStore.setState({

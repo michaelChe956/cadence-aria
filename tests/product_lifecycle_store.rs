@@ -202,6 +202,7 @@ fn save_and_load_node_detail() {
             name: "claude_code".to_string(),
             model: "claude-opus-4-7".to_string(),
         }),
+        prompt: Some("Workspace 类型: Story Spec".to_string()),
         messages: vec![],
         streaming_content: "streaming".to_string(),
         execution_events: vec![],

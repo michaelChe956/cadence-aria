@@ -378,6 +378,8 @@ pub struct NodeDetail {
     pub status: TimelineNodeStatus,
     pub agent_role: Option<AgentRole>,
     pub provider: Option<ProviderSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
     pub messages: Vec<serde_json::Value>,
     pub streaming_content: String,
     pub execution_events: Vec<serde_json::Value>,
@@ -434,6 +436,7 @@ mod tests {
                 name: "claude_code".to_string(),
                 model: "claude-opus-4-7".to_string(),
             }),
+            prompt: Some("Workspace 类型: Story Spec".to_string()),
             messages: vec![],
             streaming_content: "输出内容".to_string(),
             execution_events: vec![],
@@ -458,6 +461,7 @@ mod tests {
         let back: NodeDetail = serde_json::from_value(json).unwrap();
 
         assert_eq!(back.node_id, detail.node_id);
+        assert_eq!(back.prompt, detail.prompt);
         assert_eq!(back.permission_events.len(), 1);
     }
 }

@@ -956,7 +956,10 @@ async fn workspace_ws_human_confirm_v2_completes_workspace() {
         },
     )
     .await;
-    assert_eq!(recv_until_stage(&mut ws, "human_confirm").await, "human_confirm");
+    assert_eq!(
+        recv_until_stage(&mut ws, "human_confirm").await,
+        "human_confirm"
+    );
 
     send_json(
         &mut ws,

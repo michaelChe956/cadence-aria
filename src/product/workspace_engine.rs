@@ -86,6 +86,8 @@ pub struct WorkspaceSession {
     pub author_provider: ProviderName,
     pub reviewer_provider: Option<ProviderName>,
     pub review_rounds: u32,
+    pub superpowers_enabled: bool,
+    pub openspec_enabled: bool,
     pub repository_path: Option<PathBuf>,
 }
 
@@ -115,6 +117,8 @@ impl WorkspaceSession {
             author_provider: record.author_provider,
             reviewer_provider: Some(record.reviewer_provider),
             review_rounds: record.review_rounds,
+            superpowers_enabled: record.superpowers_enabled,
+            openspec_enabled: record.openspec_enabled,
             repository_path: None,
         }
     }
@@ -596,6 +600,7 @@ impl WorkspaceEngine {
         provider: Arc<dyn StreamingProviderAdapter>,
         command_rx: mpsc::Receiver<ProviderCommand>,
     ) {
+        let content = normalize_generation_prompt(content, &self.session.workspace_type);
         let msg_id = format!("msg_{:03}", self.session.messages.len() + 1);
         let now = chrono::Utc::now().to_rfc3339();
 
@@ -648,6 +653,9 @@ impl WorkspaceEngine {
                 return;
             }
         };
+        let _ = self
+            .persist_prompt_snapshot(&generation_node_id, input.prompt.clone())
+            .await;
 
         let session = provider.start(input, self.cancel.clone()).await;
         self.drive_provider_session(
@@ -917,6 +925,11 @@ impl WorkspaceEngine {
                 return;
             }
         };
+        if let Some(node_id) = self.active_node_id.clone() {
+            let _ = self
+                .persist_prompt_snapshot(&node_id, input.prompt.clone())
+                .await;
+        }
         let session = provider.start(input, self.cancel.clone()).await;
         self.drive_reviewer_provider_session(session, command_rx, reviewer)
             .await;
@@ -937,6 +950,11 @@ impl WorkspaceEngine {
                 return;
             }
         };
+        if let Some(node_id) = node_id.clone() {
+            let _ = self
+                .persist_prompt_snapshot(&node_id, input.prompt.clone())
+                .await;
+        }
         let session = provider.start(input, self.cancel.clone()).await;
         self.drive_provider_session(session, command_rx, node_id, Some(author))
             .await;
@@ -1874,6 +1892,8 @@ impl WorkspaceEngine {
             session_id: self.session.session_id.clone(),
             workspace_type: self.session.workspace_type.clone(),
             stage: self.session.stage.as_str().to_string(),
+            superpowers_enabled: self.session.superpowers_enabled,
+            openspec_enabled: self.session.openspec_enabled,
             messages,
             checkpoints,
             artifact: self.session.artifact.clone(),
@@ -2037,6 +2057,7 @@ impl WorkspaceEngine {
                 name: provider_name_text(provider).to_string(),
                 model: provider_name_text(provider).to_string(),
             }),
+            prompt: None,
             messages: Vec::new(),
             streaming_content: String::new(),
             execution_events: Vec::new(),
@@ -2085,6 +2106,17 @@ impl WorkspaceEngine {
             .save_node_detail(&self.session.session_id, node_id, &detail)
             .map_err(|error| format!("save node detail failed: {error}"))?;
         Ok(())
+    }
+
+    async fn persist_prompt_snapshot(
+        &mut self,
+        node_id: &str,
+        prompt: String,
+    ) -> Result<(), String> {
+        self.update_node_detail(node_id, |detail| {
+            detail.prompt = Some(prompt);
+        })
+        .await
     }
 
     async fn complete_active_node(&mut self, summary: Option<String>) {
@@ -2377,6 +2409,19 @@ fn workspace_type_title(workspace_type: &WorkspaceType) -> &'static str {
     }
 }
 
+fn normalize_generation_prompt(content: String, workspace_type: &WorkspaceType) -> String {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        format!(
+            "Workspace 类型: {}\n开始生成 {}",
+            workspace_type_title(workspace_type),
+            workspace_type_title(workspace_type)
+        )
+    } else {
+        trimmed.to_string()
+    }
+}
+
 fn ws_stage(stage: &WorkspaceStage) -> WsWorkspaceStage {
     match stage {
         WorkspaceStage::PrepareContext => WsWorkspaceStage::PrepareContext,
@@ -2519,6 +2564,8 @@ mod tests {
             author_provider: ProviderName::ClaudeCode,
             reviewer_provider: Some(ProviderName::Codex),
             review_rounds: 2,
+            superpowers_enabled: true,
+            openspec_enabled: true,
             repository_path: None,
         }
     }
@@ -2819,6 +2866,40 @@ mod tests {
             }
             _ => panic!("expected SessionState"),
         }
+    }
+
+    #[tokio::test]
+    async fn empty_start_generation_records_default_prompt_for_audit() {
+        let (_tmp, lifecycle_store, mut engine) = persistent_test_engine();
+
+        engine
+            .handle_user_message(
+                String::new(),
+                Arc::new(FakeStreamingProvider),
+                empty_provider_commands(),
+            )
+            .await;
+
+        let user_message = engine
+            .session()
+            .messages
+            .iter()
+            .find(|message| message.role == "user")
+            .expect("user prompt message");
+        assert!(!user_message.content.trim().is_empty());
+        assert!(user_message.content.contains("Story Spec"));
+
+        let author_node = engine
+            .timeline_nodes
+            .iter()
+            .find(|node| node.node_type == TimelineNodeType::AuthorRun)
+            .expect("author run node");
+        let detail = lifecycle_store
+            .load_node_detail(&engine.session().session_id, &author_node.node_id)
+            .expect("author run detail");
+        let prompt = detail.prompt.as_ref().expect("prompt snapshot");
+        assert!(prompt.contains("Workspace 类型: Story Spec"));
+        assert!(prompt.contains(&user_message.content));
     }
 
     #[tokio::test]
@@ -3332,6 +3413,7 @@ mod tests {
                 name: "claude_code".to_string(),
                 model: "claude-opus-4-7".to_string(),
             }),
+            prompt: Some("Workspace 类型: Story Spec".to_string()),
             messages: vec![],
             streaming_content: "生成内容".to_string(),
             execution_events: vec![],
