@@ -76,6 +76,7 @@ export function WorkspacePage({
     enabled: UNLOAD_GUARDED_STAGES.has(store.stage),
     message: UNLOAD_GUARD_MESSAGE,
   });
+  const sessionReady = store.sessionId === sessionId;
 
   function handleStartGeneration() {
     sendStartGeneration(
@@ -194,6 +195,7 @@ export function WorkspacePage({
               contextNotes,
               sendContextNote,
               handleStartGeneration,
+              sessionReady,
               selectedNodeDetail,
               store,
               latestArtifact,
@@ -222,6 +224,7 @@ export function WorkspacePage({
 
       <StageActionsBar
         stage={store.stage}
+        disabled={!sessionReady}
         onStartGeneration={handleStartGeneration}
         onAbort={abort}
         onConfirm={() => sendHumanConfirm("confirm")}
@@ -239,6 +242,7 @@ function renderStagePanel({
   contextNotes,
   sendContextNote,
   handleStartGeneration,
+  sessionReady,
   selectedNodeDetail,
   store,
   latestArtifact,
@@ -252,6 +256,7 @@ function renderStagePanel({
   contextNotes: string[];
   sendContextNote: (content: string) => void;
   handleStartGeneration: () => void;
+  sessionReady: boolean;
   selectedNodeDetail: TimelineNodeDetail | null;
   store: WorkspaceWsState;
   latestArtifact: ArtifactVersion;
@@ -268,6 +273,7 @@ function renderStagePanel({
           onSendContextNote={sendContextNote}
           onStartGeneration={handleStartGeneration}
           contextNotes={contextNotes}
+          disabled={!sessionReady}
         />
         <PendingPermissionCards permissions={store.pendingPermissions} onRespond={respondPermission} />
       </div>

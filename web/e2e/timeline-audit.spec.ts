@@ -6,6 +6,7 @@ import {
   openWorkspaceSession,
   seedStoryWorkspace,
   sendContextNote,
+  setPermissionTimeout,
   waitForStage,
   waitForTimelineNode,
 } from "./helpers/workspace";
@@ -23,7 +24,9 @@ test.describe("B. Timeline 审计 + 会话恢复", () => {
     await waitForTimelineNode(page, "author_run");
     await page.getByTestId("timeline-node-author_run").click();
     await page.getByTestId("tab-streaming").click();
-    await expect(page.getByTestId("streaming-content")).not.toContainText("无流式输出");
+    await expect(page.getByTestId("streaming-content")).toContainText(
+      "E2E permission fixture stream",
+    );
     const streamingBefore = await page.getByTestId("streaming-content").textContent();
 
     await dropWorkspaceSocketFromServer(page, seeded.sessionId);
@@ -43,6 +46,7 @@ test.describe("B. Timeline 审计 + 会话恢复", () => {
 
   test("B2. permission_request 未应答断开并刷新后 snapshot 含 pending", async ({ page }) => {
     const seeded = await seedStoryWorkspace(page, { projectName: "Aria E2E B2" });
+    await setPermissionTimeout(page, 900_000);
     await enablePermissionFixture(page, seeded.sessionId);
 
     await openWorkspaceSession(page, seeded.sessionId);
@@ -112,13 +116,17 @@ test.describe("B. Timeline 审计 + 会话恢复", () => {
     for (let index = 0; index < 100; index += 1) {
       await sendContextNote(page, `note-${index}`);
     }
-    await expect(page.getByTestId("timeline-node-context_note")).toHaveCount(100);
+    await expect(page.getByTestId("timeline-node-context_note")).toHaveCount(100, {
+      timeout: 30_000,
+    });
 
     const startedAt = Date.now();
     await page.reload();
 
     await waitForStage(page, "准备中");
-    await expect(page.getByTestId("timeline-node-context_note")).toHaveCount(100);
+    await expect(page.getByTestId("timeline-node-context_note")).toHaveCount(100, {
+      timeout: 30_000,
+    });
     expect(Date.now() - startedAt).toBeLessThan(5_000);
   });
 });

@@ -28,12 +28,21 @@ const PING_INTERVAL_MS = 25_000;
 const SERVER_SILENCE_TIMEOUT_MS = 60_000;
 const STALE_SOCKET_CLOSE_CODE = 4000;
 const SERVER_SILENCE_CHECK_INTERVAL_MS = 15_000;
+const CONNECT_TIMEOUT_MS = 5_000;
 
 export function useWorkspaceWs(sessionId: string | null) {
   const wsRef = useRef<WebSocket | null>(null);
+  const connectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastMessageAtRef = useRef(Date.now());
   const [closeCode, setCloseCode] = useState<number | undefined>();
   const connectionStatus = useWorkspaceStore((state) => state.connectionStatus);
+
+  const clearConnectTimeout = useCallback(() => {
+    if (connectTimeoutRef.current) {
+      clearTimeout(connectTimeoutRef.current);
+      connectTimeoutRef.current = null;
+    }
+  }, []);
 
   const connect = useCallback(() => {
     if (!sessionId) return;
@@ -53,9 +62,20 @@ export function useWorkspaceWs(sessionId: string | null) {
     const url = `${protocol}//${window.location.host}/api/workspace-sessions/${sessionId}/ws`;
     const ws = new WebSocket(url);
     wsRef.current = ws;
+    clearConnectTimeout();
+    connectTimeoutRef.current = setTimeout(() => {
+      if (wsRef.current !== ws) return;
+      wsRef.current = null;
+      setCloseCode(1006);
+      const store = useWorkspaceStore.getState();
+      store.setConnectionStatus("disconnected");
+      store.setError("WebSocket 连接超时");
+      ws.close();
+    }, CONNECT_TIMEOUT_MS);
 
     ws.onopen = () => {
       if (wsRef.current !== ws) return;
+      clearConnectTimeout();
       const store = useWorkspaceStore.getState();
       lastMessageAtRef.current = Date.now();
       store.setConnectionStatus("connected");
@@ -72,6 +92,7 @@ export function useWorkspaceWs(sessionId: string | null) {
 
     ws.onclose = (event) => {
       if (wsRef.current !== ws) return;
+      clearConnectTimeout();
       wsRef.current = null;
       setCloseCode(event.code);
       useWorkspaceStore.getState().setConnectionStatus("disconnected");
@@ -79,8 +100,11 @@ export function useWorkspaceWs(sessionId: string | null) {
 
     ws.onerror = () => {
       if (wsRef.current !== ws) return;
+      clearConnectTimeout();
       const store = useWorkspaceStore.getState();
-      store.setConnectionStatus("error");
+      wsRef.current = null;
+      setCloseCode(1006);
+      store.setConnectionStatus("disconnected");
       store.setError("WebSocket 连接失败");
     };
 
@@ -93,7 +117,7 @@ export function useWorkspaceWs(sessionId: string | null) {
         // ignore malformed messages
       }
     };
-  }, [sessionId]);
+  }, [clearConnectTimeout, sessionId]);
 
   const {
     isReconnecting,
@@ -119,11 +143,12 @@ export function useWorkspaceWs(sessionId: string | null) {
     connect();
 
     return () => {
+      clearConnectTimeout();
       const ws = wsRef.current;
       wsRef.current = null;
       ws?.close(1000);
     };
-  }, [connect, sessionId]);
+  }, [clearConnectTimeout, connect, sessionId]);
 
   useEffect(() => {
     if (connectionStatus === "connected") {

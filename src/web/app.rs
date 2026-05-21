@@ -144,6 +144,10 @@ pub fn build_web_router(state: WebAppState) -> Router {
                 post(test_controls::drop_workspace_socket),
             )
             .route(
+                "/api/test/workspace-sessions/{session_id}/ws/reject-next",
+                post(test_controls::reject_next_workspace_sockets),
+            )
+            .route(
                 "/api/test/workspace-sessions/{session_id}/permission-fixture",
                 post(test_controls::enable_permission_fixture),
             )

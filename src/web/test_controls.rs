@@ -29,6 +29,7 @@ pub struct TestControls {
 #[derive(Default)]
 struct TestControlsInner {
     workspace_sockets: Mutex<HashMap<String, Vec<mpsc::Sender<WorkspaceSocketControl>>>>,
+    workspace_socket_rejects: Mutex<HashMap<String, u32>>,
     permission_fixture_sessions: Mutex<HashSet<String>>,
     review_fixture_sessions: Mutex<HashMap<String, ReviewFixture>>,
     permission_timeout: Mutex<Option<Duration>>,
@@ -64,12 +65,32 @@ pub struct WsTimeoutRequest {
     pub session_id: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct WsRejectRequest {
+    pub count: u32,
+}
+
 pub async fn drop_workspace_socket(
     State(state): State<WebAppState>,
     Path(session_id): Path<String>,
 ) -> Json<serde_json::Value> {
-    let dropped = state.test_controls.drop_workspace_socket(&session_id).await;
+    let dropped = state
+        .test_controls
+        .drop_workspace_socket_when_registered(&session_id, Duration::from_secs(2))
+        .await;
     Json(json!({"status": "ok", "dropped": dropped}))
+}
+
+pub async fn reject_next_workspace_sockets(
+    State(state): State<WebAppState>,
+    Path(session_id): Path<String>,
+    Json(request): Json<WsRejectRequest>,
+) -> Json<serde_json::Value> {
+    state
+        .test_controls
+        .reject_next_workspace_sockets(session_id, request.count)
+        .await;
+    Json(json!({"status": "ok"}))
 }
 
 pub async fn enable_permission_fixture(
@@ -141,6 +162,39 @@ impl TestControls {
             .push(sender);
     }
 
+    pub async fn reject_next_workspace_sockets(&self, session_id: String, count: u32) {
+        if count == 0 {
+            self.inner
+                .workspace_socket_rejects
+                .lock()
+                .expect("test controls workspace socket rejects lock")
+                .remove(&session_id);
+            return;
+        }
+        self.inner
+            .workspace_socket_rejects
+            .lock()
+            .expect("test controls workspace socket rejects lock")
+            .insert(session_id, count);
+    }
+
+    pub async fn consume_workspace_socket_reject(&self, session_id: &str) -> bool {
+        let mut rejects = self
+            .inner
+            .workspace_socket_rejects
+            .lock()
+            .expect("test controls workspace socket rejects lock");
+        let Some(count) = rejects.get_mut(session_id) else {
+            return false;
+        };
+        if *count <= 1 {
+            rejects.remove(session_id);
+        } else {
+            *count -= 1;
+        }
+        true
+    }
+
     pub async fn drop_workspace_socket(&self, session_id: &str) -> bool {
         let senders = self
             .inner
@@ -161,6 +215,23 @@ impl TestControls {
             }
         }
         dropped
+    }
+
+    pub async fn drop_workspace_socket_when_registered(
+        &self,
+        session_id: &str,
+        timeout: Duration,
+    ) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if self.drop_workspace_socket(session_id).await {
+                return true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
     }
 
     pub async fn enable_permission_fixture(&self, session_id: String) {
@@ -474,6 +545,62 @@ mod tests {
         assert_eq!(
             rx.recv().await,
             Some(WorkspaceSocketControl::CloseForTestDrop)
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_socket_drop_waits_for_late_session_registration() {
+        let controls = TestControls::default();
+        let delayed_controls = controls.clone();
+        let (tx, mut rx) = mpsc::channel(1);
+
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            delayed_controls
+                .register_workspace_socket("workspace_session_1".to_string(), tx)
+                .await;
+        });
+
+        let dropped = controls
+            .drop_workspace_socket_when_registered(
+                "workspace_session_1",
+                Duration::from_millis(200),
+            )
+            .await;
+
+        assert!(dropped);
+        assert_eq!(
+            rx.recv().await,
+            Some(WorkspaceSocketControl::CloseForTestDrop)
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_socket_rejects_are_consumed_per_session() {
+        let controls = TestControls::default();
+        controls
+            .reject_next_workspace_sockets("workspace_session_1".to_string(), 2)
+            .await;
+
+        assert!(
+            controls
+                .consume_workspace_socket_reject("workspace_session_1")
+                .await
+        );
+        assert!(
+            controls
+                .consume_workspace_socket_reject("workspace_session_1")
+                .await
+        );
+        assert!(
+            !controls
+                .consume_workspace_socket_reject("workspace_session_1")
+                .await
+        );
+        assert!(
+            !controls
+                .consume_workspace_socket_reject("workspace_session_2")
+                .await
         );
     }
 

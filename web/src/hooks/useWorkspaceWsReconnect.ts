@@ -62,9 +62,13 @@ export function useWorkspaceWsReconnect({
   }, [scheduleReconnect]);
 
   useEffect(() => {
-    if (!enabled || closeCode === 1000) {
+    if (closeCode === 1000) {
       clearReconnectTimeout();
       setIsReconnecting(false);
+      return;
+    }
+    if (!enabled) {
+      clearReconnectTimeout();
       return;
     }
 

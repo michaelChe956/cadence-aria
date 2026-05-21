@@ -252,6 +252,91 @@ describe("workspace ws store", () => {
     expect(useWorkspaceStore.getState().selectedNodeId).toBe("timeline_node_001");
   });
 
+  it("preserves a valid selected timeline node when a later snapshot arrives", () => {
+    const store = useWorkspaceStore.getState();
+    const authorNode = {
+      node_id: "timeline_node_002",
+      node_type: "author_run" as const,
+      agent: "fake" as const,
+      stage: "running",
+      round: null,
+      status: "failed" as const,
+      title: "Story Spec 生成",
+      summary: "连接断开，运行已中止",
+      started_at: "2026-05-20T14:30:00Z",
+      completed_at: "2026-05-20T14:30:01Z",
+      duration_ms: null,
+      artifact_ref: null,
+      provider_config_snapshot: {
+        author: "fake" as const,
+        reviewer: "fake" as const,
+        review_rounds: 1,
+      },
+    };
+    const abortedNode = {
+      node_id: "timeline_node_003",
+      node_type: "aborted_by_disconnect" as const,
+      agent: null,
+      stage: "prepare_context",
+      round: null,
+      status: "failed" as const,
+      title: "运行因断开中止",
+      summary: "last_active_run_id: run-1",
+      started_at: "2026-05-20T14:30:02Z",
+      completed_at: "2026-05-20T14:30:02Z",
+      duration_ms: 0,
+      artifact_ref: null,
+      provider_config_snapshot: {
+        author: "fake" as const,
+        reviewer: "fake" as const,
+        review_rounds: 1,
+      },
+    };
+
+    store.setSessionState({
+      session_id: "session_keep_selection",
+      workspace_type: "story",
+      stage: "prepare_context",
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "fake", reviewer: "fake" },
+      timeline_nodes: [authorNode, abortedNode],
+      active_node_id: "timeline_node_003",
+      artifact_versions: [],
+      timeline_node_details: {
+        timeline_node_002: makeNodeDetail({
+          node_id: "timeline_node_002",
+          streaming_content: "E2E permission fixture stream\n",
+        }),
+      },
+      active_run_id: null,
+    });
+    store.setSelectedNode("timeline_node_002");
+
+    store.setSessionState({
+      session_id: "session_keep_selection",
+      workspace_type: "story",
+      stage: "prepare_context",
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "fake", reviewer: "fake" },
+      timeline_nodes: [authorNode, abortedNode],
+      active_node_id: "timeline_node_003",
+      artifact_versions: [],
+      timeline_node_details: {
+        timeline_node_002: makeNodeDetail({
+          node_id: "timeline_node_002",
+          streaming_content: "E2E permission fixture stream\n",
+        }),
+      },
+      active_run_id: null,
+    });
+
+    expect(useWorkspaceStore.getState().selectedNodeId).toBe("timeline_node_002");
+  });
+
   it("applies timeline node details and active run id from a session snapshot", () => {
     const store = useWorkspaceStore.getState();
     const detail = makeNodeDetail({

@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket, close_code};
 use axum::extract::{Path, State, WebSocketUpgrade};
+use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{Mutex, mpsc};
@@ -33,7 +34,15 @@ pub async fn workspace_ws(
     Path(session_id): Path<String>,
     State(state): State<WebAppState>,
 ) -> impl IntoResponse {
+    if state
+        .test_controls
+        .consume_workspace_socket_reject(&session_id)
+        .await
+    {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
     ws.on_upgrade(move |socket| handle_workspace_socket(socket, session_id, state))
+        .into_response()
 }
 
 #[derive(Debug)]

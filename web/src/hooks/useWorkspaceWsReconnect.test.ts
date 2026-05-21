@@ -90,6 +90,30 @@ describe("useWorkspaceWsReconnect", () => {
     expect(onReconnect).toHaveBeenCalledTimes(1);
     expect(result.current.attemptCount).toBe(1);
   });
+
+  it("keeps the reconnect banner state while a retry attempt is connecting", () => {
+    const onReconnect = vi.fn();
+    const { result, rerender } = renderHook(
+      ({ enabled }) =>
+        useWorkspaceWsReconnect({
+          enabled,
+          onReconnect,
+          closeCode: 1006,
+        }),
+      { initialProps: { enabled: true } },
+    );
+
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(result.current.isReconnecting).toBe(true);
+    expect(result.current.attemptCount).toBe(1);
+
+    rerender({ enabled: false });
+
+    expect(result.current.isReconnecting).toBe(true);
+    expect(result.current.attemptCount).toBe(1);
+  });
 });
 
 function setDocumentHidden(value: boolean) {

@@ -241,32 +241,42 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
   ...initialState,
 
   setSessionState: (state) =>
-    set({
-      sessionId: state.session_id,
-      workspaceType: state.workspace_type,
-      stage: state.stage,
-      visitedStages: visitedStagesFor(state.stage),
-      messages: state.messages,
-      checkpoints: state.checkpoints,
-      artifact: state.artifact,
-      providers: state.providers,
-      streamingContent: "",
-      pendingPermissions: [],
-      providerStatus: "starting",
-      executionEvents: [],
-      timelineNodes: state.timeline_nodes ?? [],
-      activeNodeId: state.active_node_id ?? null,
-      selectedNodeId:
-        state.active_node_id ?? state.timeline_nodes?.[state.timeline_nodes.length - 1]?.node_id ?? null,
-      nodeDetails:
-        state.timeline_node_details ??
-        detailsForTimelineNodes(state.timeline_nodes ?? [], state.session_id),
-      artifactVersions: state.artifact_versions ?? [],
-      pendingDecision: null,
-      pendingReviewDecision: null,
-      pendingReviewerSummary: null,
-      error: null,
-      activeRunId: state.active_run_id ?? null,
+    set((prev) => {
+      const timelineNodes = state.timeline_nodes ?? [];
+      const selectedNodeStillExists =
+        prev.sessionId === state.session_id &&
+        prev.selectedNodeId !== null &&
+        timelineNodes.some((node) => node.node_id === prev.selectedNodeId);
+      const defaultSelectedNodeId =
+        state.active_node_id ?? timelineNodes[timelineNodes.length - 1]?.node_id ?? null;
+
+      return {
+        sessionId: state.session_id,
+        workspaceType: state.workspace_type,
+        stage: state.stage,
+        visitedStages: visitedStagesFor(state.stage),
+        messages: state.messages,
+        checkpoints: state.checkpoints,
+        artifact: state.artifact,
+        providers: state.providers,
+        streamingContent: "",
+        pendingPermissions: [],
+        providerStatus: "starting",
+        executionEvents: [],
+        timelineNodes,
+        activeNodeId: state.active_node_id ?? null,
+        selectedNodeId: selectedNodeStillExists ? prev.selectedNodeId : defaultSelectedNodeId,
+        nodeDetails: {
+          ...detailsForTimelineNodes(timelineNodes, state.session_id),
+          ...(state.timeline_node_details ?? {}),
+        },
+        artifactVersions: state.artifact_versions ?? [],
+        pendingDecision: null,
+        pendingReviewDecision: null,
+        pendingReviewerSummary: null,
+        error: null,
+        activeRunId: state.active_run_id ?? null,
+      };
     }),
 
   appendStreamChunk: (content, nodeId) =>
@@ -492,7 +502,12 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
 export function selectPrepareContextNotes(state: WorkspaceWsState) {
   return state.timelineNodes
     .filter((node) => node.node_type === "context_note")
-    .map((node) => state.nodeDetails[node.node_id]?.streaming_content ?? node.summary ?? "")
+    .map((node) => {
+      const detailContent = state.nodeDetails[node.node_id]?.streaming_content;
+      return detailContent && detailContent.trim().length > 0
+        ? detailContent
+        : node.summary ?? "";
+    })
     .filter((content) => content.trim().length > 0);
 }
 

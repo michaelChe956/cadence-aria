@@ -104,6 +104,7 @@ describe("WorkspacePage", () => {
   it("starts generation from a prepared workspace through protocol v2", async () => {
     const api = mockWorkspaceWs();
     useWorkspaceStore.setState({
+      sessionId: "workspace_session_0001",
       stage: "prepare_context",
       providers: { author: "fake", reviewer: "codex" },
     });
@@ -121,6 +122,21 @@ describe("WorkspacePage", () => {
     );
     expect(api.startGeneration).not.toHaveBeenCalled();
     expect(api.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("keeps start generation disabled until the session snapshot is hydrated", async () => {
+    const api = mockWorkspaceWs();
+    useWorkspaceStore.setState({
+      sessionId: null,
+      stage: "prepare_context",
+      providers: null,
+    });
+
+    render(<WorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+
+    expect(screen.getAllByRole("button", { name: "开始生成" })[0]).toBeDisabled();
+    await userEvent.click(screen.getAllByRole("button", { name: "开始生成" })[0]);
+    expect(api.sendStartGeneration).not.toHaveBeenCalled();
   });
 
   it("keeps provider config visible and disables controls outside prepare context", () => {

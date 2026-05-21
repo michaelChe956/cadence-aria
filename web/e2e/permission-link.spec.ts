@@ -60,17 +60,21 @@ test.describe("G. Permission 链路", () => {
 
   test("G4. permission 超时清理", async ({ page }) => {
     const seeded = await seedStoryWorkspace(page, { projectName: "Aria E2E G4" });
-    await setPermissionTimeout(page, 500);
-    await enablePermissionFixture(page, seeded.sessionId);
-    await openWorkspaceSession(page, seeded.sessionId);
-    await clickStartGeneration(page);
-    await waitForStage(page, "运行中");
-    await expect(page.getByText("E2E permission fixture request")).toBeVisible();
+    try {
+      await setPermissionTimeout(page, 500);
+      await enablePermissionFixture(page, seeded.sessionId);
+      await openWorkspaceSession(page, seeded.sessionId);
+      await clickStartGeneration(page);
+      await waitForStage(page, "运行中");
+      await expect(page.getByText("E2E permission fixture request")).toBeVisible();
 
-    await expect(page.getByRole("alert")).toContainText("PERMISSION_TIMEOUT", {
-      timeout: 10_000,
-    });
-    await waitForStage(page, "准备中", 10_000);
+      await expect(page.getByRole("alert")).toContainText("PERMISSION_TIMEOUT", {
+        timeout: 10_000,
+      });
+      await waitForStage(page, "准备中", 10_000);
+    } finally {
+      await setPermissionTimeout(page, 900_000);
+    }
   });
 
   test("G5. 全链路 trace log", async ({ page }) => {

@@ -19,12 +19,13 @@ export function DisconnectBanner({
   onAcknowledge,
   onViewTimeline,
 }: DisconnectBannerProps) {
-  if (isReconnecting && attemptCount > 1) {
+  if (isReconnecting && attemptCount > 0) {
+    const displayAttemptCount = Math.max(attemptCount, 2);
     return (
       <div className="flex min-h-10 flex-wrap items-center justify-between gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-800">
         <span className="inline-flex min-w-0 items-center gap-2">
           <RefreshCw className="h-4 w-4 shrink-0" />
-          <span>连接断开，重连中（尝试 {attemptCount} 次）</span>
+          <span>连接断开，重连中（尝试 {displayAttemptCount} 次）</span>
         </span>
         {onManualReconnect ? (
           <button

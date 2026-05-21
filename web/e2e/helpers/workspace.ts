@@ -206,6 +206,20 @@ export async function sendWorkspaceSocketMessage(page: Page, payload: unknown) {
 export async function dropWorkspaceSocketFromServer(page: Page, sessionId: string) {
   const response = await page.request.post(`/api/test/workspace-sessions/${sessionId}/ws/drop`);
   expect(response).toBeOK();
+  const body = await response.json();
+  expect(body.dropped).toBe(true);
+}
+
+export async function rejectNextWorkspaceSockets(
+  page: Page,
+  sessionId: string,
+  count: number,
+) {
+  const response = await page.request.post(
+    `/api/test/workspace-sessions/${sessionId}/ws/reject-next`,
+    { data: { count } },
+  );
+  expect(response).toBeOK();
 }
 
 export async function enablePermissionFixture(page: Page, sessionId: string) {

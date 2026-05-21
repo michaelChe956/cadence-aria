@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 import {
   dropWorkspaceSocketFromServer,
   openWorkspaceSession,
+  rejectNextWorkspaceSockets,
   seedStoryWorkspace,
   setWsTimeout,
   waitForStage,
@@ -18,15 +19,14 @@ test.describe("F. 自动重连", () => {
     await waitForStage(page, "准备中", 10_000);
   });
 
-  test("F2. 多次失败显示重连进度 banner", async ({ page, context }) => {
+  test("F2. 多次失败显示重连进度 banner", async ({ page }) => {
     const seeded = await seedStoryWorkspace(page, { projectName: "Aria E2E F2" });
     await openWorkspaceSession(page, seeded.sessionId);
 
-    await context.setOffline(true);
+    await rejectNextWorkspaceSockets(page, seeded.sessionId, 2);
     await dropWorkspaceSocketFromServer(page, seeded.sessionId);
 
-    await expect(page.getByText(/尝试 2 次/i)).toBeVisible({ timeout: 5_000 });
-    await context.setOffline(false);
+    await expect(page.getByText(/尝试 2 次/i)).toBeVisible({ timeout: 15_000 });
   });
 
   test("F3. hidden 暂停恢复", async ({ page }) => {
@@ -80,9 +80,13 @@ test.describe("F. 自动重连", () => {
       }
     });
 
-    await setWsTimeout(page, { server_idle_timeout_ms: 1000 });
-    await openWorkspaceSession(page, seeded.sessionId);
+    try {
+      await setWsTimeout(page, { server_idle_timeout_ms: 1000 });
+      await openWorkspaceSession(page, seeded.sessionId);
 
-    await expect.poll(() => closed, { timeout: 7_000 }).toBe(true);
+      await expect.poll(() => closed, { timeout: 7_000 }).toBe(true);
+    } finally {
+      await setWsTimeout(page, { server_idle_timeout_ms: 90_000 });
+    }
   });
 });

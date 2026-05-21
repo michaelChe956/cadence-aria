@@ -468,6 +468,58 @@ describe("useWorkspaceWs", () => {
     expect(MockWebSocket.instances[1].url).toBe(harness.ws.url);
   });
 
+  it("keeps reconnecting after a replacement websocket errors", () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const harness = renderWorkspaceHook("session_001");
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.close(1006);
+    });
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+
+    const replacement = MockWebSocket.instances[1];
+    expect(replacement).toBeDefined();
+    act(() => {
+      replacement.onerror?.(new Event("error"));
+    });
+    expect(useWorkspaceStore.getState().connectionStatus).toBe("disconnected");
+
+    act(() => {
+      vi.advanceTimersByTime(2000);
+    });
+
+    expect(MockWebSocket.instances).toHaveLength(3);
+  });
+
+  it("keeps reconnecting when a replacement websocket stays connecting", () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const harness = renderWorkspaceHook("session_001");
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.close(1006);
+    });
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+
+    expect(MockWebSocket.instances[1].readyState).toBe(MockWebSocket.CONNECTING);
+    act(() => {
+      vi.advanceTimersByTime(5000);
+    });
+    expect(useWorkspaceStore.getState().connectionStatus).toBe("disconnected");
+
+    act(() => {
+      vi.advanceTimersByTime(2000);
+    });
+    expect(MockWebSocket.instances).toHaveLength(3);
+  });
+
   it("keeps pending permission requests when the socket is not open", () => {
     const harness = renderWorkspaceHook();
     useWorkspaceStore.getState().addPermissionRequest({

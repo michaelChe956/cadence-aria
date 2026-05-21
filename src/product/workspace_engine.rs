@@ -2055,17 +2055,24 @@ impl WorkspaceEngine {
     where
         F: FnOnce(&mut NodeDetail),
     {
+        let Some(store) = &self.lifecycle_store else {
+            return Ok(());
+        };
+
         let Some(node) = self
             .timeline_nodes
             .iter()
             .find(|node| node.node_id == node_id)
             .cloned()
+            .or_else(|| {
+                store
+                    .load_timeline_nodes(&self.session.session_id)
+                    .ok()?
+                    .into_iter()
+                    .find(|node| node.node_id == node_id)
+            })
         else {
             return Err(format!("timeline node not found: {node_id}"));
-        };
-
-        let Some(store) = &self.lifecycle_store else {
-            return Ok(());
         };
 
         let mut detail = match store.load_node_detail(&self.session.session_id, node_id) {

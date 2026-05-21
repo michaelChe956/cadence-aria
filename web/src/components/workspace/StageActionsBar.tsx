@@ -4,6 +4,7 @@ import type { RevisionPath } from "../../api/types";
 
 interface StageActionsBarProps {
   stage: string;
+  disabled?: boolean;
   onStartGeneration?: () => void;
   onAbort?: () => void;
   onConfirm?: () => void;
@@ -14,6 +15,7 @@ interface StageActionsBarProps {
 
 export function StageActionsBar({
   stage,
+  disabled = false,
   onStartGeneration,
   onAbort,
   onConfirm,
@@ -27,7 +29,12 @@ export function StageActionsBar({
       className="flex min-h-12 flex-wrap items-center justify-end gap-2 border-t border-[var(--aria-line)] bg-[var(--aria-panel)] px-4 py-2"
     >
       {stage === "prepare_context" && onStartGeneration ? (
-        <ActionButton variant="primary" onClick={onStartGeneration} icon={<Play className="h-4 w-4" />}>
+        <ActionButton
+          variant="primary"
+          onClick={onStartGeneration}
+          disabled={disabled}
+          icon={<Play className="h-4 w-4" />}
+        >
           开始生成
         </ActionButton>
       ) : null}
@@ -79,11 +86,13 @@ export function StageActionsBar({
 function ActionButton({
   variant,
   onClick,
+  disabled = false,
   icon,
   children,
 }: {
   variant: "primary" | "secondary" | "success" | "warning" | "danger";
   onClick: () => void;
+  disabled?: boolean;
   icon: ReactNode;
   children: string;
 }) {
@@ -91,9 +100,10 @@ function ActionButton({
     <button
       type="button"
       onClick={onClick}
+      disabled={disabled}
       className={`inline-flex h-8 items-center justify-center gap-2 rounded-md border px-3 text-sm font-semibold ${variantClass(
         variant,
-      )}`}
+      )} disabled:opacity-50`}
     >
       {icon}
       {children}

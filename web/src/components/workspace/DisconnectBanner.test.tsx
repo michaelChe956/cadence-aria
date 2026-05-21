@@ -27,8 +27,8 @@ describe("DisconnectBanner", () => {
     expect(onManualReconnect).toHaveBeenCalled();
   });
 
-  it("does not show reconnect progress for the first attempt", () => {
-    const { container } = render(<DisconnectBanner isReconnecting={true} attemptCount={1} />);
+  it("does not show reconnect progress before a retry attempt fires", () => {
+    const { container } = render(<DisconnectBanner isReconnecting={true} attemptCount={0} />);
 
     expect(container).toBeEmptyDOMElement();
   });
