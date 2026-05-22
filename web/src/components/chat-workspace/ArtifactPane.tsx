@@ -1,6 +1,8 @@
 import { ChevronDown, ChevronRight, FileText, GitCompare } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { ArtifactVersion } from "../../state/workspace-ws-store";
+import { MonacoDiffViewer } from "../shared/MonacoDiffViewer";
+import { MonacoViewer } from "../shared/MonacoViewer";
 
 interface ArtifactPaneProps {
   artifactVersions: ArtifactVersion[];
@@ -92,50 +94,19 @@ export function ArtifactPane({ artifactVersions, artifact, className = "" }: Art
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-auto p-3">
+      <div className="min-h-0 flex-1 p-3">
         {showDiff && selected && previous ? (
-          <pre
-            data-testid="artifact-diff"
-            className="mb-3 whitespace-pre-wrap rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-3 font-mono text-xs text-[var(--aria-ink)]"
-          >
-            {lineDiff(previous.markdown, selected.markdown)}
-          </pre>
-        ) : null}
-        <MarkdownPreview markdown={markdown} />
+          <MonacoDiffViewer
+            original={previous.markdown}
+            modified={selected.markdown}
+            language="markdown"
+            height="100%"
+          />
+        ) : (
+          <MonacoViewer value={markdown} language="markdown" height="100%" />
+        )}
       </div>
     </aside>
-  );
-}
-
-function MarkdownPreview({ markdown }: { markdown: string }) {
-  const blocks = markdown.split(/\n{2,}/).filter((block) => block.trim().length > 0);
-  return (
-    <div className="space-y-3 text-sm text-[var(--aria-ink)]">
-      {blocks.map((block, index) => renderBlock(block, index))}
-    </div>
-  );
-}
-
-function renderBlock(block: string, index: number) {
-  const trimmed = block.trim();
-  if (trimmed.startsWith("# ")) {
-    return (
-      <h1 key={index} className="text-lg font-semibold text-[var(--aria-ink)]">
-        {trimmed.slice(2)}
-      </h1>
-    );
-  }
-  if (trimmed.startsWith("## ")) {
-    return (
-      <h2 key={index} className="text-base font-semibold text-[var(--aria-ink)]">
-        {trimmed.slice(3)}
-      </h2>
-    );
-  }
-  return (
-    <div key={index} className="whitespace-pre-wrap">
-      {block}
-    </div>
   );
 }
 
@@ -145,15 +116,4 @@ function previousVersion(versions: ArtifactVersion[], selectedVersion: number | 
   }
   const index = versions.findIndex((version) => version.version === selectedVersion);
   return index > 0 ? versions[index - 1] : null;
-}
-
-function lineDiff(previous: string, current: string) {
-  const previousLines = previous.split("\n");
-  const currentLines = current.split("\n");
-  const removed = previousLines.filter((line) => !currentLines.includes(line));
-  const added = currentLines.filter((line) => !previousLines.includes(line));
-  return [
-    ...removed.map((line) => `- ${line}`),
-    ...added.map((line) => `+ ${line}`),
-  ].join("\n");
 }

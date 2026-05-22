@@ -38,6 +38,7 @@ export function ChatInputBar({
     }
 
     if (isHumanConfirm) {
+      useWorkspaceStore.getState().resolveGateEntry("request-change");
       appendOptimisticEntry("human_decision", trimmedInput);
       onSendHumanDecision(trimmedInput);
     } else {

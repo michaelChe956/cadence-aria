@@ -89,6 +89,28 @@ describe("chat workspace p1 entries", () => {
     expect(onDecision).toHaveBeenNthCalledWith(2, "terminate");
   });
 
+  it.each([
+    ["confirm", "已确认"],
+    ["request-change", "已要求修改"],
+    ["terminate", "已终止"],
+  ] as const)("renders resolved gate prompt entries as %s", (resolution, label) => {
+    const onDecision = vi.fn();
+    const entry = makeEntry({
+      type: "gate_prompt",
+      role: "system",
+      content: "等待人工确认",
+      resolved: true,
+      resolution,
+    });
+
+    render(<GatePromptEntry entry={entry} onDecision={onDecision} />);
+
+    expect(screen.getByText(label)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "确认" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "终止" })).not.toBeInTheDocument();
+    expect(onDecision).not.toHaveBeenCalled();
+  });
+
   it("renders human decision entries", () => {
     const entry = makeEntry({
       type: "human_decision",

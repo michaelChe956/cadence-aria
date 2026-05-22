@@ -39,7 +39,7 @@ import {
   CreateLifecycleIssueDialog,
   type CreateLifecycleIssuePayload,
 } from "./CreateLifecycleIssueDialog";
-import { LifecycleCardDrawer } from "./LifecycleCardDrawer";
+import { LifecycleCardDrawer, type DrawerEntity } from "./LifecycleCardDrawer";
 import { LifecycleColumn } from "./LifecycleColumn";
 import { ProjectSidebar } from "./ProjectSidebar";
 type ProviderWorkspaceLaunchTarget = "story" | "design" | "work_item";
@@ -518,7 +518,7 @@ export function IssueLifecycleWorkbench({
       {isDrawerOpen && focusedEntity ? (
         <div className="fixed right-0 top-0 z-50 h-full w-[min(480px,100vw)] shadow-xl">
           <LifecycleCardDrawer
-            entity={focusedEntity}
+            entity={toDrawerEntity(focusedEntity)}
             onClose={closeDrawer}
             onOpenWorkspace={() =>
               void handleOpenWorkspaceFromDrawer(focusedEntity)
@@ -605,6 +605,35 @@ function findCardInColumns(
       ...columns.work_item,
     ].find((card) => card.id === entityId) ?? null
   );
+}
+
+function toDrawerEntity(card: LifecycleCardData): DrawerEntity {
+  const base = {
+    id: card.id,
+    kind: card.kind,
+    title: card.title,
+    status: card.status,
+    version: card.version,
+  };
+
+  if (card.kind === "issue") {
+    return {
+      ...base,
+      description: card.raw.description ?? undefined,
+      artifacts: card.raw.artifacts,
+      phase: card.raw.phase,
+      createdAt: card.raw.created_at,
+    };
+  }
+
+  if (card.kind === "story_spec" || card.kind === "design_spec") {
+    return {
+      ...base,
+      artifactVersions: card.artifactVersions,
+    };
+  }
+
+  return base;
 }
 
 function defaultLaunchTitle(launchTarget: {

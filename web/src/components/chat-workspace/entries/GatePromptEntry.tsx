@@ -10,6 +10,7 @@ export function GatePromptEntry({
   onDecision?: (decision: "confirm" | "terminate") => void;
 }) {
   const summary = summaryFromEntry(entry);
+  const isResolved = entry.resolved === true;
 
   return (
     <ChatEntryContainer
@@ -21,7 +22,9 @@ export function GatePromptEntry({
       <div className="space-y-3">
         <div className="text-sm text-[var(--aria-ink)]">{entry.content}</div>
         {summary ? <div className="text-xs text-[var(--aria-ink-muted)]">{summary}</div> : null}
-        {onDecision ? (
+        {isResolved ? (
+          <ResolutionBadge resolution={entry.resolution} />
+        ) : onDecision ? (
           <div className="flex flex-wrap justify-end gap-2">
             <button
               type="button"
@@ -44,6 +47,31 @@ export function GatePromptEntry({
       </div>
     </ChatEntryContainer>
   );
+}
+
+function ResolutionBadge({ resolution }: { resolution?: string }) {
+  if (resolution === "confirm") {
+    return (
+      <span className="inline-flex items-center rounded-md bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700 ring-1 ring-emerald-200">
+        已确认
+      </span>
+    );
+  }
+  if (resolution === "request-change") {
+    return (
+      <span className="inline-flex items-center rounded-md bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-700 ring-1 ring-amber-200">
+        已要求修改
+      </span>
+    );
+  }
+  if (resolution === "terminate") {
+    return (
+      <span className="inline-flex items-center rounded-md bg-red-50 px-2 py-1 text-xs font-semibold text-red-700 ring-1 ring-red-200">
+        已终止
+      </span>
+    );
+  }
+  return null;
 }
 
 function summaryFromEntry(entry: ChatEntry) {

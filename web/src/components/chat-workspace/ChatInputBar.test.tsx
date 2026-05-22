@@ -56,6 +56,13 @@ describe("ChatInputBar", () => {
 
   it("submits human confirm feedback with optimistic insertion", () => {
     const onSendHumanDecision = vi.fn();
+    useWorkspaceStore.getState().appendChatEntry({
+      id: "gate-1",
+      type: "gate_prompt",
+      role: "system",
+      content: "等待人工确认",
+      timestamp: "2026-05-21T10:00:00Z",
+    });
 
     render(
       <ChatInputBar
@@ -72,6 +79,11 @@ describe("ChatInputBar", () => {
 
     expect(onSendHumanDecision).toHaveBeenCalledWith("补充失败路径");
     expect(useWorkspaceStore.getState().chatEntries).toEqual([
+      expect.objectContaining({
+        id: "gate-1",
+        resolved: true,
+        resolution: "request-change",
+      }),
       expect.objectContaining({
         type: "human_decision",
         role: "user",

@@ -664,4 +664,48 @@ describe("workspace ws store", () => {
       },
     ]);
   });
+
+  it("resolves the latest unresolved gate prompt entry", () => {
+    const store = useWorkspaceStore.getState();
+    store.appendChatEntry({
+      id: "gate-1",
+      type: "gate_prompt",
+      role: "system",
+      content: "等待人工确认 1",
+      timestamp: "2026-05-21T10:00:00Z",
+    });
+    store.appendChatEntry({
+      id: "gate-2",
+      type: "gate_prompt",
+      role: "system",
+      content: "等待人工确认 2",
+      timestamp: "2026-05-21T10:01:00Z",
+    });
+
+    store.resolveGateEntry("request-change");
+    const firstResolution = useWorkspaceStore.getState().chatEntries;
+    expect(firstResolution[0]).toEqual(expect.objectContaining({ id: "gate-1" }));
+    expect(firstResolution[0]).not.toHaveProperty("resolved");
+    expect(firstResolution[1]).toEqual(
+      expect.objectContaining({
+        id: "gate-2",
+        resolved: true,
+        resolution: "request-change",
+      }),
+    );
+
+    store.resolveGateEntry("confirm");
+    expect(useWorkspaceStore.getState().chatEntries).toEqual([
+      expect.objectContaining({
+        id: "gate-1",
+        resolved: true,
+        resolution: "confirm",
+      }),
+      expect.objectContaining({
+        id: "gate-2",
+        resolved: true,
+        resolution: "request-change",
+      }),
+    ]);
+  });
 });

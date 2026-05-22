@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import type { NodeDetail, WorkspaceProviderName } from "../api/types";
-import type { ChatEntry, ChatEntryRole } from "./chat-entries";
+import type { ChatEntry, ChatEntryResolution, ChatEntryRole } from "./chat-entries";
 
 export type WsConnectionStatus = "disconnected" | "connecting" | "connected" | "error";
 export type ProviderStatus =
@@ -183,6 +183,7 @@ export interface WorkspaceWsActions {
   appendStreamChunk: (content: string, nodeId?: string | null) => void;
   completeMessage: (messageId: string, checkpointId: string, nodeId?: string | null) => void;
   appendChatEntry: (entry: ChatEntry) => void;
+  resolveGateEntry: (resolution: ChatEntryResolution) => void;
   updateStreamingEntry: (entryId: string, content: string) => void;
   finalizeStreamingEntry: (entryId: string) => void;
   rebuildChatEntries: () => void;
@@ -369,6 +370,19 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
         chatEntries: next,
         activeStreamEntryId: entry.type === "provider_stream" ? entry.id : prev.activeStreamEntryId,
       };
+    }),
+
+  resolveGateEntry: (resolution) =>
+    set((prev) => {
+      const entries = [...prev.chatEntries];
+      for (let index = entries.length - 1; index >= 0; index -= 1) {
+        const entry = entries[index];
+        if (entry.type === "gate_prompt" && entry.resolved !== true) {
+          entries[index] = { ...entry, resolved: true, resolution };
+          return { chatEntries: entries };
+        }
+      }
+      return { chatEntries: prev.chatEntries };
     }),
 
   updateStreamingEntry: (entryId, content) =>

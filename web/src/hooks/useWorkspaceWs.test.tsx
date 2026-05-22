@@ -621,6 +621,31 @@ describe("useWorkspaceWs", () => {
     ]);
   });
 
+  it("marks the latest gate prompt resolved when a human confirm decision is sent", () => {
+    const harness = renderWorkspaceHook();
+    useWorkspaceStore.getState().appendChatEntry({
+      id: "gate-1",
+      type: "gate_prompt",
+      role: "system",
+      content: "等待人工确认",
+      timestamp: "2026-05-21T10:00:00Z",
+    });
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.sent.length = 0;
+      harness.api.sendHumanConfirm("terminate");
+    });
+
+    expect(useWorkspaceStore.getState().chatEntries).toEqual([
+      expect.objectContaining({
+        id: "gate-1",
+        resolved: true,
+        resolution: "terminate",
+      }),
+    ]);
+  });
+
   it("keeps deprecated sendMessage as a context note sender", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const harness = renderWorkspaceHook();

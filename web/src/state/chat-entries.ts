@@ -13,6 +13,7 @@ export type ChatEntryType =
   | "error";
 
 export type ChatEntryRole = "user" | "author" | "reviewer" | "system";
+export type ChatEntryResolution = "confirm" | "request-change" | "terminate";
 
 export interface ChatEntry {
   id: string;
@@ -22,4 +23,6 @@ export interface ChatEntry {
   timestamp: string;
   node_id?: string;
   metadata?: Record<string, unknown>;
+  resolved?: boolean;
+  resolution?: ChatEntryResolution;
 }

@@ -18,6 +18,23 @@ vi.mock("../hooks/useUnloadGuard", () => ({
   useUnloadGuard: vi.fn(),
 }));
 
+vi.mock("../components/shared/MonacoViewer", () => ({
+  MonacoViewer: ({ value, height }: { value: string; height?: string }) => (
+    <div data-testid="monaco-viewer" data-height={height}>
+      {value}
+    </div>
+  ),
+}));
+
+vi.mock("../components/shared/MonacoDiffViewer", () => ({
+  MonacoDiffViewer: ({ original, modified }: { original: string; modified: string }) => (
+    <div data-testid="monaco-diff-viewer">
+      {original}
+      {modified}
+    </div>
+  ),
+}));
+
 type WorkspaceWsApi = ReturnType<typeof useWorkspaceWs>;
 
 function mockWorkspaceWs(overrides: Partial<WorkspaceWsApi> = {}) {
@@ -86,7 +103,7 @@ describe("ChatWorkspacePage", () => {
     expect(screen.getAllByText(/Story Spec #workspace_session_0001/).length).toBeGreaterThan(0);
     expect(screen.getByTestId("timeline-node-list")).toBeInTheDocument();
     expect(screen.getByTestId("chat-entry-list")).toHaveTextContent("review output");
-    expect(screen.getByTestId("artifact-pane")).toHaveTextContent("Artifact v1");
+    expect(screen.getByTestId("monaco-viewer")).toHaveTextContent("Artifact v1");
     expect(screen.getByTestId("workspace-status-bar")).toHaveTextContent("running");
   });
 

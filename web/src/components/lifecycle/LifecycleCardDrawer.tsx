@@ -1,6 +1,8 @@
 import { ExternalLink, FileText, GitBranch, Layers3, ListChecks, ScrollText, X } from "lucide-react";
-import { useState } from "react";
-import type { ArtifactVersion } from "../../api/types";
+import { useEffect, useMemo, useState } from "react";
+import type { ArtifactVersion, ProductIssueArtifact } from "../../api/types";
+import { MonacoDiffViewer } from "../shared/MonacoDiffViewer";
+import { MonacoViewer } from "../shared/MonacoViewer";
 
 export type DrawerEntityKind = "issue" | "story_spec" | "design_spec" | "work_item";
 
@@ -11,6 +13,10 @@ export interface DrawerEntity {
   status: string;
   version: number | null;
   artifactVersions?: ArtifactVersion[];
+  description?: string;
+  artifacts?: ProductIssueArtifact[];
+  phase?: string;
+  createdAt?: string;
 }
 
 interface LifecycleCardDrawerProps {
@@ -50,11 +56,24 @@ export function LifecycleCardDrawer({
   onGenerateNext,
 }: LifecycleCardDrawerProps) {
   const [showAllVersions, setShowAllVersions] = useState(false);
-  const versions = entity.artifactVersions ?? [];
+  const [selectedVersionIndex, setSelectedVersionIndex] = useState(0);
+  const [showVersionDiff, setShowVersionDiff] = useState(false);
+  const versions = useMemo(
+    () => [...(entity.artifactVersions ?? [])].sort((left, right) => right.version - left.version),
+    [entity.artifactVersions],
+  );
   const visibleVersions = showAllVersions ? versions : versions.slice(0, 3);
+  const selectedArtifact = versions[selectedVersionIndex] ?? null;
   const latestVersion = versions[0] ?? null;
+  const canShowDiff = selectedVersionIndex > 0 && selectedArtifact !== null && latestVersion !== null;
   const nextActionLabel = entity.status === "confirmed" ? NEXT_ACTION_LABELS[entity.kind] : null;
   const Icon = iconForKind(entity.kind);
+
+  useEffect(() => {
+    setSelectedVersionIndex(0);
+    setShowVersionDiff(false);
+    setShowAllVersions(false);
+  }, [entity.id]);
 
   return (
     <aside
@@ -96,14 +115,25 @@ export function LifecycleCardDrawer({
       </header>
 
       <div className="min-h-0 flex-1 overflow-auto">
-        {versions.length > 0 ? (
+        {entity.kind === "issue" ? (
+          <IssueDetail entity={entity} />
+        ) : versions.length > 0 ? (
           <section className="border-b border-[var(--aria-line)] px-4 py-3">
             <h3 className="mb-2 text-sm font-semibold text-[var(--aria-ink)]">版本历史</h3>
             <div className="space-y-2">
-              {visibleVersions.map((version) => (
-                <div
+              {visibleVersions.map((version, index) => (
+                <button
+                  type="button"
                   key={`${version.version}-${version.source_node_id}`}
-                  className="rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-2 py-2 text-xs"
+                  onClick={() => {
+                    setSelectedVersionIndex(index);
+                    setShowVersionDiff(false);
+                  }}
+                  className={`w-full rounded-md border px-2 py-2 text-left text-xs transition-colors ${
+                    index === selectedVersionIndex
+                      ? "border-[var(--aria-primary)] bg-[var(--aria-primary)]/5"
+                      : "border-[var(--aria-line)] bg-[var(--aria-panel-muted)] hover:border-[var(--aria-primary)]/50"
+                  }`}
                 >
                   <div className="flex min-w-0 items-center justify-between gap-2">
                     <span className="font-semibold text-[var(--aria-ink)]">v{version.version}</span>
@@ -116,7 +146,7 @@ export function LifecycleCardDrawer({
                     {version.reviewed_by ? ` · 审核: ${providerLabel(version.reviewed_by)}` : ""}
                     {version.confirmed_by ? ` · 确认: ${version.confirmed_by}` : ""}
                   </div>
-                </div>
+                </button>
               ))}
             </div>
             {versions.length > 3 ? (
@@ -131,15 +161,32 @@ export function LifecycleCardDrawer({
           </section>
         ) : null}
 
-        {latestVersion ? (
+        {selectedArtifact ? (
           <section className="px-4 py-3">
             <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-[var(--aria-ink)]">
               <FileText className="h-4 w-4 text-[var(--aria-primary)]" />
-              最新版本预览
+              版本 v{selectedArtifact.version} 预览
             </div>
-            <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-md border border-[var(--aria-line)] bg-white px-3 py-2 font-mono text-xs text-[var(--aria-ink)]">
-              {previewMarkdown(latestVersion.markdown)}
-            </pre>
+            <MonacoViewer value={selectedArtifact.markdown} language="markdown" height="320px" />
+            {canShowDiff ? (
+              <button
+                type="button"
+                onClick={() => setShowVersionDiff((value) => !value)}
+                className="mt-2 text-xs font-semibold text-[var(--aria-primary)] hover:underline"
+              >
+                {showVersionDiff ? "隐藏对比" : "与最新版本对比"}
+              </button>
+            ) : null}
+            {showVersionDiff && canShowDiff ? (
+              <div className="mt-3">
+                <MonacoDiffViewer
+                  original={selectedArtifact.markdown}
+                  modified={latestVersion.markdown}
+                  language="markdown"
+                  height="320px"
+                />
+              </div>
+            ) : null}
           </section>
         ) : null}
       </div>
@@ -170,6 +217,50 @@ export function LifecycleCardDrawer({
   );
 }
 
+function IssueDetail({ entity }: { entity: DrawerEntity }) {
+  const artifacts = entity.artifacts ?? [];
+  return (
+    <>
+      {entity.description ? (
+        <section className="border-b border-[var(--aria-line)] px-4 py-3">
+          <h3 className="mb-2 text-sm font-semibold text-[var(--aria-ink)]">Issue 描述</h3>
+          <MonacoViewer value={entity.description} language="markdown" height="200px" />
+        </section>
+      ) : null}
+      {artifacts.length > 0 ? (
+        <section className="border-b border-[var(--aria-line)] px-4 py-3">
+          <h3 className="mb-2 text-sm font-semibold text-[var(--aria-ink)]">关联产物</h3>
+          <div className="space-y-2">
+            {artifacts.map((artifact) => (
+              <div
+                key={artifact.artifact_ref}
+                className="rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-2 py-2 text-xs"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-semibold text-[var(--aria-ink)]">
+                    {artifact.artifact_kind}
+                  </span>
+                  <span className="text-[var(--aria-ink-muted)]">{artifact.stage}</span>
+                </div>
+                <div className="mt-1 text-[var(--aria-ink-muted)]">{artifact.summary}</div>
+              </div>
+            ))}
+          </div>
+        </section>
+      ) : null}
+      {entity.phase || entity.createdAt ? (
+        <section className="px-4 py-3">
+          <h3 className="mb-2 text-sm font-semibold text-[var(--aria-ink)]">元信息</h3>
+          <div className="space-y-1 text-xs text-[var(--aria-ink-muted)]">
+            {entity.phase ? <div>阶段: {entity.phase}</div> : null}
+            {entity.createdAt ? <div>创建时间: {entity.createdAt.slice(0, 10)}</div> : null}
+          </div>
+        </section>
+      ) : null}
+    </>
+  );
+}
+
 function iconForKind(kind: DrawerEntityKind) {
   if (kind === "issue") return ListChecks;
   if (kind === "story_spec") return ScrollText;
@@ -182,12 +273,4 @@ function providerLabel(provider: string) {
   if (provider === "codex") return "Codex";
   if (provider === "fake") return "Fake";
   return provider;
-}
-
-function previewMarkdown(markdown: string) {
-  const limit = 400;
-  if (markdown.length <= limit) {
-    return markdown;
-  }
-  return `${markdown.slice(0, limit)}...`;
 }
