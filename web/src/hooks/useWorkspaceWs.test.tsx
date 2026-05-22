@@ -699,6 +699,22 @@ describe("useWorkspaceWs", () => {
     expect(useWorkspaceStore.getState().connectionStatus).toBe("disconnected");
   });
 
+  it("keeps the socket open during revision even when server messages are quiet", () => {
+    vi.useFakeTimers();
+    const harness = renderWorkspaceHook("session_001");
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.receive({ type: "stage_change", stage: "revision" });
+    });
+    act(() => {
+      vi.advanceTimersByTime(75_000);
+    });
+
+    expect(harness.ws.readyState).toBe(MockWebSocket.OPEN);
+    expect(useWorkspaceStore.getState().connectionStatus).toBe("connected");
+  });
+
   it("opens a replacement websocket after an abnormal close", () => {
     vi.useFakeTimers();
     const harness = renderWorkspaceHook("session_001");

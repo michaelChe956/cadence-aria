@@ -1240,11 +1240,6 @@ impl WorkspaceEngine {
         .await;
         self.mark_latest_artifact_reviewed(reviewer, Some(verdict.verdict.clone()));
 
-        if round >= self.session.review_rounds {
-            self.enter_human_confirm(Some(verdict.summary)).await;
-            return;
-        }
-
         match verdict.verdict {
             ReviewVerdictType::Pass | ReviewVerdictType::NeedsHuman => {
                 self.enter_human_confirm(Some(verdict.summary)).await;
@@ -3111,6 +3106,44 @@ mod tests {
             }
             _ => panic!("expected SessionState"),
         }
+    }
+
+    #[tokio::test]
+    async fn single_review_round_revise_still_pauses_for_decision() {
+        let (_tmp, store) = setup();
+        let (tx, _) = mpsc::channel(64);
+        let mut session = make_session("sess_single_review_revise");
+        session.review_rounds = 1;
+        let mut engine = WorkspaceEngine::new(store, tx, session);
+
+        engine
+            .handle_user_message(
+                "start".to_string(),
+                Arc::new(FakeStreamingProvider),
+                empty_provider_commands(),
+            )
+            .await;
+
+        engine
+            .drive_review_session(
+                Arc::new(ReviewVerdictStreamingProvider {
+                    output:
+                        "需要移除非规范正文。\n\n```json\n{\"verdict\":\"revise\",\"summary\":\"需要返修\"}\n```",
+                    provider_type: Arc::new(Mutex::new(None)),
+                    prompt: Arc::new(Mutex::new(None)),
+                }),
+                empty_provider_commands(),
+            )
+            .await;
+
+        assert_eq!(engine.session().stage, WorkspaceStage::ReviewDecision);
+        let active_node = engine
+            .timeline_nodes
+            .iter()
+            .find(|node| Some(&node.node_id) == engine.active_node_id.as_ref())
+            .expect("active review decision node");
+        assert_eq!(active_node.node_type, TimelineNodeType::ReviewDecision);
+        assert_eq!(active_node.status, TimelineNodeStatus::Paused);
     }
 
     #[tokio::test]

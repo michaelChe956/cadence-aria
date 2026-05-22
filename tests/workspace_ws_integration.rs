@@ -798,6 +798,51 @@ async fn workspace_ws_disconnect_during_active_run_writes_aborted_by_disconnect(
 }
 
 #[tokio::test]
+async fn workspace_ws_idle_timeout_does_not_close_socket_during_active_run() {
+    let root = tempdir().expect("root");
+    let _repo = create_workspace_session_fixture(&root).await;
+    let mut registry = ProviderRegistry::new();
+    registry.register(ProviderName::Fake, Arc::new(HangingStreamingProvider));
+    let state = WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        registry,
+    );
+    state
+        .test_controls
+        .set_server_idle_timeout(Duration::from_millis(30))
+        .await;
+    let app = build_web_router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(
+        &mut ws,
+        &WsInMessage::UserMessage {
+            content: "start long running provider".to_string(),
+        },
+    )
+    .await;
+    let _first_chunk = recv_until_stream_chunk(&mut ws).await;
+
+    let next_message = timeout(Duration::from_millis(120), ws.next()).await;
+    assert!(
+        next_message.is_err(),
+        "idle timeout must not close the socket while a provider run is active"
+    );
+
+    drop(ws);
+    server.abort();
+}
+
+#[tokio::test]
 async fn workspace_ws_test_control_drop_closes_registered_socket() {
     let root = tempdir().expect("root");
     let _repo = create_workspace_session_fixture(&root).await;
@@ -1316,6 +1361,58 @@ impl ScriptedStreamingProvider {
             outputs: Mutex::new(outputs.into_iter().map(ToOwned::to_owned).collect()),
             prompts,
         }
+    }
+}
+
+struct HangingStreamingProvider;
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for HangingStreamingProvider {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let (command_tx, mut command_rx) = mpsc::channel::<ProviderCommand>(8);
+        tokio::spawn(async move {
+            let _ = event_tx
+                .send(ProviderEvent::TextDelta {
+                    content: "# Draft".to_string(),
+                })
+                .await;
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => return,
+                    command = command_rx.recv() => {
+                        match command {
+                            Some(ProviderCommand::Abort) | None => return,
+                            Some(ProviderCommand::PermissionResponse { .. }) => {}
+                        }
+                    }
+                }
+            }
+        });
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+
+    async fn run_streaming(
+        &self,
+        _input: &AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<
+        mpsc::Receiver<cadence_aria::cross_cutting::streaming_provider::StreamChunk>,
+        ProviderAdapterError,
+    > {
+        Err(ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "run_streaming is not used by workspace websocket",
+            0,
+        ))
     }
 }
 

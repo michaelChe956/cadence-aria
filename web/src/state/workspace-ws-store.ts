@@ -684,6 +684,21 @@ function upsertEvent(events: ExecutionEvent[], event: ExecutionEvent) {
 function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
   const entries: ChatEntry[] = [];
 
+  for (const message of state.messages) {
+    if (!isPreparedWorkspaceContextMessage(message)) {
+      continue;
+    }
+
+    entries.push({
+      id: `prepared-context:${message.id}`,
+      type: "context_note",
+      role: "user",
+      content: message.content,
+      timestamp: message.created_at,
+      metadata: { prepared: true },
+    });
+  }
+
   for (const node of state.timelineNodes) {
     const detail = state.nodeDetails[node.node_id];
     if (!detail) {
@@ -883,6 +898,16 @@ function textFromSources(sources: Array<string | null | undefined>) {
     }
   }
   return "";
+}
+
+function isPreparedWorkspaceContextMessage(message: WsMessage) {
+  return (
+    message.role === "system" &&
+    (message.content.startsWith("Workspace 生成任务已准备") ||
+      message.content.includes("候选 spec 生成器") ||
+      message.content.includes("候选 design 生成器") ||
+      message.content.includes("候选 work item 生成器"))
+  );
 }
 
 function stringField(value: unknown, key: string) {

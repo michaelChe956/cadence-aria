@@ -65,6 +65,7 @@ async fn send_json_outbound<T: serde::Serialize>(
 fn spawn_idle_timeout_task(
     last_client_message_at: Arc<Mutex<tokio::time::Instant>>,
     outbound_tx: mpsc::Sender<OutboundControl>,
+    is_active_run: Arc<dyn Fn() -> bool + Send + Sync>,
     timeout_after: std::time::Duration,
     tick_every: std::time::Duration,
 ) -> tokio::task::JoinHandle<()> {
@@ -73,7 +74,7 @@ fn spawn_idle_timeout_task(
         loop {
             interval.tick().await;
             let last_seen = *last_client_message_at.lock().await;
-            if last_seen.elapsed() > timeout_after {
+            if last_seen.elapsed() > timeout_after && !is_active_run() {
                 let _ = outbound_tx
                     .send(OutboundControl::CloseDueToIdleTimeout)
                     .await;
@@ -317,9 +318,16 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
     let current_run: Arc<Mutex<Option<ActiveRun>>> = Arc::new(Mutex::new(None));
     let next_run_id: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
     let last_client_message_at = Arc::new(Mutex::new(tokio::time::Instant::now()));
+    let current_run_for_idle = current_run.clone();
     let idle_timeout_task = spawn_idle_timeout_task(
         last_client_message_at.clone(),
         outbound_tx.clone(),
+        Arc::new(move || {
+            current_run_for_idle
+                .try_lock()
+                .map(|run| run.is_some())
+                .unwrap_or(true)
+        }),
         state.test_controls.server_idle_timeout(),
         std::time::Duration::from_secs(5),
     );
@@ -737,6 +745,7 @@ mod tests {
     use crate::web::workspace_ws_types::{
         HumanConfirmDecision, ProviderConfigSnapshot, RevisionPath, StructuredFeedback,
     };
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     fn provider_config() -> ProviderConfigSnapshot {
         ProviderConfigSnapshot {
@@ -803,6 +812,7 @@ mod tests {
         let task = spawn_idle_timeout_task(
             last_client_message_at,
             tx,
+            Arc::new(|| false),
             std::time::Duration::from_millis(5),
             std::time::Duration::from_millis(1),
         );
@@ -810,6 +820,37 @@ mod tests {
         let control = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
             .await
             .expect("idle timeout control")
+            .expect("close control");
+        assert!(matches!(control, OutboundControl::CloseDueToIdleTimeout));
+
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn idle_timeout_waits_while_provider_run_is_active() {
+        let last_client_message_at = Arc::new(Mutex::new(tokio::time::Instant::now()));
+        let (tx, mut rx) = mpsc::channel(1);
+        let active = Arc::new(AtomicBool::new(true));
+        let active_for_task = active.clone();
+
+        let task = spawn_idle_timeout_task(
+            last_client_message_at,
+            tx,
+            Arc::new(move || active_for_task.load(Ordering::SeqCst)),
+            std::time::Duration::from_millis(5),
+            std::time::Duration::from_millis(1),
+        );
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(30), rx.recv())
+                .await
+                .is_err()
+        );
+
+        active.store(false, Ordering::SeqCst);
+        let control = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
+            .await
+            .expect("idle timeout after active run")
             .expect("close control");
         assert!(matches!(control, OutboundControl::CloseDueToIdleTimeout));
 

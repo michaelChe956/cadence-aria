@@ -30,6 +30,7 @@ const SERVER_SILENCE_TIMEOUT_MS = 60_000;
 const STALE_SOCKET_CLOSE_CODE = 4000;
 const SERVER_SILENCE_CHECK_INTERVAL_MS = 15_000;
 const CONNECT_TIMEOUT_MS = 5_000;
+const ACTIVE_PROVIDER_STAGES = new Set(["running", "cross_review", "revision"]);
 
 export function useWorkspaceWs(sessionId: string | null) {
   const wsRef = useRef<WebSocket | null>(null);
@@ -404,8 +405,10 @@ export function useWorkspaceWs(sessionId: string | null) {
 
     const interval = window.setInterval(() => {
       const ws = wsRef.current;
+      const stage = useWorkspaceStore.getState().stage;
       if (
         ws?.readyState === WebSocket.OPEN &&
+        !ACTIVE_PROVIDER_STAGES.has(stage) &&
         Date.now() - lastMessageAtRef.current >= SERVER_SILENCE_TIMEOUT_MS
       ) {
         ws.close(STALE_SOCKET_CLOSE_CODE);

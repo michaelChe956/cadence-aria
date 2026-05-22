@@ -81,6 +81,47 @@ describe("chat entries store", () => {
     expect(useWorkspaceStore.getState().activeStreamEntryId).toBeNull();
   });
 
+  it("shows the prepared workspace context as the first user chat entry", () => {
+    const store = useWorkspaceStore.getState();
+    store.setSessionState({
+      session_id: "session-prepared-context",
+      workspace_type: "story",
+      stage: "prepare_context",
+      messages: [
+        {
+          id: "msg_001",
+          role: "system",
+          content:
+            "Workspace 生成任务已准备\n\n[system]\n你是候选 spec 生成器。\n\n[canonical_inputs]\nIssue: 爬楼梯问题",
+          checkpoint_id: null,
+          created_at: "2026-05-21T09:00:00Z",
+        },
+      ],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "claude_code", reviewer: "codex" },
+      timeline_nodes: [],
+      active_node_id: null,
+      artifact_versions: [],
+      timeline_node_details: {},
+      active_run_id: null,
+    });
+
+    store.rebuildChatEntries();
+
+    expect(useWorkspaceStore.getState().chatEntries).toEqual([
+      {
+        id: "prepared-context:msg_001",
+        type: "context_note",
+        role: "user",
+        content:
+          "Workspace 生成任务已准备\n\n[system]\n你是候选 spec 生成器。\n\n[canonical_inputs]\nIssue: 爬楼梯问题",
+        timestamp: "2026-05-21T09:00:00Z",
+        metadata: { prepared: true },
+      },
+    ]);
+  });
+
   it("rebuilds chat entries from timeline node details in timeline order", () => {
     const contextNode = makeTimelineNode({
       node_id: "node-context-1",
