@@ -335,7 +335,7 @@ web/src/
 |-----------|---------|
 | `ChatEntryList` | 直接复用 |
 | `ChatInputBar` | 直接复用，通过 stage prop 控制按钮 |
-| `ChatEntryRenderer` | 复用，新增 coding entry 类型渲染分支 |
+| `ChatEntryRenderer` | 复用，在现有 switch case 中新增 coding entry 类型分支（`testing_summary`、`review_verdict` 等），与已有模式一致 |
 | `MonacoViewer` / `MonacoDiffViewer` | 直接复用 |
 | `DisconnectBanner` | 直接复用 |
 | `ProviderConfigPanel` | 直接复用 |
