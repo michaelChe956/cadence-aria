@@ -612,6 +612,36 @@ impl LifecycleStore {
         Ok(record)
     }
 
+    pub fn update_work_item_execution_status(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        work_item_id: &str,
+        execution_status: WorkItemStatus,
+    ) -> Result<LifecycleWorkItemRecord, ProductStoreError> {
+        let path = self.work_item_path(project_id, issue_id, work_item_id)?;
+        let mut record: LifecycleWorkItemRecord = read_json(&path)?;
+        record.execution_status = execution_status;
+        record.updated_at = Utc::now().to_rfc3339();
+        write_json(&path, &record)?;
+        Ok(record)
+    }
+
+    pub fn update_work_item_worktree_path(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        work_item_id: &str,
+        worktree_path: Option<PathBuf>,
+    ) -> Result<LifecycleWorkItemRecord, ProductStoreError> {
+        let path = self.work_item_path(project_id, issue_id, work_item_id)?;
+        let mut record: LifecycleWorkItemRecord = read_json(&path)?;
+        record.worktree_path = worktree_path;
+        record.updated_at = Utc::now().to_rfc3339();
+        write_json(&path, &record)?;
+        Ok(record)
+    }
+
     pub fn upsert_project_provider_defaults(
         &self,
         input: CreateProjectProviderDefaultsInput,
@@ -700,6 +730,27 @@ impl LifecycleStore {
     fn next_workspace_session_id(&self) -> Result<String, ProductStoreError> {
         let max_sequence = max_workspace_session_sequence(&self.paths.projects_root())?;
         Ok(next_sequential_id("workspace_session", max_sequence))
+    }
+
+    fn work_item_path(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        work_item_id: &str,
+    ) -> Result<PathBuf, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(work_item_id)?;
+        let path = self
+            .work_items_root(project_id, issue_id)
+            .join(format!("{work_item_id}.json"));
+        if !path_is_regular_file(&path)? {
+            return Err(ProductStoreError::NotFound {
+                kind: "work_item",
+                id: work_item_id.to_string(),
+            });
+        }
+        Ok(path)
     }
 
     fn find_workspace_session_path(&self, session_id: &str) -> Result<PathBuf, ProductStoreError> {

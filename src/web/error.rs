@@ -40,17 +40,21 @@ impl IntoResponse for ApiError {
             "checkpoint_unsafe_dirty_worktree" | "workspace_session_ambiguous" => {
                 StatusCode::CONFLICT
             }
+            "coding_attempt_active" => StatusCode::CONFLICT,
             "artifact_not_found"
+            | "coding_attempt_not_found"
             | "gate_not_found"
             | "interactive_task_missing"
             | "issue_not_found"
             | "project_not_found"
             | "repository_not_found"
             | "workspace_not_found"
+            | "work_item_not_found"
             | "task_workspace_not_found"
             | "workspace_session_not_found" => StatusCode::NOT_FOUND,
             "gate_ambiguous"
             | "invalid_execution_record_id"
+            | "invalid_artifact_id"
             | "invalid_file_path"
             | "invalid_issue_id"
             | "invalid_project_id"
@@ -63,7 +67,9 @@ impl IntoResponse for ApiError {
             | "repository_required"
             | "workspace_path_missing"
             | "workspace_path_not_directory"
-            | "workspace_path_not_git_repo" => StatusCode::BAD_REQUEST,
+            | "workspace_path_not_git_repo"
+            | "work_item_plan_not_confirmed"
+            | "repository_path_not_git_repo" => StatusCode::BAD_REQUEST,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, Json(self)).into_response()

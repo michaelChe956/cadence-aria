@@ -1,4 +1,5 @@
 pub mod app;
+pub mod coding_ws_handler;
 pub mod error;
 pub mod events;
 pub mod handlers;

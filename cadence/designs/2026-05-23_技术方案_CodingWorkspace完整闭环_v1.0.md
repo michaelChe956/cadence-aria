@@ -138,7 +138,6 @@
 | `project_id` | string | 项目 id |
 | `issue_id` | string | issue id |
 | `work_item_id` | string | Work Item id |
-| `workspace_session_id` | string | 关联 Workspace session |
 | `attempt_no` | number | Work Item 内递增序号 |
 | `status` | enum | `created`、`running`、`waiting_for_human`、`blocked`、`completed`、`failed`、`aborted` |
 | `stage` | enum | 当前 coding stage |
@@ -170,9 +169,10 @@
 | `review_request` | commit、push、创建或降级生成 review request | 自动 + 可人工补救 |
 | `internal_pr_review` | Aria 基于 review branch 做内部 PR review | 自动 |
 | `final_confirm` | 用户确认完成或要求继续返工 | 人工 |
-| `completed` | attempt 完成 | 终态 |
-| `blocked` | 需要用户处理外部问题 | 终态或可恢复 |
-| `aborted` | 用户中止 | 终态 |
+
+> **注意**：`stage` 只表示当前正在执行的阶段。终态（completed、blocked、aborted）完全由 `CodingExecutionAttempt.status` 表达。当 attempt 进入终态时，`stage` 保持最后一个执行阶段的值（如 `final_confirm`）。
+
+> **现有 `CodingWorkspaceStage` 处置**：`src/web/workspace_ws_types.rs` 中现有的 `CodingWorkspaceStage`（包含 PlanGeneration、PlanConfirm 等）是早期草案，将在实现时被新的 stage 定义替换。旧枚举标记为 deprecated 并在迁移完成后删除。
 
 ### 5.3 CodingTimelineNode
 
@@ -225,6 +225,22 @@ TestingReport 必须区分 provider 声称与后端验证。
 | `duration_ms` | number | 耗时 |
 | `stdout_ref` / `stderr_ref` | string | 输出文件引用 |
 | `status` | enum | `passed`、`failed`、`timed_out`、`blocked` |
+
+### 5.4.1 CodeReviewReport
+
+基础 code review 是 coding / testing 后、review branch 创建前的内部审查结果，必须单独持久化，不能只作为临时 WebSocket 消息存在。否则刷新或重连后，前端 Review Tab 无法恢复 Code Review 分组，也无法把 request changes 的证据带入 rework。
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `id` | string | code review report id |
+| `attempt_id` | string | attempt id |
+| `round` | number | 第几轮 code review |
+| `verdict` | enum | `approve`、`request_changes`、`blocked` |
+| `findings` | array | 按严重级别排序的问题 |
+| `tested_evidence_refs` | string[] | 使用的 TestingReport / command refs |
+| `diff_refs` | string[] | 使用的 diff refs |
+| `summary` | string | 审查摘要 |
+| `created_at` | string | 时间 |
 
 ### 5.5 ReviewRequest
 
@@ -389,7 +405,11 @@ Artifact tabs 行为：
 
 ### 8.2 WebSocket 消息
 
-Coding Workspace 复用 Workspace WebSocket 基础设施，但使用 coding-specific payload。
+Coding Workspace 使用独立的 WebSocket endpoint，不与 Document Workspace 共享连接：
+
+**Endpoint**：`/ws/coding-attempts/:attempt_id`
+
+> **设计决策**：由于 Coding Workspace 与 Document Workspace 的状态机和消息协议差异很大，使用独立 endpoint 避免共享连接带来的路由复杂度。attempt_id 本身即为 session 标识，无需额外 session 概念。
 
 Server -> Client：
 
@@ -404,7 +424,7 @@ Server -> Client：
 | `code_review_complete` | code review 完成 |
 | `review_request_update` | branch/commit/push/MR 状态 |
 | `internal_pr_review_complete` | internal PR review 完成 |
-| `coding_gate_required` | permission、blocked、final confirm |
+| `coding_gate_required` | permission、blocked、final confirm；blocked gate 的可用操作由后端根据 blocked 原因动态下发 |
 | `protocol_error` | 非法阶段动作或字段错误 |
 
 Client -> Server：
@@ -426,6 +446,7 @@ Client -> Server：
 - 当前 stage 和 active node。
 - Timeline nodes 与 node details。
 - TestingReport。
+- CodeReviewReport。
 - ReviewRequest。
 - InternalPrReview。
 - worktree path、branch、commit、push status。

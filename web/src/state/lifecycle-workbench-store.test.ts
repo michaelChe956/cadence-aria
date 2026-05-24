@@ -74,6 +74,7 @@ const lifecycle: IssueLifecycleResponse = {
   ],
   work_items: [],
   workspace_sessions: [],
+  coding_attempts: [],
 };
 
 const otherLifecycle: IssueLifecycleResponse = {
@@ -118,6 +119,7 @@ const otherLifecycle: IssueLifecycleResponse = {
       title: "实现验证码服务",
       plan_status: "confirmed",
       execution_status: "pending",
+      latest_attempt: null,
     },
   ],
 };

@@ -138,17 +138,19 @@ mod tests {
 
     #[tokio::test]
     async fn provider_mode_fake_routes_codex_workspace_provider_to_fake_adapter() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
-        let _provider_mode = ProviderModeGuard::fake();
         let root = tempdir().expect("root");
-        let state = WebAppState::new(
-            root.path().to_path_buf(),
-            WebRuntime::new_fake(root.path().to_path_buf()),
-        );
-        let provider = state
-            .provider_registry
-            .get(&ProviderName::Codex)
-            .expect("codex provider");
+        let provider = {
+            let _guard = ENV_LOCK.lock().expect("env lock");
+            let _provider_mode = ProviderModeGuard::fake();
+            let state = WebAppState::new(
+                root.path().to_path_buf(),
+                WebRuntime::new_fake(root.path().to_path_buf()),
+            );
+            state
+                .provider_registry
+                .get(&ProviderName::Codex)
+                .expect("codex provider")
+        };
 
         let mut session = provider
             .start(

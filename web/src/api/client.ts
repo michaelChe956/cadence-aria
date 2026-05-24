@@ -1,5 +1,8 @@
 import type {
   ApiError,
+  ArtifactContentResponse,
+  CodingAttempt,
+  CodingAttemptSnapshotResponse,
   CreateProductIssueRequest,
   CreateRepositoryRequest,
   GenerateDesignSpecsRequest,
@@ -175,5 +178,46 @@ export function generateWorkItems(
       method: "POST",
       body: JSON.stringify(payload),
     },
+  );
+}
+
+export function createCodingAttempt(
+  projectId: string,
+  issueId: string,
+  workItemId: string,
+): Promise<CodingAttempt> {
+  return requestJson<CodingAttempt>(
+    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/work-items/${encodeURIComponent(workItemId)}/coding-attempts`,
+    {
+      method: "POST",
+      body: JSON.stringify({}),
+    },
+  );
+}
+
+export function getCodingAttemptSnapshot(
+  attemptId: string,
+): Promise<CodingAttemptSnapshotResponse> {
+  return requestJson<CodingAttemptSnapshotResponse>(
+    `/api/coding-attempts/${encodeURIComponent(attemptId)}`,
+  );
+}
+
+export function abortCodingAttempt(attemptId: string): Promise<CodingAttempt> {
+  return requestJson<CodingAttempt>(
+    `/api/coding-attempts/${encodeURIComponent(attemptId)}/abort`,
+    {
+      method: "POST",
+      body: JSON.stringify({}),
+    },
+  );
+}
+
+export function getCodingAttemptArtifact(
+  attemptId: string,
+  artifactId: string,
+): Promise<ArtifactContentResponse> {
+  return requestJson<ArtifactContentResponse>(
+    `/api/coding-attempts/${encodeURIComponent(attemptId)}/artifacts/${encodeURIComponent(artifactId)}`,
   );
 }

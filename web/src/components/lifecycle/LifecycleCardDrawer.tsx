@@ -1,6 +1,15 @@
-import { ExternalLink, FileText, GitBranch, Layers3, ListChecks, ScrollText, X } from "lucide-react";
+import {
+  Code,
+  ExternalLink,
+  FileText,
+  GitBranch,
+  Layers3,
+  ListChecks,
+  ScrollText,
+  X,
+} from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import type { ArtifactVersion, ProductIssueArtifact } from "../../api/types";
+import type { ArtifactVersion, CodingAttempt, ProductIssueArtifact } from "../../api/types";
 import { MonacoDiffViewer } from "../shared/MonacoDiffViewer";
 import { MonacoViewer } from "../shared/MonacoViewer";
 
@@ -17,12 +26,14 @@ export interface DrawerEntity {
   artifacts?: ProductIssueArtifact[];
   phase?: string;
   createdAt?: string;
+  latestAttempt?: CodingAttempt | null;
 }
 
 interface LifecycleCardDrawerProps {
   entity: DrawerEntity;
   onClose: () => void;
   onOpenWorkspace: () => void;
+  onOpenCodingWorkspace?: () => void;
   onGenerateNext?: () => void;
 }
 
@@ -53,6 +64,7 @@ export function LifecycleCardDrawer({
   entity,
   onClose,
   onOpenWorkspace,
+  onOpenCodingWorkspace,
   onGenerateNext,
 }: LifecycleCardDrawerProps) {
   const [showAllVersions, setShowAllVersions] = useState(false);
@@ -67,6 +79,7 @@ export function LifecycleCardDrawer({
   const latestVersion = versions[0] ?? null;
   const canShowDiff = selectedVersionIndex > 0 && selectedArtifact !== null && latestVersion !== null;
   const nextActionLabel = entity.status === "confirmed" ? NEXT_ACTION_LABELS[entity.kind] : null;
+  const codingActionLabel = entity.latestAttempt ? "进入 Coding Workspace" : "开始 Coding";
   const Icon = iconForKind(entity.kind);
 
   useEffect(() => {
@@ -210,6 +223,17 @@ export function LifecycleCardDrawer({
           >
             <GitBranch className="h-4 w-4" />
             {nextActionLabel}
+          </button>
+        ) : null}
+        {entity.kind === "work_item" && onOpenCodingWorkspace ? (
+          <button
+            data-testid="drawer-open-coding-workspace"
+            type="button"
+            onClick={onOpenCodingWorkspace}
+            className="inline-flex h-9 w-full items-center justify-center gap-2 rounded-md border border-[var(--aria-primary)] bg-white px-3 text-sm font-semibold text-[var(--aria-primary)] hover:bg-[var(--aria-panel-muted)]"
+          >
+            <Code className="h-4 w-4" />
+            {codingActionLabel}
           </button>
         ) : null}
       </footer>

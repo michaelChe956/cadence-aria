@@ -1,7 +1,7 @@
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { WorkspaceSession } from "../../api/types";
+import type { CodingAttempt, WorkspaceSession } from "../../api/types";
 import { useLifecycleWorkbenchStore } from "../../state/lifecycle-workbench-store";
 import { CreateLifecycleIssueDialog } from "./CreateLifecycleIssueDialog";
 import { IssueLifecycleWorkbench } from "./IssueLifecycleWorkbench";
@@ -11,6 +11,7 @@ type MockLifecycleData = {
   design_specs: Array<Record<string, unknown>>;
   work_items: Array<Record<string, unknown>>;
   workspace_sessions: WorkspaceSession[];
+  coding_attempts: CodingAttempt[];
 };
 
 describe("IssueLifecycleWorkbench", () => {
@@ -252,7 +253,10 @@ describe("IssueLifecycleWorkbench", () => {
       within(dialog).getByLabelText("Policy"),
       "manual-all",
     );
-    expect(within(dialog).queryByLabelText("Provider")).not.toBeInTheDocument();
+    await user.selectOptions(
+      within(dialog).getByLabelText("Provider"),
+      "claude_code",
+    );
     await user.click(
       within(dialog).getByRole("button", { name: "添加代码库" }),
     );
@@ -267,6 +271,7 @@ describe("IssueLifecycleWorkbench", () => {
           name: "New Repo",
           path: "/tmp/new-repo",
           default_policy_preset: "manual-all",
+          default_provider_mode: "claude_code",
         }),
       }),
     );
@@ -575,6 +580,60 @@ describe("IssueLifecycleWorkbench", () => {
       ),
     );
   });
+
+  it("starts coding from a confirmed work item drawer and opens the coding workspace", async () => {
+    const fetchMock = lifecycleFetch({ confirmedWorkItem: true });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    const onOpenCodingWorkspace = vi.fn();
+
+    render(<IssueLifecycleWorkbench onOpenCodingWorkspace={onOpenCodingWorkspace} />);
+
+    await user.click(await screen.findByRole("button", { name: "实现提示组件" }));
+    await user.click(screen.getByRole("button", { name: "开始 Coding" }));
+
+    await waitFor(() =>
+      expect(onOpenCodingWorkspace).toHaveBeenCalledWith("coding_attempt_0001"),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001/coding-attempts",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("does not clear drawer URL focus while handing off to the coding workspace route", async () => {
+    vi.stubGlobal("fetch", lifecycleFetch({ confirmedWorkItem: true }));
+    const user = userEvent.setup();
+    const onDrawerFocusChange = vi.fn();
+    const onOpenCodingWorkspace = vi.fn();
+
+    render(
+      <IssueLifecycleWorkbench
+        focusEntityId="work_item_0001"
+        onDrawerFocusChange={onDrawerFocusChange}
+        onOpenCodingWorkspace={onOpenCodingWorkspace}
+      />,
+    );
+
+    await screen.findByRole("button", { name: "开始 Coding" });
+    onDrawerFocusChange.mockClear();
+
+    await user.click(screen.getByRole("button", { name: "开始 Coding" }));
+
+    await waitFor(() =>
+      expect(onOpenCodingWorkspace).toHaveBeenCalledWith("coding_attempt_0001"),
+    );
+    expect(onDrawerFocusChange).not.toHaveBeenCalledWith(null);
+  });
+
+  it("marks confirmed work item cards as ready for coding", async () => {
+    vi.stubGlobal("fetch", lifecycleFetch({ confirmedWorkItem: true }));
+
+    render(<IssueLifecycleWorkbench />);
+
+    const workItemColumn = await screen.findByRole("region", { name: "Work Item 列" });
+    expect(workItemColumn).toHaveTextContent("可编码");
+  });
 });
 
 describe("CreateLifecycleIssueDialog", () => {
@@ -610,6 +669,7 @@ function lifecycleFetch(options?: {
   duplicateCardIds?: boolean;
   emptyLifecycle?: boolean;
   invalidLifecycle?: boolean;
+  confirmedWorkItem?: boolean;
   issueTitles?: string[];
   issueTitlesByProject?: Record<string, string>;
   projects?: Array<ReturnType<typeof projectRecord>>;
@@ -642,6 +702,7 @@ function lifecycleFetch(options?: {
       issueId,
       options?.duplicateCardIds,
       options?.emptyLifecycle,
+      options?.confirmedWorkItem,
     );
     lifecycleByIssue.set(issueId, initial);
     return initial;
@@ -958,6 +1019,7 @@ function lifecycleFetch(options?: {
         title: payload.title,
         plan_status: "not_started",
         execution_status: "pending",
+        latest_attempt: null,
       };
       const session = workspaceSessionRecord(
         "work_item",
@@ -978,6 +1040,24 @@ function lifecycleFetch(options?: {
         work_items: [workItem],
         workspace_session: session,
       });
+    }
+    const codingAttemptCreateMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/issues\/([^/]+)\/work-items\/([^/]+)\/coding-attempts$/,
+    );
+    if (codingAttemptCreateMatch && init?.method === "POST") {
+      const issueId = codingAttemptCreateMatch[2];
+      const workItemId = codingAttemptCreateMatch[3];
+      const lifecycle = lifecycleData(issueId);
+      const attempt = codingAttemptRecord(workItemId);
+      lifecycle.coding_attempts.push(attempt);
+      const workItem = lifecycle.work_items.find(
+        (candidate) => candidate.work_item_id === workItemId,
+      );
+      if (workItem) {
+        workItem.latest_attempt = attempt;
+        workItem.execution_status = "coding";
+      }
+      return jsonResponse(attempt);
     }
     const issuesMatch = url.match(/^\/api\/projects\/([^/]+)\/issues$/);
     if (issuesMatch) {
@@ -1082,6 +1162,7 @@ function lifecycleFetch(options?: {
           design_specs: [],
           work_items: [],
           workspace_sessions: [],
+          coding_attempts: [],
         });
       }
       const data = lifecycleData(issueId);
@@ -1107,6 +1188,7 @@ function lifecycleFetch(options?: {
         design_specs: data.design_specs,
         work_items: data.work_items,
         workspace_sessions: data.workspace_sessions,
+        coding_attempts: data.coding_attempts,
       });
     }
     return jsonResponse({});
@@ -1202,6 +1284,7 @@ function initialLifecycleData(
   issueId: string,
   duplicate: boolean | undefined,
   empty: boolean | undefined,
+  confirmedWorkItem: boolean | undefined,
 ): MockLifecycleData {
   if (empty) {
     return {
@@ -1209,6 +1292,7 @@ function initialLifecycleData(
       design_specs: [],
       work_items: [],
       workspace_sessions: [],
+      coding_attempts: [],
     };
   }
 
@@ -1247,8 +1331,9 @@ function initialLifecycleData(
         story_spec_ids: ["story_spec_0001"],
         design_spec_ids: ["design_spec_0001"],
         title: "实现提示组件",
-        plan_status: "draft",
+        plan_status: confirmedWorkItem ? "confirmed" : "draft",
         execution_status: "planning",
+        latest_attempt: null,
       },
     ],
     workspace_sessions: [
@@ -1264,6 +1349,26 @@ function initialLifecycleData(
         "workspace_session_work_item_0001",
       ),
     ],
+    coding_attempts: [],
+  };
+}
+
+function codingAttemptRecord(workItemId: string): CodingAttempt {
+  return {
+    attempt_id: "coding_attempt_0001",
+    work_item_id: workItemId,
+    attempt_no: 1,
+    status: "created",
+    stage: "prepare_context",
+    branch_name: `aria/work-items/${workItemId}/attempt-1`,
+    base_branch: "main",
+    worktree_path: null,
+    rework_count: 0,
+    head_commit: null,
+    push_status: null,
+    review_request_url: null,
+    created_at: "2026-05-23T00:00:00Z",
+    updated_at: "2026-05-23T00:00:00Z",
   };
 }
 

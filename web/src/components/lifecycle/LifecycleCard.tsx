@@ -21,6 +21,7 @@ export function LifecycleCard({
   onGenerateStorySpec?: () => void;
   onDeleteIssue?: () => void;
 }) {
+  const codingStatusLabel = workItemCodingStatusLabel(card);
   const Icon =
     card.kind === "issue"
       ? ListChecks
@@ -66,6 +67,11 @@ export function LifecycleCard({
                   v{card.version}
                 </span>
               ) : null}
+              {codingStatusLabel ? (
+                <span className="rounded border border-[var(--aria-primary)] px-1.5 py-0.5 text-[var(--aria-primary)]">
+                  {codingStatusLabel}
+                </span>
+              ) : null}
             </span>
           </span>
         </span>
@@ -92,4 +98,15 @@ export function LifecycleCard({
       ) : null}
     </div>
   );
+}
+
+function workItemCodingStatusLabel(card: LifecycleCardData) {
+  if (card.kind !== "work_item") {
+    return null;
+  }
+  const latestAttempt = card.raw.latest_attempt;
+  if (latestAttempt) {
+    return `${latestAttempt.status} · ${latestAttempt.stage}`;
+  }
+  return card.raw.plan_status === "confirmed" ? "可编码" : null;
 }

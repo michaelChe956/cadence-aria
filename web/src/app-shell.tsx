@@ -5,10 +5,12 @@ export function AppShell({
   focusEntityId,
   onDrawerFocusChange,
   onOpenWorkspace,
+  onOpenCodingWorkspace,
 }: {
   focusEntityId?: string | null;
   onDrawerFocusChange?: (entityId: string | null) => void;
   onOpenWorkspace?: (sessionId: string) => void;
+  onOpenCodingWorkspace?: (attemptId: string) => void;
 }) {
   useEffect(() => {
     const previousScrollRestoration = window.history.scrollRestoration;
@@ -25,6 +27,7 @@ export function AppShell({
       focusEntityId={focusEntityId}
       onDrawerFocusChange={onDrawerFocusChange}
       onOpenWorkspace={onOpenWorkspace}
+      onOpenCodingWorkspace={onOpenCodingWorkspace}
     />
   );
 }

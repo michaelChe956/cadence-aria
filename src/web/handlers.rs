@@ -7,6 +7,7 @@ use serde_json::json;
 use std::convert::Infallible;
 use std::fs;
 use std::path::{Path as StdPath, PathBuf};
+use std::process::{Command, Stdio};
 use tokio_stream::wrappers::BroadcastStream;
 
 use crate::cross_cutting::provider_adapter::{
@@ -14,6 +15,11 @@ use crate::cross_cutting::provider_adapter::{
 };
 use crate::interactive::models::WebWorkspaceProjection;
 use crate::product::app_paths::ProductAppPaths;
+use crate::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
+use crate::product::coding_models::{
+    CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage, CodingTimelineNode,
+    CodingTimelineNodeStatus, PushStatus,
+};
 use crate::product::gate_store::GateStore;
 use crate::product::issue_store::{CreateProductIssueWithRepositoryInput, IssueStore};
 use crate::product::json_store::{ProductStoreError, validate_relative_id};
@@ -42,13 +48,14 @@ use crate::web::redaction::redact_sensitive_lines;
 use crate::web::runtime::WebRuntime;
 use crate::web::state::WebAppState;
 use crate::web::types::{
-    AdvanceTaskResponse, ArtifactContentResponse, ArtifactVersionDto, ConfirmTaskRequest,
-    ConfirmTaskResponse, CreateIssueRequest, CreateProductIssueRequest, CreateProjectRequest,
-    CreateRepositoryRequest, CreateTaskRequest, CreateTaskResponse, CreateWorkspaceRequest,
-    DesignSpecDto, FileContentResponse, FileDiffResponse, GenerateDesignSpecsRequest,
-    GenerateDesignSpecsResponse, GenerateStorySpecsRequest, GenerateStorySpecsResponse,
-    GenerateWorkItemsRequest, GenerateWorkItemsResponse, IssueDto, IssueLifecycleResponse,
-    IssueListResponse, IssueRollbackPreviewRequest, IssueRollbackRequest, LifecycleWorkItemDto,
+    AdvanceTaskResponse, ArtifactContentResponse, ArtifactVersionDto, CodingAttemptDto,
+    CodingAttemptSnapshotResponse, ConfirmTaskRequest, ConfirmTaskResponse, CreateIssueRequest,
+    CreateProductIssueRequest, CreateProjectRequest, CreateRepositoryRequest, CreateTaskRequest,
+    CreateTaskResponse, CreateWorkspaceRequest, DesignSpecDto, FileContentResponse,
+    FileDiffResponse, GenerateDesignSpecsRequest, GenerateDesignSpecsResponse,
+    GenerateStorySpecsRequest, GenerateStorySpecsResponse, GenerateWorkItemsRequest,
+    GenerateWorkItemsResponse, IssueDto, IssueLifecycleResponse, IssueListResponse,
+    IssueRollbackPreviewRequest, IssueRollbackRequest, LifecycleWorkItemDto,
     ProductIssueArtifactDto, ProductIssueDto, ProductIssueListResponse, ProjectDto,
     ProjectListResponse, ProviderInputContentResponse, RepositoryDto, RepositoryListResponse,
     ResolveGateRequest, ResolveGateResponse, RollbackPreviewRequest, RollbackPreviewResponse,
@@ -58,7 +65,7 @@ use crate::web::types::{
 };
 use crate::web::workspace_context::ensure_workspace_context_message;
 use crate::web::workspace_registry::{CreateWorkspaceInput, WorkspaceRecord, WorkspaceRegistry};
-use crate::web::workspace_ws_types::{ArtifactVersion, ReviewVerdictType};
+use crate::web::workspace_ws_types::{ArtifactVersion, ProviderConfigSnapshot, ReviewVerdictType};
 
 #[derive(Debug, Deserialize)]
 pub struct ProjectionQuery {
@@ -328,12 +335,21 @@ pub async fn issue_lifecycle(
             design_spec_dto(&lifecycle, &design, session)
         })
         .collect::<ApiResult<Vec<_>>>()?;
+    let coding_store = CodingAttemptStore::new(app_paths.clone());
+    let mut coding_attempts = Vec::new();
     let work_items = lifecycle
         .list_work_items(&project_id, &issue_id)
         .map_err(product_store_api_error)?
         .into_iter()
-        .map(lifecycle_work_item_dto)
-        .collect();
+        .map(|work_item| {
+            let attempts = coding_store
+                .list_attempts_for_work_item(&project_id, &issue_id, &work_item.id)
+                .map_err(product_store_api_error)?;
+            let latest_attempt = attempts.last().map(coding_attempt_dto);
+            coding_attempts.extend(attempts.iter().map(coding_attempt_dto));
+            Ok(lifecycle_work_item_dto(work_item, latest_attempt))
+        })
+        .collect::<ApiResult<Vec<_>>>()?;
     let workspace_sessions = workspace_sessions
         .into_iter()
         .map(workspace_session_dto)
@@ -345,6 +361,7 @@ pub async fn issue_lifecycle(
         design_specs,
         work_items,
         workspace_sessions,
+        coding_attempts,
     }))
 }
 
@@ -503,8 +520,194 @@ pub async fn generate_work_items(
         .map_err(product_store_api_error)?;
 
     Ok(Json(GenerateWorkItemsResponse {
-        work_items: vec![lifecycle_work_item_dto(work_item)],
+        work_items: vec![lifecycle_work_item_dto(work_item, None)],
         workspace_session: workspace_session_dto(session),
+    }))
+}
+
+pub async fn create_coding_attempt(
+    State(state): State<WebAppState>,
+    Path((project_id, issue_id, work_item_id)): Path<(String, String, String)>,
+) -> ApiResult<Json<CodingAttemptDto>> {
+    let app_paths = product_app_paths(&state);
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    let work_item = lifecycle
+        .list_work_items(&project_id, &issue_id)
+        .map_err(product_store_api_error)?
+        .into_iter()
+        .find(|work_item| work_item.id == work_item_id)
+        .ok_or_else(|| {
+            ApiError::runtime("work_item_not_found", "work item not found", json!({}))
+        })?;
+    if work_item.plan_status != WorkItemPlanStatus::Confirmed {
+        return Err(ApiError::validation(
+            "work_item_plan_not_confirmed",
+            "work item plan must be confirmed before coding",
+        ));
+    }
+
+    let repository = find_repository(&app_paths, &project_id, &work_item.repository_id)?;
+    if !is_git_repo(&repository.path) {
+        return Err(ApiError::validation(
+            "repository_path_not_git_repo",
+            "repository path must point to a git work tree",
+        ));
+    }
+
+    let coding_store = CodingAttemptStore::new(app_paths);
+    if coding_store
+        .get_active_attempt(&project_id, &issue_id, &work_item.id)
+        .map_err(product_store_api_error)?
+        .is_some()
+    {
+        return Err(ApiError::runtime(
+            "coding_attempt_active",
+            "work item already has an active coding attempt",
+            json!({}),
+        ));
+    }
+
+    let attempt_no = coding_store
+        .list_attempts_for_work_item(&project_id, &issue_id, &work_item.id)
+        .map_err(product_store_api_error)?
+        .iter()
+        .map(|attempt| attempt.attempt_no)
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let branch_name = format!("aria/work-items/{}/attempt-{attempt_no}", work_item.id);
+    let base_branch = current_git_branch(&repository.path).unwrap_or_else(|| "HEAD".to_string());
+    let author = parse_provider_name(&repository.default_provider_mode)?;
+    let attempt = coding_store
+        .create_attempt(CreateCodingAttemptInput {
+            project_id,
+            issue_id,
+            work_item_id: work_item.id,
+            base_branch,
+            branch_name,
+            worktree_path: None,
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: author.clone(),
+                reviewer: Some(author),
+                review_rounds: 1,
+            },
+            max_auto_rework: 2,
+        })
+        .map_err(product_store_api_error)?;
+
+    Ok(Json(coding_attempt_dto(&attempt)))
+}
+
+pub async fn get_coding_attempt(
+    State(state): State<WebAppState>,
+    Path(attempt_id): Path<String>,
+) -> ApiResult<Json<CodingAttemptSnapshotResponse>> {
+    let app_paths = product_app_paths(&state);
+    let coding_store = CodingAttemptStore::new(app_paths);
+    let attempt = coding_store
+        .get_attempt_by_id(&attempt_id)
+        .map_err(product_store_api_error)?;
+    let timeline_nodes = coding_store
+        .get_timeline_nodes(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .map_err(product_store_api_error)?;
+    let testing_report = coding_store
+        .list_testing_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .map_err(product_store_api_error)?
+        .into_iter()
+        .last();
+    let code_review_reports = coding_store
+        .list_code_review_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .map_err(product_store_api_error)?;
+    let review_request = coding_store
+        .list_review_requests(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .map_err(product_store_api_error)?
+        .into_iter()
+        .last();
+    let internal_pr_review = coding_store
+        .list_internal_pr_reviews(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .map_err(product_store_api_error)?
+        .into_iter()
+        .last();
+    let active_node_id = active_coding_timeline_node_id(&timeline_nodes);
+
+    Ok(Json(CodingAttemptSnapshotResponse {
+        attempt: coding_attempt_dto(&attempt),
+        provider_config_snapshot: attempt.provider_config_snapshot,
+        timeline_nodes,
+        active_node_id,
+        testing_report,
+        code_review_reports,
+        review_request,
+        internal_pr_review,
+        pending_gates: Vec::new(),
+    }))
+}
+
+pub async fn abort_coding_attempt(
+    State(state): State<WebAppState>,
+    Path(attempt_id): Path<String>,
+) -> ApiResult<Json<CodingAttemptDto>> {
+    let app_paths = product_app_paths(&state);
+    let coding_store = CodingAttemptStore::new(app_paths);
+    let attempt = coding_store
+        .get_attempt_by_id(&attempt_id)
+        .map_err(product_store_api_error)?;
+    let aborted = coding_store
+        .update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::Aborted,
+        )
+        .map_err(product_store_api_error)?;
+    Ok(Json(coding_attempt_dto(&aborted)))
+}
+
+pub async fn coding_attempt_artifact_content(
+    State(state): State<WebAppState>,
+    Path((attempt_id, artifact_id)): Path<(String, String)>,
+) -> ApiResult<Json<ArtifactContentResponse>> {
+    validate_relative_id(&artifact_id)
+        .map_err(|_| ApiError::validation("invalid_artifact_id", "invalid artifact id"))?;
+    let app_paths = product_app_paths(&state);
+    let coding_store = CodingAttemptStore::new(app_paths);
+    let attempt = coding_store
+        .get_attempt_by_id(&attempt_id)
+        .map_err(product_store_api_error)?;
+    let worktree_path = attempt.worktree_path.ok_or_else(|| {
+        ApiError::runtime(
+            "artifact_not_found",
+            "coding attempt worktree is not available",
+            json!({}),
+        )
+    })?;
+    let artifact_path = worktree_path
+        .join(".aria")
+        .join("coding-artifacts")
+        .join("test-output")
+        .join(&artifact_id);
+    if !artifact_path.is_file() {
+        return Err(ApiError::runtime(
+            "artifact_not_found",
+            "coding attempt artifact not found",
+            json!({}),
+        ));
+    }
+    let content = fs::read_to_string(&artifact_path).map_err(|error| {
+        ApiError::runtime(
+            "artifact_read_failed",
+            "coding attempt artifact could not be read",
+            json!({"error": error.to_string()}),
+        )
+    })?;
+
+    Ok(Json(ArtifactContentResponse {
+        artifact_ref: artifact_id,
+        artifact_kind: "coding_attempt_artifact".to_string(),
+        producer_node: None,
+        path: artifact_path.to_string_lossy().to_string(),
+        content_type: "text/plain".to_string(),
+        content,
     }))
 }
 
@@ -1532,7 +1735,10 @@ fn markdown_preview(markdown: &str) -> String {
     preview.chars().take(MAX_PREVIEW_CHARS).collect()
 }
 
-fn lifecycle_work_item_dto(record: LifecycleWorkItemRecord) -> LifecycleWorkItemDto {
+fn lifecycle_work_item_dto(
+    record: LifecycleWorkItemRecord,
+    latest_attempt: Option<CodingAttemptDto>,
+) -> LifecycleWorkItemDto {
     LifecycleWorkItemDto {
         work_item_id: record.id,
         issue_id: record.issue_id,
@@ -1542,7 +1748,48 @@ fn lifecycle_work_item_dto(record: LifecycleWorkItemRecord) -> LifecycleWorkItem
         title: record.title,
         plan_status: work_item_plan_status_text(&record.plan_status).to_string(),
         execution_status: work_item_status_text(&record.execution_status).to_string(),
+        latest_attempt,
     }
+}
+
+fn coding_attempt_dto(attempt: &CodingExecutionAttempt) -> CodingAttemptDto {
+    CodingAttemptDto {
+        attempt_id: attempt.id.clone(),
+        work_item_id: attempt.work_item_id.clone(),
+        attempt_no: attempt.attempt_no,
+        status: coding_attempt_status_text(&attempt.status).to_string(),
+        stage: coding_execution_stage_text(&attempt.stage).to_string(),
+        branch_name: attempt.branch_name.clone(),
+        base_branch: attempt.base_branch.clone(),
+        worktree_path: attempt
+            .worktree_path
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string()),
+        rework_count: attempt.rework_count,
+        head_commit: attempt.head_commit.clone(),
+        push_status: attempt
+            .pushed_remote
+            .as_ref()
+            .map(|_| push_status_text(&PushStatus::Pushed).to_string()),
+        review_request_url: None,
+        created_at: attempt.created_at.clone(),
+        updated_at: attempt.updated_at.clone(),
+    }
+}
+
+fn active_coding_timeline_node_id(nodes: &[CodingTimelineNode]) -> Option<String> {
+    nodes
+        .iter()
+        .rev()
+        .find(|node| {
+            matches!(
+                node.status,
+                CodingTimelineNodeStatus::Pending
+                    | CodingTimelineNodeStatus::Running
+                    | CodingTimelineNodeStatus::Blocked
+            )
+        })
+        .map(|node| node.id.clone())
 }
 
 fn workspace_session_dto(record: WorkspaceSessionRecord) -> WorkspaceSessionDto {
@@ -1677,6 +1924,32 @@ fn find_repository(
         })
 }
 
+fn is_git_repo(path: &StdPath) -> bool {
+    Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn current_git_branch(path: &StdPath) -> Option<String> {
+    let output = Command::new("git")
+        .args(["branch", "--show-current"])
+        .current_dir(path)
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!branch.is_empty()).then_some(branch)
+}
+
 fn product_execution_workspace_id(project_id: &str, repository_id: &str) -> String {
     format!("product:{project_id}:{repository_id}")
 }
@@ -1741,6 +2014,40 @@ fn work_item_status_text(status: &WorkItemStatus) -> &'static str {
         WorkItemStatus::Coding => "coding",
         WorkItemStatus::Completed => "completed",
         WorkItemStatus::Blocked => "blocked",
+    }
+}
+
+fn coding_attempt_status_text(status: &CodingAttemptStatus) -> &'static str {
+    match status {
+        CodingAttemptStatus::Created => "created",
+        CodingAttemptStatus::Running => "running",
+        CodingAttemptStatus::WaitingForHuman => "waiting_for_human",
+        CodingAttemptStatus::Blocked => "blocked",
+        CodingAttemptStatus::Completed => "completed",
+        CodingAttemptStatus::Failed => "failed",
+        CodingAttemptStatus::Aborted => "aborted",
+    }
+}
+
+fn coding_execution_stage_text(stage: &CodingExecutionStage) -> &'static str {
+    match stage {
+        CodingExecutionStage::PrepareContext => "prepare_context",
+        CodingExecutionStage::WorktreePrepare => "worktree_prepare",
+        CodingExecutionStage::Coding => "coding",
+        CodingExecutionStage::Testing => "testing",
+        CodingExecutionStage::CodeReview => "code_review",
+        CodingExecutionStage::Rework => "rework",
+        CodingExecutionStage::ReviewRequest => "review_request",
+        CodingExecutionStage::InternalPrReview => "internal_pr_review",
+        CodingExecutionStage::FinalConfirm => "final_confirm",
+    }
+}
+
+fn push_status_text(status: &PushStatus) -> &'static str {
+    match status {
+        PushStatus::NotPushed => "not_pushed",
+        PushStatus::Pushed => "pushed",
+        PushStatus::Failed => "failed",
     }
 }
 
@@ -1991,6 +2298,17 @@ fn product_store_api_error(error: ProductStoreError) -> ApiError {
         ProductStoreError::NotFound { kind: "issue", .. } => {
             ApiError::runtime("issue_not_found", "issue not found", json!({}))
         }
+        ProductStoreError::NotFound {
+            kind: "work_item", ..
+        } => ApiError::runtime("work_item_not_found", "work item not found", json!({})),
+        ProductStoreError::NotFound {
+            kind: "coding_attempt",
+            ..
+        } => ApiError::runtime(
+            "coding_attempt_not_found",
+            "coding attempt not found",
+            json!({}),
+        ),
         ProductStoreError::NotFound {
             kind: "workspace_session",
             ..

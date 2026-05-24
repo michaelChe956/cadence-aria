@@ -190,15 +190,10 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
 
     let outbound_for_socket_controls = outbound_tx.clone();
     let socket_control_task = tokio::spawn(async move {
-        while let Some(control) = socket_control_rx.recv().await {
-            match control {
-                WorkspaceSocketControl::CloseForTestDrop => {
-                    let _ = outbound_for_socket_controls
-                        .send(OutboundControl::CloseForTestDrop)
-                        .await;
-                    break;
-                }
-            }
+        if let Some(WorkspaceSocketControl::CloseForTestDrop) = socket_control_rx.recv().await {
+            let _ = outbound_for_socket_controls
+                .send(OutboundControl::CloseForTestDrop)
+                .await;
         }
     });
 

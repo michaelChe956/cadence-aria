@@ -1,6 +1,12 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::product::coding_models::{
+    CodeReviewReport, CodingGateRequired, CodingTimelineNode, InternalPrReview, ReviewRequest,
+    TestingReport,
+};
+use crate::web::workspace_ws_types::ProviderConfigSnapshot;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct CreateTaskRequest {
@@ -362,6 +368,7 @@ pub struct IssueLifecycleResponse {
     pub design_specs: Vec<DesignSpecDto>,
     pub work_items: Vec<LifecycleWorkItemDto>,
     pub workspace_sessions: Vec<WorkspaceSessionDto>,
+    pub coding_attempts: Vec<CodingAttemptDto>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -415,6 +422,40 @@ pub struct LifecycleWorkItemDto {
     pub title: String,
     pub plan_status: String,
     pub execution_status: String,
+    pub latest_attempt: Option<CodingAttemptDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct CodingAttemptDto {
+    pub attempt_id: String,
+    pub work_item_id: String,
+    pub attempt_no: u32,
+    pub status: String,
+    pub stage: String,
+    pub branch_name: String,
+    pub base_branch: String,
+    pub worktree_path: Option<String>,
+    pub rework_count: u32,
+    pub head_commit: Option<String>,
+    pub push_status: Option<String>,
+    pub review_request_url: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct CodingAttemptSnapshotResponse {
+    pub attempt: CodingAttemptDto,
+    pub provider_config_snapshot: ProviderConfigSnapshot,
+    pub timeline_nodes: Vec<CodingTimelineNode>,
+    pub active_node_id: Option<String>,
+    pub testing_report: Option<TestingReport>,
+    pub code_review_reports: Vec<CodeReviewReport>,
+    pub review_request: Option<ReviewRequest>,
+    pub internal_pr_review: Option<InternalPrReview>,
+    pub pending_gates: Vec<CodingGateRequired>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

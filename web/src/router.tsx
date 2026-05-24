@@ -12,6 +12,7 @@ import {
 import { useCallback } from "react";
 import { AppShell } from "./app-shell";
 import { ChatWorkspacePage } from "./pages/ChatWorkspacePage";
+import { CodingWorkspacePage } from "./pages/CodingWorkspacePage";
 
 const rootRoute = createRootRoute({ component: Outlet });
 
@@ -44,6 +45,9 @@ function WorkbenchRouteComponent() {
       onOpenWorkspace={(sessionId) =>
         void navigate({ to: "/workbench/workspace/$sessionId", params: { sessionId } })
       }
+      onOpenCodingWorkspace={(attemptId) =>
+        void navigate({ to: "/workbench/coding/$attemptId", params: { attemptId } })
+      }
     />
   );
 }
@@ -74,7 +78,29 @@ const workspaceRoute = createRoute({
   component: WorkspaceRouteComponent,
 });
 
-const routeTree = rootRoute.addChildren([indexRoute, workbenchRoute, workspaceRoute]);
+function CodingWorkspaceRouteComponent() {
+  const { attemptId } = useParams({ from: "/workbench/coding/$attemptId" });
+  const navigate = useNavigate();
+  return (
+    <CodingWorkspacePage
+      attemptId={attemptId}
+      onBack={() => void navigate({ to: "/workbench" })}
+    />
+  );
+}
+
+const codingWorkspaceRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/workbench/coding/$attemptId",
+  component: CodingWorkspaceRouteComponent,
+});
+
+const routeTree = rootRoute.addChildren([
+  indexRoute,
+  workbenchRoute,
+  workspaceRoute,
+  codingWorkspaceRoute,
+]);
 
 export const router = createRouter({ routeTree });
 

@@ -144,8 +144,13 @@ Work Item Plan confirmed 后，用户需要在 Product Workbench 中启动 Codin
 | `rework` | 可输入 | "中止" 按钮 |
 | `review_request` / `internal_pr_review` | 可输入 | "中止" 按钮 |
 | `final_confirm` | 可输入 | "确认完成" / "要求返工" / "中止" 按钮组 |
-| `blocked` | 可输入 | "继续返工" / "暂停" / "放弃" 按钮组 |
+| `blocked` | 可输入 | 由后端 `coding_gate_required` 消息动态下发（见下方说明） |
 | `completed` / `aborted` | 只读 | 无 |
+
+> **Blocked Gate 动态按钮**：blocked 原因多样（rework 超限、push 失败、repo 配置缺失等），不同原因对应不同的可用操作。后端通过 `coding_gate_required` 消息的 `available_actions` 字段下发按钮列表，前端据此渲染。常见组合：
+> - rework 超限：`继续返工` / `接受风险` / `放弃`
+> - push 失败：`重试 Push` / `手动处理` / `放弃`
+> - repo 配置缺失：`修复配置` / `放弃`
 
 ---
 
@@ -174,14 +179,19 @@ Work Item Plan confirmed 后，用户需要在 Product Workbench 中启动 Codin
 
 ### 6.4 Review Tab
 
-- Verdict badge（approve / request_changes / blocked）
-- Findings 列表：每条 finding 一个卡片
-  - severity badge（error / warning / info）
-  - 文件路径 + 行号
-  - 问题描述
-  - 建议操作
-- Review 摘要文本
+- 按审查类型分组展示：
+  - **Code Review**（coding 阶段后的内部审查）
+  - **Internal PR Review**（push 后的最终审查）
+- 每组内容：
+  - Verdict badge（approve / request_changes / blocked）
+  - Findings 列表：每条 finding 一个卡片
+    - severity badge（error / warning / info）
+    - 文件路径 + 行号
+    - 问题描述
+    - 建议操作
+  - Review 摘要文本
 - 多轮 review 按轮次分组展示
+- 无 review 结果时显示空状态
 
 ### 6.5 Git Tab
 
@@ -224,7 +234,12 @@ Timeline 节点点击时自动切换到相关 tab（见 4.3）。用户手动切
 2. 前端调用 `POST /api/projects/:pid/issues/:iid/work-items/:wid/coding-attempts`
 3. 后端返回 `attempt_id`
 4. 前端路由跳转到 `/workbench/coding/$attemptId`
-5. CodingWorkspacePage 建立 WebSocket 连接，进入 `prepare_context` 阶段
+5. CodingWorkspacePage 建立 WebSocket 连接到 `/ws/coding-attempts/:attemptId`
+6. 进入 `prepare_context` 阶段，展示 Work Item plan、依赖、provider 配置
+7. 用户确认后点击 ChatInputBar 中的"开始 Coding"主按钮
+8. 前端通过 WebSocket 发送 `start_coding` 消息，后端开始执行
+
+> **注意**：创建 attempt 不等于启动执行。用户在 prepare_context 阶段可以查看上下文、补充信息，确认无误后再启动。attempt_id 本身即为 WebSocket session 标识，无需额外 session 概念。
 
 ### 7.3 Work Item 卡片状态标记
 
@@ -310,7 +325,7 @@ web/src/
 - `activeTab`：当前选中 tab（diff / tests / review / git / logs）
 - `diffSummary`：文件变更列表
 - `testingReport`：TestingReport
-- `reviewFindings`：ReviewFindings[]
+- `codeReviewReports`：CodeReviewReport[]（基础 Code Review，支持刷新恢复）
 - `reviewRequest`：ReviewRequest
 - `internalPrReview`：InternalPrReview
 - `logs`：LogEntry[]
@@ -323,7 +338,7 @@ web/src/
 ### 9.2 useCodingWorkspaceWs
 
 新建 hook，参考 `useWorkspaceWs` 结构：
-- 建立 WebSocket 连接到 coding attempt session
+- 建立 WebSocket 连接到独立 endpoint `/ws/coding-attempts/:attemptId`（attempt_id 即为 session 标识）
 - 处理 `coding_*` 前缀的服务端消息
 - 暴露客户端动作：`startCoding`、`sendContextNote`、`respondPermission`、`continueRework`、`abortAttempt`、`finalConfirm`、`requestManualPause`
 

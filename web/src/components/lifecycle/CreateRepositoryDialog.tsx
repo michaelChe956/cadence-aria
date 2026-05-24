@@ -1,5 +1,5 @@
 import { useRef, useState, type FormEvent } from "react";
-import type { CreateRepositoryRequest } from "../../api/types";
+import type { CreateRepositoryRequest, WorkspaceProviderName } from "../../api/types";
 
 export function CreateRepositoryDialog({
   onCreate,
@@ -11,6 +11,7 @@ export function CreateRepositoryDialog({
   const [name, setName] = useState("");
   const [path, setPath] = useState("");
   const [policyPreset, setPolicyPreset] = useState("manual-write");
+  const [providerMode, setProviderMode] = useState<WorkspaceProviderName>("codex");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const submittingRef = useRef(false);
@@ -40,6 +41,7 @@ export function CreateRepositoryDialog({
         name: trimmedName,
         path: trimmedPath,
         default_policy_preset: policyPreset,
+        default_provider_mode: providerMode,
       });
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "添加代码库失败");
@@ -105,6 +107,21 @@ export function CreateRepositoryDialog({
               <option value="manual-all">manual-all</option>
               <option value="auto-review">auto-review</option>
               <option value="non-interactive">non-interactive</option>
+            </select>
+          </label>
+          <label className="block text-sm font-semibold text-[var(--aria-ink)]">
+            Provider
+            <select
+              value={providerMode}
+              onChange={(event) => {
+                setProviderMode(event.target.value as WorkspaceProviderName);
+                setError(null);
+              }}
+              className="mt-1 block w-full rounded-md border border-[var(--aria-line)] bg-white px-3 py-2 text-sm font-normal text-[var(--aria-ink)]"
+            >
+              <option value="codex">Codex</option>
+              <option value="claude_code">Claude Code</option>
+              <option value="fake">Fake</option>
             </select>
           </label>
           {error ? (

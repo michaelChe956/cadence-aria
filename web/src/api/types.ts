@@ -114,7 +114,238 @@ export type LifecycleWorkItem = {
   title: string;
   plan_status: "not_started" | "draft" | "confirmed" | "change_requested";
   execution_status: "pending" | "planning" | "coding" | "completed" | "blocked";
+  latest_attempt: CodingAttempt | null;
 };
+
+export type CodingAttemptStatus =
+  | "created"
+  | "running"
+  | "waiting_for_human"
+  | "blocked"
+  | "completed"
+  | "failed"
+  | "aborted";
+
+export type CodingExecutionStage =
+  | "prepare_context"
+  | "worktree_prepare"
+  | "coding"
+  | "testing"
+  | "code_review"
+  | "rework"
+  | "review_request"
+  | "internal_pr_review"
+  | "final_confirm";
+
+export type CodingAttempt = {
+  attempt_id: string;
+  work_item_id: string;
+  attempt_no: number;
+  status: CodingAttemptStatus;
+  stage: CodingExecutionStage;
+  branch_name: string;
+  base_branch: string;
+  worktree_path: string | null;
+  rework_count: number;
+  head_commit: string | null;
+  push_status: "not_pushed" | "pushed" | "failed" | null;
+  review_request_url: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CodingTimelineNodeStatus = "pending" | "running" | "completed" | "failed" | "blocked";
+export type CodingAgentRole = "author" | "tester" | "reviewer" | "git" | "system";
+
+export type CodingTimelineNode = {
+  id: string;
+  attempt_id: string;
+  stage: CodingExecutionStage;
+  title: string;
+  status: CodingTimelineNodeStatus;
+  agent_role: CodingAgentRole | null;
+  summary: string | null;
+  started_at: string;
+  completed_at: string | null;
+  artifact_refs: string[];
+};
+
+export type TestCommandStatus = "passed" | "failed" | "timed_out" | "blocked";
+export type TestingOverallStatus = "passed" | "failed" | "skipped_by_user_decision" | "blocked";
+
+export type TestCommand = {
+  command: string[];
+  cwd: string;
+  exit_code: number | null;
+  duration_ms: number;
+  stdout_ref: string;
+  stderr_ref: string;
+  status: TestCommandStatus;
+};
+
+export type TestingReport = {
+  id: string;
+  attempt_id: string;
+  commands: TestCommand[];
+  overall_status: TestingOverallStatus;
+  provider_claim: unknown | null;
+  backend_verified: boolean;
+  started_at: string;
+  completed_at: string | null;
+};
+
+export type CodingReviewVerdict = "approve" | "request_changes" | "blocked";
+export type FindingSeverity = "error" | "warning" | "info";
+
+export type ReviewFinding = {
+  severity: FindingSeverity;
+  file_path: string | null;
+  line: number | null;
+  message: string;
+  required_action: string | null;
+  source_stage: CodingExecutionStage;
+};
+
+export type CodeReviewReport = {
+  id: string;
+  attempt_id: string;
+  round: number;
+  verdict: CodingReviewVerdict;
+  findings: ReviewFinding[];
+  tested_evidence_refs: string[];
+  diff_refs: string[];
+  summary: string;
+  created_at: string;
+};
+
+export type ReviewRequestKind =
+  | "git_branch_only"
+  | "gitlab_merge_request"
+  | "github_pull_request"
+  | "manual_external_request";
+export type RemoteKind = "github" | "gitlab" | "generic_git" | "unknown";
+export type PushStatus = "not_pushed" | "pushed" | "failed";
+
+export type ReviewRequest = {
+  id: string;
+  attempt_id: string;
+  kind: ReviewRequestKind;
+  remote_kind: RemoteKind;
+  remote: string;
+  base_branch: string;
+  branch_name: string;
+  commit_sha: string;
+  push_status: PushStatus;
+  external_url: string | null;
+  manual_instructions: string[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type InternalPrReview = {
+  id: string;
+  attempt_id: string;
+  review_request_id: string;
+  verdict: CodingReviewVerdict;
+  findings: ReviewFinding[];
+  tested_evidence_refs: string[];
+  diff_refs: string[];
+  summary: string;
+  created_at: string;
+};
+
+export type CodingGateActionType =
+  | "continue_rework"
+  | "accept_risk"
+  | "abort"
+  | "retry_push"
+  | "manual_fix";
+export type CodingGateKind = "permission" | "blocked" | "final_confirm";
+
+export type CodingGateAction = {
+  action_id: string;
+  label: string;
+  action_type: CodingGateActionType;
+};
+
+export type CodingGateRequired = {
+  gate_id: string;
+  kind: CodingGateKind;
+  title: string;
+  description: string;
+  available_actions: CodingGateAction[];
+};
+
+export type CodingAttemptSnapshotResponse = {
+  attempt: CodingAttempt;
+  provider_config_snapshot: ProviderConfigSnapshot;
+  timeline_nodes: CodingTimelineNode[];
+  active_node_id: string | null;
+  testing_report: TestingReport | null;
+  code_review_reports: CodeReviewReport[];
+  review_request: ReviewRequest | null;
+  internal_pr_review: InternalPrReview | null;
+  pending_gates: CodingGateRequired[];
+};
+
+export type ArtifactContentResponse = {
+  artifact_ref: string;
+  artifact_kind: string;
+  producer_node: string | null;
+  path: string;
+  content_type: string;
+  content: string;
+};
+
+export type CodingWsInMessage =
+  | { type: "coding_hello"; attempt_id: string; last_seen_node_id?: string | null }
+  | { type: "start_coding" }
+  | { type: "context_note"; content: string }
+  | { type: "permission_response"; id: string; approved: boolean; reason?: string | null }
+  | {
+      type: "gate_response";
+      gate_id: string;
+      action_id: string;
+      extra_context?: string | null;
+    }
+  | { type: "final_confirm" }
+  | { type: "abort_attempt" }
+  | { type: "request_manual_pause" }
+  | { type: "coding_ping" };
+
+export type CodingWsOutMessage =
+  | ({
+      type: "coding_session_state";
+      attempt_id: string;
+      status: CodingAttemptStatus;
+      stage: CodingExecutionStage;
+      branch_name: string;
+      base_branch: string;
+      worktree_path: string | null;
+      rework_count: number;
+      max_auto_rework: number;
+      head_commit: string | null;
+      pushed_remote: string | null;
+    } & Omit<CodingAttemptSnapshotResponse, "attempt">)
+  | { type: "coding_stage_change"; stage: CodingExecutionStage }
+  | { type: "coding_timeline_node_created"; node: CodingTimelineNode }
+  | {
+      type: "coding_timeline_node_updated";
+      node_id: string;
+      status: CodingTimelineNodeStatus;
+      summary?: string | null;
+      completed_at?: string | null;
+    }
+  | { type: "coding_execution_event"; event: ExecutionEvent }
+  | { type: "coding_stream_chunk"; content: string; node_id?: string | null }
+  | { type: "coding_message_complete"; node_id?: string | null }
+  | { type: "testing_report_update"; report: TestingReport }
+  | { type: "code_review_complete"; report: CodeReviewReport }
+  | { type: "review_request_update"; review_request: ReviewRequest }
+  | { type: "internal_pr_review_complete"; review: InternalPrReview }
+  | { type: "coding_gate_required"; gate: CodingGateRequired }
+  | { type: "coding_protocol_error"; code: string; message: string }
+  | { type: "coding_pong" };
 
 export type WorkspaceProviderName = "claude_code" | "codex" | "fake";
 
@@ -134,6 +365,7 @@ export type IssueLifecycleResponse = {
   design_specs: DesignSpec[];
   work_items: LifecycleWorkItem[];
   workspace_sessions: WorkspaceSession[];
+  coding_attempts: CodingAttempt[];
 };
 
 export type WorkspaceMessage = {

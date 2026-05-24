@@ -3,6 +3,7 @@ use axum::routing::{delete, get, post};
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
 
+use crate::web::coding_ws_handler;
 use crate::web::events::EventHub;
 use crate::web::handlers;
 use crate::web::state::WebAppState;
@@ -71,6 +72,22 @@ pub fn build_web_router(state: WebAppState) -> Router {
             post(handlers::generate_work_items),
         )
         .route(
+            "/api/projects/{project_id}/issues/{issue_id}/work-items/{work_item_id}/coding-attempts",
+            post(handlers::create_coding_attempt),
+        )
+        .route(
+            "/api/coding-attempts/{attempt_id}",
+            get(handlers::get_coding_attempt),
+        )
+        .route(
+            "/api/coding-attempts/{attempt_id}/abort",
+            post(handlers::abort_coding_attempt),
+        )
+        .route(
+            "/api/coding-attempts/{attempt_id}/artifacts/{artifact_id}",
+            get(handlers::coding_attempt_artifact_content),
+        )
+        .route(
             "/api/workspace-sessions/{session_id}/message",
             post(handlers::workspace_session_message),
         )
@@ -135,6 +152,10 @@ pub fn build_web_router(state: WebAppState) -> Router {
         .route(
             "/api/ws/workspace/{session_id}",
             get(workspace_ws_handler::workspace_ws),
+        )
+        .route(
+            "/ws/coding-attempts/{attempt_id}",
+            get(coding_ws_handler::coding_ws),
         );
 
     let router = if test_controls::test_controls_enabled() {

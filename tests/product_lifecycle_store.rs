@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::json_store::ProductStoreError;
 use cadence_aria::product::lifecycle_store::{
@@ -6,7 +8,7 @@ use cadence_aria::product::lifecycle_store::{
 };
 use cadence_aria::product::models::{
     AgentRole, DesignKind, LifecycleConfirmationStatus, NodeDetail, ProviderName, ProviderSnapshot,
-    WorkspaceSessionStatus, WorkspaceType,
+    WorkItemStatus, WorkspaceSessionStatus, WorkspaceType,
 };
 use cadence_aria::web::workspace_ws_types::{
     ArtifactVersion, ProviderConfigSnapshot, TimelineNode, TimelineNodeStatus, TimelineNodeType,
@@ -70,6 +72,54 @@ fn creates_story_design_work_item_and_versions_with_source_links() {
     assert_eq!(work_item.story_spec_ids, vec![story.id]);
     assert_eq!(work_item.design_spec_ids, vec![design.id]);
     assert_eq!(work_item.plan_status.as_str(), "not_started");
+}
+
+#[test]
+fn updates_work_item_execution_status_and_worktree_path() {
+    let root = tempdir().expect("tempdir");
+    let store = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let work_item = store
+        .create_work_item(CreateWorkItemInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            story_spec_ids: vec!["story_spec_0001".to_string()],
+            design_spec_ids: vec!["design_spec_0001".to_string()],
+            title: "实现爬楼梯".to_string(),
+        })
+        .expect("work item");
+
+    let updated = store
+        .update_work_item_execution_status(
+            "project_0001",
+            "issue_0001",
+            &work_item.id,
+            WorkItemStatus::Coding,
+        )
+        .expect("update status");
+    assert_eq!(updated.execution_status, WorkItemStatus::Coding);
+
+    let updated = store
+        .update_work_item_worktree_path(
+            "project_0001",
+            "issue_0001",
+            &work_item.id,
+            Some(PathBuf::from("/tmp/aria-worktree")),
+        )
+        .expect("update worktree path");
+    assert_eq!(
+        updated.worktree_path.as_deref(),
+        Some(std::path::Path::new("/tmp/aria-worktree"))
+    );
+
+    let reloaded = store
+        .list_work_items("project_0001", "issue_0001")
+        .expect("list work items");
+    assert_eq!(reloaded[0].execution_status, WorkItemStatus::Coding);
+    assert_eq!(
+        reloaded[0].worktree_path.as_deref(),
+        Some(std::path::Path::new("/tmp/aria-worktree"))
+    );
 }
 
 #[test]

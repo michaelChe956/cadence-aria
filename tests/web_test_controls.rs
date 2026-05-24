@@ -1,4 +1,3 @@
-use std::sync::Mutex;
 use std::time::Duration;
 
 use axum::body::Body;
@@ -8,13 +7,14 @@ use cadence_aria::web::runtime::WebRuntime;
 use cadence_aria::web::state::WebAppState;
 use serde_json::{Value, json};
 use tempfile::tempdir;
+use tokio::sync::Mutex;
 use tower::ServiceExt;
 
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+static ENV_LOCK: Mutex<()> = Mutex::const_new(());
 
 #[tokio::test]
 async fn test_control_routes_are_disabled_without_e2e_env() {
-    let _guard = ENV_LOCK.lock().expect("env lock");
+    let _guard = ENV_LOCK.lock().await;
     unsafe {
         std::env::remove_var("ARIA_E2E_TEST_CONTROLS");
     }
@@ -38,7 +38,7 @@ async fn test_control_routes_are_disabled_without_e2e_env() {
 
 #[tokio::test]
 async fn test_control_routes_update_shared_state_when_enabled() {
-    let _guard = ENV_LOCK.lock().expect("env lock");
+    let _guard = ENV_LOCK.lock().await;
     unsafe {
         std::env::set_var("ARIA_E2E_TEST_CONTROLS", "1");
     }

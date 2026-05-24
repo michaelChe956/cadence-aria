@@ -1,6 +1,7 @@
 import { Plus, RefreshCw } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  createCodingAttempt,
   createProject,
   createProductIssue,
   createRepository,
@@ -48,10 +49,12 @@ export function IssueLifecycleWorkbench({
   focusEntityId,
   onDrawerFocusChange,
   onOpenWorkspace = defaultOpenWorkspace,
+  onOpenCodingWorkspace = defaultOpenCodingWorkspace,
 }: {
   focusEntityId?: string | null;
   onDrawerFocusChange?: (entityId: string | null) => void;
   onOpenWorkspace?: (sessionId: string) => void;
+  onOpenCodingWorkspace?: (attemptId: string) => void;
 }) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [repositories, setRepositories] = useState<Repository[]>([]);
@@ -217,9 +220,26 @@ export function IssueLifecycleWorkbench({
       return;
     }
     setError(null);
-    closeDrawer();
     await refresh(selectedProjectId);
     onOpenWorkspace(session.workspace_session_id);
+  }
+
+  async function handleOpenCodingWorkspaceFromDrawer(card: LifecycleCardData) {
+    if (!selectedProjectId || card.kind !== "work_item") {
+      setError("缺少 Project 或 Work Item");
+      return;
+    }
+
+    if (card.raw.latest_attempt) {
+      setError(null);
+      onOpenCodingWorkspace(card.raw.latest_attempt.attempt_id);
+      return;
+    }
+
+    setError(null);
+    const attempt = await createCodingAttempt(selectedProjectId, card.issueId, card.id);
+    await refresh(selectedProjectId);
+    onOpenCodingWorkspace(attempt.attempt_id);
   }
 
   async function handleGenerateNext(card: LifecycleCardData) {
@@ -523,6 +543,12 @@ export function IssueLifecycleWorkbench({
             onOpenWorkspace={() =>
               void handleOpenWorkspaceFromDrawer(focusedEntity)
             }
+            onOpenCodingWorkspace={
+              focusedEntity.kind === "work_item" &&
+              focusedEntity.raw.plan_status === "confirmed"
+                ? () => void handleOpenCodingWorkspaceFromDrawer(focusedEntity)
+                : undefined
+            }
             onGenerateNext={
               focusedEntity.status === "confirmed" &&
               (focusedEntity.kind === "story_spec" ||
@@ -562,6 +588,10 @@ function defaultOpenWorkspace(sessionId: string) {
   );
 }
 
+function defaultOpenCodingWorkspace(attemptId: string) {
+  window.location.assign(`/workbench/coding/${encodeURIComponent(attemptId)}`);
+}
+
 function normalizeLifecycleResponse(
   lifecycle: unknown,
   issue: ProductIssue,
@@ -573,7 +603,8 @@ function normalizeLifecycleResponse(
     !Array.isArray(lifecycle.story_specs) ||
     !Array.isArray(lifecycle.design_specs) ||
     !Array.isArray(lifecycle.work_items) ||
-    !Array.isArray(lifecycle.workspace_sessions)
+    !Array.isArray(lifecycle.workspace_sessions) ||
+    !Array.isArray(lifecycle.coding_attempts)
   ) {
     throw new Error("invalid lifecycle response");
   }
@@ -633,7 +664,10 @@ function toDrawerEntity(card: LifecycleCardData): DrawerEntity {
     };
   }
 
-  return base;
+  return {
+    ...base,
+    latestAttempt: card.raw.latest_attempt,
+  };
 }
 
 function defaultLaunchTitle(launchTarget: {
