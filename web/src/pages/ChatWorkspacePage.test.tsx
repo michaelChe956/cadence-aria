@@ -76,7 +76,7 @@ describe("ChatWorkspacePage", () => {
     vi.clearAllMocks();
   });
 
-  it("renders chat workspace shell with timeline, chat list, artifact pane and status", () => {
+  it("renders chat workspace shell with timeline and keeps artifact content secondary until selected", async () => {
     mockWorkspaceWs();
     useWorkspaceStore.setState({
       sessionId: "workspace_session_0001",
@@ -103,6 +103,10 @@ describe("ChatWorkspacePage", () => {
     expect(screen.getAllByText(/Story Spec #workspace_session_0001/).length).toBeGreaterThan(0);
     expect(screen.getByTestId("timeline-node-list")).toBeInTheDocument();
     expect(screen.getByTestId("chat-entry-list")).toHaveTextContent("review output");
+    expect(screen.queryByTestId("monaco-viewer")).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
+
     expect(screen.getByTestId("monaco-viewer")).toHaveTextContent("Artifact v1");
     expect(screen.getByTestId("workspace-status-bar")).toHaveTextContent("running");
   });

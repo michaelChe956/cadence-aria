@@ -2,9 +2,23 @@ import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { CodingAttempt, WorkspaceSession } from "../../api/types";
-import { useLifecycleWorkbenchStore } from "../../state/lifecycle-workbench-store";
+import {
+  useLifecycleWorkbenchStore,
+  type LifecycleCard as LifecycleCardData,
+} from "../../state/lifecycle-workbench-store";
 import { CreateLifecycleIssueDialog } from "./CreateLifecycleIssueDialog";
-import { IssueLifecycleWorkbench } from "./IssueLifecycleWorkbench";
+import {
+  defaultLaunchTitle,
+  IssueLifecycleWorkbench,
+} from "./IssueLifecycleWorkbench";
+
+vi.mock("../shared/MonacoViewer", () => ({
+  MonacoViewer: ({ value, height }: { value: string; height?: string }) => (
+    <div data-testid="monaco-viewer" data-height={height}>
+      {value}
+    </div>
+  ),
+}));
 
 type MockLifecycleData = {
   story_specs: Array<Record<string, unknown>>;
@@ -22,7 +36,7 @@ describe("IssueLifecycleWorkbench", () => {
     });
   });
 
-  it("renders four lifecycle columns and focuses derived cards by issue", async () => {
+  it("renders issues as the primary workbench and shows selected issue lifecycle content", async () => {
     vi.stubGlobal("fetch", lifecycleFetch());
     const user = userEvent.setup();
 
@@ -32,32 +46,81 @@ describe("IssueLifecycleWorkbench", () => {
       await screen.findByRole("navigation", { name: "Project 切换" }),
     ).toHaveTextContent("Aria");
     expect(
-      await screen.findByRole("region", { name: "Issue 列" }),
-    ).toBeInTheDocument();
+      await screen.findByRole("region", { name: "Issue 卡片列表" }),
+    ).toHaveTextContent("登录会话过期");
     expect(
-      screen.getByRole("region", { name: "Story Spec 列" }),
-    ).toHaveTextContent("会话过期提示");
-    expect(
-      screen.getByRole("region", { name: "Design Spec 列" }),
-    ).toHaveTextContent("前端提示设计");
-    expect(
-      screen.getByRole("region", { name: "Work Item 列" }),
-    ).toHaveTextContent("实现提示组件");
+      screen.queryByRole("region", { name: "Story Spec 列" }),
+    ).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "登录会话过期" }));
 
     expect(
-      screen.getByRole("button", { name: "显示全部" }),
+      screen.getByRole("region", { name: "Issue 生命周期详情" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("region", { name: "Story Spec 列" }),
+      screen.getByRole("region", { name: "Story Spec 内容" }),
     ).toHaveTextContent("会话过期提示");
     expect(
-      screen.getByRole("region", { name: "Design Spec 列" }),
+      screen.getByRole("region", { name: "Design Spec 内容" }),
     ).toHaveTextContent("前端提示设计");
     expect(
-      screen.getByRole("region", { name: "Work Item 列" }),
+      screen.getByRole("region", { name: "Work Item 内容" }),
     ).toHaveTextContent("实现提示组件");
+  });
+
+  it("keeps long selected issue descriptions compact and opens the full content in the drawer", async () => {
+    vi.stubGlobal(
+      "fetch",
+      lifecycleFetch({
+        issueDescription:
+          "第 1 行：背景说明\n第 2 行：用户场景\n第 3 行：边界条件\n第 4 行：异常路径\n第 5 行：业务规则\n第 6 行：主要流程\n第 7 行：补充约束\n第 8 行：完整验收标准",
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "登录会话过期" }),
+    );
+
+    const detail = screen.getByRole("region", { name: "Issue 生命周期详情" });
+    expect(within(detail).getByTestId("selected-issue-preview")).toHaveClass(
+      "line-clamp-6",
+    );
+
+    await user.click(
+      within(detail).getByRole("button", { name: "查看完整 Issue" }),
+    );
+
+    expect(
+      await screen.findByTestId("lifecycle-card-drawer"),
+    ).toHaveTextContent("查看 Markdown 内容");
+    await user.click(
+      screen.getByRole("button", { name: "查看 Markdown 内容" }),
+    );
+
+    expect(screen.getByTestId("monaco-viewer")).toHaveTextContent(
+      "第 8 行：完整验收标准",
+    );
+  });
+
+  it("does not chain lifecycle type suffixes when generating default titles", () => {
+    expect(
+      defaultLaunchTitle({
+        target: "design",
+        card: lifecycleCardTitle("story_spec", "爬楼梯问题 Story Spec"),
+      }),
+    ).toBe("爬楼梯问题 Design Spec");
+    expect(
+      defaultLaunchTitle({
+        target: "work_item",
+        card: lifecycleCardTitle(
+          "design_spec",
+          "爬楼梯问题 Story Spec Design Spec",
+        ),
+      }),
+    ).toBe("爬楼梯问题 Work Item");
   });
 
   it("syncs controlled URL focus with drawer state", async () => {
@@ -321,13 +384,72 @@ describe("IssueLifecycleWorkbench", () => {
     expect(await screen.findByText("还没有 Project")).toBeInTheDocument();
   });
 
+  it("deletes story specs, design specs, and work items from selected issue content", async () => {
+    const fetchMock = lifecycleFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "登录会话过期" }),
+    );
+
+    await user.click(
+      within(screen.getByRole("region", { name: "Story Spec 内容" })).getByRole(
+        "button",
+        { name: "删除 Story Spec 会话过期提示" },
+      ),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/project_0001/issues/issue_0001/story-specs/story_spec_0001",
+      expect.objectContaining({ method: "DELETE" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("region", { name: "Story Spec 内容" }),
+      ).not.toHaveTextContent("会话过期提示"),
+    );
+
+    await user.click(
+      within(
+        screen.getByRole("region", { name: "Design Spec 内容" }),
+      ).getByRole("button", { name: "删除 Design Spec 前端提示设计" }),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/project_0001/issues/issue_0001/design-specs/design_spec_0001",
+      expect.objectContaining({ method: "DELETE" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("region", { name: "Design Spec 内容" }),
+      ).not.toHaveTextContent("前端提示设计"),
+    );
+
+    await user.click(
+      within(screen.getByRole("region", { name: "Work Item 内容" })).getByRole(
+        "button",
+        { name: "删除 Work Item 实现提示组件" },
+      ),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001",
+      expect.objectContaining({ method: "DELETE" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("region", { name: "Work Item 内容" }),
+      ).not.toHaveTextContent("实现提示组件"),
+    );
+  });
+
   it("requires repository when creating issue", async () => {
     vi.stubGlobal("fetch", lifecycleFetch());
     const user = userEvent.setup();
 
     render(<IssueLifecycleWorkbench />);
 
-    await screen.findByRole("region", { name: "Issue 列" });
+    await screen.findByRole("region", { name: "Issue 卡片列表" });
     await user.click(screen.getByRole("button", { name: "新建 Issue" }));
     const dialog = screen.getByRole("dialog", { name: "新建 Issue" });
     await user.type(
@@ -449,7 +571,7 @@ describe("IssueLifecycleWorkbench", () => {
     render(<IssueLifecycleWorkbench />);
 
     const storyColumn = await screen.findByRole("region", {
-      name: "Story Spec 列",
+      name: "Story Spec 内容",
     });
 
     expect(storyColumn).toHaveTextContent("v1");
@@ -461,7 +583,7 @@ describe("IssueLifecycleWorkbench", () => {
     render(<IssueLifecycleWorkbench />);
 
     const storyColumn = await screen.findByRole("region", {
-      name: "Story Spec 列",
+      name: "Story Spec 内容",
     });
     expect(storyColumn).toHaveTextContent("[REQ-001] 显示会话过期提示");
   });
@@ -587,9 +709,13 @@ describe("IssueLifecycleWorkbench", () => {
     const user = userEvent.setup();
     const onOpenCodingWorkspace = vi.fn();
 
-    render(<IssueLifecycleWorkbench onOpenCodingWorkspace={onOpenCodingWorkspace} />);
+    render(
+      <IssueLifecycleWorkbench onOpenCodingWorkspace={onOpenCodingWorkspace} />,
+    );
 
-    await user.click(await screen.findByRole("button", { name: "实现提示组件" }));
+    await user.click(
+      await screen.findByRole("button", { name: "实现提示组件" }),
+    );
     await user.click(screen.getByRole("button", { name: "开始 Coding" }));
 
     await waitFor(() =>
@@ -631,7 +757,9 @@ describe("IssueLifecycleWorkbench", () => {
 
     render(<IssueLifecycleWorkbench />);
 
-    const workItemColumn = await screen.findByRole("region", { name: "Work Item 列" });
+    const workItemColumn = await screen.findByRole("region", {
+      name: "Work Item 内容",
+    });
     expect(workItemColumn).toHaveTextContent("可编码");
   });
 });
@@ -670,6 +798,7 @@ function lifecycleFetch(options?: {
   emptyLifecycle?: boolean;
   invalidLifecycle?: boolean;
   confirmedWorkItem?: boolean;
+  issueDescription?: string;
   issueTitles?: string[];
   issueTitlesByProject?: Record<string, string>;
   projects?: Array<ReturnType<typeof projectRecord>>;
@@ -817,6 +946,66 @@ function lifecycleFetch(options?: {
       deletedIssueIds.add(issueId);
       deletedIssueIdsByProject.set(projectId, deletedIssueIds);
       lifecycleByIssue.delete(issueId);
+      return jsonResponse({ status: "deleted" });
+    }
+    const storySpecDeleteMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/issues\/([^/]+)\/story-specs\/([^/]+)$/,
+    );
+    if (storySpecDeleteMatch && init?.method === "DELETE") {
+      const issueId = storySpecDeleteMatch[2];
+      const storySpecId = storySpecDeleteMatch[3];
+      const lifecycle = lifecycleData(issueId);
+      lifecycle.story_specs = lifecycle.story_specs.filter(
+        (story) => story.story_spec_id !== storySpecId,
+      );
+      lifecycle.workspace_sessions = lifecycle.workspace_sessions.filter(
+        (session) =>
+          !(
+            session.workspace_type === "story" &&
+            session.entity_id === storySpecId
+          ),
+      );
+      return jsonResponse({ status: "deleted" });
+    }
+    const designSpecDeleteMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/issues\/([^/]+)\/design-specs\/([^/]+)$/,
+    );
+    if (designSpecDeleteMatch && init?.method === "DELETE") {
+      const issueId = designSpecDeleteMatch[2];
+      const designSpecId = designSpecDeleteMatch[3];
+      const lifecycle = lifecycleData(issueId);
+      lifecycle.design_specs = lifecycle.design_specs.filter(
+        (design) => design.design_spec_id !== designSpecId,
+      );
+      lifecycle.workspace_sessions = lifecycle.workspace_sessions.filter(
+        (session) =>
+          !(
+            session.workspace_type === "design" &&
+            session.entity_id === designSpecId
+          ),
+      );
+      return jsonResponse({ status: "deleted" });
+    }
+    const workItemDeleteMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/issues\/([^/]+)\/work-items\/([^/]+)$/,
+    );
+    if (workItemDeleteMatch && init?.method === "DELETE") {
+      const issueId = workItemDeleteMatch[2];
+      const workItemId = workItemDeleteMatch[3];
+      const lifecycle = lifecycleData(issueId);
+      lifecycle.work_items = lifecycle.work_items.filter(
+        (workItem) => workItem.work_item_id !== workItemId,
+      );
+      lifecycle.workspace_sessions = lifecycle.workspace_sessions.filter(
+        (session) =>
+          !(
+            session.workspace_type === "work_item" &&
+            session.entity_id === workItemId
+          ),
+      );
+      lifecycle.coding_attempts = lifecycle.coding_attempts.filter(
+        (attempt) => attempt.work_item_id !== workItemId,
+      );
       return jsonResponse({ status: "deleted" });
     }
     const workspaceRunNextMatch = url.match(
@@ -1088,7 +1277,7 @@ function lifecycleFetch(options?: {
                   task_id: null,
                   session_id: null,
                   title,
-                  description: "描述",
+                  description: options?.issueDescription ?? "描述",
                   change_id: "mobile-refresh",
                   phase: "clarification",
                   status: "draft",
@@ -1111,7 +1300,7 @@ function lifecycleFetch(options?: {
             task_id: null,
             session_id: null,
             title: options?.duplicateCardIds ? "重复 ID Issue" : title,
-            description: "描述",
+            description: options?.issueDescription ?? "描述",
             change_id: "login-session-expired",
             phase: "clarification",
             status: "draft",
@@ -1149,7 +1338,7 @@ function lifecycleFetch(options?: {
             task_id: null,
             session_id: null,
             title: issueTitle,
-            description: "描述",
+            description: options?.issueDescription ?? "描述",
             change_id: "mobile-refresh",
             phase: "clarification",
             status: "draft",
@@ -1175,7 +1364,7 @@ function lifecycleFetch(options?: {
           task_id: null,
           session_id: null,
           title: issueTitle,
-          description: "描述",
+          description: options?.issueDescription ?? "描述",
           change_id: "login-session-expired",
           phase: "clarification",
           status: "draft",
@@ -1444,6 +1633,16 @@ function findDesignBySession(
     }
   }
   return null;
+}
+
+function lifecycleCardTitle(
+  kind: LifecycleCardData["kind"],
+  title: string,
+): LifecycleCardData {
+  return {
+    kind,
+    title,
+  } as LifecycleCardData;
 }
 
 function deferred<T>() {

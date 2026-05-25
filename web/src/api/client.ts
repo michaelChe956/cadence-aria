@@ -35,8 +35,12 @@ export async function normalizeApiError(response: Response): Promise<ApiError> {
   const body = await response.json().catch(() => ({}));
   return {
     code: typeof body.code === "string" ? body.code : "web_client_error",
-    message: typeof body.message === "string" ? body.message : response.statusText,
-    details: typeof body.details === "object" && body.details !== null ? body.details : {},
+    message:
+      typeof body.message === "string" ? body.message : response.statusText,
+    details:
+      typeof body.details === "object" && body.details !== null
+        ? body.details
+        : {},
   };
 }
 
@@ -69,12 +73,17 @@ export function createProject(payload: {
 }
 
 export function deleteProject(projectId: string): Promise<{ status: string }> {
-  return requestJson<{ status: string }>(`/api/projects/${encodeURIComponent(projectId)}`, {
-    method: "DELETE",
-  });
+  return requestJson<{ status: string }>(
+    `/api/projects/${encodeURIComponent(projectId)}`,
+    {
+      method: "DELETE",
+    },
+  );
 }
 
-export function listRepositories(projectId: string): Promise<RepositoryListResponse> {
+export function listRepositories(
+  projectId: string,
+): Promise<RepositoryListResponse> {
   return requestJson<RepositoryListResponse>(
     `/api/projects/${encodeURIComponent(projectId)}/repositories`,
   );
@@ -84,10 +93,13 @@ export function createRepository(
   projectId: string,
   payload: CreateRepositoryRequest,
 ): Promise<Repository> {
-  return requestJson<Repository>(`/api/projects/${encodeURIComponent(projectId)}/repositories`, {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
+  return requestJson<Repository>(
+    `/api/projects/${encodeURIComponent(projectId)}/repositories`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
 }
 
 export function deleteRepository(
@@ -102,7 +114,9 @@ export function deleteRepository(
   );
 }
 
-export function listProductIssues(projectId: string): Promise<ProductIssueListResponse> {
+export function listProductIssues(
+  projectId: string,
+): Promise<ProductIssueListResponse> {
   return requestJson<ProductIssueListResponse>(
     `/api/projects/${encodeURIComponent(projectId)}/issues`,
   );
@@ -112,10 +126,13 @@ export function createProductIssue(
   projectId: string,
   payload: CreateProductIssueRequest,
 ): Promise<ProductIssue> {
-  return requestJson<ProductIssue>(`/api/projects/${encodeURIComponent(projectId)}/issues`, {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
+  return requestJson<ProductIssue>(
+    `/api/projects/${encodeURIComponent(projectId)}/issues`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
 }
 
 export function deleteProductIssue(
@@ -124,6 +141,45 @@ export function deleteProductIssue(
 ): Promise<{ status: string }> {
   return requestJson<{ status: string }>(
     `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}`,
+    {
+      method: "DELETE",
+    },
+  );
+}
+
+export function deleteStorySpec(
+  projectId: string,
+  issueId: string,
+  storySpecId: string,
+): Promise<{ status: string }> {
+  return requestJson<{ status: string }>(
+    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/story-specs/${encodeURIComponent(storySpecId)}`,
+    {
+      method: "DELETE",
+    },
+  );
+}
+
+export function deleteDesignSpec(
+  projectId: string,
+  issueId: string,
+  designSpecId: string,
+): Promise<{ status: string }> {
+  return requestJson<{ status: string }>(
+    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/design-specs/${encodeURIComponent(designSpecId)}`,
+    {
+      method: "DELETE",
+    },
+  );
+}
+
+export function deleteWorkItem(
+  projectId: string,
+  issueId: string,
+  workItemId: string,
+): Promise<{ status: string }> {
+  return requestJson<{ status: string }>(
+    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/work-items/${encodeURIComponent(workItemId)}`,
     {
       method: "DELETE",
     },

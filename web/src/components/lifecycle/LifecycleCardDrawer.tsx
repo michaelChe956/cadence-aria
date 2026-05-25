@@ -70,6 +70,8 @@ export function LifecycleCardDrawer({
   const [showAllVersions, setShowAllVersions] = useState(false);
   const [selectedVersionIndex, setSelectedVersionIndex] = useState(0);
   const [showVersionDiff, setShowVersionDiff] = useState(false);
+  const [artifactPreviewOpen, setArtifactPreviewOpen] = useState(false);
+  const [issuePreviewOpen, setIssuePreviewOpen] = useState(false);
   const versions = useMemo(
     () => [...(entity.artifactVersions ?? [])].sort((left, right) => right.version - left.version),
     [entity.artifactVersions],
@@ -86,6 +88,8 @@ export function LifecycleCardDrawer({
     setSelectedVersionIndex(0);
     setShowVersionDiff(false);
     setShowAllVersions(false);
+    setArtifactPreviewOpen(false);
+    setIssuePreviewOpen(false);
   }, [entity.id]);
 
   return (
@@ -129,7 +133,10 @@ export function LifecycleCardDrawer({
 
       <div className="min-h-0 flex-1 overflow-auto">
         {entity.kind === "issue" ? (
-          <IssueDetail entity={entity} />
+          <IssueDetail
+            entity={entity}
+            onOpenPreview={() => setIssuePreviewOpen(true)}
+          />
         ) : versions.length > 0 ? (
           <section className="border-b border-[var(--aria-line)] px-4 py-3">
             <h3 className="mb-2 text-sm font-semibold text-[var(--aria-ink)]">版本历史</h3>
@@ -176,33 +183,114 @@ export function LifecycleCardDrawer({
 
         {selectedArtifact ? (
           <section className="px-4 py-3">
-            <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-[var(--aria-ink)]">
-              <FileText className="h-4 w-4 text-[var(--aria-primary)]" />
-              版本 v{selectedArtifact.version} 预览
-            </div>
-            <MonacoViewer value={selectedArtifact.markdown} language="markdown" height="320px" />
-            {canShowDiff ? (
-              <button
-                type="button"
-                onClick={() => setShowVersionDiff((value) => !value)}
-                className="mt-2 text-xs font-semibold text-[var(--aria-primary)] hover:underline"
-              >
-                {showVersionDiff ? "隐藏对比" : "与最新版本对比"}
-              </button>
-            ) : null}
-            {showVersionDiff && canShowDiff ? (
-              <div className="mt-3">
-                <MonacoDiffViewer
-                  original={selectedArtifact.markdown}
-                  modified={latestVersion.markdown}
-                  language="markdown"
-                  height="320px"
-                />
+            <div className="rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-3">
+              <div className="flex min-w-0 items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 text-sm font-semibold text-[var(--aria-ink)]">
+                    <FileText className="h-4 w-4 text-[var(--aria-primary)]" />
+                    版本 v{selectedArtifact.version}
+                  </div>
+                  <p className="mt-1 text-xs leading-5 text-[var(--aria-ink-muted)]">
+                    默认隐藏长内容，按需打开 Markdown 大预览。
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setArtifactPreviewOpen(true)}
+                  className="inline-flex h-8 shrink-0 items-center rounded-md border border-[var(--aria-line)] bg-white px-3 text-xs font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)]"
+                >
+                  查看 Markdown 内容
+                </button>
               </div>
-            ) : null}
+            </div>
           </section>
         ) : null}
       </div>
+
+      {artifactPreviewOpen && selectedArtifact ? (
+        <div className="fixed inset-4 z-[70] flex min-h-0 flex-col rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] shadow-2xl">
+          <div className="flex shrink-0 items-center justify-between gap-3 border-b border-[var(--aria-line)] px-4 py-3">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 text-sm font-semibold text-[var(--aria-ink)]">
+                <FileText className="h-4 w-4 text-[var(--aria-primary)]" />
+                版本 v{selectedArtifact.version} 预览
+              </div>
+              <p className="mt-1 truncate font-mono text-xs text-[var(--aria-ink-muted)]">
+                {entity.id}
+              </p>
+            </div>
+            <button
+              type="button"
+              aria-label="关闭 Markdown 内容预览"
+              onClick={() => {
+                setArtifactPreviewOpen(false);
+                setShowVersionDiff(false);
+              }}
+              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-[var(--aria-line)] text-[var(--aria-ink-muted)] hover:border-[var(--aria-primary)] hover:text-[var(--aria-primary)]"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          <div className="min-h-0 flex-1 p-4">
+            {showVersionDiff && canShowDiff ? (
+              <MonacoDiffViewer
+                original={selectedArtifact.markdown}
+                modified={latestVersion.markdown}
+                language="markdown"
+                height="100%"
+              />
+            ) : (
+              <MonacoViewer
+                value={selectedArtifact.markdown}
+                language="markdown"
+                height="100%"
+              />
+            )}
+          </div>
+          {canShowDiff ? (
+            <div className="flex shrink-0 justify-end border-t border-[var(--aria-line)] px-4 py-3">
+              <button
+                type="button"
+                onClick={() => setShowVersionDiff((value) => !value)}
+                className="inline-flex h-8 items-center rounded-md border border-[var(--aria-line)] bg-white px-3 text-xs font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)]"
+              >
+                {showVersionDiff ? "隐藏对比" : "与最新版本对比"}
+              </button>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {issuePreviewOpen && entity.kind === "issue" && entity.description ? (
+        <div className="fixed inset-4 z-[70] flex min-h-0 flex-col rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] shadow-2xl">
+          <div className="flex shrink-0 items-center justify-between gap-3 border-b border-[var(--aria-line)] px-4 py-3">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 text-sm font-semibold text-[var(--aria-ink)]">
+                <FileText className="h-4 w-4 text-[var(--aria-primary)]" />
+                Issue 描述预览
+              </div>
+              <p className="mt-1 truncate font-mono text-xs text-[var(--aria-ink-muted)]">
+                {entity.id}
+              </p>
+            </div>
+            <button
+              type="button"
+              aria-label="关闭 Markdown 内容预览"
+              onClick={() => setIssuePreviewOpen(false)}
+              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-[var(--aria-line)] text-[var(--aria-ink-muted)] hover:border-[var(--aria-primary)] hover:text-[var(--aria-primary)]"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          <div className="min-h-0 flex-1 p-4">
+            <MonacoViewer
+              value={entity.description}
+              language="markdown"
+              height="100%"
+            />
+          </div>
+        </div>
+      ) : null}
 
       <footer className="space-y-2 border-t border-[var(--aria-line)] px-4 py-3">
         <button
@@ -241,14 +329,38 @@ export function LifecycleCardDrawer({
   );
 }
 
-function IssueDetail({ entity }: { entity: DrawerEntity }) {
+function IssueDetail({
+  entity,
+  onOpenPreview,
+}: {
+  entity: DrawerEntity;
+  onOpenPreview: () => void;
+}) {
   const artifacts = entity.artifacts ?? [];
   return (
     <>
       {entity.description ? (
         <section className="border-b border-[var(--aria-line)] px-4 py-3">
-          <h3 className="mb-2 text-sm font-semibold text-[var(--aria-ink)]">Issue 描述</h3>
-          <MonacoViewer value={entity.description} language="markdown" height="200px" />
+          <div className="rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-3">
+            <div className="flex min-w-0 items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 text-sm font-semibold text-[var(--aria-ink)]">
+                  <FileText className="h-4 w-4 text-[var(--aria-primary)]" />
+                  Issue 描述
+                </div>
+                <p className="mt-1 text-xs leading-5 text-[var(--aria-ink-muted)]">
+                  默认隐藏长内容，按需打开 Markdown 大预览。
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={onOpenPreview}
+                className="inline-flex h-8 shrink-0 items-center rounded-md border border-[var(--aria-line)] bg-white px-3 text-xs font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)]"
+              >
+                查看 Markdown 内容
+              </button>
+            </div>
+          </div>
         </section>
       ) : null}
       {artifacts.length > 0 ? (

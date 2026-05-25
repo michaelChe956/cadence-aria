@@ -44,7 +44,7 @@ export function LifecycleColumn({
                   ? () => onGenerateStorySpec(card)
                   : undefined
               }
-              onDeleteIssue={
+              onDelete={
                 card.kind === "issue" && onDeleteIssue
                   ? () => onDeleteIssue(card.id)
                   : undefined

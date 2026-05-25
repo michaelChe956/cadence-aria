@@ -48,6 +48,7 @@ export function CodingWorkspacePage({
   const store = useCodingWorkspaceStore();
   const connected = store.connectionStatus === "connected";
   const activeTab = store.activeTab;
+  const [activePanel, setActivePanel] = useState<"chat" | "results">("chat");
 
   useUnloadGuard({
     enabled: store.status === "running",
@@ -97,31 +98,37 @@ export function CodingWorkspacePage({
         </div>
       </header>
 
-      <main className="grid min-h-0 flex-1 grid-cols-1 md:grid-cols-[16rem_minmax(0,1fr)] lg:grid-cols-[16rem_minmax(0,1fr)_minmax(19rem,25rem)]">
+      <main className="grid min-h-0 flex-1 grid-cols-1 md:grid-cols-[16rem_minmax(0,1fr)]">
         <CodingTimeline
           nodes={store.timelineNodes}
           activeNodeId={store.activeNodeId}
           selectedNodeId={store.selectedNodeId}
           onSelectNode={(nodeId) => useCodingWorkspaceStore.getState().setSelectedNode(nodeId)}
         />
-        <section className="grid min-h-0 grid-rows-[minmax(0,1fr)_auto_auto] bg-[var(--aria-panel)]">
-          <ChatEntryList entries={store.chatEntries} />
-          <PendingGatePanel
-            gate={store.pendingGates.at(-1) ?? null}
-            onRespond={api.respondGate}
-          />
-          <CodingComposer
-            api={api}
-            stage={store.stage}
-            status={store.status}
-            statusText={
-              store.protocolError
-                ? `${store.protocolError.code}: ${store.protocolError.message}`
-                : store.pendingGates.at(-1)?.title ?? "Coding Workspace"
-            }
-          />
+        <section className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] bg-[var(--aria-panel)]">
+          <CodingPanelTabs activePanel={activePanel} onSelectPanel={setActivePanel} />
+          {activePanel === "results" ? (
+            <CodingArtifactTabs activeTab={activeTab} className="min-h-0" />
+          ) : (
+            <div className="grid min-h-0 grid-rows-[minmax(0,1fr)_auto_auto]">
+              <ChatEntryList entries={store.chatEntries} />
+              <PendingGatePanel
+                gate={store.pendingGates.at(-1) ?? null}
+                onRespond={api.respondGate}
+              />
+              <CodingComposer
+                api={api}
+                stage={store.stage}
+                status={store.status}
+                statusText={
+                  store.protocolError
+                    ? `${store.protocolError.code}: ${store.protocolError.message}`
+                    : store.pendingGates.at(-1)?.title ?? "Coding Workspace"
+                }
+              />
+            </div>
+          )}
         </section>
-        <CodingArtifactTabs activeTab={activeTab} />
       </main>
 
       <div
@@ -134,6 +141,44 @@ export function CodingWorkspacePage({
       </div>
     </div>
   );
+}
+
+function CodingPanelTabs({
+  activePanel,
+  onSelectPanel,
+}: {
+  activePanel: "chat" | "results";
+  onSelectPanel: (panel: "chat" | "results") => void;
+}) {
+  return (
+    <div className="flex min-w-0 items-center justify-between gap-3 border-b border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 py-2">
+      <div className="flex min-w-0 items-center gap-1">
+        <button
+          type="button"
+          onClick={() => onSelectPanel("chat")}
+          className={codingPanelTabClass(activePanel === "chat")}
+        >
+          运行对话
+        </button>
+        <button
+          type="button"
+          onClick={() => onSelectPanel("results")}
+          className={codingPanelTabClass(activePanel === "results")}
+        >
+          运行结果
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function codingPanelTabClass(active: boolean) {
+  return [
+    "inline-flex h-8 items-center rounded-md px-3 text-xs font-semibold transition-colors",
+    active
+      ? "bg-[var(--aria-primary-soft)] text-[var(--aria-primary)]"
+      : "text-[var(--aria-ink-muted)] hover:bg-[var(--aria-panel-muted)]",
+  ].join(" ");
 }
 
 function CodingComposer({
@@ -367,14 +412,20 @@ function CodingTimeline({
   );
 }
 
-function CodingArtifactTabs({ activeTab }: { activeTab: CodingArtifactTab }) {
+function CodingArtifactTabs({
+  activeTab,
+  className = "",
+}: {
+  activeTab: CodingArtifactTab;
+  className?: string;
+}) {
   const store = useCodingWorkspaceStore();
   const tabs: CodingArtifactTab[] = ["diff", "tests", "review", "git", "logs"];
 
   return (
     <aside
       data-testid="coding-artifact-tabs"
-      className="hidden min-h-0 flex-col border-l border-[var(--aria-line)] bg-[var(--aria-panel)] lg:flex"
+      className={`flex min-h-0 flex-col bg-[var(--aria-panel)] ${className}`}
     >
       <div className="flex shrink-0 border-b border-[var(--aria-line)] px-2 py-2">
         {tabs.map((tab) => (

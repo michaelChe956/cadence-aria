@@ -1,4 +1,5 @@
-use std::path::Path;
+use std::ffi::OsString;
+use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -299,12 +300,15 @@ fn ensure_safe_worktree_path(
     let repo_root = repo_path.canonicalize().map_err(|error| {
         GitWorkspaceError::Io(format!("canonicalize {}: {error}", repo_path.display()))
     })?;
-    let normalized = if worktree_path.is_absolute() {
+    reject_parent_dir_components(worktree_path)?;
+    let absolute = if worktree_path.is_absolute() {
         worktree_path.to_path_buf()
     } else {
         repo_root.join(worktree_path)
     };
+    let normalized = normalize_existing_prefix(&absolute)?;
     let expected = repo_root.join(".worktrees").join("aria-work-items");
+    let expected = normalize_existing_prefix(&expected)?;
     if !normalized.starts_with(&expected) {
         return Err(GitWorkspaceError::UnsafePath(format!(
             "{} is outside {}",
@@ -313,6 +317,52 @@ fn ensure_safe_worktree_path(
         )));
     }
     Ok(())
+}
+
+fn reject_parent_dir_components(path: &Path) -> Result<(), GitWorkspaceError> {
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(GitWorkspaceError::UnsafePath(format!(
+            "{} contains parent directory traversal",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn normalize_existing_prefix(path: &Path) -> Result<PathBuf, GitWorkspaceError> {
+    if path.exists() {
+        return path.canonicalize().map_err(|error| {
+            GitWorkspaceError::Io(format!("canonicalize {}: {error}", path.display()))
+        });
+    }
+
+    let mut existing = path;
+    let mut missing = Vec::<OsString>::new();
+    loop {
+        if existing.exists() {
+            let mut normalized = existing.canonicalize().map_err(|error| {
+                GitWorkspaceError::Io(format!("canonicalize {}: {error}", existing.display()))
+            })?;
+            for component in missing.iter().rev() {
+                normalized.push(component);
+            }
+            return Ok(normalized);
+        }
+
+        let Some(name) = existing.file_name() else {
+            return Err(GitWorkspaceError::Io(format!(
+                "no existing parent for {}",
+                path.display()
+            )));
+        };
+        missing.push(name.to_os_string());
+        existing = existing
+            .parent()
+            .ok_or_else(|| GitWorkspaceError::Io(format!("no parent for {}", path.display())))?;
+    }
 }
 
 fn parse_status_line(line: &str) -> FileStatus {

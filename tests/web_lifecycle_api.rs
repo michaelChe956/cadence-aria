@@ -326,6 +326,141 @@ async fn confirmed_story_and_design_can_generate_design_and_work_item_workspaces
 }
 
 #[tokio::test]
+async fn delete_lifecycle_entities_removes_cards_and_workspace_sessions() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects",
+        json!({"name":"Lifecycle","description":null}),
+    )
+    .await;
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/repositories",
+        json!({"name":"Repo","path":repo.path()}),
+    )
+    .await;
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues",
+        json!({"title":"登录会话过期","description":"描述","repository_id":"repository_0001"}),
+    )
+    .await;
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/story-specs:generate",
+        json!({"title":"登录会话过期提示"}),
+    )
+    .await;
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/workspace-sessions/workspace_session_0001/confirm",
+        json!({"confirmed_by":"human"}),
+    )
+    .await;
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/design-specs:generate",
+        json!({
+            "title":"会话过期前端设计",
+            "story_spec_ids":["story_spec_0001"],
+            "design_kind":"frontend"
+        }),
+    )
+    .await;
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/workspace-sessions/workspace_session_0002/confirm",
+        json!({"confirmed_by":"human"}),
+    )
+    .await;
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items:generate",
+        json!({
+            "title":"实现会话过期提示",
+            "story_spec_ids":["story_spec_0001"],
+            "design_spec_ids":["design_spec_0001"]
+        }),
+    )
+    .await;
+
+    let (status, response) = request_json(
+        app.clone(),
+        Method::DELETE,
+        "/api/projects/project_0001/issues/issue_0001/story-specs/story_spec_0001",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response["status"], "deleted");
+    let (_, lifecycle) = request_json(
+        app.clone(),
+        Method::GET,
+        "/api/issues/issue_0001/lifecycle?project_id=project_0001",
+        json!({}),
+    )
+    .await;
+    assert_eq!(lifecycle["story_specs"].as_array().unwrap().len(), 0);
+    assert_eq!(lifecycle["design_specs"].as_array().unwrap().len(), 1);
+    assert_eq!(lifecycle["work_items"].as_array().unwrap().len(), 1);
+    assert_eq!(lifecycle["workspace_sessions"].as_array().unwrap().len(), 2);
+
+    let (status, response) = request_json(
+        app.clone(),
+        Method::DELETE,
+        "/api/projects/project_0001/issues/issue_0001/design-specs/design_spec_0001",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response["status"], "deleted");
+    let (_, lifecycle) = request_json(
+        app.clone(),
+        Method::GET,
+        "/api/issues/issue_0001/lifecycle?project_id=project_0001",
+        json!({}),
+    )
+    .await;
+    assert_eq!(lifecycle["design_specs"].as_array().unwrap().len(), 0);
+    assert_eq!(lifecycle["work_items"].as_array().unwrap().len(), 1);
+    assert_eq!(lifecycle["workspace_sessions"].as_array().unwrap().len(), 1);
+
+    let (status, response) = request_json(
+        app.clone(),
+        Method::DELETE,
+        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response["status"], "deleted");
+    let (_, lifecycle) = request_json(
+        app,
+        Method::GET,
+        "/api/issues/issue_0001/lifecycle?project_id=project_0001",
+        json!({}),
+    )
+    .await;
+    assert_eq!(lifecycle["work_items"].as_array().unwrap().len(), 0);
+    assert_eq!(lifecycle["workspace_sessions"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
 async fn generating_story_specs_returns_404_when_bound_repository_was_deleted() {
     let root = tempdir().expect("root");
     let repo = git_repo();

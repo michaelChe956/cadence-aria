@@ -55,6 +55,7 @@ export function ChatWorkspacePage({
   const store = useWorkspaceStore();
   const stageConfig = useStageUI(store.stage);
   const chatListRef = useRef<ChatEntryListHandle | null>(null);
+  const [activePanel, setActivePanel] = useState<"chat" | "artifact">("chat");
   const sessionReady = store.sessionId === sessionId;
   const inputDisabled = !sessionReady || connectionStatus !== "connected";
   const selectedEntryId = useMemo(
@@ -202,7 +203,7 @@ export function ChatWorkspacePage({
         </div>
       ) : null}
 
-      <main className="grid min-h-0 flex-1 grid-cols-1 md:grid-cols-[16rem_minmax(0,1fr)] lg:grid-cols-[16rem_minmax(0,1fr)_minmax(18rem,24rem)]">
+      <main className="grid min-h-0 flex-1 grid-cols-1 md:grid-cols-[16rem_minmax(0,1fr)]">
         <TimelineNodeList
           nodes={store.timelineNodes}
           activeNodeId={store.activeNodeId}
@@ -210,35 +211,88 @@ export function ChatWorkspacePage({
           onSelectNode={handleSelectNode}
           className="border-b border-[var(--aria-line)] md:border-b-0 md:border-r"
         />
-        <section className="grid min-h-0 grid-rows-[minmax(0,1fr)_auto] bg-[var(--aria-panel)]">
-          <ChatEntryList
-            ref={chatListRef}
-            entries={store.chatEntries}
-            onPermissionResponse={handlePermissionResponse}
-            onSelectRevisionPath={
-              store.stage === "review_decision" ? handleSelectRevisionPath : undefined
-            }
-            onHumanConfirm={handleHumanConfirm}
+        <section className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] bg-[var(--aria-panel)]">
+          <WorkspacePanelTabs
+            activePanel={activePanel}
+            onSelectPanel={setActivePanel}
+            artifactCount={store.artifactVersions.length}
           />
-          <ChatInputBar
-            stage={store.stage}
-            disabled={inputDisabled}
-            onSendContextNote={sendContextNote}
-            onStartGeneration={handleStartGeneration}
-            onSendHumanDecision={(content) => sendHumanConfirm("request-change", content)}
-            onAbort={abort}
-          />
+          {activePanel === "artifact" ? (
+            <ArtifactPane
+              artifactVersions={store.artifactVersions}
+              artifact={store.artifact}
+              className="min-h-0 border-l-0"
+            />
+          ) : (
+            <div className="grid min-h-0 grid-rows-[minmax(0,1fr)_auto]">
+              <ChatEntryList
+                ref={chatListRef}
+                entries={store.chatEntries}
+                onPermissionResponse={handlePermissionResponse}
+                onSelectRevisionPath={
+                  store.stage === "review_decision" ? handleSelectRevisionPath : undefined
+                }
+                onHumanConfirm={handleHumanConfirm}
+              />
+              <ChatInputBar
+                stage={store.stage}
+                disabled={inputDisabled}
+                onSendContextNote={sendContextNote}
+                onStartGeneration={handleStartGeneration}
+                onSendHumanDecision={(content) => sendHumanConfirm("request-change", content)}
+                onAbort={abort}
+              />
+            </div>
+          )}
         </section>
-        <ArtifactPane
-          artifactVersions={store.artifactVersions}
-          artifact={store.artifact}
-          className="hidden min-h-0 lg:flex"
-        />
       </main>
 
       <StatusBar state={store} connectionStatus={connectionStatus} />
     </div>
   );
+}
+
+function WorkspacePanelTabs({
+  activePanel,
+  onSelectPanel,
+  artifactCount,
+}: {
+  activePanel: "chat" | "artifact";
+  onSelectPanel: (panel: "chat" | "artifact") => void;
+  artifactCount: number;
+}) {
+  return (
+    <div className="flex min-w-0 items-center justify-between gap-3 border-b border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 py-2">
+      <div className="flex min-w-0 items-center gap-1">
+        <button
+          type="button"
+          onClick={() => onSelectPanel("chat")}
+          className={panelTabClass(activePanel === "chat")}
+        >
+          对话
+        </button>
+        <button
+          type="button"
+          onClick={() => onSelectPanel("artifact")}
+          className={panelTabClass(activePanel === "artifact")}
+        >
+          Artifact
+        </button>
+      </div>
+      <span className="shrink-0 rounded border border-[var(--aria-line)] px-2 py-0.5 font-mono text-[11px] text-[var(--aria-ink-muted)]">
+        artifacts {artifactCount}
+      </span>
+    </div>
+  );
+}
+
+function panelTabClass(active: boolean) {
+  return [
+    "inline-flex h-8 items-center rounded-md px-3 text-xs font-semibold transition-colors",
+    active
+      ? "bg-[var(--aria-primary-soft)] text-[var(--aria-primary)]"
+      : "text-[var(--aria-ink-muted)] hover:bg-[var(--aria-panel-muted)]",
+  ].join(" ");
 }
 
 type ProviderConfigDialogButtonProps = ComponentProps<typeof ProviderConfigPanel>;

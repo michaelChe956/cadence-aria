@@ -788,6 +788,39 @@ pub async fn delete_product_issue(
     Ok(Json(json!({"status":"deleted"})))
 }
 
+pub async fn delete_story_spec(
+    State(state): State<WebAppState>,
+    Path((project_id, issue_id, story_spec_id)): Path<(String, String, String)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let store = LifecycleStore::new(product_app_paths(&state));
+    store
+        .delete_story_spec(&project_id, &issue_id, &story_spec_id)
+        .map_err(product_store_api_error)?;
+    Ok(Json(json!({"status":"deleted"})))
+}
+
+pub async fn delete_design_spec(
+    State(state): State<WebAppState>,
+    Path((project_id, issue_id, design_spec_id)): Path<(String, String, String)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let store = LifecycleStore::new(product_app_paths(&state));
+    store
+        .delete_design_spec(&project_id, &issue_id, &design_spec_id)
+        .map_err(product_store_api_error)?;
+    Ok(Json(json!({"status":"deleted"})))
+}
+
+pub async fn delete_work_item(
+    State(state): State<WebAppState>,
+    Path((project_id, issue_id, work_item_id)): Path<(String, String, String)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let store = LifecycleStore::new(product_app_paths(&state));
+    store
+        .delete_work_item(&project_id, &issue_id, &work_item_id)
+        .map_err(product_store_api_error)?;
+    Ok(Json(json!({"status":"deleted"})))
+}
+
 pub async fn list_issues(State(state): State<WebAppState>) -> ApiResult<Json<IssueListResponse>> {
     let registry = IssueRegistry::new(state.workspace_root.clone());
     let issues = registry.list()?;

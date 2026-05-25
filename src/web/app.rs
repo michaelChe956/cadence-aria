@@ -64,12 +64,24 @@ pub fn build_web_router(state: WebAppState) -> Router {
             post(handlers::generate_story_specs),
         )
         .route(
+            "/api/projects/{project_id}/issues/{issue_id}/story-specs/{story_spec_id}",
+            delete(handlers::delete_story_spec),
+        )
+        .route(
             "/api/projects/{project_id}/issues/{issue_id}/design-specs:generate",
             post(handlers::generate_design_specs),
         )
         .route(
+            "/api/projects/{project_id}/issues/{issue_id}/design-specs/{design_spec_id}",
+            delete(handlers::delete_design_spec),
+        )
+        .route(
             "/api/projects/{project_id}/issues/{issue_id}/work-items:generate",
             post(handlers::generate_work_items),
+        )
+        .route(
+            "/api/projects/{project_id}/issues/{issue_id}/work-items/{work_item_id}",
+            delete(handlers::delete_work_item),
         )
         .route(
             "/api/projects/{project_id}/issues/{issue_id}/work-items/{work_item_id}/coding-attempts",

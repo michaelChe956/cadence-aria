@@ -147,6 +147,32 @@ impl LifecycleStore {
         list_json_records(&self.story_specs_root(project_id, issue_id))
     }
 
+    pub fn delete_story_spec(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        story_spec_id: &str,
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(story_spec_id)?;
+
+        delete_required_file(
+            &self
+                .story_specs_root(project_id, issue_id)
+                .join(format!("{story_spec_id}.json")),
+            "story_spec",
+            story_spec_id,
+        )?;
+        remove_dir_all_if_exists(&self.versions_root(project_id, issue_id, story_spec_id))?;
+        self.delete_workspace_sessions_for_entity(
+            project_id,
+            issue_id,
+            story_spec_id,
+            WorkspaceType::Story,
+        )
+    }
+
     pub fn create_design_spec(
         &self,
         input: CreateDesignSpecInput,
@@ -183,6 +209,32 @@ impl LifecycleStore {
         validate_relative_id(project_id)?;
         validate_relative_id(issue_id)?;
         list_json_records(&self.design_specs_root(project_id, issue_id))
+    }
+
+    pub fn delete_design_spec(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        design_spec_id: &str,
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(design_spec_id)?;
+
+        delete_required_file(
+            &self
+                .design_specs_root(project_id, issue_id)
+                .join(format!("{design_spec_id}.json")),
+            "design_spec",
+            design_spec_id,
+        )?;
+        remove_dir_all_if_exists(&self.versions_root(project_id, issue_id, design_spec_id))?;
+        self.delete_workspace_sessions_for_entity(
+            project_id,
+            issue_id,
+            design_spec_id,
+            WorkspaceType::Design,
+        )
     }
 
     pub fn create_work_item(
@@ -225,6 +277,31 @@ impl LifecycleStore {
         validate_relative_id(project_id)?;
         validate_relative_id(issue_id)?;
         list_json_records(&self.work_items_root(project_id, issue_id))
+    }
+
+    pub fn delete_work_item(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        work_item_id: &str,
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(work_item_id)?;
+
+        delete_required_file(
+            &self
+                .work_items_root(project_id, issue_id)
+                .join(format!("{work_item_id}.json")),
+            "work_item",
+            work_item_id,
+        )?;
+        self.delete_workspace_sessions_for_entity(
+            project_id,
+            issue_id,
+            work_item_id,
+            WorkspaceType::WorkItem,
+        )
     }
 
     pub fn append_version(
@@ -838,6 +915,31 @@ impl LifecycleStore {
             .issue_lifecycle_root(project_id, issue_id)
             .join("provider-review-rounds")
     }
+
+    fn delete_workspace_sessions_for_entity(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        entity_id: &str,
+        workspace_type: WorkspaceType,
+    ) -> Result<(), ProductStoreError> {
+        let sessions_root = self.workspace_sessions_root(project_id, issue_id);
+        let timeline_root = self
+            .paths
+            .issue_lifecycle_root(project_id, issue_id)
+            .join("workspace-timelines");
+        for session in self
+            .list_workspace_sessions(project_id, issue_id)?
+            .into_iter()
+            .filter(|session| {
+                session.entity_id == entity_id && session.workspace_type == workspace_type
+            })
+        {
+            remove_dir_all_if_exists(&timeline_root.join(&session.id))?;
+            remove_file_if_exists(&sessions_root.join(format!("{}.json", session.id)))?;
+        }
+        Ok(())
+    }
 }
 
 fn list_json_records<T: DeserializeOwned>(path: &Path) -> Result<Vec<T>, ProductStoreError> {
@@ -999,6 +1101,42 @@ fn ensure_target_absent(path: &Path) -> Result<(), ProductStoreError> {
     Ok(())
 }
 
+fn delete_required_file(
+    path: &Path,
+    kind: &'static str,
+    id: &str,
+) -> Result<(), ProductStoreError> {
+    if !path_is_regular_file(path)? {
+        return Err(ProductStoreError::NotFound {
+            kind,
+            id: id.to_string(),
+        });
+    }
+    remove_file_if_exists(path)
+}
+
+fn remove_file_if_exists(path: &Path) -> Result<(), ProductStoreError> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(ProductStoreError::Io(format!(
+            "remove {}: {error}",
+            path.display()
+        ))),
+    }
+}
+
+fn remove_dir_all_if_exists(path: &Path) -> Result<(), ProductStoreError> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(ProductStoreError::Io(format!(
+            "remove {}: {error}",
+            path.display()
+        ))),
+    }
+}
+
 fn path_is_regular_file(path: &Path) -> Result<bool, ProductStoreError> {
     match fs::metadata(path) {
         Ok(metadata) => Ok(metadata.is_file()),
@@ -1020,4 +1158,189 @@ fn validate_relative_ids(values: &[String]) -> Result<(), ProductStoreError> {
 fn path_exists(path: &Path) -> Result<bool, ProductStoreError> {
     path.try_exists()
         .map_err(|error| ProductStoreError::Io(format!("try_exists {}: {error}", path.display())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    const PROJECT_ID: &str = "project_0001";
+    const ISSUE_ID: &str = "issue_0001";
+    const REPOSITORY_ID: &str = "repository_0001";
+
+    fn setup() -> (TempDir, LifecycleStore) {
+        let tmp = TempDir::new().unwrap();
+        let store = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
+        (tmp, store)
+    }
+
+    fn create_session(
+        store: &LifecycleStore,
+        entity_id: &str,
+        workspace_type: WorkspaceType,
+    ) -> WorkspaceSessionRecord {
+        store
+            .create_workspace_session(CreateWorkspaceSessionInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                entity_id: entity_id.to_string(),
+                workspace_type,
+                author_provider: ProviderName::Codex,
+                reviewer_provider: ProviderName::ClaudeCode,
+                review_rounds: 2,
+                superpowers_enabled: true,
+                openspec_enabled: true,
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn delete_story_spec_removes_record_versions_session_and_timeline() {
+        let (_tmp, store) = setup();
+        let story = store
+            .create_story_spec(CreateStorySpecInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                repository_id: REPOSITORY_ID.to_string(),
+                title: "Session expired story".to_string(),
+            })
+            .unwrap();
+        store
+            .append_version(AppendSpecVersionInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                entity_id: story.id.clone(),
+                markdown: "story markdown".to_string(),
+                provider_run_refs: vec![],
+                review_refs: vec![],
+                confirmed_by: None,
+            })
+            .unwrap();
+        let session = create_session(&store, &story.id, WorkspaceType::Story);
+        store.save_timeline_nodes(&session.id, &[]).unwrap();
+        let versions_root = store.versions_root(PROJECT_ID, ISSUE_ID, &story.id);
+        let timeline_root = store
+            .workspace_timeline_root_for_session(&session.id)
+            .unwrap();
+
+        store
+            .delete_story_spec(PROJECT_ID, ISSUE_ID, &story.id)
+            .unwrap();
+
+        assert!(
+            store
+                .list_story_specs(PROJECT_ID, ISSUE_ID)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .list_versions(PROJECT_ID, ISSUE_ID, &story.id)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .list_workspace_sessions(PROJECT_ID, ISSUE_ID)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!versions_root.exists());
+        assert!(!timeline_root.exists());
+    }
+
+    #[test]
+    fn delete_design_spec_removes_record_versions_session_and_timeline() {
+        let (_tmp, store) = setup();
+        let design = store
+            .create_design_spec(CreateDesignSpecInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                story_spec_ids: vec!["story_spec_0001".to_string()],
+                design_kind: DesignKind::Frontend,
+                title: "Frontend design".to_string(),
+            })
+            .unwrap();
+        store
+            .append_version(AppendSpecVersionInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                entity_id: design.id.clone(),
+                markdown: "design markdown".to_string(),
+                provider_run_refs: vec![],
+                review_refs: vec![],
+                confirmed_by: None,
+            })
+            .unwrap();
+        let session = create_session(&store, &design.id, WorkspaceType::Design);
+        store.save_timeline_nodes(&session.id, &[]).unwrap();
+        let versions_root = store.versions_root(PROJECT_ID, ISSUE_ID, &design.id);
+        let timeline_root = store
+            .workspace_timeline_root_for_session(&session.id)
+            .unwrap();
+
+        store
+            .delete_design_spec(PROJECT_ID, ISSUE_ID, &design.id)
+            .unwrap();
+
+        assert!(
+            store
+                .list_design_specs(PROJECT_ID, ISSUE_ID)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .list_versions(PROJECT_ID, ISSUE_ID, &design.id)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .list_workspace_sessions(PROJECT_ID, ISSUE_ID)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!versions_root.exists());
+        assert!(!timeline_root.exists());
+    }
+
+    #[test]
+    fn delete_work_item_removes_record_session_and_timeline() {
+        let (_tmp, store) = setup();
+        let work_item = store
+            .create_work_item(CreateWorkItemInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                repository_id: REPOSITORY_ID.to_string(),
+                story_spec_ids: vec!["story_spec_0001".to_string()],
+                design_spec_ids: vec!["design_spec_0001".to_string()],
+                title: "Implement prompt component".to_string(),
+            })
+            .unwrap();
+        let session = create_session(&store, &work_item.id, WorkspaceType::WorkItem);
+        store.save_timeline_nodes(&session.id, &[]).unwrap();
+        let timeline_root = store
+            .workspace_timeline_root_for_session(&session.id)
+            .unwrap();
+
+        store
+            .delete_work_item(PROJECT_ID, ISSUE_ID, &work_item.id)
+            .unwrap();
+
+        assert!(
+            store
+                .list_work_items(PROJECT_ID, ISSUE_ID)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .list_workspace_sessions(PROJECT_ID, ISSUE_ID)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!timeline_root.exists());
+    }
 }

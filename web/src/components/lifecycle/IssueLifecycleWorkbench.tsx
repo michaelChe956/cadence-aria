@@ -1,13 +1,16 @@
-import { Plus, RefreshCw } from "lucide-react";
+import { PanelRightOpen, Plus, RefreshCw } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   createCodingAttempt,
   createProject,
   createProductIssue,
   createRepository,
+  deleteDesignSpec,
   deleteProductIssue,
   deleteProject,
   deleteRepository,
+  deleteStorySpec,
+  deleteWorkItem,
   generateDesignSpecs,
   generateStorySpecs,
   generateWorkItems,
@@ -27,8 +30,8 @@ import type {
 import {
   groupLifecycleCards,
   useLifecycleWorkbenchStore,
-  visibleLifecycle,
   type LifecycleCard as LifecycleCardData,
+  type LifecycleColumns,
 } from "../../state/lifecycle-workbench-store";
 import { WorkbenchSurface } from "../shell/WorkbenchSurface";
 import {
@@ -40,10 +43,11 @@ import {
   CreateLifecycleIssueDialog,
   type CreateLifecycleIssuePayload,
 } from "./CreateLifecycleIssueDialog";
+import { LifecycleCard } from "./LifecycleCard";
 import { LifecycleCardDrawer, type DrawerEntity } from "./LifecycleCardDrawer";
-import { LifecycleColumn } from "./LifecycleColumn";
 import { ProjectSidebar } from "./ProjectSidebar";
 type ProviderWorkspaceLaunchTarget = "story" | "design" | "work_item";
+const DELETE_EXIT_ANIMATION_MS = 220;
 
 export function IssueLifecycleWorkbench({
   focusEntityId,
@@ -64,6 +68,7 @@ export function IssueLifecycleWorkbench({
   );
   const [focusedIssueId, setFocusedIssueId] = useState<string | null>(null);
   const [selectedCardKey, setSelectedCardKey] = useState<string | null>(null);
+  const [deletingCardKey, setDeletingCardKey] = useState<string | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [repositoryDialogOpen, setRepositoryDialogOpen] = useState(false);
@@ -157,8 +162,15 @@ export function IssueLifecycleWorkbench({
 
       setRepositories(repositoryResponse.repositories ?? []);
       setLifecycles(lifecycleResponses);
+      setFocusedIssueId(
+        focusedIssueId &&
+          lifecycleResponses.some(
+            (lifecycle) => lifecycle.issue.issue_id === focusedIssueId,
+          )
+          ? focusedIssueId
+          : lifecycleResponses[0]?.issue.issue_id ?? null,
+      );
       if (projectChanged) {
-        setFocusedIssueId(null);
         setSelectedCardKey(null);
       }
     } catch (reason) {
@@ -184,8 +196,8 @@ export function IssueLifecycleWorkbench({
     () => groupLifecycleCards(lifecycles),
     [lifecycles],
   );
-  const columns = useMemo(
-    () => visibleLifecycle(allColumns, focusedIssueId),
+  const selectedIssueColumns = useMemo(
+    () => selectedLifecycleColumns(allColumns, focusedIssueId),
     [allColumns, focusedIssueId],
   );
   const focusedEntity = useMemo(
@@ -195,7 +207,7 @@ export function IssueLifecycleWorkbench({
   const selectedProject = projects.find(
     (project) => project.project_id === selectedProjectId,
   );
-  const issueCount = columns.issue.length;
+  const issueCount = allColumns.issue.length;
 
   async function handleSelectProject(projectId: string) {
     if (projectId === selectedProjectId) {
@@ -207,10 +219,18 @@ export function IssueLifecycleWorkbench({
 
   function handleSelectCard(card: LifecycleCardData) {
     setSelectedCardKey(lifecycleCardKey(card));
-    openDrawer(card.id);
     if (card.kind === "issue") {
       setFocusedIssueId(card.issueId);
+      closeDrawer();
+      return;
     }
+    openDrawer(card.id);
+  }
+
+  function handleOpenFullIssue(card: LifecycleCardData) {
+    setSelectedCardKey(lifecycleCardKey(card));
+    setFocusedIssueId(card.issueId);
+    openDrawer(card.id);
   }
 
   async function handleOpenWorkspaceFromDrawer(card: LifecycleCardData) {
@@ -237,7 +257,11 @@ export function IssueLifecycleWorkbench({
     }
 
     setError(null);
-    const attempt = await createCodingAttempt(selectedProjectId, card.issueId, card.id);
+    const attempt = await createCodingAttempt(
+      selectedProjectId,
+      card.issueId,
+      card.id,
+    );
     await refresh(selectedProjectId);
     onOpenCodingWorkspace(attempt.attempt_id);
   }
@@ -351,13 +375,65 @@ export function IssueLifecycleWorkbench({
       return;
     }
 
+    const cardKey = `issue:${issueId}`;
+    setDeletingCardKey(cardKey);
     setError(null);
-    await deleteProductIssue(selectedProjectId, issueId);
-    if (focusedIssueId === issueId) {
-      setFocusedIssueId(null);
+    try {
+      await Promise.all([
+        deleteProductIssue(selectedProjectId, issueId),
+        waitForDeleteExitAnimation(),
+      ]);
+      if (focusedIssueId === issueId) {
+        setFocusedIssueId(null);
+      }
+      setSelectedCardKey(null);
+      await refresh(selectedProjectId);
+    } catch (reason) {
+      setError(errorMessage(reason, "删除 Issue 失败"));
+    } finally {
+      setDeletingCardKey(null);
     }
-    setSelectedCardKey(null);
-    await refresh(selectedProjectId);
+  }
+
+  async function handleDeleteLifecycleCard(card: LifecycleCardData) {
+    if (!selectedProjectId) {
+      setError("缺少 Project");
+      return;
+    }
+
+    let deleteRequest: Promise<{ status: string }>;
+    if (card.kind === "story_spec") {
+      deleteRequest = deleteStorySpec(selectedProjectId, card.issueId, card.id);
+    } else if (card.kind === "design_spec") {
+      deleteRequest = deleteDesignSpec(
+        selectedProjectId,
+        card.issueId,
+        card.id,
+      );
+    } else if (card.kind === "work_item") {
+      deleteRequest = deleteWorkItem(selectedProjectId, card.issueId, card.id);
+    } else {
+      setError("Issue 请从 Issue 卡片列表删除");
+      return;
+    }
+
+    const cardKey = lifecycleCardKey(card);
+    setDeletingCardKey(cardKey);
+    setError(null);
+    try {
+      await Promise.all([deleteRequest, waitForDeleteExitAnimation()]);
+      if (selectedCardKey === cardKey) {
+        setSelectedCardKey(null);
+      }
+      if (drawerFocusedEntityId === card.id) {
+        closeDrawer();
+      }
+      await refresh(selectedProjectId);
+    } catch (reason) {
+      setError(errorMessage(reason, "删除生命周期实体失败"));
+    } finally {
+      setDeletingCardKey(null);
+    }
   }
 
   async function handleLaunchWorkspace(
@@ -498,38 +574,27 @@ export function IssueLifecycleWorkbench({
             </div>
           }
           main={
-            <div className="grid min-h-[calc(100vh-6rem)] gap-3 overflow-auto rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] p-3 xl:grid-cols-4">
-              <LifecycleColumn
-                title="Issue"
-                ariaLabel="Issue 列"
-                cards={columns.issue}
+            <div className="grid min-h-[calc(100vh-6rem)] gap-3 lg:grid-cols-[minmax(18rem,24rem)_minmax(0,1fr)]">
+              <IssueCardList
+                cards={allColumns.issue}
                 selectedKey={selectedCardKey}
                 onSelect={handleSelectCard}
                 onGenerateStorySpec={(card) =>
                   void handleLaunchWorkspace("story", card)
                 }
                 onDeleteIssue={(issueId) => void handleDeleteIssue(issueId)}
+                deletingKey={deletingCardKey}
               />
-              <LifecycleColumn
-                title="Story Spec"
-                ariaLabel="Story Spec 列"
-                cards={columns.story_spec}
+              <IssueLifecycleDetail
+                issue={selectedIssueColumns.issue[0] ?? null}
+                storySpecs={selectedIssueColumns.story_spec}
+                designSpecs={selectedIssueColumns.design_spec}
+                workItems={selectedIssueColumns.work_item}
                 selectedKey={selectedCardKey}
                 onSelect={handleSelectCard}
-              />
-              <LifecycleColumn
-                title="Design Spec"
-                ariaLabel="Design Spec 列"
-                cards={columns.design_spec}
-                selectedKey={selectedCardKey}
-                onSelect={handleSelectCard}
-              />
-              <LifecycleColumn
-                title="Work Item"
-                ariaLabel="Work Item 列"
-                cards={columns.work_item}
-                selectedKey={selectedCardKey}
-                onSelect={handleSelectCard}
+                onOpenFullIssue={handleOpenFullIssue}
+                onDelete={handleDeleteLifecycleCard}
+                deletingKey={deletingCardKey}
               />
             </div>
           }
@@ -582,10 +647,265 @@ export function IssueLifecycleWorkbench({
   );
 }
 
+function IssueCardList({
+  cards,
+  selectedKey,
+  deletingKey,
+  onSelect,
+  onGenerateStorySpec,
+  onDeleteIssue,
+}: {
+  cards: LifecycleCardData[];
+  selectedKey: string | null;
+  deletingKey: string | null;
+  onSelect: (card: LifecycleCardData) => void;
+  onGenerateStorySpec: (card: LifecycleCardData) => void;
+  onDeleteIssue: (issueId: string) => void;
+}) {
+  return (
+    <section
+      role="region"
+      aria-label="Issue 卡片列表"
+      className="min-h-0 rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-3"
+    >
+      <div className="mb-3 flex items-center justify-between gap-2">
+        <div>
+          <h2 className="text-sm font-semibold text-[var(--aria-ink)]">
+            Issues
+          </h2>
+          <p className="mt-0.5 text-xs text-[var(--aria-ink-muted)]">
+            选择 Issue 后查看它的 Story、Design 和 Work Item。
+          </p>
+        </div>
+        <span className="rounded border border-[var(--aria-line)] bg-[var(--aria-panel)] px-2 py-0.5 font-mono text-[11px] text-[var(--aria-ink-muted)]">
+          {cards.length}
+        </span>
+      </div>
+      {cards.length === 0 ? (
+        <div className="rounded-md border border-dashed border-[var(--aria-line)] bg-[var(--aria-panel)] p-4 text-sm text-[var(--aria-ink-muted)]">
+          当前 Project 还没有 Issue。
+        </div>
+      ) : (
+        <ul className="space-y-2">
+          {cards.map((card) => (
+            <li key={`${card.kind}:${card.id}`}>
+              <LifecycleCard
+                card={card}
+                selected={selectedKey === lifecycleCardKey(card)}
+                deleting={deletingKey === lifecycleCardKey(card)}
+                onSelect={() => onSelect(card)}
+                onGenerateStorySpec={() => onGenerateStorySpec(card)}
+                onDelete={() => onDeleteIssue(card.id)}
+              />
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+function IssueLifecycleDetail({
+  issue,
+  storySpecs,
+  designSpecs,
+  workItems,
+  selectedKey,
+  deletingKey,
+  onSelect,
+  onOpenFullIssue,
+  onDelete,
+}: {
+  issue: LifecycleCardData | null;
+  storySpecs: LifecycleCardData[];
+  designSpecs: LifecycleCardData[];
+  workItems: LifecycleCardData[];
+  selectedKey: string | null;
+  deletingKey: string | null;
+  onSelect: (card: LifecycleCardData) => void;
+  onOpenFullIssue: (card: LifecycleCardData) => void;
+  onDelete: (card: LifecycleCardData) => void;
+}) {
+  if (!issue) {
+    return (
+      <section
+        role="region"
+        aria-label="Issue 生命周期详情"
+        className="flex min-h-96 items-center justify-center rounded-md border border-dashed border-[var(--aria-line)] bg-[var(--aria-panel)] p-6 text-center"
+      >
+        <div className="max-w-sm">
+          <h2 className="text-sm font-semibold text-[var(--aria-ink)]">
+            选择一个 Issue
+          </h2>
+          <p className="mt-2 text-sm leading-6 text-[var(--aria-ink-muted)]">
+            Story Spec、Design Spec 和 Work Item 都会作为该 Issue
+            的内容展示在这里。
+          </p>
+        </div>
+      </section>
+    );
+  }
+  const showFullIssueAction = issue.preview
+    ? shouldShowFullIssueAction(issue.preview)
+    : false;
+
+  return (
+    <section
+      role="region"
+      aria-label="Issue 生命周期详情"
+      className="min-h-0 rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)]"
+    >
+      <div className="border-b border-[var(--aria-line)] px-4 py-3">
+        <div className="flex min-w-0 flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-xs font-semibold uppercase text-[var(--aria-ink-muted)]">
+              Selected Issue
+            </p>
+            <h2 className="mt-1 truncate text-base font-semibold text-[var(--aria-ink)]">
+              {issue.title}
+            </h2>
+            {issue.preview ? (
+              <div className="relative mt-2 max-w-3xl">
+                <p
+                  data-testid="selected-issue-preview"
+                  className={[
+                    "whitespace-pre-wrap break-words text-sm leading-6 text-[var(--aria-ink-muted)]",
+                    showFullIssueAction ? "line-clamp-6" : "",
+                  ].join(" ")}
+                >
+                  {issue.preview}
+                </p>
+                {showFullIssueAction ? (
+                  <div className="pointer-events-none absolute inset-x-0 bottom-0 h-8 bg-gradient-to-b from-transparent to-[var(--aria-panel)]" />
+                ) : null}
+              </div>
+            ) : null}
+            {showFullIssueAction ? (
+              <button
+                type="button"
+                onClick={() => onOpenFullIssue(issue)}
+                className="mt-2 inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] px-2.5 text-xs font-semibold text-[var(--aria-primary)] hover:border-[var(--aria-primary)] hover:bg-[var(--aria-panel-muted)]"
+              >
+                <PanelRightOpen className="h-3.5 w-3.5" />
+                查看完整 Issue
+              </button>
+            ) : null}
+          </div>
+        </div>
+        <div className="mt-3 flex flex-wrap gap-1.5 font-mono text-[11px] text-[var(--aria-ink-muted)]">
+          <span className="rounded border border-[var(--aria-line)] px-1.5 py-0.5">
+            {issue.id}
+          </span>
+          <span className="rounded border border-[var(--aria-line)] px-1.5 py-0.5">
+            {issue.status}
+          </span>
+        </div>
+      </div>
+      <div className="grid gap-3 p-3 xl:grid-cols-3">
+        <LifecycleContentSection
+          title="Story Spec"
+          ariaLabel="Story Spec 内容"
+          cards={storySpecs}
+          selectedKey={selectedKey}
+          deletingKey={deletingKey}
+          onSelect={onSelect}
+          onDelete={onDelete}
+        />
+        <LifecycleContentSection
+          title="Design Spec"
+          ariaLabel="Design Spec 内容"
+          cards={designSpecs}
+          selectedKey={selectedKey}
+          deletingKey={deletingKey}
+          onSelect={onSelect}
+          onDelete={onDelete}
+        />
+        <LifecycleContentSection
+          title="Work Item"
+          ariaLabel="Work Item 内容"
+          cards={workItems}
+          selectedKey={selectedKey}
+          deletingKey={deletingKey}
+          onSelect={onSelect}
+          onDelete={onDelete}
+        />
+      </div>
+    </section>
+  );
+}
+
+function shouldShowFullIssueAction(preview: string) {
+  return preview.split(/\r?\n/u).length > 6 || preview.length > 520;
+}
+
+function LifecycleContentSection({
+  title,
+  ariaLabel,
+  cards,
+  selectedKey,
+  deletingKey,
+  onSelect,
+  onDelete,
+}: {
+  title: string;
+  ariaLabel: string;
+  cards: LifecycleCardData[];
+  selectedKey: string | null;
+  deletingKey: string | null;
+  onSelect: (card: LifecycleCardData) => void;
+  onDelete: (card: LifecycleCardData) => void;
+}) {
+  return (
+    <section
+      role="region"
+      aria-label={ariaLabel}
+      className="min-h-72 rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-2"
+    >
+      <div className="mb-3 flex items-center justify-between gap-2">
+        <h3 className="text-sm font-semibold text-[var(--aria-ink)]">
+          {title}
+        </h3>
+        <span className="rounded border border-[var(--aria-line)] bg-[var(--aria-panel)] px-2 py-0.5 font-mono text-[11px] text-[var(--aria-ink-muted)]">
+          {cards.length}
+        </span>
+      </div>
+      {cards.length === 0 ? (
+        <div className="rounded-md border border-dashed border-[var(--aria-line)] bg-[var(--aria-panel)] p-3 text-sm text-[var(--aria-ink-muted)]">
+          暂无内容
+        </div>
+      ) : (
+        <ul className="space-y-2">
+          {cards.map((card) => (
+            <li key={`${card.kind}:${card.id}`}>
+              <LifecycleCard
+                card={card}
+                selected={selectedKey === lifecycleCardKey(card)}
+                deleting={deletingKey === lifecycleCardKey(card)}
+                onSelect={() => onSelect(card)}
+                onDelete={() => onDelete(card)}
+              />
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
 function defaultOpenWorkspace(sessionId: string) {
   window.location.assign(
     `/workbench/workspace/${encodeURIComponent(sessionId)}`,
   );
+}
+
+function waitForDeleteExitAnimation() {
+  return new Promise<void>((resolve) => {
+    window.setTimeout(resolve, DELETE_EXIT_ANIMATION_MS);
+  });
+}
+
+function errorMessage(reason: unknown, fallback: string) {
+  return reason instanceof Error ? reason.message : fallback;
 }
 
 function defaultOpenCodingWorkspace(attemptId: string) {
@@ -620,8 +940,30 @@ function lifecycleCardKey(card: LifecycleCardData) {
   return `${card.kind}:${card.id}`;
 }
 
+function selectedLifecycleColumns(
+  columns: LifecycleColumns,
+  focusedIssueId: string | null,
+): LifecycleColumns {
+  if (!focusedIssueId) {
+    return { issue: [], story_spec: [], design_spec: [], work_item: [] };
+  }
+
+  return {
+    issue: columns.issue.filter((card) => card.issueId === focusedIssueId),
+    story_spec: columns.story_spec.filter(
+      (card) => card.issueId === focusedIssueId,
+    ),
+    design_spec: columns.design_spec.filter(
+      (card) => card.issueId === focusedIssueId,
+    ),
+    work_item: columns.work_item.filter(
+      (card) => card.issueId === focusedIssueId,
+    ),
+  };
+}
+
 function findCardInColumns(
-  columns: ReturnType<typeof visibleLifecycle>,
+  columns: LifecycleColumns,
   entityId: string | null,
 ): LifecycleCardData | null {
   if (!entityId) {
@@ -670,17 +1012,28 @@ function toDrawerEntity(card: LifecycleCardData): DrawerEntity {
   };
 }
 
-function defaultLaunchTitle(launchTarget: {
+export function defaultLaunchTitle(launchTarget: {
   target: ProviderWorkspaceLaunchTarget;
   card: LifecycleCardData;
 }) {
+  const title = compactLifecycleTitle(launchTarget.card.title);
+
   if (launchTarget.target === "story") {
-    return `${launchTarget.card.title} Story Spec`;
+    return `${title} Story Spec`;
   }
   if (launchTarget.target === "design") {
-    return `${launchTarget.card.title} Design Spec`;
+    return `${title} Design Spec`;
   }
-  return `${launchTarget.card.title} Work Item`;
+  return `${title} Work Item`;
+}
+
+function compactLifecycleTitle(title: string) {
+  const normalizedTitle = title.trim();
+  const baseTitle = normalizedTitle
+    .replace(/(?:\s+(?:Story Spec|Design Spec|Work Item))+$/u, "")
+    .trim();
+
+  return baseTitle || normalizedTitle;
 }
 
 function findWorkspaceSession(

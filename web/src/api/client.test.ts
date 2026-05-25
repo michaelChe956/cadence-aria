@@ -3,9 +3,12 @@ import {
   createProductIssue,
   createProject,
   createRepository,
+  deleteDesignSpec,
   deleteProductIssue,
   deleteProject,
   deleteRepository,
+  deleteStorySpec,
+  deleteWorkItem,
   generateDesignSpecs,
   generateStorySpecs,
   generateWorkItems,
@@ -49,16 +52,23 @@ describe("api client", () => {
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         calls.push({ input: String(input), init });
-        return new Response(JSON.stringify(responses[calls.length - 1]), { status: 200 });
+        return new Response(JSON.stringify(responses[calls.length - 1]), {
+          status: 200,
+        });
       }),
     );
 
     await listProjects();
     await createProject({ name: "Aria", description: null });
 
-    expect(calls.map((call) => call.input)).toEqual(["/api/projects", "/api/projects"]);
+    expect(calls.map((call) => call.input)).toEqual([
+      "/api/projects",
+      "/api/projects",
+    ]);
     expect(calls[1].init?.method).toBe("POST");
-    expect(calls[1].init?.body).toBe(JSON.stringify({ name: "Aria", description: null }));
+    expect(calls[1].init?.body).toBe(
+      JSON.stringify({ name: "Aria", description: null }),
+    );
   });
 
   it("calls product repository and issue endpoints with project scoped payloads", async () => {
@@ -67,9 +77,12 @@ describe("api client", () => {
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         calls.push({ input: String(input), init });
-        return new Response(JSON.stringify({ ok: true, repositories: [], issues: [] }), {
-          status: 200,
-        });
+        return new Response(
+          JSON.stringify({ ok: true, repositories: [], issues: [] }),
+          {
+            status: 200,
+          },
+        );
       }),
     );
 
@@ -125,7 +138,9 @@ describe("api client", () => {
     );
 
     await getIssueLifecycle("issue/with space", "project/with space");
-    await generateStorySpecs("project/with space", "issue/with space", { title: "Story" });
+    await generateStorySpecs("project/with space", "issue/with space", {
+      title: "Story",
+    });
     await generateDesignSpecs("project/with space", "issue/with space", {
       title: "Design",
       story_spec_ids: ["story_0001"],
@@ -143,7 +158,9 @@ describe("api client", () => {
       "/api/projects/project%2Fwith%20space/issues/issue%2Fwith%20space/design-specs:generate",
       "/api/projects/project%2Fwith%20space/issues/issue%2Fwith%20space/work-items:generate",
     ]);
-    expect(calls.slice(1).every((call) => call.init?.method === "POST")).toBe(true);
+    expect(calls.slice(1).every((call) => call.init?.method === "POST")).toBe(
+      true,
+    );
   });
 
   it("calls delete endpoints with encoded resource ids", async () => {
@@ -152,18 +169,38 @@ describe("api client", () => {
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         calls.push({ input: String(input), init });
-        return new Response(JSON.stringify({ status: "deleted" }), { status: 200 });
+        return new Response(JSON.stringify({ status: "deleted" }), {
+          status: 200,
+        });
       }),
     );
 
     await deleteProject("project/with space");
     await deleteRepository("project/with space", "repository/with space");
     await deleteProductIssue("project/with space", "issue/with space");
+    await deleteStorySpec(
+      "project/with space",
+      "issue/with space",
+      "story/with space",
+    );
+    await deleteDesignSpec(
+      "project/with space",
+      "issue/with space",
+      "design/with space",
+    );
+    await deleteWorkItem(
+      "project/with space",
+      "issue/with space",
+      "work/with space",
+    );
 
     expect(calls.map((call) => call.input)).toEqual([
       "/api/projects/project%2Fwith%20space",
       "/api/projects/project%2Fwith%20space/repositories/repository%2Fwith%20space",
       "/api/projects/project%2Fwith%20space/issues/issue%2Fwith%20space",
+      "/api/projects/project%2Fwith%20space/issues/issue%2Fwith%20space/story-specs/story%2Fwith%20space",
+      "/api/projects/project%2Fwith%20space/issues/issue%2Fwith%20space/design-specs/design%2Fwith%20space",
+      "/api/projects/project%2Fwith%20space/issues/issue%2Fwith%20space/work-items/work%2Fwith%20space",
     ]);
     expect(calls.every((call) => call.init?.method === "DELETE")).toBe(true);
   });

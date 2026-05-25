@@ -63,6 +63,10 @@ describe("LifecycleCardDrawer", () => {
     expect(screen.getByText("用户认证模块")).toBeInTheDocument();
     expect(screen.getAllByText("v2").length).toBeGreaterThan(0);
     expect(screen.getByText("版本历史")).toBeInTheDocument();
+    expect(screen.queryByTestId("monaco-viewer")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "查看 Markdown 内容" }));
+
     expect(screen.getByText(/REQ-001/)).toBeInTheDocument();
 
     fireEvent.click(screen.getByTestId("drawer-open-workspace"));
@@ -125,7 +129,21 @@ describe("LifecycleCardDrawer", () => {
     );
 
     expect(screen.getByText("Issue 描述")).toBeInTheDocument();
-    expect(screen.getByTestId("monaco-viewer")).toHaveTextContent("会话过期后需要提示用户");
+    expect(screen.queryByTestId("monaco-viewer")).not.toBeInTheDocument();
+    expect(
+      screen.getByText("默认隐藏长内容，按需打开 Markdown 大预览。"),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "查看 Markdown 内容" }));
+
+    expect(screen.getByText("Issue 描述预览")).toBeInTheDocument();
+    expect(screen.getByTestId("monaco-viewer")).toHaveAttribute(
+      "data-height",
+      "100%",
+    );
+    expect(screen.getByTestId("monaco-viewer")).toHaveTextContent(
+      "会话过期后需要提示用户",
+    );
     expect(screen.getByText("关联产物")).toBeInTheDocument();
     expect(screen.getAllByText("story_spec")).toHaveLength(2);
     expect(screen.getByText("会话过期提示 Story")).toBeInTheDocument();
@@ -170,6 +188,9 @@ describe("LifecycleCardDrawer", () => {
         onGenerateNext={vi.fn()}
       />,
     );
+
+    expect(screen.queryByTestId("monaco-viewer")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "查看 Markdown 内容" }));
 
     expect(screen.getByText("版本 v2 预览")).toBeInTheDocument();
     expect(screen.getByTestId("monaco-viewer")).toHaveTextContent("新增验收标准");

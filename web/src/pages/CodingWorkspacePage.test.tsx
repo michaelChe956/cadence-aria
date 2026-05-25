@@ -42,7 +42,7 @@ describe("CodingWorkspacePage", () => {
     vi.clearAllMocks();
   });
 
-  it("renders coding workspace shell with timeline, chat, and artifact tabs", () => {
+  it("renders coding workspace shell with timeline and keeps result tabs secondary until selected", async () => {
     mockCodingWs();
     useCodingWorkspaceStore.setState({
       attemptId: "coding_attempt_0001",
@@ -105,6 +105,10 @@ describe("CodingWorkspacePage", () => {
     expect(screen.getByText("Coding Attempt #coding_attempt_0001")).toBeInTheDocument();
     expect(screen.getByTestId("coding-timeline")).toHaveTextContent("执行测试");
     expect(screen.getByTestId("chat-entry-list")).toHaveTextContent("cargo test");
+    expect(screen.queryByTestId("coding-artifact-tabs")).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "运行结果" }));
+
     expect(screen.getByTestId("coding-artifact-tabs")).toHaveTextContent("passed");
     expect(screen.getByTestId("coding-status-bar")).toHaveTextContent("testing");
   });
@@ -224,6 +228,7 @@ describe("CodingWorkspacePage", () => {
 
     render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
 
+    await userEvent.click(screen.getByRole("button", { name: "运行结果" }));
     await userEvent.click(screen.getByRole("button", { name: "logs" }));
 
     expect(screen.getByTestId("coding-artifact-tabs")).toHaveTextContent(
@@ -232,7 +237,7 @@ describe("CodingWorkspacePage", () => {
     expect(screen.getByTestId("coding-artifact-tabs")).not.toHaveTextContent("passed");
   });
 
-  it("renders review findings with severity, location, and required action", () => {
+  it("renders review findings with severity, location, and required action", async () => {
     mockCodingWs();
     useCodingWorkspaceStore.setState({
       attemptId: "coding_attempt_0001",
@@ -265,6 +270,7 @@ describe("CodingWorkspacePage", () => {
 
     render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
 
+    await userEvent.click(screen.getByRole("button", { name: "运行结果" }));
     const tabs = screen.getByTestId("coding-artifact-tabs");
     expect(tabs).toHaveTextContent("error");
     expect(tabs).toHaveTextContent("src/solver.py:42");
@@ -272,7 +278,7 @@ describe("CodingWorkspacePage", () => {
     expect(tabs).toHaveTextContent("补充空输入测试");
   });
 
-  it("renders review request URL, push status, and manual instructions in the git tab", () => {
+  it("renders review request URL, push status, and manual instructions in the git tab", async () => {
     mockCodingWs();
     useCodingWorkspaceStore.setState({
       attemptId: "coding_attempt_0001",
@@ -302,6 +308,7 @@ describe("CodingWorkspacePage", () => {
 
     render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
 
+    await userEvent.click(screen.getByRole("button", { name: "运行结果" }));
     const tabs = screen.getByTestId("coding-artifact-tabs");
     expect(tabs).toHaveTextContent("pushed");
     expect(screen.getByRole("link", { name: "https://git.example/review/1" })).toHaveAttribute(

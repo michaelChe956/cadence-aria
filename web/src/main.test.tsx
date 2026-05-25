@@ -17,10 +17,8 @@ describe("AppShell", () => {
     expect(
       await screen.findByRole("main", { name: "Issue 生命周期工作台" }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "Issue 列" })).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "Story Spec 列" })).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "Design Spec 列" })).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "Work Item 列" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Issue 卡片列表" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Issue 生命周期详情" })).toBeInTheDocument();
     expect(screen.queryByRole("main", { name: "Aria workbench" })).not.toBeInTheDocument();
   });
 
