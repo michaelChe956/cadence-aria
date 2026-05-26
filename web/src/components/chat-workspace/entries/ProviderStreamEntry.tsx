@@ -5,11 +5,32 @@ export function ProviderStreamEntry({ entry }: { entry: ChatEntry }) {
   return (
     <ChatEntryContainer
       role={entry.role === "reviewer" ? "reviewer" : "author"}
-      title={entry.role === "reviewer" ? "审核者" : "作者"}
+      title={entryTitle(entry)}
     >
       <MarkdownContent content={entry.content} />
     </ChatEntryContainer>
   );
+}
+
+const PROVIDER_LABELS: Record<string, string> = {
+  claude_code: "Claude Code",
+  codex: "Codex",
+  fake: "Fake",
+};
+
+function entryTitle(entry: ChatEntry) {
+  const base = entry.role === "reviewer" ? "审核者" : "作者";
+  const provider = metadataProvider(entry.metadata);
+  return provider ? `${base} · ${providerLabel(provider)}` : base;
+}
+
+function metadataProvider(metadata: ChatEntry["metadata"]) {
+  const provider = metadata?.provider ?? metadata?.agent;
+  return typeof provider === "string" && provider.length > 0 ? provider : null;
+}
+
+function providerLabel(provider: string) {
+  return PROVIDER_LABELS[provider] ?? provider;
 }
 
 function MarkdownContent({ content }: { content: string }) {

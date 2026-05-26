@@ -642,6 +642,84 @@ describe("workspace ws store", () => {
     expect(useWorkspaceStore.getState().streamingContent).toBe("");
   });
 
+  it("rebuilds reviewer command events with command titles and provider metadata", () => {
+    const store = useWorkspaceStore.getState();
+
+    store.setSessionState({
+      session_id: "session_reviewer_tools",
+      workspace_type: "story",
+      stage: "cross_review",
+      messages: [],
+      checkpoints: [],
+      artifact: "# Draft",
+      providers: { author: "claude_code", reviewer: "codex" },
+      timeline_nodes: [
+        {
+          node_id: "timeline_node_reviewer",
+          node_type: "reviewer_run",
+          agent: "codex",
+          stage: "cross_review",
+          round: 1,
+          status: "active",
+          title: "Review Round 1",
+          summary: null,
+          started_at: "2026-05-26T10:00:00Z",
+          completed_at: null,
+          duration_ms: null,
+          artifact_ref: "artifact_current",
+          provider_config_snapshot: {
+            author: "claude_code",
+            reviewer: "codex",
+            review_rounds: 1,
+          },
+        },
+      ],
+      active_node_id: "timeline_node_reviewer",
+      artifact_versions: [],
+      timeline_node_details: {
+        timeline_node_reviewer: makeNodeDetail({
+          node_id: "timeline_node_reviewer",
+          node_type: "reviewer_run",
+          agent_role: "reviewer",
+          provider: { name: "codex", model: "gpt-5" },
+          streaming_content: "reviewing diff",
+          execution_events: [
+            {
+              event_id: "command_cmd_001",
+              node_id: "timeline_node_reviewer",
+              agent: "codex",
+              kind: "command",
+              status: "completed",
+              title: "Command completed",
+              detail: "exit code 0",
+              command: "git diff --stat",
+              cwd: "/tmp/repo",
+              output: "ok\n",
+              exit_code: 0,
+            },
+          ],
+        }),
+      },
+      active_run_id: "run-1",
+    });
+    store.rebuildChatEntries();
+
+    expect(useWorkspaceStore.getState().chatEntries).toEqual([
+      expect.objectContaining({
+        type: "provider_stream",
+        role: "reviewer",
+        content: "reviewing diff",
+        metadata: expect.objectContaining({ provider: "codex" }),
+      }),
+      expect.objectContaining({
+        type: "execution_event",
+        role: "reviewer",
+        content: "git diff --stat",
+        metadata: expect.objectContaining({ agent: "codex" }),
+      }),
+    ]);
+  });
+
   it("stores review verdict and pending decision by node", () => {
     const store = useWorkspaceStore.getState();
     store.setNodeVerdict("timeline_node_003", {

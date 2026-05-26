@@ -26,7 +26,7 @@ export function MessageGroupView({
   return (
     <ChatEntryContainer
       role={group.role}
-      title={group.role === "reviewer" ? "审核者" : "作者"}
+      title={groupTitle(group)}
       testId="message-group"
     >
       <div className="space-y-3">
@@ -71,4 +71,40 @@ export function MessageGroupView({
       </div>
     </ChatEntryContainer>
   );
+}
+
+const PROVIDER_LABELS: Record<string, string> = {
+  claude_code: "Claude Code",
+  codex: "Codex",
+  fake: "Fake",
+};
+
+function groupTitle(group: MessageGroup) {
+  const base = group.role === "reviewer" ? "审核者" : "作者";
+  const provider = providerForGroup(group);
+  return provider ? `${base} · ${providerLabel(provider)}` : base;
+}
+
+function providerForGroup(group: MessageGroup) {
+  const entries = [
+    group.primaryEntry,
+    ...group.inlineEvents,
+    ...group.interruptEntries,
+  ].filter((entry): entry is ChatEntry => Boolean(entry));
+  for (const entry of entries) {
+    const provider = metadataProvider(entry.metadata);
+    if (provider) {
+      return provider;
+    }
+  }
+  return null;
+}
+
+function metadataProvider(metadata: ChatEntry["metadata"]) {
+  const provider = metadata?.provider ?? metadata?.agent;
+  return typeof provider === "string" && provider.length > 0 ? provider : null;
+}
+
+function providerLabel(provider: string) {
+  return PROVIDER_LABELS[provider] ?? provider;
 }

@@ -45,10 +45,10 @@ describe("ArtifactPane", () => {
     render(<ArtifactPane artifactVersions={artifactVersions()} artifact={null} />);
 
     fireEvent.click(screen.getByRole("button", { name: "显示 Diff" }));
+    expect(screen.getByTestId("artifact-diff")).toBeInTheDocument();
     expect(screen.getByTestId("monaco-diff-viewer")).toBeInTheDocument();
     expect(screen.getByTestId("artifact-diff-original")).toHaveTextContent("# Artifact v1");
     expect(screen.getByTestId("artifact-diff-modified")).toHaveTextContent("新增内容");
-    expect(screen.queryByTestId("artifact-diff")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "折叠 Artifact" }));
     expect(screen.queryByLabelText("Artifact 版本")).not.toBeInTheDocument();

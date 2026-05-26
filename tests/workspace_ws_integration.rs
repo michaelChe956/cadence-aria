@@ -67,6 +67,12 @@ async fn workspace_ws_hydrates_context_for_existing_empty_session() {
             assert!(messages[0].content.contains("候选 spec 生成器"));
             assert!(messages[0].content.contains("OpenSpec"));
             assert!(messages[0].content.contains("必须遵守 using-superpowers"));
+            assert!(messages[0].content.contains("必须优先通过交互提问解决"));
+            assert!(
+                messages[0]
+                    .content
+                    .contains("不要把可通过当前用户确认解决的问题直接写入待确认项")
+            );
             assert!(messages[0].content.contains("[REQ-001]"));
         }
         other => panic!("expected session_state, got {other:?}"),
@@ -110,6 +116,7 @@ async fn workspace_ws_replaces_legacy_context_with_generation_brief() {
             assert!(messages[0].content.contains("候选 spec 生成器"));
             assert!(messages[0].content.contains("OpenSpec"));
             assert!(messages[0].content.contains("必须遵守 using-superpowers"));
+            assert!(messages[0].content.contains("必须优先通过交互提问解决"));
             assert!(messages[0].content.contains("不要直接修改 OpenSpec"));
             assert!(!messages[0].content.contains("Workspace 上下文已准备"));
         }

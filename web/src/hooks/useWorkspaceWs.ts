@@ -3,6 +3,7 @@ import type {
   HumanConfirmDecision,
   ProviderConfigSnapshot,
   RevisionPath,
+  WorkspaceProviderName,
   WsInMessage,
 } from "../api/types";
 import type { ChatEntry, ChatEntryRole } from "../state/chat-entries";
@@ -254,16 +255,20 @@ export function useWorkspaceWs(sessionId: string | null) {
         store.setProviderStatus(msg.status as ProviderStatus);
         break;
       case "execution_event":
-        store.upsertExecutionEvent(msg.event as ExecutionEvent);
-        store.appendChatEntry({
-          id: chatEntryId("execution_event", (msg.event as ExecutionEvent).event_id),
-          type: "execution_event",
-          role: "system",
-          content: executionEventContent(msg.event as ExecutionEvent),
-          timestamp: new Date().toISOString(),
-          node_id: (msg.event as ExecutionEvent).node_id ?? undefined,
-          metadata: { ...(msg.event as ExecutionEvent) },
-        });
+        {
+          const event = msg.event as ExecutionEvent;
+          const provider = providerNameForNode(store, event.node_id ?? null, event.agent ?? null);
+          store.upsertExecutionEvent(event);
+          store.appendChatEntry({
+            id: chatEntryId("execution_event", event.event_id),
+            type: "execution_event",
+            role: entryRoleForNode(store, event.node_id ?? null, "system"),
+            content: executionEventContent(event),
+            timestamp: new Date().toISOString(),
+            node_id: event.node_id ?? undefined,
+            metadata: provider ? { ...event, provider } : { ...event },
+          });
+        }
         break;
       case "timeline_node_created":
         store.addTimelineNode(msg.node as TimelineNode);
@@ -485,7 +490,13 @@ export function useWorkspaceWs(sessionId: string | null) {
 
   const selectProvider = useCallback(
     (role: string, provider: string) => {
-      sendJson({ type: "provider_select", role, provider });
+      if (sendJson({ type: "provider_select", role, provider })) {
+        const validRole = role === "author" || role === "reviewer";
+        const validProvider = providerName(provider);
+        if (validRole && validProvider) {
+          useWorkspaceStore.getState().setProviderSelection(role, validProvider);
+        }
+      }
     },
     [sendJson],
   );
@@ -568,6 +579,7 @@ function handleStreamChunk(store: ReturnType<typeof useWorkspaceStore.getState>,
   const nodeId = resolveStreamEntryNodeId(store, msg.node_id as string | null | undefined);
   const entryId = streamEntryId(nodeId);
   const role = chatEntryRole((msg.role as string | undefined) ?? "author");
+  const provider = providerNameForNode(store, nodeId, null);
   if (!store.chatEntries.some((entry) => entry.id === entryId)) {
     store.appendChatEntry({
       id: entryId,
@@ -576,6 +588,7 @@ function handleStreamChunk(store: ReturnType<typeof useWorkspaceStore.getState>,
       content: "",
       timestamp: new Date().toISOString(),
       node_id: nodeId === "global" ? undefined : nodeId,
+      metadata: provider ? { provider } : undefined,
     });
   }
   store.updateStreamingEntry(entryId, msg.content as string);
@@ -612,7 +625,55 @@ function permissionRequestContent(request: { tool_name: string; description: str
 }
 
 function executionEventContent(event: ExecutionEvent) {
+  const command = event.kind === "command" ? event.command?.trim() : "";
+  if (command) {
+    return command;
+  }
   return event.detail ? `${event.title} · ${event.detail}` : event.title;
+}
+
+function entryRoleForNode(
+  store: ReturnType<typeof useWorkspaceStore.getState>,
+  nodeId: string | null | undefined,
+  fallback: ChatEntryRole,
+) {
+  const node = nodeId
+    ? store.timelineNodes.find((candidate) => candidate.node_id === nodeId)
+    : null;
+  if (node?.node_type === "reviewer_run") {
+    return "reviewer";
+  }
+  if (node?.node_type === "author_run") {
+    return "author";
+  }
+  const detail = nodeId ? store.nodeDetails[nodeId] : null;
+  if (detail?.agent_role === "reviewer") {
+    return "reviewer";
+  }
+  if (detail?.agent_role === "author") {
+    return "author";
+  }
+  return fallback;
+}
+
+function providerNameForNode(
+  store: ReturnType<typeof useWorkspaceStore.getState>,
+  nodeId: string | null | undefined,
+  fallback: string | null,
+) {
+  const node = nodeId
+    ? store.timelineNodes.find((candidate) => candidate.node_id === nodeId)
+    : null;
+  const detail = nodeId ? store.nodeDetails[nodeId] : null;
+  const provider = node?.agent ?? detail?.provider?.name ?? fallback;
+  return typeof provider === "string" && provider.length > 0 ? provider : null;
+}
+
+function providerName(value: string): WorkspaceProviderName | null {
+  if (value === "claude_code" || value === "codex" || value === "fake") {
+    return value;
+  }
+  return null;
 }
 
 function gatePromptEntryForState(state: ReturnType<typeof useWorkspaceStore.getState>): ChatEntry | null {

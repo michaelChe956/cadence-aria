@@ -99,6 +99,7 @@ test.describe("B. Timeline 审计 + 会话恢复", () => {
     await expect(page.getByTestId("timeline-node-author_run")).toHaveCount(1);
     await expect(page.getByTestId("timeline-node-revision")).toHaveCount(1);
     await expect(page.getByTestId("gate-prompt-entry")).toBeVisible();
+    await page.getByRole("button", { name: "Artifact" }).click();
     await expect(page.getByLabel("Artifact 版本")).toHaveValue("2");
     await page.getByRole("button", { name: "显示 Diff" }).click();
     await expect(page.getByTestId("artifact-diff")).toBeVisible();

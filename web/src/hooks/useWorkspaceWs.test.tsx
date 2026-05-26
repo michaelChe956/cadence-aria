@@ -174,6 +174,99 @@ describe("useWorkspaceWs", () => {
     ]);
   });
 
+  it("uses the concrete command as execution event chat title", () => {
+    const harness = renderWorkspaceHook();
+    const command =
+      "/usr/bin/zsh -lc \"sed -n '1,220p' /home/michael/.codex/superpowers/skills/using-superpowers/SKILL.md\"";
+
+    act(() => {
+      harness.ws.receive({
+        type: "execution_event",
+        event: {
+          event_id: "command_cmd_001",
+          kind: "command",
+          status: "completed",
+          title: "Command completed",
+          detail: "exit code 0",
+          command,
+          cwd: "/tmp/repo",
+          output: "ok\n",
+          exit_code: 0,
+        },
+      });
+    });
+
+    expect(useWorkspaceStore.getState().chatEntries.at(-1)).toMatchObject({
+      type: "execution_event",
+      content: command,
+    });
+  });
+
+  it("annotates reviewer stream and tool calls with the reviewer provider", () => {
+    const harness = renderWorkspaceHook();
+
+    act(() => {
+      harness.ws.receive({
+        type: "timeline_node_created",
+        node: {
+          node_id: "timeline_node_reviewer",
+          node_type: "reviewer_run",
+          agent: "codex",
+          stage: "cross_review",
+          round: 1,
+          status: "active",
+          title: "Review Round 1",
+          summary: null,
+          started_at: "2026-05-26T10:00:00Z",
+          completed_at: null,
+          duration_ms: null,
+          artifact_ref: "artifact_current",
+          provider_config_snapshot: {
+            author: "claude_code",
+            reviewer: "codex",
+            review_rounds: 1,
+          },
+        },
+      });
+      harness.ws.receive({
+        type: "stream_chunk",
+        role: "reviewer",
+        content: "reviewing",
+        node_id: "timeline_node_reviewer",
+      });
+      harness.ws.receive({
+        type: "execution_event",
+        event: {
+          event_id: "command_cmd_001",
+          node_id: "timeline_node_reviewer",
+          agent: "codex",
+          kind: "command",
+          status: "completed",
+          title: "Command completed",
+          detail: "exit code 0",
+          command: "git diff --stat",
+          cwd: "/tmp/repo",
+          output: "ok\n",
+          exit_code: 0,
+        },
+      });
+    });
+
+    expect(useWorkspaceStore.getState().chatEntries).toEqual([
+      expect.objectContaining({
+        type: "provider_stream",
+        role: "reviewer",
+        metadata: expect.objectContaining({ provider: "codex" }),
+      }),
+      expect.objectContaining({
+        type: "execution_event",
+        role: "reviewer",
+        content: "git diff --stat",
+        metadata: expect.objectContaining({ agent: "codex" }),
+      }),
+    ]);
+  });
+
   it("stores timeline websocket messages by node", () => {
     const harness = renderWorkspaceHook();
 
@@ -616,6 +709,27 @@ describe("useWorkspaceWs", () => {
       }),
     ]);
     expect(useWorkspaceStore.getState().providerStatus).toBe("running");
+  });
+
+  it("syncs provider selection locally after sending it", () => {
+    const harness = renderWorkspaceHook();
+    useWorkspaceStore.setState({
+      providers: { author: "claude_code", reviewer: "codex" },
+    });
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.sent.length = 0;
+      harness.api.selectProvider("author", "codex");
+    });
+
+    expect(harness.ws.sent).toEqual([
+      JSON.stringify({ type: "provider_select", role: "author", provider: "codex" }),
+    ]);
+    expect(useWorkspaceStore.getState().providers).toEqual({
+      author: "codex",
+      reviewer: "codex",
+    });
   });
 
   it("sends hello and ping lifecycle messages when connected", () => {

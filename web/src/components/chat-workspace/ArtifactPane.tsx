@@ -96,12 +96,14 @@ export function ArtifactPane({ artifactVersions, artifact, className = "" }: Art
 
       <div className="min-h-0 flex-1 p-3">
         {showDiff && selected && previous ? (
-          <MonacoDiffViewer
-            original={previous.markdown}
-            modified={selected.markdown}
-            language="markdown"
-            height="100%"
-          />
+          <div data-testid="artifact-diff" className="h-full min-h-0">
+            <MonacoDiffViewer
+              original={previous.markdown}
+              modified={selected.markdown}
+              language="markdown"
+              height="100%"
+            />
+          </div>
         ) : (
           <MonacoViewer value={markdown} language="markdown" height="100%" />
         )}

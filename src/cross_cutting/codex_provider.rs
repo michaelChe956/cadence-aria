@@ -1,21 +1,22 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::process::ExitStatus;
 use std::sync::Arc;
 
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 
-use crate::cross_cutting::approval_bridge::ApprovalBridge;
+use crate::cross_cutting::approval_bridge::{ApprovalBridge, ChoiceDecision};
 use crate::cross_cutting::json_rpc_peer::JsonRpcPeer;
 use crate::cross_cutting::process_manager::ProcessManager;
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
-    ProviderEvent, ProviderExecutionEvent, ProviderExecutionEventKind,
-    ProviderExecutionEventStatus, ProviderPermissionMode, ProviderSession, ProviderStatus,
-    RiskLevel, StreamChunk, StreamingProviderAdapter, StreamingProviderInput,
+    ChoiceOptionData, ChoiceRequestData, ProviderEvent, ProviderExecutionEvent,
+    ProviderExecutionEventKind, ProviderExecutionEventStatus, ProviderPermissionMode,
+    ProviderSession, ProviderStatus, RiskLevel, StreamChunk, StreamingProviderAdapter,
+    StreamingProviderInput,
 };
 use crate::protocol::contracts::AdapterInput;
 
@@ -203,6 +204,23 @@ struct CodexApprovalRequest {
     description: String,
 }
 
+#[derive(Debug, Clone)]
+struct CodexUserInputRequest {
+    rpc_id: Value,
+    id: String,
+    question_id: String,
+    prompt: String,
+    options: Vec<ChoiceOptionData>,
+    allow_free_text: bool,
+}
+
+#[derive(Debug, Clone)]
+struct AgentMessageText {
+    item_id: String,
+    content: String,
+    completed: bool,
+}
+
 async fn run_codex_session<W>(
     peer: JsonRpcPeer<W>,
     bridge: ApprovalBridge,
@@ -296,6 +314,7 @@ where
     .await?;
 
     let mut full_output = String::new();
+    let mut streamed_agent_message_items = HashSet::new();
     loop {
         let incoming = tokio::select! {
             _ = cancel.cancelled() => {
@@ -306,9 +325,20 @@ where
             })?,
         };
 
-        if let Some(content) = parse_text_delta(&incoming) {
-            full_output.push_str(&content);
-            send_provider_event(&event_tx, ProviderEvent::TextDelta { content }, &cancel).await?;
+        if let Some(message) = parse_agent_message_text(&incoming) {
+            if message.completed && streamed_agent_message_items.contains(&message.item_id) {
+                continue;
+            }
+            streamed_agent_message_items.insert(message.item_id);
+            full_output.push_str(&message.content);
+            send_provider_event(
+                &event_tx,
+                ProviderEvent::TextDelta {
+                    content: message.content,
+                },
+                &cancel,
+            )
+            .await?;
             continue;
         }
 
@@ -327,6 +357,24 @@ where
                 )
                 .await?;
             write_approval_response(&peer, request.rpc_id, decision.approved).await?;
+            continue;
+        }
+
+        if let Some(request) = parse_user_input_request(&incoming) {
+            let decision = bridge
+                .request_choice(
+                    ChoiceRequestData {
+                        id: request.id,
+                        prompt: request.prompt,
+                        options: request.options,
+                        allow_multiple: false,
+                        allow_free_text: request.allow_free_text,
+                    },
+                    cancel.clone(),
+                )
+                .await?;
+            write_user_input_response(&peer, request.rpc_id, &request.question_id, decision)
+                .await?;
             continue;
         }
 
@@ -371,13 +419,42 @@ where
     }
 }
 
-fn parse_text_delta(value: &Value) -> Option<String> {
+fn parse_agent_message_text(value: &Value) -> Option<AgentMessageText> {
     if value.get("method")?.as_str()? == "item/agentMessage/delta" {
-        return value
+        let content = value
             .pointer("/params/delta")
             .and_then(Value::as_str)
             .filter(|content| !content.is_empty())
-            .map(ToString::to_string);
+            .map(ToString::to_string)?;
+        return Some(AgentMessageText {
+            item_id: value
+                .pointer("/params/itemId")
+                .and_then(Value::as_str)
+                .unwrap_or("agent_message")
+                .to_string(),
+            content,
+            completed: false,
+        });
+    }
+
+    if value.get("method")?.as_str()? == "item/completed" {
+        let item = value.pointer("/params/item")?;
+        if !matches!(
+            item.get("type").and_then(Value::as_str),
+            Some("agentMessage" | "agent_message")
+        ) {
+            return None;
+        }
+        let content = agent_message_completed_text(item)?;
+        return Some(AgentMessageText {
+            item_id: item
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("agent_message")
+                .to_string(),
+            content,
+            completed: true,
+        });
     }
 
     if value.get("method")?.as_str()? != "codex/event" {
@@ -400,11 +477,34 @@ fn parse_text_delta(value: &Value) -> Option<String> {
         .collect::<Vec<_>>()
         .join("");
 
-    if content.is_empty() {
-        None
-    } else {
-        Some(content)
+    (!content.is_empty()).then(|| AgentMessageText {
+        item_id: item
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("legacy_message")
+            .to_string(),
+        content,
+        completed: true,
+    })
+}
+
+fn agent_message_completed_text(item: &Value) -> Option<String> {
+    if let Some(text) = item
+        .get("text")
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+    {
+        return Some(text.to_string());
     }
+
+    let content = item.get("content")?.as_array()?;
+    let text = content
+        .iter()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("text"))
+        .filter_map(|item| item.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("");
+    (!text.is_empty()).then_some(text)
 }
 
 fn parse_execution_event(value: &Value) -> Option<ProviderExecutionEvent> {
@@ -515,6 +615,59 @@ fn parse_approval_request(value: &Value) -> Option<CodexApprovalRequest> {
     None
 }
 
+fn parse_user_input_request(value: &Value) -> Option<CodexUserInputRequest> {
+    if value.get("method")?.as_str()? != "item/tool/requestUserInput" {
+        return None;
+    }
+
+    let rpc_id = value.get("id")?.clone();
+    let id = rpc_id_string(&rpc_id)?;
+    let question = value
+        .pointer("/params/questions")
+        .and_then(Value::as_array)?
+        .first()?;
+    let question_id = question.get("id").and_then(Value::as_str)?.to_string();
+    let question_text = question
+        .get("question")
+        .and_then(Value::as_str)
+        .or_else(|| question.get("header").and_then(Value::as_str))?
+        .to_string();
+    let options = question
+        .get("options")
+        .and_then(Value::as_array)
+        .map(|options| {
+            options
+                .iter()
+                .filter_map(|option| {
+                    let label = option.get("label").and_then(Value::as_str)?;
+                    Some(ChoiceOptionData {
+                        id: label.to_string(),
+                        label: label.to_string(),
+                        description: option
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .map(ToString::to_string),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let allow_free_text = options.is_empty()
+        || question
+            .get("isOther")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+
+    Some(CodexUserInputRequest {
+        rpc_id,
+        id,
+        question_id,
+        prompt: question_text,
+        options,
+        allow_free_text,
+    })
+}
+
 fn command_description(params: &Value) -> Option<String> {
     let command = params.get("command")?;
     if let Some(command) = command.as_str() {
@@ -550,6 +703,38 @@ where
         },
     }))
     .await
+}
+
+async fn write_user_input_response<W>(
+    peer: &JsonRpcPeer<W>,
+    rpc_id: Value,
+    question_id: &str,
+    decision: ChoiceDecision,
+) -> Result<(), ProviderAdapterError>
+where
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let mut answers = decision.selected_option_ids;
+    if let Some(free_text) = decision.free_text.filter(|text| !text.trim().is_empty()) {
+        answers.push(free_text);
+    }
+    let mut answer_map = Map::new();
+    answer_map.insert(question_id.to_string(), json!({ "answers": answers }));
+    peer.send(json!({
+        "jsonrpc": "2.0",
+        "id": rpc_id,
+        "result": {
+            "answers": answer_map,
+        },
+    }))
+    .await
+}
+
+fn rpc_id_string(value: &Value) -> Option<String> {
+    value
+        .as_u64()
+        .map(|id| id.to_string())
+        .or_else(|| value.as_str().map(ToString::to_string))
 }
 
 fn is_turn_completed(value: &Value) -> bool {
@@ -743,6 +928,102 @@ mod tests {
         let completed = recv_completed(&mut session.events).await;
 
         assert_eq!(completed, "Codex current chunk");
+    }
+
+    #[tokio::test]
+    async fn codex_provider_streams_completed_only_agent_messages() {
+        let fixture = executable_fixture(
+            "tests/fixtures/provider/codex_app_server_completed_only_fixture.sh",
+        );
+        let provider = CodexProvider::new(fixture);
+        let input = streaming_input(ProviderType::Codex, ProviderPermissionMode::Auto);
+        let mut session = provider
+            .start(input, CancellationToken::new())
+            .await
+            .unwrap();
+
+        let mut saw_text_delta = false;
+        let completed = loop {
+            match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+                .await
+                .expect("provider should emit completed-only text")
+                .expect("provider event channel should stay open")
+            {
+                ProviderEvent::TextDelta { content } => {
+                    assert_eq!(content, "Codex completed-only chunk");
+                    saw_text_delta = true;
+                }
+                ProviderEvent::Completed { full_output, .. } => break full_output,
+                ProviderEvent::StatusChanged(_)
+                | ProviderEvent::Execution(_)
+                | ProviderEvent::PermissionRequest(_)
+                | ProviderEvent::ChoiceRequest(_) => {}
+                ProviderEvent::Failed { message } => panic!("provider failed: {message}"),
+                ProviderEvent::ProtocolError { message, .. } => {
+                    panic!("provider protocol error: {message}")
+                }
+                ProviderEvent::PermissionTimeout { permission_id } => {
+                    panic!("provider permission timed out: {permission_id}")
+                }
+            }
+        };
+
+        assert!(saw_text_delta);
+        assert_eq!(completed, "Codex completed-only chunk");
+    }
+
+    #[tokio::test]
+    async fn codex_provider_bridges_request_user_input_and_completes() {
+        let fixture =
+            executable_fixture("tests/fixtures/provider/codex_app_server_user_input_fixture.sh");
+        let provider = CodexProvider::new(fixture);
+        let input = streaming_input(ProviderType::Codex, ProviderPermissionMode::Auto);
+        let mut session = provider
+            .start(input, CancellationToken::new())
+            .await
+            .unwrap();
+
+        let choice = loop {
+            match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+                .await
+                .expect("provider should emit a choice request")
+                .expect("provider event channel should stay open")
+            {
+                ProviderEvent::ChoiceRequest(request) => break request,
+                ProviderEvent::StatusChanged(_)
+                | ProviderEvent::Execution(_)
+                | ProviderEvent::TextDelta { .. }
+                | ProviderEvent::PermissionRequest(_) => {}
+                ProviderEvent::Completed { full_output, .. } => {
+                    panic!("provider completed before choice request: {full_output}")
+                }
+                ProviderEvent::Failed { message } => panic!("provider failed: {message}"),
+                ProviderEvent::ProtocolError { message, .. } => {
+                    panic!("provider protocol error: {message}")
+                }
+                ProviderEvent::PermissionTimeout { permission_id } => {
+                    panic!("provider permission timed out: {permission_id}")
+                }
+            }
+        };
+
+        assert_eq!(choice.id, "77");
+        assert_eq!(choice.prompt, "请选择复杂度");
+        assert_eq!(choice.options[0].id, "O(n)");
+        assert_eq!(choice.options[0].description.as_deref(), Some("线性复杂度"));
+
+        session
+            .commands
+            .send(ProviderCommand::ChoiceResponse {
+                id: choice.id,
+                selected_option_ids: vec!["O(n)".to_string()],
+                free_text: None,
+            })
+            .await
+            .unwrap();
+
+        let completed = recv_completed(&mut session.events).await;
+        assert_eq!(completed, "Codex received O(n)");
     }
 
     #[tokio::test]

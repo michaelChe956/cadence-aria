@@ -222,6 +222,7 @@ export interface WorkspaceWsActions {
   setProviderLocked: (
     payload: { snapshot: ProviderConfigSnapshot; locked_at: string } | null,
   ) => void;
+  setProviderSelection: (role: "author" | "reviewer", provider: WorkspaceProviderName) => void;
   setAcknowledgedAbortedNodes: (nodeIds: string[]) => void;
   reset: () => void;
 }
@@ -673,6 +674,17 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
       providerLockedAt: payload?.locked_at ?? null,
     }),
 
+  setProviderSelection: (role, provider) =>
+    set((prev) => {
+      const current = prev.providers ?? { author: "claude_code", reviewer: "codex" };
+      return {
+        providers:
+          role === "author"
+            ? { ...current, author: provider }
+            : { ...current, reviewer: provider },
+      };
+    }),
+
   setAcknowledgedAbortedNodes: (nodeIds) =>
     set({ acknowledgedAbortedNodes: Array.from(new Set(nodeIds)) }),
 
@@ -838,6 +850,7 @@ function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
       detail.messages.map((message) => message.content).join("\n"),
     ]);
     if (streamContent) {
+      const provider = providerNameForNode(node, detail);
       entries.push({
         id: chatEntryId(node.node_id, "stream"),
         type: "provider_stream",
@@ -845,19 +858,21 @@ function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
         content: streamContent,
         timestamp: detail.started_at || node.started_at,
         node_id: node.node_id,
+        metadata: provider ? { provider } : undefined,
       });
     }
 
     for (const event of detail.execution_events) {
       const timestamp = detail.started_at || node.started_at;
+      const provider = providerNameForNode(node, detail, event);
       entries.push({
         id: chatEntryId(node.node_id, `execution-${event.event_id}`),
         type: "execution_event",
-        role: "system",
-        content: event.detail ? `${event.title} · ${event.detail}` : event.title,
+        role,
+        content: executionEventContent(event),
         timestamp,
         node_id: node.node_id,
-        metadata: { ...event },
+        metadata: provider ? { ...event, provider } : { ...event },
       });
     }
 
@@ -1002,6 +1017,22 @@ function textFromSources(sources: Array<string | null | undefined>) {
     }
   }
   return "";
+}
+
+function executionEventContent(event: ExecutionEvent) {
+  const command = event.kind === "command" ? event.command?.trim() : "";
+  if (command) {
+    return command;
+  }
+  return event.detail ? `${event.title} · ${event.detail}` : event.title;
+}
+
+function providerNameForNode(node: TimelineNode, detail: TimelineNodeDetail, event?: ExecutionEvent) {
+  return (
+    stringField(event, "agent") ??
+    node.agent ??
+    stringField(detail.provider, "name")
+  );
 }
 
 function isPreparedWorkspaceContextMessage(message: WsMessage) {

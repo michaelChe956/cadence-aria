@@ -51,15 +51,41 @@ describe("MessageGroupView", () => {
           id: "group-reviewer",
           nodeId: "node-reviewer",
           role: "reviewer",
-          primaryEntry: makeEntry("stream-reviewer", "provider_stream", "reviewer", "审核通过"),
+          primaryEntry: makeEntry("stream-reviewer", "provider_stream", "reviewer", "审核通过", {
+            provider: "codex",
+          }),
           inlineEvents: [],
           interruptEntries: [],
         }}
       />,
     );
 
-    expect(screen.getByText("审核者")).toBeInTheDocument();
+    expect(screen.getByText("审核者 · Codex")).toBeInTheDocument();
     expect(screen.getByText("审核通过")).toBeInTheDocument();
+  });
+
+  it("shows reviewer tool calls even when no stream text has arrived", () => {
+    render(
+      <MessageGroupView
+        group={{
+          id: "group-reviewer-tools",
+          nodeId: "node-reviewer",
+          role: "reviewer",
+          inlineEvents: [
+            makeEntry("event-1", "execution_event", "reviewer", "git diff --stat", {
+              agent: "codex",
+              command: "git diff --stat",
+              output: "changed files",
+            }),
+          ],
+          interruptEntries: [],
+        }}
+      />,
+    );
+
+    expect(screen.getByText("审核者 · Codex")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /git diff --stat/ }));
+    expect(screen.getByText("changed files")).toBeInTheDocument();
   });
 });
 

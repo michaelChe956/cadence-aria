@@ -8,7 +8,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
-    PermissionRequestData, ProviderCommand, ProviderEvent, ProviderPermissionMode, RiskLevel,
+    ChoiceRequestData, PermissionRequestData, ProviderCommand, ProviderEvent,
+    ProviderPermissionMode, RiskLevel,
 };
 
 static NEXT_PERMISSION_ID: AtomicU64 = AtomicU64::new(1);
@@ -19,8 +20,15 @@ pub struct PermissionDecision {
     pub reason: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChoiceDecision {
+    pub selected_option_ids: Vec<String>,
+    pub free_text: Option<String>,
+}
+
 type PendingPermissions =
     Arc<Mutex<HashMap<String, (oneshot::Sender<PermissionDecision>, Instant)>>>;
+type PendingChoices = Arc<Mutex<HashMap<String, oneshot::Sender<ChoiceDecision>>>>;
 
 #[cfg(not(test))]
 const PERMISSION_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
@@ -67,21 +75,60 @@ impl Drop for PendingPermissionGuard {
     }
 }
 
+struct PendingChoiceGuard {
+    id: Option<String>,
+    pending: PendingChoices,
+}
+
+impl PendingChoiceGuard {
+    fn new(id: String, pending: PendingChoices) -> Self {
+        Self {
+            id: Some(id),
+            pending,
+        }
+    }
+
+    async fn remove_now(&mut self) {
+        let Some(id) = self.id.as_ref().cloned() else {
+            return;
+        };
+        self.pending.lock().await.remove(&id);
+        self.id = None;
+    }
+}
+
+impl Drop for PendingChoiceGuard {
+    fn drop(&mut self) {
+        let Some(id) = self.id.take() else {
+            return;
+        };
+        let pending = Arc::clone(&self.pending);
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                pending.lock().await.remove(&id);
+            });
+        }
+    }
+}
+
 pub struct ApprovalBridge {
     mode: ProviderPermissionMode,
     event_tx: mpsc::Sender<ProviderEvent>,
     command_tx: mpsc::Sender<ProviderCommand>,
     pending: PendingPermissions,
+    pending_choices: PendingChoices,
 }
 
 impl ApprovalBridge {
     pub fn new(mode: ProviderPermissionMode, event_tx: mpsc::Sender<ProviderEvent>) -> Self {
         let (command_tx, command_rx) = mpsc::channel(8);
         let pending = Arc::new(Mutex::new(HashMap::new()));
+        let pending_choices = Arc::new(Mutex::new(HashMap::new()));
 
         tokio::spawn(listen_for_permission_commands(
             command_rx,
             Arc::clone(&pending),
+            Arc::clone(&pending_choices),
             event_tx.clone(),
         ));
         tokio::spawn(cleanup_pending_permissions(
@@ -94,6 +141,7 @@ impl ApprovalBridge {
             event_tx,
             command_tx,
             pending,
+            pending_choices,
         }
     }
 
@@ -160,11 +208,56 @@ impl ApprovalBridge {
             }
         }
     }
+
+    pub async fn request_choice(
+        &self,
+        request: ChoiceRequestData,
+        cancel: CancellationToken,
+    ) -> Result<ChoiceDecision, ProviderAdapterError> {
+        let id = request.id.clone();
+        let (decision_tx, decision_rx) = oneshot::channel();
+        self.pending_choices
+            .lock()
+            .await
+            .insert(id.clone(), decision_tx);
+        let mut pending_guard = PendingChoiceGuard::new(id, Arc::clone(&self.pending_choices));
+
+        let send_result = tokio::select! {
+            _ = cancel.cancelled() => {
+                pending_guard.remove_now().await;
+                return Err(permission_bridge_error("choice request cancelled"));
+            }
+            result = self.event_tx.send(ProviderEvent::ChoiceRequest(request)) => result,
+        };
+
+        if send_result.is_err() {
+            pending_guard.remove_now().await;
+            return Err(permission_bridge_error(
+                "choice request event receiver closed",
+            ));
+        }
+
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                pending_guard.remove_now().await;
+                Err(permission_bridge_error("choice request cancelled"))
+            }
+            _ = self.event_tx.closed() => {
+                pending_guard.remove_now().await;
+                Err(permission_bridge_error("choice request event receiver closed"))
+            }
+            decision = decision_rx => {
+                pending_guard.remove_now().await;
+                decision.map_err(|_| permission_bridge_error("choice response channel closed"))
+            }
+        }
+    }
 }
 
 async fn listen_for_permission_commands(
     mut command_rx: mpsc::Receiver<ProviderCommand>,
     pending: PendingPermissions,
+    pending_choices: PendingChoices,
     event_tx: mpsc::Sender<ProviderEvent>,
 ) {
     while let Some(command) = command_rx.recv().await {
@@ -189,13 +282,41 @@ async fn listen_for_permission_commands(
                         .await;
                 }
             }
-            ProviderCommand::ChoiceResponse { .. } => {}
+            ProviderCommand::ChoiceResponse {
+                id,
+                selected_option_ids,
+                free_text,
+            } => {
+                tracing::info!(choice_id = %id, "bridge received choice response");
+                if let Some(decision_tx) = pending_choices.lock().await.remove(&id) {
+                    let _ = decision_tx.send(ChoiceDecision {
+                        selected_option_ids,
+                        free_text,
+                    });
+                } else {
+                    tracing::warn!(choice_id = %id, "bridge: no pending choice entry for id");
+                    let _ = event_tx
+                        .send(ProviderEvent::ProtocolError {
+                            code: "CHOICE_ID_UNMATCHED".to_string(),
+                            message: format!("ChoiceResponse id={id} not found in pending"),
+                            context: Some(serde_json::json!({ "choice_id": id })),
+                        })
+                        .await;
+                }
+            }
             ProviderCommand::Abort => {
-                let mut pending = pending.lock().await;
-                for (_, (decision_tx, _created_at)) in pending.drain() {
+                let mut pending_permissions = pending.lock().await;
+                for (_, (decision_tx, _created_at)) in pending_permissions.drain() {
                     let _ = decision_tx.send(PermissionDecision {
                         approved: false,
                         reason: Some("aborted".to_string()),
+                    });
+                }
+                let mut pending_choices = pending_choices.lock().await;
+                for (_, decision_tx) in pending_choices.drain() {
+                    let _ = decision_tx.send(ChoiceDecision {
+                        selected_option_ids: Vec::new(),
+                        free_text: Some("aborted".to_string()),
                     });
                 }
             }

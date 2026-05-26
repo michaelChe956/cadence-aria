@@ -336,7 +336,7 @@ fn workflow_discipline_for(session: &WorkspaceSessionRecord) -> String {
     if session.superpowers_enabled {
         match session.workspace_type {
             WorkspaceType::Story | WorkspaceType::Design => {
-                "必须遵守 using-superpowers 与 brainstorming；如需要用户确认，输出 open_items，不要假装已确认。"
+                "必须遵守 using-superpowers 与 brainstorming。必须优先通过交互提问解决需求、范围、验收标准中的未决问题，并等待用户回答后继续；不要把可通过当前用户确认解决的问题直接写入待确认项。只有用户明确要求保留、用户回答后仍需后续确认，或当前 provider 环境无法交互时，才允许在待确认项/open_items 中保留。"
             }
             WorkspaceType::WorkItem => {
                 "必须遵守 using-superpowers 与 writing-plans；不得直接输出实现代码，先生成可确认的计划与任务拆分。"
@@ -358,7 +358,7 @@ fn output_schema_for(workspace_type: &WorkspaceType) -> &'static str {
              - ## 成功标准\n\
              - ## 待确认项\n\
              - ## 非功能需求\n\n\
-             每条需求必须显式写稳定 ID，例如 [REQ-001]；每条验收标准必须显式写稳定 ID，例如 [AC-001]。"
+             每条需求必须显式写稳定 ID，例如 [REQ-001]；每条验收标准必须显式写稳定 ID，例如 [AC-001]。如果通过交互已解决所有疑问，## 待确认项 写“无”；不要为了填充该 heading 编造未决问题。"
         }
         WorkspaceType::Design => {
             "Markdown Design Spec 必须包含设计范围、关键决策、组件/API/数据模型、风险和追踪关系；关键决策使用 [DEC-001]，组件/API 使用 [CMP-001] 或 [API-001]。"
