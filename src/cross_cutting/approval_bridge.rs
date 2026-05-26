@@ -189,6 +189,7 @@ async fn listen_for_permission_commands(
                         .await;
                 }
             }
+            ProviderCommand::ChoiceResponse { .. } => {}
             ProviderCommand::Abort => {
                 let mut pending = pending.lock().await;
                 for (_, (decision_tx, _created_at)) in pending.drain() {

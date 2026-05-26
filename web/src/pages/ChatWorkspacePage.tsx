@@ -21,7 +21,7 @@ import { WorkspaceHeader } from "../components/workspace/WorkspaceHeader";
 import { useStageUI } from "../hooks/useStageUI";
 import { useUnloadGuard } from "../hooks/useUnloadGuard";
 import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
-import type { ChatEntry } from "../state/chat-entries";
+import type { ChatEntry, ChoiceResponsePayload } from "../state/chat-entries";
 import {
   useWorkspaceStore,
   type ProviderConfigSnapshot,
@@ -47,6 +47,7 @@ export function ChatWorkspacePage({
     abort,
     selectProvider,
     respondPermission,
+    sendChoiceResponse,
     connectionStatus,
     isReconnecting,
     reconnectAttemptCount,
@@ -101,6 +102,14 @@ export function ChatWorkspacePage({
       return;
     }
     respondPermission(requestId, approved, undefined);
+  }
+
+  function handleChoiceResponse(entry: ChatEntry, response: ChoiceResponsePayload) {
+    const requestId = requestIdFromEntry(entry);
+    if (!requestId) {
+      return;
+    }
+    sendChoiceResponse(requestId, response.selected_option_ids, response.free_text);
   }
 
   function handleSelectNode(nodeId: string) {
@@ -229,6 +238,7 @@ export function ChatWorkspacePage({
                 ref={chatListRef}
                 entries={store.chatEntries}
                 onPermissionResponse={handlePermissionResponse}
+                onChoiceResponse={handleChoiceResponse}
                 onSelectRevisionPath={
                   store.stage === "review_decision" ? handleSelectRevisionPath : undefined
                 }

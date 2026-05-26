@@ -1,6 +1,11 @@
 import { create } from "zustand";
 import type { NodeDetail, WorkspaceProviderName } from "../api/types";
-import type { ChatEntry, ChatEntryResolution, ChatEntryRole } from "./chat-entries";
+import type {
+  ChatEntry,
+  ChatEntryResolution,
+  ChatEntryRole,
+  ChoiceResponsePayload,
+} from "./chat-entries";
 
 export type WsConnectionStatus = "disconnected" | "connecting" | "connected" | "error";
 export type ProviderStatus =
@@ -201,7 +206,12 @@ export interface WorkspaceWsActions {
   setPendingDecision: (decision: ReviewDecisionRequired | null) => void;
   setConnectionStatus: (status: WsConnectionStatus) => void;
   addPermissionRequest: (request: PermissionRequest) => void;
-  resolvePermissionRequest: (id: string) => void;
+  resolvePermissionRequest: (id: string, approved?: boolean) => void;
+  resolveChoiceRequest: (
+    id: string,
+    selectedOptionIds: string[],
+    freeText: string | null,
+  ) => void;
   setProviderStatus: (status: ProviderStatus) => void;
   upsertExecutionEvent: (event: ExecutionEvent) => void;
   clearExecutionEvents: () => void;
@@ -535,10 +545,90 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
       ],
     })),
 
-  resolvePermissionRequest: (id) =>
-    set((prev) => ({
-      pendingPermissions: prev.pendingPermissions.filter((request) => request.id !== id),
-    })),
+  resolvePermissionRequest: (id, approved) =>
+    set((prev) => {
+      let matched = false;
+      const nextEntries = prev.chatEntries.map((entry) => {
+        if (entry.type !== "permission_request" || entry.metadata?.request_id !== id) {
+          return entry;
+        }
+        matched = true;
+        return {
+          ...entry,
+          resolved: approved !== undefined ? true : entry.resolved,
+          metadata: {
+            ...entry.metadata,
+            approved,
+            response:
+              approved !== undefined
+                ? {
+                    approved,
+                  }
+                : entry.metadata?.response,
+          },
+        };
+      });
+
+      if (approved !== undefined && matched) {
+        const responseEntry: ChatEntry = {
+          id: `permission_response:${id}`,
+          type: "permission_response",
+          role: "user",
+          content: approved ? "已允许" : "已拒绝",
+          timestamp: new Date().toISOString(),
+          metadata: { request_id: id, approved },
+        };
+        return {
+          pendingPermissions: prev.pendingPermissions.filter((request) => request.id !== id),
+          chatEntries: [
+            ...nextEntries.filter((entry) => entry.id !== responseEntry.id),
+            responseEntry,
+          ],
+        };
+      }
+
+      return {
+        pendingPermissions: prev.pendingPermissions.filter((request) => request.id !== id),
+        chatEntries: nextEntries,
+      };
+    }),
+
+  resolveChoiceRequest: (id, selectedOptionIds, freeText) =>
+    set((prev) => {
+      let responseContent = "已选择";
+      const response: ChoiceResponsePayload = {
+        selected_option_ids: selectedOptionIds,
+        free_text: freeText,
+      };
+      const nextEntries = prev.chatEntries.map((entry) => {
+        if (entry.type !== "choice_request" || entry.metadata?.request_id !== id) {
+          return entry;
+        }
+        responseContent = `已选择${choiceResponseSummary(entry, response)}`;
+        return {
+          ...entry,
+          resolved: true,
+          metadata: {
+            ...entry.metadata,
+            response,
+          },
+        };
+      });
+      const responseEntry: ChatEntry = {
+        id: `choice_response:${id}`,
+        type: "choice_response",
+        role: "user",
+        content: responseContent,
+        timestamp: new Date().toISOString(),
+        metadata: {
+          request_id: id,
+          ...response,
+        },
+      };
+      return {
+        chatEntries: [...nextEntries.filter((entry) => entry.id !== responseEntry.id), responseEntry],
+      };
+    }),
 
   setProviderStatus: (status) => set({ providerStatus: status }),
 
@@ -947,6 +1037,25 @@ function permissionResponseLabel(toolName: string, response: unknown) {
     return `权限超时 ${toolName}`;
   }
   return `权限响应 ${toolName}`;
+}
+
+function choiceResponseSummary(entry: ChatEntry, response: ChoiceResponsePayload) {
+  const metadata = entry.metadata;
+  const labels = response.selected_option_ids.map((id) => choiceOptionLabel(metadata?.options, id));
+  if (response.free_text) {
+    labels.push(response.free_text);
+  }
+  return labels.length > 0 ? `：${labels.join("、")}` : "";
+}
+
+function choiceOptionLabel(options: unknown, id: string) {
+  if (!Array.isArray(options)) {
+    return id;
+  }
+  const option = options.find(
+    (item) => isRecord(item) && stringField(item, "id") === id,
+  );
+  return isRecord(option) ? stringField(option, "label") ?? id : id;
 }
 
 function getStringField(value: unknown, key: string) {

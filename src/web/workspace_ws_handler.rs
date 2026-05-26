@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::cross_cutting::provider_registry::ProviderRegistry;
 use crate::cross_cutting::streaming_provider::{
-    ProviderCommand, ProviderExecutionEvent, ProviderExecutionEventKind,
+    ChoiceOptionData, ProviderCommand, ProviderExecutionEvent, ProviderExecutionEventKind,
     ProviderExecutionEventStatus, ProviderStatus, RiskLevel,
 };
 use crate::product::app_paths::ProductAppPaths;
@@ -25,7 +25,7 @@ use crate::web::state::WebAppState;
 use crate::web::test_controls::WorkspaceSocketControl;
 use crate::web::workspace_context::ensure_workspace_context_message;
 use crate::web::workspace_ws_types::{
-    HumanConfirmDecision, RevisionPath, WsExecutionEvent, WsExecutionEventKind,
+    ChoiceOption, HumanConfirmDecision, RevisionPath, WsExecutionEvent, WsExecutionEventKind,
     WsExecutionEventStatus, WsInMessage, WsOutMessage, WsPermissionRiskLevel, WsProviderStatus,
 };
 
@@ -235,6 +235,19 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                     tool_name,
                     description,
                     risk_level: ws_permission_risk_level(risk_level),
+                },
+                EngineEvent::ChoiceRequest {
+                    id,
+                    prompt,
+                    options,
+                    allow_multiple,
+                    allow_free_text,
+                } => WsOutMessage::ChoiceRequest {
+                    id,
+                    prompt,
+                    options: options.into_iter().map(ws_choice_option).collect(),
+                    allow_multiple,
+                    allow_free_text,
                 },
                 EngineEvent::ProviderStatus { status } => WsOutMessage::ProviderStatus {
                     status: ws_provider_status(status),
@@ -446,6 +459,41 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                             reason,
                         })
                         .await;
+                } else {
+                    let _ = send_json_outbound(
+                        &outbound_tx,
+                        &missing_active_run_error("permission_response", &id),
+                    )
+                    .await;
+                }
+            }
+            WsInMessage::ChoiceResponse {
+                id,
+                selected_option_ids,
+                free_text,
+            } => {
+                tracing::info!(choice_id = %id, "ws inbound choice response");
+                let command_tx = {
+                    current_run
+                        .lock()
+                        .await
+                        .as_ref()
+                        .map(|run| run.command_tx.clone())
+                };
+                if let Some(command_tx) = command_tx {
+                    let _ = command_tx
+                        .send(ProviderCommand::ChoiceResponse {
+                            id,
+                            selected_option_ids,
+                            free_text,
+                        })
+                        .await;
+                } else {
+                    let _ = send_json_outbound(
+                        &outbound_tx,
+                        &missing_active_run_error("choice_response", &id),
+                    )
+                    .await;
                 }
             }
             WsInMessage::ReviewDecisionResponse {
@@ -668,6 +716,17 @@ async fn handle_human_confirm_from_handler(
     }
 }
 
+fn missing_active_run_error(message_type: &'static str, id: &str) -> WsOutMessage {
+    WsOutMessage::ProtocolError {
+        code: "ACTIVE_RUN_NOT_FOUND".to_string(),
+        message: format!("{message_type} id={id} has no active provider run"),
+        context: Some(serde_json::json!({
+            "message_type": message_type,
+            "id": id,
+        })),
+    }
+}
+
 fn is_message_valid_for_stage(msg: &WsInMessage, stage: &WorkspaceStage) -> bool {
     if matches!(msg, WsInMessage::Hello { .. } | WsInMessage::Ping) {
         return true;
@@ -686,15 +745,21 @@ fn is_message_valid_for_stage(msg: &WsInMessage, stage: &WorkspaceStage) -> bool
         WorkspaceStage::Running => {
             matches!(
                 msg,
-                WsInMessage::Abort | WsInMessage::PermissionResponse { .. }
+                WsInMessage::Abort
+                    | WsInMessage::PermissionResponse { .. }
+                    | WsInMessage::ChoiceResponse { .. }
             )
         }
-        WorkspaceStage::CrossReview => matches!(msg, WsInMessage::Abort),
+        WorkspaceStage::CrossReview => {
+            matches!(msg, WsInMessage::Abort | WsInMessage::ChoiceResponse { .. })
+        }
         WorkspaceStage::ReviewDecision => matches!(
             msg,
             WsInMessage::SelectRevisionPath { .. } | WsInMessage::ReviewDecisionResponse { .. }
         ),
-        WorkspaceStage::Revision => matches!(msg, WsInMessage::Abort),
+        WorkspaceStage::Revision => {
+            matches!(msg, WsInMessage::Abort | WsInMessage::ChoiceResponse { .. })
+        }
         WorkspaceStage::HumanConfirm => matches!(
             msg,
             WsInMessage::HumanConfirm { .. }
@@ -710,6 +775,7 @@ fn requires_stage_validation(msg: &WsInMessage) -> bool {
         msg,
         WsInMessage::Abort
             | WsInMessage::PermissionResponse { .. }
+            | WsInMessage::ChoiceResponse { .. }
             | WsInMessage::UserMessage { .. }
             | WsInMessage::Rollback { .. }
     )
@@ -725,6 +791,7 @@ fn message_type(msg: &WsInMessage) -> &'static str {
         WsInMessage::Confirm => "confirm",
         WsInMessage::ProviderSelect { .. } => "provider_select",
         WsInMessage::PermissionResponse { .. } => "permission_response",
+        WsInMessage::ChoiceResponse { .. } => "choice_response",
         WsInMessage::ReviewDecisionResponse { .. } => "review_decision_response",
         WsInMessage::SelectRevisionPath { .. } => "select_revision_path",
         WsInMessage::RequestRevision { .. } => "request_revision",
@@ -942,6 +1009,11 @@ mod tests {
                 reason: None,
             }
         ));
+        assert!(!requires_stage_validation(&WsInMessage::ChoiceResponse {
+            id: "choice-1".to_string(),
+            selected_option_ids: vec!["continue".to_string()],
+            free_text: None,
+        }));
         assert!(!requires_stage_validation(&WsInMessage::UserMessage {
             content: "legacy generation request".to_string(),
         }));
@@ -951,6 +1023,42 @@ mod tests {
         assert!(requires_stage_validation(&WsInMessage::ContextNote {
             content: "new protocol action".to_string(),
         }));
+    }
+
+    #[test]
+    fn choice_response_message_type_is_reported_for_protocol_errors() {
+        assert_eq!(
+            message_type(&WsInMessage::ChoiceResponse {
+                id: "choice-1".to_string(),
+                selected_option_ids: vec!["continue".to_string()],
+                free_text: None,
+            }),
+            "choice_response"
+        );
+    }
+
+    #[test]
+    fn missing_active_run_error_uses_protocol_error() {
+        let error = missing_active_run_error("choice_response", "choice-1");
+
+        match error {
+            WsOutMessage::ProtocolError {
+                code,
+                message,
+                context,
+            } => {
+                assert_eq!(code, "ACTIVE_RUN_NOT_FOUND");
+                assert!(message.contains("choice_response"));
+                assert_eq!(
+                    context
+                        .as_ref()
+                        .and_then(|value| value.get("id"))
+                        .and_then(|value| value.as_str()),
+                    Some("choice-1")
+                );
+            }
+            other => panic!("expected protocol error, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1100,6 +1208,14 @@ fn ws_permission_risk_level(risk_level: RiskLevel) -> WsPermissionRiskLevel {
         RiskLevel::Low => WsPermissionRiskLevel::Low,
         RiskLevel::Medium => WsPermissionRiskLevel::Medium,
         RiskLevel::High => WsPermissionRiskLevel::High,
+    }
+}
+
+fn ws_choice_option(option: ChoiceOptionData) -> ChoiceOption {
+    ChoiceOption {
+        id: option.id,
+        label: option.label,
+        description: option.description,
     }
 }
 

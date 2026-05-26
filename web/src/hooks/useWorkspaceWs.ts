@@ -233,6 +233,23 @@ export function useWorkspaceWs(sessionId: string | null) {
           },
         });
         break;
+      case "choice_request":
+        store.appendChatEntry({
+          id: chatEntryId("choice_request", msg.id as string),
+          type: "choice_request",
+          role: "system",
+          content: msg.prompt as string,
+          timestamp: new Date().toISOString(),
+          node_id: store.activeNodeId ?? undefined,
+          metadata: {
+            request_id: msg.id as string,
+            prompt: msg.prompt as string,
+            options: (msg.options as unknown[]) ?? [],
+            allow_multiple: msg.allow_multiple === true,
+            allow_free_text: msg.allow_free_text === true,
+          },
+        });
+        break;
       case "provider_status":
         store.setProviderStatus(msg.status as ProviderStatus);
         break;
@@ -494,7 +511,26 @@ export function useWorkspaceWs(sessionId: string | null) {
         })
       ) {
         console.info("[permission] sending response", { id, approved });
-        useWorkspaceStore.getState().resolvePermissionRequest(id);
+        useWorkspaceStore.getState().resolvePermissionRequest(id, approved);
+      }
+    },
+    [sendJson],
+  );
+
+  const sendChoiceResponse = useCallback(
+    (id: string, selectedOptionIds: string[], freeText?: string | null) => {
+      const trimmedText = freeText?.trim();
+      if (
+        sendJson({
+          type: "choice_response",
+          id,
+          selected_option_ids: selectedOptionIds,
+          free_text: trimmedText ? trimmedText : null,
+        })
+      ) {
+        useWorkspaceStore
+          .getState()
+          .resolveChoiceRequest(id, selectedOptionIds, trimmedText ? trimmedText : null);
       }
     },
     [sendJson],
@@ -520,6 +556,7 @@ export function useWorkspaceWs(sessionId: string | null) {
     sendReviewDecision,
     respondPermission,
     sendPermissionResponse,
+    sendChoiceResponse,
     connectionStatus,
     isReconnecting,
     reconnectAttemptCount,

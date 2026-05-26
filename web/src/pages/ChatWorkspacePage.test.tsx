@@ -55,6 +55,7 @@ function mockWorkspaceWs(overrides: Partial<WorkspaceWsApi> = {}) {
     sendReviewDecision: vi.fn(),
     respondPermission: vi.fn(),
     sendPermissionResponse: vi.fn(),
+    sendChoiceResponse: vi.fn(),
     connectionStatus: "connected",
     isReconnecting: false,
     reconnectAttemptCount: 0,

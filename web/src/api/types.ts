@@ -453,6 +453,12 @@ export type WsInMessage =
   | { type: "confirm" }
   | { type: "provider_select"; role: string; provider: WorkspaceProviderName }
   | { type: "permission_response"; id: string; approved: boolean; reason?: string | null }
+  | {
+      type: "choice_response";
+      id: string;
+      selected_option_ids: string[];
+      free_text?: string | null;
+    }
   | { type: "review_decision_response"; decision: string; extra_context?: string | null }
   | { type: "select_revision_path"; path: RevisionPath; extra_context?: string | null }
   | { type: "request_revision"; feedback: StructuredFeedback }

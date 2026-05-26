@@ -1,4 +1,6 @@
 export { ArtifactUpdateEntry } from "./ArtifactUpdateEntry";
+export { ChoiceRequestEntry } from "./ChoiceRequestEntry";
+export { ChoiceResponseEntry } from "./ChoiceResponseEntry";
 export { ErrorEntry } from "./ErrorEntry";
 export { ExecutionEventEntry } from "./ExecutionEventEntry";
 export { GatePromptEntry } from "./GatePromptEntry";

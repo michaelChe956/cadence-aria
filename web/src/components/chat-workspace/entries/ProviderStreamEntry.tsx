@@ -52,3 +52,5 @@ function MarkdownContent({ content }: { content: string }) {
     </div>
   );
 }
+
+export { MarkdownContent };

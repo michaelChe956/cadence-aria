@@ -175,6 +175,7 @@ impl StreamingProviderAdapter for CodexProvider {
                         StreamChunk::Error(format!("Permission request {permission_id} timed out"))
                     }
                     ProviderEvent::PermissionRequest(_)
+                    | ProviderEvent::ChoiceRequest(_)
                     | ProviderEvent::StatusChanged(_)
                     | ProviderEvent::Execution(_) => {
                         continue;
@@ -676,7 +677,8 @@ mod tests {
                 ProviderEvent::StatusChanged(_)
                 | ProviderEvent::Execution(_)
                 | ProviderEvent::TextDelta { .. }
-                | ProviderEvent::PermissionRequest(_) => {}
+                | ProviderEvent::PermissionRequest(_)
+                | ProviderEvent::ChoiceRequest(_) => {}
                 ProviderEvent::Failed { message } => panic!("provider failed: {message}"),
                 ProviderEvent::ProtocolError { message, .. } => {
                     panic!("provider protocol error: {message}")
@@ -705,7 +707,9 @@ mod tests {
                     saw_text = content.contains("Codex fixture chunk");
                 }
                 ProviderEvent::PermissionRequest(data) => break data.id,
-                ProviderEvent::StatusChanged(_) | ProviderEvent::Execution(_) => {}
+                ProviderEvent::StatusChanged(_)
+                | ProviderEvent::Execution(_)
+                | ProviderEvent::ChoiceRequest(_) => {}
                 other => panic!("unexpected event before permission: {other:?}"),
             }
         };

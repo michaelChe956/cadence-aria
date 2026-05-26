@@ -1387,7 +1387,8 @@ impl StreamingProviderAdapter for HangingStreamingProvider {
                     command = command_rx.recv() => {
                         match command {
                             Some(ProviderCommand::Abort) | None => return,
-                            Some(ProviderCommand::PermissionResponse { .. }) => {}
+                            Some(ProviderCommand::PermissionResponse { .. })
+                            | Some(ProviderCommand::ChoiceResponse { .. }) => {}
                         }
                     }
                 }

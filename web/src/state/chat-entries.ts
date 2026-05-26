@@ -5,6 +5,8 @@ export type ChatEntryType =
   | "execution_event"
   | "permission_request"
   | "permission_response"
+  | "choice_request"
+  | "choice_response"
   | "artifact_update"
   | "review_verdict"
   | "gate_prompt"
@@ -14,6 +16,11 @@ export type ChatEntryType =
 
 export type ChatEntryRole = "user" | "author" | "reviewer" | "system";
 export type ChatEntryResolution = "confirm" | "request-change" | "terminate";
+
+export interface ChoiceResponsePayload {
+  selected_option_ids: string[];
+  free_text: string | null;
+}
 
 export interface ChatEntry {
   id: string;

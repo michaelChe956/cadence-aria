@@ -1,6 +1,8 @@
 import type { ChatEntry } from "../../state/chat-entries";
 import type { RevisionPath } from "../../api/types";
 import { ArtifactUpdateEntry } from "./entries/ArtifactUpdateEntry";
+import { ChoiceRequestEntry } from "./entries/ChoiceRequestEntry";
+import { ChoiceResponseEntry } from "./entries/ChoiceResponseEntry";
 import { ErrorEntry } from "./entries/ErrorEntry";
 import { ExecutionEventEntry } from "./entries/ExecutionEventEntry";
 import { GatePromptEntry } from "./entries/GatePromptEntry";
@@ -17,6 +19,10 @@ import { ChatEntryContainer } from "./ChatEntryContainer";
 interface ChatEntryRendererProps {
   entry: ChatEntry;
   onPermissionResponse?: (entry: ChatEntry, approved: boolean) => void;
+  onChoiceResponse?: (
+    entry: ChatEntry,
+    response: { selected_option_ids: string[]; free_text: string | null },
+  ) => void;
   onSelectRevisionPath?: (path: RevisionPath) => void;
   onHumanConfirm?: (decision: "confirm" | "request-change" | "terminate") => void;
 }
@@ -24,6 +30,7 @@ interface ChatEntryRendererProps {
 export function ChatEntryRenderer({
   entry,
   onPermissionResponse,
+  onChoiceResponse,
   onSelectRevisionPath,
   onHumanConfirm,
 }: ChatEntryRendererProps) {
@@ -40,6 +47,10 @@ export function ChatEntryRenderer({
       return <PermissionRequestEntry entry={entry} onRespond={onPermissionResponse} />;
     case "permission_response":
       return <PermissionResponseEntry entry={entry} />;
+    case "choice_request":
+      return <ChoiceRequestEntry entry={entry} onRespond={onChoiceResponse} />;
+    case "choice_response":
+      return <ChoiceResponseEntry entry={entry} />;
     case "artifact_update":
       return <ArtifactUpdateEntry entry={entry} />;
     case "review_verdict":

@@ -54,6 +54,22 @@ pub struct PermissionRequestData {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChoiceOptionData {
+    pub id: String,
+    pub label: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChoiceRequestData {
+    pub id: String,
+    pub prompt: String,
+    pub options: Vec<ChoiceOptionData>,
+    pub allow_multiple: bool,
+    pub allow_free_text: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderStatus {
     Starting,
     Running,
@@ -101,6 +117,7 @@ pub enum ProviderEvent {
         content: String,
     },
     PermissionRequest(PermissionRequestData),
+    ChoiceRequest(ChoiceRequestData),
     StatusChanged(ProviderStatus),
     Execution(ProviderExecutionEvent),
     Completed {
@@ -127,6 +144,11 @@ pub enum ProviderCommand {
         approved: bool,
         reason: Option<String>,
     },
+    ChoiceResponse {
+        id: String,
+        selected_option_ids: Vec<String>,
+        free_text: Option<String>,
+    },
     Abort,
 }
 
@@ -152,7 +174,8 @@ async fn fake_streaming_should_stop(
                 command = command_rx.recv() => {
                     match command {
                         Some(ProviderCommand::Abort) => return true,
-                        Some(ProviderCommand::PermissionResponse { .. }) => {}
+                        Some(ProviderCommand::PermissionResponse { .. })
+                        | Some(ProviderCommand::ChoiceResponse { .. }) => {}
                         None => *commands_open = false,
                     }
                 }
@@ -190,7 +213,8 @@ async fn fake_streaming_send_event(
                 command = command_rx.recv() => {
                     match command {
                         Some(ProviderCommand::Abort) => return false,
-                        Some(ProviderCommand::PermissionResponse { .. }) => {}
+                        Some(ProviderCommand::PermissionResponse { .. })
+                        | Some(ProviderCommand::ChoiceResponse { .. }) => {}
                         None => *commands_open = false,
                     }
                 }
@@ -338,6 +362,7 @@ impl StreamingProviderAdapter for FakeStreamingProvider {
                         StreamChunk::Error(format!("Permission request {permission_id} timed out"))
                     }
                     ProviderEvent::PermissionRequest(_)
+                    | ProviderEvent::ChoiceRequest(_)
                     | ProviderEvent::StatusChanged(_)
                     | ProviderEvent::Execution(_) => {
                         continue;

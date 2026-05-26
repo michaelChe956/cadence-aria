@@ -7,10 +7,11 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::cross_cutting::streaming_provider::{
-    ProviderCommand, ProviderEvent, ProviderExecutionEvent, ProviderExecutionEventKind,
-    ProviderExecutionEventStatus, ProviderPermissionMode, ProviderSession, ProviderStatus,
-    RiskLevel, StreamingProviderAdapter, StreamingProviderInput,
+    ChoiceOptionData, ProviderCommand, ProviderEvent, ProviderExecutionEvent,
+    ProviderExecutionEventKind, ProviderExecutionEventStatus, ProviderPermissionMode,
+    ProviderSession, ProviderStatus, RiskLevel, StreamingProviderAdapter, StreamingProviderInput,
 };
+use crate::product::artifact_extraction::extract_artifact_content;
 use crate::product::checkpoint_store::CheckpointStore;
 use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::{AppendSpecVersionInput, LifecycleStore};
@@ -163,6 +164,13 @@ pub enum EngineEvent {
         tool_name: String,
         description: String,
         risk_level: RiskLevel,
+    },
+    ChoiceRequest {
+        id: String,
+        prompt: String,
+        options: Vec<ChoiceOptionData>,
+        allow_multiple: bool,
+        allow_free_text: bool,
     },
     ProviderStatus {
         status: ProviderStatus,
@@ -743,6 +751,20 @@ impl WorkspaceEngine {
                                 commands_open = false;
                             }
                         }
+                        Some(ProviderCommand::ChoiceResponse {
+                            id,
+                            selected_option_ids,
+                            free_text,
+                        }) => {
+                            tracing::info!(choice_id = %id, "engine forwarding choice response");
+                            if session.commands.send(ProviderCommand::ChoiceResponse {
+                                id,
+                                selected_option_ids,
+                                free_text,
+                            }).await.is_err() {
+                                commands_open = false;
+                            }
+                        }
                         None => commands_open = false,
                     }
                 }
@@ -810,6 +832,18 @@ impl WorkspaceEngine {
                                     tool_name: request.tool_name,
                                     description: request.description,
                                     risk_level: request.risk_level,
+                                })
+                                .await;
+                        }
+                        ProviderEvent::ChoiceRequest(request) => {
+                            let _ = self
+                                .event_tx
+                                .send(EngineEvent::ChoiceRequest {
+                                    id: request.id,
+                                    prompt: request.prompt,
+                                    options: request.options,
+                                    allow_multiple: request.allow_multiple,
+                                    allow_free_text: request.allow_free_text,
                                 })
                                 .await;
                         }
@@ -1040,6 +1074,25 @@ impl WorkspaceEngine {
                                 commands_open = false;
                             }
                         }
+                        Some(ProviderCommand::ChoiceResponse {
+                            id,
+                            selected_option_ids,
+                            free_text,
+                        }) => {
+                            tracing::info!(choice_id = %id, "engine forwarding choice response");
+                            if session
+                                .commands
+                                .send(ProviderCommand::ChoiceResponse {
+                                    id,
+                                    selected_option_ids,
+                                    free_text,
+                                })
+                                .await
+                                .is_err()
+                            {
+                                commands_open = false;
+                            }
+                        }
                         None => commands_open = false,
                     }
                 }
@@ -1107,6 +1160,18 @@ impl WorkspaceEngine {
                                     tool_name: request.tool_name,
                                     description: request.description,
                                     risk_level: request.risk_level,
+                                })
+                                .await;
+                        }
+                        ProviderEvent::ChoiceRequest(request) => {
+                            let _ = self
+                                .event_tx
+                                .send(EngineEvent::ChoiceRequest {
+                                    id: request.id,
+                                    prompt: request.prompt,
+                                    options: request.options,
+                                    allow_multiple: request.allow_multiple,
+                                    allow_free_text: request.allow_free_text,
                                 })
                                 .await;
                         }
@@ -1423,6 +1488,7 @@ impl WorkspaceEngine {
             created_at: chrono::Utc::now().to_rfc3339(),
         };
         self.session.messages.push(assistant_msg);
+        let artifact_markdown = extract_artifact_content(&full_content);
         if let Some(store) = &self.lifecycle_store {
             let _ = store.append_workspace_message(
                 &self.session.session_id,
@@ -1437,20 +1503,14 @@ impl WorkspaceEngine {
                     project_id: self.session.project_id.clone(),
                     issue_id: self.session.issue_id.clone(),
                     entity_id: self.session.entity_id.clone(),
-                    markdown: full_content.clone(),
+                    markdown: artifact_markdown.clone(),
                     provider_run_refs: Vec::new(),
                     review_refs: Vec::new(),
                     confirmed_by: None,
                 });
             }
         }
-        let artifact_markdown = self
-            .session
-            .messages
-            .last()
-            .map(|message| message.content.clone())
-            .unwrap_or_default();
-        self.update_artifact(artifact_markdown.clone()).await;
+        self.update_artifact(artifact_markdown).await;
 
         let message_index = self.session.messages.len() as u32;
         let artifact_snapshot = self.session.artifact.clone().unwrap_or_default();
@@ -2519,7 +2579,7 @@ fn latest_artifact_from_messages(messages: &[WorkspaceMessageRecord]) -> Option<
         .iter()
         .rev()
         .find(|message| matches!(message.role.as_str(), "assistant" | "provider"))
-        .map(|message| message.content.clone())
+        .map(|message| extract_artifact_content(&message.content))
 }
 
 #[cfg(test)]

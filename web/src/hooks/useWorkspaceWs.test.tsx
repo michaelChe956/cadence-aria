@@ -1,5 +1,6 @@
 import { act, render } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ChatEntry } from "../state/chat-entries";
 import { useWorkspaceStore } from "../state/workspace-ws-store";
 import { useWorkspaceWs } from "./useWorkspaceWs";
 
@@ -106,6 +107,36 @@ describe("useWorkspaceWs", () => {
       },
     ]);
     expect(useWorkspaceStore.getState().providerStatus).toBe("waiting_approval");
+  });
+
+  it("stores choice requests from websocket messages", () => {
+    const harness = renderWorkspaceHook();
+
+    act(() => {
+      harness.ws.receive({
+        type: "choice_request",
+        id: "choice_001",
+        prompt: "请选择下一步",
+        options: [
+          { id: "continue", label: "继续" },
+          { id: "stop", label: "停止" },
+        ],
+        allow_multiple: false,
+        allow_free_text: true,
+      });
+    });
+
+    expect(useWorkspaceStore.getState().chatEntries.at(-1)).toMatchObject({
+      id: "choice_request:choice_001",
+      type: "choice_request",
+      role: "system",
+      content: "请选择下一步",
+      metadata: {
+        request_id: "choice_001",
+        allow_multiple: false,
+        allow_free_text: true,
+      },
+    });
   });
 
   it("stores execution events from websocket messages", () => {
@@ -515,6 +546,40 @@ describe("useWorkspaceWs", () => {
       approved: true,
     });
     expect(useWorkspaceStore.getState().pendingPermissions).toHaveLength(0);
+  });
+
+  it("sends choice responses and resolves the pending choice when connected", () => {
+    const harness = renderWorkspaceHook();
+    useWorkspaceStore.getState().appendChatEntry({
+      id: "choice_request:choice_001",
+      type: "choice_request",
+      role: "system",
+      content: "请选择下一步",
+      timestamp: "2026-05-26T10:00:00Z",
+      metadata: {
+        request_id: "choice_001",
+        options: [{ id: "continue", label: "继续" }],
+      },
+    } as ChatEntry);
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.sent.length = 0;
+      harness.api.sendChoiceResponse("choice_001", ["continue"], null);
+    });
+
+    expect(harness.ws.sent).toEqual([
+      JSON.stringify({
+        type: "choice_response",
+        id: "choice_001",
+        selected_option_ids: ["continue"],
+        free_text: null,
+      }),
+    ]);
+    expect(useWorkspaceStore.getState().chatEntries.at(-1)).toMatchObject({
+      type: "choice_response",
+      content: "已选择：继续",
+    });
   });
 
   it("sends context notes when connected", () => {

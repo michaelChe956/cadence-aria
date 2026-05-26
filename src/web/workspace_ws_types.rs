@@ -61,6 +61,13 @@ pub enum WsOutMessage {
         description: String,
         risk_level: WsPermissionRiskLevel,
     },
+    ChoiceRequest {
+        id: String,
+        prompt: String,
+        options: Vec<ChoiceOption>,
+        allow_multiple: bool,
+        allow_free_text: bool,
+    },
     ProviderStatus {
         status: WsProviderStatus,
     },
@@ -149,6 +156,11 @@ pub enum WsInMessage {
         approved: bool,
         reason: Option<String>,
     },
+    ChoiceResponse {
+        id: String,
+        selected_option_ids: Vec<String>,
+        free_text: Option<String>,
+    },
     ReviewDecisionResponse {
         decision: String,
         extra_context: Option<String>,
@@ -197,6 +209,13 @@ pub enum WsPermissionRiskLevel {
     Low,
     Medium,
     High,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChoiceOption {
+    pub id: String,
+    pub label: String,
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -363,9 +382,10 @@ pub struct ArtifactVersion {
 #[cfg(test)]
 mod tests {
     use super::{
-        ProviderConfigSnapshot, ReviewVerdict, ReviewVerdictType, TimelineNode, TimelineNodeStatus,
-        TimelineNodeType, WorkspaceStage, WsExecutionEvent, WsExecutionEventKind,
-        WsExecutionEventStatus, WsInMessage, WsOutMessage, WsPermissionRiskLevel, WsProviderStatus,
+        ChoiceOption, ProviderConfigSnapshot, ReviewVerdict, ReviewVerdictType, TimelineNode,
+        TimelineNodeStatus, TimelineNodeType, WorkspaceStage, WsExecutionEvent,
+        WsExecutionEventKind, WsExecutionEventStatus, WsInMessage, WsOutMessage,
+        WsPermissionRiskLevel, WsProviderStatus,
     };
     use crate::product::models::{ProviderName, WorkspaceType};
 
@@ -631,6 +651,46 @@ mod tests {
         assert_eq!(json["type"], "provider_locked");
         let back: WsOutMessage = serde_json::from_value(json).unwrap();
         assert_eq!(back, msg);
+    }
+
+    #[test]
+    fn choice_request_and_response_roundtrip() {
+        let out = WsOutMessage::ChoiceRequest {
+            id: "choice_001".to_string(),
+            prompt: "请选择下一步".to_string(),
+            options: vec![
+                ChoiceOption {
+                    id: "continue".to_string(),
+                    label: "继续".to_string(),
+                    description: Some("继续当前方案".to_string()),
+                },
+                ChoiceOption {
+                    id: "stop".to_string(),
+                    label: "停止".to_string(),
+                    description: None,
+                },
+            ],
+            allow_multiple: false,
+            allow_free_text: true,
+        };
+
+        let json = serde_json::to_value(&out).unwrap();
+
+        assert_eq!(json["type"], "choice_request");
+        assert_eq!(json["options"][0]["id"], "continue");
+        let back: WsOutMessage = serde_json::from_value(json).unwrap();
+        assert_eq!(back, out);
+
+        let input = WsInMessage::ChoiceResponse {
+            id: "choice_001".to_string(),
+            selected_option_ids: vec!["continue".to_string()],
+            free_text: Some("补充说明".to_string()),
+        };
+        let json = serde_json::to_value(&input).unwrap();
+        assert_eq!(json["type"], "choice_response");
+        assert_eq!(json["selected_option_ids"][0], "continue");
+        let back: WsInMessage = serde_json::from_value(json).unwrap();
+        assert_eq!(back, input);
     }
 
     #[test]

@@ -1,7 +1,9 @@
-import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef } from "react";
 import type { RevisionPath } from "../../api/types";
-import type { ChatEntry } from "../../state/chat-entries";
+import type { ChatEntry, ChoiceResponsePayload } from "../../state/chat-entries";
 import { ChatEntryRenderer } from "./ChatEntryRenderer";
+import { MessageGroupView } from "./MessageGroupView";
+import { groupEntries } from "./message-grouping";
 
 export interface ChatEntryListHandle {
   scrollToEntry: (entryId: string) => void;
@@ -10,6 +12,7 @@ export interface ChatEntryListHandle {
 interface ChatEntryListProps {
   entries: ChatEntry[];
   onPermissionResponse?: (entry: ChatEntry, approved: boolean) => void;
+  onChoiceResponse?: (entry: ChatEntry, response: ChoiceResponsePayload) => void;
   onSelectRevisionPath?: (path: RevisionPath) => void;
   onHumanConfirm?: (decision: "confirm" | "request-change" | "terminate") => void;
   className?: string;
@@ -17,12 +20,20 @@ interface ChatEntryListProps {
 
 export const ChatEntryList = forwardRef<ChatEntryListHandle, ChatEntryListProps>(
   function ChatEntryList(
-    { entries, onPermissionResponse, onSelectRevisionPath, onHumanConfirm, className = "" },
+    {
+      entries,
+      onPermissionResponse,
+      onChoiceResponse,
+      onSelectRevisionPath,
+      onHumanConfirm,
+      className = "",
+    },
     ref,
   ) {
     const listRef = useRef<HTMLDivElement | null>(null);
     const endRef = useRef<HTMLDivElement | null>(null);
     const latestEntryId = entries.at(-1)?.id ?? null;
+    const groupedItems = useMemo(() => groupEntries(entries), [entries]);
 
     useImperativeHandle(
       ref,
@@ -56,16 +67,36 @@ export const ChatEntryList = forwardRef<ChatEntryListHandle, ChatEntryListProps>
         {entries.length === 0 ? (
           <div className="text-sm text-[var(--aria-ink-muted)]">暂无聊天记录</div>
         ) : (
-          entries.map((entry) => (
-            <div key={entry.id} data-entry-id={entry.id} className="min-w-0">
-              <ChatEntryRenderer
-                entry={entry}
-                onPermissionResponse={onPermissionResponse}
-                onSelectRevisionPath={onSelectRevisionPath}
-                onHumanConfirm={onHumanConfirm}
-              />
-            </div>
-          ))
+          groupedItems.map((item) => {
+            if (item.kind === "group") {
+              return (
+                <div
+                  key={item.group.id}
+                  data-entry-id={item.group.primaryEntry?.id ?? item.group.id}
+                  className="min-w-0"
+                >
+                  <MessageGroupView
+                    group={item.group}
+                    onPermissionResponse={onPermissionResponse}
+                    onChoiceResponse={onChoiceResponse}
+                    onSelectRevisionPath={onSelectRevisionPath}
+                    onHumanConfirm={onHumanConfirm}
+                  />
+                </div>
+              );
+            }
+            return (
+              <div key={item.entry.id} data-entry-id={item.entry.id} className="min-w-0">
+                <ChatEntryRenderer
+                  entry={item.entry}
+                  onPermissionResponse={onPermissionResponse}
+                  onChoiceResponse={onChoiceResponse}
+                  onSelectRevisionPath={onSelectRevisionPath}
+                  onHumanConfirm={onHumanConfirm}
+                />
+              </div>
+            );
+          })
         )}
         <div ref={endRef} aria-hidden="true" className="h-px" />
       </div>

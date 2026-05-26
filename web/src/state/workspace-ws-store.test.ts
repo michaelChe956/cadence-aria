@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type { NodeDetail } from "../api/types";
+import type { ChatEntry } from "./chat-entries";
 import { selectPrepareContextNotes, useWorkspaceStore } from "./workspace-ws-store";
 
 function makeNodeDetail(overrides: Partial<NodeDetail> = {}): NodeDetail {
@@ -91,6 +92,68 @@ describe("workspace ws store", () => {
     store.resolvePermissionRequest("perm_001");
 
     expect(useWorkspaceStore.getState().pendingPermissions).toHaveLength(0);
+  });
+
+  it("marks permission request entries resolved when a response is sent", () => {
+    const store = useWorkspaceStore.getState();
+    store.appendChatEntry({
+      id: "permission-request-1",
+      type: "permission_request",
+      role: "system",
+      content: "shell · cargo test",
+      timestamp: "2026-05-26T10:00:00Z",
+      metadata: { request_id: "perm_001" },
+    });
+
+    store.resolvePermissionRequest("perm_001", true);
+
+    expect(useWorkspaceStore.getState().chatEntries).toEqual([
+      expect.objectContaining({
+        id: "permission-request-1",
+        resolved: true,
+        metadata: expect.objectContaining({ approved: true }),
+      }),
+      expect.objectContaining({
+        type: "permission_response",
+        role: "user",
+        content: "已允许",
+      }),
+    ]);
+  });
+
+  it("marks choice request entries resolved and appends a choice response entry", () => {
+    const store = useWorkspaceStore.getState();
+    store.appendChatEntry({
+      id: "choice-request-1",
+      type: "choice_request",
+      role: "system",
+      content: "请选择下一步",
+      timestamp: "2026-05-26T10:00:00Z",
+      metadata: {
+        request_id: "choice_001",
+        options: [
+          { id: "continue", label: "继续" },
+          { id: "stop", label: "停止" },
+        ],
+      },
+    } as ChatEntry);
+
+    store.resolveChoiceRequest("choice_001", ["continue"], null);
+
+    expect(useWorkspaceStore.getState().chatEntries).toEqual([
+      expect.objectContaining({
+        id: "choice-request-1",
+        resolved: true,
+        metadata: expect.objectContaining({
+          response: { selected_option_ids: ["continue"], free_text: null },
+        }),
+      }),
+      expect.objectContaining({
+        type: "choice_response",
+        role: "user",
+        content: "已选择：继续",
+      }),
+    ]);
   });
 
   it("deduplicates pending permission requests by id", () => {
