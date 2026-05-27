@@ -123,7 +123,7 @@ impl ApprovalBridge {
     pub fn new(mode: ProviderPermissionMode, event_tx: mpsc::Sender<ProviderEvent>) -> Self {
         let (command_tx, command_rx) = mpsc::channel(8);
         let pending = Arc::new(Mutex::new(HashMap::new()));
-        let pending_choices = Arc::new(Mutex::new(HashMap::new()));
+        let pending_choices: PendingChoices = Arc::new(Mutex::new(HashMap::new()));
 
         tokio::spawn(listen_for_permission_commands(
             command_rx,

@@ -13,9 +13,10 @@ use crate::cross_cutting::approval_bridge::ApprovalBridge;
 use crate::cross_cutting::process_manager::ProcessManager;
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
-    ProviderEvent, ProviderExecutionEvent, ProviderExecutionEventKind,
-    ProviderExecutionEventStatus, ProviderPermissionMode, ProviderSession, ProviderStatus,
-    RiskLevel, StreamChunk, StreamingProviderAdapter, StreamingProviderInput,
+    ChoiceOptionData, ChoiceRequestData, ProviderEvent, ProviderExecutionEvent,
+    ProviderExecutionEventKind, ProviderExecutionEventStatus, ProviderPermissionMode,
+    ProviderSession, ProviderStatus, RiskLevel, StreamChunk, StreamingProviderAdapter,
+    StreamingProviderInput,
 };
 use crate::protocol::contracts::AdapterInput;
 
@@ -24,6 +25,20 @@ struct ClaudePermissionRequest {
     request_id: String,
     tool_name: String,
     description: String,
+    input: Value,
+}
+
+#[derive(Debug, Clone)]
+struct ToolUseBlock {
+    id: String,
+    name: String,
+    input: Value,
+}
+
+#[derive(Debug, Clone)]
+struct ToolResultBlock {
+    tool_use_id: String,
+    output: String,
 }
 
 #[derive(Debug, Clone)]
@@ -60,8 +75,26 @@ impl ClaudeCodeProvider {
         args
     }
 
-    fn parse_text_delta(value: &Value) -> Option<String> {
+    fn parse_text_delta(value: &Value, received_stream_events: bool) -> Option<String> {
+        if value.get("type")?.as_str()? == "stream_event" {
+            let event = value.get("event")?;
+            if event.get("type")?.as_str()? == "content_block_delta" {
+                let delta = event.get("delta")?;
+                if delta.get("type")?.as_str()? == "text_delta" {
+                    let text = delta.get("text")?.as_str()?;
+                    if !text.is_empty() {
+                        return Some(text.to_string());
+                    }
+                }
+            }
+            return None;
+        }
+
         if value.get("type")?.as_str()? != "assistant" {
+            return None;
+        }
+
+        if received_stream_events {
             return None;
         }
 
@@ -74,6 +107,61 @@ impl ClaudeCodeProvider {
             .join("");
 
         if text.is_empty() { None } else { Some(text) }
+    }
+
+    fn parse_tool_use_from_assistant(value: &Value) -> Option<Vec<ToolUseBlock>> {
+        if value.get("type")?.as_str()? != "assistant" {
+            return None;
+        }
+        let content = value.get("message")?.get("content")?.as_array()?;
+        let tool_uses: Vec<ToolUseBlock> = content
+            .iter()
+            .filter(|item| item.get("type").and_then(Value::as_str) == Some("tool_use"))
+            .filter_map(|item| {
+                Some(ToolUseBlock {
+                    id: item.get("id")?.as_str()?.to_string(),
+                    name: item.get("name")?.as_str()?.to_string(),
+                    input: item.get("input").cloned().unwrap_or(Value::Null),
+                })
+            })
+            .collect();
+        if tool_uses.is_empty() {
+            None
+        } else {
+            Some(tool_uses)
+        }
+    }
+
+    fn parse_tool_result(value: &Value) -> Option<Vec<ToolResultBlock>> {
+        if value.get("type")?.as_str()? != "user" {
+            return None;
+        }
+        let content = value.get("message")?.get("content")?.as_array()?;
+        let results: Vec<ToolResultBlock> = content
+            .iter()
+            .filter(|item| item.get("type").and_then(Value::as_str) == Some("tool_result"))
+            .filter_map(|item| {
+                let tool_use_id = item.get("tool_use_id")?.as_str()?.to_string();
+                let output = match item.get("content") {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::Array(arr)) => arr
+                        .iter()
+                        .filter_map(|block| block.get("text").and_then(Value::as_str))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    _ => String::new(),
+                };
+                Some(ToolResultBlock {
+                    tool_use_id,
+                    output,
+                })
+            })
+            .collect();
+        if results.is_empty() {
+            None
+        } else {
+            Some(results)
+        }
     }
 
     fn parse_control_request(value: &Value) -> Option<ClaudePermissionRequest> {
@@ -102,6 +190,7 @@ impl ClaudeCodeProvider {
                 .unwrap_or("unknown")
                 .to_string(),
             description: description.to_string(),
+            input: input.clone(),
         })
     }
 
@@ -118,6 +207,27 @@ impl ClaudeCodeProvider {
             "response": {
                 "behavior": behavior,
                 "message": reason,
+            }
+        });
+        write_json_line(stdin, &payload).await
+    }
+
+    async fn write_choice_control_response(
+        stdin: &Arc<Mutex<ChildStdin>>,
+        request_id: &str,
+        original_input: &Value,
+        answers: serde_json::Map<String, Value>,
+    ) -> Result<(), ProviderAdapterError> {
+        let mut updated_input = original_input.clone();
+        if let Some(obj) = updated_input.as_object_mut() {
+            obj.insert("answers".to_string(), Value::Object(answers));
+        }
+        let payload = json!({
+            "type": "control_response",
+            "request_id": request_id,
+            "response": {
+                "behavior": "allow",
+                "updatedInput": updated_input,
             }
         });
         write_json_line(stdin, &payload).await
@@ -412,7 +522,11 @@ async fn read_claude_stream(
     event_tx: mpsc::Sender<ProviderEvent>,
     cancel: CancellationToken,
 ) -> Result<ClaudeStreamOutcome, ProviderAdapterError> {
+    use std::collections::HashMap;
+
     let mut lines = BufReader::new(stdout).lines();
+    let mut pending_tool_uses: HashMap<String, ToolUseBlock> = HashMap::new();
+    let mut received_stream_events = false;
 
     loop {
         let line = tokio::select! {
@@ -441,27 +555,138 @@ async fn read_claude_stream(
             )
         })?;
 
-        if let Some(content) = ClaudeCodeProvider::parse_text_delta(&value) {
+        if let Some(content) = ClaudeCodeProvider::parse_text_delta(&value, received_stream_events)
+        {
+            if value.get("type").and_then(Value::as_str) == Some("stream_event") {
+                received_stream_events = true;
+            }
             send_provider_event(&event_tx, ProviderEvent::TextDelta { content }, &cancel).await?;
             continue;
         }
 
         if let Some(request) = ClaudeCodeProvider::parse_control_request(&value) {
-            let decision = bridge
-                .request_tool(
-                    &request.tool_name,
-                    &request.description,
-                    RiskLevel::High,
-                    cancel.clone(),
+            if request.tool_name == "AskUserQuestion" {
+                let choice_request =
+                    parse_ask_user_question_from_input(&request.input, &request.request_id);
+                let choice_decision = bridge
+                    .request_choice(choice_request, cancel.clone())
+                    .await?;
+                let mut answers = serde_json::Map::new();
+                if let Some(text) = &choice_decision.free_text {
+                    let questions = request.input.get("questions").and_then(Value::as_array);
+                    if let Some(questions) = questions {
+                        if let Some(first_q) = questions.first() {
+                            let question_text = first_q
+                                .get("question")
+                                .and_then(Value::as_str)
+                                .unwrap_or("question");
+                            answers.insert(question_text.to_string(), Value::String(text.clone()));
+                        }
+                    }
+                } else if !choice_decision.selected_option_ids.is_empty() {
+                    let questions = request.input.get("questions").and_then(Value::as_array);
+                    if let Some(questions) = questions {
+                        if let Some(first_q) = questions.first() {
+                            let question_text = first_q
+                                .get("question")
+                                .and_then(Value::as_str)
+                                .unwrap_or("question");
+                            let options = first_q.get("options").and_then(Value::as_array);
+                            let selected_label = options
+                                .and_then(|opts| {
+                                    choice_decision.selected_option_ids.first().and_then(|id| {
+                                        let idx = id.strip_prefix("opt_")?.parse::<usize>().ok()?;
+                                        opts.get(idx)?.get("label")?.as_str().map(String::from)
+                                    })
+                                })
+                                .unwrap_or_else(|| choice_decision.selected_option_ids.join(", "));
+                            answers
+                                .insert(question_text.to_string(), Value::String(selected_label));
+                        }
+                    }
+                }
+                ClaudeCodeProvider::write_choice_control_response(
+                    &stdin,
+                    &request.request_id,
+                    &request.input,
+                    answers,
                 )
                 .await?;
-            ClaudeCodeProvider::write_control_response(
-                &stdin,
-                &request.request_id,
-                decision.approved,
-                decision.reason,
-            )
-            .await?;
+            } else {
+                let decision = bridge
+                    .request_tool(
+                        &request.tool_name,
+                        &request.description,
+                        RiskLevel::High,
+                        cancel.clone(),
+                    )
+                    .await?;
+                ClaudeCodeProvider::write_control_response(
+                    &stdin,
+                    &request.request_id,
+                    decision.approved,
+                    decision.reason,
+                )
+                .await?;
+            }
+            continue;
+        }
+
+        if let Some(tool_uses) = ClaudeCodeProvider::parse_tool_use_from_assistant(&value) {
+            for tool_use in tool_uses {
+                if tool_use.name == "AskUserQuestion" {
+                    continue;
+                } else {
+                    let description = tool_use_description(&tool_use);
+                    send_provider_event(
+                        &event_tx,
+                        ProviderEvent::Execution(ProviderExecutionEvent {
+                            event_id: tool_use.id.clone(),
+                            kind: ProviderExecutionEventKind::Command,
+                            status: ProviderExecutionEventStatus::Started,
+                            title: tool_use.name.clone(),
+                            detail: Some(description),
+                            command: tool_use_command(&tool_use),
+                            cwd: None,
+                            output: None,
+                            exit_code: None,
+                        }),
+                        &cancel,
+                    )
+                    .await?;
+                    pending_tool_uses.insert(tool_use.id.clone(), tool_use);
+                }
+            }
+            continue;
+        }
+
+        if let Some(results) = ClaudeCodeProvider::parse_tool_result(&value) {
+            for result in results {
+                if let Some(tool_use) = pending_tool_uses.remove(&result.tool_use_id) {
+                    let output_preview = if result.output.len() > 500 {
+                        format!("{}...", &result.output[..500])
+                    } else {
+                        result.output.clone()
+                    };
+                    let command = tool_use_command(&tool_use);
+                    send_provider_event(
+                        &event_tx,
+                        ProviderEvent::Execution(ProviderExecutionEvent {
+                            event_id: tool_use.id,
+                            kind: ProviderExecutionEventKind::Command,
+                            status: ProviderExecutionEventStatus::Completed,
+                            title: tool_use.name,
+                            detail: None,
+                            command,
+                            cwd: None,
+                            output: Some(output_preview),
+                            exit_code: Some(0),
+                        }),
+                        &cancel,
+                    )
+                    .await?;
+                }
+            }
             continue;
         }
 
@@ -528,6 +753,122 @@ async fn read_claude_stream(
             .await?;
             return Ok(ClaudeStreamOutcome::TerminalEventEmitted);
         }
+    }
+}
+
+fn parse_ask_user_question_from_input(input: &Value, request_id: &str) -> ChoiceRequestData {
+    let questions = input.get("questions").and_then(Value::as_array);
+
+    let (prompt, options, allow_multiple) = if let Some(questions) = questions {
+        if let Some(first_question) = questions.first() {
+            let prompt = first_question
+                .get("question")
+                .and_then(Value::as_str)
+                .unwrap_or("请选择")
+                .to_string();
+            let multi = first_question
+                .get("multiSelect")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let opts = first_question
+                .get("options")
+                .and_then(Value::as_array)
+                .map(|arr| {
+                    arr.iter()
+                        .enumerate()
+                        .filter_map(|(idx, opt)| {
+                            let label = opt.get("label")?.as_str()?.to_string();
+                            let description = opt
+                                .get("description")
+                                .and_then(Value::as_str)
+                                .map(String::from);
+                            Some(ChoiceOptionData {
+                                id: format!("opt_{idx}"),
+                                label,
+                                description,
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            (prompt, opts, multi)
+        } else {
+            ("请选择".to_string(), vec![], false)
+        }
+    } else {
+        ("请选择".to_string(), vec![], false)
+    };
+
+    ChoiceRequestData {
+        id: request_id.to_string(),
+        prompt,
+        options,
+        allow_multiple,
+        allow_free_text: true,
+    }
+}
+
+fn tool_use_description(tool_use: &ToolUseBlock) -> String {
+    match tool_use.name.as_str() {
+        "Bash" => tool_use
+            .input
+            .get("command")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        "Read" => tool_use
+            .input
+            .get("file_path")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        "Edit" | "Write" => tool_use
+            .input
+            .get("file_path")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        _ => tool_use
+            .input
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+    }
+}
+
+fn tool_use_command(tool_use: &ToolUseBlock) -> Option<String> {
+    match tool_use.name.as_str() {
+        "Bash" => tool_use
+            .input
+            .get("command")
+            .and_then(Value::as_str)
+            .map(String::from),
+        "Read" => Some(format!(
+            "read {}",
+            tool_use
+                .input
+                .get("file_path")
+                .and_then(Value::as_str)
+                .unwrap_or("?")
+        )),
+        "Edit" => Some(format!(
+            "edit {}",
+            tool_use
+                .input
+                .get("file_path")
+                .and_then(Value::as_str)
+                .unwrap_or("?")
+        )),
+        "Write" => Some(format!(
+            "write {}",
+            tool_use
+                .input
+                .get("file_path")
+                .and_then(Value::as_str)
+                .unwrap_or("?")
+        )),
+        _ => None,
     }
 }
 
