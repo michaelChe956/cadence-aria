@@ -577,7 +577,8 @@ pub async fn create_coding_attempt(
         + 1;
     let branch_name = format!("aria/work-items/{}/attempt-{attempt_no}", work_item.id);
     let base_branch = current_git_branch(&repository.path).unwrap_or_else(|| "HEAD".to_string());
-    let author = parse_provider_name(&repository.default_provider_mode)?;
+    let provider_config_snapshot =
+        coding_provider_config_snapshot(&lifecycle, &work_item, &repository.default_provider_mode)?;
     let attempt = coding_store
         .create_attempt(CreateCodingAttemptInput {
             project_id,
@@ -586,16 +587,40 @@ pub async fn create_coding_attempt(
             base_branch,
             branch_name,
             worktree_path: None,
-            provider_config_snapshot: ProviderConfigSnapshot {
-                author: author.clone(),
-                reviewer: Some(author),
-                review_rounds: 1,
-            },
+            provider_config_snapshot,
             max_auto_rework: 2,
         })
         .map_err(product_store_api_error)?;
 
     Ok(Json(coding_attempt_dto(&attempt)))
+}
+
+fn coding_provider_config_snapshot(
+    lifecycle: &LifecycleStore,
+    work_item: &LifecycleWorkItemRecord,
+    repository_default_provider: &str,
+) -> ApiResult<ProviderConfigSnapshot> {
+    let sessions = lifecycle
+        .list_workspace_sessions(&work_item.project_id, &work_item.issue_id)
+        .map_err(product_store_api_error)?;
+    if let Some(session) = sessions.iter().rev().find(|session| {
+        session.entity_id == work_item.id
+            && session.workspace_type == WorkspaceType::WorkItem
+            && session.status == WorkspaceSessionStatus::Confirmed
+    }) {
+        return Ok(ProviderConfigSnapshot {
+            author: session.author_provider.clone(),
+            reviewer: Some(session.reviewer_provider.clone()),
+            review_rounds: session.review_rounds,
+        });
+    }
+
+    let author = parse_provider_name(repository_default_provider)?;
+    Ok(ProviderConfigSnapshot {
+        author: author.clone(),
+        reviewer: Some(author),
+        review_rounds: 1,
+    })
 }
 
 pub async fn get_coding_attempt(

@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cross_cutting::streaming_provider::StreamingProviderAdapter;
 use crate::product::app_paths::ProductAppPaths;
+use crate::product::artifact_extraction::extract_artifact_content;
 use crate::product::coding_attempt_store::CodingAttemptStore;
 use crate::product::coding_models::{
     CodeReviewReport, CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
@@ -17,13 +18,19 @@ use crate::product::coding_models::{
     InternalPrReview, PushStatus, ReviewRequest, ReviewVerdict, TestingOverallStatus,
     TestingReport,
 };
-use crate::product::coding_workspace_engine::{CodingWorkspaceEngine, CodingWorkspaceEngineError};
+use crate::product::coding_workspace_engine::{
+    CodingExecutionContext, CodingWorkspaceEngine, CodingWorkspaceEngineError,
+};
 use crate::product::git_workspace_service::GitWorkspaceService;
 use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::LifecycleStore;
-use crate::product::models::ProviderName;
+use crate::product::models::{
+    ProviderName, WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType,
+};
 use crate::product::repository_store::RepositoryStore;
-use crate::product::test_executor::discover_test_commands;
+use crate::product::test_executor::{
+    TestCommandSpec, discover_test_commands, planned_test_commands_from_markdown,
+};
 use crate::web::state::WebAppState;
 use crate::web::workspace_ws_types::{ProviderConfigSnapshot, WsExecutionEvent};
 use tokio::sync::mpsc;
@@ -239,6 +246,7 @@ async fn execute_start_coding_flow(
         .as_ref()
         .unwrap_or(&attempt.provider_config_snapshot.author);
     let reviewer_provider = provider_for(state, reviewer_name, "coding reviewer provider")?;
+    let execution_context = coding_execution_context(&app_paths, attempt)?;
 
     let mut current = match run_engine_step(
         socket,
@@ -263,7 +271,7 @@ async fn execute_start_coding_flow(
     current = match run_engine_step(
         socket,
         event_rx,
-        engine.execute_coding(&current, author_provider.as_ref()),
+        engine.execute_coding(&current, author_provider.as_ref(), &execution_context),
     )
     .await
     {
@@ -271,11 +279,7 @@ async fn execute_start_coding_flow(
         None => return Ok(false),
     };
 
-    let test_specs = current
-        .worktree_path
-        .as_ref()
-        .map(discover_test_commands)
-        .unwrap_or_default();
+    let test_specs = test_specs_for_attempt(&current, &execution_context);
     let testing_report = match run_engine_step(
         socket,
         event_rx,
@@ -333,6 +337,76 @@ async fn execute_start_coding_flow(
     }
 
     send_current_session_state(socket, coding_store, attempt).await
+}
+
+fn coding_execution_context(
+    app_paths: &ProductAppPaths,
+    attempt: &CodingExecutionAttempt,
+) -> Result<CodingExecutionContext, CodingWorkspaceEngineError> {
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    let sessions = lifecycle.list_workspace_sessions(&attempt.project_id, &attempt.issue_id)?;
+    let work_item_session = sessions
+        .iter()
+        .rev()
+        .find(|session| {
+            session.entity_id == attempt.work_item_id
+                && session.workspace_type == WorkspaceType::WorkItem
+                && session.status == WorkspaceSessionStatus::Confirmed
+        })
+        .or_else(|| {
+            sessions.iter().rev().find(|session| {
+                session.entity_id == attempt.work_item_id
+                    && session.workspace_type == WorkspaceType::WorkItem
+            })
+        });
+    let work_item_markdown = match work_item_session {
+        Some(session) => lifecycle
+            .list_artifact_versions(&session.id)?
+            .into_iter()
+            .last()
+            .map(|version| version.markdown)
+            .or_else(|| latest_assistant_artifact_markdown(session)),
+        None => None,
+    };
+    let verification_commands = work_item_markdown
+        .as_deref()
+        .map(planned_test_commands_from_markdown)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|spec| spec.command.join(" "))
+        .collect();
+
+    Ok(CodingExecutionContext {
+        work_item_markdown,
+        verification_commands,
+    })
+}
+
+fn latest_assistant_artifact_markdown(session: &WorkspaceSessionRecord) -> Option<String> {
+    session
+        .messages
+        .iter()
+        .rev()
+        .find(|message| matches!(message.role.as_str(), "assistant" | "provider"))
+        .map(|message| extract_artifact_content(&message.content))
+        .filter(|content| !content.trim().is_empty())
+}
+
+fn test_specs_for_attempt(
+    attempt: &CodingExecutionAttempt,
+    context: &CodingExecutionContext,
+) -> Vec<TestCommandSpec> {
+    if let Some(markdown) = context.work_item_markdown.as_deref() {
+        let planned = planned_test_commands_from_markdown(markdown);
+        if !planned.is_empty() {
+            return planned;
+        }
+    }
+    attempt
+        .worktree_path
+        .as_ref()
+        .map(discover_test_commands)
+        .unwrap_or_default()
 }
 
 async fn run_engine_step<T, F>(

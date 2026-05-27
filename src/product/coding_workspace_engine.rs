@@ -46,6 +46,12 @@ pub enum CodingWorkspaceEngineError {
     FinalConfirmNotReady(String),
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CodingExecutionContext {
+    pub work_item_markdown: Option<String>,
+    pub verification_commands: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct CodingWorkspaceEngine {
     store: CodingAttemptStore,
@@ -148,6 +154,7 @@ impl CodingWorkspaceEngine {
         &self,
         attempt: &CodingExecutionAttempt,
         provider: &dyn StreamingProviderAdapter,
+        context: &CodingExecutionContext,
     ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
         let Some(worktree_path) = attempt.worktree_path.as_ref() else {
             return Err(CodingWorkspaceEngineError::MissingWorktree(
@@ -170,7 +177,7 @@ impl CodingWorkspaceEngine {
             provider_type: provider_type_for_name(&attempt.provider_config_snapshot.author),
             role: AdapterRole::Executor,
             worktree_path: Some(worktree_path.to_string_lossy().to_string()),
-            prompt: build_coding_prompt(&attempt),
+            prompt: build_coding_prompt(&attempt, context),
             context_files: Vec::new(),
             output_schema: "coding_workspace_markdown".to_string(),
             timeout: 2400,
@@ -297,6 +304,17 @@ impl CodingWorkspaceEngine {
                 Some("测试被阻塞".to_string()),
             ),
         };
+        if matches!(
+            report.overall_status,
+            TestingOverallStatus::Failed | TestingOverallStatus::Blocked
+        ) {
+            self.store.update_attempt_status(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                CodingAttemptStatus::Blocked,
+            )?;
+        }
         let completed_at = Utc::now().to_rfc3339();
         self.store.update_timeline_node_status(
             &attempt.project_id,
@@ -1302,11 +1320,43 @@ fn provider_type_for_name(provider: &ProviderName) -> ProviderType {
     }
 }
 
-fn build_coding_prompt(attempt: &CodingExecutionAttempt) -> String {
-    format!(
-        "Coding Workspace\nProject: {}\nIssue: {}\nWork Item: {}\nAttempt: {}\nBranch: {}\n",
+fn build_coding_prompt(
+    attempt: &CodingExecutionAttempt,
+    context: &CodingExecutionContext,
+) -> String {
+    let mut prompt = format!(
+        "Coding Workspace\n\
+         你是 Coding Workspace author。请在指定 worktree 中完成真实代码修改和测试，不要只输出计划或 Story/Design/Work Item 文档。\n\
+         Project: {}\n\
+         Issue: {}\n\
+         Work Item: {}\n\
+         Attempt: {}\n\
+         Branch: {}\n",
         attempt.project_id, attempt.issue_id, attempt.work_item_id, attempt.id, attempt.branch_name
-    )
+    );
+    if let Some(worktree_path) = attempt.worktree_path.as_ref() {
+        prompt.push_str(&format!("Worktree Path: {}\n", worktree_path.display()));
+    }
+    if !context.verification_commands.is_empty() {
+        prompt.push_str("\n验证命令:\n");
+        for command in &context.verification_commands {
+            prompt.push_str("- ");
+            prompt.push_str(command);
+            prompt.push('\n');
+        }
+    }
+    if let Some(markdown) = context.work_item_markdown.as_deref() {
+        prompt.push_str("\n已确认 Work Item:\n````markdown\n");
+        prompt.push_str(markdown.trim());
+        prompt.push_str("\n````\n");
+    }
+    prompt.push_str(
+        "\n执行要求:\n\
+         - 遵循仓库规则和 TDD 流程。\n\
+         - 优先按已确认 Work Item 的文件落点、范围和验证命令执行。\n\
+         - 完成后报告修改文件、测试命令和结果。\n",
+    );
+    prompt
 }
 
 fn build_code_review_prompt(attempt: &CodingExecutionAttempt) -> String {

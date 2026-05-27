@@ -574,35 +574,34 @@ async fn read_claude_stream(
                 let mut answers = serde_json::Map::new();
                 if let Some(text) = &choice_decision.free_text {
                     let questions = request.input.get("questions").and_then(Value::as_array);
-                    if let Some(questions) = questions {
-                        if let Some(first_q) = questions.first() {
-                            let question_text = first_q
-                                .get("question")
-                                .and_then(Value::as_str)
-                                .unwrap_or("question");
-                            answers.insert(question_text.to_string(), Value::String(text.clone()));
-                        }
+                    if let Some(questions) = questions
+                        && let Some(first_q) = questions.first()
+                    {
+                        let question_text = first_q
+                            .get("question")
+                            .and_then(Value::as_str)
+                            .unwrap_or("question");
+                        answers.insert(question_text.to_string(), Value::String(text.clone()));
                     }
                 } else if !choice_decision.selected_option_ids.is_empty() {
                     let questions = request.input.get("questions").and_then(Value::as_array);
-                    if let Some(questions) = questions {
-                        if let Some(first_q) = questions.first() {
-                            let question_text = first_q
-                                .get("question")
-                                .and_then(Value::as_str)
-                                .unwrap_or("question");
-                            let options = first_q.get("options").and_then(Value::as_array);
-                            let selected_label = options
-                                .and_then(|opts| {
-                                    choice_decision.selected_option_ids.first().and_then(|id| {
-                                        let idx = id.strip_prefix("opt_")?.parse::<usize>().ok()?;
-                                        opts.get(idx)?.get("label")?.as_str().map(String::from)
-                                    })
+                    if let Some(questions) = questions
+                        && let Some(first_q) = questions.first()
+                    {
+                        let question_text = first_q
+                            .get("question")
+                            .and_then(Value::as_str)
+                            .unwrap_or("question");
+                        let options = first_q.get("options").and_then(Value::as_array);
+                        let selected_label = options
+                            .and_then(|opts| {
+                                choice_decision.selected_option_ids.first().and_then(|id| {
+                                    let idx = id.strip_prefix("opt_")?.parse::<usize>().ok()?;
+                                    opts.get(idx)?.get("label")?.as_str().map(String::from)
                                 })
-                                .unwrap_or_else(|| choice_decision.selected_option_ids.join(", "));
-                            answers
-                                .insert(question_text.to_string(), Value::String(selected_label));
-                        }
+                            })
+                            .unwrap_or_else(|| choice_decision.selected_option_ids.join(", "));
+                        answers.insert(question_text.to_string(), Value::String(selected_label));
                     }
                 }
                 ClaudeCodeProvider::write_choice_control_response(

@@ -2,7 +2,8 @@ use std::fs;
 
 use cadence_aria::product::coding_models::{TestCommandStatus, TestingOverallStatus};
 use cadence_aria::product::test_executor::{
-    TestCommandSpec, discover_test_commands, execute_test_command, run_all_tests,
+    TestCommandSpec, discover_test_commands, execute_test_command,
+    planned_test_commands_from_markdown, run_all_tests,
 };
 use tempfile::tempdir;
 
@@ -19,6 +20,60 @@ fn discovers_project_test_commands_by_priority() {
     assert_eq!(
         specs[0].command,
         vec!["cargo", "test", "--locked", "-j", "1"]
+    );
+}
+
+#[test]
+fn extracts_planned_verification_commands_from_work_item_markdown() {
+    let markdown = r#"
+# 爬楼梯问题 Work Item
+
+## 任务拆分
+
+验证命令：
+- `uv run python -m unittest -v tests.test_climbing_stairs`
+
+预期结果：
+- 测试通过
+
+## 验证命令
+
+主验证命令：
+- `uv run python -m unittest -v tests.test_climbing_stairs`
+
+辅助检查命令：
+- `git diff -- climbing_stairs.py tests/test_climbing_stairs.py`
+
+验收条件：
+- `climb_stairs(1)` 返回 `1`。
+"#;
+
+    let specs = planned_test_commands_from_markdown(markdown);
+
+    assert_eq!(specs.len(), 2);
+    assert_eq!(specs[0].id, "planned_001");
+    assert_eq!(
+        specs[0].command,
+        vec![
+            "uv",
+            "run",
+            "python",
+            "-m",
+            "unittest",
+            "-v",
+            "tests.test_climbing_stairs"
+        ]
+    );
+    assert_eq!(specs[1].id, "planned_002");
+    assert_eq!(
+        specs[1].command,
+        vec![
+            "git",
+            "diff",
+            "--",
+            "climbing_stairs.py",
+            "tests/test_climbing_stairs.py"
+        ]
     );
 }
 

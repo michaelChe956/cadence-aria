@@ -18,7 +18,8 @@ use crate::product::checkpoint_store::CheckpointStore;
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::models::ProviderName;
 use crate::product::workspace_engine::{
-    EngineEvent, ReviewDecisionOutcome, WorkspaceEngine, WorkspaceSession, WorkspaceStage,
+    EngineEvent, PendingAuthorChoiceError, ReviewDecisionOutcome, WorkspaceEngine,
+    WorkspaceSession, WorkspaceStage,
 };
 use crate::product::workspace_repository::workspace_repository_for_session;
 use crate::web::state::WebAppState;
@@ -480,20 +481,55 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                         .as_ref()
                         .map(|run| run.command_tx.clone())
                 };
-                if let Some(command_tx) = command_tx {
-                    let _ = command_tx
+                if let Some(command_tx) = command_tx
+                    && command_tx
                         .send(ProviderCommand::ChoiceResponse {
-                            id,
-                            selected_option_ids,
-                            free_text,
+                            id: id.clone(),
+                            selected_option_ids: selected_option_ids.clone(),
+                            free_text: free_text.clone(),
                         })
+                        .await
+                        .is_ok()
+                {
+                    continue;
+                }
+
+                let prompt = {
+                    let mut engine = engine.lock().await;
+                    engine
+                        .take_pending_author_choice_prompt(&id, selected_option_ids, free_text)
+                        .await
+                };
+                match prompt {
+                    Ok(content) => {
+                        if let Err(message) = spawn_provider_run_from_handler(
+                            state.provider_registry.clone(),
+                            engine.clone(),
+                            current_run.clone(),
+                            next_run_id.clone(),
+                            ProviderRunKind::Author { content },
+                        )
+                        .await
+                        {
+                            let err = WsOutMessage::Error { message };
+                            let _ = send_json_outbound(&outbound_tx, &err).await;
+                        }
+                    }
+                    Err(PendingAuthorChoiceError::NotFound { .. }) => {
+                        let _ = send_json_outbound(
+                            &outbound_tx,
+                            &missing_active_run_error("choice_response", &id),
+                        )
                         .await;
-                } else {
-                    let _ = send_json_outbound(
-                        &outbound_tx,
-                        &missing_active_run_error("choice_response", &id),
-                    )
-                    .await;
+                    }
+                    Err(error) => {
+                        let err = WsOutMessage::ProtocolError {
+                            code: error.code().to_string(),
+                            message: error.message(),
+                            context: Some(serde_json::json!({ "id": id })),
+                        };
+                        let _ = send_json_outbound(&outbound_tx, &err).await;
+                    }
                 }
             }
             WsInMessage::ReviewDecisionResponse {

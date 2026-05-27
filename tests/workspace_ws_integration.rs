@@ -68,11 +68,18 @@ async fn workspace_ws_hydrates_context_for_existing_empty_session() {
             assert!(messages[0].content.contains("OpenSpec"));
             assert!(messages[0].content.contains("必须遵守 using-superpowers"));
             assert!(messages[0].content.contains("必须优先通过交互提问解决"));
+            assert!(messages[0].content.contains("结构化 AskUserQuestion"));
+            assert!(
+                messages[0]
+                    .content
+                    .contains("不要把 A/B/C 选择题作为最终候选产物正文输出")
+            );
             assert!(
                 messages[0]
                     .content
                     .contains("不要把可通过当前用户确认解决的问题直接写入待确认项")
             );
+            assert!(messages[0].content.contains("```artifact fenced block"));
             assert!(messages[0].content.contains("[REQ-001]"));
         }
         other => panic!("expected session_state, got {other:?}"),
@@ -168,6 +175,178 @@ async fn workspace_ws_runs_provider_from_repository_path() {
         observed_working_dir.lock().unwrap().as_ref(),
         Some(&repo.path().canonicalize().expect("repo canonical path"))
     );
+
+    drop(ws);
+    server.abort();
+}
+
+#[tokio::test]
+async fn workspace_ws_author_text_choice_blocks_reviewer_until_user_answers() {
+    let root = tempdir().expect("root");
+    create_workspace_session_fixture(&root).await;
+    let author_prompts = Arc::new(Mutex::new(Vec::new()));
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Fake,
+        Arc::new(ScriptedStreamingProvider::new(
+            [
+                "需要先确认一个边界条件，然后我再生成最终 Story Spec：\n\
+                 `climb_stairs(n)` 对 `n <= 0` 应该如何处理？\n\
+                 A. 返回 `0`，仅把正整数楼梯数视为有效输入\n\
+                 B. 抛出异常，例如 `ValueError`\n\
+                 C. 不定义该行为，Story Spec 只覆盖 issue 明确要求的 `n >= 1` 场景",
+                "# Story Spec\n\n\
+                 ## 范围\n\
+                 实现 climb_stairs。\n\n\
+                 ## 用户故事\n\
+                 作为调用方，我需要计算爬楼梯方法数。\n\n\
+                 ## 功能需求\n\
+                 - [REQ-001] 实现 `climb_stairs(n: i32) -> i32`。\n\n\
+                 ## 成功标准\n\
+                 - [AC-001] 覆盖 n=1、n=2、n=3、n=5、n=10。\n\n\
+                 ## 待确认项\n\
+                 无\n\n\
+                 ## 非功能需求\n\
+                 使用 Python 实现。",
+            ],
+            author_prompts.clone(),
+        )),
+    );
+    let app = build_web_router(WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        registry,
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(
+        &mut ws,
+        &WsInMessage::UserMessage {
+            content: "开始生成".to_string(),
+        },
+    )
+    .await;
+
+    let choice = recv_until_choice_request(&mut ws).await;
+    assert!(choice.prompt.contains("n <= 0"));
+    assert_eq!(choice.options.len(), 3);
+    assert_eq!(choice.options[0].id, "A");
+    assert_eq!(choice.options[1].id, "B");
+    assert_eq!(choice.options[2].id, "C");
+
+    send_json(
+        &mut ws,
+        &WsInMessage::ChoiceResponse {
+            id: choice.id,
+            selected_option_ids: vec!["A".to_string()],
+            free_text: None,
+        },
+    )
+    .await;
+
+    let checkpoint = recv_until_message_complete(&mut ws).await;
+    assert!(checkpoint.starts_with("cp_"));
+    let stage = recv_until_stage(&mut ws, "human_confirm").await;
+    assert_eq!(stage, "human_confirm");
+
+    let prompts = author_prompts.lock().unwrap();
+    assert_eq!(prompts.len(), 2);
+    assert!(prompts[1].contains("用户回答了 author 的确认问题"));
+    assert!(prompts[1].contains("A. 返回 `0`"));
+
+    drop(ws);
+    server.abort();
+}
+
+#[tokio::test]
+async fn workspace_ws_author_recommendation_choice_blocks_reviewer_until_user_answers() {
+    let root = tempdir().expect("root");
+    create_workspace_session_fixture(&root).await;
+    let author_prompts = Arc::new(Mutex::new(Vec::new()));
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Fake,
+        Arc::new(ScriptedStreamingProvider::new(
+            [
+                "我会先按仓库要求读取本地规则和相关技能说明，再判断这个 Story Spec 是否还有需要先向你确认的问题。\
+                 当前只剩一个会影响 Story Spec 边界的问题需要确认：\n\n\
+                 对 `n <= 0` 的输入，这个 issue 希望如何处理？\n\n\
+                 推荐选项：只声明本次需求支持 `n >= 1`，`n <= 0` 不纳入当前 issue 范围。  \n\
+                 其他可选：返回 `0`；或抛出 `ValueError`。",
+                "# Story Spec\n\n\
+                 ## 范围\n\
+                 实现 climb_stairs。\n\n\
+                 ## 用户故事\n\
+                 作为调用方，我需要计算爬楼梯方法数。\n\n\
+                 ## 功能需求\n\
+                 - [REQ-001] 实现 `climb_stairs(n: i32) -> i32`。\n\n\
+                 ## 成功标准\n\
+                 - [AC-001] 覆盖 n=1、n=2、n=3、n=5、n=10。\n\n\
+                 ## 待确认项\n\
+                 无\n\n\
+                 ## 非功能需求\n\
+                 使用 Python 实现。",
+            ],
+            author_prompts.clone(),
+        )),
+    );
+    let app = build_web_router(WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        registry,
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(
+        &mut ws,
+        &WsInMessage::UserMessage {
+            content: "开始生成".to_string(),
+        },
+    )
+    .await;
+
+    let choice = recv_until_choice_request(&mut ws).await;
+    assert!(choice.prompt.contains("n <= 0"));
+    assert_eq!(choice.options.len(), 3);
+    assert!(choice.options[0].label.contains("n >= 1"));
+    assert!(choice.options[1].label.contains("返回 `0`"));
+    assert!(choice.options[2].label.contains("ValueError"));
+
+    send_json(
+        &mut ws,
+        &WsInMessage::ChoiceResponse {
+            id: choice.id,
+            selected_option_ids: vec!["A".to_string()],
+            free_text: None,
+        },
+    )
+    .await;
+
+    let checkpoint = recv_until_message_complete(&mut ws).await;
+    assert!(checkpoint.starts_with("cp_"));
+    let stage = recv_until_stage(&mut ws, "human_confirm").await;
+    assert_eq!(stage, "human_confirm");
+
+    let prompts = author_prompts.lock().unwrap();
+    assert_eq!(prompts.len(), 2);
+    assert!(prompts[1].contains("用户回答了 author 的确认问题"));
+    assert!(prompts[1].contains("只声明本次需求支持 `n >= 1`"));
 
     drop(ws);
     server.abort();
@@ -1719,6 +1898,45 @@ async fn recv_until_permission_request(
         }
     }
     panic!("permission_request not received");
+}
+
+#[derive(Debug)]
+struct ChoiceRequestSeen {
+    id: String,
+    prompt: String,
+    options: Vec<cadence_aria::web::workspace_ws_types::ChoiceOption>,
+}
+
+async fn recv_until_choice_request(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> ChoiceRequestSeen {
+    for _ in 0..600 {
+        match recv_json(ws).await {
+            WsOutMessage::ChoiceRequest {
+                id,
+                prompt,
+                options,
+                ..
+            } => {
+                return ChoiceRequestSeen {
+                    id,
+                    prompt,
+                    options,
+                };
+            }
+            WsOutMessage::MessageComplete { .. } => {
+                panic!("author question was completed as artifact before choice_request")
+            }
+            WsOutMessage::StageChange { stage } if stage == "cross_review" => {
+                panic!("reviewer started before author choice_request")
+            }
+            WsOutMessage::Error { message } => panic!("ws error: {message}"),
+            _ => {}
+        }
+    }
+    panic!("choice_request not received");
 }
 
 async fn recv_until_protocol_error(

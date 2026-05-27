@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::process::ExitStatus;
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde_json::{Map, Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -93,6 +94,9 @@ impl StreamingProviderAdapter for CodexProvider {
 
             let result =
                 run_codex_session(peer, bridge, event_tx.clone(), input, cancel.clone()).await;
+            if result.is_err() {
+                let _ = child.start_kill();
+            }
             let status = child.wait().await;
             let _ = stderr_task.await;
             if let Err(error) = result {
@@ -315,10 +319,20 @@ where
 
     let mut full_output = String::new();
     let mut streamed_agent_message_items = HashSet::new();
+    let timeout_secs = input.timeout_secs.max(1);
+    let timeout = tokio::time::sleep(Duration::from_secs(timeout_secs));
+    tokio::pin!(timeout);
     loop {
         let incoming = tokio::select! {
             _ = cancel.cancelled() => {
                 return Err(provider_error("Codex provider cancelled"));
+            }
+            _ = &mut timeout => {
+                return Err(ProviderAdapterError::timeout(
+                    full_output.clone(),
+                    String::new(),
+                    timeout_secs.saturating_mul(1000),
+                ));
             }
             incoming = peer.next_incoming() => incoming.ok_or_else(|| {
                 provider_error("Codex app-server stream ended before completion")
@@ -1072,5 +1086,48 @@ mod tests {
 
         assert!(saw_started, "command started event was not emitted");
         assert!(saw_completed, "command completed event was not emitted");
+    }
+
+    #[tokio::test]
+    async fn codex_provider_times_out_when_turn_stops_emitting_events() {
+        let fixture =
+            executable_fixture("tests/fixtures/provider/codex_app_server_hanging_turn_fixture.sh");
+        let provider = CodexProvider::new(fixture);
+        let mut input = streaming_input(ProviderType::Codex, ProviderPermissionMode::Auto);
+        input.timeout_secs = 1;
+        let mut session = provider
+            .start(input, CancellationToken::new())
+            .await
+            .unwrap();
+
+        loop {
+            match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+                .await
+                .expect("provider should emit timeout failure")
+                .expect("provider event channel should stay open until failure")
+            {
+                ProviderEvent::Failed { message } => {
+                    assert!(
+                        message.contains("timed out") || message.contains("timeout"),
+                        "unexpected failure message: {message}"
+                    );
+                    return;
+                }
+                ProviderEvent::StatusChanged(_)
+                | ProviderEvent::Execution(_)
+                | ProviderEvent::TextDelta { .. }
+                | ProviderEvent::PermissionRequest(_)
+                | ProviderEvent::ChoiceRequest(_) => {}
+                ProviderEvent::Completed { full_output, .. } => {
+                    panic!("provider completed unexpectedly: {full_output}")
+                }
+                ProviderEvent::ProtocolError { message, .. } => {
+                    panic!("provider protocol error: {message}")
+                }
+                ProviderEvent::PermissionTimeout { permission_id } => {
+                    panic!("provider permission timed out: {permission_id}")
+                }
+            }
+        }
     }
 }

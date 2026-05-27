@@ -232,8 +232,46 @@ pub struct WorkspaceEngine {
     artifact_versions: Vec<ArtifactVersion>,
     latest_review_verdict: Option<ReviewVerdict>,
     pending_revision_context: Option<String>,
+    pending_author_choice: Option<PendingAuthorChoice>,
     active_run_id: Option<String>,
     stream_buffers: HashMap<String, PendingStreamBuffer>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingAuthorChoice {
+    id: String,
+    prompt: String,
+    options: Vec<ChoiceOptionData>,
+    source_node_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingAuthorChoiceError {
+    NotFound { id: String },
+    IdMismatch { expected: String, actual: String },
+    OptionUnmatched { id: String },
+}
+
+impl PendingAuthorChoiceError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::NotFound { .. } => "PENDING_AUTHOR_CHOICE_NOT_FOUND",
+            Self::IdMismatch { .. } => "CHOICE_ID_UNMATCHED",
+            Self::OptionUnmatched { .. } => "CHOICE_OPTION_UNMATCHED",
+        }
+    }
+
+    pub fn message(&self) -> String {
+        match self {
+            Self::NotFound { id } => {
+                format!("choice_response id={id} has no pending author choice")
+            }
+            Self::IdMismatch { expected, actual } => {
+                format!("choice_response id={actual} does not match pending choice id={expected}")
+            }
+            Self::OptionUnmatched { id } => format!("selected option id={id} is not available"),
+        }
+    }
 }
 
 struct PendingStreamBuffer {
@@ -278,6 +316,7 @@ impl WorkspaceEngine {
             artifact_versions: Vec::new(),
             latest_review_verdict: None,
             pending_revision_context: None,
+            pending_author_choice: None,
             active_run_id: None,
             stream_buffers: HashMap::new(),
         }
@@ -324,6 +363,7 @@ impl WorkspaceEngine {
             artifact_versions: persisted_artifact_versions,
             latest_review_verdict,
             pending_revision_context: None,
+            pending_author_choice: None,
             active_run_id: None,
             stream_buffers: HashMap::new(),
         }
@@ -362,6 +402,76 @@ impl WorkspaceEngine {
 
     pub fn active_run_id(&self) -> Option<&str> {
         self.active_run_id.as_deref()
+    }
+
+    pub async fn take_pending_author_choice_prompt(
+        &mut self,
+        id: &str,
+        selected_option_ids: Vec<String>,
+        free_text: Option<String>,
+    ) -> Result<String, PendingAuthorChoiceError> {
+        let Some(pending) = self.pending_author_choice.as_ref() else {
+            return Err(PendingAuthorChoiceError::NotFound { id: id.to_string() });
+        };
+        if pending.id != id {
+            return Err(PendingAuthorChoiceError::IdMismatch {
+                expected: pending.id.clone(),
+                actual: id.to_string(),
+            });
+        }
+
+        let mut selected_labels = Vec::new();
+        for selected_id in &selected_option_ids {
+            let Some(option) = pending
+                .options
+                .iter()
+                .find(|option| option.id == *selected_id)
+            else {
+                return Err(PendingAuthorChoiceError::OptionUnmatched {
+                    id: selected_id.clone(),
+                });
+            };
+            selected_labels.push(option.label.clone());
+        }
+
+        let free_text = free_text.and_then(|text| {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
+
+        let pending = self
+            .pending_author_choice
+            .take()
+            .expect("pending author choice present");
+        if let Some(node_id) = pending.source_node_id.as_deref() {
+            self.update_timeline_node(
+                node_id,
+                TimelineNodeStatus::Completed,
+                Some("已收到用户选择".to_string()),
+            )
+            .await;
+        }
+
+        let mut prompt = String::new();
+        prompt.push_str("用户回答了 author 的确认问题：\n");
+        prompt.push_str(&format!("问题：{}\n", pending.prompt));
+        if !selected_labels.is_empty() {
+            prompt.push_str("选择：\n");
+            for label in selected_labels {
+                prompt.push_str(&format!("- {label}\n"));
+            }
+        }
+        if let Some(free_text) = free_text {
+            prompt.push_str(&format!("补充：{free_text}\n"));
+        }
+        prompt.push_str(
+            "\n请基于该回答继续生成完整候选产物；如果仍有必须由用户确认的问题，请继续发起选择请求，不要进入 reviewer。",
+        );
+        Ok(prompt)
     }
 
     pub async fn append_context_note(&mut self, content: String) -> Result<TimelineNode, String> {
@@ -931,7 +1041,7 @@ impl WorkspaceEngine {
             if let Some(node_id) = node_id.as_deref() {
                 let _ = self.flush_stream_buffer(node_id).await;
             }
-            self.finish_failed_run().await;
+            self.finish_empty_assistant_output().await;
         } else {
             if let Some(node_id) = node_id.as_deref() {
                 let _ = self.flush_stream_buffer(node_id).await;
@@ -1256,7 +1366,7 @@ impl WorkspaceEngine {
             if let Some(node_id) = node_id.as_deref() {
                 let _ = self.flush_stream_buffer(node_id).await;
             }
-            self.finish_failed_run().await;
+            self.finish_empty_assistant_output().await;
         } else {
             if let Some(node_id) = node_id.as_deref() {
                 let _ = self.flush_stream_buffer(node_id).await;
@@ -1476,7 +1586,7 @@ impl WorkspaceEngine {
         }
 
         if full_content.is_empty() {
-            self.finish_failed_run().await;
+            self.finish_empty_assistant_output().await;
             return;
         }
 
@@ -1488,27 +1598,63 @@ impl WorkspaceEngine {
             created_at: chrono::Utc::now().to_rfc3339(),
         };
         self.session.messages.push(assistant_msg);
-        let artifact_markdown = extract_artifact_content(&full_content);
         if let Some(store) = &self.lifecycle_store {
             let _ = store.append_workspace_message(
                 &self.session.session_id,
                 "assistant".to_string(),
                 full_content.clone(),
             );
-            if matches!(
+        }
+
+        if let Some(choice) =
+            detect_author_choice_request(&full_content, &self.session.workspace_type).map(
+                |(prompt, options)| PendingAuthorChoice {
+                    id: format!("author_choice_{}", assistant_msg_id),
+                    prompt,
+                    options,
+                    source_node_id: self.active_node_id.clone(),
+                },
+            )
+        {
+            if let Some(node_id) = choice.source_node_id.as_deref() {
+                self.update_timeline_node(
+                    node_id,
+                    TimelineNodeStatus::Paused,
+                    Some("等待用户选择".to_string()),
+                )
+                .await;
+            }
+            self.pending_author_choice = Some(choice.clone());
+            let _ = self
+                .event_tx
+                .send(EngineEvent::ChoiceRequest {
+                    id: choice.id,
+                    prompt: choice.prompt,
+                    options: choice.options,
+                    allow_multiple: false,
+                    allow_free_text: true,
+                })
+                .await;
+            return;
+        }
+
+        self.pending_author_choice = None;
+        let artifact_markdown = extract_artifact_content(&full_content);
+        if let Some(store) = &self.lifecycle_store
+            && matches!(
                 self.session.workspace_type,
                 WorkspaceType::Story | WorkspaceType::Design
-            ) {
-                let _ = store.append_version(AppendSpecVersionInput {
-                    project_id: self.session.project_id.clone(),
-                    issue_id: self.session.issue_id.clone(),
-                    entity_id: self.session.entity_id.clone(),
-                    markdown: artifact_markdown.clone(),
-                    provider_run_refs: Vec::new(),
-                    review_refs: Vec::new(),
-                    confirmed_by: None,
-                });
-            }
+            )
+        {
+            let _ = store.append_version(AppendSpecVersionInput {
+                project_id: self.session.project_id.clone(),
+                issue_id: self.session.issue_id.clone(),
+                entity_id: self.session.entity_id.clone(),
+                markdown: artifact_markdown.clone(),
+                provider_run_refs: Vec::new(),
+                review_refs: Vec::new(),
+                confirmed_by: None,
+            });
         }
         self.update_artifact(artifact_markdown).await;
 
@@ -1841,7 +1987,26 @@ impl WorkspaceEngine {
                 WorkspaceSessionStatus::Open,
             );
         }
+        self.active_run_id = None;
         self.transition_stage(WorkspaceStage::PrepareContext).await;
+    }
+
+    async fn finish_empty_assistant_output(&mut self) {
+        let _ = self
+            .event_tx
+            .send(EngineEvent::Error {
+                message: "Provider completed without assistant output".to_string(),
+            })
+            .await;
+        if let Some(node_id) = self.active_node_id.clone() {
+            self.update_timeline_node(
+                &node_id,
+                TimelineNodeStatus::Failed,
+                Some("Provider 未返回助手内容".to_string()),
+            )
+            .await;
+        }
+        self.finish_failed_run().await;
     }
 
     async fn finish_aborted_run(&mut self) {
@@ -2462,6 +2627,185 @@ fn workspace_type_title(workspace_type: &WorkspaceType) -> &'static str {
         WorkspaceType::Design => "Design Spec",
         WorkspaceType::WorkItem => "Work Item",
     }
+}
+
+fn detect_author_choice_request(
+    content: &str,
+    workspace_type: &WorkspaceType,
+) -> Option<(String, Vec<ChoiceOptionData>)> {
+    if !matches!(workspace_type, WorkspaceType::Story | WorkspaceType::Design) {
+        return None;
+    }
+    if content_has_complete_workspace_artifact(content, workspace_type) {
+        return None;
+    }
+    if !looks_like_user_question(content) {
+        return None;
+    }
+
+    let mut options = Vec::new();
+    let mut prompt_lines = Vec::new();
+    let mut seen_first_option = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(option) = parse_choice_option_line(trimmed) {
+            seen_first_option = true;
+            options.push(option);
+            continue;
+        }
+        if !seen_first_option {
+            prompt_lines.push(trimmed.to_string());
+        }
+    }
+
+    if options.len() < 2 {
+        return detect_recommendation_choice_request(content);
+    }
+
+    let prompt = prompt_lines.join("\n");
+    let prompt = if prompt.trim().is_empty() {
+        "请选择下一步处理方式。".to_string()
+    } else {
+        prompt.trim().to_string()
+    };
+    Some((prompt, options))
+}
+
+fn detect_recommendation_choice_request(content: &str) -> Option<(String, Vec<ChoiceOptionData>)> {
+    let mut prompt_lines = Vec::new();
+    let mut option_texts = Vec::new();
+    let mut seen_option_line = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if let Some(text) = strip_choice_prefix(trimmed, &["推荐选项：", "推荐选项:"]) {
+            seen_option_line = true;
+            push_choice_text(&mut option_texts, text);
+            continue;
+        }
+
+        if let Some(text) = strip_choice_prefix(
+            trimmed,
+            &["其他可选：", "其他可选:", "其他选项：", "其他选项:"],
+        ) {
+            seen_option_line = true;
+            for choice_text in split_inline_choices(text) {
+                push_choice_text(&mut option_texts, choice_text);
+            }
+            continue;
+        }
+
+        if !seen_option_line {
+            prompt_lines.push(trimmed.to_string());
+        }
+    }
+
+    if option_texts.len() < 2 {
+        return None;
+    }
+
+    let options = option_texts
+        .into_iter()
+        .enumerate()
+        .map(|(idx, text)| {
+            let id = ((b'A' + idx as u8) as char).to_string();
+            ChoiceOptionData {
+                id: id.clone(),
+                label: format!("{id}. {text}"),
+                description: None,
+            }
+        })
+        .collect();
+    let prompt = prompt_lines.join("\n");
+    let prompt = if prompt.trim().is_empty() {
+        "请选择下一步处理方式。".to_string()
+    } else {
+        prompt.trim().to_string()
+    };
+    Some((prompt, options))
+}
+
+fn strip_choice_prefix<'a>(line: &'a str, prefixes: &[&str]) -> Option<&'a str> {
+    prefixes
+        .iter()
+        .find_map(|prefix| line.strip_prefix(prefix))
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+}
+
+fn split_inline_choices(text: &str) -> Vec<&str> {
+    text.split(['；', ';'])
+        .flat_map(|part| part.split(" 或 "))
+        .flat_map(|part| part.split("或"))
+        .map(|part| part.trim())
+        .filter(|part| !part.is_empty())
+        .collect()
+}
+
+fn push_choice_text(option_texts: &mut Vec<String>, text: &str) {
+    let normalized = text
+        .trim()
+        .trim_start_matches("或")
+        .trim()
+        .trim_end_matches(['。', '.', '；', ';'])
+        .trim();
+    if !normalized.is_empty() {
+        option_texts.push(normalized.to_string());
+    }
+}
+
+fn looks_like_user_question(content: &str) -> bool {
+    content.contains('?')
+        || content.contains('？')
+        || content.contains("需要确认")
+        || content.contains("需要先确认")
+        || content.contains("请选择")
+        || content.contains("如何处理")
+}
+
+fn content_has_complete_workspace_artifact(content: &str, workspace_type: &WorkspaceType) -> bool {
+    match workspace_type {
+        WorkspaceType::Story => content.contains("## 功能需求") && content.contains("## 成功标准"),
+        WorkspaceType::Design => {
+            content.contains("## 关键决策")
+                && (content.contains("## 组件")
+                    || content.contains("## API")
+                    || content.contains("## 数据模型"))
+        }
+        WorkspaceType::WorkItem => false,
+    }
+}
+
+fn parse_choice_option_line(line: &str) -> Option<ChoiceOptionData> {
+    let mut chars = line.char_indices();
+    let (_, first) = chars.next()?;
+    if !first.is_ascii_alphanumeric() {
+        return None;
+    }
+    let (delimiter_index, delimiter) = chars.next()?;
+    if !matches!(delimiter, '.' | '、' | ')' | '）' | '．') {
+        return None;
+    }
+
+    let label_start = delimiter_index + delimiter.len_utf8();
+    let raw_label = line.get(label_start..)?.trim();
+    if raw_label.is_empty() {
+        return None;
+    }
+
+    let id = first.to_string().to_ascii_uppercase();
+    Some(ChoiceOptionData {
+        id: id.clone(),
+        label: format!("{id}. {raw_label}"),
+        description: None,
+    })
 }
 
 fn normalize_generation_prompt(content: String, workspace_type: &WorkspaceType) -> String {
@@ -3963,6 +4307,82 @@ mod tests {
                 0,
             ))
         }
+    }
+
+    struct EmptyCompletedStreamingProvider;
+
+    #[async_trait::async_trait]
+    impl StreamingProviderAdapter for EmptyCompletedStreamingProvider {
+        async fn start(
+            &self,
+            _input: StreamingProviderInput,
+            _cancel: CancellationToken,
+        ) -> Result<ProviderSession, ProviderAdapterError> {
+            let (event_tx, event_rx) = mpsc::channel(8);
+            let (command_tx, _command_rx) = mpsc::channel(8);
+            tokio::spawn(async move {
+                let _ = event_tx
+                    .send(ProviderEvent::Completed {
+                        full_output: String::new(),
+                        provider_session_id: Some("empty-session".to_string()),
+                    })
+                    .await;
+            });
+            Ok(ProviderSession {
+                events: event_rx,
+                commands: command_tx,
+            })
+        }
+
+        async fn run_streaming(
+            &self,
+            _input: &AdapterInput,
+            _cancel: CancellationToken,
+        ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+            Err(ProviderAdapterError::execution_failed(
+                None,
+                String::new(),
+                "run_streaming is not used by WorkspaceEngine",
+                0,
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_user_message_empty_provider_output_marks_author_node_failed() {
+        let (_tmp, store) = setup();
+        let (tx, mut rx) = mpsc::channel(64);
+        let session = make_session("sess_empty_output");
+        let mut engine = WorkspaceEngine::new(store, tx, session);
+
+        engine
+            .handle_user_message(
+                "start".to_string(),
+                Arc::new(EmptyCompletedStreamingProvider),
+                empty_provider_commands(),
+            )
+            .await;
+
+        let author_node = engine
+            .timeline_nodes
+            .iter()
+            .find(|node| node.node_type == TimelineNodeType::AuthorRun)
+            .expect("author node");
+        assert_eq!(author_node.status, TimelineNodeStatus::Failed);
+        assert_eq!(
+            author_node.summary.as_deref(),
+            Some("Provider 未返回助手内容")
+        );
+        assert_eq!(engine.session().stage, WorkspaceStage::PrepareContext);
+        assert_eq!(engine.session().messages.len(), 1);
+
+        let mut saw_error = false;
+        while let Ok(event) = rx.try_recv() {
+            if let EngineEvent::Error { message } = event {
+                saw_error = message == "Provider completed without assistant output";
+            }
+        }
+        assert!(saw_error);
     }
 
     #[tokio::test]

@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 
 use cadence_aria::cross_cutting::provider_adapter::ProviderAdapterError;
 use cadence_aria::cross_cutting::streaming_provider::{StreamChunk, StreamingProviderAdapter};
@@ -11,7 +12,9 @@ use cadence_aria::product::coding_models::{
     CodingTimelineNodeStatus, PushStatus, RemoteKind, ReviewRequest, ReviewRequestKind,
     ReviewVerdict, TestingOverallStatus,
 };
-use cadence_aria::product::coding_workspace_engine::CodingWorkspaceEngine;
+use cadence_aria::product::coding_workspace_engine::{
+    CodingExecutionContext, CodingWorkspaceEngine,
+};
 use cadence_aria::product::git_workspace_service::GitWorkspaceService;
 use cadence_aria::product::lifecycle_store::{CreateWorkItemInput, LifecycleStore};
 use cadence_aria::product::models::ProviderName;
@@ -145,7 +148,7 @@ async fn execute_coding_runs_provider_in_worktree_and_streams_timeline_events() 
     let provider = FileWritingStreamingProvider;
 
     let updated = engine
-        .execute_coding(&attempt, &provider)
+        .execute_coding(&attempt, &provider, &CodingExecutionContext::default())
         .await
         .expect("execute coding");
 
@@ -198,6 +201,57 @@ async fn execute_coding_runs_provider_in_worktree_and_streams_timeline_events() 
         }
         other => panic!("expected coding node completed, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn execute_coding_includes_work_item_context_in_provider_prompt() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            ..create_input()
+        })
+        .expect("create attempt");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    let captured_prompt = Arc::new(Mutex::new(None));
+    let provider = PromptCapturingProvider {
+        prompt: Arc::clone(&captured_prompt),
+    };
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
+    let context = CodingExecutionContext {
+        work_item_markdown: Some(
+            "# 爬楼梯问题 Work Item\n\n## 验证命令\n\n- `uv run python -m unittest -v tests.test_climbing_stairs`"
+                .to_string(),
+        ),
+        verification_commands: vec![
+            "uv run python -m unittest -v tests.test_climbing_stairs".to_string(),
+        ],
+    };
+
+    engine
+        .execute_coding(&attempt, &provider, &context)
+        .await
+        .expect("execute coding");
+
+    let prompt = captured_prompt
+        .lock()
+        .expect("prompt lock")
+        .clone()
+        .expect("captured prompt");
+    assert!(prompt.contains("不要只输出计划或 Story/Design/Work Item 文档"));
+    assert!(prompt.contains("# 爬楼梯问题 Work Item"));
+    assert!(prompt.contains("uv run python -m unittest -v tests.test_climbing_stairs"));
 }
 
 #[tokio::test]
@@ -263,6 +317,42 @@ async fn execute_testing_runs_commands_persists_report_and_emits_update() {
         }
         other => panic!("expected testing report update, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn execute_testing_marks_attempt_blocked_when_no_commands_are_available() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            ..create_input()
+        })
+        .expect("create attempt");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+
+    let report = engine
+        .execute_testing(&attempt, &[])
+        .await
+        .expect("execute testing");
+
+    assert_eq!(report.overall_status, TestingOverallStatus::Blocked);
+    let updated = store
+        .get_attempt("project_0001", "issue_0001", &attempt.id)
+        .expect("updated attempt");
+    assert_eq!(updated.status, CodingAttemptStatus::Blocked);
+    assert_eq!(updated.stage, CodingExecutionStage::Testing);
 }
 
 #[tokio::test]
@@ -959,6 +1049,27 @@ impl StreamingProviderAdapter for FileWritingStreamingProvider {
         let (tx, rx) = mpsc::channel(8);
         tx.try_send(StreamChunk::Text("created generated.txt".to_string()))
             .expect("send text chunk");
+        tx.try_send(StreamChunk::Done {
+            full_output: "done".to_string(),
+        })
+        .expect("send done chunk");
+        Ok(rx)
+    }
+}
+
+struct PromptCapturingProvider {
+    prompt: Arc<Mutex<Option<String>>>,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for PromptCapturingProvider {
+    async fn run_streaming(
+        &self,
+        input: &AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+        *self.prompt.lock().expect("prompt lock") = Some(input.prompt.clone());
+        let (tx, rx) = mpsc::channel(8);
         tx.try_send(StreamChunk::Done {
             full_output: "done".to_string(),
         })

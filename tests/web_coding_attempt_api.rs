@@ -12,6 +12,7 @@ use cadence_aria::product::coding_models::{
     ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict, TestCommand, TestCommandStatus,
     TestingOverallStatus, TestingReport,
 };
+use cadence_aria::product::models::ProviderName;
 use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::runtime::WebRuntime;
 use cadence_aria::web::state::WebAppState;
@@ -70,6 +71,41 @@ async fn creates_coding_attempt_for_confirmed_work_item_and_surfaces_latest_atte
     assert_eq!(
         lifecycle["work_items"][0]["latest_attempt"]["attempt_id"],
         "coding_attempt_0001"
+    );
+}
+
+#[tokio::test]
+async fn creates_coding_attempt_with_confirmed_work_item_workspace_providers() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    bootstrap_confirmed_work_item_with_providers(app.clone(), repo.path(), "codex", "claude_code")
+        .await;
+
+    let (status, attempt) = request_json(
+        app,
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001/coding-attempts",
+        json!({}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(attempt["attempt_id"], "coding_attempt_0001");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let persisted = store
+        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("persisted attempt");
+    assert_eq!(
+        persisted.provider_config_snapshot.author,
+        ProviderName::Codex
+    );
+    assert_eq!(
+        persisted.provider_config_snapshot.reviewer,
+        Some(ProviderName::ClaudeCode)
     );
 }
 
@@ -257,7 +293,30 @@ async fn returns_coding_attempt_artifact_content_from_attempt_worktree() {
 }
 
 async fn bootstrap_confirmed_work_item(app: axum::Router, repo_path: &std::path::Path) {
-    bootstrap_unconfirmed_work_item(app.clone(), repo_path).await;
+    bootstrap_confirmed_work_item_with_providers(app, repo_path, "fake", "fake").await;
+}
+
+async fn bootstrap_confirmed_work_item_with_providers(
+    app: axum::Router,
+    repo_path: &std::path::Path,
+    work_item_author_provider: &str,
+    work_item_reviewer_provider: &str,
+) {
+    bootstrap_story_and_design(app.clone(), repo_path).await;
+    let (status, _) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items:generate",
+        json!({
+            "title":"实现爬楼梯",
+            "story_spec_ids":["story_spec_0001"],
+            "design_spec_ids":["design_spec_0001"],
+            "author_provider": work_item_author_provider,
+            "reviewer_provider": work_item_reviewer_provider
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
     let (status, _) = request_json(
         app,
         Method::POST,
@@ -269,6 +328,24 @@ async fn bootstrap_confirmed_work_item(app: axum::Router, repo_path: &std::path:
 }
 
 async fn bootstrap_unconfirmed_work_item(app: axum::Router, repo_path: &std::path::Path) {
+    bootstrap_story_and_design(app.clone(), repo_path).await;
+    let (status, _) = request_json(
+        app,
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items:generate",
+        json!({
+            "title":"实现爬楼梯",
+            "story_spec_ids":["story_spec_0001"],
+            "design_spec_ids":["design_spec_0001"],
+            "author_provider":"fake",
+            "reviewer_provider":"fake"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+async fn bootstrap_story_and_design(app: axum::Router, repo_path: &std::path::Path) {
     request_json(
         app.clone(),
         Method::POST,
@@ -322,19 +399,6 @@ async fn bootstrap_unconfirmed_work_item(app: axum::Router, repo_path: &std::pat
         Method::POST,
         "/api/workspace-sessions/workspace_session_0002/confirm",
         json!({"confirmed_by":"human"}),
-    )
-    .await;
-    request_json(
-        app,
-        Method::POST,
-        "/api/projects/project_0001/issues/issue_0001/work-items:generate",
-        json!({
-            "title":"实现爬楼梯",
-            "story_spec_ids":["story_spec_0001"],
-            "design_spec_ids":["design_spec_0001"],
-            "author_provider":"fake",
-            "reviewer_provider":"fake"
-        }),
     )
     .await;
 }
