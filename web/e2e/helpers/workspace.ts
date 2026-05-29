@@ -99,7 +99,7 @@ export async function openWorkspaceSession(page: Page, sessionId: string): Promi
 export async function openDrawerForStory(page: Page, seeded: SeededWorkspace) {
   await page.goto("/workbench");
   await page.getByRole("button", { name: seeded.projectName, exact: true }).click();
-  await expect(page.getByRole("region", { name: "Story Spec 列" })).toContainText(
+  await expect(page.getByRole("region", { name: "Story Spec 内容" })).toContainText(
     seeded.storyTitle,
   );
   await page.getByText(seeded.storyTitle).click();
@@ -201,6 +201,49 @@ export async function sendWorkspaceSocketMessage(page: Page, payload: unknown) {
     }
     socket.send(JSON.stringify(payload));
   }, payload);
+}
+
+export async function waitForWorkspaceSocketCount(
+  page: Page,
+  sessionId: string,
+  count: number,
+  timeout = 10_000,
+) {
+  await page.waitForFunction(
+    ({ sessionId, count }) => {
+      const trackedWindow = window as Window & { __ariaWorkspaceSockets?: WebSocket[] };
+      const sockets = trackedWindow.__ariaWorkspaceSockets ?? [];
+      return (
+        sockets.filter((socket) =>
+          String(socket.url).includes(`/api/workspace-sessions/${sessionId}/ws`),
+        ).length >= count
+      );
+    },
+    { sessionId, count },
+    { timeout },
+  );
+}
+
+export async function closeActiveWorkspaceSocketFromClient(
+  page: Page,
+  sessionId: string,
+  code: number,
+) {
+  await page.evaluate(
+    ({ sessionId, code }) => {
+      const trackedWindow = window as Window & { __ariaWorkspaceSockets?: WebSocket[] };
+      const socket = trackedWindow.__ariaWorkspaceSockets?.find(
+        (candidate) =>
+          candidate.readyState === WebSocket.OPEN &&
+          String(candidate.url).includes(`/api/workspace-sessions/${sessionId}/ws`),
+      );
+      if (!socket) {
+        throw new Error("workspace websocket probe did not find an open socket");
+      }
+      socket.close(code);
+    },
+    { sessionId, code },
+  );
 }
 
 export async function dropWorkspaceSocketFromServer(page: Page, sessionId: string) {

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
@@ -7,11 +8,15 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
-use crate::cross_cutting::streaming_provider::{StreamChunk, StreamingProviderAdapter};
+use crate::cross_cutting::streaming_provider::{
+    ProviderCommand, ProviderEvent, ProviderPermissionMode, ProviderToolResult, StreamChunk,
+    StreamingProviderAdapter, StreamingProviderInput,
+};
 use crate::product::coding_attempt_store::CodingAttemptStore;
 use crate::product::coding_models::{
-    CodeReviewReport, CodingAgentRole, CodingAttemptStatus, CodingExecutionAttempt,
-    CodingExecutionStage, CodingTimelineNode, CodingTimelineNodeStatus, InternalPrReview,
+    AnalystVerdict, CodeReviewReport, CodingAgentRole, CodingAttemptStatus, CodingChatEntry,
+    CodingContextNote, CodingEntryType, CodingExecutionAttempt, CodingExecutionStage,
+    CodingReworkInstruction, CodingTimelineNode, CodingTimelineNodeStatus, InternalPrReview,
     PushStatus, ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict,
     TestingOverallStatus, TestingReport,
 };
@@ -19,10 +24,18 @@ use crate::product::git_workspace_service::{GitWorkspaceError, GitWorkspaceServi
 use crate::product::id::next_sequential_id;
 use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::LifecycleStore;
-use crate::product::models::{ProviderName, WorkItemStatus};
+use crate::product::models::{ProviderName, WorkItemStatus, WorkspaceType};
 use crate::product::test_executor::{TestCommandSpec, TestExecutorError, run_all_tests};
+use crate::product::tester_agent_loop::{
+    TesterAgentOptions, build_tester_system_prompt, build_testing_report, execute_tester_tool_call,
+};
 use crate::protocol::contracts::{AdapterInput, AdapterRole, ProviderType};
 use crate::web::coding_ws_handler::CodingWsOutMessage;
+use crate::web::workspace_ws_types::{
+    WsExecutionEvent, WsExecutionEventKind, WsExecutionEventStatus,
+};
+
+const REWORK_CONTEXT_NOTE_CHAR_LIMIT: usize = 10_000;
 
 #[derive(Debug, Error)]
 pub enum CodingWorkspaceEngineError {
@@ -32,6 +45,8 @@ pub enum CodingWorkspaceEngineError {
     Git(#[from] GitWorkspaceError),
     #[error(transparent)]
     TestExecutor(#[from] TestExecutorError),
+    #[error(transparent)]
+    TesterAgent(#[from] crate::product::tester_agent_loop::TesterAgentError),
     #[error(transparent)]
     ProviderAdapter(#[from] ProviderAdapterError),
     #[error("coding_provider_stream_failed: {0}")]
@@ -44,6 +59,8 @@ pub enum CodingWorkspaceEngineError {
     MissingWorktree(String),
     #[error("coding_attempt_not_ready_for_final_confirm: {0}")]
     FinalConfirmNotReady(String),
+    #[error("{0}")]
+    NoReviewableChanges(String),
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -173,11 +190,37 @@ impl CodingWorkspaceEngine {
             .send(CodingWsOutMessage::CodingTimelineNodeCreated { node: node.clone() })
             .await;
 
+        let rework_instruction = self.store.latest_unconsumed_rework_instruction(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+        )?;
+        let prompt = build_coding_prompt(&attempt, context, rework_instruction.as_ref());
+        let coder_provider = self
+            .store
+            .get_role_provider_config_snapshot(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+            .coder;
+        let _ = self
+            .event_tx
+            .send(CodingWsOutMessage::CodingExecutionEvent {
+                event: provider_prompt_event(&node.id, &coder_provider, prompt.clone()),
+            })
+            .await;
+        if let Some(instruction) = rework_instruction.as_ref() {
+            self.store.mark_rework_instruction_consumed(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &instruction.id,
+                &node.id,
+            )?;
+        }
+
         let input = AdapterInput {
-            provider_type: provider_type_for_name(&attempt.provider_config_snapshot.author),
+            provider_type: provider_type_for_name(&coder_provider),
             role: AdapterRole::Executor,
             worktree_path: Some(worktree_path.to_string_lossy().to_string()),
-            prompt: build_coding_prompt(&attempt, context),
+            prompt,
             context_files: Vec::new(),
             output_schema: "coding_workspace_markdown".to_string(),
             timeout: 2400,
@@ -277,7 +320,12 @@ impl CodingWorkspaceEngine {
             .event_tx
             .send(CodingWsOutMessage::CodingTimelineNodeCreated { node: node.clone() })
             .await;
-        let report = run_all_tests(&attempt.id, worktree_path, specs).await?;
+        let artifact_output_root = self.store.attempt_test_output_root(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+        );
+        let report = run_all_tests(&attempt.id, worktree_path, artifact_output_root, specs).await?;
         self.store.save_testing_report(&report)?;
         let _ = self
             .event_tx
@@ -337,6 +385,235 @@ impl CodingWorkspaceEngine {
         Ok(report)
     }
 
+    pub async fn execute_testing_with_provider(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        provider: &dyn StreamingProviderAdapter,
+        context: &CodingExecutionContext,
+        specs: &[TestCommandSpec],
+        options: TesterAgentOptions,
+    ) -> Result<TestingReport, CodingWorkspaceEngineError> {
+        if !provider.supports_tool_calls() {
+            return self.execute_testing(attempt, specs).await;
+        }
+        let Some(worktree_path) = attempt.worktree_path.as_ref() else {
+            return Err(CodingWorkspaceEngineError::MissingWorktree(
+                attempt.id.clone(),
+            ));
+        };
+        let attempt = self.store.update_attempt_stage(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingExecutionStage::Testing,
+        )?;
+        let node = self.create_testing_timeline_node(&attempt)?;
+        let _ = self
+            .event_tx
+            .send(CodingWsOutMessage::CodingTimelineNodeCreated { node: node.clone() })
+            .await;
+
+        let tester_provider = self
+            .store
+            .get_role_provider_config_snapshot(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+            .tester;
+        let prompt = build_tester_system_prompt(&attempt, context, specs);
+        let _ = self
+            .event_tx
+            .send(CodingWsOutMessage::CodingExecutionEvent {
+                event: provider_prompt_event(&node.id, &tester_provider, prompt.clone()),
+            })
+            .await;
+
+        let input = StreamingProviderInput {
+            provider_type: provider_type_for_name(&tester_provider),
+            role: AdapterRole::Reviewer,
+            prompt,
+            working_dir: worktree_path.clone(),
+            session_id: None,
+            permission_mode: ProviderPermissionMode::Auto,
+            env_vars: BTreeMap::new(),
+            timeout_secs: options.timeout.as_secs().max(1),
+        };
+        let cancel = CancellationToken::new();
+        let mut session = provider.start(input, cancel.clone()).await?;
+        let timeout = tokio::time::sleep(options.timeout);
+        tokio::pin!(timeout);
+        let mut full_output = String::new();
+        let mut commands = Vec::new();
+        let mut consecutive_failures = 0usize;
+        let mut blocked_summary = None;
+        let mut chat_entry_sequence = 1usize;
+
+        loop {
+            tokio::select! {
+                _ = &mut timeout => {
+                    cancel.cancel();
+                    blocked_summary = Some("Tester Agent Loop 超时".to_string());
+                    break;
+                }
+                event = session.events.recv() => {
+                    let Some(event) = event else {
+                        blocked_summary = Some("Tester Provider stream ended before completion".to_string());
+                        break;
+                    };
+                    match event {
+                        ProviderEvent::TextDelta { content } => {
+                            full_output.push_str(&content);
+                            let _ = self
+                                .event_tx
+                                .send(CodingWsOutMessage::CodingStreamChunk {
+                                    content,
+                                    node_id: Some(node.id.clone()),
+                                })
+                                .await;
+                        }
+                        ProviderEvent::ToolCall(call) => {
+                            let entry = tester_chat_entry(
+                                &attempt,
+                                &node.id,
+                                &mut chat_entry_sequence,
+                                CodingEntryType::ToolCall {
+                                    tool_name: call.tool_name.clone(),
+                                    input: call.input.clone(),
+                                },
+                                None,
+                                Some(serde_json::json!({ "tool_use_id": call.id.clone() })),
+                            );
+                            self.save_and_emit_chat_entry(entry).await;
+
+                            let artifact_output_root = self.store.attempt_test_output_root(
+                                &attempt.project_id,
+                                &attempt.issue_id,
+                                &attempt.id,
+                            );
+                            let outcome =
+                                execute_tester_tool_call(&call, worktree_path, artifact_output_root)
+                                    .await?;
+                            if let Some(command) = outcome.command.clone() {
+                                commands.push(command);
+                            }
+                            let result = outcome.result;
+                            let is_error = result.is_error;
+                            let _ = session
+                                .commands
+                                .send(ProviderCommand::ToolResult(result.clone()))
+                                .await;
+                            self.emit_tester_tool_result_entry(
+                                &attempt,
+                                &node.id,
+                                &mut chat_entry_sequence,
+                                result,
+                            )
+                            .await;
+
+                            if is_error {
+                                consecutive_failures += 1;
+                            } else {
+                                consecutive_failures = 0;
+                            }
+                            if consecutive_failures >= options.failure_limit {
+                                cancel.cancel();
+                                blocked_summary = Some(format!(
+                                    "Tester Agent Loop 连续 {} 次 tool_use 失败",
+                                    options.failure_limit
+                                ));
+                                break;
+                            }
+                        }
+                        ProviderEvent::ToolResult(result) => {
+                            self.emit_tester_tool_result_entry(
+                                &attempt,
+                                &node.id,
+                                &mut chat_entry_sequence,
+                                result,
+                            )
+                            .await;
+                        }
+                        ProviderEvent::Execution(_) => {}
+                        ProviderEvent::Completed { full_output: completed_output, .. } => {
+                            if !completed_output.trim().is_empty() {
+                                full_output = completed_output;
+                            }
+                            let _ = self
+                                .event_tx
+                                .send(CodingWsOutMessage::CodingMessageComplete {
+                                    node_id: Some(node.id.clone()),
+                                })
+                                .await;
+                            break;
+                        }
+                        ProviderEvent::Failed { message } => {
+                            blocked_summary = Some(message);
+                            break;
+                        }
+                        ProviderEvent::ProtocolError { message, .. } => {
+                            blocked_summary = Some(message);
+                            break;
+                        }
+                        ProviderEvent::PermissionTimeout { permission_id } => {
+                            blocked_summary =
+                                Some(format!("Permission request {permission_id} timed out"));
+                            break;
+                        }
+                        ProviderEvent::PermissionRequest(_)
+                        | ProviderEvent::ChoiceRequest(_)
+                        | ProviderEvent::StatusChanged(_) => {}
+                    }
+                }
+            }
+        }
+
+        let report = build_testing_report(&attempt.id, commands, &full_output, blocked_summary);
+        self.store.save_testing_report(&report)?;
+        let _ = self
+            .event_tx
+            .send(CodingWsOutMessage::TestingReportUpdate {
+                report: Box::new(report.clone()),
+            })
+            .await;
+
+        let (node_status, summary) = match report.overall_status {
+            TestingOverallStatus::Passed => (
+                CodingTimelineNodeStatus::Completed,
+                Some("测试通过".to_string()),
+            ),
+            TestingOverallStatus::Failed => (
+                CodingTimelineNodeStatus::Failed,
+                Some("测试失败".to_string()),
+            ),
+            TestingOverallStatus::SkippedByUserDecision => (
+                CodingTimelineNodeStatus::Completed,
+                Some("测试由用户决策跳过".to_string()),
+            ),
+            TestingOverallStatus::Blocked => (
+                CodingTimelineNodeStatus::Blocked,
+                Some("测试被阻塞".to_string()),
+            ),
+        };
+        if matches!(
+            report.overall_status,
+            TestingOverallStatus::Failed | TestingOverallStatus::Blocked
+        ) {
+            self.store.update_attempt_status(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                CodingAttemptStatus::Blocked,
+            )?;
+        }
+        self.complete_timeline_node(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &node.id,
+            node_status,
+            summary,
+        )
+        .await?;
+        Ok(report)
+    }
+
     pub async fn execute_code_review(
         &self,
         attempt: &CodingExecutionAttempt,
@@ -359,16 +636,18 @@ impl CodingWorkspaceEngine {
             .send(CodingWsOutMessage::CodingTimelineNodeCreated { node: node.clone() })
             .await;
 
-        let reviewer = attempt
-            .provider_config_snapshot
-            .reviewer
-            .as_ref()
-            .unwrap_or(&attempt.provider_config_snapshot.author);
+        let reviewer = self
+            .store
+            .get_role_provider_config_snapshot(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+            .code_reviewer;
+        let prompt = self
+            .build_code_review_prompt(&attempt, worktree_path)
+            .await?;
         let input = AdapterInput {
-            provider_type: provider_type_for_name(reviewer),
+            provider_type: provider_type_for_name(&reviewer),
             role: AdapterRole::Reviewer,
             worktree_path: Some(worktree_path.to_string_lossy().to_string()),
-            prompt: build_code_review_prompt(&attempt),
+            prompt,
             context_files: Vec::new(),
             output_schema: "coding_workspace_code_review_json".to_string(),
             timeout: 2400,
@@ -397,6 +676,8 @@ impl CodingWorkspaceEngine {
                         .await;
                     let report = self.build_code_review_report(&attempt, &full_output)?;
                     self.store.save_code_review_report(&report)?;
+                    self.emit_code_review_chat_entry(&attempt, &node.id, &report)
+                        .await;
                     let _ = self
                         .event_tx
                         .send(CodingWsOutMessage::CodeReviewComplete {
@@ -491,41 +772,61 @@ impl CodingWorkspaceEngine {
         let current =
             self.store
                 .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
-        if current.rework_count >= current.max_auto_rework {
+        let source_stage = current.stage.clone();
+        let rework_round = current.rework_count + 1;
+        if current.status != CodingAttemptStatus::Running {
             self.store.update_attempt_status(
-                &attempt.project_id,
-                &attempt.issue_id,
-                &attempt.id,
-                CodingAttemptStatus::Blocked,
+                &current.project_id,
+                &current.issue_id,
+                &current.id,
+                CodingAttemptStatus::Running,
             )?;
-            return Err(CodingWorkspaceEngineError::ReworkLimitExceeded(
-                attempt.id.clone(),
-            ));
         }
-        let attempt = self.store.increment_attempt_rework_count(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-        )?;
         let attempt = self.store.update_attempt_stage(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
+            &current.project_id,
+            &current.issue_id,
+            &current.id,
             CodingExecutionStage::Rework,
         )?;
-        let node = self.create_rework_timeline_node(&attempt)?;
+        let node = self.create_rework_timeline_node(&attempt, rework_round)?;
         let _ = self
             .event_tx
             .send(CodingWsOutMessage::CodingTimelineNodeCreated { node: node.clone() })
             .await;
 
+        let notes = self.store.list_unconsumed_context_notes(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+        )?;
+        let note_ids = notes.iter().map(|note| note.id.clone()).collect::<Vec<_>>();
+        let context_note_input =
+            format_rework_context_notes(&notes, REWORK_CONTEXT_NOTE_CHAR_LIMIT);
+        let analyst_provider = self
+            .store
+            .get_role_provider_config_snapshot(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+            .analyst;
+        let prompt = build_rework_prompt(
+            &attempt,
+            evidence,
+            &source_stage,
+            rework_round,
+            &context_note_input,
+        );
+        let _ = self
+            .event_tx
+            .send(CodingWsOutMessage::CodingExecutionEvent {
+                event: provider_prompt_event(&node.id, &analyst_provider, prompt.clone()),
+            })
+            .await;
+
         let input = AdapterInput {
-            provider_type: provider_type_for_name(&attempt.provider_config_snapshot.author),
-            role: AdapterRole::Executor,
+            provider_type: provider_type_for_name(&analyst_provider),
+            role: AdapterRole::Reviewer,
             worktree_path: Some(worktree_path.to_string_lossy().to_string()),
-            prompt: build_rework_prompt(&attempt, evidence),
+            prompt,
             context_files: Vec::new(),
-            output_schema: "coding_workspace_rework_markdown".to_string(),
+            output_schema: "coding_workspace_analyst_verdict_json".to_string(),
             timeout: 2400,
             max_retries: 0,
         };
@@ -543,28 +844,49 @@ impl CodingWorkspaceEngine {
                         })
                         .await;
                 }
-                StreamChunk::Done { .. } => {
+                StreamChunk::Done { full_output } => {
                     let _ = self
                         .event_tx
                         .send(CodingWsOutMessage::CodingMessageComplete {
                             node_id: Some(node.id.clone()),
                         })
                         .await;
+                    if !note_ids.is_empty() {
+                        self.store.mark_context_notes_consumed(
+                            &attempt.project_id,
+                            &attempt.issue_id,
+                            &attempt.id,
+                            &note_ids,
+                            rework_round,
+                        )?;
+                    }
+                    let decision = parse_analyst_verdict(&full_output);
+                    self.emit_analyst_verdict_entry(
+                        &attempt,
+                        &node.id,
+                        rework_round,
+                        &source_stage,
+                        &decision,
+                    )
+                    .await;
+                    let (updated, node_status, summary) = self
+                        .apply_analyst_decision(
+                            &attempt,
+                            &node.id,
+                            &source_stage,
+                            rework_round,
+                            &decision,
+                        )
+                        .await?;
                     self.complete_timeline_node(
                         &attempt.project_id,
                         &attempt.issue_id,
                         &attempt.id,
                         &node.id,
-                        CodingTimelineNodeStatus::Completed,
-                        Some("返工完成".to_string()),
+                        node_status,
+                        Some(summary),
                     )
                     .await?;
-                    let updated = self.store.update_attempt_stage(
-                        &attempt.project_id,
-                        &attempt.issue_id,
-                        &attempt.id,
-                        CodingExecutionStage::Testing,
-                    )?;
                     return Ok(updated);
                 }
                 StreamChunk::Error(message) => {
@@ -636,16 +958,18 @@ impl CodingWorkspaceEngine {
             .send(CodingWsOutMessage::CodingTimelineNodeCreated { node: node.clone() })
             .await;
 
-        let reviewer = attempt
-            .provider_config_snapshot
-            .reviewer
-            .as_ref()
-            .unwrap_or(&attempt.provider_config_snapshot.author);
+        let reviewer = self
+            .store
+            .get_role_provider_config_snapshot(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+            .internal_reviewer;
+        let prompt = self
+            .build_internal_pr_review_prompt(&attempt, &review_request, worktree_path)
+            .await?;
         let input = AdapterInput {
-            provider_type: provider_type_for_name(reviewer),
+            provider_type: provider_type_for_name(&reviewer),
             role: AdapterRole::Reviewer,
             worktree_path: Some(worktree_path.to_string_lossy().to_string()),
-            prompt: build_internal_pr_review_prompt(&attempt, &review_request),
+            prompt,
             context_files: Vec::new(),
             output_schema: "coding_workspace_internal_pr_review_json".to_string(),
             timeout: 2400,
@@ -675,6 +999,8 @@ impl CodingWorkspaceEngine {
                     let review =
                         self.build_internal_pr_review(&attempt, &review_request, &full_output)?;
                     self.store.save_internal_pr_review(&review)?;
+                    self.emit_internal_pr_review_chat_entry(&attempt, &node.id, &review)
+                        .await;
                     let _ = self
                         .event_tx
                         .send(CodingWsOutMessage::InternalPrReviewComplete {
@@ -712,28 +1038,6 @@ impl CodingWorkspaceEngine {
                         summary,
                     )
                     .await?;
-                    if review.verdict == ReviewVerdict::Approve {
-                        let confirmed_stage = self.store.update_attempt_stage(
-                            &attempt.project_id,
-                            &attempt.issue_id,
-                            &attempt.id,
-                            CodingExecutionStage::FinalConfirm,
-                        )?;
-                        self.store.update_attempt_status(
-                            &confirmed_stage.project_id,
-                            &confirmed_stage.issue_id,
-                            &confirmed_stage.id,
-                            CodingAttemptStatus::WaitingForHuman,
-                        )?;
-                        let final_node =
-                            self.create_final_confirm_timeline_node(&confirmed_stage)?;
-                        let _ = self
-                            .event_tx
-                            .send(CodingWsOutMessage::CodingTimelineNodeCreated {
-                                node: final_node,
-                            })
-                            .await;
-                    }
                     return Ok(review);
                 }
                 StreamChunk::Error(message) => {
@@ -800,7 +1104,34 @@ impl CodingWorkspaceEngine {
             .send(CodingWsOutMessage::CodingTimelineNodeCreated { node: node.clone() })
             .await;
 
-        self._git_service.git_add_all(worktree_path).await?;
+        self._git_service
+            .git_add_work_item_changes(worktree_path)
+            .await?;
+        if !self
+            ._git_service
+            .git_has_staged_changes(worktree_path)
+            .await?
+        {
+            let summary =
+                "过滤运行产物后没有可提交的业务变更，请检查上一轮 Coder 是否只修改了运行产物。"
+                    .to_string();
+            self.store.update_attempt_status(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                CodingAttemptStatus::Blocked,
+            )?;
+            self.complete_timeline_node(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &node.id,
+                CodingTimelineNodeStatus::Blocked,
+                Some(summary.clone()),
+            )
+            .await?;
+            return Err(CodingWorkspaceEngineError::NoReviewableChanges(summary));
+        }
         let commit = self
             ._git_service
             .git_commit(worktree_path, commit_message)
@@ -1094,6 +1425,7 @@ impl CodingWorkspaceEngine {
     fn create_rework_timeline_node(
         &self,
         attempt: &CodingExecutionAttempt,
+        rework_round: u32,
     ) -> Result<CodingTimelineNode, ProductStoreError> {
         let existing =
             self.store
@@ -1102,9 +1434,9 @@ impl CodingWorkspaceEngine {
             id: format!("coding_node_{:04}", existing.len() + 1),
             attempt_id: attempt.id.clone(),
             stage: CodingExecutionStage::Rework,
-            title: format!("返工 #{}", attempt.rework_count),
+            title: format!("分析官判定 #{}", rework_round),
             status: CodingTimelineNodeStatus::Running,
-            agent_role: Some(CodingAgentRole::Author),
+            agent_role: Some(CodingAgentRole::System),
             summary: None,
             started_at: Utc::now().to_rfc3339(),
             completed_at: None,
@@ -1137,27 +1469,131 @@ impl CodingWorkspaceEngine {
         Ok(node)
     }
 
-    fn create_final_confirm_timeline_node(
+    fn create_completed_final_confirm_timeline_node(
         &self,
         attempt: &CodingExecutionAttempt,
     ) -> Result<CodingTimelineNode, ProductStoreError> {
         let existing =
             self.store
                 .get_timeline_nodes(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+        let now = Utc::now().to_rfc3339();
         let node = CodingTimelineNode {
             id: format!("coding_node_{:04}", existing.len() + 1),
             attempt_id: attempt.id.clone(),
             stage: CodingExecutionStage::FinalConfirm,
             title: "最终确认".to_string(),
-            status: CodingTimelineNodeStatus::Running,
+            status: CodingTimelineNodeStatus::Completed,
             agent_role: Some(CodingAgentRole::System),
-            summary: Some("等待用户最终确认".to_string()),
-            started_at: Utc::now().to_rfc3339(),
-            completed_at: None,
+            summary: Some("Analyst 最终判定通过，attempt 已完成".to_string()),
+            started_at: now.clone(),
+            completed_at: Some(now),
             artifact_refs: Vec::new(),
         };
         self.store.save_timeline_node(node.clone())?;
         Ok(node)
+    }
+
+    async fn build_code_review_prompt(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        worktree_path: &Path,
+    ) -> Result<String, CodingWorkspaceEngineError> {
+        let diff = self
+            ._git_service
+            .git_diff(worktree_path, &attempt.base_branch)
+            .await?;
+        let work_item = self.work_item_markdown_for_attempt(attempt)?;
+        Ok(format!(
+            "Coding Workspace CodeReviewer\n\
+             你是 CodeReviewer，只分析当前变更 diff，不修改代码、不执行写操作。\n\
+             Project: {}\n\
+             Issue: {}\n\
+             Work Item: {}\n\
+             Attempt: {}\n\
+             Branch: {}\n\
+             Base: {}\n\
+             \n代码规范:\n\
+             - 优先检查正确性、边界条件、测试覆盖、安全、性能和可维护性。\n\
+             - findings 必须包含 severity、file_path、line、message、required_action、source_stage=code_review。\n\
+             - 如果没有阻塞问题，verdict 使用 approve。\n\
+             \n原始需求上下文:\n````markdown\n{}\n````\n\
+             \ngit diff:\n````diff\n{}\n````\n\
+             \n只输出 JSON：{{\"verdict\":\"approve|request_changes|blocked\",\"summary\":\"...\",\"findings\":[...]}}\n",
+            attempt.project_id,
+            attempt.issue_id,
+            attempt.work_item_id,
+            attempt.id,
+            attempt.branch_name,
+            attempt.base_branch,
+            work_item.unwrap_or_else(
+                || "未找到 Work Item markdown，上下文仅包含 attempt 元数据。".to_string()
+            ),
+            truncate_prompt_section(&diff, 30_000)
+        ))
+    }
+
+    async fn build_internal_pr_review_prompt(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        review_request: &ReviewRequest,
+        worktree_path: &Path,
+    ) -> Result<String, CodingWorkspaceEngineError> {
+        let diff = self
+            ._git_service
+            .git_diff(worktree_path, &attempt.base_branch)
+            .await?;
+        let work_item = self.work_item_markdown_for_attempt(attempt)?;
+        Ok(format!(
+            "Coding Workspace InternalReviewer\n\
+             你是 InternalReviewer，在 ReviewRequest(push) 之后做内部 PR 审查。\n\
+             Project: {}\n\
+             Issue: {}\n\
+             Work Item: {}\n\
+             Attempt: {}\n\
+             Branch: {}\n\
+             Review Request: {}\n\
+             Review Remote: {}\n\
+             Commit: {}\n\
+             \n功能需求上下文:\n````markdown\n{}\n````\n\
+             \n完整变更 git diff:\n````diff\n{}\n````\n\
+             \n输出要求:\n\
+             - 分析影响范围（影响范围/impact_scope）。\n\
+             - 给出 PR description 预览。\n\
+             - 给出 commit message 建议。\n\
+             - findings 必须包含 source_stage=internal_pr_review。\n\
+             \n只输出 JSON：{{\"verdict\":\"approve|request_changes|blocked\",\"summary\":\"...\",\"findings\":[...],\"impact_scope\":[\"...\"],\"pr_description\":\"...\",\"commit_message_suggestion\":\"...\"}}\n",
+            attempt.project_id,
+            attempt.issue_id,
+            attempt.work_item_id,
+            attempt.id,
+            attempt.branch_name,
+            review_request.id,
+            review_request.remote,
+            review_request.commit_sha,
+            work_item.unwrap_or_else(
+                || "未找到 Work Item markdown，上下文仅包含 attempt 元数据。".to_string()
+            ),
+            truncate_prompt_section(&diff, 30_000)
+        ))
+    }
+
+    fn work_item_markdown_for_attempt(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<Option<String>, ProductStoreError> {
+        let lifecycle = LifecycleStore::new(self.store.paths());
+        let sessions = lifecycle.list_workspace_sessions(&attempt.project_id, &attempt.issue_id)?;
+        let Some(session) = sessions.iter().rev().find(|session| {
+            session.entity_id == attempt.work_item_id
+                && session.workspace_type == WorkspaceType::WorkItem
+        }) else {
+            return Ok(None);
+        };
+        Ok(lifecycle
+            .list_artifact_versions(&session.id)?
+            .into_iter()
+            .last()
+            .map(|version| version.markdown))
     }
 
     fn build_code_review_report(
@@ -1170,7 +1606,7 @@ impl CodingWorkspaceEngine {
             &attempt.issue_id,
             &attempt.id,
         )?;
-        let payload = parse_code_review_payload(full_output);
+        let payload = parse_review_payload(full_output, CodingExecutionStage::CodeReview);
         Ok(CodeReviewReport {
             id: next_sequential_id("code_review", existing.len()),
             attempt_id: attempt.id.clone(),
@@ -1195,18 +1631,78 @@ impl CodingWorkspaceEngine {
             &attempt.issue_id,
             &attempt.id,
         )?;
-        let payload = parse_code_review_payload(full_output);
+        let payload = parse_review_payload(full_output, CodingExecutionStage::InternalPrReview);
         Ok(InternalPrReview {
             id: next_sequential_id("internal_review", existing.len()),
             attempt_id: attempt.id.clone(),
             review_request_id: review_request.id.clone(),
             verdict: payload.verdict,
             findings: payload.findings,
+            impact_scope: payload.impact_scope,
+            pr_description: payload.pr_description,
+            commit_message_suggestion: payload.commit_message_suggestion,
             tested_evidence_refs: payload.tested_evidence_refs,
             diff_refs: payload.diff_refs,
             summary: payload.summary,
             created_at: Utc::now().to_rfc3339(),
         })
+    }
+
+    async fn emit_code_review_chat_entry(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        node_id: &str,
+        report: &CodeReviewReport,
+    ) {
+        let entry = CodingChatEntry {
+            id: format!("{node_id}_code_review_report"),
+            attempt_id: attempt.id.clone(),
+            node_id: Some(node_id.to_string()),
+            role: CodingAgentRole::Reviewer,
+            entry_type: CodingEntryType::AssistantMessage,
+            content: Some(report.summary.clone()),
+            metadata: Some(serde_json::json!({
+                "source": "code_review",
+                "review_id": &report.id,
+                "verdict": &report.verdict,
+                "findings_count": report.findings.len(),
+            })),
+            created_at: Utc::now().to_rfc3339(),
+        };
+        self.save_and_emit_chat_entry(entry).await;
+    }
+
+    async fn emit_internal_pr_review_chat_entry(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        node_id: &str,
+        review: &InternalPrReview,
+    ) {
+        let entry = CodingChatEntry {
+            id: format!("{node_id}_internal_pr_review"),
+            attempt_id: attempt.id.clone(),
+            node_id: Some(node_id.to_string()),
+            role: CodingAgentRole::Reviewer,
+            entry_type: CodingEntryType::AssistantMessage,
+            content: Some(review.summary.clone()),
+            metadata: Some(serde_json::json!({
+                "source": "internal_pr_review",
+                "review_id": &review.id,
+                "review_request_id": &review.review_request_id,
+                "verdict": &review.verdict,
+                "impact_scope": &review.impact_scope,
+            })),
+            created_at: Utc::now().to_rfc3339(),
+        };
+        self.save_and_emit_chat_entry(entry).await;
+    }
+
+    async fn save_and_emit_chat_entry(&self, entry: CodingChatEntry) {
+        let _ = self.store.save_chat_entry(&entry);
+        let _ = self
+            .event_tx
+            .send(CodingWsOutMessage::CodingChatEntryCreated { entry })
+            .await;
     }
 
     fn active_worktree_prepare_node_id(
@@ -1302,6 +1798,258 @@ impl CodingWorkspaceEngine {
             .await;
         Ok(())
     }
+
+    async fn emit_analyst_verdict_entry(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        node_id: &str,
+        rework_round: u32,
+        source_stage: &CodingExecutionStage,
+        decision: &AnalystDecision,
+    ) {
+        let mut metadata = serde_json::json!({
+            "source": "analyst",
+            "source_stage": source_stage,
+            "rework_round": rework_round,
+        });
+        if let Some(object) = metadata.as_object_mut() {
+            if !decision.fix_hints.is_empty() {
+                object.insert(
+                    "fix_hints".to_string(),
+                    serde_json::json!(&decision.fix_hints),
+                );
+            }
+            if !decision.questions.is_empty() {
+                object.insert(
+                    "questions".to_string(),
+                    serde_json::json!(&decision.questions),
+                );
+            }
+            if let Some(parse_error) = decision.parse_error.as_ref() {
+                object.insert("parse_error".to_string(), serde_json::json!(parse_error));
+            }
+        }
+        let entry = CodingChatEntry {
+            id: format!("{node_id}_analyst_verdict"),
+            attempt_id: attempt.id.clone(),
+            node_id: Some(node_id.to_string()),
+            role: CodingAgentRole::System,
+            entry_type: CodingEntryType::AnalystVerdict {
+                verdict: decision.verdict.clone(),
+            },
+            content: Some(decision.summary.clone()),
+            metadata: Some(metadata),
+            created_at: Utc::now().to_rfc3339(),
+        };
+        self.save_and_emit_chat_entry(entry).await;
+    }
+
+    async fn emit_rewrite_limit_warning_entry(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        node_id: &str,
+        rework_round: u32,
+        decision: &AnalystDecision,
+    ) {
+        let message = "已达到自动重写上限，跳过 Coding 并进入 CodeReview。".to_string();
+        let entry = CodingChatEntry {
+            id: format!("{node_id}_rewrite_limit_warning"),
+            attempt_id: attempt.id.clone(),
+            node_id: Some(node_id.to_string()),
+            role: CodingAgentRole::System,
+            entry_type: CodingEntryType::SystemEvent {
+                event_type: "exceeded_rewrite_limit".to_string(),
+                message: message.clone(),
+            },
+            content: Some(message),
+            metadata: Some(serde_json::json!({
+                "source": "analyst",
+                "rework_round": rework_round,
+                "rework_count": attempt.rework_count,
+                "max_auto_rework": attempt.max_auto_rework,
+                "analyst_summary": &decision.summary,
+            })),
+            created_at: Utc::now().to_rfc3339(),
+        };
+        self.save_and_emit_chat_entry(entry).await;
+    }
+
+    async fn complete_attempt_after_final_rework(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
+        let staged = self.store.update_attempt_stage(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingExecutionStage::FinalConfirm,
+        )?;
+        let completed = self.store.update_attempt_status(
+            &staged.project_id,
+            &staged.issue_id,
+            &staged.id,
+            CodingAttemptStatus::Completed,
+        )?;
+        self.mark_work_item_completed_if_present(&completed)?;
+        let node = self.create_completed_final_confirm_timeline_node(&completed)?;
+        let _ = self
+            .event_tx
+            .send(CodingWsOutMessage::CodingTimelineNodeCreated { node })
+            .await;
+        Ok(completed)
+    }
+
+    fn mark_work_item_completed_if_present(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<(), ProductStoreError> {
+        let lifecycle = LifecycleStore::new(self.store.paths());
+        let exists = lifecycle
+            .list_work_items(&attempt.project_id, &attempt.issue_id)?
+            .iter()
+            .any(|work_item| work_item.id == attempt.work_item_id);
+        if exists {
+            lifecycle.update_work_item_execution_status(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.work_item_id,
+                WorkItemStatus::Completed,
+            )?;
+        }
+        Ok(())
+    }
+
+    async fn apply_analyst_decision(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        node_id: &str,
+        source_stage: &CodingExecutionStage,
+        rework_round: u32,
+        decision: &AnalystDecision,
+    ) -> Result<
+        (CodingExecutionAttempt, CodingTimelineNodeStatus, String),
+        CodingWorkspaceEngineError,
+    > {
+        match decision.verdict {
+            AnalystVerdict::NeedsFix => {
+                if attempt.rework_count < attempt.max_auto_rework {
+                    let existing = self.store.list_rework_instructions(
+                        &attempt.project_id,
+                        &attempt.issue_id,
+                        &attempt.id,
+                    )?;
+                    let instruction = CodingReworkInstruction {
+                        id: next_sequential_id("coding_rework_instruction", existing.len()),
+                        attempt_id: attempt.id.clone(),
+                        source_stage: source_stage.clone(),
+                        rework_round,
+                        summary: decision.summary.clone(),
+                        fix_hints: decision.fix_hints.clone(),
+                        questions: decision.questions.clone(),
+                        created_at: Utc::now().to_rfc3339(),
+                        consumed_by_node_id: None,
+                        consumed_at: None,
+                    };
+                    self.store.save_rework_instruction(&instruction)?;
+                    let updated = self.store.increment_attempt_rework_count(
+                        &attempt.project_id,
+                        &attempt.issue_id,
+                        &attempt.id,
+                    )?;
+                    let updated = self.store.update_attempt_stage(
+                        &updated.project_id,
+                        &updated.issue_id,
+                        &updated.id,
+                        CodingExecutionStage::Coding,
+                    )?;
+                    Ok((
+                        updated,
+                        CodingTimelineNodeStatus::Completed,
+                        format!("NeedsFix: {}", decision.summary),
+                    ))
+                } else {
+                    self.emit_rewrite_limit_warning_entry(attempt, node_id, rework_round, decision)
+                        .await;
+                    let updated = self.store.update_attempt_stage(
+                        &attempt.project_id,
+                        &attempt.issue_id,
+                        &attempt.id,
+                        CodingExecutionStage::CodeReview,
+                    )?;
+                    Ok((
+                        updated,
+                        CodingTimelineNodeStatus::Completed,
+                        format!("NeedsFix: {}；已达到自动重写上限", decision.summary),
+                    ))
+                }
+            }
+            AnalystVerdict::NeedsHumanInput => {
+                let updated = self.store.update_attempt_status(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &attempt.id,
+                    CodingAttemptStatus::WaitingForHuman,
+                )?;
+                Ok((
+                    updated,
+                    CodingTimelineNodeStatus::Blocked,
+                    format!("NeedsHumanInput: {}", decision.summary),
+                ))
+            }
+            AnalystVerdict::NoIssue => {
+                let updated = match source_stage {
+                    CodingExecutionStage::Testing => self.store.update_attempt_stage(
+                        &attempt.project_id,
+                        &attempt.issue_id,
+                        &attempt.id,
+                        CodingExecutionStage::CodeReview,
+                    )?,
+                    CodingExecutionStage::CodeReview => self.store.update_attempt_stage(
+                        &attempt.project_id,
+                        &attempt.issue_id,
+                        &attempt.id,
+                        CodingExecutionStage::ReviewRequest,
+                    )?,
+                    CodingExecutionStage::InternalPrReview => {
+                        self.complete_attempt_after_final_rework(attempt).await?
+                    }
+                    _ => self.store.update_attempt_stage(
+                        &attempt.project_id,
+                        &attempt.issue_id,
+                        &attempt.id,
+                        CodingExecutionStage::CodeReview,
+                    )?,
+                };
+                Ok((
+                    updated,
+                    CodingTimelineNodeStatus::Completed,
+                    format!("NoIssue: {}", decision.summary),
+                ))
+            }
+        }
+    }
+
+    async fn emit_tester_tool_result_entry(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        node_id: &str,
+        sequence: &mut usize,
+        result: ProviderToolResult,
+    ) {
+        let entry = tester_chat_entry(
+            attempt,
+            node_id,
+            sequence,
+            CodingEntryType::ToolResult {
+                tool_use_id: result.tool_use_id,
+                output: result.output,
+                is_error: result.is_error,
+            },
+            None,
+            None,
+        );
+        self.save_and_emit_chat_entry(entry).await;
+    }
 }
 
 fn worktree_path_for_attempt(repo_path: &Path, attempt: &CodingExecutionAttempt) -> PathBuf {
@@ -1323,6 +2071,7 @@ fn provider_type_for_name(provider: &ProviderName) -> ProviderType {
 fn build_coding_prompt(
     attempt: &CodingExecutionAttempt,
     context: &CodingExecutionContext,
+    rework_instruction: Option<&CodingReworkInstruction>,
 ) -> String {
     let mut prompt = format!(
         "Coding Workspace\n\
@@ -1345,10 +2094,33 @@ fn build_coding_prompt(
             prompt.push('\n');
         }
     }
+
     if let Some(markdown) = context.work_item_markdown.as_deref() {
         prompt.push_str("\n已确认 Work Item:\n````markdown\n");
         prompt.push_str(markdown.trim());
         prompt.push_str("\n````\n");
+    }
+    if let Some(instruction) = rework_instruction {
+        prompt.push_str("\n上一轮返修要求:\n");
+        prompt.push_str(&format!(
+            "- 来源阶段: {:?}\n- 摘要: {}\n",
+            instruction.source_stage, instruction.summary
+        ));
+        if !instruction.fix_hints.is_empty() {
+            prompt.push_str("- 修复提示:\n");
+            for (index, hint) in instruction.fix_hints.iter().enumerate() {
+                prompt.push_str(&format!("  {}. {}\n", index + 1, hint));
+            }
+        }
+        if !instruction.questions.is_empty() {
+            prompt.push_str("- 待澄清问题:\n");
+            for (index, question) in instruction.questions.iter().enumerate() {
+                prompt.push_str(&format!("  {}. {}\n", index + 1, question));
+            }
+        }
+        prompt.push_str(
+            "\n本轮必须优先修复上述问题。完成前请检查 git diff/status，确认 reviewer 指出的文件或行为已处理。\n",
+        );
     }
     prompt.push_str(
         "\n执行要求:\n\
@@ -1359,65 +2131,352 @@ fn build_coding_prompt(
     prompt
 }
 
-fn build_code_review_prompt(attempt: &CodingExecutionAttempt) -> String {
-    format!(
-        "Coding Workspace Code Review\nProject: {}\nIssue: {}\nWork Item: {}\nAttempt: {}\nBranch: {}\nReturn JSON with verdict, summary, findings.\n",
-        attempt.project_id, attempt.issue_id, attempt.work_item_id, attempt.id, attempt.branch_name
-    )
-}
-
-fn build_rework_prompt(attempt: &CodingExecutionAttempt, evidence: &str) -> String {
-    format!(
-        "Coding Workspace Rework\nProject: {}\nIssue: {}\nWork Item: {}\nAttempt: {}\nBranch: {}\nRework Count: {}\nEvidence:\n{}\n",
-        attempt.project_id,
-        attempt.issue_id,
-        attempt.work_item_id,
-        attempt.id,
-        attempt.branch_name,
-        attempt.rework_count,
-        evidence
-    )
-}
-
-fn build_internal_pr_review_prompt(
+fn build_rework_prompt(
     attempt: &CodingExecutionAttempt,
-    review_request: &ReviewRequest,
+    evidence: &str,
+    source_stage: &CodingExecutionStage,
+    rework_round: u32,
+    context_notes: &ReworkContextNoteInput,
 ) -> String {
     format!(
-        "Coding Workspace Internal PR Review\nProject: {}\nIssue: {}\nWork Item: {}\nAttempt: {}\nBranch: {}\nReview Request: {}\nCommit: {}\nReturn JSON with verdict, summary, findings.\n",
+        "Coding Workspace Rework 分析官\n\
+         你是 Coding Workspace Rework 分析官，只做分析和路由决策。\n\
+         严格要求：不要修改代码，不要调用 tool_use，不要执行命令。\n\
+         仅根据上一阶段 summary/evidence 与本轮新增 ContextNote 输出 JSON AnalystVerdict。\n\
+         JSON 格式：{{\"verdict\":\"needs_fix|needs_human_input|no_issue\",\"summary\":\"...\",\"fix_hints\":[\"...\"],\"questions\":[\"...\"]}}\n\
+         Project: {}\n\
+         Issue: {}\n\
+         Work Item: {}\n\
+         Attempt: {}\n\
+         Branch: {}\n\
+         Previous Stage: {:?}\n\
+         Rework Round: {}\n\
+         ContextNotes Truncated: {}\n\
+         \n上一阶段 summary/evidence:\n{}\n\
+         \n本轮新增 ContextNote:\n{}\n",
         attempt.project_id,
         attempt.issue_id,
         attempt.work_item_id,
         attempt.id,
         attempt.branch_name,
-        review_request.id,
-        review_request.commit_sha
+        source_stage,
+        rework_round,
+        context_notes.truncated,
+        evidence,
+        context_notes.text
     )
+}
+
+fn provider_prompt_event(
+    node_id: &str,
+    provider: &ProviderName,
+    prompt: String,
+) -> WsExecutionEvent {
+    WsExecutionEvent {
+        event_id: format!("{node_id}_prompt"),
+        node_id: Some(node_id.to_string()),
+        agent: Some(provider.clone()),
+        kind: WsExecutionEventKind::Output,
+        status: WsExecutionEventStatus::Started,
+        title: "Provider Prompt".to_string(),
+        detail: Some("发送给 Coding provider 的完整提示词".to_string()),
+        command: None,
+        cwd: None,
+        output: Some(prompt),
+        exit_code: None,
+    }
+}
+
+fn tester_chat_entry(
+    attempt: &CodingExecutionAttempt,
+    node_id: &str,
+    sequence: &mut usize,
+    entry_type: CodingEntryType,
+    content: Option<String>,
+    metadata: Option<serde_json::Value>,
+) -> CodingChatEntry {
+    let entry = CodingChatEntry {
+        id: format!("coding_chat_entry_{:04}", *sequence),
+        attempt_id: attempt.id.clone(),
+        node_id: Some(node_id.to_string()),
+        role: CodingAgentRole::Tester,
+        entry_type,
+        content,
+        metadata,
+        created_at: Utc::now().to_rfc3339(),
+    };
+    *sequence += 1;
+    entry
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReworkContextNoteInput {
+    text: String,
+    truncated: bool,
+}
+
+fn format_rework_context_notes(
+    notes: &[CodingContextNote],
+    limit: usize,
+) -> ReworkContextNoteInput {
+    if notes.is_empty() {
+        return ReworkContextNoteInput {
+            text: "无".to_string(),
+            truncated: false,
+        };
+    }
+    let blocks = notes
+        .iter()
+        .map(|note| {
+            format!(
+                "- ContextNote {} ({})\n{}",
+                note.id,
+                note.created_at,
+                note.content.trim()
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut remaining = limit;
+    let mut selected = Vec::new();
+    let mut truncated = false;
+
+    for block in blocks.iter().rev() {
+        let block_len = block.chars().count();
+        if block_len <= remaining {
+            selected.push(block.clone());
+            remaining -= block_len;
+            continue;
+        }
+
+        truncated = true;
+        let marker = "[...已截断最早 ContextNote...]\n";
+        let marker_len = marker.chars().count();
+        if remaining > marker_len {
+            let partial = take_last_chars(block, remaining - marker_len);
+            selected.push(format!("{marker}{partial}"));
+        }
+        break;
+    }
+
+    if selected.len() < blocks.len() {
+        truncated = true;
+    }
+    selected.reverse();
+    let mut text = selected.join("\n");
+    if text.chars().count() > limit {
+        text = take_last_chars(&text, limit);
+        truncated = true;
+    }
+
+    ReworkContextNoteInput { text, truncated }
+}
+
+fn take_last_chars(value: &str, limit: usize) -> String {
+    let chars = value.chars().collect::<Vec<_>>();
+    let start = chars.len().saturating_sub(limit);
+    chars[start..].iter().collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AnalystDecision {
+    verdict: AnalystVerdict,
+    summary: String,
+    fix_hints: Vec<String>,
+    questions: Vec<String>,
+    parse_error: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
+struct AnalystProviderPayload {
+    verdict: AnalystVerdict,
+    #[serde(default)]
+    summary: Option<String>,
+    #[serde(default)]
+    fix_hints: Vec<String>,
+    #[serde(default)]
+    questions: Vec<String>,
+}
+
+fn parse_analyst_verdict(full_output: &str) -> AnalystDecision {
+    let Some(json_text) = extract_json_object(full_output) else {
+        return AnalystDecision {
+            verdict: AnalystVerdict::NeedsHumanInput,
+            summary: "Analyst 输出不是有效 JSON，已转人工确认。".to_string(),
+            fix_hints: Vec::new(),
+            questions: vec!["请人工确认 Analyst 输出并补充下一步处理意见。".to_string()],
+            parse_error: Some("missing_json_object".to_string()),
+        };
+    };
+
+    match serde_json::from_str::<AnalystProviderPayload>(json_text) {
+        Ok(payload) => {
+            let summary = payload
+                .summary
+                .as_deref()
+                .and_then(non_empty_trimmed)
+                .unwrap_or_else(|| default_analyst_summary(&payload.verdict));
+            AnalystDecision {
+                verdict: payload.verdict,
+                summary,
+                fix_hints: payload.fix_hints,
+                questions: payload.questions,
+                parse_error: None,
+            }
+        }
+        Err(error) => AnalystDecision {
+            verdict: AnalystVerdict::NeedsHumanInput,
+            summary: "Analyst 输出不是有效 JSON，已转人工确认。".to_string(),
+            fix_hints: Vec::new(),
+            questions: vec!["请人工确认 Analyst 输出并补充下一步处理意见。".to_string()],
+            parse_error: Some(error.to_string()),
+        },
+    }
+}
+
+fn extract_json_object(value: &str) -> Option<&str> {
+    let start = value.find('{')?;
+    let end = value.rfind('}')?;
+    (start <= end).then(|| &value[start..=end])
+}
+
+fn default_analyst_summary(verdict: &AnalystVerdict) -> String {
+    match verdict {
+        AnalystVerdict::NeedsFix => "Analyst 判定需要自动修复".to_string(),
+        AnalystVerdict::NeedsHumanInput => "Analyst 判定需要人工补充信息".to_string(),
+        AnalystVerdict::NoIssue => "Analyst 未发现阻塞问题".to_string(),
+    }
+}
+
+#[derive(Debug)]
 struct CodeReviewProviderPayload {
     verdict: ReviewVerdict,
     summary: String,
-    #[serde(default)]
     findings: Vec<ReviewFinding>,
+    impact_scope: Vec<String>,
+    pr_description: String,
+    commit_message_suggestion: String,
+    tested_evidence_refs: Vec<String>,
+    diff_refs: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawCodeReviewProviderPayload {
+    verdict: ReviewVerdict,
+    #[serde(default)]
+    summary: String,
+    #[serde(default)]
+    findings: Vec<RawReviewFinding>,
+    #[serde(default)]
+    impact_scope: Vec<String>,
+    #[serde(default)]
+    pr_description: String,
+    #[serde(default)]
+    commit_message_suggestion: String,
     #[serde(default)]
     tested_evidence_refs: Vec<String>,
     #[serde(default)]
     diff_refs: Vec<String>,
 }
 
-fn parse_code_review_payload(full_output: &str) -> CodeReviewProviderPayload {
-    serde_json::from_str(full_output).unwrap_or_else(|_| CodeReviewProviderPayload {
-        verdict: ReviewVerdict::Approve,
-        summary: non_empty_trimmed(full_output).unwrap_or_else(|| "code review 通过".to_string()),
+#[derive(Debug, Deserialize)]
+struct RawReviewFinding {
+    severity: crate::product::coding_models::FindingSeverity,
+    #[serde(default, alias = "file")]
+    file_path: Option<String>,
+    #[serde(default)]
+    line: Option<u32>,
+    #[serde(default, alias = "description")]
+    message: Option<String>,
+    #[serde(default, alias = "recommendation")]
+    required_action: Option<String>,
+    #[serde(default)]
+    source_stage: Option<CodingExecutionStage>,
+    #[serde(default)]
+    title: Option<String>,
+}
+
+fn parse_review_payload(
+    full_output: &str,
+    default_source_stage: CodingExecutionStage,
+) -> CodeReviewProviderPayload {
+    let json = extract_json_object(full_output).unwrap_or(full_output);
+    match serde_json::from_str::<RawCodeReviewProviderPayload>(json) {
+        Ok(raw) => raw.into_payload(default_source_stage),
+        Err(_) => blocked_review_payload(full_output),
+    }
+}
+
+impl RawCodeReviewProviderPayload {
+    fn into_payload(self, default_source_stage: CodingExecutionStage) -> CodeReviewProviderPayload {
+        let verdict = self.verdict;
+        CodeReviewProviderPayload {
+            summary: non_empty_trimmed(&self.summary)
+                .unwrap_or_else(|| default_review_summary(&verdict)),
+            verdict,
+            findings: self
+                .findings
+                .into_iter()
+                .map(|finding| finding.into_review_finding(default_source_stage.clone()))
+                .collect(),
+            impact_scope: self.impact_scope,
+            pr_description: self.pr_description,
+            commit_message_suggestion: self.commit_message_suggestion,
+            tested_evidence_refs: self.tested_evidence_refs,
+            diff_refs: self.diff_refs,
+        }
+    }
+}
+
+impl RawReviewFinding {
+    fn into_review_finding(self, default_source_stage: CodingExecutionStage) -> ReviewFinding {
+        ReviewFinding {
+            severity: self.severity,
+            file_path: self.file_path,
+            line: self.line,
+            message: self
+                .message
+                .or(self.title)
+                .unwrap_or_else(|| "review finding".to_string()),
+            required_action: self.required_action,
+            source_stage: self.source_stage.unwrap_or(default_source_stage),
+        }
+    }
+}
+
+fn blocked_review_payload(full_output: &str) -> CodeReviewProviderPayload {
+    CodeReviewProviderPayload {
+        verdict: ReviewVerdict::Blocked,
+        summary: format!(
+            "review 输出不是有效 JSON，已阻塞并等待人工确认: {}",
+            non_empty_trimmed(full_output).unwrap_or_else(|| "<empty>".to_string())
+        ),
         findings: Vec::new(),
+        impact_scope: Vec::new(),
+        pr_description: String::new(),
+        commit_message_suggestion: String::new(),
         tested_evidence_refs: Vec::new(),
         diff_refs: Vec::new(),
-    })
+    }
+}
+
+fn default_review_summary(verdict: &ReviewVerdict) -> String {
+    match verdict {
+        ReviewVerdict::Approve => "review 通过".to_string(),
+        ReviewVerdict::RequestChanges => "review 要求修改".to_string(),
+        ReviewVerdict::Blocked => "review 被阻塞".to_string(),
+    }
 }
 
 fn non_empty_trimmed(value: &str) -> Option<String> {
     let trimmed = value.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn truncate_prompt_section(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    let mut truncated: String = value.chars().take(max_chars).collect();
+    truncated.push_str("\n[truncated]");
+    truncated
 }

@@ -125,6 +125,35 @@ impl GitWorkspaceService {
             .map(|_| ())
     }
 
+    pub async fn git_add_work_item_changes(
+        &self,
+        worktree_path: &Path,
+    ) -> Result<(), GitWorkspaceError> {
+        ensure_git_repo(worktree_path).await?;
+        self.run_git(worktree_path, &["add", "-A"]).await?;
+        let output = self
+            .run_git(worktree_path, &["diff", "--cached", "--name-only", "-z"])
+            .await?;
+        for path in output.stdout.split('\0').filter(|path| !path.is_empty()) {
+            if should_exclude_from_work_item_commit(path) {
+                self.run_git(worktree_path, &["restore", "--staged", "--", path])
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn git_has_staged_changes(
+        &self,
+        worktree_path: &Path,
+    ) -> Result<bool, GitWorkspaceError> {
+        ensure_git_repo(worktree_path).await?;
+        let output = self
+            .run_git(worktree_path, &["diff", "--cached", "--name-only", "-z"])
+            .await?;
+        Ok(!output.stdout.is_empty())
+    }
+
     pub async fn git_commit(
         &self,
         worktree_path: &Path,
@@ -208,6 +237,16 @@ impl GitWorkspaceService {
             insertions: total_insertions,
             deletions: total_deletions,
         })
+    }
+
+    pub async fn git_diff(
+        &self,
+        worktree_path: &Path,
+        base_branch: &str,
+    ) -> Result<String, GitWorkspaceError> {
+        ensure_git_repo(worktree_path).await?;
+        let output = self.run_git(worktree_path, &["diff", base_branch]).await?;
+        Ok(output.stdout)
     }
 
     async fn run_git(
@@ -369,6 +408,15 @@ fn parse_status_line(line: &str) -> FileStatus {
     let code = line.get(0..2).unwrap_or("").trim().to_string();
     let path = line.get(3..).unwrap_or("").to_string();
     FileStatus { code, path }
+}
+
+fn should_exclude_from_work_item_commit(path: &str) -> bool {
+    path == ".aria"
+        || path.starts_with(".aria/coding-artifacts/")
+        || path == "__pycache__"
+        || path.starts_with("__pycache__/")
+        || path.contains("/__pycache__/")
+        || path.ends_with(".pyc")
 }
 
 fn parse_numstat_line(line: &str) -> Result<DiffFileStat, GitWorkspaceError> {

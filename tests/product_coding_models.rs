@@ -1,15 +1,174 @@
 use std::path::PathBuf;
 
 use cadence_aria::product::coding_models::{
-    CodeReviewReport, CodingAgentRole, CodingAttemptStatus, CodingExecutionAttempt,
-    CodingExecutionStage, CodingGateAction, CodingGateActionType, CodingGateKind,
-    CodingGateRequired, CodingTimelineNode, CodingTimelineNodeStatus, FindingSeverity,
-    InternalPrReview, PushStatus, RemoteKind, ReviewFinding, ReviewRequest, ReviewRequestKind,
-    ReviewVerdict, TestCommand, TestCommandStatus, TestingOverallStatus, TestingReport,
+    AnalystVerdict, CodeReviewReport, CodingAgentRole, CodingAttemptStatus, CodingChatEntry,
+    CodingContextNote, CodingEntryType, CodingExecutionAttempt, CodingExecutionStage,
+    CodingGateAction, CodingGateActionType, CodingGateKind, CodingGateRequired, CodingProviderRole,
+    CodingRoleProviderConfigSnapshot, CodingStageGateState, CodingStageGateStatus,
+    CodingTimelineNode, CodingTimelineNodeStatus, FindingSeverity, InternalPrReview, PushStatus,
+    RemoteKind, ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict, TestCommand,
+    TestCommandStatus, TestingOverallStatus, TestingReport,
 };
 use cadence_aria::product::models::ProviderName;
 use cadence_aria::web::workspace_ws_types::ProviderConfigSnapshot;
 use serde_json::json;
+
+#[test]
+fn coding_provider_roles_use_stable_wire_values_and_display_names() {
+    assert_eq!(
+        serde_json::to_value(CodingProviderRole::Coder).expect("serialize coder"),
+        json!("coder")
+    );
+    assert_eq!(
+        serde_json::to_value(CodingProviderRole::Tester).expect("serialize tester"),
+        json!("tester")
+    );
+    assert_eq!(
+        serde_json::to_value(CodingProviderRole::Analyst).expect("serialize analyst"),
+        json!("analyst")
+    );
+    assert_eq!(
+        serde_json::to_value(CodingProviderRole::CodeReviewer).expect("serialize code reviewer"),
+        json!("code_reviewer")
+    );
+    assert_eq!(
+        serde_json::to_value(CodingProviderRole::InternalReviewer)
+            .expect("serialize internal reviewer"),
+        json!("internal_reviewer")
+    );
+
+    assert_eq!(CodingProviderRole::Coder.to_string(), "Coder");
+    assert_eq!(CodingProviderRole::Tester.to_string(), "Tester");
+    assert_eq!(CodingProviderRole::Analyst.to_string(), "Analyst");
+    assert_eq!(
+        CodingProviderRole::CodeReviewer.to_string(),
+        "Code Reviewer"
+    );
+    assert_eq!(
+        CodingProviderRole::InternalReviewer.to_string(),
+        "Internal Reviewer"
+    );
+}
+
+#[test]
+fn coding_role_provider_config_snapshot_derives_from_legacy_provider_snapshot() {
+    let snapshot = CodingRoleProviderConfigSnapshot::from(ProviderConfigSnapshot {
+        author: ProviderName::Codex,
+        reviewer: Some(ProviderName::Fake),
+        review_rounds: 2,
+    });
+
+    assert_eq!(snapshot.coder, ProviderName::Codex);
+    assert_eq!(snapshot.tester, ProviderName::Codex);
+    assert_eq!(snapshot.analyst, ProviderName::Codex);
+    assert_eq!(snapshot.code_reviewer, ProviderName::Fake);
+    assert_eq!(snapshot.internal_reviewer, ProviderName::Fake);
+    assert_eq!(snapshot.review_rounds, 2);
+
+    let value = serde_json::to_value(snapshot).expect("serialize role provider snapshot");
+    assert_eq!(
+        value,
+        json!({
+            "coder": "codex",
+            "tester": "codex",
+            "analyst": "codex",
+            "code_reviewer": "fake",
+            "internal_reviewer": "fake",
+            "review_rounds": 2
+        })
+    );
+}
+
+#[test]
+fn coding_role_provider_config_snapshot_falls_back_to_author_when_reviewer_is_missing() {
+    let snapshot = CodingRoleProviderConfigSnapshot::from(ProviderConfigSnapshot {
+        author: ProviderName::ClaudeCode,
+        reviewer: None,
+        review_rounds: 1,
+    });
+
+    assert_eq!(snapshot.coder, ProviderName::ClaudeCode);
+    assert_eq!(snapshot.tester, ProviderName::ClaudeCode);
+    assert_eq!(snapshot.analyst, ProviderName::ClaudeCode);
+    assert_eq!(snapshot.code_reviewer, ProviderName::ClaudeCode);
+    assert_eq!(snapshot.internal_reviewer, ProviderName::ClaudeCode);
+}
+
+#[test]
+fn coding_chat_entries_context_notes_and_analyst_verdicts_have_stable_json_shape() {
+    let entry = CodingChatEntry {
+        id: "coding_chat_entry_0001".to_string(),
+        attempt_id: "coding_attempt_0001".to_string(),
+        node_id: Some("coding_node_0001".to_string()),
+        role: CodingAgentRole::System,
+        entry_type: CodingEntryType::AnalystVerdict {
+            verdict: AnalystVerdict::NeedsHumanInput,
+        },
+        content: Some("需要用户补充仓库路径".to_string()),
+        metadata: Some(json!({"source": "analyst"})),
+        created_at: "2026-05-28T00:00:00Z".to_string(),
+    };
+    let note = CodingContextNote {
+        id: "coding_context_note_0001".to_string(),
+        attempt_id: "coding_attempt_0001".to_string(),
+        content: "请优先使用 unittest".to_string(),
+        created_at: "2026-05-28T00:01:00Z".to_string(),
+        consumed_by_rework_round: None,
+    };
+
+    let entry_value = serde_json::to_value(&entry).expect("serialize chat entry");
+    assert_eq!(entry_value["entry_type"]["type"], "analyst_verdict");
+    assert_eq!(entry_value["entry_type"]["verdict"], "needs_human_input");
+    assert_eq!(entry_value["node_id"], "coding_node_0001");
+    assert_eq!(entry_value["role"], "system");
+
+    let decoded_entry: CodingChatEntry =
+        serde_json::from_value(entry_value).expect("deserialize chat entry");
+    assert_eq!(decoded_entry, entry);
+
+    let note_value = serde_json::to_value(&note).expect("serialize context note");
+    assert_eq!(
+        note_value["consumed_by_rework_round"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        serde_json::from_value::<CodingContextNote>(note_value).unwrap(),
+        note
+    );
+}
+
+#[test]
+fn coding_stage_gate_state_serializes_open_gate_contract() {
+    let gate = CodingStageGateState {
+        gate_id: "coding_stage_gate_0001".to_string(),
+        attempt_id: "coding_attempt_0001".to_string(),
+        stage: CodingExecutionStage::Testing,
+        role: CodingProviderRole::Tester,
+        expires_at: "2026-05-28T00:00:05Z".to_string(),
+        provider_snapshot: CodingRoleProviderConfigSnapshot {
+            coder: ProviderName::Codex,
+            tester: ProviderName::Fake,
+            analyst: ProviderName::Codex,
+            code_reviewer: ProviderName::Fake,
+            internal_reviewer: ProviderName::Fake,
+            review_rounds: 1,
+        },
+        status: CodingStageGateStatus::Open,
+        created_at: "2026-05-28T00:00:00Z".to_string(),
+        updated_at: "2026-05-28T00:00:00Z".to_string(),
+    };
+
+    let value = serde_json::to_value(&gate).expect("serialize stage gate");
+
+    assert_eq!(value["status"], "open");
+    assert_eq!(value["stage"], "testing");
+    assert_eq!(value["role"], "tester");
+    assert_eq!(value["provider_snapshot"]["tester"], "fake");
+    assert_eq!(
+        serde_json::from_value::<CodingStageGateState>(value).expect("deserialize stage gate"),
+        gate
+    );
+}
 
 #[test]
 fn coding_attempt_serializes_stage_status_and_provider_snapshot() {
@@ -97,6 +256,9 @@ fn testing_and_review_reports_preserve_backend_evidence() {
         review_request_id: "review_request_0001".to_string(),
         verdict: ReviewVerdict::Approve,
         findings: vec![finding],
+        impact_scope: vec!["src/lib.rs".to_string()],
+        pr_description: "实现 work item".to_string(),
+        commit_message_suggestion: "feat: implement work item".to_string(),
         tested_evidence_refs: vec!["testing_report_0001".to_string()],
         diff_refs: vec!["diff_0001".to_string()],
         summary: "可以合入".to_string(),
@@ -115,6 +277,15 @@ fn testing_and_review_reports_preserve_backend_evidence() {
         serde_json::to_value(&internal).unwrap()["verdict"],
         "approve"
     );
+}
+
+#[test]
+fn review_finding_deserializes_provider_severity_aliases() {
+    let json = r#"{"severity":"medium","file_path":"src/lib.rs","line":1,"message":"fix","required_action":"change","source_stage":"code_review"}"#;
+
+    let finding: ReviewFinding = serde_json::from_str(json).expect("finding should parse");
+
+    assert_eq!(finding.severity, FindingSeverity::Warning);
 }
 
 #[test]
@@ -151,6 +322,10 @@ fn review_request_timeline_and_gate_actions_use_stable_wire_values() {
         kind: CodingGateKind::Blocked,
         title: "Push 失败".to_string(),
         description: "需要用户选择下一步".to_string(),
+        stage: None,
+        role: None,
+        expires_at: None,
+        provider_snapshot: None,
         available_actions: vec![CodingGateAction {
             action_id: "retry".to_string(),
             label: "重试 Push".to_string(),

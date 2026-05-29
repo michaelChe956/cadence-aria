@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useRef } from "react";
-import type { CodingWsInMessage, CodingWsOutMessage } from "../api/types";
+import type {
+  CodingProviderSelectRole,
+  CodingWsInMessage,
+  CodingWsOutMessage,
+  WorkspaceProviderName,
+} from "../api/types";
+import { codingChatEntryToChatEntry } from "../state/coding-chat-entry-mapping";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
 
 interface CodingWsServerMessage {
@@ -14,8 +20,9 @@ export function useCodingWorkspaceWs(attemptId: string | null) {
 
   const sendJson = useCallback((message: CodingWsInMessage) => {
     const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
     ws.send(JSON.stringify(message));
+    return true;
   }, []);
 
   const sendHello = useCallback(
@@ -36,7 +43,29 @@ export function useCodingWorkspaceWs(attemptId: string | null) {
 
   const sendContextNote = useCallback(
     (content: string) => {
-      sendJson({ type: "context_note", content });
+      if (!sendJson({ type: "context_note", content })) return;
+      useCodingWorkspaceStore.getState().appendChatEntry({
+        id: pendingContextNoteId(),
+        type: "context_note",
+        role: "user",
+        content,
+        timestamp: new Date().toISOString(),
+        metadata: { pending: true },
+      });
+    },
+    [sendJson],
+  );
+
+  const sendProviderSelect = useCallback(
+    (role: CodingProviderSelectRole, provider: WorkspaceProviderName) => {
+      sendJson({ type: "provider_select", role, provider });
+    },
+    [sendJson],
+  );
+
+  const confirmStageGate = useCallback(
+    (stage: Extract<CodingWsInMessage, { type: "stage_gate_confirm" }>["stage"]) => {
+      sendJson({ type: "stage_gate_confirm", stage });
     },
     [sendJson],
   );
@@ -198,6 +227,8 @@ export function useCodingWorkspaceWs(attemptId: string | null) {
   return {
     startCoding,
     sendContextNote,
+    sendProviderSelect,
+    confirmStageGate,
     respondPermission,
     respondGate,
     finalConfirm,
@@ -269,6 +300,19 @@ function handleCodingWsMessage(message: CodingWsServerMessage) {
         (message as Extract<CodingWsOutMessage, { type: "coding_gate_required" }>).gate,
       );
       break;
+    case "coding_chat_entry_created":
+      store.replacePendingEntry(
+        codingChatEntryToChatEntry(
+          (message as Extract<CodingWsOutMessage, { type: "coding_chat_entry_created" }>).entry,
+        ),
+      );
+      break;
+    case "coding_provider_config_updated":
+      store.updateProviderConfig(
+        (message as Extract<CodingWsOutMessage, { type: "coding_provider_config_updated" }>).role,
+        (message as Extract<CodingWsOutMessage, { type: "coding_provider_config_updated" }>).provider,
+      );
+      break;
     case "coding_protocol_error":
       store.setProtocolError({
         code: message.code as string,
@@ -278,4 +322,8 @@ function handleCodingWsMessage(message: CodingWsServerMessage) {
     case "coding_pong":
       break;
   }
+}
+
+function pendingContextNoteId() {
+  return `pending_context_note_${Date.now()}_${Math.random().toString(36).slice(2)}`;
 }

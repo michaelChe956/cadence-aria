@@ -247,7 +247,7 @@ async fn aborts_coding_attempt_and_allows_next_attempt_for_same_work_item() {
 }
 
 #[tokio::test]
-async fn returns_coding_attempt_artifact_content_from_attempt_worktree() {
+async fn reads_test_output_artifact_from_attempt_store() {
     let root = tempdir().expect("root");
     let repo = git_repo();
     let app = build_web_router(WebAppState::new(
@@ -263,19 +263,14 @@ async fn returns_coding_attempt_artifact_content_from_attempt_worktree() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let worktree = root.path().join("worktree");
-    let artifact_dir = worktree.join(".aria/coding-artifacts/test-output");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let artifact_dir = store.attempt_test_output_root(
+        "project_0001",
+        "issue_0001",
+        attempt["attempt_id"].as_str().expect("attempt id"),
+    );
     fs::create_dir_all(&artifact_dir).expect("artifact dir");
     fs::write(artifact_dir.join("unit.stdout.log"), "unit stdout\n").expect("artifact");
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
-    store
-        .update_attempt_worktree_path(
-            "project_0001",
-            "issue_0001",
-            attempt["attempt_id"].as_str().expect("attempt id"),
-            worktree,
-        )
-        .expect("update worktree");
 
     let (status, artifact) = request_json(
         app,
@@ -504,6 +499,9 @@ fn sample_internal_review(attempt_id: &str, review_request_id: &str) -> Internal
         review_request_id: review_request_id.to_string(),
         verdict: ReviewVerdict::Approve,
         findings: vec![sample_finding()],
+        impact_scope: vec!["src/lib.rs".to_string()],
+        pr_description: "实现 work item".to_string(),
+        commit_message_suggestion: "feat: implement work item".to_string(),
         tested_evidence_refs: vec!["testing_report_0001".to_string()],
         diff_refs: vec!["diff_0001".to_string()],
         summary: "最终审查通过".to_string(),

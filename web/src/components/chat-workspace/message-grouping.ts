@@ -3,7 +3,7 @@ import type { ChatEntry } from "../../state/chat-entries";
 export interface MessageGroup {
   id: string;
   nodeId?: string;
-  role: "author" | "reviewer";
+  role: ChatEntry["role"];
   primaryEntry?: ChatEntry;
   inlineEvents: ChatEntry[];
   interruptEntries: ChatEntry[];
@@ -18,6 +18,7 @@ const STANDALONE_ENTRY_TYPES = new Set<string>([
   "choice_response",
   "artifact_update",
   "review_verdict",
+  "analyst_verdict",
   "stage_change",
   "human_decision",
   "start_generation",
@@ -85,6 +86,6 @@ function isGroupableEntry(type: string) {
   return type === "provider_stream" || type === "execution_event" || INTERRUPT_ENTRY_TYPES.has(type);
 }
 
-function roleForEntry(entry: ChatEntry): "author" | "reviewer" {
-  return entry.role === "reviewer" ? "reviewer" : "author";
+function roleForEntry(entry: ChatEntry): ChatEntry["role"] {
+  return entry.role;
 }

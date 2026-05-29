@@ -19,6 +19,8 @@ function mockCodingWs(overrides: Partial<CodingWsApi> = {}) {
   const api: CodingWsApi = {
     startCoding: vi.fn(),
     sendContextNote: vi.fn(),
+    sendProviderSelect: vi.fn(),
+    confirmStageGate: vi.fn(),
     respondPermission: vi.fn(),
     respondGate: vi.fn(),
     finalConfirm: vi.fn(),
@@ -113,6 +115,71 @@ describe("CodingWorkspacePage", () => {
     expect(screen.getByTestId("coding-status-bar")).toHaveTextContent("testing");
   });
 
+  it("scrolls the chat list to the first entry for a selected timeline node", async () => {
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoView,
+    });
+    mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      attemptId: "coding_attempt_0001",
+      status: "running",
+      stage: "testing",
+      timelineNodes: [
+        {
+          id: "coding_node_0001",
+          attempt_id: "coding_attempt_0001",
+          stage: "coding",
+          title: "代码编写",
+          status: "completed",
+          agent_role: "author",
+          summary: "完成",
+          started_at: "2026-05-23T00:00:00Z",
+          completed_at: "2026-05-23T00:01:00Z",
+          artifact_refs: [],
+        },
+        {
+          id: "coding_node_0002",
+          attempt_id: "coding_attempt_0001",
+          stage: "testing",
+          title: "测试执行",
+          status: "running",
+          agent_role: "tester",
+          summary: null,
+          started_at: "2026-05-23T00:01:00Z",
+          completed_at: null,
+          artifact_refs: [],
+        },
+      ],
+      chatEntries: [
+        {
+          id: "entry-coding",
+          type: "provider_stream",
+          role: "coder",
+          content: "实现完成",
+          timestamp: "2026-05-23T00:00:30Z",
+          node_id: "coding_node_0001",
+        },
+        {
+          id: "entry-testing",
+          type: "provider_stream",
+          role: "tester",
+          content: "测试中",
+          timestamp: "2026-05-23T00:01:30Z",
+          node_id: "coding_node_0002",
+        },
+      ],
+    });
+
+    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+    scrollIntoView.mockClear();
+    await userEvent.click(screen.getByRole("button", { name: /测试执行/ }));
+
+    expect(useCodingWorkspaceStore.getState().selectedNodeId).toBe("coding_node_0002");
+    expect(scrollIntoView).toHaveBeenCalled();
+  });
+
   it("starts coding from prepare context", async () => {
     const api = mockCodingWs();
     useCodingWorkspaceStore.setState({
@@ -180,6 +247,127 @@ describe("CodingWorkspacePage", () => {
     await userEvent.click(screen.getByRole("button", { name: "接受风险" }));
 
     expect(api.respondGate).toHaveBeenCalledWith("gate_0001", "accept_risk", undefined);
+  });
+
+  it("sends stage gate confirm for confirm-stage pending gate actions", async () => {
+    const api = mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      attemptId: "coding_attempt_0001",
+      status: "running",
+      stage: "testing",
+      pendingGates: [
+        {
+          gate_id: "coding_stage_gate_0001",
+          kind: "stage_gate",
+          title: "Testing Stage Gate",
+          description: "Waiting to start Testing",
+          stage: "testing",
+          role: "tester",
+          expires_at: "2026-05-28T00:00:05Z",
+          provider_snapshot: {
+            coder: "fake",
+            tester: "fake",
+            analyst: "fake",
+            code_reviewer: "fake",
+            internal_reviewer: "fake",
+            review_rounds: 1,
+          },
+          available_actions: [
+            {
+              action_id: "confirm_stage",
+              label: "立即开始",
+              action_type: "confirm_stage",
+            },
+          ],
+        },
+      ],
+    });
+
+    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Stage Gate 立即开始" }));
+
+    expect(api.confirmStageGate).toHaveBeenCalledWith("testing");
+    expect(api.respondGate).not.toHaveBeenCalled();
+  });
+
+  it("renders stage gate countdown with provider and abort action", async () => {
+    const api = mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      attemptId: "coding_attempt_0001",
+      status: "running",
+      stage: "coding",
+      pendingGates: [
+        {
+          gate_id: "coding_stage_gate_0001",
+          kind: "stage_gate",
+          title: "Coding Stage Gate",
+          description: "Waiting to start Coding",
+          stage: "coding",
+          role: "coder",
+          expires_at: new Date(Date.now() + 5_000).toISOString(),
+          provider_snapshot: {
+            coder: "fake",
+            tester: "codex",
+            analyst: "fake",
+            code_reviewer: "fake",
+            internal_reviewer: "fake",
+            review_rounds: 1,
+          },
+          available_actions: [
+            {
+              action_id: "confirm_stage",
+              label: "立即开始",
+              action_type: "confirm_stage",
+            },
+            {
+              action_id: "abort",
+              label: "中止 Attempt",
+              action_type: "abort",
+            },
+          ],
+        },
+      ],
+    });
+
+    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+
+    expect(screen.getByTestId("coding-stage-gate-entry")).toHaveTextContent("Coding Stage Gate");
+    expect(screen.getByTestId("coding-stage-gate-entry")).toHaveTextContent("Coder");
+    expect(screen.getByTestId("coding-stage-gate-entry")).toHaveTextContent("fake");
+    expect(screen.getByTestId("coding-stage-gate-entry")).toHaveTextContent("5s");
+
+    await userEvent.click(screen.getByRole("button", { name: "Stage Gate 立即开始" }));
+    await userEvent.click(screen.getByRole("button", { name: "Stage Gate 中止" }));
+
+    expect(api.confirmStageGate).toHaveBeenCalledWith("coding");
+    expect(api.abortAttempt).toHaveBeenCalled();
+  });
+
+  it("renders role provider panel and sends role-level provider selection", async () => {
+    const api = mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      attemptId: "coding_attempt_0001",
+      status: "running",
+      stage: "coding",
+      roleProviderConfigSnapshot: {
+        coder: "fake",
+        tester: "fake",
+        analyst: "fake",
+        code_reviewer: "fake",
+        internal_reviewer: "fake",
+        review_rounds: 1,
+      },
+    });
+
+    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+
+    expect(screen.getByTestId("coding-provider-config-panel")).toHaveTextContent("Coder");
+    expect(screen.getByTestId("coding-provider-config-panel")).toHaveTextContent("Tester");
+
+    await userEvent.click(screen.getByRole("button", { name: "将 Tester 切换为 Codex" }));
+
+    expect(api.sendProviderSelect).toHaveBeenCalledWith("tester", "codex");
   });
 
   it("sends coding context notes from the chat input", async () => {
@@ -276,6 +464,40 @@ describe("CodingWorkspacePage", () => {
     expect(tabs).toHaveTextContent("src/solver.py:42");
     expect(tabs).toHaveTextContent("缺少 n=0 的处理");
     expect(tabs).toHaveTextContent("补充空输入测试");
+    expect(screen.getByText("error").className).toContain("text-red");
+  });
+
+  it("renders internal PR review impact scope and PR text suggestions", async () => {
+    mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      attemptId: "coding_attempt_0001",
+      status: "running",
+      stage: "internal_pr_review",
+      activeTab: "review",
+      internalPrReview: {
+        id: "internal_review_0001",
+        attempt_id: "coding_attempt_0001",
+        review_request_id: "review_request_0001",
+        verdict: "approve",
+        summary: "内部审查通过",
+        findings: [],
+        impact_scope: ["src/solver.py", "tests/test_solver.py"],
+        pr_description: "实现 climb_stairs 动态规划函数，并覆盖 n=10。",
+        commit_message_suggestion: "feat: implement climb stairs",
+        tested_evidence_refs: [],
+        diff_refs: [],
+        created_at: "2026-05-23T00:00:00Z",
+      },
+    });
+
+    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "运行结果" }));
+    const tabs = screen.getByTestId("coding-artifact-tabs");
+    expect(tabs).toHaveTextContent("src/solver.py");
+    expect(tabs).toHaveTextContent("tests/test_solver.py");
+    expect(tabs).toHaveTextContent("实现 climb_stairs 动态规划函数");
+    expect(tabs).toHaveTextContent("feat: implement climb stairs");
   });
 
   it("renders review request URL, push status, and manual instructions in the git tab", async () => {

@@ -12,6 +12,15 @@ const providerConfig = {
   review_rounds: 1,
 };
 
+const roleProviderConfig = {
+  coder: "fake" as const,
+  tester: "fake" as const,
+  analyst: "fake" as const,
+  code_reviewer: "fake" as const,
+  internal_reviewer: "fake" as const,
+  review_rounds: 1,
+};
+
 function codingNode(overrides: Partial<CodingTimelineNode> = {}): CodingTimelineNode {
   return {
     id: "coding_node_0001",
@@ -58,6 +67,7 @@ function sessionState(
     max_auto_rework: 2,
     head_commit: null,
     pushed_remote: null,
+    role_provider_config_snapshot: roleProviderConfig,
     provider_config_snapshot: providerConfig,
     timeline_nodes: [codingNode()],
     active_node_id: "coding_node_0001",
@@ -66,6 +76,7 @@ function sessionState(
     review_request: null,
     internal_pr_review: null,
     pending_gates: [],
+    chat_entries: [],
     ...overrides,
   };
 }
@@ -86,10 +97,82 @@ describe("coding workspace store", () => {
     expect(state.stage).toBe("coding");
     expect(state.branchName).toBe("aria/work-items/work_item_0001/attempt-1");
     expect(state.providerConfigSnapshot).toEqual(providerConfig);
+    expect(state.roleProviderConfigSnapshot).toEqual(roleProviderConfig);
     expect(state.timelineNodes).toHaveLength(1);
     expect(state.activeNodeId).toBe("coding_node_0001");
     expect(state.selectedNodeId).toBe("coding_node_0001");
     expect(state.codeReviewReports).toHaveLength(1);
+  });
+
+  it("hydrates persisted coding chat entries from a websocket session snapshot", () => {
+    const store = useCodingWorkspaceStore.getState();
+
+    store.setSessionState(
+      sessionState({
+        chat_entries: [
+          {
+            id: "coding_chat_entry_analyst_0001",
+            attempt_id: "coding_attempt_0001",
+            node_id: "coding_node_0002",
+            role: "system",
+            entry_type: { type: "analyst_verdict", verdict: "no_issue" },
+            content: "测试阶段无问题",
+            metadata: { source: "rework" },
+            created_at: "2026-05-28T00:00:01Z",
+          },
+          {
+            id: "coding_chat_entry_code_review_0001",
+            attempt_id: "coding_attempt_0001",
+            node_id: "coding_node_0003",
+            role: "reviewer",
+            entry_type: { type: "assistant_message" },
+            content: "代码审查通过",
+            metadata: { source: "code_review", verdict: "approve" },
+            created_at: "2026-05-28T00:00:02Z",
+          },
+          {
+            id: "coding_chat_entry_internal_0001",
+            attempt_id: "coding_attempt_0001",
+            node_id: "coding_node_0004",
+            role: "reviewer",
+            entry_type: { type: "assistant_message" },
+            content: "PR 描述和影响范围完整",
+            metadata: { source: "internal_pr_review", impact_scope: ["src/lib.rs"] },
+            created_at: "2026-05-28T00:00:03Z",
+          },
+        ],
+      }),
+    );
+
+    expect(useCodingWorkspaceStore.getState().chatEntries).toEqual([
+      {
+        id: "coding_chat_entry_analyst_0001",
+        type: "analyst_verdict",
+        role: "analyst",
+        content: "测试阶段无问题",
+        timestamp: "2026-05-28T00:00:01Z",
+        node_id: "coding_node_0002",
+        metadata: { source: "rework", verdict: "no_issue" },
+      },
+      {
+        id: "coding_chat_entry_code_review_0001",
+        type: "provider_stream",
+        role: "code_reviewer",
+        content: "代码审查通过",
+        timestamp: "2026-05-28T00:00:02Z",
+        node_id: "coding_node_0003",
+        metadata: { source: "code_review", verdict: "approve" },
+      },
+      {
+        id: "coding_chat_entry_internal_0001",
+        type: "provider_stream",
+        role: "internal_reviewer",
+        content: "PR 描述和影响范围完整",
+        timestamp: "2026-05-28T00:00:03Z",
+        node_id: "coding_node_0004",
+        metadata: { source: "internal_pr_review", impact_scope: ["src/lib.rs"] },
+      },
+    ]);
   });
 
   it("adds and updates timeline nodes while clearing inactive active node", () => {
@@ -137,6 +220,7 @@ describe("coding workspace store", () => {
 
   it("tracks provider streaming content as chat entries", () => {
     const store = useCodingWorkspaceStore.getState();
+    store.addTimelineNode(codingNode({ id: "coding_node_0001", stage: "testing" }));
 
     store.appendStreamChunk("hello", "coding_node_0001");
     store.appendStreamChunk(" world", "coding_node_0001");
@@ -145,7 +229,7 @@ describe("coding workspace store", () => {
     expect(useCodingWorkspaceStore.getState().chatEntries).toMatchObject([
       {
         type: "provider_stream",
-        role: "author",
+        role: "tester",
         content: "hello world",
         node_id: "coding_node_0001",
       },
@@ -155,6 +239,38 @@ describe("coding workspace store", () => {
 
     expect(useCodingWorkspaceStore.getState().streamingContent).toBeNull();
     expect(useCodingWorkspaceStore.getState().activeStreamNodeId).toBeNull();
+  });
+
+  it("appends optimistic context notes and replaces them with backend chat entries", () => {
+    const store = useCodingWorkspaceStore.getState();
+
+    store.appendChatEntry({
+      id: "pending_context_note_0001",
+      type: "context_note",
+      role: "user",
+      content: "请覆盖空输入边界",
+      timestamp: "2026-05-28T00:00:00Z",
+      metadata: { pending: true },
+    });
+    store.replacePendingEntry({
+      id: "coding_chat_entry_0001",
+      type: "context_note",
+      role: "user",
+      content: "请覆盖空输入边界",
+      timestamp: "2026-05-28T00:00:01Z",
+      metadata: { context_note_id: "coding_context_note_0001" },
+    });
+
+    expect(useCodingWorkspaceStore.getState().chatEntries).toEqual([
+      {
+        id: "coding_chat_entry_0001",
+        type: "context_note",
+        role: "user",
+        content: "请覆盖空输入边界",
+        timestamp: "2026-05-28T00:00:01Z",
+        metadata: { context_note_id: "coding_context_note_0001" },
+      },
+    ]);
   });
 
   it("switches artifact tab when selecting timeline nodes until the user locks the tab", () => {

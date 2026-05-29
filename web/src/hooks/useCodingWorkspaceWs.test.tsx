@@ -112,7 +112,16 @@ describe("useCodingWorkspaceWs", () => {
         max_auto_rework: 2,
         head_commit: null,
         pushed_remote: null,
+        role_provider_config_snapshot: {
+          coder: "fake",
+          tester: "fake",
+          analyst: "fake",
+          code_reviewer: "fake",
+          internal_reviewer: "fake",
+          review_rounds: 1,
+        },
         provider_config_snapshot: { author: "fake", reviewer: "fake", review_rounds: 1 },
+        chat_entries: [],
         timeline_nodes: [],
         active_node_id: null,
         testing_report: null,
@@ -143,6 +152,11 @@ describe("useCodingWorkspaceWs", () => {
         summary: "代码编写完成",
         completed_at: "2026-05-23T00:01:00Z",
       });
+      harness.ws.receive({
+        type: "coding_provider_config_updated",
+        role: "tester",
+        provider: "codex",
+      });
     });
 
     const state = useCodingWorkspaceStore.getState();
@@ -153,6 +167,7 @@ describe("useCodingWorkspaceWs", () => {
       status: "completed",
       summary: "代码编写完成",
     });
+    expect(state.roleProviderConfigSnapshot?.tester).toBe("codex");
   });
 
   it("records coding execution events from websocket messages", () => {
@@ -194,6 +209,120 @@ describe("useCodingWorkspaceWs", () => {
     ]);
   });
 
+  it("optimistically appends context notes and replaces them with backend chat entries", () => {
+    const harness = renderCodingHook();
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.sent.length = 0;
+      harness.api.sendContextNote("请覆盖空输入边界");
+    });
+
+    expect(harness.ws.sent).toEqual([
+      JSON.stringify({ type: "context_note", content: "请覆盖空输入边界" }),
+    ]);
+    expect(useCodingWorkspaceStore.getState().chatEntries).toMatchObject([
+      {
+        type: "context_note",
+        role: "user",
+        content: "请覆盖空输入边界",
+        metadata: { pending: true },
+      },
+    ]);
+
+    act(() => {
+      harness.ws.receive({
+        type: "coding_chat_entry_created",
+        entry: {
+          id: "coding_chat_entry_0001",
+          attempt_id: "coding_attempt_0001",
+          node_id: null,
+          role: "author",
+          entry_type: { type: "user_message" },
+          content: "请覆盖空输入边界",
+          metadata: { context_note_id: "coding_context_note_0001" },
+          created_at: "2026-05-28T00:00:01Z",
+        },
+      });
+    });
+
+    expect(useCodingWorkspaceStore.getState().chatEntries).toEqual([
+      {
+        id: "coding_chat_entry_0001",
+        type: "context_note",
+        role: "user",
+        content: "请覆盖空输入边界",
+        timestamp: "2026-05-28T00:00:01Z",
+        node_id: undefined,
+        metadata: { context_note_id: "coding_context_note_0001" },
+      },
+    ]);
+  });
+
+  it("maps coding tool calls and analyst verdict chat entries to role-specific entries", () => {
+    const harness = renderCodingHook();
+
+    act(() => {
+      harness.ws.receive({
+        type: "coding_chat_entry_created",
+        entry: {
+          id: "coding_chat_entry_tool_0001",
+          attempt_id: "coding_attempt_0001",
+          node_id: "coding_node_0002",
+          role: "tester",
+          entry_type: {
+            type: "tool_call",
+            tool_name: "run_command",
+            input: { command: ["pytest"] },
+          },
+          content: null,
+          metadata: { tool_use_id: "toolu_0001" },
+          created_at: "2026-05-28T00:00:02Z",
+        },
+      });
+      harness.ws.receive({
+        type: "coding_chat_entry_created",
+        entry: {
+          id: "coding_chat_entry_analyst_0001",
+          attempt_id: "coding_attempt_0001",
+          node_id: "coding_node_0003",
+          role: "system",
+          entry_type: {
+            type: "analyst_verdict",
+            verdict: "needs_fix",
+          },
+          content: "测试仍失败",
+          metadata: { fix_hints: ["补充 n=10 测试"] },
+          created_at: "2026-05-28T00:00:03Z",
+        },
+      });
+    });
+
+    expect(useCodingWorkspaceStore.getState().chatEntries).toMatchObject([
+      {
+        id: "coding_chat_entry_tool_0001",
+        type: "execution_event",
+        role: "tester",
+        content: "run_command",
+        metadata: {
+          tool_name: "run_command",
+          input: { command: ["pytest"] },
+          tool_use_id: "toolu_0001",
+        },
+      },
+      {
+        id: "coding_chat_entry_analyst_0001",
+        type: "analyst_verdict",
+        role: "analyst",
+        content: "测试仍失败",
+        metadata: {
+          verdict: "needs_fix",
+          fix_hints: ["补充 n=10 测试"],
+        },
+      },
+    ]);
+  });
+
   it("sends coding client actions when the socket is open", () => {
     const harness = renderCodingHook();
 
@@ -202,6 +331,9 @@ describe("useCodingWorkspaceWs", () => {
       harness.ws.sent.length = 0;
       harness.api.startCoding();
       harness.api.sendContextNote("补充上下文");
+      harness.api.sendProviderSelect("author", "codex");
+      harness.api.sendProviderSelect("tester", "fake");
+      harness.api.confirmStageGate("testing");
       harness.api.finalConfirm();
       harness.api.abortAttempt();
       harness.api.sendPing();
@@ -210,6 +342,9 @@ describe("useCodingWorkspaceWs", () => {
     expect(harness.ws.sent).toEqual([
       JSON.stringify({ type: "start_coding" }),
       JSON.stringify({ type: "context_note", content: "补充上下文" }),
+      JSON.stringify({ type: "provider_select", role: "author", provider: "codex" }),
+      JSON.stringify({ type: "provider_select", role: "tester", provider: "fake" }),
+      JSON.stringify({ type: "stage_gate_confirm", stage: "testing" }),
       JSON.stringify({ type: "final_confirm" }),
       JSON.stringify({ type: "abort_attempt" }),
       JSON.stringify({ type: "coding_ping" }),

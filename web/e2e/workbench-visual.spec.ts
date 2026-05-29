@@ -12,17 +12,17 @@ test("lifecycle and workspace surfaces stay compact across desktop and mobile", 
   const projectButton = page.getByRole("button", { name: seeded.projectName, exact: true });
   await expect(projectButton).toBeEnabled();
   await projectButton.click();
-  await expect(page.getByRole("region", { name: "Issue 列" })).toContainText(
+  await expect(page.getByRole("region", { name: "Issue 卡片列表" })).toContainText(
     seeded.issueTitle,
   );
-  await expect(page.getByRole("region", { name: "Story Spec 列" })).toContainText(
+  await expect(page.getByRole("region", { name: "Story Spec 内容" })).toContainText(
     seeded.storyTitle,
   );
   await expect(page.getByText("playful coding workbench")).toHaveCount(0);
   await expect(page.getByText("AI Coding Workbench")).toHaveCount(0);
   await expectNoHorizontalOverflow(page);
 
-  await page.getByRole("button", { name: seeded.storyTitle }).click();
+  await page.getByRole("button", { name: seeded.storyTitle, exact: true }).click();
   await expect(page.getByTestId("lifecycle-card-drawer")).toContainText(seeded.storyTitle);
   await page.getByTestId("drawer-open-workspace").click();
   await expect(page.getByText("Story Spec").first()).toBeVisible();
@@ -31,9 +31,11 @@ test("lifecycle and workspace surfaces stay compact across desktop and mobile", 
   await expect(page.getByText("AI Coding Workbench")).toHaveCount(0);
   await expect(page.getByTestId("timeline-node-list")).toBeVisible();
   await expect(page.getByTestId("chat-entry-list")).toBeVisible();
+  await page.getByRole("button", { name: "Artifact" }).click();
   await expect(page.getByTestId("artifact-pane")).toBeVisible();
   await expectNoHorizontalOverflow(page);
 
+  await page.getByRole("button", { name: "对话" }).click();
   await expect(page.getByTestId("chat-input-bar")).toBeVisible();
   const contextInput = page.getByTestId("context-note-input");
   await expect(contextInput).toBeEnabled();
@@ -45,9 +47,10 @@ test("lifecycle and workspace surfaces stay compact across desktop and mobile", 
   await expectNoHorizontalOverflow(page);
 
   await page.setViewportSize({ width: 375, height: 844 });
+  await page.getByRole("button", { name: "对话" }).click();
   await expect(page.getByRole("banner")).toBeVisible();
   await expect(page.getByText("Story Spec").first()).toBeVisible();
-  await expect(page.getByTestId("artifact-pane")).toBeHidden();
+  await expect(page.getByTestId("artifact-pane")).toHaveCount(0);
   await expect(page.getByTestId("timeline-node-list")).toBeVisible();
   await expect(page.getByTestId("chat-input-bar")).toBeVisible();
   await expectNoHorizontalOverflow(page);

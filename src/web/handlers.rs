@@ -699,18 +699,14 @@ pub async fn coding_attempt_artifact_content(
     let attempt = coding_store
         .get_attempt_by_id(&attempt_id)
         .map_err(product_store_api_error)?;
-    let worktree_path = attempt.worktree_path.ok_or_else(|| {
-        ApiError::runtime(
-            "artifact_not_found",
-            "coding attempt worktree is not available",
-            json!({}),
+    let artifact_path = coding_store
+        .attempt_test_output_path(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &artifact_id,
         )
-    })?;
-    let artifact_path = worktree_path
-        .join(".aria")
-        .join("coding-artifacts")
-        .join("test-output")
-        .join(&artifact_id);
+        .map_err(product_store_api_error)?;
     if !artifact_path.is_file() {
         return Err(ApiError::runtime(
             "artifact_not_found",

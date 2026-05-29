@@ -474,6 +474,7 @@ fn start_permission_fixture_session(
                                 .await;
                         }
                         Some(ProviderCommand::ChoiceResponse { .. }) => {}
+                        Some(ProviderCommand::ToolResult(_)) => {}
                         Some(ProviderCommand::Abort) | None => return,
                     }
                 }

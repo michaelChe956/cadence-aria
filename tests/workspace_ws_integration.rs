@@ -1574,7 +1574,8 @@ impl StreamingProviderAdapter for HangingStreamingProvider {
                         match command {
                             Some(ProviderCommand::Abort) | None => return,
                             Some(ProviderCommand::PermissionResponse { .. })
-                            | Some(ProviderCommand::ChoiceResponse { .. }) => {}
+                            | Some(ProviderCommand::ChoiceResponse { .. })
+                            | Some(ProviderCommand::ToolResult(_)) => {}
                         }
                     }
                 }

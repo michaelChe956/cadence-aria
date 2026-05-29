@@ -3,10 +3,12 @@ use std::path::PathBuf;
 use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
 use cadence_aria::product::coding_models::{
-    CodeReviewReport, CodingAgentRole, CodingAttemptStatus, CodingExecutionStage,
-    CodingTimelineNode, CodingTimelineNodeStatus, FindingSeverity, InternalPrReview, PushStatus,
-    RemoteKind, ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict, TestCommand,
-    TestCommandStatus, TestingOverallStatus, TestingReport,
+    CodeReviewReport, CodingAgentRole, CodingAttemptStatus, CodingContextNote,
+    CodingExecutionStage, CodingProviderRole, CodingReworkInstruction,
+    CodingRoleProviderConfigSnapshot, CodingStageGateStatus, CodingTimelineNode,
+    CodingTimelineNodeStatus, FindingSeverity, InternalPrReview, PushStatus, RemoteKind,
+    ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict, TestCommand, TestCommandStatus,
+    TestingOverallStatus, TestingReport,
 };
 use cadence_aria::product::models::ProviderName;
 use cadence_aria::web::workspace_ws_types::ProviderConfigSnapshot;
@@ -163,6 +165,275 @@ fn store_persists_reports_reviews_and_timeline_for_snapshot_recovery() {
 }
 
 #[test]
+fn store_persists_context_notes_in_attempt_scope() {
+    let root = tempdir().expect("tempdir");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(create_input("work_item_0001"))
+        .expect("create attempt");
+
+    let note = store
+        .create_context_note(&attempt.id, "请优先使用 unittest".to_string())
+        .expect("create context note");
+
+    assert_eq!(
+        note,
+        CodingContextNote {
+            id: "coding_context_note_0001".to_string(),
+            attempt_id: attempt.id.clone(),
+            content: "请优先使用 unittest".to_string(),
+            created_at: note.created_at.clone(),
+            consumed_by_rework_round: None,
+        }
+    );
+    assert_eq!(
+        store
+            .list_context_notes("project_0001", "issue_0001", &attempt.id)
+            .expect("list context notes"),
+        vec![note]
+    );
+}
+
+#[test]
+fn store_lists_unconsumed_context_notes_and_marks_rework_round() {
+    let root = tempdir().expect("tempdir");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(create_input("work_item_0001"))
+        .expect("create attempt");
+
+    let first = store
+        .create_context_note(&attempt.id, "第一次补充".to_string())
+        .expect("first context note");
+    let second = store
+        .create_context_note(&attempt.id, "第二次补充".to_string())
+        .expect("second context note");
+
+    store
+        .mark_context_notes_consumed(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            std::slice::from_ref(&first.id),
+            1,
+        )
+        .expect("mark first consumed");
+
+    let unconsumed = store
+        .list_unconsumed_context_notes("project_0001", "issue_0001", &attempt.id)
+        .expect("list unconsumed");
+    assert_eq!(unconsumed, vec![second.clone()]);
+
+    store
+        .mark_context_notes_consumed(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            std::slice::from_ref(&second.id),
+            2,
+        )
+        .expect("mark second consumed");
+
+    let notes = store
+        .list_context_notes("project_0001", "issue_0001", &attempt.id)
+        .expect("list notes");
+    assert_eq!(notes[0].consumed_by_rework_round, Some(1));
+    assert_eq!(notes[1].consumed_by_rework_round, Some(2));
+    assert!(
+        store
+            .list_unconsumed_context_notes("project_0001", "issue_0001", &attempt.id)
+            .expect("list unconsumed after all consumed")
+            .is_empty()
+    );
+}
+
+#[test]
+fn saves_reads_and_consumes_latest_coding_rework_instruction() {
+    let root = tempdir().expect("tempdir");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(create_input("work_item_0001"))
+        .expect("create attempt");
+    let first = CodingReworkInstruction {
+        id: "coding_rework_instruction_0001".to_string(),
+        attempt_id: attempt.id.clone(),
+        source_stage: CodingExecutionStage::Testing,
+        rework_round: 1,
+        summary: "测试失败".to_string(),
+        fix_hints: vec!["修复 failing test".to_string()],
+        questions: Vec::new(),
+        created_at: "2026-05-29T00:00:00Z".to_string(),
+        consumed_by_node_id: None,
+        consumed_at: None,
+    };
+    let second = CodingReworkInstruction {
+        id: "coding_rework_instruction_0002".to_string(),
+        attempt_id: attempt.id.clone(),
+        source_stage: CodingExecutionStage::CodeReview,
+        rework_round: 2,
+        summary: "移除运行产物".to_string(),
+        fix_hints: vec!["不要提交 __pycache__".to_string()],
+        questions: vec!["确认 diff 只包含业务文件".to_string()],
+        created_at: "2026-05-29T00:01:00Z".to_string(),
+        consumed_by_node_id: None,
+        consumed_at: None,
+    };
+
+    store
+        .save_rework_instruction(&first)
+        .expect("save first instruction");
+    assert_eq!(
+        store
+            .latest_unconsumed_rework_instruction("project_0001", "issue_0001", &attempt.id)
+            .expect("latest first"),
+        Some(first.clone())
+    );
+    store
+        .mark_rework_instruction_consumed(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            &first.id,
+            "coding_node_0002",
+        )
+        .expect("consume first instruction");
+    assert_eq!(
+        store
+            .latest_unconsumed_rework_instruction("project_0001", "issue_0001", &attempt.id)
+            .expect("latest after first consume"),
+        None
+    );
+    store
+        .save_rework_instruction(&second)
+        .expect("save second instruction");
+
+    assert_eq!(
+        store
+            .latest_unconsumed_rework_instruction("project_0001", "issue_0001", &attempt.id)
+            .expect("latest unconsumed"),
+        Some(second.clone())
+    );
+
+    let consumed = store
+        .mark_rework_instruction_consumed(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            &second.id,
+            "coding_node_0003",
+        )
+        .expect("consume instruction");
+
+    assert_eq!(
+        consumed.consumed_by_node_id.as_deref(),
+        Some("coding_node_0003")
+    );
+    assert!(consumed.consumed_at.is_some());
+    assert_eq!(
+        store
+            .latest_unconsumed_rework_instruction("project_0001", "issue_0001", &attempt.id)
+            .expect("latest after consume"),
+        None
+    );
+}
+
+#[test]
+fn store_persists_role_provider_config_snapshot_in_attempt_scope() {
+    let root = tempdir().expect("tempdir");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(create_input("work_item_0001"))
+        .expect("create attempt");
+
+    let initial = store
+        .get_role_provider_config_snapshot("project_0001", "issue_0001", &attempt.id)
+        .expect("initial role provider snapshot");
+    assert_eq!(initial.coder, ProviderName::Fake);
+    assert_eq!(initial.tester, ProviderName::Fake);
+    assert_eq!(initial.code_reviewer, ProviderName::Fake);
+
+    let updated = CodingRoleProviderConfigSnapshot {
+        coder: ProviderName::Fake,
+        tester: ProviderName::Codex,
+        analyst: ProviderName::Fake,
+        code_reviewer: ProviderName::Codex,
+        internal_reviewer: ProviderName::Fake,
+        review_rounds: 1,
+    };
+    store
+        .update_role_provider_config_snapshot(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            updated.clone(),
+        )
+        .expect("update role provider snapshot");
+
+    assert_eq!(
+        store
+            .get_role_provider_config_snapshot("project_0001", "issue_0001", &attempt.id)
+            .expect("updated role provider snapshot"),
+        updated
+    );
+}
+
+#[test]
+fn store_persists_and_resolves_stage_gates_in_attempt_scope() {
+    let root = tempdir().expect("tempdir");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(create_input("work_item_0001"))
+        .expect("create attempt");
+
+    let provider_snapshot = CodingRoleProviderConfigSnapshot::from(ProviderConfigSnapshot {
+        author: ProviderName::Codex,
+        reviewer: Some(ProviderName::Fake),
+        review_rounds: 1,
+    });
+    let gate = store
+        .create_stage_gate(
+            &attempt.id,
+            CodingExecutionStage::Testing,
+            CodingProviderRole::Tester,
+            "2026-05-28T00:00:05Z".to_string(),
+            provider_snapshot.clone(),
+        )
+        .expect("create stage gate");
+
+    assert_eq!(gate.gate_id, "coding_stage_gate_0001");
+    assert_eq!(gate.attempt_id, attempt.id);
+    assert_eq!(gate.stage, CodingExecutionStage::Testing);
+    assert_eq!(gate.role, CodingProviderRole::Tester);
+    assert_eq!(gate.provider_snapshot, provider_snapshot);
+    assert_eq!(gate.status, CodingStageGateStatus::Open);
+    assert_eq!(
+        store
+            .list_open_stage_gates("project_0001", "issue_0001", &attempt.id)
+            .expect("open stage gates")
+            .len(),
+        1
+    );
+
+    let confirmed = store
+        .update_stage_gate_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            &gate.gate_id,
+            CodingStageGateStatus::Confirmed,
+        )
+        .expect("confirm stage gate");
+
+    assert_eq!(confirmed.status, CodingStageGateStatus::Confirmed);
+    assert!(
+        store
+            .list_open_stage_gates("project_0001", "issue_0001", &attempt.id)
+            .expect("open stage gates")
+            .is_empty()
+    );
+}
+
+#[test]
 fn status_and_stage_transitions_reject_invalid_backwards_moves() {
     let root = tempdir().expect("tempdir");
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
@@ -288,6 +559,9 @@ fn sample_internal_review(attempt_id: &str, review_request_id: &str) -> Internal
         review_request_id: review_request_id.to_string(),
         verdict: ReviewVerdict::Approve,
         findings: vec![sample_finding()],
+        impact_scope: vec!["src/lib.rs".to_string()],
+        pr_description: "实现 work item".to_string(),
+        commit_message_suggestion: "feat: implement work item".to_string(),
         tested_evidence_refs: vec!["testing_report_0001".to_string()],
         diff_refs: vec!["diff_0001".to_string()],
         summary: "最终审查通过".to_string(),

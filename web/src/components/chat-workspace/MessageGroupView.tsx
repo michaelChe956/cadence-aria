@@ -80,10 +80,22 @@ const PROVIDER_LABELS: Record<string, string> = {
 };
 
 function groupTitle(group: MessageGroup) {
-  const base = group.role === "reviewer" ? "审核者" : "作者";
+  const base = ROLE_LABELS[group.role] ?? group.role;
   const provider = providerForGroup(group);
   return provider ? `${base} · ${providerLabel(provider)}` : base;
 }
+
+const ROLE_LABELS: Record<string, string> = {
+  user: "用户",
+  author: "作者",
+  reviewer: "审核者",
+  coder: "Coder",
+  tester: "Tester",
+  analyst: "Analyst",
+  code_reviewer: "Code Reviewer",
+  internal_reviewer: "Internal Reviewer",
+  system: "系统",
+};
 
 function providerForGroup(group: MessageGroup) {
   const entries = [

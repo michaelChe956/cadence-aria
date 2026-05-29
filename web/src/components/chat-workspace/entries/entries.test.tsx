@@ -105,6 +105,44 @@ describe("chat workspace entries", () => {
     expect(screen.getByText("阶段不允许")).toBeInTheDocument();
   });
 
+  it("renders analyst verdict entries with fix hints and human questions", () => {
+    render(
+      <ChatEntryRenderer
+        entry={makeEntry({
+          type: "analyst_verdict",
+          role: "analyst",
+          content: "测试仍失败",
+          metadata: {
+            verdict: "needs_fix",
+            fix_hints: ["补充 climb_stairs 动态规划实现", "覆盖 n=10"],
+          },
+        })}
+      />,
+    );
+
+    expect(screen.getByTestId("analyst-verdict-entry")).toHaveTextContent("需要修复");
+    expect(screen.getByTestId("analyst-verdict-entry")).toHaveTextContent("测试仍失败");
+    expect(screen.getByText("补充 climb_stairs 动态规划实现")).toBeInTheDocument();
+
+    render(
+      <ChatEntryRenderer
+        entry={makeEntry({
+          id: "entry-2",
+          type: "analyst_verdict",
+          role: "analyst",
+          content: "需要人工补充",
+          metadata: {
+            verdict: "needs_human_input",
+            questions: ["n 的输入范围是多少？"],
+          },
+        })}
+      />,
+    );
+
+    expect(screen.getByText("需要人工输入")).toBeInTheDocument();
+    expect(screen.getByText("n 的输入范围是多少？")).toBeInTheDocument();
+  });
+
   it("dispatches entries through the renderer", () => {
     const onRespond = vi.fn();
     const entry = makeEntry({

@@ -875,6 +875,7 @@ impl WorkspaceEngine {
                                 commands_open = false;
                             }
                         }
+                        Some(ProviderCommand::ToolResult(_)) => {}
                         None => commands_open = false,
                     }
                 }
@@ -981,6 +982,7 @@ impl WorkspaceEngine {
                                 })
                                 .await;
                         }
+                        ProviderEvent::ToolCall(_) | ProviderEvent::ToolResult(_) => {}
                         ProviderEvent::Completed { full_output, .. } => {
                             if let Some(node_id) = node_id.as_deref() {
                                 let _ = self.flush_stream_buffer(node_id).await;
@@ -1203,6 +1205,7 @@ impl WorkspaceEngine {
                                 commands_open = false;
                             }
                         }
+                        Some(ProviderCommand::ToolResult(_)) => {}
                         None => commands_open = false,
                     }
                 }
@@ -1309,6 +1312,7 @@ impl WorkspaceEngine {
                                 })
                                 .await;
                         }
+                        ProviderEvent::ToolCall(_) | ProviderEvent::ToolResult(_) => {}
                         ProviderEvent::Completed { full_output, .. } => {
                             if let Some(node_id) = node_id.as_deref() {
                                 let _ = self.flush_stream_buffer(node_id).await;

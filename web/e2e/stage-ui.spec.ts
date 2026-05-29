@@ -22,6 +22,7 @@ test.describe("D. 阶段化 UI + chat 交互", () => {
     await waitForStage(page, "运行中");
     await waitForTimelineNode(page, "author_run");
     await expect(page.getByTestId("chat-entry-list")).toContainText("开始生成");
+    await page.getByRole("button", { name: "Artifact" }).click();
     await expect(page.getByTestId("artifact-pane")).toBeVisible();
   });
 

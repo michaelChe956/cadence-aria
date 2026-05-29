@@ -9,12 +9,22 @@ export type ChatEntryType =
   | "choice_response"
   | "artifact_update"
   | "review_verdict"
+  | "analyst_verdict"
   | "gate_prompt"
   | "human_decision"
   | "stage_change"
   | "error";
 
-export type ChatEntryRole = "user" | "author" | "reviewer" | "system";
+export type ChatEntryRole =
+  | "user"
+  | "author"
+  | "reviewer"
+  | "coder"
+  | "tester"
+  | "analyst"
+  | "code_reviewer"
+  | "internal_reviewer"
+  | "system";
 export type ChatEntryResolution = "confirm" | "request-change" | "terminate";
 
 export interface ChoiceResponsePayload {

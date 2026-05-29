@@ -4,6 +4,8 @@ import type {
   CodingAttemptStatus,
   CodingExecutionStage,
   CodingGateRequired,
+  CodingProviderRole,
+  CodingRoleProviderConfigSnapshot,
   CodingTimelineNode,
   CodingTimelineNodeStatus,
   CodingWsOutMessage,
@@ -12,8 +14,10 @@ import type {
   ProviderConfigSnapshot,
   ReviewRequest,
   TestingReport,
+  WorkspaceProviderName,
 } from "../api/types";
-import type { ChatEntry } from "./chat-entries";
+import type { ChatEntry, ChatEntryRole } from "./chat-entries";
+import { codingChatEntryToChatEntry } from "./coding-chat-entry-mapping";
 
 export type CodingArtifactTab = "diff" | "tests" | "review" | "git" | "logs";
 export type CodingConnectionStatus =
@@ -49,6 +53,7 @@ export interface CodingWorkspaceState {
   headCommit: string | null;
   pushedRemote: string | null;
   providerConfigSnapshot: ProviderConfigSnapshot | null;
+  roleProviderConfigSnapshot: CodingRoleProviderConfigSnapshot | null;
   timelineNodes: CodingTimelineNode[];
   activeNodeId: string | null;
   selectedNodeId: string | null;
@@ -85,8 +90,11 @@ export interface CodingWorkspaceActions {
   setReviewRequest: (request: ReviewRequest | null) => void;
   setInternalPrReview: (review: InternalPrReview | null) => void;
   addExecutionEvent: (event: ExecutionEvent) => void;
+  appendChatEntry: (entry: ChatEntry) => void;
+  replacePendingEntry: (entry: ChatEntry) => void;
   addPendingGate: (gate: CodingGateRequired) => void;
   resolvePendingGate: (gateId: string) => void;
+  updateProviderConfig: (role: CodingProviderRole, provider: WorkspaceProviderName) => void;
   appendStreamChunk: (content: string, nodeId?: string | null) => void;
   completeStream: (nodeId?: string | null) => void;
   setConnectionStatus: (status: CodingConnectionStatus) => void;
@@ -111,6 +119,7 @@ const initialState: CodingWorkspaceState = {
   headCommit: null,
   pushedRemote: null,
   providerConfigSnapshot: null,
+  roleProviderConfigSnapshot: null,
   timelineNodes: [],
   activeNodeId: null,
   selectedNodeId: null,
@@ -156,9 +165,11 @@ export const useCodingWorkspaceStore = create<
         headCommit: snapshot.head_commit,
         pushedRemote: snapshot.pushed_remote,
         providerConfigSnapshot: snapshot.provider_config_snapshot,
+        roleProviderConfigSnapshot: snapshot.role_provider_config_snapshot,
         timelineNodes: snapshot.timeline_nodes,
         activeNodeId: snapshot.active_node_id,
         selectedNodeId,
+        chatEntries: (snapshot.chat_entries ?? []).map(codingChatEntryToChatEntry),
         testingReport: snapshot.testing_report,
         codeReviewReports: snapshot.code_review_reports,
         reviewRequest: snapshot.review_request,
@@ -215,6 +226,7 @@ export const useCodingWorkspaceStore = create<
   addExecutionEvent: (event) =>
     set((state) => {
       const timestamp = new Date().toISOString();
+      const role = chatRoleForNode(state.timelineNodes, event.node_id ?? null);
       return {
         logs: upsertById(state.logs, {
           id: event.event_id,
@@ -225,7 +237,7 @@ export const useCodingWorkspaceStore = create<
         chatEntries: upsertChatEntry(state.chatEntries, {
           id: event.event_id,
           type: "execution_event",
-          role: "system",
+          role,
           content: event.title,
           timestamp,
           node_id: event.node_id ?? undefined,
@@ -233,6 +245,16 @@ export const useCodingWorkspaceStore = create<
         }),
       };
     }),
+
+  appendChatEntry: (entry) =>
+    set((state) => ({
+      chatEntries: upsertChatEntry(state.chatEntries, entry),
+    })),
+
+  replacePendingEntry: (entry) =>
+    set((state) => ({
+      chatEntries: replacePendingChatEntry(state.chatEntries, entry),
+    })),
 
   addPendingGate: (gate) =>
     set((state) => ({
@@ -244,6 +266,18 @@ export const useCodingWorkspaceStore = create<
       pendingGates: state.pendingGates.filter((gate) => gate.gate_id !== gateId),
     })),
 
+  updateProviderConfig: (role, provider) =>
+    set((state) => ({
+      roleProviderConfigSnapshot: state.roleProviderConfigSnapshot
+        ? { ...state.roleProviderConfigSnapshot, [role]: provider }
+        : state.roleProviderConfigSnapshot,
+      providerConfigSnapshot: updateLegacyProviderConfig(
+        state.providerConfigSnapshot,
+        role,
+        provider,
+      ),
+    })),
+
   appendStreamChunk: (content, nodeId = null) =>
     set((state) => {
       const streamingContent = `${state.streamingContent ?? ""}${content}`;
@@ -251,7 +285,7 @@ export const useCodingWorkspaceStore = create<
       const entry: ChatEntry = {
         id: entryId,
         type: "provider_stream",
-        role: "author",
+        role: chatRoleForNode(state.timelineNodes, nodeId),
         content: streamingContent,
         timestamp: new Date().toISOString(),
         node_id: nodeId ?? undefined,
@@ -321,6 +355,31 @@ function stageToArtifactTab(stage: CodingExecutionStage): CodingArtifactTab | nu
   }
 }
 
+function chatRoleForNode(
+  nodes: CodingTimelineNode[],
+  nodeId?: string | null,
+): ChatEntryRole {
+  const stage = nodes.find((node) => node.id === nodeId)?.stage;
+  switch (stage) {
+    case "coding":
+      return "coder";
+    case "testing":
+      return "tester";
+    case "rework":
+      return "analyst";
+    case "code_review":
+      return "code_reviewer";
+    case "internal_pr_review":
+      return "internal_reviewer";
+    case "prepare_context":
+    case "worktree_prepare":
+    case "review_request":
+    case "final_confirm":
+    case undefined:
+      return "system";
+  }
+}
+
 function upsertById<T extends { id: string }>(items: T[], item: T): T[] {
   const index = items.findIndex((existing) => existing.id === item.id);
   if (index === -1) return [...items, item];
@@ -345,8 +404,33 @@ function executionEventMessage(event: ExecutionEvent) {
   return event.output ?? event.detail ?? event.command ?? event.title;
 }
 
+function updateLegacyProviderConfig(
+  snapshot: ProviderConfigSnapshot | null,
+  role: CodingProviderRole,
+  provider: WorkspaceProviderName,
+): ProviderConfigSnapshot | null {
+  if (!snapshot) return snapshot;
+  if (role === "coder") return { ...snapshot, author: provider };
+  if (role === "code_reviewer") return { ...snapshot, reviewer: provider };
+  return snapshot;
+}
+
 function upsertChatEntry(entries: ChatEntry[], entry: ChatEntry): ChatEntry[] {
   const index = entries.findIndex((existing) => existing.id === entry.id);
   if (index === -1) return [...entries, entry];
   return entries.map((existing, currentIndex) => (currentIndex === index ? entry : existing));
+}
+
+function replacePendingChatEntry(entries: ChatEntry[], entry: ChatEntry): ChatEntry[] {
+  const pendingIndex = entries.findIndex(
+    (existing) =>
+      existing.metadata?.pending === true &&
+      existing.type === entry.type &&
+      existing.role === entry.role &&
+      existing.content === entry.content,
+  );
+  if (pendingIndex === -1) {
+    return upsertChatEntry(entries, entry);
+  }
+  return entries.map((existing, currentIndex) => (currentIndex === pendingIndex ? entry : existing));
 }

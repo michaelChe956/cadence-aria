@@ -320,6 +320,7 @@ async fn listen_for_permission_commands(
                     });
                 }
             }
+            ProviderCommand::ToolResult(_) => {}
         }
     }
 }

@@ -15,23 +15,48 @@ const ROLE_STYLES: Record<
 > = {
   user: {
     wrapper: "justify-end",
-    panel: "border-blue-200 bg-blue-50",
-    title: "text-blue-700",
+    panel: "border-gray-200 bg-gray-50",
+    title: "text-gray-600",
   },
   author: {
     wrapper: "justify-start",
-    panel: "border-[var(--aria-line)] bg-white",
-    title: "text-[var(--aria-primary)]",
+    panel: "border-blue-200 bg-blue-50",
+    title: "text-blue-600",
+  },
+  coder: {
+    wrapper: "justify-start",
+    panel: "border-blue-200 bg-blue-50",
+    title: "text-blue-600",
+  },
+  tester: {
+    wrapper: "justify-start",
+    panel: "border-purple-200 bg-purple-50",
+    title: "text-purple-600",
+  },
+  analyst: {
+    wrapper: "justify-start",
+    panel: "border-amber-200 bg-amber-50",
+    title: "text-amber-600",
   },
   reviewer: {
     wrapper: "justify-start",
-    panel: "border-amber-200 bg-amber-50",
-    title: "text-amber-700",
+    panel: "border-green-200 bg-green-50",
+    title: "text-green-600",
+  },
+  code_reviewer: {
+    wrapper: "justify-start",
+    panel: "border-green-200 bg-green-50",
+    title: "text-green-600",
+  },
+  internal_reviewer: {
+    wrapper: "justify-start",
+    panel: "border-indigo-200 bg-indigo-50",
+    title: "text-indigo-600",
   },
   system: {
     wrapper: "justify-center",
-    panel: "border-dashed border-[var(--aria-line)] bg-[var(--aria-panel-muted)]",
-    title: "text-[var(--aria-ink-muted)]",
+    panel: "border-dashed border-red-200 bg-red-50",
+    title: "text-red-500",
   },
 };
 

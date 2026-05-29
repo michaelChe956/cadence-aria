@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -111,6 +112,20 @@ pub struct ProviderExecutionEvent {
     pub exit_code: Option<i32>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderToolCall {
+    pub id: String,
+    pub tool_name: String,
+    pub input: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderToolResult {
+    pub tool_use_id: String,
+    pub output: String,
+    pub is_error: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderEvent {
     TextDelta {
@@ -120,6 +135,8 @@ pub enum ProviderEvent {
     ChoiceRequest(ChoiceRequestData),
     StatusChanged(ProviderStatus),
     Execution(ProviderExecutionEvent),
+    ToolCall(ProviderToolCall),
+    ToolResult(ProviderToolResult),
     Completed {
         full_output: String,
         provider_session_id: Option<String>,
@@ -149,6 +166,7 @@ pub enum ProviderCommand {
         selected_option_ids: Vec<String>,
         free_text: Option<String>,
     },
+    ToolResult(ProviderToolResult),
     Abort,
 }
 
@@ -175,7 +193,8 @@ async fn fake_streaming_should_stop(
                     match command {
                         Some(ProviderCommand::Abort) => return true,
                         Some(ProviderCommand::PermissionResponse { .. })
-                        | Some(ProviderCommand::ChoiceResponse { .. }) => {}
+                        | Some(ProviderCommand::ChoiceResponse { .. })
+                        | Some(ProviderCommand::ToolResult(_)) => {}
                         None => *commands_open = false,
                     }
                 }
@@ -214,7 +233,8 @@ async fn fake_streaming_send_event(
                     match command {
                         Some(ProviderCommand::Abort) => return false,
                         Some(ProviderCommand::PermissionResponse { .. })
-                        | Some(ProviderCommand::ChoiceResponse { .. }) => {}
+                        | Some(ProviderCommand::ChoiceResponse { .. })
+                        | Some(ProviderCommand::ToolResult(_)) => {}
                         None => *commands_open = false,
                     }
                 }
@@ -238,6 +258,10 @@ async fn fake_streaming_send_event(
 
 #[async_trait::async_trait]
 pub trait StreamingProviderAdapter: Send + Sync {
+    fn supports_tool_calls(&self) -> bool {
+        false
+    }
+
     async fn start(
         &self,
         _input: StreamingProviderInput,
@@ -255,7 +279,70 @@ pub trait StreamingProviderAdapter: Send + Sync {
         &self,
         input: &AdapterInput,
         cancel: CancellationToken,
-    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError>;
+    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+        let working_dir = input.worktree_path.as_ref().map(PathBuf::from).unwrap_or(
+            std::env::current_dir().map_err(|error| {
+                ProviderAdapterError::execution_failed(None, String::new(), error.to_string(), 0)
+            })?,
+        );
+        let provider_input = StreamingProviderInput {
+            provider_type: input.provider_type.clone(),
+            role: input.role.clone(),
+            prompt: input.prompt.clone(),
+            working_dir,
+            session_id: None,
+            permission_mode: ProviderPermissionMode::Auto,
+            env_vars: BTreeMap::new(),
+            timeout_secs: input.timeout,
+        };
+        let bridge_cancel = cancel.clone();
+        let mut session = self.start(provider_input, cancel).await?;
+        let (tx, rx) = mpsc::channel(32);
+
+        tokio::spawn(async move {
+            let _commands = session.commands;
+            loop {
+                let event = tokio::select! {
+                    _ = bridge_cancel.cancelled() => return,
+                    event = session.events.recv() => {
+                        match event {
+                            Some(event) => event,
+                            None => return,
+                        }
+                    }
+                };
+                let chunk = match event {
+                    ProviderEvent::TextDelta { content } => StreamChunk::Text(content),
+                    ProviderEvent::Completed { full_output, .. } => {
+                        StreamChunk::Done { full_output }
+                    }
+                    ProviderEvent::Failed { message } => StreamChunk::Error(message),
+                    ProviderEvent::ProtocolError { message, .. } => StreamChunk::Error(message),
+                    ProviderEvent::PermissionTimeout { permission_id } => {
+                        StreamChunk::Error(format!("Permission request {permission_id} timed out"))
+                    }
+                    ProviderEvent::PermissionRequest(_)
+                    | ProviderEvent::ChoiceRequest(_)
+                    | ProviderEvent::StatusChanged(_)
+                    | ProviderEvent::Execution(_)
+                    | ProviderEvent::ToolCall(_)
+                    | ProviderEvent::ToolResult(_) => {
+                        continue;
+                    }
+                };
+                tokio::select! {
+                    _ = bridge_cancel.cancelled() => return,
+                    send_result = tx.send(chunk) => {
+                        if send_result.is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok(rx)
+    }
 }
 
 pub struct FakeStreamingProvider;
@@ -364,7 +451,9 @@ impl StreamingProviderAdapter for FakeStreamingProvider {
                     ProviderEvent::PermissionRequest(_)
                     | ProviderEvent::ChoiceRequest(_)
                     | ProviderEvent::StatusChanged(_)
-                    | ProviderEvent::Execution(_) => {
+                    | ProviderEvent::Execution(_)
+                    | ProviderEvent::ToolCall(_)
+                    | ProviderEvent::ToolResult(_) => {
                         continue;
                     }
                 };
@@ -498,6 +587,7 @@ fn fake_stream_chunks(output: &str) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::protocol::contracts::AdapterInput;
+    use serde_json::json;
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -532,6 +622,51 @@ mod tests {
             .map(|index| format!("word{index}"))
             .collect::<Vec<_>>()
             .join(" ")
+    }
+
+    #[test]
+    fn provider_tool_call_and_result_have_stable_json_shape() {
+        let call = ProviderToolCall {
+            id: "tool_call_0001".to_string(),
+            tool_name: "run_command".to_string(),
+            input: json!({"command": ["cargo", "test"]}),
+        };
+        let result = ProviderToolResult {
+            tool_use_id: "tool_call_0001".to_string(),
+            output: "{\"status\":\"passed\"}".to_string(),
+            is_error: false,
+        };
+
+        assert_eq!(
+            serde_json::to_value(&call).expect("serialize tool call"),
+            json!({
+                "id": "tool_call_0001",
+                "tool_name": "run_command",
+                "input": {"command": ["cargo", "test"]}
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<ProviderToolCall>(
+                serde_json::to_value(&call).expect("serialize tool call")
+            )
+            .expect("deserialize tool call"),
+            call
+        );
+        assert_eq!(
+            serde_json::to_value(&result).expect("serialize tool result"),
+            json!({
+                "tool_use_id": "tool_call_0001",
+                "output": "{\"status\":\"passed\"}",
+                "is_error": false
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<ProviderToolResult>(
+                serde_json::to_value(&result).expect("serialize tool result")
+            )
+            .expect("deserialize tool result"),
+            result
+        );
     }
 
     async fn wait_for_buffer_len<T>(rx: &mpsc::Receiver<T>, expected_len: usize) {

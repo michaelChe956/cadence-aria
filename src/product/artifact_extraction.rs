@@ -23,14 +23,19 @@ fn extract_between_artifact_tags(input: &str) -> Option<&str> {
 }
 
 fn extract_between_fenced_artifact_tags(input: &str) -> Option<&str> {
-    let start = input.find("```artifact")?;
-    let after_marker = &input[start + "```artifact".len()..];
-    let content_start = after_marker
-        .find('\n')
-        .map(|index| start + "```artifact".len() + index + 1)
-        .unwrap_or(start + "```artifact".len());
-    let end = input[content_start..].find("\n```")?;
-    Some(&input[content_start..content_start + end])
+    let mut offset = 0;
+    for line in input.split_inclusive('\n') {
+        let line_start = offset;
+        let line_end = line_start + line.len();
+        let trimmed = line.trim();
+        if let Some(fence) = artifact_fence_marker(trimmed) {
+            let content_start = line_end;
+            let close_start = last_closing_fence_start(input, content_start, &fence)?;
+            return Some(&input[content_start..close_start]);
+        }
+        offset = line_end;
+    }
+    None
 }
 
 fn extract_after_open_artifact_tag(input: &str) -> Option<&str> {
@@ -46,6 +51,39 @@ fn first_markdown_heading_index(input: &str) -> Option<usize> {
         .find("\n# ")
         .map(|index| index + 1)
         .or_else(|| first_workspace_heading_index(input))
+}
+
+fn artifact_fence_marker(line: &str) -> Option<String> {
+    let marker = fence_marker(line)?;
+    let rest = line[marker.len()..].trim_start();
+    rest.starts_with("artifact").then_some(marker)
+}
+
+fn fence_marker(line: &str) -> Option<String> {
+    let first = line.as_bytes().first().copied()?;
+    if first != b'`' && first != b'~' {
+        return None;
+    }
+    let len = line
+        .as_bytes()
+        .iter()
+        .take_while(|byte| **byte == first)
+        .count();
+    (len >= 3).then(|| std::iter::repeat_n(char::from(first), len).collect())
+}
+
+fn last_closing_fence_start(input: &str, content_start: usize, fence: &str) -> Option<usize> {
+    let mut offset = content_start;
+    let mut last = None;
+    for line in input[content_start..].split_inclusive('\n') {
+        let line_start = offset;
+        let trimmed = line.trim();
+        if trimmed.starts_with(fence) && trimmed[fence.len()..].trim().is_empty() {
+            last = Some(line_start);
+        }
+        offset += line.len();
+    }
+    last
 }
 
 fn first_workspace_heading_index(input: &str) -> Option<usize> {
@@ -83,6 +121,16 @@ mod tests {
         let input = "前缀\n```artifact\n# Story Spec\n\n正文\n```\n尾部";
 
         assert_eq!(extract_artifact_content(input), "# Story Spec\n\n正文");
+    }
+
+    #[test]
+    fn extracts_fenced_artifact_content_with_inner_code_blocks() {
+        let input = "前缀\n```artifact\n# Work Item\n\n## 验证命令\n\n```bash\nuv run python -m unittest discover -s tests -v\n```\n\n## 风险\n\n- 无\n```\n尾部";
+
+        assert_eq!(
+            extract_artifact_content(input),
+            "# Work Item\n\n## 验证命令\n\n```bash\nuv run python -m unittest discover -s tests -v\n```\n\n## 风险\n\n- 无"
+        );
     }
 
     #[test]

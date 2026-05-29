@@ -1,33 +1,28 @@
 import {
   ArrowLeft,
   Check,
-  Circle,
-  Code,
-  FileText,
-  FlaskConical,
-  GitBranch,
-  GitPullRequest,
   Play,
-  RefreshCw,
-  SearchCode,
   Send,
-  ShieldCheck,
-  UserCheck,
   Wifi,
   WifiOff,
   X,
 } from "lucide-react";
-import type { LucideIcon } from "lucide-react";
-import { useState, type FormEvent } from "react";
+import { useRef, useState, type FormEvent } from "react";
 import type {
   CodeReviewReport,
   CodingExecutionStage,
   CodingGateRequired,
-  CodingTimelineNode,
+  CodingProviderRole,
   InternalPrReview,
   ReviewFinding,
 } from "../api/types";
-import { ChatEntryList } from "../components/chat-workspace/ChatEntryList";
+import { CodingTimeline } from "../components/coding-workspace/CodingTimeline";
+import { CodingProviderConfigPanel } from "../components/coding-workspace/CodingProviderConfigPanel";
+import { StageGateEntry } from "../components/coding-workspace/StageGateEntry";
+import {
+  ChatEntryList,
+  type ChatEntryListHandle,
+} from "../components/chat-workspace/ChatEntryList";
 import { useCodingWorkspaceWs } from "../hooks/useCodingWorkspaceWs";
 import { useUnloadGuard } from "../hooks/useUnloadGuard";
 import {
@@ -49,6 +44,7 @@ export function CodingWorkspacePage({
   const connected = store.connectionStatus === "connected";
   const activeTab = store.activeTab;
   const [activePanel, setActivePanel] = useState<"chat" | "results">("chat");
+  const chatListRef = useRef<ChatEntryListHandle | null>(null);
 
   useUnloadGuard({
     enabled: store.status === "running",
@@ -103,18 +99,33 @@ export function CodingWorkspacePage({
           nodes={store.timelineNodes}
           activeNodeId={store.activeNodeId}
           selectedNodeId={store.selectedNodeId}
-          onSelectNode={(nodeId) => useCodingWorkspaceStore.getState().setSelectedNode(nodeId)}
+          onSelectNode={(nodeId) => {
+            useCodingWorkspaceStore.getState().setSelectedNode(nodeId);
+            const targetEntry = useCodingWorkspaceStore
+              .getState()
+              .chatEntries.find((entry) => entry.node_id === nodeId);
+            if (targetEntry) {
+              chatListRef.current?.scrollToEntry(targetEntry.id);
+            }
+          }}
         />
         <section className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] bg-[var(--aria-panel)]">
           <CodingPanelTabs activePanel={activePanel} onSelectPanel={setActivePanel} />
           {activePanel === "results" ? (
             <CodingArtifactTabs activeTab={activeTab} className="min-h-0" />
           ) : (
-            <div className="grid min-h-0 grid-rows-[minmax(0,1fr)_auto_auto]">
-              <ChatEntryList entries={store.chatEntries} />
-              <PendingGatePanel
+            <div className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)_auto_auto]">
+              <CodingProviderConfigPanel
+                snapshot={store.roleProviderConfigSnapshot}
+                lockedRole={lockedProviderRole(store.stage, store.status, store.pendingGates)}
+                onSelect={api.sendProviderSelect}
+              />
+              <ChatEntryList ref={chatListRef} entries={store.chatEntries} />
+              <GatePanel
                 gate={store.pendingGates.at(-1) ?? null}
                 onRespond={api.respondGate}
+                onConfirmStage={api.confirmStageGate}
+                onAbort={api.abortAttempt}
               />
               <CodingComposer
                 api={api}
@@ -309,15 +320,25 @@ function ActionButtons({
   return null;
 }
 
-function PendingGatePanel({
+function GatePanel({
   gate,
   onRespond,
+  onConfirmStage,
+  onAbort,
 }: {
   gate: CodingGateRequired | null;
   onRespond: ReturnType<typeof useCodingWorkspaceWs>["respondGate"];
+  onConfirmStage: ReturnType<typeof useCodingWorkspaceWs>["confirmStageGate"];
+  onAbort: ReturnType<typeof useCodingWorkspaceWs>["abortAttempt"];
 }) {
   if (!gate) {
     return null;
+  }
+
+  if (gate.kind === "stage_gate") {
+    return (
+      <StageGateEntry gate={gate} onConfirmStage={onConfirmStage} onAbort={onAbort} />
+    );
   }
 
   return (
@@ -335,7 +356,13 @@ function PendingGatePanel({
             <button
               key={action.action_id}
               type="button"
-              onClick={() => onRespond(gate.gate_id, action.action_id, undefined)}
+              onClick={() => {
+                if (action.action_type === "confirm_stage" && gate.stage) {
+                  onConfirmStage(gate.stage);
+                  return;
+                }
+                onRespond(gate.gate_id, action.action_id, undefined);
+              }}
               className="inline-flex h-8 items-center justify-center rounded-md border border-amber-300 bg-white px-3 text-xs font-semibold text-amber-900 hover:bg-amber-100"
             >
               {action.label}
@@ -347,69 +374,35 @@ function PendingGatePanel({
   );
 }
 
-function CodingTimeline({
-  nodes,
-  activeNodeId,
-  selectedNodeId,
-  onSelectNode,
-}: {
-  nodes: CodingTimelineNode[];
-  activeNodeId: string | null;
-  selectedNodeId: string | null;
-  onSelectNode: (nodeId: string) => void;
-}) {
-  return (
-    <nav
-      aria-label="Coding Timeline"
-      data-testid="coding-timeline"
-      className="min-h-0 overflow-auto border-b border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-3 md:border-b-0 md:border-r"
-    >
-      {nodes.length === 0 ? (
-        <div className="rounded-md border border-[var(--aria-line)] bg-white p-3 text-sm text-[var(--aria-ink-muted)]">
-          暂无 Timeline 节点
-        </div>
-      ) : (
-        <div className="space-y-2">
-          {nodes.map((node) => {
-            const Icon = iconForStage(node.stage);
-            const active = node.id === activeNodeId;
-            const selected = node.id === selectedNodeId;
-            return (
-              <button
-                key={node.id}
-                type="button"
-                onClick={() => onSelectNode(node.id)}
-                aria-current={active ? "step" : undefined}
-                className={[
-                  "block w-full rounded-md border bg-white px-3 py-2 text-left transition-colors",
-                  active || selected
-                    ? "border-[var(--aria-primary)] ring-1 ring-[var(--aria-primary)]"
-                    : "border-[var(--aria-line)] hover:border-[var(--aria-primary)]",
-                ].join(" ")}
-              >
-                <div className="flex min-w-0 items-start gap-2">
-                  <Icon className="mt-0.5 h-4 w-4 shrink-0 text-[var(--aria-primary)]" />
-                  <div className="min-w-0 flex-1">
-                    <div className="flex min-w-0 items-center justify-between gap-2">
-                      <span className="truncate text-sm font-semibold">{node.title}</span>
-                      <span className="rounded bg-[var(--aria-panel-muted)] px-1.5 py-0.5 text-[11px] text-[var(--aria-ink-muted)]">
-                        {node.status}
-                      </span>
-                    </div>
-                    {node.summary ? (
-                      <p className="mt-1 truncate text-xs text-[var(--aria-ink-muted)]">
-                        {node.summary}
-                      </p>
-                    ) : null}
-                  </div>
-                </div>
-              </button>
-            );
-          })}
-        </div>
-      )}
-    </nav>
-  );
+function lockedProviderRole(
+  stage: CodingExecutionStage | null,
+  status: string | null,
+  pendingGates: CodingGateRequired[],
+): CodingProviderRole | null {
+  if (pendingGates.some((gate) => gate.kind === "stage_gate")) {
+    return null;
+  }
+  if (status !== "running" || !stage) {
+    return null;
+  }
+  return providerRoleForStage(stage);
+}
+
+function providerRoleForStage(stage: CodingExecutionStage): CodingProviderRole | null {
+  switch (stage) {
+    case "coding":
+      return "coder";
+    case "testing":
+      return "tester";
+    case "rework":
+      return "analyst";
+    case "code_review":
+      return "code_reviewer";
+    case "internal_pr_review":
+      return "internal_reviewer";
+    default:
+      return null;
+  }
 }
 
 function CodingArtifactTabs({
@@ -517,6 +510,9 @@ function ReviewReportCard({
         <StatusBadge value={report.verdict} />
       </div>
       <div className="mt-1 text-xs text-[var(--aria-ink-muted)]">{report.summary}</div>
+      {isInternalPrReview(report) ? (
+        <InternalPrReviewDetails review={report} />
+      ) : null}
       {report.findings.length > 0 ? (
         <div className="mt-2 space-y-2">
           {report.findings.map((finding, index) => (
@@ -528,11 +524,49 @@ function ReviewReportCard({
   );
 }
 
+function InternalPrReviewDetails({ review }: { review: InternalPrReview }) {
+  return (
+    <div className="mt-2 space-y-2 text-xs">
+      {review.impact_scope.length > 0 ? (
+        <div>
+          <div className="font-semibold text-[var(--aria-ink)]">影响范围</div>
+          <div className="mt-1 flex flex-wrap gap-1">
+            {review.impact_scope.map((scope) => (
+              <span
+                key={scope}
+                className="rounded border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-1.5 py-0.5 font-mono text-[var(--aria-ink-muted)]"
+              >
+                {scope}
+              </span>
+            ))}
+          </div>
+        </div>
+      ) : null}
+      {review.pr_description ? (
+        <div>
+          <div className="font-semibold text-[var(--aria-ink)]">PR description</div>
+          <div className="mt-1 whitespace-pre-wrap text-[var(--aria-ink-muted)]">
+            {review.pr_description}
+          </div>
+        </div>
+      ) : null}
+      {review.commit_message_suggestion ? (
+        <div>
+          <div className="font-semibold text-[var(--aria-ink)]">commit message</div>
+          <div className="mt-1 font-mono text-[var(--aria-ink-muted)]">
+            {review.commit_message_suggestion}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function ReviewFindingItem({ finding }: { finding: ReviewFinding }) {
   return (
     <div className="rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-2 text-xs">
       <div className="flex min-w-0 items-center justify-between gap-2">
-        <span className="rounded bg-white px-1.5 py-0.5 font-semibold text-[var(--aria-ink)]">
+        <span className={["rounded border px-1.5 py-0.5 font-semibold", severityClass(finding.severity)].join(" ")}>
           {finding.severity}
         </span>
         <span className="truncate font-mono text-[var(--aria-ink-muted)]">
@@ -545,6 +579,21 @@ function ReviewFindingItem({ finding }: { finding: ReviewFinding }) {
       ) : null}
     </div>
   );
+}
+
+function isInternalPrReview(report: CodeReviewReport | InternalPrReview): report is InternalPrReview {
+  return "review_request_id" in report;
+}
+
+function severityClass(severity: ReviewFinding["severity"]) {
+  switch (severity) {
+    case "error":
+      return "border-red-200 bg-red-50 text-red-700";
+    case "warning":
+      return "border-amber-200 bg-amber-50 text-amber-700";
+    case "info":
+      return "border-sky-200 bg-sky-50 text-sky-700";
+  }
 }
 
 function findingLocation(finding: ReviewFinding) {
@@ -617,27 +666,4 @@ function StatusBadge({ value }: { value: string }) {
       {value}
     </span>
   );
-}
-
-function iconForStage(stage: CodingExecutionStage): LucideIcon {
-  switch (stage) {
-    case "worktree_prepare":
-      return GitBranch;
-    case "coding":
-      return Code;
-    case "testing":
-      return FlaskConical;
-    case "code_review":
-      return SearchCode;
-    case "rework":
-      return RefreshCw;
-    case "review_request":
-      return GitPullRequest;
-    case "internal_pr_review":
-      return ShieldCheck;
-    case "final_confirm":
-      return UserCheck;
-    default:
-      return Circle;
-  }
 }

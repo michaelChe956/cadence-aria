@@ -156,6 +156,13 @@ export type CodingAttempt = {
 
 export type CodingTimelineNodeStatus = "pending" | "running" | "completed" | "failed" | "blocked";
 export type CodingAgentRole = "author" | "tester" | "reviewer" | "git" | "system";
+export type CodingProviderRole =
+  | "coder"
+  | "tester"
+  | "analyst"
+  | "code_reviewer"
+  | "internal_reviewer";
+export type CodingProviderSelectRole = "author" | "reviewer" | CodingProviderRole;
 
 export type CodingTimelineNode = {
   id: string;
@@ -168,6 +175,15 @@ export type CodingTimelineNode = {
   started_at: string;
   completed_at: string | null;
   artifact_refs: string[];
+};
+
+export type CodingRoleProviderConfigSnapshot = {
+  coder: WorkspaceProviderName;
+  tester: WorkspaceProviderName;
+  analyst: WorkspaceProviderName;
+  code_reviewer: WorkspaceProviderName;
+  internal_reviewer: WorkspaceProviderName;
+  review_rounds: number;
 };
 
 export type TestCommandStatus = "passed" | "failed" | "timed_out" | "blocked";
@@ -248,19 +264,46 @@ export type InternalPrReview = {
   review_request_id: string;
   verdict: CodingReviewVerdict;
   findings: ReviewFinding[];
+  impact_scope: string[];
+  pr_description: string;
+  commit_message_suggestion: string;
   tested_evidence_refs: string[];
   diff_refs: string[];
   summary: string;
   created_at: string;
 };
 
+export type AnalystVerdict = "needs_fix" | "needs_human_input" | "no_issue";
+
+export type CodingEntryType =
+  | { type: "user_message" }
+  | { type: "assistant_message" }
+  | { type: "tool_call"; tool_name: string; input: unknown }
+  | { type: "tool_result"; tool_use_id: string; output: string; is_error: boolean }
+  | { type: "stage_gate"; stage: CodingExecutionStage; countdown_seconds: number }
+  | { type: "analyst_verdict"; verdict: AnalystVerdict }
+  | { type: "stage_summary"; stage: CodingExecutionStage; summary: string }
+  | { type: "system_event"; event_type: string; message: string };
+
+export type CodingChatEntry = {
+  id: string;
+  attempt_id: string;
+  node_id: string | null;
+  role: CodingAgentRole;
+  entry_type: CodingEntryType;
+  content: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+};
+
 export type CodingGateActionType =
   | "continue_rework"
+  | "confirm_stage"
   | "accept_risk"
   | "abort"
   | "retry_push"
   | "manual_fix";
-export type CodingGateKind = "permission" | "blocked" | "final_confirm";
+export type CodingGateKind = "permission" | "stage_gate" | "blocked" | "final_confirm";
 
 export type CodingGateAction = {
   action_id: string;
@@ -273,6 +316,10 @@ export type CodingGateRequired = {
   kind: CodingGateKind;
   title: string;
   description: string;
+  stage?: CodingExecutionStage | null;
+  role?: CodingProviderRole | null;
+  expires_at?: string | null;
+  provider_snapshot?: CodingRoleProviderConfigSnapshot | null;
   available_actions: CodingGateAction[];
 };
 
@@ -308,6 +355,8 @@ export type CodingWsInMessage =
       action_id: string;
       extra_context?: string | null;
     }
+  | { type: "provider_select"; role: CodingProviderSelectRole; provider: WorkspaceProviderName }
+  | { type: "stage_gate_confirm"; stage: CodingExecutionStage }
   | { type: "final_confirm" }
   | { type: "abort_attempt" }
   | { type: "request_manual_pause" }
@@ -326,6 +375,8 @@ export type CodingWsOutMessage =
       max_auto_rework: number;
       head_commit: string | null;
       pushed_remote: string | null;
+      role_provider_config_snapshot: CodingRoleProviderConfigSnapshot;
+      chat_entries: CodingChatEntry[];
     } & Omit<CodingAttemptSnapshotResponse, "attempt">)
   | { type: "coding_stage_change"; stage: CodingExecutionStage }
   | { type: "coding_timeline_node_created"; node: CodingTimelineNode }
@@ -344,6 +395,12 @@ export type CodingWsOutMessage =
   | { type: "review_request_update"; review_request: ReviewRequest }
   | { type: "internal_pr_review_complete"; review: InternalPrReview }
   | { type: "coding_gate_required"; gate: CodingGateRequired }
+  | { type: "coding_chat_entry_created"; entry: CodingChatEntry }
+  | {
+      type: "coding_provider_config_updated";
+      role: CodingProviderRole;
+      provider: WorkspaceProviderName;
+    }
   | { type: "coding_protocol_error"; code: string; message: string }
   | { type: "coding_pong" };
 

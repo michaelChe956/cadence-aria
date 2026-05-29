@@ -7,7 +7,9 @@ use serde::de::DeserializeOwned;
 
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_models::{
-    CodeReviewReport, CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
+    CodeReviewReport, CodingAttemptStatus, CodingChatEntry, CodingContextNote,
+    CodingExecutionAttempt, CodingExecutionStage, CodingProviderRole, CodingReworkInstruction,
+    CodingRoleProviderConfigSnapshot, CodingStageGateState, CodingStageGateStatus,
     CodingTimelineNode, CodingTimelineNodeStatus, InternalPrReview, ReviewRequest, TestingReport,
 };
 use crate::product::id::next_sequential_id;
@@ -92,6 +94,10 @@ impl CodingAttemptStore {
         write_json(
             &self.attempt_path(&attempt.project_id, &attempt.issue_id, &id),
             &attempt,
+        )?;
+        write_json(
+            &self.role_provider_config_path(&attempt.project_id, &attempt.issue_id, &id),
+            &CodingRoleProviderConfigSnapshot::from(&attempt.provider_config_snapshot),
         )?;
         Ok(attempt)
     }
@@ -242,6 +248,58 @@ impl CodingAttemptStore {
         Ok(attempt)
     }
 
+    pub fn update_attempt_provider_config_snapshot(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        provider_config_snapshot: ProviderConfigSnapshot,
+    ) -> Result<CodingExecutionAttempt, ProductStoreError> {
+        let path = self.attempt_path(project_id, issue_id, attempt_id);
+        let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
+        attempt.provider_config_snapshot = provider_config_snapshot;
+        attempt.updated_at = Utc::now().to_rfc3339();
+        write_json(&path, &attempt)?;
+        Ok(attempt)
+    }
+
+    pub fn get_role_provider_config_snapshot(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> Result<CodingRoleProviderConfigSnapshot, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(attempt_id)?;
+        let path = self.role_provider_config_path(project_id, issue_id, attempt_id);
+        if path_is_regular_file(&path)? {
+            return read_json(&path);
+        }
+        let attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
+        Ok(CodingRoleProviderConfigSnapshot::from(
+            &attempt.provider_config_snapshot,
+        ))
+    }
+
+    pub fn update_role_provider_config_snapshot(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        role_provider_config_snapshot: CodingRoleProviderConfigSnapshot,
+    ) -> Result<CodingRoleProviderConfigSnapshot, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(attempt_id)?;
+        let attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
+        write_json(
+            &self.role_provider_config_path(&attempt.project_id, &attempt.issue_id, &attempt.id),
+            &role_provider_config_snapshot,
+        )?;
+        Ok(role_provider_config_snapshot)
+    }
+
     pub fn increment_attempt_rework_count(
         &self,
         project_id: &str,
@@ -254,6 +312,307 @@ impl CodingAttemptStore {
         attempt.updated_at = Utc::now().to_rfc3339();
         write_json(&path, &attempt)?;
         Ok(attempt)
+    }
+
+    pub fn create_context_note(
+        &self,
+        attempt_id: &str,
+        content: String,
+    ) -> Result<CodingContextNote, ProductStoreError> {
+        let attempt = self.find_attempt_by_id(attempt_id)?;
+        let notes_root = self
+            .attempt_dir(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .join("context-notes");
+        let id = next_sequential_id("coding_context_note", count_json_files(&notes_root)?);
+        let note = CodingContextNote {
+            id: id.clone(),
+            attempt_id: attempt.id,
+            content,
+            created_at: Utc::now().to_rfc3339(),
+            consumed_by_rework_round: None,
+        };
+        write_json(&notes_root.join(format!("{id}.json")), &note)?;
+        Ok(note)
+    }
+
+    pub fn list_context_notes(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> Result<Vec<CodingContextNote>, ProductStoreError> {
+        list_json_records(
+            &self
+                .attempt_dir(project_id, issue_id, attempt_id)
+                .join("context-notes"),
+        )
+    }
+
+    pub fn save_chat_entry(&self, entry: &CodingChatEntry) -> Result<(), ProductStoreError> {
+        validate_relative_id(&entry.id)?;
+        let attempt = self.find_attempt_by_id(&entry.attempt_id)?;
+        write_json(
+            &self
+                .attempt_dir(&attempt.project_id, &attempt.issue_id, &attempt.id)
+                .join("chat-entries")
+                .join(format!("{}.json", entry.id)),
+            entry,
+        )
+    }
+
+    pub fn list_chat_entries(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> Result<Vec<CodingChatEntry>, ProductStoreError> {
+        list_json_records(
+            &self
+                .attempt_dir(project_id, issue_id, attempt_id)
+                .join("chat-entries"),
+        )
+    }
+
+    pub fn list_unconsumed_context_notes(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> Result<Vec<CodingContextNote>, ProductStoreError> {
+        Ok(self
+            .list_context_notes(project_id, issue_id, attempt_id)?
+            .into_iter()
+            .filter(|note| note.consumed_by_rework_round.is_none())
+            .collect())
+    }
+
+    pub fn mark_context_notes_consumed(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        note_ids: &[String],
+        rework_round: u32,
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(attempt_id)?;
+        let notes_root = self
+            .attempt_dir(project_id, issue_id, attempt_id)
+            .join("context-notes");
+        for note_id in note_ids {
+            validate_relative_id(note_id)?;
+            let path = notes_root.join(format!("{note_id}.json"));
+            let mut note: CodingContextNote = read_json(&path)?;
+            note.consumed_by_rework_round = Some(rework_round);
+            write_json(&path, &note)?;
+        }
+        Ok(())
+    }
+
+    pub fn save_rework_instruction(
+        &self,
+        instruction: &CodingReworkInstruction,
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(&instruction.id)?;
+        let attempt = self.find_attempt_by_id(&instruction.attempt_id)?;
+        write_json(
+            &self
+                .rework_instructions_root(&attempt.project_id, &attempt.issue_id, &attempt.id)
+                .join(format!("{}.json", instruction.id)),
+            instruction,
+        )
+    }
+
+    pub fn list_rework_instructions(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> Result<Vec<CodingReworkInstruction>, ProductStoreError> {
+        list_json_records(&self.rework_instructions_root(project_id, issue_id, attempt_id))
+    }
+
+    pub fn latest_unconsumed_rework_instruction(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> Result<Option<CodingReworkInstruction>, ProductStoreError> {
+        Ok(self
+            .list_rework_instructions(project_id, issue_id, attempt_id)?
+            .into_iter()
+            .rfind(|instruction| instruction.consumed_by_node_id.is_none()))
+    }
+
+    pub fn mark_rework_instruction_consumed(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        instruction_id: &str,
+        node_id: &str,
+    ) -> Result<CodingReworkInstruction, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(attempt_id)?;
+        validate_relative_id(instruction_id)?;
+        validate_relative_id(node_id)?;
+        let path = self
+            .rework_instructions_root(project_id, issue_id, attempt_id)
+            .join(format!("{instruction_id}.json"));
+        let mut instruction: CodingReworkInstruction = read_json(&path)?;
+        instruction.consumed_by_node_id = Some(node_id.to_string());
+        instruction.consumed_at = Some(Utc::now().to_rfc3339());
+        write_json(&path, &instruction)?;
+        Ok(instruction)
+    }
+
+    pub fn attempt_artifact_root(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> PathBuf {
+        self.attempt_dir(project_id, issue_id, attempt_id)
+            .join("artifacts")
+    }
+
+    pub fn attempt_test_output_root(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> PathBuf {
+        self.attempt_artifact_root(project_id, issue_id, attempt_id)
+            .join("test-output")
+    }
+
+    pub fn attempt_test_output_path(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        artifact_id: &str,
+    ) -> Result<PathBuf, ProductStoreError> {
+        let file_name = Path::new(artifact_id)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| ProductStoreError::PathEscape(artifact_id.to_string()))?;
+        validate_relative_id(file_name)?;
+        Ok(self
+            .attempt_test_output_root(project_id, issue_id, attempt_id)
+            .join(file_name))
+    }
+
+    pub fn create_stage_gate(
+        &self,
+        attempt_id: &str,
+        stage: CodingExecutionStage,
+        role: CodingProviderRole,
+        expires_at: String,
+        provider_snapshot: CodingRoleProviderConfigSnapshot,
+    ) -> Result<CodingStageGateState, ProductStoreError> {
+        let attempt = self.find_attempt_by_id(attempt_id)?;
+        let gates_root = self
+            .attempt_dir(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .join("stage-gates");
+        let gate_id = next_sequential_id("coding_stage_gate", count_json_files(&gates_root)?);
+        let now = Utc::now().to_rfc3339();
+        let gate = CodingStageGateState {
+            gate_id: gate_id.clone(),
+            attempt_id: attempt.id,
+            stage,
+            role,
+            expires_at,
+            provider_snapshot,
+            status: CodingStageGateStatus::Open,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        write_json(&gates_root.join(format!("{gate_id}.json")), &gate)?;
+        Ok(gate)
+    }
+
+    pub fn list_stage_gates(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> Result<Vec<CodingStageGateState>, ProductStoreError> {
+        list_json_records(
+            &self
+                .attempt_dir(project_id, issue_id, attempt_id)
+                .join("stage-gates"),
+        )
+    }
+
+    pub fn list_open_stage_gates(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> Result<Vec<CodingStageGateState>, ProductStoreError> {
+        Ok(self
+            .list_stage_gates(project_id, issue_id, attempt_id)?
+            .into_iter()
+            .filter(|gate| gate.status == CodingStageGateStatus::Open)
+            .collect())
+    }
+
+    pub fn update_stage_gate_status(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        gate_id: &str,
+        status: CodingStageGateStatus,
+    ) -> Result<CodingStageGateState, ProductStoreError> {
+        validate_relative_id(gate_id)?;
+        let path = self
+            .attempt_dir(project_id, issue_id, attempt_id)
+            .join("stage-gates")
+            .join(format!("{gate_id}.json"));
+        if !path_is_regular_file(&path)? {
+            return Err(ProductStoreError::NotFound {
+                kind: "coding_stage_gate",
+                id: gate_id.to_string(),
+            });
+        }
+        let mut gate: CodingStageGateState = read_json(&path)?;
+        gate.status = status;
+        gate.updated_at = Utc::now().to_rfc3339();
+        write_json(&path, &gate)?;
+        Ok(gate)
+    }
+
+    pub fn refresh_stage_gate(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        gate_id: &str,
+        expires_at: String,
+        provider_snapshot: CodingRoleProviderConfigSnapshot,
+    ) -> Result<CodingStageGateState, ProductStoreError> {
+        validate_relative_id(gate_id)?;
+        let path = self
+            .attempt_dir(project_id, issue_id, attempt_id)
+            .join("stage-gates")
+            .join(format!("{gate_id}.json"));
+        if !path_is_regular_file(&path)? {
+            return Err(ProductStoreError::NotFound {
+                kind: "coding_stage_gate",
+                id: gate_id.to_string(),
+            });
+        }
+        let mut gate: CodingStageGateState = read_json(&path)?;
+        gate.expires_at = expires_at;
+        gate.provider_snapshot = provider_snapshot;
+        gate.status = CodingStageGateStatus::Open;
+        gate.updated_at = Utc::now().to_rfc3339();
+        write_json(&path, &gate)?;
+        Ok(gate)
     }
 
     pub fn save_testing_report(&self, report: &TestingReport) -> Result<(), ProductStoreError> {
@@ -517,6 +876,26 @@ impl CodingAttemptStore {
             .join(attempt_id)
     }
 
+    fn role_provider_config_path(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> PathBuf {
+        self.attempt_dir(project_id, issue_id, attempt_id)
+            .join("role-provider-config.json")
+    }
+
+    fn rework_instructions_root(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> PathBuf {
+        self.attempt_dir(project_id, issue_id, attempt_id)
+            .join("rework-instructions")
+    }
+
     fn coding_attempts_root(&self, project_id: &str, issue_id: &str) -> PathBuf {
         self.paths
             .issue_lifecycle_root(project_id, issue_id)
@@ -576,6 +955,9 @@ fn valid_stage_transition(current: &CodingExecutionStage, next: &CodingExecution
             CodingExecutionStage::Coding
                 | CodingExecutionStage::Testing
                 | CodingExecutionStage::CodeReview
+                | CodingExecutionStage::ReviewRequest
+                | CodingExecutionStage::InternalPrReview
+                | CodingExecutionStage::FinalConfirm
         );
     }
     next.order() >= current.order()

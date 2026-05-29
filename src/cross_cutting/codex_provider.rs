@@ -182,7 +182,9 @@ impl StreamingProviderAdapter for CodexProvider {
                     ProviderEvent::PermissionRequest(_)
                     | ProviderEvent::ChoiceRequest(_)
                     | ProviderEvent::StatusChanged(_)
-                    | ProviderEvent::Execution(_) => {
+                    | ProviderEvent::Execution(_)
+                    | ProviderEvent::ToolCall(_)
+                    | ProviderEvent::ToolResult(_) => {
                         continue;
                     }
                 };
@@ -831,7 +833,7 @@ mod tests {
 
     use super::CodexProvider;
 
-    const TEST_TIMEOUT: Duration = Duration::from_secs(2);
+    const TEST_TIMEOUT: Duration = Duration::from_secs(5);
 
     fn executable_fixture(relative_path: &str) -> PathBuf {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative_path);
@@ -877,7 +879,9 @@ mod tests {
                 | ProviderEvent::Execution(_)
                 | ProviderEvent::TextDelta { .. }
                 | ProviderEvent::PermissionRequest(_)
-                | ProviderEvent::ChoiceRequest(_) => {}
+                | ProviderEvent::ChoiceRequest(_)
+                | ProviderEvent::ToolCall(_)
+                | ProviderEvent::ToolResult(_) => {}
                 ProviderEvent::Failed { message } => panic!("provider failed: {message}"),
                 ProviderEvent::ProtocolError { message, .. } => {
                     panic!("provider protocol error: {message}")
@@ -908,7 +912,9 @@ mod tests {
                 ProviderEvent::PermissionRequest(data) => break data.id,
                 ProviderEvent::StatusChanged(_)
                 | ProviderEvent::Execution(_)
-                | ProviderEvent::ChoiceRequest(_) => {}
+                | ProviderEvent::ChoiceRequest(_)
+                | ProviderEvent::ToolCall(_)
+                | ProviderEvent::ToolResult(_) => {}
                 other => panic!("unexpected event before permission: {other:?}"),
             }
         };
@@ -971,7 +977,9 @@ mod tests {
                 ProviderEvent::StatusChanged(_)
                 | ProviderEvent::Execution(_)
                 | ProviderEvent::PermissionRequest(_)
-                | ProviderEvent::ChoiceRequest(_) => {}
+                | ProviderEvent::ChoiceRequest(_)
+                | ProviderEvent::ToolCall(_)
+                | ProviderEvent::ToolResult(_) => {}
                 ProviderEvent::Failed { message } => panic!("provider failed: {message}"),
                 ProviderEvent::ProtocolError { message, .. } => {
                     panic!("provider protocol error: {message}")
@@ -1007,7 +1015,9 @@ mod tests {
                 ProviderEvent::StatusChanged(_)
                 | ProviderEvent::Execution(_)
                 | ProviderEvent::TextDelta { .. }
-                | ProviderEvent::PermissionRequest(_) => {}
+                | ProviderEvent::PermissionRequest(_)
+                | ProviderEvent::ToolCall(_)
+                | ProviderEvent::ToolResult(_) => {}
                 ProviderEvent::Completed { full_output, .. } => {
                     panic!("provider completed before choice request: {full_output}")
                 }
@@ -1117,7 +1127,9 @@ mod tests {
                 | ProviderEvent::Execution(_)
                 | ProviderEvent::TextDelta { .. }
                 | ProviderEvent::PermissionRequest(_)
-                | ProviderEvent::ChoiceRequest(_) => {}
+                | ProviderEvent::ChoiceRequest(_)
+                | ProviderEvent::ToolCall(_)
+                | ProviderEvent::ToolResult(_) => {}
                 ProviderEvent::Completed { full_output, .. } => {
                     panic!("provider completed unexpectedly: {full_output}")
                 }

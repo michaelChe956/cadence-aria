@@ -11,7 +11,7 @@ test.describe("C. 看板侧滑详情", () => {
 
     await page.goto("/workbench");
     await page.getByRole("button", { name: seeded.projectName, exact: true }).click();
-    await expect(page.getByRole("region", { name: "Story Spec 列" })).toContainText(
+    await expect(page.getByRole("region", { name: "Story Spec 内容" })).toContainText(
       seeded.storyTitle,
     );
     await page.getByText(seeded.storyTitle).click();

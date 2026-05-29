@@ -33,7 +33,7 @@ test("fake provider workspace streams a story spec and confirms lifecycle state"
   const projectButton = page.getByRole("button", { name: seeded.projectName, exact: true });
   await expect(projectButton).toBeEnabled();
   await projectButton.click();
-  const storyColumn = page.getByRole("region", { name: "Story Spec 列" });
+  const storyColumn = page.getByRole("region", { name: "Story Spec 内容" });
   await expect(storyColumn).toContainText(seeded.storyTitle);
   await expect(storyColumn).toContainText("confirmed");
 });

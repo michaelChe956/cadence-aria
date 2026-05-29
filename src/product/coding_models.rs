@@ -1,7 +1,9 @@
+use std::fmt;
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::product::models::ProviderName;
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,6 +58,84 @@ impl CodingAttemptStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodingProviderRole {
+    Coder,
+    Tester,
+    Analyst,
+    CodeReviewer,
+    InternalReviewer,
+}
+
+impl fmt::Display for CodingProviderRole {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let label = match self {
+            Self::Coder => "Coder",
+            Self::Tester => "Tester",
+            Self::Analyst => "Analyst",
+            Self::CodeReviewer => "Code Reviewer",
+            Self::InternalReviewer => "Internal Reviewer",
+        };
+        formatter.write_str(label)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodingRoleProviderConfigSnapshot {
+    pub coder: ProviderName,
+    pub tester: ProviderName,
+    pub analyst: ProviderName,
+    pub code_reviewer: ProviderName,
+    pub internal_reviewer: ProviderName,
+    pub review_rounds: u32,
+}
+
+impl From<ProviderConfigSnapshot> for CodingRoleProviderConfigSnapshot {
+    fn from(snapshot: ProviderConfigSnapshot) -> Self {
+        Self::from(&snapshot)
+    }
+}
+
+impl From<&ProviderConfigSnapshot> for CodingRoleProviderConfigSnapshot {
+    fn from(snapshot: &ProviderConfigSnapshot) -> Self {
+        let reviewer = snapshot
+            .reviewer
+            .clone()
+            .unwrap_or_else(|| snapshot.author.clone());
+        Self {
+            coder: snapshot.author.clone(),
+            tester: snapshot.author.clone(),
+            analyst: snapshot.author.clone(),
+            code_reviewer: reviewer.clone(),
+            internal_reviewer: reviewer,
+            review_rounds: snapshot.review_rounds,
+        }
+    }
+}
+
+impl CodingRoleProviderConfigSnapshot {
+    pub fn provider_for_role(&self, role: &CodingProviderRole) -> &ProviderName {
+        match role {
+            CodingProviderRole::Coder => &self.coder,
+            CodingProviderRole::Tester => &self.tester,
+            CodingProviderRole::Analyst => &self.analyst,
+            CodingProviderRole::CodeReviewer => &self.code_reviewer,
+            CodingProviderRole::InternalReviewer => &self.internal_reviewer,
+        }
+    }
+
+    pub fn set_provider_for_role(&mut self, role: &CodingProviderRole, provider: ProviderName) {
+        match role {
+            CodingProviderRole::Coder => self.coder = provider,
+            CodingProviderRole::Tester => self.tester = provider,
+            CodingProviderRole::Analyst => self.analyst = provider,
+            CodingProviderRole::CodeReviewer => self.code_reviewer = provider,
+            CodingProviderRole::InternalReviewer => self.internal_reviewer = provider,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CodingExecutionAttempt {
     pub id: String,
     pub project_id: String,
@@ -76,6 +156,102 @@ pub struct CodingExecutionAttempt {
     pub created_at: String,
     pub updated_at: String,
     pub completed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnalystVerdict {
+    NeedsFix,
+    NeedsHumanInput,
+    NoIssue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CodingEntryType {
+    UserMessage,
+    AssistantMessage,
+    ToolCall {
+        tool_name: String,
+        input: serde_json::Value,
+    },
+    ToolResult {
+        tool_use_id: String,
+        output: String,
+        is_error: bool,
+    },
+    StageGate {
+        stage: CodingExecutionStage,
+        countdown_seconds: u8,
+    },
+    AnalystVerdict {
+        verdict: AnalystVerdict,
+    },
+    StageSummary {
+        stage: CodingExecutionStage,
+        summary: String,
+    },
+    SystemEvent {
+        event_type: String,
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodingChatEntry {
+    pub id: String,
+    pub attempt_id: String,
+    pub node_id: Option<String>,
+    pub role: CodingAgentRole,
+    pub entry_type: CodingEntryType,
+    pub content: Option<String>,
+    pub metadata: Option<serde_json::Value>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodingContextNote {
+    pub id: String,
+    pub attempt_id: String,
+    pub content: String,
+    pub created_at: String,
+    pub consumed_by_rework_round: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodingReworkInstruction {
+    pub id: String,
+    pub attempt_id: String,
+    pub source_stage: CodingExecutionStage,
+    pub rework_round: u32,
+    pub summary: String,
+    pub fix_hints: Vec<String>,
+    pub questions: Vec<String>,
+    pub created_at: String,
+    pub consumed_by_node_id: Option<String>,
+    pub consumed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodingStageGateStatus {
+    Open,
+    Confirmed,
+    Expired,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodingStageGateState {
+    pub gate_id: String,
+    pub attempt_id: String,
+    pub stage: CodingExecutionStage,
+    pub role: CodingProviderRole,
+    pub expires_at: String,
+    pub provider_snapshot: CodingRoleProviderConfigSnapshot,
+    pub status: CodingStageGateStatus,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -170,12 +346,32 @@ pub enum ReviewVerdict {
     Blocked,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FindingSeverity {
     Error,
     Warning,
     Info,
+}
+
+impl<'de> Deserialize<'de> for FindingSeverity {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        match value.trim().to_ascii_lowercase().as_str() {
+            "error" | "blocking" | "critical" | "high" => Ok(Self::Error),
+            "warning" | "medium" => Ok(Self::Warning),
+            "info" | "low" => Ok(Self::Info),
+            other => Err(serde::de::Error::unknown_variant(
+                other,
+                &[
+                    "error", "warning", "info", "blocking", "critical", "high", "medium", "low",
+                ],
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -208,6 +404,9 @@ pub struct InternalPrReview {
     pub review_request_id: String,
     pub verdict: ReviewVerdict,
     pub findings: Vec<ReviewFinding>,
+    pub impact_scope: Vec<String>,
+    pub pr_description: String,
+    pub commit_message_suggestion: String,
     pub tested_evidence_refs: Vec<String>,
     pub diff_refs: Vec<String>,
     pub summary: String,
@@ -259,6 +458,7 @@ pub struct CodingGateAction {
 #[serde(rename_all = "snake_case")]
 pub enum CodingGateActionType {
     ContinueRework,
+    ConfirmStage,
     AcceptRisk,
     Abort,
     RetryPush,
@@ -269,6 +469,7 @@ pub enum CodingGateActionType {
 #[serde(rename_all = "snake_case")]
 pub enum CodingGateKind {
     Permission,
+    StageGate,
     Blocked,
     FinalConfirm,
 }
@@ -279,5 +480,9 @@ pub struct CodingGateRequired {
     pub kind: CodingGateKind,
     pub title: String,
     pub description: String,
+    pub stage: Option<CodingExecutionStage>,
+    pub role: Option<CodingProviderRole>,
+    pub expires_at: Option<String>,
+    pub provider_snapshot: Option<CodingRoleProviderConfigSnapshot>,
     pub available_actions: Vec<CodingGateAction>,
 }

@@ -12,6 +12,7 @@ class MockWebSocket {
   static instances: MockWebSocket[] = [];
 
   readonly sent: string[] = [];
+  readonly closeCodes: number[] = [];
   readonly url: string;
   readyState = MockWebSocket.CONNECTING;
   onopen: ((event: Event) => void) | null = null;
@@ -29,6 +30,7 @@ class MockWebSocket {
   }
 
   close(code = 1000) {
+    this.closeCodes.push(code);
     this.readyState = MockWebSocket.CLOSED;
     this.onclose?.(new CloseEvent("close", { code }));
   }
@@ -900,6 +902,7 @@ describe("useWorkspaceWs", () => {
     });
 
     expect(harness.ws.readyState).toBe(MockWebSocket.CLOSED);
+    expect(harness.ws.closeCodes).toContain(4000);
     expect(useWorkspaceStore.getState().connectionStatus).toBe("disconnected");
   });
 

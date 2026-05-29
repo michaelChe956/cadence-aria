@@ -1,7 +1,8 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use chrono::Utc;
+use serde_json::Value;
 use thiserror::Error;
 use tokio::process::Command;
 use tokio::time::timeout;
@@ -57,11 +58,48 @@ pub fn discover_test_commands(worktree_path: impl AsRef<Path>) -> Vec<TestComman
     Vec::new()
 }
 
+pub fn infer_test_commands(worktree_path: impl AsRef<Path>) -> Vec<TestCommandSpec> {
+    let worktree_path = worktree_path.as_ref();
+    if worktree_path.join("Cargo.toml").is_file() {
+        return vec![TestCommandSpec {
+            id: "inferred_rust".to_string(),
+            command: vec!["cargo".to_string(), "test".to_string()],
+        }];
+    }
+    if package_json_has_test_script(&worktree_path.join("package.json")) {
+        return vec![TestCommandSpec {
+            id: "inferred_node".to_string(),
+            command: vec!["pnpm".to_string(), "test".to_string()],
+        }];
+    }
+    if worktree_path.join("pytest.ini").is_file()
+        || pyproject_declares_pytest(&worktree_path.join("pyproject.toml"))
+    {
+        return vec![TestCommandSpec {
+            id: "inferred_python".to_string(),
+            command: vec!["pytest".to_string()],
+        }];
+    }
+    Vec::new()
+}
+
 pub fn planned_test_commands_from_markdown(markdown: &str) -> Vec<TestCommandSpec> {
     let mut commands = Vec::new();
     let mut in_verification_block = false;
+    let mut in_command_fence: Option<String> = None;
     for line in markdown.lines() {
         let trimmed = line.trim();
+        if let Some(fence) = in_command_fence.as_deref() {
+            if is_closing_fence(trimmed, fence) {
+                in_command_fence = None;
+                continue;
+            }
+            let command = trimmed.strip_prefix("$ ").unwrap_or(trimmed).to_string();
+            if is_allowed_planned_command(&command) && !commands.contains(&command) {
+                commands.push(command);
+            }
+            continue;
+        }
         if trimmed.starts_with('#') {
             in_verification_block = trimmed.contains("验证命令");
             continue;
@@ -75,6 +113,10 @@ pub fn planned_test_commands_from_markdown(markdown: &str) -> Vec<TestCommandSpe
             continue;
         }
         if !in_verification_block {
+            continue;
+        }
+        if let Some(fence) = code_fence_marker(trimmed) {
+            in_command_fence = Some(fence);
             continue;
         }
         for command in inline_code_spans(trimmed) {
@@ -100,13 +142,21 @@ pub fn planned_test_commands_from_markdown(markdown: &str) -> Vec<TestCommandSpe
 pub async fn execute_test_command(
     spec: &TestCommandSpec,
     worktree_path: impl AsRef<Path>,
+    artifact_output_root: impl AsRef<Path>,
 ) -> Result<TestCommand, TestExecutorError> {
-    execute_test_command_with_timeout(spec, worktree_path, DEFAULT_TEST_TIMEOUT).await
+    execute_test_command_with_timeout(
+        spec,
+        worktree_path,
+        artifact_output_root,
+        DEFAULT_TEST_TIMEOUT,
+    )
+    .await
 }
 
 async fn execute_test_command_with_timeout(
     spec: &TestCommandSpec,
     worktree_path: impl AsRef<Path>,
+    artifact_output_root: impl AsRef<Path>,
     timeout_duration: Duration,
 ) -> Result<TestCommand, TestExecutorError> {
     if spec.command.is_empty() {
@@ -114,11 +164,12 @@ async fn execute_test_command_with_timeout(
     }
     validate_command_id(&spec.id)?;
     let worktree_path = worktree_path.as_ref();
+    let artifact_output_root = artifact_output_root.as_ref();
     let started = std::time::Instant::now();
     let stdout_ref = artifact_ref(&spec.id, "stdout");
     let stderr_ref = artifact_ref(&spec.id, "stderr");
-    let stdout_path = worktree_path.join(&stdout_ref);
-    let stderr_path = worktree_path.join(&stderr_ref);
+    let stdout_path = artifact_output_root.join(&stdout_ref);
+    let stderr_path = artifact_output_root.join(&stderr_ref);
     if let Some(parent) = stdout_path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
@@ -147,8 +198,8 @@ async fn execute_test_command_with_timeout(
                 cwd: worktree_path.to_path_buf(),
                 exit_code,
                 duration_ms,
-                stdout_ref: stdout_ref.to_string_lossy().to_string(),
-                stderr_ref: stderr_ref.to_string_lossy().to_string(),
+                stdout_ref,
+                stderr_ref,
                 status,
             })
         }
@@ -160,8 +211,8 @@ async fn execute_test_command_with_timeout(
                 cwd: worktree_path.to_path_buf(),
                 exit_code: None,
                 duration_ms,
-                stdout_ref: stdout_ref.to_string_lossy().to_string(),
-                stderr_ref: stderr_ref.to_string_lossy().to_string(),
+                stdout_ref,
+                stderr_ref,
                 status: TestCommandStatus::TimedOut,
             })
         }
@@ -171,13 +222,15 @@ async fn execute_test_command_with_timeout(
 pub async fn run_all_tests(
     attempt_id: &str,
     worktree_path: impl AsRef<Path>,
+    artifact_output_root: impl AsRef<Path>,
     specs: &[TestCommandSpec],
 ) -> Result<TestingReport, TestExecutorError> {
     let started_at = Utc::now().to_rfc3339();
     let worktree_path = worktree_path.as_ref();
+    let artifact_output_root = artifact_output_root.as_ref();
     let mut commands = Vec::with_capacity(specs.len());
     for spec in specs {
-        commands.push(execute_test_command(spec, worktree_path).await?);
+        commands.push(execute_test_command(spec, worktree_path, artifact_output_root).await?);
     }
     let overall_status = if commands.is_empty() {
         TestingOverallStatus::Blocked
@@ -202,11 +255,32 @@ pub async fn run_all_tests(
     })
 }
 
-fn artifact_ref(command_id: &str, stream: &str) -> PathBuf {
-    PathBuf::from(".aria")
-        .join("coding-artifacts")
-        .join("test-output")
-        .join(format!("{command_id}.{stream}.log"))
+fn artifact_ref(command_id: &str, stream: &str) -> String {
+    format!("{command_id}.{stream}.log")
+}
+
+fn package_json_has_test_script(path: &Path) -> bool {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&content) else {
+        return false;
+    };
+    value
+        .get("scripts")
+        .and_then(|scripts| scripts.get("test"))
+        .and_then(Value::as_str)
+        .is_some_and(|script| !script.trim().is_empty())
+}
+
+fn pyproject_declares_pytest(path: &Path) -> bool {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    content.lines().any(|line| {
+        let trimmed = line.trim();
+        trimmed == "[tool.pytest]" || trimmed == "[tool.pytest.ini_options]"
+    })
 }
 
 fn validate_command_id(command_id: &str) -> Result<(), TestExecutorError> {
@@ -230,6 +304,7 @@ fn is_non_verification_label(line: &str) -> bool {
     line.ends_with('：')
         && !line.starts_with('-')
         && !line.starts_with('*')
+        && !line.contains("命令")
         && !is_verification_label(line)
 }
 
@@ -269,4 +344,21 @@ fn split_simple_command(command: &str) -> Option<Vec<String>> {
         .map(ToString::to_string)
         .collect();
     (!parts.is_empty()).then_some(parts)
+}
+
+fn code_fence_marker(line: &str) -> Option<String> {
+    let first = line.as_bytes().first().copied()?;
+    if first != b'`' && first != b'~' {
+        return None;
+    }
+    let len = line
+        .as_bytes()
+        .iter()
+        .take_while(|byte| **byte == first)
+        .count();
+    (len >= 3).then(|| std::iter::repeat_n(char::from(first), len).collect())
+}
+
+fn is_closing_fence(line: &str, fence: &str) -> bool {
+    line.starts_with(fence) && line[fence.len()..].trim().is_empty()
 }

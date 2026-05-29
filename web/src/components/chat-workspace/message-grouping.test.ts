@@ -67,6 +67,37 @@ describe("groupEntries", () => {
       "choice-1",
     ]);
   });
+
+  it("groups coding roles by node and keeps analyst verdicts standalone", () => {
+    const items = groupEntries([
+      makeEntry("tester-stream", "provider_stream", "tester", "测试中", "coding_node_0002"),
+      makeEntry("tester-tool", "execution_event", "tester", "run_command", "coding_node_0002"),
+      makeEntry(
+        "analyst-verdict",
+        "analyst_verdict",
+        "analyst",
+        "测试仍失败",
+        "coding_node_0003",
+      ),
+      makeEntry(
+        "review-stream",
+        "provider_stream",
+        "code_reviewer",
+        "审查中",
+        "coding_node_0004",
+      ),
+    ]);
+
+    expect(items.map((item) => item.kind)).toEqual(["group", "entry", "group"]);
+    if (items[0].kind !== "group" || items[2].kind !== "group") return;
+    expect(items[0].group.role).toBe("tester");
+    expect(items[0].group.inlineEvents.map((entry) => entry.id)).toEqual(["tester-tool"]);
+    expect(items[1]).toMatchObject({
+      kind: "entry",
+      entry: expect.objectContaining({ id: "analyst-verdict" }),
+    });
+    expect(items[2].group.role).toBe("code_reviewer");
+  });
 });
 
 function makeEntry(
