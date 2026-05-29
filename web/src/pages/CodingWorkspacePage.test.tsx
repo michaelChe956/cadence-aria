@@ -1,9 +1,14 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { deleteCodingAttempt } from "../api/client";
 import { useCodingWorkspaceWs } from "../hooks/useCodingWorkspaceWs";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
 import { CodingWorkspacePage } from "./CodingWorkspacePage";
+
+vi.mock("../api/client", () => ({
+  deleteCodingAttempt: vi.fn(),
+}));
 
 vi.mock("../hooks/useCodingWorkspaceWs", () => ({
   useCodingWorkspaceWs: vi.fn(),
@@ -193,6 +198,33 @@ describe("CodingWorkspacePage", () => {
     await userEvent.click(screen.getByRole("button", { name: "开始 Coding" }));
 
     expect(api.startCoding).toHaveBeenCalled();
+  });
+
+  it("deletes the coding workspace after confirmation and navigates back", async () => {
+    mockCodingWs();
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    vi.mocked(deleteCodingAttempt).mockResolvedValue({ status: "deleted" });
+    const onBack = vi.fn();
+    useCodingWorkspaceStore.setState({
+      attemptId: "coding_attempt_0001",
+      status: "running",
+      stage: "coding",
+    });
+
+    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={onBack} />);
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "删除 Coding Workspace" }),
+    );
+
+    expect(confirm).toHaveBeenCalledWith(
+      expect.stringContaining("日志、测试输出和 worktree"),
+    );
+    await waitFor(() =>
+      expect(deleteCodingAttempt).toHaveBeenCalledWith("coding_attempt_0001"),
+    );
+    expect(onBack).toHaveBeenCalled();
+    confirm.mockRestore();
   });
 
   it("sends final confirm and abort actions", async () => {

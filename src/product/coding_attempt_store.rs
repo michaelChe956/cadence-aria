@@ -163,6 +163,34 @@ impl CodingAttemptStore {
         Ok(active)
     }
 
+    pub fn delete_attempt(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> Result<CodingExecutionAttempt, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(attempt_id)?;
+        let attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
+        remove_file_if_exists(&self.attempt_path(project_id, issue_id, attempt_id))?;
+        remove_dir_all_if_exists(&self.attempt_dir(project_id, issue_id, attempt_id))?;
+        Ok(attempt)
+    }
+
+    pub fn delete_attempts_for_work_item(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        work_item_id: &str,
+    ) -> Result<Vec<CodingExecutionAttempt>, ProductStoreError> {
+        let attempts = self.list_attempts_for_work_item(project_id, issue_id, work_item_id)?;
+        for attempt in &attempts {
+            self.delete_attempt(project_id, issue_id, &attempt.id)?;
+        }
+        Ok(attempts)
+    }
+
     pub fn update_attempt_status(
         &self,
         project_id: &str,
@@ -1046,6 +1074,28 @@ fn path_is_regular_file(path: &Path) -> Result<bool, ProductStoreError> {
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
         Err(error) => Err(ProductStoreError::Io(format!(
             "metadata {}: {error}",
+            path.display()
+        ))),
+    }
+}
+
+fn remove_file_if_exists(path: &Path) -> Result<(), ProductStoreError> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(ProductStoreError::Io(format!(
+            "remove {}: {error}",
+            path.display()
+        ))),
+    }
+}
+
+fn remove_dir_all_if_exists(path: &Path) -> Result<(), ProductStoreError> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(ProductStoreError::Io(format!(
+            "remove {}: {error}",
             path.display()
         ))),
     }

@@ -259,6 +259,17 @@ export function getCodingAttemptSnapshot(
   );
 }
 
+export function deleteCodingAttempt(
+  attemptId: string,
+): Promise<{ status: string }> {
+  return requestJson<{ status: string }>(
+    `/api/coding-attempts/${encodeURIComponent(attemptId)}`,
+    {
+      method: "DELETE",
+    },
+  );
+}
+
 export function abortCodingAttempt(attemptId: string): Promise<CodingAttempt> {
   return requestJson<CodingAttempt>(
     `/api/coding-attempts/${encodeURIComponent(attemptId)}/abort`,

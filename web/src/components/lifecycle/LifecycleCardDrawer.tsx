@@ -6,6 +6,7 @@ import {
   Layers3,
   ListChecks,
   ScrollText,
+  Trash2,
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
@@ -35,6 +36,7 @@ interface LifecycleCardDrawerProps {
   onOpenWorkspace: () => void;
   onOpenCodingWorkspace?: () => void;
   onGenerateNext?: () => void;
+  onDelete?: () => void;
 }
 
 const KIND_LABELS: Record<DrawerEntityKind, string> = {
@@ -66,6 +68,7 @@ export function LifecycleCardDrawer({
   onOpenWorkspace,
   onOpenCodingWorkspace,
   onGenerateNext,
+  onDelete,
 }: LifecycleCardDrawerProps) {
   const [showAllVersions, setShowAllVersions] = useState(false);
   const [selectedVersionIndex, setSelectedVersionIndex] = useState(0);
@@ -322,6 +325,17 @@ export function LifecycleCardDrawer({
           >
             <Code className="h-4 w-4" />
             {codingActionLabel}
+          </button>
+        ) : null}
+        {entity.kind === "work_item" && onDelete ? (
+          <button
+            data-testid="drawer-delete-work-item"
+            type="button"
+            onClick={onDelete}
+            className="inline-flex h-9 w-full items-center justify-center gap-2 rounded-md border border-[var(--aria-danger)] bg-white px-3 text-sm font-semibold text-[var(--aria-danger)] hover:bg-red-50"
+          >
+            <Trash2 className="h-4 w-4" />
+            删除 Work Item
           </button>
         ) : null}
       </footer>

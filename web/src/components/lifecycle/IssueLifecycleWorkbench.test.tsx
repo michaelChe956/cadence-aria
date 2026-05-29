@@ -727,6 +727,36 @@ describe("IssueLifecycleWorkbench", () => {
     );
   });
 
+  it("deletes a work item from the drawer and removes its coding workspace content", async () => {
+    const fetchMock = lifecycleFetch({ confirmedWorkItem: true });
+    vi.stubGlobal("fetch", fetchMock);
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "实现提示组件" }),
+    );
+    expect(await screen.findByTestId("lifecycle-card-drawer")).toHaveTextContent(
+      "实现提示组件",
+    );
+
+    await user.click(screen.getByTestId("drawer-delete-work-item"));
+
+    expect(confirm).toHaveBeenCalledWith(
+      expect.stringContaining("Coding Workspace、日志和 worktree"),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001",
+      expect.objectContaining({ method: "DELETE" }),
+    );
+    await waitFor(() =>
+      expect(screen.queryByTestId("lifecycle-card-drawer")).not.toBeInTheDocument(),
+    );
+    confirm.mockRestore();
+  });
+
   it("does not clear drawer URL focus while handing off to the coding workspace route", async () => {
     vi.stubGlobal("fetch", lifecycleFetch({ confirmedWorkItem: true }));
     const user = userEvent.setup();

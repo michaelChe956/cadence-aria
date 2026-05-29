@@ -436,6 +436,19 @@ export function IssueLifecycleWorkbench({
     }
   }
 
+  function handleDeleteWorkItemFromDrawer(card: LifecycleCardData) {
+    if (card.kind !== "work_item") {
+      return;
+    }
+    const confirmed = window.confirm(
+      "删除 Work Item 会同时删除关联的 Coding Workspace、日志和 worktree，且无法撤销。",
+    );
+    if (!confirmed) {
+      return;
+    }
+    void handleDeleteLifecycleCard(card);
+  }
+
   async function handleLaunchWorkspace(
     target: ProviderWorkspaceLaunchTarget,
     card: LifecycleCardData,
@@ -619,6 +632,11 @@ export function IssueLifecycleWorkbench({
               (focusedEntity.kind === "story_spec" ||
                 focusedEntity.kind === "design_spec")
                 ? () => void handleGenerateNext(focusedEntity)
+                : undefined
+            }
+            onDelete={
+              focusedEntity.kind === "work_item"
+                ? () => handleDeleteWorkItemFromDrawer(focusedEntity)
                 : undefined
             }
           />

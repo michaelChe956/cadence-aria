@@ -3,11 +3,13 @@ import {
   Check,
   Play,
   Send,
+  Trash2,
   Wifi,
   WifiOff,
   X,
 } from "lucide-react";
 import { useRef, useState, type FormEvent } from "react";
+import { deleteCodingAttempt } from "../api/client";
 import type {
   CodeReviewReport,
   CodingExecutionStage,
@@ -44,12 +46,36 @@ export function CodingWorkspacePage({
   const connected = store.connectionStatus === "connected";
   const activeTab = store.activeTab;
   const [activePanel, setActivePanel] = useState<"chat" | "results">("chat");
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const chatListRef = useRef<ChatEntryListHandle | null>(null);
 
   useUnloadGuard({
     enabled: store.status === "running",
     message: "Coding attempt 运行中。刷新/关闭可能中断当前操作，是否继续？",
   });
+
+  async function handleDeleteCodingWorkspace() {
+    const targetAttemptId = store.attemptId ?? attemptId;
+    const active = ACTIVE_ATTEMPT_STATUSES.has(store.status ?? "created");
+    const message = active
+      ? "运行中的 Attempt 会被终止并删除。本操作会删除 Coding Workspace 的日志、测试输出和 worktree，且无法撤销。"
+      : "本操作会删除 Coding Workspace 的日志、测试输出和 worktree，且无法撤销。";
+    if (!window.confirm(message)) {
+      return;
+    }
+
+    setDeleteBusy(true);
+    setDeleteError(null);
+    try {
+      await deleteCodingAttempt(targetAttemptId);
+      onBack();
+    } catch (reason) {
+      setDeleteError(errorMessage(reason, "删除 Coding Workspace 失败"));
+    } finally {
+      setDeleteBusy(false);
+    }
+  }
 
   return (
     <div className="flex h-screen min-w-0 flex-col overflow-hidden bg-[var(--aria-bg)] text-[var(--aria-ink)]">
@@ -66,6 +92,15 @@ export function CodingWorkspacePage({
           Coding Attempt #{store.attemptId ?? attemptId}
         </div>
         <div className="flex shrink-0 items-center gap-2">
+          <button
+            type="button"
+            disabled={deleteBusy}
+            onClick={() => void handleDeleteCodingWorkspace()}
+            className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-[var(--aria-danger)] bg-white px-2 text-xs font-semibold text-[var(--aria-danger)] hover:bg-red-50 disabled:opacity-50"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+            删除 Coding Workspace
+          </button>
           <StatusBadge value={store.status ?? "created"} />
           {connected ? (
             <Wifi aria-label="已连接" className="h-4 w-4 text-[var(--aria-success)]" />
@@ -147,7 +182,9 @@ export function CodingWorkspacePage({
         className="flex h-8 shrink-0 items-center justify-between gap-3 border-t border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 text-xs text-[var(--aria-ink-muted)]"
       >
         <span>{store.stage ?? "prepare_context"}</span>
-        <span>{store.connectionStatus}</span>
+        <span className={deleteError ? "text-[var(--aria-danger)]" : undefined}>
+          {deleteError ?? store.connectionStatus}
+        </span>
         <span>rework {store.reworkCount}/{store.maxAutoRework}</span>
       </div>
     </div>
@@ -190,6 +227,10 @@ function codingPanelTabClass(active: boolean) {
       ? "bg-[var(--aria-primary-soft)] text-[var(--aria-primary)]"
       : "text-[var(--aria-ink-muted)] hover:bg-[var(--aria-panel-muted)]",
   ].join(" ");
+}
+
+function errorMessage(reason: unknown, fallback: string) {
+  return reason instanceof Error ? reason.message : fallback;
 }
 
 function CodingComposer({

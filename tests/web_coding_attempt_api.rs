@@ -7,10 +7,10 @@ use axum::http::{Method, Request, StatusCode};
 use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::coding_attempt_store::CodingAttemptStore;
 use cadence_aria::product::coding_models::{
-    CodeReviewReport, CodingAgentRole, CodingExecutionStage, CodingTimelineNode,
-    CodingTimelineNodeStatus, FindingSeverity, InternalPrReview, PushStatus, RemoteKind,
-    ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict, TestCommand, TestCommandStatus,
-    TestingOverallStatus, TestingReport,
+    CodeReviewReport, CodingAgentRole, CodingExecutionAttempt, CodingExecutionStage,
+    CodingTimelineNode, CodingTimelineNodeStatus, FindingSeverity, InternalPrReview, PushStatus,
+    RemoteKind, ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict, TestCommand,
+    TestCommandStatus, TestingOverallStatus, TestingReport,
 };
 use cadence_aria::product::models::ProviderName;
 use cadence_aria::web::app::build_web_router;
@@ -247,6 +247,210 @@ async fn aborts_coding_attempt_and_allows_next_attempt_for_same_work_item() {
 }
 
 #[tokio::test]
+async fn deletes_coding_attempt_and_preserves_work_item() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    bootstrap_confirmed_work_item(app.clone(), repo.path()).await;
+    let (status, attempt) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001/coding-attempts",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(attempt["attempt_id"], "coding_attempt_0001");
+
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = prepare_attempt_with_worktree(
+        &store,
+        repo.path(),
+        "project_0001",
+        "issue_0001",
+        "coding_attempt_0001",
+    );
+    let artifact_dir =
+        store.attempt_test_output_root("project_0001", "issue_0001", "coding_attempt_0001");
+    fs::create_dir_all(&artifact_dir).expect("artifact dir");
+    fs::write(artifact_dir.join("unit.stdout.log"), "unit stdout\n").expect("artifact");
+    store
+        .save_testing_report(&sample_testing_report("coding_attempt_0001"))
+        .expect("save testing report");
+    store
+        .save_timeline_node(sample_running_node("coding_attempt_0001"))
+        .expect("save timeline node");
+    let attempt_dir = artifact_dir
+        .parent()
+        .and_then(|path| path.parent())
+        .expect("attempt dir")
+        .to_path_buf();
+    let worktree_path = attempt.worktree_path.clone().expect("worktree path");
+    assert!(attempt_dir.exists());
+    assert!(worktree_path.exists());
+    assert!(branch_exists(repo.path(), &attempt.branch_name));
+
+    let (status, body) = request_json(
+        app.clone(),
+        Method::DELETE,
+        "/api/coding-attempts/coding_attempt_0001",
+        json!({}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "deleted");
+    assert!(!attempt_dir.exists());
+    assert!(!worktree_path.exists());
+    assert!(!branch_exists(repo.path(), &attempt.branch_name));
+
+    let (status, _) = request_json(
+        app.clone(),
+        Method::GET,
+        "/api/coding-attempts/coding_attempt_0001",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, lifecycle) = request_json(
+        app.clone(),
+        Method::GET,
+        "/api/issues/issue_0001/lifecycle?project_id=project_0001",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(lifecycle["work_items"].as_array().unwrap().len(), 1);
+    assert!(lifecycle["work_items"][0]["latest_attempt"].is_null());
+    assert!(lifecycle["coding_attempts"].as_array().unwrap().is_empty());
+
+    let (status, second) = request_json(
+        app,
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001/coding-attempts",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(second["attempt_id"], "coding_attempt_0001");
+    assert_eq!(second["attempt_no"], 1);
+}
+
+#[tokio::test]
+async fn delete_work_item_cascades_coding_attempts_worktrees_and_branches() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    bootstrap_confirmed_work_item(app.clone(), repo.path()).await;
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+
+    let (status, _) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001/coding-attempts",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let first = prepare_attempt_with_worktree(
+        &store,
+        repo.path(),
+        "project_0001",
+        "issue_0001",
+        "coding_attempt_0001",
+    );
+    let first_artifact_dir =
+        store.attempt_test_output_root("project_0001", "issue_0001", "coding_attempt_0001");
+    fs::create_dir_all(&first_artifact_dir).expect("first artifact dir");
+    fs::write(first_artifact_dir.join("unit.stdout.log"), "first\n").expect("first artifact");
+    let (status, _) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/coding-attempts/coding_attempt_0001/abort",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001/coding-attempts",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let second = prepare_attempt_with_worktree(
+        &store,
+        repo.path(),
+        "project_0001",
+        "issue_0001",
+        "coding_attempt_0002",
+    );
+    let second_artifact_dir =
+        store.attempt_test_output_root("project_0001", "issue_0001", "coding_attempt_0002");
+    fs::create_dir_all(&second_artifact_dir).expect("second artifact dir");
+    fs::write(second_artifact_dir.join("unit.stdout.log"), "second\n").expect("second artifact");
+    let first_attempt_dir = first_artifact_dir
+        .parent()
+        .and_then(|path| path.parent())
+        .expect("first attempt dir")
+        .to_path_buf();
+    let second_attempt_dir = second_artifact_dir
+        .parent()
+        .and_then(|path| path.parent())
+        .expect("second attempt dir")
+        .to_path_buf();
+
+    let (status, body) = request_json(
+        app.clone(),
+        Method::DELETE,
+        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001",
+        json!({}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "deleted");
+    assert!(!first_attempt_dir.exists());
+    assert!(!second_attempt_dir.exists());
+    assert!(
+        !first
+            .worktree_path
+            .as_ref()
+            .expect("first worktree")
+            .exists()
+    );
+    assert!(
+        !second
+            .worktree_path
+            .as_ref()
+            .expect("second worktree")
+            .exists()
+    );
+    assert!(!branch_exists(repo.path(), &first.branch_name));
+    assert!(!branch_exists(repo.path(), &second.branch_name));
+
+    let (status, lifecycle) = request_json(
+        app,
+        Method::GET,
+        "/api/issues/issue_0001/lifecycle?project_id=project_0001",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(lifecycle["work_items"].as_array().unwrap().is_empty());
+    assert!(lifecycle["coding_attempts"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn reads_test_output_artifact_from_attempt_store() {
     let root = tempdir().expect("root");
     let repo = git_repo();
@@ -437,6 +641,50 @@ fn run_git(cwd: &std::path::Path, args: &[&str]) {
         .status()
         .expect("git");
     assert!(status.success());
+}
+
+fn prepare_attempt_with_worktree(
+    store: &CodingAttemptStore,
+    repo_path: &std::path::Path,
+    project_id: &str,
+    issue_id: &str,
+    attempt_id: &str,
+) -> CodingExecutionAttempt {
+    let attempt = store
+        .get_attempt(project_id, issue_id, attempt_id)
+        .expect("attempt");
+    run_git(repo_path, &["branch", &attempt.branch_name, "HEAD"]);
+    let worktree_path = repo_path
+        .join(".worktrees")
+        .join("aria-work-items")
+        .join(&attempt.work_item_id)
+        .join(format!("attempt-{}", attempt.attempt_no));
+    run_git(
+        repo_path,
+        &[
+            "worktree",
+            "add",
+            worktree_path.to_str().expect("worktree path"),
+            &attempt.branch_name,
+        ],
+    );
+    store
+        .update_attempt_worktree_path(project_id, issue_id, attempt_id, worktree_path)
+        .expect("update worktree path")
+}
+
+fn branch_exists(repo_path: &std::path::Path, branch_name: &str) -> bool {
+    Command::new("git")
+        .args([
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch_name}"),
+        ])
+        .current_dir(repo_path)
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 fn sample_testing_report(attempt_id: &str) -> TestingReport {

@@ -21,6 +21,7 @@ use crate::product::coding_models::{
     CodingTimelineNodeStatus, PushStatus,
 };
 use crate::product::gate_store::GateStore;
+use crate::product::git_workspace_service::{GitWorkspaceError, GitWorkspaceService};
 use crate::product::issue_store::{CreateProductIssueWithRepositoryInput, IssueStore};
 use crate::product::json_store::{ProductStoreError, validate_relative_id};
 use crate::product::lifecycle_store::{
@@ -688,6 +689,36 @@ pub async fn abort_coding_attempt(
     Ok(Json(coding_attempt_dto(&aborted)))
 }
 
+pub async fn delete_coding_attempt(
+    State(state): State<WebAppState>,
+    Path(attempt_id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let app_paths = product_app_paths(&state);
+    let coding_store = CodingAttemptStore::new(app_paths.clone());
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    let attempt = coding_store
+        .get_attempt_by_id(&attempt_id)
+        .map_err(product_store_api_error)?;
+    let work_item = lifecycle
+        .list_work_items(&attempt.project_id, &attempt.issue_id)
+        .map_err(product_store_api_error)?
+        .into_iter()
+        .find(|work_item| work_item.id == attempt.work_item_id)
+        .ok_or_else(|| {
+            product_store_api_error(ProductStoreError::NotFound {
+                kind: "work_item",
+                id: attempt.work_item_id.clone(),
+            })
+        })?;
+    let repository = find_repository(&app_paths, &attempt.project_id, &work_item.repository_id)?;
+    let attempt = abort_attempt_if_active(&coding_store, attempt)?;
+    cleanup_coding_attempt_workspace(&repository, &attempt).await?;
+    coding_store
+        .delete_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .map_err(product_store_api_error)?;
+    Ok(Json(json!({"status":"deleted"})))
+}
+
 pub async fn coding_attempt_artifact_content(
     State(state): State<WebAppState>,
     Path((attempt_id, artifact_id)): Path<(String, String)>,
@@ -835,7 +866,31 @@ pub async fn delete_work_item(
     State(state): State<WebAppState>,
     Path((project_id, issue_id, work_item_id)): Path<(String, String, String)>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let store = LifecycleStore::new(product_app_paths(&state));
+    let app_paths = product_app_paths(&state);
+    let store = LifecycleStore::new(app_paths.clone());
+    let work_item = store
+        .list_work_items(&project_id, &issue_id)
+        .map_err(product_store_api_error)?
+        .into_iter()
+        .find(|work_item| work_item.id == work_item_id)
+        .ok_or_else(|| {
+            product_store_api_error(ProductStoreError::NotFound {
+                kind: "work_item",
+                id: work_item_id.clone(),
+            })
+        })?;
+    let repository = find_repository(&app_paths, &project_id, &work_item.repository_id)?;
+    let coding_store = CodingAttemptStore::new(app_paths);
+    let attempts = coding_store
+        .list_attempts_for_work_item(&project_id, &issue_id, &work_item_id)
+        .map_err(product_store_api_error)?;
+    for attempt in attempts {
+        let attempt = abort_attempt_if_active(&coding_store, attempt)?;
+        cleanup_coding_attempt_workspace(&repository, &attempt).await?;
+    }
+    coding_store
+        .delete_attempts_for_work_item(&project_id, &issue_id, &work_item_id)
+        .map_err(product_store_api_error)?;
     store
         .delete_work_item(&project_id, &issue_id, &work_item_id)
         .map_err(product_store_api_error)?;
@@ -1976,6 +2031,50 @@ fn find_repository(
                 id: repository_id.to_string(),
             })
         })
+}
+
+fn abort_attempt_if_active(
+    coding_store: &CodingAttemptStore,
+    attempt: CodingExecutionAttempt,
+) -> ApiResult<CodingExecutionAttempt> {
+    if !attempt.status.is_active() {
+        return Ok(attempt);
+    }
+    coding_store
+        .update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::Aborted,
+        )
+        .map_err(product_store_api_error)
+}
+
+async fn cleanup_coding_attempt_workspace(
+    repository: &RepositoryRecord,
+    attempt: &CodingExecutionAttempt,
+) -> ApiResult<()> {
+    let git = GitWorkspaceService::new();
+    if let Some(worktree_path) = attempt.worktree_path.as_ref() {
+        git.remove_worktree(&repository.path, worktree_path)
+            .await
+            .map_err(git_workspace_api_error)?;
+    }
+    git.prune_worktrees(&repository.path)
+        .await
+        .map_err(git_workspace_api_error)?;
+    git.delete_local_branch(&repository.path, &attempt.branch_name)
+        .await
+        .map_err(git_workspace_api_error)?;
+    Ok(())
+}
+
+fn git_workspace_api_error(error: GitWorkspaceError) -> ApiError {
+    ApiError::runtime(
+        "git_workspace_cleanup_failed",
+        "git workspace cleanup failed",
+        json!({"details": error.to_string()}),
+    )
 }
 
 fn is_git_repo(path: &StdPath) -> bool {

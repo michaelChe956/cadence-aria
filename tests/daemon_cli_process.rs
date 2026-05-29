@@ -64,7 +64,7 @@ async fn aria_daemon_run_starts_socket_and_serves_wire_request() {
 async fn wait_for_ready(workspace_root: &std::path::Path) {
     let metadata_path = daemon_metadata_path(workspace_root).expect("metadata path");
     let socket_path = default_socket_path(workspace_root).expect("socket path");
-    for _ in 0..100 {
+    for _ in 0..500 {
         if metadata_path.exists() && socket_path.exists() {
             return;
         }

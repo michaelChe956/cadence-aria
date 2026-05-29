@@ -102,6 +102,48 @@ impl GitWorkspaceService {
             .map(|_| ())
     }
 
+    pub async fn remove_worktree(
+        &self,
+        repo_path: &Path,
+        worktree_path: &Path,
+    ) -> Result<(), GitWorkspaceError> {
+        ensure_git_repo(repo_path).await?;
+        ensure_safe_worktree_path(repo_path, worktree_path)?;
+        if !worktree_path.exists() {
+            return Ok(());
+        }
+        let worktree = worktree_path.to_string_lossy().to_string();
+        self.run_git(repo_path, &["worktree", "remove", "--force", &worktree])
+            .await
+            .map(|_| ())
+    }
+
+    pub async fn prune_worktrees(&self, repo_path: &Path) -> Result<(), GitWorkspaceError> {
+        ensure_git_repo(repo_path).await?;
+        self.run_git(repo_path, &["worktree", "prune"])
+            .await
+            .map(|_| ())
+    }
+
+    pub async fn delete_local_branch(
+        &self,
+        repo_path: &Path,
+        branch_name: &str,
+    ) -> Result<(), GitWorkspaceError> {
+        ensure_git_repo(repo_path).await?;
+        ensure_safe_attempt_branch_name(branch_name)?;
+        let ref_name = format!("refs/heads/{branch_name}");
+        let exists = self
+            .run_git_allow_failure(repo_path, &["show-ref", "--verify", "--quiet", &ref_name])
+            .await?;
+        if !exists.status_success {
+            return Ok(());
+        }
+        self.run_git(repo_path, &["branch", "-D", branch_name])
+            .await
+            .map(|_| ())
+    }
+
     pub async fn git_status(
         &self,
         worktree_path: &Path,
@@ -369,6 +411,15 @@ fn reject_parent_dir_components(path: &Path) -> Result<(), GitWorkspaceError> {
         )));
     }
     Ok(())
+}
+
+fn ensure_safe_attempt_branch_name(branch_name: &str) -> Result<(), GitWorkspaceError> {
+    if branch_name.starts_with("aria/work-items/") && !branch_name.contains("..") {
+        return Ok(());
+    }
+    Err(GitWorkspaceError::UnsafePath(format!(
+        "{branch_name} is outside aria/work-items"
+    )))
 }
 
 fn normalize_existing_prefix(path: &Path) -> Result<PathBuf, GitWorkspaceError> {
