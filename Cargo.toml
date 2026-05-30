@@ -41,3 +41,12 @@ serde_yaml = "0.9.34"
 tempfile = "3.27.0"
 tokio-tungstenite = "0.29"
 tower = { version = "0.5", features = ["util"] }
+
+# 开发/测试构建：用更轻的调试信息以控制 target 体积
+[profile.dev]
+debug = "line-tables-only"
+
+# 依赖项不带本地调试信息，并带轻度优化（依赖代码不调试，无需 debuginfo）
+[profile.dev.package."*"]
+debug = false
+opt-level = 1
