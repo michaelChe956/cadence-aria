@@ -1,4 +1,4 @@
-mod support;
+use super::support;
 
 use cadence_aria::cross_cutting::adapter_compatibility::{
     PromptInputMode, StructuredOutputMode, default_compatibility_matrix,

@@ -38,7 +38,7 @@ fn spec_projection_compiles_from_document_model_and_matches_golden_json() {
     );
 
     let golden: Value = serde_json::from_str(include_str!(
-        "fixtures/artifacts/golden/spec_projection.json"
+        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/artifacts/golden/spec_projection.json")
     ))
     .expect("golden json");
     assert_eq!(serde_json::to_value(payload).expect("payload json"), golden);
