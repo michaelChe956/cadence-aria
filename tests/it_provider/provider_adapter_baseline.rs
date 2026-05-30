@@ -11,9 +11,9 @@ use serde_json::{Value, json};
 
 #[test]
 fn adapter_input_and_output_use_shared_snake_case_contract() {
-    let input = adapter_input(include_str!(
-        "fixtures/provider/fake_stdout_clarification.txt"
-    ));
+    let input = adapter_input(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/provider/fake_stdout_clarification.txt"
+    )));
     let input_json = serde_json::to_value(&input).expect("input json");
     assert_eq!(input_json["provider_type"], json!("fake"));
     assert_eq!(input_json["role"], json!("orchestrator"));
@@ -48,7 +48,9 @@ fn runtime_role_maps_advisory_reviewer_to_adapter_reviewer() {
 
 #[test]
 fn fake_provider_parses_last_structured_output_sentinel_and_keeps_raw_stdout() {
-    let stdout = include_str!("fixtures/provider/fake_stdout_clarification.txt");
+    let stdout = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/provider/fake_stdout_clarification.txt"
+    ));
     let structured = parse_last_structured_output(stdout)
         .expect("parse sentinel")
         .expect("structured output");
@@ -75,9 +77,9 @@ fn parser_accepts_fenced_json_inside_structured_output_sentinel() {
 
 #[test]
 fn provider_router_records_completed_run_with_external_raw_output_refs() {
-    let input = adapter_input(include_str!(
-        "fixtures/provider/fake_stdout_clarification.txt"
-    ));
+    let input = adapter_input(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/provider/fake_stdout_clarification.txt"
+    )));
     let router = ProviderRouter::new(Box::new(FakeProviderAdapter));
     let (output, record) = router
         .run(

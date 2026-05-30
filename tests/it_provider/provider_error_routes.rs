@@ -1,4 +1,4 @@
-mod support;
+use super::support;
 
 use cadence_aria::cross_cutting::adapter_compatibility::fixture_compatibility_entry;
 use cadence_aria::cross_cutting::cli_adapter::{CliAdapterConfig, CliProviderAdapter};
