@@ -13,7 +13,10 @@ fn markdown_section_upsert_uses_full_heading_path_and_preserves_surrounding_mark
     let spec_path = workspace.path().join("spec.md");
     std::fs::write(
         &spec_path,
-        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/document_ops/section_upsert_input.md")),
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/document_ops/section_upsert_input.md"
+        )),
     )
     .expect("write fixture");
 
@@ -59,7 +62,10 @@ fn markdown_section_upsert_uses_full_heading_path_and_preserves_surrounding_mark
     let rendered = render_document_model(&model);
     assert_eq!(
         rendered,
-        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/document_ops/section_upsert_expected.md"))
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/document_ops/section_upsert_expected.md"
+        ))
     );
 
     let projection_source = cadence_aria::cross_cutting::document_ops::extract_projection_source(
@@ -147,7 +153,10 @@ fn create_document_uses_controlled_openspec_template_and_does_not_overwrite_exis
     let content = std::fs::read_to_string(&spec_path).expect("read created spec");
     assert_eq!(
         content,
-        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/document_ops/create_document_openspec_spec_expected.md"))
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/document_ops/create_document_openspec_spec_expected.md"
+        ))
     );
 
     let error =

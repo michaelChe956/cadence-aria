@@ -40,9 +40,10 @@ fn plan_projection_compiles_work_packages_dependencies_and_parallelism() {
     );
     assert_eq!(payload.parallelism_groups[0].max_parallel, 1);
 
-    let golden: Value = serde_json::from_str(include_str!(
-        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/artifacts/golden/plan_projection.json")
-    ))
+    let golden: Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/artifacts/golden/plan_projection.json"
+    )))
     .expect("golden json");
     assert_eq!(serde_json::to_value(payload).expect("payload json"), golden);
 

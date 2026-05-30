@@ -37,9 +37,10 @@ fn design_projection_compiles_decisions_components_and_risks() {
         vec!["dd-001".to_string()]
     );
 
-    let golden: Value = serde_json::from_str(include_str!(
-        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/artifacts/golden/design_projection.json")
-    ))
+    let golden: Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/artifacts/golden/design_projection.json"
+    )))
     .expect("golden json");
     assert_eq!(serde_json::to_value(payload).expect("payload json"), golden);
 
