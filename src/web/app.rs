@@ -92,6 +92,10 @@ pub fn build_web_router(state: WebAppState) -> Router {
             get(handlers::get_coding_attempt).delete(handlers::delete_coding_attempt),
         )
         .route(
+            "/api/coding-attempts/{attempt_id}/diff",
+            get(handlers::coding_attempt_diff),
+        )
+        .route(
             "/api/coding-attempts/{attempt_id}/abort",
             post(handlers::abort_coding_attempt),
         )

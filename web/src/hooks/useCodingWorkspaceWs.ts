@@ -5,6 +5,7 @@ import type {
   CodingWsOutMessage,
   WorkspaceProviderName,
 } from "../api/types";
+import type { ChoiceResponsePayload } from "../state/chat-entries";
 import { codingChatEntryToChatEntry } from "../state/coding-chat-entry-mapping";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
 
@@ -72,7 +73,31 @@ export function useCodingWorkspaceWs(attemptId: string | null) {
 
   const respondPermission = useCallback(
     (id: string, approved: boolean, reason?: string | null) => {
-      sendJson({ type: "permission_response", id, approved, reason: reason ?? null });
+      if (!sendJson({ type: "permission_response", id, approved, reason: reason ?? null })) {
+        return;
+      }
+      resolveCodingPermissionRequest(id, approved);
+    },
+    [sendJson],
+  );
+
+  const respondChoice = useCallback(
+    (id: string, selectedOptionIds: string[], freeText?: string | null) => {
+      const trimmedText = freeText?.trim();
+      if (
+        !sendJson({
+          type: "choice_response",
+          id,
+          selected_option_ids: selectedOptionIds,
+          free_text: trimmedText ? trimmedText : null,
+        })
+      ) {
+        return;
+      }
+      resolveCodingChoiceRequest(id, {
+        selected_option_ids: selectedOptionIds,
+        free_text: trimmedText ? trimmedText : null,
+      });
     },
     [sendJson],
   );
@@ -230,6 +255,7 @@ export function useCodingWorkspaceWs(attemptId: string | null) {
     sendProviderSelect,
     confirmStageGate,
     respondPermission,
+    respondChoice,
     respondGate,
     finalConfirm,
     abortAttempt,
@@ -275,6 +301,45 @@ function handleCodingWsMessage(message: CodingWsServerMessage) {
         (message as Extract<CodingWsOutMessage, { type: "coding_execution_event" }>).event,
       );
       break;
+    case "coding_permission_request": {
+      const request = message as Extract<
+        CodingWsOutMessage,
+        { type: "coding_permission_request" }
+      >;
+      store.appendChatEntry({
+        id: permissionRequestEntryId(request.id),
+        type: "permission_request",
+        role: "system",
+        content: permissionRequestContent(request.tool_name, request.description),
+        timestamp: new Date().toISOString(),
+        metadata: {
+          request_id: request.id,
+          tool_name: request.tool_name,
+          description: request.description,
+          risk_level: request.risk_level,
+          request,
+        },
+      });
+      break;
+    }
+    case "coding_choice_request": {
+      const request = message as Extract<CodingWsOutMessage, { type: "coding_choice_request" }>;
+      store.appendChatEntry({
+        id: choiceRequestEntryId(request.id),
+        type: "choice_request",
+        role: "system",
+        content: request.prompt,
+        timestamp: new Date().toISOString(),
+        metadata: {
+          request_id: request.id,
+          prompt: request.prompt,
+          options: request.options,
+          allow_multiple: request.allow_multiple,
+          allow_free_text: request.allow_free_text,
+        },
+      });
+      break;
+    }
     case "testing_report_update":
       store.setTestingReport(
         (message as Extract<CodingWsOutMessage, { type: "testing_report_update" }>).report,
@@ -326,4 +391,50 @@ function handleCodingWsMessage(message: CodingWsServerMessage) {
 
 function pendingContextNoteId() {
   return `pending_context_note_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+}
+
+function permissionRequestEntryId(id: string) {
+  return `permission_request:${id}`;
+}
+
+function choiceRequestEntryId(id: string) {
+  return `choice_request:${id}`;
+}
+
+function permissionRequestContent(toolName: string, description: string) {
+  return description ? `${toolName} · ${description}` : toolName;
+}
+
+function resolveCodingPermissionRequest(id: string, approved: boolean) {
+  const store = useCodingWorkspaceStore.getState();
+  const entry = store.chatEntries.find(
+    (candidate) =>
+      candidate.type === "permission_request" && candidate.metadata?.request_id === id,
+  );
+  if (!entry) return;
+  store.appendChatEntry({
+    ...entry,
+    resolved: true,
+    metadata: {
+      ...entry.metadata,
+      approved,
+      response: { approved },
+    },
+  });
+}
+
+function resolveCodingChoiceRequest(id: string, response: ChoiceResponsePayload) {
+  const store = useCodingWorkspaceStore.getState();
+  const entry = store.chatEntries.find(
+    (candidate) => candidate.type === "choice_request" && candidate.metadata?.request_id === id,
+  );
+  if (!entry) return;
+  store.appendChatEntry({
+    ...entry,
+    resolved: true,
+    metadata: {
+      ...entry.metadata,
+      response,
+    },
+  });
 }

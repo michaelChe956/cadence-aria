@@ -70,6 +70,27 @@ async fn git_workspace_service_drives_branch_worktree_commit_diff_and_push() {
 }
 
 #[tokio::test]
+async fn git_diff_includes_untracked_files_without_staging_changes() {
+    let root = tempdir().expect("tempdir");
+    let repo = root.path().join("repo");
+    init_repo(&repo);
+    fs::write(repo.join("src.txt"), "hello\ntracked change\n").expect("modify tracked file");
+    fs::write(
+        repo.join("climbing_stairs.py"),
+        "def climb_stairs(n):\n    return n\n",
+    )
+    .expect("write untracked file");
+    let service = GitWorkspaceService::new();
+
+    let diff = service.git_diff(&repo, "master").await.expect("git diff");
+
+    assert!(diff.contains("diff --git a/src.txt b/src.txt"));
+    assert!(diff.contains("+tracked change"));
+    assert!(diff.contains("diff --git a/climbing_stairs.py b/climbing_stairs.py"));
+    assert!(diff.contains("+def climb_stairs(n):"));
+}
+
+#[tokio::test]
 async fn stages_source_changes_without_runtime_artifacts() {
     let root = tempdir().expect("tempdir");
     let repo = root.path().join("repo");

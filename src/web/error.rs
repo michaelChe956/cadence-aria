@@ -40,7 +40,7 @@ impl IntoResponse for ApiError {
             "checkpoint_unsafe_dirty_worktree" | "workspace_session_ambiguous" => {
                 StatusCode::CONFLICT
             }
-            "coding_attempt_active" => StatusCode::CONFLICT,
+            "coding_attempt_active" | "coding_attempt_worktree_not_ready" => StatusCode::CONFLICT,
             "artifact_not_found"
             | "coding_attempt_not_found"
             | "gate_not_found"

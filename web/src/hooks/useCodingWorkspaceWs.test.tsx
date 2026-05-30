@@ -195,7 +195,7 @@ describe("useCodingWorkspaceWs", () => {
       {
         id: "execution_event_0001",
         nodeId: "coding_node_0001",
-        message: "test result ok",
+        message: "cargo test --locked",
       },
     ]);
     expect(state.chatEntries).toMatchObject([
@@ -203,9 +203,84 @@ describe("useCodingWorkspaceWs", () => {
         id: "execution_event_0001",
         type: "execution_event",
         role: "system",
-        content: "cargo test",
+        content: "cargo test --locked",
         node_id: "coding_node_0001",
       },
+    ]);
+  });
+
+  it("records coding permission and choice requests and sends responses", () => {
+    const harness = renderCodingHook();
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.sent.length = 0;
+      harness.ws.receive({
+        type: "coding_permission_request",
+        id: "permission_0001",
+        tool_name: "shell",
+        description: "Run uv test command",
+        risk_level: "high",
+      });
+      harness.ws.receive({
+        type: "coding_choice_request",
+        id: "choice_0001",
+        prompt: "Select implementation strategy",
+        options: [{ id: "dp", label: "Dynamic programming", description: "Iterative" }],
+        allow_multiple: false,
+        allow_free_text: true,
+      });
+      harness.api.respondPermission("permission_0001", true);
+      harness.api.respondChoice("choice_0001", ["dp"], "use iterative dp");
+    });
+
+    expect(useCodingWorkspaceStore.getState().chatEntries).toMatchObject([
+      {
+        id: "permission_request:permission_0001",
+        type: "permission_request",
+        role: "system",
+        content: "shell · Run uv test command",
+        metadata: {
+          request_id: "permission_0001",
+          tool_name: "shell",
+          description: "Run uv test command",
+          risk_level: "high",
+          approved: true,
+        },
+        resolved: true,
+      },
+      {
+        id: "choice_request:choice_0001",
+        type: "choice_request",
+        role: "system",
+        content: "Select implementation strategy",
+        metadata: {
+          request_id: "choice_0001",
+          prompt: "Select implementation strategy",
+          options: [{ id: "dp", label: "Dynamic programming", description: "Iterative" }],
+          allow_multiple: false,
+          allow_free_text: true,
+          response: {
+            selected_option_ids: ["dp"],
+            free_text: "use iterative dp",
+          },
+        },
+        resolved: true,
+      },
+    ]);
+    expect(harness.ws.sent).toEqual([
+      JSON.stringify({
+        type: "permission_response",
+        id: "permission_0001",
+        approved: true,
+        reason: null,
+      }),
+      JSON.stringify({
+        type: "choice_response",
+        id: "choice_0001",
+        selected_option_ids: ["dp"],
+        free_text: "use iterative dp",
+      }),
     ]);
   });
 

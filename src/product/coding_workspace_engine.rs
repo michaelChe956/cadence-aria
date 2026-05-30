@@ -9,8 +9,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
-    ProviderCommand, ProviderEvent, ProviderPermissionMode, ProviderToolResult, StreamChunk,
-    StreamingProviderAdapter, StreamingProviderInput,
+    ChoiceRequestData, PermissionRequestData, ProviderCommand, ProviderEvent,
+    ProviderExecutionEvent, ProviderExecutionEventKind, ProviderExecutionEventStatus,
+    ProviderPermissionMode, ProviderStatus, ProviderToolCall, ProviderToolResult, RiskLevel,
+    StreamChunk, StreamingProviderAdapter, StreamingProviderInput,
 };
 use crate::product::coding_attempt_store::CodingAttemptStore;
 use crate::product::coding_models::{
@@ -20,6 +22,7 @@ use crate::product::coding_models::{
     PushStatus, ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict,
     TestingOverallStatus, TestingReport,
 };
+use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::git_workspace_service::{GitWorkspaceError, GitWorkspaceService};
 use crate::product::id::next_sequential_id;
 use crate::product::json_store::ProductStoreError;
@@ -32,7 +35,8 @@ use crate::product::tester_agent_loop::{
 use crate::protocol::contracts::{AdapterInput, AdapterRole, ProviderType};
 use crate::web::coding_ws_handler::CodingWsOutMessage;
 use crate::web::workspace_ws_types::{
-    WsExecutionEvent, WsExecutionEventKind, WsExecutionEventStatus,
+    ChoiceOption, WsExecutionEvent, WsExecutionEventKind, WsExecutionEventStatus,
+    WsPermissionRiskLevel,
 };
 
 const REWORK_CONTEXT_NOTE_CHAR_LIMIT: usize = 10_000;
@@ -67,6 +71,16 @@ pub enum CodingWorkspaceEngineError {
 pub struct CodingExecutionContext {
     pub work_item_markdown: Option<String>,
     pub verification_commands: Vec<String>,
+}
+
+struct CodingProviderStreamRun<'a> {
+    attempt: &'a CodingExecutionAttempt,
+    node_id: &'a str,
+    provider: &'a dyn StreamingProviderAdapter,
+    legacy_input: &'a AdapterInput,
+    input: StreamingProviderInput,
+    provider_name: &'a ProviderName,
+    command_rx: &'a mut mpsc::Receiver<CodingRunnerCommand>,
 }
 
 #[derive(Debug, Clone)]
@@ -173,6 +187,18 @@ impl CodingWorkspaceEngine {
         provider: &dyn StreamingProviderAdapter,
         context: &CodingExecutionContext,
     ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
+        let (_command_tx, mut command_rx) = mpsc::channel(1);
+        self.execute_coding_with_commands(attempt, provider, context, &mut command_rx)
+            .await
+    }
+
+    pub async fn execute_coding_with_commands(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        provider: &dyn StreamingProviderAdapter,
+        context: &CodingExecutionContext,
+        command_rx: &mut mpsc::Receiver<CodingRunnerCommand>,
+    ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
         let Some(worktree_path) = attempt.worktree_path.as_ref() else {
             return Err(CodingWorkspaceEngineError::MissingWorktree(
                 attempt.id.clone(),
@@ -216,7 +242,7 @@ impl CodingWorkspaceEngine {
             )?;
         }
 
-        let input = AdapterInput {
+        let legacy_input = AdapterInput {
             provider_type: provider_type_for_name(&coder_provider),
             role: AdapterRole::Executor,
             worktree_path: Some(worktree_path.to_string_lossy().to_string()),
@@ -226,59 +252,238 @@ impl CodingWorkspaceEngine {
             timeout: 2400,
             max_retries: 0,
         };
-        let mut stream = provider
-            .run_streaming(&input, CancellationToken::new())
+        let input = StreamingProviderInput {
+            provider_type: legacy_input.provider_type.clone(),
+            role: legacy_input.role.clone(),
+            prompt: legacy_input.prompt.clone(),
+            working_dir: worktree_path.clone(),
+            session_id: None,
+            permission_mode: ProviderPermissionMode::Auto,
+            env_vars: BTreeMap::new(),
+            timeout_secs: legacy_input.timeout,
+        };
+        let _full_output = self
+            .run_provider_stream_to_completion(CodingProviderStreamRun {
+                attempt: &attempt,
+                node_id: &node.id,
+                provider,
+                legacy_input: &legacy_input,
+                input,
+                provider_name: &coder_provider,
+                command_rx,
+            })
             .await?;
+        self.complete_timeline_node(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &node.id,
+            CodingTimelineNodeStatus::Completed,
+            Some("代码编写完成".to_string()),
+        )
+        .await?;
+        Ok(attempt)
+    }
+
+    async fn run_provider_stream_to_completion(
+        &self,
+        run: CodingProviderStreamRun<'_>,
+    ) -> Result<String, CodingWorkspaceEngineError> {
+        let CodingProviderStreamRun {
+            attempt,
+            node_id,
+            provider,
+            legacy_input,
+            input,
+            provider_name,
+            command_rx,
+        } = run;
+        let cancel = CancellationToken::new();
+        let mut session = match provider.start(input, cancel.clone()).await {
+            Ok(session) => session,
+            Err(error) if provider_start_is_not_implemented(&error) => {
+                return self
+                    .run_legacy_stream_to_completion(attempt, node_id, provider, legacy_input)
+                    .await;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let mut commands_open = true;
+        let mut full_output = String::new();
+        let mut tool_call_titles = BTreeMap::new();
+        let mut tool_call_commands = BTreeMap::new();
+        loop {
+            tokio::select! {
+                command = command_rx.recv(), if commands_open => {
+                    let Some(command) = command else {
+                        commands_open = false;
+                        continue;
+                    };
+                    if !forward_runner_command_to_provider(command, &session.commands).await {
+                        commands_open = false;
+                    }
+                }
+                event = session.events.recv() => {
+                    let Some(event) = event else {
+                        return self.fail_provider_stream_ended(attempt, node_id).await;
+                    };
+                    match event {
+                        ProviderEvent::TextDelta { content } => {
+                            full_output.push_str(&content);
+                            let _ = self
+                                .event_tx
+                                .send(CodingWsOutMessage::CodingStreamChunk {
+                                    content,
+                                    node_id: Some(node_id.to_string()),
+                                })
+                                .await;
+                        }
+                        ProviderEvent::Execution(event) => {
+                            let _ = self
+                                .event_tx
+                                .send(CodingWsOutMessage::CodingExecutionEvent {
+                                    event: ws_event_from_provider_execution(
+                                        event,
+                                        node_id,
+                                        provider_name,
+                                    ),
+                                })
+                                .await;
+                        }
+                        ProviderEvent::ToolCall(call) => {
+                            tool_call_titles.insert(call.id.clone(), call.tool_name.clone());
+                            if let Some(command) = extract_tool_command(&call.input) {
+                                tool_call_commands.insert(call.id.clone(), command);
+                            }
+                            let _ = self
+                                .event_tx
+                                .send(CodingWsOutMessage::CodingExecutionEvent {
+                                    event: ws_event_from_tool_call(node_id, provider_name, call),
+                                })
+                                .await;
+                        }
+                        ProviderEvent::ToolResult(result) => {
+                            let title = tool_call_titles
+                                .get(&result.tool_use_id)
+                                .cloned()
+                                .unwrap_or_else(|| "Tool result".to_string());
+                            let command = tool_call_commands.get(&result.tool_use_id).cloned();
+                            let _ = self
+                                .event_tx
+                                .send(CodingWsOutMessage::CodingExecutionEvent {
+                                    event: ws_event_from_tool_result(
+                                        node_id,
+                                        provider_name,
+                                        &title,
+                                        command,
+                                        result,
+                                    ),
+                                })
+                                .await;
+                        }
+                        ProviderEvent::PermissionRequest(request) => {
+                            self.emit_permission_request(node_id, provider_name, request).await;
+                        }
+                        ProviderEvent::ChoiceRequest(request) => {
+                            self.emit_choice_request(node_id, provider_name, request).await;
+                        }
+                        ProviderEvent::StatusChanged(status) => {
+                            let _ = self
+                                .event_tx
+                                .send(CodingWsOutMessage::CodingExecutionEvent {
+                                    event: ws_event_from_provider_status(
+                                        node_id,
+                                        provider_name,
+                                        status,
+                                    ),
+                                })
+                                .await;
+                        }
+                        ProviderEvent::Completed { full_output: completed_output, .. } => {
+                            if !completed_output.trim().is_empty() {
+                                full_output = completed_output;
+                            }
+                            let _ = self
+                                .event_tx
+                                .send(CodingWsOutMessage::CodingMessageComplete {
+                                    node_id: Some(node_id.to_string()),
+                                })
+                                .await;
+                            return Ok(full_output);
+                        }
+                        ProviderEvent::Failed { message } => {
+                            return self.fail_provider_stream(attempt, node_id, message).await;
+                        }
+                        ProviderEvent::ProtocolError { message, .. } => {
+                            return self.fail_provider_stream(attempt, node_id, message).await;
+                        }
+                        ProviderEvent::PermissionTimeout { permission_id } => {
+                            return self
+                                .fail_provider_stream(
+                                    attempt,
+                                    node_id,
+                                    format!("Permission request {permission_id} timed out"),
+                                )
+                                .await;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn run_legacy_stream_to_completion(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        node_id: &str,
+        provider: &dyn StreamingProviderAdapter,
+        input: &AdapterInput,
+    ) -> Result<String, CodingWorkspaceEngineError> {
+        let mut stream = provider
+            .run_streaming(input, CancellationToken::new())
+            .await?;
+        let mut full_output = String::new();
         while let Some(chunk) = stream.recv().await {
             match chunk {
                 StreamChunk::Text(content) => {
+                    full_output.push_str(&content);
                     let _ = self
                         .event_tx
                         .send(CodingWsOutMessage::CodingStreamChunk {
                             content,
-                            node_id: Some(node.id.clone()),
+                            node_id: Some(node_id.to_string()),
                         })
                         .await;
                 }
-                StreamChunk::Done { .. } => {
+                StreamChunk::Done {
+                    full_output: completed_output,
+                } => {
                     let _ = self
                         .event_tx
                         .send(CodingWsOutMessage::CodingMessageComplete {
-                            node_id: Some(node.id.clone()),
+                            node_id: Some(node_id.to_string()),
                         })
                         .await;
-                    self.complete_timeline_node(
-                        &attempt.project_id,
-                        &attempt.issue_id,
-                        &attempt.id,
-                        &node.id,
-                        CodingTimelineNodeStatus::Completed,
-                        Some("代码编写完成".to_string()),
-                    )
-                    .await?;
-                    return Ok(attempt);
+                    if !completed_output.trim().is_empty() {
+                        return Ok(completed_output);
+                    }
+                    return Ok(full_output);
                 }
                 StreamChunk::Error(message) => {
-                    self.store.update_attempt_status(
-                        &attempt.project_id,
-                        &attempt.issue_id,
-                        &attempt.id,
-                        CodingAttemptStatus::Blocked,
-                    )?;
-                    self.complete_timeline_node(
-                        &attempt.project_id,
-                        &attempt.issue_id,
-                        &attempt.id,
-                        &node.id,
-                        CodingTimelineNodeStatus::Failed,
-                        Some(message.clone()),
-                    )
-                    .await?;
-                    return Err(CodingWorkspaceEngineError::ProviderStream(message));
+                    return self.fail_provider_stream(attempt, node_id, message).await;
                 }
             }
         }
 
+        self.fail_provider_stream_ended(attempt, node_id).await
+    }
+
+    async fn fail_provider_stream<T>(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        node_id: &str,
+        message: String,
+    ) -> Result<T, CodingWorkspaceEngineError> {
         self.store.update_attempt_status(
             &attempt.project_id,
             &attempt.issue_id,
@@ -289,14 +494,80 @@ impl CodingWorkspaceEngine {
             &attempt.project_id,
             &attempt.issue_id,
             &attempt.id,
-            &node.id,
+            node_id,
             CodingTimelineNodeStatus::Failed,
-            Some("provider stream ended before completion".to_string()),
+            Some(message.clone()),
         )
         .await?;
-        Err(CodingWorkspaceEngineError::ProviderStream(
+        Err(CodingWorkspaceEngineError::ProviderStream(message))
+    }
+
+    async fn fail_provider_stream_ended<T>(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        node_id: &str,
+    ) -> Result<T, CodingWorkspaceEngineError> {
+        self.fail_provider_stream(
+            attempt,
+            node_id,
             "provider stream ended before completion".to_string(),
-        ))
+        )
+        .await
+    }
+
+    async fn emit_permission_request(
+        &self,
+        node_id: &str,
+        provider: &ProviderName,
+        request: PermissionRequestData,
+    ) {
+        let _ = self
+            .event_tx
+            .send(CodingWsOutMessage::CodingExecutionEvent {
+                event: ws_event_from_permission_request(node_id, provider, &request),
+            })
+            .await;
+        let _ = self
+            .event_tx
+            .send(CodingWsOutMessage::CodingPermissionRequest {
+                id: request.id,
+                tool_name: request.tool_name,
+                description: request.description,
+                risk_level: ws_permission_risk_level(request.risk_level),
+            })
+            .await;
+    }
+
+    async fn emit_choice_request(
+        &self,
+        node_id: &str,
+        provider: &ProviderName,
+        request: ChoiceRequestData,
+    ) {
+        let _ = self
+            .event_tx
+            .send(CodingWsOutMessage::CodingExecutionEvent {
+                event: ws_event_from_choice_request(node_id, provider, &request),
+            })
+            .await;
+        let _ = self
+            .event_tx
+            .send(CodingWsOutMessage::CodingChoiceRequest {
+                id: request.id,
+                prompt: request.prompt,
+                options: request
+                    .options
+                    .into_iter()
+                    .map(|option| ChoiceOption {
+                        id: option.id,
+                        label: option.label,
+                        description: option.description,
+                    })
+                    .collect(),
+                allow_multiple: request.allow_multiple,
+                allow_free_text: request.allow_free_text,
+            })
+            .await;
     }
 
     pub async fn execute_testing(
@@ -393,6 +664,27 @@ impl CodingWorkspaceEngine {
         specs: &[TestCommandSpec],
         options: TesterAgentOptions,
     ) -> Result<TestingReport, CodingWorkspaceEngineError> {
+        let (_command_tx, mut command_rx) = mpsc::channel(1);
+        self.execute_testing_with_provider_commands(
+            attempt,
+            provider,
+            context,
+            specs,
+            options,
+            &mut command_rx,
+        )
+        .await
+    }
+
+    pub async fn execute_testing_with_provider_commands(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        provider: &dyn StreamingProviderAdapter,
+        context: &CodingExecutionContext,
+        specs: &[TestCommandSpec],
+        options: TesterAgentOptions,
+        command_rx: &mut mpsc::Receiver<CodingRunnerCommand>,
+    ) -> Result<TestingReport, CodingWorkspaceEngineError> {
         if !provider.supports_tool_calls() {
             return self.execute_testing(attempt, specs).await;
         }
@@ -444,6 +736,9 @@ impl CodingWorkspaceEngine {
         let mut consecutive_failures = 0usize;
         let mut blocked_summary = None;
         let mut chat_entry_sequence = 1usize;
+        let mut commands_open = true;
+        let mut tool_call_titles = BTreeMap::new();
+        let mut tool_call_commands = BTreeMap::new();
 
         loop {
             tokio::select! {
@@ -451,6 +746,15 @@ impl CodingWorkspaceEngine {
                     cancel.cancel();
                     blocked_summary = Some("Tester Agent Loop 超时".to_string());
                     break;
+                }
+                command = command_rx.recv(), if commands_open => {
+                    let Some(command) = command else {
+                        commands_open = false;
+                        continue;
+                    };
+                    if !forward_runner_command_to_provider(command, &session.commands).await {
+                        commands_open = false;
+                    }
                 }
                 event = session.events.recv() => {
                     let Some(event) = event else {
@@ -469,6 +773,16 @@ impl CodingWorkspaceEngine {
                                 .await;
                         }
                         ProviderEvent::ToolCall(call) => {
+                            tool_call_titles.insert(call.id.clone(), call.tool_name.clone());
+                            if let Some(command) = extract_tool_command(&call.input) {
+                                tool_call_commands.insert(call.id.clone(), command);
+                            }
+                            let _ = self
+                                .event_tx
+                                .send(CodingWsOutMessage::CodingExecutionEvent {
+                                    event: ws_event_from_tool_call(&node.id, &tester_provider, call.clone()),
+                                })
+                                .await;
                             let entry = tester_chat_entry(
                                 &attempt,
                                 &node.id,
@@ -499,6 +813,18 @@ impl CodingWorkspaceEngine {
                                 .commands
                                 .send(ProviderCommand::ToolResult(result.clone()))
                                 .await;
+                            let _ = self
+                                .event_tx
+                                .send(CodingWsOutMessage::CodingExecutionEvent {
+                                    event: ws_event_from_tool_result(
+                                        &node.id,
+                                        &tester_provider,
+                                        &call.tool_name,
+                                        extract_tool_command(&call.input),
+                                        result.clone(),
+                                    ),
+                                })
+                                .await;
                             self.emit_tester_tool_result_entry(
                                 &attempt,
                                 &node.id,
@@ -522,6 +848,23 @@ impl CodingWorkspaceEngine {
                             }
                         }
                         ProviderEvent::ToolResult(result) => {
+                            let title = tool_call_titles
+                                .get(&result.tool_use_id)
+                                .cloned()
+                                .unwrap_or_else(|| "Tool result".to_string());
+                            let command = tool_call_commands.get(&result.tool_use_id).cloned();
+                            let _ = self
+                                .event_tx
+                                .send(CodingWsOutMessage::CodingExecutionEvent {
+                                    event: ws_event_from_tool_result(
+                                        &node.id,
+                                        &tester_provider,
+                                        &title,
+                                        command,
+                                        result.clone(),
+                                    ),
+                                })
+                                .await;
                             self.emit_tester_tool_result_entry(
                                 &attempt,
                                 &node.id,
@@ -530,7 +873,18 @@ impl CodingWorkspaceEngine {
                             )
                             .await;
                         }
-                        ProviderEvent::Execution(_) => {}
+                        ProviderEvent::Execution(event) => {
+                            let _ = self
+                                .event_tx
+                                .send(CodingWsOutMessage::CodingExecutionEvent {
+                                    event: ws_event_from_provider_execution(
+                                        event,
+                                        &node.id,
+                                        &tester_provider,
+                                    ),
+                                })
+                                .await;
+                        }
                         ProviderEvent::Completed { full_output: completed_output, .. } => {
                             if !completed_output.trim().is_empty() {
                                 full_output = completed_output;
@@ -556,9 +910,24 @@ impl CodingWorkspaceEngine {
                                 Some(format!("Permission request {permission_id} timed out"));
                             break;
                         }
-                        ProviderEvent::PermissionRequest(_)
-                        | ProviderEvent::ChoiceRequest(_)
-                        | ProviderEvent::StatusChanged(_) => {}
+                        ProviderEvent::PermissionRequest(request) => {
+                            self.emit_permission_request(&node.id, &tester_provider, request).await;
+                        }
+                        ProviderEvent::ChoiceRequest(request) => {
+                            self.emit_choice_request(&node.id, &tester_provider, request).await;
+                        }
+                        ProviderEvent::StatusChanged(status) => {
+                            let _ = self
+                                .event_tx
+                                .send(CodingWsOutMessage::CodingExecutionEvent {
+                                    event: ws_event_from_provider_status(
+                                        &node.id,
+                                        &tester_provider,
+                                        status,
+                                    ),
+                                })
+                                .await;
+                        }
                     }
                 }
             }
@@ -619,6 +988,17 @@ impl CodingWorkspaceEngine {
         attempt: &CodingExecutionAttempt,
         provider: &dyn StreamingProviderAdapter,
     ) -> Result<CodeReviewReport, CodingWorkspaceEngineError> {
+        let (_command_tx, mut command_rx) = mpsc::channel(1);
+        self.execute_code_review_with_commands(attempt, provider, &mut command_rx)
+            .await
+    }
+
+    pub async fn execute_code_review_with_commands(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        provider: &dyn StreamingProviderAdapter,
+        command_rx: &mut mpsc::Receiver<CodingRunnerCommand>,
+    ) -> Result<CodeReviewReport, CodingWorkspaceEngineError> {
         let Some(worktree_path) = attempt.worktree_path.as_ref() else {
             return Err(CodingWorkspaceEngineError::MissingWorktree(
                 attempt.id.clone(),
@@ -653,109 +1033,60 @@ impl CodingWorkspaceEngine {
             timeout: 2400,
             max_retries: 0,
         };
-        let mut stream = provider
-            .run_streaming(&input, CancellationToken::new())
+        let provider_input = streaming_input_from_adapter(&input, worktree_path.clone());
+        let full_output = self
+            .run_provider_stream_to_completion(CodingProviderStreamRun {
+                attempt: &attempt,
+                node_id: &node.id,
+                provider,
+                legacy_input: &input,
+                input: provider_input,
+                provider_name: &reviewer,
+                command_rx,
+            })
             .await?;
-        while let Some(chunk) = stream.recv().await {
-            match chunk {
-                StreamChunk::Text(content) => {
-                    let _ = self
-                        .event_tx
-                        .send(CodingWsOutMessage::CodingStreamChunk {
-                            content,
-                            node_id: Some(node.id.clone()),
-                        })
-                        .await;
-                }
-                StreamChunk::Done { full_output } => {
-                    let _ = self
-                        .event_tx
-                        .send(CodingWsOutMessage::CodingMessageComplete {
-                            node_id: Some(node.id.clone()),
-                        })
-                        .await;
-                    let report = self.build_code_review_report(&attempt, &full_output)?;
-                    self.store.save_code_review_report(&report)?;
-                    self.emit_code_review_chat_entry(&attempt, &node.id, &report)
-                        .await;
-                    let _ = self
-                        .event_tx
-                        .send(CodingWsOutMessage::CodeReviewComplete {
-                            report: Box::new(report.clone()),
-                        })
-                        .await;
-                    let (node_status, summary) = match report.verdict {
-                        ReviewVerdict::Approve => (
-                            CodingTimelineNodeStatus::Completed,
-                            Some("code review 通过".to_string()),
-                        ),
-                        ReviewVerdict::RequestChanges => (
-                            CodingTimelineNodeStatus::Failed,
-                            Some("code review 要求修改".to_string()),
-                        ),
-                        ReviewVerdict::Blocked => {
-                            self.store.update_attempt_status(
-                                &attempt.project_id,
-                                &attempt.issue_id,
-                                &attempt.id,
-                                CodingAttemptStatus::Blocked,
-                            )?;
-                            (
-                                CodingTimelineNodeStatus::Blocked,
-                                Some("code review 被阻塞".to_string()),
-                            )
-                        }
-                    };
-                    self.complete_timeline_node(
-                        &attempt.project_id,
-                        &attempt.issue_id,
-                        &attempt.id,
-                        &node.id,
-                        node_status,
-                        summary,
-                    )
-                    .await?;
-                    return Ok(report);
-                }
-                StreamChunk::Error(message) => {
-                    self.store.update_attempt_status(
-                        &attempt.project_id,
-                        &attempt.issue_id,
-                        &attempt.id,
-                        CodingAttemptStatus::Blocked,
-                    )?;
-                    self.complete_timeline_node(
-                        &attempt.project_id,
-                        &attempt.issue_id,
-                        &attempt.id,
-                        &node.id,
-                        CodingTimelineNodeStatus::Failed,
-                        Some(message.clone()),
-                    )
-                    .await?;
-                    return Err(CodingWorkspaceEngineError::ProviderStream(message));
-                }
+        let report = self.build_code_review_report(&attempt, &full_output)?;
+        self.store.save_code_review_report(&report)?;
+        self.emit_code_review_chat_entry(&attempt, &node.id, &report)
+            .await;
+        let _ = self
+            .event_tx
+            .send(CodingWsOutMessage::CodeReviewComplete {
+                report: Box::new(report.clone()),
+            })
+            .await;
+        let (node_status, summary) = match report.verdict {
+            ReviewVerdict::Approve => (
+                CodingTimelineNodeStatus::Completed,
+                Some("code review 通过".to_string()),
+            ),
+            ReviewVerdict::RequestChanges => (
+                CodingTimelineNodeStatus::Failed,
+                Some("code review 要求修改".to_string()),
+            ),
+            ReviewVerdict::Blocked => {
+                self.store.update_attempt_status(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &attempt.id,
+                    CodingAttemptStatus::Blocked,
+                )?;
+                (
+                    CodingTimelineNodeStatus::Blocked,
+                    Some("code review 被阻塞".to_string()),
+                )
             }
-        }
-
-        self.store.update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Blocked,
-        )?;
+        };
         self.complete_timeline_node(
             &attempt.project_id,
             &attempt.issue_id,
             &attempt.id,
             &node.id,
-            CodingTimelineNodeStatus::Failed,
-            Some("provider stream ended before completion".to_string()),
+            node_status,
+            summary,
         )
         .await?;
-        Err(CodingWorkspaceEngineError::ProviderStream(
-            "provider stream ended before completion".to_string(),
-        ))
+        Ok(report)
     }
 
     pub async fn execute_rework(
@@ -763,6 +1094,18 @@ impl CodingWorkspaceEngine {
         attempt: &CodingExecutionAttempt,
         evidence: &str,
         provider: &dyn StreamingProviderAdapter,
+    ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
+        let (_command_tx, mut command_rx) = mpsc::channel(1);
+        self.execute_rework_with_commands(attempt, evidence, provider, &mut command_rx)
+            .await
+    }
+
+    pub async fn execute_rework_with_commands(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        evidence: &str,
+        provider: &dyn StreamingProviderAdapter,
+        command_rx: &mut mpsc::Receiver<CodingRunnerCommand>,
     ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
         let Some(worktree_path) = attempt.worktree_path.as_ref() else {
             return Err(CodingWorkspaceEngineError::MissingWorktree(
@@ -830,110 +1173,60 @@ impl CodingWorkspaceEngine {
             timeout: 2400,
             max_retries: 0,
         };
-        let mut stream = provider
-            .run_streaming(&input, CancellationToken::new())
+        let provider_input = streaming_input_from_adapter(&input, worktree_path.clone());
+        let full_output = self
+            .run_provider_stream_to_completion(CodingProviderStreamRun {
+                attempt: &attempt,
+                node_id: &node.id,
+                provider,
+                legacy_input: &input,
+                input: provider_input,
+                provider_name: &analyst_provider,
+                command_rx,
+            })
             .await?;
-        while let Some(chunk) = stream.recv().await {
-            match chunk {
-                StreamChunk::Text(content) => {
-                    let _ = self
-                        .event_tx
-                        .send(CodingWsOutMessage::CodingStreamChunk {
-                            content,
-                            node_id: Some(node.id.clone()),
-                        })
-                        .await;
-                }
-                StreamChunk::Done { full_output } => {
-                    let _ = self
-                        .event_tx
-                        .send(CodingWsOutMessage::CodingMessageComplete {
-                            node_id: Some(node.id.clone()),
-                        })
-                        .await;
-                    if !note_ids.is_empty() {
-                        self.store.mark_context_notes_consumed(
-                            &attempt.project_id,
-                            &attempt.issue_id,
-                            &attempt.id,
-                            &note_ids,
-                            rework_round,
-                        )?;
-                    }
-                    let decision = parse_analyst_verdict(&full_output);
-                    self.emit_analyst_verdict_entry(
-                        &attempt,
-                        &node.id,
-                        rework_round,
-                        &source_stage,
-                        &decision,
-                    )
-                    .await;
-                    let (updated, node_status, summary) = self
-                        .apply_analyst_decision(
-                            &attempt,
-                            &node.id,
-                            &source_stage,
-                            rework_round,
-                            &decision,
-                        )
-                        .await?;
-                    self.complete_timeline_node(
-                        &attempt.project_id,
-                        &attempt.issue_id,
-                        &attempt.id,
-                        &node.id,
-                        node_status,
-                        Some(summary),
-                    )
-                    .await?;
-                    return Ok(updated);
-                }
-                StreamChunk::Error(message) => {
-                    self.store.update_attempt_status(
-                        &attempt.project_id,
-                        &attempt.issue_id,
-                        &attempt.id,
-                        CodingAttemptStatus::Blocked,
-                    )?;
-                    self.complete_timeline_node(
-                        &attempt.project_id,
-                        &attempt.issue_id,
-                        &attempt.id,
-                        &node.id,
-                        CodingTimelineNodeStatus::Failed,
-                        Some(message.clone()),
-                    )
-                    .await?;
-                    return Err(CodingWorkspaceEngineError::ProviderStream(message));
-                }
-            }
+        if !note_ids.is_empty() {
+            self.store.mark_context_notes_consumed(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &note_ids,
+                rework_round,
+            )?;
         }
-
-        self.store.update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Blocked,
-        )?;
+        let decision = parse_analyst_verdict(&full_output);
+        self.emit_analyst_verdict_entry(&attempt, &node.id, rework_round, &source_stage, &decision)
+            .await;
+        let (updated, node_status, summary) = self
+            .apply_analyst_decision(&attempt, &node.id, &source_stage, rework_round, &decision)
+            .await?;
         self.complete_timeline_node(
             &attempt.project_id,
             &attempt.issue_id,
             &attempt.id,
             &node.id,
-            CodingTimelineNodeStatus::Failed,
-            Some("provider stream ended before completion".to_string()),
+            node_status,
+            Some(summary),
         )
         .await?;
-        Err(CodingWorkspaceEngineError::ProviderStream(
-            "provider stream ended before completion".to_string(),
-        ))
+        Ok(updated)
     }
 
     pub async fn execute_internal_pr_review(
         &self,
         attempt: &CodingExecutionAttempt,
         provider: &dyn StreamingProviderAdapter,
+    ) -> Result<InternalPrReview, CodingWorkspaceEngineError> {
+        let (_command_tx, mut command_rx) = mpsc::channel(1);
+        self.execute_internal_pr_review_with_commands(attempt, provider, &mut command_rx)
+            .await
+    }
+
+    pub async fn execute_internal_pr_review_with_commands(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        provider: &dyn StreamingProviderAdapter,
+        command_rx: &mut mpsc::Receiver<CodingRunnerCommand>,
     ) -> Result<InternalPrReview, CodingWorkspaceEngineError> {
         let Some(worktree_path) = attempt.worktree_path.as_ref() else {
             return Err(CodingWorkspaceEngineError::MissingWorktree(
@@ -975,110 +1268,60 @@ impl CodingWorkspaceEngine {
             timeout: 2400,
             max_retries: 0,
         };
-        let mut stream = provider
-            .run_streaming(&input, CancellationToken::new())
+        let provider_input = streaming_input_from_adapter(&input, worktree_path.clone());
+        let full_output = self
+            .run_provider_stream_to_completion(CodingProviderStreamRun {
+                attempt: &attempt,
+                node_id: &node.id,
+                provider,
+                legacy_input: &input,
+                input: provider_input,
+                provider_name: &reviewer,
+                command_rx,
+            })
             .await?;
-        while let Some(chunk) = stream.recv().await {
-            match chunk {
-                StreamChunk::Text(content) => {
-                    let _ = self
-                        .event_tx
-                        .send(CodingWsOutMessage::CodingStreamChunk {
-                            content,
-                            node_id: Some(node.id.clone()),
-                        })
-                        .await;
-                }
-                StreamChunk::Done { full_output } => {
-                    let _ = self
-                        .event_tx
-                        .send(CodingWsOutMessage::CodingMessageComplete {
-                            node_id: Some(node.id.clone()),
-                        })
-                        .await;
-                    let review =
-                        self.build_internal_pr_review(&attempt, &review_request, &full_output)?;
-                    self.store.save_internal_pr_review(&review)?;
-                    self.emit_internal_pr_review_chat_entry(&attempt, &node.id, &review)
-                        .await;
-                    let _ = self
-                        .event_tx
-                        .send(CodingWsOutMessage::InternalPrReviewComplete {
-                            review: Box::new(review.clone()),
-                        })
-                        .await;
-                    let (node_status, summary) = match review.verdict {
-                        ReviewVerdict::Approve => (
-                            CodingTimelineNodeStatus::Completed,
-                            Some("internal PR review 通过".to_string()),
-                        ),
-                        ReviewVerdict::RequestChanges => (
-                            CodingTimelineNodeStatus::Failed,
-                            Some("internal PR review 要求修改".to_string()),
-                        ),
-                        ReviewVerdict::Blocked => {
-                            self.store.update_attempt_status(
-                                &attempt.project_id,
-                                &attempt.issue_id,
-                                &attempt.id,
-                                CodingAttemptStatus::Blocked,
-                            )?;
-                            (
-                                CodingTimelineNodeStatus::Blocked,
-                                Some("internal PR review 被阻塞".to_string()),
-                            )
-                        }
-                    };
-                    self.complete_timeline_node(
-                        &attempt.project_id,
-                        &attempt.issue_id,
-                        &attempt.id,
-                        &node.id,
-                        node_status,
-                        summary,
-                    )
-                    .await?;
-                    return Ok(review);
-                }
-                StreamChunk::Error(message) => {
-                    self.store.update_attempt_status(
-                        &attempt.project_id,
-                        &attempt.issue_id,
-                        &attempt.id,
-                        CodingAttemptStatus::Blocked,
-                    )?;
-                    self.complete_timeline_node(
-                        &attempt.project_id,
-                        &attempt.issue_id,
-                        &attempt.id,
-                        &node.id,
-                        CodingTimelineNodeStatus::Failed,
-                        Some(message.clone()),
-                    )
-                    .await?;
-                    return Err(CodingWorkspaceEngineError::ProviderStream(message));
-                }
+        let review = self.build_internal_pr_review(&attempt, &review_request, &full_output)?;
+        self.store.save_internal_pr_review(&review)?;
+        self.emit_internal_pr_review_chat_entry(&attempt, &node.id, &review)
+            .await;
+        let _ = self
+            .event_tx
+            .send(CodingWsOutMessage::InternalPrReviewComplete {
+                review: Box::new(review.clone()),
+            })
+            .await;
+        let (node_status, summary) = match review.verdict {
+            ReviewVerdict::Approve => (
+                CodingTimelineNodeStatus::Completed,
+                Some("internal PR review 通过".to_string()),
+            ),
+            ReviewVerdict::RequestChanges => (
+                CodingTimelineNodeStatus::Failed,
+                Some("internal PR review 要求修改".to_string()),
+            ),
+            ReviewVerdict::Blocked => {
+                self.store.update_attempt_status(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &attempt.id,
+                    CodingAttemptStatus::Blocked,
+                )?;
+                (
+                    CodingTimelineNodeStatus::Blocked,
+                    Some("internal PR review 被阻塞".to_string()),
+                )
             }
-        }
-
-        self.store.update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Blocked,
-        )?;
+        };
         self.complete_timeline_node(
             &attempt.project_id,
             &attempt.issue_id,
             &attempt.id,
             &node.id,
-            CodingTimelineNodeStatus::Failed,
-            Some("provider stream ended before completion".to_string()),
+            node_status,
+            summary,
         )
         .await?;
-        Err(CodingWorkspaceEngineError::ProviderStream(
-            "provider stream ended before completion".to_string(),
-        ))
+        Ok(review)
     }
 
     pub async fn execute_review_request(
@@ -2185,6 +2428,260 @@ fn provider_prompt_event(
         output: Some(prompt),
         exit_code: None,
     }
+}
+
+fn streaming_input_from_adapter(
+    input: &AdapterInput,
+    working_dir: PathBuf,
+) -> StreamingProviderInput {
+    StreamingProviderInput {
+        provider_type: input.provider_type.clone(),
+        role: input.role.clone(),
+        prompt: input.prompt.clone(),
+        working_dir,
+        session_id: None,
+        permission_mode: ProviderPermissionMode::Auto,
+        env_vars: BTreeMap::new(),
+        timeout_secs: input.timeout,
+    }
+}
+
+fn provider_start_is_not_implemented(error: &ProviderAdapterError) -> bool {
+    error.stderr == "streaming provider start is not implemented"
+}
+
+fn ws_event_from_provider_execution(
+    event: ProviderExecutionEvent,
+    node_id: &str,
+    provider: &ProviderName,
+) -> WsExecutionEvent {
+    WsExecutionEvent {
+        event_id: event.event_id,
+        node_id: Some(node_id.to_string()),
+        agent: Some(provider.clone()),
+        kind: ws_execution_event_kind(event.kind),
+        status: ws_execution_event_status(event.status),
+        title: event.title,
+        detail: event.detail,
+        command: event.command,
+        cwd: event.cwd,
+        output: event.output,
+        exit_code: event.exit_code,
+    }
+}
+
+fn ws_event_from_tool_call(
+    node_id: &str,
+    provider: &ProviderName,
+    call: ProviderToolCall,
+) -> WsExecutionEvent {
+    WsExecutionEvent {
+        event_id: call.id,
+        node_id: Some(node_id.to_string()),
+        agent: Some(provider.clone()),
+        kind: WsExecutionEventKind::Command,
+        status: WsExecutionEventStatus::Started,
+        title: call.tool_name,
+        detail: Some(format_tool_call_input(&call.input)),
+        command: extract_tool_command(&call.input),
+        cwd: None,
+        output: None,
+        exit_code: None,
+    }
+}
+
+fn ws_event_from_tool_result(
+    node_id: &str,
+    provider: &ProviderName,
+    title: &str,
+    command: Option<String>,
+    result: ProviderToolResult,
+) -> WsExecutionEvent {
+    WsExecutionEvent {
+        event_id: result.tool_use_id,
+        node_id: Some(node_id.to_string()),
+        agent: Some(provider.clone()),
+        kind: WsExecutionEventKind::Command,
+        status: if result.is_error {
+            WsExecutionEventStatus::Failed
+        } else {
+            WsExecutionEventStatus::Completed
+        },
+        title: title.to_string(),
+        detail: None,
+        command,
+        cwd: None,
+        output: Some(result.output),
+        exit_code: if result.is_error { Some(1) } else { Some(0) },
+    }
+}
+
+fn ws_event_from_permission_request(
+    node_id: &str,
+    provider: &ProviderName,
+    request: &PermissionRequestData,
+) -> WsExecutionEvent {
+    WsExecutionEvent {
+        event_id: format!("permission_{}", request.id),
+        node_id: Some(node_id.to_string()),
+        agent: Some(provider.clone()),
+        kind: WsExecutionEventKind::Command,
+        status: WsExecutionEventStatus::WaitingApproval,
+        title: "Waiting for permission".to_string(),
+        detail: Some(request.description.clone()),
+        command: Some(request.tool_name.clone()),
+        cwd: None,
+        output: None,
+        exit_code: None,
+    }
+}
+
+fn ws_event_from_choice_request(
+    node_id: &str,
+    provider: &ProviderName,
+    request: &ChoiceRequestData,
+) -> WsExecutionEvent {
+    WsExecutionEvent {
+        event_id: format!("choice_{}", request.id),
+        node_id: Some(node_id.to_string()),
+        agent: Some(provider.clone()),
+        kind: WsExecutionEventKind::Provider,
+        status: WsExecutionEventStatus::WaitingApproval,
+        title: "Waiting for choice".to_string(),
+        detail: Some(request.prompt.clone()),
+        command: None,
+        cwd: None,
+        output: None,
+        exit_code: None,
+    }
+}
+
+fn ws_event_from_provider_status(
+    node_id: &str,
+    provider: &ProviderName,
+    status: ProviderStatus,
+) -> WsExecutionEvent {
+    let status_text = provider_status_text(&status);
+    WsExecutionEvent {
+        event_id: format!("{node_id}_provider_status_{status_text}"),
+        node_id: Some(node_id.to_string()),
+        agent: Some(provider.clone()),
+        kind: WsExecutionEventKind::Provider,
+        status: ws_status_from_provider_status(status),
+        title: format!("Provider {status_text}"),
+        detail: None,
+        command: None,
+        cwd: None,
+        output: None,
+        exit_code: None,
+    }
+}
+
+fn ws_execution_event_kind(kind: ProviderExecutionEventKind) -> WsExecutionEventKind {
+    match kind {
+        ProviderExecutionEventKind::Provider => WsExecutionEventKind::Provider,
+        ProviderExecutionEventKind::Turn => WsExecutionEventKind::Turn,
+        ProviderExecutionEventKind::Command => WsExecutionEventKind::Command,
+        ProviderExecutionEventKind::Output => WsExecutionEventKind::Output,
+        ProviderExecutionEventKind::Artifact => WsExecutionEventKind::Artifact,
+    }
+}
+
+fn ws_execution_event_status(status: ProviderExecutionEventStatus) -> WsExecutionEventStatus {
+    match status {
+        ProviderExecutionEventStatus::Started => WsExecutionEventStatus::Started,
+        ProviderExecutionEventStatus::Running => WsExecutionEventStatus::Running,
+        ProviderExecutionEventStatus::WaitingApproval => WsExecutionEventStatus::WaitingApproval,
+        ProviderExecutionEventStatus::Completed => WsExecutionEventStatus::Completed,
+        ProviderExecutionEventStatus::Failed => WsExecutionEventStatus::Failed,
+        ProviderExecutionEventStatus::Aborted => WsExecutionEventStatus::Aborted,
+    }
+}
+
+fn ws_status_from_provider_status(status: ProviderStatus) -> WsExecutionEventStatus {
+    match status {
+        ProviderStatus::Starting => WsExecutionEventStatus::Started,
+        ProviderStatus::Running => WsExecutionEventStatus::Running,
+        ProviderStatus::WaitingApproval => WsExecutionEventStatus::WaitingApproval,
+        ProviderStatus::Completed => WsExecutionEventStatus::Completed,
+        ProviderStatus::Failed => WsExecutionEventStatus::Failed,
+        ProviderStatus::Aborted => WsExecutionEventStatus::Aborted,
+    }
+}
+
+fn provider_status_text(status: &ProviderStatus) -> &'static str {
+    match status {
+        ProviderStatus::Starting => "starting",
+        ProviderStatus::Running => "running",
+        ProviderStatus::WaitingApproval => "waiting_approval",
+        ProviderStatus::Completed => "completed",
+        ProviderStatus::Failed => "failed",
+        ProviderStatus::Aborted => "aborted",
+    }
+}
+
+fn ws_permission_risk_level(risk_level: RiskLevel) -> WsPermissionRiskLevel {
+    match risk_level {
+        RiskLevel::Low => WsPermissionRiskLevel::Low,
+        RiskLevel::Medium => WsPermissionRiskLevel::Medium,
+        RiskLevel::High => WsPermissionRiskLevel::High,
+    }
+}
+
+fn format_tool_call_input(input: &serde_json::Value) -> String {
+    serde_json::to_string_pretty(input).unwrap_or_else(|_| input.to_string())
+}
+
+async fn forward_runner_command_to_provider(
+    command: CodingRunnerCommand,
+    provider_commands: &mpsc::Sender<ProviderCommand>,
+) -> bool {
+    match command {
+        CodingRunnerCommand::PermissionResponse {
+            id,
+            approved,
+            reason,
+        } => provider_commands
+            .send(ProviderCommand::PermissionResponse {
+                id,
+                approved,
+                reason,
+            })
+            .await
+            .is_ok(),
+        CodingRunnerCommand::ChoiceResponse {
+            id,
+            selected_option_ids,
+            free_text,
+        } => provider_commands
+            .send(ProviderCommand::ChoiceResponse {
+                id,
+                selected_option_ids,
+                free_text,
+            })
+            .await
+            .is_ok(),
+        CodingRunnerCommand::AbortAttempt => {
+            provider_commands.send(ProviderCommand::Abort).await.is_ok()
+        }
+        CodingRunnerCommand::ProviderSelect { .. }
+        | CodingRunnerCommand::StageGateConfirm { .. } => true,
+    }
+}
+
+fn extract_tool_command(input: &serde_json::Value) -> Option<String> {
+    let command = input.get("command").or_else(|| input.get("cmd"))?;
+    if let Some(command) = command.as_str() {
+        return Some(command.to_string());
+    }
+    command.as_array().and_then(|parts| {
+        parts
+            .iter()
+            .map(serde_json::Value::as_str)
+            .collect::<Option<Vec<_>>>()
+            .map(|parts| parts.join(" "))
+            .filter(|command| !command.trim().is_empty())
+    })
 }
 
 fn tester_chat_entry(

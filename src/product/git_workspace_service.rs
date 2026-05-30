@@ -288,7 +288,33 @@ impl GitWorkspaceService {
     ) -> Result<String, GitWorkspaceError> {
         ensure_git_repo(worktree_path).await?;
         let output = self.run_git(worktree_path, &["diff", base_branch]).await?;
-        Ok(output.stdout)
+        let mut diff = output.stdout;
+        let untracked = self
+            .run_git(
+                worktree_path,
+                &["ls-files", "--others", "--exclude-standard", "-z"],
+            )
+            .await?;
+        for path in untracked.stdout.split('\0').filter(|path| !path.is_empty()) {
+            let output = self
+                .run_git_allow_failure(
+                    worktree_path,
+                    &["diff", "--no-index", "--", "/dev/null", path],
+                )
+                .await?;
+            if !output.status_success && output.stdout.is_empty() {
+                return Err(GitWorkspaceError::CommandFailed {
+                    args: format!("diff --no-index -- /dev/null {path}"),
+                    cwd: worktree_path.display().to_string(),
+                    stderr: output.stderr,
+                });
+            }
+            if !diff.is_empty() && !diff.ends_with('\n') {
+                diff.push('\n');
+            }
+            diff.push_str(&output.stdout);
+        }
+        Ok(diff)
     }
 
     async fn run_git(

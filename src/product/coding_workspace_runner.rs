@@ -16,6 +16,16 @@ pub enum CodingRunnerCommand {
     StageGateConfirm {
         stage: CodingExecutionStage,
     },
+    PermissionResponse {
+        id: String,
+        approved: bool,
+        reason: Option<String>,
+    },
+    ChoiceResponse {
+        id: String,
+        selected_option_ids: Vec<String>,
+        free_text: Option<String>,
+    },
     AbortAttempt,
 }
 

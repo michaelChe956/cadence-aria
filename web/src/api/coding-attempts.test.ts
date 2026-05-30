@@ -3,6 +3,7 @@ import {
   abortCodingAttempt,
   createCodingAttempt,
   getCodingAttemptArtifact,
+  getCodingAttemptDiff,
   getCodingAttemptSnapshot,
 } from "./client";
 
@@ -19,23 +20,30 @@ describe("coding attempts api client", () => {
 
     await createCodingAttempt("project/with space", "issue/with space", "work item/1");
     await getCodingAttemptSnapshot("coding attempt/1");
+    await getCodingAttemptDiff("coding attempt/1");
     await abortCodingAttempt("coding attempt/1");
     await getCodingAttemptArtifact("coding attempt/1", "unit.stdout.log");
 
     expect(calls.map((call) => call.input)).toEqual([
       "/api/projects/project%2Fwith%20space/issues/issue%2Fwith%20space/work-items/work%20item%2F1/coding-attempts",
       "/api/coding-attempts/coding%20attempt%2F1",
+      "/api/coding-attempts/coding%20attempt%2F1/diff",
       "/api/coding-attempts/coding%20attempt%2F1/abort",
       "/api/coding-attempts/coding%20attempt%2F1/artifacts/unit.stdout.log",
     ]);
     expect(calls[0].init?.method).toBe("POST");
     expect(calls[0].init?.body).toBe(JSON.stringify({}));
     expect(calls[1].init?.method).toBeUndefined();
-    expect(calls[2].init?.method).toBe("POST");
+    expect(calls[2].init?.method).toBeUndefined();
+    expect(calls[3].init?.method).toBe("POST");
   });
 
   it("maps coding attempt snapshot and artifact response fields", async () => {
-    const responses = [codingAttemptSnapshotResponse(), artifactContentResponse()];
+    const responses = [
+      codingAttemptSnapshotResponse(),
+      codingAttemptDiffResponse(),
+      artifactContentResponse(),
+    ];
     let index = 0;
     vi.stubGlobal(
       "fetch",
@@ -47,12 +55,19 @@ describe("coding attempts api client", () => {
     );
 
     const snapshot = await getCodingAttemptSnapshot("coding_attempt_0001");
+    const diff = await getCodingAttemptDiff("coding_attempt_0001");
     const artifact = await getCodingAttemptArtifact("coding_attempt_0001", "unit.stdout.log");
 
     expect(snapshot.attempt.stage).toBe("prepare_context");
     expect(snapshot.provider_config_snapshot.author).toBe("fake");
     expect(snapshot.timeline_nodes[0].title).toBe("准备上下文");
     expect(snapshot.pending_gates[0].available_actions[0].action_type).toBe("abort");
+    expect(diff).toMatchObject({
+      attempt_id: "coding_attempt_0001",
+      base_branch: "main",
+      worktree_path: "/tmp/worktree",
+      diff: "diff --git a/climbing_stairs.py b/climbing_stairs.py\n+def climb_stairs(n):\n",
+    });
     expect(artifact).toMatchObject({
       artifact_ref: "unit.stdout.log",
       artifact_kind: "coding_attempt_artifact",
@@ -148,6 +163,15 @@ function codingAttemptSnapshotResponse() {
         ],
       },
     ],
+  };
+}
+
+function codingAttemptDiffResponse() {
+  return {
+    attempt_id: "coding_attempt_0001",
+    base_branch: "main",
+    worktree_path: "/tmp/worktree",
+    diff: "diff --git a/climbing_stairs.py b/climbing_stairs.py\n+def climb_stairs(n):\n",
   };
 }
 

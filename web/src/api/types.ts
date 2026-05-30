@@ -335,6 +335,13 @@ export type CodingAttemptSnapshotResponse = {
   pending_gates: CodingGateRequired[];
 };
 
+export type CodingAttemptDiffResponse = {
+  attempt_id: string;
+  base_branch: string;
+  worktree_path: string;
+  diff: string;
+};
+
 export type ArtifactContentResponse = {
   artifact_ref: string;
   artifact_kind: string;
@@ -349,6 +356,12 @@ export type CodingWsInMessage =
   | { type: "start_coding" }
   | { type: "context_note"; content: string }
   | { type: "permission_response"; id: string; approved: boolean; reason?: string | null }
+  | {
+      type: "choice_response";
+      id: string;
+      selected_option_ids: string[];
+      free_text?: string | null;
+    }
   | {
       type: "gate_response";
       gate_id: string;
@@ -388,6 +401,21 @@ export type CodingWsOutMessage =
       completed_at?: string | null;
     }
   | { type: "coding_execution_event"; event: ExecutionEvent }
+  | {
+      type: "coding_permission_request";
+      id: string;
+      tool_name: string;
+      description: string;
+      risk_level: "low" | "medium" | "high";
+    }
+  | {
+      type: "coding_choice_request";
+      id: string;
+      prompt: string;
+      options: ChoiceOption[];
+      allow_multiple: boolean;
+      allow_free_text: boolean;
+    }
   | { type: "coding_stream_chunk"; content: string; node_id?: string | null }
   | { type: "coding_message_complete"; node_id?: string | null }
   | { type: "testing_report_update"; report: TestingReport }
@@ -615,6 +643,12 @@ export type ExecutionEvent = {
   cwd?: string | null;
   output?: string | null;
   exit_code?: number | null;
+};
+
+export type ChoiceOption = {
+  id: string;
+  label: string;
+  description?: string | null;
 };
 
 export type ArtifactVersion = {

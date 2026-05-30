@@ -49,11 +49,11 @@ use crate::web::redaction::redact_sensitive_lines;
 use crate::web::runtime::WebRuntime;
 use crate::web::state::WebAppState;
 use crate::web::types::{
-    AdvanceTaskResponse, ArtifactContentResponse, ArtifactVersionDto, CodingAttemptDto,
-    CodingAttemptSnapshotResponse, ConfirmTaskRequest, ConfirmTaskResponse, CreateIssueRequest,
-    CreateProductIssueRequest, CreateProjectRequest, CreateRepositoryRequest, CreateTaskRequest,
-    CreateTaskResponse, CreateWorkspaceRequest, DesignSpecDto, FileContentResponse,
-    FileDiffResponse, GenerateDesignSpecsRequest, GenerateDesignSpecsResponse,
+    AdvanceTaskResponse, ArtifactContentResponse, ArtifactVersionDto, CodingAttemptDiffResponse,
+    CodingAttemptDto, CodingAttemptSnapshotResponse, ConfirmTaskRequest, ConfirmTaskResponse,
+    CreateIssueRequest, CreateProductIssueRequest, CreateProjectRequest, CreateRepositoryRequest,
+    CreateTaskRequest, CreateTaskResponse, CreateWorkspaceRequest, DesignSpecDto,
+    FileContentResponse, FileDiffResponse, GenerateDesignSpecsRequest, GenerateDesignSpecsResponse,
     GenerateStorySpecsRequest, GenerateStorySpecsResponse, GenerateWorkItemsRequest,
     GenerateWorkItemsResponse, IssueDto, IssueLifecycleResponse, IssueListResponse,
     IssueRollbackPreviewRequest, IssueRollbackRequest, LifecycleWorkItemDto,
@@ -666,6 +666,35 @@ pub async fn get_coding_attempt(
         review_request,
         internal_pr_review,
         pending_gates: Vec::new(),
+    }))
+}
+
+pub async fn coding_attempt_diff(
+    State(state): State<WebAppState>,
+    Path(attempt_id): Path<String>,
+) -> ApiResult<Json<CodingAttemptDiffResponse>> {
+    let app_paths = product_app_paths(&state);
+    let coding_store = CodingAttemptStore::new(app_paths);
+    let attempt = coding_store
+        .get_attempt_by_id(&attempt_id)
+        .map_err(product_store_api_error)?;
+    let worktree_path = attempt.worktree_path.clone().ok_or_else(|| {
+        ApiError::runtime(
+            "coding_attempt_worktree_not_ready",
+            "coding attempt worktree is not ready",
+            json!({}),
+        )
+    })?;
+    let diff = GitWorkspaceService::new()
+        .git_diff(&worktree_path, &attempt.base_branch)
+        .await
+        .map_err(git_workspace_diff_api_error)?;
+
+    Ok(Json(CodingAttemptDiffResponse {
+        attempt_id: attempt.id,
+        base_branch: attempt.base_branch,
+        worktree_path,
+        diff,
     }))
 }
 
@@ -2073,6 +2102,14 @@ fn git_workspace_api_error(error: GitWorkspaceError) -> ApiError {
     ApiError::runtime(
         "git_workspace_cleanup_failed",
         "git workspace cleanup failed",
+        json!({"details": error.to_string()}),
+    )
+}
+
+fn git_workspace_diff_api_error(error: GitWorkspaceError) -> ApiError {
+    ApiError::runtime(
+        "git_workspace_diff_failed",
+        "git workspace diff failed",
         json!({"details": error.to_string()}),
     )
 }

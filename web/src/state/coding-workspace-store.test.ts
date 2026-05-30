@@ -241,6 +241,43 @@ describe("coding workspace store", () => {
     expect(useCodingWorkspaceStore.getState().activeStreamNodeId).toBeNull();
   });
 
+  it("uses concrete commands for coding execution event chat titles and logs", () => {
+    const store = useCodingWorkspaceStore.getState();
+
+    store.addExecutionEvent({
+      event_id: "command_cmd_001",
+      node_id: "coding_node_0001",
+      agent: "codex",
+      kind: "command",
+      status: "completed",
+      title: "Command completed",
+      detail: "exit code 0",
+      command: "git diff --stat",
+      cwd: "/tmp/repo",
+      output: "ok\n",
+      exit_code: 0,
+    });
+
+    expect(useCodingWorkspaceStore.getState().logs).toMatchObject([
+      {
+        id: "command_cmd_001",
+        message: "git diff --stat",
+      },
+    ]);
+    expect(useCodingWorkspaceStore.getState().chatEntries).toMatchObject([
+      {
+        id: "command_cmd_001",
+        type: "execution_event",
+        content: "git diff --stat",
+        metadata: {
+          title: "Command completed",
+          command: "git diff --stat",
+          output: "ok\n",
+        },
+      },
+    ]);
+  });
+
   it("appends optimistic context notes and replaces them with backend chat entries", () => {
     const store = useCodingWorkspaceStore.getState();
 

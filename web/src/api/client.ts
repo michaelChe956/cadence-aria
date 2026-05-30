@@ -2,6 +2,7 @@ import type {
   ApiError,
   ArtifactContentResponse,
   CodingAttempt,
+  CodingAttemptDiffResponse,
   CodingAttemptSnapshotResponse,
   CreateProductIssueRequest,
   CreateRepositoryRequest,
@@ -256,6 +257,14 @@ export function getCodingAttemptSnapshot(
 ): Promise<CodingAttemptSnapshotResponse> {
   return requestJson<CodingAttemptSnapshotResponse>(
     `/api/coding-attempts/${encodeURIComponent(attemptId)}`,
+  );
+}
+
+export function getCodingAttemptDiff(
+  attemptId: string,
+): Promise<CodingAttemptDiffResponse> {
+  return requestJson<CodingAttemptDiffResponse>(
+    `/api/coding-attempts/${encodeURIComponent(attemptId)}/diff`,
   );
 }
 

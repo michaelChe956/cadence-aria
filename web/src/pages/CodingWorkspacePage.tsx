@@ -8,8 +8,8 @@ import {
   WifiOff,
   X,
 } from "lucide-react";
-import { useRef, useState, type FormEvent } from "react";
-import { deleteCodingAttempt } from "../api/client";
+import { useEffect, useRef, useState, type FormEvent } from "react";
+import { deleteCodingAttempt, getCodingAttemptDiff } from "../api/client";
 import type {
   CodeReviewReport,
   CodingExecutionStage,
@@ -31,8 +31,16 @@ import {
   type CodingArtifactTab,
   useCodingWorkspaceStore,
 } from "../state/coding-workspace-store";
+import type { ChatEntry, ChoiceResponsePayload } from "../state/chat-entries";
 
 const ACTIVE_ATTEMPT_STATUSES = new Set(["created", "running", "waiting_for_human", "blocked"]);
+
+type CodingDiffState = {
+  attemptId: string | null;
+  status: "idle" | "loading" | "loaded" | "error";
+  diff: string;
+  error: string | null;
+};
 
 export function CodingWorkspacePage({
   attemptId,
@@ -155,7 +163,12 @@ export function CodingWorkspacePage({
                 lockedRole={lockedProviderRole(store.stage, store.status, store.pendingGates)}
                 onSelect={api.sendProviderSelect}
               />
-              <ChatEntryList ref={chatListRef} entries={store.chatEntries} />
+              <ChatEntryList
+                ref={chatListRef}
+                entries={store.chatEntries}
+                onPermissionResponse={handlePermissionResponse}
+                onChoiceResponse={handleChoiceResponse}
+              />
               <GatePanel
                 gate={store.pendingGates.at(-1) ?? null}
                 onRespond={api.respondGate}
@@ -189,6 +202,18 @@ export function CodingWorkspacePage({
       </div>
     </div>
   );
+
+  function handlePermissionResponse(entry: ChatEntry, approved: boolean) {
+    const requestId = requestIdFromEntry(entry);
+    if (!requestId) return;
+    api.respondPermission(requestId, approved);
+  }
+
+  function handleChoiceResponse(entry: ChatEntry, response: ChoiceResponsePayload) {
+    const requestId = requestIdFromEntry(entry);
+    if (!requestId) return;
+    api.respondChoice(requestId, response.selected_option_ids, response.free_text);
+  }
 }
 
 function CodingPanelTabs({
@@ -231,6 +256,11 @@ function codingPanelTabClass(active: boolean) {
 
 function errorMessage(reason: unknown, fallback: string) {
   return reason instanceof Error ? reason.message : fallback;
+}
+
+function requestIdFromEntry(entry: ChatEntry) {
+  const requestId = entry.metadata?.request_id;
+  return typeof requestId === "string" ? requestId : null;
 }
 
 function CodingComposer({
@@ -453,8 +483,54 @@ function CodingArtifactTabs({
   activeTab: CodingArtifactTab;
   className?: string;
 }) {
-  const store = useCodingWorkspaceStore();
+  const attemptId = useCodingWorkspaceStore((state) => state.attemptId);
+  const [diffState, setDiffState] = useState<CodingDiffState>({
+    attemptId: null,
+    status: "idle",
+    diff: "",
+    error: null,
+  });
   const tabs: CodingArtifactTab[] = ["diff", "tests", "review", "git", "logs"];
+
+  useEffect(() => {
+    if (activeTab !== "diff" || !attemptId) {
+      return;
+    }
+    if (diffState.attemptId === attemptId && diffState.status === "loaded") {
+      return;
+    }
+
+    let cancelled = false;
+    setDiffState({
+      attemptId,
+      status: "loading",
+      diff: "",
+      error: null,
+    });
+    getCodingAttemptDiff(attemptId)
+      .then((response) => {
+        if (cancelled) return;
+        setDiffState({
+          attemptId,
+          status: "loaded",
+          diff: response.diff,
+          error: null,
+        });
+      })
+      .catch((reason) => {
+        if (cancelled) return;
+        setDiffState({
+          attemptId,
+          status: "error",
+          diff: "",
+          error: errorMessage(reason, "加载代码变更失败"),
+        });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, attemptId]);
 
   return (
     <aside
@@ -488,10 +564,27 @@ function CodingArtifactTabs({
         ) : activeTab === "logs" ? (
           <LogsPanel />
         ) : (
-          <div className="text-[var(--aria-ink-muted)]">暂无代码变更摘要</div>
+          <DiffPanel diffState={diffState} />
         )}
       </div>
     </aside>
+  );
+}
+
+function DiffPanel({ diffState }: { diffState: CodingDiffState }) {
+  if (diffState.status === "loading") {
+    return <div className="text-[var(--aria-ink-muted)]">正在加载代码变更...</div>;
+  }
+  if (diffState.status === "error") {
+    return <div className="text-[var(--aria-danger)]">{diffState.error}</div>;
+  }
+  if (!diffState.diff.trim()) {
+    return <div className="text-[var(--aria-ink-muted)]">暂无代码变更</div>;
+  }
+  return (
+    <pre className="overflow-auto whitespace-pre-wrap rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-3 font-mono text-xs leading-5 text-[var(--aria-ink)]">
+      {diffState.diff}
+    </pre>
   );
 }
 

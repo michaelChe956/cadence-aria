@@ -238,7 +238,7 @@ export const useCodingWorkspaceStore = create<
           id: event.event_id,
           type: "execution_event",
           role,
-          content: event.title,
+          content: executionEventMessage(event),
           timestamp,
           node_id: event.node_id ?? undefined,
           metadata: event as unknown as Record<string, unknown>,
@@ -401,7 +401,11 @@ function streamEntryId(nodeId?: string | null) {
 }
 
 function executionEventMessage(event: ExecutionEvent) {
-  return event.output ?? event.detail ?? event.command ?? event.title;
+  const command = event.kind === "command" ? event.command?.trim() : "";
+  if (command) {
+    return command;
+  }
+  return event.detail ? `${event.title} · ${event.detail}` : event.title;
 }
 
 function updateLegacyProviderConfig(

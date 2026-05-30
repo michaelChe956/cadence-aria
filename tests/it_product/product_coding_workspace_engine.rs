@@ -4,7 +4,12 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use cadence_aria::cross_cutting::provider_adapter::ProviderAdapterError;
-use cadence_aria::cross_cutting::streaming_provider::{StreamChunk, StreamingProviderAdapter};
+use cadence_aria::cross_cutting::streaming_provider::{
+    ChoiceOptionData, ChoiceRequestData, PermissionRequestData, ProviderEvent,
+    ProviderExecutionEvent, ProviderExecutionEventKind, ProviderExecutionEventStatus,
+    ProviderSession, ProviderStatus, ProviderToolCall, ProviderToolResult, RiskLevel, StreamChunk,
+    StreamingProviderAdapter, StreamingProviderInput,
+};
 use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
 use cadence_aria::product::coding_models::{
@@ -24,7 +29,9 @@ use cadence_aria::product::models::{ProviderName, WorkItemStatus, WorkspaceType}
 use cadence_aria::product::test_executor::TestCommandSpec;
 use cadence_aria::protocol::contracts::{AdapterInput, AdapterRole, ProviderType};
 use cadence_aria::web::coding_ws_handler::CodingWsOutMessage;
-use cadence_aria::web::workspace_ws_types::{ArtifactVersion, ProviderConfigSnapshot};
+use cadence_aria::web::workspace_ws_types::{
+    ArtifactVersion, ProviderConfigSnapshot, WsExecutionEventKind, WsExecutionEventStatus,
+};
 use tempfile::tempdir;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -393,6 +400,351 @@ async fn execute_coding_emits_prompt_for_coder_provider() {
         .clone()
         .expect("captured input");
     assert_eq!(input.provider_type, ProviderType::Codex);
+}
+
+#[tokio::test]
+async fn execute_coding_forwards_provider_execution_and_tool_events() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            ..create_input()
+        })
+        .expect("create attempt");
+    store
+        .update_role_provider_config_snapshot(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingRoleProviderConfigSnapshot {
+                coder: ProviderName::Codex,
+                tester: ProviderName::Fake,
+                analyst: ProviderName::Fake,
+                code_reviewer: ProviderName::Fake,
+                internal_reviewer: ProviderName::Fake,
+                review_rounds: 1,
+            },
+        )
+        .expect("set role provider snapshot");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    let provider = EventEmittingCodingProvider;
+    let (tx, mut rx) = mpsc::channel(16);
+    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
+
+    engine
+        .execute_coding(&attempt, &provider, &CodingExecutionContext::default())
+        .await
+        .expect("execute coding");
+
+    let events = drain_events(&mut rx);
+    let execution_events = events
+        .iter()
+        .filter_map(|event| match event {
+            CodingWsOutMessage::CodingExecutionEvent { event } => Some(event),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        execution_events
+            .iter()
+            .any(|event| event.event_id == "command_0001"
+                && event.agent == Some(ProviderName::Codex)
+                && event.kind == WsExecutionEventKind::Command
+                && event.status == WsExecutionEventStatus::Completed
+                && event.title == "Run tests"
+                && event.command.as_deref() == Some("uv run pytest")
+                && event.output.as_deref() == Some("1 passed")),
+        "expected command execution event, got {events:?}"
+    );
+    assert!(
+        execution_events
+            .iter()
+            .any(|event| event.event_id == "tool_0001"
+                && event.kind == WsExecutionEventKind::Command
+                && event.status == WsExecutionEventStatus::Started
+                && event.title == "run_command"
+                && event
+                    .detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("uv run pytest"))),
+        "expected tool call execution event, got {events:?}"
+    );
+    assert!(
+        execution_events
+            .iter()
+            .any(|event| event.event_id == "tool_0001"
+                && event.kind == WsExecutionEventKind::Command
+                && event.status == WsExecutionEventStatus::Completed
+                && event.title == "run_command"
+                && event.command.as_deref() == Some("uv run pytest")
+                && event.output.as_deref() == Some("1 passed")),
+        "expected tool result execution event, got {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn execute_coding_forwards_provider_permission_choice_and_status_events() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            ..create_input()
+        })
+        .expect("create attempt");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    let provider = ControlEventCodingProvider;
+    let (tx, mut rx) = mpsc::channel(16);
+    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
+
+    engine
+        .execute_coding(&attempt, &provider, &CodingExecutionContext::default())
+        .await
+        .expect("execute coding");
+
+    let events = drain_events(&mut rx);
+    assert!(
+        events.iter().any(|event| {
+            matches!(
+                event,
+                CodingWsOutMessage::CodingPermissionRequest {
+                    id,
+                    tool_name,
+                    description,
+                    ..
+                } if id == "permission_0001"
+                    && tool_name == "shell"
+                    && description == "Run uv test command"
+            )
+        }),
+        "expected permission request event, got {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| {
+            matches!(
+                event,
+                CodingWsOutMessage::CodingChoiceRequest {
+                    id,
+                    prompt,
+                    options,
+                    allow_multiple,
+                    allow_free_text,
+                } if id == "choice_0001"
+                    && prompt == "Select implementation strategy"
+                    && options.len() == 1
+                    && !allow_multiple
+                    && *allow_free_text
+            )
+        }),
+        "expected choice request event, got {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| {
+            matches!(
+                event,
+                CodingWsOutMessage::CodingExecutionEvent { event }
+                    if event.event_id == "coding_node_0001_provider_status_running"
+                        && event.status == WsExecutionEventStatus::Running
+                        && event.title == "Provider running"
+            )
+        }),
+        "expected visible provider status event, got {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn execute_coding_forwards_permission_responses_to_provider_session() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            ..create_input()
+        })
+        .expect("create attempt");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    let provider = PermissionAwaitingProvider;
+    let (event_tx, mut event_rx) = mpsc::channel(16);
+    let (command_tx, mut command_rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), event_tx);
+    let context = CodingExecutionContext::default();
+
+    let execute =
+        engine.execute_coding_with_commands(&attempt, &provider, &context, &mut command_rx);
+    tokio::pin!(execute);
+    let mut saw_permission_request = false;
+
+    let updated = loop {
+        tokio::select! {
+            result = &mut execute => break result.expect("execute coding"),
+            event = event_rx.recv() => {
+                if matches!(
+                    event,
+                    Some(CodingWsOutMessage::CodingPermissionRequest { ref id, .. })
+                        if id == "permission_0001"
+                ) {
+                    saw_permission_request = true;
+                    command_tx
+                        .send(cadence_aria::product::coding_workspace_runner::CodingRunnerCommand::PermissionResponse {
+                            id: "permission_0001".to_string(),
+                            approved: true,
+                            reason: Some("approved by test".to_string()),
+                        })
+                        .await
+                        .expect("send permission response");
+                }
+            }
+        }
+    };
+
+    assert!(saw_permission_request);
+    assert_eq!(updated.stage, CodingExecutionStage::Coding);
+}
+
+#[tokio::test]
+async fn execute_code_review_forwards_provider_execution_events() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    init_repo(&worktree);
+    fs::write(worktree.join("src.txt"), "hello\nreviewed\n").expect("modify file");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            base_branch: "HEAD".to_string(),
+            ..create_input()
+        })
+        .expect("create attempt");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    let provider = EventThenCompletedProvider {
+        output: r#"{"verdict":"approve","summary":"review ok","findings":[]}"#.to_string(),
+    };
+    let (tx, mut rx) = mpsc::channel(16);
+    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
+
+    engine
+        .execute_code_review(&attempt, &provider)
+        .await
+        .expect("execute code review");
+
+    assert_provider_command_event(&drain_events(&mut rx));
+}
+
+#[tokio::test]
+async fn execute_rework_forwards_provider_execution_events() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            ..create_input()
+        })
+        .expect("create attempt");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    store
+        .update_attempt_stage(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingExecutionStage::Testing,
+        )
+        .expect("testing stage");
+    let provider = EventThenCompletedProvider {
+        output: r#"{"verdict":"no_issue","summary":"testing ok"}"#.to_string(),
+    };
+    let (tx, mut rx) = mpsc::channel(16);
+    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
+
+    engine
+        .execute_rework(&attempt, "testing evidence", &provider)
+        .await
+        .expect("execute rework");
+
+    assert_provider_command_event(&drain_events(&mut rx));
+}
+
+#[tokio::test]
+async fn execute_internal_pr_review_forwards_provider_execution_events() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    init_repo(&worktree);
+    fs::write(worktree.join("src.txt"), "hello\nreviewed\n").expect("modify file");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            base_branch: "HEAD".to_string(),
+            ..create_input()
+        })
+        .expect("create attempt");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    store
+        .save_review_request(&sample_review_request(&attempt.id))
+        .expect("save review request");
+    let provider = EventThenCompletedProvider {
+        output: r#"{"verdict":"approve","summary":"internal review ok","findings":[],"impact_scope":["src"],"pr_description":"实现 work item","commit_message_suggestion":"feat: implement work item"}"#.to_string(),
+    };
+    let (tx, mut rx) = mpsc::channel(16);
+    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
+
+    engine
+        .execute_internal_pr_review(&attempt, &provider)
+        .await
+        .expect("execute internal review");
+
+    assert_provider_command_event(&drain_events(&mut rx));
 }
 
 #[tokio::test]
@@ -2125,6 +2477,200 @@ impl StreamingProviderAdapter for InputCapturingProvider {
     }
 }
 
+struct EventEmittingCodingProvider;
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for EventEmittingCodingProvider {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let (event_tx, event_rx) = mpsc::channel(16);
+        let (command_tx, _command_rx) = mpsc::channel(8);
+        event_tx
+            .try_send(ProviderEvent::TextDelta {
+                content: "working".to_string(),
+            })
+            .expect("send text");
+        event_tx
+            .try_send(ProviderEvent::Execution(ProviderExecutionEvent {
+                event_id: "command_0001".to_string(),
+                kind: ProviderExecutionEventKind::Command,
+                status: ProviderExecutionEventStatus::Completed,
+                title: "Run tests".to_string(),
+                detail: Some("Executed verification command".to_string()),
+                command: Some("uv run pytest".to_string()),
+                cwd: None,
+                output: Some("1 passed".to_string()),
+                exit_code: Some(0),
+            }))
+            .expect("send execution event");
+        event_tx
+            .try_send(ProviderEvent::ToolCall(ProviderToolCall {
+                id: "tool_0001".to_string(),
+                tool_name: "run_command".to_string(),
+                input: serde_json::json!({ "command": "uv run pytest" }),
+            }))
+            .expect("send tool call");
+        event_tx
+            .try_send(ProviderEvent::ToolResult(ProviderToolResult {
+                tool_use_id: "tool_0001".to_string(),
+                output: "1 passed".to_string(),
+                is_error: false,
+            }))
+            .expect("send tool result");
+        event_tx
+            .try_send(ProviderEvent::Completed {
+                full_output: "done".to_string(),
+                provider_session_id: None,
+            })
+            .expect("send completed");
+
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+}
+
+struct ControlEventCodingProvider;
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for ControlEventCodingProvider {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let (event_tx, event_rx) = mpsc::channel(16);
+        let (command_tx, _command_rx) = mpsc::channel(8);
+        event_tx
+            .try_send(ProviderEvent::StatusChanged(ProviderStatus::Running))
+            .expect("send status");
+        event_tx
+            .try_send(ProviderEvent::PermissionRequest(PermissionRequestData {
+                id: "permission_0001".to_string(),
+                tool_name: "shell".to_string(),
+                description: "Run uv test command".to_string(),
+                risk_level: RiskLevel::High,
+            }))
+            .expect("send permission");
+        event_tx
+            .try_send(ProviderEvent::ChoiceRequest(ChoiceRequestData {
+                id: "choice_0001".to_string(),
+                prompt: "Select implementation strategy".to_string(),
+                options: vec![ChoiceOptionData {
+                    id: "dp".to_string(),
+                    label: "Dynamic programming".to_string(),
+                    description: Some("Iterative solution".to_string()),
+                }],
+                allow_multiple: false,
+                allow_free_text: true,
+            }))
+            .expect("send choice");
+        event_tx
+            .try_send(ProviderEvent::Completed {
+                full_output: "done".to_string(),
+                provider_session_id: None,
+            })
+            .expect("send completed");
+
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+}
+
+struct PermissionAwaitingProvider;
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for PermissionAwaitingProvider {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let (event_tx, event_rx) = mpsc::channel(16);
+        let (command_tx, mut command_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            let _ = event_tx
+                .send(ProviderEvent::PermissionRequest(PermissionRequestData {
+                    id: "permission_0001".to_string(),
+                    tool_name: "shell".to_string(),
+                    description: "Run uv test command".to_string(),
+                    risk_level: RiskLevel::High,
+                }))
+                .await;
+            while let Some(command) = command_rx.recv().await {
+                match command {
+                    cadence_aria::cross_cutting::streaming_provider::ProviderCommand::PermissionResponse {
+                        id,
+                        approved,
+                        ..
+                    } if id == "permission_0001" && approved => {
+                        let _ = event_tx
+                            .send(ProviderEvent::Completed {
+                                full_output: "approved".to_string(),
+                                provider_session_id: None,
+                            })
+                            .await;
+                        return;
+                    }
+                    cadence_aria::cross_cutting::streaming_provider::ProviderCommand::Abort => {
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        });
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+}
+
+struct EventThenCompletedProvider {
+    output: String,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for EventThenCompletedProvider {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let (event_tx, event_rx) = mpsc::channel(16);
+        let (command_tx, _command_rx) = mpsc::channel(8);
+        event_tx
+            .try_send(ProviderEvent::Execution(ProviderExecutionEvent {
+                event_id: "provider_command_0001".to_string(),
+                kind: ProviderExecutionEventKind::Command,
+                status: ProviderExecutionEventStatus::Completed,
+                title: "Provider command".to_string(),
+                detail: Some("Provider emitted a command event".to_string()),
+                command: Some("git diff --stat".to_string()),
+                cwd: Some(input.working_dir.display().to_string()),
+                output: Some("changed files".to_string()),
+                exit_code: Some(0),
+            }))
+            .expect("send execution event");
+        event_tx
+            .try_send(ProviderEvent::Completed {
+                full_output: self.output.clone(),
+                provider_session_id: None,
+            })
+            .expect("send completed");
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+}
+
 struct ReviewStreamingProvider;
 
 #[async_trait::async_trait]
@@ -2151,6 +2697,23 @@ fn drain_events(rx: &mut mpsc::Receiver<CodingWsOutMessage>) -> Vec<CodingWsOutM
         events.push(event);
     }
     events
+}
+
+fn assert_provider_command_event(events: &[CodingWsOutMessage]) {
+    assert!(
+        events.iter().any(|event| {
+            matches!(
+                event,
+                CodingWsOutMessage::CodingExecutionEvent { event }
+                    if event.title == "Provider command"
+                        && event.kind == WsExecutionEventKind::Command
+                        && event.status == WsExecutionEventStatus::Completed
+                        && event.command.as_deref() == Some("git diff --stat")
+                        && event.output.as_deref() == Some("changed files")
+            )
+        }),
+        "expected provider command execution event, got {events:?}"
+    );
 }
 
 struct AnalystStreamingProvider {

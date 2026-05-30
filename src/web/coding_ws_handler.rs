@@ -40,7 +40,9 @@ use crate::product::test_executor::{
 };
 use crate::product::tester_agent_loop::TesterAgentOptions;
 use crate::web::state::WebAppState;
-use crate::web::workspace_ws_types::{ProviderConfigSnapshot, WsExecutionEvent};
+use crate::web::workspace_ws_types::{
+    ChoiceOption, ProviderConfigSnapshot, WsExecutionEvent, WsPermissionRiskLevel,
+};
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 
@@ -368,6 +370,36 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                             .await;
                         }
                     }
+                } else if let CodingWsInMessage::PermissionResponse {
+                    id,
+                    approved,
+                    reason,
+                } = inbound
+                {
+                    if let Some(command_tx) = runner_command_tx.as_ref() {
+                        let _ = command_tx
+                            .send(CodingRunnerCommand::PermissionResponse {
+                                id,
+                                approved,
+                                reason,
+                            })
+                            .await;
+                    }
+                } else if let CodingWsInMessage::ChoiceResponse {
+                    id,
+                    selected_option_ids,
+                    free_text,
+                } = inbound
+                {
+                    if let Some(command_tx) = runner_command_tx.as_ref() {
+                        let _ = command_tx
+                            .send(CodingRunnerCommand::ChoiceResponse {
+                                id,
+                                selected_option_ids,
+                                free_text,
+                            })
+                            .await;
+                    }
                 } else if let CodingWsInMessage::ContextNote { content } = inbound {
                     let note = match coding_store.create_context_note(&current_attempt.id, content)
                     {
@@ -475,7 +507,12 @@ async fn execute_start_coding_flow(
             let author_provider =
                 provider_for(state, &author_provider_name, "coding author provider")?;
             current = engine
-                .execute_coding(&current, author_provider.as_ref(), &execution_context)
+                .execute_coding_with_commands(
+                    &current,
+                    author_provider.as_ref(),
+                    &execution_context,
+                    &mut command_rx,
+                )
                 .await?;
             if handle_pending_runner_commands(
                 &mut command_rx,
@@ -513,12 +550,13 @@ async fn execute_start_coding_flow(
             let tester_provider =
                 provider_for(state, &tester_provider_name, "coding tester provider")?;
             let testing_report = engine
-                .execute_testing_with_provider(
+                .execute_testing_with_provider_commands(
                     &current,
                     tester_provider.as_ref(),
                     &execution_context,
                     &test_specs,
                     TesterAgentOptions::default(),
+                    &mut command_rx,
                 )
                 .await?;
             current =
@@ -559,7 +597,12 @@ async fn execute_start_coding_flow(
                 provider_for(state, &analyst_provider_name, "coding analyst provider")?;
             let evidence = testing_rework_evidence(&testing_report);
             current = engine
-                .execute_rework(&current, &evidence, analyst_provider.as_ref())
+                .execute_rework_with_commands(
+                    &current,
+                    &evidence,
+                    analyst_provider.as_ref(),
+                    &mut command_rx,
+                )
                 .await?;
             current =
                 coding_store.get_attempt(&current.project_id, &current.issue_id, &current.id)?;
@@ -606,7 +649,11 @@ async fn execute_start_coding_flow(
             let reviewer_provider =
                 provider_for(state, &reviewer_provider_name, "coding reviewer provider")?;
             let review_report = engine
-                .execute_code_review(&current, reviewer_provider.as_ref())
+                .execute_code_review_with_commands(
+                    &current,
+                    reviewer_provider.as_ref(),
+                    &mut command_rx,
+                )
                 .await?;
             current =
                 coding_store.get_attempt(&current.project_id, &current.issue_id, &current.id)?;
@@ -649,7 +696,12 @@ async fn execute_start_coding_flow(
                 provider_for(state, &analyst_provider_name, "coding analyst provider")?;
             let evidence = code_review_rework_evidence(&review_report);
             current = engine
-                .execute_rework(&current, &evidence, analyst_provider.as_ref())
+                .execute_rework_with_commands(
+                    &current,
+                    &evidence,
+                    analyst_provider.as_ref(),
+                    &mut command_rx,
+                )
                 .await?;
             current =
                 coding_store.get_attempt(&current.project_id, &current.issue_id, &current.id)?;
@@ -716,7 +768,11 @@ async fn execute_start_coding_flow(
                 "coding internal reviewer provider",
             )?;
             let internal_review = engine
-                .execute_internal_pr_review(&current, internal_reviewer_provider.as_ref())
+                .execute_internal_pr_review_with_commands(
+                    &current,
+                    internal_reviewer_provider.as_ref(),
+                    &mut command_rx,
+                )
                 .await?;
             current =
                 coding_store.get_attempt(&current.project_id, &current.issue_id, &current.id)?;
@@ -759,7 +815,12 @@ async fn execute_start_coding_flow(
                 provider_for(state, &analyst_provider_name, "coding analyst provider")?;
             let evidence = internal_pr_review_rework_evidence(&internal_review);
             current = engine
-                .execute_rework(&current, &evidence, analyst_provider.as_ref())
+                .execute_rework_with_commands(
+                    &current,
+                    &evidence,
+                    analyst_provider.as_ref(),
+                    &mut command_rx,
+                )
                 .await?;
             current =
                 coding_store.get_attempt(&current.project_id, &current.issue_id, &current.id)?;
@@ -865,6 +926,8 @@ async fn await_stage_gate(
                             })
                             .await;
                     }
+                    CodingRunnerCommand::PermissionResponse { .. }
+                    | CodingRunnerCommand::ChoiceResponse { .. } => {}
                     CodingRunnerCommand::ProviderSelect { role, provider } => {
                         let (updated, changed_role, changed_provider) =
                             match update_provider_selection(
@@ -979,6 +1042,8 @@ async fn handle_pending_runner_commands(
                     .await;
             }
             CodingRunnerCommand::StageGateConfirm { .. } => {}
+            CodingRunnerCommand::PermissionResponse { .. }
+            | CodingRunnerCommand::ChoiceResponse { .. } => {}
         }
     }
     Ok(false)
@@ -1392,6 +1457,19 @@ pub enum CodingWsOutMessage {
     CodingExecutionEvent {
         event: WsExecutionEvent,
     },
+    CodingPermissionRequest {
+        id: String,
+        tool_name: String,
+        description: String,
+        risk_level: WsPermissionRiskLevel,
+    },
+    CodingChoiceRequest {
+        id: String,
+        prompt: String,
+        options: Vec<ChoiceOption>,
+        allow_multiple: bool,
+        allow_free_text: bool,
+    },
     CodingStreamChunk {
         content: String,
         node_id: Option<String>,
@@ -1443,6 +1521,11 @@ pub enum CodingWsInMessage {
         id: String,
         approved: bool,
         reason: Option<String>,
+    },
+    ChoiceResponse {
+        id: String,
+        selected_option_ids: Vec<String>,
+        free_text: Option<String>,
     },
     GateResponse {
         gate_id: String,
@@ -1502,17 +1585,18 @@ pub fn is_coding_ws_message_allowed(
                 | CodingWsInMessage::ProviderSelect { .. }
                 | CodingWsInMessage::AbortAttempt
         ),
-        CodingExecutionStage::WorktreePrepare
-        | CodingExecutionStage::Testing
-        | CodingExecutionStage::CodeReview
-        | CodingExecutionStage::ReviewRequest
-        | CodingExecutionStage::InternalPrReview => {
+        CodingExecutionStage::WorktreePrepare | CodingExecutionStage::ReviewRequest => {
             matches!(message, CodingWsInMessage::AbortAttempt)
         }
-        CodingExecutionStage::Coding | CodingExecutionStage::Rework => matches!(
+        CodingExecutionStage::Coding
+        | CodingExecutionStage::Testing
+        | CodingExecutionStage::Rework
+        | CodingExecutionStage::CodeReview
+        | CodingExecutionStage::InternalPrReview => matches!(
             message,
             CodingWsInMessage::ContextNote { .. }
                 | CodingWsInMessage::PermissionResponse { .. }
+                | CodingWsInMessage::ChoiceResponse { .. }
                 | CodingWsInMessage::AbortAttempt
         ),
         CodingExecutionStage::FinalConfirm => matches!(

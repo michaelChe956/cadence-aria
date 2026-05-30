@@ -491,6 +491,59 @@ async fn reads_test_output_artifact_from_attempt_store() {
     assert_eq!(artifact["content"], "unit stdout\n");
 }
 
+#[tokio::test]
+async fn reads_coding_attempt_diff_from_worktree_against_base_branch() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    bootstrap_confirmed_work_item(app.clone(), repo.path()).await;
+    let (status, created) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001/coding-attempts",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = prepare_attempt_with_worktree(
+        &store,
+        repo.path(),
+        "project_0001",
+        "issue_0001",
+        "coding_attempt_0001",
+    );
+    let worktree_path = attempt.worktree_path.as_ref().expect("worktree path");
+    fs::write(
+        worktree_path.join("climbing_stairs.py"),
+        "def climb_stairs(n):\n    return n\n",
+    )
+    .expect("write changed file");
+
+    let (status, diff) = request_json(
+        app,
+        Method::GET,
+        "/api/coding-attempts/coding_attempt_0001/diff",
+        json!({}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(diff["attempt_id"], "coding_attempt_0001");
+    assert_eq!(diff["base_branch"], created["base_branch"]);
+    assert_eq!(
+        diff["worktree_path"],
+        worktree_path.to_string_lossy().to_string()
+    );
+    let content = diff["diff"].as_str().expect("diff content");
+    assert!(content.contains("diff --git"));
+    assert!(content.contains("climbing_stairs.py"));
+    assert!(content.contains("+def climb_stairs(n):"));
+}
+
 async fn bootstrap_confirmed_work_item(app: axum::Router, repo_path: &std::path::Path) {
     bootstrap_confirmed_work_item_with_providers(app, repo_path, "fake", "fake").await;
 }

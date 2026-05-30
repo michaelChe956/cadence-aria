@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::path::PathBuf;
 
 use crate::product::coding_models::{
     CodeReviewReport, CodingGateRequired, CodingTimelineNode, InternalPrReview, ReviewRequest,
@@ -193,6 +194,15 @@ pub struct FileContentResponse {
 pub struct FileDiffResponse {
     pub base_checkpoint: String,
     pub path: String,
+    pub diff: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct CodingAttemptDiffResponse {
+    pub attempt_id: String,
+    pub base_branch: String,
+    pub worktree_path: PathBuf,
     pub diff: String,
 }
 

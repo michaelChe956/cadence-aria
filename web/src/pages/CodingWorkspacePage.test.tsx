@@ -1,13 +1,14 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { deleteCodingAttempt } from "../api/client";
+import { deleteCodingAttempt, getCodingAttemptDiff } from "../api/client";
 import { useCodingWorkspaceWs } from "../hooks/useCodingWorkspaceWs";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
 import { CodingWorkspacePage } from "./CodingWorkspacePage";
 
 vi.mock("../api/client", () => ({
   deleteCodingAttempt: vi.fn(),
+  getCodingAttemptDiff: vi.fn(),
 }));
 
 vi.mock("../hooks/useCodingWorkspaceWs", () => ({
@@ -27,6 +28,7 @@ function mockCodingWs(overrides: Partial<CodingWsApi> = {}) {
     sendProviderSelect: vi.fn(),
     confirmStageGate: vi.fn(),
     respondPermission: vi.fn(),
+    respondChoice: vi.fn(),
     respondGate: vi.fn(),
     finalConfirm: vi.fn(),
     abortAttempt: vi.fn(),
@@ -51,6 +53,12 @@ describe("CodingWorkspacePage", () => {
 
   it("renders coding workspace shell with timeline and keeps result tabs secondary until selected", async () => {
     mockCodingWs();
+    vi.mocked(getCodingAttemptDiff).mockResolvedValue({
+      attempt_id: "coding_attempt_0001",
+      base_branch: "main",
+      worktree_path: "/tmp/worktree",
+      diff: "",
+    });
     useCodingWorkspaceStore.setState({
       attemptId: "coding_attempt_0001",
       status: "running",
@@ -118,6 +126,40 @@ describe("CodingWorkspacePage", () => {
 
     expect(screen.getByTestId("coding-artifact-tabs")).toHaveTextContent("passed");
     expect(screen.getByTestId("coding-status-bar")).toHaveTextContent("testing");
+  });
+
+  it("loads and renders the coding attempt git diff in result tabs", async () => {
+    mockCodingWs();
+    vi.mocked(getCodingAttemptDiff).mockResolvedValue({
+      attempt_id: "coding_attempt_0001",
+      base_branch: "main",
+      worktree_path: "/tmp/worktree",
+      diff: [
+        "diff --git a/climbing_stairs.py b/climbing_stairs.py",
+        "new file mode 100644",
+        "+def climb_stairs(n):",
+        "+    return n",
+      ].join("\n"),
+    });
+    useCodingWorkspaceStore.setState({
+      attemptId: "coding_attempt_0001",
+      status: "completed",
+      stage: "final_confirm",
+      activeTab: "diff",
+      branchName: "aria/work-items/work_item_0001/attempt-1",
+      baseBranch: "main",
+      worktreePath: "/tmp/worktree",
+    });
+
+    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "运行结果" }));
+
+    await waitFor(() => {
+      expect(getCodingAttemptDiff).toHaveBeenCalledWith("coding_attempt_0001");
+    });
+    expect(await screen.findByText(/diff --git a\/climbing_stairs.py/)).toBeInTheDocument();
+    expect(screen.getByTestId("coding-artifact-tabs")).toHaveTextContent("+def climb_stairs(n):");
   });
 
   it("scrolls the chat list to the first entry for a selected timeline node", async () => {

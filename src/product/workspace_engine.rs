@@ -9,7 +9,8 @@ use tokio_util::sync::CancellationToken;
 use crate::cross_cutting::streaming_provider::{
     ChoiceOptionData, ProviderCommand, ProviderEvent, ProviderExecutionEvent,
     ProviderExecutionEventKind, ProviderExecutionEventStatus, ProviderPermissionMode,
-    ProviderSession, ProviderStatus, RiskLevel, StreamingProviderAdapter, StreamingProviderInput,
+    ProviderSession, ProviderStatus, ProviderToolCall, ProviderToolResult, RiskLevel,
+    StreamingProviderAdapter, StreamingProviderInput,
 };
 use crate::product::artifact_extraction::extract_artifact_content;
 use crate::product::checkpoint_store::CheckpointStore;
@@ -814,6 +815,8 @@ impl WorkspaceEngine {
         let cancel = self.cancel.clone();
         let mut events_open = true;
         let mut commands_open = true;
+        let mut tool_call_titles = BTreeMap::new();
+        let mut tool_call_commands = BTreeMap::new();
 
         while events_open {
             tokio::select! {
@@ -965,24 +968,35 @@ impl WorkspaceEngine {
                                 .await;
                         }
                         ProviderEvent::Execution(event) => {
-                            if let Some(node_id) = node_id.as_deref() {
-                                let event_json = execution_event_json(&event);
-                                let _ = self
-                                    .update_node_detail(node_id, |detail| {
-                                        detail.execution_events.push(event_json);
-                                    })
-                                    .await;
+                            self.emit_execution_event(event, node_id.clone(), agent.clone()).await;
+                        }
+                        ProviderEvent::ToolCall(call) => {
+                            tool_call_titles.insert(call.id.clone(), call.tool_name.clone());
+                            if let Some(command) = extract_tool_command(&call.input) {
+                                tool_call_commands.insert(call.id.clone(), command);
                             }
-                            let _ = self
-                                .event_tx
-                                .send(EngineEvent::ExecutionEvent {
-                                    event,
-                                    node_id: node_id.clone(),
-                                    agent: agent.clone(),
-                                })
+                            self
+                                .emit_execution_event(
+                                    execution_event_from_tool_call(call),
+                                    node_id.clone(),
+                                    agent.clone(),
+                                )
                                 .await;
                         }
-                        ProviderEvent::ToolCall(_) | ProviderEvent::ToolResult(_) => {}
+                        ProviderEvent::ToolResult(result) => {
+                            let title = tool_call_titles
+                                .get(&result.tool_use_id)
+                                .cloned()
+                                .unwrap_or_else(|| "Tool result".to_string());
+                            let command = tool_call_commands.get(&result.tool_use_id).cloned();
+                            self
+                                .emit_execution_event(
+                                    execution_event_from_tool_result(result, title, command),
+                                    node_id.clone(),
+                                    agent.clone(),
+                                )
+                                .await;
+                        }
                         ProviderEvent::Completed { full_output, .. } => {
                             if let Some(node_id) = node_id.as_deref() {
                                 let _ = self.flush_stream_buffer(node_id).await;
@@ -1051,6 +1065,30 @@ impl WorkspaceEngine {
             self.complete_assistant_message(assistant_msg_id, full_content)
                 .await;
         }
+    }
+
+    async fn emit_execution_event(
+        &mut self,
+        event: ProviderExecutionEvent,
+        node_id: Option<String>,
+        agent: Option<ProviderName>,
+    ) {
+        if let Some(node_id) = node_id.as_deref() {
+            let event_json = execution_event_json(&event);
+            let _ = self
+                .update_node_detail(node_id, |detail| {
+                    detail.execution_events.push(event_json);
+                })
+                .await;
+        }
+        let _ = self
+            .event_tx
+            .send(EngineEvent::ExecutionEvent {
+                event,
+                node_id,
+                agent,
+            })
+            .await;
     }
 
     pub async fn drive_review_session(
@@ -1134,6 +1172,8 @@ impl WorkspaceEngine {
         let cancel = self.cancel.clone();
         let mut events_open = true;
         let mut commands_open = true;
+        let mut tool_call_titles = BTreeMap::new();
+        let mut tool_call_commands = BTreeMap::new();
 
         while events_open {
             tokio::select! {
@@ -1295,24 +1335,41 @@ impl WorkspaceEngine {
                                 .await;
                         }
                         ProviderEvent::Execution(event) => {
-                            if let Some(node_id) = node_id.as_deref() {
-                                let event_json = execution_event_json(&event);
-                                let _ = self
-                                    .update_node_detail(node_id, |detail| {
-                                        detail.execution_events.push(event_json);
-                                    })
-                                    .await;
-                            }
-                            let _ = self
-                                .event_tx
-                                .send(EngineEvent::ExecutionEvent {
+                            self
+                                .emit_execution_event(
                                     event,
-                                    node_id: node_id.clone(),
-                                    agent: Some(reviewer.clone()),
-                                })
+                                    node_id.clone(),
+                                    Some(reviewer.clone()),
+                                )
                                 .await;
                         }
-                        ProviderEvent::ToolCall(_) | ProviderEvent::ToolResult(_) => {}
+                        ProviderEvent::ToolCall(call) => {
+                            tool_call_titles.insert(call.id.clone(), call.tool_name.clone());
+                            if let Some(command) = extract_tool_command(&call.input) {
+                                tool_call_commands.insert(call.id.clone(), command);
+                            }
+                            self
+                                .emit_execution_event(
+                                    execution_event_from_tool_call(call),
+                                    node_id.clone(),
+                                    Some(reviewer.clone()),
+                                )
+                                .await;
+                        }
+                        ProviderEvent::ToolResult(result) => {
+                            let title = tool_call_titles
+                                .get(&result.tool_use_id)
+                                .cloned()
+                                .unwrap_or_else(|| "Tool result".to_string());
+                            let command = tool_call_commands.get(&result.tool_use_id).cloned();
+                            self
+                                .emit_execution_event(
+                                    execution_event_from_tool_result(result, title, command),
+                                    node_id.clone(),
+                                    Some(reviewer.clone()),
+                                )
+                                .await;
+                        }
                         ProviderEvent::Completed { full_output, .. } => {
                             if let Some(node_id) = node_id.as_deref() {
                                 let _ = self.flush_stream_buffer(node_id).await;
@@ -2875,6 +2932,61 @@ fn execution_event_json(event: &ProviderExecutionEvent) -> serde_json::Value {
     })
 }
 
+fn execution_event_from_tool_call(call: ProviderToolCall) -> ProviderExecutionEvent {
+    ProviderExecutionEvent {
+        event_id: call.id,
+        kind: ProviderExecutionEventKind::Command,
+        status: ProviderExecutionEventStatus::Started,
+        title: call.tool_name,
+        detail: Some(format_tool_call_input(&call.input)),
+        command: extract_tool_command(&call.input),
+        cwd: None,
+        output: None,
+        exit_code: None,
+    }
+}
+
+fn execution_event_from_tool_result(
+    result: ProviderToolResult,
+    title: String,
+    command: Option<String>,
+) -> ProviderExecutionEvent {
+    ProviderExecutionEvent {
+        event_id: result.tool_use_id,
+        kind: ProviderExecutionEventKind::Command,
+        status: if result.is_error {
+            ProviderExecutionEventStatus::Failed
+        } else {
+            ProviderExecutionEventStatus::Completed
+        },
+        title,
+        detail: None,
+        command,
+        cwd: None,
+        output: Some(result.output),
+        exit_code: if result.is_error { Some(1) } else { Some(0) },
+    }
+}
+
+fn format_tool_call_input(input: &serde_json::Value) -> String {
+    serde_json::to_string_pretty(input).unwrap_or_else(|_| input.to_string())
+}
+
+fn extract_tool_command(input: &serde_json::Value) -> Option<String> {
+    let command = input.get("command").or_else(|| input.get("cmd"))?;
+    if let Some(command) = command.as_str() {
+        return Some(command.to_string());
+    }
+    command.as_array().and_then(|parts| {
+        parts
+            .iter()
+            .map(serde_json::Value::as_str)
+            .collect::<Option<Vec<_>>>()
+            .map(|parts| parts.join(" "))
+            .filter(|command| !command.trim().is_empty())
+    })
+}
+
 fn execution_event_kind_text(kind: &ProviderExecutionEventKind) -> &'static str {
     match kind {
         ProviderExecutionEventKind::Provider => "provider",
@@ -4214,6 +4326,96 @@ mod tests {
         }
     }
 
+    fn tool_event_provider_session(full_output: &str) -> ProviderSession {
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let (command_tx, _command_rx) = mpsc::channel(8);
+        event_tx
+            .try_send(ProviderEvent::ToolCall(
+                crate::cross_cutting::streaming_provider::ProviderToolCall {
+                    id: "tool_0001".to_string(),
+                    tool_name: "edit_file".to_string(),
+                    input: serde_json::json!({
+                        "command": "apply_patch",
+                        "path": "stairs.py"
+                    }),
+                },
+            ))
+            .expect("send tool call");
+        event_tx
+            .try_send(ProviderEvent::ToolResult(
+                crate::cross_cutting::streaming_provider::ProviderToolResult {
+                    tool_use_id: "tool_0001".to_string(),
+                    output: "updated stairs.py".to_string(),
+                    is_error: false,
+                },
+            ))
+            .expect("send tool result");
+        event_tx
+            .try_send(ProviderEvent::Completed {
+                full_output: full_output.to_string(),
+                provider_session_id: None,
+            })
+            .expect("send completed");
+        ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        }
+    }
+
+    fn drain_engine_events(rx: &mut mpsc::Receiver<EngineEvent>) -> Vec<EngineEvent> {
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        events
+    }
+
+    fn assert_tool_call_and_result_events(
+        events: &[EngineEvent],
+        expected_node_id: Option<&str>,
+        expected_agent: ProviderName,
+    ) {
+        assert!(
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    EngineEvent::ExecutionEvent { event, node_id, agent }
+                        if event.event_id == "tool_0001"
+                            && event.kind == ProviderExecutionEventKind::Command
+                            && event.status == ProviderExecutionEventStatus::Started
+                            && event.title == "edit_file"
+                            && event
+                                .detail
+                                .as_deref()
+                                .is_some_and(|detail| detail.contains("stairs.py"))
+                            && node_id.as_deref() == expected_node_id
+                            && agent.as_ref() == Some(&expected_agent)
+                )
+            }),
+            "expected visible tool call event, got {} engine events",
+            events.len()
+        );
+        assert!(
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    EngineEvent::ExecutionEvent { event, node_id, agent }
+                        if event.event_id == "tool_0001"
+                            && event.kind == ProviderExecutionEventKind::Command
+                            && event.status == ProviderExecutionEventStatus::Completed
+                            && event.title == "edit_file"
+                            && event.command.as_deref() == Some("apply_patch")
+                            && event.output.as_deref() == Some("updated stairs.py")
+                            && event.exit_code == Some(0)
+                            && node_id.as_deref() == expected_node_id
+                            && agent.as_ref() == Some(&expected_agent)
+                )
+            }),
+            "expected visible tool result event, got {} engine events",
+            events.len()
+        );
+    }
+
     #[tokio::test]
     async fn handle_user_message_forwards_provider_execution_events() {
         let (_tmp, store) = setup();
@@ -4245,6 +4447,81 @@ mod tests {
             saw_execution_event,
             "provider execution events should be forwarded to websocket layer"
         );
+    }
+
+    #[tokio::test]
+    async fn provider_session_forwards_tool_call_and_result_events() {
+        let (tmp, checkpoint_store) = setup();
+        let lifecycle_store = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
+        let (tx, mut rx) = mpsc::channel(64);
+        let session_record = lifecycle_store
+            .create_workspace_session(CreateWorkspaceSessionInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                entity_id: "story_spec_0001".to_string(),
+                workspace_type: WorkspaceType::Story,
+                author_provider: ProviderName::ClaudeCode,
+                reviewer_provider: ProviderName::Codex,
+                review_rounds: 2,
+                superpowers_enabled: true,
+                openspec_enabled: true,
+            })
+            .unwrap();
+        let session = WorkspaceSession::from_record(session_record);
+        let mut engine =
+            WorkspaceEngine::new_persistent(checkpoint_store, lifecycle_store.clone(), tx, session);
+        let node_id = create_author_run_node(&mut engine).await;
+
+        engine
+            .drive_provider_session(
+                Ok(tool_event_provider_session("# Draft")),
+                empty_provider_commands(),
+                Some(node_id.clone()),
+                Some(ProviderName::ClaudeCode),
+            )
+            .await;
+
+        let events = drain_engine_events(&mut rx);
+        assert_tool_call_and_result_events(
+            &events,
+            Some(node_id.as_str()),
+            ProviderName::ClaudeCode,
+        );
+
+        let detail = lifecycle_store
+            .load_node_detail(&engine.session().session_id, &node_id)
+            .unwrap();
+        assert!(
+            detail
+                .execution_events
+                .iter()
+                .any(|event| event["event_id"] == "tool_0001"
+                    && event["status"] == "completed"
+                    && event["output"] == "updated stairs.py"),
+            "tool result should be persisted to node detail, got {detail:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reviewer_provider_session_forwards_tool_call_and_result_events() {
+        let (_tmp, store) = setup();
+        let (tx, mut rx) = mpsc::channel(64);
+        let session = make_session("sess_007_review_tools");
+        let mut engine = WorkspaceEngine::new(store, tx, session);
+        let node_id = create_reviewer_run_node(&mut engine).await;
+
+        engine
+            .drive_reviewer_provider_session(
+                Ok(tool_event_provider_session(
+                    r#"{"verdict":"pass","summary":"审核通过"}"#,
+                )),
+                empty_provider_commands(),
+                ProviderName::Codex,
+            )
+            .await;
+
+        let events = drain_engine_events(&mut rx);
+        assert_tool_call_and_result_events(&events, Some(node_id.as_str()), ProviderName::Codex);
     }
 
     #[tokio::test]
