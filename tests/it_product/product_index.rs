@@ -253,9 +253,11 @@ fn write_json_error_does_not_remove_existing_target_directory() {
 
 #[test]
 fn product_store_error_paths_do_not_drop_iteration_errors_or_delete_targets() {
-    let runtime_binding_store = include_str!("../src/product/runtime_binding_store.rs");
+    let runtime_binding_store =
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/product/runtime_binding_store.rs"));
     assert!(!runtime_binding_store.contains("filter_map(|entry| entry.ok()"));
 
-    let json_store = include_str!("../src/product/json_store.rs");
+    let json_store =
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/product/json_store.rs"));
     assert!(!json_store.contains("remove_file(target_path)"));
 }
