@@ -1,2 +1,5 @@
 [alias]
 test-approval-bridge = "test --locked --lib approval_bridge"
+
+[build]
+rustc-wrapper = "sccache"
