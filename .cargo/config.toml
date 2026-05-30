@@ -1,2 +1,8 @@
+[build]
+# 本仓库编译图为串行瓶颈型（lib 先编完，6 个测试二进制才能并行），
+# 有效并行宽度约 5–8；钉 8 既不更慢又控制内存峰值（实测峰值 ~3GB），避免 swap 抖动。
+# 命令行无需再写 -j；严禁用 -j 1（会退化为单核串行，测试从 ~1.5min 涨到 6min）。
+jobs = 8
+
 [alias]
 test-approval-bridge = "test --locked --lib approval_bridge"

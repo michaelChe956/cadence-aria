@@ -31,6 +31,8 @@
 
 详见 `cadence/project-rules/README.md`。
 
+其中 **Rust 构建/测试/检查命令规范**（标准命令、🔴 禁止 `-j 1`、定向快反馈命令）详见 `cadence/project-rules/build-test-commands.md`，本地与 CI 必须遵循。
+
 ## 与 CLAUDE.md 的关系
 
 - 用户在当前任务中的明确指令优先级最高。

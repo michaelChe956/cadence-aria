@@ -47,11 +47,15 @@
 - **Rust/Cargo 本地开发与验证规则**
   - 后续本地开发、测试与 CLI 验证必须直接使用宿主机 Rust 环境执行，不使用 Docker 作为默认开发测试环境。
   - 仓库根目录的 `rust-toolchain.toml` 是唯一工具链声明来源；进入仓库根目录或当前 worktree 根目录后直接运行 `cargo` 命令。
-  - 常用本地验证命令：`cargo fmt --check`、`cargo clippy --all-targets --all-features --locked -- -D warnings`、`cargo check --locked`、`cargo test --locked -j 1`。
+  - 常用本地验证命令：`cargo fmt --check`、`cargo clippy --all-targets --all-features --locked -- -D warnings`、`cargo check --locked`、`cargo test --locked`。
+  - 🔴 **禁止**给 `cargo test` 携带 `-j 1`；并行度由 `.cargo/config.toml` 的 `jobs = 8` 统一托管，命令行无需也不应再写 `-j`。完整命令规范、性能预期与历史背景见 `cadence/project-rules/build-test-commands.md`。
   - 定向验证 `src/lib.rs` 内的单元测试时必须限制测试目标，例如 `cargo test --locked --lib <测试过滤名>`；禁止使用 `cargo test --locked <测试过滤名>` 作为快速反馈命令，因为它仍会遍历所有 integration test 二进制。
   - `approval_bridge` 单元测试使用 `cargo test-approval-bridge`（等价于 `cargo test --locked --lib approval_bridge`），避免在 9 个单元测试通过后继续等待无关测试二进制过滤。
   - 若宿主机 Rust 工具链或组件缺失，应按 `rust-toolchain.toml` 修复宿主机环境，而不是改用 Docker 绕过。
   - 目录中旧 Docker 开发指南仅作为历史文档保留，不属于已启用项目规则。
+
+- **Rust 构建/测试/检查命令规范**
+  - 标准命令、`-j 1` 禁令、定向快反馈命令、性能预期等强制规范，详见 `cadence/project-rules/build-test-commands.md`。
 
 **示例规则**（默认不启用，需用户主动添加）：
 
