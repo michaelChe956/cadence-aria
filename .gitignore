@@ -10,3 +10,8 @@ target/
 .rustup-home/
 .superpowers/
 .playwright-cli/
+
+# npm 组包产物（由 scripts/pack-npm.mjs 生成，不入库）
+npm/cli-*/bin/
+npm/cli-*/package.json
+npm/*.tgz

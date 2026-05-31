@@ -37,3 +37,18 @@ test("non-web subcommand forwarded verbatim, no open", () => {
   assert.equal(plan.defaultWebMode, false);
   assert.equal(plan.open, false);
 });
+
+test("web with any flag (e.g. --check) is NOT default web mode, forwarded verbatim", () => {
+  // 回归：web --check 曾被误判为默认 web 模式,导致 launcher 劫持端口起真实服务、忽略 --check。
+  const plan = planInvocation(["web", "--check", "--workspace", "/tmp/x"]);
+  assert.deepEqual(plan.forwardArgs, ["web", "--check", "--workspace", "/tmp/x"]);
+  assert.equal(plan.defaultWebMode, false);
+  assert.equal(plan.open, false);
+});
+
+test("web with --host only is also non-default (user takes over)", () => {
+  const plan = planInvocation(["web", "--host", "0.0.0.0"]);
+  assert.deepEqual(plan.forwardArgs, ["web", "--host", "0.0.0.0"]);
+  assert.equal(plan.defaultWebMode, false);
+  assert.equal(plan.open, false);
+});
