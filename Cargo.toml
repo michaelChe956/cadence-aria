@@ -33,6 +33,7 @@ thiserror = "2.0.18"
 tokio = { version = "1.52.1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-util = "0.7"
+tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["fs", "trace"] }
 tracing = "0.1"
 uuid = { version = "1.23.1", features = ["v4"] }
@@ -41,7 +42,6 @@ uuid = { version = "1.23.1", features = ["v4"] }
 serde_yaml = "0.9.34"
 tempfile = "3.27.0"
 tokio-tungstenite = "0.29"
-tower = { version = "0.5", features = ["util"] }
 
 # 开发/测试构建：用更轻的调试信息以控制 target 体积
 [profile.dev]

@@ -217,8 +217,11 @@ pub async fn serve_web(
             .map_err(|error| anyhow::anyhow!("{:?}: {}", error.code, error.message))?,
         events,
     );
-    let app =
-        build_web_router(state).fallback_service(crate::web::static_assets::static_dist_service());
+    let static_service = crate::web::static_assets::static_dist_service();
+    let app = build_web_router(state).fallback(move |req: axum::extract::Request| {
+        let static_service = static_service.clone();
+        async move { crate::web::static_assets::serve_static(static_service, req).await }
+    });
     let listener = TcpListener::bind(addr).await?;
     let bound_addr = listener.local_addr()?;
     eprintln!("aria web listening on http://{bound_addr}");
