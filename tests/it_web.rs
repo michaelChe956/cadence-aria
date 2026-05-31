@@ -35,6 +35,8 @@ mod web_runtime_fake;
 mod web_runtime_persistence;
 #[path = "it_web/web_runtime_real.rs"]
 mod web_runtime_real;
+#[path = "it_web/web_static_assets.rs"]
+mod web_static_assets;
 #[path = "it_web/web_test_controls.rs"]
 mod web_test_controls;
 #[path = "it_web/web_types.rs"]
