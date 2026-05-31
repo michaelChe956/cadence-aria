@@ -19,6 +19,18 @@ jobs:
           components: rustfmt, clippy
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      # 前端必须先构建：aria 通过 rust-embed 在编译期嵌入 web/dist，
+      # build.rs 会在 web/dist 缺失时硬失败（web/dist 不在版本控制中）。
+      - name: Build frontend
+        run: pnpm -C web install --frozen-lockfile && pnpm -C web build
       - name: Check formatting
         run: cargo fmt --check
       - name: Run clippy
