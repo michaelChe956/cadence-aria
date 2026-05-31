@@ -15,6 +15,8 @@ mod web_events;
 mod web_hard_gate;
 #[path = "it_web/web_lifecycle_api.rs"]
 mod web_lifecycle_api;
+#[path = "it_web/web_listening_line.rs"]
+mod web_listening_line;
 #[path = "it_web/web_node_context.rs"]
 mod web_node_context;
 #[path = "it_web/web_policy_runtime.rs"]

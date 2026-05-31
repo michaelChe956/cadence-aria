@@ -204,6 +204,14 @@ pub fn build_web_router(state: WebAppState) -> Router {
     router.with_state(state)
 }
 
+/// launcher 依赖的就绪行前缀契约。修改即破坏 launcher 解析，须同步更新 bin/aria.js 与回归测试。
+pub const LISTENING_LINE_PREFIX: &str = "aria web listening on http://";
+
+/// 生成就绪行（统一格式来源）。
+pub fn listening_line(addr: &SocketAddr) -> String {
+    format!("{LISTENING_LINE_PREFIX}{addr}")
+}
+
 pub async fn serve_web(
     workspace_root: std::path::PathBuf,
     host: String,
@@ -222,9 +230,10 @@ pub async fn serve_web(
         let static_service = static_service.clone();
         async move { crate::web::static_assets::serve_static(static_service, req).await }
     });
+    crate::web::provider_probe::emit_provider_probe_notice();
     let listener = TcpListener::bind(addr).await?;
     let bound_addr = listener.local_addr()?;
-    eprintln!("aria web listening on http://{bound_addr}");
+    eprintln!("{}", listening_line(&bound_addr));
     axum::serve(listener, app).await?;
     Ok(())
 }
