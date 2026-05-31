@@ -12,6 +12,14 @@
 
 **前置：** P3 已交付（`scripts/pack-npm.mjs`、`npm/` 包结构）。workflow 仅编排，不改 P1-P3 代码。
 
+> **执行进度（subagent-driven 实测）：全部完成 ✅**
+> - Task 1 ✅ 附件脚本 `make-release-assets.mjs`（ESM；本地验证生成 `aria-linux-x64.tar.gz` 含 aria/LICENSE/README + SHA256SUMS）。
+> - Task 2 + Task 3 ✅ `.github/workflows/release.yml`（build matrix + release job 一次写完）。结构关键字、无 tab、与现有 ci.yml 同构均校验通过。**注**：workflow 无法本地真实触发（需 tag push + macOS runner），真实验证在首次 `v*` tag 时由 GitHub 完成。
+> - Task 4 ✅ 契约对齐验证：pack-npm 参数（version/main-only/platform/binary）、平台 key（三处一致）；本地端到端串跑（extract→组包→体积gate→附件）单平台全过，二进制执行位保留，体积 6MB ≪ 90MB 阈值。
+> - Task 5 ✅ 开发发布指南 `cadence/readmes/2026-05-31_README_npx分发开发与发布指南_v1.0.md`。
+> - **全局收尾**：全量 Rust 测试 0 失败、launcher 16 单测全绿、fmt/clippy 干净、工作区干净。自 plan 提交起共 25 个实现提交。
+
+
 ---
 
 ## 文件结构
