@@ -64,6 +64,8 @@ async fn static_assets_embedded_and_override_behavior() {
     let resp = html_get(static_router(), "/").await;
     unsafe { std::env::remove_var("ARIA_WEB_DIST") };
     assert_eq!(resp.status(), StatusCode::OK);
-    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
     assert!(String::from_utf8_lossy(&bytes).contains("disk-override"));
 }
