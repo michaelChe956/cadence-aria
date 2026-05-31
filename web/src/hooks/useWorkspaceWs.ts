@@ -167,6 +167,9 @@ export function useWorkspaceWs(sessionId: string | null) {
         store.rebuildChatEntries();
         break;
       case "stream_chunk":
+        if (!ACTIVE_PROVIDER_STAGES.has(store.stage) && store.activeRunId) {
+          break;
+        }
         store.appendStreamChunk(msg.content as string, msg.node_id as string | null | undefined);
         handleStreamChunk(store, msg as never);
         break;
@@ -263,7 +266,7 @@ export function useWorkspaceWs(sessionId: string | null) {
             id: chatEntryId("execution_event", event.event_id),
             type: "execution_event",
             role: entryRoleForNode(store, event.node_id ?? null, "system"),
-            content: executionEventContent(event),
+            content: executionEventContent(event, nodeTitleForEvent(store, event)),
             timestamp: new Date().toISOString(),
             node_id: event.node_id ?? undefined,
             metadata: provider ? { ...event, provider } : { ...event },
@@ -624,12 +627,24 @@ function permissionRequestContent(request: { tool_name: string; description: str
   return request.description ? `${request.tool_name} · ${request.description}` : request.tool_name;
 }
 
-function executionEventContent(event: ExecutionEvent) {
+function executionEventContent(event: ExecutionEvent, nodeTitle?: string | null) {
   const command = event.kind === "command" ? event.command?.trim() : "";
   if (command) {
     return command;
   }
+  if (event.title === "Provider Prompt" && typeof event.output === "string" && nodeTitle) {
+    return `${nodeTitle} · Provider Prompt`;
+  }
   return event.detail ? `${event.title} · ${event.detail}` : event.title;
+}
+
+function nodeTitleForEvent(
+  store: ReturnType<typeof useWorkspaceStore.getState>,
+  event: ExecutionEvent,
+) {
+  return event.node_id
+    ? store.timelineNodes.find((candidate) => candidate.node_id === event.node_id)?.title ?? null
+    : null;
 }
 
 function entryRoleForNode(

@@ -19,6 +19,41 @@ vi.mock("../hooks/useUnloadGuard", () => ({
   useUnloadGuard: vi.fn(),
 }));
 
+vi.mock("../components/shared/MonacoViewer", () => ({
+  MonacoViewer: ({
+    value,
+    language,
+    height,
+  }: {
+    value: string;
+    language?: string;
+    height?: string;
+  }) => (
+    <div data-testid="monaco-viewer" data-language={language} data-height={height}>
+      {value}
+    </div>
+  ),
+}));
+
+vi.mock("../components/shared/MonacoDiffViewer", () => ({
+  MonacoDiffViewer: ({
+    original,
+    modified,
+    language,
+    height,
+  }: {
+    original: string;
+    modified: string;
+    language?: string;
+    height?: string;
+  }) => (
+    <div data-testid="monaco-diff-viewer" data-language={language} data-height={height}>
+      <span data-testid="monaco-diff-original">{original}</span>
+      <span data-testid="monaco-diff-modified">{modified}</span>
+    </div>
+  ),
+}));
+
 type CodingWsApi = ReturnType<typeof useCodingWorkspaceWs>;
 
 function mockCodingWs(overrides: Partial<CodingWsApi> = {}) {
@@ -137,6 +172,10 @@ describe("CodingWorkspacePage", () => {
       diff: [
         "diff --git a/climbing_stairs.py b/climbing_stairs.py",
         "new file mode 100644",
+        "index 0000000..a56d173",
+        "--- /dev/null",
+        "+++ b/climbing_stairs.py",
+        "@@ -0,0 +1,2 @@",
         "+def climb_stairs(n):",
         "+    return n",
       ].join("\n"),
@@ -158,8 +197,13 @@ describe("CodingWorkspacePage", () => {
     await waitFor(() => {
       expect(getCodingAttemptDiff).toHaveBeenCalledWith("coding_attempt_0001");
     });
-    expect(await screen.findByText(/diff --git a\/climbing_stairs.py/)).toBeInTheDocument();
-    expect(screen.getByTestId("coding-artifact-tabs")).toHaveTextContent("+def climb_stairs(n):");
+    const viewer = await screen.findByTestId("monaco-diff-viewer");
+    expect(viewer).toHaveAttribute("data-language", "python");
+    expect(screen.getByText("climbing_stairs.py")).toBeInTheDocument();
+    expect(screen.getByTestId("monaco-diff-original").textContent).toBe("");
+    expect(screen.getByTestId("monaco-diff-modified").textContent).toBe(
+      "def climb_stairs(n):\n    return n",
+    );
   });
 
   it("scrolls the chat list to the first entry for a selected timeline node", async () => {

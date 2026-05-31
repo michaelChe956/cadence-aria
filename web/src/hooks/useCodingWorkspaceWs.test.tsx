@@ -209,6 +209,66 @@ describe("useCodingWorkspaceWs", () => {
     ]);
   });
 
+  it("ignores late provider output after a coding attempt is aborted", () => {
+    const harness = renderCodingHook();
+
+    act(() => {
+      harness.ws.receive({
+        type: "coding_session_state",
+        attempt_id: "coding_attempt_0001",
+        status: "aborted",
+        stage: "coding",
+        branch_name: "aria/work-items/work_item_0001/attempt-1",
+        base_branch: "main",
+        worktree_path: "/tmp/worktree",
+        rework_count: 0,
+        max_auto_rework: 2,
+        head_commit: null,
+        pushed_remote: null,
+        role_provider_config_snapshot: {
+          coder: "fake",
+          tester: "fake",
+          analyst: "fake",
+          code_reviewer: "fake",
+          internal_reviewer: "fake",
+          review_rounds: 1,
+        },
+        provider_config_snapshot: { author: "fake", reviewer: "fake", review_rounds: 1 },
+        chat_entries: [],
+        timeline_nodes: [],
+        active_node_id: null,
+        testing_report: null,
+        code_review_reports: [],
+        review_request: null,
+        internal_pr_review: null,
+        pending_gates: [],
+      });
+      harness.ws.receive({
+        type: "coding_stream_chunk",
+        content: "late output",
+        node_id: "coding_node_0001",
+      });
+      harness.ws.receive({
+        type: "coding_execution_event",
+        event: {
+          event_id: "late_event",
+          node_id: "coding_node_0001",
+          agent: "codex",
+          kind: "command",
+          status: "completed",
+          title: "late command",
+          command: "git status",
+          output: "late",
+          exit_code: 0,
+        },
+      });
+    });
+
+    const state = useCodingWorkspaceStore.getState();
+    expect(state.chatEntries).toHaveLength(0);
+    expect(state.logs).toHaveLength(0);
+  });
+
   it("records coding permission and choice requests and sends responses", () => {
     const harness = renderCodingHook();
 

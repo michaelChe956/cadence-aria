@@ -775,6 +775,12 @@ impl WorkspaceEngine {
         let _ = self
             .persist_prompt_snapshot(&generation_node_id, input.prompt.clone())
             .await;
+        self.emit_execution_event(
+            provider_prompt_event(&generation_node_id, input.prompt.clone()),
+            Some(generation_node_id.clone()),
+            Some(self.session.author_provider.clone()),
+        )
+        .await;
 
         let session = provider.start(input, self.cancel.clone()).await;
         self.drive_provider_session(
@@ -1113,6 +1119,12 @@ impl WorkspaceEngine {
             let _ = self
                 .persist_prompt_snapshot(&node_id, input.prompt.clone())
                 .await;
+            self.emit_execution_event(
+                provider_prompt_event(&node_id, input.prompt.clone()),
+                Some(node_id),
+                Some(reviewer.clone()),
+            )
+            .await;
         }
         let session = provider.start(input, self.cancel.clone()).await;
         self.drive_reviewer_provider_session(session, command_rx, reviewer)
@@ -1138,6 +1150,12 @@ impl WorkspaceEngine {
             let _ = self
                 .persist_prompt_snapshot(&node_id, input.prompt.clone())
                 .await;
+            self.emit_execution_event(
+                provider_prompt_event(&node_id, input.prompt.clone()),
+                Some(node_id),
+                Some(author.clone()),
+            )
+            .await;
         }
         let session = provider.start(input, self.cancel.clone()).await;
         self.drive_provider_session(session, command_rx, node_id, Some(author))
@@ -2932,6 +2950,20 @@ fn execution_event_json(event: &ProviderExecutionEvent) -> serde_json::Value {
     })
 }
 
+fn provider_prompt_event(node_id: &str, prompt: String) -> ProviderExecutionEvent {
+    ProviderExecutionEvent {
+        event_id: format!("{node_id}_prompt"),
+        kind: ProviderExecutionEventKind::Output,
+        status: ProviderExecutionEventStatus::Started,
+        title: "Provider Prompt".to_string(),
+        detail: Some("发送给 Workspace provider 的完整提示词".to_string()),
+        command: None,
+        cwd: None,
+        output: Some(prompt),
+        exit_code: None,
+    }
+}
+
 fn execution_event_from_tool_call(call: ProviderToolCall) -> ProviderExecutionEvent {
     ProviderExecutionEvent {
         event_id: call.id,
@@ -4434,6 +4466,9 @@ mod tests {
         let mut saw_execution_event = false;
         while let Ok(event) = rx.try_recv() {
             if let EngineEvent::ExecutionEvent { event, .. } = event {
+                if event.event_id != "command_cmd_001" {
+                    continue;
+                }
                 assert_eq!(event.event_id, "command_cmd_001");
                 assert_eq!(event.kind, ProviderExecutionEventKind::Command);
                 assert_eq!(event.status, ProviderExecutionEventStatus::Completed);
@@ -4446,6 +4481,38 @@ mod tests {
         assert!(
             saw_execution_event,
             "provider execution events should be forwarded to websocket layer"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_user_message_emits_provider_prompt_event() {
+        let (_tmp, store) = setup();
+        let (tx, mut rx) = mpsc::channel(64);
+        let session = make_session("sess_007_prompt");
+        let mut engine = WorkspaceEngine::new(store, tx, session);
+
+        engine
+            .handle_user_message(
+                "start".to_string(),
+                Arc::new(ExecutionEventStreamingProvider),
+                empty_provider_commands(),
+            )
+            .await;
+
+        let events = drain_engine_events(&mut rx);
+        assert!(
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    EngineEvent::ExecutionEvent { event, node_id, agent }
+                        if event.title == "Provider Prompt"
+                            && event.kind == ProviderExecutionEventKind::Output
+                            && event.output.as_deref().is_some_and(|output| output.contains("[user]: start"))
+                            && node_id.as_deref().is_some_and(|id| id.starts_with("timeline_node_"))
+                    && agent.as_ref() == Some(&ProviderName::ClaudeCode)
+                )
+            }),
+            "expected provider prompt event"
         );
     }
 

@@ -36,6 +36,37 @@ describe("chat workspace entries", () => {
     expect(screen.getByText("支持手机号登录。")).toBeInTheDocument();
   });
 
+  it("renders provider stream content with escaped and single newlines as readable blocks", () => {
+    const entry = makeEntry({
+      type: "provider_stream",
+      role: "author",
+      content: "# Story Spec\\n## 范围\\n实现爬楼梯问题\\n- n=1\\n- n=2",
+    });
+
+    render(<ProviderStreamEntry entry={entry} />);
+
+    expect(screen.getByRole("heading", { name: "Story Spec" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "范围" })).toBeInTheDocument();
+    expect(screen.getByText(/实现爬楼梯问题/)).toBeInTheDocument();
+    expect(screen.getByText(/n=1/)).toBeInTheDocument();
+  });
+
+  it("breaks long provider prose into sentence lines when the provider streams one dense line", () => {
+    const entry = makeEntry({
+      type: "provider_stream",
+      role: "author",
+      content:
+        "仓库规则已确认。 我现在进入红灯阶段。 红灯已成立：python -m unittest discover -s tests 因 ModuleNotFoundError 失败。 绿色阶段测试已通过。",
+    });
+
+    render(<ProviderStreamEntry entry={entry} />);
+
+    const prose = screen.getByText(/仓库规则已确认/);
+    expect(prose.textContent).toBe(
+      "仓库规则已确认。\n我现在进入红灯阶段。\n红灯已成立：python -m unittest discover -s tests 因 ModuleNotFoundError 失败。\n绿色阶段测试已通过。",
+    );
+  });
+
   it("renders execution event entries with command detail", () => {
     const entry = makeEntry({
       type: "execution_event",

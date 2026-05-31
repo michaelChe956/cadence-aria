@@ -225,12 +225,16 @@ export const useCodingWorkspaceStore = create<
 
   addExecutionEvent: (event) =>
     set((state) => {
+      if (state.status === "aborted") {
+        return {};
+      }
       const timestamp = new Date().toISOString();
+      const node = nodeForEvent(state.timelineNodes, event.node_id ?? null);
       const role = chatRoleForNode(state.timelineNodes, event.node_id ?? null);
       return {
         logs: upsertById(state.logs, {
           id: event.event_id,
-          message: executionEventMessage(event),
+          message: executionEventMessage(event, node),
           timestamp,
           nodeId: event.node_id ?? null,
         }),
@@ -238,7 +242,7 @@ export const useCodingWorkspaceStore = create<
           id: event.event_id,
           type: "execution_event",
           role,
-          content: executionEventMessage(event),
+          content: executionEventMessage(event, node),
           timestamp,
           node_id: event.node_id ?? undefined,
           metadata: event as unknown as Record<string, unknown>,
@@ -280,6 +284,9 @@ export const useCodingWorkspaceStore = create<
 
   appendStreamChunk: (content, nodeId = null) =>
     set((state) => {
+      if (state.status === "aborted") {
+        return {};
+      }
       const streamingContent = `${state.streamingContent ?? ""}${content}`;
       const entryId = streamEntryId(nodeId);
       const entry: ChatEntry = {
@@ -359,7 +366,7 @@ function chatRoleForNode(
   nodes: CodingTimelineNode[],
   nodeId?: string | null,
 ): ChatEntryRole {
-  const stage = nodes.find((node) => node.id === nodeId)?.stage;
+  const stage = nodeForEvent(nodes, nodeId)?.stage;
   switch (stage) {
     case "coding":
       return "coder";
@@ -378,6 +385,10 @@ function chatRoleForNode(
     case undefined:
       return "system";
   }
+}
+
+function nodeForEvent(nodes: CodingTimelineNode[], nodeId?: string | null) {
+  return nodes.find((node) => node.id === nodeId) ?? null;
 }
 
 function upsertById<T extends { id: string }>(items: T[], item: T): T[] {
@@ -400,12 +411,19 @@ function streamEntryId(nodeId?: string | null) {
   return `coding_stream_${nodeId ?? "global"}`;
 }
 
-function executionEventMessage(event: ExecutionEvent) {
+function executionEventMessage(event: ExecutionEvent, node?: CodingTimelineNode | null) {
   const command = event.kind === "command" ? event.command?.trim() : "";
   if (command) {
     return command;
   }
+  if (isProviderPromptEvent(event) && node?.title) {
+    return `${node.title} · Provider Prompt`;
+  }
   return event.detail ? `${event.title} · ${event.detail}` : event.title;
+}
+
+function isProviderPromptEvent(event: ExecutionEvent) {
+  return event.title === "Provider Prompt" && typeof event.output === "string";
 }
 
 function updateLegacyProviderConfig(

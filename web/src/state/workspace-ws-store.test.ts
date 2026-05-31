@@ -720,6 +720,68 @@ describe("workspace ws store", () => {
     ]);
   });
 
+  it("rebuilds provider prompt events from spec node prompt snapshots", () => {
+    const store = useWorkspaceStore.getState();
+
+    store.setSessionState({
+      session_id: "session_story_prompt",
+      workspace_type: "story",
+      stage: "running",
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "claude_code", reviewer: "codex" },
+      timeline_nodes: [
+        {
+          node_id: "timeline_node_author",
+          node_type: "author_run",
+          agent: "claude_code",
+          stage: "running",
+          round: null,
+          status: "active",
+          title: "Story 生成",
+          summary: null,
+          started_at: "2026-05-26T10:00:00Z",
+          completed_at: null,
+          duration_ms: null,
+          artifact_ref: null,
+          provider_config_snapshot: {
+            author: "claude_code",
+            reviewer: "codex",
+            review_rounds: 1,
+          },
+        },
+      ],
+      active_node_id: "timeline_node_author",
+      artifact_versions: [],
+      timeline_node_details: {
+        timeline_node_author: makeNodeDetail({
+          node_id: "timeline_node_author",
+          node_type: "author_run",
+          agent_role: "author",
+          provider: { name: "claude_code", model: "claude-opus-4" },
+          prompt: "[user]: 实现爬楼梯 Story Spec",
+        }),
+      },
+      active_run_id: "run-1",
+    });
+    store.rebuildChatEntries();
+
+    expect(useWorkspaceStore.getState().chatEntries).toEqual([
+      expect.objectContaining({
+        id: "timeline_node_author:provider-prompt",
+        type: "execution_event",
+        role: "author",
+        content: "Story 生成 · Provider Prompt",
+        metadata: expect.objectContaining({
+          title: "Provider Prompt",
+          output: "[user]: 实现爬楼梯 Story Spec",
+          provider: "claude_code",
+        }),
+      }),
+    ]);
+  });
+
   it("stores review verdict and pending decision by node", () => {
     const store = useWorkspaceStore.getState();
     store.setNodeVerdict("timeline_node_003", {

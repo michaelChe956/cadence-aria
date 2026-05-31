@@ -174,6 +174,9 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                     )
                     .await
                     {
+                            if matches!(error, CodingWorkspaceEngineError::Aborted) {
+                                return;
+                            }
                             let _ = runner_event_tx
                                 .send(CodingWsOutMessage::CodingProtocolError {
                                     code: "coding_start_failed".to_string(),

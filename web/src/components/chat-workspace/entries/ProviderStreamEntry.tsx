@@ -34,7 +34,7 @@ function providerLabel(provider: string) {
 }
 
 function MarkdownContent({ content }: { content: string }) {
-  const blocks = content.split(/\n{2,}/).filter((block) => block.trim().length > 0);
+  const blocks = markdownBlocks(content);
   if (blocks.length === 0) {
     return <div className="whitespace-pre-wrap text-sm text-[var(--aria-ink)]" />;
   }
@@ -65,13 +65,53 @@ function MarkdownContent({ content }: { content: string }) {
           );
         }
         return (
-          <div key={index} className="whitespace-pre-wrap text-sm text-[var(--aria-ink)]">
+          <div key={index} className="whitespace-pre-wrap break-words text-sm text-[var(--aria-ink)]">
             {block}
           </div>
         );
       })}
     </div>
   );
+}
+
+function markdownBlocks(content: string) {
+  const normalized = normalizeProviderContent(content);
+  const blocks: string[] = [];
+  let current: string[] = [];
+
+  function flushCurrent() {
+    const block = current.join("\n").trim();
+    if (block) {
+      blocks.push(block);
+    }
+    current = [];
+  }
+
+  for (const line of normalized.split("\n")) {
+    if (line.trim().length === 0) {
+      flushCurrent();
+      continue;
+    }
+    if (/^#{1,6}\s+/.test(line.trim())) {
+      flushCurrent();
+      blocks.push(line.trim());
+      continue;
+    }
+    current.push(line);
+  }
+  flushCurrent();
+
+  return blocks;
+}
+
+function normalizeProviderContent(content: string) {
+  const normalized = content.replace(/\r\n?/g, "\n").replace(/\\n/g, "\n");
+  return normalized
+    .split("\n")
+    .map((line) =>
+      line.length > 80 ? line.replace(/([。！？.!?])\s+(?=\S)/g, "$1\n") : line,
+    )
+    .join("\n");
 }
 
 export { MarkdownContent };

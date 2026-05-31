@@ -55,6 +55,8 @@ pub enum CodingWorkspaceEngineError {
     ProviderAdapter(#[from] ProviderAdapterError),
     #[error("coding_provider_stream_failed: {0}")]
     ProviderStream(String),
+    #[error("coding_aborted")]
+    Aborted,
     #[error("coding_rework_limit_exceeded: {0}")]
     ReworkLimitExceeded(String),
     #[error("coding_review_request_missing: {0}")]
@@ -306,7 +308,11 @@ impl CodingWorkspaceEngine {
                     .run_legacy_stream_to_completion(attempt, node_id, provider, legacy_input)
                     .await;
             }
-            Err(error) => return Err(error.into()),
+            Err(error) => {
+                return self
+                    .fail_provider_stream(attempt, node_id, error.details)
+                    .await;
+            }
         };
         let mut commands_open = true;
         let mut full_output = String::new();
@@ -319,8 +325,27 @@ impl CodingWorkspaceEngine {
                         commands_open = false;
                         continue;
                     };
-                    if !forward_runner_command_to_provider(command, &session.commands).await {
-                        commands_open = false;
+                    match command {
+                        CodingRunnerCommand::AbortAttempt => {
+                            let _ = session.commands.send(ProviderCommand::Abort).await;
+                            cancel.cancel();
+                            let _ = self
+                                .event_tx
+                                .send(CodingWsOutMessage::CodingExecutionEvent {
+                                    event: ws_event_from_provider_status(
+                                        node_id,
+                                        provider_name,
+                                        ProviderStatus::Aborted,
+                                    ),
+                                })
+                                .await;
+                            return Err(CodingWorkspaceEngineError::Aborted);
+                        }
+                        command => {
+                            if !forward_runner_command_to_provider(command, &session.commands).await {
+                                commands_open = false;
+                            }
+                        }
                     }
                 }
                 event = session.events.recv() => {
@@ -752,8 +777,27 @@ impl CodingWorkspaceEngine {
                         commands_open = false;
                         continue;
                     };
-                    if !forward_runner_command_to_provider(command, &session.commands).await {
-                        commands_open = false;
+                    match command {
+                        CodingRunnerCommand::AbortAttempt => {
+                            let _ = session.commands.send(ProviderCommand::Abort).await;
+                            cancel.cancel();
+                            let _ = self
+                                .event_tx
+                                .send(CodingWsOutMessage::CodingExecutionEvent {
+                                    event: ws_event_from_provider_status(
+                                        &node.id,
+                                        &tester_provider,
+                                        ProviderStatus::Aborted,
+                                    ),
+                                })
+                                .await;
+                            return Err(CodingWorkspaceEngineError::Aborted);
+                        }
+                        command => {
+                            if !forward_runner_command_to_provider(command, &session.commands).await {
+                                commands_open = false;
+                            }
+                        }
                     }
                 }
                 event = session.events.recv() => {
@@ -1023,6 +1067,12 @@ impl CodingWorkspaceEngine {
         let prompt = self
             .build_code_review_prompt(&attempt, worktree_path)
             .await?;
+        let _ = self
+            .event_tx
+            .send(CodingWsOutMessage::CodingExecutionEvent {
+                event: provider_prompt_event(&node.id, &reviewer, prompt.clone()),
+            })
+            .await;
         let input = AdapterInput {
             provider_type: provider_type_for_name(&reviewer),
             role: AdapterRole::Reviewer,
@@ -1258,6 +1308,12 @@ impl CodingWorkspaceEngine {
         let prompt = self
             .build_internal_pr_review_prompt(&attempt, &review_request, worktree_path)
             .await?;
+        let _ = self
+            .event_tx
+            .send(CodingWsOutMessage::CodingExecutionEvent {
+                event: provider_prompt_event(&node.id, &reviewer, prompt.clone()),
+            })
+            .await;
         let input = AdapterInput {
             provider_type: provider_type_for_name(&reviewer),
             role: AdapterRole::Reviewer,

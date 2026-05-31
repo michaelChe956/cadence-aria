@@ -631,6 +631,62 @@ async fn execute_coding_forwards_permission_responses_to_provider_session() {
 }
 
 #[tokio::test]
+async fn execute_coding_stops_forwarding_provider_events_after_abort_command() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            ..create_input()
+        })
+        .expect("create attempt");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    let provider = PermissionAwaitingProvider;
+    let (event_tx, mut event_rx) = mpsc::channel(16);
+    let (command_tx, mut command_rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), event_tx);
+    let context = CodingExecutionContext::default();
+
+    let execute =
+        engine.execute_coding_with_commands(&attempt, &provider, &context, &mut command_rx);
+    tokio::pin!(execute);
+    let mut abort_sent = false;
+
+    let error = loop {
+        tokio::select! {
+            result = &mut execute => break result.expect_err("abort should stop coding execution"),
+            event = event_rx.recv() => {
+                if !abort_sent
+                    && matches!(
+                        event,
+                        Some(CodingWsOutMessage::CodingPermissionRequest { ref id, .. })
+                            if id == "permission_0001"
+                    )
+                {
+                    abort_sent = true;
+                    command_tx
+                        .send(cadence_aria::product::coding_workspace_runner::CodingRunnerCommand::AbortAttempt)
+                        .await
+                        .expect("send abort");
+                }
+            }
+        }
+    };
+
+    assert_eq!(error.to_string(), "coding_aborted");
+    assert!(abort_sent);
+}
+
+#[tokio::test]
 async fn execute_code_review_forwards_provider_execution_events() {
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
@@ -906,6 +962,20 @@ async fn execute_code_review_persists_report_and_emits_review_events() {
         }
         other => panic!("expected code review node created, got {other:?}"),
     }
+    match rx.recv().await.expect("code review provider prompt") {
+        CodingWsOutMessage::CodingExecutionEvent { event } => {
+            assert_eq!(event.event_id, "coding_node_0001_prompt");
+            assert_eq!(event.node_id.as_deref(), Some("coding_node_0001"));
+            assert_eq!(event.title, "Provider Prompt");
+            assert!(
+                event
+                    .output
+                    .as_deref()
+                    .is_some_and(|output| output.contains("CodeReviewer"))
+            );
+        }
+        other => panic!("expected code review provider prompt, got {other:?}"),
+    }
     assert_eq!(
         rx.recv().await.expect("code review stream chunk"),
         CodingWsOutMessage::CodingStreamChunk {
@@ -1061,6 +1131,53 @@ async fn review_payload_parse_failure_blocks_instead_of_approves() {
         .get_attempt("project_0001", "issue_0001", &attempt.id)
         .expect("updated attempt");
     assert_eq!(updated.status, CodingAttemptStatus::Blocked);
+}
+
+#[tokio::test]
+async fn code_review_provider_start_failure_marks_attempt_blocked_and_node_failed() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    init_repo(&worktree);
+    fs::write(worktree.join("src.txt"), "hello\nreviewed\n").expect("modify file");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            base_branch: "HEAD".to_string(),
+            ..create_input()
+        })
+        .expect("create attempt");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let provider = StartFailingProvider;
+
+    let error = engine
+        .execute_code_review(&attempt, &provider)
+        .await
+        .expect_err("provider start should fail");
+
+    assert!(error.to_string().contains("provider failed to start"));
+    let updated = store
+        .get_attempt("project_0001", "issue_0001", &attempt.id)
+        .expect("updated attempt");
+    assert_eq!(updated.status, CodingAttemptStatus::Blocked);
+    assert_eq!(updated.stage, CodingExecutionStage::CodeReview);
+    let nodes = store
+        .get_timeline_nodes("project_0001", "issue_0001", &attempt.id)
+        .expect("timeline nodes");
+    let node = nodes.last().expect("code review node");
+    assert_eq!(node.stage, CodingExecutionStage::CodeReview);
+    assert_eq!(node.status, CodingTimelineNodeStatus::Failed);
+    assert_eq!(node.summary.as_deref(), Some("provider failed to start"));
+    assert!(node.completed_at.is_some());
 }
 
 #[tokio::test]
@@ -1966,6 +2083,20 @@ async fn execute_internal_pr_review_persists_review_and_waits_for_final_rework()
         }
         other => panic!("expected internal review node created, got {other:?}"),
     }
+    match rx.recv().await.expect("internal review provider prompt") {
+        CodingWsOutMessage::CodingExecutionEvent { event } => {
+            assert_eq!(event.event_id, "coding_node_0001_prompt");
+            assert_eq!(event.node_id.as_deref(), Some("coding_node_0001"));
+            assert_eq!(event.title, "Provider Prompt");
+            assert!(
+                event
+                    .output
+                    .as_deref()
+                    .is_some_and(|output| output.contains("InternalReviewer"))
+            );
+        }
+        other => panic!("expected internal review provider prompt, got {other:?}"),
+    }
     assert_eq!(
         rx.recv().await.expect("internal review stream chunk"),
         CodingWsOutMessage::CodingStreamChunk {
@@ -2668,6 +2799,21 @@ impl StreamingProviderAdapter for EventThenCompletedProvider {
             events: event_rx,
             commands: command_tx,
         })
+    }
+}
+
+struct StartFailingProvider;
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for StartFailingProvider {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        Err(ProviderAdapterError::command_missing(
+            "provider failed to start",
+        ))
     }
 }
 

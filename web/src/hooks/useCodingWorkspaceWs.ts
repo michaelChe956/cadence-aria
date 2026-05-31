@@ -288,6 +288,9 @@ function handleCodingWsMessage(message: CodingWsServerMessage) {
       );
       break;
     case "coding_stream_chunk":
+      if (store.status === "aborted") {
+        break;
+      }
       store.appendStreamChunk(
         message.content as string,
         (message.node_id as string | null | undefined) ?? null,
@@ -297,6 +300,9 @@ function handleCodingWsMessage(message: CodingWsServerMessage) {
       store.completeStream((message.node_id as string | null | undefined) ?? null);
       break;
     case "coding_execution_event":
+      if (store.status === "aborted") {
+        break;
+      }
       store.addExecutionEvent(
         (message as Extract<CodingWsOutMessage, { type: "coding_execution_event" }>).event,
       );

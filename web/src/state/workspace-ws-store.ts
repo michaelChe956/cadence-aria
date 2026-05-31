@@ -845,6 +845,33 @@ function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
     }
 
     const role: ChatEntryRole = node.node_type === "author_run" ? "author" : "reviewer";
+    const prompt = detail.prompt?.trim();
+    if (prompt && !detail.execution_events.some(isProviderPromptEvent)) {
+      const provider = providerNameForNode(node, detail);
+      entries.push({
+        id: chatEntryId(node.node_id, "provider-prompt"),
+        type: "execution_event",
+        role,
+        content: providerPromptContent(node.title),
+        timestamp: detail.started_at || node.started_at,
+        node_id: node.node_id,
+        metadata: {
+          event_id: `${node.node_id}_prompt`,
+          node_id: node.node_id,
+          agent: provider,
+          kind: "output",
+          status: "started",
+          title: "Provider Prompt",
+          detail: "发送给 Workspace provider 的完整提示词",
+          command: null,
+          cwd: null,
+          output: prompt,
+          exit_code: null,
+          ...(provider ? { provider } : {}),
+        },
+      });
+    }
+
     const streamContent = textFromSources([
       detail.streaming_content,
       detail.messages.map((message) => message.content).join("\n"),
@@ -869,7 +896,7 @@ function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
         id: chatEntryId(node.node_id, `execution-${event.event_id}`),
         type: "execution_event",
         role,
-        content: executionEventContent(event),
+        content: executionEventContent(event, node.title),
         timestamp,
         node_id: node.node_id,
         metadata: provider ? { ...event, provider } : { ...event },
@@ -1019,12 +1046,23 @@ function textFromSources(sources: Array<string | null | undefined>) {
   return "";
 }
 
-function executionEventContent(event: ExecutionEvent) {
+function executionEventContent(event: ExecutionEvent, nodeTitle?: string | null) {
   const command = event.kind === "command" ? event.command?.trim() : "";
   if (command) {
     return command;
   }
+  if (isProviderPromptEvent(event) && nodeTitle) {
+    return providerPromptContent(nodeTitle);
+  }
   return event.detail ? `${event.title} · ${event.detail}` : event.title;
+}
+
+function providerPromptContent(nodeTitle: string) {
+  return `${nodeTitle} · Provider Prompt`;
+}
+
+function isProviderPromptEvent(event: Pick<ExecutionEvent, "title" | "output">) {
+  return event.title === "Provider Prompt" && typeof event.output === "string";
 }
 
 function providerNameForNode(node: TimelineNode, detail: TimelineNodeDetail, event?: ExecutionEvent) {

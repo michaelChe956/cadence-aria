@@ -564,6 +564,44 @@ describe("useWorkspaceWs", () => {
     });
   });
 
+  it("ignores late provider stream chunks after an abort returns to prepare_context", () => {
+    const harness = renderWorkspaceHook();
+
+    act(() => {
+      harness.ws.receive({
+        type: "session_state",
+        session_id: "session_abort",
+        workspace_type: "story",
+        stage: "running",
+        superpowers_enabled: false,
+        openspec_enabled: false,
+        messages: [],
+        checkpoints: [],
+        artifact: null,
+        providers: { author: "claude_code", reviewer: "codex" },
+        timeline_nodes: [],
+        active_node_id: null,
+        artifact_versions: [],
+        timeline_node_details: {},
+        active_run_id: "run-1",
+      });
+      harness.ws.receive({ type: "stage_change", stage: "prepare_context" });
+      harness.ws.receive({
+        type: "stream_chunk",
+        role: "author",
+        content: "late output",
+        node_id: "timeline_node_aborted",
+      });
+    });
+
+    expect(
+      useWorkspaceStore
+        .getState()
+        .chatEntries.some((entry) => entry.type === "provider_stream"),
+    ).toBe(false);
+    expect(useWorkspaceStore.getState().streamingContent).toBe("");
+  });
+
   it("stores protocol errors and provider lock events from websocket messages", () => {
     const harness = renderWorkspaceHook();
 

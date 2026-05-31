@@ -278,6 +278,38 @@ describe("coding workspace store", () => {
     ]);
   });
 
+  it("labels provider prompt events with the current coding node title", () => {
+    const store = useCodingWorkspaceStore.getState();
+    store.addTimelineNode(codingNode({ id: "coding_node_0001", title: "代码编写" }));
+
+    store.addExecutionEvent({
+      event_id: "coding_node_0001_prompt",
+      node_id: "coding_node_0001",
+      agent: "codex",
+      kind: "output",
+      status: "started",
+      title: "Provider Prompt",
+      detail: "发送给 Coding provider 的完整提示词",
+      command: null,
+      cwd: null,
+      output: "Coding Workspace\n请实现 climb_stairs",
+      exit_code: null,
+    });
+
+    expect(useCodingWorkspaceStore.getState().chatEntries).toMatchObject([
+      {
+        id: "coding_node_0001_prompt",
+        type: "execution_event",
+        role: "coder",
+        content: "代码编写 · Provider Prompt",
+        node_id: "coding_node_0001",
+        metadata: {
+          output: "Coding Workspace\n请实现 climb_stairs",
+        },
+      },
+    ]);
+  });
+
   it("appends optimistic context notes and replaces them with backend chat entries", () => {
     const store = useCodingWorkspaceStore.getState();
 
