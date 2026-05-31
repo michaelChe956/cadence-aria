@@ -12,6 +12,14 @@
 
 **前置：** 所有 `cargo` 命令前先 `pnpm -C web build`（P1 引入的 build.rs 要求 `web/dist` 存在）。建议在 P1 完成后执行本分册。
 
+> **执行进度（subagent-driven 实测）：全部完成 ✅**
+> - Task 1 ✅ `52dfd58`（provider_probe 模块）。注：模块注册用 `src/web/mod.rs` 的简单 `pub mod` 格式；测试模块注册用 `tests/it_web.rs` 的 `#[path = "..."] mod` 显式格式。
+> - Task 2 ✅ `91f6a12`（探测纯函数单测 4 绿）。
+> - Task 3 + Task 4 ✅ `2ce0b18`（合并：探测接入 + 就绪行契约常量/回归测试）。
+> - Task 5 ✅ `6c5da90`（release profile）。**release 二进制实测 6.3M**——远小于设计预估「数十 MB」与体积 gate 90MB 阈值（strip+lto+opt-level=s 效果显著）。`web --check` 验证可执行。
+> - **已知 pre-existing flaky**：`claude_provider_run_streaming_cancel_closes_backpressured_bridge` 偶发 `Text file busy (os error 26)`（该测试写临时可执行脚本后立即 exec 的竞态，与本改动无关；单独重跑稳定通过，全量重跑全绿）。
+
+
 ---
 
 ## 文件结构
