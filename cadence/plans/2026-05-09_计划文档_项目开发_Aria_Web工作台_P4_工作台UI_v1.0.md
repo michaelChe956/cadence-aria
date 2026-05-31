@@ -123,4 +123,4 @@ Expected: tests and build PASS.
 
 - [x] P4 first screen remains workbench UI.
 - [x] P4 does not copy vibe-kanban visuals.
-- [x] P4 covers all read-only TUI information fields from design.
+- [x] P4 covers all runtime information fields from design.

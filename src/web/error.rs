@@ -37,17 +37,39 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = match self.code.as_str() {
             "invalid_task_request" => StatusCode::BAD_REQUEST,
-            "checkpoint_unsafe_dirty_worktree" => StatusCode::CONFLICT,
+            "checkpoint_unsafe_dirty_worktree" | "workspace_session_ambiguous" => {
+                StatusCode::CONFLICT
+            }
+            "coding_attempt_active" | "coding_attempt_worktree_not_ready" => StatusCode::CONFLICT,
             "artifact_not_found"
+            | "coding_attempt_not_found"
+            | "gate_not_found"
             | "interactive_task_missing"
             | "issue_not_found"
+            | "project_not_found"
+            | "repository_not_found"
             | "workspace_not_found"
-            | "task_workspace_not_found" => StatusCode::NOT_FOUND,
-            "invalid_file_path"
+            | "work_item_not_found"
+            | "task_workspace_not_found"
+            | "workspace_session_not_found" => StatusCode::NOT_FOUND,
+            "gate_ambiguous"
+            | "invalid_execution_record_id"
+            | "invalid_artifact_id"
+            | "invalid_file_path"
+            | "invalid_issue_id"
+            | "invalid_project_id"
+            | "invalid_workspace_message"
+            | "invalid_task_id"
+            | "issue_rollback_missing_worktree"
             | "issue_title_required"
+            | "project_required"
+            | "provider_input_path_escape"
+            | "repository_required"
             | "workspace_path_missing"
             | "workspace_path_not_directory"
-            | "workspace_path_not_git_repo" => StatusCode::BAD_REQUEST,
+            | "workspace_path_not_git_repo"
+            | "work_item_plan_not_confirmed"
+            | "repository_path_not_git_repo" => StatusCode::BAD_REQUEST,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, Json(self)).into_response()

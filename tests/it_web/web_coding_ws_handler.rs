@@ -1,0 +1,2308 @@
+use cadence_aria::cross_cutting::provider_adapter::ProviderAdapterError;
+use cadence_aria::cross_cutting::provider_registry::ProviderRegistry;
+use cadence_aria::cross_cutting::streaming_provider::{StreamChunk, StreamingProviderAdapter};
+use cadence_aria::product::app_paths::ProductAppPaths;
+use cadence_aria::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
+use cadence_aria::product::coding_models::{
+    CodingAgentRole, CodingAttemptStatus, CodingEntryType, CodingExecutionStage, CodingGateAction,
+    CodingGateActionType, CodingGateKind, CodingGateRequired, CodingProviderRole,
+    CodingRoleProviderConfigSnapshot, CodingTimelineNode, CodingTimelineNodeStatus, PushStatus,
+    TestingOverallStatus,
+};
+use cadence_aria::product::lifecycle_store::{
+    CreateWorkItemInput, CreateWorkspaceSessionInput, LifecycleStore,
+};
+use cadence_aria::product::models::WorkItemStatus;
+use cadence_aria::product::models::{
+    ProviderName, WorkItemPlanStatus, WorkspaceSessionStatus, WorkspaceType,
+};
+use cadence_aria::product::repository_store::{CreateRepositoryInput, RepositoryStore};
+use cadence_aria::protocol::contracts::{AdapterInput, AdapterRole};
+use cadence_aria::web::app::build_web_router;
+use cadence_aria::web::coding_ws_handler::{
+    CodingWsInMessage, CodingWsOutMessage, is_coding_ws_message_allowed,
+};
+use cadence_aria::web::runtime::WebRuntime;
+use cadence_aria::web::state::WebAppState;
+use cadence_aria::web::workspace_ws_types::{ArtifactVersion, ProviderConfigSnapshot};
+use futures_util::{SinkExt, StreamExt};
+use serde_json::json;
+use std::collections::HashSet;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::{Arc, Mutex};
+use tempfile::tempdir;
+use tokio::net::TcpListener;
+use tokio::sync::mpsc;
+use tokio::time::{Duration, timeout};
+use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::Message;
+use tokio_util::sync::CancellationToken;
+
+static WS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[test]
+fn coding_ws_out_messages_serialize_with_coding_message_type_names() {
+    let message = CodingWsOutMessage::CodingStageChange {
+        stage: CodingExecutionStage::Testing,
+    };
+
+    let value = serde_json::to_value(message).expect("serialize");
+
+    assert_eq!(
+        value,
+        json!({
+            "type": "coding_stage_change",
+            "stage": "testing"
+        })
+    );
+
+    let provider_update = CodingWsOutMessage::CodingProviderConfigUpdated {
+        role: CodingProviderRole::Coder,
+        provider: ProviderName::Codex,
+    };
+
+    assert_eq!(
+        serde_json::to_value(provider_update).expect("serialize provider update"),
+        json!({
+            "type": "coding_provider_config_updated",
+            "role": "coder",
+            "provider": "codex"
+        })
+    );
+}
+
+#[test]
+fn coding_ws_in_messages_deserialize_client_commands() {
+    let message: CodingWsInMessage = serde_json::from_value(json!({
+        "type": "gate_response",
+        "gate_id": "gate_0001",
+        "action_id": "continue_rework",
+        "extra_context": "已补充测试"
+    }))
+    .expect("deserialize");
+
+    assert_eq!(
+        message,
+        CodingWsInMessage::GateResponse {
+            gate_id: "gate_0001".to_string(),
+            action_id: "continue_rework".to_string(),
+            extra_context: Some("已补充测试".to_string())
+        }
+    );
+
+    let provider_select: CodingWsInMessage = serde_json::from_value(json!({
+        "type": "provider_select",
+        "role": "author",
+        "provider": "codex"
+    }))
+    .expect("deserialize provider select");
+
+    assert_eq!(
+        provider_select,
+        CodingWsInMessage::ProviderSelect {
+            role: "author".to_string(),
+            provider: ProviderName::Codex
+        }
+    );
+
+    let stage_gate_confirm: CodingWsInMessage = serde_json::from_value(json!({
+        "type": "stage_gate_confirm",
+        "stage": "testing"
+    }))
+    .expect("deserialize stage gate confirm");
+
+    assert_eq!(
+        stage_gate_confirm,
+        CodingWsInMessage::StageGateConfirm {
+            stage: CodingExecutionStage::Testing,
+        }
+    );
+}
+
+#[test]
+fn coding_ws_stage_validation_matches_attempt_status_and_stage() {
+    assert!(is_coding_ws_message_allowed(
+        &CodingAttemptStatus::Running,
+        &CodingExecutionStage::PrepareContext,
+        &CodingWsInMessage::StartCoding,
+    ));
+    assert!(is_coding_ws_message_allowed(
+        &CodingAttemptStatus::Running,
+        &CodingExecutionStage::Testing,
+        &CodingWsInMessage::ContextNote {
+            content: "补充背景".to_string()
+        },
+    ));
+    assert!(is_coding_ws_message_allowed(
+        &CodingAttemptStatus::WaitingForHuman,
+        &CodingExecutionStage::FinalConfirm,
+        &CodingWsInMessage::ContextNote {
+            content: "最终确认前补充背景".to_string()
+        },
+    ));
+    assert!(is_coding_ws_message_allowed(
+        &CodingAttemptStatus::Blocked,
+        &CodingExecutionStage::CodeReview,
+        &CodingWsInMessage::ContextNote {
+            content: "阻塞时补充背景".to_string()
+        },
+    ));
+    assert!(is_coding_ws_message_allowed(
+        &CodingAttemptStatus::WaitingForHuman,
+        &CodingExecutionStage::FinalConfirm,
+        &CodingWsInMessage::FinalConfirm,
+    ));
+    assert!(is_coding_ws_message_allowed(
+        &CodingAttemptStatus::Blocked,
+        &CodingExecutionStage::CodeReview,
+        &CodingWsInMessage::GateResponse {
+            gate_id: "gate_0001".to_string(),
+            action_id: "accept_risk".to_string(),
+            extra_context: None
+        },
+    ));
+    assert!(is_coding_ws_message_allowed(
+        &CodingAttemptStatus::Completed,
+        &CodingExecutionStage::FinalConfirm,
+        &CodingWsInMessage::CodingPing,
+    ));
+    assert!(!is_coding_ws_message_allowed(
+        &CodingAttemptStatus::Completed,
+        &CodingExecutionStage::FinalConfirm,
+        &CodingWsInMessage::AbortAttempt,
+    ));
+    assert!(is_coding_ws_message_allowed(
+        &CodingAttemptStatus::Created,
+        &CodingExecutionStage::PrepareContext,
+        &CodingWsInMessage::ProviderSelect {
+            role: "author".to_string(),
+            provider: ProviderName::Codex,
+        },
+    ));
+    assert!(is_coding_ws_message_allowed(
+        &CodingAttemptStatus::Running,
+        &CodingExecutionStage::Testing,
+        &CodingWsInMessage::ProviderSelect {
+            role: "author".to_string(),
+            provider: ProviderName::Codex,
+        },
+    ));
+    assert!(is_coding_ws_message_allowed(
+        &CodingAttemptStatus::Running,
+        &CodingExecutionStage::Testing,
+        &CodingWsInMessage::StageGateConfirm {
+            stage: CodingExecutionStage::Testing,
+        },
+    ));
+}
+
+#[test]
+fn coding_gate_required_out_message_preserves_action_contract() {
+    let gate = CodingGateRequired {
+        gate_id: "gate_0001".to_string(),
+        kind: CodingGateKind::Blocked,
+        title: "需要人工决策".to_string(),
+        description: "测试失败次数达到上限".to_string(),
+        stage: None,
+        role: None,
+        expires_at: None,
+        provider_snapshot: None,
+        available_actions: vec![CodingGateAction {
+            action_id: "accept_risk".to_string(),
+            label: "接受风险".to_string(),
+            action_type: CodingGateActionType::AcceptRisk,
+        }],
+    };
+    let message = CodingWsOutMessage::CodingGateRequired { gate };
+
+    let value = serde_json::to_value(message).expect("serialize");
+
+    assert_eq!(value["type"], "coding_gate_required");
+    assert_eq!(value["gate"]["kind"], "blocked");
+    assert_eq!(
+        value["gate"]["available_actions"][0]["action_type"],
+        "accept_risk"
+    );
+}
+
+#[tokio::test]
+async fn coding_ws_sends_session_state_on_connect_and_responds_to_ping() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let app = app_with_attempt(root.path());
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+
+    match recv_json(&mut ws).await {
+        CodingWsOutMessage::CodingSessionState {
+            attempt_id,
+            status,
+            stage,
+            branch_name,
+            role_provider_config_snapshot,
+            timeline_nodes,
+            testing_report,
+            ..
+        } => {
+            assert_eq!(attempt_id, "coding_attempt_0001");
+            assert_eq!(status, CodingAttemptStatus::Created);
+            assert_eq!(stage, CodingExecutionStage::PrepareContext);
+            assert_eq!(branch_name, "aria/work-items/work_item_0001/attempt-1");
+            assert_eq!(role_provider_config_snapshot.coder, ProviderName::Fake);
+            assert_eq!(
+                role_provider_config_snapshot.code_reviewer,
+                ProviderName::Fake
+            );
+            assert!(timeline_nodes.is_empty());
+            assert!(testing_report.is_none());
+        }
+        other => panic!("expected coding session state, got {other:?}"),
+    }
+
+    send_json(&mut ws, &CodingWsInMessage::CodingPing).await;
+    assert_eq!(recv_json(&mut ws).await, CodingWsOutMessage::CodingPong);
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+#[tokio::test]
+async fn coding_ws_session_state_includes_persisted_open_stage_gates() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let app = app_with_attempt(root.path());
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    store
+        .create_stage_gate(
+            "coding_attempt_0001",
+            CodingExecutionStage::Testing,
+            CodingProviderRole::Tester,
+            "2026-05-28T00:00:05Z".to_string(),
+            CodingRoleProviderConfigSnapshot::from(ProviderConfigSnapshot {
+                author: ProviderName::Codex,
+                reviewer: Some(ProviderName::Fake),
+                review_rounds: 1,
+            }),
+        )
+        .expect("create stage gate");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+
+    match recv_json(&mut ws).await {
+        CodingWsOutMessage::CodingSessionState { pending_gates, .. } => {
+            assert_eq!(pending_gates.len(), 1);
+            assert_eq!(pending_gates[0].gate_id, "coding_stage_gate_0001");
+            assert_eq!(pending_gates[0].kind, CodingGateKind::StageGate);
+            assert_eq!(pending_gates[0].stage, Some(CodingExecutionStage::Testing));
+            assert_eq!(pending_gates[0].role, Some(CodingProviderRole::Tester));
+            assert_eq!(
+                pending_gates[0].expires_at.as_deref(),
+                Some("2026-05-28T00:00:05Z")
+            );
+            assert!(pending_gates[0].title.contains("Testing"));
+            assert_eq!(
+                pending_gates[0].available_actions[0].action_type,
+                CodingGateActionType::ConfirmStage
+            );
+        }
+        other => panic!("expected coding session state, got {other:?}"),
+    }
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+#[tokio::test]
+async fn coding_ws_stage_gate_confirm_resolves_persisted_gate() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let app = app_with_attempt(root.path());
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let gate = store
+        .create_stage_gate(
+            "coding_attempt_0001",
+            CodingExecutionStage::Testing,
+            CodingProviderRole::Tester,
+            "2026-05-28T00:00:05Z".to_string(),
+            CodingRoleProviderConfigSnapshot::from(ProviderConfigSnapshot {
+                author: ProviderName::Codex,
+                reviewer: Some(ProviderName::Fake),
+                review_rounds: 1,
+            }),
+        )
+        .expect("create stage gate");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(
+        &mut ws,
+        &CodingWsInMessage::StageGateConfirm {
+            stage: CodingExecutionStage::Testing,
+        },
+    )
+    .await;
+
+    match recv_json(&mut ws).await {
+        CodingWsOutMessage::CodingSessionState { pending_gates, .. } => {
+            assert!(pending_gates.is_empty());
+        }
+        other => panic!("expected coding session state, got {other:?}"),
+    }
+    let gates = store
+        .list_stage_gates("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("list stage gates");
+    assert_eq!(gates.len(), 1);
+    assert_eq!(gates[0].gate_id, gate.gate_id);
+    assert_eq!(
+        gates[0].status,
+        cadence_aria::product::coding_models::CodingStageGateStatus::Confirmed
+    );
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+#[tokio::test]
+async fn coding_ws_prepare_context_sends_work_item_context_and_updates_provider_selection() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let app = app_with_confirmed_work_item_context(root.path());
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+
+    match recv_json(&mut ws).await {
+        CodingWsOutMessage::CodingSessionState {
+            work_item_markdown,
+            verification_commands,
+            provider_config_snapshot,
+            ..
+        } => {
+            let markdown = work_item_markdown.expect("work item markdown");
+            assert!(markdown.contains("实现爬楼梯问题"));
+            assert!(markdown.contains("climb_stairs"));
+            assert_eq!(
+                verification_commands,
+                vec!["uv run python -m unittest discover -s tests -v"]
+            );
+            assert_eq!(provider_config_snapshot.author, ProviderName::Fake);
+        }
+        other => panic!("expected coding session state, got {other:?}"),
+    }
+
+    send_json(
+        &mut ws,
+        &CodingWsInMessage::ProviderSelect {
+            role: "author".to_string(),
+            provider: ProviderName::Codex,
+        },
+    )
+    .await;
+
+    assert_eq!(
+        recv_json(&mut ws).await,
+        CodingWsOutMessage::CodingProviderConfigUpdated {
+            role: CodingProviderRole::Coder,
+            provider: ProviderName::Codex,
+        }
+    );
+    match recv_json(&mut ws).await {
+        CodingWsOutMessage::CodingSessionState {
+            provider_config_snapshot,
+            work_item_markdown,
+            ..
+        } => {
+            assert_eq!(provider_config_snapshot.author, ProviderName::Codex);
+            assert_eq!(provider_config_snapshot.reviewer, Some(ProviderName::Fake));
+            assert!(
+                work_item_markdown
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("实现爬楼梯问题")
+            );
+        }
+        other => panic!("expected updated coding session state, got {other:?}"),
+    }
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+#[tokio::test]
+async fn coding_ws_context_note_persists_and_echoes_chat_entry() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let app = app_with_attempt(root.path());
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(
+        &mut ws,
+        &CodingWsInMessage::ContextNote {
+            content: "请优先使用 unittest".to_string(),
+        },
+    )
+    .await;
+
+    match recv_json(&mut ws).await {
+        CodingWsOutMessage::CodingChatEntryCreated { entry } => {
+            assert_eq!(entry.id, "coding_chat_entry_0001");
+            assert_eq!(entry.attempt_id, "coding_attempt_0001");
+            assert_eq!(entry.node_id, None);
+            assert_eq!(entry.role, CodingAgentRole::Author);
+            assert_eq!(entry.entry_type, CodingEntryType::UserMessage);
+            assert_eq!(entry.content.as_deref(), Some("请优先使用 unittest"));
+            assert_eq!(
+                entry.metadata.as_ref().and_then(|value| {
+                    value
+                        .get("context_note_id")
+                        .and_then(|context_note_id| context_note_id.as_str())
+                }),
+                Some("coding_context_note_0001")
+            );
+        }
+        other => panic!("expected coding chat entry echo, got {other:?}"),
+    }
+
+    let notes = store
+        .list_context_notes("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("list context notes");
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0].id, "coding_context_note_0001");
+    assert_eq!(notes[0].content, "请优先使用 unittest");
+    assert!(notes[0].consumed_by_rework_round.is_none());
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+#[tokio::test]
+async fn coding_ws_start_coding_pushes_engine_stage_and_timeline_events() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let app = app_with_attempt(root.path());
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(&mut ws, &CodingWsInMessage::StartCoding).await;
+
+    assert_eq!(
+        recv_json(&mut ws).await,
+        CodingWsOutMessage::CodingStageChange {
+            stage: CodingExecutionStage::WorktreePrepare
+        }
+    );
+    match recv_json(&mut ws).await {
+        CodingWsOutMessage::CodingTimelineNodeCreated { node } => {
+            assert_eq!(node.id, "coding_node_0001");
+            assert_eq!(node.stage, CodingExecutionStage::WorktreePrepare);
+            assert_eq!(node.status, CodingTimelineNodeStatus::Running);
+        }
+        other => panic!("expected coding timeline node event, got {other:?}"),
+    }
+    let updated = store
+        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("updated attempt");
+    assert_eq!(updated.status, CodingAttemptStatus::Running);
+    assert_eq!(updated.stage, CodingExecutionStage::WorktreePrepare);
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+#[tokio::test]
+async fn coding_ws_start_coding_waits_at_stage_gate_and_confirm_resumes_runner() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let app = app_with_full_chain_attempt(root.path());
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(&mut ws, &CodingWsInMessage::StartCoding).await;
+
+    let gate = wait_for_stage_gate(&mut ws, CodingExecutionStage::Coding).await;
+    assert_eq!(gate.kind, CodingGateKind::StageGate);
+    assert_eq!(gate.role, Some(CodingProviderRole::Coder));
+    assert_eq!(
+        gate.provider_snapshot
+            .as_ref()
+            .map(|snapshot| &snapshot.coder),
+        Some(&ProviderName::Fake)
+    );
+    assert!(
+        store
+            .list_open_stage_gates("project_0001", "issue_0001", "coding_attempt_0001")
+            .expect("open stage gates")
+            .iter()
+            .any(|gate| gate.stage == CodingExecutionStage::Coding)
+    );
+
+    send_json(
+        &mut ws,
+        &CodingWsInMessage::StageGateConfirm {
+            stage: CodingExecutionStage::Coding,
+        },
+    )
+    .await;
+
+    let node = wait_for_timeline_node(&mut ws, CodingExecutionStage::Coding).await;
+    assert_eq!(node.status, CodingTimelineNodeStatus::Running);
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+#[tokio::test]
+async fn coding_ws_provider_select_during_stage_gate_updates_roles_and_refreshes_gate() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let app = app_with_full_chain_attempt(root.path());
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(&mut ws, &CodingWsInMessage::StartCoding).await;
+
+    let gate = wait_for_stage_gate(&mut ws, CodingExecutionStage::Coding).await;
+    let original_expires_at = gate.expires_at.expect("gate expires_at");
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    send_json(
+        &mut ws,
+        &CodingWsInMessage::ProviderSelect {
+            role: "tester".to_string(),
+            provider: ProviderName::Codex,
+        },
+    )
+    .await;
+
+    assert_eq!(
+        wait_for_provider_config_update(&mut ws).await,
+        CodingWsOutMessage::CodingProviderConfigUpdated {
+            role: CodingProviderRole::Tester,
+            provider: ProviderName::Codex,
+        }
+    );
+    let refreshed_gate = wait_for_stage_gate(&mut ws, CodingExecutionStage::Coding).await;
+    assert_ne!(
+        refreshed_gate.expires_at.as_deref(),
+        Some(original_expires_at.as_str())
+    );
+    assert_eq!(
+        refreshed_gate
+            .provider_snapshot
+            .as_ref()
+            .map(|snapshot| &snapshot.tester),
+        Some(&ProviderName::Codex)
+    );
+    assert_eq!(
+        store
+            .get_role_provider_config_snapshot("project_0001", "issue_0001", "coding_attempt_0001")
+            .expect("role provider snapshot")
+            .tester,
+        ProviderName::Codex
+    );
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+#[tokio::test]
+async fn coding_ws_stage_gate_timeout_auto_starts_stage() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let app = app_with_full_chain_attempt(root.path());
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(&mut ws, &CodingWsInMessage::StartCoding).await;
+
+    let gate = wait_for_stage_gate(&mut ws, CodingExecutionStage::Coding).await;
+    let node = wait_for_timeline_node(&mut ws, CodingExecutionStage::Coding).await;
+    assert_eq!(node.status, CodingTimelineNodeStatus::Running);
+    let gates = store
+        .list_stage_gates("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("list stage gates");
+    let expired = gates
+        .iter()
+        .find(|candidate| candidate.gate_id == gate.gate_id)
+        .expect("expired gate");
+    assert_eq!(
+        expired.status,
+        cadence_aria::product::coding_models::CodingStageGateStatus::Expired
+    );
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+#[tokio::test]
+async fn coding_ws_provider_select_rejects_current_running_stage_role_without_gate() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let app = app_with_running_testing_attempt(root.path());
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(
+        &mut ws,
+        &CodingWsInMessage::ProviderSelect {
+            role: "tester".to_string(),
+            provider: ProviderName::Codex,
+        },
+    )
+    .await;
+
+    match recv_json(&mut ws).await {
+        CodingWsOutMessage::CodingProtocolError { code, .. } => {
+            assert_eq!(code, "coding_provider_role_locked");
+        }
+        other => panic!("expected provider lock error, got {other:?}"),
+    }
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+#[tokio::test]
+async fn coding_ws_abort_during_stage_gate_cancels_gate_before_snapshot() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let app = app_with_full_chain_attempt(root.path());
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(&mut ws, &CodingWsInMessage::StartCoding).await;
+    let gate = wait_for_stage_gate(&mut ws, CodingExecutionStage::Coding).await;
+    match recv_json(&mut ws).await {
+        CodingWsOutMessage::CodingSessionState { pending_gates, .. } => {
+            assert_eq!(pending_gates.len(), 1);
+        }
+        other => panic!("expected stage gate session state, got {other:?}"),
+    }
+
+    send_json(&mut ws, &CodingWsInMessage::AbortAttempt).await;
+
+    match recv_json(&mut ws).await {
+        CodingWsOutMessage::CodingSessionState {
+            status,
+            pending_gates,
+            ..
+        } => {
+            assert_eq!(status, CodingAttemptStatus::Aborted);
+            assert!(pending_gates.is_empty());
+        }
+        other => panic!("expected aborted session state, got {other:?}"),
+    }
+    let gates = store
+        .list_stage_gates("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("list gates");
+    let cancelled = gates
+        .iter()
+        .find(|candidate| candidate.gate_id == gate.gate_id)
+        .expect("cancelled gate");
+    assert_eq!(
+        cancelled.status,
+        cadence_aria::product::coding_models::CodingStageGateStatus::Cancelled
+    );
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+#[tokio::test]
+async fn coding_ws_start_coding_keeps_socket_responsive_while_runner_is_active() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let app = app_with_hanging_coding_attempt(root.path());
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(&mut ws, &CodingWsInMessage::StartCoding).await;
+    let _gate = wait_for_stage_gate(&mut ws, CodingExecutionStage::Coding).await;
+    send_json(
+        &mut ws,
+        &CodingWsInMessage::StageGateConfirm {
+            stage: CodingExecutionStage::Coding,
+        },
+    )
+    .await;
+
+    let mut saw_hanging_chunk = false;
+    for _ in 0..8 {
+        match recv_json(&mut ws).await {
+            CodingWsOutMessage::CodingStreamChunk { content, .. }
+                if content == "hanging provider started" =>
+            {
+                saw_hanging_chunk = true;
+                break;
+            }
+            CodingWsOutMessage::CodingProtocolError { code, message } => {
+                panic!("unexpected coding protocol error {code}: {message}");
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_hanging_chunk, "expected hanging provider to start");
+
+    send_json(&mut ws, &CodingWsInMessage::CodingPing).await;
+    assert_eq!(recv_json(&mut ws).await, CodingWsOutMessage::CodingPong);
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+#[tokio::test]
+async fn coding_ws_start_coding_drives_full_happy_path_to_final_confirm() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let app = app_with_full_chain_attempt(root.path());
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(&mut ws, &CodingWsInMessage::StartCoding).await;
+
+    let mut stages = Vec::new();
+    let mut final_snapshot_seen = false;
+    let mut final_chat_entries = Vec::new();
+    let mut confirmed_gates = HashSet::new();
+    for _ in 0..80 {
+        let message = recv_json(&mut ws).await;
+        match message {
+            CodingWsOutMessage::CodingTimelineNodeCreated { node } => {
+                stages.push(node.stage);
+            }
+            CodingWsOutMessage::CodingGateRequired { gate } => {
+                if let Some(stage) = gate.stage.clone()
+                    && confirmed_gates.insert(gate.gate_id)
+                {
+                    send_json(&mut ws, &CodingWsInMessage::StageGateConfirm { stage }).await;
+                }
+            }
+            CodingWsOutMessage::CodingSessionState {
+                status,
+                stage,
+                chat_entries,
+                ..
+            } if status == CodingAttemptStatus::Completed
+                && stage == CodingExecutionStage::FinalConfirm =>
+            {
+                final_chat_entries = chat_entries;
+                final_snapshot_seen = true;
+                break;
+            }
+            CodingWsOutMessage::CodingProtocolError { code, message } => {
+                panic!("unexpected coding protocol error {code}: {message}");
+            }
+            _ => {}
+        }
+    }
+
+    assert!(
+        final_snapshot_seen,
+        "expected final_confirm snapshot over websocket"
+    );
+    for expected in [
+        CodingExecutionStage::WorktreePrepare,
+        CodingExecutionStage::Coding,
+        CodingExecutionStage::Testing,
+        CodingExecutionStage::Rework,
+        CodingExecutionStage::CodeReview,
+        CodingExecutionStage::ReviewRequest,
+        CodingExecutionStage::InternalPrReview,
+        CodingExecutionStage::FinalConfirm,
+    ] {
+        assert!(
+            stages.contains(&expected),
+            "missing timeline stage {expected:?}; got {stages:?}"
+        );
+    }
+    assert_eq!(
+        stages
+            .iter()
+            .filter(|stage| **stage == CodingExecutionStage::Rework)
+            .count(),
+        3,
+        "expected rework after testing, code review, and internal review; got {stages:?}"
+    );
+    assert!(
+        final_chat_entries
+            .iter()
+            .any(|entry| matches!(entry.entry_type, CodingEntryType::AnalystVerdict { .. })),
+        "expected persisted analyst verdict chat entry"
+    );
+    assert!(
+        final_chat_entries.iter().any(|entry| {
+            entry
+                .metadata
+                .as_ref()
+                .and_then(|value| value.get("source"))
+                .and_then(|value| value.as_str())
+                == Some("code_review")
+        }),
+        "expected persisted code review chat entry"
+    );
+    assert!(
+        final_chat_entries.iter().any(|entry| {
+            entry
+                .metadata
+                .as_ref()
+                .and_then(|value| value.get("source"))
+                .and_then(|value| value.as_str())
+                == Some("internal_pr_review")
+        }),
+        "expected persisted internal PR review chat entry"
+    );
+
+    let attempt = store
+        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("updated attempt");
+    assert_eq!(attempt.status, CodingAttemptStatus::Completed);
+    assert_eq!(attempt.stage, CodingExecutionStage::FinalConfirm);
+    let worktree = attempt.worktree_path.as_ref().expect("worktree path");
+    assert_ne!(worktree, &root.path().join("repo"));
+    assert!(worktree.join("src/lib.rs").is_file());
+
+    let report = store
+        .list_testing_reports("project_0001", "issue_0001", &attempt.id)
+        .expect("testing reports")
+        .pop()
+        .expect("testing report");
+    assert_eq!(report.overall_status, TestingOverallStatus::Passed);
+    assert!(report.backend_verified);
+
+    let review_request = store
+        .list_review_requests("project_0001", "issue_0001", &attempt.id)
+        .expect("review requests")
+        .pop()
+        .expect("review request");
+    assert_eq!(review_request.push_status, PushStatus::Pushed);
+    assert!(attempt.head_commit.is_some());
+
+    assert_eq!(
+        store
+            .list_internal_pr_reviews("project_0001", "issue_0001", &attempt.id)
+            .expect("internal reviews")
+            .len(),
+        1
+    );
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+#[tokio::test]
+async fn internal_review_rework_creates_new_review_request_commit() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let app = app_with_internal_review_rework_attempt(root.path());
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(&mut ws, &CodingWsInMessage::StartCoding).await;
+
+    let mut confirmed_gates = HashSet::new();
+    let mut completed = false;
+    for _ in 0..140 {
+        match recv_json(&mut ws).await {
+            CodingWsOutMessage::CodingGateRequired { gate } => {
+                if let Some(stage) = gate.stage.clone()
+                    && confirmed_gates.insert(gate.gate_id)
+                {
+                    send_json(&mut ws, &CodingWsInMessage::StageGateConfirm { stage }).await;
+                }
+            }
+            CodingWsOutMessage::CodingSessionState { status, stage, .. }
+                if status == CodingAttemptStatus::Completed
+                    && stage == CodingExecutionStage::FinalConfirm =>
+            {
+                completed = true;
+                break;
+            }
+            CodingWsOutMessage::CodingProtocolError { code, message } => {
+                panic!("unexpected coding protocol error {code}: {message}");
+            }
+            _ => {}
+        }
+    }
+
+    assert!(
+        completed,
+        "expected completed attempt after internal review rework"
+    );
+    let requests = store
+        .list_review_requests("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("review requests");
+    assert_eq!(requests.len(), 2);
+    assert_ne!(requests[0].commit_sha, requests[1].commit_sha);
+    assert_eq!(
+        store
+            .list_internal_pr_reviews("project_0001", "issue_0001", "coding_attempt_0001")
+            .expect("internal reviews")
+            .len(),
+        2
+    );
+    let attempt = store
+        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("attempt");
+    assert_eq!(
+        attempt.review_request_id.as_deref(),
+        Some("review_request_0002")
+    );
+    let worktree = attempt.worktree_path.expect("worktree path");
+    assert!(worktree.join("src/internal_fix.rs").is_file());
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+#[tokio::test]
+async fn code_review_findings_are_injected_into_next_coding_round() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let provider = Arc::new(CodeReviewReworkProvider::default());
+    let app = app_with_code_review_rework_attempt(root.path(), provider.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(&mut ws, &CodingWsInMessage::StartCoding).await;
+
+    let mut confirmed_gates = HashSet::new();
+    let mut completed = false;
+    for _ in 0..140 {
+        match recv_json(&mut ws).await {
+            CodingWsOutMessage::CodingGateRequired { gate } => {
+                if let Some(stage) = gate.stage.clone()
+                    && confirmed_gates.insert(gate.gate_id)
+                {
+                    send_json(&mut ws, &CodingWsInMessage::StageGateConfirm { stage }).await;
+                }
+            }
+            CodingWsOutMessage::CodingSessionState { status, stage, .. }
+                if status == CodingAttemptStatus::Completed
+                    && stage == CodingExecutionStage::FinalConfirm =>
+            {
+                completed = true;
+                break;
+            }
+            CodingWsOutMessage::CodingProtocolError { code, message } => {
+                panic!("unexpected coding protocol error {code}: {message}");
+            }
+            _ => {}
+        }
+    }
+
+    assert!(
+        completed,
+        "expected completed attempt after code review rework"
+    );
+    let prompts = provider.coding_prompts();
+    assert_eq!(prompts.len(), 2);
+    assert!(prompts[1].contains("上一轮返修要求"));
+    assert!(prompts[1].contains("移除 __pycache__ 和 .pyc 文件"));
+    let attempt = store
+        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("attempt");
+    let worktree = attempt.worktree_path.expect("worktree path");
+    let latest_request = store
+        .list_review_requests("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("review requests")
+        .pop()
+        .expect("review request");
+    let committed = git_stdout(
+        &worktree,
+        &[
+            "show",
+            "--name-only",
+            "--format=",
+            &latest_request.commit_sha,
+        ],
+    );
+    assert!(!committed.contains("__pycache__"));
+    assert!(!committed.contains(".pyc"));
+    assert!(!committed.contains(".aria/coding-artifacts"));
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+#[tokio::test]
+async fn coding_ws_final_confirm_completes_attempt_and_sends_snapshot() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let app = app_with_final_confirm_attempt(root.path());
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+
+    match recv_json(&mut ws).await {
+        CodingWsOutMessage::CodingSessionState { status, stage, .. } => {
+            assert_eq!(status, CodingAttemptStatus::WaitingForHuman);
+            assert_eq!(stage, CodingExecutionStage::FinalConfirm);
+        }
+        other => panic!("expected coding session state, got {other:?}"),
+    }
+
+    send_json(&mut ws, &CodingWsInMessage::FinalConfirm).await;
+
+    match recv_json(&mut ws).await {
+        CodingWsOutMessage::CodingTimelineNodeUpdated {
+            node_id,
+            status,
+            summary,
+            completed_at,
+        } => {
+            assert_eq!(node_id, "coding_node_0001");
+            assert_eq!(status, CodingTimelineNodeStatus::Completed);
+            assert_eq!(summary.as_deref(), Some("用户已确认完成"));
+            assert!(completed_at.is_some());
+        }
+        other => panic!("expected final confirm timeline update, got {other:?}"),
+    }
+    match recv_json(&mut ws).await {
+        CodingWsOutMessage::CodingSessionState {
+            status,
+            stage,
+            active_node_id,
+            ..
+        } => {
+            assert_eq!(status, CodingAttemptStatus::Completed);
+            assert_eq!(stage, CodingExecutionStage::FinalConfirm);
+            assert!(active_node_id.is_none());
+        }
+        other => panic!("expected completed coding session state, got {other:?}"),
+    }
+    let updated = store
+        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("updated attempt");
+    assert_eq!(updated.status, CodingAttemptStatus::Completed);
+    assert!(updated.completed_at.is_some());
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+#[tokio::test]
+async fn coding_ws_abort_attempt_closes_active_node_and_sends_snapshot() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let app = app_with_running_testing_attempt(root.path());
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+
+    match recv_json(&mut ws).await {
+        CodingWsOutMessage::CodingSessionState {
+            status,
+            stage,
+            active_node_id,
+            ..
+        } => {
+            assert_eq!(status, CodingAttemptStatus::Running);
+            assert_eq!(stage, CodingExecutionStage::Testing);
+            assert_eq!(active_node_id.as_deref(), Some("coding_node_0001"));
+        }
+        other => panic!("expected coding session state, got {other:?}"),
+    }
+
+    send_json(&mut ws, &CodingWsInMessage::AbortAttempt).await;
+
+    match recv_json(&mut ws).await {
+        CodingWsOutMessage::CodingTimelineNodeUpdated {
+            node_id,
+            status,
+            summary,
+            completed_at,
+        } => {
+            assert_eq!(node_id, "coding_node_0001");
+            assert_eq!(status, CodingTimelineNodeStatus::Failed);
+            assert_eq!(summary.as_deref(), Some("用户已中止"));
+            assert!(completed_at.is_some());
+        }
+        other => panic!("expected abort timeline update, got {other:?}"),
+    }
+    match recv_json(&mut ws).await {
+        CodingWsOutMessage::CodingSessionState {
+            status,
+            stage,
+            active_node_id,
+            ..
+        } => {
+            assert_eq!(status, CodingAttemptStatus::Aborted);
+            assert_eq!(stage, CodingExecutionStage::Testing);
+            assert!(active_node_id.is_none());
+        }
+        other => panic!("expected aborted coding session state, got {other:?}"),
+    }
+    let updated = store
+        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("updated attempt");
+    assert_eq!(updated.status, CodingAttemptStatus::Aborted);
+    assert!(updated.completed_at.is_some());
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+fn app_with_attempt(root_path: &std::path::Path) -> axum::Router {
+    let app_paths = ProductAppPaths::new(root_path.join(".aria"));
+    let repo = root_path.join("repo");
+    init_simple_git_repo(&repo);
+    let repository = RepositoryStore::new(app_paths.clone())
+        .create(CreateRepositoryInput {
+            project_id: "project_0001".to_string(),
+            name: "repo".to_string(),
+            path: repo,
+            default_policy_preset: Some("manual-write".to_string()),
+            default_provider_mode: Some("fake".to_string()),
+        })
+        .expect("create repository");
+    LifecycleStore::new(app_paths.clone())
+        .create_work_item(CreateWorkItemInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: repository.id,
+            story_spec_ids: Vec::new(),
+            design_spec_ids: Vec::new(),
+            title: "Coding work item".to_string(),
+        })
+        .expect("create work item");
+    let store = CodingAttemptStore::new(app_paths);
+    store
+        .create_attempt(CreateCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            work_item_id: "work_item_0001".to_string(),
+            base_branch: "main".to_string(),
+            branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Fake,
+                reviewer: Some(ProviderName::Fake),
+                review_rounds: 1,
+            },
+            max_auto_rework: 2,
+        })
+        .expect("create attempt");
+    build_web_router(WebAppState::new(
+        root_path.to_path_buf(),
+        WebRuntime::new_fake(root_path.to_path_buf()),
+    ))
+}
+
+fn app_with_confirmed_work_item_context(root_path: &std::path::Path) -> axum::Router {
+    let app_paths = ProductAppPaths::new(root_path.join(".aria"));
+    let repo = root_path.join("repo");
+    init_simple_git_repo(&repo);
+    let repository = RepositoryStore::new(app_paths.clone())
+        .create(CreateRepositoryInput {
+            project_id: "project_0001".to_string(),
+            name: "repo".to_string(),
+            path: repo,
+            default_policy_preset: Some("manual-write".to_string()),
+            default_provider_mode: Some("fake".to_string()),
+        })
+        .expect("create repository");
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    lifecycle
+        .create_work_item(CreateWorkItemInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: repository.id,
+            story_spec_ids: Vec::new(),
+            design_spec_ids: Vec::new(),
+            title: "实现爬楼梯问题".to_string(),
+        })
+        .expect("create work item");
+    let session = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "work_item_0001".to_string(),
+            workspace_type: WorkspaceType::WorkItem,
+            author_provider: ProviderName::Fake,
+            reviewer_provider: ProviderName::Fake,
+            review_rounds: 1,
+            superpowers_enabled: true,
+            openspec_enabled: true,
+        })
+        .expect("create workspace session");
+    lifecycle
+        .append_artifact_version(
+            &session.id,
+            ArtifactVersion {
+                version: 1,
+                markdown: CLIMB_STAIRS_WORK_ITEM.to_string(),
+                generated_by: ProviderName::Fake,
+                reviewed_by: Some(ProviderName::Fake),
+                review_verdict: None,
+                confirmed_by: Some("user".to_string()),
+                created_at: "2026-05-28T00:00:00Z".to_string(),
+                source_node_id: "node_0001".to_string(),
+            },
+        )
+        .expect("append artifact version");
+    lifecycle
+        .update_workspace_session_status(&session.id, WorkspaceSessionStatus::Confirmed)
+        .expect("confirm workspace session");
+    CodingAttemptStore::new(app_paths)
+        .create_attempt(CreateCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            work_item_id: "work_item_0001".to_string(),
+            base_branch: "main".to_string(),
+            branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Fake,
+                reviewer: Some(ProviderName::Fake),
+                review_rounds: 1,
+            },
+            max_auto_rework: 2,
+        })
+        .expect("create attempt");
+    build_web_router(WebAppState::new(
+        root_path.to_path_buf(),
+        WebRuntime::new_fake(root_path.to_path_buf()),
+    ))
+}
+
+fn app_with_full_chain_attempt(root_path: &Path) -> axum::Router {
+    let repo = root_path.join("repo");
+    let remote = root_path.join("remote.git");
+    init_cargo_repo(&repo);
+    run_git(root_path, &["init", "--bare", remote.to_str().unwrap()]);
+    run_git(
+        &repo,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+
+    let app_paths = ProductAppPaths::new(root_path.join(".aria"));
+    let repository = RepositoryStore::new(app_paths.clone())
+        .create(CreateRepositoryInput {
+            project_id: "project_0001".to_string(),
+            name: "repo".to_string(),
+            path: repo,
+            default_policy_preset: Some("manual-write".to_string()),
+            default_provider_mode: Some("fake".to_string()),
+        })
+        .expect("create repository");
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    lifecycle
+        .create_work_item(CreateWorkItemInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: repository.id,
+            story_spec_ids: Vec::new(),
+            design_spec_ids: Vec::new(),
+            title: "实现爬楼梯".to_string(),
+        })
+        .expect("create work item");
+    lifecycle
+        .update_work_item_plan_status(
+            "project_0001",
+            "issue_0001",
+            "work_item_0001",
+            WorkItemPlanStatus::Confirmed,
+        )
+        .expect("confirm work item");
+    CodingAttemptStore::new(app_paths)
+        .create_attempt(CreateCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            work_item_id: "work_item_0001".to_string(),
+            base_branch: "HEAD".to_string(),
+            branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Fake,
+                reviewer: Some(ProviderName::Fake),
+                review_rounds: 1,
+            },
+            max_auto_rework: 2,
+        })
+        .expect("create attempt");
+
+    let mut registry = ProviderRegistry::new();
+    registry.register(ProviderName::Fake, Arc::new(FullChainStreamingProvider));
+    build_web_router(WebAppState::with_provider_registry(
+        root_path.to_path_buf(),
+        WebRuntime::new_fake(root_path.to_path_buf()),
+        registry,
+    ))
+}
+
+fn app_with_internal_review_rework_attempt(root_path: &Path) -> axum::Router {
+    let repo = root_path.join("repo");
+    let remote = root_path.join("remote.git");
+    init_cargo_repo(&repo);
+    run_git(root_path, &["init", "--bare", remote.to_str().unwrap()]);
+    run_git(
+        &repo,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+
+    let app_paths = ProductAppPaths::new(root_path.join(".aria"));
+    let repository = RepositoryStore::new(app_paths.clone())
+        .create(CreateRepositoryInput {
+            project_id: "project_0001".to_string(),
+            name: "repo".to_string(),
+            path: repo,
+            default_policy_preset: Some("manual-write".to_string()),
+            default_provider_mode: Some("fake".to_string()),
+        })
+        .expect("create repository");
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    lifecycle
+        .create_work_item(CreateWorkItemInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: repository.id,
+            story_spec_ids: Vec::new(),
+            design_spec_ids: Vec::new(),
+            title: "实现爬楼梯".to_string(),
+        })
+        .expect("create work item");
+    lifecycle
+        .update_work_item_plan_status(
+            "project_0001",
+            "issue_0001",
+            "work_item_0001",
+            WorkItemPlanStatus::Confirmed,
+        )
+        .expect("confirm work item");
+    CodingAttemptStore::new(app_paths)
+        .create_attempt(CreateCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            work_item_id: "work_item_0001".to_string(),
+            base_branch: "HEAD".to_string(),
+            branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Fake,
+                reviewer: Some(ProviderName::Fake),
+                review_rounds: 1,
+            },
+            max_auto_rework: 2,
+        })
+        .expect("create attempt");
+
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Fake,
+        Arc::new(InternalReviewReworkProvider::default()),
+    );
+    build_web_router(WebAppState::with_provider_registry(
+        root_path.to_path_buf(),
+        WebRuntime::new_fake(root_path.to_path_buf()),
+        registry,
+    ))
+}
+
+fn app_with_code_review_rework_attempt(
+    root_path: &Path,
+    provider: Arc<CodeReviewReworkProvider>,
+) -> axum::Router {
+    let repo = root_path.join("repo");
+    let remote = root_path.join("remote.git");
+    init_cargo_repo(&repo);
+    run_git(root_path, &["init", "--bare", remote.to_str().unwrap()]);
+    run_git(
+        &repo,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+
+    let app_paths = ProductAppPaths::new(root_path.join(".aria"));
+    let repository = RepositoryStore::new(app_paths.clone())
+        .create(CreateRepositoryInput {
+            project_id: "project_0001".to_string(),
+            name: "repo".to_string(),
+            path: repo,
+            default_policy_preset: Some("manual-write".to_string()),
+            default_provider_mode: Some("fake".to_string()),
+        })
+        .expect("create repository");
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    lifecycle
+        .create_work_item(CreateWorkItemInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: repository.id,
+            story_spec_ids: Vec::new(),
+            design_spec_ids: Vec::new(),
+            title: "实现爬楼梯".to_string(),
+        })
+        .expect("create work item");
+    lifecycle
+        .update_work_item_plan_status(
+            "project_0001",
+            "issue_0001",
+            "work_item_0001",
+            WorkItemPlanStatus::Confirmed,
+        )
+        .expect("confirm work item");
+    CodingAttemptStore::new(app_paths)
+        .create_attempt(CreateCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            work_item_id: "work_item_0001".to_string(),
+            base_branch: "HEAD".to_string(),
+            branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Fake,
+                reviewer: Some(ProviderName::Fake),
+                review_rounds: 1,
+            },
+            max_auto_rework: 2,
+        })
+        .expect("create attempt");
+
+    let mut registry = ProviderRegistry::new();
+    registry.register(ProviderName::Fake, provider);
+    build_web_router(WebAppState::with_provider_registry(
+        root_path.to_path_buf(),
+        WebRuntime::new_fake(root_path.to_path_buf()),
+        registry,
+    ))
+}
+
+fn app_with_hanging_coding_attempt(root_path: &Path) -> axum::Router {
+    let repo = root_path.join("repo");
+    init_cargo_repo(&repo);
+
+    let app_paths = ProductAppPaths::new(root_path.join(".aria"));
+    let repository = RepositoryStore::new(app_paths.clone())
+        .create(CreateRepositoryInput {
+            project_id: "project_0001".to_string(),
+            name: "repo".to_string(),
+            path: repo,
+            default_policy_preset: Some("manual-write".to_string()),
+            default_provider_mode: Some("fake".to_string()),
+        })
+        .expect("create repository");
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    lifecycle
+        .create_work_item(CreateWorkItemInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: repository.id,
+            story_spec_ids: Vec::new(),
+            design_spec_ids: Vec::new(),
+            title: "实现爬楼梯".to_string(),
+        })
+        .expect("create work item");
+    lifecycle
+        .update_work_item_plan_status(
+            "project_0001",
+            "issue_0001",
+            "work_item_0001",
+            WorkItemPlanStatus::Confirmed,
+        )
+        .expect("confirm work item");
+    CodingAttemptStore::new(app_paths)
+        .create_attempt(CreateCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            work_item_id: "work_item_0001".to_string(),
+            base_branch: "HEAD".to_string(),
+            branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Fake,
+                reviewer: Some(ProviderName::Fake),
+                review_rounds: 1,
+            },
+            max_auto_rework: 2,
+        })
+        .expect("create attempt");
+
+    let mut registry = ProviderRegistry::new();
+    registry.register(ProviderName::Fake, Arc::new(HangingCodingProvider));
+    build_web_router(WebAppState::with_provider_registry(
+        root_path.to_path_buf(),
+        WebRuntime::new_fake(root_path.to_path_buf()),
+        registry,
+    ))
+}
+
+fn app_with_running_testing_attempt(root_path: &std::path::Path) -> axum::Router {
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root_path.join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            work_item_id: "work_item_0001".to_string(),
+            base_branch: "main".to_string(),
+            branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Fake,
+                reviewer: Some(ProviderName::Fake),
+                review_rounds: 1,
+            },
+            max_auto_rework: 2,
+        })
+        .expect("create attempt");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    store
+        .update_attempt_stage(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingExecutionStage::Testing,
+        )
+        .expect("testing stage");
+    store
+        .save_timeline_node(CodingTimelineNode {
+            id: "coding_node_0001".to_string(),
+            attempt_id: attempt.id,
+            stage: CodingExecutionStage::Testing,
+            title: "执行测试".to_string(),
+            status: CodingTimelineNodeStatus::Running,
+            agent_role: Some(CodingAgentRole::Tester),
+            summary: None,
+            started_at: "2026-05-23T00:00:00Z".to_string(),
+            completed_at: None,
+            artifact_refs: Vec::new(),
+        })
+        .expect("save testing node");
+    build_web_router(WebAppState::new(
+        root_path.to_path_buf(),
+        WebRuntime::new_fake(root_path.to_path_buf()),
+    ))
+}
+
+fn app_with_final_confirm_attempt(root_path: &std::path::Path) -> axum::Router {
+    let app_paths = ProductAppPaths::new(root_path.join(".aria"));
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    lifecycle
+        .create_work_item(CreateWorkItemInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            story_spec_ids: Vec::new(),
+            design_spec_ids: Vec::new(),
+            title: "Coding work item".to_string(),
+        })
+        .expect("create work item");
+    lifecycle
+        .update_work_item_execution_status(
+            "project_0001",
+            "issue_0001",
+            "work_item_0001",
+            WorkItemStatus::Coding,
+        )
+        .expect("coding work item");
+    let store = CodingAttemptStore::new(app_paths);
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            work_item_id: "work_item_0001".to_string(),
+            base_branch: "main".to_string(),
+            branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Fake,
+                reviewer: Some(ProviderName::Fake),
+                review_rounds: 1,
+            },
+            max_auto_rework: 2,
+        })
+        .expect("create attempt");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    store
+        .update_attempt_stage(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingExecutionStage::FinalConfirm,
+        )
+        .expect("final confirm stage");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::WaitingForHuman,
+        )
+        .expect("waiting for human");
+    store
+        .save_timeline_node(CodingTimelineNode {
+            id: "coding_node_0001".to_string(),
+            attempt_id: attempt.id,
+            stage: CodingExecutionStage::FinalConfirm,
+            title: "最终确认".to_string(),
+            status: CodingTimelineNodeStatus::Running,
+            agent_role: Some(CodingAgentRole::System),
+            summary: None,
+            started_at: "2026-05-23T00:00:00Z".to_string(),
+            completed_at: None,
+            artifact_refs: Vec::new(),
+        })
+        .expect("save final confirm node");
+    build_web_router(WebAppState::new(
+        root_path.to_path_buf(),
+        WebRuntime::new_fake(root_path.to_path_buf()),
+    ))
+}
+
+async fn wait_for_stage_gate(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    stage: CodingExecutionStage,
+) -> CodingGateRequired {
+    for _ in 0..50 {
+        match recv_json(ws).await {
+            CodingWsOutMessage::CodingGateRequired { gate }
+                if gate.stage.as_ref() == Some(&stage) =>
+            {
+                return gate;
+            }
+            CodingWsOutMessage::CodingSessionState { pending_gates, .. } => {
+                if let Some(gate) = pending_gates
+                    .into_iter()
+                    .find(|gate| gate.stage.as_ref() == Some(&stage))
+                {
+                    return gate;
+                }
+            }
+            CodingWsOutMessage::CodingTimelineNodeCreated { node } if node.stage == stage => {
+                panic!("stage {stage:?} started before stage gate was confirmed");
+            }
+            CodingWsOutMessage::CodingProtocolError { code, message } => {
+                panic!("unexpected coding protocol error {code}: {message}");
+            }
+            _ => {}
+        }
+    }
+    panic!("expected stage gate for {stage:?}");
+}
+
+async fn wait_for_timeline_node(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    stage: CodingExecutionStage,
+) -> CodingTimelineNode {
+    for _ in 0..50 {
+        match recv_json(ws).await {
+            CodingWsOutMessage::CodingTimelineNodeCreated { node } if node.stage == stage => {
+                return node;
+            }
+            CodingWsOutMessage::CodingProtocolError { code, message } => {
+                panic!("unexpected coding protocol error {code}: {message}");
+            }
+            _ => {}
+        }
+    }
+    panic!("expected timeline node for {stage:?}");
+}
+
+async fn wait_for_provider_config_update(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> CodingWsOutMessage {
+    for _ in 0..20 {
+        match recv_json(ws).await {
+            message @ CodingWsOutMessage::CodingProviderConfigUpdated { .. } => return message,
+            CodingWsOutMessage::CodingProtocolError { code, message } => {
+                panic!("unexpected coding protocol error {code}: {message}");
+            }
+            _ => {}
+        }
+    }
+    panic!("expected provider config update");
+}
+
+async fn send_json(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    message: &CodingWsInMessage,
+) {
+    ws.send(Message::Text(
+        serde_json::to_string(message).unwrap().into(),
+    ))
+    .await
+    .expect("send ws message");
+}
+
+async fn recv_json(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> CodingWsOutMessage {
+    let message = timeout(Duration::from_secs(10), ws.next())
+        .await
+        .expect("ws message timeout")
+        .expect("ws message")
+        .expect("valid ws message");
+    match message {
+        Message::Text(text) => serde_json::from_str(&text).expect("ws json"),
+        other => panic!("expected text ws message, got {other:?}"),
+    }
+}
+
+fn init_cargo_repo(repo: &Path) {
+    fs::create_dir_all(repo.join("src")).expect("create src");
+    fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname = \"coding-ws-full-chain\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .expect("write cargo manifest");
+    fs::write(
+        repo.join("src/lib.rs"),
+        "pub fn climb_stairs(_n: u32) -> u32 { 0 }\n",
+    )
+    .expect("write lib");
+    run_command(repo, "cargo", &["generate-lockfile"]);
+    run_git(repo, &["init"]);
+    run_git(repo, &["config", "user.email", "aria@example.com"]);
+    run_git(repo, &["config", "user.name", "Aria Test"]);
+    run_git(repo, &["add", "."]);
+    run_git(repo, &["commit", "-m", "initial"]);
+}
+
+fn init_simple_git_repo(repo: &Path) {
+    fs::create_dir_all(repo).expect("create repo");
+    fs::write(repo.join("README.md"), "coding fixture\n").expect("write readme");
+    run_git(repo, &["init"]);
+    run_git(repo, &["config", "user.email", "aria@example.com"]);
+    run_git(repo, &["config", "user.name", "Aria Test"]);
+    run_git(repo, &["add", "."]);
+    run_git(repo, &["commit", "-m", "initial"]);
+}
+
+fn run_git(cwd: &Path, args: &[&str]) {
+    run_command(cwd, "git", args);
+}
+
+fn git_stdout(cwd: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .expect("run git");
+    assert!(
+        output.status.success(),
+        "git {:?} failed\nstdout:{}\nstderr:{}",
+        args,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).to_string()
+}
+
+fn run_command(cwd: &Path, program: &str, args: &[&str]) {
+    let output = Command::new(program)
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .expect("run command");
+    assert!(
+        output.status.success(),
+        "{program} {:?} failed\nstdout:{}\nstderr:{}",
+        args,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+struct FullChainStreamingProvider;
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for FullChainStreamingProvider {
+    async fn run_streaming(
+        &self,
+        input: &AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+        let (tx, rx) = mpsc::channel(8);
+        match input.role {
+            AdapterRole::Executor => {
+                let worktree = input
+                    .worktree_path
+                    .as_ref()
+                    .map(PathBuf::from)
+                    .expect("worktree path");
+                fs::write(worktree.join("src/lib.rs"), CLIMB_STAIRS_LIB).map_err(|error| {
+                    ProviderAdapterError::incompatible_output(error.to_string(), "", "")
+                })?;
+                tx.try_send(StreamChunk::Text("implemented climb_stairs".to_string()))
+                    .expect("send coding chunk");
+                tx.try_send(StreamChunk::Done {
+                    full_output: "implemented climb_stairs".to_string(),
+                })
+                .expect("send coding done");
+            }
+            AdapterRole::Reviewer
+                if input.output_schema == "coding_workspace_analyst_verdict_json" =>
+            {
+                tx.try_send(StreamChunk::Done {
+                    full_output: r#"{"verdict":"no_issue","summary":"testing ok"}"#.to_string(),
+                })
+                .expect("send analyst done");
+            }
+            AdapterRole::Reviewer => {
+                tx.try_send(StreamChunk::Text("review approved".to_string()))
+                    .expect("send review chunk");
+                tx.try_send(StreamChunk::Done {
+                    full_output: r#"{"verdict":"approve","summary":"review ok","findings":[]}"#
+                        .to_string(),
+                })
+                .expect("send review done");
+            }
+            _ => {
+                tx.try_send(StreamChunk::Done {
+                    full_output: "ok".to_string(),
+                })
+                .expect("send done");
+            }
+        }
+        Ok(rx)
+    }
+}
+
+#[derive(Default)]
+struct InternalReviewReworkProvider {
+    state: Mutex<InternalReviewReworkState>,
+}
+
+#[derive(Default)]
+struct InternalReviewReworkState {
+    coding_calls: usize,
+    analyst_calls: usize,
+    internal_review_calls: usize,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for InternalReviewReworkProvider {
+    async fn run_streaming(
+        &self,
+        input: &AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+        let (tx, rx) = mpsc::channel(8);
+        match input.role {
+            AdapterRole::Executor => {
+                let worktree = input
+                    .worktree_path
+                    .as_ref()
+                    .map(PathBuf::from)
+                    .expect("worktree path");
+                let coding_call = {
+                    let mut state = self.state.lock().expect("state lock");
+                    state.coding_calls += 1;
+                    state.coding_calls
+                };
+                fs::write(worktree.join("src/lib.rs"), CLIMB_STAIRS_LIB).map_err(|error| {
+                    ProviderAdapterError::incompatible_output(error.to_string(), "", "")
+                })?;
+                if coding_call >= 2 {
+                    fs::write(
+                        worktree.join("src/internal_fix.rs"),
+                        "pub const FIXED: bool = true;\n",
+                    )
+                    .map_err(|error| {
+                        ProviderAdapterError::incompatible_output(error.to_string(), "", "")
+                    })?;
+                }
+                tx.try_send(StreamChunk::Text(format!("coding round {coding_call}")))
+                    .expect("send coding chunk");
+                tx.try_send(StreamChunk::Done {
+                    full_output: format!("coding round {coding_call} done"),
+                })
+                .expect("send coding done");
+            }
+            AdapterRole::Reviewer
+                if input.output_schema == "coding_workspace_analyst_verdict_json" =>
+            {
+                let analyst_call = {
+                    let mut state = self.state.lock().expect("state lock");
+                    state.analyst_calls += 1;
+                    state.analyst_calls
+                };
+                let full_output = if analyst_call == 3 {
+                    r#"{"verdict":"needs_fix","summary":"internal review 要求修复","fix_hints":["补充 internal_fix.rs"]}"#
+                } else {
+                    r#"{"verdict":"no_issue","summary":"ok"}"#
+                };
+                tx.try_send(StreamChunk::Done {
+                    full_output: full_output.to_string(),
+                })
+                .expect("send analyst done");
+            }
+            AdapterRole::Reviewer
+                if input.output_schema == "coding_workspace_internal_pr_review_json" =>
+            {
+                let internal_review_call = {
+                    let mut state = self.state.lock().expect("state lock");
+                    state.internal_review_calls += 1;
+                    state.internal_review_calls
+                };
+                let full_output = if internal_review_call == 1 {
+                    r#"{"verdict":"request_changes","summary":"需要 internal fix","findings":[{"severity":"medium","file":"src/internal_fix.rs","description":"缺少 internal fix","recommendation":"补充 internal_fix.rs"}],"impact_scope":["src"],"pr_description":"实现 work item","commit_message_suggestion":"feat: implement work item"}"#
+                } else {
+                    r#"{"verdict":"approve","summary":"internal review ok","findings":[],"impact_scope":["src"],"pr_description":"实现 work item","commit_message_suggestion":"feat: implement work item"}"#
+                };
+                tx.try_send(StreamChunk::Done {
+                    full_output: full_output.to_string(),
+                })
+                .expect("send internal review done");
+            }
+            AdapterRole::Reviewer => {
+                tx.try_send(StreamChunk::Done {
+                    full_output: r#"{"verdict":"approve","summary":"review ok","findings":[]}"#
+                        .to_string(),
+                })
+                .expect("send review done");
+            }
+            _ => {
+                tx.try_send(StreamChunk::Done {
+                    full_output: "ok".to_string(),
+                })
+                .expect("send done");
+            }
+        }
+        Ok(rx)
+    }
+}
+
+#[derive(Default)]
+struct CodeReviewReworkProvider {
+    state: Mutex<CodeReviewReworkState>,
+}
+
+#[derive(Default)]
+struct CodeReviewReworkState {
+    coding_calls: usize,
+    analyst_calls: usize,
+    code_review_calls: usize,
+    coding_prompts: Vec<String>,
+}
+
+impl CodeReviewReworkProvider {
+    fn coding_prompts(&self) -> Vec<String> {
+        self.state
+            .lock()
+            .expect("state lock")
+            .coding_prompts
+            .clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for CodeReviewReworkProvider {
+    async fn run_streaming(
+        &self,
+        input: &AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+        let (tx, rx) = mpsc::channel(8);
+        match input.role {
+            AdapterRole::Executor => {
+                let worktree = input
+                    .worktree_path
+                    .as_ref()
+                    .map(PathBuf::from)
+                    .expect("worktree path");
+                let coding_call = {
+                    let mut state = self.state.lock().expect("state lock");
+                    state.coding_calls += 1;
+                    state.coding_prompts.push(input.prompt.clone());
+                    state.coding_calls
+                };
+                fs::write(worktree.join("src/lib.rs"), CLIMB_STAIRS_LIB).map_err(|error| {
+                    ProviderAdapterError::incompatible_output(error.to_string(), "", "")
+                })?;
+                if coding_call == 1 {
+                    fs::create_dir_all(worktree.join("__pycache__")).map_err(|error| {
+                        ProviderAdapterError::incompatible_output(error.to_string(), "", "")
+                    })?;
+                    fs::write(
+                        worktree.join("__pycache__/climbing_stairs.cpython-310.pyc"),
+                        b"pyc",
+                    )
+                    .map_err(|error| {
+                        ProviderAdapterError::incompatible_output(error.to_string(), "", "")
+                    })?;
+                } else {
+                    let _ = fs::remove_dir_all(worktree.join("__pycache__"));
+                    fs::write(
+                        worktree.join("src/review_fix.rs"),
+                        "pub const FIXED: bool = true;\n",
+                    )
+                    .map_err(|error| {
+                        ProviderAdapterError::incompatible_output(error.to_string(), "", "")
+                    })?;
+                }
+                tx.try_send(StreamChunk::Done {
+                    full_output: format!("coding round {coding_call} done"),
+                })
+                .expect("send coding done");
+            }
+            AdapterRole::Reviewer
+                if input.output_schema == "coding_workspace_analyst_verdict_json" =>
+            {
+                let analyst_call = {
+                    let mut state = self.state.lock().expect("state lock");
+                    state.analyst_calls += 1;
+                    state.analyst_calls
+                };
+                let full_output = if analyst_call == 2 {
+                    r#"{"verdict":"needs_fix","summary":"code review 要求移除运行产物","fix_hints":["移除 __pycache__ 和 .pyc 文件"]}"#
+                } else {
+                    r#"{"verdict":"no_issue","summary":"ok"}"#
+                };
+                tx.try_send(StreamChunk::Done {
+                    full_output: full_output.to_string(),
+                })
+                .expect("send analyst done");
+            }
+            AdapterRole::Reviewer if input.output_schema == "coding_workspace_code_review_json" => {
+                let code_review_call = {
+                    let mut state = self.state.lock().expect("state lock");
+                    state.code_review_calls += 1;
+                    state.code_review_calls
+                };
+                let full_output = if code_review_call == 1 {
+                    r#"{"verdict":"request_changes","summary":"运行产物进入 diff","findings":[{"severity":"medium","file":"__pycache__/climbing_stairs.cpython-310.pyc","description":"不应提交 pyc","recommendation":"移除 __pycache__ 和 .pyc 文件"}]}"#
+                } else {
+                    r#"{"verdict":"approve","summary":"review ok","findings":[]}"#
+                };
+                tx.try_send(StreamChunk::Done {
+                    full_output: full_output.to_string(),
+                })
+                .expect("send code review done");
+            }
+            AdapterRole::Reviewer => {
+                tx.try_send(StreamChunk::Done {
+                    full_output: r#"{"verdict":"approve","summary":"internal review ok","findings":[],"impact_scope":["src"],"pr_description":"实现 work item","commit_message_suggestion":"feat: implement work item"}"#.to_string(),
+                })
+                .expect("send internal review done");
+            }
+            _ => {
+                tx.try_send(StreamChunk::Done {
+                    full_output: "ok".to_string(),
+                })
+                .expect("send done");
+            }
+        }
+        Ok(rx)
+    }
+}
+
+struct HangingCodingProvider;
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for HangingCodingProvider {
+    async fn run_streaming(
+        &self,
+        input: &AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+        let (tx, rx) = mpsc::channel(8);
+        if input.role == AdapterRole::Executor {
+            tokio::spawn(async move {
+                let _ = tx
+                    .send(StreamChunk::Text("hanging provider started".to_string()))
+                    .await;
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            });
+        } else if input.output_schema == "coding_workspace_analyst_verdict_json" {
+            tx.try_send(StreamChunk::Done {
+                full_output: r#"{"verdict":"no_issue","summary":"testing ok"}"#.to_string(),
+            })
+            .expect("send analyst done");
+        } else {
+            tx.try_send(StreamChunk::Done {
+                full_output: r#"{"verdict":"approve","summary":"review ok","findings":[]}"#
+                    .to_string(),
+            })
+            .expect("send done");
+        }
+        Ok(rx)
+    }
+}
+
+const CLIMB_STAIRS_LIB: &str = r#"pub fn climb_stairs(n: u32) -> u32 {
+    if n <= 2 {
+        return n;
+    }
+    let mut prev = 1;
+    let mut curr = 2;
+    for _ in 3..=n {
+        let next = prev + curr;
+        prev = curr;
+        curr = next;
+    }
+    curr
+}
+
+#[cfg(test)]
+mod tests {
+    use super::climb_stairs;
+
+    #[test]
+    fn computes_climb_stairs_examples() {
+        assert_eq!(climb_stairs(1), 1);
+        assert_eq!(climb_stairs(2), 2);
+        assert_eq!(climb_stairs(3), 3);
+        assert_eq!(climb_stairs(5), 8);
+        assert_eq!(climb_stairs(10), 89);
+    }
+}
+"#;
+
+const CLIMB_STAIRS_WORK_ITEM: &str = r#"# 实现爬楼梯问题 Work Item
+
+请使用 python 实现函数 `climb_stairs(n: i32) -> i32`，覆盖 n=1、n=2、n=3、n=5、n=10。
+
+## 验证命令
+
+```bash
+uv run python -m unittest discover -s tests -v
+```
+"#;

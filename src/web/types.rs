@@ -1,5 +1,12 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::path::PathBuf;
+
+use crate::product::coding_models::{
+    CodeReviewReport, CodingGateRequired, CodingTimelineNode, InternalPrReview, ReviewRequest,
+    TestingReport,
+};
+use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -67,6 +74,7 @@ pub struct ConfirmTaskRequest {
     pub checkpoint_id: String,
     pub prompt: String,
     pub policy_override: Option<String>,
+    pub provider_type: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,6 +123,19 @@ impl From<crate::interactive::checkpoint::RollbackPreview> for RollbackPreviewRe
 #[serde(rename_all = "snake_case")]
 pub struct RollbackRequest {
     pub checkpoint_id: String,
+    pub force_when_dirty: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct IssueRollbackPreviewRequest {
+    pub execution_record_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct IssueRollbackRequest {
+    pub execution_record_id: String,
     pub force_when_dirty: bool,
 }
 
@@ -178,6 +199,33 @@ pub struct FileDiffResponse {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub struct CodingAttemptDiffResponse {
+    pub attempt_id: String,
+    pub base_branch: String,
+    pub worktree_path: PathBuf,
+    pub diff: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ProviderInputContentResponse {
+    pub input_ref: String,
+    pub content_type: String,
+    pub content: String,
+    pub redaction_applied: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ProviderInputPrepared {
+    pub node_id: String,
+    pub input_ref: String,
+    pub input_summary: Value,
+    pub redaction_applied: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct ProviderOutputChunk {
     pub node_id: String,
     pub provider_run_id: String,
@@ -222,6 +270,305 @@ pub struct CreateWorkspaceRequest {
     pub default_provider_mode: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ProjectDto {
+    pub project_id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub last_opened_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ProjectListResponse {
+    pub projects: Vec<ProjectDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct CreateProjectRequest {
+    pub name: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RepositoryDto {
+    pub repository_id: String,
+    pub project_id: String,
+    pub name: String,
+    pub path: String,
+    pub repo_hash: String,
+    pub runtime_root: String,
+    pub default_policy_preset: String,
+    pub default_provider_mode: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RepositoryListResponse {
+    pub repositories: Vec<RepositoryDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct CreateRepositoryRequest {
+    pub name: String,
+    pub path: String,
+    pub default_policy_preset: Option<String>,
+    pub default_provider_mode: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ProductIssueDto {
+    pub issue_id: String,
+    pub project_id: String,
+    pub repo_id: Option<String>,
+    pub workspace_id: Option<String>,
+    pub task_id: Option<String>,
+    pub session_id: Option<String>,
+    pub title: String,
+    pub description: Option<String>,
+    pub change_id: String,
+    pub phase: String,
+    pub status: String,
+    pub active_binding_id: Option<String>,
+    pub artifacts: Vec<ProductIssueArtifactDto>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ProductIssueArtifactDto {
+    pub artifact_ref: String,
+    pub artifact_kind: String,
+    pub producer_node: Option<String>,
+    pub path: String,
+    pub summary: String,
+    pub stage: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ProductIssueListResponse {
+    pub issues: Vec<ProductIssueDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct CreateProductIssueRequest {
+    pub title: String,
+    pub description: Option<String>,
+    pub change_id: Option<String>,
+    pub repository_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct IssueLifecycleResponse {
+    pub issue: ProductIssueDto,
+    pub story_specs: Vec<StorySpecDto>,
+    pub design_specs: Vec<DesignSpecDto>,
+    pub work_items: Vec<LifecycleWorkItemDto>,
+    pub workspace_sessions: Vec<WorkspaceSessionDto>,
+    pub coding_attempts: Vec<CodingAttemptDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ArtifactVersionDto {
+    pub version: u32,
+    pub markdown: String,
+    pub generated_by: String,
+    pub reviewed_by: Option<String>,
+    pub review_verdict: Option<String>,
+    pub confirmed_by: Option<String>,
+    pub created_at: String,
+    pub source_node_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct StorySpecDto {
+    pub story_spec_id: String,
+    pub issue_id: String,
+    pub repository_id: String,
+    pub title: String,
+    pub current_version: Option<u32>,
+    pub current_markdown_preview: Option<String>,
+    pub confirmation_status: String,
+    pub artifact_versions: Vec<ArtifactVersionDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct DesignSpecDto {
+    pub design_spec_id: String,
+    pub issue_id: String,
+    pub story_spec_ids: Vec<String>,
+    pub design_kind: String,
+    pub title: String,
+    pub current_version: Option<u32>,
+    pub current_markdown_preview: Option<String>,
+    pub confirmation_status: String,
+    pub artifact_versions: Vec<ArtifactVersionDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct LifecycleWorkItemDto {
+    pub work_item_id: String,
+    pub issue_id: String,
+    pub repository_id: String,
+    pub story_spec_ids: Vec<String>,
+    pub design_spec_ids: Vec<String>,
+    pub title: String,
+    pub plan_status: String,
+    pub execution_status: String,
+    pub latest_attempt: Option<CodingAttemptDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct CodingAttemptDto {
+    pub attempt_id: String,
+    pub work_item_id: String,
+    pub attempt_no: u32,
+    pub status: String,
+    pub stage: String,
+    pub branch_name: String,
+    pub base_branch: String,
+    pub worktree_path: Option<String>,
+    pub rework_count: u32,
+    pub head_commit: Option<String>,
+    pub push_status: Option<String>,
+    pub review_request_url: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct CodingAttemptSnapshotResponse {
+    pub attempt: CodingAttemptDto,
+    pub provider_config_snapshot: ProviderConfigSnapshot,
+    pub timeline_nodes: Vec<CodingTimelineNode>,
+    pub active_node_id: Option<String>,
+    pub testing_report: Option<TestingReport>,
+    pub code_review_reports: Vec<CodeReviewReport>,
+    pub review_request: Option<ReviewRequest>,
+    pub internal_pr_review: Option<InternalPrReview>,
+    pub pending_gates: Vec<CodingGateRequired>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct GenerateStorySpecsRequest {
+    pub title: String,
+    pub author_provider: Option<String>,
+    pub reviewer_provider: Option<String>,
+    pub review_rounds: Option<u32>,
+    pub superpowers_enabled: Option<bool>,
+    pub openspec_enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct GenerateStorySpecsResponse {
+    pub story_specs: Vec<StorySpecDto>,
+    pub workspace_session: WorkspaceSessionDto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct GenerateDesignSpecsRequest {
+    pub title: String,
+    pub story_spec_ids: Vec<String>,
+    pub design_kind: String,
+    pub author_provider: Option<String>,
+    pub reviewer_provider: Option<String>,
+    pub review_rounds: Option<u32>,
+    pub superpowers_enabled: Option<bool>,
+    pub openspec_enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct GenerateDesignSpecsResponse {
+    pub design_specs: Vec<DesignSpecDto>,
+    pub workspace_session: WorkspaceSessionDto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct GenerateWorkItemsRequest {
+    pub title: String,
+    pub story_spec_ids: Vec<String>,
+    pub design_spec_ids: Vec<String>,
+    pub author_provider: Option<String>,
+    pub reviewer_provider: Option<String>,
+    pub review_rounds: Option<u32>,
+    pub superpowers_enabled: Option<bool>,
+    pub openspec_enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct GenerateWorkItemsResponse {
+    pub work_items: Vec<LifecycleWorkItemDto>,
+    pub workspace_session: WorkspaceSessionDto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkspaceSessionMessageRequest {
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkspaceSessionRunNextRequest {
+    pub user_prompt: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkspaceSessionConfirmRequest {
+    pub confirmed_by: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkspaceMessageDto {
+    pub role: String,
+    pub content: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkspaceSessionDto {
+    pub workspace_session_id: String,
+    pub issue_id: String,
+    pub entity_id: String,
+    pub workspace_type: String,
+    pub status: String,
+    pub author_provider: String,
+    pub reviewer_provider: String,
+    pub review_rounds: u32,
+    pub superpowers_enabled: bool,
+    pub openspec_enabled: bool,
+    pub messages: Vec<WorkspaceMessageDto>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct IssueListResponse {
@@ -251,21 +598,19 @@ pub struct CreateIssueRequest {
     pub change_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub struct StartIssueRequest {
-    pub workspace_id: String,
-    pub policy_preset: Option<String>,
-    pub provider_mode: Option<String>,
-    pub timeout_secs: Option<u64>,
+pub struct ResolveGateRequest {
+    pub comment: Option<String>,
+    pub requested_change: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub struct StartIssueResponse {
+pub struct ResolveGateResponse {
     pub issue_id: String,
-    pub workspace_id: String,
-    pub task_id: String,
-    pub session_id: String,
-    pub status: String,
+    pub gate_id: String,
+    pub node_id: String,
+    pub decision: String,
+    pub next_node: Option<String>,
 }

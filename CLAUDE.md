@@ -31,6 +31,8 @@
 
 详见 `cadence/project-rules/README.md`。
 
+其中 **Rust 构建/测试/检查命令规范**（标准命令、🔴 禁止 `-j 1`、定向快反馈命令）详见 `cadence/project-rules/build-test-commands.md`，本地与 CI 必须遵循。
+
 ## 项目配置
 
 > 以下内容由初始化脚本根据项目环境自动检测生成，非通用规则。
@@ -45,12 +47,13 @@
 - **禁止使用**：npm（前端）、pip（Python）、yarn（前端）
 
 ### 项目技术栈
-- **语言**：待确定
-- **包管理器**：待确定
-- **测试命令**：待确定
-- **检查命令**：待确定
-- **格式化命令**：待确定
+- **语言**：Rust（edition 2024，工具链固定 `rust-toolchain.toml` 的 1.95.0）
+- **包管理器**：Cargo
+- **测试命令**：`cargo test --locked`（🔴 禁止 `-j 1`；定向单测用 `cargo test --locked --lib <过滤名>`）
+- **检查命令**：`cargo check --locked` / `cargo clippy --all-targets --all-features --locked -- -D warnings`
+- **格式化命令**：`cargo fmt --check`（应用：`cargo fmt`）
 - **覆盖率阈值**：80%（默认值）
+- **命令规范**：详见 `cadence/project-rules/build-test-commands.md`
 
 ## 当前日期
 

@@ -13,6 +13,7 @@ pub enum WebEventType {
     NodeCompleted,
     NodeFailed,
     PausedForApproval,
+    ProviderInputPrepared,
     ProviderOutput,
     ArtifactWritten,
     GateBlocked,
@@ -30,6 +31,7 @@ impl WebEventType {
             Self::NodeCompleted,
             Self::NodeFailed,
             Self::PausedForApproval,
+            Self::ProviderInputPrepared,
             Self::ProviderOutput,
             Self::ArtifactWritten,
             Self::GateBlocked,
@@ -47,6 +49,7 @@ impl WebEventType {
             Self::NodeCompleted => "node_completed",
             Self::NodeFailed => "node_failed",
             Self::PausedForApproval => "paused_for_approval",
+            Self::ProviderInputPrepared => "provider.input_prepared",
             Self::ProviderOutput => "provider_output",
             Self::ArtifactWritten => "artifact_written",
             Self::GateBlocked => "gate_blocked",
@@ -120,6 +123,21 @@ impl EventHub {
             .filter(|event| event.cursor > cursor)
             .cloned()
             .collect()
+    }
+
+    pub fn subscribe_with_replay_after(
+        &self,
+        cursor: u64,
+    ) -> (Vec<WebEvent>, broadcast::Receiver<WebEvent>) {
+        let inner = self.inner.lock().expect("event hub lock");
+        let replay = inner
+            .replay
+            .iter()
+            .filter(|event| event.cursor > cursor)
+            .cloned()
+            .collect();
+        let receiver = self.tx.subscribe();
+        (replay, receiver)
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<WebEvent> {

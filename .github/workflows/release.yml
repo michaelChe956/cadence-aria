@@ -1,0 +1,164 @@
+name: Release npx
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build ${{ matrix.target_key }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target_key: linux-x64
+            rust_target: x86_64-unknown-linux-gnu
+          # macos-13 为 Intel runner，存在退役风险（设计 v1.3 §6.1）；
+          # 若未来下线，改用 arm64 runner 交叉编译 x86_64-apple-darwin（需额外验证 git 重依赖交叉编译）。
+          - os: macos-13
+            target_key: darwin-x64
+            rust_target: x86_64-apple-darwin
+          - os: macos-14
+            target_key: darwin-arm64
+            rust_target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+          targets: ${{ matrix.rust_target }}
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+
+      # 强制顺序：前端先于二进制（rust-embed 嵌入 web/dist；build.rs 硬校验兜底）
+      - name: Build frontend
+        run: pnpm -C web install --frozen-lockfile && pnpm -C web build
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.rust_target }}
+
+      # tar 打包保执行位（actions/upload-artifact 以 zip 存储会丢 +x，设计 v1.3 §6.1）
+      - name: Package binary (tar preserves +x)
+        run: |
+          mkdir -p out
+          tar -czf "out/aria-${{ matrix.target_key }}.tar.gz" \
+            -C "target/${{ matrix.rust_target }}/release" aria
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aria-${{ matrix.target_key }}
+          path: out/aria-${{ matrix.target_key }}.tar.gz
+          retention-days: 1
+
+  release:
+    name: publish npm + github release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # 创建 GitHub Release 需要（默认 GITHUB_TOKEN 即可）
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Resolve version from tag
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      # 解包三平台 tar（恢复执行位），整理出各平台二进制路径
+      - name: Extract binaries
+        run: |
+          set -euo pipefail
+          mkdir -p bins
+          for key in linux-x64 darwin-x64 darwin-arm64; do
+            tar -xzf "artifacts/aria-${key}/aria-${key}.tar.gz" -C bins
+            mv bins/aria "bins/aria-${key}"
+            chmod +x "bins/aria-${key}"   # 双保险（设计 §6.2）
+            test -x "bins/aria-${key}"    # gate：缺执行位则失败
+          done
+          ls -l bins
+
+      # 复用 P3 组包脚本：主包版本 + 三平台子包（chmod +x + test -x 在脚本内）
+      - name: Assemble npm packages
+        run: |
+          set -euo pipefail
+          V="${{ steps.ver.outputs.version }}"
+          node scripts/pack-npm.mjs --version "$V" --main-only
+          node scripts/pack-npm.mjs --version "$V" --platform linux-x64    --binary bins/aria-linux-x64
+          node scripts/pack-npm.mjs --version "$V" --platform darwin-x64   --binary bins/aria-darwin-x64
+          node scripts/pack-npm.mjs --version "$V" --platform darwin-arm64 --binary bins/aria-darwin-arm64
+
+      # 体积 gate（设计 §7.3）：超阈即失败（阈值首次实测后校准；实测 linux-x64 约 6.3MB）
+      - name: Size gate
+        run: |
+          set -euo pipefail
+          MAX_BIN=$((90 * 1024 * 1024))   # 90MB 上限（初值，按实测调整）
+          for key in linux-x64 darwin-x64 darwin-arm64; do
+            sz=$(stat -c%s "npm/cli-${key}/bin/aria")
+            echo "cli-${key} 二进制大小: $sz bytes"
+            if [ "$sz" -gt "$MAX_BIN" ]; then
+              echo "::error::cli-${key} 二进制超过体积上限 ($sz > $MAX_BIN)"; exit 1
+            fi
+          done
+
+      # 发布顺序：子包先、主包后（设计 §6.3）；任一失败整体失败。
+      # publish 非原子：若中途失败,勿覆盖同版本,改用新 patch 版整体重发。
+      - name: Publish subpackages then main
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          for key in linux-x64 darwin-x64 darwin-arm64; do
+            npm publish "npm/cli-${key}" --access public
+          done
+          npm publish "npm/cli" --access public
+
+      # GitHub Release 附件（设计 §6.4）
+      - name: Make release assets
+        run: |
+          set -euo pipefail
+          node scripts/make-release-assets.mjs \
+            --version "${{ steps.ver.outputs.version }}" --out dist-release \
+            --binary linux-x64=bins/aria-linux-x64 \
+            --binary darwin-x64=bins/aria-darwin-x64 \
+            --binary darwin-arm64=bins/aria-darwin-arm64
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            dist-release/aria-linux-x64.tar.gz
+            dist-release/aria-darwin-x64.tar.gz
+            dist-release/aria-darwin-arm64.tar.gz
+            dist-release/SHA256SUMS

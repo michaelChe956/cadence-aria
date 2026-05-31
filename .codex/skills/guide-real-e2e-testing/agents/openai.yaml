@@ -1,0 +1,4 @@
+interface:
+  display_name: "真实 E2E 测试指导"
+  short_description: "指导 Cadence Aria 真实端到端场景测试"
+  default_prompt: "按真实 E2E 测试流程指导我验证当前 issue。"

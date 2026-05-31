@@ -1,22 +1,23 @@
 import type {
   ApiError,
   ArtifactContentResponse,
-  CreateIssueRequest,
-  CreateWorkspaceRequest,
-  CreateTaskRequest,
-  CreateTaskResponse,
-  FileContentResponse,
-  FileDiffResponse,
-  Issue,
-  IssueListResponse,
-  RollbackPreviewResponse,
-  StartIssueRequest,
-  StartIssueResponse,
-  StopTaskResponse,
-  TaskListResponse,
-  WebWorkspaceProjection,
-  Workspace,
-  WorkspaceListResponse,
+  CodingAttempt,
+  CodingAttemptDiffResponse,
+  CodingAttemptSnapshotResponse,
+  CreateProductIssueRequest,
+  CreateRepositoryRequest,
+  GenerateDesignSpecsRequest,
+  GenerateDesignSpecsResponse,
+  GenerateStorySpecsRequest,
+  GenerateStorySpecsResponse,
+  GenerateWorkItemsRequest,
+  GenerateWorkItemsResponse,
+  IssueLifecycleResponse,
+  ProductIssue,
+  ProductIssueListResponse,
+  Project,
+  Repository,
+  RepositoryListResponse,
 } from "./types";
 
 export class ApiRequestError extends Error implements ApiError {
@@ -35,8 +36,12 @@ export async function normalizeApiError(response: Response): Promise<ApiError> {
   const body = await response.json().catch(() => ({}));
   return {
     code: typeof body.code === "string" ? body.code : "web_client_error",
-    message: typeof body.message === "string" ? body.message : response.statusText,
-    details: typeof body.details === "object" && body.details !== null ? body.details : {},
+    message:
+      typeof body.message === "string" ? body.message : response.statusText,
+    details:
+      typeof body.details === "object" && body.details !== null
+        ? body.details
+        : {},
   };
 }
 
@@ -54,145 +59,241 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-export function createTask(payload: CreateTaskRequest): Promise<CreateTaskResponse> {
-  return requestJson<CreateTaskResponse>("/api/tasks", {
+export function listProjects(): Promise<{ projects: Project[] }> {
+  return requestJson<{ projects: Project[] }>("/api/projects");
+}
+
+export function createProject(payload: {
+  name: string;
+  description?: string | null;
+}): Promise<Project> {
+  return requestJson<Project>("/api/projects", {
     method: "POST",
     body: JSON.stringify(payload),
   });
 }
 
-export function listWorkspaces(): Promise<WorkspaceListResponse> {
-  return requestJson<WorkspaceListResponse>("/api/workspaces");
+export function deleteProject(projectId: string): Promise<{ status: string }> {
+  return requestJson<{ status: string }>(
+    `/api/projects/${encodeURIComponent(projectId)}`,
+    {
+      method: "DELETE",
+    },
+  );
 }
 
-export function createWorkspace(payload: CreateWorkspaceRequest): Promise<Workspace> {
-  return requestJson<Workspace>("/api/workspaces", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
+export function listRepositories(
+  projectId: string,
+): Promise<RepositoryListResponse> {
+  return requestJson<RepositoryListResponse>(
+    `/api/projects/${encodeURIComponent(projectId)}/repositories`,
+  );
 }
 
-export function listIssues(): Promise<IssueListResponse> {
-  return requestJson<IssueListResponse>("/api/issues");
+export function createRepository(
+  projectId: string,
+  payload: CreateRepositoryRequest,
+): Promise<Repository> {
+  return requestJson<Repository>(
+    `/api/projects/${encodeURIComponent(projectId)}/repositories`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
 }
 
-export function createIssue(payload: CreateIssueRequest): Promise<Issue> {
-  return requestJson<Issue>("/api/issues", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
+export function deleteRepository(
+  projectId: string,
+  repositoryId: string,
+): Promise<{ status: string }> {
+  return requestJson<{ status: string }>(
+    `/api/projects/${encodeURIComponent(projectId)}/repositories/${encodeURIComponent(repositoryId)}`,
+    {
+      method: "DELETE",
+    },
+  );
 }
 
-export function startIssue(
+export function listProductIssues(
+  projectId: string,
+): Promise<ProductIssueListResponse> {
+  return requestJson<ProductIssueListResponse>(
+    `/api/projects/${encodeURIComponent(projectId)}/issues`,
+  );
+}
+
+export function createProductIssue(
+  projectId: string,
+  payload: CreateProductIssueRequest,
+): Promise<ProductIssue> {
+  return requestJson<ProductIssue>(
+    `/api/projects/${encodeURIComponent(projectId)}/issues`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export function deleteProductIssue(
+  projectId: string,
   issueId: string,
-  payload: StartIssueRequest,
-): Promise<StartIssueResponse> {
-  return requestJson<StartIssueResponse>(`/api/issues/${encodeURIComponent(issueId)}/start`, {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
+): Promise<{ status: string }> {
+  return requestJson<{ status: string }>(
+    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}`,
+    {
+      method: "DELETE",
+    },
+  );
 }
 
-export function getProjection(
-  taskId?: string,
-  nodeId?: string,
-  workspaceId?: string,
-): Promise<WebWorkspaceProjection> {
-  const params = new URLSearchParams();
-  if (taskId) params.set("task_id", taskId);
-  if (nodeId) params.set("node_id", nodeId);
-  if (workspaceId) params.set("workspace_id", workspaceId);
-  const query = params.toString();
-  return requestJson<WebWorkspaceProjection>(`/api/projection${query ? `?${query}` : ""}`);
+export function deleteStorySpec(
+  projectId: string,
+  issueId: string,
+  storySpecId: string,
+): Promise<{ status: string }> {
+  return requestJson<{ status: string }>(
+    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/story-specs/${encodeURIComponent(storySpecId)}`,
+    {
+      method: "DELETE",
+    },
+  );
 }
 
-export function listTasks(): Promise<TaskListResponse> {
-  return requestJson<TaskListResponse>("/api/tasks");
+export function deleteDesignSpec(
+  projectId: string,
+  issueId: string,
+  designSpecId: string,
+): Promise<{ status: string }> {
+  return requestJson<{ status: string }>(
+    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/design-specs/${encodeURIComponent(designSpecId)}`,
+    {
+      method: "DELETE",
+    },
+  );
 }
 
-export function getArtifactContent(
-  artifactRef: string,
-  workspaceId?: string,
+export function deleteWorkItem(
+  projectId: string,
+  issueId: string,
+  workItemId: string,
+): Promise<{ status: string }> {
+  return requestJson<{ status: string }>(
+    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/work-items/${encodeURIComponent(workItemId)}`,
+    {
+      method: "DELETE",
+    },
+  );
+}
+
+export function getIssueLifecycle(
+  issueId: string,
+  projectId: string,
+): Promise<IssueLifecycleResponse> {
+  return requestJson<IssueLifecycleResponse>(
+    `/api/issues/${encodeURIComponent(issueId)}/lifecycle?project_id=${encodeURIComponent(projectId)}`,
+  );
+}
+
+export function generateStorySpecs(
+  projectId: string,
+  issueId: string,
+  payload: GenerateStorySpecsRequest,
+): Promise<GenerateStorySpecsResponse> {
+  return requestJson<GenerateStorySpecsResponse>(
+    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/story-specs:generate`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export function generateDesignSpecs(
+  projectId: string,
+  issueId: string,
+  payload: GenerateDesignSpecsRequest,
+): Promise<GenerateDesignSpecsResponse> {
+  return requestJson<GenerateDesignSpecsResponse>(
+    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/design-specs:generate`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export function generateWorkItems(
+  projectId: string,
+  issueId: string,
+  payload: GenerateWorkItemsRequest,
+): Promise<GenerateWorkItemsResponse> {
+  return requestJson<GenerateWorkItemsResponse>(
+    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/work-items:generate`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export function createCodingAttempt(
+  projectId: string,
+  issueId: string,
+  workItemId: string,
+): Promise<CodingAttempt> {
+  return requestJson<CodingAttempt>(
+    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/work-items/${encodeURIComponent(workItemId)}/coding-attempts`,
+    {
+      method: "POST",
+      body: JSON.stringify({}),
+    },
+  );
+}
+
+export function getCodingAttemptSnapshot(
+  attemptId: string,
+): Promise<CodingAttemptSnapshotResponse> {
+  return requestJson<CodingAttemptSnapshotResponse>(
+    `/api/coding-attempts/${encodeURIComponent(attemptId)}`,
+  );
+}
+
+export function getCodingAttemptDiff(
+  attemptId: string,
+): Promise<CodingAttemptDiffResponse> {
+  return requestJson<CodingAttemptDiffResponse>(
+    `/api/coding-attempts/${encodeURIComponent(attemptId)}/diff`,
+  );
+}
+
+export function deleteCodingAttempt(
+  attemptId: string,
+): Promise<{ status: string }> {
+  return requestJson<{ status: string }>(
+    `/api/coding-attempts/${encodeURIComponent(attemptId)}`,
+    {
+      method: "DELETE",
+    },
+  );
+}
+
+export function abortCodingAttempt(attemptId: string): Promise<CodingAttempt> {
+  return requestJson<CodingAttempt>(
+    `/api/coding-attempts/${encodeURIComponent(attemptId)}/abort`,
+    {
+      method: "POST",
+      body: JSON.stringify({}),
+    },
+  );
+}
+
+export function getCodingAttemptArtifact(
+  attemptId: string,
+  artifactId: string,
 ): Promise<ArtifactContentResponse> {
-  const params = new URLSearchParams();
-  if (workspaceId) params.set("workspace_id", workspaceId);
-  const query = params.toString();
   return requestJson<ArtifactContentResponse>(
-    `/api/artifacts/${encodeURIComponent(artifactRef)}${query ? `?${query}` : ""}`,
+    `/api/coding-attempts/${encodeURIComponent(attemptId)}/artifacts/${encodeURIComponent(artifactId)}`,
   );
-}
-
-export function getFileContent(path: string, workspaceId?: string): Promise<FileContentResponse> {
-  const params = new URLSearchParams({ path });
-  if (workspaceId) params.set("workspace_id", workspaceId);
-  return requestJson<FileContentResponse>(`/api/files/content?${params.toString()}`);
-}
-
-export function getFileDiff(
-  baseCheckpoint: string,
-  path: string,
-  workspaceId?: string,
-): Promise<FileDiffResponse> {
-  const params = new URLSearchParams({ base_checkpoint: baseCheckpoint, path });
-  if (workspaceId) params.set("workspace_id", workspaceId);
-  return requestJson<FileDiffResponse>(`/api/files/diff?${params.toString()}`);
-}
-
-export function stopTask(taskId: string, workspaceId?: string): Promise<StopTaskResponse> {
-  return requestJson<StopTaskResponse>(taskActionPath(taskId, "stop", workspaceId), {
-    method: "POST",
-    body: JSON.stringify({}),
-  });
-}
-
-export function confirmTask(
-  taskId: string,
-  payload: { checkpoint_id: string; prompt: string; policy_override?: string | null },
-  workspaceId?: string,
-) {
-  return requestJson<{ status: string; node_id: string; turn_id: string }>(
-    taskActionPath(taskId, "confirm", workspaceId),
-    {
-      method: "POST",
-      body: JSON.stringify(payload),
-    },
-  );
-}
-
-export function advanceTask(taskId: string, workspaceId?: string) {
-  return requestJson<unknown>(taskActionPath(taskId, "advance", workspaceId), {
-    method: "POST",
-    body: JSON.stringify({}),
-  });
-}
-
-export function rollbackPreview(taskId: string, checkpointId: string, workspaceId?: string) {
-  return requestJson<RollbackPreviewResponse>(
-    taskActionPath(taskId, "rollback/preview", workspaceId),
-    {
-      method: "POST",
-      body: JSON.stringify({ checkpoint_id: checkpointId }),
-    },
-  );
-}
-
-export function rollbackTask(
-  taskId: string,
-  payload: { checkpoint_id: string; force_when_dirty: boolean },
-  workspaceId?: string,
-) {
-  return requestJson<{ status: string; checkpoint_id: string }>(
-    taskActionPath(taskId, "rollback", workspaceId),
-    {
-      method: "POST",
-      body: JSON.stringify(payload),
-    },
-  );
-}
-
-function taskActionPath(taskId: string, action: string, workspaceId?: string) {
-  const params = new URLSearchParams();
-  if (workspaceId) params.set("workspace_id", workspaceId);
-  const query = params.toString();
-  return `/api/tasks/${encodeURIComponent(taskId)}/${action}${query ? `?${query}` : ""}`;
 }

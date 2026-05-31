@@ -1,12 +1,11 @@
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vitest/config";
+import { devServerProxy } from "./dev-server-proxy";
 
 export default defineConfig({
   plugins: [react()],
   server: {
-    proxy: {
-      "/api": "http://127.0.0.1:4317",
-    },
+    proxy: devServerProxy,
   },
   test: {
     environment: "jsdom",

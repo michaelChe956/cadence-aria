@@ -33,7 +33,7 @@
 | 本地单机、单 workspace、`aria web --workspace` | P2、P6 | 覆盖 |
 | 不做云端、多用户、桌面壳、多 workspace 管理 | 拆分总览、P6 | 覆盖 |
 | 默认监听本地，未指定端口时可自动选择 | 总计划 Task 8、P2 | 已补齐自动端口要求 |
-| TUI 全信息域：Overview、Timeline、IO、Artifacts、Changes、Diagnostics、Action | P1、P3、P4、P5、P6 | 覆盖 |
+| Web Runtime 全信息域：Overview、Timeline、IO、Artifacts、Changes、Diagnostics、Action | P1、P3、P4、P5、P6 | 覆盖 |
 | 第一屏即工作台，不做 landing page | P3、P4、P6 | 覆盖 |
 | 顶部状态栏全部状态字段和 blocked_by_gate 拆解 | P4、P6 | 覆盖 |
 | Flow Rail N00-N28、状态、provider、attempt/rework、artifact、gate 标记 | P4、P6 | 覆盖 |

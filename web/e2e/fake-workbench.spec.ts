@@ -1,33 +1,39 @@
 import { expect, test } from "@playwright/test";
+import { seedStoryWorkspace, waitForStage } from "./helpers/workspace";
 
-test("fake provider workbench creates, confirms, observes, rolls back and reruns", async ({
+test("fake provider workspace streams a story spec and confirms lifecycle state", async ({
   page,
 }) => {
-  await page.goto("/");
-  await expect(page.getByRole("banner")).toContainText("Aria Web");
-  await expect(page.getByRole("navigation", { name: "Workflow map" })).toBeVisible();
-  await expect(page.getByRole("main")).toContainText("Workspace");
-  await expect(page.getByRole("region", { name: "Provider stream" })).toBeVisible();
+  const seeded = await seedStoryWorkspace(page, "Aria E2E");
 
-  await page.getByLabel("任务请求").fill("实现 Fibonacci square sum");
-  await page.getByLabel("change id").fill("aria-fibonacci-square");
-  await page.getByLabel("provider mode").selectOption("fake");
-  await page.getByRole("button", { name: "新建任务" }).click();
+  await page.goto(`/workbench/workspace/${seeded.sessionId}`);
 
-  await page.getByRole("button", { name: /推进|Advance/ }).click();
-  await expect(page.getByLabel("Provider prompt")).toBeVisible();
-  await page.getByLabel("Provider prompt").fill("确认后的 fake provider prompt");
-  await page.getByLabel("Policy override").selectOption("manual-all");
-  await page.getByRole("button", { name: "确认执行" }).click();
+  await expect(page.getByText("Story Spec").first()).toBeVisible();
+  await expect(page.getByText("Author: Fake")).toBeVisible();
+  await expect(page.getByText("Reviewer: Fake")).toBeVisible();
 
-  await expect(page.getByRole("main").getByText("provider_output")).toBeVisible();
-  await expect(page.getByRole("button", { name: /coding_report/ })).toBeVisible();
-  await page.getByRole("button", { name: /回退/ }).click();
-  await expect(page.getByRole("dialog")).toContainText(/checkpoint|Checkpoint/);
-  await page.getByRole("button", { name: "执行回退" }).click();
+  await expect(page.getByTestId("chat-input-bar")).toBeVisible();
+  const contextInput = page.getByTestId("context-note-input");
+  await expect(contextInput).toBeEnabled();
+  await contextInput.fill("请生成 Story Spec 和验收标准");
+  await page.getByTestId("send-context-note").click();
 
-  await expect(
-    page.getByRole("navigation", { name: "Workflow map" }).getByRole("button", { name: /N16 dropped/ }).first(),
-  ).toBeVisible();
-  await expect(page.getByLabel("Provider prompt")).toBeVisible();
+  await expect(page.getByText("请生成 Story Spec 和验收标准").first()).toBeVisible();
+  await expect(page.getByTestId("timeline-node-context_note")).toBeVisible();
+  await page.getByTestId("start-generation").click();
+  await waitForStage(page, "等待确认", 60_000);
+  const gatePrompt = page.getByTestId("gate-prompt-entry");
+  await expect(gatePrompt).toBeVisible();
+  await expect(gatePrompt.getByRole("button", { name: "确认" })).toBeVisible();
+  await gatePrompt.getByRole("button", { name: "确认" }).click();
+
+  await expect(page.getByTestId("stage-badge")).toContainText("已完成", { timeout: 60_000 });
+
+  await page.getByRole("button", { name: "返回" }).click();
+  const projectButton = page.getByRole("button", { name: seeded.projectName, exact: true });
+  await expect(projectButton).toBeEnabled();
+  await projectButton.click();
+  const storyColumn = page.getByRole("region", { name: "Story Spec 内容" });
+  await expect(storyColumn).toContainText(seeded.storyTitle);
+  await expect(storyColumn).toContainText("confirmed");
 });

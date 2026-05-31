@@ -94,9 +94,9 @@ impl WorkspaceRegistry {
     }
 
     pub fn ensure_default_workspace(&self) -> Result<Vec<WorkspaceRecord>, WorkspaceRegistryError> {
-        let existing = self.list()?;
-        if !existing.is_empty() {
-            return Ok(existing);
+        let path = self.path();
+        if path.exists() {
+            return self.list();
         }
         let name = self
             .app_root
@@ -111,6 +111,16 @@ impl WorkspaceRegistry {
             default_provider_mode: None,
         })?;
         self.list()
+    }
+
+    pub fn delete(&self, workspace_id: &str) -> Result<(), WorkspaceRegistryError> {
+        let mut records = self.list()?;
+        let initial_len = records.len();
+        records.retain(|record| record.workspace_id != workspace_id);
+        if records.len() == initial_len {
+            return Err(registry_error("workspace_not_found", workspace_id));
+        }
+        self.write(&records)
     }
 
     fn path(&self) -> PathBuf {

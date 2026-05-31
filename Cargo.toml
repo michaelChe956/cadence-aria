@@ -14,25 +14,48 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.102"
-axum = "0.8"
+async-trait = "0.1"
+axum = { version = "0.8", features = ["ws"] }
 chrono = { version = "0.4.44", features = ["clock", "serde"] }
-crossterm = "0.28"
+codex-app-server-protocol = { git = "https://github.com/openai/codex.git", package = "codex-app-server-protocol", tag = "rust-v0.124.0" }
+codex-protocol = { git = "https://github.com/openai/codex.git", package = "codex-protocol", tag = "rust-v0.124.0" }
+command-group = { version = "5.0", features = ["with-tokio"] }
 futures-util = "0.3"
 hex = "0.4.3"
 libc = "0.2.177"
 mime_guess = "2.0"
 pulldown-cmark = "0.13.3"
-ratatui = "0.29"
+rust-embed = { version = "8", features = ["debug-embed"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 sha2 = "0.10.9"
 thiserror = "2.0.18"
 tokio = { version = "1.52.1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-util = "0.7"
+tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["fs", "trace"] }
+tracing = "0.1"
 uuid = { version = "1.23.1", features = ["v4"] }
 
 [dev-dependencies]
 serde_yaml = "0.9.34"
 tempfile = "3.27.0"
-tower = { version = "0.5", features = ["util"] }
+tokio-tungstenite = "0.29"
+
+# 开发/测试构建：用更轻的调试信息以控制 target 体积
+[profile.dev]
+debug = "line-tables-only"
+
+# 依赖项不带本地调试信息，并带轻度优化（依赖代码不调试，无需 debuginfo）
+[profile.dev.package."*"]
+debug = false
+opt-level = 1
+
+# Release 构建：嵌入前端 + git 重依赖后控制二进制体积（npx 分发友好）
+[profile.release]
+strip = true
+lto = true
+opt-level = "s"
+codegen-units = 1
+

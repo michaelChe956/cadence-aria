@@ -86,6 +86,7 @@ case "${1:-run}" in
     exit 0
     ;;
   run)
+    cat >/dev/null
     echo "provider log without sentinel"
     exit 0
     ;;
@@ -102,6 +103,7 @@ case "${1:-run}" in
     exit 0
     ;;
   run)
+    cat >/dev/null
     echo "<ARIA_STRUCTURED_OUTPUT>"
     echo '{"artifact_kind":"spec"}'
     echo "</ARIA_STRUCTURED_OUTPUT>"
