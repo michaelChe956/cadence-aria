@@ -12,6 +12,13 @@
 
 **前置：** 本分册所有 `cargo` 命令前必须先 `pnpm -C web build` 生成 `web/dist`（否则 Task 3 起 build.rs 会硬失败）。
 
+> **执行进度（subagent-driven 实测修正）：**
+> - **Task 1 ✅ 完成**（commit `21764b5`）。注：首次加依赖时 `cargo check --locked` 必然失败（lock 需更新），改用 `cargo check`（去 `--locked`）更新 lock 后通过，符合 Task 注解「Cargo.lock 更新属正常」。
+> - **Task 2 + Task 5 ✅ 合并完成**（commit `6980780`）。**两处计划缺陷已修正**：
+>   ① `tower` 仅在 `[dev-dependencies]`，`serve_static` 运行时需 `tower::util::ServiceExt::oneshot`，故将 `tower = { version = "0.5", features = ["util"] }` 从 dev-deps **提升为主依赖**；import 用 `tower::util::ServiceExt`（非 `tower::ServiceExt`）。
+>   ② `static_dist_service()` 返回类型由 `ServeDir` 变为 `StaticDistService`（不再实现 `Service`），导致 app.rs 旧 `.fallback_service(...)` 约束不满足、**lib 无法独立编译**。故 Task 2 与 Task 5（app.rs 挂载点适配）必须合并提交，不能分两次。后续执行 **跳过 Task 5**（已含在此提交）。
+
+
 ---
 
 ## 文件结构
