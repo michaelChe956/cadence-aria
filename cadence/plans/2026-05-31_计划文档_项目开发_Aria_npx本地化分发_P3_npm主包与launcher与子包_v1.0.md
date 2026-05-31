@@ -12,6 +12,16 @@
 
 **前置：** P1（前端嵌入）+ P2（release profile）已完成——本分册冒烟需要「发布形态」的 release 二进制。本机已确认 node v25 / pnpm 10。
 
+> **执行进度（subagent-driven 实测）：全部完成 ✅**（Task 1~9，commit `6487a60`…`27a39b3`）。修正 4 处计划缺陷：
+> - **测试命令**：node v25 下 `node --test npm/cli/test/`（目录形式）会把目录当模块 require 而报错；改用 glob `node --test "npm/cli/test/*.test.mjs"`。最终 16 个 launcher 单测全绿。
+> - **CJS/ESM 互操作**：测试 `import { x } from "../lib/x.js"`（CJS 默认导出具名）在本机不稳，改为 `import mod from "..."; const { x } = mod;`。
+> - **`.mjs` 不能用 `require`**：`scripts/pack-npm.mjs` 与 `scripts/smoke-npx.mjs` 计划写成 CJS 风格但用 `.mjs` 扩展名，矛盾；改写为 ESM（`import` + `fileURLToPath(import.meta.url)`）。
+> - **npm install 挂起**：冒烟 `npm install` 本地 tgz 时，npm 会去 registry 解析主包声明的、尚未发布的 `@cadence-aria/cli-*@<smoke版本>` optionalDependencies 而挂起；加 `--offline` 解决（仅用本地 tgz）。
+> - **launcher 逻辑 bug（冒烟暴露的真实缺陷）**：原 `web --port` 才退出默认模式的判定太粗——`web --check` 被误判为默认 web 模式，launcher 劫持端口起真实服务、忽略 `--check`，导致冒烟挂起。修正为「**恰好只传 `web`**（无任何其它参数）才是默认 web 模式」，并加 `web --check`/`web --host` 回归测试。
+> - **Task 5 resolveBinary cwd 回退** 已合并进 Task 1 的 platform.js。
+> - 冒烟最终 `exit=0`，「✓ 执行位保留」「✓ 参数透传 (web --check)」「冒烟通过 ✅」。
+
+
 ---
 
 ## 文件结构
