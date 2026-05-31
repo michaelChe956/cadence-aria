@@ -51,3 +51,11 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 debug = false
 opt-level = 1
+
+# Release 构建：嵌入前端 + git 重依赖后控制二进制体积（npx 分发友好）
+[profile.release]
+strip = true
+lto = true
+opt-level = "s"
+codegen-units = 1
+
