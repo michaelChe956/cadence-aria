@@ -25,6 +25,10 @@ run("git", ["commit", "-m", "initial workspace"]);
 
 process.env.ARIA_PROVIDER_MODE = "fake";
 process.env.ARIA_E2E_TEST_CONTROLS = "1";
+// 嵌入改造后，e2e 通过 ARIA_WEB_DIST 指向源码树 web/dist，
+// 使前端改动无需重编 Rust（与 dev 工作流一致）。
+process.env.ARIA_WEB_DIST = new URL("../dist", import.meta.url).pathname;
+
 
 const child = spawn(
   "cargo",
