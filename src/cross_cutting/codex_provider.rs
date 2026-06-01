@@ -257,24 +257,34 @@ where
     }))
     .await?;
 
-    let thread_response = peer
-        .request(json!({
-            "jsonrpc": "2.0",
-            "method": "thread/start",
-            "params": {
-                "cwd": input.working_dir,
-                "approvalPolicy": match input.permission_mode {
-                    ProviderPermissionMode::Auto => "never",
-                    ProviderPermissionMode::Supervised => "on-request",
+    let thread_id = if let Some(session_id) = input
+        .resume_provider_session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|session_id| !session_id.is_empty())
+    {
+        Some(session_id.to_string())
+    } else {
+        let thread_response = peer
+            .request(json!({
+                "jsonrpc": "2.0",
+                "method": "thread/start",
+                "params": {
+                    "cwd": input.working_dir.clone(),
+                    "approvalPolicy": match input.permission_mode {
+                        ProviderPermissionMode::Auto => "never",
+                        ProviderPermissionMode::Supervised => "on-request",
+                    },
+                    "ephemeral": true,
                 },
-                "ephemeral": true,
-            },
-        }))
-        .await?;
-    let thread_id = thread_response
-        .pointer("/thread/id")
-        .and_then(Value::as_str)
-        .map(ToString::to_string);
+            }))
+            .await?;
+        thread_response
+            .pointer("/thread/id")
+            .or_else(|| thread_response.pointer("/id"))
+            .and_then(Value::as_str)
+            .map(ToString::to_string)
+    };
     let turn_thread_id = thread_id.clone().unwrap_or_default();
 
     let turn_response = peer
@@ -893,6 +903,23 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn codex_resume_uses_existing_thread_without_starting_new_thread() {
+        let fixture =
+            executable_fixture("tests/fixtures/provider/codex_app_server_resume_fixture.sh");
+        let provider = CodexProvider::new(fixture);
+        let mut input = streaming_input(ProviderType::Codex, ProviderPermissionMode::Auto);
+        input.resume_provider_session_id = Some("codex-thread-123".to_string());
+        let mut session = provider
+            .start(input, CancellationToken::new())
+            .await
+            .unwrap();
+
+        let completed = recv_completed(&mut session.events).await;
+
+        assert_eq!(completed, "resumed done");
     }
 
     #[tokio::test]
