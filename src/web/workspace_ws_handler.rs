@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket, close_code};
 use axum::extract::{Path, State, WebSocketUpgrade};
@@ -22,7 +25,7 @@ use crate::product::workspace_engine::{
     WorkspaceSession, WorkspaceStage,
 };
 use crate::product::workspace_repository::workspace_repository_for_session;
-use crate::web::state::WebAppState;
+use crate::web::state::{WebAppState, WorkspaceActiveRun, WorkspaceRunRegistry};
 use crate::web::test_controls::WorkspaceSocketControl;
 use crate::web::workspace_context::ensure_workspace_context_message;
 use crate::web::workspace_ws_types::{
@@ -52,6 +55,8 @@ enum OutboundControl {
     CloseDueToIdleTimeout,
     CloseForTestDrop,
 }
+
+static NEXT_ACTIVE_RUN_TOKEN: AtomicU64 = AtomicU64::new(1);
 
 async fn send_json_outbound<T: serde::Serialize>(
     outbound_tx: &mpsc::Sender<OutboundControl>,
@@ -149,8 +154,7 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
     )));
 
     let session_state = {
-        let mut engine = engine.lock().await;
-        engine.recover_stale_active_run_after_disconnect().await;
+        let engine = engine.lock().await;
         engine.build_session_state()
     };
     if let Ok(json) = serde_json::to_string(&session_state) {
@@ -324,8 +328,16 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
         }
     });
 
-    let current_run: Arc<Mutex<Option<ActiveRun>>> = Arc::new(Mutex::new(None));
+    let current_run: Arc<Mutex<Option<WorkspaceActiveRun>>> = Arc::new(Mutex::new(None));
     let next_run_id: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
+    let run_context = ProviderRunContext {
+        provider_registry: state.provider_registry.clone(),
+        engine: engine.clone(),
+        current_run: current_run.clone(),
+        workspace_runs: state.workspace_runs.clone(),
+        session_id: session_id.clone(),
+        next_run_id: next_run_id.clone(),
+    };
     let last_client_message_at = Arc::new(Mutex::new(tokio::time::Instant::now()));
     let current_run_for_idle = current_run.clone();
     let idle_timeout_task = spawn_idle_timeout_task(
@@ -390,10 +402,7 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
         match in_msg {
             WsInMessage::UserMessage { content } => {
                 if let Err(message) = spawn_provider_run_from_handler(
-                    state.provider_registry.clone(),
-                    engine.clone(),
-                    current_run.clone(),
-                    next_run_id.clone(),
+                    run_context.clone(),
                     ProviderRunKind::Author { content },
                 )
                 .await
@@ -403,11 +412,7 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                 }
             }
             WsInMessage::Rollback { checkpoint_id } => {
-                let active = { current_run.lock().await.take() };
-                if let Some(run) = active {
-                    let _ = run.command_tx.send(ProviderCommand::Abort).await;
-                    run.cancel.cancel();
-                }
+                abort_active_run(&current_run, &state.workspace_runs, &session_id).await;
                 let mut engine = engine.lock().await;
                 if let Err(e) = engine.handle_rollback(&checkpoint_id).await {
                     let err = WsOutMessage::Error { message: e };
@@ -419,10 +424,7 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
             }
             WsInMessage::Confirm => {
                 handle_human_confirm_from_handler(
-                    state.provider_registry.clone(),
-                    engine.clone(),
-                    current_run.clone(),
-                    next_run_id.clone(),
+                    run_context.clone(),
                     outbound_tx.clone(),
                     HumanConfirmDecision::Confirm,
                     None,
@@ -445,13 +447,8 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                 reason,
             } => {
                 tracing::info!(permission_id = %id, approved, "ws inbound permission response");
-                let command_tx = {
-                    current_run
-                        .lock()
-                        .await
-                        .as_ref()
-                        .map(|run| run.command_tx.clone())
-                };
+                let command_tx =
+                    active_run_command_tx(&current_run, &state.workspace_runs, &session_id).await;
                 if let Some(command_tx) = command_tx {
                     let _ = command_tx
                         .send(ProviderCommand::PermissionResponse {
@@ -474,13 +471,8 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                 free_text,
             } => {
                 tracing::info!(choice_id = %id, "ws inbound choice response");
-                let command_tx = {
-                    current_run
-                        .lock()
-                        .await
-                        .as_ref()
-                        .map(|run| run.command_tx.clone())
-                };
+                let command_tx =
+                    active_run_command_tx(&current_run, &state.workspace_runs, &session_id).await;
                 if let Some(command_tx) = command_tx
                     && command_tx
                         .send(ProviderCommand::ChoiceResponse {
@@ -503,10 +495,7 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                 match prompt {
                     Ok(content) => {
                         if let Err(message) = spawn_provider_run_from_handler(
-                            state.provider_registry.clone(),
-                            engine.clone(),
-                            current_run.clone(),
-                            next_run_id.clone(),
+                            run_context.clone(),
                             ProviderRunKind::Author { content },
                         )
                         .await
@@ -537,10 +526,7 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                 extra_context,
             } => {
                 handle_review_decision_from_handler(
-                    state.provider_registry.clone(),
-                    engine.clone(),
-                    current_run.clone(),
-                    next_run_id.clone(),
+                    run_context.clone(),
                     outbound_tx.clone(),
                     decision,
                     extra_context,
@@ -548,11 +534,7 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                 .await;
             }
             WsInMessage::Abort => {
-                let active = { current_run.lock().await.take() };
-                if let Some(run) = active {
-                    let _ = run.command_tx.send(ProviderCommand::Abort).await;
-                    run.cancel.cancel();
-                }
+                abort_active_run(&current_run, &state.workspace_runs, &session_id).await;
             }
             WsInMessage::Ping => {
                 let _ = send_json_outbound(&outbound_tx, &WsOutMessage::Pong).await;
@@ -585,10 +567,7 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                     Ok((_node, locked)) => {
                         let _ = send_json_outbound(&outbound_tx, &locked).await;
                         if let Err(message) = spawn_provider_run_from_handler(
-                            state.provider_registry.clone(),
-                            engine.clone(),
-                            current_run.clone(),
-                            next_run_id.clone(),
+                            run_context.clone(),
                             ProviderRunKind::Author {
                                 content: String::new(),
                             },
@@ -611,10 +590,7 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
             } => {
                 let (decision, extra_context) = map_revision_path(path, extra_context);
                 handle_review_decision_from_handler(
-                    state.provider_registry.clone(),
-                    engine.clone(),
-                    current_run.clone(),
-                    next_run_id.clone(),
+                    run_context.clone(),
                     outbound_tx.clone(),
                     decision,
                     extra_context,
@@ -624,10 +600,7 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
             WsInMessage::RequestRevision { feedback } => {
                 let payload = serde_json::to_value(feedback).ok();
                 handle_human_confirm_from_handler(
-                    state.provider_registry.clone(),
-                    engine.clone(),
-                    current_run.clone(),
-                    next_run_id.clone(),
+                    run_context.clone(),
                     outbound_tx.clone(),
                     HumanConfirmDecision::RequestChange,
                     payload,
@@ -636,10 +609,7 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
             }
             WsInMessage::HumanConfirm { decision, payload } => {
                 handle_human_confirm_from_handler(
-                    state.provider_registry.clone(),
-                    engine.clone(),
-                    current_run.clone(),
-                    next_run_id.clone(),
+                    run_context.clone(),
                     outbound_tx.clone(),
                     decision,
                     payload,
@@ -652,17 +622,22 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
     let active = { current_run.lock().await.take() };
     if let Some(run) = active {
         let last_active_run_id = format!("run-{}", run.id);
-        let _ = run.command_tx.send(ProviderCommand::Abort).await;
-        run.cancel.cancel();
-        let mut engine = engine.lock().await;
-        let _ = engine
-            .append_aborted_by_disconnect(last_active_run_id)
+        let owned_registry_run = state
+            .workspace_runs
+            .remove_if_token(&session_id, run.token)
             .await;
-        engine
-            .transition_to_prepare_context_after_disconnect()
-            .await;
-        let state_msg = engine.build_session_state();
-        let _ = send_json_outbound(&outbound_tx, &state_msg).await;
+        abort_workspace_run(&run).await;
+        if owned_registry_run {
+            let mut engine = engine.lock().await;
+            let _ = engine
+                .append_aborted_by_disconnect(last_active_run_id)
+                .await;
+            engine
+                .transition_to_prepare_context_after_disconnect()
+                .await;
+            let state_msg = engine.build_session_state();
+            let _ = send_json_outbound(&outbound_tx, &state_msg).await;
+        }
     }
     drop(outbound_tx);
     idle_timeout_task.abort();
@@ -674,31 +649,32 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
     let _ = send_task.await;
 }
 
-async fn handle_review_decision_from_handler(
+#[derive(Clone)]
+struct ProviderRunContext {
     provider_registry: Arc<ProviderRegistry>,
     engine: Arc<Mutex<WorkspaceEngine>>,
-    current_run: Arc<Mutex<Option<ActiveRun>>>,
+    current_run: Arc<Mutex<Option<WorkspaceActiveRun>>>,
+    workspace_runs: WorkspaceRunRegistry,
+    session_id: String,
     next_run_id: Arc<Mutex<u64>>,
+}
+
+async fn handle_review_decision_from_handler(
+    run_context: ProviderRunContext,
     outbound_tx: mpsc::Sender<OutboundControl>,
     decision: String,
     extra_context: Option<String>,
 ) {
     let outcome = {
-        let mut engine = engine.lock().await;
+        let mut engine = run_context.engine.lock().await;
         engine.handle_review_decision(decision, extra_context).await
     };
 
     match outcome {
         Ok(ReviewDecisionOutcome::HumanConfirm) => {}
         Ok(ReviewDecisionOutcome::StartRevision) => {
-            if let Err(message) = spawn_provider_run_from_handler(
-                provider_registry,
-                engine,
-                current_run,
-                next_run_id,
-                ProviderRunKind::Revision,
-            )
-            .await
+            if let Err(message) =
+                spawn_provider_run_from_handler(run_context, ProviderRunKind::Revision).await
             {
                 let err = WsOutMessage::Error { message };
                 let _ = send_json_outbound(&outbound_tx, &err).await;
@@ -712,30 +688,21 @@ async fn handle_review_decision_from_handler(
 }
 
 async fn handle_human_confirm_from_handler(
-    provider_registry: Arc<ProviderRegistry>,
-    engine: Arc<Mutex<WorkspaceEngine>>,
-    current_run: Arc<Mutex<Option<ActiveRun>>>,
-    next_run_id: Arc<Mutex<u64>>,
+    run_context: ProviderRunContext,
     outbound_tx: mpsc::Sender<OutboundControl>,
     decision: HumanConfirmDecision,
     payload: Option<serde_json::Value>,
 ) {
     let outcome = {
-        let mut engine = engine.lock().await;
+        let mut engine = run_context.engine.lock().await;
         engine.handle_human_confirm(decision, payload).await
     };
 
     match outcome {
         Ok(ReviewDecisionOutcome::HumanConfirm) => {}
         Ok(ReviewDecisionOutcome::StartRevision) => {
-            if let Err(message) = spawn_provider_run_from_handler(
-                provider_registry,
-                engine,
-                current_run,
-                next_run_id,
-                ProviderRunKind::Revision,
-            )
-            .await
+            if let Err(message) =
+                spawn_provider_run_from_handler(run_context, ProviderRunKind::Revision).await
             {
                 let err = WsOutMessage::Error { message };
                 let _ = send_json_outbound(&outbound_tx, &err).await;
@@ -838,6 +805,7 @@ fn message_type(msg: &WsInMessage) -> &'static str {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
     use crate::web::workspace_ws_types::{
@@ -1120,34 +1088,65 @@ mod tests {
     }
 }
 
-#[derive(Debug)]
-struct ActiveRun {
-    id: u64,
-    cancel: CancellationToken,
-    command_tx: mpsc::Sender<ProviderCommand>,
-}
-
 enum ProviderRunKind {
     Author { content: String },
     Revision,
 }
 
-async fn abort_active_run(current_run: &Arc<Mutex<Option<ActiveRun>>>) {
+async fn active_run_command_tx(
+    current_run: &Arc<Mutex<Option<WorkspaceActiveRun>>>,
+    workspace_runs: &WorkspaceRunRegistry,
+    session_id: &str,
+) -> Option<mpsc::Sender<ProviderCommand>> {
+    let local = {
+        current_run
+            .lock()
+            .await
+            .as_ref()
+            .map(|run| run.command_tx.clone())
+    };
+    if local.is_some() {
+        return local;
+    }
+    workspace_runs.command_tx(session_id).await
+}
+
+async fn abort_workspace_run(run: &WorkspaceActiveRun) {
+    let _ = run.command_tx.send(ProviderCommand::Abort).await;
+    run.cancel.cancel();
+}
+
+async fn abort_active_run(
+    current_run: &Arc<Mutex<Option<WorkspaceActiveRun>>>,
+    workspace_runs: &WorkspaceRunRegistry,
+    session_id: &str,
+) {
     let active = { current_run.lock().await.take() };
     if let Some(run) = active {
-        let _ = run.command_tx.send(ProviderCommand::Abort).await;
-        run.cancel.cancel();
+        let _ = workspace_runs.remove_if_token(session_id, run.token).await;
+        abort_workspace_run(&run).await;
+        return;
+    }
+
+    if let Some(run) = workspace_runs.take(session_id).await {
+        abort_workspace_run(&run).await;
     }
 }
 
 async fn spawn_provider_run_from_handler(
-    provider_registry: Arc<ProviderRegistry>,
-    engine: Arc<Mutex<WorkspaceEngine>>,
-    current_run: Arc<Mutex<Option<ActiveRun>>>,
-    next_run_id: Arc<Mutex<u64>>,
+    run_context: ProviderRunContext,
     run_kind: ProviderRunKind,
 ) -> Result<(), String> {
-    abort_active_run(&current_run).await;
+    let ProviderRunContext {
+        provider_registry,
+        engine,
+        current_run,
+        workspace_runs,
+        session_id,
+        next_run_id,
+    } = run_context;
+
+    abort_active_run(&current_run, &workspace_runs, &session_id).await;
 
     let provider_name = {
         let engine = engine.lock().await;
@@ -1163,13 +1162,17 @@ async fn spawn_provider_run_from_handler(
         *next
     };
     let run_label = format!("run-{run_id}");
+    let run_token = NEXT_ACTIVE_RUN_TOKEN.fetch_add(1, Ordering::Relaxed);
     let run_cancel = CancellationToken::new();
     let (command_tx, command_rx) = mpsc::channel(8);
-    *current_run.lock().await = Some(ActiveRun {
+    let active_run = WorkspaceActiveRun {
         id: run_id,
+        token: run_token,
         cancel: run_cancel.clone(),
-        command_tx,
-    });
+        command_tx: command_tx.clone(),
+    };
+    *current_run.lock().await = Some(active_run.clone());
+    workspace_runs.insert(session_id.clone(), active_run).await;
 
     {
         let mut engine = engine.lock().await;
@@ -1178,6 +1181,8 @@ async fn spawn_provider_run_from_handler(
 
     let engine_for_run = engine.clone();
     let current_run_for_task = current_run.clone();
+    let workspace_runs_for_task = workspace_runs.clone();
+    let session_id_for_task = session_id.clone();
     let provider_registry_for_run = provider_registry.clone();
     tokio::spawn(async move {
         let mut engine = engine_for_run.lock().await;
@@ -1207,11 +1212,14 @@ async fn spawn_provider_run_from_handler(
             {
                 let mut current = current_run_for_task.lock().await;
                 if let Some(active) = current.as_mut()
-                    && active.id == run_id
+                    && active.token == run_token
                 {
-                    active.command_tx = review_command_tx;
+                    active.command_tx = review_command_tx.clone();
                 }
             }
+            workspace_runs_for_task
+                .replace_command_tx_if_token(&session_id_for_task, run_token, review_command_tx)
+                .await;
             engine
                 .drive_review_session(provider_for_review, review_command_rx)
                 .await;
@@ -1219,8 +1227,14 @@ async fn spawn_provider_run_from_handler(
         engine.mark_active_run_finished(&run_label);
         drop(engine);
 
+        let _ = workspace_runs_for_task
+            .remove_if_token(&session_id_for_task, run_token)
+            .await;
         let mut current = current_run_for_task.lock().await;
-        if current.as_ref().is_some_and(|active| active.id == run_id) {
+        if current
+            .as_ref()
+            .is_some_and(|active| active.token == run_token)
+        {
             *current = None;
         }
     });

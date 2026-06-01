@@ -1,21 +1,79 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex as StdMutex};
 
 use crate::cross_cutting::claude_code_provider::ClaudeCodeProvider;
 use crate::cross_cutting::codex_provider::CodexProvider;
 use crate::cross_cutting::provider_registry::ProviderRegistry;
+use crate::cross_cutting::streaming_provider::ProviderCommand;
 use crate::product::models::ProviderName;
 use crate::web::events::EventHub;
 use crate::web::runtime::WebRuntime;
 use crate::web::test_controls::{TestControlledFakeStreamingProvider, TestControls};
+use tokio::sync::{Mutex as AsyncMutex, mpsc};
+use tokio_util::sync::CancellationToken;
+
+#[derive(Debug, Clone)]
+pub struct WorkspaceActiveRun {
+    pub id: u64,
+    pub token: u64,
+    pub cancel: CancellationToken,
+    pub command_tx: mpsc::Sender<ProviderCommand>,
+}
+
+#[derive(Clone, Default)]
+pub struct WorkspaceRunRegistry {
+    runs: Arc<AsyncMutex<HashMap<String, WorkspaceActiveRun>>>,
+}
+
+impl WorkspaceRunRegistry {
+    pub async fn insert(&self, session_id: String, run: WorkspaceActiveRun) {
+        self.runs.lock().await.insert(session_id, run);
+    }
+
+    pub async fn take(&self, session_id: &str) -> Option<WorkspaceActiveRun> {
+        self.runs.lock().await.remove(session_id)
+    }
+
+    pub async fn command_tx(&self, session_id: &str) -> Option<mpsc::Sender<ProviderCommand>> {
+        self.runs
+            .lock()
+            .await
+            .get(session_id)
+            .map(|run| run.command_tx.clone())
+    }
+
+    pub async fn remove_if_token(&self, session_id: &str, token: u64) -> bool {
+        let mut runs = self.runs.lock().await;
+        if runs.get(session_id).is_some_and(|run| run.token == token) {
+            runs.remove(session_id);
+            return true;
+        }
+        false
+    }
+
+    pub async fn replace_command_tx_if_token(
+        &self,
+        session_id: &str,
+        token: u64,
+        command_tx: mpsc::Sender<ProviderCommand>,
+    ) {
+        if let Some(run) = self.runs.lock().await.get_mut(session_id)
+            && run.token == token
+        {
+            run.command_tx = command_tx;
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct WebAppState {
     pub workspace_root: PathBuf,
-    pub runtime: Arc<Mutex<WebRuntime>>,
+    pub runtime: Arc<StdMutex<WebRuntime>>,
     pub events: EventHub,
     pub provider_registry: Arc<ProviderRegistry>,
     pub test_controls: TestControls,
+    pub workspace_runs: WorkspaceRunRegistry,
 }
 
 impl WebAppState {
@@ -27,10 +85,11 @@ impl WebAppState {
         let test_controls = TestControls::default();
         Self {
             workspace_root,
-            runtime: Arc::new(Mutex::new(runtime)),
+            runtime: Arc::new(StdMutex::new(runtime)),
             events,
             provider_registry: default_provider_registry(test_controls.clone()),
             test_controls,
+            workspace_runs: WorkspaceRunRegistry::default(),
         }
     }
 
@@ -55,10 +114,11 @@ impl WebAppState {
     ) -> Self {
         Self {
             workspace_root,
-            runtime: Arc::new(Mutex::new(runtime)),
+            runtime: Arc::new(StdMutex::new(runtime)),
             events,
             provider_registry,
             test_controls: TestControls::default(),
+            workspace_runs: WorkspaceRunRegistry::default(),
         }
     }
 }
