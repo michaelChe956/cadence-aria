@@ -18,8 +18,8 @@ use crate::product::coding_attempt_store::CodingAttemptStore;
 use crate::product::coding_models::{
     AnalystVerdict, CodeReviewReport, CodingAgentRole, CodingAttemptStatus, CodingChatEntry,
     CodingContextNote, CodingEntryType, CodingExecutionAttempt, CodingExecutionStage,
-    CodingReworkInstruction, CodingTimelineNode, CodingTimelineNodeStatus, InternalPrReview,
-    PushStatus, ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict,
+    CodingProviderRole, CodingReworkInstruction, CodingTimelineNode, CodingTimelineNodeStatus,
+    InternalPrReview, PushStatus, ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict,
     TestingOverallStatus, TestingReport,
 };
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
@@ -27,7 +27,9 @@ use crate::product::git_workspace_service::{GitWorkspaceError, GitWorkspaceServi
 use crate::product::id::next_sequential_id;
 use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::LifecycleStore;
-use crate::product::models::{ProviderName, WorkItemStatus, WorkspaceType};
+use crate::product::models::{
+    ProviderConversationRef, ProviderConversationRole, ProviderName, WorkItemStatus, WorkspaceType,
+};
 use crate::product::test_executor::{TestCommandSpec, TestExecutorError, run_all_tests};
 use crate::product::tester_agent_loop::{
     TesterAgentOptions, build_tester_system_prompt, build_testing_report, execute_tester_tool_call,
@@ -82,7 +84,20 @@ struct CodingProviderStreamRun<'a> {
     legacy_input: &'a AdapterInput,
     input: StreamingProviderInput,
     provider_name: &'a ProviderName,
+    provider_role: CodingProviderRole,
     command_rx: &'a mut mpsc::Receiver<CodingRunnerCommand>,
+}
+
+fn provider_conversation_role_for_coding_role(
+    role: &CodingProviderRole,
+) -> ProviderConversationRole {
+    match role {
+        CodingProviderRole::Coder => ProviderConversationRole::Coder,
+        CodingProviderRole::Tester => ProviderConversationRole::Tester,
+        CodingProviderRole::Analyst => ProviderConversationRole::Analyst,
+        CodingProviderRole::CodeReviewer => ProviderConversationRole::CodeReviewer,
+        CodingProviderRole::InternalReviewer => ProviderConversationRole::InternalReviewer,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -103,6 +118,63 @@ impl CodingWorkspaceEngine {
             _git_service: git_service,
             event_tx,
         }
+    }
+
+    fn provider_resume_session_id_for_attempt(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        role: &CodingProviderRole,
+        provider: &ProviderName,
+    ) -> Option<String> {
+        let conversation_role = provider_conversation_role_for_coding_role(role);
+        attempt
+            .provider_conversations
+            .iter()
+            .find(|conversation| {
+                conversation.role == conversation_role && &conversation.provider == provider
+            })
+            .map(|conversation| conversation.provider_session_id.clone())
+            .filter(|id| !id.trim().is_empty())
+    }
+
+    fn record_attempt_provider_session(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        role: &CodingProviderRole,
+        provider: ProviderName,
+        provider_session_id: Option<String>,
+        node_id: &str,
+    ) -> Result<(), CodingWorkspaceEngineError> {
+        let Some(provider_session_id) = provider_session_id
+            .map(|id| id.trim().to_string())
+            .filter(|id| !id.is_empty())
+        else {
+            return Ok(());
+        };
+
+        let conversation_role = provider_conversation_role_for_coding_role(role);
+        let mut conversations = attempt.provider_conversations.clone();
+        let now = chrono::Utc::now().to_rfc3339();
+        if let Some(existing) = conversations.iter_mut().find(|conversation| {
+            conversation.role == conversation_role && conversation.provider == provider
+        }) {
+            existing.provider_session_id = provider_session_id;
+            existing.updated_at = now;
+            existing.last_node_id = Some(node_id.to_string());
+        } else {
+            conversations.push(ProviderConversationRef {
+                role: conversation_role,
+                provider,
+                provider_session_id,
+                updated_at: now,
+                last_node_id: Some(node_id.to_string()),
+            });
+        }
+
+        self.store
+            .replace_attempt_provider_conversations(&attempt.id, conversations)
+            .map_err(CodingWorkspaceEngineError::from)?;
+        Ok(())
     }
 
     pub async fn start_attempt(
@@ -254,12 +326,18 @@ impl CodingWorkspaceEngine {
             timeout: 2400,
             max_retries: 0,
         };
+        let resume_provider_session_id = self.provider_resume_session_id_for_attempt(
+            &attempt,
+            &CodingProviderRole::Coder,
+            &coder_provider,
+        );
         let input = StreamingProviderInput {
             provider_type: legacy_input.provider_type.clone(),
             role: legacy_input.role.clone(),
             prompt: legacy_input.prompt.clone(),
             working_dir: worktree_path.clone(),
-            session_id: None,
+            workspace_session_id: Some(attempt.id.clone()),
+            resume_provider_session_id,
             permission_mode: ProviderPermissionMode::Auto,
             env_vars: BTreeMap::new(),
             timeout_secs: legacy_input.timeout,
@@ -272,6 +350,7 @@ impl CodingWorkspaceEngine {
                 legacy_input: &legacy_input,
                 input,
                 provider_name: &coder_provider,
+                provider_role: CodingProviderRole::Coder,
                 command_rx,
             })
             .await?;
@@ -298,6 +377,7 @@ impl CodingWorkspaceEngine {
             legacy_input,
             input,
             provider_name,
+            provider_role,
             command_rx,
         } = run;
         let cancel = CancellationToken::new();
@@ -424,7 +504,17 @@ impl CodingWorkspaceEngine {
                                 })
                                 .await;
                         }
-                        ProviderEvent::Completed { full_output: completed_output, .. } => {
+                        ProviderEvent::Completed {
+                            full_output: completed_output,
+                            provider_session_id,
+                        } => {
+                            self.record_attempt_provider_session(
+                                attempt,
+                                &provider_role,
+                                provider_name.clone(),
+                                provider_session_id,
+                                node_id,
+                            )?;
                             if !completed_output.trim().is_empty() {
                                 full_output = completed_output;
                             }
@@ -742,12 +832,18 @@ impl CodingWorkspaceEngine {
             })
             .await;
 
+        let resume_provider_session_id = self.provider_resume_session_id_for_attempt(
+            &attempt,
+            &CodingProviderRole::Tester,
+            &tester_provider,
+        );
         let input = StreamingProviderInput {
             provider_type: provider_type_for_name(&tester_provider),
             role: AdapterRole::Reviewer,
             prompt,
             working_dir: worktree_path.clone(),
-            session_id: None,
+            workspace_session_id: Some(attempt.id.clone()),
+            resume_provider_session_id,
             permission_mode: ProviderPermissionMode::Auto,
             env_vars: BTreeMap::new(),
             timeout_secs: options.timeout.as_secs().max(1),
@@ -929,7 +1025,17 @@ impl CodingWorkspaceEngine {
                                 })
                                 .await;
                         }
-                        ProviderEvent::Completed { full_output: completed_output, .. } => {
+                        ProviderEvent::Completed {
+                            full_output: completed_output,
+                            provider_session_id,
+                        } => {
+                            self.record_attempt_provider_session(
+                                &attempt,
+                                &CodingProviderRole::Tester,
+                                tester_provider.clone(),
+                                provider_session_id,
+                                &node.id,
+                            )?;
                             if !completed_output.trim().is_empty() {
                                 full_output = completed_output;
                             }
@@ -1083,7 +1189,14 @@ impl CodingWorkspaceEngine {
             timeout: 2400,
             max_retries: 0,
         };
-        let provider_input = streaming_input_from_adapter(&input, worktree_path.clone());
+        let resume_provider_session_id = self.provider_resume_session_id_for_attempt(
+            &attempt,
+            &CodingProviderRole::CodeReviewer,
+            &reviewer,
+        );
+        let mut provider_input = streaming_input_from_adapter(&input, worktree_path.clone());
+        provider_input.workspace_session_id = Some(attempt.id.clone());
+        provider_input.resume_provider_session_id = resume_provider_session_id;
         let full_output = self
             .run_provider_stream_to_completion(CodingProviderStreamRun {
                 attempt: &attempt,
@@ -1092,6 +1205,7 @@ impl CodingWorkspaceEngine {
                 legacy_input: &input,
                 input: provider_input,
                 provider_name: &reviewer,
+                provider_role: CodingProviderRole::CodeReviewer,
                 command_rx,
             })
             .await?;
@@ -1223,7 +1337,14 @@ impl CodingWorkspaceEngine {
             timeout: 2400,
             max_retries: 0,
         };
-        let provider_input = streaming_input_from_adapter(&input, worktree_path.clone());
+        let resume_provider_session_id = self.provider_resume_session_id_for_attempt(
+            &attempt,
+            &CodingProviderRole::Analyst,
+            &analyst_provider,
+        );
+        let mut provider_input = streaming_input_from_adapter(&input, worktree_path.clone());
+        provider_input.workspace_session_id = Some(attempt.id.clone());
+        provider_input.resume_provider_session_id = resume_provider_session_id;
         let full_output = self
             .run_provider_stream_to_completion(CodingProviderStreamRun {
                 attempt: &attempt,
@@ -1232,6 +1353,7 @@ impl CodingWorkspaceEngine {
                 legacy_input: &input,
                 input: provider_input,
                 provider_name: &analyst_provider,
+                provider_role: CodingProviderRole::Analyst,
                 command_rx,
             })
             .await?;
@@ -1324,7 +1446,14 @@ impl CodingWorkspaceEngine {
             timeout: 2400,
             max_retries: 0,
         };
-        let provider_input = streaming_input_from_adapter(&input, worktree_path.clone());
+        let resume_provider_session_id = self.provider_resume_session_id_for_attempt(
+            &attempt,
+            &CodingProviderRole::InternalReviewer,
+            &reviewer,
+        );
+        let mut provider_input = streaming_input_from_adapter(&input, worktree_path.clone());
+        provider_input.workspace_session_id = Some(attempt.id.clone());
+        provider_input.resume_provider_session_id = resume_provider_session_id;
         let full_output = self
             .run_provider_stream_to_completion(CodingProviderStreamRun {
                 attempt: &attempt,
@@ -1333,6 +1462,7 @@ impl CodingWorkspaceEngine {
                 legacy_input: &input,
                 input: provider_input,
                 provider_name: &reviewer,
+                provider_role: CodingProviderRole::InternalReviewer,
                 command_rx,
             })
             .await?;
@@ -2495,7 +2625,8 @@ fn streaming_input_from_adapter(
         role: input.role.clone(),
         prompt: input.prompt.clone(),
         working_dir,
-        session_id: None,
+        workspace_session_id: None,
+        resume_provider_session_id: None,
         permission_mode: ProviderPermissionMode::Auto,
         env_vars: BTreeMap::new(),
         timeout_secs: input.timeout,
@@ -3032,4 +3163,118 @@ fn truncate_prompt_section(value: &str, max_chars: usize) -> String {
     let mut truncated: String = value.chars().take(max_chars).collect();
     truncated.push_str("\n[truncated]");
     truncated
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::product::app_paths::ProductAppPaths;
+    use crate::product::coding_models::CodingProviderRole;
+    use crate::product::models::{ProviderConversationRef, ProviderConversationRole};
+    use crate::web::workspace_ws_types::ProviderConfigSnapshot;
+    use tempfile::tempdir;
+
+    #[test]
+    fn coding_provider_role_maps_to_provider_conversation_role() {
+        assert_eq!(
+            provider_conversation_role_for_coding_role(&CodingProviderRole::Coder),
+            ProviderConversationRole::Coder
+        );
+        assert_eq!(
+            provider_conversation_role_for_coding_role(&CodingProviderRole::Tester),
+            ProviderConversationRole::Tester
+        );
+        assert_eq!(
+            provider_conversation_role_for_coding_role(&CodingProviderRole::Analyst),
+            ProviderConversationRole::Analyst
+        );
+        assert_eq!(
+            provider_conversation_role_for_coding_role(&CodingProviderRole::CodeReviewer),
+            ProviderConversationRole::CodeReviewer
+        );
+        assert_eq!(
+            provider_conversation_role_for_coding_role(&CodingProviderRole::InternalReviewer),
+            ProviderConversationRole::InternalReviewer
+        );
+    }
+
+    #[test]
+    fn coding_provider_resume_session_id_is_isolated_by_role_and_provider() {
+        let store = CodingAttemptStore::new(ProductAppPaths::new(
+            tempdir().expect("tempdir").path().join(".aria"),
+        ));
+        let (tx, _rx) = mpsc::channel(8);
+        let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
+        let mut attempt = test_attempt("coding_attempt_0001");
+        attempt.provider_conversations = vec![
+            ProviderConversationRef {
+                role: ProviderConversationRole::Coder,
+                provider: ProviderName::ClaudeCode,
+                provider_session_id: "coder-session".to_string(),
+                updated_at: "2026-06-01T00:00:00Z".to_string(),
+                last_node_id: Some("coder-node".to_string()),
+            },
+            ProviderConversationRef {
+                role: ProviderConversationRole::Tester,
+                provider: ProviderName::ClaudeCode,
+                provider_session_id: "tester-session".to_string(),
+                updated_at: "2026-06-01T00:01:00Z".to_string(),
+                last_node_id: Some("tester-node".to_string()),
+            },
+        ];
+
+        assert_eq!(
+            engine.provider_resume_session_id_for_attempt(
+                &attempt,
+                &CodingProviderRole::Coder,
+                &ProviderName::ClaudeCode,
+            ),
+            Some("coder-session".to_string())
+        );
+        assert_eq!(
+            engine.provider_resume_session_id_for_attempt(
+                &attempt,
+                &CodingProviderRole::Tester,
+                &ProviderName::ClaudeCode,
+            ),
+            Some("tester-session".to_string())
+        );
+        assert_eq!(
+            engine.provider_resume_session_id_for_attempt(
+                &attempt,
+                &CodingProviderRole::Coder,
+                &ProviderName::Codex,
+            ),
+            None
+        );
+    }
+
+    fn test_attempt(id: &str) -> CodingExecutionAttempt {
+        CodingExecutionAttempt {
+            id: id.to_string(),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            work_item_id: "work_item_0001".to_string(),
+            attempt_no: 1,
+            status: CodingAttemptStatus::Running,
+            stage: CodingExecutionStage::Coding,
+            base_branch: "HEAD".to_string(),
+            branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::Codex),
+                review_rounds: 1,
+            },
+            provider_conversations: Vec::new(),
+            rework_count: 0,
+            max_auto_rework: 2,
+            head_commit: None,
+            pushed_remote: None,
+            review_request_id: None,
+            created_at: "2026-06-01T00:00:00Z".to_string(),
+            updated_at: "2026-06-01T00:00:00Z".to_string(),
+            completed_at: None,
+        }
+    }
 }

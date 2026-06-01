@@ -58,7 +58,11 @@ impl ClaudeCodeProvider {
         Self { command }
     }
 
-    fn build_args(&self, mode: ProviderPermissionMode) -> Vec<String> {
+    fn build_args(
+        &self,
+        mode: ProviderPermissionMode,
+        resume_provider_session_id: Option<&str>,
+    ) -> Vec<String> {
         let mut args = vec![
             "-p".to_string(),
             "--verbose".to_string(),
@@ -67,6 +71,14 @@ impl ClaudeCodeProvider {
             "--include-partial-messages".to_string(),
             "--replay-user-messages".to_string(),
         ];
+
+        if let Some(session_id) = resume_provider_session_id
+            .map(str::trim)
+            .filter(|session_id| !session_id.is_empty())
+        {
+            args.push("--resume".to_string());
+            args.push(session_id.to_string());
+        }
 
         if mode == ProviderPermissionMode::Supervised {
             args.push("--permission-prompt-tool=stdio".to_string());
@@ -282,7 +294,10 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
         input: StreamingProviderInput,
         cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
-        let args = self.build_args(input.permission_mode.clone());
+        let args = self.build_args(
+            input.permission_mode.clone(),
+            input.resume_provider_session_id.as_deref(),
+        );
         let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
         let command = self.command.to_string_lossy().to_string();
         let process = ProcessManager::spawn(
@@ -464,7 +479,8 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
             role: input.role.clone(),
             prompt: input.prompt.clone(),
             working_dir,
-            session_id: None,
+            workspace_session_id: None,
+            resume_provider_session_id: None,
             permission_mode: ProviderPermissionMode::Auto,
             env_vars: BTreeMap::new(),
             timeout_secs: input.timeout,
@@ -962,6 +978,29 @@ mod tests {
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(5);
 
+    #[test]
+    fn claude_args_include_resume_when_provider_session_is_available() {
+        let provider = ClaudeCodeProvider::new(PathBuf::from("claude"));
+        let args = provider.build_args(
+            ProviderPermissionMode::Supervised,
+            Some("claude-session-123"),
+        );
+
+        assert!(args.contains(&"--resume".to_string()));
+        assert!(args.contains(&"claude-session-123".to_string()));
+        assert!(!args.contains(&"--continue".to_string()));
+        assert!(!args.contains(&"--fork-session".to_string()));
+    }
+
+    #[test]
+    fn claude_args_do_not_include_resume_without_provider_session() {
+        let provider = ClaudeCodeProvider::new(PathBuf::from("claude"));
+        let args = provider.build_args(ProviderPermissionMode::Supervised, None);
+
+        assert!(!args.contains(&"--resume".to_string()));
+        assert!(!args.contains(&"--continue".to_string()));
+    }
+
     fn executable_fixture(relative_path: &str) -> PathBuf {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative_path);
         #[cfg(unix)]
@@ -987,7 +1026,8 @@ mod tests {
             role: AdapterRole::Orchestrator,
             prompt: "Run the fixture provider".to_string(),
             working_dir: std::env::current_dir().unwrap(),
-            session_id: None,
+            workspace_session_id: None,
+            resume_provider_session_id: None,
             permission_mode,
             env_vars: BTreeMap::new(),
             timeout_secs: 60,

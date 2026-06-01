@@ -10,9 +10,10 @@ use crate::product::id::next_sequential_id;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::models::{
     DesignKind, DesignSpecRecord, LifecycleConfirmationStatus, LifecycleWorkItemRecord, NodeDetail,
-    ProjectProviderDefaultsRecord, ProviderName, ProviderReviewRoundRecord, SpecVersionRecord,
-    StorySpecRecord, WorkItemPlanStatus, WorkItemStatus, WorkspaceMessageRecord,
-    WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType,
+    ProjectProviderDefaultsRecord, ProviderConversationRef, ProviderName,
+    ProviderReviewRoundRecord, SpecVersionRecord, StorySpecRecord, WorkItemPlanStatus,
+    WorkItemStatus, WorkspaceMessageRecord, WorkspaceSessionRecord, WorkspaceSessionStatus,
+    WorkspaceType,
 };
 use crate::web::workspace_ws_types::{ArtifactVersion, TimelineNode};
 
@@ -407,6 +408,7 @@ impl LifecycleStore {
             review_rounds: input.review_rounds,
             superpowers_enabled: input.superpowers_enabled,
             openspec_enabled: input.openspec_enabled,
+            provider_conversations: Vec::new(),
             messages: Vec::new(),
             created_at: now.clone(),
             updated_at: now,
@@ -465,6 +467,20 @@ impl LifecycleStore {
         let session_path = self.find_workspace_session_path(session_id)?;
         let mut session: WorkspaceSessionRecord = read_json(&session_path)?;
         session.messages = messages;
+        session.updated_at = Utc::now().to_rfc3339();
+        write_json(&session_path, &session)?;
+        Ok(session)
+    }
+
+    pub fn replace_workspace_provider_conversations(
+        &self,
+        session_id: &str,
+        provider_conversations: Vec<ProviderConversationRef>,
+    ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
+        validate_relative_id(session_id)?;
+        let session_path = self.find_workspace_session_path(session_id)?;
+        let mut session: WorkspaceSessionRecord = read_json(&session_path)?;
+        session.provider_conversations = provider_conversations;
         session.updated_at = Utc::now().to_rfc3339();
         write_json(&session_path, &session)?;
         Ok(session)

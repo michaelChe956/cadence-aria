@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -25,8 +26,11 @@ use cadence_aria::product::git_workspace_service::GitWorkspaceService;
 use cadence_aria::product::lifecycle_store::{
     CreateWorkItemInput, CreateWorkspaceSessionInput, LifecycleStore,
 };
-use cadence_aria::product::models::{ProviderName, WorkItemStatus, WorkspaceType};
+use cadence_aria::product::models::{
+    ProviderConversationRef, ProviderConversationRole, ProviderName, WorkItemStatus, WorkspaceType,
+};
 use cadence_aria::product::test_executor::TestCommandSpec;
+use cadence_aria::product::tester_agent_loop::TesterAgentOptions;
 use cadence_aria::protocol::contracts::{AdapterInput, AdapterRole, ProviderType};
 use cadence_aria::web::coding_ws_handler::CodingWsOutMessage;
 use cadence_aria::web::workspace_ws_types::{
@@ -224,6 +228,356 @@ async fn execute_coding_runs_provider_in_worktree_and_streams_timeline_events() 
         }
         other => panic!("expected coding node completed, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn coding_coder_run_resumes_previous_coder_provider_session() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree.clone()),
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::Codex),
+                review_rounds: 1,
+            },
+            ..create_input()
+        })
+        .expect("create attempt");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
+    let provider = SessionInputCapturingProvider::default();
+
+    let first = engine
+        .execute_coding(&attempt, &provider, &CodingExecutionContext::default())
+        .await
+        .expect("first coding run");
+    let second = engine
+        .execute_coding(&first, &provider, &CodingExecutionContext::default())
+        .await
+        .expect("second coding run");
+
+    assert_eq!(second.stage, CodingExecutionStage::Coding);
+    let inputs = provider.inputs.lock().expect("inputs lock");
+    assert_eq!(inputs.len(), 2);
+    assert_eq!(inputs[0].resume_provider_session_id, None);
+    assert_eq!(
+        inputs[1].resume_provider_session_id.as_deref(),
+        Some("coder-session-1")
+    );
+}
+
+#[tokio::test]
+async fn coding_tester_does_not_resume_coder_provider_session() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+            },
+            ..create_input()
+        })
+        .expect("create attempt");
+    let attempt = store
+        .replace_attempt_provider_conversations(
+            &attempt.id,
+            vec![
+                ProviderConversationRef {
+                    role: ProviderConversationRole::Coder,
+                    provider: ProviderName::ClaudeCode,
+                    provider_session_id: "coder-session-1".to_string(),
+                    updated_at: "2026-06-01T00:00:00Z".to_string(),
+                    last_node_id: Some("coding-node-1".to_string()),
+                },
+                ProviderConversationRef {
+                    role: ProviderConversationRole::Tester,
+                    provider: ProviderName::ClaudeCode,
+                    provider_session_id: "tester-session-1".to_string(),
+                    updated_at: "2026-06-01T00:01:00Z".to_string(),
+                    last_node_id: Some("testing-node-1".to_string()),
+                },
+            ],
+        )
+        .expect("persist provider conversations");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let provider = SessionInputCapturingProvider::with_outputs(
+        [r#"{"summary":"testing ok","bugs_found":[]}"#],
+        [Some("tester-session-2".to_string())],
+    );
+
+    let _report = engine
+        .execute_testing_with_provider(
+            &attempt,
+            &provider,
+            &CodingExecutionContext::default(),
+            &[],
+            TesterAgentOptions::default(),
+        )
+        .await
+        .expect("testing provider run");
+
+    let inputs = provider.inputs.lock().expect("inputs lock");
+    assert_eq!(inputs.len(), 1);
+    assert_eq!(
+        inputs[0].resume_provider_session_id.as_deref(),
+        Some("tester-session-1")
+    );
+    let updated = store
+        .get_attempt("project_0001", "issue_0001", &attempt.id)
+        .expect("updated attempt");
+    assert!(updated.provider_conversations.iter().any(|conversation| {
+        conversation.role == ProviderConversationRole::Tester
+            && conversation.provider == ProviderName::ClaudeCode
+            && conversation.provider_session_id == "tester-session-2"
+    }));
+}
+
+#[tokio::test]
+async fn coding_code_reviewer_run_does_not_resume_coder_or_tester_session() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    init_repo(&worktree);
+    fs::write(worktree.join("src.txt"), "hello\nreviewed\n").expect("modify file");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            base_branch: "HEAD".to_string(),
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+            },
+            ..create_input()
+        })
+        .expect("create attempt");
+    let attempt = store
+        .replace_attempt_provider_conversations(
+            &attempt.id,
+            vec![
+                ProviderConversationRef {
+                    role: ProviderConversationRole::Coder,
+                    provider: ProviderName::ClaudeCode,
+                    provider_session_id: "coder-session-1".to_string(),
+                    updated_at: "2026-06-01T00:00:00Z".to_string(),
+                    last_node_id: Some("coding-node-1".to_string()),
+                },
+                ProviderConversationRef {
+                    role: ProviderConversationRole::Tester,
+                    provider: ProviderName::ClaudeCode,
+                    provider_session_id: "tester-session-1".to_string(),
+                    updated_at: "2026-06-01T00:01:00Z".to_string(),
+                    last_node_id: Some("testing-node-1".to_string()),
+                },
+                ProviderConversationRef {
+                    role: ProviderConversationRole::CodeReviewer,
+                    provider: ProviderName::ClaudeCode,
+                    provider_session_id: "code-reviewer-session-0".to_string(),
+                    updated_at: "2026-06-01T00:02:00Z".to_string(),
+                    last_node_id: Some("code-review-node-0".to_string()),
+                },
+            ],
+        )
+        .expect("persist conversations");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let provider = SessionInputCapturingProvider::with_outputs(
+        [r#"{"verdict":"approve","summary":"code review ok","findings":[]}"#],
+        [Some("code-reviewer-session-1".to_string())],
+    );
+
+    let report = engine
+        .execute_code_review(&attempt, &provider)
+        .await
+        .expect("code review provider run");
+
+    assert_eq!(report.verdict, ReviewVerdict::Approve);
+    let inputs = provider.inputs.lock().expect("inputs lock");
+    assert_eq!(inputs.len(), 1);
+    assert_eq!(
+        inputs[0].resume_provider_session_id.as_deref(),
+        Some("code-reviewer-session-0")
+    );
+    let updated = store
+        .get_attempt("project_0001", "issue_0001", &attempt.id)
+        .expect("updated attempt");
+    assert!(updated.provider_conversations.iter().any(|conversation| {
+        conversation.role == ProviderConversationRole::CodeReviewer
+            && conversation.provider == ProviderName::ClaudeCode
+            && conversation.provider_session_id == "code-reviewer-session-1"
+    }));
+}
+
+#[tokio::test]
+async fn coding_analyst_rework_resumes_analyst_provider_session() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::Codex),
+                review_rounds: 1,
+            },
+            ..create_input()
+        })
+        .expect("create attempt");
+    let attempt = store
+        .replace_attempt_provider_conversations(
+            &attempt.id,
+            vec![ProviderConversationRef {
+                role: ProviderConversationRole::Analyst,
+                provider: ProviderName::ClaudeCode,
+                provider_session_id: "analyst-session-1".to_string(),
+                updated_at: "2026-06-01T00:00:00Z".to_string(),
+                last_node_id: Some("rework-node-1".to_string()),
+            }],
+        )
+        .expect("persist analyst conversation");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    store
+        .update_attempt_stage(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingExecutionStage::Testing,
+        )
+        .expect("testing stage");
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
+    let provider = SessionInputCapturingProvider::with_outputs(
+        [r#"{"verdict":"no_issue","summary":"testing ok"}"#],
+        [Some("analyst-session-2".to_string())],
+    );
+
+    engine
+        .execute_rework(&attempt, "testing evidence", &provider)
+        .await
+        .expect("analyst rework provider run");
+
+    let inputs = provider.inputs.lock().expect("inputs lock");
+    assert_eq!(inputs.len(), 1);
+    assert_eq!(
+        inputs[0].resume_provider_session_id.as_deref(),
+        Some("analyst-session-1")
+    );
+}
+
+#[tokio::test]
+async fn coding_internal_reviewer_resumes_internal_reviewer_provider_session() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    init_repo(&worktree);
+    fs::write(worktree.join("src.txt"), "hello\ninternal review\n").expect("modify file");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            base_branch: "HEAD".to_string(),
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+            },
+            ..create_input()
+        })
+        .expect("create attempt");
+    let attempt = store
+        .replace_attempt_provider_conversations(
+            &attempt.id,
+            vec![ProviderConversationRef {
+                role: ProviderConversationRole::InternalReviewer,
+                provider: ProviderName::ClaudeCode,
+                provider_session_id: "internal-reviewer-session-1".to_string(),
+                updated_at: "2026-06-01T00:00:00Z".to_string(),
+                last_node_id: Some("internal-review-node-1".to_string()),
+            }],
+        )
+        .expect("persist internal reviewer conversation");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    store
+        .update_attempt_stage(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingExecutionStage::ReviewRequest,
+        )
+        .expect("review request stage");
+    store
+        .save_review_request(&sample_review_request(&attempt.id))
+        .expect("save review request");
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
+    let provider = SessionInputCapturingProvider::with_outputs(
+        [
+            r#"{"verdict":"approve","summary":"internal review ok","findings":[],"impact_scope":["src"],"pr_description":"实现 work item","commit_message_suggestion":"feat: implement work item"}"#,
+        ],
+        [Some("internal-reviewer-session-2".to_string())],
+    );
+
+    let review = engine
+        .execute_internal_pr_review(&attempt, &provider)
+        .await
+        .expect("internal reviewer provider run");
+
+    assert_eq!(review.verdict, ReviewVerdict::Approve);
+    let inputs = provider.inputs.lock().expect("inputs lock");
+    assert_eq!(inputs.len(), 1);
+    assert_eq!(
+        inputs[0].resume_provider_session_id.as_deref(),
+        Some("internal-reviewer-session-1")
+    );
 }
 
 #[tokio::test]
@@ -2605,6 +2959,85 @@ impl StreamingProviderAdapter for InputCapturingProvider {
         })
         .expect("send done chunk");
         Ok(rx)
+    }
+}
+
+struct SessionInputCapturingProvider {
+    inputs: Arc<Mutex<Vec<StreamingProviderInput>>>,
+    outputs: Arc<Mutex<VecDeque<String>>>,
+    provider_session_ids: Arc<Mutex<VecDeque<Option<String>>>>,
+}
+
+impl Default for SessionInputCapturingProvider {
+    fn default() -> Self {
+        Self::with_outputs(["coding done"], [Some("coder-session-1".to_string())])
+    }
+}
+
+impl SessionInputCapturingProvider {
+    fn with_outputs<const N: usize, const M: usize>(
+        outputs: [&str; N],
+        provider_session_ids: [Option<String>; M],
+    ) -> Self {
+        Self {
+            inputs: Arc::new(Mutex::new(Vec::new())),
+            outputs: Arc::new(Mutex::new(
+                outputs.into_iter().map(ToOwned::to_owned).collect(),
+            )),
+            provider_session_ids: Arc::new(Mutex::new(provider_session_ids.into_iter().collect())),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for SessionInputCapturingProvider {
+    fn supports_tool_calls(&self) -> bool {
+        true
+    }
+
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.inputs.lock().expect("inputs lock").push(input);
+        let output = self
+            .outputs
+            .lock()
+            .expect("outputs lock")
+            .pop_front()
+            .unwrap_or_else(|| "coding done".to_string());
+        let provider_session_id = self
+            .provider_session_ids
+            .lock()
+            .expect("provider session ids lock")
+            .pop_front()
+            .unwrap_or_else(|| Some("coder-session-1".to_string()));
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let (command_tx, _command_rx) = mpsc::channel(8);
+        event_tx
+            .try_send(ProviderEvent::Completed {
+                full_output: output,
+                provider_session_id,
+            })
+            .expect("send completed");
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+
+    async fn run_streaming(
+        &self,
+        _input: &AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+        Err(ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "run_streaming is not used by this test provider",
+            0,
+        ))
     }
 }
 

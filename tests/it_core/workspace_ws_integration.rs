@@ -5,11 +5,11 @@ use cadence_aria::cross_cutting::codex_provider::CodexProvider;
 use cadence_aria::cross_cutting::provider_adapter::ProviderAdapterError;
 use cadence_aria::cross_cutting::provider_registry::ProviderRegistry;
 use cadence_aria::cross_cutting::streaming_provider::{
-    FakeStreamingProvider, ProviderCommand, ProviderEvent, ProviderSession,
+    FakeStreamingProvider, ProviderCommand, ProviderEvent, ProviderSession, StreamChunk,
     StreamingProviderAdapter, StreamingProviderInput,
 };
 use cadence_aria::product::models::ProviderName;
-use cadence_aria::protocol::contracts::AdapterInput;
+use cadence_aria::protocol::contracts::{AdapterInput, AdapterRole};
 use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::runtime::WebRuntime;
 use cadence_aria::web::state::WebAppState;
@@ -184,33 +184,13 @@ async fn workspace_ws_runs_provider_from_repository_path() {
 async fn workspace_ws_author_text_choice_blocks_reviewer_until_user_answers() {
     let root = tempdir().expect("root");
     create_workspace_session_fixture(&root).await;
-    let author_prompts = Arc::new(Mutex::new(Vec::new()));
+    let provider_state = Arc::new(ChoiceThenArtifactProviderState::default());
     let mut registry = ProviderRegistry::new();
     registry.register(
         ProviderName::Fake,
-        Arc::new(ScriptedStreamingProvider::new(
-            [
-                "需要先确认一个边界条件，然后我再生成最终 Story Spec：\n\
-                 `climb_stairs(n)` 对 `n <= 0` 应该如何处理？\n\
-                 A. 返回 `0`，仅把正整数楼梯数视为有效输入\n\
-                 B. 抛出异常，例如 `ValueError`\n\
-                 C. 不定义该行为，Story Spec 只覆盖 issue 明确要求的 `n >= 1` 场景",
-                "# Story Spec\n\n\
-                 ## 范围\n\
-                 实现 climb_stairs。\n\n\
-                 ## 用户故事\n\
-                 作为调用方，我需要计算爬楼梯方法数。\n\n\
-                 ## 功能需求\n\
-                 - [REQ-001] 实现 `climb_stairs(n: i32) -> i32`。\n\n\
-                 ## 成功标准\n\
-                 - [AC-001] 覆盖 n=1、n=2、n=3、n=5、n=10。\n\n\
-                 ## 待确认项\n\
-                 无\n\n\
-                 ## 非功能需求\n\
-                 使用 Python 实现。",
-            ],
-            author_prompts.clone(),
-        )),
+        Arc::new(ChoiceThenArtifactProvider {
+            state: provider_state.clone(),
+        }),
     );
     let app = build_web_router(WebAppState::with_provider_registry(
         root.path().to_path_buf(),
@@ -257,10 +237,70 @@ async fn workspace_ws_author_text_choice_blocks_reviewer_until_user_answers() {
     let stage = recv_until_stage(&mut ws, "human_confirm").await;
     assert_eq!(stage, "human_confirm");
 
-    let prompts = author_prompts.lock().unwrap();
+    let prompts = provider_state.prompts.lock().unwrap();
     assert_eq!(prompts.len(), 2);
     assert!(prompts[1].contains("用户回答了 author 的确认问题"));
     assert!(prompts[1].contains("A. 返回 `0`"));
+    let resume_ids = provider_state.resume_ids.lock().unwrap().clone();
+    assert_eq!(resume_ids.len(), 2);
+    assert_eq!(resume_ids[0], None);
+    assert_eq!(resume_ids[1].as_deref(), Some("author-provider-session-1"));
+
+    drop(ws);
+    server.abort();
+}
+
+#[tokio::test]
+async fn workspace_ws_reviewer_does_not_resume_author_provider_session() {
+    let root = tempdir().expect("root");
+    create_workspace_session_fixture_with_providers(&root, "codex", "codex", 1).await;
+    let provider_state = Arc::new(RoleResumeRecordingProviderState::default());
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Codex,
+        Arc::new(RoleResumeRecordingProvider {
+            state: provider_state.clone(),
+        }),
+    );
+    let app = build_web_router(WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        registry,
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(
+        &mut ws,
+        &WsInMessage::UserMessage {
+            content: "开始生成".to_string(),
+        },
+    )
+    .await;
+
+    let _checkpoint = recv_until_message_complete(&mut ws).await;
+    let stage = recv_until_stage(&mut ws, "human_confirm").await;
+    assert_eq!(stage, "human_confirm");
+
+    assert_eq!(
+        provider_state.author_resume_ids.lock().unwrap().as_slice(),
+        &[None]
+    );
+    assert_eq!(
+        provider_state
+            .reviewer_resume_ids
+            .lock()
+            .unwrap()
+            .as_slice(),
+        &[None]
+    );
 
     drop(ws);
     server.abort();
@@ -1547,6 +1587,163 @@ impl ScriptedStreamingProvider {
             outputs: Mutex::new(outputs.into_iter().map(ToOwned::to_owned).collect()),
             prompts,
         }
+    }
+}
+
+#[derive(Default)]
+struct ChoiceThenArtifactProviderState {
+    calls: Mutex<u32>,
+    resume_ids: Mutex<Vec<Option<String>>>,
+    prompts: Mutex<Vec<String>>,
+}
+
+struct ChoiceThenArtifactProvider {
+    state: Arc<ChoiceThenArtifactProviderState>,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for ChoiceThenArtifactProvider {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.state
+            .resume_ids
+            .lock()
+            .unwrap()
+            .push(input.resume_provider_session_id.clone());
+        self.state.prompts.lock().unwrap().push(input.prompt);
+        let mut calls = self.state.calls.lock().unwrap();
+        *calls += 1;
+        let call_no = *calls;
+        drop(calls);
+
+        let output = if call_no == 1 {
+            "需要先确认一个边界条件，然后我再生成最终 Story Spec：\n\
+             `climb_stairs(n)` 对 `n <= 0` 应该如何处理？\n\
+             A. 返回 `0`，仅把正整数楼梯数视为有效输入\n\
+             B. 抛出异常，例如 `ValueError`\n\
+             C. 不定义该行为，Story Spec 只覆盖 issue 明确要求的 `n >= 1` 场景"
+        } else {
+            "# Story Spec\n\n\
+             ## 范围\n\
+             实现 climb_stairs。\n\n\
+             ## 用户故事\n\
+             作为调用方，我需要计算爬楼梯方法数。\n\n\
+             ## 功能需求\n\
+             - [REQ-001] 实现 `climb_stairs(n: i32) -> i32`。\n\n\
+             ## 成功标准\n\
+             - [AC-001] 覆盖 n=1、n=2、n=3、n=5、n=10。\n\n\
+             ## 待确认项\n\
+             无\n\n\
+             ## 非功能需求\n\
+             使用 Python 实现。"
+        };
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let (command_tx, _command_rx) = mpsc::channel::<ProviderCommand>(8);
+        tokio::spawn(async move {
+            let output = output.to_string();
+            let _ = event_tx
+                .send(ProviderEvent::TextDelta {
+                    content: output.clone(),
+                })
+                .await;
+            let _ = event_tx
+                .send(ProviderEvent::Completed {
+                    full_output: output,
+                    provider_session_id: Some("author-provider-session-1".to_string()),
+                })
+                .await;
+        });
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+
+    async fn run_streaming(
+        &self,
+        _input: &AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+        Err(ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "run_streaming is not used by workspace websocket",
+            0,
+        ))
+    }
+}
+
+#[derive(Default)]
+struct RoleResumeRecordingProviderState {
+    author_resume_ids: Mutex<Vec<Option<String>>>,
+    reviewer_resume_ids: Mutex<Vec<Option<String>>>,
+}
+
+struct RoleResumeRecordingProvider {
+    state: Arc<RoleResumeRecordingProviderState>,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for RoleResumeRecordingProvider {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let (output, provider_session_id) = match input.role {
+            AdapterRole::Reviewer => {
+                self.state
+                    .reviewer_resume_ids
+                    .lock()
+                    .unwrap()
+                    .push(input.resume_provider_session_id.clone());
+                (
+                    "审核通过。\n```json\n{\"verdict\":\"pass\",\"summary\":\"ok\"}\n```",
+                    Some("reviewer-provider-session-1".to_string()),
+                )
+            }
+            _ => {
+                self.state
+                    .author_resume_ids
+                    .lock()
+                    .unwrap()
+                    .push(input.resume_provider_session_id.clone());
+                (
+                    "# Story Spec\n\n## 功能需求\n- 实现登录会话过期提示。\n\n## 成功标准\n- 会话过期时提示用户重新登录。\n",
+                    Some("author-provider-session-1".to_string()),
+                )
+            }
+        };
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let (command_tx, _command_rx) = mpsc::channel::<ProviderCommand>(8);
+        tokio::spawn(async move {
+            let _ = event_tx
+                .send(ProviderEvent::Completed {
+                    full_output: output.to_string(),
+                    provider_session_id,
+                })
+                .await;
+        });
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+
+    async fn run_streaming(
+        &self,
+        _input: &AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+        Err(ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "run_streaming is not used by workspace websocket",
+            0,
+        ))
     }
 }
 

@@ -33,7 +33,10 @@ pub struct StreamingProviderInput {
     pub role: AdapterRole,
     pub prompt: String,
     pub working_dir: PathBuf,
-    pub session_id: Option<String>,
+    /// 产品/工作区 session ID，用于日志追踪和关联，不用于 provider 续接。
+    pub workspace_session_id: Option<String>,
+    /// Provider 原生 session ID，用于续接 Claude Code / Codex 会话。
+    pub resume_provider_session_id: Option<String>,
     pub permission_mode: ProviderPermissionMode,
     pub env_vars: BTreeMap<String, String>,
     pub timeout_secs: u64,
@@ -290,7 +293,8 @@ pub trait StreamingProviderAdapter: Send + Sync {
             role: input.role.clone(),
             prompt: input.prompt.clone(),
             working_dir,
-            session_id: None,
+            workspace_session_id: None,
+            resume_provider_session_id: None,
             permission_mode: ProviderPermissionMode::Auto,
             env_vars: BTreeMap::new(),
             timeout_secs: input.timeout,
@@ -417,7 +421,8 @@ impl StreamingProviderAdapter for FakeStreamingProvider {
             role: input.role.clone(),
             prompt: input.prompt.clone(),
             working_dir,
-            session_id: None,
+            workspace_session_id: None,
+            resume_provider_session_id: None,
             permission_mode: ProviderPermissionMode::Auto,
             env_vars: BTreeMap::new(),
             timeout_secs: input.timeout,
@@ -610,7 +615,8 @@ mod tests {
             role: crate::protocol::contracts::AdapterRole::Orchestrator,
             prompt: prompt.to_string(),
             working_dir: std::env::current_dir().unwrap(),
-            session_id: None,
+            workspace_session_id: None,
+            resume_provider_session_id: None,
             permission_mode: ProviderPermissionMode::Auto,
             env_vars: std::collections::BTreeMap::new(),
             timeout_secs: 60,
@@ -622,6 +628,30 @@ mod tests {
             .map(|index| format!("word{index}"))
             .collect::<Vec<_>>()
             .join(" ")
+    }
+
+    #[test]
+    fn streaming_provider_input_distinguishes_workspace_and_resume_sessions() {
+        let input = StreamingProviderInput {
+            provider_type: crate::protocol::contracts::ProviderType::Fake,
+            role: crate::protocol::contracts::AdapterRole::Orchestrator,
+            prompt: "prompt".to_string(),
+            working_dir: std::env::current_dir().unwrap(),
+            workspace_session_id: Some("workspace_session_0001".to_string()),
+            resume_provider_session_id: Some("provider_session_0001".to_string()),
+            permission_mode: ProviderPermissionMode::Auto,
+            env_vars: std::collections::BTreeMap::new(),
+            timeout_secs: 60,
+        };
+
+        assert_eq!(
+            input.workspace_session_id.as_deref(),
+            Some("workspace_session_0001")
+        );
+        assert_eq!(
+            input.resume_provider_session_id.as_deref(),
+            Some("provider_session_0001")
+        );
     }
 
     #[test]

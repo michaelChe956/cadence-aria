@@ -7,8 +7,9 @@ use cadence_aria::product::lifecycle_store::{
     CreateStorySpecInput, CreateWorkItemInput, CreateWorkspaceSessionInput, LifecycleStore,
 };
 use cadence_aria::product::models::{
-    AgentRole, DesignKind, LifecycleConfirmationStatus, NodeDetail, ProviderName, ProviderSnapshot,
-    WorkItemStatus, WorkspaceSessionStatus, WorkspaceType,
+    AgentRole, DesignKind, LifecycleConfirmationStatus, NodeDetail, ProviderConversationRef,
+    ProviderConversationRole, ProviderName, ProviderSnapshot, WorkItemStatus,
+    WorkspaceSessionStatus, WorkspaceType,
 };
 use cadence_aria::web::workspace_ws_types::{
     ArtifactVersion, ProviderConfigSnapshot, TimelineNode, TimelineNodeStatus, TimelineNodeType,
@@ -162,6 +163,81 @@ fn persists_workspace_session_and_project_provider_defaults() {
             .len(),
         1
     );
+}
+
+#[test]
+fn workspace_session_provider_conversations_default_for_legacy_json() {
+    let root = tempdir().expect("tempdir");
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let store = LifecycleStore::new(paths.clone());
+    let session = store
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "story_0001".to_string(),
+            workspace_type: WorkspaceType::Story,
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: ProviderName::Codex,
+            review_rounds: 1,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+        })
+        .expect("create workspace session");
+
+    let session_path = paths
+        .root()
+        .join("projects/project_0001/issues/issue_0001/workspace-sessions")
+        .join(format!("{}.json", session.id));
+    let mut value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&session_path).unwrap()).unwrap();
+    value
+        .as_object_mut()
+        .unwrap()
+        .remove("provider_conversations");
+    std::fs::write(&session_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+
+    let reloaded = store
+        .get_workspace_session(&session.id)
+        .expect("reload legacy session");
+    assert!(reloaded.provider_conversations.is_empty());
+}
+
+#[test]
+fn updates_workspace_session_provider_conversations() {
+    let root = tempdir().expect("tempdir");
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let store = LifecycleStore::new(paths);
+    let session = store
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "story_0001".to_string(),
+            workspace_type: WorkspaceType::Story,
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: ProviderName::Codex,
+            review_rounds: 1,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+        })
+        .expect("create workspace session");
+
+    let conversations = vec![ProviderConversationRef {
+        role: ProviderConversationRole::Author,
+        provider: ProviderName::ClaudeCode,
+        provider_session_id: "claude-author-session".to_string(),
+        updated_at: "2026-06-01T00:00:00Z".to_string(),
+        last_node_id: Some("node-author-1".to_string()),
+    }];
+
+    let updated = store
+        .replace_workspace_provider_conversations(&session.id, conversations.clone())
+        .expect("persist provider conversations");
+
+    assert_eq!(updated.provider_conversations, conversations);
+    let reloaded = store
+        .get_workspace_session(&session.id)
+        .expect("reload session");
+    assert_eq!(reloaded.provider_conversations, conversations);
 }
 
 #[test]

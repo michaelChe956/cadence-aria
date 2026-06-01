@@ -193,6 +193,7 @@ fn coding_attempt_serializes_stage_status_and_provider_snapshot() {
         head_commit: None,
         pushed_remote: None,
         review_request_id: None,
+        provider_conversations: Vec::new(),
         created_at: "2026-05-23T00:00:00Z".to_string(),
         updated_at: "2026-05-23T00:00:00Z".to_string(),
         completed_at: None,

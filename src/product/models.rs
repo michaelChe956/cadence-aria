@@ -217,6 +217,28 @@ pub enum ProviderName {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum ProviderConversationRole {
+    Author,
+    Reviewer,
+    Coder,
+    Tester,
+    Analyst,
+    CodeReviewer,
+    InternalReviewer,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ProviderConversationRef {
+    pub role: ProviderConversationRole,
+    pub provider: ProviderName,
+    pub provider_session_id: String,
+    pub updated_at: String,
+    pub last_node_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum WorkspaceType {
     Story,
     Design,
@@ -330,6 +352,8 @@ pub struct WorkspaceSessionRecord {
     pub review_rounds: u32,
     pub superpowers_enabled: bool,
     pub openspec_enabled: bool,
+    #[serde(default)]
+    pub provider_conversations: Vec<ProviderConversationRef>,
     pub messages: Vec<WorkspaceMessageRecord>,
     pub created_at: String,
     pub updated_at: String,

@@ -1635,6 +1635,7 @@ mod tests {
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
+            provider_conversations: Vec::new(),
             messages: vec![WorkspaceMessageRecord {
                 role: "assistant".to_string(),
                 content: "```artifact\n# Work Item\n\n## 验证命令\n\n```bash\nuv run python -m unittest discover -s tests -v\n```\n```"

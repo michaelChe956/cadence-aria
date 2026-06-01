@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::product::models::ProviderName;
+use crate::product::models::{ProviderConversationRef, ProviderName};
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,6 +153,8 @@ pub struct CodingExecutionAttempt {
     pub head_commit: Option<String>,
     pub pushed_remote: Option<String>,
     pub review_request_id: Option<String>,
+    #[serde(default)]
+    pub provider_conversations: Vec<ProviderConversationRef>,
     pub created_at: String,
     pub updated_at: String,
     pub completed_at: Option<String>,
