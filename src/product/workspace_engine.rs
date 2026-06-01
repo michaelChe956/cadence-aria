@@ -17,9 +17,10 @@ use crate::product::checkpoint_store::CheckpointStore;
 use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::{AppendSpecVersionInput, LifecycleStore};
 use crate::product::models::{
-    AgentRole, ArtifactRef, LifecycleConfirmationStatus, NodeDetail, PermissionEvent, ProviderName,
-    ProviderSnapshot, WorkItemPlanStatus, WorkspaceMessageRecord, WorkspaceSessionRecord,
-    WorkspaceSessionStatus, WorkspaceType,
+    AgentRole, ArtifactRef, LifecycleConfirmationStatus, NodeDetail, PermissionEvent,
+    ProviderConversationRef, ProviderConversationRole, ProviderName, ProviderSnapshot,
+    WorkItemPlanStatus, WorkspaceMessageRecord, WorkspaceSessionRecord, WorkspaceSessionStatus,
+    WorkspaceType,
 };
 use crate::protocol::contracts::{AdapterRole, ProviderType};
 use crate::web::workspace_ws_types::{
@@ -90,6 +91,7 @@ pub struct WorkspaceSession {
     pub review_rounds: u32,
     pub superpowers_enabled: bool,
     pub openspec_enabled: bool,
+    pub provider_conversations: Vec<ProviderConversationRef>,
     pub repository_path: Option<PathBuf>,
 }
 
@@ -121,6 +123,7 @@ impl WorkspaceSession {
             review_rounds: record.review_rounds,
             superpowers_enabled: record.superpowers_enabled,
             openspec_enabled: record.openspec_enabled,
+            provider_conversations: record.provider_conversations,
             repository_path: None,
         }
     }
@@ -372,6 +375,61 @@ impl WorkspaceEngine {
 
     pub fn session(&self) -> &WorkspaceSession {
         &self.session
+    }
+
+    fn provider_resume_session_id(
+        &self,
+        role: ProviderConversationRole,
+        provider: &ProviderName,
+    ) -> Option<String> {
+        self.session
+            .provider_conversations
+            .iter()
+            .find(|conversation| conversation.role == role && &conversation.provider == provider)
+            .map(|conversation| conversation.provider_session_id.clone())
+            .filter(|id| !id.trim().is_empty())
+    }
+
+    async fn record_provider_session(
+        &mut self,
+        role: ProviderConversationRole,
+        provider: ProviderName,
+        provider_session_id: Option<String>,
+        node_id: Option<String>,
+    ) {
+        let Some(provider_session_id) = provider_session_id
+            .map(|id| id.trim().to_string())
+            .filter(|id| !id.is_empty())
+        else {
+            return;
+        };
+        let now = chrono::Utc::now().to_rfc3339();
+        if let Some(existing) = self
+            .session
+            .provider_conversations
+            .iter_mut()
+            .find(|conversation| conversation.role == role && conversation.provider == provider)
+        {
+            existing.provider_session_id = provider_session_id;
+            existing.updated_at = now;
+            existing.last_node_id = node_id;
+        } else {
+            self.session
+                .provider_conversations
+                .push(ProviderConversationRef {
+                    role,
+                    provider,
+                    provider_session_id,
+                    updated_at: now,
+                    last_node_id: node_id,
+                });
+        }
+        if let Some(store) = &self.lifecycle_store {
+            let _ = store.replace_workspace_provider_conversations(
+                &self.session.session_id,
+                self.session.provider_conversations.clone(),
+            );
+        }
     }
 
     pub fn current_stage(&self) -> WorkspaceStage {
@@ -788,6 +846,7 @@ impl WorkspaceEngine {
             command_rx,
             Some(generation_node_id),
             Some(self.session.author_provider.clone()),
+            ProviderConversationRole::Author,
         )
         .await;
     }
@@ -801,6 +860,7 @@ impl WorkspaceEngine {
         mut command_rx: mpsc::Receiver<ProviderCommand>,
         node_id: Option<String>,
         agent: Option<ProviderName>,
+        role: ProviderConversationRole,
     ) {
         let mut session = match session {
             Ok(session) => session,
@@ -1003,9 +1063,21 @@ impl WorkspaceEngine {
                                 )
                                 .await;
                         }
-                        ProviderEvent::Completed { full_output, .. } => {
+                        ProviderEvent::Completed {
+                            full_output,
+                            provider_session_id,
+                        } => {
                             if let Some(node_id) = node_id.as_deref() {
                                 let _ = self.flush_stream_buffer(node_id).await;
+                            }
+                            if let Some(provider) = agent.clone() {
+                                self.record_provider_session(
+                                    role.clone(),
+                                    provider,
+                                    provider_session_id,
+                                    node_id.clone(),
+                                )
+                                .await;
                             }
                             self.complete_assistant_message(assistant_msg_id, full_output).await;
                             return;
@@ -1158,7 +1230,13 @@ impl WorkspaceEngine {
             .await;
         }
         let session = provider.start(input, self.cancel.clone()).await;
-        self.drive_provider_session(session, command_rx, node_id, Some(author))
+        self.drive_provider_session(
+            session,
+            command_rx,
+            node_id,
+            Some(author),
+            ProviderConversationRole::Author,
+        )
             .await;
     }
 
@@ -1388,10 +1466,20 @@ impl WorkspaceEngine {
                                 )
                                 .await;
                         }
-                        ProviderEvent::Completed { full_output, .. } => {
+                        ProviderEvent::Completed {
+                            full_output,
+                            provider_session_id,
+                        } => {
                             if let Some(node_id) = node_id.as_deref() {
                                 let _ = self.flush_stream_buffer(node_id).await;
                             }
+                            self.record_provider_session(
+                                ProviderConversationRole::Reviewer,
+                                reviewer.clone(),
+                                provider_session_id,
+                                node_id.clone(),
+                            )
+                            .await;
                             self.complete_review(full_output).await;
                             return;
                         }
@@ -1784,14 +1872,17 @@ impl WorkspaceEngine {
             None => std::env::current_dir()
                 .map_err(|error| format!("working directory error: {error}"))?,
         };
+        let provider = self.session.author_provider.clone();
+        let resume_provider_session_id =
+            self.provider_resume_session_id(ProviderConversationRole::Author, &provider);
 
         Ok(StreamingProviderInput {
-            provider_type: provider_type_for_name(&self.session.author_provider),
+            provider_type: provider_type_for_name(&provider),
             role: AdapterRole::Orchestrator,
             prompt: self.build_prompt(user_content),
             working_dir,
             workspace_session_id: Some(self.session.session_id.clone()),
-            resume_provider_session_id: None,
+            resume_provider_session_id,
             permission_mode: ProviderPermissionMode::Supervised,
             env_vars: BTreeMap::new(),
             timeout_secs: 300,
@@ -1806,6 +1897,13 @@ impl WorkspaceEngine {
         };
 
         let artifact = self.session.artifact.clone().unwrap_or_default();
+        let provider = self
+            .session
+            .reviewer_provider
+            .clone()
+            .unwrap_or(ProviderName::Codex);
+        let resume_provider_session_id =
+            self.provider_resume_session_id(ProviderConversationRole::Reviewer, &provider);
         let mut prompt = String::new();
         prompt.push_str("请作为 reviewer 审核当前 Workspace 产物。\n\n");
         prompt.push_str(&format!(
@@ -1826,18 +1924,12 @@ impl WorkspaceEngine {
         );
 
         Ok(StreamingProviderInput {
-            provider_type: provider_type_for_name(
-                &self
-                    .session
-                    .reviewer_provider
-                    .clone()
-                    .unwrap_or(ProviderName::Codex),
-            ),
+            provider_type: provider_type_for_name(&provider),
             role: AdapterRole::Reviewer,
             prompt,
             working_dir,
             workspace_session_id: Some(self.session.session_id.clone()),
-            resume_provider_session_id: None,
+            resume_provider_session_id,
             permission_mode: ProviderPermissionMode::Supervised,
             env_vars: BTreeMap::new(),
             timeout_secs: 300,
@@ -1852,6 +1944,9 @@ impl WorkspaceEngine {
         };
 
         let artifact = self.session.artifact.clone().unwrap_or_default();
+        let provider = self.session.author_provider.clone();
+        let resume_provider_session_id =
+            self.provider_resume_session_id(ProviderConversationRole::Author, &provider);
         let review = self
             .latest_review_verdict
             .as_ref()
@@ -1879,12 +1974,12 @@ impl WorkspaceEngine {
         prompt.push_str("\n\n请根据以上审核意见修改产物，输出完整更新后的 artifact markdown。\n");
 
         Ok(StreamingProviderInput {
-            provider_type: provider_type_for_name(&self.session.author_provider),
+            provider_type: provider_type_for_name(&provider),
             role: AdapterRole::Orchestrator,
             prompt,
             working_dir,
             workspace_session_id: Some(self.session.session_id.clone()),
-            resume_provider_session_id: None,
+            resume_provider_session_id,
             permission_mode: ProviderPermissionMode::Supervised,
             env_vars: BTreeMap::new(),
             timeout_secs: 300,
@@ -3116,6 +3211,7 @@ mod tests {
             review_rounds: 2,
             superpowers_enabled: true,
             openspec_enabled: true,
+            provider_conversations: Vec::new(),
             repository_path: None,
         }
     }
@@ -3123,6 +3219,146 @@ mod tests {
     fn empty_provider_commands() -> mpsc::Receiver<ProviderCommand> {
         let (_tx, rx) = mpsc::channel(8);
         rx
+    }
+
+    #[derive(Default)]
+    struct SessionRecordingProvider {
+        inputs: Arc<Mutex<Vec<StreamingProviderInput>>>,
+        calls: Arc<Mutex<u32>>,
+    }
+
+    #[async_trait::async_trait]
+    impl StreamingProviderAdapter for SessionRecordingProvider {
+        async fn start(
+            &self,
+            input: StreamingProviderInput,
+            _cancel: CancellationToken,
+        ) -> Result<ProviderSession, ProviderAdapterError> {
+            self.inputs.lock().unwrap().push(input);
+            let mut calls = self.calls.lock().unwrap();
+            *calls += 1;
+            let call_no = *calls;
+            drop(calls);
+
+            let (event_tx, event_rx) = mpsc::channel(8);
+            let (command_tx, _command_rx) = mpsc::channel(8);
+            tokio::spawn(async move {
+                let output = if call_no == 1 {
+                    "climb_stairs(n) 对 n <= 0 应该如何处理？\nA. 返回 0\nB. 抛出 ValueError\n"
+                } else {
+                    "# Story Spec\n\n## 功能需求\n- 对 n <= 0 返回 0。\n\n## 成功标准\n- n <= 0 时返回 0。\n"
+                };
+                let _ = event_tx
+                    .send(ProviderEvent::Completed {
+                        full_output: output.to_string(),
+                        provider_session_id: Some("provider-author-session-1".to_string()),
+                    })
+                    .await;
+            });
+            Ok(ProviderSession {
+                events: event_rx,
+                commands: command_tx,
+            })
+        }
+
+        async fn run_streaming(
+            &self,
+            _input: &AdapterInput,
+            _cancel: CancellationToken,
+        ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+            Err(ProviderAdapterError::execution_failed(
+                None,
+                String::new(),
+                "run_streaming is not used by this test provider",
+                0,
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn author_choice_followup_resumes_author_provider_session() {
+        let (event_tx, _event_rx) = mpsc::channel(32);
+        let mut session = make_session("sess_resume_author");
+        session.workspace_type = WorkspaceType::Story;
+        session.author_provider = ProviderName::ClaudeCode;
+        session.reviewer_provider = None;
+        let checkpoint_tmp = TempDir::new().unwrap();
+        let mut engine = WorkspaceEngine::new(
+            Arc::new(CheckpointStore::new(checkpoint_tmp.path().to_path_buf())),
+            event_tx,
+            session,
+        );
+        let provider = Arc::new(SessionRecordingProvider::default());
+
+        let (_command_tx, command_rx) = mpsc::channel(8);
+        engine
+            .handle_user_message("开始生成 Story Spec".to_string(), provider.clone(), command_rx)
+            .await;
+
+        let prompt = engine
+            .take_pending_author_choice_prompt(
+                "author_choice_msg_002",
+                vec!["A".to_string()],
+                None,
+            )
+            .await
+            .expect("pending author choice prompt");
+
+        let (_command_tx2, command_rx2) = mpsc::channel(8);
+        engine
+            .handle_user_message(prompt, provider.clone(), command_rx2)
+            .await;
+
+        let inputs = provider.inputs.lock().unwrap();
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[0].resume_provider_session_id, None);
+        assert_eq!(
+            inputs[1].resume_provider_session_id.as_deref(),
+            Some("provider-author-session-1")
+        );
+    }
+
+    #[test]
+    fn provider_resume_session_id_is_isolated_by_role_and_provider() {
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let mut session = make_session("sess_role_isolation");
+        session.author_provider = ProviderName::ClaudeCode;
+        session.reviewer_provider = Some(ProviderName::ClaudeCode);
+        session.provider_conversations = vec![ProviderConversationRef {
+            role: ProviderConversationRole::Author,
+            provider: ProviderName::ClaudeCode,
+            provider_session_id: "author-session".to_string(),
+            updated_at: "2026-06-01T00:00:00Z".to_string(),
+            last_node_id: Some("node-author".to_string()),
+        }];
+        let checkpoint_tmp = TempDir::new().unwrap();
+        let engine = WorkspaceEngine::new(
+            Arc::new(CheckpointStore::new(checkpoint_tmp.path().to_path_buf())),
+            event_tx,
+            session,
+        );
+
+        assert_eq!(
+            engine.provider_resume_session_id(
+                ProviderConversationRole::Author,
+                &ProviderName::ClaudeCode
+            ),
+            Some("author-session".to_string())
+        );
+        assert_eq!(
+            engine.provider_resume_session_id(
+                ProviderConversationRole::Reviewer,
+                &ProviderName::ClaudeCode
+            ),
+            None
+        );
+        assert_eq!(
+            engine.provider_resume_session_id(
+                ProviderConversationRole::Author,
+                &ProviderName::Codex
+            ),
+            None
+        );
     }
 
     fn persistent_test_engine() -> (TempDir, LifecycleStore, WorkspaceEngine) {
@@ -3302,6 +3538,7 @@ mod tests {
                 empty_provider_commands(),
                 Some(node_id.clone()),
                 Some(ProviderName::ClaudeCode),
+                ProviderConversationRole::Author,
             )
             .await;
 
@@ -4548,6 +4785,7 @@ mod tests {
                 empty_provider_commands(),
                 Some(node_id.clone()),
                 Some(ProviderName::ClaudeCode),
+                ProviderConversationRole::Author,
             )
             .await;
 
