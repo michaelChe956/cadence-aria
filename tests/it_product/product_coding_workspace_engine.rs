@@ -26,8 +26,11 @@ use cadence_aria::product::git_workspace_service::GitWorkspaceService;
 use cadence_aria::product::lifecycle_store::{
     CreateWorkItemInput, CreateWorkspaceSessionInput, LifecycleStore,
 };
-use cadence_aria::product::models::{ProviderName, WorkItemStatus, WorkspaceType};
+use cadence_aria::product::models::{
+    ProviderConversationRef, ProviderConversationRole, ProviderName, WorkItemStatus, WorkspaceType,
+};
 use cadence_aria::product::test_executor::TestCommandSpec;
+use cadence_aria::product::tester_agent_loop::TesterAgentOptions;
 use cadence_aria::protocol::contracts::{AdapterInput, AdapterRole, ProviderType};
 use cadence_aria::web::coding_ws_handler::CodingWsOutMessage;
 use cadence_aria::web::workspace_ws_types::{
@@ -273,6 +276,86 @@ async fn coding_coder_run_resumes_previous_coder_provider_session() {
         inputs[1].resume_provider_session_id.as_deref(),
         Some("coder-session-1")
     );
+}
+
+#[tokio::test]
+async fn coding_tester_does_not_resume_coder_provider_session() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+            },
+            ..create_input()
+        })
+        .expect("create attempt");
+    let attempt = store
+        .replace_attempt_provider_conversations(
+            &attempt.id,
+            vec![
+                ProviderConversationRef {
+                    role: ProviderConversationRole::Coder,
+                    provider: ProviderName::ClaudeCode,
+                    provider_session_id: "coder-session-1".to_string(),
+                    updated_at: "2026-06-01T00:00:00Z".to_string(),
+                    last_node_id: Some("coding-node-1".to_string()),
+                },
+                ProviderConversationRef {
+                    role: ProviderConversationRole::Tester,
+                    provider: ProviderName::ClaudeCode,
+                    provider_session_id: "tester-session-1".to_string(),
+                    updated_at: "2026-06-01T00:01:00Z".to_string(),
+                    last_node_id: Some("testing-node-1".to_string()),
+                },
+            ],
+        )
+        .expect("persist provider conversations");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let provider = SessionInputCapturingProvider::with_outputs(
+        [r#"{"summary":"testing ok","bugs_found":[]}"#],
+        [Some("tester-session-2".to_string())],
+    );
+
+    let _report = engine
+        .execute_testing_with_provider(
+            &attempt,
+            &provider,
+            &CodingExecutionContext::default(),
+            &[],
+            TesterAgentOptions::default(),
+        )
+        .await
+        .expect("testing provider run");
+
+    let inputs = provider.inputs.lock().expect("inputs lock");
+    assert_eq!(inputs.len(), 1);
+    assert_eq!(
+        inputs[0].resume_provider_session_id.as_deref(),
+        Some("tester-session-1")
+    );
+    let updated = store
+        .get_attempt("project_0001", "issue_0001", &attempt.id)
+        .expect("updated attempt");
+    assert!(updated.provider_conversations.iter().any(|conversation| {
+        conversation.role == ProviderConversationRole::Tester
+            && conversation.provider == ProviderName::ClaudeCode
+            && conversation.provider_session_id == "tester-session-2"
+    }));
 }
 
 #[tokio::test]

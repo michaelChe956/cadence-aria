@@ -830,13 +830,18 @@ impl CodingWorkspaceEngine {
             })
             .await;
 
+        let resume_provider_session_id = self.provider_resume_session_id_for_attempt(
+            &attempt,
+            &CodingProviderRole::Tester,
+            &tester_provider,
+        );
         let input = StreamingProviderInput {
             provider_type: provider_type_for_name(&tester_provider),
             role: AdapterRole::Reviewer,
             prompt,
             working_dir: worktree_path.clone(),
-            workspace_session_id: None,
-            resume_provider_session_id: None,
+            workspace_session_id: Some(attempt.id.clone()),
+            resume_provider_session_id,
             permission_mode: ProviderPermissionMode::Auto,
             env_vars: BTreeMap::new(),
             timeout_secs: options.timeout.as_secs().max(1),
@@ -1018,7 +1023,17 @@ impl CodingWorkspaceEngine {
                                 })
                                 .await;
                         }
-                        ProviderEvent::Completed { full_output: completed_output, .. } => {
+                        ProviderEvent::Completed {
+                            full_output: completed_output,
+                            provider_session_id,
+                        } => {
+                            self.record_attempt_provider_session(
+                                &attempt,
+                                &CodingProviderRole::Tester,
+                                tester_provider.clone(),
+                                provider_session_id,
+                                &node.id,
+                            )?;
                             if !completed_output.trim().is_empty() {
                                 full_output = completed_output;
                             }
