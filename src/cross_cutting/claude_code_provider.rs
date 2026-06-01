@@ -20,6 +20,8 @@ use crate::cross_cutting::streaming_provider::{
 };
 use crate::protocol::contracts::AdapterInput;
 
+const TOOL_RESULT_PREVIEW_MAX_BYTES: usize = 500;
+
 #[derive(Debug, Clone)]
 struct ClaudePermissionRequest {
     request_id: String,
@@ -349,6 +351,7 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
             });
 
             if let Err(error) = Self::write_initial_messages(&stdin, &input).await {
+                let _ = child.start_kill();
                 let status = child.wait().await;
                 let _ = stderr_task.await;
                 let stderr = combine_stderr(stderr_output.lock().await.clone(), error.stderr);
@@ -397,6 +400,9 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
                 .await;
 
             let result = read_claude_stream(stdout, stdin, bridge, event_tx.clone(), cancel).await;
+            if matches!(result, Ok(ClaudeStreamOutcome::Aborted) | Err(_)) {
+                let _ = child.start_kill();
+            }
             match result {
                 Ok(outcome) => {
                     let status = child.wait().await;
@@ -680,11 +686,8 @@ async fn read_claude_stream(
         if let Some(results) = ClaudeCodeProvider::parse_tool_result(&value) {
             for result in results {
                 if let Some(tool_use) = pending_tool_uses.remove(&result.tool_use_id) {
-                    let output_preview = if result.output.len() > 500 {
-                        format!("{}...", &result.output[..500])
-                    } else {
-                        result.output.clone()
-                    };
+                    let output_preview =
+                        output_preview(&result.output, TOOL_RESULT_PREVIEW_MAX_BYTES);
                     let command = tool_use_command(&tool_use);
                     send_provider_event(
                         &event_tx,
@@ -889,6 +892,20 @@ fn tool_use_command(tool_use: &ToolUseBlock) -> Option<String> {
     }
 }
 
+fn output_preview(output: &str, max_bytes: usize) -> String {
+    if output.len() <= max_bytes {
+        return output.to_string();
+    }
+
+    let truncate_at = output
+        .char_indices()
+        .map(|(idx, _)| idx)
+        .take_while(|idx| *idx <= max_bytes)
+        .last()
+        .unwrap_or(0);
+    format!("{}...", &output[..truncate_at])
+}
+
 fn combine_stderr(process_stderr: String, write_stderr: String) -> String {
     match (process_stderr.trim(), write_stderr.trim()) {
         ("", "") => String::new(),
@@ -969,8 +986,8 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use crate::cross_cutting::streaming_provider::{
-        ProviderCommand, ProviderEvent, ProviderPermissionMode, ProviderSession, ProviderStatus,
-        StreamingProviderAdapter, StreamingProviderInput,
+        ProviderCommand, ProviderEvent, ProviderExecutionEventStatus, ProviderPermissionMode,
+        ProviderSession, ProviderStatus, StreamingProviderAdapter, StreamingProviderInput,
     };
     use crate::protocol::contracts::{AdapterInput, AdapterRole, ProviderType};
 
@@ -1081,6 +1098,18 @@ mod tests {
             "receiver buffer did not reach {expected_len} items; actual len is {}",
             rx.len()
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn wait_for_process_absent(pid: u32) {
+        let proc_path = PathBuf::from(format!("/proc/{pid}"));
+        for _ in 0..200 {
+            if !proc_path.exists() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("process {pid} was not reaped after cancellation");
     }
 
     fn adapter_input(prompt: &str) -> AdapterInput {
@@ -1199,6 +1228,157 @@ mod tests {
             failed.contains("not authenticated"),
             "unexpected failure message: {failed}"
         );
+    }
+
+    #[tokio::test]
+    async fn claude_provider_truncates_multibyte_tool_result_preview_without_panicking() {
+        let long_output = "通".repeat(180);
+        let tool_use_line = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{
+                    "type": "tool_use",
+                    "id": "toolu_utf8",
+                    "name": "Bash",
+                    "input": { "command": "printf unicode output" }
+                }]
+            },
+            "session_id": "claude_fixture_session"
+        })
+        .to_string();
+        let tool_result_line = serde_json::json!({
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_utf8",
+                    "content": long_output
+                }]
+            },
+            "session_id": "claude_fixture_session"
+        })
+        .to_string();
+        let result_line = serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "result": "done",
+            "session_id": "claude_fixture_session"
+        })
+        .to_string();
+        let body = format!(
+            "#!/usr/bin/env bash\nset -euo pipefail\nwhile IFS= read -r line; do\n  if [[ \"$line\" == *'\"user\"'* ]]; then\n    printf '%s\\n' '{tool_use_line}'\n    printf '%s\\n' '{tool_result_line}'\n    printf '%s\\n' '{result_line}'\n    exit 0\n  fi\ndone\n"
+        );
+        let fixture = write_fixture("claude_utf8_tool_result_fixture.sh", &body);
+        let provider = ClaudeCodeProvider::new(fixture);
+        let input = streaming_input(ProviderType::ClaudeCode, ProviderPermissionMode::Auto);
+
+        let mut session = provider
+            .start(input, CancellationToken::new())
+            .await
+            .expect("start provider");
+        let mut preview = None;
+        let mut completed = None;
+
+        while let Some(event) = tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+            .await
+            .expect("provider should not hang while handling utf8 tool result")
+        {
+            match event {
+                ProviderEvent::Execution(event) => {
+                    if event.event_id == "toolu_utf8"
+                        && event.status == ProviderExecutionEventStatus::Completed
+                    {
+                        preview = event.output;
+                    }
+                }
+                ProviderEvent::Completed { full_output, .. } => {
+                    completed = Some(full_output);
+                    break;
+                }
+                ProviderEvent::Failed { message } => panic!("provider failed: {message}"),
+                ProviderEvent::ProtocolError { message, .. } => {
+                    panic!("provider protocol error: {message}")
+                }
+                ProviderEvent::PermissionTimeout { permission_id } => {
+                    panic!("provider permission timed out: {permission_id}")
+                }
+                ProviderEvent::StatusChanged(_)
+                | ProviderEvent::TextDelta { .. }
+                | ProviderEvent::PermissionRequest(_)
+                | ProviderEvent::ChoiceRequest(_)
+                | ProviderEvent::ToolCall(_)
+                | ProviderEvent::ToolResult(_) => {}
+            }
+        }
+
+        assert_eq!(completed.as_deref(), Some("done"));
+        let preview = preview.expect("tool result preview");
+        assert!(preview.ends_with("..."), "preview should be truncated");
+        assert!(
+            preview.len() <= 503,
+            "preview should be capped to 500 bytes plus suffix, got {} bytes",
+            preview.len()
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn claude_provider_cancel_kills_and_reaps_hanging_process() {
+        let fixture = write_fixture(
+            "claude_hanging_after_output_fixture.sh",
+            "#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\n' \"$$\" > \"$ARIA_FIXTURE_PID\"\nwhile IFS= read -r line; do\n  if [[ \"$line\" == *'\"user\"'* ]]; then\n    echo '{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"started\"}]},\"session_id\":\"claude_fixture_session\"}'\n    sleep 30\n  fi\ndone\n",
+        );
+        let provider = ClaudeCodeProvider::new(fixture);
+        let pid_path = tempfile::NamedTempFile::new()
+            .expect("pid file")
+            .into_temp_path();
+        let mut input = streaming_input(ProviderType::ClaudeCode, ProviderPermissionMode::Auto);
+        input.env_vars.insert(
+            "ARIA_FIXTURE_PID".to_string(),
+            pid_path.to_string_lossy().to_string(),
+        );
+        let cancel = CancellationToken::new();
+
+        let mut session = provider
+            .start(input, cancel.clone())
+            .await
+            .expect("start provider");
+        loop {
+            match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+                .await
+                .expect("provider should emit startup event")
+                .expect("provider channel should stay open until cancellation")
+            {
+                ProviderEvent::TextDelta { content } if content == "started" => break,
+                ProviderEvent::Failed { message } => panic!("provider failed: {message}"),
+                ProviderEvent::ProtocolError { message, .. } => {
+                    panic!("provider protocol error: {message}")
+                }
+                ProviderEvent::PermissionTimeout { permission_id } => {
+                    panic!("provider permission timed out: {permission_id}")
+                }
+                ProviderEvent::StatusChanged(_)
+                | ProviderEvent::Execution(_)
+                | ProviderEvent::TextDelta { .. }
+                | ProviderEvent::PermissionRequest(_)
+                | ProviderEvent::ChoiceRequest(_)
+                | ProviderEvent::ToolCall(_)
+                | ProviderEvent::ToolResult(_)
+                | ProviderEvent::Completed { .. } => {}
+            }
+        }
+
+        let pid = std::fs::read_to_string(&pid_path)
+            .expect("fixture pid")
+            .trim()
+            .parse::<u32>()
+            .expect("fixture pid number");
+        cancel.cancel();
+        drop(session);
+        wait_for_process_absent(pid).await;
     }
 
     #[tokio::test]
