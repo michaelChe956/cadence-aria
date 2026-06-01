@@ -393,12 +393,12 @@ fn record_attempt_provider_session(
     provider: ProviderName,
     provider_session_id: Option<String>,
     node_id: &str,
-) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
+) -> Result<(), CodingWorkspaceEngineError> {
     let Some(provider_session_id) = provider_session_id
         .map(|id| id.trim().to_string())
         .filter(|id| !id.is_empty())
     else {
-        return Ok(attempt.clone());
+        return Ok(());
     };
 
     let conversation_role = provider_conversation_role_for_coding_role(role);
@@ -425,7 +425,8 @@ fn record_attempt_provider_session(
 
     self.store
         .replace_attempt_provider_conversations(&attempt.id, conversations)
-        .map_err(CodingWorkspaceEngineError::from)
+        .map_err(CodingWorkspaceEngineError::from)?;
+    Ok(())
 }
 ```
 
@@ -464,9 +465,34 @@ git commit -m "feat: map coding roles to provider conversations"
 在 `tests/it_product/product_coding_workspace_engine.rs` 追加 provider：
 
 ```rust
-#[derive(Default)]
 struct SessionInputCapturingProvider {
     inputs: Arc<Mutex<Vec<StreamingProviderInput>>>,
+    outputs: Arc<Mutex<VecDeque<String>>>,
+    provider_session_ids: Arc<Mutex<VecDeque<Option<String>>>>,
+}
+
+impl Default for SessionInputCapturingProvider {
+    fn default() -> Self {
+        Self::with_outputs(
+            ["coding done"],
+            [Some("coder-session-1".to_string())],
+        )
+    }
+}
+
+impl SessionInputCapturingProvider {
+    fn with_outputs<const N: usize, const M: usize>(
+        outputs: [&str; N],
+        provider_session_ids: [Option<String>; M],
+    ) -> Self {
+        Self {
+            inputs: Arc::new(Mutex::new(Vec::new())),
+            outputs: Arc::new(Mutex::new(
+                outputs.into_iter().map(ToOwned::to_owned).collect(),
+            )),
+            provider_session_ids: Arc::new(Mutex::new(provider_session_ids.into_iter().collect())),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -477,12 +503,24 @@ impl StreamingProviderAdapter for SessionInputCapturingProvider {
         _cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
         self.inputs.lock().expect("inputs lock").push(input);
+        let output = self
+            .outputs
+            .lock()
+            .expect("outputs lock")
+            .pop_front()
+            .unwrap_or_else(|| "coding done".to_string());
+        let provider_session_id = self
+            .provider_session_ids
+            .lock()
+            .expect("provider session ids lock")
+            .pop_front()
+            .unwrap_or_else(|| Some("coder-session-1".to_string()));
         let (event_tx, event_rx) = mpsc::channel(8);
         let (command_tx, _command_rx) = mpsc::channel(8);
         event_tx
             .try_send(ProviderEvent::Completed {
-                full_output: "coding done".to_string(),
-                provider_session_id: Some("coder-session-1".to_string()),
+                full_output: output,
+                provider_session_id,
             })
             .expect("send completed");
         Ok(ProviderSession {
@@ -499,6 +537,12 @@ impl StreamingProviderAdapter for SessionInputCapturingProvider {
         Err(ProviderAdapterError::not_implemented("streaming test provider"))
     }
 }
+```
+
+确保测试文件 imports 包含：
+
+```rust
+use std::collections::VecDeque;
 ```
 
 在同一文件追加测试：
@@ -635,7 +679,7 @@ ProviderEvent::Completed {
     full_output: completed_output,
     provider_session_id,
 } => {
-    let _updated_attempt = self.record_attempt_provider_session(
+    let _ = self.record_attempt_provider_session(
         attempt,
         &provider_role,
         provider_name.clone(),
@@ -785,7 +829,7 @@ ProviderEvent::Completed {
     full_output: completed_output,
     provider_session_id,
 } => {
-    let _updated_attempt = self.record_attempt_provider_session(
+    let _ = self.record_attempt_provider_session(
         &attempt,
         &CodingProviderRole::Tester,
         tester_provider.clone(),
@@ -817,6 +861,7 @@ git commit -m "feat: resume tester provider sessions"
 
 **Files:**
 - Modify: `src/product/coding_workspace_engine.rs`
+- Modify: `tests/it_product/product_coding_workspace_engine.rs`
 
 - [ ] **Step 1: 为 code reviewer input 填入 role-based resume**
 
@@ -839,30 +884,28 @@ provider_input.resume_provider_session_id = resume_provider_session_id;
 provider_role: CodingProviderRole::CodeReviewer,
 ```
 
-- [ ] **Step 2: 为 rework/coder input 填入 role-based resume**
+- [ ] **Step 2: 为 analyst/rework input 填入 role-based resume**
 
-在 `execute_rework_with_commands` 构造 provider input 前使用 `CodingProviderRole::Coder`：
+在 `execute_rework_with_commands` 构造 `provider_input` 前使用 `CodingProviderRole::Analyst` 和 `analyst_provider`：
 
 ```rust
 let resume_provider_session_id = self.provider_resume_session_id_for_attempt(
     &attempt,
-    &CodingProviderRole::Coder,
-    &coder_provider,
+    &CodingProviderRole::Analyst,
+    &analyst_provider,
 );
-```
-
-input 中填入：
-
-```rust
-workspace_session_id: Some(attempt.id.clone()),
-resume_provider_session_id,
+let mut provider_input = streaming_input_from_adapter(&input, worktree_path.clone());
+provider_input.workspace_session_id = Some(attempt.id.clone());
+provider_input.resume_provider_session_id = resume_provider_session_id;
 ```
 
 `CodingProviderStreamRun` 构造中加入：
 
 ```rust
-provider_role: CodingProviderRole::Coder,
+provider_role: CodingProviderRole::Analyst,
 ```
+
+不要在 `execute_rework_with_commands` 中使用 `CodingProviderRole::Coder` 或 `coder_provider`；当前 rework provider run 是 Analyst 路径。
 
 - [ ] **Step 3: 为 internal reviewer input 填入 role-based resume**
 
@@ -872,7 +915,7 @@ provider_role: CodingProviderRole::Coder,
 let resume_provider_session_id = self.provider_resume_session_id_for_attempt(
     &attempt,
     &CodingProviderRole::InternalReviewer,
-    &internal_reviewer_provider,
+    &reviewer,
 );
 let mut provider_input = streaming_input_from_adapter(&input, worktree_path.clone());
 provider_input.workspace_session_id = Some(attempt.id.clone());
@@ -885,38 +928,255 @@ provider_input.resume_provider_session_id = resume_provider_session_id;
 provider_role: CodingProviderRole::InternalReviewer,
 ```
 
-- [ ] **Step 4: 为 analyst provider run 填入 role-based resume**
+- [ ] **Step 4: 写 code reviewer provider run 隔离测试**
 
-找到 analyst provider run 构造位置，使用 `CodingProviderRole::Analyst`：
-
-```rust
-let resume_provider_session_id = self.provider_resume_session_id_for_attempt(
-    &attempt,
-    &CodingProviderRole::Analyst,
-    &analyst_provider,
-);
-```
-
-input 中填入：
+在 `tests/it_product/product_coding_workspace_engine.rs` 追加：
 
 ```rust
-workspace_session_id: Some(attempt.id.clone()),
-resume_provider_session_id,
+#[tokio::test]
+async fn coding_code_reviewer_run_does_not_resume_coder_or_tester_session() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    init_repo(&worktree);
+    fs::write(worktree.join("src.txt"), "hello\nreviewed\n").expect("modify file");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            base_branch: "HEAD".to_string(),
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+            },
+            ..create_input()
+        })
+        .expect("create attempt");
+    let attempt = store
+        .replace_attempt_provider_conversations(
+            &attempt.id,
+            vec![
+                ProviderConversationRef {
+                    role: ProviderConversationRole::Coder,
+                    provider: ProviderName::ClaudeCode,
+                    provider_session_id: "coder-session-1".to_string(),
+                    updated_at: "2026-06-01T00:00:00Z".to_string(),
+                    last_node_id: Some("coding-node-1".to_string()),
+                },
+                ProviderConversationRef {
+                    role: ProviderConversationRole::Tester,
+                    provider: ProviderName::ClaudeCode,
+                    provider_session_id: "tester-session-1".to_string(),
+                    updated_at: "2026-06-01T00:01:00Z".to_string(),
+                    last_node_id: Some("testing-node-1".to_string()),
+                },
+            ],
+        )
+        .expect("persist conversations");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let provider = SessionInputCapturingProvider::with_outputs(
+        [r#"{"verdict":"approve","summary":"code review ok","findings":[]}"#],
+        [Some("code-reviewer-session-1".to_string())],
+    );
+
+    let report = engine
+        .execute_code_review(&attempt, &provider)
+        .await
+        .expect("code review provider run");
+
+    assert_eq!(report.verdict, ReviewVerdict::Approve);
+    let inputs = provider.inputs.lock().expect("inputs lock");
+    assert_eq!(inputs.len(), 1);
+    assert_eq!(inputs[0].resume_provider_session_id, None);
+    let updated = store
+        .get_attempt("project_0001", "issue_0001", &attempt.id)
+        .expect("updated attempt");
+    assert!(updated.provider_conversations.iter().any(|conversation| {
+        conversation.role == ProviderConversationRole::CodeReviewer
+            && conversation.provider == ProviderName::ClaudeCode
+            && conversation.provider_session_id == "code-reviewer-session-1"
+    }));
+}
 ```
 
-provider 完成时调用：
+- [ ] **Step 5: 写 analyst provider run 续接测试**
+
+在同一测试文件追加：
 
 ```rust
-let _updated_attempt = self.record_attempt_provider_session(
-    &attempt,
-    &CodingProviderRole::Analyst,
-    analyst_provider.clone(),
-    provider_session_id,
-    &node.id,
-)?;
+#[tokio::test]
+async fn coding_analyst_rework_resumes_analyst_provider_session() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::Codex),
+                review_rounds: 1,
+            },
+            ..create_input()
+        })
+        .expect("create attempt");
+    let attempt = store
+        .replace_attempt_provider_conversations(
+            &attempt.id,
+            vec![ProviderConversationRef {
+                role: ProviderConversationRole::Analyst,
+                provider: ProviderName::ClaudeCode,
+                provider_session_id: "analyst-session-1".to_string(),
+                updated_at: "2026-06-01T00:00:00Z".to_string(),
+                last_node_id: Some("rework-node-1".to_string()),
+            }],
+        )
+        .expect("persist analyst conversation");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    store
+        .update_attempt_stage(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingExecutionStage::Testing,
+        )
+        .expect("testing stage");
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
+    let provider = SessionInputCapturingProvider::with_outputs(
+        [r#"{"verdict":"no_issue","summary":"testing ok"}"#],
+        [Some("analyst-session-2".to_string())],
+    );
+
+    engine
+        .execute_rework(&attempt, "testing evidence", &provider)
+        .await
+        .expect("analyst rework provider run");
+
+    let inputs = provider.inputs.lock().expect("inputs lock");
+    assert_eq!(inputs.len(), 1);
+    assert_eq!(
+        inputs[0].resume_provider_session_id.as_deref(),
+        Some("analyst-session-1")
+    );
+}
 ```
 
-- [ ] **Step 5: 运行编译检查**
+- [ ] **Step 6: 写 internal reviewer provider run 续接测试**
+
+在同一测试文件追加：
+
+```rust
+#[tokio::test]
+async fn coding_internal_reviewer_resumes_internal_reviewer_provider_session() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    init_repo(&worktree);
+    fs::write(worktree.join("src.txt"), "hello\ninternal review\n").expect("modify file");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            base_branch: "HEAD".to_string(),
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+            },
+            ..create_input()
+        })
+        .expect("create attempt");
+    let attempt = store
+        .replace_attempt_provider_conversations(
+            &attempt.id,
+            vec![ProviderConversationRef {
+                role: ProviderConversationRole::InternalReviewer,
+                provider: ProviderName::ClaudeCode,
+                provider_session_id: "internal-reviewer-session-1".to_string(),
+                updated_at: "2026-06-01T00:00:00Z".to_string(),
+                last_node_id: Some("internal-review-node-1".to_string()),
+            }],
+        )
+        .expect("persist internal reviewer conversation");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    store
+        .update_attempt_stage(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingExecutionStage::ReviewRequest,
+        )
+        .expect("review request stage");
+    store
+        .save_review_request(&sample_review_request(&attempt.id))
+        .expect("save review request");
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
+    let provider = SessionInputCapturingProvider::with_outputs(
+        [r#"{"verdict":"approve","summary":"internal review ok","findings":[],"impact_scope":["src"],"pr_description":"实现 work item","commit_message_suggestion":"feat: implement work item"}"#],
+        [Some("internal-reviewer-session-2".to_string())],
+    );
+
+    let review = engine
+        .execute_internal_pr_review(&attempt, &provider)
+        .await
+        .expect("internal reviewer provider run");
+
+    assert_eq!(review.verdict, ReviewVerdict::Approve);
+    let inputs = provider.inputs.lock().expect("inputs lock");
+    assert_eq!(inputs.len(), 1);
+    assert_eq!(
+        inputs[0].resume_provider_session_id.as_deref(),
+        Some("internal-reviewer-session-1")
+    );
+}
+```
+
+确保测试文件 imports 包含：
+
+```rust
+use cadence_aria::product::models::{
+    ProviderConversationRef, ProviderConversationRole, ProviderName,
+};
+```
+
+- [ ] **Step 7: 运行 review 类 provider run 测试**
+
+Run:
+
+```bash
+cargo test --locked --test product_coding_workspace_engine coding_code_reviewer_run_does_not_resume_coder_or_tester_session
+cargo test --locked --test product_coding_workspace_engine coding_analyst_rework_resumes_analyst_provider_session
+cargo test --locked --test product_coding_workspace_engine coding_internal_reviewer_resumes_internal_reviewer_provider_session
+```
+
+Expected: 全部 PASS。
+
+- [ ] **Step 8: 运行编译检查**
 
 Run:
 
@@ -926,10 +1186,10 @@ cargo check --locked
 
 Expected: PASS。
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
-git add src/product/coding_workspace_engine.rs
+git add src/product/coding_workspace_engine.rs tests/it_product/product_coding_workspace_engine.rs
 git commit -m "feat: resume coding review provider sessions"
 ```
 
@@ -969,6 +1229,9 @@ cargo test --locked --lib coding_provider_role_maps_to_provider_conversation_rol
 cargo test --locked --lib coding_provider_resume_session_id_is_isolated_by_role_and_provider
 cargo test --locked --test product_coding_workspace_engine coding_coder_run_resumes_previous_coder_provider_session
 cargo test --locked --test product_coding_workspace_engine coding_tester_does_not_resume_coder_provider_session
+cargo test --locked --test product_coding_workspace_engine coding_code_reviewer_run_does_not_resume_coder_or_tester_session
+cargo test --locked --test product_coding_workspace_engine coding_analyst_rework_resumes_analyst_provider_session
+cargo test --locked --test product_coding_workspace_engine coding_internal_reviewer_resumes_internal_reviewer_provider_session
 ```
 
 Expected: 全部 PASS。

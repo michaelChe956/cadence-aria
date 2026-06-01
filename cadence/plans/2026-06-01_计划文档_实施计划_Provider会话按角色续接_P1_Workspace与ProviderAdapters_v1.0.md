@@ -284,13 +284,9 @@ resume_provider_session_id: None,
 在 `src/cross_cutting/streaming_provider.rs` 中把字段：
 
 ```rust
-pub session_id: Option<String>,
-```
-
-替换为：
-
-```rust
+/// 产品/工作区 session ID，用于日志追踪和关联（不用于 provider 续接）
 pub workspace_session_id: Option<String>,
+/// Provider session ID，用于续接 Claude Code / Codex 原生会话（如 `--resume <id>` 或 `threadId`）
 pub resume_provider_session_id: Option<String>,
 ```
 
@@ -593,6 +589,19 @@ Ok(StreamingProviderInput {
 
 - [ ] **Step 6: provider 完成时保存 session id**
 
+修改 `drive_provider_session` 签名，增加 `role` 参数：
+
+```rust
+async fn drive_provider_session(
+    &mut self,
+    session: Result<ProviderSession, ProviderAdapterError>,
+    mut command_rx: mpsc::Receiver<ProviderCommand>,
+    node_id: Option<String>,
+    agent: Option<ProviderName>,
+    role: ProviderConversationRole,
+) {
+```
+
 修改 `drive_provider_session` 的 completed 分支：
 
 ```rust
@@ -605,7 +614,7 @@ ProviderEvent::Completed {
     }
     if let Some(provider) = agent.clone() {
         self.record_provider_session(
-            ProviderConversationRole::Author,
+            role,
             provider,
             provider_session_id,
             node_id.clone(),
@@ -616,6 +625,11 @@ ProviderEvent::Completed {
     return;
 }
 ```
+
+更新所有 `drive_provider_session` 调用点，传入对应 role：
+- author generation 调用处传入 `ProviderConversationRole::Author`
+- revision 调用处传入 `ProviderConversationRole::Author`
+- 测试调用处根据场景传入对应 role
 
 修改 `drive_reviewer_provider_session` 的 completed 分支为 reviewer role：
 
@@ -830,17 +844,21 @@ git commit -m "feat: resume claude provider sessions"
 #!/usr/bin/env bash
 set -euo pipefail
 
+# 该 fixture 验证 resume 路径不会发送 thread/start
+# 如果收到 thread/start，说明实现有误，fixture 会输出错误信息到 stderr 并退出
+
 while IFS= read -r line; do
   if [[ "$line" == *'"method":"initialize"'* ]]; then
     echo '{"id":1,"result":{"capabilities":{}}}'
   elif [[ "$line" == *'"method":"initialized"'* ]]; then
     :
   elif [[ "$line" == *'"method":"thread/start"'* ]]; then
-    echo '{"id":999,"error":{"code":-32000,"message":"thread/start must not be called during resume"}}'
+    # 错误：resume 路径不应该发送 thread/start
+    echo '{"id":999,"error":{"code":-32000,"message":"thread/start must not be called during resume"}}' >&2
     exit 1
   elif [[ "$line" == *'"method":"turn/start"'* ]]; then
     if [[ "$line" != *'"threadId":"codex-thread-123"'* ]]; then
-      echo '{"id":2,"error":{"code":-32001,"message":"unexpected threadId"}}'
+      echo '{"id":2,"error":{"code":-32001,"message":"unexpected threadId"}}' >&2
       exit 1
     fi
     echo '{"id":2,"result":{"id":"turn-1"}}'
@@ -1022,24 +1040,148 @@ Run:
 
 ```bash
 cargo test --locked --test workspace_ws_integration workspace_ws_author_text_choice_blocks_reviewer_until_user_answers
+cargo test --locked --test workspace_ws_integration workspace_ws_reviewer_does_not_resume_author_provider_session
 ```
 
-Expected: PASS。
+Expected: 两个测试 PASS。
 
-- [ ] **Step 4: 增加 reviewer 不复用 author session 的集成断言**
+- [ ] **Step 4: 新增 reviewer 不复用 author session 的集成测试**
 
-如果该测试启用了 reviewer，记录 reviewer provider input，并断言：
+在 `tests/it_core/workspace_ws_integration.rs` 追加 role-aware provider 和测试。这个测试必须真实跑 author -> reviewer provider run，不要只调用 helper。
 
 ```rust
-assert_eq!(reviewer_resume_ids[0], None);
+#[derive(Default)]
+struct RoleResumeRecordingProviderState {
+    author_resume_ids: Mutex<Vec<Option<String>>>,
+    reviewer_resume_ids: Mutex<Vec<Option<String>>>,
+}
+
+struct RoleResumeRecordingProvider {
+    state: Arc<RoleResumeRecordingProviderState>,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for RoleResumeRecordingProvider {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let (output, provider_session_id) = match input.role {
+            AdapterRole::Reviewer => {
+                self.state
+                    .reviewer_resume_ids
+                    .lock()
+                    .unwrap()
+                    .push(input.resume_provider_session_id.clone());
+                (
+                    "审核通过。\n```json\n{\"verdict\":\"pass\",\"summary\":\"ok\"}\n```",
+                    Some("reviewer-provider-session-1".to_string()),
+                )
+            }
+            _ => {
+                self.state
+                    .author_resume_ids
+                    .lock()
+                    .unwrap()
+                    .push(input.resume_provider_session_id.clone());
+                (
+                    "# Story Spec\n\n## 功能需求\n- 实现登录会话过期提示。\n\n## 成功标准\n- 会话过期时提示用户重新登录。\n",
+                    Some("author-provider-session-1".to_string()),
+                )
+            }
+        };
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let (command_tx, _command_rx) = mpsc::channel::<ProviderCommand>(8);
+        tokio::spawn(async move {
+            let _ = event_tx
+                .send(ProviderEvent::Completed {
+                    full_output: output.to_string(),
+                    provider_session_id,
+                })
+                .await;
+        });
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+
+    async fn run_streaming(
+        &self,
+        _input: &AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+        Err(ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "run_streaming is not used by workspace websocket",
+            0,
+        ))
+    }
+}
+
+#[tokio::test]
+async fn workspace_ws_reviewer_does_not_resume_author_provider_session() {
+    let root = tempdir().expect("root");
+    create_workspace_session_fixture_with_providers(&root, "fake", "fake", 1).await;
+    let provider_state = Arc::new(RoleResumeRecordingProviderState::default());
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Fake,
+        Arc::new(RoleResumeRecordingProvider {
+            state: provider_state.clone(),
+        }),
+    );
+    let app = build_web_router(WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        registry,
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(
+        &mut ws,
+        &WsInMessage::UserMessage {
+            content: "开始生成".to_string(),
+        },
+    )
+    .await;
+
+    let _checkpoint = recv_until_message_complete(&mut ws).await;
+    let _stage = recv_until_stage(&mut ws, "human_confirm").await;
+
+    assert_eq!(
+        provider_state.author_resume_ids.lock().unwrap().as_slice(),
+        &[None]
+    );
+    assert_eq!(
+        provider_state.reviewer_resume_ids.lock().unwrap().as_slice(),
+        &[None]
+    );
+
+    drop(ws);
+    server.abort();
+}
 ```
 
-如果该测试未启用 reviewer，新增一个小测试 `workspace_ws_reviewer_does_not_resume_author_provider_session`，流程：
+更新该测试文件 imports：
 
-1. author provider 返回有效 Story Spec 和 `provider_session_id = Some("author-session")`。
-2. reviewer provider 记录 `resume_provider_session_id`。
-3. reviewer provider 返回 pass verdict。
-4. 断言 reviewer 第一轮 `resume_provider_session_id == None`。
+```rust
+use cadence_aria::cross_cutting::streaming_provider::{
+    FakeStreamingProvider, ProviderCommand, ProviderEvent, ProviderSession, StreamChunk,
+    StreamingProviderAdapter, StreamingProviderInput,
+};
+use cadence_aria::protocol::contracts::{AdapterInput, AdapterRole};
+```
 
 - [ ] **Step 5: 运行 reviewer 隔离集成测试**
 
@@ -1049,7 +1191,7 @@ Run:
 cargo test --locked --test workspace_ws_integration workspace_ws_reviewer_does_not_resume_author_provider_session
 ```
 
-Expected: PASS。如果 reviewer 断言合并在原测试中，则运行原测试并确认 PASS。
+Expected: PASS。
 
 - [ ] **Step 6: Commit**
 
