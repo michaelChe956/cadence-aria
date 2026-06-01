@@ -2722,7 +2722,6 @@ fn active_timeline_node_id(nodes: &[TimelineNode]) -> Option<String> {
                 TimelineNodeStatus::Active | TimelineNodeStatus::Paused
             )
         })
-        .or_else(|| nodes.last())
         .map(|node| node.node_id.clone())
 }
 
@@ -4164,6 +4163,85 @@ mod tests {
             active_timeline_node_id(&[stale_human_confirm, completed]).as_deref(),
             Some("timeline_node_002")
         );
+    }
+
+    #[tokio::test]
+    async fn persistent_engine_keeps_open_stage_after_failed_running_node() {
+        let (tmp, checkpoint_store) = setup();
+        let lifecycle_store = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
+        let (tx, _) = mpsc::channel(64);
+        let session_record = lifecycle_store
+            .create_workspace_session(CreateWorkspaceSessionInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                entity_id: "story_spec_0001".to_string(),
+                workspace_type: WorkspaceType::Story,
+                author_provider: ProviderName::ClaudeCode,
+                reviewer_provider: ProviderName::Codex,
+                review_rounds: 1,
+                superpowers_enabled: true,
+                openspec_enabled: true,
+            })
+            .unwrap();
+        let session_id = session_record.id.clone();
+        let provider_config_snapshot = ProviderConfigSnapshot {
+            author: session_record.author_provider.clone(),
+            reviewer: Some(session_record.reviewer_provider.clone()),
+            review_rounds: session_record.review_rounds,
+        };
+        lifecycle_store
+            .save_timeline_nodes(
+                &session_id,
+                &[
+                    TimelineNode {
+                        node_id: "timeline_node_001".to_string(),
+                        node_type: TimelineNodeType::StartGeneration,
+                        agent: None,
+                        stage: WsWorkspaceStage::PrepareContext,
+                        round: None,
+                        status: TimelineNodeStatus::Completed,
+                        title: "开始生成".to_string(),
+                        summary: None,
+                        started_at: "2026-06-01T14:12:29Z".to_string(),
+                        completed_at: Some("2026-06-01T14:12:29Z".to_string()),
+                        duration_ms: Some(0),
+                        artifact_ref: None,
+                        provider_config_snapshot: provider_config_snapshot.clone(),
+                    },
+                    TimelineNode {
+                        node_id: "timeline_node_002".to_string(),
+                        node_type: TimelineNodeType::AuthorRun,
+                        agent: Some(ProviderName::ClaudeCode),
+                        stage: WsWorkspaceStage::Running,
+                        round: None,
+                        status: TimelineNodeStatus::Failed,
+                        title: "Story Spec 生成".to_string(),
+                        summary: Some("运行已中止".to_string()),
+                        started_at: "2026-06-01T14:12:29Z".to_string(),
+                        completed_at: Some("2026-06-01T14:12:36Z".to_string()),
+                        duration_ms: None,
+                        artifact_ref: None,
+                        provider_config_snapshot,
+                    },
+                ],
+            )
+            .unwrap();
+
+        let session = WorkspaceSession::from_record(
+            lifecycle_store
+                .get_workspace_session(&session_id)
+                .expect("workspace session"),
+        );
+        let engine =
+            WorkspaceEngine::new_persistent(checkpoint_store, lifecycle_store, tx, session);
+
+        assert_eq!(engine.current_stage(), WorkspaceStage::PrepareContext);
+        match engine.build_session_state() {
+            WsOutMessage::SessionState { stage, .. } => {
+                assert_eq!(stage, "prepare_context");
+            }
+            other => panic!("expected session_state, got {other:?}"),
+        }
     }
 
     #[tokio::test]

@@ -1024,6 +1024,133 @@ async fn workspace_ws_disconnect_during_active_run_writes_aborted_by_disconnect(
 }
 
 #[tokio::test]
+async fn workspace_ws_second_connection_does_not_mark_active_run_stale() {
+    let root = tempdir().expect("root");
+    create_workspace_session_fixture(&root).await;
+    let mut registry = ProviderRegistry::new();
+    registry.register(ProviderName::Fake, Arc::new(HangingStreamingProvider));
+    let app = build_web_router(WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        registry,
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+    let (mut primary, _) = connect_async(url.clone())
+        .await
+        .expect("connect primary ws");
+    let _initial = recv_json(&mut primary).await;
+
+    send_json(
+        &mut primary,
+        &WsInMessage::UserMessage {
+            content: long_message("primary_instruction"),
+        },
+    )
+    .await;
+    let _first_chunk = recv_until_stream_chunk(&mut primary).await;
+
+    let (mut secondary, _) = connect_async(url.clone())
+        .await
+        .expect("connect secondary ws");
+    match recv_json(&mut secondary).await {
+        WsOutMessage::SessionState {
+            stage,
+            timeline_nodes,
+            active_run_id,
+            ..
+        } => {
+            let last = timeline_nodes.last().expect("timeline node");
+            assert_eq!(stage, "running");
+            assert!(active_run_id.is_none());
+            assert_ne!(last.node_type, TimelineNodeType::AbortedByDisconnect);
+            assert_ne!(last.status, TimelineNodeStatus::Failed);
+        }
+        other => panic!("expected session_state, got {other:?}"),
+    }
+
+    send_json(&mut primary, &WsInMessage::Abort).await;
+    let _stage = recv_until_stage(&mut primary, "prepare_context").await;
+
+    drop(secondary);
+    drop(primary);
+    server.abort();
+}
+
+#[tokio::test]
+async fn workspace_ws_secondary_connection_can_abort_active_run_started_by_primary() {
+    let root = tempdir().expect("root");
+    create_workspace_session_fixture(&root).await;
+    let mut registry = ProviderRegistry::new();
+    registry.register(ProviderName::Fake, Arc::new(HangingStreamingProvider));
+    let app = build_web_router(WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        registry,
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+    let (mut primary, _) = connect_async(url.clone())
+        .await
+        .expect("connect primary ws");
+    let _initial = recv_json(&mut primary).await;
+
+    send_json(
+        &mut primary,
+        &WsInMessage::UserMessage {
+            content: long_message("primary_instruction"),
+        },
+    )
+    .await;
+    let _first_chunk = recv_until_stream_chunk(&mut primary).await;
+
+    let (mut secondary, _) = connect_async(url.clone())
+        .await
+        .expect("connect secondary ws");
+    let _secondary_state = recv_json(&mut secondary).await;
+
+    send_json(&mut secondary, &WsInMessage::Abort).await;
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        recv_until_stage(&mut primary, "prepare_context"),
+    )
+    .await
+    .expect("secondary abort should stop the primary active run");
+
+    let (mut refreshed, _) = connect_async(url).await.expect("connect refreshed ws");
+    match recv_json(&mut refreshed).await {
+        WsOutMessage::SessionState {
+            stage,
+            active_run_id,
+            timeline_nodes,
+            ..
+        } => {
+            assert_eq!(stage, "prepare_context");
+            assert!(active_run_id.is_none());
+            let last = timeline_nodes.last().expect("timeline node");
+            assert_eq!(last.status, TimelineNodeStatus::Failed);
+            assert_eq!(last.summary.as_deref(), Some("运行已中止"));
+        }
+        other => panic!("expected session_state, got {other:?}"),
+    }
+
+    drop(refreshed);
+    drop(secondary);
+    drop(primary);
+    server.abort();
+}
+
+#[tokio::test]
 async fn workspace_ws_idle_timeout_does_not_close_socket_during_active_run() {
     let root = tempdir().expect("root");
     let _repo = create_workspace_session_fixture(&root).await;
