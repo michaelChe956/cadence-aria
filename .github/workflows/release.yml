@@ -137,9 +137,9 @@ jobs:
         run: |
           set -euo pipefail
           for key in linux-x64 darwin-x64 darwin-arm64; do
-            npm publish "npm/cli-${key}" --access public
+            npm publish "./npm/cli-${key}" --access public
           done
-          npm publish "npm/cli" --access public
+          npm publish "./npm/cli" --access public
 
       # GitHub Release 附件（设计 §6.4）
       - name: Make release assets
