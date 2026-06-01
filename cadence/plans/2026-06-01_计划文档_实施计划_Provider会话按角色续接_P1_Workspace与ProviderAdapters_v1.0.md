@@ -419,7 +419,12 @@ impl StreamingProviderAdapter for SessionRecordingProvider {
         _input: &AdapterInput,
         _cancel: CancellationToken,
     ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
-        Err(ProviderAdapterError::not_implemented("streaming test provider"))
+        Err(ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "run_streaming is not used by this test provider",
+            0,
+        ))
     }
 }
 
@@ -1040,10 +1045,9 @@ Run:
 
 ```bash
 cargo test --locked --test workspace_ws_integration workspace_ws_author_text_choice_blocks_reviewer_until_user_answers
-cargo test --locked --test workspace_ws_integration workspace_ws_reviewer_does_not_resume_author_provider_session
 ```
 
-Expected: 两个测试 PASS。
+Expected: PASS。
 
 - [ ] **Step 4: 新增 reviewer 不复用 author session 的集成测试**
 

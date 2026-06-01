@@ -534,7 +534,12 @@ impl StreamingProviderAdapter for SessionInputCapturingProvider {
         _input: &AdapterInput,
         _cancel: CancellationToken,
     ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
-        Err(ProviderAdapterError::not_implemented("streaming test provider"))
+        Err(ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "run_streaming is not used by this test provider",
+            0,
+        ))
     }
 }
 ```
