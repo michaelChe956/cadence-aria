@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -224,6 +225,54 @@ async fn execute_coding_runs_provider_in_worktree_and_streams_timeline_events() 
         }
         other => panic!("expected coding node completed, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn coding_coder_run_resumes_previous_coder_provider_session() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree.clone()),
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::Codex),
+                review_rounds: 1,
+            },
+            ..create_input()
+        })
+        .expect("create attempt");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
+    let provider = SessionInputCapturingProvider::default();
+
+    let first = engine
+        .execute_coding(&attempt, &provider, &CodingExecutionContext::default())
+        .await
+        .expect("first coding run");
+    let second = engine
+        .execute_coding(&first, &provider, &CodingExecutionContext::default())
+        .await
+        .expect("second coding run");
+
+    assert_eq!(second.stage, CodingExecutionStage::Coding);
+    let inputs = provider.inputs.lock().expect("inputs lock");
+    assert_eq!(inputs.len(), 2);
+    assert_eq!(inputs[0].resume_provider_session_id, None);
+    assert_eq!(
+        inputs[1].resume_provider_session_id.as_deref(),
+        Some("coder-session-1")
+    );
 }
 
 #[tokio::test]
@@ -2605,6 +2654,85 @@ impl StreamingProviderAdapter for InputCapturingProvider {
         })
         .expect("send done chunk");
         Ok(rx)
+    }
+}
+
+struct SessionInputCapturingProvider {
+    inputs: Arc<Mutex<Vec<StreamingProviderInput>>>,
+    outputs: Arc<Mutex<VecDeque<String>>>,
+    provider_session_ids: Arc<Mutex<VecDeque<Option<String>>>>,
+}
+
+impl Default for SessionInputCapturingProvider {
+    fn default() -> Self {
+        Self::with_outputs(["coding done"], [Some("coder-session-1".to_string())])
+    }
+}
+
+impl SessionInputCapturingProvider {
+    fn with_outputs<const N: usize, const M: usize>(
+        outputs: [&str; N],
+        provider_session_ids: [Option<String>; M],
+    ) -> Self {
+        Self {
+            inputs: Arc::new(Mutex::new(Vec::new())),
+            outputs: Arc::new(Mutex::new(
+                outputs.into_iter().map(ToOwned::to_owned).collect(),
+            )),
+            provider_session_ids: Arc::new(Mutex::new(provider_session_ids.into_iter().collect())),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for SessionInputCapturingProvider {
+    fn supports_tool_calls(&self) -> bool {
+        true
+    }
+
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.inputs.lock().expect("inputs lock").push(input);
+        let output = self
+            .outputs
+            .lock()
+            .expect("outputs lock")
+            .pop_front()
+            .unwrap_or_else(|| "coding done".to_string());
+        let provider_session_id = self
+            .provider_session_ids
+            .lock()
+            .expect("provider session ids lock")
+            .pop_front()
+            .unwrap_or_else(|| Some("coder-session-1".to_string()));
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let (command_tx, _command_rx) = mpsc::channel(8);
+        event_tx
+            .try_send(ProviderEvent::Completed {
+                full_output: output,
+                provider_session_id,
+            })
+            .expect("send completed");
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+
+    async fn run_streaming(
+        &self,
+        _input: &AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+        Err(ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "run_streaming is not used by this test provider",
+            0,
+        ))
     }
 }
 

@@ -84,6 +84,7 @@ struct CodingProviderStreamRun<'a> {
     legacy_input: &'a AdapterInput,
     input: StreamingProviderInput,
     provider_name: &'a ProviderName,
+    provider_role: CodingProviderRole,
     command_rx: &'a mut mpsc::Receiver<CodingRunnerCommand>,
 }
 
@@ -323,13 +324,18 @@ impl CodingWorkspaceEngine {
             timeout: 2400,
             max_retries: 0,
         };
+        let resume_provider_session_id = self.provider_resume_session_id_for_attempt(
+            &attempt,
+            &CodingProviderRole::Coder,
+            &coder_provider,
+        );
         let input = StreamingProviderInput {
             provider_type: legacy_input.provider_type.clone(),
             role: legacy_input.role.clone(),
             prompt: legacy_input.prompt.clone(),
             working_dir: worktree_path.clone(),
-            workspace_session_id: None,
-            resume_provider_session_id: None,
+            workspace_session_id: Some(attempt.id.clone()),
+            resume_provider_session_id,
             permission_mode: ProviderPermissionMode::Auto,
             env_vars: BTreeMap::new(),
             timeout_secs: legacy_input.timeout,
@@ -342,6 +348,7 @@ impl CodingWorkspaceEngine {
                 legacy_input: &legacy_input,
                 input,
                 provider_name: &coder_provider,
+                provider_role: CodingProviderRole::Coder,
                 command_rx,
             })
             .await?;
@@ -368,6 +375,7 @@ impl CodingWorkspaceEngine {
             legacy_input,
             input,
             provider_name,
+            provider_role,
             command_rx,
         } = run;
         let cancel = CancellationToken::new();
@@ -494,7 +502,17 @@ impl CodingWorkspaceEngine {
                                 })
                                 .await;
                         }
-                        ProviderEvent::Completed { full_output: completed_output, .. } => {
+                        ProviderEvent::Completed {
+                            full_output: completed_output,
+                            provider_session_id,
+                        } => {
+                            self.record_attempt_provider_session(
+                                attempt,
+                                &provider_role,
+                                provider_name.clone(),
+                                provider_session_id,
+                                node_id,
+                            )?;
                             if !completed_output.trim().is_empty() {
                                 full_output = completed_output;
                             }
@@ -1163,6 +1181,7 @@ impl CodingWorkspaceEngine {
                 legacy_input: &input,
                 input: provider_input,
                 provider_name: &reviewer,
+                provider_role: CodingProviderRole::CodeReviewer,
                 command_rx,
             })
             .await?;
@@ -1303,6 +1322,7 @@ impl CodingWorkspaceEngine {
                 legacy_input: &input,
                 input: provider_input,
                 provider_name: &analyst_provider,
+                provider_role: CodingProviderRole::Analyst,
                 command_rx,
             })
             .await?;
@@ -1404,6 +1424,7 @@ impl CodingWorkspaceEngine {
                 legacy_input: &input,
                 input: provider_input,
                 provider_name: &reviewer,
+                provider_role: CodingProviderRole::InternalReviewer,
                 command_rx,
             })
             .await?;
