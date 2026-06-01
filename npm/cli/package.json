@@ -1,6 +1,6 @@
 {
   "name": "@cadence-aria/cli",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "description": "Aria 本地化工作台 — 通过 npx 一键启动",
   "license": "MIT",
   "repository": {
@@ -20,8 +20,8 @@
     "node": ">=18"
   },
   "optionalDependencies": {
-    "@cadence-aria/cli-linux-x64": "0.0.0",
-    "@cadence-aria/cli-darwin-x64": "0.0.0",
-    "@cadence-aria/cli-darwin-arm64": "0.0.0"
+    "@cadence-aria/cli-linux-x64": "0.0.1",
+    "@cadence-aria/cli-darwin-x64": "0.0.1",
+    "@cadence-aria/cli-darwin-arm64": "0.0.1"
   }
 }

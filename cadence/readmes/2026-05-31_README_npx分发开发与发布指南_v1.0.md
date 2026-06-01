@@ -56,7 +56,7 @@ launcher 单测：`node --test "npm/cli/test/*.test.mjs"`（注意用 glob；nod
 
 推送 `v<x.y.z>` tag 触发 `.github/workflows/release.yml`：
 
-1. build：ubuntu/macos-13/macos-14 各自原生编译，tar 打包上传 artifact（tar 保执行位）。
+1. build：ubuntu/macos-15-intel/macos-14 各自原生编译，tar 打包上传 artifact（tar 保执行位）。
 2. release：下载解包 → chmod +x + test -x → 组包 → 体积 gate → npm publish（子包先、主包后）→ GitHub Release（附 tar.gz + SHA256SUMS）。
 
 ### 发布前置条件（维护者提供）
@@ -64,7 +64,7 @@ launcher 单测：`node --test "npm/cli/test/*.test.mjs"`（注意用 glob；nod
 - npm `@cadence-aria` scope 已创建。
 - 仓库 secret `NPM_TOKEN`（具 `@cadence-aria` 发布权限）。
 - GitHub Release 用默认 `GITHUB_TOKEN` + `permissions: contents: write`，无需额外 PAT。
-- 版本来源：tag `v0.1.0` → 包版本 `0.1.0`。
+- 版本来源：tag `v0.0.1` → 包版本 `0.0.1`。
 
 ### publish 失败处理（非原子）
 
@@ -73,13 +73,13 @@ launcher 单测：`node --test "npm/cli/test/*.test.mjs"`（注意用 glob；nod
 ## 6. 平台支持与风险
 
 - 预编译矩阵：linux-x64、darwin-x64、darwin-arm64。
-- `macos-13`（Intel runner）有退役风险；下线后改用 arm64 runner 交叉编译 x86_64-apple-darwin（需验证 git 重依赖交叉编译）。
+- `macos-15-intel`（Intel runner）用于 darwin-x64 原生编译；若该标签未来不可用，再评估 arm64 runner 交叉编译 x86_64-apple-darwin（需验证 git 重依赖交叉编译）。
 - linux-arm64、Windows 原生为后续增量；非支持平台 launcher 给出清晰错误。
 
 ## 7. 实测数据与待确认（开放事项）
 
 - **release 二进制实测约 6.3MB**（linux-x64，strip+lto+opt-level=s），远低于体积 gate 90MB 初值。
-- 首个版本号（建议 `0.1.0`）。
+- 首个版本号：`0.0.1`。
 - 启动检测提示中 codex/claude 安装指引文案/链接（当前为占位文案）。
 - release profile `opt-level`（`s` vs `z`）、`panic = "abort"` 最终取值。
 - 体积 gate 阈值（workflow 中初值 90MB，按多平台实测校准）。
