@@ -321,13 +321,13 @@ impl StreamingProviderAdapter for TestControlledFakeStreamingProvider {
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
         if input.role == AdapterRole::Reviewer
-            && let Some(session_id) = input.session_id.as_deref()
+            && let Some(session_id) = input.workspace_session_id.as_deref()
             && let Some(fixture) = self.controls.consume_review_fixture(session_id).await
         {
             return Ok(start_review_fixture_session(fixture, cancel));
         }
 
-        let use_fixture = match input.session_id.as_deref() {
+        let use_fixture = match input.workspace_session_id.as_deref() {
             Some(session_id) => self.controls.consume_permission_fixture(session_id).await,
             None => false,
         };
@@ -788,7 +788,8 @@ mod tests {
                     role: AdapterRole::Reviewer,
                     prompt: "请作为 reviewer 审核当前 Workspace 产物。".to_string(),
                     working_dir: std::env::current_dir().expect("current dir"),
-                    session_id: Some("workspace_session_1".to_string()),
+                    workspace_session_id: Some("workspace_session_1".to_string()),
+                    resume_provider_session_id: None,
                     permission_mode: ProviderPermissionMode::Supervised,
                     env_vars: Default::default(),
                     timeout_secs: 60,
@@ -871,7 +872,8 @@ mod tests {
             role: AdapterRole::Orchestrator,
             prompt: "生成测试产物".to_string(),
             working_dir: std::env::current_dir().expect("current dir"),
-            session_id: Some(session_id.to_string()),
+            workspace_session_id: Some(session_id.to_string()),
+            resume_provider_session_id: None,
             permission_mode: ProviderPermissionMode::Supervised,
             env_vars: Default::default(),
             timeout_secs: 60,
