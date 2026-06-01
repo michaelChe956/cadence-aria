@@ -88,7 +88,9 @@ struct CodingProviderStreamRun<'a> {
     command_rx: &'a mut mpsc::Receiver<CodingRunnerCommand>,
 }
 
-fn provider_conversation_role_for_coding_role(role: &CodingProviderRole) -> ProviderConversationRole {
+fn provider_conversation_role_for_coding_role(
+    role: &CodingProviderRole,
+) -> ProviderConversationRole {
     match role {
         CodingProviderRole::Coder => ProviderConversationRole::Coder,
         CodingProviderRole::Tester => ProviderConversationRole::Tester,

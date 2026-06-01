@@ -560,7 +560,9 @@ async fn coding_internal_reviewer_resumes_internal_reviewer_provider_session() {
     let (tx, _rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
     let provider = SessionInputCapturingProvider::with_outputs(
-        [r#"{"verdict":"approve","summary":"internal review ok","findings":[],"impact_scope":["src"],"pr_description":"实现 work item","commit_message_suggestion":"feat: implement work item"}"#],
+        [
+            r#"{"verdict":"approve","summary":"internal review ok","findings":[],"impact_scope":["src"],"pr_description":"实现 work item","commit_message_suggestion":"feat: implement work item"}"#,
+        ],
         [Some("internal-reviewer-session-2".to_string())],
     );
 
