@@ -1237,7 +1237,7 @@ impl WorkspaceEngine {
             Some(author),
             ProviderConversationRole::Author,
         )
-            .await;
+        .await;
     }
 
     async fn drive_reviewer_provider_session(
@@ -3292,15 +3292,15 @@ mod tests {
 
         let (_command_tx, command_rx) = mpsc::channel(8);
         engine
-            .handle_user_message("开始生成 Story Spec".to_string(), provider.clone(), command_rx)
+            .handle_user_message(
+                "开始生成 Story Spec".to_string(),
+                provider.clone(),
+                command_rx,
+            )
             .await;
 
         let prompt = engine
-            .take_pending_author_choice_prompt(
-                "author_choice_msg_002",
-                vec!["A".to_string()],
-                None,
-            )
+            .take_pending_author_choice_prompt("author_choice_msg_002", vec!["A".to_string()], None)
             .await
             .expect("pending author choice prompt");
 
@@ -3353,10 +3353,8 @@ mod tests {
             None
         );
         assert_eq!(
-            engine.provider_resume_session_id(
-                ProviderConversationRole::Author,
-                &ProviderName::Codex
-            ),
+            engine
+                .provider_resume_session_id(ProviderConversationRole::Author, &ProviderName::Codex),
             None
         );
     }

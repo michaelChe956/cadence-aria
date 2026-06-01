@@ -244,10 +244,7 @@ async fn workspace_ws_author_text_choice_blocks_reviewer_until_user_answers() {
     let resume_ids = provider_state.resume_ids.lock().unwrap().clone();
     assert_eq!(resume_ids.len(), 2);
     assert_eq!(resume_ids[0], None);
-    assert_eq!(
-        resume_ids[1].as_deref(),
-        Some("author-provider-session-1")
-    );
+    assert_eq!(resume_ids[1].as_deref(), Some("author-provider-session-1"));
 
     drop(ws);
     server.abort();
@@ -297,7 +294,11 @@ async fn workspace_ws_reviewer_does_not_resume_author_provider_session() {
         &[None]
     );
     assert_eq!(
-        provider_state.reviewer_resume_ids.lock().unwrap().as_slice(),
+        provider_state
+            .reviewer_resume_ids
+            .lock()
+            .unwrap()
+            .as_slice(),
         &[None]
     );
 
