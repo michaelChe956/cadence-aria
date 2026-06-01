@@ -1187,7 +1187,14 @@ impl CodingWorkspaceEngine {
             timeout: 2400,
             max_retries: 0,
         };
-        let provider_input = streaming_input_from_adapter(&input, worktree_path.clone());
+        let resume_provider_session_id = self.provider_resume_session_id_for_attempt(
+            &attempt,
+            &CodingProviderRole::CodeReviewer,
+            &reviewer,
+        );
+        let mut provider_input = streaming_input_from_adapter(&input, worktree_path.clone());
+        provider_input.workspace_session_id = Some(attempt.id.clone());
+        provider_input.resume_provider_session_id = resume_provider_session_id;
         let full_output = self
             .run_provider_stream_to_completion(CodingProviderStreamRun {
                 attempt: &attempt,
@@ -1328,7 +1335,14 @@ impl CodingWorkspaceEngine {
             timeout: 2400,
             max_retries: 0,
         };
-        let provider_input = streaming_input_from_adapter(&input, worktree_path.clone());
+        let resume_provider_session_id = self.provider_resume_session_id_for_attempt(
+            &attempt,
+            &CodingProviderRole::Analyst,
+            &analyst_provider,
+        );
+        let mut provider_input = streaming_input_from_adapter(&input, worktree_path.clone());
+        provider_input.workspace_session_id = Some(attempt.id.clone());
+        provider_input.resume_provider_session_id = resume_provider_session_id;
         let full_output = self
             .run_provider_stream_to_completion(CodingProviderStreamRun {
                 attempt: &attempt,
@@ -1430,7 +1444,14 @@ impl CodingWorkspaceEngine {
             timeout: 2400,
             max_retries: 0,
         };
-        let provider_input = streaming_input_from_adapter(&input, worktree_path.clone());
+        let resume_provider_session_id = self.provider_resume_session_id_for_attempt(
+            &attempt,
+            &CodingProviderRole::InternalReviewer,
+            &reviewer,
+        );
+        let mut provider_input = streaming_input_from_adapter(&input, worktree_path.clone());
+        provider_input.workspace_session_id = Some(attempt.id.clone());
+        provider_input.resume_provider_session_id = resume_provider_session_id;
         let full_output = self
             .run_provider_stream_to_completion(CodingProviderStreamRun {
                 attempt: &attempt,
