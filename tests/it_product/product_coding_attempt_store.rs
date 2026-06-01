@@ -10,7 +10,9 @@ use cadence_aria::product::coding_models::{
     ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict, TestCommand, TestCommandStatus,
     TestingOverallStatus, TestingReport,
 };
-use cadence_aria::product::models::ProviderName;
+use cadence_aria::product::models::{
+    ProviderConversationRef, ProviderConversationRole, ProviderName,
+};
 use cadence_aria::web::workspace_ws_types::ProviderConfigSnapshot;
 use tempfile::tempdir;
 
@@ -75,6 +77,61 @@ fn create_attempt_assigns_attempt_number_and_blocks_active_attempts() {
         .expect("create second attempt after terminal status");
     assert_eq!(second.id, "coding_attempt_0002");
     assert_eq!(second.attempt_no, 2);
+}
+
+#[test]
+fn coding_attempt_provider_conversations_default_for_legacy_json() {
+    let root = tempdir().expect("tempdir");
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let store = CodingAttemptStore::new(paths.clone());
+    let attempt = store
+        .create_attempt(create_input("work_item_0001"))
+        .expect("create attempt");
+
+    let attempt_path = paths
+        .root()
+        .join("projects/project_0001/issues/issue_0001/coding-attempts")
+        .join(format!("{}.json", attempt.id));
+    let mut value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&attempt_path).unwrap()).unwrap();
+    value
+        .as_object_mut()
+        .unwrap()
+        .remove("provider_conversations");
+    std::fs::write(&attempt_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+
+    let reloaded = store
+        .get_attempt_by_id(&attempt.id)
+        .expect("reload legacy coding attempt");
+    assert!(reloaded.provider_conversations.is_empty());
+}
+
+#[test]
+fn updates_coding_attempt_provider_conversations() {
+    let root = tempdir().expect("tempdir");
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let store = CodingAttemptStore::new(paths);
+    let attempt = store
+        .create_attempt(create_input("work_item_0001"))
+        .expect("create attempt");
+
+    let conversations = vec![ProviderConversationRef {
+        role: ProviderConversationRole::Coder,
+        provider: ProviderName::ClaudeCode,
+        provider_session_id: "coder-session-1".to_string(),
+        updated_at: "2026-06-01T00:00:00Z".to_string(),
+        last_node_id: Some("coding-node-1".to_string()),
+    }];
+
+    let updated = store
+        .replace_attempt_provider_conversations(&attempt.id, conversations.clone())
+        .expect("persist coding provider conversations");
+
+    assert_eq!(updated.provider_conversations, conversations);
+    let reloaded = store
+        .get_attempt_by_id(&attempt.id)
+        .expect("reload attempt");
+    assert_eq!(reloaded.provider_conversations, conversations);
 }
 
 #[test]

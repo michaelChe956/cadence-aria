@@ -14,6 +14,7 @@ use crate::product::coding_models::{
 };
 use crate::product::id::next_sequential_id;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
+use crate::product::models::ProviderConversationRef;
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +87,7 @@ impl CodingAttemptStore {
             head_commit: None,
             pushed_remote: None,
             review_request_id: None,
+            provider_conversations: Vec::new(),
             created_at: now.clone(),
             updated_at: now,
             completed_at: None,
@@ -337,6 +339,20 @@ impl CodingAttemptStore {
         let path = self.attempt_path(project_id, issue_id, attempt_id);
         let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
         attempt.rework_count += 1;
+        attempt.updated_at = Utc::now().to_rfc3339();
+        write_json(&path, &attempt)?;
+        Ok(attempt)
+    }
+
+    pub fn replace_attempt_provider_conversations(
+        &self,
+        attempt_id: &str,
+        provider_conversations: Vec<ProviderConversationRef>,
+    ) -> Result<CodingExecutionAttempt, ProductStoreError> {
+        validate_relative_id(attempt_id)?;
+        let mut attempt = self.find_attempt_by_id(attempt_id)?;
+        let path = self.attempt_path(&attempt.project_id, &attempt.issue_id, &attempt.id);
+        attempt.provider_conversations = provider_conversations;
         attempt.updated_at = Utc::now().to_rfc3339();
         write_json(&path, &attempt)?;
         Ok(attempt)
