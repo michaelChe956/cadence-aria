@@ -71,6 +71,26 @@ pub struct ChoiceRequestData {
     pub options: Vec<ChoiceOptionData>,
     pub allow_multiple: bool,
     pub allow_free_text: bool,
+    pub source: ChoiceRequestSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChoiceRequestSource {
+    AskUserQuestion,
+    RequestUserInput,
+    TextFallback,
+    ProviderChoice,
+}
+
+impl ChoiceRequestSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AskUserQuestion => "ask_user_question",
+            Self::RequestUserInput => "request_user_input",
+            Self::TextFallback => "text_fallback",
+            Self::ProviderChoice => "provider_choice",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

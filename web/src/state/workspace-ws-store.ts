@@ -1007,19 +1007,21 @@ function buildGatePromptEntry(
 
   const gatePromptNode =
     findLatestNodeOfType(state.timelineNodes, "human_confirm") ?? state.timelineNodes.at(-1);
-  const summary =
-    entries
-      .filter((entry) => entry.type === "review_verdict")
-      .at(-1)
-      ?.metadata?.summary?.toString() ?? "";
+  const latestReview = entries.filter((entry) => entry.type === "review_verdict").at(-1);
+  const summary = latestReview?.metadata?.summary?.toString() ?? "";
+  const verdict = latestReview?.metadata?.verdict?.toString() ?? "";
+  const metadata = {
+    ...(summary ? { summary } : {}),
+    ...(verdict ? { verdict } : {}),
+  };
   return {
     id: chatEntryId(gatePromptNode?.node_id ?? "human_confirm", "gate-prompt"),
     type: "gate_prompt",
     role: "system",
-    content: "等待人工确认",
+    content: verdict === "needs_human" ? "需要人工确认" : "等待人工确认",
     timestamp: gatePromptNode?.completed_at ?? gatePromptNode?.started_at ?? new Date().toISOString(),
     node_id: gatePromptNode?.node_id,
-    metadata: summary ? { summary } : undefined,
+    metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
   };
 }
 

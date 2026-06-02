@@ -172,8 +172,40 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
         while let Some(control) = outbound_rx.recv().await {
             match control {
                 OutboundControl::Text(msg) => {
+                    let diag_type = serde_json::from_str::<serde_json::Value>(&msg)
+                        .ok()
+                        .and_then(|value| {
+                            let message_type = value.get("type")?.as_str()?.to_string();
+                            let id = value
+                                .get("id")
+                                .and_then(serde_json::Value::as_str)
+                                .map(ToString::to_string);
+                            Some((message_type, id))
+                        });
+                    if let Some((message_type, id)) = diag_type.as_ref() {
+                        eprintln!(
+                            "[aria-choice-diag] ws send_task sending outbound type={} id={} bytes={}",
+                            message_type,
+                            id.as_deref().unwrap_or("<none>"),
+                            msg.len()
+                        );
+                    }
                     if ws_sender.send(Message::Text(msg.into())).await.is_err() {
+                        if let Some((message_type, id)) = diag_type.as_ref() {
+                            eprintln!(
+                                "[aria-choice-diag] ws send_task failed outbound type={} id={}",
+                                message_type,
+                                id.as_deref().unwrap_or("<none>")
+                            );
+                        }
                         break;
+                    }
+                    if let Some((message_type, id)) = diag_type.as_ref() {
+                        eprintln!(
+                            "[aria-choice-diag] ws send_task sent outbound type={} id={}",
+                            message_type,
+                            id.as_deref().unwrap_or("<none>")
+                        );
                     }
                 }
                 OutboundControl::CloseDueToIdleTimeout => {
@@ -203,6 +235,7 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
     });
 
     let outbound_for_events = outbound_tx.clone();
+    let session_id_for_events = session_id.clone();
     let event_forward_task = tokio::spawn(async move {
         while let Some(event) = engine_rx.recv().await {
             let ws_msg = match event {
@@ -247,13 +280,25 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                     options,
                     allow_multiple,
                     allow_free_text,
-                } => WsOutMessage::ChoiceRequest {
-                    id,
-                    prompt,
-                    options: options.into_iter().map(ws_choice_option).collect(),
-                    allow_multiple,
-                    allow_free_text,
-                },
+                    source,
+                } => {
+                    eprintln!(
+                        "[aria-choice-diag] ws outbound choice_request session={} id={} source={} options={} prompt_chars={}",
+                        session_id_for_events,
+                        id,
+                        source.as_str(),
+                        options.len(),
+                        prompt.chars().count()
+                    );
+                    WsOutMessage::ChoiceRequest {
+                        id,
+                        prompt,
+                        options: options.into_iter().map(ws_choice_option).collect(),
+                        allow_multiple,
+                        allow_free_text,
+                        source: source.as_str().to_string(),
+                    }
+                }
                 EngineEvent::ProviderStatus { status } => WsOutMessage::ProviderStatus {
                     status: ws_provider_status(status),
                 },
@@ -471,10 +516,23 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                 free_text,
             } => {
                 tracing::info!(choice_id = %id, "ws inbound choice response");
+                eprintln!(
+                    "[aria-choice-diag] ws inbound choice_response session={} id={} selected={:?} free_text_present={}",
+                    session_id,
+                    id,
+                    selected_option_ids,
+                    free_text
+                        .as_ref()
+                        .is_some_and(|text| !text.trim().is_empty())
+                );
                 let command_tx =
                     active_run_command_tx(&current_run, &state.workspace_runs, &session_id).await;
-                if let Some(command_tx) = command_tx
-                    && command_tx
+                if let Some(command_tx) = command_tx {
+                    eprintln!(
+                        "[aria-choice-diag] ws forwarding choice_response to active run session={} id={}",
+                        session_id, id
+                    );
+                    if command_tx
                         .send(ProviderCommand::ChoiceResponse {
                             id: id.clone(),
                             selected_option_ids: selected_option_ids.clone(),
@@ -482,8 +540,22 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                         })
                         .await
                         .is_ok()
-                {
-                    continue;
+                    {
+                        eprintln!(
+                            "[aria-choice-diag] ws forwarded choice_response to active run session={} id={}",
+                            session_id, id
+                        );
+                        continue;
+                    }
+                    eprintln!(
+                        "[aria-choice-diag] ws failed to forward choice_response to active run session={} id={}; falling back",
+                        session_id, id
+                    );
+                } else {
+                    eprintln!(
+                        "[aria-choice-diag] ws has no active run for choice_response session={} id={}; trying text fallback follow-up",
+                        session_id, id
+                    );
                 }
 
                 let prompt = {
@@ -496,7 +568,7 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                     Ok(content) => {
                         if let Err(message) = spawn_provider_run_from_handler(
                             run_context.clone(),
-                            ProviderRunKind::Author { content },
+                            ProviderRunKind::AuthorChoiceFollowup { content },
                         )
                         .await
                         {
@@ -534,7 +606,15 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                 .await;
             }
             WsInMessage::Abort => {
-                abort_active_run(&current_run, &state.workspace_runs, &session_id).await;
+                if abort_active_run(&current_run, &state.workspace_runs, &session_id).await {
+                    let _ = send_json_outbound(
+                        &outbound_tx,
+                        &WsOutMessage::ProviderStatus {
+                            status: WsProviderStatus::Aborted,
+                        },
+                    )
+                    .await;
+                }
             }
             WsInMessage::Ping => {
                 let _ = send_json_outbound(&outbound_tx, &WsOutMessage::Pong).await;
@@ -1090,6 +1170,7 @@ mod tests {
 
 enum ProviderRunKind {
     Author { content: String },
+    AuthorChoiceFollowup { content: String },
     Revision,
 }
 
@@ -1120,17 +1201,20 @@ async fn abort_active_run(
     current_run: &Arc<Mutex<Option<WorkspaceActiveRun>>>,
     workspace_runs: &WorkspaceRunRegistry,
     session_id: &str,
-) {
+) -> bool {
     let active = { current_run.lock().await.take() };
     if let Some(run) = active {
         let _ = workspace_runs.remove_if_token(session_id, run.token).await;
         abort_workspace_run(&run).await;
-        return;
+        return true;
     }
 
     if let Some(run) = workspace_runs.take(session_id).await {
         abort_workspace_run(&run).await;
+        return true;
     }
+
+    false
 }
 
 async fn spawn_provider_run_from_handler(
@@ -1191,6 +1275,11 @@ async fn spawn_provider_run_from_handler(
             ProviderRunKind::Author { content } => {
                 engine
                     .handle_user_message(content, provider_for_run, command_rx)
+                    .await;
+            }
+            ProviderRunKind::AuthorChoiceFollowup { content } => {
+                engine
+                    .handle_author_choice_followup_message(content, provider_for_run, command_rx)
                     .await;
             }
             ProviderRunKind::Revision => {

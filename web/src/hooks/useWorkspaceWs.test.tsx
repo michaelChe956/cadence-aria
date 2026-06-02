@@ -125,6 +125,7 @@ describe("useWorkspaceWs", () => {
         ],
         allow_multiple: false,
         allow_free_text: true,
+        source: "ask_user_question",
       });
     });
 
@@ -137,6 +138,7 @@ describe("useWorkspaceWs", () => {
         request_id: "choice_001",
         allow_multiple: false,
         allow_free_text: true,
+        source: "ask_user_question",
       },
     });
   });

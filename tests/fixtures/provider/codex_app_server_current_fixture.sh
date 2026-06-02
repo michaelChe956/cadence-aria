@@ -27,8 +27,8 @@ while IFS= read -r line; do
     echo "{\"jsonrpc\":\"2.0\",\"id\":${id:-3},\"result\":{\"turn\":{\"id\":\"codex_current_turn_fixture\",\"status\":\"inProgress\"}}}"
     echo "{\"jsonrpc\":\"2.0\",\"method\":\"item/started\",\"params\":{\"threadId\":\"codex_current_thread_fixture\",\"turnId\":\"codex_current_turn_fixture\",\"item\":{\"type\":\"commandExecution\",\"id\":\"cmd_001\",\"command\":\"pwd\",\"cwd\":\"$cwd\"}}}"
     echo "{\"jsonrpc\":\"2.0\",\"method\":\"item/completed\",\"params\":{\"threadId\":\"codex_current_thread_fixture\",\"turnId\":\"codex_current_turn_fixture\",\"item\":{\"type\":\"commandExecution\",\"id\":\"cmd_001\",\"command\":\"pwd\",\"cwd\":\"$cwd\",\"aggregatedOutput\":\"$cwd\\n\",\"exitCode\":0}}}"
-    echo '{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"threadId":"codex_current_thread_fixture","turnId":"codex_current_turn_fixture","itemId":"message_001","delta":"Codex current chunk"}}'
-    echo '{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"agentMessage","id":"message_001","text":"Codex current chunk","phase":"final_answer"},"threadId":"codex_current_thread_fixture","turnId":"codex_current_turn_fixture"}}'
+    echo '{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"threadId":"codex_current_thread_fixture","turnId":"codex_current_turn_fixture","itemId":"message_001","delta":"# Story Spec\n\n## 功能需求\n- [REQ-001] Codex current fixture generates a valid candidate artifact.\n\n## 成功标准\n- [AC-001] The candidate artifact can proceed to review."}}'
+    echo '{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"agentMessage","id":"message_001","text":"# Story Spec\n\n## 功能需求\n- [REQ-001] Codex current fixture generates a valid candidate artifact.\n\n## 成功标准\n- [AC-001] The candidate artifact can proceed to review.","phase":"final_answer"},"threadId":"codex_current_thread_fixture","turnId":"codex_current_turn_fixture"}}'
     echo '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"codex_current_thread_fixture","turn":{"id":"codex_current_turn_fixture","status":"completed"}}}'
     exit 0
   fi

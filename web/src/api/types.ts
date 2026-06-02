@@ -651,6 +651,12 @@ export type ChoiceOption = {
   description?: string | null;
 };
 
+export type WorkspaceChoiceRequestSource =
+  | "ask_user_question"
+  | "request_user_input"
+  | "text_fallback"
+  | "provider_choice";
+
 export type ArtifactVersion = {
   version: number;
   markdown: string;
@@ -716,6 +722,15 @@ export type WsOutMessage =
       tool_name: string;
       description: string;
       risk_level: "low" | "medium" | "high";
+    }
+  | {
+      type: "choice_request";
+      id: string;
+      prompt: string;
+      options: ChoiceOption[];
+      allow_multiple: boolean;
+      allow_free_text: boolean;
+      source: WorkspaceChoiceRequestSource;
     }
   | { type: "provider_status"; status: ProviderStatus }
   | { type: "execution_event"; event: ExecutionEvent }

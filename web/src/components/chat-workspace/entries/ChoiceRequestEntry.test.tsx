@@ -80,6 +80,18 @@ describe("ChoiceRequestEntry", () => {
     expect(screen.queryByRole("button", { name: "提交选择" })).not.toBeInTheDocument();
   });
 
+  it("shows the choice request source", () => {
+    render(<ChoiceRequestEntry entry={makeChoiceEntry({ source: "ask_user_question" })} />);
+
+    expect(screen.getByText("AskUserQuestion")).toBeInTheDocument();
+  });
+
+  it("shows text fallback choice request source", () => {
+    render(<ChoiceRequestEntry entry={makeChoiceEntry({ source: "text_fallback" })} />);
+
+    expect(screen.getByText("文本 fallback")).toBeInTheDocument();
+  });
+
   it("renders choice response entries", () => {
     render(
       <ChoiceResponseEntry

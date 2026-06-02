@@ -5,7 +5,8 @@ use cadence_aria::cross_cutting::codex_provider::CodexProvider;
 use cadence_aria::cross_cutting::provider_adapter::ProviderAdapterError;
 use cadence_aria::cross_cutting::provider_registry::ProviderRegistry;
 use cadence_aria::cross_cutting::streaming_provider::{
-    FakeStreamingProvider, ProviderCommand, ProviderEvent, ProviderSession, StreamChunk,
+    ChoiceOptionData, ChoiceRequestData, ChoiceRequestSource, FakeStreamingProvider,
+    ProviderCommand, ProviderEvent, ProviderSession, ProviderStatus, StreamChunk,
     StreamingProviderAdapter, StreamingProviderInput,
 };
 use cadence_aria::product::models::ProviderName;
@@ -14,7 +15,7 @@ use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::runtime::WebRuntime;
 use cadence_aria::web::state::WebAppState;
 use cadence_aria::web::workspace_ws_types::{
-    TimelineNodeStatus, TimelineNodeType, WsInMessage, WsOutMessage,
+    TimelineNodeStatus, TimelineNodeType, WsInMessage, WsOutMessage, WsProviderStatus,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -31,6 +32,30 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
+
+const VALID_STORY_SPEC: &str = "# Story Spec\n\n\
+## 功能需求\n\
+- [REQ-001] 生成可审核的候选产物。\n\n\
+## 成功标准\n\
+- [AC-001] 候选产物包含成功标准。\n";
+
+const INITIAL_STORY_SPEC: &str = "# Initial Story Spec\n\n\
+## 功能需求\n\
+- [REQ-001] 生成初始候选产物。\n\n\
+## 成功标准\n\
+- [AC-001] 初始候选产物可进入审核。\n";
+
+const REVISED_STORY_SPEC: &str = "# Revised Story Spec\n\n\
+## 功能需求\n\
+- [REQ-001] 补充返修后的候选产物。\n\n\
+## 成功标准\n\
+- [AC-001] 返修候选产物可进入二次审核。\n";
+
+const REVISED_AFTER_RECONNECT_STORY_SPEC: &str = "# Revised After Reconnect\n\n\
+## 功能需求\n\
+- [REQ-001] 重连后继续生成返修候选产物。\n\n\
+## 成功标准\n\
+- [AC-001] 重连后的返修候选产物可进入审核。\n";
 
 #[tokio::test]
 async fn workspace_ws_hydrates_context_for_existing_empty_session() {
@@ -112,7 +137,7 @@ async fn workspace_ws_replaces_legacy_context_with_generation_brief() {
     });
 
     let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
-    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let (mut ws, _) = connect_async(url.clone()).await.expect("connect ws");
 
     let initial = recv_json(&mut ws).await;
     match initial {
@@ -158,7 +183,7 @@ async fn workspace_ws_runs_provider_from_repository_path() {
     });
 
     let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
-    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let (mut ws, _) = connect_async(url.clone()).await.expect("connect ws");
     let _initial = recv_json(&mut ws).await;
 
     send_json(
@@ -216,6 +241,7 @@ async fn workspace_ws_author_text_choice_blocks_reviewer_until_user_answers() {
     .await;
 
     let choice = recv_until_choice_request(&mut ws).await;
+    assert_eq!(choice.source.as_deref(), Some("text_fallback"));
     assert!(choice.prompt.contains("n <= 0"));
     assert_eq!(choice.options.len(), 3);
     assert_eq!(choice.options[0].id, "A");
@@ -241,6 +267,8 @@ async fn workspace_ws_author_text_choice_blocks_reviewer_until_user_answers() {
     assert_eq!(prompts.len(), 2);
     assert!(prompts[1].contains("用户回答了 author 的确认问题"));
     assert!(prompts[1].contains("A. 返回 `0`"));
+    assert!(!prompts[1].contains("[system]:"));
+    assert!(!prompts[1].contains("[assistant]:"));
     let resume_ids = provider_state.resume_ids.lock().unwrap().clone();
     assert_eq!(resume_ids.len(), 2);
     assert_eq!(resume_ids[0], None);
@@ -362,6 +390,7 @@ async fn workspace_ws_author_recommendation_choice_blocks_reviewer_until_user_an
     .await;
 
     let choice = recv_until_choice_request(&mut ws).await;
+    assert_eq!(choice.source.as_deref(), Some("text_fallback"));
     assert!(choice.prompt.contains("n <= 0"));
     assert_eq!(choice.options.len(), 3);
     assert!(choice.options[0].label.contains("n >= 1"));
@@ -387,6 +416,79 @@ async fn workspace_ws_author_recommendation_choice_blocks_reviewer_until_user_an
     assert_eq!(prompts.len(), 2);
     assert!(prompts[1].contains("用户回答了 author 的确认问题"));
     assert!(prompts[1].contains("只声明本次需求支持 `n >= 1`"));
+    assert!(!prompts[1].contains("[system]:"));
+    assert!(!prompts[1].contains("[assistant]:"));
+
+    drop(ws);
+    server.abort();
+}
+
+#[tokio::test]
+async fn workspace_ws_claude_author_text_choice_uses_text_fallback_delta_only_followup() {
+    let root = tempdir().expect("root");
+    create_workspace_session_fixture_with_author(&root, "claude_code").await;
+    let provider_state = Arc::new(ChoiceThenArtifactProviderState::default());
+    let mut registry = ProviderRegistry::new();
+    registry.register(ProviderName::Fake, Arc::new(FakeStreamingProvider));
+    registry.register(
+        ProviderName::ClaudeCode,
+        Arc::new(ChoiceThenArtifactProvider {
+            state: provider_state.clone(),
+        }),
+    );
+    let app = build_web_router(WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        registry,
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(
+        &mut ws,
+        &WsInMessage::UserMessage {
+            content: "开始生成".to_string(),
+        },
+    )
+    .await;
+
+    let choice = recv_until_choice_request(&mut ws).await;
+    assert_eq!(choice.source.as_deref(), Some("text_fallback"));
+    assert!(choice.prompt.contains("n <= 0"));
+    assert_eq!(choice.options.len(), 3);
+
+    send_json(
+        &mut ws,
+        &WsInMessage::ChoiceResponse {
+            id: choice.id,
+            selected_option_ids: vec!["A".to_string()],
+            free_text: None,
+        },
+    )
+    .await;
+
+    let checkpoint = recv_until_message_complete(&mut ws).await;
+    assert!(checkpoint.starts_with("cp_"));
+    let stage = recv_until_stage(&mut ws, "human_confirm").await;
+    assert_eq!(stage, "human_confirm");
+
+    let prompts = provider_state.prompts.lock().unwrap();
+    assert_eq!(prompts.len(), 2);
+    assert!(prompts[1].contains("用户回答了 author 的确认问题"));
+    assert!(prompts[1].contains("A. 返回 `0`"));
+    assert!(!prompts[1].contains("[system]:"));
+    assert!(!prompts[1].contains("[assistant]:"));
+    let resume_ids = provider_state.resume_ids.lock().unwrap().clone();
+    assert_eq!(resume_ids.len(), 2);
+    assert_eq!(resume_ids[0], None);
+    assert_eq!(resume_ids[1].as_deref(), Some("author-provider-session-1"));
 
     drop(ws);
     server.abort();
@@ -580,7 +682,7 @@ async fn workspace_ws_review_decision_continue_runs_revision_and_second_review()
     registry.register(
         ProviderName::Fake,
         Arc::new(ScriptedStreamingProvider::new(
-            ["# Initial Story Spec", "# Revised Story Spec"],
+            [INITIAL_STORY_SPEC, REVISED_STORY_SPEC],
             author_prompts.clone(),
         )),
     );
@@ -1327,6 +1429,7 @@ async fn workspace_ws_claude_author_ask_user_question_choice_continues_same_prov
     .await;
 
     let choice = recv_until_choice_request(&mut ws).await;
+    assert_eq!(choice.source.as_deref(), Some("ask_user_question"));
     assert_eq!(choice.id, "ask_req_001");
     assert_eq!(choice.prompt, "Drink?");
     assert_eq!(choice.options[0].id, "opt_0");
@@ -1349,6 +1452,72 @@ async fn workspace_ws_claude_author_ask_user_question_choice_continues_same_prov
 
     drop(ws);
     server.abort();
+}
+
+#[tokio::test]
+async fn workspace_ws_abort_after_choice_response_returns_prepare_context() {
+    let root = tempdir().expect("root");
+    create_workspace_session_fixture(&root).await;
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Fake,
+        Arc::new(ChoiceThenHangingStreamingProvider),
+    );
+    let app = build_web_router(WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        registry,
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(
+        &mut ws,
+        &WsInMessage::UserMessage {
+            content: "run choice and hang provider".to_string(),
+        },
+    )
+    .await;
+
+    let choice = recv_until_choice_request(&mut ws).await;
+    send_json(
+        &mut ws,
+        &WsInMessage::ChoiceResponse {
+            id: choice.id,
+            selected_option_ids: vec!["opt_0".to_string()],
+            free_text: None,
+        },
+    )
+    .await;
+    send_json(&mut ws, &WsInMessage::Abort).await;
+
+    let mut saw_aborted_status = false;
+    for _ in 0..80 {
+        match recv_json(&mut ws).await {
+            WsOutMessage::ProviderStatus {
+                status: WsProviderStatus::Aborted,
+            } => saw_aborted_status = true,
+            WsOutMessage::StageChange { stage } if stage == "prepare_context" => {
+                assert!(saw_aborted_status);
+                drop(ws);
+                server.abort();
+                return;
+            }
+            WsOutMessage::MessageComplete { .. } => {
+                panic!("aborted choice run should not complete")
+            }
+            WsOutMessage::Error { message } => panic!("ws error: {message}"),
+            _ => {}
+        }
+    }
+    panic!("abort after choice response did not return workspace to prepare_context");
 }
 
 #[tokio::test]
@@ -1632,7 +1801,7 @@ async fn workspace_ws_reconnect_during_review_decision_can_still_run_revision() 
     registry.register(
         ProviderName::Fake,
         Arc::new(ScriptedStreamingProvider::new(
-            ["# Initial Story Spec", "# Revised After Reconnect"],
+            [INITIAL_STORY_SPEC, REVISED_AFTER_RECONNECT_STORY_SPEC],
             author_prompts.clone(),
         )),
     );
@@ -1731,12 +1900,12 @@ impl StreamingProviderAdapter for WorkingDirRecordingStreamingProvider {
         tokio::spawn(async move {
             let _ = event_tx
                 .send(ProviderEvent::TextDelta {
-                    content: "# Draft".to_string(),
+                    content: VALID_STORY_SPEC.to_string(),
                 })
                 .await;
             let _ = event_tx
                 .send(ProviderEvent::Completed {
-                    full_output: "# Draft".to_string(),
+                    full_output: VALID_STORY_SPEC.to_string(),
                     provider_session_id: None,
                 })
                 .await;
@@ -1810,9 +1979,9 @@ impl StreamingProviderAdapter for ChoiceThenArtifactProvider {
         let output = if call_no == 1 {
             "需要先确认一个边界条件，然后我再生成最终 Story Spec：\n\
              `climb_stairs(n)` 对 `n <= 0` 应该如何处理？\n\
-             A. 返回 `0`，仅把正整数楼梯数视为有效输入\n\
-             B. 抛出异常，例如 `ValueError`\n\
-             C. 不定义该行为，Story Spec 只覆盖 issue 明确要求的 `n >= 1` 场景"
+             - **A)** 返回 `0`，仅把正整数楼梯数视为有效输入\n\
+             - **B)** 抛出异常，例如 `ValueError`\n\
+             - **C)** 不定义该行为，Story Spec 只覆盖 issue 明确要求的 `n >= 1` 场景"
         } else {
             "# Story Spec\n\n\
              ## 范围\n\
@@ -1980,6 +2149,70 @@ impl StreamingProviderAdapter for HangingStreamingProvider {
         mpsc::Receiver<cadence_aria::cross_cutting::streaming_provider::StreamChunk>,
         ProviderAdapterError,
     > {
+        Err(ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "run_streaming is not used by workspace websocket",
+            0,
+        ))
+    }
+}
+
+struct ChoiceThenHangingStreamingProvider;
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for ChoiceThenHangingStreamingProvider {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let (command_tx, mut command_rx) = mpsc::channel::<ProviderCommand>(8);
+        tokio::spawn(async move {
+            let _ = event_tx
+                .send(ProviderEvent::ChoiceRequest(ChoiceRequestData {
+                    id: "choice_hanging_001".to_string(),
+                    prompt: "继续方式？".to_string(),
+                    options: vec![ChoiceOptionData {
+                        id: "opt_0".to_string(),
+                        label: "继续 author".to_string(),
+                        description: None,
+                    }],
+                    allow_multiple: false,
+                    allow_free_text: false,
+                    source: ChoiceRequestSource::ProviderChoice,
+                }))
+                .await;
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => return,
+                    command = command_rx.recv() => {
+                        match command {
+                            Some(ProviderCommand::Abort) | None => return,
+                            Some(ProviderCommand::ChoiceResponse { .. }) => {
+                                let _ = event_tx
+                                    .send(ProviderEvent::StatusChanged(ProviderStatus::Running))
+                                    .await;
+                            }
+                            Some(ProviderCommand::PermissionResponse { .. })
+                            | Some(ProviderCommand::ToolResult(_)) => {}
+                        }
+                    }
+                }
+            }
+        });
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+
+    async fn run_streaming(
+        &self,
+        _input: &AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
         Err(ProviderAdapterError::execution_failed(
             None,
             String::new(),
@@ -2291,6 +2524,7 @@ struct ChoiceRequestSeen {
     id: String,
     prompt: String,
     options: Vec<cadence_aria::web::workspace_ws_types::ChoiceOption>,
+    source: Option<String>,
 }
 
 async fn recv_until_choice_request(
@@ -2304,12 +2538,14 @@ async fn recv_until_choice_request(
                 id,
                 prompt,
                 options,
+                source,
                 ..
             } => {
                 return ChoiceRequestSeen {
                     id,
                     prompt,
                     options,
+                    source: Some(source),
                 };
             }
             WsOutMessage::MessageComplete { .. } => {

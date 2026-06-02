@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::cross_cutting::streaming_provider::{
-    ChoiceOptionData, ProviderCommand, ProviderEvent, ProviderExecutionEvent,
+    ChoiceOptionData, ChoiceRequestSource, ProviderCommand, ProviderEvent, ProviderExecutionEvent,
     ProviderExecutionEventKind, ProviderExecutionEventStatus, ProviderPermissionMode,
     ProviderSession, ProviderStatus, ProviderToolCall, ProviderToolResult, RiskLevel,
     StreamingProviderAdapter, StreamingProviderInput,
@@ -175,6 +175,7 @@ pub enum EngineEvent {
         options: Vec<ChoiceOptionData>,
         allow_multiple: bool,
         allow_free_text: bool,
+        source: ChoiceRequestSource,
     },
     ProviderStatus {
         status: ProviderStatus,
@@ -247,6 +248,21 @@ struct PendingAuthorChoice {
     prompt: String,
     options: Vec<ChoiceOptionData>,
     source_node_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthorPromptMode {
+    FullConversation,
+    DeltaOnly,
+}
+
+impl AuthorPromptMode {
+    fn prompt_event_detail(self) -> &'static str {
+        match self {
+            Self::FullConversation => "发送给 Workspace provider 的完整提示词",
+            Self::DeltaOnly => "发送给 Workspace provider 的追加提示词",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -777,6 +793,37 @@ impl WorkspaceEngine {
         provider: Arc<dyn StreamingProviderAdapter>,
         command_rx: mpsc::Receiver<ProviderCommand>,
     ) {
+        self.handle_author_message_with_prompt_mode(
+            content,
+            provider,
+            command_rx,
+            AuthorPromptMode::FullConversation,
+        )
+        .await;
+    }
+
+    pub async fn handle_author_choice_followup_message(
+        &mut self,
+        content: String,
+        provider: Arc<dyn StreamingProviderAdapter>,
+        command_rx: mpsc::Receiver<ProviderCommand>,
+    ) {
+        self.handle_author_message_with_prompt_mode(
+            content,
+            provider,
+            command_rx,
+            AuthorPromptMode::DeltaOnly,
+        )
+        .await;
+    }
+
+    async fn handle_author_message_with_prompt_mode(
+        &mut self,
+        content: String,
+        provider: Arc<dyn StreamingProviderAdapter>,
+        command_rx: mpsc::Receiver<ProviderCommand>,
+        prompt_mode: AuthorPromptMode,
+    ) {
         let content = normalize_generation_prompt(content, &self.session.workspace_type);
         let msg_id = format!("msg_{:03}", self.session.messages.len() + 1);
         let now = chrono::Utc::now().to_rfc3339();
@@ -822,7 +869,7 @@ impl WorkspaceEngine {
             })
             .await;
 
-        let input = match self.build_streaming_input(&content) {
+        let input = match self.build_streaming_input(&content, prompt_mode) {
             Ok(input) => input,
             Err(message) => {
                 let _ = self.event_tx.send(EngineEvent::Error { message }).await;
@@ -834,7 +881,11 @@ impl WorkspaceEngine {
             .persist_prompt_snapshot(&generation_node_id, input.prompt.clone())
             .await;
         self.emit_execution_event(
-            provider_prompt_event(&generation_node_id, input.prompt.clone()),
+            provider_prompt_event(
+                &generation_node_id,
+                input.prompt.clone(),
+                prompt_mode.prompt_event_detail(),
+            ),
             Some(generation_node_id.clone()),
             Some(self.session.author_provider.clone()),
         )
@@ -936,12 +987,28 @@ impl WorkspaceEngine {
                             free_text,
                         }) => {
                             tracing::info!(choice_id = %id, "engine forwarding choice response");
+                            let choice_id = id.clone();
+                            eprintln!(
+                                "[aria-choice-diag] engine forwarding author choice_response id={} selected={:?} free_text_present={}",
+                                choice_id,
+                                selected_option_ids,
+                                free_text.as_ref().is_some_and(|text| !text.trim().is_empty())
+                            );
                             if session.commands.send(ProviderCommand::ChoiceResponse {
                                 id,
                                 selected_option_ids,
                                 free_text,
                             }).await.is_err() {
+                                eprintln!(
+                                    "[aria-choice-diag] engine failed to forward author choice_response id={} to provider session",
+                                    choice_id
+                                );
                                 commands_open = false;
+                            } else {
+                                eprintln!(
+                                    "[aria-choice-diag] engine forwarded author choice_response id={} to provider session",
+                                    choice_id
+                                );
                             }
                         }
                         Some(ProviderCommand::ToolResult(_)) => {}
@@ -1024,6 +1091,7 @@ impl WorkspaceEngine {
                                     options: request.options,
                                     allow_multiple: request.allow_multiple,
                                     allow_free_text: request.allow_free_text,
+                                    source: request.source,
                                 })
                                 .await;
                         }
@@ -1192,7 +1260,11 @@ impl WorkspaceEngine {
                 .persist_prompt_snapshot(&node_id, input.prompt.clone())
                 .await;
             self.emit_execution_event(
-                provider_prompt_event(&node_id, input.prompt.clone()),
+                provider_prompt_event(
+                    &node_id,
+                    input.prompt.clone(),
+                    "发送给 Workspace provider 的完整提示词",
+                ),
                 Some(node_id),
                 Some(reviewer.clone()),
             )
@@ -1223,7 +1295,11 @@ impl WorkspaceEngine {
                 .persist_prompt_snapshot(&node_id, input.prompt.clone())
                 .await;
             self.emit_execution_event(
-                provider_prompt_event(&node_id, input.prompt.clone()),
+                provider_prompt_event(
+                    &node_id,
+                    input.prompt.clone(),
+                    "发送给 Workspace provider 的完整提示词",
+                ),
                 Some(node_id),
                 Some(author.clone()),
             )
@@ -1328,6 +1404,13 @@ impl WorkspaceEngine {
                             free_text,
                         }) => {
                             tracing::info!(choice_id = %id, "engine forwarding choice response");
+                            let choice_id = id.clone();
+                            eprintln!(
+                                "[aria-choice-diag] engine forwarding reviewer choice_response id={} selected={:?} free_text_present={}",
+                                choice_id,
+                                selected_option_ids,
+                                free_text.as_ref().is_some_and(|text| !text.trim().is_empty())
+                            );
                             if session
                                 .commands
                                 .send(ProviderCommand::ChoiceResponse {
@@ -1338,7 +1421,16 @@ impl WorkspaceEngine {
                                 .await
                                 .is_err()
                             {
+                                eprintln!(
+                                    "[aria-choice-diag] engine failed to forward reviewer choice_response id={} to provider session",
+                                    choice_id
+                                );
                                 commands_open = false;
+                            } else {
+                                eprintln!(
+                                    "[aria-choice-diag] engine forwarded reviewer choice_response id={} to provider session",
+                                    choice_id
+                                );
                             }
                         }
                         Some(ProviderCommand::ToolResult(_)) => {}
@@ -1421,6 +1513,7 @@ impl WorkspaceEngine {
                                     options: request.options,
                                     allow_multiple: request.allow_multiple,
                                     allow_free_text: request.allow_free_text,
+                                    source: request.source,
                                 })
                                 .await;
                         }
@@ -1800,6 +1893,7 @@ impl WorkspaceEngine {
                     options: choice.options,
                     allow_multiple: false,
                     allow_free_text: true,
+                    source: ChoiceRequestSource::TextFallback,
                 })
                 .await;
             return;
@@ -1807,6 +1901,15 @@ impl WorkspaceEngine {
 
         self.pending_author_choice = None;
         let artifact_markdown = extract_artifact_content(&full_content);
+        if self.workspace_requires_artifact_gate()
+            && !content_has_complete_workspace_artifact(
+                &artifact_markdown,
+                &self.session.workspace_type,
+            )
+        {
+            self.finish_invalid_workspace_artifact().await;
+            return;
+        }
         if let Some(store) = &self.lifecycle_store
             && matches!(
                 self.session.workspace_type,
@@ -1866,7 +1969,11 @@ impl WorkspaceEngine {
         self.start_review_or_skip().await;
     }
 
-    fn build_streaming_input(&self, user_content: &str) -> Result<StreamingProviderInput, String> {
+    fn build_streaming_input(
+        &self,
+        user_content: &str,
+        prompt_mode: AuthorPromptMode,
+    ) -> Result<StreamingProviderInput, String> {
         let working_dir = match &self.session.repository_path {
             Some(path) => path.clone(),
             None => std::env::current_dir()
@@ -1879,7 +1986,10 @@ impl WorkspaceEngine {
         Ok(StreamingProviderInput {
             provider_type: provider_type_for_name(&provider),
             role: AdapterRole::Orchestrator,
-            prompt: self.build_prompt(user_content),
+            prompt: match prompt_mode {
+                AuthorPromptMode::FullConversation => self.build_prompt(user_content),
+                AuthorPromptMode::DeltaOnly => user_content.to_string(),
+            },
             working_dir,
             workspace_session_id: Some(self.session.session_id.clone()),
             resume_provider_session_id,
@@ -2184,6 +2294,29 @@ impl WorkspaceEngine {
             .await;
         }
         self.finish_failed_run().await;
+    }
+
+    async fn finish_invalid_workspace_artifact(&mut self) {
+        let artifact_name = workspace_type_title(&self.session.workspace_type);
+        let message = format!("Provider 未返回有效的 {artifact_name} artifact");
+        let _ = self
+            .event_tx
+            .send(EngineEvent::Error {
+                message: message.clone(),
+            })
+            .await;
+        if let Some(node_id) = self.active_node_id.clone() {
+            self.update_timeline_node(&node_id, TimelineNodeStatus::Failed, Some(message))
+                .await;
+        }
+        self.finish_failed_run().await;
+    }
+
+    fn workspace_requires_artifact_gate(&self) -> bool {
+        matches!(
+            self.session.workspace_type,
+            WorkspaceType::Story | WorkspaceType::Design
+        )
     }
 
     async fn finish_aborted_run(&mut self) {
@@ -2960,6 +3093,7 @@ fn content_has_complete_workspace_artifact(content: &str, workspace_type: &Works
 }
 
 fn parse_choice_option_line(line: &str) -> Option<ChoiceOptionData> {
+    let line = normalize_choice_option_line(line);
     let mut chars = line.char_indices();
     let (_, first) = chars.next()?;
     if !first.is_ascii_alphanumeric() {
@@ -2971,7 +3105,12 @@ fn parse_choice_option_line(line: &str) -> Option<ChoiceOptionData> {
     }
 
     let label_start = delimiter_index + delimiter.len_utf8();
-    let raw_label = line.get(label_start..)?.trim();
+    let raw_label = line
+        .get(label_start..)?
+        .trim()
+        .trim_start_matches('*')
+        .trim_start_matches('_')
+        .trim();
     if raw_label.is_empty() {
         return None;
     }
@@ -2982,6 +3121,32 @@ fn parse_choice_option_line(line: &str) -> Option<ChoiceOptionData> {
         label: format!("{id}. {raw_label}"),
         description: None,
     })
+}
+
+fn normalize_choice_option_line(line: &str) -> String {
+    let mut candidate = line.trim();
+    if let Some(rest) = strip_markdown_list_marker(candidate) {
+        candidate = rest;
+    }
+    candidate = candidate.trim_start();
+    if let Some(rest) = candidate.strip_prefix("**") {
+        candidate = rest;
+    } else if let Some(rest) = candidate.strip_prefix("__") {
+        candidate = rest;
+    }
+    candidate.trim_start().to_string()
+}
+
+fn strip_markdown_list_marker(line: &str) -> Option<&str> {
+    let mut chars = line.char_indices();
+    let (_, marker) = chars.next()?;
+    if !matches!(marker, '-' | '*' | '+') {
+        return None;
+    }
+    let (space_index, space) = chars.next()?;
+    space
+        .is_whitespace()
+        .then(|| line[space_index + space.len_utf8()..].trim_start())
 }
 
 fn normalize_generation_prompt(content: String, workspace_type: &WorkspaceType) -> String {
@@ -3047,13 +3212,17 @@ fn execution_event_json(event: &ProviderExecutionEvent) -> serde_json::Value {
     })
 }
 
-fn provider_prompt_event(node_id: &str, prompt: String) -> ProviderExecutionEvent {
+fn provider_prompt_event(
+    node_id: &str,
+    prompt: String,
+    detail: &'static str,
+) -> ProviderExecutionEvent {
     ProviderExecutionEvent {
         event_id: format!("{node_id}_prompt"),
         kind: ProviderExecutionEventKind::Output,
         status: ProviderExecutionEventStatus::Started,
         title: "Provider Prompt".to_string(),
-        detail: Some("发送给 Workspace provider 的完整提示词".to_string()),
+        detail: Some(detail.to_string()),
         command: None,
         cwd: None,
         output: Some(prompt),
@@ -3279,7 +3448,7 @@ mod tests {
         let (event_tx, _event_rx) = mpsc::channel(32);
         let mut session = make_session("sess_resume_author");
         session.workspace_type = WorkspaceType::Story;
-        session.author_provider = ProviderName::ClaudeCode;
+        session.author_provider = ProviderName::Codex;
         session.reviewer_provider = None;
         let checkpoint_tmp = TempDir::new().unwrap();
         let mut engine = WorkspaceEngine::new(
@@ -3305,7 +3474,7 @@ mod tests {
 
         let (_command_tx2, command_rx2) = mpsc::channel(8);
         engine
-            .handle_user_message(prompt, provider.clone(), command_rx2)
+            .handle_author_choice_followup_message(prompt.clone(), provider.clone(), command_rx2)
             .await;
 
         let inputs = provider.inputs.lock().unwrap();
@@ -3315,6 +3484,65 @@ mod tests {
             inputs[1].resume_provider_session_id.as_deref(),
             Some("provider-author-session-1")
         );
+        assert_eq!(inputs[1].prompt, prompt);
+        assert!(
+            inputs[1]
+                .prompt
+                .starts_with("用户回答了 author 的确认问题：")
+        );
+        assert!(!inputs[1].prompt.contains("[system]:"));
+        assert!(!inputs[1].prompt.contains("[assistant]:"));
+    }
+
+    #[tokio::test]
+    async fn claude_code_text_choice_output_uses_text_fallback_as_recovery_path() {
+        let (_tmp, store) = setup();
+        let (tx, mut rx) = mpsc::channel(64);
+        let mut session = make_session("sess_claude_text_choice_fallback");
+        session.author_provider = ProviderName::ClaudeCode;
+        session.reviewer_provider = None;
+        let mut engine = WorkspaceEngine::new(store, tx, session);
+
+        engine
+            .drive_provider_session(
+                Ok(text_choice_provider_session(
+                    "climb_stairs(n) 对 n <= 0 应该如何处理？\nA. 返回 0\nB. 抛出 ValueError\n",
+                )),
+                empty_provider_commands(),
+                Some("timeline_node_author".to_string()),
+                Some(ProviderName::ClaudeCode),
+                ProviderConversationRole::Author,
+            )
+            .await;
+
+        let events = drain_engine_events(&mut rx);
+        assert!(
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    EngineEvent::ChoiceRequest {
+                        prompt,
+                        source,
+                        ..
+                    } if prompt.contains("n <= 0")
+                        && *source == ChoiceRequestSource::TextFallback
+                )
+            }),
+            "Claude Code 文本选择题应该作为兜底进入 text_fallback choice_request"
+        );
+        assert!(
+            !events.iter().any(|event| {
+                matches!(event, EngineEvent::ProtocolError { code, .. }
+                    if code == "CLAUDE_CODE_STRUCTURED_QUESTION_REQUIRED")
+            }),
+            "Claude Code 可解析文本选择题不应该再被结构化提问 protocol error 拦截"
+        );
+        let prompt = engine
+            .take_pending_author_choice_prompt("author_choice_msg_001", vec!["A".to_string()], None)
+            .await
+            .expect("pending Claude Code text fallback choice prompt");
+        assert!(prompt.contains("用户回答了 author 的确认问题"));
+        assert!(prompt.contains("A. 返回 0"));
     }
 
     #[test]
@@ -3737,6 +3965,27 @@ mod tests {
         assert_eq!(verdict.comments, output);
     }
 
+    #[test]
+    fn detect_author_choice_request_accepts_markdown_bold_bulleted_options() {
+        let output = "感谢提供项目上下文。\n\n\
+            在生成 Story Spec 之前，我有几个问题需要确认：\n\n\
+            **问题 1：弹窗触发时机**\n\n\
+            根据 Issue 描述，弹窗是在\"启动 aria 后\"触发。请问这里的\"启动 aria\"具体指什么时机？\n\n\
+            - **A)** 用户运行 `aria` 命令启动 daemon 时（Rust 后端启动时）\n\
+            - **B)** 用户打开 Web 工作台页面时（前端首次加载时）\n\
+            - **C)** 两者都需要（后端启动时检测，前端展示弹窗）\n";
+
+        let (prompt, options) = detect_author_choice_request(output, &WorkspaceType::Story)
+            .expect("markdown bold bulleted options should become a choice request");
+
+        assert!(prompt.contains("弹窗触发时机"));
+        assert_eq!(options.len(), 3);
+        assert_eq!(options[0].id, "A");
+        assert!(options[0].label.contains("用户运行 `aria`"));
+        assert_eq!(options[1].id, "B");
+        assert_eq!(options[2].id, "C");
+    }
+
     struct ReviewVerdictStreamingProvider {
         output: &'static str,
         provider_type: Arc<Mutex<Option<ProviderType>>>,
@@ -3981,10 +4230,15 @@ mod tests {
 
         let revision_provider_type = Arc::new(Mutex::new(None));
         let revision_prompt = Arc::new(Mutex::new(None));
+        let revised_artifact = "# Story Spec\n\n\
+            ## 功能需求\n\
+            - [REQ-001] 补充失败路径后的版本。\n\n\
+            ## 成功标准\n\
+            - [AC-001] 覆盖失败路径。\n";
         engine
             .drive_revision_session(
                 Arc::new(ReviewVerdictStreamingProvider {
-                    output: "# Story Spec\n\n补充失败路径后的版本",
+                    output: revised_artifact,
                     provider_type: revision_provider_type.clone(),
                     prompt: revision_prompt.clone(),
                 }),
@@ -4007,7 +4261,7 @@ mod tests {
         assert!(prompt.contains("请根据以上审核意见修改产物"));
         assert_eq!(
             engine.session().artifact.as_deref(),
-            Some("# Story Spec\n\n补充失败路径后的版本")
+            Some(revised_artifact.trim())
         );
         assert_eq!(engine.session().stage, WorkspaceStage::CrossReview);
         match engine.build_session_state() {
@@ -4543,14 +4797,19 @@ mod tests {
             let (event_tx, event_rx) = mpsc::channel(8);
             let (command_tx, _command_rx) = mpsc::channel(8);
             tokio::spawn(async move {
+                let output = "# Story Spec\n\n\
+                    ## 功能需求\n\
+                    - [REQ-001] 生成候选草稿。\n\n\
+                    ## 成功标准\n\
+                    - [AC-001] 候选草稿可进入审核。\n";
                 let _ = event_tx
                     .send(ProviderEvent::TextDelta {
-                        content: "# Draft".to_string(),
+                        content: output.to_string(),
                     })
                     .await;
                 let _ = event_tx
                     .send(ProviderEvent::Completed {
-                        full_output: "# Draft".to_string(),
+                        full_output: output.to_string(),
                         provider_session_id: None,
                     })
                     .await;
@@ -4597,13 +4856,23 @@ mod tests {
 
         assert_eq!(*provider_type.lock().unwrap(), Some(ProviderType::Codex));
         assert_eq!(engine.session().stage, WorkspaceStage::CrossReview);
-        assert_eq!(engine.session().artifact.as_deref(), Some("# Draft"));
+        assert!(
+            engine
+                .session()
+                .artifact
+                .as_deref()
+                .is_some_and(
+                    |artifact| artifact.contains("## 功能需求") && artifact.contains("## 成功标准")
+                )
+        );
 
         let mut saw_artifact = false;
         let mut saw_cross_review = false;
         while let Ok(event) = rx.try_recv() {
             match event {
-                EngineEvent::ArtifactUpdate { markdown, .. } if markdown == "# Draft" => {
+                EngineEvent::ArtifactUpdate { markdown, .. }
+                    if markdown.contains("## 功能需求") && markdown.contains("## 成功标准") =>
+                {
                     saw_artifact = true;
                 }
                 EngineEvent::StageChange { stage } if stage == "cross_review" => {
@@ -4702,6 +4971,21 @@ mod tests {
             .try_send(ProviderEvent::Completed {
                 full_output: full_output.to_string(),
                 provider_session_id: None,
+            })
+            .expect("send completed");
+        ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        }
+    }
+
+    fn text_choice_provider_session(full_output: &str) -> ProviderSession {
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let (command_tx, _command_rx) = mpsc::channel(8);
+        event_tx
+            .try_send(ProviderEvent::Completed {
+                full_output: full_output.to_string(),
+                provider_session_id: Some("provider-author-session-1".to_string()),
             })
             .expect("send completed");
         ProviderSession {
@@ -5011,6 +5295,81 @@ mod tests {
                 0,
             ))
         }
+    }
+
+    struct InvalidArtifactStreamingProvider;
+
+    #[async_trait::async_trait]
+    impl StreamingProviderAdapter for InvalidArtifactStreamingProvider {
+        async fn start(
+            &self,
+            _input: StreamingProviderInput,
+            _cancel: CancellationToken,
+        ) -> Result<ProviderSession, ProviderAdapterError> {
+            let (event_tx, event_rx) = mpsc::channel(8);
+            let (command_tx, _command_rx) = mpsc::channel(8);
+            tokio::spawn(async move {
+                let _ = event_tx
+                    .send(ProviderEvent::Completed {
+                        full_output: "我还需要继续分析，目前没有生成 Story Spec。".to_string(),
+                        provider_session_id: Some("invalid-artifact-session".to_string()),
+                    })
+                    .await;
+            });
+            Ok(ProviderSession {
+                events: event_rx,
+                commands: command_tx,
+            })
+        }
+
+        async fn run_streaming(
+            &self,
+            _input: &AdapterInput,
+            _cancel: CancellationToken,
+        ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+            Err(ProviderAdapterError::execution_failed(
+                None,
+                String::new(),
+                "run_streaming is not used by WorkspaceEngine",
+                0,
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_user_message_rejects_non_artifact_author_output_without_review() {
+        let (_tmp, store) = setup();
+        let (tx, mut rx) = mpsc::channel(64);
+        let session = make_session("sess_invalid_artifact");
+        let mut engine = WorkspaceEngine::new(store, tx, session);
+
+        engine
+            .handle_user_message(
+                "start".to_string(),
+                Arc::new(InvalidArtifactStreamingProvider),
+                empty_provider_commands(),
+            )
+            .await;
+
+        assert_eq!(engine.session().stage, WorkspaceStage::PrepareContext);
+        assert_eq!(engine.session().artifact, None);
+
+        let events = drain_engine_events(&mut rx);
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                EngineEvent::Error { message }
+                    if message.contains("未返回有效的 Story Spec artifact")
+            )),
+            "invalid author output should emit an explicit artifact error"
+        );
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                EngineEvent::StageChange { stage } if stage == "cross_review"
+            )),
+            "invalid author output must not start reviewer"
+        );
     }
 
     #[tokio::test]

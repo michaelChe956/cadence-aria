@@ -19,6 +19,7 @@ export function ChoiceRequestEntry({
   const allowMultiple = metadata?.allow_multiple === true;
   const allowFreeText = metadata?.allow_free_text === true;
   const prompt = stringField(metadata, "prompt") ?? entry.content;
+  const sourceLabel = choiceSourceLabel(stringField(metadata, "source"));
   const response = responseFromMetadata(metadata?.response);
   const isResolved = entry.resolved === true;
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -54,6 +55,11 @@ export function ChoiceRequestEntry({
         <ListChecks className="mt-0.5 h-4 w-4 shrink-0 text-[var(--aria-primary)]" />
         <div className="min-w-0">
           <div className="font-medium">选择请求</div>
+          {sourceLabel ? (
+            <span className="mt-1 inline-flex rounded-md border border-[var(--aria-line)] bg-white px-2 py-0.5 text-xs font-medium text-[var(--aria-ink-muted)]">
+              {sourceLabel}
+            </span>
+          ) : null}
           <div className="mt-1 text-[var(--aria-ink-muted)]">{prompt}</div>
         </div>
       </div>
@@ -187,6 +193,21 @@ function choiceSummary(response: ChoiceResponsePayload | null, options: ChoiceOp
     labels.push(response.free_text);
   }
   return labels.join("、");
+}
+
+function choiceSourceLabel(source: string | null) {
+  switch (source) {
+    case "ask_user_question":
+      return "AskUserQuestion";
+    case "request_user_input":
+      return "requestUserInput";
+    case "text_fallback":
+      return "文本 fallback";
+    case "provider_choice":
+      return "provider choice";
+    default:
+      return null;
+  }
 }
 
 function stringField(value: unknown, key: string) {

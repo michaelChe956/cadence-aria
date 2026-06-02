@@ -1,8 +1,7 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::process::ExitStatus;
 use std::sync::Arc;
-use std::time::Duration;
 
 use command_group::AsyncGroupChild;
 use serde_json::{Value, json};
@@ -11,26 +10,31 @@ use tokio::process::ChildStdin;
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 
-use crate::cross_cutting::approval_bridge::ApprovalBridge;
+use crate::cross_cutting::approval_bridge::{ApprovalBridge, ChoiceDecision};
 use crate::cross_cutting::process_manager::ProcessManager;
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
-    ChoiceOptionData, ChoiceRequestData, ProviderEvent, ProviderExecutionEvent,
-    ProviderExecutionEventKind, ProviderExecutionEventStatus, ProviderPermissionMode,
-    ProviderSession, ProviderStatus, RiskLevel, StreamChunk, StreamingProviderAdapter,
-    StreamingProviderInput,
+    ChoiceOptionData, ChoiceRequestData, ChoiceRequestSource, ProviderEvent,
+    ProviderExecutionEvent, ProviderExecutionEventKind, ProviderExecutionEventStatus,
+    ProviderPermissionMode, ProviderSession, ProviderStatus, RiskLevel, StreamChunk,
+    StreamingProviderAdapter, StreamingProviderInput,
 };
 use crate::protocol::contracts::AdapterInput;
 
 const TOOL_RESULT_PREVIEW_MAX_BYTES: usize = 500;
-const PROVIDER_ABORT_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
-
 #[derive(Debug, Clone)]
 struct ClaudePermissionRequest {
     request_id: String,
+    tool_use_id: Option<String>,
     tool_name: String,
     description: String,
     input: Value,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedAskUserQuestion {
+    input: Value,
+    answers: serde_json::Map<String, Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -201,6 +205,11 @@ impl ClaudeCodeProvider {
 
         Some(ClaudePermissionRequest {
             request_id: value.get("request_id")?.as_str()?.to_string(),
+            tool_use_id: value
+                .get("tool_use_id")
+                .or_else(|| request.get("tool_use_id"))
+                .and_then(Value::as_str)
+                .map(ToString::to_string),
             tool_name: request
                 .get("tool_name")
                 .and_then(Value::as_str)
@@ -234,6 +243,11 @@ impl ClaudeCodeProvider {
         original_input: &Value,
         answers: serde_json::Map<String, Value>,
     ) -> Result<(), ProviderAdapterError> {
+        eprintln!(
+            "[aria-choice-diag] claude writing control_response request_id={} answer_keys={:?}",
+            request_id,
+            answers.keys().cloned().collect::<Vec<_>>()
+        );
         let mut updated_input = original_input.clone();
         if let Some(obj) = updated_input.as_object_mut() {
             obj.insert("answers".to_string(), Value::Object(answers));
@@ -245,6 +259,32 @@ impl ClaudeCodeProvider {
                 "updatedInput": updated_input,
             }),
         );
+        write_json_line(stdin, &payload).await
+    }
+
+    async fn write_tool_result(
+        stdin: &Arc<Mutex<ChildStdin>>,
+        tool_use_id: &str,
+        input: &Value,
+        answers: &serde_json::Map<String, Value>,
+    ) -> Result<(), ProviderAdapterError> {
+        eprintln!(
+            "[aria-choice-diag] claude writing AskUserQuestion tool_result tool_use_id={} answer_keys={:?}",
+            tool_use_id,
+            answers.keys().cloned().collect::<Vec<_>>()
+        );
+        let content = ask_user_question_tool_result_content(input, answers);
+        let payload = json!({
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": content,
+                }],
+            },
+        });
         write_json_line(stdin, &payload).await
     }
 
@@ -563,11 +603,8 @@ async fn terminate_aborted_child(child: &mut AsyncGroupChild) {
     }
     let _ = child.start_kill();
     let _ = child.inner().start_kill();
-    if tokio::time::timeout(PROVIDER_ABORT_WAIT_TIMEOUT, child.wait())
-        .await
-        .is_err()
-    {
-        tracing::warn!("timed out waiting for aborted Claude Code provider process to exit");
+    if let Err(error) = child.wait().await {
+        tracing::warn!(%error, "failed to wait for aborted Claude Code provider process");
     }
 }
 
@@ -578,10 +615,9 @@ async fn read_claude_stream(
     event_tx: mpsc::Sender<ProviderEvent>,
     cancel: CancellationToken,
 ) -> Result<ClaudeStreamOutcome, ProviderAdapterError> {
-    use std::collections::HashMap;
-
     let mut lines = BufReader::new(stdout).lines();
     let mut pending_tool_uses: HashMap<String, ToolUseBlock> = HashMap::new();
+    let mut resolved_ask_user_questions: HashMap<String, ResolvedAskUserQuestion> = HashMap::new();
     let mut received_stream_events = false;
 
     loop {
@@ -622,51 +658,43 @@ async fn read_claude_stream(
 
         if let Some(request) = ClaudeCodeProvider::parse_control_request(&value) {
             if request.tool_name == "AskUserQuestion" {
+                eprintln!(
+                    "[aria-choice-diag] claude received control_request AskUserQuestion request_id={} tool_use_id={}",
+                    request.request_id,
+                    request.tool_use_id.as_deref().unwrap_or("<none>")
+                );
                 let choice_request =
                     parse_ask_user_question_from_input(&request.input, &request.request_id);
                 let choice_decision = bridge
                     .request_choice(choice_request, cancel.clone())
                     .await?;
-                let mut answers = serde_json::Map::new();
-                if let Some(text) = &choice_decision.free_text {
-                    let questions = request.input.get("questions").and_then(Value::as_array);
-                    if let Some(questions) = questions
-                        && let Some(first_q) = questions.first()
-                    {
-                        let question_text = first_q
-                            .get("question")
-                            .and_then(Value::as_str)
-                            .unwrap_or("question");
-                        answers.insert(question_text.to_string(), Value::String(text.clone()));
-                    }
-                } else if !choice_decision.selected_option_ids.is_empty() {
-                    let questions = request.input.get("questions").and_then(Value::as_array);
-                    if let Some(questions) = questions
-                        && let Some(first_q) = questions.first()
-                    {
-                        let question_text = first_q
-                            .get("question")
-                            .and_then(Value::as_str)
-                            .unwrap_or("question");
-                        let options = first_q.get("options").and_then(Value::as_array);
-                        let selected_label = options
-                            .and_then(|opts| {
-                                choice_decision.selected_option_ids.first().and_then(|id| {
-                                    let idx = id.strip_prefix("opt_")?.parse::<usize>().ok()?;
-                                    opts.get(idx)?.get("label")?.as_str().map(String::from)
-                                })
-                            })
-                            .unwrap_or_else(|| choice_decision.selected_option_ids.join(", "));
-                        answers.insert(question_text.to_string(), Value::String(selected_label));
-                    }
-                }
+                eprintln!(
+                    "[aria-choice-diag] claude got choice decision for control_request request_id={} selected={:?} free_text_present={}",
+                    request.request_id,
+                    choice_decision.selected_option_ids,
+                    choice_decision
+                        .free_text
+                        .as_ref()
+                        .is_some_and(|text| !text.trim().is_empty())
+                );
+                let answers =
+                    ask_user_question_answers_from_decision(&request.input, &choice_decision);
                 ClaudeCodeProvider::write_choice_control_response(
                     &stdin,
                     &request.request_id,
                     &request.input,
-                    answers,
+                    answers.clone(),
                 )
                 .await?;
+                if let Some(tool_use_id) = request.tool_use_id {
+                    resolved_ask_user_questions.insert(
+                        tool_use_id,
+                        ResolvedAskUserQuestion {
+                            input: request.input,
+                            answers,
+                        },
+                    );
+                }
             } else {
                 let decision = bridge
                     .request_tool(
@@ -690,6 +718,43 @@ async fn read_claude_stream(
         if let Some(tool_uses) = ClaudeCodeProvider::parse_tool_use_from_assistant(&value) {
             for tool_use in tool_uses {
                 if tool_use.name == "AskUserQuestion" {
+                    eprintln!(
+                        "[aria-choice-diag] claude received assistant tool_use AskUserQuestion tool_use_id={}",
+                        tool_use.id
+                    );
+                    let resolved = match resolved_ask_user_questions.remove(&tool_use.id) {
+                        Some(resolved) => resolved,
+                        None => {
+                            let choice_request =
+                                parse_ask_user_question_from_input(&tool_use.input, &tool_use.id);
+                            let choice_decision = bridge
+                                .request_choice(choice_request, cancel.clone())
+                                .await?;
+                            eprintln!(
+                                "[aria-choice-diag] claude got choice decision for assistant tool_use tool_use_id={} selected={:?} free_text_present={}",
+                                tool_use.id,
+                                choice_decision.selected_option_ids,
+                                choice_decision
+                                    .free_text
+                                    .as_ref()
+                                    .is_some_and(|text| !text.trim().is_empty())
+                            );
+                            ResolvedAskUserQuestion {
+                                input: tool_use.input.clone(),
+                                answers: ask_user_question_answers_from_decision(
+                                    &tool_use.input,
+                                    &choice_decision,
+                                ),
+                            }
+                        }
+                    };
+                    ClaudeCodeProvider::write_tool_result(
+                        &stdin,
+                        &tool_use.id,
+                        &resolved.input,
+                        &resolved.answers,
+                    )
+                    .await?;
                     continue;
                 } else {
                     let description = tool_use_description(&tool_use);
@@ -857,6 +922,111 @@ fn parse_ask_user_question_from_input(input: &Value, request_id: &str) -> Choice
         options,
         allow_multiple,
         allow_free_text: true,
+        source: ChoiceRequestSource::AskUserQuestion,
+    }
+}
+
+fn ask_user_question_answers_from_decision(
+    input: &Value,
+    decision: &ChoiceDecision,
+) -> serde_json::Map<String, Value> {
+    let mut answers = serde_json::Map::new();
+    let Some(first_question) = input
+        .get("questions")
+        .and_then(Value::as_array)
+        .and_then(|questions| questions.first())
+    else {
+        return answers;
+    };
+
+    let question_text = first_question
+        .get("question")
+        .and_then(Value::as_str)
+        .unwrap_or("question");
+    let answer = if let Some(text) = decision
+        .free_text
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        text.to_string()
+    } else if !decision.selected_option_ids.is_empty() {
+        selected_option_labels(first_question, &decision.selected_option_ids).join(", ")
+    } else {
+        String::new()
+    };
+
+    if !answer.is_empty() {
+        answers.insert(question_text.to_string(), Value::String(answer));
+    }
+    answers
+}
+
+fn selected_option_labels(question: &Value, selected_option_ids: &[String]) -> Vec<String> {
+    let options = question.get("options").and_then(Value::as_array);
+    selected_option_ids
+        .iter()
+        .map(|id| {
+            options
+                .and_then(|opts| {
+                    let idx = id.strip_prefix("opt_")?.parse::<usize>().ok()?;
+                    opts.get(idx)?.get("label")?.as_str().map(String::from)
+                })
+                .unwrap_or_else(|| id.clone())
+        })
+        .collect()
+}
+
+fn ask_user_question_tool_result_content(
+    input: &Value,
+    answers: &serde_json::Map<String, Value>,
+) -> String {
+    let ordered_questions = input
+        .get("questions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|question| question.get("question").and_then(Value::as_str));
+    let mut rendered_answers = Vec::new();
+    for question in ordered_questions {
+        if let Some(answer) = answers.get(question) {
+            rendered_answers.push(format!(
+                "\"{question}\"=\"{}\"",
+                render_answer_value(answer)
+            ));
+        }
+    }
+    for (question, answer) in answers {
+        if !rendered_answers
+            .iter()
+            .any(|rendered| rendered.starts_with(&format!("\"{question}\"=")))
+        {
+            rendered_answers.push(format!(
+                "\"{question}\"=\"{}\"",
+                render_answer_value(answer)
+            ));
+        }
+    }
+
+    if rendered_answers.is_empty() {
+        return "Your questions have been answered: no answer was provided. You can now continue with these answers in mind.".to_string();
+    }
+
+    format!(
+        "Your questions have been answered: {}. You can now continue with these answers in mind.",
+        rendered_answers.join(", ")
+    )
+}
+
+fn render_answer_value(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Array(items) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(", "),
+        other => other.to_string(),
     }
 }
 
@@ -1306,6 +1476,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn claude_control_request_reads_top_level_tool_use_id() {
+        let value = json!({
+            "type": "control_request",
+            "request_id": "ask_req_001",
+            "tool_use_id": "toolu_question",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "AskUserQuestion",
+                "input": {
+                    "questions": [{
+                        "question": "Drink?",
+                        "options": [{ "label": "Tea" }]
+                    }]
+                }
+            }
+        });
+
+        let request = ClaudeCodeProvider::parse_control_request(&value).expect("control request");
+
+        assert_eq!(request.request_id, "ask_req_001");
+        assert_eq!(request.tool_name, "AskUserQuestion");
+        assert_eq!(request.tool_use_id.as_deref(), Some("toolu_question"));
+    }
+
     #[tokio::test]
     async fn claude_provider_bridges_permission_and_completes() {
         let fixture = executable_fixture("tests/fixtures/provider/claude_stream_json_fixture.sh");
@@ -1326,7 +1521,9 @@ mod tests {
         let permission_id = loop {
             match session.events.recv().await.unwrap() {
                 ProviderEvent::TextDelta { content } => {
-                    saw_text = content.contains("Claude fixture chunk");
+                    saw_text = content.contains("# Story Spec")
+                        && content.contains("## 功能需求")
+                        && content.contains("## 成功标准");
                 }
                 ProviderEvent::PermissionRequest(data) => break data.id,
                 ProviderEvent::StatusChanged(_)
@@ -1350,7 +1547,9 @@ mod tests {
             .unwrap();
 
         let completed = recv_completed(&mut session.events).await;
-        assert_eq!(completed, "Claude fixture chunk done");
+        assert!(completed.contains("# Story Spec"));
+        assert!(completed.contains("## 功能需求"));
+        assert!(completed.contains("## 成功标准"));
     }
 
     #[tokio::test]
@@ -1404,7 +1603,9 @@ mod tests {
             .expect("send choice response");
 
         let completed = recv_completed(&mut session.events).await;
-        assert_eq!(completed, "choice continued");
+        assert!(completed.contains("# Story Spec"));
+        assert!(completed.contains("## 功能需求"));
+        assert!(completed.contains("## 成功标准"));
     }
 
     #[tokio::test]
@@ -1418,6 +1619,8 @@ if [[ "${1:-}" == "--version" ]]; then
   echo "claude 2.1.160"
   exit 0
 fi
+
+printf '%s\n' "$$" > "$ARIA_FIXTURE_PID"
 
 while IFS= read -r line; do
   if [[ "$line" == *'"initialize"'* ]]; then
@@ -1446,12 +1649,19 @@ done
         );
         let marker_dir = tempfile::tempdir().expect("marker dir");
         let marker_path = marker_dir.path().join("abort_marker");
+        let pid_path = tempfile::NamedTempFile::new()
+            .expect("pid file")
+            .into_temp_path();
         let provider = ClaudeCodeProvider::new(fixture);
         let mut input =
             streaming_input(ProviderType::ClaudeCode, ProviderPermissionMode::Supervised);
         input.env_vars.insert(
             "ARIA_ABORT_MARKER".to_string(),
             marker_path.to_string_lossy().to_string(),
+        );
+        input.env_vars.insert(
+            "ARIA_FIXTURE_PID".to_string(),
+            pid_path.to_string_lossy().to_string(),
         );
         let cancel = CancellationToken::new();
 
@@ -1534,6 +1744,16 @@ done
             }
         }
         assert!(saw_aborted);
+
+        #[cfg(target_os = "linux")]
+        {
+            let pid = std::fs::read_to_string(&pid_path)
+                .expect("fixture pid")
+                .trim()
+                .parse::<u32>()
+                .expect("fixture pid number");
+            wait_for_process_absent(pid).await;
+        }
     }
 
     #[tokio::test]

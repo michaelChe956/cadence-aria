@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use cadence_aria::cross_cutting::provider_adapter::ProviderAdapterError;
 use cadence_aria::cross_cutting::streaming_provider::{
-    ChoiceOptionData, ChoiceRequestData, PermissionRequestData, ProviderEvent,
+    ChoiceOptionData, ChoiceRequestData, ChoiceRequestSource, PermissionRequestData, ProviderEvent,
     ProviderExecutionEvent, ProviderExecutionEventKind, ProviderExecutionEventStatus,
     ProviderSession, ProviderStatus, ProviderToolCall, ProviderToolResult, RiskLevel, StreamChunk,
     StreamingProviderAdapter, StreamingProviderInput,
@@ -3131,6 +3131,7 @@ impl StreamingProviderAdapter for ControlEventCodingProvider {
                 }],
                 allow_multiple: false,
                 allow_free_text: true,
+                source: ChoiceRequestSource::ProviderChoice,
             }))
             .expect("send choice");
         event_tx

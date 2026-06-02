@@ -14,10 +14,10 @@ use crate::cross_cutting::json_rpc_peer::JsonRpcPeer;
 use crate::cross_cutting::process_manager::ProcessManager;
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
-    ChoiceOptionData, ChoiceRequestData, ProviderEvent, ProviderExecutionEvent,
-    ProviderExecutionEventKind, ProviderExecutionEventStatus, ProviderPermissionMode,
-    ProviderSession, ProviderStatus, RiskLevel, StreamChunk, StreamingProviderAdapter,
-    StreamingProviderInput,
+    ChoiceOptionData, ChoiceRequestData, ChoiceRequestSource, ProviderEvent,
+    ProviderExecutionEvent, ProviderExecutionEventKind, ProviderExecutionEventStatus,
+    ProviderPermissionMode, ProviderSession, ProviderStatus, RiskLevel, StreamChunk,
+    StreamingProviderAdapter, StreamingProviderInput,
 };
 use crate::protocol::contracts::AdapterInput;
 
@@ -396,6 +396,7 @@ where
                         options: request.options,
                         allow_multiple: false,
                         allow_free_text: request.allow_free_text,
+                        source: ChoiceRequestSource::RequestUserInput,
                     },
                     cancel.clone(),
                 )
@@ -976,7 +977,9 @@ mod tests {
 
         let completed = recv_completed(&mut session.events).await;
 
-        assert_eq!(completed, "Codex current chunk");
+        assert!(completed.contains("# Story Spec"));
+        assert!(completed.contains("## 功能需求"));
+        assert!(completed.contains("## 成功标准"));
     }
 
     #[tokio::test]

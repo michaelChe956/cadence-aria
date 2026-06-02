@@ -219,11 +219,18 @@ impl ApprovalBridge {
         cancel: CancellationToken,
     ) -> Result<ChoiceDecision, ProviderAdapterError> {
         let id = request.id.clone();
+        eprintln!(
+            "[aria-choice-diag] bridge emitting choice_request id={} source={} options={}",
+            id,
+            request.source.as_str(),
+            request.options.len()
+        );
         let (decision_tx, decision_rx) = oneshot::channel();
         self.pending_choices
             .lock()
             .await
             .insert(id.clone(), decision_tx);
+        let request_id = id.clone();
         let mut pending_guard = PendingChoiceGuard::new(id, Arc::clone(&self.pending_choices));
 
         let send_result = tokio::select! {
@@ -252,7 +259,14 @@ impl ApprovalBridge {
             }
             decision = decision_rx => {
                 pending_guard.remove_now().await;
-                decision.map_err(|_| permission_bridge_error("choice response channel closed"))
+                let decision = decision.map_err(|_| permission_bridge_error("choice response channel closed"))?;
+                eprintln!(
+                    "[aria-choice-diag] bridge resolved choice_request id={} selected={:?} free_text_present={}",
+                    request_id,
+                    decision.selected_option_ids,
+                    decision.free_text.as_ref().is_some_and(|text| !text.trim().is_empty())
+                );
+                Ok(decision)
             }
         }
     }
@@ -298,13 +312,29 @@ async fn listen_for_permission_commands(
                 free_text,
             } => {
                 tracing::info!(choice_id = %id, "bridge received choice response");
+                eprintln!(
+                    "[aria-choice-diag] bridge received choice_response id={} selected={:?} free_text_present={}",
+                    id,
+                    selected_option_ids,
+                    free_text
+                        .as_ref()
+                        .is_some_and(|text| !text.trim().is_empty())
+                );
                 if let Some(decision_tx) = pending_choices.lock().await.remove(&id) {
+                    eprintln!(
+                        "[aria-choice-diag] bridge matched pending choice_response id={}",
+                        id
+                    );
                     let _ = decision_tx.send(ChoiceDecision {
                         selected_option_ids,
                         free_text,
                     });
                 } else {
                     tracing::warn!(choice_id = %id, "bridge: no pending choice entry for id");
+                    eprintln!(
+                        "[aria-choice-diag] bridge missing pending choice_response id={}",
+                        id
+                    );
                     let _ = event_tx
                         .send(ProviderEvent::ProtocolError {
                             code: "CHOICE_ID_UNMATCHED".to_string(),
