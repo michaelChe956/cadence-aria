@@ -1291,6 +1291,67 @@ async fn workspace_ws_supervised_permission_allows_real_stream_to_complete() {
 }
 
 #[tokio::test]
+async fn workspace_ws_claude_author_ask_user_question_choice_continues_same_provider() {
+    let root = tempdir().expect("root");
+    let _repo = create_workspace_session_fixture_with_author(&root, "claude_code").await;
+    let mut registry = ProviderRegistry::new();
+    registry.register(ProviderName::Fake, Arc::new(FakeStreamingProvider));
+    registry.register(
+        ProviderName::ClaudeCode,
+        Arc::new(ClaudeCodeProvider::new(executable_fixture(
+            "tests/fixtures/provider/claude_ask_user_question_fixture.sh",
+        ))),
+    );
+
+    let app = build_web_router(WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        registry,
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(
+        &mut ws,
+        &WsInMessage::UserMessage {
+            content: "run claude ask user question provider".to_string(),
+        },
+    )
+    .await;
+
+    let choice = recv_until_choice_request(&mut ws).await;
+    assert_eq!(choice.id, "ask_req_001");
+    assert_eq!(choice.prompt, "Drink?");
+    assert_eq!(choice.options[0].id, "opt_0");
+    assert_eq!(choice.options[0].label, "Tea");
+
+    send_json(
+        &mut ws,
+        &WsInMessage::ChoiceResponse {
+            id: choice.id,
+            selected_option_ids: vec!["opt_0".to_string()],
+            free_text: None,
+        },
+    )
+    .await;
+
+    let checkpoint = recv_until_message_complete(&mut ws).await;
+    assert!(checkpoint.starts_with("cp_"));
+    let stage = recv_until_stage(&mut ws, "human_confirm").await;
+    assert_eq!(stage, "human_confirm");
+
+    drop(ws);
+    server.abort();
+}
+
+#[tokio::test]
 async fn workspace_ws_test_permission_fixture_emits_permission_request_for_fake_provider() {
     let root = tempdir().expect("root");
     let _repo = create_workspace_session_fixture(&root).await;

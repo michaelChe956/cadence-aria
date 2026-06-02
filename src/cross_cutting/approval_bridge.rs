@@ -117,6 +117,7 @@ pub struct ApprovalBridge {
     command_tx: mpsc::Sender<ProviderCommand>,
     pending: PendingPermissions,
     pending_choices: PendingChoices,
+    cleanup_cancel: CancellationToken,
 }
 
 impl ApprovalBridge {
@@ -124,6 +125,7 @@ impl ApprovalBridge {
         let (command_tx, command_rx) = mpsc::channel(8);
         let pending = Arc::new(Mutex::new(HashMap::new()));
         let pending_choices: PendingChoices = Arc::new(Mutex::new(HashMap::new()));
+        let cleanup_cancel = CancellationToken::new();
 
         tokio::spawn(listen_for_permission_commands(
             command_rx,
@@ -134,6 +136,7 @@ impl ApprovalBridge {
         tokio::spawn(cleanup_pending_permissions(
             Arc::clone(&pending),
             event_tx.clone(),
+            cleanup_cancel.clone(),
         ));
 
         Self {
@@ -142,6 +145,7 @@ impl ApprovalBridge {
             command_tx,
             pending,
             pending_choices,
+            cleanup_cancel,
         }
     }
 
@@ -254,6 +258,12 @@ impl ApprovalBridge {
     }
 }
 
+impl Drop for ApprovalBridge {
+    fn drop(&mut self) {
+        self.cleanup_cancel.cancel();
+    }
+}
+
 async fn listen_for_permission_commands(
     mut command_rx: mpsc::Receiver<ProviderCommand>,
     pending: PendingPermissions,
@@ -328,9 +338,13 @@ async fn listen_for_permission_commands(
 async fn cleanup_pending_permissions(
     pending: PendingPermissions,
     event_tx: mpsc::Sender<ProviderEvent>,
+    cancel: CancellationToken,
 ) {
     loop {
-        tokio::time::sleep(PERMISSION_CLEANUP_INTERVAL).await;
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            _ = tokio::time::sleep(PERMISSION_CLEANUP_INTERVAL) => {}
+        }
         let now = Instant::now();
         let expired_ids: Vec<String> = {
             let guard = pending.lock().await;
@@ -354,9 +368,12 @@ async fn cleanup_pending_permissions(
         };
 
         for id in timed_out_ids {
-            let _ = event_tx
-                .send(ProviderEvent::PermissionTimeout { permission_id: id })
-                .await;
+            tokio::select! {
+                _ = cancel.cancelled() => return,
+                result = event_tx.send(ProviderEvent::PermissionTimeout { permission_id: id }) => {
+                    let _ = result;
+                }
+            }
         }
     }
 }

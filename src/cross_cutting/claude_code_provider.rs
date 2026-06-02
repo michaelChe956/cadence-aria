@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::ExitStatus;
 use std::sync::Arc;
+use std::time::Duration;
 
+use command_group::AsyncGroupChild;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::ChildStdin;
@@ -21,6 +23,7 @@ use crate::cross_cutting::streaming_provider::{
 use crate::protocol::contracts::AdapterInput;
 
 const TOOL_RESULT_PREVIEW_MAX_BYTES: usize = 500;
+const PROVIDER_ABORT_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone)]
 struct ClaudePermissionRequest {
@@ -215,14 +218,13 @@ impl ClaudeCodeProvider {
         reason: Option<String>,
     ) -> Result<(), ProviderAdapterError> {
         let behavior = if approved { "allow" } else { "deny" };
-        let payload = json!({
-            "type": "control_response",
-            "request_id": request_id,
-            "response": {
+        let payload = Self::control_response_payload(
+            request_id,
+            json!({
                 "behavior": behavior,
                 "message": reason,
-            }
-        });
+            }),
+        );
         write_json_line(stdin, &payload).await
     }
 
@@ -236,15 +238,25 @@ impl ClaudeCodeProvider {
         if let Some(obj) = updated_input.as_object_mut() {
             obj.insert("answers".to_string(), Value::Object(answers));
         }
-        let payload = json!({
-            "type": "control_response",
-            "request_id": request_id,
-            "response": {
+        let payload = Self::control_response_payload(
+            request_id,
+            json!({
                 "behavior": "allow",
                 "updatedInput": updated_input,
-            }
-        });
+            }),
+        );
         write_json_line(stdin, &payload).await
+    }
+
+    fn control_response_payload(request_id: &str, response: Value) -> Value {
+        json!({
+            "type": "control_response",
+            "response": {
+                "subtype": "success",
+                "request_id": request_id,
+                "response": response,
+            }
+        })
     }
 
     async fn write_initial_messages(
@@ -400,10 +412,12 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
                 .await;
 
             let result = read_claude_stream(stdout, stdin, bridge, event_tx.clone(), cancel).await;
-            if matches!(result, Ok(ClaudeStreamOutcome::Aborted) | Err(_)) {
-                let _ = child.start_kill();
-            }
             match result {
+                Ok(ClaudeStreamOutcome::Aborted) => {
+                    stderr_task.abort();
+                    terminate_aborted_child(&mut child).await;
+                    let _ = stderr_task.await;
+                }
                 Ok(outcome) => {
                     let status = child.wait().await;
                     let _ = stderr_task.await;
@@ -437,6 +451,7 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
                     }
                 }
                 Err(error) => {
+                    let _ = child.start_kill();
                     let _ = event_tx
                         .send(ProviderEvent::StatusChanged(ProviderStatus::Failed))
                         .await;
@@ -536,6 +551,23 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
         });
 
         Ok(rx)
+    }
+}
+
+async fn terminate_aborted_child(child: &mut AsyncGroupChild) {
+    #[cfg(unix)]
+    if let Some(pgid) = child.id() {
+        unsafe {
+            let _ = libc::killpg(pgid as i32, libc::SIGKILL);
+        }
+    }
+    let _ = child.start_kill();
+    let _ = child.inner().start_kill();
+    if tokio::time::timeout(PROVIDER_ABORT_WAIT_TIMEOUT, child.wait())
+        .await
+        .is_err()
+    {
+        tracing::warn!("timed out waiting for aborted Claude Code provider process to exit");
     }
 }
 
@@ -980,9 +1012,13 @@ async fn send_provider_event(
 mod tests {
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
+    use std::process::Stdio;
+    use std::sync::Arc;
     use std::time::Duration;
 
-    use tokio::sync::mpsc;
+    use serde_json::{Map, Value, json};
+    use tokio::io::AsyncBufReadExt;
+    use tokio::sync::{Mutex, mpsc};
     use tokio_util::sync::CancellationToken;
 
     use crate::cross_cutting::streaming_provider::{
@@ -1078,7 +1114,7 @@ mod tests {
     }
 
     async fn wait_for_receiver_closed<T>(rx: &mpsc::Receiver<T>) {
-        for _ in 0..200 {
+        for _ in 0..1000 {
             if rx.is_closed() {
                 return;
             }
@@ -1098,6 +1134,16 @@ mod tests {
             "receiver buffer did not reach {expected_len} items; actual len is {}",
             rx.len()
         );
+    }
+
+    async fn wait_for_file(path: &Path) {
+        for _ in 0..200 {
+            if path.exists() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("file did not appear: {}", path.display());
     }
 
     #[cfg(target_os = "linux")]
@@ -1147,6 +1193,119 @@ mod tests {
         path
     }
 
+    async fn capture_tool_control_response(approved: bool, reason: Option<String>) -> Value {
+        let mut child = tokio::process::Command::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn cat fixture");
+        let stdin = Arc::new(Mutex::new(child.stdin.take().expect("child stdin")));
+        let stdout = child.stdout.take().expect("child stdout");
+
+        ClaudeCodeProvider::write_control_response(&stdin, "perm_req_001", approved, reason)
+            .await
+            .expect("write control response");
+        drop(stdin);
+
+        let mut lines = tokio::io::BufReader::new(stdout).lines();
+        let line = tokio::time::timeout(TEST_TIMEOUT, lines.next_line())
+            .await
+            .expect("control response line timeout")
+            .expect("read control response line")
+            .expect("control response line");
+        let _ = tokio::time::timeout(TEST_TIMEOUT, child.wait())
+            .await
+            .expect("cat wait timeout")
+            .expect("cat status");
+        serde_json::from_str(&line).expect("control response json")
+    }
+
+    async fn capture_choice_control_response(
+        original_input: Value,
+        answers: Map<String, Value>,
+    ) -> Value {
+        let mut child = tokio::process::Command::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn cat fixture");
+        let stdin = Arc::new(Mutex::new(child.stdin.take().expect("child stdin")));
+        let stdout = child.stdout.take().expect("child stdout");
+
+        ClaudeCodeProvider::write_choice_control_response(
+            &stdin,
+            "ask_req_001",
+            &original_input,
+            answers,
+        )
+        .await
+        .expect("write choice control response");
+        drop(stdin);
+
+        let mut lines = tokio::io::BufReader::new(stdout).lines();
+        let line = tokio::time::timeout(TEST_TIMEOUT, lines.next_line())
+            .await
+            .expect("choice control response line timeout")
+            .expect("read choice control response line")
+            .expect("choice control response line");
+        let _ = tokio::time::timeout(TEST_TIMEOUT, child.wait())
+            .await
+            .expect("cat wait timeout")
+            .expect("cat status");
+        serde_json::from_str(&line).expect("choice control response json")
+    }
+
+    #[tokio::test]
+    async fn claude_control_response_uses_sdk_success_envelope_for_approved_tool() {
+        let payload = capture_tool_control_response(true, None).await;
+
+        assert_eq!(payload["type"], "control_response");
+        assert!(payload.get("request_id").is_none());
+        assert_eq!(payload["response"]["subtype"], "success");
+        assert_eq!(payload["response"]["request_id"], "perm_req_001");
+        assert_eq!(payload["response"]["response"]["behavior"], "allow");
+        assert!(payload["response"]["response"]["message"].is_null());
+    }
+
+    #[tokio::test]
+    async fn claude_control_response_uses_sdk_success_envelope_for_denied_tool() {
+        let payload = capture_tool_control_response(false, Some("用户拒绝执行".to_string())).await;
+
+        assert_eq!(payload["type"], "control_response");
+        assert!(payload.get("request_id").is_none());
+        assert_eq!(payload["response"]["subtype"], "success");
+        assert_eq!(payload["response"]["request_id"], "perm_req_001");
+        assert_eq!(payload["response"]["response"]["behavior"], "deny");
+        assert_eq!(payload["response"]["response"]["message"], "用户拒绝执行");
+    }
+
+    #[tokio::test]
+    async fn claude_choice_control_response_uses_sdk_success_envelope_with_answers() {
+        let original_input = json!({
+            "questions": [{
+                "question": "Drink?",
+                "options": [
+                    { "label": "Tea" },
+                    { "label": "Coffee" }
+                ]
+            }]
+        });
+        let mut answers = Map::new();
+        answers.insert("Drink?".to_string(), Value::String("Tea".to_string()));
+
+        let payload = capture_choice_control_response(original_input, answers).await;
+
+        assert_eq!(payload["type"], "control_response");
+        assert!(payload.get("request_id").is_none());
+        assert_eq!(payload["response"]["subtype"], "success");
+        assert_eq!(payload["response"]["request_id"], "ask_req_001");
+        assert_eq!(payload["response"]["response"]["behavior"], "allow");
+        assert_eq!(
+            payload["response"]["response"]["updatedInput"]["answers"]["Drink?"],
+            "Tea"
+        );
+    }
+
     #[tokio::test]
     async fn claude_provider_bridges_permission_and_completes() {
         let fixture = executable_fixture("tests/fixtures/provider/claude_stream_json_fixture.sh");
@@ -1192,6 +1351,189 @@ mod tests {
 
         let completed = recv_completed(&mut session.events).await;
         assert_eq!(completed, "Claude fixture chunk done");
+    }
+
+    #[tokio::test]
+    async fn claude_provider_continues_same_session_after_ask_user_question_choice() {
+        let fixture =
+            executable_fixture("tests/fixtures/provider/claude_ask_user_question_fixture.sh");
+        let provider = ClaudeCodeProvider::new(fixture);
+        let input = streaming_input(ProviderType::ClaudeCode, ProviderPermissionMode::Supervised);
+
+        let mut session = provider
+            .start(input, CancellationToken::new())
+            .await
+            .expect("start provider");
+
+        let choice = loop {
+            match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+                .await
+                .expect("provider should emit choice")
+                .expect("provider event channel should stay open")
+            {
+                ProviderEvent::ChoiceRequest(choice) => break choice,
+                ProviderEvent::Failed { message } => {
+                    panic!("provider failed before choice: {message}")
+                }
+                ProviderEvent::ProtocolError { message, .. } => {
+                    panic!("provider protocol error before choice: {message}")
+                }
+                ProviderEvent::PermissionTimeout { permission_id } => {
+                    panic!("provider permission timed out before choice: {permission_id}")
+                }
+                ProviderEvent::StatusChanged(_)
+                | ProviderEvent::Execution(_)
+                | ProviderEvent::TextDelta { .. }
+                | ProviderEvent::PermissionRequest(_)
+                | ProviderEvent::ToolCall(_)
+                | ProviderEvent::ToolResult(_)
+                | ProviderEvent::Completed { .. } => {}
+            }
+        };
+        assert_eq!(choice.id, "ask_req_001");
+        assert_eq!(choice.options[0].id, "opt_0");
+
+        session
+            .commands
+            .send(ProviderCommand::ChoiceResponse {
+                id: choice.id,
+                selected_option_ids: vec!["opt_0".to_string()],
+                free_text: None,
+            })
+            .await
+            .expect("send choice response");
+
+        let completed = recv_completed(&mut session.events).await;
+        assert_eq!(completed, "choice continued");
+    }
+
+    #[tokio::test]
+    async fn claude_provider_abort_during_ask_user_question_closes_without_completion() {
+        let fixture = write_fixture(
+            "claude_ask_user_question_abort_fixture.sh",
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == "--version" ]]; then
+  echo "claude 2.1.160"
+  exit 0
+fi
+
+while IFS= read -r line; do
+  if [[ "$line" == *'"initialize"'* ]]; then
+    continue
+  fi
+  if [[ "$line" == *'"set_permission_mode"'* ]]; then
+    continue
+  fi
+  if [[ "$line" == *'"user"'* ]]; then
+    echo '{"type":"control_request","request_id":"ask_abort_001","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"Continue?","options":[{"label":"Yes"},{"label":"No"}]}]},"tool_use_id":"toolu_abort_question"}}'
+  fi
+  if [[ "$line" == *'"control_response"'* ]]; then
+    if [[ "$line" != *'"subtype":"success"'* ]]; then
+      echo "missing SDK success subtype during abort: $line" >&2
+      exit 42
+    fi
+    if [[ "$line" != *'"updatedInput"'* || "$line" != *'"answers"'* || "$line" != *'"Continue?"'* || "$line" != *'"aborted"'* ]]; then
+      echo "missing aborted answer: $line" >&2
+      exit 43
+    fi
+    printf 'aborted-control-response\n' > "$ARIA_ABORT_MARKER"
+    sleep 30
+  fi
+done
+"#,
+        );
+        let marker_dir = tempfile::tempdir().expect("marker dir");
+        let marker_path = marker_dir.path().join("abort_marker");
+        let provider = ClaudeCodeProvider::new(fixture);
+        let mut input =
+            streaming_input(ProviderType::ClaudeCode, ProviderPermissionMode::Supervised);
+        input.env_vars.insert(
+            "ARIA_ABORT_MARKER".to_string(),
+            marker_path.to_string_lossy().to_string(),
+        );
+        let cancel = CancellationToken::new();
+
+        let ProviderSession {
+            mut events,
+            commands,
+        } = provider
+            .start(input, cancel.clone())
+            .await
+            .expect("start provider");
+
+        let choice = loop {
+            match tokio::time::timeout(TEST_TIMEOUT, events.recv())
+                .await
+                .expect("provider should emit choice")
+                .expect("provider event channel should stay open")
+            {
+                ProviderEvent::ChoiceRequest(choice) => break choice,
+                ProviderEvent::Failed { message } => {
+                    panic!("provider failed before choice: {message}")
+                }
+                ProviderEvent::ProtocolError { message, .. } => {
+                    panic!("provider protocol error before choice: {message}")
+                }
+                ProviderEvent::PermissionTimeout { permission_id } => {
+                    panic!("provider permission timed out before choice: {permission_id}")
+                }
+                ProviderEvent::StatusChanged(_)
+                | ProviderEvent::Execution(_)
+                | ProviderEvent::TextDelta { .. }
+                | ProviderEvent::PermissionRequest(_)
+                | ProviderEvent::ToolCall(_)
+                | ProviderEvent::ToolResult(_)
+                | ProviderEvent::Completed { .. } => {}
+            }
+        };
+        assert_eq!(choice.id, "ask_abort_001");
+
+        commands
+            .send(ProviderCommand::Abort)
+            .await
+            .expect("send abort command");
+        drop(commands);
+        wait_for_file(&marker_path).await;
+
+        cancel.cancel();
+        let mut saw_aborted = false;
+        loop {
+            let event = tokio::time::timeout(TEST_TIMEOUT, events.recv())
+                .await
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "provider receiver did not close after abort cancellation; saw_aborted={saw_aborted}"
+                    )
+                });
+            let Some(event) = event else {
+                break;
+            };
+            match event {
+                ProviderEvent::StatusChanged(ProviderStatus::Aborted) => saw_aborted = true,
+                ProviderEvent::Completed { .. } => {
+                    panic!("aborted AskUserQuestion provider should not complete")
+                }
+                ProviderEvent::Failed { message } => {
+                    panic!("provider failed during abort: {message}")
+                }
+                ProviderEvent::ProtocolError { message, .. } => {
+                    panic!("provider protocol error during abort: {message}")
+                }
+                ProviderEvent::PermissionTimeout { permission_id } => {
+                    panic!("provider permission timed out during abort: {permission_id}")
+                }
+                ProviderEvent::StatusChanged(_)
+                | ProviderEvent::Execution(_)
+                | ProviderEvent::TextDelta { .. }
+                | ProviderEvent::PermissionRequest(_)
+                | ProviderEvent::ChoiceRequest(_)
+                | ProviderEvent::ToolCall(_)
+                | ProviderEvent::ToolResult(_) => {}
+            }
+        }
+        assert!(saw_aborted);
     }
 
     #[tokio::test]
