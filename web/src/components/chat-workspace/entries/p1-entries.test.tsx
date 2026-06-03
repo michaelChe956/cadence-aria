@@ -63,10 +63,15 @@ describe("chat workspace p1 entries", () => {
 
     render(<ReviewVerdictEntry entry={entry} onSelectPath={onSelectPath} />);
     fireEvent.click(screen.getByRole("button", { name: "补充上下文后修订" }));
+    expect(onSelectPath).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText("补充返修上下文"), {
+      target: { value: "请补充错误码说明" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "提交补充并修订" }));
 
     expect(screen.getByText("建议返修")).toBeInTheDocument();
     expect(screen.getByText("需要补充失败路径")).toBeInTheDocument();
-    expect(onSelectPath).toHaveBeenCalledWith("revise-with-context");
+    expect(onSelectPath).toHaveBeenCalledWith("revise-with-context", "请补充错误码说明");
   });
 
   it("renders gate prompt entries and human decision actions", () => {

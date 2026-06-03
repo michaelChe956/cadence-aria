@@ -116,8 +116,8 @@ export function ChatWorkspacePage({
     useWorkspaceStore.getState().setSelectedNode(nodeId);
   }
 
-  function handleSelectRevisionPath(path: RevisionPath) {
-    sendSelectRevisionPath(path, undefined);
+  function handleSelectRevisionPath(path: RevisionPath, extraContext?: string) {
+    sendSelectRevisionPath(path, extraContext);
   }
 
   function handleHumanConfirm(decision: "confirm" | "request-change" | "terminate") {

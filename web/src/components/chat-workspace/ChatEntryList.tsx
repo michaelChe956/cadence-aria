@@ -13,7 +13,7 @@ interface ChatEntryListProps {
   entries: ChatEntry[];
   onPermissionResponse?: (entry: ChatEntry, approved: boolean) => void;
   onChoiceResponse?: (entry: ChatEntry, response: ChoiceResponsePayload) => void;
-  onSelectRevisionPath?: (path: RevisionPath) => void;
+  onSelectRevisionPath?: (path: RevisionPath, extraContext?: string) => void;
   onHumanConfirm?: (decision: "confirm" | "request-change" | "terminate") => void;
   className?: string;
 }

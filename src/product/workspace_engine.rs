@@ -145,6 +145,18 @@ impl WorkspaceSession {
     }
 }
 
+fn provider_conversation_session_id(
+    conversations: &[ProviderConversationRef],
+    role: &ProviderConversationRole,
+    provider: &ProviderName,
+) -> Option<String> {
+    conversations
+        .iter()
+        .find(|conversation| &conversation.role == role && &conversation.provider == provider)
+        .map(|conversation| conversation.provider_session_id.clone())
+        .filter(|id| !id.trim().is_empty())
+}
+
 pub enum EngineEvent {
     StreamChunk {
         role: String,
@@ -263,6 +275,12 @@ impl AuthorPromptMode {
             Self::DeltaOnly => "发送给 Workspace provider 的追加提示词",
         }
     }
+}
+
+struct ArtifactRetryContext {
+    provider: Arc<dyn StreamingProviderAdapter>,
+    input: StreamingProviderInput,
+    attempted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -398,12 +416,21 @@ impl WorkspaceEngine {
         role: ProviderConversationRole,
         provider: &ProviderName,
     ) -> Option<String> {
-        self.session
-            .provider_conversations
-            .iter()
-            .find(|conversation| conversation.role == role && &conversation.provider == provider)
-            .map(|conversation| conversation.provider_session_id.clone())
-            .filter(|id| !id.trim().is_empty())
+        provider_conversation_session_id(&self.session.provider_conversations, &role, provider)
+            .or_else(|| {
+                self.lifecycle_store.as_ref().and_then(|store| {
+                    store
+                        .get_workspace_session(&self.session.session_id)
+                        .ok()
+                        .and_then(|session| {
+                            provider_conversation_session_id(
+                                &session.provider_conversations,
+                                &role,
+                                provider,
+                            )
+                        })
+                })
+            })
     }
 
     async fn record_provider_session(
@@ -891,6 +918,11 @@ impl WorkspaceEngine {
         )
         .await;
 
+        let retry_context = ArtifactRetryContext {
+            provider: provider.clone(),
+            input: input.clone(),
+            attempted: false,
+        };
         let session = provider.start(input, self.cancel.clone()).await;
         self.drive_provider_session(
             session,
@@ -898,6 +930,7 @@ impl WorkspaceEngine {
             Some(generation_node_id),
             Some(self.session.author_provider.clone()),
             ProviderConversationRole::Author,
+            Some(retry_context),
         )
         .await;
     }
@@ -912,6 +945,7 @@ impl WorkspaceEngine {
         node_id: Option<String>,
         agent: Option<ProviderName>,
         role: ProviderConversationRole,
+        mut artifact_retry: Option<ArtifactRetryContext>,
     ) {
         let mut session = match session {
             Ok(session) => session,
@@ -1138,6 +1172,7 @@ impl WorkspaceEngine {
                             if let Some(node_id) = node_id.as_deref() {
                                 let _ = self.flush_stream_buffer(node_id).await;
                             }
+                            let completed_provider_session_id = provider_session_id.clone();
                             if let Some(provider) = agent.clone() {
                                 self.record_provider_session(
                                     role.clone(),
@@ -1160,7 +1195,79 @@ impl WorkspaceEngine {
                             } else {
                                 full_output
                             };
-                            self.complete_assistant_message(assistant_msg_id, completed_output)
+
+                            let retry_start = if self
+                                .should_retry_missing_workspace_artifact(&completed_output)
+                            {
+                                if let Some(context) = artifact_retry.as_mut() {
+                                    if context.attempted {
+                                        None
+                                    } else {
+                                        context.attempted = true;
+                                        let retry_input = self.build_artifact_retry_input(
+                                            &context.input,
+                                            &completed_output,
+                                            completed_provider_session_id.clone(),
+                                        );
+                                        context.input = retry_input.clone();
+                                        Some((context.provider.clone(), retry_input))
+                                    }
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            };
+
+                            if let Some((provider, retry_input)) = retry_start {
+                                if let Some(node_id) = node_id.as_deref() {
+                                    self.emit_execution_event(
+                                        provider_prompt_event(
+                                            node_id,
+                                            retry_input.prompt.clone(),
+                                            "自动续写缺失 artifact 的提示词",
+                                        ),
+                                        Some(node_id.to_string()),
+                                        agent.clone(),
+                                    )
+                                    .await;
+                                }
+                                match provider.start(retry_input, self.cancel.clone()).await {
+                                    Ok(next_session) => {
+                                        session = next_session;
+                                        full_content.clear();
+                                        tool_call_titles.clear();
+                                        tool_call_commands.clear();
+                                        continue;
+                                    }
+                                    Err(error) => {
+                                        let _ = self
+                                            .event_tx
+                                            .send(EngineEvent::Error {
+                                                message: error.details.clone(),
+                                            })
+                                            .await;
+                                        if let Some(node_id) = node_id.as_deref() {
+                                            self.update_timeline_node(
+                                                node_id,
+                                                TimelineNodeStatus::Failed,
+                                                Some("Provider 自动续写启动失败".to_string()),
+                                            )
+                                            .await;
+                                        }
+                                        self.finish_failed_run().await;
+                                        return;
+                                    }
+                                }
+                            }
+
+                            let artifact_retry_attempted =
+                                artifact_retry.as_ref().is_some_and(|context| context.attempted);
+                            self.complete_assistant_message(
+                                assistant_msg_id,
+                                completed_output,
+                                artifact_retry_attempted,
+                            )
                                 .await;
                             return;
                         }
@@ -1222,7 +1329,7 @@ impl WorkspaceEngine {
             if let Some(node_id) = node_id.as_deref() {
                 let _ = self.flush_stream_buffer(node_id).await;
             }
-            self.complete_assistant_message(assistant_msg_id, full_content)
+            self.complete_assistant_message(assistant_msg_id, full_content, false)
                 .await;
         }
     }
@@ -1319,6 +1426,11 @@ impl WorkspaceEngine {
             )
             .await;
         }
+        let retry_context = ArtifactRetryContext {
+            provider: provider.clone(),
+            input: input.clone(),
+            attempted: false,
+        };
         let session = provider.start(input, self.cancel.clone()).await;
         self.drive_provider_session(
             session,
@@ -1326,6 +1438,7 @@ impl WorkspaceEngine {
             node_id,
             Some(author),
             ProviderConversationRole::Author,
+            Some(retry_context),
         )
         .await;
     }
@@ -1748,6 +1861,11 @@ impl WorkspaceEngine {
                 } else {
                     None
                 };
+                if decision == "continue_with_context" && normalized_context.is_none() {
+                    return Err(
+                        "continue_with_context requires non-empty extra_context".to_string()
+                    );
+                }
                 self.pending_revision_context = normalized_context;
                 self.complete_active_node(Some("已选择返修".to_string()))
                     .await;
@@ -1853,7 +1971,39 @@ impl WorkspaceEngine {
         }
     }
 
-    async fn complete_assistant_message(&mut self, assistant_msg_id: String, full_content: String) {
+    fn should_retry_missing_workspace_artifact(&self, full_content: &str) -> bool {
+        if !self.workspace_requires_artifact_gate() || full_content.trim().is_empty() {
+            return false;
+        }
+
+        let artifact_markdown = extract_artifact_content(full_content);
+        !content_has_complete_workspace_artifact(&artifact_markdown, &self.session.workspace_type)
+            && detect_author_choice_request(full_content, &self.session.workspace_type).is_none()
+    }
+
+    fn build_artifact_retry_input(
+        &self,
+        base_input: &StreamingProviderInput,
+        previous_output: &str,
+        provider_session_id: Option<String>,
+    ) -> StreamingProviderInput {
+        let mut input = base_input.clone();
+        input.prompt = build_artifact_retry_prompt(&self.session.workspace_type, previous_output);
+        if let Some(provider_session_id) = provider_session_id
+            .map(|id| id.trim().to_string())
+            .filter(|id| !id.is_empty())
+        {
+            input.resume_provider_session_id = Some(provider_session_id);
+        }
+        input
+    }
+
+    async fn complete_assistant_message(
+        &mut self,
+        assistant_msg_id: String,
+        full_content: String,
+        artifact_retry_attempted: bool,
+    ) {
         if self.cancel.is_cancelled() {
             self.finish_aborted_run().await;
             return;
@@ -1921,7 +2071,11 @@ impl WorkspaceEngine {
                 &self.session.workspace_type,
             )
         {
-            self.finish_invalid_workspace_artifact().await;
+            if artifact_retry_attempted {
+                self.finish_invalid_workspace_artifact_after_retry().await;
+            } else {
+                self.finish_invalid_workspace_artifact().await;
+            }
             return;
         }
         if let Some(store) = &self.lifecycle_store
@@ -2073,27 +2227,11 @@ impl WorkspaceEngine {
             .latest_review_verdict
             .as_ref()
             .ok_or_else(|| "review verdict is unavailable for revision".to_string())?;
-        let mut prompt = String::new();
-        prompt.push_str("请作为 author 返修当前 Workspace 产物。\n\n");
-        prompt.push_str(&format!(
-            "Workspace 类型: {}\n",
-            workspace_type_title(&self.session.workspace_type)
-        ));
-        prompt.push_str("会话上下文:\n");
-        for msg in &self.session.messages {
-            prompt.push_str(&format!("[{}]: {}\n", msg.role, msg.content));
-        }
-        prompt.push_str("\n上一版 Artifact:\n\n");
-        prompt.push_str(&artifact);
-        prompt.push_str("\n\nReviewer 审核意见:\n\n");
-        prompt.push_str(&review.comments);
-        prompt.push_str("\n\nReviewer 摘要:\n");
-        prompt.push_str(&review.summary);
-        if let Some(context) = &self.pending_revision_context {
-            prompt.push_str("\n\n用户补充信息:\n");
-            prompt.push_str(context);
-        }
-        prompt.push_str("\n\n请根据以上审核意见修改产物，输出完整更新后的 artifact markdown。\n");
+        let prompt = if resume_provider_session_id.is_some() {
+            self.build_revision_delta_prompt(review)
+        } else {
+            self.build_revision_full_prompt(&artifact, review)
+        };
 
         Ok(StreamingProviderInput {
             provider_type: provider_type_for_name(&provider),
@@ -2106,6 +2244,51 @@ impl WorkspaceEngine {
             env_vars: BTreeMap::new(),
             timeout_secs: 300,
         })
+    }
+
+    fn build_revision_delta_prompt(&self, review: &ReviewVerdict) -> String {
+        let mut prompt = String::new();
+        prompt.push_str("请作为 author 继续返修当前 Workspace 产物。\n\n");
+        prompt.push_str(&format!(
+            "Workspace 类型: {}\n",
+            workspace_type_title(&self.session.workspace_type)
+        ));
+        prompt.push_str("这是对当前 provider 会话的增量返修指令。不要重新调研完整上下文，不要只解释；请基于本会话已有上下文、上一版 artifact 和以下 reviewer 意见，直接输出完整更新后的 artifact markdown。\n");
+        prompt.push_str("\nReviewer 审核意见:\n\n");
+        prompt.push_str(&review.comments);
+        prompt.push_str("\n\nReviewer 摘要:\n");
+        prompt.push_str(&review.summary);
+        if let Some(context) = &self.pending_revision_context {
+            prompt.push_str("\n\n用户补充信息优先级高于 Reviewer 审核意见；如二者冲突，以用户补充信息为准，并在更新后的 artifact 中体现用户补充要求。\n用户补充信息:\n");
+            prompt.push_str(context);
+        }
+        prompt.push_str("\n\n请根据以上审核意见修改产物，输出完整更新后的 artifact markdown。\n");
+        prompt
+    }
+
+    fn build_revision_full_prompt(&self, artifact: &str, review: &ReviewVerdict) -> String {
+        let mut prompt = String::new();
+        prompt.push_str("请作为 author 返修当前 Workspace 产物。\n\n");
+        prompt.push_str(&format!(
+            "Workspace 类型: {}\n",
+            workspace_type_title(&self.session.workspace_type)
+        ));
+        prompt.push_str("会话上下文:\n");
+        for msg in &self.session.messages {
+            prompt.push_str(&format!("[{}]: {}\n", msg.role, msg.content));
+        }
+        prompt.push_str("\n上一版 Artifact:\n\n");
+        prompt.push_str(artifact);
+        prompt.push_str("\n\nReviewer 审核意见:\n\n");
+        prompt.push_str(&review.comments);
+        prompt.push_str("\n\nReviewer 摘要:\n");
+        prompt.push_str(&review.summary);
+        if let Some(context) = &self.pending_revision_context {
+            prompt.push_str("\n\n用户补充信息优先级高于 Reviewer 审核意见；如二者冲突，以用户补充信息为准，并在更新后的 artifact 中体现用户补充要求。\n用户补充信息:\n");
+            prompt.push_str(context);
+        }
+        prompt.push_str("\n\n请根据以上审核意见修改产物，输出完整更新后的 artifact markdown。\n");
+        prompt
     }
 
     pub async fn handle_rollback(&mut self, checkpoint_id: &str) -> Result<(), String> {
@@ -2311,6 +2494,22 @@ impl WorkspaceEngine {
     async fn finish_invalid_workspace_artifact(&mut self) {
         let artifact_name = workspace_type_title(&self.session.workspace_type);
         let message = format!("Provider 未返回有效的 {artifact_name} artifact");
+        let _ = self
+            .event_tx
+            .send(EngineEvent::Error {
+                message: message.clone(),
+            })
+            .await;
+        if let Some(node_id) = self.active_node_id.clone() {
+            self.update_timeline_node(&node_id, TimelineNodeStatus::Failed, Some(message))
+                .await;
+        }
+        self.finish_failed_run().await;
+    }
+
+    async fn finish_invalid_workspace_artifact_after_retry(&mut self) {
+        let artifact_name = workspace_type_title(&self.session.workspace_type);
+        let message = format!("自动续写后仍未返回有效的 {artifact_name} artifact");
         let _ = self
             .event_tx
             .send(EngineEvent::Error {
@@ -3257,6 +3456,22 @@ fn normalize_generation_prompt(content: String, workspace_type: &WorkspaceType) 
     }
 }
 
+fn build_artifact_retry_prompt(workspace_type: &WorkspaceType, previous_output: &str) -> String {
+    let artifact_name = workspace_type_title(workspace_type);
+    let mut prompt = format!(
+        "上一轮已结束，但没有输出完整 artifact。\n\
+         不要继续调研，不要只解释。\n\
+         请基于已有上下文和刚才读取的文件，立即输出完整 ```artifact``` {artifact_name}。\n"
+    );
+    let previous_output = previous_output.trim();
+    if !previous_output.is_empty() {
+        prompt.push_str("\n上一轮可见输出:\n");
+        prompt.push_str(previous_output);
+        prompt.push('\n');
+    }
+    prompt
+}
+
 fn ws_stage(stage: &WorkspaceStage) -> WsWorkspaceStage {
     match stage {
         WorkspaceStage::PrepareContext => WsWorkspaceStage::PrepareContext,
@@ -3607,6 +3822,7 @@ mod tests {
                 Some("timeline_node_author".to_string()),
                 Some(ProviderName::ClaudeCode),
                 ProviderConversationRole::Author,
+                None,
             )
             .await;
 
@@ -3935,6 +4151,7 @@ mod tests {
                 Some(node_id.clone()),
                 Some(ProviderName::ClaudeCode),
                 ProviderConversationRole::Author,
+                None,
             )
             .await;
 
@@ -4429,6 +4646,8 @@ mod tests {
         assert!(prompt.contains("# Story Spec"));
         assert!(prompt.contains("需要补充失败路径"));
         assert!(prompt.contains("补充登录错误码"));
+        assert!(prompt.contains("用户补充信息优先级高于 Reviewer 审核意见"));
+        assert!(prompt.contains("如二者冲突，以用户补充信息为准"));
         assert!(prompt.contains("请根据以上审核意见修改产物"));
         assert_eq!(
             engine.session().artifact.as_deref(),
@@ -4454,6 +4673,233 @@ mod tests {
                 assert_eq!(active.round, Some(2));
             }
             _ => panic!("expected SessionState"),
+        }
+    }
+
+    #[tokio::test]
+    async fn review_decision_with_context_requires_non_empty_context_for_all_workspace_types() {
+        for workspace_type in [
+            WorkspaceType::Story,
+            WorkspaceType::Design,
+            WorkspaceType::WorkItem,
+        ] {
+            let (_tmp, store) = setup();
+            let (tx, _) = mpsc::channel(64);
+            let mut session = make_session("sess_review_context_required");
+            session.workspace_type = workspace_type.clone();
+            session.stage = WorkspaceStage::ReviewDecision;
+            let mut engine = WorkspaceEngine::new(store, tx, session);
+            engine.latest_review_verdict = Some(ReviewVerdict {
+                verdict: ReviewVerdictType::Revise,
+                comments: "需要补充上下文后再返修。".to_string(),
+                summary: "补充上下文".to_string(),
+            });
+
+            let result = engine
+                .handle_review_decision(
+                    "continue_with_context".to_string(),
+                    Some("   ".to_string()),
+                )
+                .await;
+
+            assert_eq!(
+                result,
+                Err("continue_with_context requires non-empty extra_context".to_string())
+            );
+            assert_eq!(engine.session().stage, WorkspaceStage::ReviewDecision);
+            assert!(
+                !engine
+                    .timeline_nodes
+                    .iter()
+                    .any(|node| node.node_type == TimelineNodeType::Revision),
+                "{workspace_type:?} should not create revision node without extra context"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn revision_input_uses_persisted_codex_author_session_when_engine_session_is_stale() {
+        let (tmp, checkpoint_store) = setup();
+        let lifecycle_store = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
+        let (tx, _) = mpsc::channel(64);
+        let session_record = lifecycle_store
+            .create_workspace_session(CreateWorkspaceSessionInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                entity_id: "story_spec_0001".to_string(),
+                workspace_type: WorkspaceType::Story,
+                author_provider: ProviderName::Codex,
+                reviewer_provider: ProviderName::ClaudeCode,
+                review_rounds: 1,
+                superpowers_enabled: true,
+                openspec_enabled: true,
+            })
+            .unwrap();
+        lifecycle_store
+            .replace_workspace_provider_conversations(
+                &session_record.id,
+                vec![ProviderConversationRef {
+                    role: ProviderConversationRole::Author,
+                    provider: ProviderName::Codex,
+                    provider_session_id: "codex-author-session-1".to_string(),
+                    updated_at: chrono::Utc::now().to_rfc3339(),
+                    last_node_id: Some("timeline_node_002".to_string()),
+                }],
+            )
+            .unwrap();
+
+        let mut session = WorkspaceSession::from_record(session_record);
+        session.stage = WorkspaceStage::Revision;
+        session.artifact = Some(
+            "# Story Spec\n\n## 功能需求\n- [REQ-001] 初版。\n\n## 成功标准\n- [AC-001] 初版可验收。\n"
+                .to_string(),
+        );
+        session.messages.push(SessionMessage {
+            id: "msg_001".to_string(),
+            role: "system".to_string(),
+            content: "很长的系统上下文，返修续接时不应重复发送。".to_string(),
+            checkpoint_id: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        });
+        let mut engine =
+            WorkspaceEngine::new_persistent(checkpoint_store, lifecycle_store, tx, session);
+        engine.latest_review_verdict = Some(ReviewVerdict {
+            verdict: ReviewVerdictType::Revise,
+            comments: "需要补充 reviewer 指出的 API 字段。".to_string(),
+            summary: "补 API 字段".to_string(),
+        });
+
+        let input = engine.build_revision_input().expect("revision input");
+
+        assert_eq!(
+            input.resume_provider_session_id.as_deref(),
+            Some("codex-author-session-1")
+        );
+        assert!(input.prompt.contains("需要补充 reviewer 指出的 API 字段。"));
+        assert!(input.prompt.contains("输出完整更新后的 artifact markdown"));
+        assert!(!input.prompt.contains("会话上下文:"));
+        assert!(!input.prompt.contains("[system]:"));
+        assert!(!input.prompt.contains("上一版 Artifact"));
+        assert!(!input.prompt.contains("# Story Spec"));
+    }
+
+    #[tokio::test]
+    async fn revision_with_existing_author_provider_session_uses_delta_prompt() {
+        let (_tmp, store) = setup();
+        let (tx, _) = mpsc::channel(64);
+        let mut session = make_session("sess_revision_delta_prompt");
+        session.stage = WorkspaceStage::Revision;
+        session.artifact = Some(
+            "# Story Spec\n\n## 功能需求\n- [REQ-001] 初版。\n\n## 成功标准\n- [AC-001] 初版可验收。\n"
+                .to_string(),
+        );
+        session.messages.push(SessionMessage {
+            id: "msg_001".to_string(),
+            role: "system".to_string(),
+            content: "很长的系统上下文，返修续接时不应重复发送。".to_string(),
+            checkpoint_id: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        });
+        session.messages.push(SessionMessage {
+            id: "msg_002".to_string(),
+            role: "assistant".to_string(),
+            content: session.artifact.clone().expect("artifact"),
+            checkpoint_id: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        });
+        session
+            .provider_conversations
+            .push(ProviderConversationRef {
+                role: ProviderConversationRole::Author,
+                provider: ProviderName::ClaudeCode,
+                provider_session_id: "provider-author-session-1".to_string(),
+                updated_at: chrono::Utc::now().to_rfc3339(),
+                last_node_id: Some("timeline_node_002".to_string()),
+            });
+        let mut engine = WorkspaceEngine::new(store, tx, session);
+        engine.latest_review_verdict = Some(ReviewVerdict {
+            verdict: ReviewVerdictType::Revise,
+            comments: "需要补充失败路径。".to_string(),
+            summary: "补充失败路径".to_string(),
+        });
+        engine.pending_revision_context = Some("补充登录错误码".to_string());
+        let captured_input = Arc::new(Mutex::new(None));
+
+        engine
+            .drive_revision_session(
+                Arc::new(RevisionInputRecordingProvider {
+                    input: captured_input.clone(),
+                    output: "# Story Spec\n\n## 功能需求\n- [REQ-001] 补充失败路径。\n\n## 成功标准\n- [AC-001] 覆盖失败路径。\n",
+                }),
+                empty_provider_commands(),
+            )
+            .await;
+
+        let input = captured_input
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("revision provider input");
+        assert_eq!(
+            input.resume_provider_session_id.as_deref(),
+            Some("provider-author-session-1")
+        );
+        assert!(input.prompt.contains("需要补充失败路径。"));
+        assert!(input.prompt.contains("补充登录错误码"));
+        assert!(
+            input
+                .prompt
+                .contains("用户补充信息优先级高于 Reviewer 审核意见")
+        );
+        assert!(input.prompt.contains("如二者冲突，以用户补充信息为准"));
+        assert!(input.prompt.contains("输出完整更新后的 artifact markdown"));
+        assert!(!input.prompt.contains("会话上下文:"));
+        assert!(!input.prompt.contains("[system]:"));
+        assert!(!input.prompt.contains("上一版 Artifact"));
+        assert!(!input.prompt.contains("# Story Spec"));
+    }
+
+    struct RevisionInputRecordingProvider {
+        input: Arc<Mutex<Option<StreamingProviderInput>>>,
+        output: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl StreamingProviderAdapter for RevisionInputRecordingProvider {
+        async fn start(
+            &self,
+            input: StreamingProviderInput,
+            _cancel: CancellationToken,
+        ) -> Result<ProviderSession, ProviderAdapterError> {
+            *self.input.lock().unwrap() = Some(input);
+            let (event_tx, event_rx) = mpsc::channel(8);
+            let (command_tx, _command_rx) = mpsc::channel(8);
+            let output = self.output.to_string();
+            tokio::spawn(async move {
+                let _ = event_tx
+                    .send(ProviderEvent::Completed {
+                        full_output: output,
+                        provider_session_id: Some("provider-author-session-1".to_string()),
+                    })
+                    .await;
+            });
+            Ok(ProviderSession {
+                events: event_rx,
+                commands: command_tx,
+            })
+        }
+
+        async fn run_streaming(
+            &self,
+            _input: &AdapterInput,
+            _cancel: CancellationToken,
+        ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+            Err(ProviderAdapterError::execution_failed(
+                None,
+                String::new(),
+                "run_streaming is not used by WorkspaceEngine",
+                0,
+            ))
         }
     }
 
@@ -5095,6 +5541,64 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn handle_user_message_retries_once_when_design_author_completes_without_artifact() {
+        let (_tmp, store) = setup();
+        let (tx, mut rx) = mpsc::channel(64);
+        let mut session = make_session("sess_design_artifact_retry");
+        session.workspace_type = WorkspaceType::Design;
+        session.entity_id = "design_spec_0001".to_string();
+        session.reviewer_provider = None;
+        session.review_rounds = 0;
+        let mut engine = WorkspaceEngine::new(store, tx, session);
+        let provider = Arc::new(DesignArtifactRetryProvider::default());
+
+        engine
+            .handle_user_message(
+                "start".to_string(),
+                provider.clone(),
+                empty_provider_commands(),
+            )
+            .await;
+
+        assert_eq!(*provider.calls.lock().unwrap(), 2);
+        let inputs = provider.inputs.lock().unwrap();
+        assert_eq!(inputs.len(), 2);
+        assert!(
+            inputs[1].prompt.contains("上一轮已结束")
+                && inputs[1].prompt.contains("没有输出完整 artifact")
+                && inputs[1]
+                    .prompt
+                    .contains("立即输出完整 ```artifact``` Design Spec"),
+            "retry prompt should force a complete Design Spec artifact, got: {}",
+            inputs[1].prompt
+        );
+        assert_eq!(
+            inputs[1].resume_provider_session_id.as_deref(),
+            Some("design-retry-session-1")
+        );
+        drop(inputs);
+
+        assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
+        assert!(
+            engine
+                .session()
+                .artifact
+                .as_deref()
+                .is_some_and(
+                    |artifact| artifact.contains("## 设计决策") && artifact.contains("## 公共组件")
+                )
+        );
+        assert!(
+            drain_engine_events(&mut rx).iter().any(|event| matches!(
+                event,
+                EngineEvent::ArtifactUpdate { markdown, .. }
+                    if markdown.contains("# Retried Design Spec")
+            )),
+            "retry artifact should be published"
+        );
+    }
+
     struct StreamedArtifactSummaryProvider;
 
     #[async_trait::async_trait]
@@ -5122,6 +5626,82 @@ mod tests {
                     .send(ProviderEvent::Completed {
                         full_output: "Story Spec 候选已输出。等待 daemon 处理。".to_string(),
                         provider_session_id: None,
+                    })
+                    .await;
+            });
+            Ok(ProviderSession {
+                events: event_rx,
+                commands: command_tx,
+            })
+        }
+
+        async fn run_streaming(
+            &self,
+            _input: &AdapterInput,
+            _cancel: CancellationToken,
+        ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+            Err(ProviderAdapterError::execution_failed(
+                None,
+                String::new(),
+                "run_streaming is not used by WorkspaceEngine",
+                0,
+            ))
+        }
+    }
+
+    #[derive(Default)]
+    struct DesignArtifactRetryProvider {
+        inputs: Arc<Mutex<Vec<StreamingProviderInput>>>,
+        calls: Arc<Mutex<u32>>,
+    }
+
+    #[async_trait::async_trait]
+    impl StreamingProviderAdapter for DesignArtifactRetryProvider {
+        async fn start(
+            &self,
+            input: StreamingProviderInput,
+            _cancel: CancellationToken,
+        ) -> Result<ProviderSession, ProviderAdapterError> {
+            self.inputs.lock().unwrap().push(input);
+            let mut calls = self.calls.lock().unwrap();
+            *calls += 1;
+            let call_no = *calls;
+            drop(calls);
+
+            let (event_tx, event_rx) = mpsc::channel(8);
+            let (command_tx, _command_rx) = mpsc::channel(8);
+            tokio::spawn(async move {
+                if call_no == 1 {
+                    let output = "我先核对 reviewer 指出的几处代码锚点。\n";
+                    let _ = event_tx
+                        .send(ProviderEvent::TextDelta {
+                            content: output.to_string(),
+                        })
+                        .await;
+                    let _ = event_tx
+                        .send(ProviderEvent::Completed {
+                            full_output: output.to_string(),
+                            provider_session_id: Some("design-retry-session-1".to_string()),
+                        })
+                        .await;
+                    return;
+                }
+
+                let output = "```artifact\n# Retried Design Spec\n\n\
+                    ## 设计决策\n\
+                    - [DEC-001] 返修时直接输出完整设计产物。\n\n\
+                    ## 公共组件\n\
+                    - [CMP-001] ProviderDependencyDialog。\n\
+                    ```";
+                let _ = event_tx
+                    .send(ProviderEvent::TextDelta {
+                        content: output.to_string(),
+                    })
+                    .await;
+                let _ = event_tx
+                    .send(ProviderEvent::Completed {
+                        full_output: output.to_string(),
+                        provider_session_id: Some("design-retry-session-2".to_string()),
                     })
                     .await;
             });
@@ -5400,6 +5980,7 @@ mod tests {
                 Some(node_id.clone()),
                 Some(ProviderName::ClaudeCode),
                 ProviderConversationRole::Author,
+                None,
             )
             .await;
 

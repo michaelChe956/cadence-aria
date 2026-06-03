@@ -96,7 +96,7 @@ impl ClaudeCodeProvider {
         args
     }
 
-    fn parse_text_delta(value: &Value, received_stream_events: bool) -> Option<String> {
+    fn parse_stream_text_delta(value: &Value) -> Option<String> {
         if value.get("type")?.as_str()? == "stream_event" {
             let event = value.get("event")?;
             if event.get("type")?.as_str()? == "content_block_delta" {
@@ -108,14 +108,12 @@ impl ClaudeCodeProvider {
                     }
                 }
             }
-            return None;
         }
+        None
+    }
 
+    fn parse_assistant_text(value: &Value) -> Option<String> {
         if value.get("type")?.as_str()? != "assistant" {
-            return None;
-        }
-
-        if received_stream_events {
             return None;
         }
 
@@ -128,6 +126,25 @@ impl ClaudeCodeProvider {
             .join("");
 
         if text.is_empty() { None } else { Some(text) }
+    }
+
+    fn assistant_text_delta(assistant_text: &str, emitted_text: &str) -> Option<String> {
+        if assistant_text.is_empty() || assistant_text == emitted_text {
+            return None;
+        }
+        if emitted_text.is_empty() {
+            return Some(assistant_text.to_string());
+        }
+        if let Some(suffix) = assistant_text.strip_prefix(emitted_text) {
+            if suffix.is_empty() {
+                return None;
+            }
+            return Some(suffix.to_string());
+        }
+        if emitted_text.ends_with(assistant_text) {
+            return None;
+        }
+        Some(assistant_text.to_string())
     }
 
     fn parse_tool_use_from_assistant(value: &Value) -> Option<Vec<ToolUseBlock>> {
@@ -618,7 +635,7 @@ async fn read_claude_stream(
     let mut lines = BufReader::new(stdout).lines();
     let mut pending_tool_uses: HashMap<String, ToolUseBlock> = HashMap::new();
     let mut resolved_ask_user_questions: HashMap<String, ResolvedAskUserQuestion> = HashMap::new();
-    let mut received_stream_events = false;
+    let mut emitted_assistant_text = String::new();
 
     loop {
         let line = tokio::select! {
@@ -647,13 +664,18 @@ async fn read_claude_stream(
             )
         })?;
 
-        if let Some(content) = ClaudeCodeProvider::parse_text_delta(&value, received_stream_events)
-        {
-            if value.get("type").and_then(Value::as_str) == Some("stream_event") {
-                received_stream_events = true;
-            }
+        if let Some(content) = ClaudeCodeProvider::parse_stream_text_delta(&value) {
+            emitted_assistant_text.push_str(&content);
             send_provider_event(&event_tx, ProviderEvent::TextDelta { content }, &cancel).await?;
             continue;
+        }
+
+        if let Some(assistant_text) = ClaudeCodeProvider::parse_assistant_text(&value)
+            && let Some(content) =
+                ClaudeCodeProvider::assistant_text_delta(&assistant_text, &emitted_assistant_text)
+        {
+            emitted_assistant_text.push_str(&content);
+            send_provider_event(&event_tx, ProviderEvent::TextDelta { content }, &cancel).await?;
         }
 
         if let Some(request) = ClaudeCodeProvider::parse_control_request(&value) {
@@ -848,11 +870,17 @@ async fn read_claude_stream(
                 return Ok(ClaudeStreamOutcome::TerminalEventEmitted);
             }
 
-            let full_output = value
+            let result_output = value
                 .get("result")
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
+            let full_output =
+                if result_output.trim().is_empty() && !emitted_assistant_text.trim().is_empty() {
+                    emitted_assistant_text.clone()
+                } else {
+                    result_output
+                };
             let provider_session_id = value
                 .get("session_id")
                 .and_then(Value::as_str)
@@ -1570,6 +1598,77 @@ mod tests {
         assert!(completed.contains("# Story Spec"));
         assert!(completed.contains("## 功能需求"));
         assert!(completed.contains("## 成功标准"));
+    }
+
+    #[tokio::test]
+    async fn claude_provider_emits_assistant_final_text_after_stream_delta_when_result_is_empty() {
+        let fixture = write_fixture(
+            "claude_partial_then_final_assistant_empty_result_fixture.sh",
+            r##"#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == "--version" ]]; then
+  echo "claude 2.1.160"
+  exit 0
+fi
+
+while IFS= read -r line; do
+  if [[ "$line" == *'"initialize"'* ]]; then
+    continue
+  fi
+  if [[ "$line" == *'"set_permission_mode"'* ]]; then
+    continue
+  fi
+  if [[ "$line" == *'"user"'* ]]; then
+    echo '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"我先调研。\n"}},"session_id":"claude_fixture_session"}'
+    echo '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"```artifact\n# 依赖自检查 Design Spec\n\n## 设计范围\n- [DEC-001] 设计入口。\n\n## 设计决策\n- [DEC-001] 使用轻量探测。\n\n## 公共组件\n- [CMP-001] ProviderDependencyDialog。\n\n## API 契约\n- [API-001] GET /api/provider-dependencies。\n\n## 数据模型\n- repository provider settings。\n\n## 风险\n- npm 缺失。\n\n## 追踪关系\n- REQ-001 -> DEC-001\n```"}]},"session_id":"claude_fixture_session"}'
+    echo '{"type":"result","subtype":"success","is_error":false,"result":"","session_id":"claude_fixture_session"}'
+    exit 0
+  fi
+done
+"##,
+        );
+        let provider = ClaudeCodeProvider::new(fixture);
+        let input = streaming_input(ProviderType::ClaudeCode, ProviderPermissionMode::Supervised);
+
+        let mut session = provider
+            .start(input, CancellationToken::new())
+            .await
+            .expect("start provider");
+        let mut streamed = String::new();
+        let completed = loop {
+            match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+                .await
+                .expect("provider should emit completion")
+                .expect("provider event channel should stay open")
+            {
+                ProviderEvent::TextDelta { content } => streamed.push_str(&content),
+                ProviderEvent::Completed { full_output, .. } => break full_output,
+                ProviderEvent::StatusChanged(_)
+                | ProviderEvent::Execution(_)
+                | ProviderEvent::PermissionRequest(_)
+                | ProviderEvent::ChoiceRequest(_)
+                | ProviderEvent::ToolCall(_)
+                | ProviderEvent::ToolResult(_) => {}
+                ProviderEvent::Failed { message } => panic!("provider failed: {message}"),
+                ProviderEvent::ProtocolError { message, .. } => {
+                    panic!("provider protocol error: {message}")
+                }
+                ProviderEvent::PermissionTimeout { permission_id } => {
+                    panic!("provider permission timed out: {permission_id}")
+                }
+            }
+        };
+
+        assert_eq!(completed, streamed);
+        assert!(
+            completed.contains("# 依赖自检查 Design Spec"),
+            "completed output should fall back to visible assistant text, got: {completed}"
+        );
+        assert!(
+            streamed.contains("# 依赖自检查 Design Spec"),
+            "final assistant artifact should be emitted as stream text, got: {streamed}"
+        );
     }
 
     #[tokio::test]
