@@ -440,7 +440,15 @@ fn output_schema_for(workspace_type: &WorkspaceType) -> &'static str {
              最终候选 Markdown 必须用 ```artifact fenced block 包裹，且 fenced block 内第一行必须是 Story Spec 一级标题，例如 # <名称> Story Spec；过程说明必须放在 fenced block 外。每条需求必须显式写稳定 ID，例如 [REQ-001]；每条验收标准必须显式写稳定 ID，例如 [AC-001]。如果通过交互已解决所有疑问，## 待确认项 写“无”；不要为了填充该 heading 编造未决问题。"
         }
         WorkspaceType::Design => {
-            "Markdown Design Spec 必须用 ```artifact fenced block 包裹，且 fenced block 内第一行必须是 Design Spec 一级标题；内容必须包含设计范围、关键决策、组件/API/数据模型、风险和追踪关系；关键决策使用 [DEC-001]，组件/API 使用 [CMP-001] 或 [API-001]。"
+            "Markdown Design Spec 必须用 ```artifact fenced block 包裹，且 fenced block 内第一行必须是 Design Spec 一级标题；内容必须包含以下 heading：\n\
+             - ## 设计范围\n\
+             - ## 设计决策\n\
+             - ## 公共组件\n\
+             - ## API 契约\n\
+             - ## 数据模型\n\
+             - ## 风险\n\
+             - ## 追踪关系\n\n\
+             设计决策使用 [DEC-001]，组件使用 [CMP-001]，API 使用 [API-001]。"
         }
         WorkspaceType::WorkItem => {
             "Markdown Work Item 必须用 ```artifact fenced block 包裹，且 fenced block 内第一行必须是 Work Item 一级标题；内容必须包含目标、范围、任务拆分、依赖、验证命令、风险和追踪关系；任务使用 [TASK-001]，并绑定来源 Story/Design。"
@@ -492,6 +500,17 @@ mod tests {
                 "{workspace_type:?} output schema must require artifact fenced block"
             );
         }
+    }
+
+    #[test]
+    fn design_output_schema_uses_canonical_projection_headings() {
+        let schema = output_schema_for(&WorkspaceType::Design);
+
+        assert!(schema.contains("设计决策"));
+        assert!(schema.contains("公共组件"));
+        assert!(schema.contains("API 契约"));
+        assert!(schema.contains("数据模型"));
+        assert!(!schema.contains("关键决策"));
     }
 
     #[test]

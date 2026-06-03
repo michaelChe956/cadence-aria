@@ -510,10 +510,14 @@ fn fake_workspace_markdown(prompt: &str) -> String {
             "# Design Spec\n\n\
              ## 设计范围\n\n\
              面向 {issue} 生成候选设计，响应用户指令：{user_intent}。\n\n\
-             ## 关键决策\n\n\
+             ## 设计决策\n\n\
              [DEC-001] 采用最小可验证实现，保持实现与测试边界清晰。\n\n\
-             ## 组件/API/数据模型\n\n\
+             ## 公共组件\n\n\
              [CMP-001] 在现有代码结构中增加必要模块，不引入无关依赖。\n\n\
+             ## API 契约\n\n\
+             [API-001] 复用现有 Workspace 工作流入口，不新增外部 API。\n\n\
+             ## 数据模型\n\n\
+             [DATA-001] 不新增持久化实体；状态变更沿用现有生命周期记录。\n\n\
              ## 风险\n\n\
              [RISK-001] 需求边界不完整时，在待确认项中保留人工确认入口。\n\n\
              ## 追踪关系\n\n\

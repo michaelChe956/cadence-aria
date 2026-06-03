@@ -2026,8 +2026,6 @@ impl WorkspaceEngine {
             .reviewer_provider
             .clone()
             .unwrap_or(ProviderName::Codex);
-        let resume_provider_session_id =
-            self.provider_resume_session_id(ProviderConversationRole::Reviewer, &provider);
         let mut prompt = String::new();
         prompt.push_str("请作为 reviewer 审核当前 Workspace 产物。\n\n");
         prompt.push_str(&format!(
@@ -2053,7 +2051,7 @@ impl WorkspaceEngine {
             prompt,
             working_dir,
             workspace_session_id: Some(self.session.session_id.clone()),
-            resume_provider_session_id,
+            resume_provider_session_id: None,
             permission_mode: ProviderPermissionMode::Supervised,
             env_vars: BTreeMap::new(),
             timeout_secs: 300,
@@ -3096,14 +3094,97 @@ fn looks_like_user_question(content: &str) -> bool {
 fn content_has_complete_workspace_artifact(content: &str, workspace_type: &WorkspaceType) -> bool {
     match workspace_type {
         WorkspaceType::Story => content.contains("## 功能需求") && content.contains("## 成功标准"),
-        WorkspaceType::Design => {
-            content.contains("## 关键决策")
-                && (content.contains("## 组件")
-                    || content.contains("## API")
-                    || content.contains("## 数据模型"))
-        }
+        WorkspaceType::Design => design_artifact_has_required_headings(content),
         WorkspaceType::WorkItem => false,
     }
+}
+
+fn design_artifact_has_required_headings(content: &str) -> bool {
+    let headings = workspace_artifact_headings(content).collect::<Vec<_>>();
+    let has_decisions = headings
+        .iter()
+        .any(|heading| heading_matches(heading, &["设计决策", "Design Decisions"]));
+    let has_structure = headings.iter().any(|heading| {
+        heading_matches(
+            heading,
+            &[
+                "公共组件",
+                "Shared Components",
+                "shared_components",
+                "API 契约",
+                "API Contract",
+                "api_entries",
+                "数据模型",
+                "数据实体",
+                "Data Entities",
+                "data_entities",
+            ],
+        ) || heading_contains_component_api_data_bucket(heading)
+    });
+
+    has_decisions && has_structure
+}
+
+fn workspace_artifact_headings(content: &str) -> impl Iterator<Item = String> + '_ {
+    content.lines().filter_map(normalize_workspace_heading_line)
+}
+
+fn normalize_workspace_heading_line(line: &str) -> Option<String> {
+    let trimmed = line.trim_start();
+    let heading_level = trimmed.chars().take_while(|ch| *ch == '#').count();
+    if !(1..=6).contains(&heading_level) {
+        return None;
+    }
+
+    let heading_text = trimmed.get(heading_level..)?.trim();
+    if heading_text.is_empty() {
+        return None;
+    }
+
+    Some(strip_heading_number_prefix(heading_text).trim().to_string())
+}
+
+fn strip_heading_number_prefix(text: &str) -> &str {
+    let trimmed = text.trim_start();
+    let Some(split_index) = trimmed
+        .char_indices()
+        .find(|(_, ch)| ch.is_whitespace())
+        .map(|(index, _)| index)
+    else {
+        return trimmed;
+    };
+
+    let token = &trimmed[..split_index];
+    if is_heading_number_token(token) {
+        trimmed[split_index..].trim_start()
+    } else {
+        trimmed
+    }
+}
+
+fn is_heading_number_token(token: &str) -> bool {
+    if !token
+        .chars()
+        .any(|ch| matches!(ch, '.' | '、' | ')' | '）'))
+    {
+        return false;
+    }
+
+    let number = token.trim_end_matches(['.', '、', ')', '）']);
+    !number.is_empty()
+        && number
+            .split('.')
+            .all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()))
+}
+
+fn heading_matches(heading: &str, candidates: &[&str]) -> bool {
+    candidates
+        .iter()
+        .any(|candidate| heading.eq_ignore_ascii_case(candidate))
+}
+
+fn heading_contains_component_api_data_bucket(heading: &str) -> bool {
+    heading.contains("组件") && heading.contains("API") && heading.contains("数据模型")
 }
 
 fn parse_choice_option_line(line: &str) -> Option<ChoiceOptionData> {
@@ -3598,6 +3679,82 @@ mod tests {
                 .provider_resume_session_id(ProviderConversationRole::Author, &ProviderName::Codex),
             None
         );
+    }
+
+    #[test]
+    fn design_artifact_gate_accepts_numbered_canonical_headings() {
+        let content = r#"# Provider 依赖自检 Design Spec
+
+## 1. 设计范围
+
+本设计覆盖 provider 依赖自检与安装。
+
+## 2. 设计决策
+
+- [DEC-001] 新建 ProviderCatalog。
+
+## 3. 组件 / API / 数据模型
+
+- [CMP-001] ProviderCatalog。
+
+## 4. 风险
+
+无。
+"#;
+
+        assert!(content_has_complete_workspace_artifact(
+            content,
+            &WorkspaceType::Design
+        ));
+    }
+
+    #[test]
+    fn design_artifact_gate_rejects_legacy_key_decision_heading() {
+        let content = r#"# Provider 依赖自检 Design Spec
+
+## 1. 设计范围
+
+本设计覆盖 provider 依赖自检与安装。
+
+## 关键决策
+
+- [DEC-001] 新建 ProviderCatalog。
+
+## 组件 / API / 数据模型
+
+- [CMP-001] ProviderCatalog。
+"#;
+
+        assert!(!content_has_complete_workspace_artifact(
+            content,
+            &WorkspaceType::Design
+        ));
+    }
+
+    #[test]
+    fn review_input_does_not_resume_prior_reviewer_provider_session() {
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let mut session = make_session("sess_review_no_resume");
+        session.reviewer_provider = Some(ProviderName::Codex);
+        session.artifact = Some("# Story Spec\n\n## 功能需求\n- [REQ-001] Draft.\n".to_string());
+        session.provider_conversations = vec![ProviderConversationRef {
+            role: ProviderConversationRole::Reviewer,
+            provider: ProviderName::Codex,
+            provider_session_id: "codex-review-thread-1".to_string(),
+            updated_at: "2026-06-01T00:00:00Z".to_string(),
+            last_node_id: Some("timeline_node_003".to_string()),
+        }];
+        let checkpoint_tmp = TempDir::new().unwrap();
+        let engine = WorkspaceEngine::new(
+            Arc::new(CheckpointStore::new(checkpoint_tmp.path().to_path_buf())),
+            event_tx,
+            session,
+        );
+
+        let input = engine.build_review_input().expect("review input");
+
+        assert_eq!(input.resume_provider_session_id, None);
+        assert!(input.prompt.contains("当前 Artifact"));
     }
 
     fn persistent_test_engine() -> (TempDir, LifecycleStore, WorkspaceEngine) {
