@@ -1455,6 +1455,141 @@ async fn workspace_ws_claude_author_ask_user_question_choice_continues_same_prov
 }
 
 #[tokio::test]
+async fn workspace_ws_hello_during_pending_choice_does_not_block_choice_response() {
+    let root = tempdir().expect("root");
+    create_workspace_session_fixture(&root).await;
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Fake,
+        Arc::new(ChoiceThenCompletingStreamingProvider),
+    );
+    let app = build_web_router(WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        registry,
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(
+        &mut ws,
+        &WsInMessage::UserMessage {
+            content: "run choice provider".to_string(),
+        },
+    )
+    .await;
+
+    let choice = recv_until_choice_request(&mut ws).await;
+    send_json(
+        &mut ws,
+        &WsInMessage::Hello {
+            session_id: "workspace_session_0001".to_string(),
+            last_seen_node_id: None,
+        },
+    )
+    .await;
+    send_json(
+        &mut ws,
+        &WsInMessage::ChoiceResponse {
+            id: choice.id,
+            selected_option_ids: vec!["opt_0".to_string()],
+            free_text: None,
+        },
+    )
+    .await;
+
+    let checkpoint = recv_until_message_complete(&mut ws).await;
+    assert!(checkpoint.starts_with("cp_"));
+
+    drop(ws);
+    server.abort();
+}
+
+#[tokio::test]
+async fn workspace_ws_stale_choice_response_after_new_run_is_rejected_before_provider() {
+    let root = tempdir().expect("root");
+    create_workspace_session_fixture(&root).await;
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Fake,
+        Arc::new(SequencedChoiceCompletingProvider::default()),
+    );
+    let app = build_web_router(WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        registry,
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(
+        &mut ws,
+        &WsInMessage::UserMessage {
+            content: "run first choice provider".to_string(),
+        },
+    )
+    .await;
+    let first_choice = recv_until_choice_request(&mut ws).await;
+
+    send_json(
+        &mut ws,
+        &WsInMessage::UserMessage {
+            content: "replace with second choice provider".to_string(),
+        },
+    )
+    .await;
+    let second_choice = recv_until_choice_request(&mut ws).await;
+    assert_ne!(first_choice.id, second_choice.id);
+
+    send_json(
+        &mut ws,
+        &WsInMessage::ChoiceResponse {
+            id: first_choice.id.clone(),
+            selected_option_ids: vec!["opt_0".to_string()],
+            free_text: None,
+        },
+    )
+    .await;
+
+    match recv_until_protocol_error(&mut ws).await {
+        WsOutMessage::ProtocolError { code, message, .. } => {
+            assert_eq!(code, "CHOICE_ID_UNMATCHED");
+            assert!(message.contains(&first_choice.id));
+        }
+        other => panic!("expected protocol_error, got {other:?}"),
+    }
+
+    send_json(
+        &mut ws,
+        &WsInMessage::ChoiceResponse {
+            id: second_choice.id,
+            selected_option_ids: vec!["opt_0".to_string()],
+            free_text: None,
+        },
+    )
+    .await;
+    let checkpoint = recv_until_message_complete(&mut ws).await;
+    assert!(checkpoint.starts_with("cp_"));
+
+    drop(ws);
+    server.abort();
+}
+
+#[tokio::test]
 async fn workspace_ws_abort_after_choice_response_returns_prepare_context() {
     let root = tempdir().expect("root");
     create_workspace_session_fixture(&root).await;
@@ -2195,6 +2330,154 @@ impl StreamingProviderAdapter for ChoiceThenHangingStreamingProvider {
                                     .send(ProviderEvent::StatusChanged(ProviderStatus::Running))
                                     .await;
                             }
+                            Some(ProviderCommand::PermissionResponse { .. })
+                            | Some(ProviderCommand::ToolResult(_)) => {}
+                        }
+                    }
+                }
+            }
+        });
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+
+    async fn run_streaming(
+        &self,
+        _input: &AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+        Err(ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "run_streaming is not used by workspace websocket",
+            0,
+        ))
+    }
+}
+
+struct ChoiceThenCompletingStreamingProvider;
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for ChoiceThenCompletingStreamingProvider {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let (command_tx, mut command_rx) = mpsc::channel::<ProviderCommand>(8);
+        tokio::spawn(async move {
+            let _ = event_tx
+                .send(ProviderEvent::ChoiceRequest(ChoiceRequestData {
+                    id: "choice_completing_001".to_string(),
+                    prompt: "继续方式？".to_string(),
+                    options: vec![ChoiceOptionData {
+                        id: "opt_0".to_string(),
+                        label: "继续 author".to_string(),
+                        description: None,
+                    }],
+                    allow_multiple: false,
+                    allow_free_text: false,
+                    source: ChoiceRequestSource::ProviderChoice,
+                }))
+                .await;
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => return,
+                    command = command_rx.recv() => {
+                        match command {
+                            Some(ProviderCommand::ChoiceResponse { .. }) => {
+                                let _ = event_tx
+                                    .send(ProviderEvent::Completed {
+                                        full_output: VALID_STORY_SPEC.to_string(),
+                                        provider_session_id: Some(
+                                            "choice-completing-session".to_string(),
+                                        ),
+                                    })
+                                    .await;
+                                return;
+                            }
+                            Some(ProviderCommand::Abort) | None => return,
+                            Some(ProviderCommand::PermissionResponse { .. })
+                            | Some(ProviderCommand::ToolResult(_)) => {}
+                        }
+                    }
+                }
+            }
+        });
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+
+    async fn run_streaming(
+        &self,
+        _input: &AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+        Err(ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "run_streaming is not used by workspace websocket",
+            0,
+        ))
+    }
+}
+
+#[derive(Default)]
+struct SequencedChoiceCompletingProvider {
+    next_choice: Mutex<u32>,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for SequencedChoiceCompletingProvider {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let id = {
+            let mut next = self.next_choice.lock().unwrap();
+            *next += 1;
+            format!("choice_sequence_{next:03}")
+        };
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let (command_tx, mut command_rx) = mpsc::channel::<ProviderCommand>(8);
+        tokio::spawn(async move {
+            let _ = event_tx
+                .send(ProviderEvent::ChoiceRequest(ChoiceRequestData {
+                    id,
+                    prompt: "继续方式？".to_string(),
+                    options: vec![ChoiceOptionData {
+                        id: "opt_0".to_string(),
+                        label: "继续 author".to_string(),
+                        description: None,
+                    }],
+                    allow_multiple: false,
+                    allow_free_text: false,
+                    source: ChoiceRequestSource::ProviderChoice,
+                }))
+                .await;
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => return,
+                    command = command_rx.recv() => {
+                        match command {
+                            Some(ProviderCommand::ChoiceResponse { .. }) => {
+                                let _ = event_tx
+                                    .send(ProviderEvent::Completed {
+                                        full_output: VALID_STORY_SPEC.to_string(),
+                                        provider_session_id: Some(
+                                            "choice-sequence-session".to_string(),
+                                        ),
+                                    })
+                                    .await;
+                                return;
+                            }
+                            Some(ProviderCommand::Abort) | None => return,
                             Some(ProviderCommand::PermissionResponse { .. })
                             | Some(ProviderCommand::ToolResult(_)) => {}
                         }

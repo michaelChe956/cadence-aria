@@ -1147,7 +1147,21 @@ impl WorkspaceEngine {
                                 )
                                 .await;
                             }
-                            self.complete_assistant_message(assistant_msg_id, full_output).await;
+                            let completed_output = if self.workspace_requires_artifact_gate()
+                                && !content_has_complete_workspace_artifact(
+                                    &extract_artifact_content(&full_output),
+                                    &self.session.workspace_type,
+                                )
+                                && content_has_complete_workspace_artifact(
+                                    &extract_artifact_content(&full_content),
+                                    &self.session.workspace_type,
+                                ) {
+                                full_content.clone()
+                            } else {
+                                full_output
+                            };
+                            self.complete_assistant_message(assistant_msg_id, completed_output)
+                                .await;
                             return;
                         }
                         ProviderEvent::Failed { message } => {
@@ -4889,6 +4903,89 @@ mod tests {
             saw_cross_review,
             "provider completion should start cross review"
         );
+    }
+
+    #[tokio::test]
+    async fn handle_user_message_uses_streamed_artifact_when_completed_output_is_summary() {
+        let (_tmp, store) = setup();
+        let (tx, mut rx) = mpsc::channel(64);
+        let session = make_session("sess_streamed_artifact_summary");
+        let mut engine = WorkspaceEngine::new(store, tx, session);
+
+        engine
+            .handle_user_message(
+                "start".to_string(),
+                Arc::new(StreamedArtifactSummaryProvider),
+                empty_provider_commands(),
+            )
+            .await;
+
+        assert_eq!(engine.session().stage, WorkspaceStage::CrossReview);
+        assert!(
+            engine
+                .session()
+                .artifact
+                .as_deref()
+                .is_some_and(|artifact| artifact.contains("# Streamed Story Spec"))
+        );
+        assert!(
+            drain_engine_events(&mut rx).iter().any(|event| matches!(
+                event,
+                EngineEvent::ArtifactUpdate { markdown, .. }
+                    if markdown.contains("# Streamed Story Spec")
+            )),
+            "streamed artifact should be published even when Completed.full_output is only a summary"
+        );
+    }
+
+    struct StreamedArtifactSummaryProvider;
+
+    #[async_trait::async_trait]
+    impl StreamingProviderAdapter for StreamedArtifactSummaryProvider {
+        async fn start(
+            &self,
+            _input: StreamingProviderInput,
+            _cancel: CancellationToken,
+        ) -> Result<ProviderSession, ProviderAdapterError> {
+            let (event_tx, event_rx) = mpsc::channel(8);
+            let (command_tx, _command_rx) = mpsc::channel(8);
+            tokio::spawn(async move {
+                let streamed = "```artifact\n# Streamed Story Spec\n\n\
+                    ## 功能需求\n\
+                    - [REQ-001] 使用流式正文中的候选产物。\n\n\
+                    ## 成功标准\n\
+                    - [AC-001] Completed 摘要不含 artifact 时仍能进入审核。\n\
+                    ```";
+                let _ = event_tx
+                    .send(ProviderEvent::TextDelta {
+                        content: streamed.to_string(),
+                    })
+                    .await;
+                let _ = event_tx
+                    .send(ProviderEvent::Completed {
+                        full_output: "Story Spec 候选已输出。等待 daemon 处理。".to_string(),
+                        provider_session_id: None,
+                    })
+                    .await;
+            });
+            Ok(ProviderSession {
+                events: event_rx,
+                commands: command_tx,
+            })
+        }
+
+        async fn run_streaming(
+            &self,
+            _input: &AdapterInput,
+            _cancel: CancellationToken,
+        ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+            Err(ProviderAdapterError::execution_failed(
+                None,
+                String::new(),
+                "run_streaming is not used by WorkspaceEngine",
+                0,
+            ))
+        }
     }
 
     struct ExecutionEventStreamingProvider;

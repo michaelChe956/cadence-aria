@@ -13,8 +13,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::cross_cutting::provider_registry::ProviderRegistry;
 use crate::cross_cutting::streaming_provider::{
-    ChoiceOptionData, ProviderCommand, ProviderExecutionEvent, ProviderExecutionEventKind,
-    ProviderExecutionEventStatus, ProviderStatus, RiskLevel,
+    ChoiceOptionData, ChoiceRequestSource, ProviderCommand, ProviderExecutionEvent,
+    ProviderExecutionEventKind, ProviderExecutionEventStatus, ProviderStatus, RiskLevel,
 };
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::checkpoint_store::CheckpointStore;
@@ -236,6 +236,7 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
 
     let outbound_for_events = outbound_tx.clone();
     let session_id_for_events = session_id.clone();
+    let workspace_runs_for_events = state.workspace_runs.clone();
     let event_forward_task = tokio::spawn(async move {
         while let Some(event) = engine_rx.recv().await {
             let ws_msg = match event {
@@ -290,6 +291,11 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                         options.len(),
                         prompt.chars().count()
                     );
+                    if source != ChoiceRequestSource::TextFallback {
+                        let _ = workspace_runs_for_events
+                            .register_choice(&session_id_for_events, id.clone())
+                            .await;
+                    }
                     WsOutMessage::ChoiceRequest {
                         id,
                         prompt,
@@ -525,14 +531,22 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                         .as_ref()
                         .is_some_and(|text| !text.trim().is_empty())
                 );
-                let command_tx =
-                    active_run_command_tx(&current_run, &state.workspace_runs, &session_id).await;
-                if let Some(command_tx) = command_tx {
+                let active_run = active_run(&current_run, &state.workspace_runs, &session_id).await;
+                if let Some(run) = active_run {
+                    let mut pending_choice_ids = run.pending_choice_ids.lock().await;
+                    if !pending_choice_ids.remove(&id) {
+                        let _ =
+                            send_json_outbound(&outbound_tx, &choice_id_unmatched_error(&id)).await;
+                        continue;
+                    }
+                    drop(pending_choice_ids);
+
                     eprintln!(
                         "[aria-choice-diag] ws forwarding choice_response to active run session={} id={}",
                         session_id, id
                     );
-                    if command_tx
+                    if run
+                        .command_tx
                         .send(ProviderCommand::ChoiceResponse {
                             id: id.clone(),
                             selected_option_ids: selected_option_ids.clone(),
@@ -620,8 +634,15 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                 let _ = send_json_outbound(&outbound_tx, &WsOutMessage::Pong).await;
             }
             WsInMessage::Hello { .. } => {
-                let state_msg = engine.lock().await.build_session_state();
-                let _ = send_json_outbound(&outbound_tx, &state_msg).await;
+                let engine_for_hello = engine.clone();
+                let outbound_for_hello = outbound_tx.clone();
+                tokio::spawn(async move {
+                    let state_msg = {
+                        let engine = engine_for_hello.lock().await;
+                        engine.build_session_state()
+                    };
+                    let _ = send_json_outbound(&outbound_for_hello, &state_msg).await;
+                });
             }
             WsInMessage::ContextNote { content } => {
                 let result = {
@@ -810,6 +831,14 @@ fn missing_active_run_error(message_type: &'static str, id: &str) -> WsOutMessag
     }
 }
 
+fn choice_id_unmatched_error(id: &str) -> WsOutMessage {
+    WsOutMessage::ProtocolError {
+        code: "CHOICE_ID_UNMATCHED".to_string(),
+        message: format!("ChoiceResponse id={id} not found in pending"),
+        context: Some(serde_json::json!({ "choice_id": id })),
+    }
+}
+
 fn is_message_valid_for_stage(msg: &WsInMessage, stage: &WorkspaceStage) -> bool {
     if matches!(msg, WsInMessage::Hello { .. } | WsInMessage::Ping) {
         return true;
@@ -861,6 +890,8 @@ fn requires_stage_validation(msg: &WsInMessage) -> bool {
             | WsInMessage::ChoiceResponse { .. }
             | WsInMessage::UserMessage { .. }
             | WsInMessage::Rollback { .. }
+            | WsInMessage::Hello { .. }
+            | WsInMessage::Ping
     )
 }
 
@@ -1104,6 +1135,11 @@ mod tests {
         assert!(!requires_stage_validation(&WsInMessage::Rollback {
             checkpoint_id: "cp_001".to_string(),
         }));
+        assert!(!requires_stage_validation(&WsInMessage::Hello {
+            session_id: "session-1".to_string(),
+            last_seen_node_id: None,
+        }));
+        assert!(!requires_stage_validation(&WsInMessage::Ping));
         assert!(requires_stage_validation(&WsInMessage::ContextNote {
             content: "new protocol action".to_string(),
         }));
@@ -1179,17 +1215,21 @@ async fn active_run_command_tx(
     workspace_runs: &WorkspaceRunRegistry,
     session_id: &str,
 ) -> Option<mpsc::Sender<ProviderCommand>> {
-    let local = {
-        current_run
-            .lock()
-            .await
-            .as_ref()
-            .map(|run| run.command_tx.clone())
-    };
+    active_run(current_run, workspace_runs, session_id)
+        .await
+        .map(|run| run.command_tx.clone())
+}
+
+async fn active_run(
+    current_run: &Arc<Mutex<Option<WorkspaceActiveRun>>>,
+    workspace_runs: &WorkspaceRunRegistry,
+    session_id: &str,
+) -> Option<WorkspaceActiveRun> {
+    let local = { current_run.lock().await.clone() };
     if local.is_some() {
         return local;
     }
-    workspace_runs.command_tx(session_id).await
+    workspace_runs.run(session_id).await
 }
 
 async fn abort_workspace_run(run: &WorkspaceActiveRun) {
@@ -1254,6 +1294,7 @@ async fn spawn_provider_run_from_handler(
         token: run_token,
         cancel: run_cancel.clone(),
         command_tx: command_tx.clone(),
+        pending_choice_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
     };
     *current_run.lock().await = Some(active_run.clone());
     workspace_runs.insert(session_id.clone(), active_run).await;

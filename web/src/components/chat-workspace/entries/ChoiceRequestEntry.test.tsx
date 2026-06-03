@@ -80,6 +80,21 @@ describe("ChoiceRequestEntry", () => {
     expect(screen.queryByRole("button", { name: "提交选择" })).not.toBeInTheDocument();
   });
 
+  it("shows rejected stale choice requests without submit controls", () => {
+    const onRespond = vi.fn();
+    const entry = makeChoiceEntry({
+      resolved: true,
+      rejected: true,
+      rejection_reason: "ChoiceResponse id=choice-1 not found in pending",
+    });
+
+    render(<ChoiceRequestEntry entry={entry} onRespond={onRespond} />);
+
+    expect(screen.getByText("选择已失效")).toBeInTheDocument();
+    expect(screen.getByText("ChoiceResponse id=choice-1 not found in pending")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "提交选择" })).not.toBeInTheDocument();
+  });
+
   it("shows the choice request source", () => {
     render(<ChoiceRequestEntry entry={makeChoiceEntry({ source: "ask_user_question" })} />);
 

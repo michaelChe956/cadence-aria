@@ -212,6 +212,7 @@ export interface WorkspaceWsActions {
     selectedOptionIds: string[],
     freeText: string | null,
   ) => void;
+  rejectChoiceRequest: (id: string, reason: string) => void;
   setProviderStatus: (status: ProviderStatus) => void;
   upsertExecutionEvent: (event: ExecutionEvent) => void;
   clearExecutionEvents: () => void;
@@ -630,6 +631,28 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
         chatEntries: [...nextEntries.filter((entry) => entry.id !== responseEntry.id), responseEntry],
       };
     }),
+
+  rejectChoiceRequest: (id, reason) =>
+    set((prev) => ({
+      chatEntries: prev.chatEntries
+        .filter((entry) => entry.id !== `choice_response:${id}`)
+        .map((entry) => {
+          if (entry.type !== "choice_request" || entry.metadata?.request_id !== id) {
+            return entry;
+          }
+          const metadata = { ...(entry.metadata ?? {}) };
+          delete metadata.response;
+          return {
+            ...entry,
+            resolved: true,
+            metadata: {
+              ...metadata,
+              rejected: true,
+              rejection_reason: reason,
+            },
+          };
+        }),
+    })),
 
   setProviderStatus: (status) => set({ providerStatus: status }),
 

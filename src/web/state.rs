@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
 
@@ -19,6 +19,7 @@ pub struct WorkspaceActiveRun {
     pub token: u64,
     pub cancel: CancellationToken,
     pub command_tx: mpsc::Sender<ProviderCommand>,
+    pub pending_choice_ids: Arc<AsyncMutex<HashSet<String>>>,
 }
 
 #[derive(Clone, Default)]
@@ -41,6 +42,18 @@ impl WorkspaceRunRegistry {
             .await
             .get(session_id)
             .map(|run| run.command_tx.clone())
+    }
+
+    pub async fn run(&self, session_id: &str) -> Option<WorkspaceActiveRun> {
+        self.runs.lock().await.get(session_id).cloned()
+    }
+
+    pub async fn register_choice(&self, session_id: &str, choice_id: String) -> bool {
+        let Some(run) = self.runs.lock().await.get(session_id).cloned() else {
+            return false;
+        };
+        run.pending_choice_ids.lock().await.insert(choice_id);
+        true
     }
 
     pub async fn remove_if_token(&self, session_id: &str, token: u64) -> bool {

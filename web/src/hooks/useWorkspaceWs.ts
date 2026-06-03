@@ -327,10 +327,20 @@ export function useWorkspaceWs(sessionId: string | null) {
         });
         break;
       case "protocol_error":
-        store.setProtocolError({
-          code: msg.code as string,
-          message: msg.message as string,
-        });
+        {
+          const code = msg.code as string;
+          const message = msg.message as string;
+          if (code === "CHOICE_ID_UNMATCHED") {
+            const choiceId = choiceIdFromProtocolError(msg.context, message);
+            if (choiceId) {
+              store.rejectChoiceRequest(choiceId, message);
+            }
+          }
+          store.setProtocolError({
+            code,
+            message,
+          });
+        }
         store.appendChatEntry({
           id: chatEntryId("protocol_error", `${msg.code as string}:${msg.message as string}`),
           type: "error",
@@ -706,6 +716,17 @@ function providerName(value: string): WorkspaceProviderName | null {
     return value;
   }
   return null;
+}
+
+function choiceIdFromProtocolError(context: unknown, message: string) {
+  if (isRecord(context) && typeof context.choice_id === "string") {
+    return context.choice_id;
+  }
+  return message.match(/^ChoiceResponse id=(.+) not found in pending$/)?.[1] ?? null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 function wsReadyStateName(socket: WebSocket | null) {

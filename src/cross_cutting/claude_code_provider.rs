@@ -663,6 +663,25 @@ async fn read_claude_stream(
                     request.request_id,
                     request.tool_use_id.as_deref().unwrap_or("<none>")
                 );
+                if let Some(resolved) = request
+                    .tool_use_id
+                    .as_deref()
+                    .and_then(|tool_use_id| resolved_ask_user_questions.get(tool_use_id))
+                {
+                    eprintln!(
+                        "[aria-choice-diag] claude reusing AskUserQuestion decision for control_request request_id={} tool_use_id={}",
+                        request.request_id,
+                        request.tool_use_id.as_deref().unwrap_or("<none>")
+                    );
+                    ClaudeCodeProvider::write_choice_control_response(
+                        &stdin,
+                        &request.request_id,
+                        &request.input,
+                        resolved.answers.clone(),
+                    )
+                    .await?;
+                    continue;
+                }
                 let choice_request =
                     parse_ask_user_question_from_input(&request.input, &request.request_id);
                 let choice_decision = bridge
@@ -748,6 +767,7 @@ async fn read_claude_stream(
                             }
                         }
                     };
+                    resolved_ask_user_questions.insert(tool_use.id.clone(), resolved.clone());
                     ClaudeCodeProvider::write_tool_result(
                         &stdin,
                         &tool_use.id,
@@ -1606,6 +1626,128 @@ mod tests {
         assert!(completed.contains("# Story Spec"));
         assert!(completed.contains("## 功能需求"));
         assert!(completed.contains("## 成功标准"));
+    }
+
+    #[tokio::test]
+    async fn claude_provider_deduplicates_assistant_then_control_ask_user_question() {
+        let fixture = write_fixture(
+            "claude_assistant_then_control_ask_user_question_fixture.sh",
+            r##"#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == "--version" ]]; then
+  echo "claude 2.1.160"
+  exit 0
+fi
+
+sent_question=0
+while IFS= read -r line; do
+  if [[ "$line" == *'"initialize"'* ]]; then
+    continue
+  fi
+  if [[ "$line" == *'"set_permission_mode"'* ]]; then
+    continue
+  fi
+  if [[ "$sent_question" == "0" && "$line" == *'"user"'* ]]; then
+    sent_question=1
+    echo '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_question","name":"AskUserQuestion","input":{"questions":[{"question":"Scope?","options":[{"label":"Global"},{"label":"Project"}]}]}}]}}'
+    continue
+  fi
+  if [[ "$line" == *'"tool_result"'* ]]; then
+    if [[ "$line" != *'"tool_use_id":"toolu_question"'* || "$line" != *'Scope?'* || "$line" != *'Global'* ]]; then
+      echo "missing AskUserQuestion tool_result: $line" >&2
+      exit 44
+    fi
+    echo '{"type":"control_request","request_id":"ask_req_duplicate","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"Scope?","options":[{"label":"Global"},{"label":"Project"}]}]},"tool_use_id":"toolu_question"}}'
+    continue
+  fi
+  if [[ "$line" == *'"control_response"'* ]]; then
+    if [[ "$line" != *'"request_id":"ask_req_duplicate"'* || "$line" != *'"updatedInput"'* || "$line" != *'Scope?'* || "$line" != *'Global'* ]]; then
+      echo "missing reused AskUserQuestion control_response: $line" >&2
+      exit 45
+    fi
+    echo '{"type":"result","subtype":"success","is_error":false,"result":"# Story Spec\n\n## 功能需求\n- [REQ-001] Duplicate AskUserQuestion events are answered once.\n\n## 成功标准\n- [AC-001] The provider completes without a second frontend choice.","session_id":"claude_fixture_session"}'
+    exit 0
+  fi
+done
+"##,
+        );
+        let provider = ClaudeCodeProvider::new(fixture);
+        let input = streaming_input(ProviderType::ClaudeCode, ProviderPermissionMode::Supervised);
+
+        let mut session = provider
+            .start(input, CancellationToken::new())
+            .await
+            .expect("start provider");
+
+        let choice = loop {
+            match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+                .await
+                .expect("provider should emit choice")
+                .expect("provider event channel should stay open")
+            {
+                ProviderEvent::ChoiceRequest(choice) => break choice,
+                ProviderEvent::Failed { message } => {
+                    panic!("provider failed before choice: {message}")
+                }
+                ProviderEvent::ProtocolError { message, .. } => {
+                    panic!("provider protocol error before choice: {message}")
+                }
+                ProviderEvent::PermissionTimeout { permission_id } => {
+                    panic!("provider permission timed out before choice: {permission_id}")
+                }
+                ProviderEvent::StatusChanged(_)
+                | ProviderEvent::Execution(_)
+                | ProviderEvent::TextDelta { .. }
+                | ProviderEvent::PermissionRequest(_)
+                | ProviderEvent::ToolCall(_)
+                | ProviderEvent::ToolResult(_)
+                | ProviderEvent::Completed { .. } => {}
+            }
+        };
+        assert_eq!(choice.id, "toolu_question");
+
+        session
+            .commands
+            .send(ProviderCommand::ChoiceResponse {
+                id: choice.id,
+                selected_option_ids: vec!["opt_0".to_string()],
+                free_text: None,
+            })
+            .await
+            .expect("send choice response");
+
+        loop {
+            match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+                .await
+                .expect("provider should emit completion")
+                .expect("provider event channel should stay open")
+            {
+                ProviderEvent::Completed { full_output, .. } => {
+                    assert!(full_output.contains("# Story Spec"));
+                    break;
+                }
+                ProviderEvent::ChoiceRequest(choice) => {
+                    panic!(
+                        "duplicate AskUserQuestion should not be emitted: {}",
+                        choice.id
+                    )
+                }
+                ProviderEvent::Failed { message } => panic!("provider failed: {message}"),
+                ProviderEvent::ProtocolError { message, .. } => {
+                    panic!("provider protocol error: {message}")
+                }
+                ProviderEvent::PermissionTimeout { permission_id } => {
+                    panic!("provider permission timed out: {permission_id}")
+                }
+                ProviderEvent::StatusChanged(_)
+                | ProviderEvent::Execution(_)
+                | ProviderEvent::TextDelta { .. }
+                | ProviderEvent::PermissionRequest(_)
+                | ProviderEvent::ToolCall(_)
+                | ProviderEvent::ToolResult(_) => {}
+            }
+        }
     }
 
     #[tokio::test]

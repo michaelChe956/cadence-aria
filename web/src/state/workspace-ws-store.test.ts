@@ -156,6 +156,35 @@ describe("workspace ws store", () => {
     ]);
   });
 
+  it("rejects stale choice requests and removes optimistic choice responses", () => {
+    const store = useWorkspaceStore.getState();
+    store.appendChatEntry({
+      id: "choice-request-1",
+      type: "choice_request",
+      role: "system",
+      content: "请选择下一步",
+      timestamp: "2026-05-26T10:00:00Z",
+      metadata: {
+        request_id: "choice_001",
+        options: [{ id: "continue", label: "继续" }],
+      },
+    } as ChatEntry);
+    store.resolveChoiceRequest("choice_001", ["continue"], null);
+
+    store.rejectChoiceRequest("choice_001", "ChoiceResponse id=choice_001 not found in pending");
+
+    expect(useWorkspaceStore.getState().chatEntries).toEqual([
+      expect.objectContaining({
+        id: "choice-request-1",
+        resolved: true,
+        metadata: expect.objectContaining({
+          rejected: true,
+          rejection_reason: "ChoiceResponse id=choice_001 not found in pending",
+        }),
+      }),
+    ]);
+  });
+
   it("deduplicates pending permission requests by id", () => {
     const store = useWorkspaceStore.getState();
 

@@ -1,4 +1,4 @@
-import { Check, ListChecks } from "lucide-react";
+import { Check, CircleAlert, ListChecks } from "lucide-react";
 import { useState } from "react";
 import type { ChatEntry, ChoiceResponsePayload } from "../../../state/chat-entries";
 import { ChatEntryContainer } from "../ChatEntryContainer";
@@ -22,6 +22,8 @@ export function ChoiceRequestEntry({
   const sourceLabel = choiceSourceLabel(stringField(metadata, "source"));
   const response = responseFromMetadata(metadata?.response);
   const isResolved = entry.resolved === true;
+  const isRejected = metadata?.rejected === true;
+  const rejectionReason = stringField(metadata, "rejection_reason");
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [freeText, setFreeText] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -65,11 +67,23 @@ export function ChoiceRequestEntry({
       </div>
 
       {isResolved ? (
-        <span className="inline-flex items-center gap-1 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700">
-          <Check className="h-3.5 w-3.5" />
-          <span>已选择</span>
-          {resolvedSummary ? <span>：{resolvedSummary}</span> : null}
-        </span>
+        isRejected ? (
+          <span className="inline-flex max-w-full items-start gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-700">
+            <CircleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span className="min-w-0">
+              <span>选择已失效</span>
+              {rejectionReason ? (
+                <span className="ml-1 break-words font-medium">{rejectionReason}</span>
+              ) : null}
+            </span>
+          </span>
+        ) : (
+          <span className="inline-flex items-center gap-1 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700">
+            <Check className="h-3.5 w-3.5" />
+            <span>已选择</span>
+            {resolvedSummary ? <span>：{resolvedSummary}</span> : null}
+          </span>
+        )
       ) : (
         <>
           {options.length > 0 ? (
