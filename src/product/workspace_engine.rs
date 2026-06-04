@@ -2283,10 +2283,19 @@ impl WorkspaceEngine {
             prompt.push_str(&format!("[{}]: {}\n", msg.role, msg.content));
         }
         self.append_missing_context_notes_to_prompt(&mut prompt);
-        prompt.push_str("\n当前 Artifact:\n\n");
+        prompt.push_str("\n当前已提取 Artifact Markdown（daemon 已剥离外层 artifact fence）:\n\n");
         prompt.push_str(&artifact);
         prompt.push_str(
+            "\n\n审核边界说明：当前 Artifact 是 daemon 从 author 原始输出中提取后的 markdown，外层 artifact fence 已被剥离是正常状态。\
+             不要因为当前 Artifact 未包含外层 artifact fence 判定返修；只审核 markdown 内部一级标题、必需 heading、稳定 ID、追踪关系、内容完整性和设计质量。\
+             如果 markdown 正文内部的代码块未闭合或内容结构不合规，仍可按实际问题要求返修。\n",
+        );
+        prompt.push_str(
             "\n\n请输出审核意见，并在末尾附加 JSON 代码块：\n\
+             - `pass`：产物可进入最终人工确认。\n\
+             - `revise`：产物存在可由 author 修改的问题，包括需求遗漏、接口设计歧义、实现约束错误、验收标准不足或格式不合规。\n\
+             - `needs_human`：没有明确可返修内容，必须先等待用户做产品/范围决策。\n\
+             如果审核正文包含“不建议通过”、High/Medium 问题、建议改动或可执行返修项，必须使用 `revise`，不要使用 `needs_human`。\n\
              ```json\n\
              {\"verdict\":\"pass|revise|needs_human\",\"summary\":\"一句话摘要\"}\n\
              ```\n",
@@ -2356,6 +2365,7 @@ impl WorkspaceEngine {
             prompt.push_str("\n\n用户补充信息优先级高于 Reviewer 审核意见；如二者冲突，以用户补充信息为准，并在更新后的 artifact 中体现用户补充要求。\n用户补充信息:\n");
             prompt.push_str(context);
         }
+        self.append_author_artifact_output_contract(&mut prompt, false);
         prompt.push_str("\n\n请根据以上审核意见修改产物，输出完整更新后的 artifact markdown。\n");
         prompt
     }
@@ -2382,8 +2392,32 @@ impl WorkspaceEngine {
             prompt.push_str("\n\n用户补充信息优先级高于 Reviewer 审核意见；如二者冲突，以用户补充信息为准，并在更新后的 artifact 中体现用户补充要求。\n用户补充信息:\n");
             prompt.push_str(context);
         }
+        self.append_author_artifact_output_contract(&mut prompt, true);
         prompt.push_str("\n\n请根据以上审核意见修改产物，输出完整更新后的 artifact markdown。\n");
         prompt
+    }
+
+    fn append_author_artifact_output_contract(
+        &self,
+        prompt: &mut String,
+        mentions_prior_artifact: bool,
+    ) {
+        prompt.push_str("\n\n输出格式契约：");
+        if mentions_prior_artifact {
+            prompt.push_str(
+                "上一版 Artifact 是 daemon 已提取的 markdown，外层 artifact fence 已被剥离；不要把上一版 Artifact 的裸 markdown 形态当作原始返回格式样例。",
+            );
+        } else {
+            prompt.push_str(
+                "当前 provider 会话中的既有 artifact 是 daemon 已提取的 markdown，外层 artifact fence 可能已被剥离；不要把裸 markdown 形态当作原始返回格式样例。",
+            );
+        }
+        prompt.push_str("原始返回必须使用完整 artifact fenced block，fence 内第一行必须是 ");
+        prompt.push_str(workspace_type_title(&self.session.workspace_type));
+        prompt.push_str(
+            " 一级标题。正文内部包含 ``` 代码块时，外层使用四反引号 ````artifact ... ````，避免和内部代码块冲突。\
+             过程说明必须放在 artifact fence 外，最终候选产物必须放在 artifact fence 内。",
+        );
     }
 
     pub async fn handle_rollback(&mut self, checkpoint_id: &str) -> Result<(), String> {
@@ -3180,10 +3214,17 @@ impl WorkspaceEngine {
     fn parse_review_verdict(output: &str) -> ReviewVerdict {
         let trimmed = output.trim();
         let parsed = extract_tail_json(trimmed).and_then(|(comments, json)| {
-            parse_review_json(&json).map(|(verdict, summary)| ReviewVerdict {
-                verdict,
-                comments: comments.trim().to_string(),
-                summary,
+            parse_review_json(&json).map(|(mut verdict, summary)| {
+                if verdict == ReviewVerdictType::NeedsHuman
+                    && review_comments_indicate_actionable_revision(&comments)
+                {
+                    verdict = ReviewVerdictType::Revise;
+                }
+                ReviewVerdict {
+                    verdict,
+                    comments: comments.trim().to_string(),
+                    summary,
+                }
             })
         });
 
@@ -3278,6 +3319,26 @@ fn extract_tail_json(output: &str) -> Option<(String, String)> {
         json = stripped.trim().to_string();
     }
     Some((comments, json))
+}
+
+fn review_comments_indicate_actionable_revision(comments: &str) -> bool {
+    let normalized = comments.to_ascii_lowercase();
+    comments.contains("不建议通过")
+        || comments.contains("建议返修")
+        || comments.contains("需要返修")
+        || comments.contains("需要修正")
+        || comments.contains("建议改")
+        || comments.contains("建议修改")
+        || comments.contains("主要问题")
+        || comments.contains("阻断")
+        || comments.contains("未通过")
+        || normalized.contains("high")
+        || normalized.contains("medium")
+        || normalized.contains("request changes")
+        || normalized.contains("changes requested")
+        || normalized.contains("revise")
+        || normalized.contains("revision")
+        || normalized.contains("blocking")
 }
 
 fn parse_review_json(json: &str) -> Option<(ReviewVerdictType, String)> {
@@ -4292,6 +4353,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn review_input_marks_design_artifact_as_extracted_markdown_without_outer_fence() {
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let mut session = make_session("sess_design_review_prompt_extracted_artifact");
+        session.workspace_type = WorkspaceType::Design;
+        session.artifact = Some(
+            "# 底层依赖安装任务 Design Spec\n\n\
+             ## 设计范围\n\n\
+             - [DEC-001] 覆盖依赖安装任务。\n\n\
+             ## API 契约\n\n\
+             ```json\n\
+             {\"task_id\":\"install_001\"}\n\
+             ```\n\n\
+             ## 风险\n\n\
+             - 无。\n"
+                .to_string(),
+        );
+        let checkpoint_tmp = TempDir::new().unwrap();
+        let engine = WorkspaceEngine::new(
+            Arc::new(CheckpointStore::new(checkpoint_tmp.path().to_path_buf())),
+            event_tx,
+            session,
+        );
+
+        let input = engine.build_review_input().expect("review input");
+
+        assert!(
+            input
+                .prompt
+                .contains("当前已提取 Artifact Markdown（daemon 已剥离外层 artifact fence）"),
+            "review prompt should label stored artifact as extracted markdown: {}",
+            input.prompt
+        );
+        assert!(input.prompt.contains("# 底层依赖安装任务 Design Spec"));
+        assert!(
+            input
+                .prompt
+                .contains("不要因为当前 Artifact 未包含外层 artifact fence 判定返修"),
+            "reviewer should not reject extracted artifact for missing outer fence: {}",
+            input.prompt
+        );
+    }
+
     fn persistent_test_engine() -> (TempDir, LifecycleStore, WorkspaceEngine) {
         let (tmp, checkpoint_store) = setup();
         let lifecycle_store = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
@@ -4669,6 +4773,23 @@ mod tests {
         assert_eq!(verdict.verdict, ReviewVerdictType::Revise);
         assert_eq!(verdict.summary, "补充异常路径");
         assert_eq!(verdict.comments.trim(), "整体可用，但需要补充异常路径。");
+    }
+
+    #[test]
+    fn parse_review_verdict_normalizes_actionable_needs_human_to_revise() {
+        let output = "**审核结论**\n\n\
+            不建议通过。当前 Story Spec 覆盖主方向，但安装任务 API 设计存在实现级歧义。\n\n\
+            **主要问题**\n\n\
+            - **High**：进度接口无法区分并发安装、重试安装、页面刷新后重连到哪一次任务。\n\n\
+            ```json\n\
+            {\"verdict\":\"needs_human\",\"summary\":\"安装任务 API 设计需修正。\"}\n\
+            ```";
+
+        let verdict = WorkspaceEngine::parse_review_verdict(output);
+
+        assert_eq!(verdict.verdict, ReviewVerdictType::Revise);
+        assert_eq!(verdict.summary, "安装任务 API 设计需修正。");
+        assert!(verdict.comments.contains("不建议通过"));
     }
 
     #[test]
@@ -5199,6 +5320,59 @@ mod tests {
         assert!(!input.prompt.contains("[system]:"));
         assert!(!input.prompt.contains("上一版 Artifact"));
         assert!(!input.prompt.contains("# Story Spec"));
+    }
+
+    #[test]
+    fn revision_input_reminds_design_author_to_return_artifact_fenced_block() {
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let mut session = make_session("sess_design_revision_prompt_fence_contract");
+        session.workspace_type = WorkspaceType::Design;
+        session.stage = WorkspaceStage::Revision;
+        session.artifact = Some(
+            "# 底层依赖安装任务 Design Spec\n\n\
+             ## 设计范围\n\n\
+             - 覆盖依赖安装任务。\n\n\
+             ## API 契约\n\n\
+             ```json\n\
+             {\"task_id\":\"install_001\"}\n\
+             ```\n"
+                .to_string(),
+        );
+        let checkpoint_tmp = TempDir::new().unwrap();
+        let mut engine = WorkspaceEngine::new(
+            Arc::new(CheckpointStore::new(checkpoint_tmp.path().to_path_buf())),
+            event_tx,
+            session,
+        );
+        engine.latest_review_verdict = Some(ReviewVerdict {
+            verdict: ReviewVerdictType::Revise,
+            comments: "需要补齐追踪关系。".to_string(),
+            summary: "补齐追踪关系".to_string(),
+        });
+
+        let input = engine.build_revision_input().expect("revision input");
+
+        assert!(
+            input
+                .prompt
+                .contains("原始返回必须使用完整 artifact fenced block"),
+            "revision author prompt should require the raw artifact fence: {}",
+            input.prompt
+        );
+        assert!(
+            input
+                .prompt
+                .contains("正文内部包含 ``` 代码块时，外层使用四反引号 ````artifact"),
+            "revision author prompt should explain four-backtick outer fence: {}",
+            input.prompt
+        );
+        assert!(
+            input
+                .prompt
+                .contains("上一版 Artifact 是 daemon 已提取的 markdown"),
+            "revision author prompt should explain why prior artifact has no fence: {}",
+            input.prompt
+        );
     }
 
     #[tokio::test]
