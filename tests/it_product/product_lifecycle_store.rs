@@ -283,6 +283,7 @@ fn persists_workspace_timeline_nodes_and_artifact_versions() {
         reviewed_by: Some(ProviderName::Codex),
         review_verdict: None,
         confirmed_by: None,
+        is_current: true,
         created_at: "2026-05-19T00:01:00Z".to_string(),
         source_node_id: "timeline_node_001".to_string(),
     };

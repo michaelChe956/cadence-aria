@@ -9,6 +9,7 @@ use crate::product::models::{NodeDetail, ProviderName, WorkspaceType};
 pub enum WorkspaceStage {
     PrepareContext,
     Running,
+    AuthorConfirm,
     CrossReview,
     ReviewDecision,
     Revision,
@@ -166,6 +167,9 @@ pub enum WsInMessage {
         decision: String,
         extra_context: Option<String>,
     },
+    AuthorDecision {
+        decision: AuthorDecision,
+    },
     SelectRevisionPath {
         path: RevisionPath,
         extra_context: Option<String>,
@@ -195,6 +199,13 @@ pub enum HumanConfirmDecision {
     Confirm,
     RequestChange,
     Terminate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AuthorDecision {
+    Accept,
+    Reject,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -300,6 +311,7 @@ pub enum TimelineNodeType {
     PrepareContext,
     ContextNote,
     StartGeneration,
+    AuthorConfirm,
     #[serde(alias = "generation")]
     AuthorRun,
     #[serde(alias = "review")]
@@ -376,8 +388,14 @@ pub struct ArtifactVersion {
     pub reviewed_by: Option<ProviderName>,
     pub review_verdict: Option<ReviewVerdictType>,
     pub confirmed_by: Option<String>,
+    #[serde(default = "default_true")]
+    pub is_current: bool,
     pub created_at: String,
     pub source_node_id: String,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[cfg(test)]

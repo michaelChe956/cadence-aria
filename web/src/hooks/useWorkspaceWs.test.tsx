@@ -882,6 +882,28 @@ describe("useWorkspaceWs", () => {
     ]);
   });
 
+  it("sends author decisions", () => {
+    const harness = renderWorkspaceHook();
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.sent.length = 0;
+      harness.api.sendAuthorDecision("accept");
+      harness.api.sendAuthorDecision("reject");
+    });
+
+    expect(harness.ws.sent).toEqual([
+      JSON.stringify({
+        type: "author_decision",
+        decision: "accept",
+      }),
+      JSON.stringify({
+        type: "author_decision",
+        decision: "reject",
+      }),
+    ]);
+  });
+
   it("marks the latest gate prompt resolved when a human confirm decision is sent", () => {
     const harness = renderWorkspaceHook();
     useWorkspaceStore.getState().appendChatEntry({

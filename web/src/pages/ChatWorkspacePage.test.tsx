@@ -43,6 +43,7 @@ function mockWorkspaceWs(overrides: Partial<WorkspaceWsApi> = {}) {
     sendContextNote: vi.fn(),
     sendStartGeneration: vi.fn(),
     sendSelectRevisionPath: vi.fn(),
+    sendAuthorDecision: vi.fn(),
     sendHumanConfirm: vi.fn(),
     sendHello: vi.fn(),
     sendPing: vi.fn(),
@@ -130,6 +131,24 @@ describe("ChatWorkspacePage", () => {
       { author: "fake", reviewer: "codex", review_rounds: 2 },
       true,
     );
+  });
+
+  it("sends author confirmation decisions from the chat input", async () => {
+    const api = mockWorkspaceWs();
+    useWorkspaceStore.setState({
+      sessionId: "workspace_session_0001",
+      stage: "author_confirm",
+      providers: { author: "fake", reviewer: "codex" },
+      artifact: "# Story Spec",
+    });
+
+    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "进入 Review" }));
+    await userEvent.click(screen.getByRole("button", { name: "重新编写" }));
+
+    expect(api.sendAuthorDecision).toHaveBeenNthCalledWith(1, "accept");
+    expect(api.sendAuthorDecision).toHaveBeenNthCalledWith(2, "reject");
   });
 
   it("sends permission responses from permission request entries", async () => {

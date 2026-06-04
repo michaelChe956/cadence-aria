@@ -43,6 +43,7 @@ export function ChatWorkspacePage({
     sendContextNote,
     sendStartGeneration,
     sendSelectRevisionPath,
+    sendAuthorDecision,
     sendHumanConfirm,
     abort,
     selectProvider,
@@ -122,6 +123,10 @@ export function ChatWorkspacePage({
 
   function handleHumanConfirm(decision: "confirm" | "request-change" | "terminate") {
     sendHumanConfirm(decision);
+  }
+
+  function handleAuthorDecision(decision: "accept" | "reject") {
+    sendAuthorDecision(decision);
   }
 
   const providerPanel = (
@@ -250,6 +255,7 @@ export function ChatWorkspacePage({
                 onSendContextNote={sendContextNote}
                 onStartGeneration={handleStartGeneration}
                 onSendHumanDecision={(content) => sendHumanConfirm("request-change", content)}
+                onAuthorDecision={handleAuthorDecision}
                 onAbort={abort}
               />
             </div>

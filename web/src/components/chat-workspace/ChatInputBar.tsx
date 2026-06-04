@@ -1,4 +1,4 @@
-import { Play, Send, X } from "lucide-react";
+import { Check, Play, RefreshCcw, Send, X } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { useWorkspaceStore } from "../../state/workspace-ws-store";
 import type { ChatEntry, ChatEntryType } from "../../state/chat-entries";
@@ -8,6 +8,7 @@ interface ChatInputBarProps {
   onSendContextNote: (content: string) => void;
   onStartGeneration: () => void;
   onSendHumanDecision: (content: string) => void;
+  onAuthorDecision?: (decision: "accept" | "reject") => void;
   onAbort: () => void;
   disabled?: boolean;
 }
@@ -19,15 +20,17 @@ export function ChatInputBar({
   onSendContextNote,
   onStartGeneration,
   onSendHumanDecision,
+  onAuthorDecision = () => undefined,
   onAbort,
   disabled = false,
 }: ChatInputBarProps) {
   const [input, setInput] = useState("");
   const trimmedInput = input.trim();
   const isPrepareContext = stage === "prepare_context";
+  const isAuthorConfirm = stage === "author_confirm";
   const isHumanConfirm = stage === "human_confirm";
   const isBusy = BUSY_STAGES.has(stage);
-  const inputDisabled = disabled || isBusy || stage === "completed";
+  const inputDisabled = disabled || isBusy || isAuthorConfirm || stage === "completed";
   const canSend = !inputDisabled && (isPrepareContext || isHumanConfirm) && trimmedInput.length > 0;
   const showSend = isPrepareContext || isHumanConfirm;
 
@@ -95,6 +98,28 @@ export function ChatInputBar({
               {isHumanConfirm ? "发送修改意见" : "发送"}
             </button>
           ) : null}
+          {isAuthorConfirm ? (
+            <>
+              <button
+                type="button"
+                onClick={() => onAuthorDecision("reject")}
+                disabled={disabled}
+                className="inline-flex h-9 items-center gap-2 rounded-md border border-[var(--aria-line)] bg-white px-3 text-sm font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)] disabled:opacity-50"
+              >
+                <RefreshCcw className="h-4 w-4" />
+                重新编写
+              </button>
+              <button
+                type="button"
+                onClick={() => onAuthorDecision("accept")}
+                disabled={disabled}
+                className="inline-flex h-9 items-center gap-2 rounded-md bg-[var(--aria-primary)] px-3 text-sm font-semibold text-white disabled:opacity-50"
+              >
+                <Check className="h-4 w-4" />
+                进入 Review
+              </button>
+            </>
+          ) : null}
           {isPrepareContext ? (
             <button
               data-testid="start-generation"
@@ -116,6 +141,9 @@ export function ChatInputBar({
 function placeholderForStage(stage: string) {
   if (stage === "human_confirm") {
     return "输入修改意见...";
+  }
+  if (stage === "author_confirm") {
+    return "等待确认 Author 结果";
   }
   if (BUSY_STAGES.has(stage)) {
     return "Provider 运行中，暂不可输入";

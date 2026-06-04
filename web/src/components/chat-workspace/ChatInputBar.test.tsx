@@ -54,6 +54,29 @@ describe("ChatInputBar", () => {
     expect(screen.getByRole("button", { name: "中止" })).toBeInTheDocument();
   });
 
+  it("shows author confirmation actions", () => {
+    const onAuthorDecision = vi.fn();
+
+    render(
+      <ChatInputBar
+        stage="author_confirm"
+        onSendContextNote={vi.fn()}
+        onStartGeneration={vi.fn()}
+        onSendHumanDecision={vi.fn()}
+        onAuthorDecision={onAuthorDecision}
+        onAbort={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("textbox")).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "发送" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "进入 Review" }));
+    fireEvent.click(screen.getByRole("button", { name: "重新编写" }));
+
+    expect(onAuthorDecision).toHaveBeenNthCalledWith(1, "accept");
+    expect(onAuthorDecision).toHaveBeenNthCalledWith(2, "reject");
+  });
+
   it("submits human confirm feedback with optimistic insertion", () => {
     const onSendHumanDecision = vi.fn();
     useWorkspaceStore.getState().appendChatEntry({

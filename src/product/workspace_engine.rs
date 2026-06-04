@@ -24,16 +24,19 @@ use crate::product::models::{
 };
 use crate::protocol::contracts::{AdapterRole, ProviderType};
 use crate::web::workspace_ws_types::{
-    ArtifactVersion, HumanConfirmDecision, ProviderConfigSnapshot, ReviewVerdict,
+    ArtifactVersion, AuthorDecision, HumanConfirmDecision, ProviderConfigSnapshot, ReviewVerdict,
     ReviewVerdictType, TimelineNode, TimelineNodeStatus, TimelineNodeType,
     WorkspaceStage as WsWorkspaceStage, WsCheckpointDto, WsMessageDto, WsOutMessage,
     WsProviderConfig,
 };
 
+const WORKSPACE_PROVIDER_TIMEOUT_SECS: u64 = 3600;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkspaceStage {
     PrepareContext,
     Running,
+    AuthorConfirm,
     CrossReview,
     ReviewDecision,
     Revision,
@@ -46,6 +49,7 @@ impl WorkspaceStage {
         match self {
             Self::PrepareContext => "prepare_context",
             Self::Running => "running",
+            Self::AuthorConfirm => "author_confirm",
             Self::CrossReview => "cross_review",
             Self::ReviewDecision => "review_decision",
             Self::Revision => "revision",
@@ -58,6 +62,7 @@ impl WorkspaceStage {
         match s {
             "prepare_context" => Some(Self::PrepareContext),
             "running" => Some(Self::Running),
+            "author_confirm" => Some(Self::AuthorConfirm),
             "cross_review" => Some(Self::CrossReview),
             "review_decision" => Some(Self::ReviewDecision),
             "revision" => Some(Self::Revision),
@@ -238,6 +243,13 @@ pub enum ReviewDecisionOutcome {
     HumanConfirm,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthorDecisionOutcome {
+    StartReview,
+    HumanConfirm,
+    PrepareContext,
+}
+
 pub struct WorkspaceEngine {
     checkpoint_store: Arc<CheckpointStore>,
     lifecycle_store: Option<LifecycleStore>,
@@ -372,6 +384,13 @@ impl WorkspaceEngine {
         let persisted_artifact_versions = lifecycle_store
             .list_artifact_versions(&session.session_id)
             .unwrap_or_default();
+        if !persisted_artifact_versions.is_empty() {
+            session.artifact = persisted_artifact_versions
+                .iter()
+                .rev()
+                .find(|version| version.is_current)
+                .map(|version| version.markdown.clone());
+        }
         let (timeline_nodes, active_node_id) = if persisted_timeline_nodes.is_empty() {
             initial_timeline(&session)
         } else {
@@ -577,6 +596,24 @@ impl WorkspaceEngine {
     }
 
     pub async fn append_context_note(&mut self, content: String) -> Result<TimelineNode, String> {
+        let msg_id = format!("msg_{:03}", self.session.messages.len() + 1);
+        let now = chrono::Utc::now().to_rfc3339();
+        self.session.messages.push(SessionMessage {
+            id: msg_id,
+            role: "user".to_string(),
+            content: content.clone(),
+            checkpoint_id: None,
+            created_at: now,
+        });
+        if let Some(store) = &self.lifecycle_store {
+            store
+                .append_workspace_message(
+                    &self.session.session_id,
+                    "user".to_string(),
+                    content.clone(),
+                )
+                .map_err(|error| format!("persist context note failed: {error}"))?;
+        }
         Ok(self
             .append_completed_timeline_event(
                 TimelineNodeType::ContextNote,
@@ -1835,6 +1872,57 @@ impl WorkspaceEngine {
         }
     }
 
+    pub async fn handle_author_decision(
+        &mut self,
+        decision: AuthorDecision,
+    ) -> Result<AuthorDecisionOutcome, String> {
+        if self.session.stage != WorkspaceStage::AuthorConfirm {
+            return Err(
+                "author decision is only available during author_confirm stage".to_string(),
+            );
+        }
+
+        match decision {
+            AuthorDecision::Accept => {
+                let review_enabled =
+                    self.session.review_rounds > 0 && self.session.reviewer_provider.is_some();
+                self.complete_active_node(Some("已进入 Review".to_string()))
+                    .await;
+                self.start_review_or_skip().await;
+                if review_enabled && self.session.stage == WorkspaceStage::CrossReview {
+                    Ok(AuthorDecisionOutcome::StartReview)
+                } else {
+                    Ok(AuthorDecisionOutcome::HumanConfirm)
+                }
+            }
+            AuthorDecision::Reject => {
+                self.complete_active_node(Some("用户要求重新编写".to_string()))
+                    .await;
+                self.session.artifact = None;
+                self.mark_latest_artifact_rejected();
+                if let Some(store) = &self.lifecycle_store {
+                    let _ = store.update_workspace_session_status(
+                        &self.session.session_id,
+                        WorkspaceSessionStatus::Open,
+                    );
+                }
+                self.transition_stage(WorkspaceStage::PrepareContext).await;
+                let _ = self
+                    .create_timeline_node(TimelineNodeDraft {
+                        node_type: TimelineNodeType::PrepareContext,
+                        agent: None,
+                        stage: WorkspaceStage::PrepareContext,
+                        round: None,
+                        title: "准备上下文".to_string(),
+                        summary: Some("等待重新补充上下文".to_string()),
+                        status: TimelineNodeStatus::Active,
+                    })
+                    .await;
+                Ok(AuthorDecisionOutcome::PrepareContext)
+            }
+        }
+    }
+
     pub async fn handle_review_decision(
         &mut self,
         decision: String,
@@ -2102,7 +2190,7 @@ impl WorkspaceEngine {
             &self.session.session_id,
             message_index,
             &artifact_snapshot,
-            WorkspaceStage::HumanConfirm.as_str(),
+            WorkspaceStage::AuthorConfirm.as_str(),
         );
 
         let checkpoint_id = match checkpoint {
@@ -2134,7 +2222,8 @@ impl WorkspaceEngine {
             .await;
         self.complete_active_node(Some("生成完成".to_string()))
             .await;
-        self.start_review_or_skip().await;
+        self.enter_author_confirm(Some("等待用户确认 author 结果".to_string()))
+            .await;
     }
 
     fn build_streaming_input(
@@ -2163,7 +2252,7 @@ impl WorkspaceEngine {
             resume_provider_session_id,
             permission_mode: ProviderPermissionMode::Supervised,
             env_vars: BTreeMap::new(),
-            timeout_secs: 300,
+            timeout_secs: WORKSPACE_PROVIDER_TIMEOUT_SECS,
         })
     }
 
@@ -2188,8 +2277,12 @@ impl WorkspaceEngine {
         ));
         prompt.push_str("会话上下文:\n");
         for msg in &self.session.messages {
+            if matches!(msg.role.as_str(), "assistant" | "provider") {
+                continue;
+            }
             prompt.push_str(&format!("[{}]: {}\n", msg.role, msg.content));
         }
+        self.append_missing_context_notes_to_prompt(&mut prompt);
         prompt.push_str("\n当前 Artifact:\n\n");
         prompt.push_str(&artifact);
         prompt.push_str(
@@ -2208,7 +2301,7 @@ impl WorkspaceEngine {
             resume_provider_session_id: None,
             permission_mode: ProviderPermissionMode::Supervised,
             env_vars: BTreeMap::new(),
-            timeout_secs: 300,
+            timeout_secs: WORKSPACE_PROVIDER_TIMEOUT_SECS,
         })
     }
 
@@ -2242,7 +2335,7 @@ impl WorkspaceEngine {
             resume_provider_session_id,
             permission_mode: ProviderPermissionMode::Supervised,
             env_vars: BTreeMap::new(),
-            timeout_secs: 300,
+            timeout_secs: WORKSPACE_PROVIDER_TIMEOUT_SECS,
         })
     }
 
@@ -2254,6 +2347,7 @@ impl WorkspaceEngine {
             workspace_type_title(&self.session.workspace_type)
         ));
         prompt.push_str("这是对当前 provider 会话的增量返修指令。不要重新调研完整上下文，不要只解释；请基于本会话已有上下文、上一版 artifact 和以下 reviewer 意见，直接输出完整更新后的 artifact markdown。\n");
+        self.append_missing_context_notes_to_prompt(&mut prompt);
         prompt.push_str("\nReviewer 审核意见:\n\n");
         prompt.push_str(&review.comments);
         prompt.push_str("\n\nReviewer 摘要:\n");
@@ -2277,6 +2371,7 @@ impl WorkspaceEngine {
         for msg in &self.session.messages {
             prompt.push_str(&format!("[{}]: {}\n", msg.role, msg.content));
         }
+        self.append_missing_context_notes_to_prompt(&mut prompt);
         prompt.push_str("\n上一版 Artifact:\n\n");
         prompt.push_str(artifact);
         prompt.push_str("\n\nReviewer 审核意见:\n\n");
@@ -2413,6 +2508,9 @@ impl WorkspaceEngine {
 
     pub async fn update_artifact(&mut self, markdown: String) {
         self.session.artifact = Some(markdown.clone());
+        for version in &mut self.artifact_versions {
+            version.is_current = false;
+        }
         let version = self.artifact_versions.len() as u32 + 1;
         let source_node_id = self
             .active_node_id
@@ -2425,6 +2523,7 @@ impl WorkspaceEngine {
             reviewed_by: None,
             review_verdict: None,
             confirmed_by: None,
+            is_current: true,
             created_at: chrono::Utc::now().to_rfc3339(),
             source_node_id,
         });
@@ -2570,18 +2669,65 @@ impl WorkspaceEngine {
 
     fn build_prompt(&self, user_content: &str) -> String {
         let mut prompt = String::new();
-        for msg in &self.session.messages {
+        let last_current_user_message_index =
+            self.session.messages.len().checked_sub(1).filter(|index| {
+                let message = &self.session.messages[*index];
+                message.role == "user" && message.content == user_content
+            });
+        for (index, msg) in self.session.messages.iter().enumerate() {
+            if Some(index) == last_current_user_message_index {
+                continue;
+            }
             prompt.push_str(&format!("[{}]: {}\n", msg.role, msg.content));
         }
-        if self
-            .session
-            .messages
-            .last()
-            .is_none_or(|message| message.role != "user" || message.content != user_content)
-        {
+
+        for note in self.missing_context_note_summaries() {
+            prompt.push_str(&format!("[user]: {note}\n"));
+        }
+
+        if let Some(index) = last_current_user_message_index {
+            let msg = &self.session.messages[index];
+            prompt.push_str(&format!("[{}]: {}\n", msg.role, msg.content));
+        } else {
             prompt.push_str(&format!("[user]: {user_content}\n"));
         }
         prompt
+    }
+
+    fn missing_context_note_summaries(&self) -> Vec<String> {
+        let known_message_contents = self
+            .session
+            .messages
+            .iter()
+            .map(|message| message.content.trim().to_string())
+            .collect::<Vec<_>>();
+
+        self.timeline_nodes
+            .iter()
+            .filter_map(|node| {
+                if node.node_type != TimelineNodeType::ContextNote {
+                    return None;
+                }
+                let note = node.summary.as_deref()?.trim();
+                (!note.is_empty()
+                    && !known_message_contents
+                        .iter()
+                        .any(|content| content.as_str() == note))
+                .then(|| note.to_string())
+            })
+            .collect()
+    }
+
+    fn append_missing_context_notes_to_prompt(&self, prompt: &mut String) {
+        let notes = self.missing_context_note_summaries();
+        if notes.is_empty() {
+            return;
+        }
+
+        prompt.push_str("\n准备阶段用户补充上下文:\n");
+        for note in notes {
+            prompt.push_str(&format!("- {note}\n"));
+        }
     }
 
     pub fn build_session_state(&self) -> WsOutMessage {
@@ -2686,6 +2832,27 @@ impl WorkspaceEngine {
             self.mark_latest_artifact_reviewed(Some(ProviderName::Fake), None);
             self.enter_human_confirm(Some("等待人工确认".to_string()))
                 .await;
+        }
+    }
+
+    async fn enter_author_confirm(&mut self, summary: Option<String>) {
+        self.transition_stage(WorkspaceStage::AuthorConfirm).await;
+        let _ = self
+            .create_timeline_node(TimelineNodeDraft {
+                node_type: TimelineNodeType::AuthorConfirm,
+                agent: None,
+                stage: WorkspaceStage::AuthorConfirm,
+                round: None,
+                title: "Author 结果确认".to_string(),
+                summary,
+                status: TimelineNodeStatus::Active,
+            })
+            .await;
+        if let Some(store) = &self.lifecycle_store {
+            let _ = store.update_workspace_session_status(
+                &self.session.session_id,
+                WorkspaceSessionStatus::WaitingForHuman,
+            );
         }
     }
 
@@ -2991,6 +3158,13 @@ impl WorkspaceEngine {
         }
     }
 
+    fn mark_latest_artifact_rejected(&mut self) {
+        if let Some(version) = self.artifact_versions.last_mut() {
+            version.is_current = false;
+            self.persist_artifact_versions();
+        }
+    }
+
     fn persist_timeline_nodes(&self) {
         if let Some(store) = &self.lifecycle_store {
             let _ = store.save_timeline_nodes(&self.session.session_id, &self.timeline_nodes);
@@ -3073,6 +3247,7 @@ fn workspace_stage_from_ws_stage(stage: &WsWorkspaceStage) -> WorkspaceStage {
     match stage {
         WsWorkspaceStage::PrepareContext => WorkspaceStage::PrepareContext,
         WsWorkspaceStage::Running => WorkspaceStage::Running,
+        WsWorkspaceStage::AuthorConfirm => WorkspaceStage::AuthorConfirm,
         WsWorkspaceStage::CrossReview => WorkspaceStage::CrossReview,
         WsWorkspaceStage::ReviewDecision => WorkspaceStage::ReviewDecision,
         WsWorkspaceStage::Revision => WorkspaceStage::Revision,
@@ -3476,6 +3651,7 @@ fn ws_stage(stage: &WorkspaceStage) -> WsWorkspaceStage {
     match stage {
         WorkspaceStage::PrepareContext => WsWorkspaceStage::PrepareContext,
         WorkspaceStage::Running => WsWorkspaceStage::Running,
+        WorkspaceStage::AuthorConfirm => WsWorkspaceStage::AuthorConfirm,
         WorkspaceStage::CrossReview => WsWorkspaceStage::CrossReview,
         WorkspaceStage::ReviewDecision => WsWorkspaceStage::ReviewDecision,
         WorkspaceStage::Revision => WsWorkspaceStage::Revision,
@@ -3637,7 +3813,9 @@ fn workspace_status_for_stage(stage: &WorkspaceStage) -> WorkspaceSessionStatus 
         | WorkspaceStage::CrossReview
         | WorkspaceStage::ReviewDecision
         | WorkspaceStage::Revision => WorkspaceSessionStatus::Running,
-        WorkspaceStage::HumanConfirm => WorkspaceSessionStatus::WaitingForHuman,
+        WorkspaceStage::AuthorConfirm | WorkspaceStage::HumanConfirm => {
+            WorkspaceSessionStatus::WaitingForHuman
+        }
         WorkspaceStage::Completed => WorkspaceSessionStatus::Confirmed,
     }
 }
@@ -3664,7 +3842,9 @@ mod tests {
         AgentRole, ArtifactRef, NodeDetail, PermissionEvent, ProviderSnapshot,
     };
     use crate::protocol::contracts::{AdapterInput, ProviderType};
-    use crate::web::workspace_ws_types::{ReviewVerdictType, TimelineNodeStatus, TimelineNodeType};
+    use crate::web::workspace_ws_types::{
+        AuthorDecision, ReviewVerdictType, TimelineNodeStatus, TimelineNodeType,
+    };
     use std::sync::Mutex;
     use tempfile::TempDir;
 
@@ -3703,6 +3883,50 @@ mod tests {
     struct SessionRecordingProvider {
         inputs: Arc<Mutex<Vec<StreamingProviderInput>>>,
         calls: Arc<Mutex<u32>>,
+    }
+
+    struct ImmediateOutputRecordingProvider {
+        inputs: Arc<Mutex<Vec<StreamingProviderInput>>>,
+        output: String,
+    }
+
+    #[async_trait::async_trait]
+    impl StreamingProviderAdapter for ImmediateOutputRecordingProvider {
+        async fn start(
+            &self,
+            input: StreamingProviderInput,
+            _cancel: CancellationToken,
+        ) -> Result<ProviderSession, ProviderAdapterError> {
+            self.inputs.lock().unwrap().push(input);
+            let output = self.output.clone();
+            let (event_tx, event_rx) = mpsc::channel(8);
+            let (command_tx, _command_rx) = mpsc::channel(8);
+            tokio::spawn(async move {
+                let _ = event_tx
+                    .send(ProviderEvent::Completed {
+                        full_output: output,
+                        provider_session_id: None,
+                    })
+                    .await;
+            });
+            Ok(ProviderSession {
+                events: event_rx,
+                commands: command_tx,
+            })
+        }
+
+        async fn run_streaming(
+            &self,
+            _input: &AdapterInput,
+            _cancel: CancellationToken,
+        ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+            Err(ProviderAdapterError::execution_failed(
+                None,
+                String::new(),
+                "run_streaming is not used by this test provider",
+                0,
+            ))
+        }
     }
 
     #[async_trait::async_trait]
@@ -3973,6 +4197,101 @@ mod tests {
         assert!(input.prompt.contains("当前 Artifact"));
     }
 
+    #[test]
+    fn workspace_provider_inputs_use_one_hour_timeout() {
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let mut session = make_session("sess_workspace_timeout");
+        session.artifact = Some("# Story Spec\n\n## 功能需求\n- [REQ-001] Draft.\n".to_string());
+        let checkpoint_tmp = TempDir::new().unwrap();
+        let mut engine = WorkspaceEngine::new(
+            Arc::new(CheckpointStore::new(checkpoint_tmp.path().to_path_buf())),
+            event_tx,
+            session,
+        );
+        engine.latest_review_verdict = Some(ReviewVerdict {
+            verdict: ReviewVerdictType::Revise,
+            comments: "补充验收标准".to_string(),
+            summary: "需要返修".to_string(),
+        });
+
+        assert_eq!(
+            engine
+                .build_streaming_input("开始生成", AuthorPromptMode::FullConversation)
+                .expect("author input")
+                .timeout_secs,
+            3600
+        );
+        assert_eq!(
+            engine
+                .build_review_input()
+                .expect("review input")
+                .timeout_secs,
+            3600
+        );
+        assert_eq!(
+            engine
+                .build_revision_input()
+                .expect("revision input")
+                .timeout_secs,
+            3600
+        );
+    }
+
+    #[test]
+    fn review_input_keeps_current_artifact_and_context_without_old_assistant_artifacts() {
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let mut session = make_session("sess_review_prompt_dedupe");
+        session.messages = vec![
+            SessionMessage {
+                id: "msg_001".to_string(),
+                role: "system".to_string(),
+                content: "系统上下文：真实 issue 描述。".to_string(),
+                checkpoint_id: None,
+                created_at: "2026-06-01T00:00:00Z".to_string(),
+            },
+            SessionMessage {
+                id: "msg_002".to_string(),
+                role: "user".to_string(),
+                content: "用户补充：必须覆盖 n=10 -> 89。".to_string(),
+                checkpoint_id: None,
+                created_at: "2026-06-01T00:00:01Z".to_string(),
+            },
+            SessionMessage {
+                id: "msg_003".to_string(),
+                role: "assistant".to_string(),
+                content: "# Old Story Spec\n\n## 功能需求\n- [REQ-OLD] 旧稿。\n\n## 成功标准\n- [AC-OLD] 旧验收。\n".to_string(),
+                checkpoint_id: None,
+                created_at: "2026-06-01T00:00:02Z".to_string(),
+            },
+        ];
+        session.artifact = Some(
+            "# Current Story Spec\n\n## 功能需求\n- [REQ-001] 当前稿。\n\n## 成功标准\n- [AC-001] 当前稿覆盖 n=10 -> 89。\n"
+                .to_string(),
+        );
+        let checkpoint_tmp = TempDir::new().unwrap();
+        let engine = WorkspaceEngine::new(
+            Arc::new(CheckpointStore::new(checkpoint_tmp.path().to_path_buf())),
+            event_tx,
+            session,
+        );
+
+        let input = engine.build_review_input().expect("review input");
+
+        assert!(input.prompt.contains("系统上下文：真实 issue 描述。"));
+        assert!(input.prompt.contains("用户补充：必须覆盖 n=10 -> 89。"));
+        assert_eq!(input.prompt.matches("# Current Story Spec").count(), 1);
+        assert!(
+            !input.prompt.contains("# Old Story Spec"),
+            "review prompt should not include historical assistant artifact bodies: {}",
+            input.prompt
+        );
+        assert!(
+            input
+                .prompt
+                .contains("{\"verdict\":\"pass|revise|needs_human\"")
+        );
+    }
+
     fn persistent_test_engine() -> (TempDir, LifecycleStore, WorkspaceEngine) {
         let (tmp, checkpoint_store) = setup();
         let lifecycle_store = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
@@ -4229,6 +4548,11 @@ mod tests {
             )
             .await;
 
+        engine
+            .handle_author_decision(AuthorDecision::Accept)
+            .await
+            .unwrap();
+
         let mut saw_running = false;
         while let Ok(event) = rx.try_recv() {
             if matches!(event, EngineEvent::StageChange { stage } if stage == "running") {
@@ -4317,6 +4641,11 @@ mod tests {
                 empty_provider_commands(),
             )
             .await;
+
+        engine
+            .handle_author_decision(AuthorDecision::Accept)
+            .await
+            .unwrap();
 
         assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
         match engine.build_session_state() {
@@ -4439,6 +4768,10 @@ mod tests {
                 empty_provider_commands(),
             )
             .await;
+        engine
+            .handle_author_decision(AuthorDecision::Accept)
+            .await
+            .unwrap();
         assert_eq!(engine.session().stage, WorkspaceStage::CrossReview);
 
         let provider_type = Arc::new(Mutex::new(None));
@@ -4593,6 +4926,11 @@ mod tests {
                 .as_deref()
                 .is_some_and(|artifact| artifact.contains("# Story Spec"))
         );
+        engine
+            .handle_author_decision(AuthorDecision::Accept)
+            .await
+            .unwrap();
+        assert_eq!(engine.session().stage, WorkspaceStage::CrossReview);
 
         engine
             .drive_review_session(
@@ -4653,6 +4991,10 @@ mod tests {
             engine.session().artifact.as_deref(),
             Some(revised_artifact.trim())
         );
+        engine
+            .handle_author_decision(AuthorDecision::Accept)
+            .await
+            .unwrap();
         assert_eq!(engine.session().stage, WorkspaceStage::CrossReview);
         match engine.build_session_state() {
             WsOutMessage::SessionState {
@@ -4859,6 +5201,55 @@ mod tests {
         assert!(!input.prompt.contains("# Story Spec"));
     }
 
+    #[tokio::test]
+    async fn revision_delta_prompt_includes_legacy_context_note() {
+        let (_tmp, store) = setup();
+        let (tx, _) = mpsc::channel(64);
+        let mut session = make_session("sess_revision_delta_legacy_context_note");
+        session.stage = WorkspaceStage::Revision;
+        session.artifact = Some(
+            "# Story Spec\n\n## 功能需求\n- [REQ-001] 初版。\n\n## 成功标准\n- [AC-001] 初版可验收。\n"
+                .to_string(),
+        );
+        session
+            .provider_conversations
+            .push(ProviderConversationRef {
+                role: ProviderConversationRole::Author,
+                provider: ProviderName::ClaudeCode,
+                provider_session_id: "provider-author-session-1".to_string(),
+                updated_at: chrono::Utc::now().to_rfc3339(),
+                last_node_id: Some("timeline_node_002".to_string()),
+            });
+        let mut engine = WorkspaceEngine::new(store, tx, session);
+        engine.latest_review_verdict = Some(ReviewVerdict {
+            verdict: ReviewVerdictType::Revise,
+            comments: "需要补充验收值。".to_string(),
+            summary: "补充验收值".to_string(),
+        });
+        engine
+            .append_completed_timeline_event(
+                TimelineNodeType::ContextNote,
+                WorkspaceStage::PrepareContext,
+                "上下文补充".to_string(),
+                Some("旧现场补充：必须覆盖 n=10 -> 89。".to_string()),
+                TimelineNodeStatus::Completed,
+                false,
+            )
+            .await;
+
+        let input = engine.build_revision_input().expect("revision input");
+
+        assert_eq!(
+            input.resume_provider_session_id.as_deref(),
+            Some("provider-author-session-1")
+        );
+        assert!(
+            input.prompt.contains("旧现场补充：必须覆盖 n=10 -> 89。"),
+            "revision author prompt should include legacy context note, got: {}",
+            input.prompt
+        );
+    }
+
     struct RevisionInputRecordingProvider {
         input: Arc<Mutex<Option<StreamingProviderInput>>>,
         output: &'static str,
@@ -4960,6 +5351,10 @@ mod tests {
                 empty_provider_commands(),
             )
             .await;
+        engine
+            .handle_author_decision(AuthorDecision::Accept)
+            .await
+            .unwrap();
         assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
 
         engine.handle_confirm().await;
@@ -5260,6 +5655,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn context_notes_are_included_in_author_prompt_for_all_workspace_types() {
+        for (workspace_type, output) in [
+            (
+                WorkspaceType::Story,
+                "# Story Spec\n\n## 功能需求\n- [REQ-001] 记录用户补充上下文。\n\n## 成功标准\n- [AC-001] author prompt 包含补充上下文。\n",
+            ),
+            (
+                WorkspaceType::Design,
+                "# Design Spec\n\n## 设计决策\n- [DEC-001] 使用用户补充上下文。\n\n## API 契约\n- 无新增 API。\n",
+            ),
+            (
+                WorkspaceType::WorkItem,
+                "# Work Item\n\n## 目标\n- 使用用户补充上下文。\n\n## 验证命令\n- cargo test --locked\n",
+            ),
+        ] {
+            let (_tmp, store) = setup();
+            let (tx, _) = mpsc::channel(64);
+            let mut session = make_session("sess_context_note_prompt");
+            session.workspace_type = workspace_type.clone();
+            session.reviewer_provider = None;
+            let mut engine = WorkspaceEngine::new(store, tx, session);
+            let inputs = Arc::new(Mutex::new(Vec::new()));
+            let provider = Arc::new(ImmediateOutputRecordingProvider {
+                inputs: inputs.clone(),
+                output: output.to_string(),
+            });
+
+            engine
+                .append_context_note("用户补充：必须覆盖 n=10 -> 89。".to_string())
+                .await
+                .unwrap();
+            engine
+                .handle_user_message("开始生成".to_string(), provider, empty_provider_commands())
+                .await;
+
+            let inputs = inputs.lock().unwrap();
+            let prompt = &inputs
+                .first()
+                .expect("author provider should receive input")
+                .prompt;
+            assert!(
+                prompt.contains("用户补充：必须覆盖 n=10 -> 89。"),
+                "{workspace_type:?} author prompt should include prepare context note, got: {prompt}"
+            );
+            assert!(
+                prompt.contains("开始生成"),
+                "{workspace_type:?} author prompt should include generation request, got: {prompt}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_context_note_timeline_nodes_are_included_in_author_prompt() {
+        let (_tmp, store) = setup();
+        let (tx, _) = mpsc::channel(64);
+        let mut session = make_session("sess_legacy_context_note_prompt");
+        session.reviewer_provider = None;
+        let mut engine = WorkspaceEngine::new(store, tx, session);
+        let inputs = Arc::new(Mutex::new(Vec::new()));
+        let provider = Arc::new(ImmediateOutputRecordingProvider {
+            inputs: inputs.clone(),
+            output: "# Story Spec\n\n## 功能需求\n- [REQ-001] 记录旧补充上下文。\n\n## 成功标准\n- [AC-001] author prompt 包含旧补充上下文。\n".to_string(),
+        });
+
+        engine
+            .append_completed_timeline_event(
+                TimelineNodeType::ContextNote,
+                WorkspaceStage::PrepareContext,
+                "上下文补充".to_string(),
+                Some("旧现场补充：Story Spec 必须使用 n=10 -> 89。".to_string()),
+                TimelineNodeStatus::Completed,
+                false,
+            )
+            .await;
+        engine
+            .handle_user_message("开始生成".to_string(), provider, empty_provider_commands())
+            .await;
+
+        let inputs = inputs.lock().unwrap();
+        let prompt = &inputs
+            .first()
+            .expect("author provider should receive input")
+            .prompt;
+        assert!(
+            prompt.contains("旧现场补充：Story Spec 必须使用 n=10 -> 89。"),
+            "author prompt should include legacy timeline-only context note, got: {prompt}"
+        );
+    }
+
+    #[tokio::test]
     async fn start_generation_locks_provider_and_creates_node() {
         let (_tmp, store) = setup();
         let (tx, _) = mpsc::channel(64);
@@ -5399,6 +5884,219 @@ mod tests {
         assert!(err.is_err());
     }
 
+    #[tokio::test]
+    async fn author_completion_enters_author_confirm_for_all_workspace_types() {
+        for (workspace_type, output) in [
+            (
+                WorkspaceType::Story,
+                "# Story Spec\n\n## 功能需求\n- [REQ-001] 生成候选草稿。\n\n## 成功标准\n- [AC-001] 候选草稿可进入人工处理。\n",
+            ),
+            (
+                WorkspaceType::Design,
+                "# Design Spec\n\n## 设计决策\n- [DEC-001] 生成候选设计。\n\n## 公共组件\n- [CMP-001] 无新增组件。\n",
+            ),
+            (
+                WorkspaceType::WorkItem,
+                "# Work Item\n\n## 目标\n- 生成候选实施计划。\n\n## 验证命令\n- cargo test --locked\n",
+            ),
+        ] {
+            let (_tmp, store) = setup();
+            let (tx, _) = mpsc::channel(64);
+            let mut session = make_session("sess_author_confirm");
+            session.workspace_type = workspace_type.clone();
+            session.reviewer_provider = Some(ProviderName::Codex);
+            session.review_rounds = 1;
+            let mut engine = WorkspaceEngine::new(store, tx, session);
+
+            engine
+                .handle_user_message(
+                    "开始生成".to_string(),
+                    Arc::new(ImmediateOutputRecordingProvider {
+                        inputs: Arc::new(Mutex::new(Vec::new())),
+                        output: output.to_string(),
+                    }),
+                    empty_provider_commands(),
+                )
+                .await;
+
+            assert_eq!(
+                engine.session().stage,
+                WorkspaceStage::AuthorConfirm,
+                "{workspace_type:?} should pause after author output"
+            );
+            assert!(
+                engine
+                    .timeline_nodes
+                    .iter()
+                    .any(|node| node.node_type == TimelineNodeType::AuthorConfirm
+                        && node.status == TimelineNodeStatus::Active),
+                "{workspace_type:?} should create an active author_confirm node"
+            );
+            assert!(
+                !engine
+                    .timeline_nodes
+                    .iter()
+                    .any(|node| node.node_type == TimelineNodeType::ReviewerRun),
+                "{workspace_type:?} should not start reviewer before user accepts author output"
+            );
+            assert!(
+                engine.session().artifact.is_some(),
+                "{workspace_type:?} author output should remain visible while waiting for decision"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn author_decision_accept_starts_review_or_final_confirmation() {
+        let (_tmp, store) = setup();
+        let (tx, _) = mpsc::channel(64);
+        let mut session = make_session("sess_author_accept_review");
+        session.reviewer_provider = Some(ProviderName::Codex);
+        session.review_rounds = 1;
+        let mut engine = WorkspaceEngine::new(store, tx, session);
+        engine
+            .handle_user_message(
+                "开始生成".to_string(),
+                Arc::new(ImmediateOutputRecordingProvider {
+                    inputs: Arc::new(Mutex::new(Vec::new())),
+                    output: "# Story Spec\n\n## 功能需求\n- [REQ-001] 候选。\n\n## 成功标准\n- [AC-001] 可审核。\n".to_string(),
+                }),
+                empty_provider_commands(),
+            )
+            .await;
+
+        engine
+            .handle_author_decision(AuthorDecision::Accept)
+            .await
+            .unwrap();
+
+        assert_eq!(engine.session().stage, WorkspaceStage::CrossReview);
+        assert!(engine.timeline_nodes.iter().any(|node| {
+            node.node_type == TimelineNodeType::ReviewerRun
+                && node.status == TimelineNodeStatus::Active
+        }));
+
+        let (_tmp, store) = setup();
+        let (tx, _) = mpsc::channel(64);
+        let mut session = make_session("sess_author_accept_no_review");
+        session.reviewer_provider = None;
+        session.review_rounds = 0;
+        let mut engine = WorkspaceEngine::new(store, tx, session);
+        engine
+            .handle_user_message(
+                "开始生成".to_string(),
+                Arc::new(ImmediateOutputRecordingProvider {
+                    inputs: Arc::new(Mutex::new(Vec::new())),
+                    output: "# Story Spec\n\n## 功能需求\n- [REQ-001] 候选。\n\n## 成功标准\n- [AC-001] 可确认。\n".to_string(),
+                }),
+                empty_provider_commands(),
+            )
+            .await;
+
+        engine
+            .handle_author_decision(AuthorDecision::Accept)
+            .await
+            .unwrap();
+
+        assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
+        assert!(engine.timeline_nodes.iter().any(|node| {
+            node.node_type == TimelineNodeType::HumanConfirm
+                && node.status == TimelineNodeStatus::Active
+        }));
+    }
+
+    #[tokio::test]
+    async fn author_decision_reject_returns_to_prepare_without_losing_history() {
+        let (_tmp, store) = setup();
+        let (tx, _) = mpsc::channel(64);
+        let mut session = make_session("sess_author_reject");
+        session.reviewer_provider = Some(ProviderName::Codex);
+        session.review_rounds = 1;
+        let mut engine = WorkspaceEngine::new(store, tx, session);
+        engine
+            .handle_user_message(
+                "开始生成".to_string(),
+                Arc::new(ImmediateOutputRecordingProvider {
+                    inputs: Arc::new(Mutex::new(Vec::new())),
+                    output: "# Story Spec\n\n## 功能需求\n- [REQ-001] 不满意的候选。\n\n## 成功标准\n- [AC-001] 需要重新写。\n".to_string(),
+                }),
+                empty_provider_commands(),
+            )
+            .await;
+
+        engine
+            .handle_author_decision(AuthorDecision::Reject)
+            .await
+            .unwrap();
+
+        assert_eq!(engine.session().stage, WorkspaceStage::PrepareContext);
+        assert_eq!(engine.session().artifact, None);
+        assert!(
+            engine
+                .session()
+                .messages
+                .iter()
+                .any(|message| message.role == "assistant"
+                    && message.content.contains("不满意的候选")),
+            "rejected author output should remain in message history"
+        );
+        assert_eq!(engine.artifact_versions.len(), 1);
+        assert!(
+            engine.artifact_versions[0]
+                .markdown
+                .contains("不满意的候选")
+        );
+        assert!(
+            !engine.artifact_versions[0].is_current,
+            "rejected artifact version should remain historical but not active"
+        );
+        assert!(
+            engine.timeline_nodes.iter().any(|node| {
+                node.node_type == TimelineNodeType::AuthorConfirm
+                    && node.status == TimelineNodeStatus::Completed
+                    && node.summary.as_deref() == Some("用户要求重新编写")
+            }),
+            "author_confirm node should record the rejection decision"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_author_artifact_is_not_restored_after_reconnect() {
+        let (tmp, lifecycle_store, mut engine) = persistent_test_engine();
+        engine
+            .handle_user_message(
+                "开始生成".to_string(),
+                Arc::new(ImmediateOutputRecordingProvider {
+                    inputs: Arc::new(Mutex::new(Vec::new())),
+                    output: "# Story Spec\n\n## 功能需求\n- [REQ-001] 被拒绝候选。\n\n## 成功标准\n- [AC-001] 不应恢复为当前稿。\n".to_string(),
+                }),
+                empty_provider_commands(),
+            )
+            .await;
+
+        engine
+            .handle_author_decision(AuthorDecision::Reject)
+            .await
+            .unwrap();
+
+        let session_record = lifecycle_store
+            .get_workspace_session(&engine.session().session_id)
+            .unwrap();
+        let reloaded = WorkspaceEngine::new_persistent(
+            Arc::new(CheckpointStore::new(tmp.path().to_path_buf())),
+            lifecycle_store,
+            mpsc::channel(64).0,
+            WorkspaceSession::from_record(session_record),
+        );
+
+        assert_eq!(reloaded.session().stage, WorkspaceStage::PrepareContext);
+        assert_eq!(reloaded.session().artifact, None);
+        match reloaded.build_session_state() {
+            WsOutMessage::SessionState { artifact, .. } => assert_eq!(artifact, None),
+            other => panic!("expected SessionState, got {other:?}"),
+        }
+    }
+
     struct RecordingStreamingProvider {
         provider_type: Arc<Mutex<Option<ProviderType>>>,
     }
@@ -5472,7 +6170,7 @@ mod tests {
             .await;
 
         assert_eq!(*provider_type.lock().unwrap(), Some(ProviderType::Codex));
-        assert_eq!(engine.session().stage, WorkspaceStage::CrossReview);
+        assert_eq!(engine.session().stage, WorkspaceStage::AuthorConfirm);
         assert!(
             engine
                 .session()
@@ -5484,7 +6182,7 @@ mod tests {
         );
 
         let mut saw_artifact = false;
-        let mut saw_cross_review = false;
+        let mut saw_author_confirm = false;
         while let Ok(event) = rx.try_recv() {
             match event {
                 EngineEvent::ArtifactUpdate { markdown, .. }
@@ -5492,8 +6190,8 @@ mod tests {
                 {
                     saw_artifact = true;
                 }
-                EngineEvent::StageChange { stage } if stage == "cross_review" => {
-                    saw_cross_review = true;
+                EngineEvent::StageChange { stage } if stage == "author_confirm" => {
+                    saw_author_confirm = true;
                 }
                 _ => {}
             }
@@ -5503,8 +6201,8 @@ mod tests {
             "provider completion should update the artifact pane"
         );
         assert!(
-            saw_cross_review,
-            "provider completion should start cross review"
+            saw_author_confirm,
+            "provider completion should wait for author confirmation"
         );
     }
 
@@ -5522,6 +6220,11 @@ mod tests {
                 empty_provider_commands(),
             )
             .await;
+
+        engine
+            .handle_author_decision(AuthorDecision::Accept)
+            .await
+            .unwrap();
 
         assert_eq!(engine.session().stage, WorkspaceStage::CrossReview);
         assert!(
@@ -5579,7 +6282,7 @@ mod tests {
         );
         drop(inputs);
 
-        assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
+        assert_eq!(engine.session().stage, WorkspaceStage::AuthorConfirm);
         assert!(
             engine
                 .session()
@@ -6041,6 +6744,11 @@ mod tests {
                 empty_provider_commands(),
             )
             .await;
+
+        engine
+            .handle_author_decision(AuthorDecision::Accept)
+            .await
+            .unwrap();
 
         let mut saw_running = false;
         while let Ok(event) = rx.try_recv() {

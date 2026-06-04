@@ -58,6 +58,7 @@ describe("workspace ws store", () => {
     expect(useWorkspaceStore.getState().visitedStages).toEqual([
       "prepare_context",
       "running",
+      "author_confirm",
       "cross_review",
       "human_confirm",
     ]);
@@ -74,6 +75,7 @@ describe("workspace ws store", () => {
     expect(useWorkspaceStore.getState().visitedStages).toEqual([
       "prepare_context",
       "running",
+      "author_confirm",
       "cross_review",
     ]);
   });
@@ -298,6 +300,7 @@ describe("workspace ws store", () => {
     expect(useWorkspaceStore.getState().visitedStages).toEqual([
       "prepare_context",
       "running",
+      "author_confirm",
       "cross_review",
       "human_confirm",
     ]);

@@ -113,6 +113,7 @@ function iconForNode(nodeType: TimelineNode["node_type"]) {
       return Eye;
     case "revision":
       return RefreshCw;
+    case "author_confirm":
     case "human_confirm":
       return Hand;
     case "aborted_by_disconnect":

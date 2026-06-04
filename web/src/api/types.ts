@@ -525,6 +525,7 @@ export type StructuredFeedback = {
 
 export type RevisionPath = "revise" | "revise-with-context" | "skip-to-human";
 export type HumanConfirmDecision = "confirm" | "request-change" | "terminate";
+export type AuthorDecision = "accept" | "reject";
 
 export type WsInMessage =
   | { type: "user_message"; content: string }
@@ -545,6 +546,7 @@ export type WsInMessage =
       free_text?: string | null;
     }
   | { type: "review_decision_response"; decision: string; extra_context?: string | null }
+  | { type: "author_decision"; decision: AuthorDecision }
   | { type: "select_revision_path"; path: RevisionPath; extra_context?: string | null }
   | { type: "request_revision"; feedback: StructuredFeedback }
   | { type: "human_confirm"; decision: HumanConfirmDecision; payload?: unknown }
@@ -556,6 +558,7 @@ export type TimelineNodeType =
   | "prepare_context"
   | "context_note"
   | "start_generation"
+  | "author_confirm"
   | "author_run"
   | "reviewer_run"
   | "review_decision"
@@ -664,6 +667,7 @@ export type ArtifactVersion = {
   reviewed_by?: WorkspaceProviderName | null;
   review_verdict?: ReviewVerdictType | null;
   confirmed_by?: string | null;
+  is_current?: boolean;
   created_at: string;
   source_node_id: string;
 };

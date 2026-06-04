@@ -1360,6 +1360,7 @@ fn app_with_confirmed_work_item_context(root_path: &std::path::Path) -> axum::Ro
                 reviewed_by: Some(ProviderName::Fake),
                 review_verdict: None,
                 confirmed_by: Some("user".to_string()),
+                is_current: true,
                 created_at: "2026-05-28T00:00:00Z".to_string(),
                 source_node_id: "node_0001".to_string(),
             },

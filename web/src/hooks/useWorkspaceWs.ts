@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
+  AuthorDecision,
   HumanConfirmDecision,
   ProviderConfigSnapshot,
   RevisionPath,
@@ -475,6 +476,13 @@ export function useWorkspaceWs(sessionId: string | null) {
     [sendJson],
   );
 
+  const sendAuthorDecision = useCallback(
+    (decision: AuthorDecision) => {
+      sendJson({ type: "author_decision", decision });
+    },
+    [sendJson],
+  );
+
   const sendMessage = useCallback(
     (content: string) => {
       console.warn("sendMessage is deprecated, use sendContextNote or sendStartGeneration");
@@ -585,6 +593,7 @@ export function useWorkspaceWs(sessionId: string | null) {
     sendContextNote,
     sendStartGeneration,
     sendSelectRevisionPath,
+    sendAuthorDecision,
     sendHumanConfirm,
     sendHello,
     sendPing,

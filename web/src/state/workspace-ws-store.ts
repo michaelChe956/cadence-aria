@@ -27,6 +27,7 @@ export type TimelineNodeType =
   | "prepare_context"
   | "context_note"
   | "start_generation"
+  | "author_confirm"
   | "author_run"
   | "reviewer_run"
   | "review_decision"
@@ -114,6 +115,7 @@ export interface ArtifactVersion {
   reviewed_by?: WorkspaceProviderName | null;
   review_verdict?: ReviewVerdictType | null;
   confirmed_by?: string | null;
+  is_current?: boolean;
   created_at: string;
   source_node_id: string;
 }
@@ -729,6 +731,7 @@ export function selectPrepareContextNotes(state: WorkspaceWsState) {
 const STAGE_ORDER = [
   "prepare_context",
   "running",
+  "author_confirm",
   "cross_review",
   "human_confirm",
   "completed",
