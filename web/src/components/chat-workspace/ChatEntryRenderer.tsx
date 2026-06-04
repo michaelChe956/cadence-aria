@@ -24,7 +24,7 @@ interface ChatEntryRendererProps {
     entry: ChatEntry,
     response: { selected_option_ids: string[]; free_text: string | null },
   ) => void;
-  onSelectRevisionPath?: (path: RevisionPath) => void;
+  onSelectRevisionPath?: (path: RevisionPath, extraContext?: string) => void;
   onHumanConfirm?: (decision: "confirm" | "request-change" | "terminate") => void;
 }
 

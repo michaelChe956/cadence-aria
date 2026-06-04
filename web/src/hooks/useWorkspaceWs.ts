@@ -251,6 +251,7 @@ export function useWorkspaceWs(sessionId: string | null) {
             options: (msg.options as unknown[]) ?? [],
             allow_multiple: msg.allow_multiple === true,
             allow_free_text: msg.allow_free_text === true,
+            source: typeof msg.source === "string" ? msg.source : "provider_choice",
           },
         });
         break;
@@ -326,10 +327,20 @@ export function useWorkspaceWs(sessionId: string | null) {
         });
         break;
       case "protocol_error":
-        store.setProtocolError({
-          code: msg.code as string,
-          message: msg.message as string,
-        });
+        {
+          const code = msg.code as string;
+          const message = msg.message as string;
+          if (code === "CHOICE_ID_UNMATCHED") {
+            const choiceId = choiceIdFromProtocolError(msg.context, message);
+            if (choiceId) {
+              store.rejectChoiceRequest(choiceId, message);
+            }
+          }
+          store.setProtocolError({
+            code,
+            message,
+          });
+        }
         store.appendChatEntry({
           id: chatEntryId("protocol_error", `${msg.code as string}:${msg.message as string}`),
           type: "error",
@@ -534,14 +545,30 @@ export function useWorkspaceWs(sessionId: string | null) {
   const sendChoiceResponse = useCallback(
     (id: string, selectedOptionIds: string[], freeText?: string | null) => {
       const trimmedText = freeText?.trim();
-      if (
-        sendJson({
-          type: "choice_response",
-          id,
-          selected_option_ids: selectedOptionIds,
-          free_text: trimmedText ? trimmedText : null,
-        })
-      ) {
+      const store = useWorkspaceStore.getState();
+      const choiceEntry = store.chatEntries.find(
+        (entry) => entry.type === "choice_request" && entry.metadata?.request_id === id,
+      );
+      console.info("[aria-choice-diag] frontend choice_response send attempt", {
+        id,
+        selected_option_ids: selectedOptionIds,
+        free_text_present: Boolean(trimmedText),
+        source: choiceEntry?.metadata?.source ?? null,
+        node_id: choiceEntry?.node_id ?? null,
+        connection_status: store.connectionStatus,
+        ws_ready_state: wsReadyStateName(wsRef.current),
+      });
+      const sent = sendJson({
+        type: "choice_response",
+        id,
+        selected_option_ids: selectedOptionIds,
+        free_text: trimmedText ? trimmedText : null,
+      });
+      console.info("[aria-choice-diag] frontend choice_response send result", {
+        id,
+        sent,
+      });
+      if (sent) {
         useWorkspaceStore
           .getState()
           .resolveChoiceRequest(id, selectedOptionIds, trimmedText ? trimmedText : null);
@@ -691,6 +718,32 @@ function providerName(value: string): WorkspaceProviderName | null {
   return null;
 }
 
+function choiceIdFromProtocolError(context: unknown, message: string) {
+  if (isRecord(context) && typeof context.choice_id === "string") {
+    return context.choice_id;
+  }
+  return message.match(/^ChoiceResponse id=(.+) not found in pending$/)?.[1] ?? null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function wsReadyStateName(socket: WebSocket | null) {
+  switch (socket?.readyState) {
+    case WebSocket.CONNECTING:
+      return "connecting";
+    case WebSocket.OPEN:
+      return "open";
+    case WebSocket.CLOSING:
+      return "closing";
+    case WebSocket.CLOSED:
+      return "closed";
+    default:
+      return "missing";
+  }
+}
+
 function gatePromptEntryForState(state: ReturnType<typeof useWorkspaceStore.getState>): ChatEntry | null {
   if (state.stage !== "human_confirm") {
     return null;
@@ -699,18 +752,20 @@ function gatePromptEntryForState(state: ReturnType<typeof useWorkspaceStore.getS
   const gatePromptNode =
     [...state.timelineNodes].reverse().find((node) => node.node_type === "human_confirm") ??
     state.timelineNodes.at(-1);
-  const summary =
-    state.chatEntries
-      .filter((entry) => entry.type === "review_verdict")
-      .at(-1)
-      ?.metadata?.summary?.toString() ?? "";
+  const latestReview = state.chatEntries.filter((entry) => entry.type === "review_verdict").at(-1);
+  const summary = latestReview?.metadata?.summary?.toString() ?? "";
+  const verdict = latestReview?.metadata?.verdict?.toString() ?? "";
+  const metadata = {
+    ...(summary ? { summary } : {}),
+    ...(verdict ? { verdict } : {}),
+  };
   return {
     id: `${gatePromptNode?.node_id ?? "human_confirm"}:gate-prompt`,
     type: "gate_prompt",
     role: "system",
-    content: "等待人工确认",
+    content: verdict === "needs_human" ? "需要人工确认" : "等待人工确认",
     timestamp: gatePromptNode?.completed_at ?? gatePromptNode?.started_at ?? new Date().toISOString(),
     node_id: gatePromptNode?.node_id,
-    metadata: summary ? { summary } : undefined,
+    metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
   };
 }

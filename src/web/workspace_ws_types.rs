@@ -67,6 +67,7 @@ pub enum WsOutMessage {
         options: Vec<ChoiceOption>,
         allow_multiple: bool,
         allow_free_text: bool,
+        source: String,
     },
     ProviderStatus {
         status: WsProviderStatus,
@@ -672,11 +673,13 @@ mod tests {
             ],
             allow_multiple: false,
             allow_free_text: true,
+            source: "ask_user_question".to_string(),
         };
 
         let json = serde_json::to_value(&out).unwrap();
 
         assert_eq!(json["type"], "choice_request");
+        assert_eq!(json["source"], "ask_user_question");
         assert_eq!(json["options"][0]["id"], "continue");
         let back: WsOutMessage = serde_json::from_value(json).unwrap();
         assert_eq!(back, out);

@@ -1,4 +1,4 @@
-import { Check, ListChecks } from "lucide-react";
+import { Check, CircleAlert, ListChecks } from "lucide-react";
 import { useState } from "react";
 import type { ChatEntry, ChoiceResponsePayload } from "../../../state/chat-entries";
 import { ChatEntryContainer } from "../ChatEntryContainer";
@@ -19,8 +19,11 @@ export function ChoiceRequestEntry({
   const allowMultiple = metadata?.allow_multiple === true;
   const allowFreeText = metadata?.allow_free_text === true;
   const prompt = stringField(metadata, "prompt") ?? entry.content;
+  const sourceLabel = choiceSourceLabel(stringField(metadata, "source"));
   const response = responseFromMetadata(metadata?.response);
   const isResolved = entry.resolved === true;
+  const isRejected = metadata?.rejected === true;
+  const rejectionReason = stringField(metadata, "rejection_reason");
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [freeText, setFreeText] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -54,16 +57,33 @@ export function ChoiceRequestEntry({
         <ListChecks className="mt-0.5 h-4 w-4 shrink-0 text-[var(--aria-primary)]" />
         <div className="min-w-0">
           <div className="font-medium">选择请求</div>
+          {sourceLabel ? (
+            <span className="mt-1 inline-flex rounded-md border border-[var(--aria-line)] bg-white px-2 py-0.5 text-xs font-medium text-[var(--aria-ink-muted)]">
+              {sourceLabel}
+            </span>
+          ) : null}
           <div className="mt-1 text-[var(--aria-ink-muted)]">{prompt}</div>
         </div>
       </div>
 
       {isResolved ? (
-        <span className="inline-flex items-center gap-1 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700">
-          <Check className="h-3.5 w-3.5" />
-          <span>已选择</span>
-          {resolvedSummary ? <span>：{resolvedSummary}</span> : null}
-        </span>
+        isRejected ? (
+          <span className="inline-flex max-w-full items-start gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-700">
+            <CircleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span className="min-w-0">
+              <span>选择已失效</span>
+              {rejectionReason ? (
+                <span className="ml-1 break-words font-medium">{rejectionReason}</span>
+              ) : null}
+            </span>
+          </span>
+        ) : (
+          <span className="inline-flex items-center gap-1 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700">
+            <Check className="h-3.5 w-3.5" />
+            <span>已选择</span>
+            {resolvedSummary ? <span>：{resolvedSummary}</span> : null}
+          </span>
+        )
       ) : (
         <>
           {options.length > 0 ? (
@@ -187,6 +207,21 @@ function choiceSummary(response: ChoiceResponsePayload | null, options: ChoiceOp
     labels.push(response.free_text);
   }
   return labels.join("、");
+}
+
+function choiceSourceLabel(source: string | null) {
+  switch (source) {
+    case "ask_user_question":
+      return "AskUserQuestion";
+    case "request_user_input":
+      return "requestUserInput";
+    case "text_fallback":
+      return "文本 fallback";
+    case "provider_choice":
+      return "provider choice";
+    default:
+      return null;
+  }
 }
 
 function stringField(value: unknown, key: string) {

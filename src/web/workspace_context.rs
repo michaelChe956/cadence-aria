@@ -3,8 +3,9 @@ use crate::product::issue_store::IssueStore;
 use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::models::{
-    DesignSpecRecord, IssueRecord, LifecycleWorkItemRecord, RepositoryRecord, SpecVersionRecord,
-    StorySpecRecord, WorkspaceMessageRecord, WorkspaceSessionRecord, WorkspaceType,
+    DesignSpecRecord, IssueRecord, LifecycleWorkItemRecord, ProviderName, RepositoryRecord,
+    SpecVersionRecord, StorySpecRecord, WorkspaceMessageRecord, WorkspaceSessionRecord,
+    WorkspaceType,
 };
 use crate::product::repository_store::RepositoryStore;
 use chrono::Utc;
@@ -397,10 +398,10 @@ fn constraint_summary_for(session: &WorkspaceSessionRecord) -> String {
 }
 
 fn workflow_discipline_for(session: &WorkspaceSessionRecord) -> String {
-    if session.superpowers_enabled {
+    let base = if session.superpowers_enabled {
         match session.workspace_type {
             WorkspaceType::Story | WorkspaceType::Design => {
-                "必须遵守 using-superpowers 与 brainstorming。必须优先通过交互提问解决需求、范围、验收标准中的未决问题，并等待用户回答后继续；如果需要向用户提问，必须使用结构化 AskUserQuestion / requestUserInput 交互能力。不要把 A/B/C 选择题作为最终候选产物正文输出；不要把可通过当前用户确认解决的问题直接写入待确认项。只有用户明确要求保留、用户回答后仍需后续确认，或当前 provider 环境无法交互时，才允许在待确认项/open_items 中保留。若当前 provider 环境无法发起结构化交互，才允许输出清晰的人工选择题，daemon 会暂停 reviewer 并转换为用户选择卡片。"
+                "必须遵守 using-superpowers 与 brainstorming。必须优先通过交互提问解决需求、范围、验收标准中的未决问题，并等待用户回答后继续；如果需要向用户提问，必须使用结构化 AskUserQuestion / requestUserInput 交互能力。不要把 A/B/C 选择题作为最终候选产物正文输出，也不要把文本选择题当作正常交互路径；不要把可通过当前用户确认解决的问题直接写入待确认项。只有用户明确要求保留、用户回答后仍需后续确认，或当前 provider 环境确实无法交互时，才允许在待确认项/open_items 中保留。若仍输出了可解析的文本选择题，daemon 只会作为 text_fallback 异常兜底暂停 reviewer 并转换为用户选择卡片，用户回答后仅追加 compact QA，不会重新灌入完整 prompt。"
             }
             WorkspaceType::WorkItem => {
                 "必须遵守 using-superpowers 与 writing-plans；只使用 writing-plans 的计划结构要求来生成候选 Work Item artifact，不要执行该技能默认的落盘和执行交接流程。不得直接输出实现代码，先生成可确认的计划与任务拆分。不要创建 docs/superpowers/plans 文件，不要询问 Subagent-Driven 或 Inline Execution；daemon 会负责候选产物落盘和后续执行调度。"
@@ -409,6 +410,20 @@ fn workflow_discipline_for(session: &WorkspaceSessionRecord) -> String {
         .to_string()
     } else {
         "Superpowers 未启用；仍需显式说明假设、风险、待确认项与下一步。".to_string()
+    };
+
+    if matches!(
+        (&session.workspace_type, &session.author_provider),
+        (
+            WorkspaceType::Story | WorkspaceType::Design,
+            ProviderName::ClaudeCode
+        )
+    ) {
+        format!(
+            "{base}\n当前 author provider 是 Claude Code；需要向用户确认时，必须使用结构化 AskUserQuestion，让同一个 Claude Code 进程等待用户回答后继续。禁止输出文本 A/B/C 选择题作为交互替代；若仍输出可解析的文本选择题，daemon 仅作为 text_fallback 异常兜底处理，并在用户回答后只追加 compact QA。"
+        )
+    } else {
+        base
     }
 }
 
@@ -425,7 +440,15 @@ fn output_schema_for(workspace_type: &WorkspaceType) -> &'static str {
              最终候选 Markdown 必须用 ```artifact fenced block 包裹，且 fenced block 内第一行必须是 Story Spec 一级标题，例如 # <名称> Story Spec；过程说明必须放在 fenced block 外。每条需求必须显式写稳定 ID，例如 [REQ-001]；每条验收标准必须显式写稳定 ID，例如 [AC-001]。如果通过交互已解决所有疑问，## 待确认项 写“无”；不要为了填充该 heading 编造未决问题。"
         }
         WorkspaceType::Design => {
-            "Markdown Design Spec 必须用 ```artifact fenced block 包裹，且 fenced block 内第一行必须是 Design Spec 一级标题；内容必须包含设计范围、关键决策、组件/API/数据模型、风险和追踪关系；关键决策使用 [DEC-001]，组件/API 使用 [CMP-001] 或 [API-001]。"
+            "Markdown Design Spec 必须用 ```artifact fenced block 包裹，且 fenced block 内第一行必须是 Design Spec 一级标题；内容必须包含以下 heading：\n\
+             - ## 设计范围\n\
+             - ## 设计决策\n\
+             - ## 公共组件\n\
+             - ## API 契约\n\
+             - ## 数据模型\n\
+             - ## 风险\n\
+             - ## 追踪关系\n\n\
+             设计决策使用 [DEC-001]，组件使用 [CMP-001]，API 使用 [API-001]。"
         }
         WorkspaceType::WorkItem => {
             "Markdown Work Item 必须用 ```artifact fenced block 包裹，且 fenced block 内第一行必须是 Work Item 一级标题；内容必须包含目标、范围、任务拆分、依赖、验证命令、风险和追踪关系；任务使用 [TASK-001]，并绑定来源 Story/Design。"
@@ -477,6 +500,75 @@ mod tests {
                 "{workspace_type:?} output schema must require artifact fenced block"
             );
         }
+    }
+
+    #[test]
+    fn design_output_schema_uses_canonical_projection_headings() {
+        let schema = output_schema_for(&WorkspaceType::Design);
+
+        assert!(schema.contains("设计决策"));
+        assert!(schema.contains("公共组件"));
+        assert!(schema.contains("API 契约"));
+        assert!(schema.contains("数据模型"));
+        assert!(!schema.contains("关键决策"));
+    }
+
+    #[test]
+    fn claude_code_story_context_requires_structured_ask_user_question() {
+        let root = tempdir().expect("root");
+        let repo = tempdir().expect("repo");
+        let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+        let repository = RepositoryStore::new(app_paths.clone())
+            .create(CreateRepositoryInput {
+                project_id: "project_0001".to_string(),
+                name: "Repo".to_string(),
+                path: repo.path().to_path_buf(),
+                default_policy_preset: None,
+                default_provider_mode: None,
+            })
+            .expect("repository");
+        IssueStore::new(app_paths.clone())
+            .create(CreateProductIssueInput {
+                project_id: "project_0001".to_string(),
+                repo_id: Some(repository.id.clone()),
+                title: "爬楼梯问题".to_string(),
+                description: Some("使用 Python 实现 climb_stairs".to_string()),
+                change_id: None,
+            })
+            .expect("issue");
+
+        let lifecycle = LifecycleStore::new(app_paths.clone());
+        let story = lifecycle
+            .create_story_spec(CreateStorySpecInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                repository_id: repository.id,
+                title: "爬楼梯问题 Story Spec".to_string(),
+            })
+            .expect("story");
+        let session = lifecycle
+            .create_workspace_session(CreateWorkspaceSessionInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                entity_id: story.id,
+                workspace_type: WorkspaceType::Story,
+                author_provider: ProviderName::ClaudeCode,
+                reviewer_provider: ProviderName::Codex,
+                review_rounds: 1,
+                superpowers_enabled: true,
+                openspec_enabled: true,
+            })
+            .expect("session");
+
+        let session = ensure_workspace_context_message(&app_paths, &lifecycle, session)
+            .expect("workspace context");
+        let context = &session.messages[0].content;
+
+        assert!(context.contains("当前 author provider 是 Claude Code"));
+        assert!(context.contains("必须使用结构化 AskUserQuestion"));
+        assert!(context.contains("禁止输出文本 A/B/C 选择题"));
+        assert!(context.contains("text_fallback 异常兜底"));
+        assert!(context.contains("只追加 compact QA"));
     }
 
     #[test]

@@ -125,6 +125,7 @@ describe("useWorkspaceWs", () => {
         ],
         allow_multiple: false,
         allow_free_text: true,
+        source: "ask_user_question",
       });
     });
 
@@ -137,6 +138,7 @@ describe("useWorkspaceWs", () => {
         request_id: "choice_001",
         allow_multiple: false,
         allow_free_text: true,
+        source: "ask_user_question",
       },
     });
   });
@@ -630,6 +632,46 @@ describe("useWorkspaceWs", () => {
       reviewer: "codex",
       review_rounds: 1,
     });
+  });
+
+  it("marks stale choice requests rejected when the server reports an unmatched choice id", () => {
+    const harness = renderWorkspaceHook();
+    useWorkspaceStore.getState().appendChatEntry({
+      id: "choice_request:choice_001",
+      type: "choice_request",
+      role: "system",
+      content: "请选择下一步",
+      timestamp: "2026-05-26T10:00:00Z",
+      metadata: {
+        request_id: "choice_001",
+        options: [{ id: "continue", label: "继续" }],
+      },
+    } as ChatEntry);
+    useWorkspaceStore.getState().resolveChoiceRequest("choice_001", ["continue"], null);
+
+    act(() => {
+      harness.ws.receive({
+        type: "protocol_error",
+        code: "CHOICE_ID_UNMATCHED",
+        message: "ChoiceResponse id=choice_001 not found in pending",
+        context: { choice_id: "choice_001" },
+      });
+    });
+
+    expect(useWorkspaceStore.getState().chatEntries).toEqual([
+      expect.objectContaining({
+        id: "choice_request:choice_001",
+        resolved: true,
+        metadata: expect.objectContaining({
+          rejected: true,
+          rejection_reason: "ChoiceResponse id=choice_001 not found in pending",
+        }),
+      }),
+      expect.objectContaining({
+        type: "error",
+        content: "CHOICE_ID_UNMATCHED · ChoiceResponse id=choice_001 not found in pending",
+      }),
+    ]);
   });
 
   it("sends review decision responses when connected", () => {

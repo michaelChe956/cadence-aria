@@ -10,12 +10,14 @@ export function GatePromptEntry({
   onDecision?: (decision: "confirm" | "terminate") => void;
 }) {
   const summary = summaryFromEntry(entry);
+  const verdict = verdictFromEntry(entry);
+  const needsHuman = verdict === "needs_human";
   const isResolved = entry.resolved === true;
 
   return (
     <ChatEntryContainer
       role="system"
-      title="人工确认"
+      title={needsHuman ? "需要人工确认" : "人工确认"}
       className="border-slate-200 bg-slate-50"
       testId="gate-prompt-entry"
     >
@@ -32,7 +34,7 @@ export function GatePromptEntry({
               className="inline-flex h-8 items-center gap-1 rounded-md border border-emerald-200 bg-white px-3 text-xs font-semibold text-emerald-700 hover:bg-emerald-50"
             >
               <Check className="h-3.5 w-3.5" />
-              确认
+              {needsHuman ? "提交人工确认" : "确认产物"}
             </button>
             <button
               type="button"
@@ -77,4 +79,9 @@ function ResolutionBadge({ resolution }: { resolution?: string }) {
 function summaryFromEntry(entry: ChatEntry) {
   const metadata = entry.metadata as Record<string, unknown> | undefined;
   return typeof metadata?.summary === "string" ? metadata.summary : null;
+}
+
+function verdictFromEntry(entry: ChatEntry) {
+  const metadata = entry.metadata as Record<string, unknown> | undefined;
+  return typeof metadata?.verdict === "string" ? metadata.verdict : null;
 }

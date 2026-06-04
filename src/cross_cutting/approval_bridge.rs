@@ -117,6 +117,7 @@ pub struct ApprovalBridge {
     command_tx: mpsc::Sender<ProviderCommand>,
     pending: PendingPermissions,
     pending_choices: PendingChoices,
+    cleanup_cancel: CancellationToken,
 }
 
 impl ApprovalBridge {
@@ -124,6 +125,7 @@ impl ApprovalBridge {
         let (command_tx, command_rx) = mpsc::channel(8);
         let pending = Arc::new(Mutex::new(HashMap::new()));
         let pending_choices: PendingChoices = Arc::new(Mutex::new(HashMap::new()));
+        let cleanup_cancel = CancellationToken::new();
 
         tokio::spawn(listen_for_permission_commands(
             command_rx,
@@ -134,6 +136,7 @@ impl ApprovalBridge {
         tokio::spawn(cleanup_pending_permissions(
             Arc::clone(&pending),
             event_tx.clone(),
+            cleanup_cancel.clone(),
         ));
 
         Self {
@@ -142,6 +145,7 @@ impl ApprovalBridge {
             command_tx,
             pending,
             pending_choices,
+            cleanup_cancel,
         }
     }
 
@@ -215,11 +219,18 @@ impl ApprovalBridge {
         cancel: CancellationToken,
     ) -> Result<ChoiceDecision, ProviderAdapterError> {
         let id = request.id.clone();
+        eprintln!(
+            "[aria-choice-diag] bridge emitting choice_request id={} source={} options={}",
+            id,
+            request.source.as_str(),
+            request.options.len()
+        );
         let (decision_tx, decision_rx) = oneshot::channel();
         self.pending_choices
             .lock()
             .await
             .insert(id.clone(), decision_tx);
+        let request_id = id.clone();
         let mut pending_guard = PendingChoiceGuard::new(id, Arc::clone(&self.pending_choices));
 
         let send_result = tokio::select! {
@@ -248,9 +259,22 @@ impl ApprovalBridge {
             }
             decision = decision_rx => {
                 pending_guard.remove_now().await;
-                decision.map_err(|_| permission_bridge_error("choice response channel closed"))
+                let decision = decision.map_err(|_| permission_bridge_error("choice response channel closed"))?;
+                eprintln!(
+                    "[aria-choice-diag] bridge resolved choice_request id={} selected={:?} free_text_present={}",
+                    request_id,
+                    decision.selected_option_ids,
+                    decision.free_text.as_ref().is_some_and(|text| !text.trim().is_empty())
+                );
+                Ok(decision)
             }
         }
+    }
+}
+
+impl Drop for ApprovalBridge {
+    fn drop(&mut self) {
+        self.cleanup_cancel.cancel();
     }
 }
 
@@ -288,13 +312,29 @@ async fn listen_for_permission_commands(
                 free_text,
             } => {
                 tracing::info!(choice_id = %id, "bridge received choice response");
+                eprintln!(
+                    "[aria-choice-diag] bridge received choice_response id={} selected={:?} free_text_present={}",
+                    id,
+                    selected_option_ids,
+                    free_text
+                        .as_ref()
+                        .is_some_and(|text| !text.trim().is_empty())
+                );
                 if let Some(decision_tx) = pending_choices.lock().await.remove(&id) {
+                    eprintln!(
+                        "[aria-choice-diag] bridge matched pending choice_response id={}",
+                        id
+                    );
                     let _ = decision_tx.send(ChoiceDecision {
                         selected_option_ids,
                         free_text,
                     });
                 } else {
                     tracing::warn!(choice_id = %id, "bridge: no pending choice entry for id");
+                    eprintln!(
+                        "[aria-choice-diag] bridge missing pending choice_response id={}",
+                        id
+                    );
                     let _ = event_tx
                         .send(ProviderEvent::ProtocolError {
                             code: "CHOICE_ID_UNMATCHED".to_string(),
@@ -328,9 +368,13 @@ async fn listen_for_permission_commands(
 async fn cleanup_pending_permissions(
     pending: PendingPermissions,
     event_tx: mpsc::Sender<ProviderEvent>,
+    cancel: CancellationToken,
 ) {
     loop {
-        tokio::time::sleep(PERMISSION_CLEANUP_INTERVAL).await;
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            _ = tokio::time::sleep(PERMISSION_CLEANUP_INTERVAL) => {}
+        }
         let now = Instant::now();
         let expired_ids: Vec<String> = {
             let guard = pending.lock().await;
@@ -354,9 +398,12 @@ async fn cleanup_pending_permissions(
         };
 
         for id in timed_out_ids {
-            let _ = event_tx
-                .send(ProviderEvent::PermissionTimeout { permission_id: id })
-                .await;
+            tokio::select! {
+                _ = cancel.cancelled() => return,
+                result = event_tx.send(ProviderEvent::PermissionTimeout { permission_id: id }) => {
+                    let _ = result;
+                }
+            }
         }
     }
 }
