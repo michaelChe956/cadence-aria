@@ -63,7 +63,7 @@ export function ChatWorkspacePage({
   const selectedEntryId = useMemo(
     () =>
       store.selectedNodeId
-        ? store.chatEntries.find((entry) => entry.node_id === store.selectedNodeId)?.id ?? null
+        ? scrollTargetEntryIdForNode(store.chatEntries, store.selectedNodeId)
         : null,
     [store.chatEntries, store.selectedNodeId],
   );
@@ -395,6 +395,15 @@ function latestUnacknowledgedAbortedNode(nodes: TimelineNode[], acknowledgedNode
     return null;
   }
   return acknowledged.has(latest.node_id) ? null : latest;
+}
+
+function scrollTargetEntryIdForNode(entries: ChatEntry[], nodeId: string) {
+  const nodeEntries = entries.filter((entry) => entry.node_id === nodeId);
+  return (
+    nodeEntries.find((entry) => entry.type === "provider_stream")?.id ??
+    nodeEntries[0]?.id ??
+    null
+  );
 }
 
 function providerConfigFor(

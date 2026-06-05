@@ -153,11 +153,19 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
         session,
     )));
 
-    let session_state = {
+    let (session_state, restored_choice_request) = {
         let engine = engine.lock().await;
-        engine.build_session_state()
+        (
+            engine.build_session_state(),
+            engine.pending_author_choice_request_message(),
+        )
     };
     if let Ok(json) = serde_json::to_string(&session_state) {
+        let _ = ws_sender.send(Message::Text(json.into())).await;
+    }
+    if let Some(choice_request) = restored_choice_request
+        && let Ok(json) = serde_json::to_string(&choice_request)
+    {
         let _ = ws_sender.send(Message::Text(json.into())).await;
     }
 

@@ -752,6 +752,213 @@ describe("workspace ws store", () => {
     ]);
   });
 
+  it.each([
+    ["story", "Story Spec"],
+    ["design", "Design Spec"],
+    ["work_item", "Work Item"],
+  ])("rebuilds revision nodes as author chat entries for %s workspaces", (workspaceType, label) => {
+    const store = useWorkspaceStore.getState();
+    store.reset();
+    store.setSessionState({
+      session_id: `session_revision_${workspaceType}`,
+      workspace_type: workspaceType,
+      stage: "revision",
+      messages: [],
+      checkpoints: [],
+      artifact: "# Draft",
+      providers: { author: "claude_code", reviewer: "codex" },
+      timeline_nodes: [
+        {
+          node_id: "timeline_node_revision",
+          node_type: "revision",
+          agent: "claude_code",
+          stage: "revision",
+          round: 1,
+          status: "completed",
+          title: "返修 Round 1",
+          summary: "生成完成",
+          started_at: "2026-05-26T10:00:00Z",
+          completed_at: "2026-05-26T10:01:00Z",
+          duration_ms: 60_000,
+          artifact_ref: "artifact_revision",
+          provider_config_snapshot: {
+            author: "claude_code",
+            reviewer: "codex",
+            review_rounds: 1,
+          },
+        },
+      ],
+      active_node_id: null,
+      artifact_versions: [],
+      timeline_node_details: {
+        timeline_node_revision: makeNodeDetail({
+          node_id: "timeline_node_revision",
+          node_type: "revision",
+          agent_role: null,
+          provider: { name: "claude_code", model: "claude-opus-4" },
+          streaming_content: `已按 reviewer 意见返修 ${label}`,
+          is_revision: true,
+        }),
+      },
+      active_run_id: null,
+    });
+    store.rebuildChatEntries();
+
+    expect(useWorkspaceStore.getState().chatEntries).toEqual([
+      expect.objectContaining({
+        type: "provider_stream",
+        role: "author",
+        content: `已按 reviewer 意见返修 ${label}`,
+        metadata: expect.objectContaining({ provider: "claude_code" }),
+      }),
+    ]);
+  });
+
+  it("deduplicates snapshot execution events before rebuilding chat entries", () => {
+    const store = useWorkspaceStore.getState();
+
+    store.setSessionState({
+      session_id: "session_duplicate_events",
+      workspace_type: "story",
+      stage: "cross_review",
+      messages: [],
+      checkpoints: [],
+      artifact: "# Draft",
+      providers: { author: "claude_code", reviewer: "codex" },
+      timeline_nodes: [
+        {
+          node_id: "timeline_node_reviewer",
+          node_type: "reviewer_run",
+          agent: "codex",
+          stage: "cross_review",
+          round: 1,
+          status: "completed",
+          title: "Review Round 1",
+          summary: "需要返修",
+          started_at: "2026-05-26T10:00:00Z",
+          completed_at: "2026-05-26T10:01:00Z",
+          duration_ms: 60_000,
+          artifact_ref: "artifact_current",
+          provider_config_snapshot: {
+            author: "claude_code",
+            reviewer: "codex",
+            review_rounds: 1,
+          },
+        },
+      ],
+      active_node_id: null,
+      artifact_versions: [],
+      timeline_node_details: {
+        timeline_node_reviewer: makeNodeDetail({
+          node_id: "timeline_node_reviewer",
+          node_type: "reviewer_run",
+          agent_role: "reviewer",
+          provider: { name: "codex", model: "gpt-5" },
+          execution_events: [
+            {
+              event_id: "command_cmd_001",
+              node_id: "timeline_node_reviewer",
+              agent: "codex",
+              kind: "command",
+              status: "started",
+              title: "Command started",
+              detail: null,
+              command: "git diff --stat",
+              cwd: "/tmp/repo",
+              output: null,
+              exit_code: null,
+            },
+            {
+              event_id: "command_cmd_001",
+              node_id: "timeline_node_reviewer",
+              agent: "codex",
+              kind: "command",
+              status: "completed",
+              title: "Command completed",
+              detail: "exit code 0",
+              command: "git diff --stat",
+              cwd: "/tmp/repo",
+              output: "ok\n",
+              exit_code: 0,
+            },
+          ],
+        }),
+      },
+      active_run_id: null,
+    });
+    store.rebuildChatEntries();
+
+    expect(
+      useWorkspaceStore.getState().nodeDetails.timeline_node_reviewer.execution_events,
+    ).toEqual([
+      expect.objectContaining({
+        event_id: "command_cmd_001",
+        status: "completed",
+        output: "ok\n",
+      }),
+    ]);
+    expect(
+      useWorkspaceStore
+        .getState()
+        .chatEntries.filter(
+          (entry) => entry.id === "timeline_node_reviewer:execution-command_cmd_001",
+        ),
+    ).toHaveLength(1);
+  });
+
+  it.each(["story", "design", "work_item"])(
+    "rebuilds system timeline nodes as chat anchors for %s workspaces",
+    (workspaceType) => {
+      const store = useWorkspaceStore.getState();
+      store.reset();
+      store.setSessionState({
+        session_id: `session_review_decision_anchor_${workspaceType}`,
+        workspace_type: workspaceType,
+        stage: "review_decision",
+        messages: [],
+        checkpoints: [],
+        artifact: "# Draft",
+        providers: { author: "claude_code", reviewer: "codex" },
+        timeline_nodes: [
+          {
+            node_id: "timeline_node_decision",
+            node_type: "review_decision",
+            agent: null,
+            stage: "review_decision",
+            round: 1,
+            status: "completed",
+            title: "Review Decision Round 1",
+            summary: "已选择返修",
+            started_at: "2026-05-26T10:02:00Z",
+            completed_at: "2026-05-26T10:02:05Z",
+            duration_ms: 5_000,
+            artifact_ref: null,
+            provider_config_snapshot: {
+              author: "claude_code",
+              reviewer: "codex",
+              review_rounds: 1,
+            },
+          },
+        ],
+        active_node_id: null,
+        artifact_versions: [],
+        timeline_node_details: {},
+        active_run_id: null,
+      });
+      store.rebuildChatEntries();
+
+      expect(useWorkspaceStore.getState().chatEntries).toEqual([
+        expect.objectContaining({
+          id: "timeline_node_decision:timeline-anchor",
+          type: "stage_change",
+          role: "system",
+          content: "Review Decision Round 1 · 已选择返修",
+          node_id: "timeline_node_decision",
+        }),
+      ]);
+    },
+  );
+
   it("rebuilds provider prompt events from spec node prompt snapshots", () => {
     const store = useWorkspaceStore.getState();
 

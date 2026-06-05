@@ -3,7 +3,7 @@ import type { RevisionPath } from "../../api/types";
 import type { ChatEntry, ChoiceResponsePayload } from "../../state/chat-entries";
 import { ChatEntryRenderer } from "./ChatEntryRenderer";
 import { MessageGroupView } from "./MessageGroupView";
-import { groupEntries } from "./message-grouping";
+import { groupEntries, type MessageGroup } from "./message-grouping";
 
 export interface ChatEntryListHandle {
   scrollToEntry: (entryId: string) => void;
@@ -42,7 +42,7 @@ export const ChatEntryList = forwardRef<ChatEntryListHandle, ChatEntryListProps>
           const target = listRef.current?.querySelector<HTMLElement>(
             `[data-entry-id="${entryId}"]`,
           );
-          target?.scrollIntoView({ behavior: "smooth", block: "start" });
+          target?.scrollIntoView({ behavior: "auto", block: "start" });
         },
       }),
       [],
@@ -72,7 +72,7 @@ export const ChatEntryList = forwardRef<ChatEntryListHandle, ChatEntryListProps>
               return (
                 <div
                   key={item.group.id}
-                  data-entry-id={item.group.primaryEntry?.id ?? item.group.id}
+                  data-entry-id={entryIdForGroup(item.group)}
                   className="min-w-0"
                 >
                   <MessageGroupView
@@ -103,3 +103,12 @@ export const ChatEntryList = forwardRef<ChatEntryListHandle, ChatEntryListProps>
     );
   },
 );
+
+function entryIdForGroup(group: MessageGroup) {
+  return (
+    group.primaryEntry?.id ??
+    group.inlineEvents[0]?.id ??
+    group.interruptEntries[0]?.id ??
+    group.id
+  );
+}

@@ -64,6 +64,31 @@ describe("MessageGroupView", () => {
     expect(screen.getByText("审核通过")).toBeInTheDocument();
   });
 
+  it("renders grouped primary stream markdown semantics in the message bubble", () => {
+    render(
+      <MessageGroupView
+        group={{
+          id: "group-markdown",
+          nodeId: "node-markdown",
+          role: "author",
+          primaryEntry: makeEntry(
+            "stream-markdown",
+            "provider_stream",
+            "author",
+            "## 结论\n\n- 审核 **通过**\n- 使用 `pnpm test` 验证",
+          ),
+          inlineEvents: [],
+          interruptEntries: [],
+        }}
+      />,
+    );
+
+    expect(screen.getByRole("heading", { name: "结论" })).toBeInTheDocument();
+    expect(screen.getByRole("list")).toBeInTheDocument();
+    expect(screen.getByText("通过").tagName).toBe("STRONG");
+    expect(screen.getByText("pnpm test").tagName).toBe("CODE");
+  });
+
   it("shows reviewer tool calls even when no stream text has arrived", () => {
     render(
       <MessageGroupView

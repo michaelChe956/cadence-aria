@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { ChatEntry } from "../../../state/chat-entries";
 import { ChatEntryRenderer } from "../ChatEntryRenderer";
@@ -49,6 +49,48 @@ describe("chat workspace entries", () => {
     expect(screen.getByRole("heading", { name: "范围" })).toBeInTheDocument();
     expect(screen.getByText(/实现爬楼梯问题/)).toBeInTheDocument();
     expect(screen.getByText(/n=1/)).toBeInTheDocument();
+  });
+
+  it("renders provider stream markdown semantics inside message bubbles", () => {
+    const entry = makeEntry({
+      type: "provider_stream",
+      role: "author",
+      content:
+        "## 范围\n\n- 支持 **粗体** 和 `inline code`\n- 查看 [设计说明](https://example.com/design)",
+    });
+
+    render(<ProviderStreamEntry entry={entry} />);
+
+    expect(screen.getByRole("heading", { name: "范围" })).toBeInTheDocument();
+    const list = screen.getByRole("list");
+    expect(list).toBeInTheDocument();
+    expect(within(list).getAllByRole("listitem")[0]).toHaveTextContent(
+      "支持 粗体 和 inline code",
+    );
+    expect(screen.getByText("粗体").tagName).toBe("STRONG");
+    expect(screen.getByText("inline code").tagName).toBe("CODE");
+    expect(screen.getByRole("link", { name: "设计说明" })).toHaveAttribute(
+      "href",
+      "https://example.com/design",
+    );
+  });
+
+  it("does not inject raw HTML or unsafe markdown links in message bubbles", () => {
+    const entry = makeEntry({
+      type: "provider_stream",
+      role: "author",
+      content:
+        '正文\n\n<script>alert("x")</script>\n\n<img src=x onerror=alert(1)>\n\n[危险链接](javascript:alert(1))',
+    });
+
+    const { container } = render(<ProviderStreamEntry entry={entry} />);
+
+    expect(container.querySelector("script")).toBeNull();
+    expect(container.querySelector("img")).toBeNull();
+    expect(screen.getByText('<script>alert("x")</script>')).toBeInTheDocument();
+    expect(screen.getByText("<img src=x onerror=alert(1)>")).toBeInTheDocument();
+    expect(screen.getByText("危险链接")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "危险链接" })).not.toBeInTheDocument();
   });
 
   it("breaks long provider prose into sentence lines when the provider streams one dense line", () => {

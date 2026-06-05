@@ -66,6 +66,7 @@ function TimelineNodeButton({
 }) {
   const Icon = iconForNode(node.node_type);
   const completed = node.status === "completed";
+  const title = displayTitleForNode(node);
 
   return (
     <button
@@ -85,7 +86,7 @@ function TimelineNodeButton({
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-center justify-between gap-2">
             <span className="truncate text-sm font-semibold text-[var(--aria-ink)]">
-              {node.title}
+              {title}
             </span>
             <span className="inline-flex shrink-0 items-center gap-1 rounded bg-[var(--aria-panel-muted)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--aria-ink-muted)]">
               {completed ? <Check className="h-3 w-3" aria-hidden="true" /> : null}
@@ -99,6 +100,13 @@ function TimelineNodeButton({
       </div>
     </button>
   );
+}
+
+function displayTitleForNode(node: TimelineNode) {
+  if (node.node_type === "revision" && !node.title.startsWith("Author ")) {
+    return `Author ${node.title}`;
+  }
+  return node.title;
 }
 
 function iconForNode(nodeType: TimelineNode["node_type"]) {

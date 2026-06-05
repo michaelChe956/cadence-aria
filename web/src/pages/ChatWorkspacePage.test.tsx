@@ -209,6 +209,115 @@ describe("ChatWorkspacePage", () => {
     expect(scrollIntoView).toHaveBeenCalled();
   });
 
+  it.each([
+    ["story", "Story Spec 生成"],
+    ["design", "Design Spec 生成"],
+    ["work_item", "Work Item 生成"],
+  ])(
+    "scrolls timeline provider nodes to their rendered stream group for %s workspaces",
+    async (workspaceType, title) => {
+      mockWorkspaceWs();
+      const scrolledEntryIds: Array<string | undefined> = [];
+      Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+        configurable: true,
+        value: function scrollIntoView() {
+          scrolledEntryIds.push((this as HTMLElement).dataset.entryId);
+        },
+      });
+      useWorkspaceStore.setState({
+        sessionId: "workspace_session_0001",
+        workspaceType,
+        timelineNodes: [
+          timelineNode({ node_id: "node-1", node_type: "context_note", title: "补充上下文" }),
+          timelineNode({ node_id: "node-2", node_type: "author_run", title }),
+        ],
+        activeNodeId: "node-2",
+        selectedNodeId: "node-1",
+        chatEntries: [
+          chatEntry({
+            id: "entry-context",
+            node_id: "node-1",
+            type: "context_note",
+            role: "user",
+          }),
+          chatEntry({
+            id: "entry-prompt",
+            node_id: "node-2",
+            type: "execution_event",
+            role: "author",
+            content: "Provider Prompt",
+          }),
+          chatEntry({
+            id: "entry-stream",
+            node_id: "node-2",
+            type: "provider_stream",
+            role: "author",
+            content: "生成内容",
+          }),
+        ],
+      });
+
+      render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+      scrolledEntryIds.length = 0;
+
+      await userEvent.click(screen.getByTestId("timeline-node-author_run"));
+
+      expect(scrolledEntryIds).toContain("entry-stream");
+    },
+  );
+
+  it.each(["story", "design", "work_item"])(
+    "scrolls author confirm timeline nodes to their rendered anchor for %s workspaces",
+    async (workspaceType) => {
+      mockWorkspaceWs();
+      const scrolledEntryIds: Array<string | undefined> = [];
+      Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+        configurable: true,
+        value: function scrollIntoView() {
+          scrolledEntryIds.push((this as HTMLElement).dataset.entryId);
+        },
+      });
+      useWorkspaceStore.setState({
+        sessionId: "workspace_session_0001",
+        workspaceType,
+        timelineNodes: [
+          timelineNode({ node_id: "node-1", node_type: "revision", title: "Author 返修 Round 2" }),
+          timelineNode({
+            node_id: "node-2",
+            node_type: "author_confirm",
+            title: "Author 结果确认",
+            summary: "已进入 Review",
+          }),
+        ],
+        activeNodeId: "node-2",
+        selectedNodeId: "node-1",
+        chatEntries: [
+          chatEntry({
+            id: "entry-revision",
+            node_id: "node-1",
+            type: "provider_stream",
+            role: "author",
+            content: "返修内容",
+          }),
+          chatEntry({
+            id: "entry-author-confirm",
+            node_id: "node-2",
+            type: "stage_change",
+            role: "system",
+            content: "Author 结果确认 · 已进入 Review",
+          }),
+        ],
+      });
+
+      render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+      scrolledEntryIds.length = 0;
+
+      await userEvent.click(screen.getByTestId("timeline-node-author_confirm"));
+
+      expect(scrolledEntryIds).toContain("entry-author-confirm");
+    },
+  );
+
   it("renders protocol errors and enables unload guard while running", () => {
     mockWorkspaceWs();
     useWorkspaceStore.setState({

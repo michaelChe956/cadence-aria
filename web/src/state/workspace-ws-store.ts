@@ -302,7 +302,7 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
         selectedNodeId: selectedNodeStillExists ? prev.selectedNodeId : defaultSelectedNodeId,
         nodeDetails: {
           ...detailsForTimelineNodes(timelineNodes, state.session_id),
-          ...(state.timeline_node_details ?? {}),
+          ...normalizeTimelineNodeDetails(state.timeline_node_details ?? {}),
         },
         artifactVersions: state.artifact_versions ?? [],
         pendingDecision: null,
@@ -804,7 +804,7 @@ function ensureNodeDetail(details: Record<string, TimelineNodeDetail>, nodeId: s
 }
 
 function agentRoleFor(node?: TimelineNode): "author" | "reviewer" | null {
-  if (node?.node_type === "author_run") {
+  if (node?.node_type === "author_run" || node?.node_type === "revision") {
     return "author";
   }
   if (node?.node_type === "reviewer_run") {
@@ -821,6 +821,30 @@ function upsertEvent(events: ExecutionEvent[], event: ExecutionEvent) {
   const next = [...events];
   next[index] = { ...next[index], ...event };
   return next;
+}
+
+function normalizeTimelineNodeDetails(details: Record<string, TimelineNodeDetail>) {
+  return Object.fromEntries(
+    Object.entries(details).map(([nodeId, detail]) => [
+      nodeId,
+      {
+        ...detail,
+        execution_events: deduplicateExecutionEvents(detail.execution_events),
+      },
+    ]),
+  );
+}
+
+function deduplicateExecutionEvents(events: ExecutionEvent[]) {
+  return events.reduce<ExecutionEvent[]>((deduped, event) => {
+    const index = deduped.findIndex((existing) => existing.event_id === event.event_id);
+    if (index === -1) {
+      deduped.push(event);
+    } else {
+      deduped[index] = { ...deduped[index], ...event };
+    }
+    return deduped;
+  }, []);
 }
 
 function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
@@ -866,11 +890,15 @@ function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
       continue;
     }
 
-    if (node.node_type !== "author_run" && node.node_type !== "reviewer_run") {
+    const role = chatRoleForNode(node);
+    if (!role) {
+      const marker = timelineAnchorEntry(node, detail);
+      if (marker) {
+        entries.push(marker);
+      }
       continue;
     }
 
-    const role: ChatEntryRole = node.node_type === "author_run" ? "author" : "reviewer";
     const prompt = detail.prompt?.trim();
     if (prompt && !detail.execution_events.some(isProviderPromptEvent)) {
       const provider = providerNameForNode(node, detail);
@@ -1021,6 +1049,54 @@ function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
   }
 
   return entries;
+}
+
+function chatRoleForNode(node: TimelineNode): ChatEntryRole | null {
+  if (node.node_type === "author_run" || node.node_type === "revision") {
+    return "author";
+  }
+  if (node.node_type === "reviewer_run") {
+    return "reviewer";
+  }
+  return null;
+}
+
+function timelineAnchorEntry(node: TimelineNode, detail: TimelineNodeDetail): ChatEntry | null {
+  if (!shouldRenderTimelineAnchor(node)) {
+    return null;
+  }
+
+  return {
+    id: chatEntryId(node.node_id, "timeline-anchor"),
+    type: node.node_type === "start_generation" ? "start_generation" : "stage_change",
+    role: "system",
+    content: timelineAnchorContent(node),
+    timestamp: detail.started_at || node.started_at,
+    node_id: node.node_id,
+    metadata: {
+      node_type: node.node_type,
+      status: node.status,
+      stage: node.stage,
+      summary: node.summary ?? null,
+      snapshot: node.provider_config_snapshot,
+    },
+  };
+}
+
+function shouldRenderTimelineAnchor(node: TimelineNode) {
+  return [
+    "start_generation",
+    "author_confirm",
+    "review_decision",
+    "completed",
+    "aborted_by_disconnect",
+    "protocol_error",
+  ].includes(node.node_type);
+}
+
+function timelineAnchorContent(node: TimelineNode) {
+  const summary = node.summary?.trim();
+  return summary ? `${node.title} · ${summary}` : node.title;
 }
 
 function buildGatePromptEntry(

@@ -412,18 +412,18 @@ fn workflow_discipline_for(session: &WorkspaceSessionRecord) -> String {
         "Superpowers 未启用；仍需显式说明假设、风险、待确认项与下一步。".to_string()
     };
 
-    if matches!(
-        (&session.workspace_type, &session.author_provider),
-        (
-            WorkspaceType::Story | WorkspaceType::Design,
-            ProviderName::ClaudeCode
-        )
-    ) {
-        format!(
-            "{base}\n当前 author provider 是 Claude Code；需要向用户确认时，必须使用结构化 AskUserQuestion，让同一个 Claude Code 进程等待用户回答后继续。禁止输出文本 A/B/C 选择题作为交互替代；若仍输出可解析的文本选择题，daemon 仅作为 text_fallback 异常兜底处理，并在用户回答后只追加 compact QA。"
-        )
-    } else {
-        base
+    match (&session.workspace_type, &session.author_provider) {
+        (WorkspaceType::Story | WorkspaceType::Design, ProviderName::ClaudeCode) => {
+            format!(
+                "{base}\n当前 author provider 是 Claude Code；需要向用户确认时，必须使用结构化 AskUserQuestion，让同一个 Claude Code 进程等待用户回答后继续。禁止输出文本 A/B/C 选择题作为交互替代；若仍输出可解析的文本选择题，daemon 仅作为 text_fallback 异常兜底处理，并在用户回答后只追加 compact QA。"
+            )
+        }
+        (WorkspaceType::Story | WorkspaceType::Design, ProviderName::Codex) => {
+            format!(
+                "{base}\n当前 author provider 是 Codex；需要向用户确认时，必须使用结构化 requestUserInput，让同一个 Codex turn 等待用户回答后继续。禁止输出文本 1/2/3 或 A/B/C 选择题作为交互替代；若仍输出可解析的文本选择题，daemon 仅作为 text_fallback 异常兜底处理，并在用户回答后只追加 compact QA。"
+            )
+        }
+        _ => base,
     }
 }
 
@@ -569,6 +569,63 @@ mod tests {
         assert!(context.contains("禁止输出文本 A/B/C 选择题"));
         assert!(context.contains("text_fallback 异常兜底"));
         assert!(context.contains("只追加 compact QA"));
+    }
+
+    #[test]
+    fn story_workspace_context_codex_author_requires_request_user_input() {
+        let root = tempdir().expect("root");
+        let repo = tempdir().expect("repo");
+        let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+        let repository = RepositoryStore::new(app_paths.clone())
+            .create(CreateRepositoryInput {
+                project_id: "project_0001".to_string(),
+                name: "Repo".to_string(),
+                path: repo.path().to_path_buf(),
+                default_policy_preset: None,
+                default_provider_mode: None,
+            })
+            .expect("repository");
+        IssueStore::new(app_paths.clone())
+            .create(CreateProductIssueInput {
+                project_id: "project_0001".to_string(),
+                repo_id: Some(repository.id.clone()),
+                title: "爬楼梯问题".to_string(),
+                description: Some("使用 Python 实现 climb_stairs".to_string()),
+                change_id: None,
+            })
+            .expect("issue");
+
+        let lifecycle = LifecycleStore::new(app_paths.clone());
+        let story = lifecycle
+            .create_story_spec(CreateStorySpecInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                repository_id: repository.id,
+                title: "爬楼梯问题 Story Spec".to_string(),
+            })
+            .expect("story");
+        let session = lifecycle
+            .create_workspace_session(CreateWorkspaceSessionInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                entity_id: story.id,
+                workspace_type: WorkspaceType::Story,
+                author_provider: ProviderName::Codex,
+                reviewer_provider: ProviderName::ClaudeCode,
+                review_rounds: 1,
+                superpowers_enabled: true,
+                openspec_enabled: true,
+            })
+            .expect("session");
+
+        let session = ensure_workspace_context_message(&app_paths, &lifecycle, session)
+            .expect("workspace context");
+        let context = &session.messages[0].content;
+
+        assert!(context.contains("当前 author provider 是 Codex"));
+        assert!(context.contains("必须使用结构化 requestUserInput"));
+        assert!(context.contains("禁止输出文本 1/2/3 或 A/B/C 选择题"));
+        assert!(context.contains("text_fallback 异常兜底"));
     }
 
     #[test]

@@ -24,8 +24,8 @@ use crate::product::models::{
 };
 use crate::protocol::contracts::{AdapterRole, ProviderType};
 use crate::web::workspace_ws_types::{
-    ArtifactVersion, AuthorDecision, HumanConfirmDecision, ProviderConfigSnapshot, ReviewVerdict,
-    ReviewVerdictType, TimelineNode, TimelineNodeStatus, TimelineNodeType,
+    ArtifactVersion, AuthorDecision, ChoiceOption, HumanConfirmDecision, ProviderConfigSnapshot,
+    ReviewVerdict, ReviewVerdictType, TimelineNode, TimelineNodeStatus, TimelineNodeType,
     WorkspaceStage as WsWorkspaceStage, WsCheckpointDto, WsMessageDto, WsOutMessage,
     WsProviderConfig,
 };
@@ -409,6 +409,8 @@ impl WorkspaceEngine {
             (persisted_timeline_nodes, active_node_id)
         };
         let latest_review_verdict = latest_review_verdict_from_messages(&session.messages);
+        let pending_author_choice =
+            recover_pending_author_choice(&session, active_node_id.as_deref(), &timeline_nodes);
         Self {
             checkpoint_store,
             lifecycle_store: Some(lifecycle_store),
@@ -420,7 +422,7 @@ impl WorkspaceEngine {
             artifact_versions: persisted_artifact_versions,
             latest_review_verdict,
             pending_revision_context: None,
-            pending_author_choice: None,
+            pending_author_choice,
             active_run_id: None,
             stream_buffers: HashMap::new(),
         }
@@ -428,6 +430,26 @@ impl WorkspaceEngine {
 
     pub fn session(&self) -> &WorkspaceSession {
         &self.session
+    }
+
+    pub fn pending_author_choice_request_message(&self) -> Option<WsOutMessage> {
+        let pending = self.pending_author_choice.as_ref()?;
+        Some(WsOutMessage::ChoiceRequest {
+            id: pending.id.clone(),
+            prompt: pending.prompt.clone(),
+            options: pending
+                .options
+                .iter()
+                .map(|option| ChoiceOption {
+                    id: option.id.clone(),
+                    label: option.label.clone(),
+                    description: option.description.clone(),
+                })
+                .collect(),
+            allow_multiple: false,
+            allow_free_text: true,
+            source: ChoiceRequestSource::TextFallback.as_str().to_string(),
+        })
     }
 
     fn provider_resume_session_id(
@@ -1381,7 +1403,7 @@ impl WorkspaceEngine {
             let event_json = execution_event_json(&event);
             let _ = self
                 .update_node_detail(node_id, |detail| {
-                    detail.execution_events.push(event_json);
+                    upsert_execution_event_json(&mut detail.execution_events, event_json);
                 })
                 .await;
         }
@@ -3284,6 +3306,40 @@ fn active_timeline_node_id(nodes: &[TimelineNode]) -> Option<String> {
         .map(|node| node.node_id.clone())
 }
 
+fn recover_pending_author_choice(
+    session: &WorkspaceSession,
+    active_node_id: Option<&str>,
+    timeline_nodes: &[TimelineNode],
+) -> Option<PendingAuthorChoice> {
+    let active_node_id = active_node_id?;
+    let active_node = timeline_nodes
+        .iter()
+        .find(|node| node.node_id == active_node_id)?;
+    if active_node.node_type != TimelineNodeType::AuthorRun
+        || active_node.status != TimelineNodeStatus::Paused
+        || !active_node
+            .summary
+            .as_deref()
+            .is_some_and(|summary| summary.contains("等待用户选择"))
+    {
+        return None;
+    }
+
+    let assistant_message = session
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == "assistant")?;
+    let (prompt, options) =
+        detect_author_choice_request(&assistant_message.content, &session.workspace_type)?;
+    Some(PendingAuthorChoice {
+        id: format!("author_choice_{}", assistant_message.id),
+        prompt,
+        options,
+        source_node_id: Some(active_node_id.to_string()),
+    })
+}
+
 fn workspace_stage_from_ws_stage(stage: &WsWorkspaceStage) -> WorkspaceStage {
     match stage {
         WsWorkspaceStage::PrepareContext => WorkspaceStage::PrepareContext,
@@ -3399,35 +3455,109 @@ fn detect_author_choice_request(
         return None;
     }
 
-    let mut options = Vec::new();
-    let mut prompt_lines = Vec::new();
-    let mut seen_first_option = false;
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
+    if let Some(choice) = detect_explicit_choice_request(content) {
+        return Some(choice);
+    }
+
+    detect_recommendation_choice_request(content)
+}
+
+fn detect_explicit_choice_request(content: &str) -> Option<(String, Vec<ChoiceOptionData>)> {
+    let lines = content.lines().collect::<Vec<_>>();
+    let mut candidates = Vec::new();
+    let mut index = 0;
+
+    while index < lines.len() {
+        let trimmed = lines[index].trim();
+        let Some(first_option) = parse_choice_option_line(trimmed) else {
+            index += 1;
             continue;
-        }
-        if let Some(option) = parse_choice_option_line(trimmed) {
-            seen_first_option = true;
+        };
+
+        let option_start = index;
+        let mut options = vec![first_option];
+        index += 1;
+        while index < lines.len() {
+            let trimmed = lines[index].trim();
+            if trimmed.is_empty() {
+                break;
+            }
+            let Some(option) = parse_choice_option_line(trimmed) else {
+                break;
+            };
             options.push(option);
-            continue;
+            index += 1;
         }
-        if !seen_first_option {
-            prompt_lines.push(trimmed.to_string());
+
+        if options.len() >= 2 {
+            candidates.push((choice_prompt_before_options(&lines, option_start), options));
         }
     }
 
-    if options.len() < 2 {
-        return detect_recommendation_choice_request(content);
-    }
+    candidates.into_iter().last()
+}
 
-    let prompt = prompt_lines.join("\n");
-    let prompt = if prompt.trim().is_empty() {
-        "请选择下一步处理方式。".to_string()
-    } else {
-        prompt.trim().to_string()
+fn choice_prompt_before_options(lines: &[&str], option_start: usize) -> String {
+    let Some((prompt_start, prompt_lines)) = previous_non_empty_block(lines, option_start) else {
+        return default_choice_prompt();
     };
-    Some((prompt, options))
+
+    let mut prompt_parts = Vec::new();
+    if let Some((_, heading_lines)) = previous_non_empty_block(lines, prompt_start)
+        && heading_lines.len() == 1
+        && looks_like_choice_question_heading(&heading_lines[0])
+    {
+        prompt_parts.extend(heading_lines);
+    }
+    prompt_parts.extend(prompt_lines);
+
+    let prompt = prompt_parts.join("\n");
+    let trimmed = prompt.trim();
+    if trimmed.is_empty() {
+        default_choice_prompt()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn previous_non_empty_block(lines: &[&str], before: usize) -> Option<(usize, Vec<String>)> {
+    if before == 0 {
+        return None;
+    }
+
+    let mut index = before;
+    loop {
+        index -= 1;
+        if !lines[index].trim().is_empty() {
+            break;
+        }
+        if index == 0 {
+            return None;
+        }
+    }
+
+    let end = index + 1;
+    while index > 0 && !lines[index - 1].trim().is_empty() {
+        index -= 1;
+    }
+
+    Some((
+        index,
+        lines[index..end]
+            .iter()
+            .map(|line| line.trim().to_string())
+            .collect(),
+    ))
+}
+
+fn looks_like_choice_question_heading(line: &str) -> bool {
+    let normalized = line.trim().trim_matches('*').trim_matches('_').trim();
+    (normalized.starts_with("问题") || normalized.starts_with("Question"))
+        && (normalized.contains('：') || normalized.contains(':'))
+}
+
+fn default_choice_prompt() -> String {
+    "请选择下一步处理方式。".to_string()
 }
 
 fn detect_recommendation_choice_request(content: &str) -> Option<(String, Vec<ChoiceOptionData>)> {
@@ -3759,6 +3889,26 @@ fn execution_event_json(event: &ProviderExecutionEvent) -> serde_json::Value {
     })
 }
 
+fn upsert_execution_event_json(events: &mut Vec<serde_json::Value>, event: serde_json::Value) {
+    let Some(event_id) = event
+        .get("event_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+    else {
+        events.push(event);
+        return;
+    };
+
+    if let Some(existing) = events.iter_mut().find(|existing| {
+        existing.get("event_id").and_then(serde_json::Value::as_str) == Some(event_id.as_str())
+    }) {
+        *existing = event;
+        return;
+    }
+
+    events.push(event);
+}
+
 fn provider_prompt_event(
     node_id: &str,
     prompt: String,
@@ -3901,10 +4051,12 @@ mod tests {
     use crate::product::lifecycle_store::CreateWorkspaceSessionInput;
     use crate::product::models::{
         AgentRole, ArtifactRef, NodeDetail, PermissionEvent, ProviderSnapshot,
+        WorkspaceMessageRecord,
     };
     use crate::protocol::contracts::{AdapterInput, ProviderType};
     use crate::web::workspace_ws_types::{
-        AuthorDecision, ReviewVerdictType, TimelineNodeStatus, TimelineNodeType,
+        AuthorDecision, ProviderConfigSnapshot, ReviewVerdictType, TimelineNode,
+        TimelineNodeStatus, TimelineNodeType, WorkspaceStage as WsWorkspaceStage,
     };
     use std::sync::Mutex;
     use tempfile::TempDir;
@@ -4139,6 +4291,93 @@ mod tests {
             .expect("pending Claude Code text fallback choice prompt");
         assert!(prompt.contains("用户回答了 author 的确认问题"));
         assert!(prompt.contains("A. 返回 0"));
+    }
+
+    #[tokio::test]
+    async fn persistent_engine_recovers_pending_text_fallback_choice_after_restart() {
+        let (_tmp, checkpoint_store) = setup();
+        let app_root = tempfile::tempdir().expect("app root");
+        let app_paths = ProductAppPaths::new(app_root.path().join(".aria"));
+        let lifecycle_store = LifecycleStore::new(app_paths.clone());
+        let session_record = lifecycle_store
+            .create_workspace_session(CreateWorkspaceSessionInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                entity_id: "story_spec_0001".to_string(),
+                workspace_type: WorkspaceType::Story,
+                author_provider: ProviderName::Codex,
+                reviewer_provider: ProviderName::ClaudeCode,
+                review_rounds: 1,
+                superpowers_enabled: true,
+                openspec_enabled: true,
+            })
+            .expect("workspace session");
+        lifecycle_store
+            .replace_workspace_messages(
+                &session_record.id,
+                vec![
+                    WorkspaceMessageRecord {
+                        role: "system".to_string(),
+                        content: "context".to_string(),
+                        created_at: "2026-06-05T00:00:00Z".to_string(),
+                    },
+                    WorkspaceMessageRecord {
+                        role: "user".to_string(),
+                        content: "开始生成".to_string(),
+                        created_at: "2026-06-05T00:00:01Z".to_string(),
+                    },
+                    WorkspaceMessageRecord {
+                        role: "assistant".to_string(),
+                        content: "我先说明一下当前判断。\n\n首次启动检测到缺失 Claude Code/Codex 时，Aria 应采用哪种安装策略？\n\n1. `确认后安装`\n2. `自动静默安装`\n3. `只检查不安装`".to_string(),
+                        created_at: "2026-06-05T00:00:02Z".to_string(),
+                    },
+                ],
+            )
+            .expect("replace messages");
+        let provider_config_snapshot = ProviderConfigSnapshot {
+            author: ProviderName::Codex,
+            reviewer: Some(ProviderName::ClaudeCode),
+            review_rounds: 1,
+        };
+        lifecycle_store
+            .save_timeline_nodes(
+                &session_record.id,
+                &[TimelineNode {
+                    node_id: "timeline_node_002".to_string(),
+                    node_type: TimelineNodeType::AuthorRun,
+                    agent: Some(ProviderName::Codex),
+                    stage: WsWorkspaceStage::Running,
+                    round: None,
+                    status: TimelineNodeStatus::Paused,
+                    title: "Story Spec 生成".to_string(),
+                    summary: Some("等待用户选择".to_string()),
+                    started_at: "2026-06-05T00:00:02Z".to_string(),
+                    completed_at: None,
+                    duration_ms: None,
+                    artifact_ref: None,
+                    provider_config_snapshot,
+                }],
+            )
+            .expect("replace timeline nodes");
+
+        let session = WorkspaceSession::from_record(
+            lifecycle_store
+                .get_workspace_session(&session_record.id)
+                .expect("reload session"),
+        );
+        let (tx, _rx) = mpsc::channel(8);
+        let mut engine =
+            WorkspaceEngine::new_persistent(checkpoint_store, lifecycle_store, tx, session);
+
+        let prompt = engine
+            .take_pending_author_choice_prompt("author_choice_msg_003", vec!["1".to_string()], None)
+            .await
+            .expect("pending choice should be recovered from persisted assistant text");
+
+        assert!(prompt.contains("用户回答了 author 的确认问题"));
+        assert!(prompt.contains("首次启动检测到缺失 Claude Code/Codex"));
+        assert!(prompt.contains("1. `确认后安装`"));
+        assert!(!prompt.contains("我先说明一下当前判断"));
     }
 
     #[test]
@@ -4822,6 +5061,33 @@ mod tests {
         assert!(options[0].label.contains("用户运行 `aria`"));
         assert_eq!(options[1].id, "B");
         assert_eq!(options[2].id, "C");
+    }
+
+    #[test]
+    fn detect_author_choice_request_uses_nearest_question_for_codex_numbered_options() {
+        let output = "我会先读取本仓库规则和必须使用的技能说明，然后根据未决点用结构化提问确认范围，再产出候选 Story Spec。\
+            规则侧已经明确：这次最终只输出候选 Markdown，不落盘、不改 OpenSpec。\
+            结构化提问工具当前不可用，我先用文本方式提问：\n\n\
+            首次启动检测到缺失 Claude Code/Codex 时，Aria 应采用哪种安装策略？\n\n\
+            1. `确认后安装`：弹窗展示将执行的 npm 安装命令，用户点击安装后才执行。\n\
+            2. `自动静默安装`：检测缺失后直接运行 npm 安装。\n\
+            3. `只检查不安装`：只展示缺失与命令，由用户自行安装。\n\n\
+            我建议选 `确认后安装`，因为它满足“自动检查与自动安装”。";
+
+        let (prompt, options) = detect_author_choice_request(output, &WorkspaceType::Story)
+            .expect("Codex numbered text question should become a choice request");
+
+        assert_eq!(
+            prompt,
+            "首次启动检测到缺失 Claude Code/Codex 时，Aria 应采用哪种安装策略？"
+        );
+        assert!(!prompt.contains("我会先读取本仓库规则"));
+        assert!(!prompt.contains("结构化提问工具当前不可用"));
+        assert_eq!(options.len(), 3);
+        assert_eq!(options[0].id, "1");
+        assert!(options[0].label.contains("确认后安装"));
+        assert_eq!(options[1].id, "2");
+        assert_eq!(options[2].id, "3");
     }
 
     struct ReviewVerdictStreamingProvider {
@@ -6871,13 +7137,19 @@ mod tests {
         let detail = lifecycle_store
             .load_node_detail(&engine.session().session_id, &node_id)
             .unwrap();
+        let tool_events = detail
+            .execution_events
+            .iter()
+            .filter(|event| event["event_id"] == "tool_0001")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tool_events.len(),
+            1,
+            "same provider execution event id should be persisted once, got {detail:?}"
+        );
         assert!(
-            detail
-                .execution_events
-                .iter()
-                .any(|event| event["event_id"] == "tool_0001"
-                    && event["status"] == "completed"
-                    && event["output"] == "updated stairs.py"),
+            tool_events[0]["status"] == "completed"
+                && tool_events[0]["output"] == "updated stairs.py",
             "tool result should be persisted to node detail, got {detail:?}"
         );
     }

@@ -51,6 +51,47 @@ describe("ChatEntryList", () => {
 
     expect(scrollIntoView).toHaveBeenCalledTimes(1);
   });
+
+  it("scrolls requested timeline targets immediately for long review threads", () => {
+    const ref = createRef<ChatEntryListHandle>();
+
+    render(
+      <ChatEntryList
+        ref={ref}
+        entries={[
+          makeEntry("round-1-author", "provider_stream", "第一轮作者输出"),
+          makeEntry("round-2-author", "provider_stream", "第二轮作者输出"),
+          makeEntry("round-3-author-confirm", "stage_change", "Author 结果确认 · 已进入 Review"),
+        ]}
+      />,
+    );
+
+    scrollIntoView.mockClear();
+    ref.current?.scrollToEntry("round-3-author-confirm");
+
+    expect(scrollIntoView).toHaveBeenCalledWith({ behavior: "auto", block: "start" });
+  });
+
+  it("scrolls to an execution-only grouped entry on demand", () => {
+    const ref = createRef<ChatEntryListHandle>();
+
+    render(
+      <ChatEntryList
+        ref={ref}
+        entries={[
+          {
+            ...makeEntry("entry-event", "execution_event", "命令失败"),
+            node_id: "node-failed",
+          },
+        ]}
+      />,
+    );
+
+    scrollIntoView.mockClear();
+    ref.current?.scrollToEntry("entry-event");
+
+    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+  });
 });
 
 function makeEntry(id: string, type: ChatEntry["type"], content: string): ChatEntry {
