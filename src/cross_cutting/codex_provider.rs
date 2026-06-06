@@ -32,7 +32,11 @@ impl CodexProvider {
     }
 
     fn build_args(&self) -> Vec<String> {
-        vec!["app-server".to_string()]
+        vec![
+            "app-server".to_string(),
+            "--enable".to_string(),
+            "default_mode_request_user_input".to_string(),
+        ]
     }
 }
 
@@ -904,6 +908,20 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn codex_provider_enables_default_mode_request_user_input_feature() {
+        let provider = CodexProvider::new(PathBuf::from("codex"));
+
+        assert_eq!(
+            provider.build_args(),
+            vec![
+                "app-server".to_string(),
+                "--enable".to_string(),
+                "default_mode_request_user_input".to_string(),
+            ]
+        );
     }
 
     #[tokio::test]
