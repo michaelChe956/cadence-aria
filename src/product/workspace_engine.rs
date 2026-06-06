@@ -24,13 +24,85 @@ use crate::product::models::{
 };
 use crate::protocol::contracts::{AdapterRole, ProviderType};
 use crate::web::workspace_ws_types::{
-    ArtifactVersion, AuthorDecision, ChoiceOption, HumanConfirmDecision, ProviderConfigSnapshot,
-    ReviewVerdict, ReviewVerdictType, TimelineNode, TimelineNodeStatus, TimelineNodeType,
-    WorkspaceStage as WsWorkspaceStage, WsCheckpointDto, WsMessageDto, WsOutMessage,
-    WsProviderConfig,
+    ArtifactVersion, ArtifactVersionSummary, AuthorDecision, ChoiceOption, HumanConfirmDecision,
+    NodeDetailSummary, ProviderConfigSnapshot, ReviewVerdict, ReviewVerdictType, TimelineNode,
+    TimelineNodeStatus, TimelineNodeType, WorkspaceStage as WsWorkspaceStage, WsCheckpointDto,
+    WsMessageDto, WsOutMessage, WsProviderConfig,
 };
 
 const WORKSPACE_PROVIDER_TIMEOUT_SECS: u64 = 3600;
+const SUMMARY_PREVIEW_CHARS: usize = 2048;
+
+fn preview(value: &str) -> String {
+    value.chars().take(SUMMARY_PREVIEW_CHARS).collect()
+}
+
+fn serialized_string<T: serde::Serialize>(value: &T) -> String {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn build_node_detail_summary(detail: &NodeDetail) -> NodeDetailSummary {
+    let prompt = detail.prompt.as_deref().unwrap_or("");
+    let stream = if !detail.streaming_content.is_empty() {
+        detail.streaming_content.as_str()
+    } else {
+        detail
+            .messages
+            .last()
+            .and_then(|message| message.get("content"))
+            .and_then(|content| content.as_str())
+            .unwrap_or("")
+    };
+    let has_large_event_output = detail.execution_events.iter().any(|event| {
+        event
+            .get("output")
+            .and_then(|output| output.as_str())
+            .is_some_and(|output| output.chars().count() > SUMMARY_PREVIEW_CHARS)
+    });
+
+    NodeDetailSummary {
+        node_id: detail.node_id.clone(),
+        node_type: serialized_string(&detail.node_type),
+        status: serialized_string(&detail.status),
+        agent_role: detail.agent_role.as_ref().map(serialized_string),
+        provider_name: detail
+            .provider
+            .as_ref()
+            .map(|provider| provider.name.clone()),
+        prompt_size: prompt.len(),
+        prompt_preview: detail.prompt.as_ref().map(|prompt| preview(prompt)),
+        stream_size: stream.len(),
+        stream_preview: (!stream.is_empty()).then(|| preview(stream)),
+        execution_event_count: detail.execution_events.len(),
+        has_large_outputs: prompt.chars().count() > SUMMARY_PREVIEW_CHARS
+            || stream.chars().count() > SUMMARY_PREVIEW_CHARS
+            || has_large_event_output,
+        artifact_ref: detail
+            .artifact_ref
+            .as_ref()
+            .map(|artifact| format!("{}/v{}", artifact.artifact_id, artifact.version)),
+        started_at: detail.started_at.clone(),
+        ended_at: detail.ended_at.clone(),
+    }
+}
+
+fn build_artifact_version_summary(version: &ArtifactVersion) -> ArtifactVersionSummary {
+    ArtifactVersionSummary {
+        version: version.version,
+        generated_by: version.generated_by.clone(),
+        reviewed_by: version.reviewed_by.clone(),
+        review_verdict: version.review_verdict.clone(),
+        confirmed_by: version.confirmed_by.clone(),
+        is_current: version.is_current,
+        created_at: version.created_at.clone(),
+        source_node_id: version.source_node_id.clone(),
+        markdown_size: version.markdown.len(),
+        markdown_preview: preview(&version.markdown),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkspaceStage {
@@ -2813,7 +2885,7 @@ impl WorkspaceEngine {
             })
             .collect();
 
-        let timeline_node_details = self
+        let timeline_node_summaries = self
             .lifecycle_store
             .as_ref()
             .and_then(|store| {
@@ -2824,12 +2896,17 @@ impl WorkspaceEngine {
                             store
                                 .load_node_detail(&self.session.session_id, &id)
                                 .ok()
-                                .map(|detail| (id, detail))
+                                .map(|detail| (id, build_node_detail_summary(&detail)))
                         })
                         .collect::<HashMap<_, _>>(),
                 )
             })
             .unwrap_or_default();
+        let artifact_version_summaries = self
+            .artifact_versions
+            .iter()
+            .map(build_artifact_version_summary)
+            .collect();
 
         WsOutMessage::SessionState {
             session_id: self.session.session_id.clone(),
@@ -2846,8 +2923,10 @@ impl WorkspaceEngine {
             },
             timeline_nodes: self.timeline_nodes.clone(),
             active_node_id: self.active_node_id.clone(),
-            artifact_versions: self.artifact_versions.clone(),
-            timeline_node_details,
+            artifact_versions: Vec::new(),
+            artifact_version_summaries,
+            timeline_node_details: HashMap::new(),
+            timeline_node_summaries,
             active_run_id: self.active_run_id.clone(),
         }
     }
@@ -6010,6 +6089,21 @@ mod tests {
                 review_rounds: 0,
             },
         });
+        let huge_prompt = "P".repeat(3000);
+        let huge_stream = "S".repeat(3000);
+        let huge_output = "O".repeat(3000);
+        let artifact_markdown = format!("# Artifact\n\n{}", "M".repeat(3000));
+        engine.artifact_versions.push(ArtifactVersion {
+            version: 2,
+            markdown: artifact_markdown.clone(),
+            generated_by: ProviderName::ClaudeCode,
+            reviewed_by: Some(ProviderName::Codex),
+            review_verdict: Some(ReviewVerdictType::Pass),
+            confirmed_by: Some("user".to_string()),
+            is_current: true,
+            created_at: "2026-05-20T14:35:00Z".to_string(),
+            source_node_id: "node-1".to_string(),
+        });
         let detail = NodeDetail {
             node_id: "node-1".to_string(),
             session_id: session_id.clone(),
@@ -6020,10 +6114,10 @@ mod tests {
                 name: "claude_code".to_string(),
                 model: "claude-opus-4-7".to_string(),
             }),
-            prompt: Some("Workspace 类型: Story Spec".to_string()),
+            prompt: Some(huge_prompt.clone()),
             messages: vec![],
-            streaming_content: "生成内容".to_string(),
-            execution_events: vec![],
+            streaming_content: huge_stream.clone(),
+            execution_events: vec![serde_json::json!({"output": huge_output})],
             permission_events: vec![PermissionEvent {
                 request_id: "perm-1".to_string(),
                 request: serde_json::json!({"tool": "shell"}),
@@ -6046,29 +6140,51 @@ mod tests {
         engine.mark_active_run_started("run-1");
 
         let state = engine.build_session_state();
+        let serialized = serde_json::to_string(&state).unwrap();
         match state {
             WsOutMessage::SessionState {
                 timeline_node_details,
+                timeline_node_summaries,
+                artifact_versions,
+                artifact_version_summaries,
                 active_run_id,
                 ..
             } => {
-                assert_eq!(
-                    timeline_node_details
-                        .get("node-1")
-                        .map(|detail| detail.streaming_content.as_str()),
-                    Some("生成内容")
+                assert!(timeline_node_details.is_empty());
+                assert!(artifact_versions.is_empty());
+
+                let summary = timeline_node_summaries.get("node-1").expect("node summary");
+                assert_eq!(summary.node_id, "node-1");
+                assert_eq!(summary.prompt_size, huge_prompt.len());
+                assert!(summary.prompt_preview.as_ref().unwrap().chars().count() <= 2048);
+                assert_ne!(
+                    summary.prompt_preview.as_deref(),
+                    Some(huge_prompt.as_str())
                 );
-                assert_eq!(
-                    timeline_node_details
-                        .get("node-1")
-                        .and_then(|detail| detail.artifact_ref.as_ref())
-                        .map(|artifact| artifact.version),
-                    Some(2)
+                assert_eq!(summary.stream_size, huge_stream.len());
+                assert!(summary.stream_preview.as_ref().unwrap().chars().count() <= 2048);
+                assert_ne!(
+                    summary.stream_preview.as_deref(),
+                    Some(huge_stream.as_str())
                 );
+                assert_eq!(summary.execution_event_count, 1);
+                assert_eq!(summary.artifact_ref.as_deref(), Some("artifact-1/v2"));
+                assert!(summary.has_large_outputs);
+
+                let artifact_summary = artifact_version_summaries
+                    .iter()
+                    .find(|summary| summary.version == 2)
+                    .expect("artifact summary");
+                assert_eq!(artifact_summary.markdown_size, artifact_markdown.len());
+                assert!(artifact_summary.markdown_preview.chars().count() <= 2048);
+                assert_ne!(artifact_summary.markdown_preview, artifact_markdown);
                 assert_eq!(active_run_id.as_deref(), Some("run-1"));
             }
             _ => panic!("expected SessionState"),
         }
+        assert!(!serialized.contains(&huge_prompt));
+        assert!(!serialized.contains(&huge_stream));
+        assert!(!serialized.contains(&artifact_markdown));
     }
 
     #[tokio::test]

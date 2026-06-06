@@ -116,6 +116,22 @@ pub fn build_web_router(state: WebAppState) -> Router {
             post(handlers::workspace_session_confirm),
         )
         .route(
+            "/api/workspace-sessions/{session_id}/timeline-node-details/{node_id}",
+            get(handlers::workspace_session_timeline_node_detail),
+        )
+        .route(
+            "/api/workspace-sessions/{session_id}/timeline-node-details/{node_id}/prompt",
+            get(handlers::workspace_session_timeline_node_prompt),
+        )
+        .route(
+            "/api/workspace-sessions/{session_id}/timeline-node-details/{node_id}/events/{event_id}/output",
+            get(handlers::workspace_session_timeline_event_output),
+        )
+        .route(
+            "/api/workspace-sessions/{session_id}/artifact-versions/{version}",
+            get(handlers::workspace_session_artifact_version),
+        )
+        .route(
             "/api/issues",
             get(handlers::list_issues).post(handlers::create_issue),
         )
@@ -191,6 +207,10 @@ pub fn build_web_router(state: WebAppState) -> Router {
             .route(
                 "/api/test/workspace-sessions/{session_id}/review-fixture",
                 post(test_controls::enable_review_fixture),
+            )
+            .route(
+                "/api/test/workspace-sessions/large-fixture",
+                post(test_controls::seed_large_workspace_fixture),
             )
             .route(
                 "/api/test/permission-timeout",

@@ -672,6 +672,8 @@ export type ArtifactVersion = {
   source_node_id: string;
 };
 
+export type ArtifactVersionSummary = Omit<ArtifactVersion, "markdown"> & { markdown?: string };
+
 export type ProviderSnapshot = {
   name: string;
   model: string;
@@ -707,6 +709,24 @@ export type NodeDetail = {
   base_artifact_ref: ArtifactRef | null;
   started_at: string;
   ended_at: string | null;
+};
+
+export type WorkspaceNodeDetailResponse = unknown;
+
+export type WorkspacePromptResponse = {
+  node_id: string;
+  prompt: string;
+};
+
+export type WorkspaceEventOutputResponse = {
+  node_id: string;
+  event_id: string;
+  output: string;
+};
+
+export type WorkspaceArtifactVersionResponse = {
+  version: number;
+  markdown: string;
 };
 
 export type WsOutMessage =
@@ -769,6 +789,7 @@ export type WsOutMessage =
       timeline_nodes: TimelineNode[];
       active_node_id: string | null;
       artifact_versions: ArtifactVersion[];
+      artifact_version_summaries?: ArtifactVersionSummary[];
       timeline_node_details: Record<string, NodeDetail>;
       active_run_id: string | null;
     }

@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { lexer, type Token, type Tokens } from "marked";
 import type { ChatEntry } from "../../../state/chat-entries";
 import { ChatEntryContainer } from "../ChatEntryContainer";
@@ -20,6 +20,9 @@ const PROVIDER_LABELS: Record<string, string> = {
   fake: "Fake",
 };
 
+const LARGE_MARKDOWN_COLLAPSE_CHARS = 80_000;
+const LARGE_MARKDOWN_PREVIEW_CHARS = 8_000;
+
 function entryTitle(entry: ChatEntry) {
   const base = entry.role === "reviewer" ? "审核者" : "作者";
   const provider = metadataProvider(entry.metadata);
@@ -36,8 +39,20 @@ function providerLabel(provider: string) {
 }
 
 function MarkdownContent({ content }: { content: string }) {
-  const tokens = lexer(normalizeProviderContent(content)).filter(
-    (token) => token.type !== "space" && token.type !== "def",
+  const [expanded, setExpanded] = useState(false);
+  const isLarge = content.length > LARGE_MARKDOWN_COLLAPSE_CHARS;
+  const visibleContent =
+    isLarge && !expanded ? content.slice(0, LARGE_MARKDOWN_PREVIEW_CHARS) : content;
+  const normalizedContent = useMemo(
+    () => normalizeProviderContent(visibleContent),
+    [visibleContent],
+  );
+  const tokens = useMemo(
+    () =>
+      lexer(normalizedContent).filter(
+        (token) => token.type !== "space" && token.type !== "def",
+      ),
+    [normalizedContent],
   );
   if (tokens.length === 0) {
     return <div className="whitespace-pre-wrap text-sm text-[var(--aria-ink)]" />;
@@ -45,7 +60,21 @@ function MarkdownContent({ content }: { content: string }) {
 
   return (
     <div className="space-y-2 break-words text-sm text-[var(--aria-ink)]">
+      {isLarge && !expanded ? (
+        <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          内容较长，当前显示前 {LARGE_MARKDOWN_PREVIEW_CHARS} 字符。完整内容仍可展开查看。
+        </div>
+      ) : null}
       {tokens.map((token, index) => renderBlockToken(token, `block-${index}`))}
+      {isLarge ? (
+        <button
+          className="rounded-md border border-[var(--aria-line)] bg-white px-3 py-1 text-xs font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)]"
+          onClick={() => setExpanded((value) => !value)}
+          type="button"
+        >
+          {expanded ? "收起全文" : "展开全文"}
+        </button>
+      ) : null}
     </div>
   );
 }

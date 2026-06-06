@@ -1,10 +1,13 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { fetchWorkspaceArtifactVersion, fetchWorkspaceEventOutput } from "../api/workspace-content";
 import { useUnloadGuard } from "../hooks/useUnloadGuard";
 import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
 import type { ChatEntry } from "../state/chat-entries";
 import {
+  selectChatPanelState,
+  selectWorkspaceHeaderState,
   useWorkspaceStore,
   type TimelineNode,
 } from "../state/workspace-ws-store";
@@ -16,6 +19,12 @@ vi.mock("../hooks/useWorkspaceWs", () => ({
 
 vi.mock("../hooks/useUnloadGuard", () => ({
   useUnloadGuard: vi.fn(),
+}));
+
+vi.mock("../api/workspace-content", () => ({
+  fetchWorkspaceArtifactVersion: vi.fn(),
+  fetchWorkspaceEventOutput: vi.fn(),
+  fetchWorkspacePrompt: vi.fn(),
 }));
 
 vi.mock("../components/shared/MonacoViewer", () => ({
@@ -113,17 +122,159 @@ describe("ChatWorkspacePage", () => {
     expect(screen.getByTestId("workspace-status-bar")).toHaveTextContent("running");
   });
 
+  it("loads artifact summary markdown through the workspace content cache", async () => {
+    mockWorkspaceWs();
+    let resolveArtifact!: (value: { version: number; markdown: string }) => void;
+    vi.mocked(fetchWorkspaceArtifactVersion).mockReturnValue(
+      new Promise((resolve) => {
+        resolveArtifact = resolve;
+      }),
+    );
+    useWorkspaceStore.setState({
+      sessionId: "workspace_session_0001",
+      workspaceType: "story",
+      stage: "completed",
+      providers: { author: "claude_code", reviewer: "codex" },
+      artifactVersions: [
+        {
+          version: 1,
+          generated_by: "claude_code",
+          created_at: "2026-05-21T10:00:00Z",
+          source_node_id: "node-1",
+        },
+      ],
+      artifactContentCache: {},
+    });
+
+    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("artifact-loading")).toHaveTextContent("正在加载 v1");
+    });
+    resolveArtifact({ version: 1, markdown: "# Loaded Artifact\n\n内容" });
+
+    expect(await screen.findByText(/Loaded Artifact/)).toBeInTheDocument();
+    expect(fetchWorkspaceArtifactVersion).toHaveBeenCalledWith("workspace_session_0001", 1);
+    expect(useWorkspaceStore.getState().artifactContentCache[1]).toBe("# Loaded Artifact\n\n内容");
+  });
+
+  it("does not cache artifact content when the workspace session changes before load resolves", async () => {
+    mockWorkspaceWs();
+    let resolveArtifact!: (value: { version: number; markdown: string }) => void;
+    vi.mocked(fetchWorkspaceArtifactVersion).mockReturnValue(
+      new Promise((resolve) => {
+        resolveArtifact = resolve;
+      }),
+    );
+    useWorkspaceStore.setState({
+      sessionId: "workspace_session_0001",
+      workspaceType: "story",
+      stage: "completed",
+      providers: { author: "claude_code", reviewer: "codex" },
+      artifactVersions: [
+        {
+          version: 1,
+          generated_by: "claude_code",
+          created_at: "2026-05-21T10:00:00Z",
+          source_node_id: "node-1",
+        },
+      ],
+      artifactContentCache: {},
+    });
+
+    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
+    await waitFor(() => expect(fetchWorkspaceArtifactVersion).toHaveBeenCalledWith("workspace_session_0001", 1));
+
+    useWorkspaceStore.setState({ sessionId: "workspace_session_0002", artifactContentCache: {} });
+    resolveArtifact({ version: 1, markdown: "# Stale Artifact" });
+    await Promise.resolve();
+
+    expect(useWorkspaceStore.getState().artifactContentCache[1]).toBeUndefined();
+  });
+
+  it("does not cache chat content when the workspace session changes before load resolves", async () => {
+    mockWorkspaceWs();
+    let resolveOutput!: (value: { node_id: string; event_id: string; output: string }) => void;
+    vi.mocked(fetchWorkspaceEventOutput).mockReturnValue(
+      new Promise((resolve) => {
+        resolveOutput = resolve;
+      }),
+    );
+    useWorkspaceStore.setState({
+      sessionId: "workspace_session_0001",
+      workspaceType: "story",
+      stage: "running",
+      providers: { author: "codex", reviewer: "claude_code" },
+      contentCache: {},
+      chatEntries: [
+        chatEntry({
+          id: "entry-stream",
+          type: "provider_stream",
+          role: "author",
+          content: "stream summary",
+          node_id: "timeline_node_001",
+        }),
+        chatEntry({
+          id: "entry-output",
+          type: "execution_event",
+          role: "author",
+          content: "Execution Output · 按需加载",
+          node_id: "timeline_node_001",
+          content_ref: {
+            kind: "execution_output",
+            nodeId: "timeline_node_001",
+            eventId: "timeline_node_001_output",
+          },
+          metadata: {
+            event_id: "timeline_node_001_output",
+            title: "Execution Output",
+            detail: "Provider execution output 按需加载",
+          },
+        }),
+      ],
+    });
+
+    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: /Execution Output/ }));
+    await waitFor(() => {
+      expect(fetchWorkspaceEventOutput).toHaveBeenCalledWith(
+        "workspace_session_0001",
+        "timeline_node_001",
+        "timeline_node_001_output",
+      );
+    });
+
+    useWorkspaceStore.setState({ sessionId: "workspace_session_0002", contentCache: {} });
+    resolveOutput({
+      node_id: "timeline_node_001",
+      event_id: "timeline_node_001_output",
+      output: "stale output",
+    });
+    await waitFor(() => {
+      expect(fetchWorkspaceEventOutput).toHaveResolved();
+    });
+
+    expect(useWorkspaceStore.getState().contentCache).toEqual({});
+  });
+
   it("starts generation with provider config from the chat input", async () => {
     const api = mockWorkspaceWs();
     useWorkspaceStore.setState({
       sessionId: "workspace_session_0001",
       stage: "prepare_context",
+      providers: { author: "claude_code", reviewer: "codex" },
+      reviewerEnabled: true,
+      reviewRounds: 1,
+    });
+
+    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    useWorkspaceStore.setState({
       providers: { author: "fake", reviewer: "codex" },
       reviewerEnabled: true,
       reviewRounds: 2,
     });
-
-    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
 
     await userEvent.click(screen.getByTestId("start-generation"));
 
@@ -131,6 +282,41 @@ describe("ChatWorkspacePage", () => {
       { author: "fake", reviewer: "codex", review_rounds: 2 },
       true,
     );
+  });
+
+  it("exposes focused selectors for the workspace header and chat panel", () => {
+    useWorkspaceStore.setState({
+      sessionId: "workspace_session_0001",
+      workspaceType: "design",
+      stage: "review_decision",
+      providers: { author: "fake", reviewer: "codex" },
+      reviewRounds: 3,
+      providerLocked: true,
+      providerLockedAt: "2026-06-06T00:00:00Z",
+      superpowersEnabled: true,
+      openSpecEnabled: true,
+      selectedNodeId: "node-1",
+      chatEntries: [chatEntry({ id: "entry-1", node_id: "node-1" })],
+    });
+
+    const state = useWorkspaceStore.getState();
+
+    expect(selectWorkspaceHeaderState(state)).toEqual({
+      sessionId: "workspace_session_0001",
+      workspaceType: "design",
+      providers: { author: "fake", reviewer: "codex" },
+      reviewRounds: 3,
+      stage: "review_decision",
+      providerLocked: true,
+      providerLockedAt: "2026-06-06T00:00:00Z",
+      superpowersEnabled: true,
+      openSpecEnabled: true,
+    });
+    expect(selectChatPanelState(state)).toEqual({
+      chatEntries: [chatEntry({ id: "entry-1", node_id: "node-1" })],
+      stage: "review_decision",
+      selectedNodeId: "node-1",
+    });
   });
 
   it("sends author confirmation decisions from the chat input", async () => {

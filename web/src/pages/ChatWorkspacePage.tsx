@@ -6,7 +6,12 @@ import {
   WifiOff,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type ComponentProps } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps } from "react";
+import {
+  fetchWorkspaceArtifactVersion,
+  fetchWorkspaceEventOutput,
+  fetchWorkspacePrompt,
+} from "../api/workspace-content";
 import type { RevisionPath, WorkspaceProviderName } from "../api/types";
 import { ArtifactPane } from "../components/chat-workspace/ArtifactPane";
 import { ChatEntryList, type ChatEntryListHandle } from "../components/chat-workspace/ChatEntryList";
@@ -21,12 +26,11 @@ import { WorkspaceHeader } from "../components/workspace/WorkspaceHeader";
 import { useStageUI } from "../hooks/useStageUI";
 import { useUnloadGuard } from "../hooks/useUnloadGuard";
 import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
-import type { ChatEntry, ChoiceResponsePayload } from "../state/chat-entries";
+import type { ChatEntry, ChoiceResponsePayload, WorkspaceContentRef } from "../state/chat-entries";
 import {
   useWorkspaceStore,
   type ProviderConfigSnapshot,
   type TimelineNode,
-  type WorkspaceWsState,
 } from "../state/workspace-ws-store";
 
 const UNLOAD_GUARDED_STAGES = new Set(["running", "cross_review", "revision"]);
@@ -54,22 +58,41 @@ export function ChatWorkspacePage({
     reconnectAttemptCount,
     retryNow,
   } = useWorkspaceWs(sessionId);
-  const store = useWorkspaceStore();
-  const stageConfig = useStageUI(store.stage);
+  const storeSessionId = useWorkspaceStore((state) => state.sessionId);
+  const workspaceType = useWorkspaceStore((state) => state.workspaceType);
+  const stage = useWorkspaceStore((state) => state.stage);
+  const providers = useWorkspaceStore((state) => state.providers);
+  const reviewRounds = useWorkspaceStore((state) => state.reviewRounds);
+  const providerLocked = useWorkspaceStore((state) => state.providerLocked);
+  const providerLockedAt = useWorkspaceStore((state) => state.providerLockedAt);
+  const superpowersEnabled = useWorkspaceStore((state) => state.superpowersEnabled);
+  const openSpecEnabled = useWorkspaceStore((state) => state.openSpecEnabled);
+  const chatEntries = useWorkspaceStore((state) => state.chatEntries);
+  const contentCache = useWorkspaceStore((state) => state.contentCache);
+  const selectedNodeId = useWorkspaceStore((state) => state.selectedNodeId);
+  const timelineNodes = useWorkspaceStore((state) => state.timelineNodes);
+  const activeNodeId = useWorkspaceStore((state) => state.activeNodeId);
+  const artifactVersions = useWorkspaceStore((state) => state.artifactVersions);
+  const artifactContentCache = useWorkspaceStore((state) => state.artifactContentCache);
+  const artifact = useWorkspaceStore((state) => state.artifact);
+  const protocolError = useWorkspaceStore((state) => state.protocolError);
+  const acknowledgedAbortedNodes = useWorkspaceStore((state) => state.acknowledgedAbortedNodes);
+  const reviewerEnabled = useWorkspaceStore((state) => state.reviewerEnabled);
+  const stageConfig = useStageUI(stage);
   const chatListRef = useRef<ChatEntryListHandle | null>(null);
   const [activePanel, setActivePanel] = useState<"chat" | "artifact">("chat");
-  const sessionReady = store.sessionId === sessionId;
+  const sessionReady = storeSessionId === sessionId;
   const inputDisabled = !sessionReady || connectionStatus !== "connected";
   const selectedEntryId = useMemo(
     () =>
-      store.selectedNodeId
-        ? scrollTargetEntryIdForNode(store.chatEntries, store.selectedNodeId)
+      selectedNodeId
+        ? scrollTargetEntryIdForNode(chatEntries, selectedNodeId)
         : null,
-    [store.chatEntries, store.selectedNodeId],
+    [chatEntries, selectedNodeId],
   );
   const abortedByDisconnectNode = latestUnacknowledgedAbortedNode(
-    store.timelineNodes,
-    store.acknowledgedAbortedNodes,
+    timelineNodes,
+    acknowledgedAbortedNodes,
   );
 
   useEffect(() => {
@@ -86,14 +109,15 @@ export function ChatWorkspacePage({
   }, [selectedEntryId]);
 
   useUnloadGuard({
-    enabled: UNLOAD_GUARDED_STAGES.has(store.stage),
+    enabled: UNLOAD_GUARDED_STAGES.has(stage),
     message: UNLOAD_GUARD_MESSAGE,
   });
 
   function handleStartGeneration() {
+    const { providers, reviewerEnabled, reviewRounds } = useWorkspaceStore.getState();
     sendStartGeneration(
-      providerConfigFor(store.providers, store.reviewerEnabled, store.reviewRounds),
-      store.reviewerEnabled,
+      providerConfigFor(providers, reviewerEnabled, reviewRounds),
+      reviewerEnabled,
     );
   }
 
@@ -129,14 +153,47 @@ export function ChatWorkspacePage({
     sendAuthorDecision(decision);
   }
 
+  const handleLoadContent = useCallback(async (currentSessionId: string, ref: WorkspaceContentRef) => {
+    if (ref.kind === "execution_output") {
+      const response = await fetchWorkspaceEventOutput(currentSessionId, ref.nodeId, ref.eventId);
+      return response.output;
+    }
+    if (ref.kind === "provider_prompt") {
+      const response = await fetchWorkspacePrompt(currentSessionId, ref.nodeId);
+      return response.prompt;
+    }
+    throw new Error("不支持加载该内容类型");
+  }, []);
+
+  const handleCacheContent = useCallback((key: string, value: string) => {
+    const state = useWorkspaceStore.getState();
+    if (state.sessionId !== sessionId) {
+      return;
+    }
+    state.setContentCacheEntry(key, value);
+  }, [sessionId]);
+
+  const handleLoadArtifactVersion = useCallback(async (version: number) => {
+    const response = await fetchWorkspaceArtifactVersion(sessionId, version);
+    return response.markdown;
+  }, [sessionId]);
+
+  const handleCacheArtifactContent = useCallback((version: number, value: string) => {
+    const state = useWorkspaceStore.getState();
+    if (state.sessionId !== sessionId) {
+      return;
+    }
+    state.setArtifactContentCacheEntry(version, value);
+  }, [sessionId]);
+
   const providerPanel = (
     <ProviderConfigDialogButton
-      providers={store.providers}
+      providers={providers}
       editable={stageConfig.providerEditable}
       onSelectProvider={(role, provider) => selectProvider(role, provider)}
-      reviewerEnabled={store.reviewerEnabled}
+      reviewerEnabled={reviewerEnabled}
       onToggleReviewer={(enabled) => useWorkspaceStore.setState({ reviewerEnabled: enabled })}
-      rounds={store.reviewRounds}
+      rounds={reviewRounds}
       onChangeRounds={(rounds) =>
         useWorkspaceStore.setState({ reviewRounds: clampReviewRounds(rounds) })
       }
@@ -155,7 +212,7 @@ export function ChatWorkspacePage({
           返回
         </button>
         <div className="min-w-0 flex-1 truncate text-center text-sm font-semibold text-[var(--aria-ink)]">
-          {entityTypeLabel(store.workspaceType)} #{store.sessionId ?? sessionId}
+          {entityTypeLabel(workspaceType)} #{storeSessionId ?? sessionId}
         </div>
         <div className="flex shrink-0 items-center gap-2">
           {providerPanel}
@@ -190,19 +247,19 @@ export function ChatWorkspacePage({
       />
 
       <WorkspaceHeader
-        entityType={entityTypeLabel(store.workspaceType)}
-        entityId={store.sessionId ?? sessionId}
-        author={store.providers?.author ?? "claude_code"}
-        reviewer={store.providers?.reviewer ?? null}
-        rounds={store.reviewRounds}
-        stage={store.stage}
-        providerLocked={store.providerLocked}
-        lockedAt={store.providerLockedAt}
-        superpowers={store.superpowersEnabled}
-        openSpec={store.openSpecEnabled}
+        entityType={entityTypeLabel(workspaceType)}
+        entityId={storeSessionId ?? sessionId}
+        author={providers?.author ?? "claude_code"}
+        reviewer={providers?.reviewer ?? null}
+        rounds={reviewRounds}
+        stage={stage}
+        providerLocked={providerLocked}
+        lockedAt={providerLockedAt}
+        superpowers={superpowersEnabled}
+        openSpec={openSpecEnabled}
       />
 
-      {store.protocolError ? (
+      {protocolError ? (
         <div
           role="alert"
           data-testid="protocol-error-alert"
@@ -210,18 +267,18 @@ export function ChatWorkspacePage({
         >
           <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
           <div className="min-w-0 break-words">
-            <span className="font-mono text-xs font-semibold">{store.protocolError.code}</span>
+            <span className="font-mono text-xs font-semibold">{protocolError.code}</span>
             <span className="mx-2 text-red-300">/</span>
-            <span>{store.protocolError.message}</span>
+            <span>{protocolError.message}</span>
           </div>
         </div>
       ) : null}
 
       <main className="grid min-h-0 flex-1 grid-cols-1 md:grid-cols-[16rem_minmax(0,1fr)]">
         <TimelineNodeList
-          nodes={store.timelineNodes}
-          activeNodeId={store.activeNodeId}
-          selectedNodeId={store.selectedNodeId}
+          nodes={timelineNodes}
+          activeNodeId={activeNodeId}
+          selectedNodeId={selectedNodeId}
           onSelectNode={handleSelectNode}
           className="border-b border-[var(--aria-line)] md:border-b-0 md:border-r"
         />
@@ -229,28 +286,36 @@ export function ChatWorkspacePage({
           <WorkspacePanelTabs
             activePanel={activePanel}
             onSelectPanel={setActivePanel}
-            artifactCount={store.artifactVersions.length}
+            artifactCount={artifactVersions.length}
           />
           {activePanel === "artifact" ? (
             <ArtifactPane
-              artifactVersions={store.artifactVersions}
-              artifact={store.artifact}
+              artifactVersions={artifactVersions}
+              artifact={artifact}
+              sessionId={sessionReady ? sessionId : null}
+              artifactContentCache={artifactContentCache}
+              loadArtifactVersion={handleLoadArtifactVersion}
+              onCacheArtifactContent={handleCacheArtifactContent}
               className="min-h-0 border-l-0"
             />
           ) : (
             <div className="grid min-h-0 grid-rows-[minmax(0,1fr)_auto]">
               <ChatEntryList
                 ref={chatListRef}
-                entries={store.chatEntries}
+                entries={chatEntries}
                 onPermissionResponse={handlePermissionResponse}
                 onChoiceResponse={handleChoiceResponse}
                 onSelectRevisionPath={
-                  store.stage === "review_decision" ? handleSelectRevisionPath : undefined
+                  stage === "review_decision" ? handleSelectRevisionPath : undefined
                 }
                 onHumanConfirm={handleHumanConfirm}
+                sessionId={sessionReady ? sessionId : null}
+                contentCache={contentCache}
+                loadContent={handleLoadContent}
+                onCacheContent={handleCacheContent}
               />
               <ChatInputBar
-                stage={store.stage}
+                stage={stage}
                 disabled={inputDisabled}
                 onSendContextNote={sendContextNote}
                 onStartGeneration={handleStartGeneration}
@@ -263,7 +328,12 @@ export function ChatWorkspacePage({
         </section>
       </main>
 
-      <StatusBar state={store} connectionStatus={connectionStatus} />
+      <StatusBar
+        stage={stage}
+        timelineNodes={timelineNodes}
+        activeNodeId={activeNodeId}
+        connectionStatus={connectionStatus}
+      />
     </div>
   );
 }
@@ -360,22 +430,26 @@ function ProviderConfigDialogButton(props: ProviderConfigDialogButtonProps) {
 }
 
 function StatusBar({
-  state,
+  stage,
+  timelineNodes,
+  activeNodeId,
   connectionStatus,
 }: {
-  state: WorkspaceWsState;
+  stage: string;
+  timelineNodes: TimelineNode[];
+  activeNodeId: string | null;
   connectionStatus: string;
 }) {
   const activeNode =
-    state.timelineNodes.find((node) => node.node_id === state.activeNodeId) ??
-    state.timelineNodes.at(-1) ??
+    timelineNodes.find((node) => node.node_id === activeNodeId) ??
+    timelineNodes.at(-1) ??
     null;
   return (
     <footer
       data-testid="workspace-status-bar"
       className="flex h-8 shrink-0 items-center justify-between gap-3 border-t border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 text-xs text-[var(--aria-ink-muted)]"
     >
-      <span>阶段 {state.stage}</span>
+      <span>阶段 {stage}</span>
       <span>连接 {connectionStatus}</span>
       <span>耗时 {activeNode ? elapsedText(activeNode) : "--"}</span>
     </footer>

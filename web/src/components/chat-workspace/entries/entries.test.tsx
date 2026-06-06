@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { ChatEntry } from "../../../state/chat-entries";
 import { ChatEntryRenderer } from "../ChatEntryRenderer";
@@ -6,7 +7,7 @@ import { ErrorEntry } from "./ErrorEntry";
 import { ExecutionEventEntry } from "./ExecutionEventEntry";
 import { PermissionRequestEntry } from "./PermissionRequestEntry";
 import { PermissionResponseEntry } from "./PermissionResponseEntry";
-import { ProviderStreamEntry } from "./ProviderStreamEntry";
+import { MarkdownContent, ProviderStreamEntry } from "./ProviderStreamEntry";
 import { UserContextEntry } from "./UserContextEntry";
 
 describe("chat workspace entries", () => {
@@ -107,6 +108,22 @@ describe("chat workspace entries", () => {
     expect(prose.textContent).toBe(
       "仓库规则已确认。\n我现在进入红灯阶段。\n红灯已成立：python -m unittest discover -s tests 因 ModuleNotFoundError 失败。\n绿色阶段测试已通过。",
     );
+  });
+
+  it("collapses very large markdown content until expanded", async () => {
+    const huge = "intro\n" + "line\n".repeat(30_000) + "\n# Full Title\nOnly after expansion";
+
+    render(<MarkdownContent content={huge} />);
+
+    expect(screen.getByText(/内容较长/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /展开全文/ })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Full Title" })).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: /展开全文/ }));
+
+    expect(screen.getByRole("heading", { name: "Full Title" })).toBeInTheDocument();
+    expect(screen.getByText("Only after expansion")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /收起全文/ })).toBeInTheDocument();
   });
 
   it("renders execution event entries with command detail", () => {

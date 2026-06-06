@@ -110,7 +110,9 @@ pub enum WsOutMessage {
         timeline_nodes: Vec<TimelineNode>,
         active_node_id: Option<String>,
         artifact_versions: Vec<ArtifactVersion>,
+        artifact_version_summaries: Vec<ArtifactVersionSummary>,
         timeline_node_details: HashMap<String, NodeDetail>,
+        timeline_node_summaries: HashMap<String, NodeDetailSummary>,
         active_run_id: Option<String>,
     },
     Error {
@@ -394,6 +396,38 @@ pub struct ArtifactVersion {
     pub source_node_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeDetailSummary {
+    pub node_id: String,
+    pub node_type: String,
+    pub status: String,
+    pub agent_role: Option<String>,
+    pub provider_name: Option<String>,
+    pub prompt_size: usize,
+    pub prompt_preview: Option<String>,
+    pub stream_size: usize,
+    pub stream_preview: Option<String>,
+    pub execution_event_count: usize,
+    pub has_large_outputs: bool,
+    pub artifact_ref: Option<String>,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactVersionSummary {
+    pub version: u32,
+    pub generated_by: ProviderName,
+    pub reviewed_by: Option<ProviderName>,
+    pub review_verdict: Option<ReviewVerdictType>,
+    pub confirmed_by: Option<String>,
+    pub is_current: bool,
+    pub created_at: String,
+    pub source_node_id: String,
+    pub markdown_size: usize,
+    pub markdown_preview: String,
+}
+
 fn default_true() -> bool {
     true
 }
@@ -593,7 +627,9 @@ mod tests {
             timeline_nodes: Vec::new(),
             active_node_id: Some("node_review_decision_001".to_string()),
             artifact_versions: Vec::new(),
+            artifact_version_summaries: Vec::new(),
             timeline_node_details: std::collections::HashMap::new(),
+            timeline_node_summaries: std::collections::HashMap::new(),
             active_run_id: None,
         })
         .unwrap();

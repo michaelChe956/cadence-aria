@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type { NodeDetail, WorkspaceProviderName } from "../api/types";
+import type { WorkspaceContentRef } from "./chat-entries";
 import type {
   ChatEntry,
   ChatEntryResolution,
@@ -108,9 +109,9 @@ export interface ReviewVerdict {
   summary: string;
 }
 
-export interface ArtifactVersion {
+export interface ArtifactVersionSummary {
   version: number;
-  markdown: string;
+  markdown?: string;
   generated_by: WorkspaceProviderName;
   reviewed_by?: WorkspaceProviderName | null;
   review_verdict?: ReviewVerdictType | null;
@@ -120,7 +121,28 @@ export interface ArtifactVersion {
   source_node_id: string;
 }
 
+export interface ArtifactVersion extends ArtifactVersionSummary {
+  markdown: string;
+}
+
 export type TimelineNodeDetail = NodeDetail;
+
+export interface NodeDetailSummary {
+  node_id: string;
+  node_type: string;
+  status: string;
+  agent_role?: string | null;
+  provider_name?: string | null;
+  prompt_size: number;
+  prompt_preview?: string | null;
+  stream_size: number;
+  stream_preview?: string | null;
+  execution_event_count: number;
+  has_large_outputs: boolean;
+  artifact_ref?: string | null;
+  started_at: string;
+  ended_at?: string | null;
+}
 
 export interface ReviewDecisionRequired {
   node_id: string;
@@ -147,6 +169,7 @@ export interface WorkspaceWsState {
   providers: WsProviderConfig | null;
   connectionStatus: WsConnectionStatus;
   streamingContent: string;
+  streamBuffers: Record<string, { chunks: string[]; visibleText: string; role: ChatEntryRole }>;
   activeStreamEntryId: string | null;
   pendingPermissions: PermissionRequest[];
   providerStatus: ProviderStatus;
@@ -155,7 +178,10 @@ export interface WorkspaceWsState {
   activeNodeId: string | null;
   selectedNodeId: string | null;
   nodeDetails: Record<string, TimelineNodeDetail>;
-  artifactVersions: ArtifactVersion[];
+  nodeSummaries: Record<string, NodeDetailSummary>;
+  contentCache: Record<string, string>;
+  artifactContentCache: Record<number, string>;
+  artifactVersions: ArtifactVersionSummary[];
   pendingDecision: ReviewDecisionRequired | null;
   error: string | null;
   activeRunId: string | null;
@@ -184,10 +210,17 @@ export interface WorkspaceWsActions {
     timeline_nodes?: TimelineNode[];
     active_node_id?: string | null;
     artifact_versions?: ArtifactVersion[];
+    artifact_version_summaries?: ArtifactVersionSummary[];
     timeline_node_details?: Record<string, TimelineNodeDetail>;
+    timeline_node_summaries?: Record<string, NodeDetailSummary>;
     active_run_id?: string | null;
   }) => void;
   appendStreamChunk: (content: string, nodeId?: string | null) => void;
+  appendBufferedStreamChunk: (content: string, nodeId: string, role: ChatEntryRole) => void;
+  flushBufferedStream: (nodeId: string) => void;
+  completeBufferedStream: (nodeId: string, messageId: string, checkpointId: string) => void;
+  clearBufferedStream: (nodeId: string) => void;
+  clearAllStreamBuffers: () => void;
   completeMessage: (messageId: string, checkpointId: string, nodeId?: string | null) => void;
   appendChatEntry: (entry: ChatEntry) => void;
   resolveGateEntry: (resolution: ChatEntryResolution) => void;
@@ -205,6 +238,8 @@ export interface WorkspaceWsActions {
   ) => void;
   setSelectedNode: (nodeId: string | null) => void;
   setNodeVerdict: (nodeId: string, verdict: ReviewVerdict) => void;
+  setContentCacheEntry: (key: string, value: string) => void;
+  setArtifactContentCacheEntry: (version: number, value: string) => void;
   setPendingDecision: (decision: ReviewDecisionRequired | null) => void;
   setConnectionStatus: (status: WsConnectionStatus) => void;
   addPermissionRequest: (request: PermissionRequest) => void;
@@ -244,6 +279,7 @@ const initialState: WorkspaceWsState = {
   providers: null,
   connectionStatus: "disconnected",
   streamingContent: "",
+  streamBuffers: {},
   activeStreamEntryId: null,
   pendingPermissions: [],
   providerStatus: "starting",
@@ -252,6 +288,9 @@ const initialState: WorkspaceWsState = {
   activeNodeId: null,
   selectedNodeId: null,
   nodeDetails: {},
+  nodeSummaries: {},
+  contentCache: {},
+  artifactContentCache: {},
   artifactVersions: [],
   pendingDecision: null,
   error: null,
@@ -280,7 +319,8 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
       const defaultSelectedNodeId =
         state.active_node_id ?? timelineNodes[timelineNodes.length - 1]?.node_id ?? null;
 
-      return {
+      const nextState: WorkspaceWsState = {
+        ...prev,
         sessionId: state.session_id,
         workspaceType: state.workspace_type,
         stage: state.stage,
@@ -293,6 +333,7 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
         artifact: state.artifact,
         providers: state.providers,
         streamingContent: "",
+        streamBuffers: {},
         activeStreamEntryId: null,
         pendingPermissions: [],
         providerStatus: "starting",
@@ -304,12 +345,19 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
           ...detailsForTimelineNodes(timelineNodes, state.session_id),
           ...normalizeTimelineNodeDetails(state.timeline_node_details ?? {}),
         },
-        artifactVersions: state.artifact_versions ?? [],
+        nodeSummaries: state.timeline_node_summaries ?? {},
+        contentCache: prev.sessionId === state.session_id ? prev.contentCache : {},
+        artifactContentCache: prev.sessionId === state.session_id ? prev.artifactContentCache : {},
+        artifactVersions: state.artifact_version_summaries ?? state.artifact_versions ?? [],
         pendingDecision: null,
         pendingReviewDecision: null,
         pendingReviewerSummary: null,
         error: null,
         activeRunId: state.active_run_id ?? null,
+      };
+      return {
+        ...nextState,
+        chatEntries: buildChatEntries(nextState),
       };
     }),
 
@@ -323,6 +371,76 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
       detail.streaming_content += content;
       return { nodeDetails: details };
     }),
+
+  appendBufferedStreamChunk: (content, nodeId, role) =>
+    set((prev) => {
+      const existing = prev.streamBuffers[nodeId] ?? { chunks: [], visibleText: "", role };
+      return {
+        streamBuffers: {
+          ...prev.streamBuffers,
+          [nodeId]: {
+            ...existing,
+            role,
+            chunks: [...existing.chunks, content],
+          },
+        },
+      };
+    }),
+
+  flushBufferedStream: (nodeId) =>
+    set((prev) => {
+      const buffer = prev.streamBuffers[nodeId];
+      if (!buffer || buffer.chunks.length === 0) {
+        return {};
+      }
+      const appended = buffer.chunks.join("");
+      const visibleText = buffer.visibleText + appended;
+      const entryId = chatEntryId(nodeId, "stream-active");
+      const index = prev.chatEntries.findIndex((entry) => entry.id === entryId);
+      const provider =
+        prev.timelineNodes.find((candidate) => candidate.node_id === nodeId)?.agent ??
+        prev.nodeDetails[nodeId]?.provider?.name ??
+        null;
+      const entry: ChatEntry = {
+        id: entryId,
+        type: "provider_stream",
+        role: buffer.role,
+        content: visibleText,
+        timestamp: new Date().toISOString(),
+        node_id: nodeId,
+        content_ref: { kind: "node_stream", nodeId },
+        metadata: provider ? { provider } : undefined,
+      };
+      const chatEntries = index === -1 ? [...prev.chatEntries, entry] : [...prev.chatEntries];
+      if (index !== -1) {
+        chatEntries[index] = entry;
+      }
+      return {
+        chatEntries,
+        streamBuffers: {
+          ...prev.streamBuffers,
+          [nodeId]: { ...buffer, chunks: [], visibleText },
+        },
+        activeStreamEntryId: entryId,
+      };
+    }),
+
+  completeBufferedStream: (nodeId, messageId, checkpointId) => {
+    get().flushBufferedStream(nodeId);
+    get().completeMessage(messageId, checkpointId, nodeId);
+    get().clearBufferedStream(nodeId);
+  },
+
+  clearBufferedStream: (nodeId) =>
+    set((prev) => {
+      if (!prev.streamBuffers[nodeId]) {
+        return {};
+      }
+      const { [nodeId]: _removed, ...streamBuffers } = prev.streamBuffers;
+      return { streamBuffers };
+    }),
+
+  clearAllStreamBuffers: () => set({ streamBuffers: {} }),
 
   completeMessage: (messageId, checkpointId, nodeId) =>
     set((prev) => {
@@ -524,6 +642,12 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
       };
     }),
 
+  setContentCacheEntry: (key, value) =>
+    set((prev) => ({ contentCache: { ...prev.contentCache, [key]: value } })),
+
+  setArtifactContentCacheEntry: (version, value) =>
+    set((prev) => ({ artifactContentCache: { ...prev.artifactContentCache, [version]: value } })),
+
   setPendingDecision: (decision) =>
     set((prev) => {
       if (!decision) {
@@ -681,7 +805,7 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
 
   setError: (error) => set({ error }),
 
-  clearStreaming: () => set({ streamingContent: "", activeStreamEntryId: null }),
+  clearStreaming: () => set({ streamingContent: "", streamBuffers: {}, activeStreamEntryId: null }),
 
   selectNodeDetail: (nodeId) => {
     if (!nodeId) {
@@ -715,6 +839,37 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
 
   reset: () => set(initialState),
 }));
+
+export const selectWorkspaceHeaderState = (state: WorkspaceWsState) => ({
+  sessionId: state.sessionId,
+  workspaceType: state.workspaceType,
+  providers: state.providers,
+  reviewRounds: state.reviewRounds,
+  stage: state.stage,
+  providerLocked: state.providerLocked,
+  providerLockedAt: state.providerLockedAt,
+  superpowersEnabled: state.superpowersEnabled,
+  openSpecEnabled: state.openSpecEnabled,
+});
+
+export function workspaceContentCacheKey(ref: WorkspaceContentRef) {
+  if (ref.kind === "provider_prompt") {
+    return `provider_prompt:${ref.nodeId}`;
+  }
+  if (ref.kind === "execution_output") {
+    return `execution_output:${ref.nodeId}:${ref.eventId}`;
+  }
+  if (ref.kind === "node_stream") {
+    return `node_stream:${ref.nodeId}`;
+  }
+  return null;
+}
+
+export const selectChatPanelState = (state: WorkspaceWsState) => ({
+  chatEntries: state.chatEntries,
+  stage: state.stage,
+  selectedNodeId: state.selectedNodeId,
+});
 
 export function selectPrepareContextNotes(state: WorkspaceWsState) {
   return state.timelineNodes
@@ -899,6 +1054,18 @@ function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
       continue;
     }
 
+    const summary = state.nodeSummaries[node.node_id];
+    const hasPersistedDetailContent = Boolean(
+      detail.prompt?.trim() ||
+        detail.streaming_content.trim() ||
+        detail.messages.length > 0 ||
+        detail.execution_events.length > 0,
+    );
+    if (!hasPersistedDetailContent && summary) {
+      entries.push(...providerSummaryEntries(node, summary, role));
+      continue;
+    }
+
     const prompt = detail.prompt?.trim();
     if (prompt && !detail.execution_events.some(isProviderPromptEvent)) {
       const provider = providerNameForNode(node, detail);
@@ -906,7 +1073,7 @@ function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
         id: chatEntryId(node.node_id, "provider-prompt"),
         type: "execution_event",
         role,
-        content: providerPromptContent(node.title),
+        content: `${providerPromptContent(node.title)} · ${formatContentSize(prompt.length)}`,
         timestamp: detail.started_at || node.started_at,
         node_id: node.node_id,
         metadata: {
@@ -919,10 +1086,12 @@ function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
           detail: "发送给 Workspace provider 的完整提示词",
           command: null,
           cwd: null,
-          output: prompt,
           exit_code: null,
           ...(provider ? { provider } : {}),
         },
+        content_ref: { kind: "provider_prompt", nodeId: node.node_id },
+        content_size: prompt.length,
+        has_full_content: true,
       });
     }
 
@@ -946,6 +1115,21 @@ function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
     for (const event of detail.execution_events) {
       const timestamp = detail.started_at || node.started_at;
       const provider = providerNameForNode(node, detail, event);
+      if (isProviderPromptEvent(event)) {
+        entries.push({
+          id: chatEntryId(node.node_id, `execution-${event.event_id}`),
+          type: "execution_event",
+          role,
+          content: `${executionEventContent(event, node.title)} · ${formatContentSize(event.output.length)}`,
+          timestamp,
+          node_id: node.node_id,
+          metadata: providerPromptEventMetadata(event, provider),
+          content_ref: { kind: "provider_prompt", nodeId: node.node_id },
+          content_size: event.output.length,
+          has_full_content: true,
+        });
+        continue;
+      }
       entries.push({
         id: chatEntryId(node.node_id, `execution-${event.event_id}`),
         type: "execution_event",
@@ -954,6 +1138,9 @@ function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
         timestamp,
         node_id: node.node_id,
         metadata: provider ? { ...event, provider } : { ...event },
+        content_ref: { kind: "execution_output", nodeId: node.node_id, eventId: event.event_id },
+        content_size: event.output?.length,
+        has_full_content: typeof event.output === "string",
       });
     }
 
@@ -1013,13 +1200,19 @@ function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
         node_id: node.node_id,
         metadata: {
           version: artifact.version,
-          markdown: artifact.markdown,
           generated_by: artifact.generated_by,
           reviewed_by: artifact.reviewed_by ?? null,
           review_verdict: artifact.review_verdict ?? null,
           confirmed_by: artifact.confirmed_by ?? null,
           source_node_id: artifact.source_node_id,
         },
+        content_ref: {
+          kind: "artifact_version",
+          version: artifact.version,
+          sourceNodeId: artifact.source_node_id,
+        },
+        content_size: typeof artifact.markdown === "string" ? artifact.markdown.length : undefined,
+        has_full_content: typeof artifact.markdown === "string",
       });
     }
 
@@ -1046,6 +1239,88 @@ function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
   const gatePrompt = buildGatePromptEntry(state, entries);
   if (gatePrompt) {
     entries.push(gatePrompt);
+  }
+
+  return entries;
+}
+
+function providerSummaryEntries(
+  node: TimelineNode,
+  summary: NodeDetailSummary,
+  role: ChatEntryRole,
+): ChatEntry[] {
+  const entries: ChatEntry[] = [];
+  const provider = summary.provider_name ?? node.agent ?? null;
+  const timestamp = summary.started_at || node.started_at;
+  const streamPreview = summary.stream_preview?.trim();
+
+  if (streamPreview) {
+    entries.push({
+      id: chatEntryId(node.node_id, "stream-summary"),
+      type: "provider_stream",
+      role,
+      content: streamPreview,
+      timestamp,
+      node_id: node.node_id,
+      metadata: provider ? { provider } : undefined,
+    });
+  }
+
+  if (summary.prompt_size > 0) {
+    entries.push({
+      id: chatEntryId(node.node_id, "provider-prompt-summary"),
+      type: "execution_event",
+      role,
+      content: `${providerPromptContent(node.title)} · ${formatContentSize(summary.prompt_size)}`,
+      timestamp,
+      node_id: node.node_id,
+      metadata: {
+        event_id: `${node.node_id}_prompt`,
+        node_id: node.node_id,
+        agent: provider,
+        kind: "output",
+        status: summary.status,
+        title: "Provider Prompt",
+        detail: "发送给 Workspace provider 的完整提示词",
+        command: null,
+        cwd: null,
+        exit_code: null,
+        ...(provider ? { provider } : {}),
+      },
+      content_ref: { kind: "provider_prompt", nodeId: node.node_id },
+      content_size: summary.prompt_size,
+      has_full_content: true,
+    });
+  }
+
+  if (summary.has_large_outputs || summary.execution_event_count > 0) {
+    entries.push({
+      id: chatEntryId(node.node_id, "execution-output-summary"),
+      type: "execution_event",
+      role,
+      content: `Execution Output · ${summary.has_large_outputs ? "按需加载" : "摘要"}`,
+      timestamp,
+      node_id: node.node_id,
+      metadata: {
+        event_id: `${node.node_id}_output`,
+        node_id: node.node_id,
+        agent: provider,
+        kind: "output",
+        status: summary.status,
+        title: "Execution Output",
+        detail: "Provider execution output 按需加载",
+        command: null,
+        cwd: null,
+        exit_code: null,
+        ...(provider ? { provider } : {}),
+      },
+      content_ref: {
+        kind: "execution_output",
+        nodeId: node.node_id,
+        eventId: `${node.node_id}_output`,
+      },
+      has_full_content: true,
+    });
   }
 
   return entries;
@@ -1165,8 +1440,33 @@ function providerPromptContent(nodeTitle: string) {
   return `${nodeTitle} · Provider Prompt`;
 }
 
-function isProviderPromptEvent(event: Pick<ExecutionEvent, "title" | "output">) {
+function formatContentSize(chars: number) {
+  if (chars < 1024) {
+    return `${chars} 字符`;
+  }
+  return `约 ${Math.ceil(chars / 1024)}KB`;
+}
+
+function isProviderPromptEvent(
+  event: Pick<ExecutionEvent, "title" | "output">,
+): event is Pick<ExecutionEvent, "title" | "output"> & { output: string } {
   return event.title === "Provider Prompt" && typeof event.output === "string";
+}
+
+function providerPromptEventMetadata(event: ExecutionEvent, provider?: string | null) {
+  return {
+    event_id: event.event_id,
+    node_id: event.node_id ?? null,
+    agent: event.agent ?? null,
+    kind: event.kind,
+    status: event.status,
+    title: event.title,
+    detail: event.detail ?? null,
+    command: event.command ?? null,
+    cwd: event.cwd ?? null,
+    exit_code: event.exit_code ?? null,
+    ...(provider ? { provider } : {}),
+  };
 }
 
 function providerNameForNode(node: TimelineNode, detail: TimelineNodeDetail, event?: ExecutionEvent) {

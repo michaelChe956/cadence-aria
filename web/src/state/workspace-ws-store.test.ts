@@ -347,6 +347,40 @@ describe("workspace ws store", () => {
     expect(useWorkspaceStore.getState().selectedNodeId).toBe("timeline_node_001");
   });
 
+  it("uses artifact version summaries from session snapshots without requiring markdown", () => {
+    const store = useWorkspaceStore.getState();
+
+    store.setSessionState({
+      session_id: "session_artifact_summaries",
+      workspace_type: "story",
+      stage: "completed",
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "claude_code", reviewer: "codex" },
+      timeline_nodes: [],
+      active_node_id: null,
+      artifact_versions: [],
+      artifact_version_summaries: [
+        {
+          version: 1,
+          generated_by: "claude_code",
+          reviewed_by: null,
+          review_verdict: null,
+          confirmed_by: null,
+          is_current: true,
+          created_at: "2026-05-26T10:01:00Z",
+          source_node_id: "timeline_node_001",
+        },
+      ],
+    });
+
+    expect(useWorkspaceStore.getState().artifactVersions).toEqual([
+      expect.objectContaining({ version: 1, source_node_id: "timeline_node_001" }),
+    ]);
+    expect("markdown" in useWorkspaceStore.getState().artifactVersions[0]).toBe(false);
+  });
+
   it("preserves a valid selected timeline node when a later snapshot arrives", () => {
     const store = useWorkspaceStore.getState();
     const authorNode = {
@@ -1011,14 +1045,379 @@ describe("workspace ws store", () => {
         id: "timeline_node_author:provider-prompt",
         type: "execution_event",
         role: "author",
-        content: "Story 生成 · Provider Prompt",
+        content: "Story 生成 · Provider Prompt · 24 字符",
+        content_ref: { kind: "provider_prompt", nodeId: "timeline_node_author" },
+        content_size: 24,
+        has_full_content: true,
         metadata: expect.objectContaining({
           title: "Provider Prompt",
-          output: "[user]: 实现爬楼梯 Story Spec",
           provider: "claude_code",
         }),
       }),
     ]);
+  });
+
+  it("does not duplicate artifact markdown in rebuilt chat entry metadata", () => {
+    const store = useWorkspaceStore.getState();
+    const hugeMarkdown = "# Artifact\n" + "content\n".repeat(10_000);
+
+    store.setSessionState({
+      session_id: "session_huge_artifact",
+      workspace_type: "story",
+      stage: "running",
+      messages: [],
+      checkpoints: [],
+      artifact: hugeMarkdown,
+      providers: { author: "claude_code", reviewer: "codex" },
+      timeline_nodes: [
+        {
+          node_id: "timeline_node_001",
+          node_type: "author_run",
+          agent: "claude_code",
+          stage: "running",
+          round: null,
+          status: "completed",
+          title: "Story 生成",
+          summary: "生成完成",
+          started_at: "2026-05-26T10:00:00Z",
+          completed_at: "2026-05-26T10:01:00Z",
+          duration_ms: 60_000,
+          artifact_ref: "artifact_current",
+          provider_config_snapshot: {
+            author: "claude_code",
+            reviewer: "codex",
+            review_rounds: 1,
+          },
+        },
+      ],
+      active_node_id: "timeline_node_001",
+      artifact_versions: [
+        {
+          version: 1,
+          markdown: hugeMarkdown,
+          generated_by: "claude_code",
+          reviewed_by: null,
+          review_verdict: null,
+          confirmed_by: null,
+          is_current: true,
+          created_at: "2026-05-26T10:01:00Z",
+          source_node_id: "timeline_node_001",
+        },
+      ],
+      timeline_node_details: {
+        timeline_node_001: makeNodeDetail(),
+      },
+      active_run_id: null,
+    });
+    store.rebuildChatEntries();
+
+    const artifactEntry = useWorkspaceStore
+      .getState()
+      .chatEntries.find((entry) => entry.type === "artifact_update");
+    expect(artifactEntry?.metadata?.markdown).toBeUndefined();
+    expect(JSON.stringify(artifactEntry)).not.toContain(hugeMarkdown.slice(0, 100));
+  });
+
+  it("does not duplicate provider prompt output in rebuilt chat entry metadata", () => {
+    const store = useWorkspaceStore.getState();
+    const hugePrompt = "[system]\n" + "prompt line\n".repeat(10_000);
+
+    store.setSessionState({
+      session_id: "session_huge_prompt",
+      workspace_type: "story",
+      stage: "running",
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "claude_code", reviewer: "codex" },
+      timeline_nodes: [
+        {
+          node_id: "timeline_node_001",
+          node_type: "author_run",
+          agent: "claude_code",
+          stage: "running",
+          round: null,
+          status: "active",
+          title: "Story 生成",
+          summary: null,
+          started_at: "2026-05-26T10:00:00Z",
+          completed_at: null,
+          duration_ms: null,
+          artifact_ref: null,
+          provider_config_snapshot: {
+            author: "claude_code",
+            reviewer: "codex",
+            review_rounds: 1,
+          },
+        },
+      ],
+      active_node_id: "timeline_node_001",
+      artifact_versions: [],
+      timeline_node_details: {
+        timeline_node_001: makeNodeDetail({
+          prompt: hugePrompt,
+        }),
+      },
+      active_run_id: "run-1",
+    });
+    store.rebuildChatEntries();
+
+    const promptEntry = useWorkspaceStore
+      .getState()
+      .chatEntries.find((entry) => entry.id === "timeline_node_001:provider-prompt");
+    expect(promptEntry?.metadata?.output).toBeUndefined();
+    expect(JSON.stringify(promptEntry)).not.toContain(hugePrompt.slice(0, 100));
+  });
+
+  it("does not duplicate provider prompt execution event output in rebuilt chat entry metadata", () => {
+    const store = useWorkspaceStore.getState();
+    const hugePrompt = "[system]\n" + "prompt line\n".repeat(10_000);
+
+    store.setSessionState({
+      session_id: "session_huge_prompt_event",
+      workspace_type: "story",
+      stage: "running",
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "claude_code", reviewer: "codex" },
+      timeline_nodes: [
+        {
+          node_id: "timeline_node_001",
+          node_type: "author_run",
+          agent: "claude_code",
+          stage: "running",
+          round: null,
+          status: "active",
+          title: "Story 生成",
+          summary: null,
+          started_at: "2026-05-26T10:00:00Z",
+          completed_at: null,
+          duration_ms: null,
+          artifact_ref: null,
+          provider_config_snapshot: {
+            author: "claude_code",
+            reviewer: "codex",
+            review_rounds: 1,
+          },
+        },
+      ],
+      active_node_id: "timeline_node_001",
+      artifact_versions: [],
+      timeline_node_details: {
+        timeline_node_001: makeNodeDetail({
+          execution_events: [
+            {
+              event_id: "timeline_node_001_prompt",
+              node_id: "timeline_node_001",
+              agent: "claude_code",
+              kind: "output",
+              status: "started",
+              title: "Provider Prompt",
+              detail: "发送给 Workspace provider 的完整提示词",
+              command: null,
+              cwd: null,
+              output: hugePrompt,
+              exit_code: null,
+            },
+          ],
+        }),
+      },
+      active_run_id: "run-1",
+    });
+    store.rebuildChatEntries();
+
+    const promptEntry = useWorkspaceStore
+      .getState()
+      .chatEntries.find((entry) => entry.id === "timeline_node_001:execution-timeline_node_001_prompt");
+    expect(promptEntry?.metadata?.output).toBeUndefined();
+    expect(JSON.stringify(promptEntry)).not.toContain(hugePrompt.slice(0, 100));
+    expect(promptEntry).toEqual(
+      expect.objectContaining({
+        content_ref: { kind: "provider_prompt", nodeId: "timeline_node_001" },
+        content_size: hugePrompt.length,
+        has_full_content: true,
+      }),
+    );
+  });
+
+  it("rebuilds lightweight provider content entries from node summaries", () => {
+    const store = useWorkspaceStore.getState();
+
+    store.setSessionState({
+      session_id: "session_summary_only",
+      workspace_type: "story",
+      stage: "running",
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "codex", reviewer: "claude_code" },
+      timeline_nodes: [
+        {
+          node_id: "timeline_node_034",
+          node_type: "author_run",
+          agent: "codex",
+          stage: "running",
+          round: 1,
+          status: "completed",
+          title: "Large Provider Stream 33",
+          summary: "large provider summary",
+          started_at: "2026-06-06T00:00:00Z",
+          completed_at: "2026-06-06T00:00:01Z",
+          duration_ms: 1000,
+          artifact_ref: null,
+          provider_config_snapshot: {
+            author: "codex",
+            reviewer: "claude_code",
+            review_rounds: 5,
+          },
+        },
+      ],
+      active_node_id: "timeline_node_034",
+      artifact_versions: [],
+      timeline_node_details: {},
+      timeline_node_summaries: {
+        timeline_node_034: {
+          node_id: "timeline_node_034",
+          node_type: "author_run",
+          status: "completed",
+          agent_role: "author",
+          provider_name: "codex",
+          prompt_size: 120_000,
+          prompt_preview: "完整提示词 large-prompt-0 preview",
+          stream_size: 80,
+          stream_preview: "stream summary",
+          execution_event_count: 1,
+          has_large_outputs: true,
+          artifact_ref: null,
+          started_at: "2026-06-06T00:00:00Z",
+          ended_at: "2026-06-06T00:00:01Z",
+        },
+      },
+      active_run_id: "run-1",
+    });
+
+    const entries = useWorkspaceStore.getState().chatEntries;
+
+    expect(entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          content: expect.stringContaining("Provider Prompt"),
+          content_ref: { kind: "provider_prompt", nodeId: "timeline_node_034" },
+          content_size: 120_000,
+        }),
+        expect.objectContaining({
+          content: expect.stringContaining("Execution Output"),
+          content_ref: {
+            kind: "execution_output",
+            nodeId: "timeline_node_034",
+            eventId: "timeline_node_034_output",
+          },
+        }),
+      ]),
+    );
+  });
+
+  it("preserves active stream chunk order while avoiding duplicate historical entries", () => {
+    const store = useWorkspaceStore.getState();
+    store.setSessionState({
+      session_id: "workspace_session_stream",
+      workspace_type: "story",
+      stage: "running",
+      superpowers_enabled: true,
+      openspec_enabled: true,
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "codex", reviewer: "claude_code" },
+      timeline_nodes: [
+        {
+          node_id: "timeline_node_001",
+          node_type: "author_run",
+          agent: "codex",
+          stage: "running",
+          status: "active",
+          title: "Story Spec 生成",
+          started_at: "2026-06-06T00:00:00Z",
+          provider_config_snapshot: {
+            author: "codex",
+            reviewer: "claude_code",
+            review_rounds: 1,
+          },
+        },
+      ],
+      active_node_id: "timeline_node_001",
+      artifact_versions: [],
+      timeline_node_details: {},
+      active_run_id: "run-1",
+    });
+
+    useWorkspaceStore
+      .getState()
+      .appendBufferedStreamChunk("A", "timeline_node_001", "author");
+    useWorkspaceStore
+      .getState()
+      .appendBufferedStreamChunk("B", "timeline_node_001", "author");
+    useWorkspaceStore.getState().flushBufferedStream("timeline_node_001");
+
+    const streamEntry = useWorkspaceStore
+      .getState()
+      .chatEntries.find((entry) => entry.id === "timeline_node_001:stream-active");
+
+    expect(streamEntry?.content).toBe("AB");
+    expect(
+      useWorkspaceStore
+        .getState()
+        .chatEntries.filter((entry) => entry.id === "timeline_node_001:stream-active"),
+    ).toHaveLength(1);
+  });
+
+  it("clears buffered stream state after completing a node stream", () => {
+    const store = useWorkspaceStore.getState();
+    store.setSessionState({
+      session_id: "workspace_session_stream_complete",
+      workspace_type: "story",
+      stage: "running",
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "codex", reviewer: "claude_code" },
+      timeline_nodes: [
+        {
+          node_id: "timeline_node_001",
+          node_type: "author_run",
+          agent: "codex",
+          stage: "running",
+          status: "active",
+          title: "Story Spec 生成",
+          started_at: "2026-06-06T00:00:00Z",
+          provider_config_snapshot: {
+            author: "codex",
+            reviewer: "claude_code",
+            review_rounds: 1,
+          },
+        },
+      ],
+      active_node_id: "timeline_node_001",
+      artifact_versions: [],
+      timeline_node_details: {},
+      active_run_id: "run-1",
+    });
+
+    store.appendStreamChunk("A", "timeline_node_001");
+    store.appendStreamChunk("B", "timeline_node_001");
+    store.appendBufferedStreamChunk("A", "timeline_node_001", "author");
+    store.appendBufferedStreamChunk("B", "timeline_node_001", "author");
+
+    store.completeBufferedStream("timeline_node_001", "msg_001", "checkpoint_001");
+
+    const state = useWorkspaceStore.getState();
+    const streamEntry = state.chatEntries.find(
+      (entry) => entry.id === "timeline_node_001:stream-active",
+    );
+    expect(streamEntry?.content).toBe("AB");
+    expect(state.nodeDetails.timeline_node_001.messages.at(-1)?.content).toBe("AB");
+    expect(state.streamBuffers.timeline_node_001).toBeUndefined();
   });
 
   it("stores review verdict and pending decision by node", () => {
