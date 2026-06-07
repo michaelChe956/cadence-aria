@@ -100,6 +100,25 @@ fn provider_conversation_role_for_coding_role(
     }
 }
 
+fn should_resume_provider_conversation(role: &CodingProviderRole) -> bool {
+    matches!(role, CodingProviderRole::Coder)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodingPromptMode {
+    FullConversation,
+    DeltaOnly,
+}
+
+impl CodingPromptMode {
+    fn event_detail(self) -> &'static str {
+        match self {
+            Self::FullConversation => "发送给 Coding provider 的完整提示词",
+            Self::DeltaOnly => "发送给 Coding provider 的增量提示词",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CodingWorkspaceEngine {
     store: CodingAttemptStore,
@@ -126,6 +145,10 @@ impl CodingWorkspaceEngine {
         role: &CodingProviderRole,
         provider: &ProviderName,
     ) -> Option<String> {
+        if !should_resume_provider_conversation(role) {
+            return None;
+        }
+
         let conversation_role = provider_conversation_role_for_coding_role(role);
         attempt
             .provider_conversations
@@ -290,20 +313,42 @@ impl CodingWorkspaceEngine {
             .send(CodingWsOutMessage::CodingTimelineNodeCreated { node: node.clone() })
             .await;
 
+        let coder_provider = self
+            .store
+            .get_role_provider_config_snapshot(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+            .coder;
+        let resume_provider_session_id = self.provider_resume_session_id_for_attempt(
+            &attempt,
+            &CodingProviderRole::Coder,
+            &coder_provider,
+        );
         let rework_instruction = self.store.latest_unconsumed_rework_instruction(
             &attempt.project_id,
             &attempt.issue_id,
             &attempt.id,
         )?;
-        let prompt = build_coding_prompt(&attempt, context, rework_instruction.as_ref());
-        let coder_provider = self
-            .store
-            .get_role_provider_config_snapshot(&attempt.project_id, &attempt.issue_id, &attempt.id)?
-            .coder;
+        let prompt_mode = if resume_provider_session_id.is_some() {
+            CodingPromptMode::DeltaOnly
+        } else {
+            CodingPromptMode::FullConversation
+        };
+        let prompt = match prompt_mode {
+            CodingPromptMode::FullConversation => {
+                build_coding_prompt(&attempt, context, rework_instruction.as_ref())
+            }
+            CodingPromptMode::DeltaOnly => {
+                build_coding_delta_prompt(&attempt, context, rework_instruction.as_ref())
+            }
+        };
         let _ = self
             .event_tx
             .send(CodingWsOutMessage::CodingExecutionEvent {
-                event: provider_prompt_event(&node.id, &coder_provider, prompt.clone()),
+                event: provider_prompt_event(
+                    &node.id,
+                    &coder_provider,
+                    prompt.clone(),
+                    prompt_mode.event_detail(),
+                ),
             })
             .await;
         if let Some(instruction) = rework_instruction.as_ref() {
@@ -326,11 +371,6 @@ impl CodingWorkspaceEngine {
             timeout: 2400,
             max_retries: 0,
         };
-        let resume_provider_session_id = self.provider_resume_session_id_for_attempt(
-            &attempt,
-            &CodingProviderRole::Coder,
-            &coder_provider,
-        );
         let input = StreamingProviderInput {
             provider_type: legacy_input.provider_type.clone(),
             role: legacy_input.role.clone(),
@@ -828,7 +868,12 @@ impl CodingWorkspaceEngine {
         let _ = self
             .event_tx
             .send(CodingWsOutMessage::CodingExecutionEvent {
-                event: provider_prompt_event(&node.id, &tester_provider, prompt.clone()),
+                event: provider_prompt_event(
+                    &node.id,
+                    &tester_provider,
+                    prompt.clone(),
+                    CodingPromptMode::FullConversation.event_detail(),
+                ),
             })
             .await;
 
@@ -1176,7 +1221,12 @@ impl CodingWorkspaceEngine {
         let _ = self
             .event_tx
             .send(CodingWsOutMessage::CodingExecutionEvent {
-                event: provider_prompt_event(&node.id, &reviewer, prompt.clone()),
+                event: provider_prompt_event(
+                    &node.id,
+                    &reviewer,
+                    prompt.clone(),
+                    CodingPromptMode::FullConversation.event_detail(),
+                ),
             })
             .await;
         let input = AdapterInput {
@@ -1323,7 +1373,12 @@ impl CodingWorkspaceEngine {
         let _ = self
             .event_tx
             .send(CodingWsOutMessage::CodingExecutionEvent {
-                event: provider_prompt_event(&node.id, &analyst_provider, prompt.clone()),
+                event: provider_prompt_event(
+                    &node.id,
+                    &analyst_provider,
+                    prompt.clone(),
+                    CodingPromptMode::FullConversation.event_detail(),
+                ),
             })
             .await;
 
@@ -1433,7 +1488,12 @@ impl CodingWorkspaceEngine {
         let _ = self
             .event_tx
             .send(CodingWsOutMessage::CodingExecutionEvent {
-                event: provider_prompt_event(&node.id, &reviewer, prompt.clone()),
+                event: provider_prompt_event(
+                    &node.id,
+                    &reviewer,
+                    prompt.clone(),
+                    CodingPromptMode::FullConversation.event_detail(),
+                ),
             })
             .await;
         let input = AdapterInput {
@@ -2560,6 +2620,71 @@ fn build_coding_prompt(
     prompt
 }
 
+fn build_coding_delta_prompt(
+    attempt: &CodingExecutionAttempt,
+    context: &CodingExecutionContext,
+    rework_instruction: Option<&CodingReworkInstruction>,
+) -> String {
+    let mut prompt = format!(
+        "Coding Workspace\n\
+         你是 Coding Workspace Coder。请继续在指定 worktree 中完成真实代码修改和测试，不要只输出计划。\n\
+         Project: {}\n\
+         Issue: {}\n\
+         Work Item: {}\n\
+         Attempt: {}\n\
+         Branch: {}\n",
+        attempt.project_id, attempt.issue_id, attempt.work_item_id, attempt.id, attempt.branch_name
+    );
+    if let Some(worktree_path) = attempt.worktree_path.as_ref() {
+        prompt.push_str(&format!("Worktree Path: {}\n", worktree_path.display()));
+    }
+    prompt.push_str(
+        "\n这是对当前 provider 会话的增量代码编写指令。不要重新发送或复述完整 Work Item；请基于本会话已有上下文、当前 worktree 状态和以下新增要求，直接继续修改代码。\n",
+    );
+    if !context.verification_commands.is_empty() {
+        prompt.push_str("\n验证命令:\n");
+        for command in &context.verification_commands {
+            prompt.push_str("- ");
+            prompt.push_str(command);
+            prompt.push('\n');
+        }
+    }
+
+    if let Some(instruction) = rework_instruction {
+        prompt.push_str("\n本轮返修要求:\n");
+        prompt.push_str(&format!(
+            "- 来源阶段: {:?}\n- 摘要: {}\n",
+            instruction.source_stage, instruction.summary
+        ));
+        if !instruction.fix_hints.is_empty() {
+            prompt.push_str("- 修复提示:\n");
+            for (index, hint) in instruction.fix_hints.iter().enumerate() {
+                prompt.push_str(&format!("  {}. {}\n", index + 1, hint));
+            }
+        }
+        if !instruction.questions.is_empty() {
+            prompt.push_str("- 待澄清问题:\n");
+            for (index, question) in instruction.questions.iter().enumerate() {
+                prompt.push_str(&format!("  {}. {}\n", index + 1, question));
+            }
+        }
+        prompt.push_str(
+            "\n本轮必须优先修复上述问题。完成前请检查 git diff/status，确认 reviewer 指出的文件或行为已处理。\n",
+        );
+    } else {
+        prompt.push_str(
+            "\n本轮没有新增返修要求。请基于当前会话和 worktree 状态继续完成未结束的代码编写任务。\n",
+        );
+    }
+    prompt.push_str(
+        "\n执行要求:\n\
+         - 遵循仓库规则和 TDD 流程。\n\
+         - 不要重新生成 Story/Design/Work Item 文档。\n\
+         - 完成后报告修改文件、测试命令和结果。\n",
+    );
+    prompt
+}
+
 fn build_rework_prompt(
     attempt: &CodingExecutionAttempt,
     evidence: &str,
@@ -2600,6 +2725,7 @@ fn provider_prompt_event(
     node_id: &str,
     provider: &ProviderName,
     prompt: String,
+    detail: &str,
 ) -> WsExecutionEvent {
     WsExecutionEvent {
         event_id: format!("{node_id}_prompt"),
@@ -2608,7 +2734,7 @@ fn provider_prompt_event(
         kind: WsExecutionEventKind::Output,
         status: WsExecutionEventStatus::Started,
         title: "Provider Prompt".to_string(),
-        detail: Some("发送给 Coding provider 的完整提示词".to_string()),
+        detail: Some(detail.to_string()),
         command: None,
         cwd: None,
         output: Some(prompt),
@@ -3237,7 +3363,7 @@ mod tests {
                 &CodingProviderRole::Tester,
                 &ProviderName::ClaudeCode,
             ),
-            Some("tester-session".to_string())
+            None
         );
         assert_eq!(
             engine.provider_resume_session_id_for_attempt(

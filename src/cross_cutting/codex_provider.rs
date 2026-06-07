@@ -26,6 +26,8 @@ pub struct CodexProvider {
     command: PathBuf,
 }
 
+const CODEX_RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
 impl CodexProvider {
     pub fn new(command: PathBuf) -> Self {
         Self { command }
@@ -243,16 +245,19 @@ where
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let _ = peer
-        .request(json!({
-            "jsonrpc": "2.0",
-            "method": "initialize",
-            "params": {
-                "clientInfo": {
-                    "name": "cadence-aria",
-                    "version": env!("CARGO_PKG_VERSION"),
+        .request_with_timeout(
+            json!({
+                "jsonrpc": "2.0",
+                "method": "initialize",
+                "params": {
+                    "clientInfo": {
+                        "name": "cadence-aria",
+                        "version": env!("CARGO_PKG_VERSION"),
+                    },
                 },
-            },
-        }))
+            }),
+            CODEX_RPC_REQUEST_TIMEOUT,
+        )
         .await?;
     peer.send(json!({
         "jsonrpc": "2.0",
@@ -267,21 +272,46 @@ where
         .map(str::trim)
         .filter(|session_id| !session_id.is_empty())
     {
-        Some(session_id.to_string())
+        let resume_response = peer
+            .request_with_timeout(
+                json!({
+                    "jsonrpc": "2.0",
+                    "method": "thread/resume",
+                    "params": {
+                        "threadId": session_id,
+                        "cwd": input.working_dir.clone(),
+                        "approvalPolicy": match input.permission_mode {
+                            ProviderPermissionMode::Auto => "never",
+                            ProviderPermissionMode::Supervised => "on-request",
+                        },
+                    },
+                }),
+                CODEX_RPC_REQUEST_TIMEOUT,
+            )
+            .await?;
+        resume_response
+            .pointer("/thread/id")
+            .or_else(|| resume_response.pointer("/id"))
+            .and_then(Value::as_str)
+            .map(ToString::to_string)
+            .or_else(|| Some(session_id.to_string()))
     } else {
         let thread_response = peer
-            .request(json!({
-                "jsonrpc": "2.0",
-                "method": "thread/start",
-                "params": {
-                    "cwd": input.working_dir.clone(),
-                    "approvalPolicy": match input.permission_mode {
-                        ProviderPermissionMode::Auto => "never",
-                        ProviderPermissionMode::Supervised => "on-request",
+            .request_with_timeout(
+                json!({
+                    "jsonrpc": "2.0",
+                    "method": "thread/start",
+                    "params": {
+                        "cwd": input.working_dir.clone(),
+                        "approvalPolicy": match input.permission_mode {
+                            ProviderPermissionMode::Auto => "never",
+                            ProviderPermissionMode::Supervised => "on-request",
+                        },
+                        "ephemeral": true,
                     },
-                    "ephemeral": true,
-                },
-            }))
+                }),
+                CODEX_RPC_REQUEST_TIMEOUT,
+            )
             .await?;
         thread_response
             .pointer("/thread/id")
@@ -292,19 +322,22 @@ where
     let turn_thread_id = thread_id.clone().unwrap_or_default();
 
     let turn_response = peer
-        .request(json!({
-            "jsonrpc": "2.0",
-            "method": "turn/start",
-            "params": {
-                "threadId": turn_thread_id,
-                "input": [
-                    {
-                        "type": "text",
-                        "text": input.prompt.clone(),
-                    }
-                ],
-            },
-        }))
+        .request_with_timeout(
+            json!({
+                "jsonrpc": "2.0",
+                "method": "turn/start",
+                "params": {
+                    "threadId": turn_thread_id,
+                    "input": [
+                        {
+                            "type": "text",
+                            "text": input.prompt.clone(),
+                        }
+                    ],
+                },
+            }),
+            CODEX_RPC_REQUEST_TIMEOUT,
+        )
         .await?;
     let turn_id = turn_response
         .pointer("/turn/id")

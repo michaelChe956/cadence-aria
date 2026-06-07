@@ -89,6 +89,23 @@ impl ProviderAdapterError {
         )
     }
 
+    pub fn timeout_with_details(
+        details: impl Into<String>,
+        stdout: impl Into<String>,
+        stderr: impl Into<String>,
+        duration_ms: u64,
+    ) -> Self {
+        Self::with_output(
+            ProviderErrorCode::ProviderTimeout,
+            details,
+            stdout,
+            stderr,
+            None,
+            TimeoutStatus::HardTimeoutKilled,
+            duration_ms,
+        )
+    }
+
     pub fn parse_error(
         details: impl Into<String>,
         stdout: impl Into<String>,
