@@ -104,6 +104,7 @@ describe("workspace websocket protocol types", () => {
           plan_status: "confirmed",
           execution_status: "pending",
           latest_attempt: attempt,
+          artifact_versions: [],
         },
       ],
       workspace_sessions: [],

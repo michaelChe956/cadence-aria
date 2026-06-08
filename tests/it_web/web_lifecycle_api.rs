@@ -805,6 +805,24 @@ async fn lifecycle_returns_artifact_versions() {
         }),
     )
     .await;
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/workspace-sessions/workspace_session_0002/confirm",
+        json!({"confirmed_by":"human"}),
+    )
+    .await;
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items:generate",
+        json!({
+            "title":"爬楼梯问题 Work Item",
+            "story_spec_ids":["story_spec_0001"],
+            "design_spec_ids":["design_spec_0001"]
+        }),
+    )
+    .await;
 
     let lifecycle = LifecycleStore::new(app_paths);
     lifecycle
@@ -839,6 +857,22 @@ async fn lifecycle_returns_artifact_versions() {
             },
         )
         .expect("append design artifact version");
+    lifecycle
+        .append_artifact_version(
+            "workspace_session_0003",
+            ArtifactVersion {
+                version: 1,
+                markdown: "## 实施计划\n\n[TASK-001] 实现 climb_stairs。".to_string(),
+                generated_by: ProviderName::Fake,
+                reviewed_by: Some(ProviderName::Fake),
+                review_verdict: None,
+                confirmed_by: None,
+                is_current: true,
+                created_at: "2026-05-20T00:02:00Z".to_string(),
+                source_node_id: "timeline_node_work_item_001".to_string(),
+            },
+        )
+        .expect("append work item artifact version");
 
     let (status, response) = request_json(
         app,
@@ -871,6 +905,18 @@ async fn lifecycle_returns_artifact_versions() {
             .as_str()
             .expect("design markdown")
             .contains("关键决策")
+    );
+
+    let work_item_versions = response["work_items"][0]["artifact_versions"]
+        .as_array()
+        .expect("work item artifact_versions");
+    assert_eq!(work_item_versions.len(), 1);
+    assert_eq!(work_item_versions[0]["version"], 1);
+    assert!(
+        work_item_versions[0]["markdown"]
+            .as_str()
+            .expect("work item markdown")
+            .contains("实施计划")
     );
 }
 

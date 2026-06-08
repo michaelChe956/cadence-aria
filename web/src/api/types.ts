@@ -115,6 +115,7 @@ export type LifecycleWorkItem = {
   plan_status: "not_started" | "draft" | "confirmed" | "change_requested";
   execution_status: "pending" | "planning" | "coding" | "completed" | "blocked";
   latest_attempt: CodingAttempt | null;
+  artifact_versions: ArtifactVersion[];
 };
 
 export type CodingAttemptStatus =

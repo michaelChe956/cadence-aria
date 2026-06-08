@@ -348,7 +348,12 @@ pub async fn issue_lifecycle(
                 .map_err(product_store_api_error)?;
             let latest_attempt = attempts.last().map(coding_attempt_dto);
             coding_attempts.extend(attempts.iter().map(coding_attempt_dto));
-            Ok(lifecycle_work_item_dto(work_item, latest_attempt))
+            let session = workspace_session_for_entity(
+                &workspace_sessions,
+                &work_item.id,
+                &WorkspaceType::WorkItem,
+            );
+            lifecycle_work_item_dto(&lifecycle, work_item, latest_attempt, session)
         })
         .collect::<ApiResult<Vec<_>>>()?;
     let workspace_sessions = workspace_sessions
@@ -520,8 +525,10 @@ pub async fn generate_work_items(
     let session = ensure_workspace_context_message(&app_paths, &lifecycle, session)
         .map_err(product_store_api_error)?;
 
+    let work_item_dto = lifecycle_work_item_dto(&lifecycle, work_item, None, Some(&session))?;
+
     Ok(Json(GenerateWorkItemsResponse {
-        work_items: vec![lifecycle_work_item_dto(work_item, None)],
+        work_items: vec![work_item_dto],
         workspace_session: workspace_session_dto(session),
     }))
 }
@@ -1946,10 +1953,12 @@ fn markdown_preview(markdown: &str) -> String {
 }
 
 fn lifecycle_work_item_dto(
+    lifecycle: &LifecycleStore,
     record: LifecycleWorkItemRecord,
     latest_attempt: Option<CodingAttemptDto>,
-) -> LifecycleWorkItemDto {
-    LifecycleWorkItemDto {
+    session: Option<&WorkspaceSessionRecord>,
+) -> ApiResult<LifecycleWorkItemDto> {
+    Ok(LifecycleWorkItemDto {
         work_item_id: record.id,
         issue_id: record.issue_id,
         repository_id: record.repository_id,
@@ -1959,7 +1968,8 @@ fn lifecycle_work_item_dto(
         plan_status: work_item_plan_status_text(&record.plan_status).to_string(),
         execution_status: work_item_status_text(&record.execution_status).to_string(),
         latest_attempt,
-    }
+        artifact_versions: artifact_version_dtos(lifecycle, session)?,
+    })
 }
 
 fn coding_attempt_dto(attempt: &CodingExecutionAttempt) -> CodingAttemptDto {

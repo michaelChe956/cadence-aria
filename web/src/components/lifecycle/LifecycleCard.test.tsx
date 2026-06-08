@@ -171,6 +171,7 @@ function lifecycleCard(
   return {
     ...base,
     kind,
+    artifactVersions: [],
     raw: {
       work_item_id: "work_item_0001",
       issue_id: "issue_0001",
@@ -181,6 +182,7 @@ function lifecycleCard(
       plan_status: "draft",
       execution_status: "pending",
       latest_attempt: null,
+      artifact_versions: [],
     },
   };
 }

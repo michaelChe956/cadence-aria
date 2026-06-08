@@ -120,6 +120,18 @@ const otherLifecycle: IssueLifecycleResponse = {
       plan_status: "confirmed",
       execution_status: "pending",
       latest_attempt: null,
+      artifact_versions: [
+        {
+          version: 1,
+          markdown: "## 实施计划\n\n[TASK-001] 实现验证码服务。",
+          generated_by: "claude_code",
+          reviewed_by: "codex",
+          review_verdict: "pass",
+          confirmed_by: "human",
+          created_at: "2026-05-20T00:02:00Z",
+          source_node_id: "timeline_node_work_item_001",
+        },
+      ],
     },
   ],
 };
@@ -143,18 +155,24 @@ describe("lifecycle workbench store", () => {
     expect(lifecycle.design_specs[0].story_spec_ids).toEqual(["story_spec_0001"]);
   });
 
-  it("passes story and design artifact versions through card data", () => {
-    const grouped = groupLifecycleCards([lifecycle]);
+  it("passes story, design, and work item artifact versions through card data", () => {
+    const grouped = groupLifecycleCards([lifecycle, otherLifecycle]);
     const storyCard = grouped.story_spec[0];
     const designCard = grouped.design_spec[0];
+    const workItemCard = grouped.work_item[0];
 
-    expect(storyCard.kind).toBe("story_spec");
-    expect(designCard.kind).toBe("design_spec");
-    if (storyCard.kind !== "story_spec" || designCard.kind !== "design_spec") {
+    if (
+      storyCard.kind !== "story_spec" ||
+      designCard.kind !== "design_spec" ||
+      workItemCard.kind !== "work_item"
+    ) {
       throw new Error("unexpected card kind");
     }
     expect(storyCard.artifactVersions).toEqual(lifecycle.story_specs[0].artifact_versions);
     expect(designCard.artifactVersions).toEqual(lifecycle.design_specs[0].artifact_versions);
+    expect(workItemCard.artifactVersions).toEqual(
+      otherLifecycle.work_items[0].artifact_versions,
+    );
   });
 
   it("filters cards by focused issue", () => {

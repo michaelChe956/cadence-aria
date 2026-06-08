@@ -1026,6 +1026,7 @@ function toDrawerEntity(card: LifecycleCardData): DrawerEntity {
 
   return {
     ...base,
+    artifactVersions: card.artifactVersions,
     latestAttempt: card.raw.latest_attempt,
   };
 }
