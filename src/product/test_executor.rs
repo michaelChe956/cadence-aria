@@ -31,56 +31,42 @@ pub enum TestExecutorError {
 
 pub fn discover_test_commands(worktree_path: impl AsRef<Path>) -> Vec<TestCommandSpec> {
     let worktree_path = worktree_path.as_ref();
+    let mut specs = Vec::new();
     if worktree_path.join("Cargo.toml").is_file() {
-        return vec![TestCommandSpec {
+        specs.push(TestCommandSpec {
             id: "rust".to_string(),
-            command: vec![
-                "cargo".to_string(),
-                "test".to_string(),
-                "--locked".to_string(),
-                "-j".to_string(),
-                "1".to_string(),
-            ],
-        }];
+            command: vec!["cargo".to_string(), "test".to_string(), "--locked".to_string()],
+        });
     }
     if worktree_path.join("pyproject.toml").is_file() || worktree_path.join("setup.py").is_file() {
-        return vec![TestCommandSpec {
+        specs.push(TestCommandSpec {
             id: "python".to_string(),
             command: vec!["uv".to_string(), "run".to_string(), "pytest".to_string()],
-        }];
+        });
     }
-    if worktree_path.join("package.json").is_file() {
-        return vec![TestCommandSpec {
-            id: "node".to_string(),
-            command: vec!["pnpm".to_string(), "test".to_string()],
-        }];
-    }
-    Vec::new()
+    specs.extend(package_test_commands(worktree_path, false));
+    specs
 }
 
 pub fn infer_test_commands(worktree_path: impl AsRef<Path>) -> Vec<TestCommandSpec> {
     let worktree_path = worktree_path.as_ref();
+    let mut specs = Vec::new();
     if worktree_path.join("Cargo.toml").is_file() {
-        return vec![TestCommandSpec {
+        specs.push(TestCommandSpec {
             id: "inferred_rust".to_string(),
             command: vec!["cargo".to_string(), "test".to_string()],
-        }];
-    }
-    if package_json_has_test_script(&worktree_path.join("package.json")) {
-        return vec![TestCommandSpec {
-            id: "inferred_node".to_string(),
-            command: vec!["pnpm".to_string(), "test".to_string()],
-        }];
+        });
     }
     if worktree_path.join("pytest.ini").is_file()
         || pyproject_declares_pytest(&worktree_path.join("pyproject.toml"))
     {
-        return vec![TestCommandSpec {
+        specs.push(TestCommandSpec {
             id: "inferred_python".to_string(),
             command: vec!["pytest".to_string()],
-        }];
+        });
     }
-    Vec::new()
+    specs.extend(package_test_commands(worktree_path, true));
+    specs
 }
 
 pub fn planned_test_commands_from_markdown(markdown: &str) -> Vec<TestCommandSpec> {
@@ -257,6 +243,75 @@ pub async fn run_all_tests(
 
 fn artifact_ref(command_id: &str, stream: &str) -> String {
     format!("{command_id}.{stream}.log")
+}
+
+fn package_test_commands(worktree_path: &Path, inferred: bool) -> Vec<TestCommandSpec> {
+    let mut specs = Vec::new();
+    push_package_test_command(worktree_path, None, inferred, &mut specs);
+
+    let Ok(entries) = std::fs::read_dir(worktree_path) else {
+        return specs;
+    };
+    let mut child_dirs = entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().is_dir())
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+            (!ignored_test_discovery_dir(&name)).then_some((name, entry.path()))
+        })
+        .collect::<Vec<_>>();
+    child_dirs.sort_by(|left, right| left.0.cmp(&right.0));
+
+    for (relative_dir, path) in child_dirs {
+        push_package_test_command(&path, Some(&relative_dir), inferred, &mut specs);
+    }
+    specs
+}
+
+fn push_package_test_command(
+    package_dir: &Path,
+    relative_dir: Option<&str>,
+    inferred: bool,
+    specs: &mut Vec<TestCommandSpec>,
+) {
+    if !package_json_has_test_script(&package_dir.join("package.json")) {
+        return;
+    }
+    let prefix = if inferred { "inferred_node" } else { "node" };
+    let id = relative_dir
+        .map(|dir| format!("{prefix}_{}", sanitize_command_id_fragment(dir)))
+        .unwrap_or_else(|| prefix.to_string());
+    let command = relative_dir
+        .map(|dir| {
+            vec![
+                "pnpm".to_string(),
+                "-C".to_string(),
+                dir.to_string(),
+                "test".to_string(),
+            ]
+        })
+        .unwrap_or_else(|| vec!["pnpm".to_string(), "test".to_string()]);
+    specs.push(TestCommandSpec { id, command });
+}
+
+fn ignored_test_discovery_dir(name: &str) -> bool {
+    matches!(
+        name,
+        ".aria" | ".git" | ".worktrees" | "node_modules" | "target" | "dist"
+    )
+}
+
+fn sanitize_command_id_fragment(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 fn package_json_has_test_script(path: &Path) -> bool {

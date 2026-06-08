@@ -10,19 +10,23 @@ use cadence_aria::product::test_executor::{
 use tempfile::tempdir;
 
 #[test]
-fn discovers_project_test_commands_by_priority() {
+fn discovers_mixed_rust_and_web_frontend_commands_without_forced_serial_cargo() {
     let root = tempdir().expect("root");
-    fs::write(root.path().join("package.json"), "{}").expect("package");
     fs::write(root.path().join("Cargo.toml"), "[package]\nname='demo'\n").expect("cargo");
+    fs::create_dir_all(root.path().join("web")).expect("web dir");
+    fs::write(
+        root.path().join("web/package.json"),
+        r#"{"scripts":{"test":"vitest --run"}}"#,
+    )
+    .expect("web package");
 
     let specs = discover_test_commands(root.path());
 
-    assert_eq!(specs.len(), 1);
+    assert_eq!(specs.len(), 2);
     assert_eq!(specs[0].id, "rust");
-    assert_eq!(
-        specs[0].command,
-        vec!["cargo", "test", "--locked", "-j", "1"]
-    );
+    assert_eq!(specs[0].command, vec!["cargo", "test", "--locked"]);
+    assert_eq!(specs[1].id, "node_web");
+    assert_eq!(specs[1].command, vec!["pnpm", "-C", "web", "test"]);
 }
 
 #[test]
@@ -35,6 +39,26 @@ fn infers_tester_commands_from_project_files() {
     assert_eq!(specs.len(), 1);
     assert_eq!(specs[0].id, "inferred_rust");
     assert_eq!(specs[0].command, vec!["cargo", "test"]);
+}
+
+#[test]
+fn infers_mixed_rust_and_web_frontend_commands() {
+    let root = tempdir().expect("root");
+    fs::write(root.path().join("Cargo.toml"), "[package]\nname='demo'\n").expect("cargo");
+    fs::create_dir_all(root.path().join("web")).expect("web dir");
+    fs::write(
+        root.path().join("web/package.json"),
+        r#"{"scripts":{"test":"vitest --run"}}"#,
+    )
+    .expect("web package");
+
+    let specs = infer_test_commands(root.path());
+
+    assert_eq!(specs.len(), 2);
+    assert_eq!(specs[0].id, "inferred_rust");
+    assert_eq!(specs[0].command, vec!["cargo", "test"]);
+    assert_eq!(specs[1].id, "inferred_node_web");
+    assert_eq!(specs[1].command, vec!["pnpm", "-C", "web", "test"]);
 }
 
 #[test]
@@ -59,6 +83,19 @@ fn infers_node_command_only_when_package_test_script_exists() {
     )
     .expect("package");
     assert!(infer_test_commands(no_test_script.path()).is_empty());
+}
+
+#[test]
+fn does_not_infer_child_package_without_test_script() {
+    let root = tempdir().expect("root");
+    fs::create_dir_all(root.path().join("web")).expect("web dir");
+    fs::write(
+        root.path().join("web/package.json"),
+        r#"{"scripts":{"build":"vite build"}}"#,
+    )
+    .expect("web package");
+
+    assert!(infer_test_commands(root.path()).is_empty());
 }
 
 #[test]
