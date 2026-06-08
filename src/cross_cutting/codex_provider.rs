@@ -27,6 +27,11 @@ pub struct CodexProvider {
 }
 
 const CODEX_RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+const CODEX_RESUME_STALL_ERROR: &str = "Codex resume stalled before provider progress";
+#[cfg(not(test))]
+const CODEX_RESUME_STALL_TIMEOUT: Duration = Duration::from_secs(60);
+#[cfg(test)]
+const CODEX_RESUME_STALL_TIMEOUT: Duration = Duration::from_millis(100);
 
 impl CodexProvider {
     pub fn new(command: PathBuf) -> Self {
@@ -266,12 +271,14 @@ where
     }))
     .await?;
 
-    let thread_id = if let Some(session_id) = input
+    let resume_session_id = input
         .resume_provider_session_id
         .as_deref()
         .map(str::trim)
         .filter(|session_id| !session_id.is_empty())
-    {
+        .map(ToString::to_string);
+
+    let thread_id = if let Some(session_id) = resume_session_id.as_deref() {
         let resume_response = peer
             .request_with_timeout(
                 json!({
@@ -307,7 +314,6 @@ where
                             ProviderPermissionMode::Auto => "never",
                             ProviderPermissionMode::Supervised => "on-request",
                         },
-                        "ephemeral": true,
                     },
                 }),
                 CODEX_RPC_REQUEST_TIMEOUT,
@@ -372,6 +378,9 @@ where
     let timeout_secs = input.timeout_secs.max(1);
     let timeout = tokio::time::sleep(Duration::from_secs(timeout_secs));
     tokio::pin!(timeout);
+    let resume_stall_timeout = tokio::time::sleep(CODEX_RESUME_STALL_TIMEOUT);
+    tokio::pin!(resume_stall_timeout);
+    let mut waiting_for_resume_progress = resume_session_id.is_some();
     loop {
         let incoming = tokio::select! {
             _ = cancel.cancelled() => {
@@ -384,12 +393,19 @@ where
                     timeout_secs.saturating_mul(1000),
                 ));
             }
+            _ = &mut resume_stall_timeout, if waiting_for_resume_progress => {
+                let session_id = resume_session_id.as_deref().unwrap_or("unknown");
+                return Err(provider_error(format!(
+                    "{CODEX_RESUME_STALL_ERROR} for thread {session_id}"
+                )));
+            }
             incoming = peer.next_incoming() => incoming.ok_or_else(|| {
                 provider_error("Codex app-server stream ended before completion")
             })?,
         };
 
         if let Some(message) = parse_agent_message_text(&incoming) {
+            waiting_for_resume_progress = false;
             if message.completed && streamed_agent_message_items.contains(&message.item_id) {
                 continue;
             }
@@ -407,11 +423,13 @@ where
         }
 
         if let Some(event) = parse_execution_event(&incoming) {
+            waiting_for_resume_progress = false;
             send_provider_event(&event_tx, ProviderEvent::Execution(event), &cancel).await?;
             continue;
         }
 
         if let Some(request) = parse_approval_request(&incoming) {
+            waiting_for_resume_progress = false;
             let decision = bridge
                 .request_tool(
                     &request.tool_name,
@@ -425,6 +443,7 @@ where
         }
 
         if let Some(request) = parse_user_input_request(&incoming) {
+            waiting_for_resume_progress = false;
             let decision = bridge
                 .request_choice(
                     ChoiceRequestData {
@@ -975,6 +994,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn codex_thread_start_creates_persistent_thread_for_later_resume() {
+        let fixture = executable_fixture(
+            "tests/fixtures/provider/codex_app_server_persistent_thread_fixture.sh",
+        );
+        let provider = CodexProvider::new(fixture);
+        let input = streaming_input(ProviderType::Codex, ProviderPermissionMode::Auto);
+        let mut session = provider
+            .start(input, CancellationToken::new())
+            .await
+            .unwrap();
+
+        let completed = recv_completed(&mut session.events).await;
+
+        assert_eq!(completed, "persistent thread done");
+    }
+
+    #[tokio::test]
     async fn codex_provider_bridges_permission_and_completes() {
         let fixture = executable_fixture("tests/fixtures/provider/codex_app_server_fixture.sh");
         let provider = CodexProvider::new(fixture);
@@ -1202,6 +1238,52 @@ mod tests {
                 ProviderEvent::Failed { message } => {
                     assert!(
                         message.contains("timed out") || message.contains("timeout"),
+                        "unexpected failure message: {message}"
+                    );
+                    return;
+                }
+                ProviderEvent::StatusChanged(_)
+                | ProviderEvent::Execution(_)
+                | ProviderEvent::TextDelta { .. }
+                | ProviderEvent::PermissionRequest(_)
+                | ProviderEvent::ChoiceRequest(_)
+                | ProviderEvent::ToolCall(_)
+                | ProviderEvent::ToolResult(_) => {}
+                ProviderEvent::Completed { full_output, .. } => {
+                    panic!("provider completed unexpectedly: {full_output}")
+                }
+                ProviderEvent::ProtocolError { message, .. } => {
+                    panic!("provider protocol error: {message}")
+                }
+                ProviderEvent::PermissionTimeout { permission_id } => {
+                    panic!("provider permission timed out: {permission_id}")
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn codex_provider_reports_resume_stall_when_resumed_turn_emits_no_events() {
+        let fixture = executable_fixture(
+            "tests/fixtures/provider/codex_app_server_resume_hanging_turn_fixture.sh",
+        );
+        let provider = CodexProvider::new(fixture);
+        let mut input = streaming_input(ProviderType::Codex, ProviderPermissionMode::Auto);
+        input.resume_provider_session_id = Some("codex-thread-stale".to_string());
+        let mut session = provider
+            .start(input, CancellationToken::new())
+            .await
+            .unwrap();
+
+        loop {
+            match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+                .await
+                .expect("provider should emit resume stall failure")
+                .expect("provider event channel should stay open until failure")
+            {
+                ProviderEvent::Failed { message } => {
+                    assert!(
+                        message.contains("Codex resume stalled before provider progress"),
                         "unexpected failure message: {message}"
                     );
                     return;

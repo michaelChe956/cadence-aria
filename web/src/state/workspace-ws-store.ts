@@ -7,6 +7,12 @@ import type {
   ChatEntryRole,
   ChoiceResponsePayload,
 } from "./chat-entries";
+import {
+  emptyWorkspaceContentCache,
+  getWorkspaceContentCacheValue,
+  setWorkspaceContentCacheEntry,
+  type WorkspaceContentCache,
+} from "./workspace-content-cache";
 
 export type WsConnectionStatus = "disconnected" | "connecting" | "connected" | "error";
 export type ProviderStatus =
@@ -107,6 +113,26 @@ export interface ReviewVerdict {
   verdict: ReviewVerdictType;
   comments: string;
   summary: string;
+  findings?: ReviewFinding[];
+  review_gate?: ReviewGate;
+}
+
+export type ReviewFindingSeverity =
+  | "blocking"
+  | "must_fix"
+  | "strong_recommend_fix"
+  | "suggestion"
+  | "minor"
+  | "optional";
+
+export type ReviewGate = "requires_revision" | "user_confirm_allowed";
+
+export interface ReviewFinding {
+  severity: ReviewFindingSeverity;
+  message: string;
+  evidence: string;
+  impact: string;
+  required_action: string;
 }
 
 export interface ArtifactVersionSummary {
@@ -179,8 +205,8 @@ export interface WorkspaceWsState {
   selectedNodeId: string | null;
   nodeDetails: Record<string, TimelineNodeDetail>;
   nodeSummaries: Record<string, NodeDetailSummary>;
-  contentCache: Record<string, string>;
-  artifactContentCache: Record<number, string>;
+  contentCache: WorkspaceContentCache;
+  artifactContentCache: WorkspaceContentCache;
   artifactVersions: ArtifactVersionSummary[];
   pendingDecision: ReviewDecisionRequired | null;
   error: string | null;
@@ -237,9 +263,12 @@ export interface WorkspaceWsActions {
     completedAt?: string | null,
   ) => void;
   setSelectedNode: (nodeId: string | null) => void;
+  setNodeDetail: (detail: TimelineNodeDetail) => void;
   setNodeVerdict: (nodeId: string, verdict: ReviewVerdict) => void;
-  setContentCacheEntry: (key: string, value: string) => void;
-  setArtifactContentCacheEntry: (version: number, value: string) => void;
+  setContentCacheEntry: (key: string, value: string, now?: number) => void;
+  touchContentCacheEntry: (key: string, now?: number) => void;
+  setArtifactContentCacheEntry: (version: number, value: string, now?: number) => void;
+  touchArtifactContentCacheEntry: (version: number, now?: number) => void;
   setPendingDecision: (decision: ReviewDecisionRequired | null) => void;
   setConnectionStatus: (status: WsConnectionStatus) => void;
   addPermissionRequest: (request: PermissionRequest) => void;
@@ -289,8 +318,8 @@ const initialState: WorkspaceWsState = {
   selectedNodeId: null,
   nodeDetails: {},
   nodeSummaries: {},
-  contentCache: {},
-  artifactContentCache: {},
+  contentCache: emptyWorkspaceContentCache(),
+  artifactContentCache: emptyWorkspaceContentCache(),
   artifactVersions: [],
   pendingDecision: null,
   error: null,
@@ -346,8 +375,12 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
           ...normalizeTimelineNodeDetails(state.timeline_node_details ?? {}),
         },
         nodeSummaries: state.timeline_node_summaries ?? {},
-        contentCache: prev.sessionId === state.session_id ? prev.contentCache : {},
-        artifactContentCache: prev.sessionId === state.session_id ? prev.artifactContentCache : {},
+        contentCache:
+          prev.sessionId === state.session_id ? prev.contentCache : emptyWorkspaceContentCache(),
+        artifactContentCache:
+          prev.sessionId === state.session_id
+            ? prev.artifactContentCache
+            : emptyWorkspaceContentCache(),
         artifactVersions: state.artifact_version_summaries ?? state.artifact_versions ?? [],
         pendingDecision: null,
         pendingReviewDecision: null,
@@ -624,6 +657,16 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
 
   setSelectedNode: (nodeId) => set({ selectedNodeId: nodeId }),
 
+  setNodeDetail: (detail) =>
+    set((prev) => {
+      const nodeDetails = { ...prev.nodeDetails, [detail.node_id]: detail };
+      const nextState = { ...prev, nodeDetails };
+      return {
+        nodeDetails,
+        chatEntries: buildChatEntries(nextState),
+      };
+    }),
+
   setNodeVerdict: (nodeId, verdict) =>
     set((prev) => {
       const details = { ...prev.nodeDetails };
@@ -642,11 +685,36 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
       };
     }),
 
-  setContentCacheEntry: (key, value) =>
-    set((prev) => ({ contentCache: { ...prev.contentCache, [key]: value } })),
+  setContentCacheEntry: (key, value, now) =>
+    set((prev) => ({
+      contentCache: setWorkspaceContentCacheEntry(prev.contentCache, key, value, now),
+    })),
 
-  setArtifactContentCacheEntry: (version, value) =>
-    set((prev) => ({ artifactContentCache: { ...prev.artifactContentCache, [version]: value } })),
+  touchContentCacheEntry: (key, now) =>
+    set((prev) => {
+      const touched = getWorkspaceContentCacheValue(prev.contentCache, key, now);
+      return touched ? { contentCache: touched.cache } : {};
+    }),
+
+  setArtifactContentCacheEntry: (version, value, now) =>
+    set((prev) => ({
+      artifactContentCache: setWorkspaceContentCacheEntry(
+        prev.artifactContentCache,
+        String(version),
+        value,
+        now,
+      ),
+    })),
+
+  touchArtifactContentCacheEntry: (version, now) =>
+    set((prev) => {
+      const touched = getWorkspaceContentCacheValue(
+        prev.artifactContentCache,
+        String(version),
+        now,
+      );
+      return touched ? { artifactContentCache: touched.cache } : {};
+    }),
 
   setPendingDecision: (decision) =>
     set((prev) => {
@@ -1220,6 +1288,8 @@ function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
       const verdictSummary = getStringField(detail.verdict, "summary") ?? "审核结论";
       const verdictValue = getStringField(detail.verdict, "verdict") ?? "revise";
       const verdictComments = getStringField(detail.verdict, "comments") ?? "";
+      const verdictFindings = getArrayField(detail.verdict, "findings");
+      const reviewGate = getStringField(detail.verdict, "review_gate") ?? "user_confirm_allowed";
       entries.push({
         id: chatEntryId(node.node_id, "review-verdict"),
         type: "review_verdict",
@@ -1231,6 +1301,8 @@ function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
           verdict: verdictValue,
           comments: verdictComments,
           summary: verdictSummary,
+          findings: verdictFindings,
+          review_gate: reviewGate,
         },
       });
     }
@@ -1387,9 +1459,11 @@ function buildGatePromptEntry(
   const latestReview = entries.filter((entry) => entry.type === "review_verdict").at(-1);
   const summary = latestReview?.metadata?.summary?.toString() ?? "";
   const verdict = latestReview?.metadata?.verdict?.toString() ?? "";
+  const reviewGate = latestReview?.metadata?.review_gate?.toString() ?? "";
   const metadata = {
     ...(summary ? { summary } : {}),
     ...(verdict ? { verdict } : {}),
+    ...(reviewGate ? { review_gate: reviewGate } : {}),
   };
   return {
     id: chatEntryId(gatePromptNode?.node_id ?? "human_confirm", "gate-prompt"),
@@ -1537,6 +1611,14 @@ function getStringField(value: unknown, key: string) {
   }
   const field = value[key];
   return typeof field === "string" ? field : null;
+}
+
+function getArrayField(value: unknown, key: string) {
+  if (!isRecord(value)) {
+    return [];
+  }
+  const field = value[key];
+  return Array.isArray(field) ? field : [];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

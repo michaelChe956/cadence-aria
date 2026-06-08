@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type { NodeDetail } from "../api/types";
 import type { ChatEntry } from "./chat-entries";
+import {
+  emptyWorkspaceContentCache,
+  workspaceContentCacheValues,
+} from "./workspace-content-cache";
 import { selectPrepareContextNotes, useWorkspaceStore } from "./workspace-ws-store";
 
 function makeNodeDetail(overrides: Partial<NodeDetail> = {}): NodeDetail {
@@ -220,6 +224,82 @@ describe("workspace ws store", () => {
 
     expect(useWorkspaceStore.getState().providerStatus).toBe("waiting_approval");
     expect(useWorkspaceStore.getState().stage).toBe("prepare_context");
+  });
+
+  it("evicts content cache entries by byte budget", () => {
+    const store = useWorkspaceStore.getState();
+    useWorkspaceStore.setState({
+      contentCache: emptyWorkspaceContentCache(6),
+    });
+
+    store.setContentCacheEntry("a", "aaa", 1);
+    store.setContentCacheEntry("b", "bbb", 2);
+    store.touchContentCacheEntry("a", 3);
+    store.setContentCacheEntry("c", "ccc", 4);
+
+    expect(workspaceContentCacheValues(useWorkspaceStore.getState().contentCache)).toEqual({
+      a: "aaa",
+      c: "ccc",
+    });
+  });
+
+  it("merges hydrated node detail and rebuilds chat entries", () => {
+    const store = useWorkspaceStore.getState();
+    useWorkspaceStore.setState({
+      sessionId: "workspace_session_0001",
+      timelineNodes: [
+        {
+          node_id: "node-1",
+          node_type: "reviewer_run",
+          agent: "codex",
+          stage: "cross_review",
+          round: 1,
+          status: "completed",
+          title: "Review Round 1",
+          summary: "仅有可选建议",
+          started_at: "2026-05-20T00:00:00Z",
+          completed_at: "2026-05-20T00:01:00Z",
+          duration_ms: 60_000,
+          artifact_ref: null,
+          provider_config_snapshot: {
+            author: "claude_code",
+            reviewer: "codex",
+            review_rounds: 1,
+          },
+        },
+      ],
+      nodeDetails: {
+        "node-1": makeNodeDetail({
+          node_id: "node-1",
+          node_type: "reviewer_run",
+          streaming_content: "summary only",
+        }),
+      },
+    });
+
+    store.setNodeDetail(
+      makeNodeDetail({
+        node_id: "node-1",
+        node_type: "reviewer_run",
+        streaming_content: "complete review output",
+        verdict: {
+          verdict: "needs_human",
+          comments: "完整 comments",
+          summary: "仅有可选建议",
+          findings: [],
+          review_gate: "user_confirm_allowed",
+        },
+      }),
+    );
+
+    expect(useWorkspaceStore.getState().nodeDetails["node-1"].streaming_content).toBe(
+      "complete review output",
+    );
+    expect(
+      useWorkspaceStore
+        .getState()
+        .chatEntries.some((entry) => entry.content.includes("complete review output")),
+    ).toBe(true);
   });
 
   it("upserts execution events by id so command completion replaces running state", () => {

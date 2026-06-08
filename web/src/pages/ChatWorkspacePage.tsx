@@ -10,12 +10,14 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps 
 import {
   fetchWorkspaceArtifactVersion,
   fetchWorkspaceEventOutput,
+  fetchWorkspaceNodeDetail,
   fetchWorkspacePrompt,
 } from "../api/workspace-content";
 import type { RevisionPath, WorkspaceProviderName } from "../api/types";
 import { ArtifactPane } from "../components/chat-workspace/ArtifactPane";
 import { ChatEntryList, type ChatEntryListHandle } from "../components/chat-workspace/ChatEntryList";
 import { ChatInputBar } from "../components/chat-workspace/ChatInputBar";
+import { ReviewDecisionActions } from "../components/chat-workspace/ReviewDecisionActions";
 import { TimelineNodeList } from "../components/chat-workspace/TimelineNodeList";
 import {
   DisconnectBanner,
@@ -32,6 +34,7 @@ import {
   type ProviderConfigSnapshot,
   type TimelineNode,
 } from "../state/workspace-ws-store";
+import { workspaceContentCacheValues } from "../state/workspace-content-cache";
 
 const UNLOAD_GUARDED_STAGES = new Set(["running", "cross_review", "revision"]);
 const UNLOAD_GUARD_MESSAGE = "运行中。刷新/关闭将中止当前 Provider 运行，是否继续？";
@@ -80,6 +83,7 @@ export function ChatWorkspacePage({
   const reviewerEnabled = useWorkspaceStore((state) => state.reviewerEnabled);
   const stageConfig = useStageUI(stage);
   const chatListRef = useRef<ChatEntryListHandle | null>(null);
+  const hydratedNodeIdsRef = useRef<Set<string>>(new Set());
   const [activePanel, setActivePanel] = useState<"chat" | "artifact">("chat");
   const sessionReady = storeSessionId === sessionId;
   const inputDisabled = !sessionReady || connectionStatus !== "connected";
@@ -89,6 +93,14 @@ export function ChatWorkspacePage({
         ? scrollTargetEntryIdForNode(chatEntries, selectedNodeId)
         : null,
     [chatEntries, selectedNodeId],
+  );
+  const contentCacheValues = useMemo(
+    () => workspaceContentCacheValues(contentCache),
+    [contentCache],
+  );
+  const artifactContentCacheValues = useMemo(
+    () => numericContentCacheValues(artifactContentCache),
+    [artifactContentCache],
   );
   const abortedByDisconnectNode = latestUnacknowledgedAbortedNode(
     timelineNodes,
@@ -107,6 +119,39 @@ export function ChatWorkspacePage({
       chatListRef.current?.scrollToEntry(selectedEntryId);
     }
   }, [selectedEntryId]);
+
+  useEffect(() => {
+    hydratedNodeIdsRef.current.clear();
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (!sessionReady) {
+      return;
+    }
+    const nodeIds = [selectedNodeId, activeNodeId].filter(
+      (nodeId): nodeId is string => typeof nodeId === "string" && nodeId.length > 0,
+    );
+    for (const nodeId of nodeIds) {
+      if (hydratedNodeIdsRef.current.has(nodeId)) {
+        continue;
+      }
+      if (!useWorkspaceStore.getState().nodeDetails[nodeId]) {
+        continue;
+      }
+      hydratedNodeIdsRef.current.add(nodeId);
+      fetchWorkspaceNodeDetail(sessionId, nodeId)
+        .then((detail) => {
+          const state = useWorkspaceStore.getState();
+          if (state.sessionId !== sessionId) {
+            return;
+          }
+          state.setNodeDetail(detail);
+        })
+        .catch(() => {
+          hydratedNodeIdsRef.current.delete(nodeId);
+        });
+    }
+  }, [activeNodeId, selectedNodeId, sessionId, sessionReady]);
 
   useUnloadGuard({
     enabled: UNLOAD_GUARDED_STAGES.has(stage),
@@ -293,27 +338,27 @@ export function ChatWorkspacePage({
               artifactVersions={artifactVersions}
               artifact={artifact}
               sessionId={sessionReady ? sessionId : null}
-              artifactContentCache={artifactContentCache}
+              artifactContentCache={artifactContentCacheValues}
               loadArtifactVersion={handleLoadArtifactVersion}
               onCacheArtifactContent={handleCacheArtifactContent}
               className="min-h-0 border-l-0"
             />
           ) : (
-            <div className="grid min-h-0 grid-rows-[minmax(0,1fr)_auto]">
+            <div className="grid min-h-0 grid-rows-[minmax(0,1fr)_auto_auto]">
               <ChatEntryList
                 ref={chatListRef}
                 entries={chatEntries}
                 onPermissionResponse={handlePermissionResponse}
                 onChoiceResponse={handleChoiceResponse}
-                onSelectRevisionPath={
-                  stage === "review_decision" ? handleSelectRevisionPath : undefined
-                }
                 onHumanConfirm={handleHumanConfirm}
                 sessionId={sessionReady ? sessionId : null}
-                contentCache={contentCache}
+                contentCache={contentCacheValues}
                 loadContent={handleLoadContent}
                 onCacheContent={handleCacheContent}
               />
+              {stage === "review_decision" ? (
+                <ReviewDecisionActionBar onSelectRevisionPath={handleSelectRevisionPath} />
+              ) : null}
               <ChatInputBar
                 stage={stage}
                 disabled={inputDisabled}
@@ -334,6 +379,18 @@ export function ChatWorkspacePage({
         activeNodeId={activeNodeId}
         connectionStatus={connectionStatus}
       />
+    </div>
+  );
+}
+
+function ReviewDecisionActionBar({
+  onSelectRevisionPath,
+}: {
+  onSelectRevisionPath: (path: RevisionPath, extraContext?: string) => void;
+}) {
+  return (
+    <div className="border-t border-amber-200 bg-amber-50/80 px-3 py-2">
+      <ReviewDecisionActions onSelectPath={onSelectRevisionPath} />
     </div>
   );
 }
@@ -369,6 +426,17 @@ function WorkspacePanelTabs({
         artifacts {artifactCount}
       </span>
     </div>
+  );
+}
+
+function numericContentCacheValues(
+  cache: ReturnType<typeof useWorkspaceStore.getState>["artifactContentCache"],
+) {
+  return Object.fromEntries(
+    Object.entries(workspaceContentCacheValues(cache)).map(([version, markdown]) => [
+      Number(version),
+      markdown,
+    ]),
   );
 }
 

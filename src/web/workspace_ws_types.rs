@@ -369,10 +369,45 @@ pub enum ReviewVerdictType {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewFindingSeverity {
+    Blocking,
+    MustFix,
+    StrongRecommendFix,
+    Suggestion,
+    Minor,
+    Optional,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewFinding {
+    pub severity: ReviewFindingSeverity,
+    pub message: String,
+    pub evidence: String,
+    pub impact: String,
+    pub required_action: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewGate {
+    RequiresRevision,
+    UserConfirmAllowed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewVerdict {
     pub verdict: ReviewVerdictType,
     pub comments: String,
     pub summary: String,
+    #[serde(default)]
+    pub findings: Vec<ReviewFinding>,
+    #[serde(default = "default_review_gate")]
+    pub review_gate: ReviewGate,
+}
+
+fn default_review_gate() -> ReviewGate {
+    ReviewGate::UserConfirmAllowed
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -435,8 +470,8 @@ fn default_true() -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChoiceOption, ProviderConfigSnapshot, ReviewVerdict, ReviewVerdictType, TimelineNode,
-        TimelineNodeStatus, TimelineNodeType, WorkspaceStage, WsExecutionEvent,
+        ChoiceOption, ProviderConfigSnapshot, ReviewGate, ReviewVerdict, ReviewVerdictType,
+        TimelineNode, TimelineNodeStatus, TimelineNodeType, WorkspaceStage, WsExecutionEvent,
         WsExecutionEventKind, WsExecutionEventStatus, WsInMessage, WsOutMessage,
         WsPermissionRiskLevel, WsProviderStatus,
     };
@@ -584,6 +619,8 @@ mod tests {
             verdict: ReviewVerdictType::Revise,
             comments: "需要补充验收标准".to_string(),
             summary: "补充验收标准后返修".to_string(),
+            findings: Vec::new(),
+            review_gate: ReviewGate::RequiresRevision,
         };
 
         let review_complete = serde_json::to_value(WsOutMessage::ReviewComplete {

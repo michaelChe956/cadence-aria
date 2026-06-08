@@ -25,16 +25,22 @@ use crate::product::models::{
 use crate::protocol::contracts::{AdapterRole, ProviderType};
 use crate::web::workspace_ws_types::{
     ArtifactVersion, ArtifactVersionSummary, AuthorDecision, ChoiceOption, HumanConfirmDecision,
-    NodeDetailSummary, ProviderConfigSnapshot, ReviewVerdict, ReviewVerdictType, TimelineNode,
-    TimelineNodeStatus, TimelineNodeType, WorkspaceStage as WsWorkspaceStage, WsCheckpointDto,
-    WsMessageDto, WsOutMessage, WsProviderConfig,
+    NodeDetailSummary, ProviderConfigSnapshot, ReviewFinding, ReviewFindingSeverity, ReviewGate,
+    ReviewVerdict, ReviewVerdictType, TimelineNode, TimelineNodeStatus, TimelineNodeType,
+    WorkspaceStage as WsWorkspaceStage, WsCheckpointDto, WsMessageDto, WsOutMessage,
+    WsProviderConfig,
 };
 
 const WORKSPACE_PROVIDER_TIMEOUT_SECS: u64 = 3600;
 const SUMMARY_PREVIEW_CHARS: usize = 2048;
+const CODEX_RESUME_STALL_ERROR_MARKER: &str = "Codex resume stalled before provider progress";
 
 fn preview(value: &str) -> String {
     value.chars().take(SUMMARY_PREVIEW_CHARS).collect()
+}
+
+fn is_codex_resume_stall_failure(message: &str) -> bool {
+    message.contains(CODEX_RESUME_STALL_ERROR_MARKER)
 }
 
 fn serialized_string<T: serde::Serialize>(value: &T) -> String {
@@ -364,6 +370,11 @@ impl AuthorPromptMode {
 struct ArtifactRetryContext {
     provider: Arc<dyn StreamingProviderAdapter>,
     input: StreamingProviderInput,
+    attempted: bool,
+}
+
+struct RevisionResumeFallbackContext {
+    provider: Arc<dyn StreamingProviderAdapter>,
     attempted: bool,
 }
 
@@ -1062,6 +1073,7 @@ impl WorkspaceEngine {
             Some(self.session.author_provider.clone()),
             ProviderConversationRole::Author,
             Some(retry_context),
+            None,
         )
         .await;
     }
@@ -1077,6 +1089,7 @@ impl WorkspaceEngine {
         agent: Option<ProviderName>,
         role: ProviderConversationRole,
         mut artifact_retry: Option<ArtifactRetryContext>,
+        mut revision_resume_fallback: Option<RevisionResumeFallbackContext>,
     ) {
         let mut session = match session {
             Ok(session) => session,
@@ -1403,6 +1416,74 @@ impl WorkspaceEngine {
                             return;
                         }
                         ProviderEvent::Failed { message } => {
+                            let retry_provider =
+                                revision_resume_fallback.as_mut().and_then(|context| {
+                                    if !context.attempted && is_codex_resume_stall_failure(&message)
+                                    {
+                                        context.attempted = true;
+                                        Some(context.provider.clone())
+                                    } else {
+                                        None
+                                    }
+                                });
+                            if let Some(provider) = retry_provider {
+                                let retry_input = match self.build_revision_input_without_resume() {
+                                    Ok(input) => input,
+                                    Err(error) => {
+                                        let _ = self
+                                            .event_tx
+                                            .send(EngineEvent::Error { message: error })
+                                            .await;
+                                        self.finish_failed_run().await;
+                                        return;
+                                    }
+                                };
+                                if let Some(context) = artifact_retry.as_mut() {
+                                    context.input = retry_input.clone();
+                                }
+                                if let Some(node_id) = node_id.as_deref() {
+                                    let _ = self
+                                        .persist_prompt_snapshot(node_id, retry_input.prompt.clone())
+                                        .await;
+                                    self.emit_execution_event(
+                                        provider_prompt_event(
+                                            node_id,
+                                            retry_input.prompt.clone(),
+                                            "Codex resume 无事件，改用新 thread 的完整返修提示词",
+                                        ),
+                                        Some(node_id.to_string()),
+                                        agent.clone(),
+                                    )
+                                    .await;
+                                }
+                                match provider.start(retry_input, self.cancel.clone()).await {
+                                    Ok(next_session) => {
+                                        session = next_session;
+                                        full_content.clear();
+                                        tool_call_titles.clear();
+                                        tool_call_commands.clear();
+                                        continue;
+                                    }
+                                    Err(error) => {
+                                        let _ = self
+                                            .event_tx
+                                            .send(EngineEvent::Error {
+                                                message: error.details.clone(),
+                                            })
+                                            .await;
+                                        if let Some(node_id) = node_id.as_deref() {
+                                            self.update_timeline_node(
+                                                node_id,
+                                                TimelineNodeStatus::Failed,
+                                                Some("Provider fresh retry 启动失败".to_string()),
+                                            )
+                                            .await;
+                                        }
+                                        self.finish_failed_run().await;
+                                        return;
+                                    }
+                                }
+                            }
                             let _ = self
                                 .event_tx
                                 .send(EngineEvent::Error { message })
@@ -1562,6 +1643,16 @@ impl WorkspaceEngine {
             input: input.clone(),
             attempted: false,
         };
+        let revision_resume_fallback = if input.resume_provider_session_id.is_some()
+            && self.session.author_provider == ProviderName::Codex
+        {
+            Some(RevisionResumeFallbackContext {
+                provider: provider.clone(),
+                attempted: false,
+            })
+        } else {
+            None
+        };
         let session = provider.start(input, self.cancel.clone()).await;
         self.drive_provider_session(
             session,
@@ -1570,6 +1661,7 @@ impl WorkspaceEngine {
             Some(author),
             ProviderConversationRole::Author,
             Some(retry_context),
+            revision_resume_fallback,
         )
         .await;
     }
@@ -1912,6 +2004,8 @@ impl WorkspaceEngine {
                     "verdict": verdict.verdict.clone(),
                     "comments": verdict.comments.clone(),
                     "summary": verdict.summary.clone(),
+                    "findings": verdict.findings.clone(),
+                    "review_gate": verdict.review_gate.clone(),
                 }),
             )
             .await;
@@ -1931,13 +2025,22 @@ impl WorkspaceEngine {
             Some(verdict.summary.clone()),
         )
         .await;
-        self.mark_latest_artifact_reviewed(reviewer, Some(verdict.verdict.clone()));
+        let artifact_verdict = match &verdict.review_gate {
+            ReviewGate::RequiresRevision => ReviewVerdictType::Revise,
+            ReviewGate::UserConfirmAllowed => match &verdict.verdict {
+                ReviewVerdictType::Pass => ReviewVerdictType::Pass,
+                ReviewVerdictType::Revise | ReviewVerdictType::NeedsHuman => {
+                    ReviewVerdictType::NeedsHuman
+                }
+            },
+        };
+        self.mark_latest_artifact_reviewed(reviewer, Some(artifact_verdict));
 
-        match verdict.verdict {
-            ReviewVerdictType::Pass | ReviewVerdictType::NeedsHuman => {
+        match &verdict.review_gate {
+            ReviewGate::UserConfirmAllowed => {
                 self.enter_human_confirm(Some(verdict.summary)).await;
             }
-            ReviewVerdictType::Revise => {
+            ReviewGate::RequiresRevision => {
                 self.transition_stage(WorkspaceStage::ReviewDecision).await;
                 let decision_node_id = self
                     .create_timeline_node(TimelineNodeDraft {
@@ -2103,6 +2206,8 @@ impl WorkspaceEngine {
                             .clone()
                             .unwrap_or_else(|| "人工请求修改".to_string()),
                         summary: "人工请求修改".to_string(),
+                        findings: Vec::new(),
+                        review_gate: ReviewGate::RequiresRevision,
                     });
                 }
                 self.pending_revision_context = context;
@@ -2386,12 +2491,15 @@ impl WorkspaceEngine {
         );
         prompt.push_str(
             "\n\n请输出审核意见，并在末尾附加 JSON 代码块：\n\
+             - 只有影响下一阶段可用性的 finding 才能标记为 `blocking`、`must_fix` 或 `strong_recommend_fix`。\n\
+             - 风格、措辞、文档美化、未来扩展、非必要补充只能标记为 `suggestion`、`minor` 或 `optional`。\n\
+             - 没有强返修 finding 时，必须允许用户确认当前版本，不要为了普通建议使用强返修。\n\
+             - 第二轮及后续 review 只复核上一轮强返修项是否关闭；除非 revision 新引入真正阻塞问题，不得重新发散普通建议。\n\
              - `pass`：产物可进入最终人工确认。\n\
-             - `revise`：产物存在可由 author 修改的问题，包括需求遗漏、接口设计歧义、实现约束错误、验收标准不足或格式不合规。\n\
-             - `needs_human`：没有明确可返修内容，必须先等待用户做产品/范围决策。\n\
-             如果审核正文包含“不建议通过”、High/Medium 问题、建议改动或可执行返修项，必须使用 `revise`，不要使用 `needs_human`。\n\
+             - `revise`：仅当存在 blocking/must_fix/strong_recommend_fix finding。\n\
+             - `needs_human`：没有明确可自动返修内容，需要用户做产品/范围判断。\n\
              ```json\n\
-             {\"verdict\":\"pass|revise|needs_human\",\"summary\":\"一句话摘要\"}\n\
+             {\"verdict\":\"pass|revise|needs_human\",\"summary\":\"一句话摘要\",\"findings\":[{\"severity\":\"blocking|must_fix|strong_recommend_fix|suggestion|minor|optional\",\"message\":\"问题描述\",\"evidence\":\"当前产物中的具体证据\",\"impact\":\"为什么影响或不影响下一阶段\",\"required_action\":\"需要作者执行的最小动作\"}]}\n\
              ```\n",
         );
 
@@ -2409,6 +2517,17 @@ impl WorkspaceEngine {
     }
 
     fn build_revision_input(&self) -> Result<StreamingProviderInput, String> {
+        self.build_revision_input_with_resume(true)
+    }
+
+    fn build_revision_input_without_resume(&self) -> Result<StreamingProviderInput, String> {
+        self.build_revision_input_with_resume(false)
+    }
+
+    fn build_revision_input_with_resume(
+        &self,
+        allow_resume: bool,
+    ) -> Result<StreamingProviderInput, String> {
         let working_dir = match &self.session.repository_path {
             Some(path) => path.clone(),
             None => std::env::current_dir()
@@ -2417,8 +2536,11 @@ impl WorkspaceEngine {
 
         let artifact = self.session.artifact.clone().unwrap_or_default();
         let provider = self.session.author_provider.clone();
-        let resume_provider_session_id =
-            self.provider_resume_session_id(ProviderConversationRole::Author, &provider);
+        let resume_provider_session_id = if allow_resume {
+            self.provider_resume_session_id(ProviderConversationRole::Author, &provider)
+        } else {
+            None
+        };
         let review = self
             .latest_review_verdict
             .as_ref()
@@ -3314,25 +3436,15 @@ impl WorkspaceEngine {
 
     fn parse_review_verdict(output: &str) -> ReviewVerdict {
         let trimmed = output.trim();
-        let parsed = extract_tail_json(trimmed).and_then(|(comments, json)| {
-            parse_review_json(&json).map(|(mut verdict, summary)| {
-                if verdict == ReviewVerdictType::NeedsHuman
-                    && review_comments_indicate_actionable_revision(&comments)
-                {
-                    verdict = ReviewVerdictType::Revise;
-                }
-                ReviewVerdict {
-                    verdict,
-                    comments: comments.trim().to_string(),
-                    summary,
-                }
-            })
-        });
+        let parsed = extract_tail_json(trimmed)
+            .and_then(|(comments, json)| parse_review_json(&json, &comments));
 
         parsed.unwrap_or_else(|| ReviewVerdict {
             verdict: ReviewVerdictType::NeedsHuman,
             comments: output.to_string(),
             summary: "需要人工确认".to_string(),
+            findings: Vec::new(),
+            review_gate: ReviewGate::UserConfirmAllowed,
         })
     }
 }
@@ -3456,29 +3568,9 @@ fn extract_tail_json(output: &str) -> Option<(String, String)> {
     Some((comments, json))
 }
 
-fn review_comments_indicate_actionable_revision(comments: &str) -> bool {
-    let normalized = comments.to_ascii_lowercase();
-    comments.contains("不建议通过")
-        || comments.contains("建议返修")
-        || comments.contains("需要返修")
-        || comments.contains("需要修正")
-        || comments.contains("建议改")
-        || comments.contains("建议修改")
-        || comments.contains("主要问题")
-        || comments.contains("阻断")
-        || comments.contains("未通过")
-        || normalized.contains("high")
-        || normalized.contains("medium")
-        || normalized.contains("request changes")
-        || normalized.contains("changes requested")
-        || normalized.contains("revise")
-        || normalized.contains("revision")
-        || normalized.contains("blocking")
-}
-
-fn parse_review_json(json: &str) -> Option<(ReviewVerdictType, String)> {
+fn parse_review_json(json: &str, comments: &str) -> Option<ReviewVerdict> {
     let value: serde_json::Value = serde_json::from_str(json).ok()?;
-    let verdict = match value.get("verdict")?.as_str()? {
+    let parsed_verdict = match value.get("verdict")?.as_str()? {
         "pass" => ReviewVerdictType::Pass,
         "revise" => ReviewVerdictType::Revise,
         "needs_human" => ReviewVerdictType::NeedsHuman,
@@ -3487,13 +3579,86 @@ fn parse_review_json(json: &str) -> Option<(ReviewVerdictType, String)> {
     let summary = value
         .get("summary")
         .and_then(|value| value.as_str())
-        .unwrap_or(match verdict {
+        .unwrap_or(match parsed_verdict {
             ReviewVerdictType::Pass => "审核通过",
             ReviewVerdictType::Revise => "需要返修",
             ReviewVerdictType::NeedsHuman => "需要人工确认",
         })
         .to_string();
-    Some((verdict, summary))
+    let findings = parse_review_findings(value.get("findings"));
+    let review_gate = review_gate_for(&parsed_verdict, &findings);
+    let verdict = match review_gate {
+        ReviewGate::RequiresRevision => ReviewVerdictType::Revise,
+        ReviewGate::UserConfirmAllowed => match parsed_verdict {
+            ReviewVerdictType::Pass => ReviewVerdictType::Pass,
+            ReviewVerdictType::Revise | ReviewVerdictType::NeedsHuman => {
+                ReviewVerdictType::NeedsHuman
+            }
+        },
+    };
+    Some(ReviewVerdict {
+        verdict,
+        comments: comments.trim().to_string(),
+        summary,
+        findings,
+        review_gate,
+    })
+}
+
+fn parse_review_findings(value: Option<&serde_json::Value>) -> Vec<ReviewFinding> {
+    let Some(items) = value.and_then(|value| value.as_array()) else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            Some(ReviewFinding {
+                severity: parse_review_finding_severity(item.get("severity")?.as_str()?)?,
+                message: item.get("message")?.as_str()?.to_string(),
+                evidence: item
+                    .get("evidence")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                impact: item
+                    .get("impact")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                required_action: item
+                    .get("required_action")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            })
+        })
+        .collect()
+}
+
+fn parse_review_finding_severity(value: &str) -> Option<ReviewFindingSeverity> {
+    match value {
+        "blocking" => Some(ReviewFindingSeverity::Blocking),
+        "must_fix" => Some(ReviewFindingSeverity::MustFix),
+        "strong_recommend_fix" => Some(ReviewFindingSeverity::StrongRecommendFix),
+        "suggestion" => Some(ReviewFindingSeverity::Suggestion),
+        "minor" => Some(ReviewFindingSeverity::Minor),
+        "optional" => Some(ReviewFindingSeverity::Optional),
+        _ => None,
+    }
+}
+
+fn review_gate_for(_verdict: &ReviewVerdictType, findings: &[ReviewFinding]) -> ReviewGate {
+    if findings.iter().any(|finding| {
+        matches!(
+            finding.severity,
+            ReviewFindingSeverity::Blocking
+                | ReviewFindingSeverity::MustFix
+                | ReviewFindingSeverity::StrongRecommendFix
+        )
+    }) {
+        return ReviewGate::RequiresRevision;
+    }
+    ReviewGate::UserConfirmAllowed
 }
 
 fn human_confirm_payload_description(payload: Option<serde_json::Value>) -> Option<String> {
@@ -4134,8 +4299,9 @@ mod tests {
     };
     use crate::protocol::contracts::{AdapterInput, ProviderType};
     use crate::web::workspace_ws_types::{
-        AuthorDecision, ProviderConfigSnapshot, ReviewVerdictType, TimelineNode,
-        TimelineNodeStatus, TimelineNodeType, WorkspaceStage as WsWorkspaceStage,
+        AuthorDecision, ProviderConfigSnapshot, ReviewFindingSeverity, ReviewGate,
+        ReviewVerdictType, TimelineNode, TimelineNodeStatus, TimelineNodeType,
+        WorkspaceStage as WsWorkspaceStage,
     };
     use std::sync::Mutex;
     use tempfile::TempDir;
@@ -4338,6 +4504,7 @@ mod tests {
                 Some("timeline_node_author".to_string()),
                 Some(ProviderName::ClaudeCode),
                 ProviderConversationRole::Author,
+                None,
                 None,
             )
             .await;
@@ -4591,6 +4758,8 @@ mod tests {
             verdict: ReviewVerdictType::Revise,
             comments: "补充验收标准".to_string(),
             summary: "需要返修".to_string(),
+            findings: Vec::new(),
+            review_gate: ReviewGate::RequiresRevision,
         });
 
         assert_eq!(
@@ -4893,6 +5062,7 @@ mod tests {
                 Some(ProviderName::ClaudeCode),
                 ProviderConversationRole::Author,
                 None,
+                None,
             )
             .await;
 
@@ -5088,13 +5258,14 @@ mod tests {
 
         let verdict = WorkspaceEngine::parse_review_verdict(output);
 
-        assert_eq!(verdict.verdict, ReviewVerdictType::Revise);
+        assert_eq!(verdict.verdict, ReviewVerdictType::NeedsHuman);
+        assert_eq!(verdict.review_gate, ReviewGate::UserConfirmAllowed);
         assert_eq!(verdict.summary, "补充异常路径");
         assert_eq!(verdict.comments.trim(), "整体可用，但需要补充异常路径。");
     }
 
     #[test]
-    fn parse_review_verdict_normalizes_actionable_needs_human_to_revise() {
+    fn parse_review_verdict_does_not_upgrade_actionable_comments_without_strong_findings() {
         let output = "**审核结论**\n\n\
             不建议通过。当前 Story Spec 覆盖主方向，但安装任务 API 设计存在实现级歧义。\n\n\
             **主要问题**\n\n\
@@ -5105,7 +5276,8 @@ mod tests {
 
         let verdict = WorkspaceEngine::parse_review_verdict(output);
 
-        assert_eq!(verdict.verdict, ReviewVerdictType::Revise);
+        assert_eq!(verdict.verdict, ReviewVerdictType::NeedsHuman);
+        assert_eq!(verdict.review_gate, ReviewGate::UserConfirmAllowed);
         assert_eq!(verdict.summary, "安装任务 API 设计需修正。");
         assert!(verdict.comments.contains("不建议通过"));
     }
@@ -5119,6 +5291,222 @@ mod tests {
         assert_eq!(verdict.verdict, ReviewVerdictType::NeedsHuman);
         assert_eq!(verdict.summary, "需要人工确认");
         assert_eq!(verdict.comments, output);
+    }
+
+    #[test]
+    fn parse_review_verdict_classifies_optional_findings_as_user_confirm_allowed() {
+        let output = r#"整体可用，建议补充措辞。
+
+```json
+{
+  "verdict": "revise",
+  "summary": "有非阻塞建议",
+  "findings": [
+    {
+      "severity": "suggestion",
+      "message": "建议补充边界说明",
+      "evidence": "验收标准已经覆盖主路径",
+      "impact": "不影响下一阶段执行",
+      "required_action": "可在后续优化中补充"
+    }
+  ]
+}
+```"#;
+
+        let verdict = WorkspaceEngine::parse_review_verdict(output);
+
+        assert_eq!(verdict.verdict, ReviewVerdictType::NeedsHuman);
+        assert_eq!(verdict.review_gate, ReviewGate::UserConfirmAllowed);
+        assert_eq!(verdict.findings.len(), 1);
+        assert_eq!(
+            verdict.findings[0].severity,
+            ReviewFindingSeverity::Suggestion
+        );
+    }
+
+    #[test]
+    fn parse_review_verdict_classifies_strong_findings_as_requires_revision() {
+        let output = r#"缺少 Work Item 可执行验证命令。
+
+```json
+{
+  "verdict": "revise",
+  "summary": "必须补充验证命令",
+  "findings": [
+    {
+      "severity": "must_fix",
+      "message": "Work Item 没有验证命令",
+      "evidence": "Artifact 未出现验证命令段落",
+      "impact": "Coding Workspace 无法执行验收",
+      "required_action": "补充明确验证命令"
+    }
+  ]
+}
+```"#;
+
+        let verdict = WorkspaceEngine::parse_review_verdict(output);
+
+        assert_eq!(verdict.verdict, ReviewVerdictType::Revise);
+        assert_eq!(verdict.review_gate, ReviewGate::RequiresRevision);
+        assert_eq!(verdict.findings[0].severity, ReviewFindingSeverity::MustFix);
+    }
+
+    #[test]
+    fn parse_review_verdict_revise_without_findings_falls_back_to_human_confirm_allowed() {
+        let output = r#"建议修改一些描述。
+
+```json
+{"verdict":"revise","summary":"建议修改描述"}
+```"#;
+
+        let verdict = WorkspaceEngine::parse_review_verdict(output);
+
+        assert_eq!(verdict.verdict, ReviewVerdictType::NeedsHuman);
+        assert_eq!(verdict.review_gate, ReviewGate::UserConfirmAllowed);
+        assert!(verdict.findings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn optional_review_findings_enter_human_confirm_for_all_workspace_types() {
+        for workspace_type in [
+            WorkspaceType::Story,
+            WorkspaceType::Design,
+            WorkspaceType::WorkItem,
+        ] {
+            let (_tmp, store) = setup();
+            let (tx, _) = mpsc::channel(64);
+            let mut session = make_session(&format!("sess_optional_review_{workspace_type:?}"));
+            session.workspace_type = workspace_type.clone();
+            session.review_rounds = 2;
+            session.artifact = Some("# Artifact\n\n可用版本".to_string());
+            let mut engine = WorkspaceEngine::new(store, tx, session);
+            engine.start_review_or_skip().await;
+
+            engine
+                .drive_review_session(
+                    Arc::new(ReviewVerdictStreamingProvider {
+                        output: r#"建议补充说明。
+
+```json
+{
+  "verdict": "revise",
+  "summary": "仅有可选建议",
+  "findings": [
+    {
+      "severity": "optional",
+      "message": "可补充说明",
+      "evidence": "当前主路径完整",
+      "impact": "不影响下一阶段执行",
+      "required_action": "可后续优化"
+    }
+  ]
+}
+```"#,
+                        provider_type: Arc::new(Mutex::new(None)),
+                        prompt: Arc::new(Mutex::new(None)),
+                    }),
+                    empty_provider_commands(),
+                )
+                .await;
+
+            assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
+            assert!(
+                engine
+                    .timeline_nodes
+                    .iter()
+                    .any(|node| node.node_type == TimelineNodeType::HumanConfirm),
+                "{workspace_type:?} should create human_confirm node"
+            );
+            assert!(
+                !engine
+                    .timeline_nodes
+                    .iter()
+                    .any(|node| node.node_type == TimelineNodeType::ReviewDecision),
+                "{workspace_type:?} should not block optional review findings"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn strong_review_findings_enter_review_decision_for_all_workspace_types() {
+        for workspace_type in [
+            WorkspaceType::Story,
+            WorkspaceType::Design,
+            WorkspaceType::WorkItem,
+        ] {
+            let (_tmp, store) = setup();
+            let (tx, _) = mpsc::channel(64);
+            let mut session = make_session(&format!("sess_strong_review_{workspace_type:?}"));
+            session.workspace_type = workspace_type.clone();
+            session.review_rounds = 2;
+            session.artifact = Some("# Artifact\n\n缺少验收标准".to_string());
+            let mut engine = WorkspaceEngine::new(store, tx, session);
+            engine.start_review_or_skip().await;
+
+            engine
+                .drive_review_session(
+                    Arc::new(ReviewVerdictStreamingProvider {
+                        output: r#"必须补充验收标准。
+
+```json
+{
+  "verdict": "revise",
+  "summary": "必须补充验收标准",
+  "findings": [
+    {
+      "severity": "strong_recommend_fix",
+      "message": "验收标准不足",
+      "evidence": "Artifact 未列出可测试验收值",
+      "impact": "下一阶段无法判断实现是否完成",
+      "required_action": "补充明确验收标准"
+    }
+  ]
+}
+```"#,
+                        provider_type: Arc::new(Mutex::new(None)),
+                        prompt: Arc::new(Mutex::new(None)),
+                    }),
+                    empty_provider_commands(),
+                )
+                .await;
+
+            assert_eq!(engine.session().stage, WorkspaceStage::ReviewDecision);
+            assert!(
+                engine
+                    .timeline_nodes
+                    .iter()
+                    .any(|node| node.node_type == TimelineNodeType::ReviewDecision),
+                "{workspace_type:?} should require revision for strong findings"
+            );
+        }
+    }
+
+    #[test]
+    fn review_prompt_limits_revise_to_strong_findings() {
+        let (_tmp, store) = setup();
+        let (tx, _) = mpsc::channel(8);
+        let mut session = make_session("sess_review_prompt_gate");
+        session.artifact = Some("# Story Spec\n\n可用版本".to_string());
+        let engine = WorkspaceEngine::new(store, tx, session);
+
+        let input = engine.build_review_input().expect("review input");
+
+        assert!(
+            input
+                .prompt
+                .contains("blocking|must_fix|strong_recommend_fix")
+        );
+        assert!(input.prompt.contains("suggestion|minor|optional"));
+        assert!(
+            input
+                .prompt
+                .contains("没有强返修 finding 时，必须允许用户确认当前版本")
+        );
+        assert!(
+            !input
+                .prompt
+                .contains("High/Medium 问题、建议改动或可执行返修项，必须使用 `revise`")
+        );
     }
 
     #[test]
@@ -5501,6 +5889,8 @@ mod tests {
                 verdict: ReviewVerdictType::Revise,
                 comments: "需要补充上下文后再返修。".to_string(),
                 summary: "补充上下文".to_string(),
+                findings: Vec::new(),
+                review_gate: ReviewGate::RequiresRevision,
             });
 
             let result = engine
@@ -5575,6 +5965,8 @@ mod tests {
             verdict: ReviewVerdictType::Revise,
             comments: "需要补充 reviewer 指出的 API 字段。".to_string(),
             summary: "补 API 字段".to_string(),
+            findings: Vec::new(),
+            review_gate: ReviewGate::RequiresRevision,
         });
 
         let input = engine.build_revision_input().expect("revision input");
@@ -5629,6 +6021,8 @@ mod tests {
             verdict: ReviewVerdictType::Revise,
             comments: "需要补充失败路径。".to_string(),
             summary: "补充失败路径".to_string(),
+            findings: Vec::new(),
+            review_gate: ReviewGate::RequiresRevision,
         });
         engine.pending_revision_context = Some("补充登录错误码".to_string());
         let captured_input = Arc::new(Mutex::new(None));
@@ -5667,6 +6061,109 @@ mod tests {
         assert!(!input.prompt.contains("# Story Spec"));
     }
 
+    #[tokio::test]
+    async fn revision_codex_resume_stall_retries_fresh_full_prompt_for_all_workspace_types() {
+        for (workspace_type, artifact, output) in [
+            (
+                WorkspaceType::Story,
+                "# Story Spec\n\n## 功能需求\n- [REQ-001] 初版。\n\n## 成功标准\n- [AC-001] 初版可验收。\n",
+                "# Story Spec\n\n## 功能需求\n- [REQ-001] fresh 返修版本。\n\n## 成功标准\n- [AC-001] fresh 返修可验收。\n",
+            ),
+            (
+                WorkspaceType::Design,
+                "# Design Spec\n\n## 设计决策\n- [DEC-001] 初版。\n\n## API 契约\n- [API-001] 初版接口。\n",
+                "# Design Spec\n\n## 设计决策\n- [DEC-001] fresh 返修版本。\n\n## API 契约\n- [API-001] fresh 返修接口。\n",
+            ),
+            (
+                WorkspaceType::WorkItem,
+                "# Work Item\n\n## 目标\n- 初版任务。\n\n## 验证命令\n- cargo test --locked\n",
+                "# Work Item\n\n## 目标\n- fresh 返修任务。\n\n## 验证命令\n- cargo test --locked\n",
+            ),
+        ] {
+            let (_tmp, store) = setup();
+            let (tx, _) = mpsc::channel(64);
+            let mut session =
+                make_session(&format!("sess_revision_resume_stall_{workspace_type:?}"));
+            session.workspace_type = workspace_type.clone();
+            session.stage = WorkspaceStage::ReviewDecision;
+            session.artifact = Some(artifact.to_string());
+            session.author_provider = ProviderName::Codex;
+            session.messages.push(SessionMessage {
+                id: "msg_001".to_string(),
+                role: "assistant".to_string(),
+                content: artifact.to_string(),
+                checkpoint_id: None,
+                created_at: chrono::Utc::now().to_rfc3339(),
+            });
+            session
+                .provider_conversations
+                .push(ProviderConversationRef {
+                    role: ProviderConversationRole::Author,
+                    provider: ProviderName::Codex,
+                    provider_session_id: "codex-stale-ephemeral-thread".to_string(),
+                    updated_at: chrono::Utc::now().to_rfc3339(),
+                    last_node_id: Some("timeline_node_002".to_string()),
+                });
+            let mut engine = WorkspaceEngine::new(store, tx, session);
+            engine.latest_review_verdict = Some(ReviewVerdict {
+                verdict: ReviewVerdictType::Revise,
+                comments: "需要补充失败路径。".to_string(),
+                summary: "补充失败路径".to_string(),
+                findings: Vec::new(),
+                review_gate: ReviewGate::RequiresRevision,
+            });
+            engine
+                .handle_review_decision(
+                    "continue_with_context".to_string(),
+                    Some("补充旧 session 不可恢复时的处理。".to_string()),
+                )
+                .await
+                .expect("review decision should enter revision");
+
+            let inputs = Arc::new(Mutex::new(Vec::new()));
+            engine
+                .drive_revision_session(
+                    Arc::new(RevisionResumeStallThenSuccessProvider {
+                        inputs: inputs.clone(),
+                        calls: Arc::new(Mutex::new(0)),
+                        output,
+                    }),
+                    empty_provider_commands(),
+                )
+                .await;
+
+            let inputs = inputs.lock().unwrap().clone();
+            assert_eq!(inputs.len(), 2, "{workspace_type:?} should retry once");
+            assert_eq!(
+                inputs[0].resume_provider_session_id.as_deref(),
+                Some("codex-stale-ephemeral-thread")
+            );
+            assert!(
+                !inputs[0].prompt.contains("上一版 Artifact"),
+                "{workspace_type:?} first resume attempt should use delta prompt"
+            );
+            assert_eq!(inputs[1].resume_provider_session_id, None);
+            assert!(
+                inputs[1].prompt.contains("上一版 Artifact"),
+                "{workspace_type:?} fresh retry should use full prompt"
+            );
+            assert!(
+                inputs[1].prompt.contains(artifact.trim()),
+                "{workspace_type:?} fresh retry should include prior artifact"
+            );
+            assert_eq!(engine.session().artifact.as_deref(), Some(output.trim()));
+            assert_eq!(
+                engine
+                    .provider_resume_session_id(
+                        ProviderConversationRole::Author,
+                        &ProviderName::Codex,
+                    )
+                    .as_deref(),
+                Some("codex-fresh-thread")
+            );
+        }
+    }
+
     #[test]
     fn revision_input_reminds_design_author_to_return_artifact_fenced_block() {
         let (event_tx, _event_rx) = mpsc::channel(8);
@@ -5693,6 +6190,8 @@ mod tests {
             verdict: ReviewVerdictType::Revise,
             comments: "需要补齐追踪关系。".to_string(),
             summary: "补齐追踪关系".to_string(),
+            findings: Vec::new(),
+            review_gate: ReviewGate::RequiresRevision,
         });
 
         let input = engine.build_revision_input().expect("revision input");
@@ -5744,6 +6243,8 @@ mod tests {
             verdict: ReviewVerdictType::Revise,
             comments: "需要补充验收值。".to_string(),
             summary: "补充验收值".to_string(),
+            findings: Vec::new(),
+            review_gate: ReviewGate::RequiresRevision,
         });
         engine
             .append_completed_timeline_event(
@@ -5772,6 +6273,66 @@ mod tests {
     struct RevisionInputRecordingProvider {
         input: Arc<Mutex<Option<StreamingProviderInput>>>,
         output: &'static str,
+    }
+
+    struct RevisionResumeStallThenSuccessProvider {
+        inputs: Arc<Mutex<Vec<StreamingProviderInput>>>,
+        calls: Arc<Mutex<u32>>,
+        output: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl StreamingProviderAdapter for RevisionResumeStallThenSuccessProvider {
+        async fn start(
+            &self,
+            input: StreamingProviderInput,
+            _cancel: CancellationToken,
+        ) -> Result<ProviderSession, ProviderAdapterError> {
+            self.inputs.lock().unwrap().push(input);
+            let mut calls = self.calls.lock().unwrap();
+            *calls += 1;
+            let call_no = *calls;
+            drop(calls);
+
+            let (event_tx, event_rx) = mpsc::channel(8);
+            let (command_tx, _command_rx) = mpsc::channel(8);
+            let output = self.output.to_string();
+            tokio::spawn(async move {
+                if call_no == 1 {
+                    let _ = event_tx
+                        .send(ProviderEvent::Failed {
+                            message:
+                                "Codex resume stalled before provider progress for thread codex-stale-ephemeral-thread"
+                                    .to_string(),
+                        })
+                        .await;
+                } else {
+                    let _ = event_tx
+                        .send(ProviderEvent::Completed {
+                            full_output: output,
+                            provider_session_id: Some("codex-fresh-thread".to_string()),
+                        })
+                        .await;
+                }
+            });
+            Ok(ProviderSession {
+                events: event_rx,
+                commands: command_tx,
+            })
+        }
+
+        async fn run_streaming(
+            &self,
+            _input: &AdapterInput,
+            _cancel: CancellationToken,
+        ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+            Err(ProviderAdapterError::execution_failed(
+                None,
+                String::new(),
+                "run_streaming is not used by WorkspaceEngine",
+                0,
+            ))
+        }
     }
 
     #[async_trait::async_trait]
@@ -6390,6 +6951,8 @@ mod tests {
             verdict: ReviewVerdictType::NeedsHuman,
             comments: "需要人工判断".to_string(),
             summary: "等待人工确认".to_string(),
+            findings: Vec::new(),
+            review_gate: ReviewGate::UserConfirmAllowed,
         });
         engine
             .enter_human_confirm(Some("等待人工确认".to_string()))
@@ -7239,6 +7802,7 @@ mod tests {
                 Some(node_id.clone()),
                 Some(ProviderName::ClaudeCode),
                 ProviderConversationRole::Author,
+                None,
                 None,
             )
             .await;

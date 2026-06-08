@@ -11,13 +11,20 @@ export function GatePromptEntry({
 }) {
   const summary = summaryFromEntry(entry);
   const verdict = verdictFromEntry(entry);
+  const reviewGate = reviewGateFromEntry(entry);
   const needsHuman = verdict === "needs_human";
+  const confirmLabel =
+    reviewGate === "user_confirm_allowed"
+      ? "确认使用当前版本"
+      : needsHuman
+        ? "提交人工确认"
+        : "确认产物";
   const isResolved = entry.resolved === true;
 
   return (
     <ChatEntryContainer
       role="system"
-      title={needsHuman ? "需要人工确认" : "人工确认"}
+      title={reviewGate === "user_confirm_allowed" ? "可确认当前版本" : needsHuman ? "需要人工确认" : "人工确认"}
       className="border-slate-200 bg-slate-50"
       testId="gate-prompt-entry"
     >
@@ -34,7 +41,7 @@ export function GatePromptEntry({
               className="inline-flex h-8 items-center gap-1 rounded-md border border-emerald-200 bg-white px-3 text-xs font-semibold text-emerald-700 hover:bg-emerald-50"
             >
               <Check className="h-3.5 w-3.5" />
-              {needsHuman ? "提交人工确认" : "确认产物"}
+              {confirmLabel}
             </button>
             <button
               type="button"
@@ -84,4 +91,9 @@ function summaryFromEntry(entry: ChatEntry) {
 function verdictFromEntry(entry: ChatEntry) {
   const metadata = entry.metadata as Record<string, unknown> | undefined;
   return typeof metadata?.verdict === "string" ? metadata.verdict : null;
+}
+
+function reviewGateFromEntry(entry: ChatEntry) {
+  const metadata = entry.metadata as Record<string, unknown> | undefined;
+  return typeof metadata?.review_gate === "string" ? metadata.review_gate : null;
 }

@@ -585,6 +585,22 @@ export type ExecutionEventStatus =
   | "failed"
   | "aborted";
 export type ReviewVerdictType = "pass" | "revise" | "needs_human";
+export type WorkspaceReviewFindingSeverity =
+  | "blocking"
+  | "must_fix"
+  | "strong_recommend_fix"
+  | "suggestion"
+  | "minor"
+  | "optional";
+export type ReviewGate = "requires_revision" | "user_confirm_allowed";
+
+export type WorkspaceReviewFinding = {
+  severity: WorkspaceReviewFindingSeverity;
+  message: string;
+  evidence: string;
+  impact: string;
+  required_action: string;
+};
 
 export type WsMessage = {
   id: string;
@@ -632,6 +648,8 @@ export type ReviewVerdict = {
   verdict: ReviewVerdictType;
   comments: string;
   summary: string;
+  findings?: WorkspaceReviewFinding[];
+  review_gate?: ReviewGate;
 };
 
 export type ExecutionEvent = {
@@ -711,7 +729,7 @@ export type NodeDetail = {
   ended_at: string | null;
 };
 
-export type WorkspaceNodeDetailResponse = unknown;
+export type WorkspaceNodeDetailResponse = NodeDetail;
 
 export type WorkspacePromptResponse = {
   node_id: string;
