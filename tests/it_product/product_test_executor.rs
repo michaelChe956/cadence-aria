@@ -205,6 +205,37 @@ git diff -- climbing_stairs.py tests/test_climbing_stairs.py
     );
 }
 
+#[test]
+fn normalizes_planned_pnpm_commands_from_cd_web_form() {
+    let markdown = r#"
+# Provider 依赖 Work Item
+
+## 验证命令
+
+- `cargo test --locked --lib provider_dependencies`
+- `cd web && pnpm test`
+- `cd web && pnpm build`
+- `cd web && pnpm test:e2e`
+"#;
+
+    let specs = planned_test_commands_from_markdown(markdown);
+
+    assert_eq!(specs.len(), 4);
+    assert_eq!(
+        specs[0].command,
+        vec![
+            "cargo",
+            "test",
+            "--locked",
+            "--lib",
+            "provider_dependencies"
+        ]
+    );
+    assert_eq!(specs[1].command, vec!["pnpm", "-C", "web", "test"]);
+    assert_eq!(specs[2].command, vec!["pnpm", "-C", "web", "build"]);
+    assert_eq!(specs[3].command, vec!["pnpm", "-C", "web", "test:e2e"]);
+}
+
 #[tokio::test]
 async fn executes_test_command_and_records_stdout_stderr_artifacts() {
     let root = tempdir().expect("root");

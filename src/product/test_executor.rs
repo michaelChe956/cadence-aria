@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Component, Path};
 use std::time::Duration;
 
 use chrono::Utc;
@@ -85,7 +85,9 @@ pub fn planned_test_commands_from_markdown(markdown: &str) -> Vec<TestCommandSpe
                 continue;
             }
             let command = trimmed.strip_prefix("$ ").unwrap_or(trimmed).to_string();
-            if is_allowed_planned_command(&command) && !commands.contains(&command) {
+            if let Some(command) = normalize_planned_command(&command)
+                && !commands.contains(&command)
+            {
                 commands.push(command);
             }
             continue;
@@ -110,7 +112,10 @@ pub fn planned_test_commands_from_markdown(markdown: &str) -> Vec<TestCommandSpe
             continue;
         }
         for command in inline_code_spans(trimmed) {
-            if !is_allowed_planned_command(&command) || commands.contains(&command) {
+            let Some(command) = normalize_planned_command(&command) else {
+                continue;
+            };
+            if commands.contains(&command) {
                 continue;
             }
             commands.push(command);
@@ -120,11 +125,9 @@ pub fn planned_test_commands_from_markdown(markdown: &str) -> Vec<TestCommandSpe
     commands
         .into_iter()
         .enumerate()
-        .filter_map(|(index, command)| {
-            split_simple_command(&command).map(|parts| TestCommandSpec {
-                id: format!("planned_{:03}", index + 1),
-                command: parts,
-            })
+        .map(|(index, command)| TestCommandSpec {
+            id: format!("planned_{:03}", index + 1),
+            command,
         })
         .collect()
 }
@@ -384,15 +387,59 @@ fn inline_code_spans(line: &str) -> Vec<String> {
     spans
 }
 
-fn is_allowed_planned_command(command: &str) -> bool {
+fn normalize_planned_command(command: &str) -> Option<Vec<String>> {
     let Some(parts) = split_simple_command(command) else {
-        return false;
+        return None;
     };
+
+    if let Some(parts) = normalize_cd_pnpm_command(&parts) {
+        return Some(parts);
+    }
+
+    allowed_planned_command_parts(&parts).then_some(parts)
+}
+
+fn normalize_cd_pnpm_command(parts: &[String]) -> Option<Vec<String>> {
+    if parts.len() < 4
+        || parts.first().map(String::as_str) != Some("cd")
+        || parts.get(2).map(String::as_str) != Some("&&")
+        || parts.get(3).map(String::as_str) != Some("pnpm")
+    {
+        return None;
+    }
+    let package_dir = parts.get(1)?;
+    if !is_safe_package_dir_argument(package_dir) {
+        return None;
+    }
+    let mut normalized = vec![
+        "pnpm".to_string(),
+        "-C".to_string(),
+        package_dir.to_string(),
+    ];
+    normalized.extend(parts.iter().skip(4).cloned());
+    allowed_planned_command_parts(&normalized).then_some(normalized)
+}
+
+fn allowed_planned_command_parts(parts: &[String]) -> bool {
     match parts.first().map(String::as_str) {
         Some("cargo" | "uv" | "pnpm" | "node" | "python" | "python3" | "pytest") => true,
         Some("git") => parts.get(1).is_some_and(|subcommand| subcommand == "diff"),
         _ => false,
     }
+}
+
+fn is_safe_package_dir_argument(value: &str) -> bool {
+    let path = Path::new(value);
+    !value.is_empty()
+        && !value.starts_with('-')
+        && path.is_relative()
+        && path.components().all(|component| match component {
+            Component::Normal(value) => value
+                .to_string_lossy()
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.')),
+            _ => false,
+        })
 }
 
 fn split_simple_command(command: &str) -> Option<Vec<String>> {
