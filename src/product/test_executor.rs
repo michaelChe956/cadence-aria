@@ -35,7 +35,11 @@ pub fn discover_test_commands(worktree_path: impl AsRef<Path>) -> Vec<TestComman
     if worktree_path.join("Cargo.toml").is_file() {
         specs.push(TestCommandSpec {
             id: "rust".to_string(),
-            command: vec!["cargo".to_string(), "test".to_string(), "--locked".to_string()],
+            command: vec![
+                "cargo".to_string(),
+                "test".to_string(),
+                "--locked".to_string(),
+            ],
         });
     }
     if worktree_path.join("pyproject.toml").is_file() || worktree_path.join("setup.py").is_file() {
