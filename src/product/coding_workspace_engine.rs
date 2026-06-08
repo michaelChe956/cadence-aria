@@ -2611,6 +2611,7 @@ fn build_coding_prompt(
             "\n本轮必须优先修复上述问题。完成前请检查 git diff/status，确认 reviewer 指出的文件或行为已处理。\n",
         );
     }
+    prompt.push_str(dependency_bootstrap_guidance());
     prompt.push_str(
         "\n执行要求:\n\
          - 遵循仓库规则和 TDD 流程。\n\
@@ -2676,6 +2677,7 @@ fn build_coding_delta_prompt(
             "\n本轮没有新增返修要求。请基于当前会话和 worktree 状态继续完成未结束的代码编写任务。\n",
         );
     }
+    prompt.push_str(dependency_bootstrap_guidance());
     prompt.push_str(
         "\n执行要求:\n\
          - 遵循仓库规则和 TDD 流程。\n\
@@ -2683,6 +2685,14 @@ fn build_coding_delta_prompt(
          - 完成后报告修改文件、测试命令和结果。\n",
     );
     prompt
+}
+
+fn dependency_bootstrap_guidance() -> &'static str {
+    "\n依赖初始化诊断要求:\n\
+     - 如果前端命令出现 `Local package.json exists, but node_modules missing`、`tsc EACCES`、`vitest EACCES`、`Permission denied` 或 `spawn ... EACCES`，先不要判定 pnpm 环境不可用。\n\
+     - 先运行 `pnpm --version` 区分 pnpm 是否存在；只有该命令失败时，才报告 pnpm 不可用。\n\
+     - 如果 pnpm 可用且对应 package 目录存在 lockfile，请先运行 `pnpm -C <package-dir> install --frozen-lockfile`，例如 Aria 前端为 `pnpm -C web install --frozen-lockfile`，然后重试 build/test。\n\
+     - 不要把缺少 node_modules 误判为 pnpm 不可用。\n"
 }
 
 fn build_rework_prompt(
@@ -3373,6 +3383,33 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn coding_prompt_guides_pnpm_install_when_frontend_dependencies_are_missing() {
+        let attempt = test_attempt("coding_attempt_0001");
+        let context = CodingExecutionContext::default();
+
+        let prompt = build_coding_prompt(&attempt, &context, None);
+
+        assert!(prompt.contains("node_modules missing"));
+        assert!(prompt.contains("tsc EACCES"));
+        assert!(prompt.contains("vitest EACCES"));
+        assert!(prompt.contains("pnpm --version"));
+        assert!(prompt.contains("pnpm -C <package-dir> install --frozen-lockfile"));
+        assert!(prompt.contains("不要把缺少 node_modules 误判为 pnpm 不可用"));
+    }
+
+    #[test]
+    fn coding_delta_prompt_guides_pnpm_install_when_frontend_dependencies_are_missing() {
+        let attempt = test_attempt("coding_attempt_0001");
+        let context = CodingExecutionContext::default();
+
+        let prompt = build_coding_delta_prompt(&attempt, &context, None);
+
+        assert!(prompt.contains("node_modules missing"));
+        assert!(prompt.contains("pnpm -C <package-dir> install --frozen-lockfile"));
+        assert!(prompt.contains("不要把缺少 node_modules 误判为 pnpm 不可用"));
     }
 
     fn test_attempt(id: &str) -> CodingExecutionAttempt {
