@@ -857,7 +857,23 @@ async fn workspace_ws_review_decision_continue_runs_revision_and_second_review()
         ProviderName::Codex,
         Arc::new(ScriptedStreamingProvider::new(
             [
-                "需要补充失败路径。\n\n```json\n{\"verdict\":\"revise\",\"summary\":\"补充失败路径\"}\n```",
+                r#"需要补充失败路径。
+
+```json
+{
+  "verdict": "revise",
+  "summary": "补充失败路径",
+  "findings": [
+    {
+      "severity": "must_fix",
+      "message": "缺少失败路径",
+      "evidence": "Artifact 未覆盖失败路径",
+      "impact": "下一阶段无法验收异常流程",
+      "required_action": "补充失败路径说明"
+    }
+  ]
+}
+```"#,
                 "审核通过。\n\n```json\n{\"verdict\":\"pass\",\"summary\":\"可以确认\"}\n```",
             ],
             reviewer_prompts.clone(),
@@ -2385,7 +2401,23 @@ async fn workspace_ws_reconnect_during_review_decision_can_still_run_revision() 
         ProviderName::Codex,
         Arc::new(ScriptedStreamingProvider::new(
             [
-                "需要补充失败路径。\n\n```json\n{\"verdict\":\"revise\",\"summary\":\"补充失败路径\"}\n```",
+                r#"需要补充失败路径。
+
+```json
+{
+  "verdict": "revise",
+  "summary": "补充失败路径",
+  "findings": [
+    {
+      "severity": "must_fix",
+      "message": "缺少失败路径",
+      "evidence": "Artifact 未覆盖失败路径",
+      "impact": "下一阶段无法验收异常流程",
+      "required_action": "补充失败路径说明"
+    }
+  ]
+}
+```"#,
                 "审核通过。\n\n```json\n{\"verdict\":\"pass\",\"summary\":\"可以确认\"}\n```",
             ],
             Arc::new(Mutex::new(Vec::new())),

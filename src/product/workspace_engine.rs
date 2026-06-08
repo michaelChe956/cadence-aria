@@ -5677,7 +5677,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn drive_review_session_revise_pauses_for_decision() {
+    async fn drive_review_session_strong_revise_pauses_for_decision() {
         let (_tmp, store) = setup();
         let (tx, _) = mpsc::channel(64);
         let session = make_session("sess_review_revise");
@@ -5694,8 +5694,23 @@ mod tests {
         engine
             .drive_review_session(
                 Arc::new(ReviewVerdictStreamingProvider {
-                    output:
-                        "需要补充失败路径。\n\n```json\n{\"verdict\":\"revise\",\"summary\":\"补充失败路径\"}\n```",
+                    output: r#"需要补充失败路径。
+
+```json
+{
+  "verdict": "revise",
+  "summary": "补充失败路径",
+  "findings": [
+    {
+      "severity": "must_fix",
+      "message": "缺少失败路径",
+      "evidence": "Artifact 未覆盖失败路径",
+      "impact": "下一阶段无法验收异常流程",
+      "required_action": "补充失败路径说明"
+    }
+  ]
+}
+```"#,
                     provider_type: Arc::new(Mutex::new(None)),
                     prompt: Arc::new(Mutex::new(None)),
                 }),
@@ -5722,7 +5737,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn single_review_round_revise_still_pauses_for_decision() {
+    async fn single_review_round_strong_revise_still_pauses_for_decision() {
         let (_tmp, store) = setup();
         let (tx, _) = mpsc::channel(64);
         let mut session = make_session("sess_single_review_revise");
@@ -5740,8 +5755,23 @@ mod tests {
         engine
             .drive_review_session(
                 Arc::new(ReviewVerdictStreamingProvider {
-                    output:
-                        "需要移除非规范正文。\n\n```json\n{\"verdict\":\"revise\",\"summary\":\"需要返修\"}\n```",
+                    output: r#"需要移除非规范正文。
+
+```json
+{
+  "verdict": "revise",
+  "summary": "需要返修",
+  "findings": [
+    {
+      "severity": "strong_recommend_fix",
+      "message": "存在非规范正文",
+      "evidence": "Artifact 包含不符合模板的正文",
+      "impact": "会影响下一阶段投影和审核",
+      "required_action": "移除非规范正文"
+    }
+  ]
+}
+```"#,
                     provider_type: Arc::new(Mutex::new(None)),
                     prompt: Arc::new(Mutex::new(None)),
                 }),
@@ -5760,7 +5790,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn review_decision_continue_with_context_runs_revision_and_starts_next_review() {
+    async fn review_decision_continue_after_strong_revise_runs_revision() {
         let (_tmp, store) = setup();
         let (tx, _) = mpsc::channel(64);
         let session = make_session("sess_review_revision");
@@ -5789,8 +5819,23 @@ mod tests {
         engine
             .drive_review_session(
                 Arc::new(ReviewVerdictStreamingProvider {
-                    output:
-                        "需要补充失败路径。\n\n```json\n{\"verdict\":\"revise\",\"summary\":\"补充失败路径\"}\n```",
+                    output: r#"需要补充失败路径。
+
+```json
+{
+  "verdict": "revise",
+  "summary": "补充失败路径",
+  "findings": [
+    {
+      "severity": "must_fix",
+      "message": "缺少失败路径",
+      "evidence": "Artifact 未覆盖登录错误码",
+      "impact": "下一阶段无法实现和验收失败路径",
+      "required_action": "补充登录错误码失败路径"
+    }
+  ]
+}
+```"#,
                     provider_type: Arc::new(Mutex::new(None)),
                     prompt: Arc::new(Mutex::new(None)),
                 }),
