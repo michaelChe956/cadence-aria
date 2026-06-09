@@ -7,7 +7,7 @@ use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::cross_cutting::provider_adapter::ProviderAdapterError;
+use crate::cross_cutting::provider_adapter::{DEFAULT_PROVIDER_TIMEOUT_SECS, ProviderAdapterError};
 use crate::cross_cutting::streaming_provider::{
     ChoiceRequestData, PermissionRequestData, ProviderCommand, ProviderEvent,
     ProviderExecutionEvent, ProviderExecutionEventKind, ProviderExecutionEventStatus,
@@ -102,6 +102,10 @@ fn provider_conversation_role_for_coding_role(
 
 fn should_resume_provider_conversation(role: &CodingProviderRole) -> bool {
     matches!(role, CodingProviderRole::Coder)
+}
+
+fn coding_provider_permission_mode() -> ProviderPermissionMode {
+    ProviderPermissionMode::Supervised
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -368,7 +372,7 @@ impl CodingWorkspaceEngine {
             prompt,
             context_files: Vec::new(),
             output_schema: "coding_workspace_markdown".to_string(),
-            timeout: 2400,
+            timeout: DEFAULT_PROVIDER_TIMEOUT_SECS,
             max_retries: 0,
         };
         let input = StreamingProviderInput {
@@ -378,7 +382,7 @@ impl CodingWorkspaceEngine {
             working_dir: worktree_path.clone(),
             workspace_session_id: Some(attempt.id.clone()),
             resume_provider_session_id,
-            permission_mode: ProviderPermissionMode::Auto,
+            permission_mode: coding_provider_permission_mode(),
             env_vars: BTreeMap::new(),
             timeout_secs: legacy_input.timeout,
         };
@@ -889,7 +893,7 @@ impl CodingWorkspaceEngine {
             working_dir: worktree_path.clone(),
             workspace_session_id: Some(attempt.id.clone()),
             resume_provider_session_id,
-            permission_mode: ProviderPermissionMode::Auto,
+            permission_mode: coding_provider_permission_mode(),
             env_vars: BTreeMap::new(),
             timeout_secs: options.timeout.as_secs().max(1),
         };
@@ -1236,7 +1240,7 @@ impl CodingWorkspaceEngine {
             prompt,
             context_files: Vec::new(),
             output_schema: "coding_workspace_code_review_json".to_string(),
-            timeout: 2400,
+            timeout: DEFAULT_PROVIDER_TIMEOUT_SECS,
             max_retries: 0,
         };
         let resume_provider_session_id = self.provider_resume_session_id_for_attempt(
@@ -1389,7 +1393,7 @@ impl CodingWorkspaceEngine {
             prompt,
             context_files: Vec::new(),
             output_schema: "coding_workspace_analyst_verdict_json".to_string(),
-            timeout: 2400,
+            timeout: DEFAULT_PROVIDER_TIMEOUT_SECS,
             max_retries: 0,
         };
         let resume_provider_session_id = self.provider_resume_session_id_for_attempt(
@@ -1503,7 +1507,7 @@ impl CodingWorkspaceEngine {
             prompt,
             context_files: Vec::new(),
             output_schema: "coding_workspace_internal_pr_review_json".to_string(),
-            timeout: 2400,
+            timeout: DEFAULT_PROVIDER_TIMEOUT_SECS,
             max_retries: 0,
         };
         let resume_provider_session_id = self.provider_resume_session_id_for_attempt(
@@ -2763,7 +2767,7 @@ fn streaming_input_from_adapter(
         working_dir,
         workspace_session_id: None,
         resume_provider_session_id: None,
-        permission_mode: ProviderPermissionMode::Auto,
+        permission_mode: coding_provider_permission_mode(),
         env_vars: BTreeMap::new(),
         timeout_secs: input.timeout,
     }

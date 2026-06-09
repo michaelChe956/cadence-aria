@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::cross_cutting::provider_adapter::DEFAULT_PROVIDER_TIMEOUT_SECS;
 use crate::cross_cutting::streaming_provider::{
     ChoiceOptionData, ChoiceRequestSource, ProviderCommand, ProviderEvent, ProviderExecutionEvent,
     ProviderExecutionEventKind, ProviderExecutionEventStatus, ProviderPermissionMode,
@@ -31,7 +32,6 @@ use crate::web::workspace_ws_types::{
     WsProviderConfig,
 };
 
-const WORKSPACE_PROVIDER_TIMEOUT_SECS: u64 = 3600;
 const SUMMARY_PREVIEW_CHARS: usize = 2048;
 const CODEX_RESUME_STALL_ERROR_MARKER: &str = "Codex resume stalled before provider progress";
 
@@ -2463,7 +2463,7 @@ impl WorkspaceEngine {
             resume_provider_session_id,
             permission_mode: ProviderPermissionMode::Supervised,
             env_vars: BTreeMap::new(),
-            timeout_secs: WORKSPACE_PROVIDER_TIMEOUT_SECS,
+            timeout_secs: DEFAULT_PROVIDER_TIMEOUT_SECS,
         })
     }
 
@@ -2525,7 +2525,7 @@ impl WorkspaceEngine {
             resume_provider_session_id: None,
             permission_mode: ProviderPermissionMode::Supervised,
             env_vars: BTreeMap::new(),
-            timeout_secs: WORKSPACE_PROVIDER_TIMEOUT_SECS,
+            timeout_secs: DEFAULT_PROVIDER_TIMEOUT_SECS,
         })
     }
 
@@ -2573,7 +2573,7 @@ impl WorkspaceEngine {
             resume_provider_session_id,
             permission_mode: ProviderPermissionMode::Supervised,
             env_vars: BTreeMap::new(),
-            timeout_secs: WORKSPACE_PROVIDER_TIMEOUT_SECS,
+            timeout_secs: DEFAULT_PROVIDER_TIMEOUT_SECS,
         })
     }
 
@@ -4804,7 +4804,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_provider_inputs_use_one_hour_timeout() {
+    fn workspace_provider_inputs_use_three_hour_timeout() {
         let (event_tx, _event_rx) = mpsc::channel(8);
         let mut session = make_session("sess_workspace_timeout");
         session.artifact = Some("# Story Spec\n\n## 功能需求\n- [REQ-001] Draft.\n".to_string());
@@ -4827,21 +4827,21 @@ mod tests {
                 .build_streaming_input("开始生成", AuthorPromptMode::FullConversation)
                 .expect("author input")
                 .timeout_secs,
-            3600
+            10_800
         );
         assert_eq!(
             engine
                 .build_review_input()
                 .expect("review input")
                 .timeout_secs,
-            3600
+            10_800
         );
         assert_eq!(
             engine
                 .build_revision_input()
                 .expect("revision input")
                 .timeout_secs,
-            3600
+            10_800
         );
     }
 

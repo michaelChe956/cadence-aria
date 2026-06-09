@@ -8,8 +8,8 @@ use cadence_aria::cross_cutting::provider_adapter::ProviderAdapterError;
 use cadence_aria::cross_cutting::streaming_provider::{
     ChoiceOptionData, ChoiceRequestData, ChoiceRequestSource, PermissionRequestData, ProviderEvent,
     ProviderExecutionEvent, ProviderExecutionEventKind, ProviderExecutionEventStatus,
-    ProviderSession, ProviderStatus, ProviderToolCall, ProviderToolResult, RiskLevel, StreamChunk,
-    StreamingProviderAdapter, StreamingProviderInput,
+    ProviderPermissionMode, ProviderSession, ProviderStatus, ProviderToolCall, ProviderToolResult,
+    RiskLevel, StreamChunk, StreamingProviderAdapter, StreamingProviderInput,
 };
 use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
@@ -271,6 +271,16 @@ async fn coding_coder_run_resumes_previous_coder_provider_session() {
     assert_eq!(second.stage, CodingExecutionStage::Coding);
     let inputs = provider.inputs.lock().expect("inputs lock");
     assert_eq!(inputs.len(), 2);
+    assert_eq!(
+        inputs[0].permission_mode,
+        ProviderPermissionMode::Supervised
+    );
+    assert_eq!(
+        inputs[1].permission_mode,
+        ProviderPermissionMode::Supervised
+    );
+    assert_eq!(inputs[0].timeout_secs, 10_800);
+    assert_eq!(inputs[1].timeout_secs, 10_800);
     assert_eq!(inputs[0].resume_provider_session_id, None);
     assert_eq!(
         inputs[1].resume_provider_session_id.as_deref(),
@@ -432,6 +442,11 @@ async fn coding_tester_does_not_resume_coder_provider_session() {
 
     let inputs = provider.inputs.lock().expect("inputs lock");
     assert_eq!(inputs.len(), 1);
+    assert_eq!(
+        inputs[0].permission_mode,
+        ProviderPermissionMode::Supervised
+    );
+    assert_eq!(inputs[0].timeout_secs, 10_800);
     assert_eq!(inputs[0].resume_provider_session_id, None);
     let updated = store
         .get_attempt("project_0001", "issue_0001", &attempt.id)
@@ -513,6 +528,11 @@ async fn coding_code_reviewer_run_uses_fresh_provider_session() {
     assert_eq!(report.verdict, ReviewVerdict::Approve);
     let inputs = provider.inputs.lock().expect("inputs lock");
     assert_eq!(inputs.len(), 1);
+    assert_eq!(
+        inputs[0].permission_mode,
+        ProviderPermissionMode::Supervised
+    );
+    assert_eq!(inputs[0].timeout_secs, 10_800);
     assert_eq!(inputs[0].resume_provider_session_id, None);
     let updated = store
         .get_attempt("project_0001", "issue_0001", &attempt.id)
@@ -583,6 +603,11 @@ async fn coding_analyst_rework_uses_fresh_provider_session() {
 
     let inputs = provider.inputs.lock().expect("inputs lock");
     assert_eq!(inputs.len(), 1);
+    assert_eq!(
+        inputs[0].permission_mode,
+        ProviderPermissionMode::Supervised
+    );
+    assert_eq!(inputs[0].timeout_secs, 10_800);
     assert_eq!(inputs[0].resume_provider_session_id, None);
 }
 
@@ -653,6 +678,11 @@ async fn coding_internal_reviewer_uses_fresh_provider_session() {
     assert_eq!(review.verdict, ReviewVerdict::Approve);
     let inputs = provider.inputs.lock().expect("inputs lock");
     assert_eq!(inputs.len(), 1);
+    assert_eq!(
+        inputs[0].permission_mode,
+        ProviderPermissionMode::Supervised
+    );
+    assert_eq!(inputs[0].timeout_secs, 10_800);
     assert_eq!(inputs[0].resume_provider_session_id, None);
 }
 

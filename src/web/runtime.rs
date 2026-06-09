@@ -371,7 +371,7 @@ impl WebRuntime {
         let timeout_secs = state
             .get("timeout_secs")
             .and_then(serde_json::Value::as_u64)
-            .unwrap_or(2400);
+            .unwrap_or(crate::cross_cutting::provider_adapter::DEFAULT_PROVIDER_TIMEOUT_SECS);
         let task_id = state
             .get("task_id")
             .and_then(serde_json::Value::as_str)

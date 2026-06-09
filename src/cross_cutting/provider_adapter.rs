@@ -4,6 +4,7 @@ use serde_json::Value;
 
 pub const STRUCTURED_OUTPUT_START: &str = "<ARIA_STRUCTURED_OUTPUT>";
 pub const STRUCTURED_OUTPUT_END: &str = "</ARIA_STRUCTURED_OUTPUT>";
+pub const DEFAULT_PROVIDER_TIMEOUT_SECS: u64 = 3 * 60 * 60;
 
 pub trait ProviderAdapter {
     fn run(

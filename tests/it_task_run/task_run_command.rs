@@ -56,7 +56,7 @@ fn defaults_provider_timeout_report_and_non_interactive() {
     .expect("parse task run args");
 
     assert_eq!(options.provider_mode, ProviderMode::Real);
-    assert_eq!(options.timeout_secs, 3600);
+    assert_eq!(options.timeout_secs, 10_800);
     assert_eq!(options.report_mode, ReportMode::Text);
     assert!(!options.non_interactive);
 }

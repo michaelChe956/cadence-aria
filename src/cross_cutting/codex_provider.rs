@@ -778,11 +778,7 @@ where
     peer.send(json!({
         "jsonrpc": "2.0",
         "id": rpc_id,
-        "method": "item/commandExecution/requestApproval",
         "result": {
-            "decision": decision,
-        },
-        "response": {
             "decision": decision,
         },
     }))
@@ -1067,6 +1063,60 @@ mod tests {
         assert!(completed.contains("# Story Spec"));
         assert!(completed.contains("## 功能需求"));
         assert!(completed.contains("## 成功标准"));
+    }
+
+    #[tokio::test]
+    async fn codex_provider_responds_to_current_command_approval_with_json_rpc_result() {
+        let fixture = executable_fixture(
+            "tests/fixtures/provider/codex_app_server_current_permission_fixture.sh",
+        );
+        let provider = CodexProvider::new(fixture);
+        let input = streaming_input(ProviderType::Codex, ProviderPermissionMode::Supervised);
+        let mut session = provider
+            .start(input, CancellationToken::new())
+            .await
+            .unwrap();
+
+        let permission = loop {
+            match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+                .await
+                .expect("provider should emit current command approval")
+                .expect("provider event channel should stay open")
+            {
+                ProviderEvent::PermissionRequest(request) => break request,
+                ProviderEvent::StatusChanged(_)
+                | ProviderEvent::Execution(_)
+                | ProviderEvent::TextDelta { .. }
+                | ProviderEvent::ChoiceRequest(_)
+                | ProviderEvent::ToolCall(_)
+                | ProviderEvent::ToolResult(_) => {}
+                ProviderEvent::Completed { full_output, .. } => {
+                    panic!("provider completed before permission request: {full_output}")
+                }
+                ProviderEvent::Failed { message } => panic!("provider failed: {message}"),
+                ProviderEvent::ProtocolError { message, .. } => {
+                    panic!("provider protocol error: {message}")
+                }
+                ProviderEvent::PermissionTimeout { permission_id } => {
+                    panic!("provider permission timed out: {permission_id}")
+                }
+            }
+        };
+        assert_eq!(permission.tool_name, "command");
+        assert!(permission.description.contains("pnpm -C web install"));
+
+        session
+            .commands
+            .send(ProviderCommand::PermissionResponse {
+                id: permission.id,
+                approved: true,
+                reason: None,
+            })
+            .await
+            .unwrap();
+
+        let completed = recv_completed(&mut session.events).await;
+        assert_eq!(completed, "permission accepted");
     }
 
     #[tokio::test]

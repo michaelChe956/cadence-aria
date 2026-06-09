@@ -26,7 +26,7 @@ fn web_runtime_real_mode_runs_task_orchestrator_provider_path() {
             change_id: "aria-climb-stairs".to_string(),
             policy_preset: "manual-write".to_string(),
             provider_mode: "real".to_string(),
-            timeout_secs: 2400,
+            timeout_secs: 10_800,
         })
         .expect("create real task");
 
@@ -94,7 +94,7 @@ fn web_runtime_real_mode_preserves_web_metadata_after_provider_failure() {
             change_id: "aria-climb-stairs-fails-on-design".to_string(),
             policy_preset: "manual-write".to_string(),
             provider_mode: "real".to_string(),
-            timeout_secs: 2400,
+            timeout_secs: 10_800,
         })
         .expect("create real task");
     let pending = runtime
@@ -123,7 +123,7 @@ fn web_runtime_real_mode_preserves_web_metadata_after_provider_failure() {
     assert_eq!(state["provider_mode"], "real");
     assert_eq!(state["request_text"], request_text);
     assert_eq!(state["policy_preset"], "manual-write");
-    assert_eq!(state["timeout_secs"], 2400);
+    assert_eq!(state["timeout_secs"], 10_800);
 }
 
 fn prepare_workspace() -> tempfile::TempDir {
