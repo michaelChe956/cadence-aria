@@ -336,7 +336,7 @@ export function useWorkspaceWs(sessionId: string | null) {
           store.upsertExecutionEvent(event);
           if (isProviderPromptEvent(event)) {
             store.appendChatEntry({
-              id: chatEntryId("execution_event", event.event_id),
+              id: providerPromptChatEntryId(event),
               type: "execution_event",
               role: entryRoleForNode(store, event.node_id ?? null, "system"),
               content: `${executionEventContent(event, nodeTitleForEvent(store, event))} · ${formatContentSize(event.output.length)}`,
@@ -778,6 +778,12 @@ function isProviderPromptEvent(
   event: Pick<ExecutionEvent, "title" | "output">,
 ): event is Pick<ExecutionEvent, "title" | "output"> & { output: string } {
   return event.title === "Provider Prompt" && typeof event.output === "string";
+}
+
+function providerPromptChatEntryId(event: ExecutionEvent) {
+  return event.node_id
+    ? chatEntryId(event.node_id, "provider-prompt")
+    : chatEntryId("execution_event", event.event_id);
 }
 
 function providerPromptEventMetadata(event: ExecutionEvent, provider?: string | null) {

@@ -1220,6 +1220,96 @@ describe("workspace ws store", () => {
     ]);
   });
 
+  it("rebuilds only the latest provider prompt event for a node", () => {
+    const store = useWorkspaceStore.getState();
+    const firstPrompt = "delta prompt";
+    const secondPrompt = "full prompt ".repeat(200);
+
+    store.setSessionState({
+      session_id: "session_revision_prompt_replace",
+      workspace_type: "design",
+      stage: "revision",
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "codex", reviewer: "claude_code" },
+      timeline_nodes: [
+        {
+          node_id: "timeline_node_revision",
+          node_type: "revision",
+          agent: "codex",
+          stage: "revision",
+          round: 1,
+          status: "failed",
+          title: "返修 Round 1",
+          summary: "运行已中止",
+          started_at: "2026-05-26T10:00:00Z",
+          completed_at: "2026-05-26T10:01:00Z",
+          duration_ms: 60_000,
+          artifact_ref: null,
+          provider_config_snapshot: {
+            author: "codex",
+            reviewer: "claude_code",
+            review_rounds: 1,
+          },
+        },
+      ],
+      active_node_id: "timeline_node_revision",
+      artifact_versions: [],
+      timeline_node_details: {
+        timeline_node_revision: makeNodeDetail({
+          node_id: "timeline_node_revision",
+          node_type: "revision",
+          agent_role: "author",
+          provider: { name: "codex", model: "codex" },
+          prompt: secondPrompt,
+          execution_events: [
+            {
+              event_id: "revision_prompt_delta",
+              node_id: "timeline_node_revision",
+              agent: "codex",
+              kind: "output",
+              status: "started",
+              title: "Provider Prompt",
+              detail: "发送给 Workspace provider 的完整提示词",
+              command: null,
+              cwd: null,
+              output: firstPrompt,
+              exit_code: null,
+            },
+            {
+              event_id: "revision_prompt_full",
+              node_id: "timeline_node_revision",
+              agent: "codex",
+              kind: "output",
+              status: "started",
+              title: "Provider Prompt",
+              detail: "发送给 Workspace provider 的完整提示词",
+              command: null,
+              cwd: null,
+              output: secondPrompt,
+              exit_code: null,
+            },
+          ],
+        }),
+      },
+      active_run_id: null,
+    });
+    store.rebuildChatEntries();
+
+    const promptEntries = useWorkspaceStore
+      .getState()
+      .chatEntries.filter(
+        (entry) => entry.type === "execution_event" && entry.content.includes("Provider Prompt"),
+      );
+    expect(promptEntries).toHaveLength(1);
+    expect(promptEntries[0]).toMatchObject({
+      id: "timeline_node_revision:provider-prompt",
+      content_size: secondPrompt.length,
+      metadata: expect.objectContaining({ event_id: "revision_prompt_full" }),
+    });
+  });
+
   it("does not duplicate artifact markdown in rebuilt chat entry metadata", () => {
     const store = useWorkspaceStore.getState();
     const hugeMarkdown = "# Artifact\n" + "content\n".repeat(10_000);
@@ -1392,7 +1482,7 @@ describe("workspace ws store", () => {
 
     const promptEntry = useWorkspaceStore
       .getState()
-      .chatEntries.find((entry) => entry.id === "timeline_node_001:execution-timeline_node_001_prompt");
+      .chatEntries.find((entry) => entry.id === "timeline_node_001:provider-prompt");
     expect(promptEntry?.metadata?.output).toBeUndefined();
     expect(JSON.stringify(promptEntry)).not.toContain(hugePrompt.slice(0, 100));
     expect(promptEntry).toEqual(

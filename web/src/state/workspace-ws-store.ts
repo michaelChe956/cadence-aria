@@ -1183,12 +1183,16 @@ function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
       });
     }
 
+    const latestProviderPrompt = latestProviderPromptEvent(detail.execution_events);
     for (const event of detail.execution_events) {
       const timestamp = detail.started_at || node.started_at;
       const provider = providerNameForNode(node, detail, event);
       if (isProviderPromptEvent(event)) {
+        if (event !== latestProviderPrompt) {
+          continue;
+        }
         entries.push({
-          id: chatEntryId(node.node_id, `execution-${event.event_id}`),
+          id: chatEntryId(node.node_id, "provider-prompt"),
           type: "execution_event",
           role,
           content: `${executionEventContent(event, node.title)} · ${formatContentSize(event.output.length)}`,
@@ -1534,6 +1538,16 @@ function isProviderPromptEvent(
   event: Pick<ExecutionEvent, "title" | "output">,
 ): event is Pick<ExecutionEvent, "title" | "output"> & { output: string } {
   return event.title === "Provider Prompt" && typeof event.output === "string";
+}
+
+function latestProviderPromptEvent(events: ExecutionEvent[]) {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (isProviderPromptEvent(event)) {
+      return event;
+    }
+  }
+  return null;
 }
 
 function providerPromptEventMetadata(event: ExecutionEvent, provider?: string | null) {

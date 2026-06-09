@@ -15,13 +15,15 @@ export function GatePromptEntry({
   const summary = summaryFromEntry(entry);
   const verdict = verdictFromEntry(entry);
   const reviewGate = reviewGateFromEntry(entry);
+  const findings = findingsFromEntry(entry);
   const needsHuman = verdict === "needs_human";
   const requiresTriage = reviewGate === "user_triage_required";
-  const canAdoptSuggestions = reviewGate === "user_confirm_allowed";
+  const allowsCurrentVersion = reviewGate === "user_confirm_allowed";
+  const canAdoptSuggestions = allowsCurrentVersion && findings.length > 0;
   const confirmLabel =
     requiresTriage
       ? "确认当前版本"
-      : canAdoptSuggestions
+      : allowsCurrentVersion
       ? "确认使用当前版本"
       : needsHuman
         ? "提交人工确认"
@@ -34,7 +36,7 @@ export function GatePromptEntry({
   const isResolved = entry.resolved === true;
   const title = requiresTriage
     ? "需要判断 reviewer 意图"
-    : canAdoptSuggestions
+    : allowsCurrentVersion
       ? "可确认当前版本"
       : needsHuman
         ? "需要人工确认"
@@ -144,6 +146,11 @@ function requestChangeDescription(entry: ChatEntry) {
   const summary = summaryFromEntry(entry);
   const comments = typeof metadata?.comments === "string" ? metadata.comments.trim() : "";
   const findings = findingsFromEntry(entry);
+  const reviewGate = reviewGateFromEntry(entry);
+  if (reviewGate === "user_confirm_allowed" && findings.length > 0) {
+    return formatFindingsForRevision(findings);
+  }
+
   const sections: string[] = [];
 
   if (summary) {
@@ -168,6 +175,19 @@ function requestChangeDescription(entry: ChatEntry) {
   }
 
   return sections.join("\n\n").trim() || entry.content;
+}
+
+function formatFindingsForRevision(findings: ReviewFinding[]) {
+  return [
+    "Review findings：",
+    ...findings.map((finding) => {
+      const details = [
+        finding.message,
+        finding.required_action ? `处理建议：${finding.required_action}` : "",
+      ].filter(Boolean);
+      return `- ${details.join("；")}`;
+    }),
+  ].join("\n");
 }
 
 function findingsFromEntry(entry: ChatEntry): ReviewFinding[] {

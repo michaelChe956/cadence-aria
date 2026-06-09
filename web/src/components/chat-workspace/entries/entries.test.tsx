@@ -76,6 +76,21 @@ describe("chat workspace entries", () => {
     );
   });
 
+  it("hides reviewer trailing JSON contract from provider stream bubbles", () => {
+    const entry = makeEntry({
+      type: "provider_stream",
+      role: "reviewer",
+      content:
+        '当前产物可以进入下一阶段。\n\n```json\n{"verdict":"pass","summary":"审核通过","findings":[]}\n```',
+    });
+
+    const { container } = render(<ProviderStreamEntry entry={entry} />);
+
+    expect(screen.getByText("当前产物可以进入下一阶段。")).toBeInTheDocument();
+    expect(container.textContent).not.toContain('"verdict"');
+    expect(container.textContent).not.toContain('"findings"');
+  });
+
   it("does not inject raw HTML or unsafe markdown links in message bubbles", () => {
     const entry = makeEntry({
       type: "provider_stream",
