@@ -130,6 +130,9 @@ function verdictLabel(verdict: string | null, reviewGate: string | null) {
   if (reviewGate === "user_confirm_allowed") {
     return "可确认当前版本";
   }
+  if (reviewGate === "user_triage_required") {
+    return "需要判断 reviewer 意图";
+  }
   if (verdict === "pass") {
     return "通过";
   }

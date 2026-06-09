@@ -302,6 +302,89 @@ describe("workspace ws store", () => {
     ).toBe(true);
   });
 
+  it("rebuilds user triage gate prompts with review metadata from hydrated node detail", () => {
+    const store = useWorkspaceStore.getState();
+    useWorkspaceStore.setState({
+      sessionId: "workspace_session_0001",
+      stage: "human_confirm",
+      timelineNodes: [
+        {
+          node_id: "node-review-1",
+          node_type: "reviewer_run",
+          agent: "codex",
+          stage: "cross_review",
+          round: 1,
+          status: "completed",
+          title: "Review Round 1",
+          summary: "返修意图需要人工判断",
+          started_at: "2026-05-20T00:00:00Z",
+          completed_at: "2026-05-20T00:01:00Z",
+          duration_ms: 60_000,
+          artifact_ref: null,
+          provider_config_snapshot: {
+            author: "claude_code",
+            reviewer: "codex",
+            review_rounds: 1,
+          },
+        },
+        {
+          node_id: "node-human-1",
+          node_type: "human_confirm",
+          agent: null,
+          stage: "human_confirm",
+          round: 1,
+          status: "paused",
+          title: "人工确认",
+          summary: "等待用户裁决",
+          started_at: "2026-05-20T00:01:00Z",
+          completed_at: null,
+          duration_ms: null,
+          artifact_ref: null,
+          provider_config_snapshot: {
+            author: "claude_code",
+            reviewer: "codex",
+            review_rounds: 1,
+          },
+        },
+      ],
+    });
+
+    store.setNodeDetail(
+      makeNodeDetail({
+        node_id: "node-review-1",
+        node_type: "reviewer_run",
+        streaming_content: "Reviewer 要求返修但未输出 finding",
+        verdict: {
+          verdict: "needs_human",
+          comments: "请补齐异常路径说明。",
+          summary: "返修意图需要人工判断",
+          findings: [
+            {
+              severity: "optional",
+              message: "建议补充说明",
+              evidence: "当前版本可用",
+              impact: "不影响下一阶段",
+              required_action: "补充说明段落",
+            },
+          ],
+          review_gate: "user_triage_required",
+        },
+      }),
+    );
+
+    const gatePrompt = useWorkspaceStore
+      .getState()
+      .chatEntries.find((entry) => entry.type === "gate_prompt");
+    expect(gatePrompt).toMatchObject({
+      content: "需要人工确认",
+      metadata: expect.objectContaining({
+        comments: "请补齐异常路径说明。",
+        review_gate: "user_triage_required",
+        findings: [expect.objectContaining({ message: "建议补充说明" })],
+      }),
+    });
+  });
+
   it("upserts execution events by id so command completion replaces running state", () => {
     const store = useWorkspaceStore.getState();
 

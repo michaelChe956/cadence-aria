@@ -728,6 +728,83 @@ describe("ChatWorkspacePage", () => {
 
     expect(api.sendHumanConfirm).toHaveBeenCalledWith("confirm");
   });
+
+  it("sends request-change payload when adopting optional review findings", async () => {
+    const api = mockWorkspaceWs();
+    useWorkspaceStore.setState({
+      sessionId: "workspace_session_0001",
+      workspaceType: "work_item",
+      stage: "human_confirm",
+      providers: { author: "claude_code", reviewer: "codex" },
+      timelineNodes: [
+        timelineNode({
+          node_id: "timeline_node_human",
+          node_type: "human_confirm",
+          stage: "human_confirm",
+          status: "paused",
+          title: "人工确认",
+          summary: "仅有可选建议",
+        }),
+      ],
+      chatEntries: [
+        chatEntry({
+          type: "review_verdict",
+          role: "reviewer",
+          content: "仅有可选建议",
+          metadata: {
+            verdict: "needs_human",
+            comments: "当前版本可用，但建议补充说明。",
+            summary: "仅有可选建议",
+            review_gate: "user_confirm_allowed",
+            findings: [
+              {
+                severity: "optional",
+                message: "建议补充说明",
+                evidence: "当前版本可用",
+                impact: "不影响下一阶段",
+                required_action: "补充说明段落",
+              },
+            ],
+          },
+        }),
+        chatEntry({
+          id: "timeline_node_human:gate-prompt",
+          type: "gate_prompt",
+          role: "system",
+          content: "等待人工确认",
+          node_id: "timeline_node_human",
+          metadata: {
+            verdict: "needs_human",
+            comments: "当前版本可用，但建议补充说明。",
+            summary: "仅有可选建议",
+            review_gate: "user_confirm_allowed",
+            findings: [
+              {
+                severity: "optional",
+                message: "建议补充说明",
+                evidence: "当前版本可用",
+                impact: "不影响下一阶段",
+                required_action: "补充说明段落",
+              },
+            ],
+          },
+        }),
+      ],
+    });
+
+    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "采纳建议并返修" }));
+
+    expect(api.sendHumanConfirm).toHaveBeenCalledWith(
+      "request-change",
+      expect.objectContaining({
+        description: expect.stringContaining("建议补充说明"),
+      }),
+    );
+    const payload = vi.mocked(api.sendHumanConfirm).mock.calls[0][1] as { description: string };
+    expect(payload.description).toContain("补充说明段落");
+  });
 });
 
 function timelineNode(overrides: Partial<TimelineNode> = {}): TimelineNode {

@@ -410,13 +410,33 @@ describe("useWorkspaceWs", () => {
         verdict: "pass",
         comments: "审核通过",
         summary: "可以确认",
+        findings: [
+          {
+            severity: "optional",
+            message: "建议补充说明",
+            evidence: "当前版本可用",
+            impact: "不影响下一阶段",
+            required_action: "可后续优化",
+          },
+        ],
+        review_gate: "user_triage_required",
       });
     });
 
     const state = useWorkspaceStore.getState();
     expect(state.selectedNodeId).toBe("timeline_node_001");
     expect(state.nodeDetails.timeline_node_001.streaming_content).toBe("review output");
-    expect(state.nodeDetails.timeline_node_001.verdict?.summary).toBe("可以确认");
+    expect(state.nodeDetails.timeline_node_001.verdict).toMatchObject({
+      summary: "可以确认",
+      review_gate: "user_triage_required",
+      findings: [expect.objectContaining({ message: "建议补充说明" })],
+    });
+    expect(
+      state.chatEntries.find((entry) => entry.type === "review_verdict")?.metadata,
+    ).toMatchObject({
+      review_gate: "user_triage_required",
+      findings: [expect.objectContaining({ required_action: "可后续优化" })],
+    });
   });
 
   it("maps websocket events into chat entries", () => {
@@ -577,6 +597,16 @@ describe("useWorkspaceWs", () => {
         verdict: "pass",
         comments: "审核通过",
         summary: "可以确认",
+        findings: [
+          {
+            severity: "minor",
+            message: "建议优化标题",
+            evidence: "标题可读但不够具体",
+            impact: "不影响下一阶段",
+            required_action: "可后续调整",
+          },
+        ],
+        review_gate: "user_confirm_allowed",
       });
       harness.ws.receive({ type: "error", message: "阶段不允许" });
     });
@@ -610,6 +640,10 @@ describe("useWorkspaceWs", () => {
     expect(state.chatEntries[7]).toMatchObject({
       role: "reviewer",
       content: "可以确认",
+      metadata: expect.objectContaining({
+        review_gate: "user_confirm_allowed",
+        findings: [expect.objectContaining({ message: "建议优化标题" })],
+      }),
     });
     expect(state.activeStreamEntryId).toBeNull();
   });

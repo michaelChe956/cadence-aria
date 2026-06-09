@@ -388,9 +388,7 @@ fn inline_code_spans(line: &str) -> Vec<String> {
 }
 
 fn normalize_planned_command(command: &str) -> Option<Vec<String>> {
-    let Some(parts) = split_simple_command(command) else {
-        return None;
-    };
+    let parts = split_simple_command(command)?;
 
     if let Some(parts) = normalize_cd_pnpm_command(&parts) {
         return Some(parts);

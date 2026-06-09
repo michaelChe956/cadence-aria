@@ -593,7 +593,10 @@ export type WorkspaceReviewFindingSeverity =
   | "suggestion"
   | "minor"
   | "optional";
-export type ReviewGate = "requires_revision" | "user_confirm_allowed";
+export type ReviewGate =
+  | "requires_revision"
+  | "user_confirm_allowed"
+  | "user_triage_required";
 
 export type WorkspaceReviewFinding = {
   severity: WorkspaceReviewFindingSeverity;
@@ -792,6 +795,8 @@ export type WsOutMessage =
       verdict: ReviewVerdictType;
       comments: string;
       summary: string;
+      findings?: WorkspaceReviewFinding[];
+      review_gate?: ReviewGate;
     }
   | { type: "review_decision_required"; node_id: string; round: number; options: string[] }
   | {

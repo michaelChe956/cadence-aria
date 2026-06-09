@@ -91,6 +91,8 @@ pub enum WsOutMessage {
         verdict: ReviewVerdictType,
         comments: String,
         summary: String,
+        findings: Vec<ReviewFinding>,
+        review_gate: ReviewGate,
     },
     ReviewDecisionRequired {
         node_id: String,
@@ -393,6 +395,7 @@ pub struct ReviewFinding {
 pub enum ReviewGate {
     RequiresRevision,
     UserConfirmAllowed,
+    UserTriageRequired,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -619,8 +622,14 @@ mod tests {
             verdict: ReviewVerdictType::Revise,
             comments: "需要补充验收标准".to_string(),
             summary: "补充验收标准后返修".to_string(),
-            findings: Vec::new(),
-            review_gate: ReviewGate::RequiresRevision,
+            findings: vec![super::ReviewFinding {
+                severity: super::ReviewFindingSeverity::MustFix,
+                message: "缺少验收标准".to_string(),
+                evidence: "Artifact 未列出验收标准".to_string(),
+                impact: "无法进入下一阶段".to_string(),
+                required_action: "补充验收标准".to_string(),
+            }],
+            review_gate: ReviewGate::UserTriageRequired,
         };
 
         let review_complete = serde_json::to_value(WsOutMessage::ReviewComplete {
@@ -629,10 +638,14 @@ mod tests {
             verdict: verdict.verdict.clone(),
             comments: verdict.comments.clone(),
             summary: verdict.summary.clone(),
+            findings: verdict.findings.clone(),
+            review_gate: verdict.review_gate.clone(),
         })
         .unwrap();
         assert_eq!(review_complete["type"], "review_complete");
         assert_eq!(review_complete["verdict"], "revise");
+        assert_eq!(review_complete["review_gate"], "user_triage_required");
+        assert_eq!(review_complete["findings"][0]["severity"], "must_fix");
 
         let input: WsInMessage = serde_json::from_value(serde_json::json!({
             "type": "review_decision_response",

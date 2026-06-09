@@ -13,7 +13,10 @@ interface MessageGroupViewProps {
   onPermissionResponse?: (entry: ChatEntry, approved: boolean) => void;
   onChoiceResponse?: (entry: ChatEntry, response: ChoiceResponsePayload) => void;
   onSelectRevisionPath?: (path: RevisionPath, extraContext?: string) => void;
-  onHumanConfirm?: (decision: "confirm" | "request-change" | "terminate") => void;
+  onHumanConfirm?: (
+    decision: "confirm" | "request-change" | "terminate",
+    payload?: unknown,
+  ) => void;
   sessionId?: string | null;
   contentCache?: Record<string, string>;
   loadContent?: (sessionId: string, ref: WorkspaceContentRef) => Promise<string>;

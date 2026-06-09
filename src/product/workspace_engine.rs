@@ -295,6 +295,8 @@ pub enum EngineEvent {
         verdict: ReviewVerdictType,
         comments: String,
         summary: String,
+        findings: Vec<ReviewFinding>,
+        review_gate: ReviewGate,
     },
     ReviewDecisionRequired {
         node_id: String,
@@ -376,6 +378,16 @@ struct ArtifactRetryContext {
 struct RevisionResumeFallbackContext {
     provider: Arc<dyn StreamingProviderAdapter>,
     attempted: bool,
+}
+
+struct ProviderSessionDriveInput {
+    session: Result<ProviderSession, crate::cross_cutting::provider_adapter::ProviderAdapterError>,
+    command_rx: mpsc::Receiver<ProviderCommand>,
+    node_id: Option<String>,
+    agent: Option<ProviderName>,
+    role: ProviderConversationRole,
+    artifact_retry: Option<ArtifactRetryContext>,
+    revision_resume_fallback: Option<RevisionResumeFallbackContext>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1066,31 +1078,28 @@ impl WorkspaceEngine {
             attempted: false,
         };
         let session = provider.start(input, self.cancel.clone()).await;
-        self.drive_provider_session(
+        self.drive_provider_session(ProviderSessionDriveInput {
             session,
             command_rx,
-            Some(generation_node_id),
-            Some(self.session.author_provider.clone()),
-            ProviderConversationRole::Author,
-            Some(retry_context),
-            None,
-        )
+            node_id: Some(generation_node_id),
+            agent: Some(self.session.author_provider.clone()),
+            role: ProviderConversationRole::Author,
+            artifact_retry: Some(retry_context),
+            revision_resume_fallback: None,
+        })
         .await;
     }
 
-    async fn drive_provider_session(
-        &mut self,
-        session: Result<
-            ProviderSession,
-            crate::cross_cutting::provider_adapter::ProviderAdapterError,
-        >,
-        mut command_rx: mpsc::Receiver<ProviderCommand>,
-        node_id: Option<String>,
-        agent: Option<ProviderName>,
-        role: ProviderConversationRole,
-        mut artifact_retry: Option<ArtifactRetryContext>,
-        mut revision_resume_fallback: Option<RevisionResumeFallbackContext>,
-    ) {
+    async fn drive_provider_session(&mut self, input: ProviderSessionDriveInput) {
+        let ProviderSessionDriveInput {
+            session,
+            mut command_rx,
+            node_id,
+            agent,
+            role,
+            mut artifact_retry,
+            mut revision_resume_fallback,
+        } = input;
         let mut session = match session {
             Ok(session) => session,
             Err(error) => {
@@ -1654,15 +1663,15 @@ impl WorkspaceEngine {
             None
         };
         let session = provider.start(input, self.cancel.clone()).await;
-        self.drive_provider_session(
+        self.drive_provider_session(ProviderSessionDriveInput {
             session,
             command_rx,
             node_id,
-            Some(author),
-            ProviderConversationRole::Author,
-            Some(retry_context),
+            agent: Some(author),
+            role: ProviderConversationRole::Author,
+            artifact_retry: Some(retry_context),
             revision_resume_fallback,
-        )
+        })
         .await;
     }
 
@@ -2017,6 +2026,8 @@ impl WorkspaceEngine {
                 verdict: verdict.verdict.clone(),
                 comments: verdict.comments.clone(),
                 summary: verdict.summary.clone(),
+                findings: verdict.findings.clone(),
+                review_gate: verdict.review_gate.clone(),
             })
             .await;
         self.update_timeline_node(
@@ -2033,11 +2044,12 @@ impl WorkspaceEngine {
                     ReviewVerdictType::NeedsHuman
                 }
             },
+            ReviewGate::UserTriageRequired => ReviewVerdictType::NeedsHuman,
         };
         self.mark_latest_artifact_reviewed(reviewer, Some(artifact_verdict));
 
         match &verdict.review_gate {
-            ReviewGate::UserConfirmAllowed => {
+            ReviewGate::UserConfirmAllowed | ReviewGate::UserTriageRequired => {
                 self.enter_human_confirm(Some(verdict.summary)).await;
             }
             ReviewGate::RequiresRevision => {
@@ -2494,6 +2506,7 @@ impl WorkspaceEngine {
              - 只有影响下一阶段可用性的 finding 才能标记为 `blocking`、`must_fix` 或 `strong_recommend_fix`。\n\
              - 风格、措辞、文档美化、未来扩展、非必要补充只能标记为 `suggestion`、`minor` 或 `optional`。\n\
              - 没有强返修 finding 时，必须允许用户确认当前版本，不要为了普通建议使用强返修。\n\
+             - 如果输出 `verdict=revise`，必须给出至少一个结构化 finding；否则系统会进入人工裁决而不是自动返修。\n\
              - 第二轮及后续 review 只复核上一轮强返修项是否关闭；除非 revision 新引入真正阻塞问题，不得重新发散普通建议。\n\
              - `pass`：产物可进入最终人工确认。\n\
              - `revise`：仅当存在 blocking/must_fix/strong_recommend_fix finding。\n\
@@ -3444,7 +3457,7 @@ impl WorkspaceEngine {
             comments: output.to_string(),
             summary: "需要人工确认".to_string(),
             findings: Vec::new(),
-            review_gate: ReviewGate::UserConfirmAllowed,
+            review_gate: ReviewGate::UserTriageRequired,
         })
     }
 }
@@ -3585,8 +3598,8 @@ fn parse_review_json(json: &str, comments: &str) -> Option<ReviewVerdict> {
             ReviewVerdictType::NeedsHuman => "需要人工确认",
         })
         .to_string();
-    let findings = parse_review_findings(value.get("findings"));
-    let review_gate = review_gate_for(&parsed_verdict, &findings);
+    let parsed_findings = parse_review_findings(value.get("findings"));
+    let review_gate = review_gate_for(&parsed_verdict, &parsed_findings);
     let verdict = match review_gate {
         ReviewGate::RequiresRevision => ReviewVerdictType::Revise,
         ReviewGate::UserConfirmAllowed => match parsed_verdict {
@@ -3595,44 +3608,77 @@ fn parse_review_json(json: &str, comments: &str) -> Option<ReviewVerdict> {
                 ReviewVerdictType::NeedsHuman
             }
         },
+        ReviewGate::UserTriageRequired => ReviewVerdictType::NeedsHuman,
     };
     Some(ReviewVerdict {
         verdict,
         comments: comments.trim().to_string(),
         summary,
-        findings,
+        findings: parsed_findings.findings,
         review_gate,
     })
 }
 
-fn parse_review_findings(value: Option<&serde_json::Value>) -> Vec<ReviewFinding> {
-    let Some(items) = value.and_then(|value| value.as_array()) else {
-        return Vec::new();
+struct ParsedReviewFindings {
+    findings: Vec<ReviewFinding>,
+    malformed: bool,
+}
+
+fn parse_review_findings(value: Option<&serde_json::Value>) -> ParsedReviewFindings {
+    let Some(value) = value else {
+        return ParsedReviewFindings {
+            findings: Vec::new(),
+            malformed: false,
+        };
     };
-    items
-        .iter()
-        .filter_map(|item| {
-            Some(ReviewFinding {
-                severity: parse_review_finding_severity(item.get("severity")?.as_str()?)?,
-                message: item.get("message")?.as_str()?.to_string(),
-                evidence: item
-                    .get("evidence")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                impact: item
-                    .get("impact")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                required_action: item
-                    .get("required_action")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-            })
-        })
-        .collect()
+    let Some(items) = value.as_array() else {
+        return ParsedReviewFindings {
+            findings: Vec::new(),
+            malformed: true,
+        };
+    };
+
+    let mut findings = Vec::new();
+    let mut malformed = false;
+    for item in items {
+        let Some(severity) = item
+            .get("severity")
+            .and_then(|value| value.as_str())
+            .and_then(parse_review_finding_severity)
+        else {
+            malformed = true;
+            continue;
+        };
+        let Some(message) = item.get("message").and_then(|value| value.as_str()) else {
+            malformed = true;
+            continue;
+        };
+
+        findings.push(ReviewFinding {
+            severity,
+            message: message.to_string(),
+            evidence: item
+                .get("evidence")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string(),
+            impact: item
+                .get("impact")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string(),
+            required_action: item
+                .get("required_action")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string(),
+        });
+    }
+
+    ParsedReviewFindings {
+        findings,
+        malformed,
+    }
 }
 
 fn parse_review_finding_severity(value: &str) -> Option<ReviewFindingSeverity> {
@@ -3647,8 +3693,11 @@ fn parse_review_finding_severity(value: &str) -> Option<ReviewFindingSeverity> {
     }
 }
 
-fn review_gate_for(_verdict: &ReviewVerdictType, findings: &[ReviewFinding]) -> ReviewGate {
-    if findings.iter().any(|finding| {
+fn review_gate_for(
+    verdict: &ReviewVerdictType,
+    parsed_findings: &ParsedReviewFindings,
+) -> ReviewGate {
+    if parsed_findings.findings.iter().any(|finding| {
         matches!(
             finding.severity,
             ReviewFindingSeverity::Blocking
@@ -3658,7 +3707,18 @@ fn review_gate_for(_verdict: &ReviewVerdictType, findings: &[ReviewFinding]) -> 
     }) {
         return ReviewGate::RequiresRevision;
     }
-    ReviewGate::UserConfirmAllowed
+    if parsed_findings.malformed {
+        return ReviewGate::UserTriageRequired;
+    }
+
+    match verdict {
+        ReviewVerdictType::Pass => ReviewGate::UserConfirmAllowed,
+        ReviewVerdictType::NeedsHuman => ReviewGate::UserTriageRequired,
+        ReviewVerdictType::Revise if parsed_findings.findings.is_empty() => {
+            ReviewGate::UserTriageRequired
+        }
+        ReviewVerdictType::Revise => ReviewGate::UserConfirmAllowed,
+    }
 }
 
 fn human_confirm_payload_description(payload: Option<serde_json::Value>) -> Option<String> {
@@ -4496,17 +4556,17 @@ mod tests {
         let mut engine = WorkspaceEngine::new(store, tx, session);
 
         engine
-            .drive_provider_session(
-                Ok(text_choice_provider_session(
+            .drive_provider_session(ProviderSessionDriveInput {
+                session: Ok(text_choice_provider_session(
                     "climb_stairs(n) 对 n <= 0 应该如何处理？\nA. 返回 0\nB. 抛出 ValueError\n",
                 )),
-                empty_provider_commands(),
-                Some("timeline_node_author".to_string()),
-                Some(ProviderName::ClaudeCode),
-                ProviderConversationRole::Author,
-                None,
-                None,
-            )
+                command_rx: empty_provider_commands(),
+                node_id: Some("timeline_node_author".to_string()),
+                agent: Some(ProviderName::ClaudeCode),
+                role: ProviderConversationRole::Author,
+                artifact_retry: None,
+                revision_resume_fallback: None,
+            })
             .await;
 
         let events = drain_engine_events(&mut rx);
@@ -5052,18 +5112,18 @@ mod tests {
         drop(provider_event_tx);
 
         engine
-            .drive_provider_session(
-                Ok(ProviderSession {
+            .drive_provider_session(ProviderSessionDriveInput {
+                session: Ok(ProviderSession {
                     events: provider_event_rx,
                     commands: provider_command_tx,
                 }),
-                empty_provider_commands(),
-                Some(node_id.clone()),
-                Some(ProviderName::ClaudeCode),
-                ProviderConversationRole::Author,
-                None,
-                None,
-            )
+                command_rx: empty_provider_commands(),
+                node_id: Some(node_id.clone()),
+                agent: Some(ProviderName::ClaudeCode),
+                role: ProviderConversationRole::Author,
+                artifact_retry: None,
+                revision_resume_fallback: None,
+            })
             .await;
 
         let detail = lifecycle_store
@@ -5259,7 +5319,7 @@ mod tests {
         let verdict = WorkspaceEngine::parse_review_verdict(output);
 
         assert_eq!(verdict.verdict, ReviewVerdictType::NeedsHuman);
-        assert_eq!(verdict.review_gate, ReviewGate::UserConfirmAllowed);
+        assert_eq!(verdict.review_gate, ReviewGate::UserTriageRequired);
         assert_eq!(verdict.summary, "补充异常路径");
         assert_eq!(verdict.comments.trim(), "整体可用，但需要补充异常路径。");
     }
@@ -5277,7 +5337,7 @@ mod tests {
         let verdict = WorkspaceEngine::parse_review_verdict(output);
 
         assert_eq!(verdict.verdict, ReviewVerdictType::NeedsHuman);
-        assert_eq!(verdict.review_gate, ReviewGate::UserConfirmAllowed);
+        assert_eq!(verdict.review_gate, ReviewGate::UserTriageRequired);
         assert_eq!(verdict.summary, "安装任务 API 设计需修正。");
         assert!(verdict.comments.contains("不建议通过"));
     }
@@ -5289,6 +5349,7 @@ mod tests {
         let verdict = WorkspaceEngine::parse_review_verdict(output);
 
         assert_eq!(verdict.verdict, ReviewVerdictType::NeedsHuman);
+        assert_eq!(verdict.review_gate, ReviewGate::UserTriageRequired);
         assert_eq!(verdict.summary, "需要人工确认");
         assert_eq!(verdict.comments, output);
     }
@@ -5352,7 +5413,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_review_verdict_revise_without_findings_falls_back_to_human_confirm_allowed() {
+    fn parse_review_verdict_revise_without_findings_requires_user_triage() {
         let output = r#"建议修改一些描述。
 
 ```json
@@ -5362,7 +5423,31 @@ mod tests {
         let verdict = WorkspaceEngine::parse_review_verdict(output);
 
         assert_eq!(verdict.verdict, ReviewVerdictType::NeedsHuman);
-        assert_eq!(verdict.review_gate, ReviewGate::UserConfirmAllowed);
+        assert_eq!(verdict.review_gate, ReviewGate::UserTriageRequired);
+        assert!(verdict.findings.is_empty());
+    }
+
+    #[test]
+    fn parse_review_verdict_malformed_findings_require_user_triage() {
+        let output = r#"建议返修，但 findings 结构不合规。
+
+```json
+{
+  "verdict": "revise",
+  "summary": "返修意图不结构化",
+  "findings": [
+    {
+      "severity": "must_fix",
+      "message": 42
+    }
+  ]
+}
+```"#;
+
+        let verdict = WorkspaceEngine::parse_review_verdict(output);
+
+        assert_eq!(verdict.verdict, ReviewVerdictType::NeedsHuman);
+        assert_eq!(verdict.review_gate, ReviewGate::UserTriageRequired);
         assert!(verdict.findings.is_empty());
     }
 
@@ -5481,6 +5566,113 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn revise_without_findings_enters_user_triage_for_all_workspace_types() {
+        for workspace_type in [
+            WorkspaceType::Story,
+            WorkspaceType::Design,
+            WorkspaceType::WorkItem,
+        ] {
+            let (_tmp, store) = setup();
+            let (tx, _) = mpsc::channel(64);
+            let mut session = make_session(&format!("sess_triage_review_{workspace_type:?}"));
+            session.workspace_type = workspace_type.clone();
+            session.review_rounds = 2;
+            session.artifact = Some("# Artifact\n\n需要人工裁决的版本".to_string());
+            let mut engine = WorkspaceEngine::new(store, tx, session);
+            engine.start_review_or_skip().await;
+
+            engine
+                .drive_review_session(
+                    Arc::new(ReviewVerdictStreamingProvider {
+                        output: r#"Reviewer 明确要求返修，但未输出结构化 finding。
+
+```json
+{
+  "verdict": "revise",
+  "summary": "返修意图需要人工判断"
+}
+```"#,
+                        provider_type: Arc::new(Mutex::new(None)),
+                        prompt: Arc::new(Mutex::new(None)),
+                    }),
+                    empty_provider_commands(),
+                )
+                .await;
+
+            assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
+            assert_eq!(
+                engine
+                    .latest_review_verdict
+                    .as_ref()
+                    .expect("latest review verdict")
+                    .review_gate,
+                ReviewGate::UserTriageRequired
+            );
+            assert!(
+                engine
+                    .timeline_nodes
+                    .iter()
+                    .any(|node| node.node_type == TimelineNodeType::HumanConfirm),
+                "{workspace_type:?} should create human_confirm node for user triage"
+            );
+            assert!(
+                !engine
+                    .timeline_nodes
+                    .iter()
+                    .any(|node| node.node_type == TimelineNodeType::ReviewDecision),
+                "{workspace_type:?} should not auto-revise unstructured review intent"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_findings_enter_user_triage_for_all_workspace_types() {
+        for workspace_type in [
+            WorkspaceType::Story,
+            WorkspaceType::Design,
+            WorkspaceType::WorkItem,
+        ] {
+            let (_tmp, store) = setup();
+            let (tx, _) = mpsc::channel(64);
+            let mut session = make_session(&format!("sess_malformed_review_{workspace_type:?}"));
+            session.workspace_type = workspace_type.clone();
+            session.review_rounds = 2;
+            session.artifact = Some("# Artifact\n\n需要人工裁决的版本".to_string());
+            let mut engine = WorkspaceEngine::new(store, tx, session);
+            engine.start_review_or_skip().await;
+
+            engine
+                .drive_review_session(
+                    Arc::new(ReviewVerdictStreamingProvider {
+                        output: r#"Reviewer 明确要求返修，但 findings 结构错误。
+
+```json
+{
+  "verdict": "revise",
+  "summary": "findings 无法可靠解析",
+  "findings": [{"severity": "must_fix", "message": 42}]
+}
+```"#,
+                        provider_type: Arc::new(Mutex::new(None)),
+                        prompt: Arc::new(Mutex::new(None)),
+                    }),
+                    empty_provider_commands(),
+                )
+                .await;
+
+            assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
+            assert_eq!(
+                engine
+                    .latest_review_verdict
+                    .as_ref()
+                    .expect("latest review verdict")
+                    .review_gate,
+                ReviewGate::UserTriageRequired
+            );
+        }
+    }
+
     #[test]
     fn review_prompt_limits_revise_to_strong_findings() {
         let (_tmp, store) = setup();
@@ -5506,6 +5698,11 @@ mod tests {
             !input
                 .prompt
                 .contains("High/Medium 问题、建议改动或可执行返修项，必须使用 `revise`")
+        );
+        assert!(
+            input
+                .prompt
+                .contains("如果输出 `verdict=revise`，必须给出至少一个结构化 finding")
         );
     }
 
@@ -5665,11 +5862,17 @@ mod tests {
         let mut saw_review_complete = false;
         while let Ok(event) = rx.try_recv() {
             if let EngineEvent::ReviewComplete {
-                verdict, summary, ..
+                verdict,
+                summary,
+                findings,
+                review_gate,
+                ..
             } = event
             {
                 assert_eq!(verdict, ReviewVerdictType::Pass);
                 assert_eq!(summary, "可以确认");
+                assert!(findings.is_empty());
+                assert_eq!(review_gate, ReviewGate::UserConfirmAllowed);
                 saw_review_complete = true;
             }
         }
@@ -7841,15 +8044,15 @@ mod tests {
         let node_id = create_author_run_node(&mut engine).await;
 
         engine
-            .drive_provider_session(
-                Ok(tool_event_provider_session("# Draft")),
-                empty_provider_commands(),
-                Some(node_id.clone()),
-                Some(ProviderName::ClaudeCode),
-                ProviderConversationRole::Author,
-                None,
-                None,
-            )
+            .drive_provider_session(ProviderSessionDriveInput {
+                session: Ok(tool_event_provider_session("# Draft")),
+                command_rx: empty_provider_commands(),
+                node_id: Some(node_id.clone()),
+                agent: Some(ProviderName::ClaudeCode),
+                role: ProviderConversationRole::Author,
+                artifact_retry: None,
+                revision_resume_fallback: None,
+            })
             .await;
 
         let events = drain_engine_events(&mut rx);

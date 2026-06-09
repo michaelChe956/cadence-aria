@@ -25,7 +25,10 @@ interface ChatEntryRendererProps {
     response: { selected_option_ids: string[]; free_text: string | null },
   ) => void;
   onSelectRevisionPath?: (path: RevisionPath, extraContext?: string) => void;
-  onHumanConfirm?: (decision: "confirm" | "request-change" | "terminate") => void;
+  onHumanConfirm?: (
+    decision: "confirm" | "request-change" | "terminate",
+    payload?: unknown,
+  ) => void;
 }
 
 export function ChatEntryRenderer({

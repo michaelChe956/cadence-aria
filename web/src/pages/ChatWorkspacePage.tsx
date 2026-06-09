@@ -190,8 +190,15 @@ export function ChatWorkspacePage({
     sendSelectRevisionPath(path, extraContext);
   }
 
-  function handleHumanConfirm(decision: "confirm" | "request-change" | "terminate") {
-    sendHumanConfirm(decision);
+  function handleHumanConfirm(
+    decision: "confirm" | "request-change" | "terminate",
+    payload?: unknown,
+  ) {
+    if (payload === undefined) {
+      sendHumanConfirm(decision);
+      return;
+    }
+    sendHumanConfirm(decision, payload);
   }
 
   function handleAuthorDecision(decision: "accept" | "reject") {

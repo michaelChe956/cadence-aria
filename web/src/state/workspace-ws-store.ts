@@ -125,7 +125,10 @@ export type ReviewFindingSeverity =
   | "minor"
   | "optional";
 
-export type ReviewGate = "requires_revision" | "user_confirm_allowed";
+export type ReviewGate =
+  | "requires_revision"
+  | "user_confirm_allowed"
+  | "user_triage_required";
 
 export interface ReviewFinding {
   severity: ReviewFindingSeverity;
@@ -1459,10 +1462,16 @@ function buildGatePromptEntry(
   const latestReview = entries.filter((entry) => entry.type === "review_verdict").at(-1);
   const summary = latestReview?.metadata?.summary?.toString() ?? "";
   const verdict = latestReview?.metadata?.verdict?.toString() ?? "";
+  const comments = latestReview?.metadata?.comments?.toString() ?? "";
+  const findings = Array.isArray(latestReview?.metadata?.findings)
+    ? latestReview.metadata.findings
+    : [];
   const reviewGate = latestReview?.metadata?.review_gate?.toString() ?? "";
   const metadata = {
     ...(summary ? { summary } : {}),
     ...(verdict ? { verdict } : {}),
+    ...(comments ? { comments } : {}),
+    ...(findings.length > 0 ? { findings } : {}),
     ...(reviewGate ? { review_gate: reviewGate } : {}),
   };
   return {

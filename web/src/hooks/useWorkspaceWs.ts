@@ -374,25 +374,35 @@ export function useWorkspaceWs(sessionId: string | null) {
         );
         break;
       case "review_complete":
-        store.setNodeVerdict(msg.node_id as string, {
-          verdict: msg.verdict,
-          comments: msg.comments,
-          summary: msg.summary,
-        } as ReviewVerdict);
-        store.appendChatEntry({
-          id: chatEntryId("review_verdict", msg.node_id as string),
-          type: "review_verdict",
-          role: "reviewer",
-          content: msg.summary as string,
-          timestamp: new Date().toISOString(),
-          node_id: msg.node_id as string,
-          metadata: {
-            verdict: msg.verdict as string,
-            comments: msg.comments as string,
-            summary: msg.summary as string,
-            round: msg.round as number,
-          },
-        });
+        {
+          const findings = Array.isArray(msg.findings) ? msg.findings : [];
+          const reviewGate =
+            typeof msg.review_gate === "string" ? msg.review_gate : undefined;
+          const verdict = {
+            verdict: msg.verdict,
+            comments: msg.comments,
+            summary: msg.summary,
+            findings,
+            ...(reviewGate ? { review_gate: reviewGate } : {}),
+          } as ReviewVerdict;
+          store.setNodeVerdict(msg.node_id as string, verdict);
+          store.appendChatEntry({
+            id: chatEntryId("review_verdict", msg.node_id as string),
+            type: "review_verdict",
+            role: "reviewer",
+            content: msg.summary as string,
+            timestamp: new Date().toISOString(),
+            node_id: msg.node_id as string,
+            metadata: {
+              verdict: msg.verdict as string,
+              comments: msg.comments as string,
+              summary: msg.summary as string,
+              round: msg.round as number,
+              findings,
+              ...(reviewGate ? { review_gate: reviewGate } : {}),
+            },
+          });
+        }
         break;
       case "review_decision_required":
         store.setPendingDecision({
@@ -883,9 +893,17 @@ function gatePromptEntryForState(state: ReturnType<typeof useWorkspaceStore.getS
   const latestReview = state.chatEntries.filter((entry) => entry.type === "review_verdict").at(-1);
   const summary = latestReview?.metadata?.summary?.toString() ?? "";
   const verdict = latestReview?.metadata?.verdict?.toString() ?? "";
+  const comments = latestReview?.metadata?.comments?.toString() ?? "";
+  const findings = Array.isArray(latestReview?.metadata?.findings)
+    ? latestReview.metadata.findings
+    : [];
+  const reviewGate = latestReview?.metadata?.review_gate?.toString() ?? "";
   const metadata = {
     ...(summary ? { summary } : {}),
     ...(verdict ? { verdict } : {}),
+    ...(comments ? { comments } : {}),
+    ...(findings.length > 0 ? { findings } : {}),
+    ...(reviewGate ? { review_gate: reviewGate } : {}),
   };
   return {
     id: `${gatePromptNode?.node_id ?? "human_confirm"}:gate-prompt`,
