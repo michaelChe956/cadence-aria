@@ -433,6 +433,7 @@ pub struct LifecycleWorkItemDto {
     pub plan_status: String,
     pub execution_status: String,
     pub latest_attempt: Option<CodingAttemptDto>,
+    pub artifact_versions: Vec<ArtifactVersionDto>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

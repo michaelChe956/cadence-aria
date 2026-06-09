@@ -26,13 +26,24 @@ pub struct CodexProvider {
     command: PathBuf,
 }
 
+const CODEX_RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+const CODEX_RESUME_STALL_ERROR: &str = "Codex resume stalled before provider progress";
+#[cfg(not(test))]
+const CODEX_RESUME_STALL_TIMEOUT: Duration = Duration::from_secs(60);
+#[cfg(test)]
+const CODEX_RESUME_STALL_TIMEOUT: Duration = Duration::from_millis(100);
+
 impl CodexProvider {
     pub fn new(command: PathBuf) -> Self {
         Self { command }
     }
 
     fn build_args(&self) -> Vec<String> {
-        vec!["app-server".to_string()]
+        vec![
+            "app-server".to_string(),
+            "--enable".to_string(),
+            "default_mode_request_user_input".to_string(),
+        ]
     }
 }
 
@@ -239,16 +250,19 @@ where
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let _ = peer
-        .request(json!({
-            "jsonrpc": "2.0",
-            "method": "initialize",
-            "params": {
-                "clientInfo": {
-                    "name": "cadence-aria",
-                    "version": env!("CARGO_PKG_VERSION"),
+        .request_with_timeout(
+            json!({
+                "jsonrpc": "2.0",
+                "method": "initialize",
+                "params": {
+                    "clientInfo": {
+                        "name": "cadence-aria",
+                        "version": env!("CARGO_PKG_VERSION"),
+                    },
                 },
-            },
-        }))
+            }),
+            CODEX_RPC_REQUEST_TIMEOUT,
+        )
         .await?;
     peer.send(json!({
         "jsonrpc": "2.0",
@@ -257,27 +271,53 @@ where
     }))
     .await?;
 
-    let thread_id = if let Some(session_id) = input
+    let resume_session_id = input
         .resume_provider_session_id
         .as_deref()
         .map(str::trim)
         .filter(|session_id| !session_id.is_empty())
-    {
-        Some(session_id.to_string())
+        .map(ToString::to_string);
+
+    let thread_id = if let Some(session_id) = resume_session_id.as_deref() {
+        let resume_response = peer
+            .request_with_timeout(
+                json!({
+                    "jsonrpc": "2.0",
+                    "method": "thread/resume",
+                    "params": {
+                        "threadId": session_id,
+                        "cwd": input.working_dir.clone(),
+                        "approvalPolicy": match input.permission_mode {
+                            ProviderPermissionMode::Auto => "never",
+                            ProviderPermissionMode::Supervised => "on-request",
+                        },
+                    },
+                }),
+                CODEX_RPC_REQUEST_TIMEOUT,
+            )
+            .await?;
+        resume_response
+            .pointer("/thread/id")
+            .or_else(|| resume_response.pointer("/id"))
+            .and_then(Value::as_str)
+            .map(ToString::to_string)
+            .or_else(|| Some(session_id.to_string()))
     } else {
         let thread_response = peer
-            .request(json!({
-                "jsonrpc": "2.0",
-                "method": "thread/start",
-                "params": {
-                    "cwd": input.working_dir.clone(),
-                    "approvalPolicy": match input.permission_mode {
-                        ProviderPermissionMode::Auto => "never",
-                        ProviderPermissionMode::Supervised => "on-request",
+            .request_with_timeout(
+                json!({
+                    "jsonrpc": "2.0",
+                    "method": "thread/start",
+                    "params": {
+                        "cwd": input.working_dir.clone(),
+                        "approvalPolicy": match input.permission_mode {
+                            ProviderPermissionMode::Auto => "never",
+                            ProviderPermissionMode::Supervised => "on-request",
+                        },
                     },
-                    "ephemeral": true,
-                },
-            }))
+                }),
+                CODEX_RPC_REQUEST_TIMEOUT,
+            )
             .await?;
         thread_response
             .pointer("/thread/id")
@@ -288,19 +328,22 @@ where
     let turn_thread_id = thread_id.clone().unwrap_or_default();
 
     let turn_response = peer
-        .request(json!({
-            "jsonrpc": "2.0",
-            "method": "turn/start",
-            "params": {
-                "threadId": turn_thread_id,
-                "input": [
-                    {
-                        "type": "text",
-                        "text": input.prompt.clone(),
-                    }
-                ],
-            },
-        }))
+        .request_with_timeout(
+            json!({
+                "jsonrpc": "2.0",
+                "method": "turn/start",
+                "params": {
+                    "threadId": turn_thread_id,
+                    "input": [
+                        {
+                            "type": "text",
+                            "text": input.prompt.clone(),
+                        }
+                    ],
+                },
+            }),
+            CODEX_RPC_REQUEST_TIMEOUT,
+        )
         .await?;
     let turn_id = turn_response
         .pointer("/turn/id")
@@ -335,6 +378,9 @@ where
     let timeout_secs = input.timeout_secs.max(1);
     let timeout = tokio::time::sleep(Duration::from_secs(timeout_secs));
     tokio::pin!(timeout);
+    let resume_stall_timeout = tokio::time::sleep(CODEX_RESUME_STALL_TIMEOUT);
+    tokio::pin!(resume_stall_timeout);
+    let mut waiting_for_resume_progress = resume_session_id.is_some();
     loop {
         let incoming = tokio::select! {
             _ = cancel.cancelled() => {
@@ -347,12 +393,19 @@ where
                     timeout_secs.saturating_mul(1000),
                 ));
             }
+            _ = &mut resume_stall_timeout, if waiting_for_resume_progress => {
+                let session_id = resume_session_id.as_deref().unwrap_or("unknown");
+                return Err(provider_error(format!(
+                    "{CODEX_RESUME_STALL_ERROR} for thread {session_id}"
+                )));
+            }
             incoming = peer.next_incoming() => incoming.ok_or_else(|| {
                 provider_error("Codex app-server stream ended before completion")
             })?,
         };
 
         if let Some(message) = parse_agent_message_text(&incoming) {
+            waiting_for_resume_progress = false;
             if message.completed && streamed_agent_message_items.contains(&message.item_id) {
                 continue;
             }
@@ -370,11 +423,13 @@ where
         }
 
         if let Some(event) = parse_execution_event(&incoming) {
+            waiting_for_resume_progress = false;
             send_provider_event(&event_tx, ProviderEvent::Execution(event), &cancel).await?;
             continue;
         }
 
         if let Some(request) = parse_approval_request(&incoming) {
+            waiting_for_resume_progress = false;
             let decision = bridge
                 .request_tool(
                     &request.tool_name,
@@ -388,6 +443,7 @@ where
         }
 
         if let Some(request) = parse_user_input_request(&incoming) {
+            waiting_for_resume_progress = false;
             let decision = bridge
                 .request_choice(
                     ChoiceRequestData {
@@ -722,11 +778,7 @@ where
     peer.send(json!({
         "jsonrpc": "2.0",
         "id": rpc_id,
-        "method": "item/commandExecution/requestApproval",
         "result": {
-            "decision": decision,
-        },
-        "response": {
             "decision": decision,
         },
     }))
@@ -906,6 +958,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn codex_provider_enables_default_mode_request_user_input_feature() {
+        let provider = CodexProvider::new(PathBuf::from("codex"));
+
+        assert_eq!(
+            provider.build_args(),
+            vec![
+                "app-server".to_string(),
+                "--enable".to_string(),
+                "default_mode_request_user_input".to_string(),
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn codex_resume_uses_existing_thread_without_starting_new_thread() {
         let fixture =
@@ -921,6 +987,23 @@ mod tests {
         let completed = recv_completed(&mut session.events).await;
 
         assert_eq!(completed, "resumed done");
+    }
+
+    #[tokio::test]
+    async fn codex_thread_start_creates_persistent_thread_for_later_resume() {
+        let fixture = executable_fixture(
+            "tests/fixtures/provider/codex_app_server_persistent_thread_fixture.sh",
+        );
+        let provider = CodexProvider::new(fixture);
+        let input = streaming_input(ProviderType::Codex, ProviderPermissionMode::Auto);
+        let mut session = provider
+            .start(input, CancellationToken::new())
+            .await
+            .unwrap();
+
+        let completed = recv_completed(&mut session.events).await;
+
+        assert_eq!(completed, "persistent thread done");
     }
 
     #[tokio::test]
@@ -980,6 +1063,60 @@ mod tests {
         assert!(completed.contains("# Story Spec"));
         assert!(completed.contains("## 功能需求"));
         assert!(completed.contains("## 成功标准"));
+    }
+
+    #[tokio::test]
+    async fn codex_provider_responds_to_current_command_approval_with_json_rpc_result() {
+        let fixture = executable_fixture(
+            "tests/fixtures/provider/codex_app_server_current_permission_fixture.sh",
+        );
+        let provider = CodexProvider::new(fixture);
+        let input = streaming_input(ProviderType::Codex, ProviderPermissionMode::Supervised);
+        let mut session = provider
+            .start(input, CancellationToken::new())
+            .await
+            .unwrap();
+
+        let permission = loop {
+            match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+                .await
+                .expect("provider should emit current command approval")
+                .expect("provider event channel should stay open")
+            {
+                ProviderEvent::PermissionRequest(request) => break request,
+                ProviderEvent::StatusChanged(_)
+                | ProviderEvent::Execution(_)
+                | ProviderEvent::TextDelta { .. }
+                | ProviderEvent::ChoiceRequest(_)
+                | ProviderEvent::ToolCall(_)
+                | ProviderEvent::ToolResult(_) => {}
+                ProviderEvent::Completed { full_output, .. } => {
+                    panic!("provider completed before permission request: {full_output}")
+                }
+                ProviderEvent::Failed { message } => panic!("provider failed: {message}"),
+                ProviderEvent::ProtocolError { message, .. } => {
+                    panic!("provider protocol error: {message}")
+                }
+                ProviderEvent::PermissionTimeout { permission_id } => {
+                    panic!("provider permission timed out: {permission_id}")
+                }
+            }
+        };
+        assert_eq!(permission.tool_name, "command");
+        assert!(permission.description.contains("pnpm -C web install"));
+
+        session
+            .commands
+            .send(ProviderCommand::PermissionResponse {
+                id: permission.id,
+                approved: true,
+                reason: None,
+            })
+            .await
+            .unwrap();
+
+        let completed = recv_completed(&mut session.events).await;
+        assert_eq!(completed, "permission accepted");
     }
 
     #[tokio::test]
@@ -1151,6 +1288,52 @@ mod tests {
                 ProviderEvent::Failed { message } => {
                     assert!(
                         message.contains("timed out") || message.contains("timeout"),
+                        "unexpected failure message: {message}"
+                    );
+                    return;
+                }
+                ProviderEvent::StatusChanged(_)
+                | ProviderEvent::Execution(_)
+                | ProviderEvent::TextDelta { .. }
+                | ProviderEvent::PermissionRequest(_)
+                | ProviderEvent::ChoiceRequest(_)
+                | ProviderEvent::ToolCall(_)
+                | ProviderEvent::ToolResult(_) => {}
+                ProviderEvent::Completed { full_output, .. } => {
+                    panic!("provider completed unexpectedly: {full_output}")
+                }
+                ProviderEvent::ProtocolError { message, .. } => {
+                    panic!("provider protocol error: {message}")
+                }
+                ProviderEvent::PermissionTimeout { permission_id } => {
+                    panic!("provider permission timed out: {permission_id}")
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn codex_provider_reports_resume_stall_when_resumed_turn_emits_no_events() {
+        let fixture = executable_fixture(
+            "tests/fixtures/provider/codex_app_server_resume_hanging_turn_fixture.sh",
+        );
+        let provider = CodexProvider::new(fixture);
+        let mut input = streaming_input(ProviderType::Codex, ProviderPermissionMode::Auto);
+        input.resume_provider_session_id = Some("codex-thread-stale".to_string());
+        let mut session = provider
+            .start(input, CancellationToken::new())
+            .await
+            .unwrap();
+
+        loop {
+            match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+                .await
+                .expect("provider should emit resume stall failure")
+                .expect("provider event channel should stay open until failure")
+            {
+                ProviderEvent::Failed { message } => {
+                    assert!(
+                        message.contains("Codex resume stalled before provider progress"),
                         "unexpected failure message: {message}"
                     );
                     return;

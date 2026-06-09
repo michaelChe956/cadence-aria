@@ -8,8 +8,8 @@ use cadence_aria::cross_cutting::provider_adapter::ProviderAdapterError;
 use cadence_aria::cross_cutting::streaming_provider::{
     ChoiceOptionData, ChoiceRequestData, ChoiceRequestSource, PermissionRequestData, ProviderEvent,
     ProviderExecutionEvent, ProviderExecutionEventKind, ProviderExecutionEventStatus,
-    ProviderSession, ProviderStatus, ProviderToolCall, ProviderToolResult, RiskLevel, StreamChunk,
-    StreamingProviderAdapter, StreamingProviderInput,
+    ProviderPermissionMode, ProviderSession, ProviderStatus, ProviderToolCall, ProviderToolResult,
+    RiskLevel, StreamChunk, StreamingProviderAdapter, StreamingProviderInput,
 };
 use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
@@ -271,10 +271,108 @@ async fn coding_coder_run_resumes_previous_coder_provider_session() {
     assert_eq!(second.stage, CodingExecutionStage::Coding);
     let inputs = provider.inputs.lock().expect("inputs lock");
     assert_eq!(inputs.len(), 2);
+    assert_eq!(
+        inputs[0].permission_mode,
+        ProviderPermissionMode::Supervised
+    );
+    assert_eq!(
+        inputs[1].permission_mode,
+        ProviderPermissionMode::Supervised
+    );
+    assert_eq!(inputs[0].timeout_secs, 10_800);
+    assert_eq!(inputs[1].timeout_secs, 10_800);
     assert_eq!(inputs[0].resume_provider_session_id, None);
     assert_eq!(
         inputs[1].resume_provider_session_id.as_deref(),
         Some("coder-session-1")
+    );
+}
+
+#[tokio::test]
+async fn coding_coder_rework_with_resume_uses_delta_prompt() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Codex,
+                reviewer: Some(ProviderName::Fake),
+                review_rounds: 1,
+            },
+            ..create_input()
+        })
+        .expect("create attempt");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    let context = CodingExecutionContext {
+        work_item_markdown: Some(
+            "# 爬楼梯问题 Work Item\n\n\
+             ## 实现要求\n\
+             这里是一段很长的已确认 Work Item，返修续接时不应重复发送。\n"
+                .to_string(),
+        ),
+        verification_commands: vec!["uv run python -m unittest".to_string()],
+    };
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let provider = SessionInputCapturingProvider::with_outputs(
+        ["first coding done", "second coding done"],
+        [
+            Some("coder-session-1".to_string()),
+            Some("coder-session-1".to_string()),
+        ],
+    );
+
+    let first = engine
+        .execute_coding(&attempt, &provider, &context)
+        .await
+        .expect("first coding run");
+    store
+        .save_rework_instruction(&CodingReworkInstruction {
+            id: "coding_rework_instruction_0001".to_string(),
+            attempt_id: attempt.id.clone(),
+            source_stage: CodingExecutionStage::CodeReview,
+            rework_round: 1,
+            summary: "reviewer 要求补充边界测试".to_string(),
+            fix_hints: vec!["补充 n=0 的输入处理".to_string()],
+            questions: Vec::new(),
+            created_at: "2026-06-07T00:00:00Z".to_string(),
+            consumed_by_node_id: None,
+            consumed_at: None,
+        })
+        .expect("save rework instruction");
+
+    engine
+        .execute_coding(&first, &provider, &context)
+        .await
+        .expect("second coding run");
+
+    let inputs = provider.inputs.lock().expect("inputs lock");
+    assert_eq!(inputs.len(), 2);
+    let second_input = &inputs[1];
+    assert_eq!(
+        second_input.resume_provider_session_id.as_deref(),
+        Some("coder-session-1")
+    );
+    assert!(second_input.prompt.contains("增量代码编写指令"));
+    assert!(second_input.prompt.contains("reviewer 要求补充边界测试"));
+    assert!(second_input.prompt.contains("补充 n=0 的输入处理"));
+    assert!(second_input.prompt.contains("uv run python -m unittest"));
+    assert!(!second_input.prompt.contains("# 爬楼梯问题 Work Item"));
+    assert!(!second_input.prompt.contains("已确认 Work Item"));
+    assert!(
+        !second_input
+            .prompt
+            .contains("不要只输出计划或 Story/Design/Work Item 文档")
     );
 }
 
@@ -345,9 +443,11 @@ async fn coding_tester_does_not_resume_coder_provider_session() {
     let inputs = provider.inputs.lock().expect("inputs lock");
     assert_eq!(inputs.len(), 1);
     assert_eq!(
-        inputs[0].resume_provider_session_id.as_deref(),
-        Some("tester-session-1")
+        inputs[0].permission_mode,
+        ProviderPermissionMode::Supervised
     );
+    assert_eq!(inputs[0].timeout_secs, 10_800);
+    assert_eq!(inputs[0].resume_provider_session_id, None);
     let updated = store
         .get_attempt("project_0001", "issue_0001", &attempt.id)
         .expect("updated attempt");
@@ -359,7 +459,7 @@ async fn coding_tester_does_not_resume_coder_provider_session() {
 }
 
 #[tokio::test]
-async fn coding_code_reviewer_run_does_not_resume_coder_or_tester_session() {
+async fn coding_code_reviewer_run_uses_fresh_provider_session() {
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
     init_repo(&worktree);
@@ -429,9 +529,11 @@ async fn coding_code_reviewer_run_does_not_resume_coder_or_tester_session() {
     let inputs = provider.inputs.lock().expect("inputs lock");
     assert_eq!(inputs.len(), 1);
     assert_eq!(
-        inputs[0].resume_provider_session_id.as_deref(),
-        Some("code-reviewer-session-0")
+        inputs[0].permission_mode,
+        ProviderPermissionMode::Supervised
     );
+    assert_eq!(inputs[0].timeout_secs, 10_800);
+    assert_eq!(inputs[0].resume_provider_session_id, None);
     let updated = store
         .get_attempt("project_0001", "issue_0001", &attempt.id)
         .expect("updated attempt");
@@ -443,7 +545,7 @@ async fn coding_code_reviewer_run_does_not_resume_coder_or_tester_session() {
 }
 
 #[tokio::test]
-async fn coding_analyst_rework_resumes_analyst_provider_session() {
+async fn coding_analyst_rework_uses_fresh_provider_session() {
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
     fs::create_dir_all(&worktree).expect("worktree");
@@ -502,13 +604,15 @@ async fn coding_analyst_rework_resumes_analyst_provider_session() {
     let inputs = provider.inputs.lock().expect("inputs lock");
     assert_eq!(inputs.len(), 1);
     assert_eq!(
-        inputs[0].resume_provider_session_id.as_deref(),
-        Some("analyst-session-1")
+        inputs[0].permission_mode,
+        ProviderPermissionMode::Supervised
     );
+    assert_eq!(inputs[0].timeout_secs, 10_800);
+    assert_eq!(inputs[0].resume_provider_session_id, None);
 }
 
 #[tokio::test]
-async fn coding_internal_reviewer_resumes_internal_reviewer_provider_session() {
+async fn coding_internal_reviewer_uses_fresh_provider_session() {
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
     init_repo(&worktree);
@@ -575,9 +679,11 @@ async fn coding_internal_reviewer_resumes_internal_reviewer_provider_session() {
     let inputs = provider.inputs.lock().expect("inputs lock");
     assert_eq!(inputs.len(), 1);
     assert_eq!(
-        inputs[0].resume_provider_session_id.as_deref(),
-        Some("internal-reviewer-session-1")
+        inputs[0].permission_mode,
+        ProviderPermissionMode::Supervised
     );
+    assert_eq!(inputs[0].timeout_secs, 10_800);
+    assert_eq!(inputs[0].resume_provider_session_id, None);
 }
 
 #[tokio::test]
@@ -2825,6 +2931,7 @@ fn seed_work_item_markdown(app_paths: &ProductAppPaths, markdown: &str) {
                 reviewed_by: Some(ProviderName::Fake),
                 review_verdict: None,
                 confirmed_by: Some("user".to_string()),
+                is_current: true,
                 created_at: "2026-05-23T00:00:00Z".to_string(),
                 source_node_id: "node_0001".to_string(),
             },

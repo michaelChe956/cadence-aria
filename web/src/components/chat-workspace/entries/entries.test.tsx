@@ -1,4 +1,5 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { ChatEntry } from "../../../state/chat-entries";
 import { ChatEntryRenderer } from "../ChatEntryRenderer";
@@ -6,7 +7,7 @@ import { ErrorEntry } from "./ErrorEntry";
 import { ExecutionEventEntry } from "./ExecutionEventEntry";
 import { PermissionRequestEntry } from "./PermissionRequestEntry";
 import { PermissionResponseEntry } from "./PermissionResponseEntry";
-import { ProviderStreamEntry } from "./ProviderStreamEntry";
+import { MarkdownContent, ProviderStreamEntry } from "./ProviderStreamEntry";
 import { UserContextEntry } from "./UserContextEntry";
 
 describe("chat workspace entries", () => {
@@ -51,6 +52,48 @@ describe("chat workspace entries", () => {
     expect(screen.getByText(/n=1/)).toBeInTheDocument();
   });
 
+  it("renders provider stream markdown semantics inside message bubbles", () => {
+    const entry = makeEntry({
+      type: "provider_stream",
+      role: "author",
+      content:
+        "## 范围\n\n- 支持 **粗体** 和 `inline code`\n- 查看 [设计说明](https://example.com/design)",
+    });
+
+    render(<ProviderStreamEntry entry={entry} />);
+
+    expect(screen.getByRole("heading", { name: "范围" })).toBeInTheDocument();
+    const list = screen.getByRole("list");
+    expect(list).toBeInTheDocument();
+    expect(within(list).getAllByRole("listitem")[0]).toHaveTextContent(
+      "支持 粗体 和 inline code",
+    );
+    expect(screen.getByText("粗体").tagName).toBe("STRONG");
+    expect(screen.getByText("inline code").tagName).toBe("CODE");
+    expect(screen.getByRole("link", { name: "设计说明" })).toHaveAttribute(
+      "href",
+      "https://example.com/design",
+    );
+  });
+
+  it("does not inject raw HTML or unsafe markdown links in message bubbles", () => {
+    const entry = makeEntry({
+      type: "provider_stream",
+      role: "author",
+      content:
+        '正文\n\n<script>alert("x")</script>\n\n<img src=x onerror=alert(1)>\n\n[危险链接](javascript:alert(1))',
+    });
+
+    const { container } = render(<ProviderStreamEntry entry={entry} />);
+
+    expect(container.querySelector("script")).toBeNull();
+    expect(container.querySelector("img")).toBeNull();
+    expect(screen.getByText('<script>alert("x")</script>')).toBeInTheDocument();
+    expect(screen.getByText("<img src=x onerror=alert(1)>")).toBeInTheDocument();
+    expect(screen.getByText("危险链接")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "危险链接" })).not.toBeInTheDocument();
+  });
+
   it("breaks long provider prose into sentence lines when the provider streams one dense line", () => {
     const entry = makeEntry({
       type: "provider_stream",
@@ -65,6 +108,22 @@ describe("chat workspace entries", () => {
     expect(prose.textContent).toBe(
       "仓库规则已确认。\n我现在进入红灯阶段。\n红灯已成立：python -m unittest discover -s tests 因 ModuleNotFoundError 失败。\n绿色阶段测试已通过。",
     );
+  });
+
+  it("collapses very large markdown content until expanded", async () => {
+    const huge = "intro\n" + "line\n".repeat(30_000) + "\n# Full Title\nOnly after expansion";
+
+    render(<MarkdownContent content={huge} />);
+
+    expect(screen.getByText(/内容较长/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /展开全文/ })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Full Title" })).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: /展开全文/ }));
+
+    expect(screen.getByRole("heading", { name: "Full Title" })).toBeInTheDocument();
+    expect(screen.getByText("Only after expansion")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /收起全文/ })).toBeInTheDocument();
   });
 
   it("renders execution event entries with command detail", () => {

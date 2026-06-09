@@ -115,6 +115,7 @@ export type LifecycleWorkItem = {
   plan_status: "not_started" | "draft" | "confirmed" | "change_requested";
   execution_status: "pending" | "planning" | "coding" | "completed" | "blocked";
   latest_attempt: CodingAttempt | null;
+  artifact_versions: ArtifactVersion[];
 };
 
 export type CodingAttemptStatus =
@@ -525,6 +526,7 @@ export type StructuredFeedback = {
 
 export type RevisionPath = "revise" | "revise-with-context" | "skip-to-human";
 export type HumanConfirmDecision = "confirm" | "request-change" | "terminate";
+export type AuthorDecision = "accept" | "reject";
 
 export type WsInMessage =
   | { type: "user_message"; content: string }
@@ -545,6 +547,7 @@ export type WsInMessage =
       free_text?: string | null;
     }
   | { type: "review_decision_response"; decision: string; extra_context?: string | null }
+  | { type: "author_decision"; decision: AuthorDecision }
   | { type: "select_revision_path"; path: RevisionPath; extra_context?: string | null }
   | { type: "request_revision"; feedback: StructuredFeedback }
   | { type: "human_confirm"; decision: HumanConfirmDecision; payload?: unknown }
@@ -556,6 +559,7 @@ export type TimelineNodeType =
   | "prepare_context"
   | "context_note"
   | "start_generation"
+  | "author_confirm"
   | "author_run"
   | "reviewer_run"
   | "review_decision"
@@ -582,6 +586,25 @@ export type ExecutionEventStatus =
   | "failed"
   | "aborted";
 export type ReviewVerdictType = "pass" | "revise" | "needs_human";
+export type WorkspaceReviewFindingSeverity =
+  | "blocking"
+  | "must_fix"
+  | "strong_recommend_fix"
+  | "suggestion"
+  | "minor"
+  | "optional";
+export type ReviewGate =
+  | "requires_revision"
+  | "user_confirm_allowed"
+  | "user_triage_required";
+
+export type WorkspaceReviewFinding = {
+  severity: WorkspaceReviewFindingSeverity;
+  message: string;
+  evidence: string;
+  impact: string;
+  required_action: string;
+};
 
 export type WsMessage = {
   id: string;
@@ -629,6 +652,8 @@ export type ReviewVerdict = {
   verdict: ReviewVerdictType;
   comments: string;
   summary: string;
+  findings?: WorkspaceReviewFinding[];
+  review_gate?: ReviewGate;
 };
 
 export type ExecutionEvent = {
@@ -664,9 +689,12 @@ export type ArtifactVersion = {
   reviewed_by?: WorkspaceProviderName | null;
   review_verdict?: ReviewVerdictType | null;
   confirmed_by?: string | null;
+  is_current?: boolean;
   created_at: string;
   source_node_id: string;
 };
+
+export type ArtifactVersionSummary = Omit<ArtifactVersion, "markdown"> & { markdown?: string };
 
 export type ProviderSnapshot = {
   name: string;
@@ -703,6 +731,24 @@ export type NodeDetail = {
   base_artifact_ref: ArtifactRef | null;
   started_at: string;
   ended_at: string | null;
+};
+
+export type WorkspaceNodeDetailResponse = NodeDetail;
+
+export type WorkspacePromptResponse = {
+  node_id: string;
+  prompt: string;
+};
+
+export type WorkspaceEventOutputResponse = {
+  node_id: string;
+  event_id: string;
+  output: string;
+};
+
+export type WorkspaceArtifactVersionResponse = {
+  version: number;
+  markdown: string;
 };
 
 export type WsOutMessage =
@@ -749,6 +795,8 @@ export type WsOutMessage =
       verdict: ReviewVerdictType;
       comments: string;
       summary: string;
+      findings?: WorkspaceReviewFinding[];
+      review_gate?: ReviewGate;
     }
   | { type: "review_decision_required"; node_id: string; round: number; options: string[] }
   | {
@@ -765,6 +813,7 @@ export type WsOutMessage =
       timeline_nodes: TimelineNode[];
       active_node_id: string | null;
       artifact_versions: ArtifactVersion[];
+      artifact_version_summaries?: ArtifactVersionSummary[];
       timeline_node_details: Record<string, NodeDetail>;
       active_run_id: string | null;
     }

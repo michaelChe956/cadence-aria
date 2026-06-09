@@ -727,6 +727,27 @@ describe("IssueLifecycleWorkbench", () => {
     );
   });
 
+  it("opens work item drawer artifact preview from lifecycle data", async () => {
+    vi.stubGlobal("fetch", lifecycleFetch({ confirmedWorkItem: true }));
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "实现提示组件" }),
+    );
+    expect(await screen.findByTestId("lifecycle-card-drawer")).toHaveTextContent(
+      "实现提示组件",
+    );
+
+    await user.click(screen.getByRole("button", { name: "查看 Markdown 内容" }));
+
+    expect(screen.getByText("版本 v1 预览")).toBeInTheDocument();
+    expect(screen.getByTestId("monaco-viewer")).toHaveTextContent(
+      "实现会话过期提示组件",
+    );
+  });
+
   it("deletes a work item from the drawer and removes its coding workspace content", async () => {
     const fetchMock = lifecycleFetch({ confirmedWorkItem: true });
     vi.stubGlobal("fetch", fetchMock);
@@ -1239,6 +1260,7 @@ function lifecycleFetch(options?: {
         plan_status: "not_started",
         execution_status: "pending",
         latest_attempt: null,
+        artifact_versions: [],
       };
       const session = workspaceSessionRecord(
         "work_item",
@@ -1553,6 +1575,18 @@ function initialLifecycleData(
         plan_status: confirmedWorkItem ? "confirmed" : "draft",
         execution_status: "planning",
         latest_attempt: null,
+        artifact_versions: [
+          {
+            version: 1,
+            markdown: "## 实施计划\n\n[TASK-001] 实现会话过期提示组件。",
+            generated_by: "claude_code",
+            reviewed_by: "codex",
+            review_verdict: "pass",
+            confirmed_by: confirmedWorkItem ? "human" : null,
+            created_at: "2026-05-20T00:02:00Z",
+            source_node_id: "timeline_node_work_item_001",
+          },
+        ],
       },
     ],
     workspace_sessions: [

@@ -42,10 +42,14 @@ impl IntoResponse for ApiError {
             }
             "coding_attempt_active" | "coding_attempt_worktree_not_ready" => StatusCode::CONFLICT,
             "artifact_not_found"
+            | "artifact_version_not_found"
             | "coding_attempt_not_found"
+            | "event_output_not_found"
             | "gate_not_found"
             | "interactive_task_missing"
             | "issue_not_found"
+            | "node_detail_not_found"
+            | "node_detail_prompt_not_found"
             | "project_not_found"
             | "repository_not_found"
             | "workspace_not_found"

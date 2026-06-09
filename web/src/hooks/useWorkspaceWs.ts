@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
+  AuthorDecision,
   HumanConfirmDecision,
   ProviderConfigSnapshot,
   RevisionPath,
@@ -31,11 +32,13 @@ const SERVER_SILENCE_TIMEOUT_MS = 60_000;
 const STALE_SOCKET_CLOSE_CODE = 4000;
 const SERVER_SILENCE_CHECK_INTERVAL_MS = 15_000;
 const CONNECT_TIMEOUT_MS = 5_000;
+const STREAM_FLUSH_INTERVAL_MS = 80;
 const ACTIVE_PROVIDER_STAGES = new Set(["running", "cross_review", "revision"]);
 
 export function useWorkspaceWs(sessionId: string | null) {
   const wsRef = useRef<WebSocket | null>(null);
   const connectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const streamFlushTimeoutsRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const lastMessageAtRef = useRef(Date.now());
   const [closeCode, setCloseCode] = useState<number | undefined>();
   const connectionStatus = useWorkspaceStore((state) => state.connectionStatus);
@@ -45,6 +48,28 @@ export function useWorkspaceWs(sessionId: string | null) {
       clearTimeout(connectTimeoutRef.current);
       connectTimeoutRef.current = null;
     }
+  }, []);
+
+  const clearStreamFlushTimeouts = useCallback(() => {
+    for (const timeout of Object.values(streamFlushTimeoutsRef.current)) {
+      clearTimeout(timeout);
+    }
+    streamFlushTimeoutsRef.current = {};
+  }, []);
+
+  const clearPendingStreams = useCallback(() => {
+    clearStreamFlushTimeouts();
+    useWorkspaceStore.getState().clearAllStreamBuffers();
+  }, [clearStreamFlushTimeouts]);
+
+  const scheduleFlush = useCallback((nodeId: string) => {
+    if (streamFlushTimeoutsRef.current[nodeId]) {
+      return;
+    }
+    streamFlushTimeoutsRef.current[nodeId] = setTimeout(() => {
+      delete streamFlushTimeoutsRef.current[nodeId];
+      useWorkspaceStore.getState().flushBufferedStream(nodeId);
+    }, STREAM_FLUSH_INTERVAL_MS);
   }, []);
 
   const connect = useCallback(() => {
@@ -96,6 +121,7 @@ export function useWorkspaceWs(sessionId: string | null) {
     ws.onclose = (event) => {
       if (wsRef.current !== ws) return;
       clearConnectTimeout();
+      clearPendingStreams();
       wsRef.current = null;
       setCloseCode(event.code);
       useWorkspaceStore.getState().setConnectionStatus("disconnected");
@@ -104,6 +130,7 @@ export function useWorkspaceWs(sessionId: string | null) {
     ws.onerror = () => {
       if (wsRef.current !== ws) return;
       clearConnectTimeout();
+      clearPendingStreams();
       const store = useWorkspaceStore.getState();
       wsRef.current = null;
       setCloseCode(1006);
@@ -120,7 +147,7 @@ export function useWorkspaceWs(sessionId: string | null) {
         // ignore malformed messages
       }
     };
-  }, [clearConnectTimeout, sessionId]);
+  }, [clearConnectTimeout, clearPendingStreams, sessionId]);
 
   const {
     isReconnecting,
@@ -139,6 +166,7 @@ export function useWorkspaceWs(sessionId: string | null) {
 
   useEffect(() => {
     if (!sessionId) {
+      clearPendingStreams();
       useWorkspaceStore.getState().reset();
       return;
     }
@@ -147,11 +175,12 @@ export function useWorkspaceWs(sessionId: string | null) {
 
     return () => {
       clearConnectTimeout();
+      clearPendingStreams();
       const ws = wsRef.current;
       wsRef.current = null;
       ws?.close(1000);
     };
-  }, [clearConnectTimeout, connect, sessionId]);
+  }, [clearConnectTimeout, clearPendingStreams, connect, sessionId]);
 
   useEffect(() => {
     if (connectionStatus === "connected") {
@@ -170,10 +199,39 @@ export function useWorkspaceWs(sessionId: string | null) {
         if (!ACTIVE_PROVIDER_STAGES.has(store.stage) && store.activeRunId) {
           break;
         }
-        store.appendStreamChunk(msg.content as string, msg.node_id as string | null | undefined);
-        handleStreamChunk(store, msg as never);
+        {
+          const nodeId = msg.node_id as string | null | undefined;
+          if (nodeId) {
+            const role = entryRoleForNode(
+              store,
+              nodeId,
+              chatEntryRole((msg.role as string | undefined) ?? "author"),
+            );
+            store.appendStreamChunk(msg.content as string, nodeId);
+            store.appendBufferedStreamChunk(msg.content as string, nodeId, role);
+            scheduleFlush(nodeId);
+          } else {
+            store.appendStreamChunk(msg.content as string, nodeId);
+            handleStreamChunk(store, msg as never);
+          }
+        }
         break;
       case "message_complete":
+        if (msg.node_id) {
+          const nodeId = msg.node_id as string;
+          const timeout = streamFlushTimeoutsRef.current[nodeId];
+          if (timeout) {
+            clearTimeout(timeout);
+            delete streamFlushTimeoutsRef.current[nodeId];
+          }
+          store.completeBufferedStream(
+            nodeId,
+            msg.message_id as string,
+            msg.checkpoint_id as string,
+          );
+          store.finalizeStreamingEntry(resolveStreamEntryId(store, nodeId));
+          break;
+        }
         store.completeMessage(
           msg.message_id as string,
           msg.checkpoint_id as string,
@@ -198,19 +256,32 @@ export function useWorkspaceWs(sessionId: string | null) {
         }
         break;
       case "artifact_update":
-        store.setArtifact(msg.markdown as string, msg.version as number | undefined);
-        store.appendChatEntry({
-          id: chatEntryId("artifact_update", String(msg.version as number | undefined)),
-          type: "artifact_update",
-          role: "system",
-          content: `产物已更新 -> v${msg.version as number | undefined}`,
-          timestamp: new Date().toISOString(),
-          metadata: {
-            version: msg.version as number | undefined,
-            markdown: msg.markdown as string,
-            diff: (msg as { diff?: string | null }).diff ?? null,
-          },
-        });
+        {
+          const markdown = msg.markdown as string;
+          const version = msg.version as number | undefined;
+          store.setArtifact(markdown, version);
+          store.appendChatEntry({
+            id: chatEntryId("artifact_update", String(version)),
+            type: "artifact_update",
+            role: "system",
+            content: `产物已更新 -> v${version}`,
+            timestamp: new Date().toISOString(),
+            metadata: {
+              version,
+              diff: (msg as { diff?: string | null }).diff ?? null,
+            },
+            content_ref:
+              version === undefined
+                ? undefined
+                : {
+                    kind: "artifact_version",
+                    version,
+                    sourceNodeId: store.activeNodeId ?? undefined,
+                  },
+            content_size: markdown.length,
+            has_full_content: true,
+          });
+        }
         break;
       case "permission_request":
         store.addPermissionRequest({
@@ -263,6 +334,23 @@ export function useWorkspaceWs(sessionId: string | null) {
           const event = msg.event as ExecutionEvent;
           const provider = providerNameForNode(store, event.node_id ?? null, event.agent ?? null);
           store.upsertExecutionEvent(event);
+          if (isProviderPromptEvent(event)) {
+            store.appendChatEntry({
+              id: chatEntryId("execution_event", event.event_id),
+              type: "execution_event",
+              role: entryRoleForNode(store, event.node_id ?? null, "system"),
+              content: `${executionEventContent(event, nodeTitleForEvent(store, event))} · ${formatContentSize(event.output.length)}`,
+              timestamp: new Date().toISOString(),
+              node_id: event.node_id ?? undefined,
+              metadata: providerPromptEventMetadata(event, provider),
+              content_ref: event.node_id
+                ? { kind: "provider_prompt", nodeId: event.node_id }
+                : undefined,
+              content_size: event.output.length,
+              has_full_content: true,
+            });
+            break;
+          }
           store.appendChatEntry({
             id: chatEntryId("execution_event", event.event_id),
             type: "execution_event",
@@ -286,25 +374,35 @@ export function useWorkspaceWs(sessionId: string | null) {
         );
         break;
       case "review_complete":
-        store.setNodeVerdict(msg.node_id as string, {
-          verdict: msg.verdict,
-          comments: msg.comments,
-          summary: msg.summary,
-        } as ReviewVerdict);
-        store.appendChatEntry({
-          id: chatEntryId("review_verdict", msg.node_id as string),
-          type: "review_verdict",
-          role: "reviewer",
-          content: msg.summary as string,
-          timestamp: new Date().toISOString(),
-          node_id: msg.node_id as string,
-          metadata: {
-            verdict: msg.verdict as string,
-            comments: msg.comments as string,
-            summary: msg.summary as string,
-            round: msg.round as number,
-          },
-        });
+        {
+          const findings = Array.isArray(msg.findings) ? msg.findings : [];
+          const reviewGate =
+            typeof msg.review_gate === "string" ? msg.review_gate : undefined;
+          const verdict = {
+            verdict: msg.verdict,
+            comments: msg.comments,
+            summary: msg.summary,
+            findings,
+            ...(reviewGate ? { review_gate: reviewGate } : {}),
+          } as ReviewVerdict;
+          store.setNodeVerdict(msg.node_id as string, verdict);
+          store.appendChatEntry({
+            id: chatEntryId("review_verdict", msg.node_id as string),
+            type: "review_verdict",
+            role: "reviewer",
+            content: msg.summary as string,
+            timestamp: new Date().toISOString(),
+            node_id: msg.node_id as string,
+            metadata: {
+              verdict: msg.verdict as string,
+              comments: msg.comments as string,
+              summary: msg.summary as string,
+              round: msg.round as number,
+              findings,
+              ...(reviewGate ? { review_gate: reviewGate } : {}),
+            },
+          });
+        }
         break;
       case "review_decision_required":
         store.setPendingDecision({
@@ -475,6 +573,13 @@ export function useWorkspaceWs(sessionId: string | null) {
     [sendJson],
   );
 
+  const sendAuthorDecision = useCallback(
+    (decision: AuthorDecision) => {
+      sendJson({ type: "author_decision", decision });
+    },
+    [sendJson],
+  );
+
   const sendMessage = useCallback(
     (content: string) => {
       console.warn("sendMessage is deprecated, use sendContextNote or sendStartGeneration");
@@ -585,6 +690,7 @@ export function useWorkspaceWs(sessionId: string | null) {
     sendContextNote,
     sendStartGeneration,
     sendSelectRevisionPath,
+    sendAuthorDecision,
     sendHumanConfirm,
     sendHello,
     sendPing,
@@ -632,6 +738,9 @@ function resolveStreamEntryId(
   store: ReturnType<typeof useWorkspaceStore.getState>,
   nodeId?: string | null,
 ) {
+  if (nodeId) {
+    return `${nodeId}:stream-active`;
+  }
   return streamEntryId(resolveStreamEntryNodeId(store, nodeId));
 }
 
@@ -663,6 +772,35 @@ function executionEventContent(event: ExecutionEvent, nodeTitle?: string | null)
     return `${nodeTitle} · Provider Prompt`;
   }
   return event.detail ? `${event.title} · ${event.detail}` : event.title;
+}
+
+function isProviderPromptEvent(
+  event: Pick<ExecutionEvent, "title" | "output">,
+): event is Pick<ExecutionEvent, "title" | "output"> & { output: string } {
+  return event.title === "Provider Prompt" && typeof event.output === "string";
+}
+
+function providerPromptEventMetadata(event: ExecutionEvent, provider?: string | null) {
+  return {
+    event_id: event.event_id,
+    node_id: event.node_id ?? null,
+    agent: event.agent ?? null,
+    kind: event.kind,
+    status: event.status,
+    title: event.title,
+    detail: event.detail ?? null,
+    command: event.command ?? null,
+    cwd: event.cwd ?? null,
+    exit_code: event.exit_code ?? null,
+    ...(provider ? { provider } : {}),
+  };
+}
+
+function formatContentSize(chars: number) {
+  if (chars < 1024) {
+    return `${chars} 字符`;
+  }
+  return `约 ${Math.ceil(chars / 1024)}KB`;
 }
 
 function nodeTitleForEvent(
@@ -755,9 +893,17 @@ function gatePromptEntryForState(state: ReturnType<typeof useWorkspaceStore.getS
   const latestReview = state.chatEntries.filter((entry) => entry.type === "review_verdict").at(-1);
   const summary = latestReview?.metadata?.summary?.toString() ?? "";
   const verdict = latestReview?.metadata?.verdict?.toString() ?? "";
+  const comments = latestReview?.metadata?.comments?.toString() ?? "";
+  const findings = Array.isArray(latestReview?.metadata?.findings)
+    ? latestReview.metadata.findings
+    : [];
+  const reviewGate = latestReview?.metadata?.review_gate?.toString() ?? "";
   const metadata = {
     ...(summary ? { summary } : {}),
     ...(verdict ? { verdict } : {}),
+    ...(comments ? { comments } : {}),
+    ...(findings.length > 0 ? { findings } : {}),
+    ...(reviewGate ? { review_gate: reviewGate } : {}),
   };
   return {
     id: `${gatePromptNode?.node_id ?? "human_confirm"}:gate-prompt`,

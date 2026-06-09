@@ -26,10 +26,20 @@ describe("useStageUI", () => {
     expect(result.current.headerBadge).toBe("等待确认");
   });
 
+  it("returns author confirm config", () => {
+    const { result } = renderHook(() => useStageUI("author_confirm"));
+
+    expect(result.current.actions).toEqual(["accept_author", "reject_author"]);
+    expect(result.current.headerBadge).toBe("Author 待确认");
+    expect(result.current.showContextInput).toBe(false);
+    expect(result.current.providerEditable).toBe(false);
+  });
+
   it("returns correct config for all stages", () => {
     const stages = [
       ["prepare_context", ["start_generation"]],
       ["running", ["abort"]],
+      ["author_confirm", ["accept_author", "reject_author"]],
       ["cross_review", ["abort"]],
       ["review_decision", ["select_revision_path", "abort"]],
       ["revision", ["abort"]],

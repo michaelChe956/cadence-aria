@@ -13,8 +13,22 @@ use crate::cross_cutting::streaming_provider::{
     FakeStreamingProvider, PermissionRequestData, ProviderCommand, ProviderEvent, ProviderSession,
     RiskLevel, StreamChunk, StreamingProviderAdapter, StreamingProviderInput,
 };
+use crate::product::app_paths::ProductAppPaths;
+use crate::product::issue_store::{CreateProductIssueInput, IssueStore};
+use crate::product::lifecycle_store::{
+    CreateStorySpecInput, CreateWorkspaceSessionInput, LifecycleStore,
+};
+use crate::product::models::{
+    AgentRole, NodeDetail, ProviderName, ProviderSnapshot, WorkspaceType,
+};
+use crate::product::project_store::{CreateProjectInput, ProjectStore};
+use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
 use crate::protocol::contracts::{AdapterInput, AdapterRole};
 use crate::web::state::WebAppState;
+use crate::web::workspace_ws_types::{
+    ArtifactVersion, ProviderConfigSnapshot, ReviewVerdictType, TimelineNode, TimelineNodeStatus,
+    TimelineNodeType, WorkspaceStage, WsExecutionEventKind, WsExecutionEventStatus,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkspaceSocketControl {
@@ -145,6 +159,214 @@ pub async fn set_ws_timeout(
         request.session_id,
     );
     Json(json!({"status": "ok"}))
+}
+
+pub async fn seed_large_workspace_fixture(
+    State(state): State<WebAppState>,
+) -> Json<serde_json::Value> {
+    match create_large_workspace_fixture(ProductAppPaths::new(state.workspace_root.join(".aria"))) {
+        Ok(session_id) => Json(json!({"session_id": session_id})),
+        Err(error) => Json(json!({"error": error.to_string()})),
+    }
+}
+
+fn create_large_workspace_fixture(
+    app_paths: ProductAppPaths,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let project = ProjectStore::new(app_paths.clone()).create(CreateProjectInput {
+        name: "Large Workspace Memory E2E".to_string(),
+        description: Some("大型 Workspace 内存治理 E2E fixture".to_string()),
+    })?;
+    let repository = RepositoryStore::new(app_paths.clone()).create(CreateRepositoryInput {
+        project_id: project.id.clone(),
+        name: "Large Fixture Repo".to_string(),
+        path: app_paths.root().to_path_buf(),
+        default_policy_preset: Some("manual-write".to_string()),
+        default_provider_mode: Some("fake".to_string()),
+    })?;
+    let issue = IssueStore::new(app_paths.clone()).create(CreateProductIssueInput {
+        project_id: project.id.clone(),
+        repo_id: Some(repository.id.clone()),
+        title: "Large Workspace Memory Issue".to_string(),
+        description: Some("验证大型 workspace 的按需内容加载".to_string()),
+        change_id: None,
+    })?;
+    let lifecycle = LifecycleStore::new(app_paths);
+    let story = lifecycle.create_story_spec(CreateStorySpecInput {
+        project_id: project.id.clone(),
+        issue_id: issue.id.clone(),
+        repository_id: repository.id,
+        title: "Large Workspace Memory Story".to_string(),
+    })?;
+    let session = lifecycle.create_workspace_session(CreateWorkspaceSessionInput {
+        project_id: project.id,
+        issue_id: issue.id,
+        entity_id: story.id,
+        workspace_type: WorkspaceType::Story,
+        author_provider: ProviderName::Codex,
+        reviewer_provider: ProviderName::ClaudeCode,
+        review_rounds: 5,
+        superpowers_enabled: false,
+        openspec_enabled: true,
+    })?;
+
+    let session_id = session.id;
+    let now = chrono::Utc::now().to_rfc3339();
+    let provider_snapshot = ProviderConfigSnapshot {
+        author: ProviderName::Codex,
+        reviewer: Some(ProviderName::ClaudeCode),
+        review_rounds: 5,
+    };
+    let mut nodes = Vec::new();
+    for index in 0..45 {
+        let node_id = format!("timeline_node_{:03}", index + 1);
+        let is_provider_node = index >= 33;
+        let provider_index = index - 33;
+        let node_type = if is_provider_node {
+            if provider_index % 2 == 0 {
+                TimelineNodeType::AuthorRun
+            } else {
+                TimelineNodeType::ReviewerRun
+            }
+        } else {
+            TimelineNodeType::ContextNote
+        };
+        let stage = match node_type {
+            TimelineNodeType::ReviewerRun => WorkspaceStage::CrossReview,
+            TimelineNodeType::HumanConfirm => WorkspaceStage::HumanConfirm,
+            TimelineNodeType::ContextNote => WorkspaceStage::PrepareContext,
+            _ => WorkspaceStage::Running,
+        };
+        let agent = match node_type {
+            TimelineNodeType::AuthorRun => Some(ProviderName::Codex),
+            TimelineNodeType::ReviewerRun => Some(ProviderName::ClaudeCode),
+            _ => None,
+        };
+        let source_artifact = index >= 40;
+        nodes.push(TimelineNode {
+            node_id: node_id.clone(),
+            node_type: node_type.clone(),
+            agent: agent.clone(),
+            stage,
+            round: if is_provider_node {
+                Some((provider_index / 2 + 1) as u32)
+            } else {
+                None
+            },
+            status: TimelineNodeStatus::Completed,
+            title: if is_provider_node {
+                format!("Large Provider Stream {}", index)
+            } else {
+                format!("Large Timeline Node {}", index)
+            },
+            summary: if is_provider_node {
+                Some(format!(
+                    "Provider Prompt / Execution Output summary large-prompt-{provider_index} large-output-{provider_index}"
+                ))
+            } else {
+                Some(format!("large fixture summary {}", index))
+            },
+            started_at: now.clone(),
+            completed_at: Some(now.clone()),
+            duration_ms: Some(100 + index as u64),
+            artifact_ref: if source_artifact {
+                Some("artifact_current".to_string())
+            } else {
+                None
+            },
+            provider_config_snapshot: provider_snapshot.clone(),
+        });
+        if is_provider_node {
+            let prompt_index = provider_index as usize;
+            let output_index = provider_index as usize;
+            let prompt = large_text("完整提示词", "large-prompt", prompt_index);
+            let output = large_text("完整输出", "large-output", output_index);
+            lifecycle.save_node_detail(
+                &session_id,
+                &node_id,
+                &NodeDetail {
+                    node_id: node_id.clone(),
+                    session_id: session_id.clone(),
+                    node_type,
+                    status: TimelineNodeStatus::Completed,
+                    agent_role: if provider_index % 2 == 0 {
+                        Some(AgentRole::Author)
+                    } else {
+                        Some(AgentRole::Reviewer)
+                    },
+                    provider: agent.map(|provider| ProviderSnapshot {
+                        name: provider_name(&provider).to_string(),
+                        model: provider_name(&provider).to_string(),
+                    }),
+                    prompt: Some(prompt),
+                    messages: Vec::new(),
+                    streaming_content: format!("stream summary large-output-{output_index}"),
+                    execution_events: vec![json!({
+                        "event_id": format!("{node_id}_output"),
+                        "node_id": node_id,
+                        "agent": if provider_index % 2 == 0 { "codex" } else { "claude_code" },
+                        "kind": WsExecutionEventKind::Output,
+                        "status": WsExecutionEventStatus::Completed,
+                        "title": "Execution Output",
+                        "detail": "Large output loaded on demand",
+                        "command": null,
+                        "cwd": null,
+                        "output": output,
+                        "exit_code": 0
+                    })],
+                    permission_events: Vec::new(),
+                    verdict: None,
+                    artifact_ref: None,
+                    is_revision: false,
+                    base_artifact_ref: None,
+                    started_at: now.clone(),
+                    ended_at: Some(now.clone()),
+                },
+            )?;
+        }
+    }
+    lifecycle.save_timeline_nodes(&session_id, &nodes)?;
+
+    let artifact_versions = (1..=5)
+        .map(|version| ArtifactVersion {
+            version,
+            markdown: format!(
+                "{}\n# Large Artifact v{version}\n\n{}",
+                "artifact line\n".repeat(220),
+                "artifact line\n".repeat(8780)
+            ),
+            generated_by: ProviderName::Codex,
+            reviewed_by: Some(ProviderName::ClaudeCode),
+            review_verdict: Some(ReviewVerdictType::Pass),
+            confirmed_by: if version == 5 {
+                Some("e2e".to_string())
+            } else {
+                None
+            },
+            is_current: false,
+            created_at: now.clone(),
+            source_node_id: format!("timeline_node_{:03}", 40 + version),
+        })
+        .collect::<Vec<_>>();
+    lifecycle.save_artifact_versions(&session_id, &artifact_versions)?;
+
+    Ok(session_id)
+}
+
+fn large_text(label: &str, token: &str, index: usize) -> String {
+    format!(
+        "{}\n{label} {token}-{index}\n{}",
+        format!("{token}-{index} payload line\n").repeat(120),
+        format!("{token}-{index} payload line\n").repeat(5880)
+    )
+}
+
+fn provider_name(provider: &ProviderName) -> &'static str {
+    match provider {
+        ProviderName::ClaudeCode => "claude_code",
+        ProviderName::Codex => "codex",
+        ProviderName::Fake => "fake",
+    }
 }
 
 impl TestControls {
@@ -500,11 +722,13 @@ mod tests {
         ProviderCommand, ProviderEvent, ProviderPermissionMode, StreamingProviderAdapter,
         StreamingProviderInput,
     };
+    use crate::product::app_paths::ProductAppPaths;
+    use crate::product::lifecycle_store::LifecycleStore;
     use crate::protocol::contracts::{AdapterRole, ProviderType};
 
     use super::{
         ReviewFixture, TestControlledFakeStreamingProvider, TestControls, WorkspaceSocketControl,
-        test_controls_enabled,
+        create_large_workspace_fixture, test_controls_enabled,
     };
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -531,6 +755,46 @@ mod tests {
         unsafe {
             std::env::remove_var("ARIA_E2E_TEST_CONTROLS");
         }
+    }
+
+    #[test]
+    fn large_workspace_fixture_contains_large_lazy_loaded_content() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let app_paths = ProductAppPaths::new(temp_dir.path());
+
+        let session_id = create_large_workspace_fixture(app_paths.clone()).expect("large fixture");
+
+        let lifecycle = LifecycleStore::new(app_paths);
+        let nodes = lifecycle
+            .load_timeline_nodes(&session_id)
+            .expect("timeline nodes");
+        let provider_nodes = nodes
+            .iter()
+            .filter(|node| {
+                matches!(
+                    node.node_type,
+                    crate::web::workspace_ws_types::TimelineNodeType::AuthorRun
+                        | crate::web::workspace_ws_types::TimelineNodeType::ReviewerRun
+                )
+            })
+            .count();
+        let detail = lifecycle
+            .load_node_detail(&session_id, "timeline_node_034")
+            .expect("first node detail");
+        let output = detail.execution_events[0]
+            .get("output")
+            .and_then(|value| value.as_str())
+            .expect("large output");
+        let artifacts = lifecycle
+            .list_artifact_versions(&session_id)
+            .expect("artifact versions");
+
+        assert_eq!(nodes.len(), 45);
+        assert!(provider_nodes >= 10);
+        assert!(detail.prompt.expect("large prompt").len() > 100_000);
+        assert!(output.len() > 100_000);
+        assert_eq!(artifacts.len(), 5);
+        assert!(artifacts[4].markdown.contains("# Large Artifact v5"));
     }
 
     #[tokio::test]

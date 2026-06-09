@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use crate::cross_cutting::provider_adapter::DEFAULT_PROVIDER_TIMEOUT_SECS;
 use crate::task_run::types::{ProviderMode, ReportMode, TaskRunError, TaskRunOptions};
 
 pub fn parse_task_run_args(args: &[String]) -> Result<TaskRunOptions, TaskRunError> {
@@ -8,7 +9,7 @@ pub fn parse_task_run_args(args: &[String]) -> Result<TaskRunOptions, TaskRunErr
     let mut change_id = None;
     let mut provider_mode = ProviderMode::Real;
     let mut non_interactive = false;
-    let mut timeout_secs = 3600;
+    let mut timeout_secs = DEFAULT_PROVIDER_TIMEOUT_SECS;
     let mut report_mode = ReportMode::Text;
 
     let mut index = 0;

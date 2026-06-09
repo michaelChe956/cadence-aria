@@ -1,5 +1,5 @@
 import type { RevisionPath } from "../../api/types";
-import type { ChatEntry, ChoiceResponsePayload } from "../../state/chat-entries";
+import type { ChatEntry, ChoiceResponsePayload, WorkspaceContentRef } from "../../state/chat-entries";
 import { ChatEntryContainer } from "./ChatEntryContainer";
 import { ChatEntryRenderer } from "./ChatEntryRenderer";
 import { InlineEventRow } from "./InlineEventRow";
@@ -13,7 +13,14 @@ interface MessageGroupViewProps {
   onPermissionResponse?: (entry: ChatEntry, approved: boolean) => void;
   onChoiceResponse?: (entry: ChatEntry, response: ChoiceResponsePayload) => void;
   onSelectRevisionPath?: (path: RevisionPath, extraContext?: string) => void;
-  onHumanConfirm?: (decision: "confirm" | "request-change" | "terminate") => void;
+  onHumanConfirm?: (
+    decision: "confirm" | "request-change" | "terminate",
+    payload?: unknown,
+  ) => void;
+  sessionId?: string | null;
+  contentCache?: Record<string, string>;
+  loadContent?: (sessionId: string, ref: WorkspaceContentRef) => Promise<string>;
+  onCacheContent?: (key: string, value: string) => void;
 }
 
 export function MessageGroupView({
@@ -22,6 +29,10 @@ export function MessageGroupView({
   onChoiceResponse,
   onSelectRevisionPath,
   onHumanConfirm,
+  sessionId,
+  contentCache,
+  loadContent,
+  onCacheContent,
 }: MessageGroupViewProps) {
   return (
     <ChatEntryContainer
@@ -34,7 +45,14 @@ export function MessageGroupView({
         {group.inlineEvents.length > 0 ? (
           <div className="space-y-2">
             {group.inlineEvents.map((entry) => (
-              <InlineEventRow key={entry.id} entry={entry} />
+              <InlineEventRow
+                key={entry.id}
+                entry={entry}
+                sessionId={sessionId}
+                contentCache={contentCache}
+                loadContent={loadContent}
+                onCacheContent={onCacheContent}
+              />
             ))}
           </div>
         ) : null}

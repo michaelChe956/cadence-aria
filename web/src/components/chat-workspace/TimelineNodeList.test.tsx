@@ -40,6 +40,31 @@ describe("TimelineNodeList", () => {
 
     expect(screen.getByText("暂无 Timeline 节点")).toBeInTheDocument();
   });
+
+  it("labels revision nodes as author rework", () => {
+    render(
+      <TimelineNodeList
+        nodes={[
+          timelineNode({
+            node_id: "revision-1",
+            node_type: "revision",
+            agent: "claude_code",
+            stage: "revision",
+            round: 1,
+            title: "返修 Round 1",
+            status: "completed",
+          }),
+        ]}
+        activeNodeId={null}
+        selectedNodeId={null}
+        onSelectNode={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("timeline-node-revision")).toHaveTextContent(
+      "Author 返修 Round 1",
+    );
+  });
 });
 
 function timelineNode(overrides: Partial<TimelineNode> = {}): TimelineNode {

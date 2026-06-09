@@ -57,6 +57,10 @@
 - **Rust 构建/测试/检查命令规范**
   - 标准命令、`-j 1` 禁令、定向快反馈命令、性能预期等强制规范，详见 `cadence/project-rules/build-test-commands.md`。
 
+- **Workspace 产物链路 Bug 三模块联动排查规则**
+  - 后续遇到涉及 Story Spec、Design Spec、Work Item 任一产物 Workspace 的 Bug、展示异常、状态恢复异常、交互定位异常、审核/返修流程异常时，必须同时评估三种产物类型是否受影响。
+  - 若三者复用同一链路，应优先在共享层修复，并补充覆盖 `story`、`design`、`work_item` 的回归测试；完整规则详见 `cadence/project-rules/workspace-artifact-bug-triage.md`。
+
 **示例规则**（默认不启用，需用户主动添加）：
 
 ```markdown

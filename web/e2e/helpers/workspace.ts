@@ -118,6 +118,14 @@ export async function seedConfirmedStoryWorkspace(page: Page): Promise<SeededWor
   return seeded;
 }
 
+export async function seedLargeWorkspaceFixture(page: Page): Promise<{ sessionId: string }> {
+  const response = await page.request.post("/api/test/workspace-sessions/large-fixture");
+  expect(response).toBeOK();
+  const body = await response.json();
+  expect(body.session_id).toEqual(expect.any(String));
+  return { sessionId: body.session_id as string };
+}
+
 export async function waitForStage(page: Page, stageText: string, timeout = 30_000) {
   await expect(page.getByTestId("stage-badge")).toContainText(stageText, { timeout });
 }

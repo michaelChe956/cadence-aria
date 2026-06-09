@@ -6,6 +6,7 @@ use chrono::Utc;
 use serde_json::{Value, json};
 use thiserror::Error;
 
+use crate::cross_cutting::provider_adapter::DEFAULT_PROVIDER_TIMEOUT_SECS;
 use crate::cross_cutting::streaming_provider::{ProviderToolCall, ProviderToolResult};
 use crate::product::coding_models::{
     CodingExecutionAttempt, TestCommand, TestCommandStatus, TestingOverallStatus, TestingReport,
@@ -17,7 +18,6 @@ use crate::product::test_executor::{
 
 pub const TESTER_TOOL_FAILURE_LIMIT: usize = 3;
 
-const TESTER_AGENT_TIMEOUT_SECS: u64 = 300;
 const MAX_LISTED_FILES: usize = 200;
 const MAX_SEARCH_MATCHES: usize = 100;
 
@@ -30,7 +30,7 @@ pub struct TesterAgentOptions {
 impl Default for TesterAgentOptions {
     fn default() -> Self {
         Self {
-            timeout: Duration::from_secs(TESTER_AGENT_TIMEOUT_SECS),
+            timeout: Duration::from_secs(DEFAULT_PROVIDER_TIMEOUT_SECS),
             failure_limit: TESTER_TOOL_FAILURE_LIMIT,
         }
     }

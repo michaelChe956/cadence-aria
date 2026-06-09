@@ -32,7 +32,7 @@ use crate::product::models::{
     DesignKind, DesignSpecRecord, GateStatus, IssuePhase as ProductIssuePhase,
     IssueRecord as ProductIssueRecord, IssueRuntimeBindingRecord,
     IssueStatus as ProductIssueStatus, LifecycleConfirmationStatus, LifecycleWorkItemRecord,
-    ProjectRecord, ProviderName, RepositoryRecord, StorySpecRecord, WorkItemPlanStatus,
+    NodeDetail, ProjectRecord, ProviderName, RepositoryRecord, StorySpecRecord, WorkItemPlanStatus,
     WorkItemStatus, WorkspaceMessageRecord, WorkspaceSessionRecord, WorkspaceSessionStatus,
     WorkspaceType,
 };
@@ -348,7 +348,12 @@ pub async fn issue_lifecycle(
                 .map_err(product_store_api_error)?;
             let latest_attempt = attempts.last().map(coding_attempt_dto);
             coding_attempts.extend(attempts.iter().map(coding_attempt_dto));
-            Ok(lifecycle_work_item_dto(work_item, latest_attempt))
+            let session = workspace_session_for_entity(
+                &workspace_sessions,
+                &work_item.id,
+                &WorkspaceType::WorkItem,
+            );
+            lifecycle_work_item_dto(&lifecycle, work_item, latest_attempt, session)
         })
         .collect::<ApiResult<Vec<_>>>()?;
     let workspace_sessions = workspace_sessions
@@ -520,8 +525,10 @@ pub async fn generate_work_items(
     let session = ensure_workspace_context_message(&app_paths, &lifecycle, session)
         .map_err(product_store_api_error)?;
 
+    let work_item_dto = lifecycle_work_item_dto(&lifecycle, work_item, None, Some(&session))?;
+
     Ok(Json(GenerateWorkItemsResponse {
-        work_items: vec![lifecycle_work_item_dto(work_item, None)],
+        work_items: vec![work_item_dto],
         workspace_session: workspace_session_dto(session),
     }))
 }
@@ -856,6 +863,78 @@ pub async fn workspace_session_confirm(
         )
         .map_err(product_store_api_error)?;
     Ok(Json(workspace_session_dto(session)))
+}
+
+pub async fn workspace_session_timeline_node_detail(
+    State(state): State<WebAppState>,
+    Path((session_id, node_id)): Path<(String, String)>,
+) -> ApiResult<Json<NodeDetail>> {
+    let detail = LifecycleStore::new(product_app_paths(&state))
+        .load_node_detail(&session_id, &node_id)
+        .map_err(node_detail_store_api_error)?;
+    Ok(Json(detail))
+}
+
+pub async fn workspace_session_timeline_node_prompt(
+    State(state): State<WebAppState>,
+    Path((session_id, node_id)): Path<(String, String)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let detail = LifecycleStore::new(product_app_paths(&state))
+        .load_node_detail(&session_id, &node_id)
+        .map_err(node_detail_store_api_error)?;
+    let prompt = detail.prompt.ok_or_else(|| {
+        ApiError::runtime(
+            "node_detail_prompt_not_found",
+            "node detail prompt not found",
+            json!({}),
+        )
+    })?;
+    Ok(Json(json!({"node_id": node_id, "prompt": prompt})))
+}
+
+pub async fn workspace_session_timeline_event_output(
+    State(state): State<WebAppState>,
+    Path((session_id, node_id, event_id)): Path<(String, String, String)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let detail = LifecycleStore::new(product_app_paths(&state))
+        .load_node_detail(&session_id, &node_id)
+        .map_err(node_detail_store_api_error)?;
+    let output = detail
+        .execution_events
+        .iter()
+        .find(|event| event.get("event_id").and_then(|value| value.as_str()) == Some(&event_id))
+        .and_then(|event| event.get("output").and_then(|value| value.as_str()))
+        .ok_or_else(|| {
+            ApiError::runtime(
+                "event_output_not_found",
+                "timeline event output not found",
+                json!({}),
+            )
+        })?;
+    Ok(Json(
+        json!({"node_id": node_id, "event_id": event_id, "output": output}),
+    ))
+}
+
+pub async fn workspace_session_artifact_version(
+    State(state): State<WebAppState>,
+    Path((session_id, version)): Path<(String, u32)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let version = LifecycleStore::new(product_app_paths(&state))
+        .list_artifact_versions(&session_id)
+        .map_err(product_store_api_error)?
+        .into_iter()
+        .find(|artifact| artifact.version == version)
+        .ok_or_else(|| {
+            ApiError::runtime(
+                "artifact_version_not_found",
+                "artifact version not found",
+                json!({}),
+            )
+        })?;
+    Ok(Json(
+        json!({"version": version.version, "markdown": version.markdown}),
+    ))
 }
 
 pub async fn delete_product_issue(
@@ -1874,10 +1953,12 @@ fn markdown_preview(markdown: &str) -> String {
 }
 
 fn lifecycle_work_item_dto(
+    lifecycle: &LifecycleStore,
     record: LifecycleWorkItemRecord,
     latest_attempt: Option<CodingAttemptDto>,
-) -> LifecycleWorkItemDto {
-    LifecycleWorkItemDto {
+    session: Option<&WorkspaceSessionRecord>,
+) -> ApiResult<LifecycleWorkItemDto> {
+    Ok(LifecycleWorkItemDto {
         work_item_id: record.id,
         issue_id: record.issue_id,
         repository_id: record.repository_id,
@@ -1887,7 +1968,8 @@ fn lifecycle_work_item_dto(
         plan_status: work_item_plan_status_text(&record.plan_status).to_string(),
         execution_status: work_item_status_text(&record.execution_status).to_string(),
         latest_attempt,
-    }
+        artifact_versions: artifact_version_dtos(lifecycle, session)?,
+    })
 }
 
 fn coding_attempt_dto(attempt: &CodingExecutionAttempt) -> CodingAttemptDto {
@@ -2530,5 +2612,15 @@ fn product_store_api_error(error: ProductStoreError) -> ApiError {
             "product store operation failed",
             json!({}),
         ),
+    }
+}
+
+fn node_detail_store_api_error(error: ProductStoreError) -> ApiError {
+    match error {
+        ProductStoreError::NotFound {
+            kind: "node_detail",
+            ..
+        } => ApiError::runtime("node_detail_not_found", "node detail not found", json!({})),
+        other => product_store_api_error(other),
     }
 }

@@ -29,6 +29,10 @@ const STAGE_BADGES: Record<string, { text: string; className: string }> = {
     text: "运行中 · 保持本页打开",
     className: "border-amber-200 bg-amber-50 text-amber-800",
   },
+  author_confirm: {
+    text: "Author 待确认",
+    className: "border-emerald-200 bg-emerald-50 text-emerald-800",
+  },
   cross_review: {
     text: "审核中",
     className: "border-sky-200 bg-sky-50 text-sky-800",

@@ -9,6 +9,7 @@ use crate::product::models::{NodeDetail, ProviderName, WorkspaceType};
 pub enum WorkspaceStage {
     PrepareContext,
     Running,
+    AuthorConfirm,
     CrossReview,
     ReviewDecision,
     Revision,
@@ -90,6 +91,8 @@ pub enum WsOutMessage {
         verdict: ReviewVerdictType,
         comments: String,
         summary: String,
+        findings: Vec<ReviewFinding>,
+        review_gate: ReviewGate,
     },
     ReviewDecisionRequired {
         node_id: String,
@@ -109,7 +112,9 @@ pub enum WsOutMessage {
         timeline_nodes: Vec<TimelineNode>,
         active_node_id: Option<String>,
         artifact_versions: Vec<ArtifactVersion>,
+        artifact_version_summaries: Vec<ArtifactVersionSummary>,
         timeline_node_details: HashMap<String, NodeDetail>,
+        timeline_node_summaries: HashMap<String, NodeDetailSummary>,
         active_run_id: Option<String>,
     },
     Error {
@@ -166,6 +171,9 @@ pub enum WsInMessage {
         decision: String,
         extra_context: Option<String>,
     },
+    AuthorDecision {
+        decision: AuthorDecision,
+    },
     SelectRevisionPath {
         path: RevisionPath,
         extra_context: Option<String>,
@@ -195,6 +203,13 @@ pub enum HumanConfirmDecision {
     Confirm,
     RequestChange,
     Terminate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AuthorDecision {
+    Accept,
+    Reject,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -300,6 +315,7 @@ pub enum TimelineNodeType {
     PrepareContext,
     ContextNote,
     StartGeneration,
+    AuthorConfirm,
     #[serde(alias = "generation")]
     AuthorRun,
     #[serde(alias = "review")]
@@ -355,10 +371,46 @@ pub enum ReviewVerdictType {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewFindingSeverity {
+    Blocking,
+    MustFix,
+    StrongRecommendFix,
+    Suggestion,
+    Minor,
+    Optional,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewFinding {
+    pub severity: ReviewFindingSeverity,
+    pub message: String,
+    pub evidence: String,
+    pub impact: String,
+    pub required_action: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewGate {
+    RequiresRevision,
+    UserConfirmAllowed,
+    UserTriageRequired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewVerdict {
     pub verdict: ReviewVerdictType,
     pub comments: String,
     pub summary: String,
+    #[serde(default)]
+    pub findings: Vec<ReviewFinding>,
+    #[serde(default = "default_review_gate")]
+    pub review_gate: ReviewGate,
+}
+
+fn default_review_gate() -> ReviewGate {
+    ReviewGate::UserConfirmAllowed
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -376,15 +428,53 @@ pub struct ArtifactVersion {
     pub reviewed_by: Option<ProviderName>,
     pub review_verdict: Option<ReviewVerdictType>,
     pub confirmed_by: Option<String>,
+    #[serde(default = "default_true")]
+    pub is_current: bool,
     pub created_at: String,
     pub source_node_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeDetailSummary {
+    pub node_id: String,
+    pub node_type: String,
+    pub status: String,
+    pub agent_role: Option<String>,
+    pub provider_name: Option<String>,
+    pub prompt_size: usize,
+    pub prompt_preview: Option<String>,
+    pub stream_size: usize,
+    pub stream_preview: Option<String>,
+    pub execution_event_count: usize,
+    pub has_large_outputs: bool,
+    pub artifact_ref: Option<String>,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactVersionSummary {
+    pub version: u32,
+    pub generated_by: ProviderName,
+    pub reviewed_by: Option<ProviderName>,
+    pub review_verdict: Option<ReviewVerdictType>,
+    pub confirmed_by: Option<String>,
+    pub is_current: bool,
+    pub created_at: String,
+    pub source_node_id: String,
+    pub markdown_size: usize,
+    pub markdown_preview: String,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ChoiceOption, ProviderConfigSnapshot, ReviewVerdict, ReviewVerdictType, TimelineNode,
-        TimelineNodeStatus, TimelineNodeType, WorkspaceStage, WsExecutionEvent,
+        ChoiceOption, ProviderConfigSnapshot, ReviewGate, ReviewVerdict, ReviewVerdictType,
+        TimelineNode, TimelineNodeStatus, TimelineNodeType, WorkspaceStage, WsExecutionEvent,
         WsExecutionEventKind, WsExecutionEventStatus, WsInMessage, WsOutMessage,
         WsPermissionRiskLevel, WsProviderStatus,
     };
@@ -532,6 +622,14 @@ mod tests {
             verdict: ReviewVerdictType::Revise,
             comments: "需要补充验收标准".to_string(),
             summary: "补充验收标准后返修".to_string(),
+            findings: vec![super::ReviewFinding {
+                severity: super::ReviewFindingSeverity::MustFix,
+                message: "缺少验收标准".to_string(),
+                evidence: "Artifact 未列出验收标准".to_string(),
+                impact: "无法进入下一阶段".to_string(),
+                required_action: "补充验收标准".to_string(),
+            }],
+            review_gate: ReviewGate::UserTriageRequired,
         };
 
         let review_complete = serde_json::to_value(WsOutMessage::ReviewComplete {
@@ -540,10 +638,14 @@ mod tests {
             verdict: verdict.verdict.clone(),
             comments: verdict.comments.clone(),
             summary: verdict.summary.clone(),
+            findings: verdict.findings.clone(),
+            review_gate: verdict.review_gate.clone(),
         })
         .unwrap();
         assert_eq!(review_complete["type"], "review_complete");
         assert_eq!(review_complete["verdict"], "revise");
+        assert_eq!(review_complete["review_gate"], "user_triage_required");
+        assert_eq!(review_complete["findings"][0]["severity"], "must_fix");
 
         let input: WsInMessage = serde_json::from_value(serde_json::json!({
             "type": "review_decision_response",
@@ -575,7 +677,9 @@ mod tests {
             timeline_nodes: Vec::new(),
             active_node_id: Some("node_review_decision_001".to_string()),
             artifact_versions: Vec::new(),
+            artifact_version_summaries: Vec::new(),
             timeline_node_details: std::collections::HashMap::new(),
+            timeline_node_summaries: std::collections::HashMap::new(),
             active_run_id: None,
         })
         .unwrap();

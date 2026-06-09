@@ -206,7 +206,102 @@ describe("useWorkspaceWs", () => {
     });
   });
 
+  it("does not duplicate realtime provider prompt execution event output in chat entry metadata", () => {
+    const harness = renderWorkspaceHook();
+    const hugePrompt = "[system]\n" + "prompt line\n".repeat(10_000);
+
+    act(() => {
+      harness.ws.receive({
+        type: "session_state",
+        session_id: "session_prompt_event",
+        workspace_type: "story",
+        stage: "running",
+        superpowers_enabled: false,
+        openspec_enabled: false,
+        messages: [],
+        checkpoints: [],
+        artifact: null,
+        providers: { author: "claude_code", reviewer: "codex" },
+        timeline_nodes: [
+          {
+            node_id: "timeline_node_001",
+            node_type: "author_run",
+            agent: "claude_code",
+            stage: "running",
+            round: null,
+            status: "active",
+            title: "Story Spec 生成",
+            summary: null,
+            started_at: "2026-05-21T10:00:00Z",
+            completed_at: null,
+            duration_ms: null,
+            artifact_ref: null,
+            provider_config_snapshot: {
+              author: "claude_code",
+              reviewer: "codex",
+              review_rounds: 1,
+            },
+          },
+        ],
+        active_node_id: "timeline_node_001",
+        artifact_versions: [],
+        timeline_node_details: {
+          timeline_node_001: {
+            node_id: "timeline_node_001",
+            session_id: "session_prompt_event",
+            node_type: "author_run",
+            status: "active",
+            agent_role: "author",
+            provider: { name: "claude_code", model: "claude-opus-4" },
+            prompt: null,
+            messages: [],
+            streaming_content: "",
+            execution_events: [],
+            permission_events: [],
+            verdict: null,
+            artifact_ref: null,
+            is_revision: false,
+            base_artifact_ref: null,
+            started_at: "2026-05-21T10:00:00Z",
+            ended_at: null,
+          },
+        },
+        active_run_id: "run-001",
+      });
+      harness.ws.receive({
+        type: "execution_event",
+        event: {
+          event_id: "timeline_node_001_prompt",
+          node_id: "timeline_node_001",
+          agent: "claude_code",
+          kind: "output",
+          status: "started",
+          title: "Provider Prompt",
+          detail: "发送给 Workspace provider 的完整提示词",
+          command: null,
+          cwd: null,
+          output: hugePrompt,
+          exit_code: null,
+        },
+      });
+    });
+
+    const promptEntry = useWorkspaceStore
+      .getState()
+      .chatEntries.find((entry) => entry.id === "execution_event:timeline_node_001_prompt");
+    expect(promptEntry?.metadata?.output).toBeUndefined();
+    expect(JSON.stringify(promptEntry)).not.toContain(hugePrompt.slice(0, 100));
+    expect(promptEntry).toEqual(
+      expect.objectContaining({
+        content_ref: { kind: "provider_prompt", nodeId: "timeline_node_001" },
+        content_size: hugePrompt.length,
+        has_full_content: true,
+      }),
+    );
+  });
+
   it("annotates reviewer stream and tool calls with the reviewer provider", () => {
+    vi.useFakeTimers();
     const harness = renderWorkspaceHook();
 
     act(() => {
@@ -238,6 +333,11 @@ describe("useWorkspaceWs", () => {
         content: "reviewing",
         node_id: "timeline_node_reviewer",
       });
+    });
+    act(() => {
+      vi.advanceTimersByTime(80);
+    });
+    act(() => {
       harness.ws.receive({
         type: "execution_event",
         event: {
@@ -310,13 +410,33 @@ describe("useWorkspaceWs", () => {
         verdict: "pass",
         comments: "审核通过",
         summary: "可以确认",
+        findings: [
+          {
+            severity: "optional",
+            message: "建议补充说明",
+            evidence: "当前版本可用",
+            impact: "不影响下一阶段",
+            required_action: "可后续优化",
+          },
+        ],
+        review_gate: "user_triage_required",
       });
     });
 
     const state = useWorkspaceStore.getState();
     expect(state.selectedNodeId).toBe("timeline_node_001");
     expect(state.nodeDetails.timeline_node_001.streaming_content).toBe("review output");
-    expect(state.nodeDetails.timeline_node_001.verdict?.summary).toBe("可以确认");
+    expect(state.nodeDetails.timeline_node_001.verdict).toMatchObject({
+      summary: "可以确认",
+      review_gate: "user_triage_required",
+      findings: [expect.objectContaining({ message: "建议补充说明" })],
+    });
+    expect(
+      state.chatEntries.find((entry) => entry.type === "review_verdict")?.metadata,
+    ).toMatchObject({
+      review_gate: "user_triage_required",
+      findings: [expect.objectContaining({ required_action: "可后续优化" })],
+    });
   });
 
   it("maps websocket events into chat entries", () => {
@@ -477,6 +597,16 @@ describe("useWorkspaceWs", () => {
         verdict: "pass",
         comments: "审核通过",
         summary: "可以确认",
+        findings: [
+          {
+            severity: "minor",
+            message: "建议优化标题",
+            evidence: "标题可读但不够具体",
+            impact: "不影响下一阶段",
+            required_action: "可后续调整",
+          },
+        ],
+        review_gate: "user_confirm_allowed",
       });
       harness.ws.receive({ type: "error", message: "阶段不允许" });
     });
@@ -510,6 +640,10 @@ describe("useWorkspaceWs", () => {
     expect(state.chatEntries[7]).toMatchObject({
       role: "reviewer",
       content: "可以确认",
+      metadata: expect.objectContaining({
+        review_gate: "user_confirm_allowed",
+        findings: [expect.objectContaining({ message: "建议优化标题" })],
+      }),
     });
     expect(state.activeStreamEntryId).toBeNull();
   });
@@ -882,6 +1016,28 @@ describe("useWorkspaceWs", () => {
     ]);
   });
 
+  it("sends author decisions", () => {
+    const harness = renderWorkspaceHook();
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.sent.length = 0;
+      harness.api.sendAuthorDecision("accept");
+      harness.api.sendAuthorDecision("reject");
+    });
+
+    expect(harness.ws.sent).toEqual([
+      JSON.stringify({
+        type: "author_decision",
+        decision: "accept",
+      }),
+      JSON.stringify({
+        type: "author_decision",
+        decision: "reject",
+      }),
+    ]);
+  });
+
   it("marks the latest gate prompt resolved when a human confirm decision is sent", () => {
     const harness = renderWorkspaceHook();
     useWorkspaceStore.getState().appendChatEntry({
@@ -984,6 +1140,47 @@ describe("useWorkspaceWs", () => {
     expect(harness.ws.readyState).toBe(MockWebSocket.CLOSED);
     expect(harness.ws.closeCodes).toContain(4000);
     expect(useWorkspaceStore.getState().connectionStatus).toBe("disconnected");
+  });
+
+  it("clears pending stream buffers when the socket closes before scheduled flush", () => {
+    vi.useFakeTimers();
+    const harness = renderWorkspaceHook("session_001");
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.receive({
+        type: "timeline_node_created",
+        node: {
+          node_id: "timeline_node_001",
+          node_type: "author_run",
+          agent: "codex",
+          stage: "running",
+          status: "active",
+          title: "Story Spec 生成",
+          started_at: "2026-06-06T00:00:00Z",
+          provider_config_snapshot: {
+            author: "codex",
+            reviewer: "claude_code",
+            review_rounds: 1,
+          },
+        },
+      });
+      harness.ws.receive({
+        type: "stream_chunk",
+        role: "author",
+        content: "pending",
+        node_id: "timeline_node_001",
+      });
+    });
+
+    expect(useWorkspaceStore.getState().streamBuffers.timeline_node_001).toBeDefined();
+
+    act(() => {
+      harness.ws.close(1000);
+      vi.advanceTimersByTime(80);
+    });
+
+    expect(useWorkspaceStore.getState().streamBuffers).toEqual({});
   });
 
   it("keeps the socket open during revision even when server messages are quiet", () => {

@@ -13,8 +13,9 @@ description: Use when guiding Cadence Aria real end-to-end product workbench tes
 
 1. 读取当前 worktree 内 `AGENTS.md`、`CLAUDE.md`、`.claude/rules/` 和 `cadence/project-rules/README.md`。
 2. 确认分支、未提交改动、目标仓库状态，不回退用户已有改动。
-3. 默认在当前 worktree 启动 Aria 服务。除非用户明确要求，不要把被测业务仓库作为 `aria web --workspace` 参数；业务仓库应由用户在页面里添加为代码库。
-4. 启动服务时使用 `start-cadence-aria-service` skill；后端默认：
+3. 如果用户请求包含 `worktrees`、`worktree branch`、`【branch】` 或“全流程端到端测试当前项目”，先使用 `start-aria-e2e-worktree` 完成 worktree 准备、服务清理、启动和健康检查，再继续本 skill 的页面测试指导。
+4. 默认在当前 worktree 启动 Aria 服务。除非用户明确要求，不要把被测业务仓库作为 `aria web --workspace` 参数；业务仓库应由用户在页面里添加为代码库。
+5. 启动服务时使用 `start-cadence-aria-service` skill；后端默认：
 
 ```bash
 cargo watch -w src -w Cargo.toml -w Cargo.lock -x "run --locked -- web --workspace . --host 127.0.0.1 --port 4317"
@@ -26,7 +27,7 @@ cargo watch -w src -w Cargo.toml -w Cargo.lock -x "run --locked -- web --workspa
 pnpm dev --port 5173
 ```
 
-5. 健康检查必须通过：
+6. 健康检查必须通过：
 
 ```bash
 curl --noproxy '*' -sS http://127.0.0.1:4317/api/health

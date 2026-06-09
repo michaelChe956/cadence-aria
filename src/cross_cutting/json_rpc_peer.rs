@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
@@ -48,7 +49,28 @@ impl<W> JsonRpcPeer<W>
 where
     W: AsyncWrite + Unpin + Send + 'static,
 {
-    pub async fn request(&self, mut payload: Value) -> Result<Value, ProviderAdapterError> {
+    pub async fn request(&self, payload: Value) -> Result<Value, ProviderAdapterError> {
+        self.request_inner(payload, None).await
+    }
+
+    pub async fn request_with_timeout(
+        &self,
+        payload: Value,
+        timeout: Duration,
+    ) -> Result<Value, ProviderAdapterError> {
+        self.request_inner(payload, Some(timeout)).await
+    }
+
+    async fn request_inner(
+        &self,
+        mut payload: Value,
+        timeout: Option<Duration>,
+    ) -> Result<Value, ProviderAdapterError> {
+        let method = payload
+            .get("method")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
         let id = ensure_request_id(&mut payload, &self.next_id)?;
         let (response_tx, response_rx) = oneshot::channel();
         self.pending.lock().await.insert(id.clone(), response_tx);
@@ -58,14 +80,34 @@ where
             return Err(error);
         }
 
-        response_rx.await.map_err(|_| {
-            ProviderAdapterError::execution_failed(
-                None,
-                String::new(),
-                "JSON-RPC response channel closed",
-                0,
-            )
-        })
+        let wait_for_response = async {
+            response_rx.await.map_err(|_| {
+                ProviderAdapterError::execution_failed(
+                    None,
+                    String::new(),
+                    "JSON-RPC response channel closed",
+                    0,
+                )
+            })
+        };
+
+        let Some(timeout) = timeout else {
+            return wait_for_response.await;
+        };
+
+        match tokio::time::timeout(timeout, wait_for_response).await {
+            Ok(response) => response,
+            Err(_) => {
+                self.pending.lock().await.remove(&id);
+                let duration_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
+                Err(ProviderAdapterError::timeout_with_details(
+                    format!("JSON-RPC request {method} timed out"),
+                    String::new(),
+                    String::new(),
+                    duration_ms,
+                ))
+            }
+        }
     }
 
     pub async fn send(&self, payload: Value) -> Result<(), ProviderAdapterError> {
@@ -229,6 +271,37 @@ mod tests {
         .expect("pending request should close when reader ends");
 
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn json_rpc_peer_times_out_and_removes_pending_request() {
+        let (client_io, server_io) = tokio::io::duplex(4096);
+        let (reader, writer) = tokio::io::split(client_io);
+        let peer = JsonRpcPeer::new(reader, writer);
+
+        tokio::spawn(async move {
+            let (server_reader, _server_writer) = tokio::io::split(server_io);
+            let mut line = String::new();
+            let mut reader = tokio::io::BufReader::new(server_reader);
+            reader.read_line(&mut line).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        });
+
+        let result = peer
+            .request_with_timeout(
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "turn/start",
+                    "params": {},
+                }),
+                Duration::from_millis(10),
+            )
+            .await;
+
+        let error = result.expect_err("request should time out");
+        assert!(error.details.contains("turn/start"));
+        assert!(peer.pending.lock().await.is_empty());
     }
 
     #[tokio::test]

@@ -1,4 +1,6 @@
-use crate::cross_cutting::provider_adapter::{ProviderAdapter, ProviderAdapterError};
+use crate::cross_cutting::provider_adapter::{
+    DEFAULT_PROVIDER_TIMEOUT_SECS, ProviderAdapter, ProviderAdapterError,
+};
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::lifecycle_store::{
     AppendProviderReviewRoundInput, AppendSpecVersionInput, LifecycleStore,
@@ -52,7 +54,7 @@ impl ProviderWorkspaceRunner {
             prompt,
             context_files: Vec::new(),
             output_schema: "provider_workspace_markdown".to_string(),
-            timeout: 2400,
+            timeout: DEFAULT_PROVIDER_TIMEOUT_SECS,
             max_retries: 0,
         };
         let adapter_output = provider.run(&adapter_input)?;

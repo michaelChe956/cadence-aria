@@ -9,13 +9,17 @@ use cadence_aria::cross_cutting::streaming_provider::{
     ProviderCommand, ProviderEvent, ProviderSession, ProviderStatus, StreamChunk,
     StreamingProviderAdapter, StreamingProviderInput,
 };
+use cadence_aria::product::app_paths::ProductAppPaths;
+use cadence_aria::product::lifecycle_store::LifecycleStore;
 use cadence_aria::product::models::ProviderName;
+use cadence_aria::product::models::{AgentRole, NodeDetail, ProviderSnapshot};
 use cadence_aria::protocol::contracts::{AdapterInput, AdapterRole};
 use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::runtime::WebRuntime;
 use cadence_aria::web::state::WebAppState;
 use cadence_aria::web::workspace_ws_types::{
-    TimelineNodeStatus, TimelineNodeType, WsInMessage, WsOutMessage, WsProviderStatus,
+    ArtifactVersion, AuthorDecision, ProviderConfigSnapshot, ReviewVerdictType, TimelineNodeStatus,
+    TimelineNodeType, WsInMessage, WsOutMessage, WsProviderStatus,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -260,6 +264,7 @@ async fn workspace_ws_author_text_choice_blocks_reviewer_until_user_answers() {
 
     let checkpoint = recv_until_message_complete(&mut ws).await;
     assert!(checkpoint.starts_with("cp_"));
+    accept_author_output(&mut ws).await;
     let stage = recv_until_stage(&mut ws, "human_confirm").await;
     assert_eq!(stage, "human_confirm");
 
@@ -314,6 +319,7 @@ async fn workspace_ws_reviewer_does_not_resume_author_provider_session() {
     .await;
 
     let _checkpoint = recv_until_message_complete(&mut ws).await;
+    accept_author_output(&mut ws).await;
     let stage = recv_until_stage(&mut ws, "human_confirm").await;
     assert_eq!(stage, "human_confirm");
 
@@ -409,6 +415,7 @@ async fn workspace_ws_author_recommendation_choice_blocks_reviewer_until_user_an
 
     let checkpoint = recv_until_message_complete(&mut ws).await;
     assert!(checkpoint.starts_with("cp_"));
+    accept_author_output(&mut ws).await;
     let stage = recv_until_stage(&mut ws, "human_confirm").await;
     assert_eq!(stage, "human_confirm");
 
@@ -476,6 +483,7 @@ async fn workspace_ws_claude_author_text_choice_uses_text_fallback_delta_only_fo
 
     let checkpoint = recv_until_message_complete(&mut ws).await;
     assert!(checkpoint.starts_with("cp_"));
+    accept_author_output(&mut ws).await;
     let stage = recv_until_stage(&mut ws, "human_confirm").await;
     assert_eq!(stage, "human_confirm");
 
@@ -566,6 +574,15 @@ async fn workspace_ws_streams_persistent_session_and_confirms_lifecycle_entity()
                 checkpoint_id: next_checkpoint,
                 ..
             } => checkpoint_id = Some(next_checkpoint),
+            WsOutMessage::StageChange { stage } if stage == "author_confirm" => {
+                send_json(
+                    &mut ws,
+                    &WsInMessage::AuthorDecision {
+                        decision: AuthorDecision::Accept,
+                    },
+                )
+                .await;
+            }
             WsOutMessage::StageChange { stage } if stage == "human_confirm" => {
                 saw_human_confirm = true;
                 break;
@@ -642,6 +659,7 @@ async fn workspace_ws_reconnect_restores_timeline_and_artifact_versions() {
         },
     )
     .await;
+    accept_author_output(&mut ws).await;
     let stage = recv_until_stage(&mut ws, "human_confirm").await;
     assert_eq!(stage, "human_confirm");
     drop(ws);
@@ -651,6 +669,7 @@ async fn workspace_ws_reconnect_restores_timeline_and_artifact_versions() {
         WsOutMessage::SessionState {
             timeline_nodes,
             artifact_versions,
+            artifact_version_summaries,
             ..
         } => {
             assert!(timeline_nodes.iter().any(|node| {
@@ -661,15 +680,163 @@ async fn workspace_ws_reconnect_restores_timeline_and_artifact_versions() {
                 node.node_type == TimelineNodeType::ReviewerRun
                     && node.summary.as_deref() == Some("未执行真实 review（Fake 快速路径）")
             }));
-            assert_eq!(artifact_versions.len(), 1);
-            assert_eq!(artifact_versions[0].generated_by, ProviderName::Fake);
-            assert_eq!(artifact_versions[0].reviewed_by, Some(ProviderName::Fake));
+            assert_eq!(artifact_versions.len(), 0);
+            assert_eq!(artifact_version_summaries.len(), 1);
+            assert_eq!(
+                artifact_version_summaries[0].generated_by,
+                ProviderName::Fake
+            );
+            assert_eq!(
+                artifact_version_summaries[0].reviewed_by,
+                Some(ProviderName::Fake)
+            );
         }
         other => panic!("expected session_state, got {other:?}"),
     }
 
     drop(reconnected);
     server.abort();
+}
+
+#[tokio::test]
+async fn workspace_session_detail_http_api_returns_full_persisted_content() {
+    let root = tempdir().expect("root");
+    create_workspace_session_fixture(&root).await;
+    let lifecycle = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let detail = NodeDetail {
+        node_id: "author_run_001".to_string(),
+        session_id: "workspace_session_0001".to_string(),
+        node_type: TimelineNodeType::AuthorRun,
+        status: TimelineNodeStatus::Completed,
+        agent_role: Some(AgentRole::Author),
+        provider: Some(ProviderSnapshot {
+            name: "fake".to_string(),
+            model: "fixture-model".to_string(),
+        }),
+        prompt: Some("完整 Provider Prompt 文本\n包含第二行".to_string()),
+        messages: vec![json!({"role":"user","content":"请生成完整产物"})],
+        streaming_content: "完整输出\n包含工具结果".to_string(),
+        execution_events: vec![
+            json!({"event_id":"event_output_001","kind":"output","output":"完整输出\n包含工具结果"}),
+            json!({"event_id":"event_without_output","kind":"output","output":null}),
+        ],
+        permission_events: Vec::new(),
+        verdict: Some(json!({"verdict":"pass","summary":"可确认"})),
+        artifact_ref: None,
+        is_revision: false,
+        base_artifact_ref: None,
+        started_at: "2026-05-20T14:30:00Z".to_string(),
+        ended_at: Some("2026-05-20T14:35:00Z".to_string()),
+    };
+    lifecycle
+        .save_node_detail("workspace_session_0001", "author_run_001", &detail)
+        .expect("save node detail");
+    lifecycle
+        .append_artifact_version(
+            "workspace_session_0001",
+            ArtifactVersion {
+                version: 3,
+                markdown: "# Artifact v3\n\n完整 Markdown".to_string(),
+                generated_by: ProviderName::Fake,
+                reviewed_by: Some(ProviderName::Fake),
+                review_verdict: Some(ReviewVerdictType::Pass),
+                confirmed_by: None,
+                is_current: true,
+                created_at: "2026-05-20T14:36:00Z".to_string(),
+                source_node_id: "author_run_001".to_string(),
+            },
+        )
+        .expect("append artifact version");
+
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+
+    let (status, node_detail) = request_json(
+        app.clone(),
+        Method::GET,
+        "/api/workspace-sessions/workspace_session_0001/timeline-node-details/author_run_001",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(node_detail["node_id"], "author_run_001");
+    assert_eq!(
+        node_detail["prompt"],
+        "完整 Provider Prompt 文本\n包含第二行"
+    );
+    assert_eq!(node_detail["streaming_content"], "完整输出\n包含工具结果");
+    assert_eq!(node_detail["messages"][0]["content"], "请生成完整产物");
+
+    let (status, prompt) = request_json(
+        app.clone(),
+        Method::GET,
+        "/api/workspace-sessions/workspace_session_0001/timeline-node-details/author_run_001/prompt",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(prompt["node_id"], "author_run_001");
+    assert_eq!(prompt["prompt"], "完整 Provider Prompt 文本\n包含第二行");
+
+    let (status, output) = request_json(
+        app.clone(),
+        Method::GET,
+        "/api/workspace-sessions/workspace_session_0001/timeline-node-details/author_run_001/events/event_output_001/output",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(output["node_id"], "author_run_001");
+    assert_eq!(output["event_id"], "event_output_001");
+    assert_eq!(output["output"], "完整输出\n包含工具结果");
+
+    let (status, artifact) = request_json(
+        app.clone(),
+        Method::GET,
+        "/api/workspace-sessions/workspace_session_0001/artifact-versions/3",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(artifact["version"], 3);
+    assert_eq!(artifact["markdown"], "# Artifact v3\n\n完整 Markdown");
+
+    let (missing_node_status, _) = request_json(
+        app.clone(),
+        Method::GET,
+        "/api/workspace-sessions/workspace_session_0001/timeline-node-details/missing_node",
+        json!({}),
+    )
+    .await;
+    assert_eq!(missing_node_status, StatusCode::NOT_FOUND);
+
+    let (missing_event_status, _) = request_json(
+        app.clone(),
+        Method::GET,
+        "/api/workspace-sessions/workspace_session_0001/timeline-node-details/author_run_001/events/missing_event/output",
+        json!({}),
+    )
+    .await;
+    assert_eq!(missing_event_status, StatusCode::NOT_FOUND);
+    let (missing_output_status, _) = request_json(
+        app.clone(),
+        Method::GET,
+        "/api/workspace-sessions/workspace_session_0001/timeline-node-details/author_run_001/events/event_without_output/output",
+        json!({}),
+    )
+    .await;
+    assert_eq!(missing_output_status, StatusCode::NOT_FOUND);
+
+    let (missing_artifact_status, _) = request_json(
+        app,
+        Method::GET,
+        "/api/workspace-sessions/workspace_session_0001/artifact-versions/99",
+        json!({}),
+    )
+    .await;
+    assert_eq!(missing_artifact_status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -690,7 +857,23 @@ async fn workspace_ws_review_decision_continue_runs_revision_and_second_review()
         ProviderName::Codex,
         Arc::new(ScriptedStreamingProvider::new(
             [
-                "需要补充失败路径。\n\n```json\n{\"verdict\":\"revise\",\"summary\":\"补充失败路径\"}\n```",
+                r#"需要补充失败路径。
+
+```json
+{
+  "verdict": "revise",
+  "summary": "补充失败路径",
+  "findings": [
+    {
+      "severity": "must_fix",
+      "message": "缺少失败路径",
+      "evidence": "Artifact 未覆盖失败路径",
+      "impact": "下一阶段无法验收异常流程",
+      "required_action": "补充失败路径说明"
+    }
+  ]
+}
+```"#,
                 "审核通过。\n\n```json\n{\"verdict\":\"pass\",\"summary\":\"可以确认\"}\n```",
             ],
             reviewer_prompts.clone(),
@@ -722,6 +905,15 @@ async fn workspace_ws_review_decision_continue_runs_revision_and_second_review()
     let mut decision_required = false;
     for _ in 0..600 {
         match recv_json(&mut ws).await {
+            WsOutMessage::StageChange { stage } if stage == "author_confirm" => {
+                send_json(
+                    &mut ws,
+                    &WsInMessage::AuthorDecision {
+                        decision: AuthorDecision::Accept,
+                    },
+                )
+                .await;
+            }
             WsOutMessage::ReviewDecisionRequired { options, .. } => {
                 assert!(options.contains(&"continue_with_context".to_string()));
                 decision_required = true;
@@ -754,6 +946,15 @@ async fn workspace_ws_review_decision_continue_runs_revision_and_second_review()
             }
             WsOutMessage::ReviewComplete { summary, .. } if summary == "可以确认" => {
                 saw_review_pass = true;
+            }
+            WsOutMessage::StageChange { stage } if stage == "author_confirm" => {
+                send_json(
+                    &mut ws,
+                    &WsInMessage::AuthorDecision {
+                        decision: AuthorDecision::Accept,
+                    },
+                )
+                .await;
             }
             WsOutMessage::StageChange { stage } if stage == "human_confirm" => {
                 saw_human_confirm = true;
@@ -810,6 +1011,7 @@ async fn workspace_ws_rollback_truncates_persistent_messages() {
     )
     .await;
     let first_checkpoint = recv_until_message_complete(&mut ws).await;
+    accept_author_output(&mut ws).await;
     let _ = recv_until_stage(&mut ws, "human_confirm").await;
 
     send_json(
@@ -820,6 +1022,7 @@ async fn workspace_ws_rollback_truncates_persistent_messages() {
     )
     .await;
     let _second_checkpoint = recv_until_message_complete(&mut ws).await;
+    accept_author_output(&mut ws).await;
     let _ = recv_until_stage(&mut ws, "human_confirm").await;
 
     send_json(
@@ -835,7 +1038,7 @@ async fn workspace_ws_rollback_truncates_persistent_messages() {
         WsOutMessage::SessionState {
             messages, stage, ..
         } => {
-            assert_eq!(stage, "human_confirm");
+            assert_eq!(stage, "author_confirm");
             assert_eq!(messages.len(), 3);
             assert!(messages.iter().any(|message| message.role == "system"));
             assert!(messages.iter().any(|message| message.content == "first"));
@@ -915,6 +1118,255 @@ async fn workspace_ws_provider_selection_persists_across_reconnect() {
 }
 
 #[tokio::test]
+async fn workspace_ws_start_generation_includes_context_note_in_author_prompt() {
+    let root = tempdir().expect("root");
+    create_workspace_session_fixture_with_providers(&root, "fake", "fake", 1).await;
+    let author_prompts = Arc::new(Mutex::new(Vec::new()));
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Fake,
+        Arc::new(ScriptedStreamingProvider::new(
+            [VALID_STORY_SPEC],
+            author_prompts.clone(),
+        )),
+    );
+    let app = build_web_router(WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        registry,
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(
+        &mut ws,
+        &WsInMessage::ContextNote {
+            content: "用户补充：必须覆盖 n=10 -> 89。".to_string(),
+        },
+    )
+    .await;
+    send_json(
+        &mut ws,
+        &WsInMessage::StartGeneration {
+            provider_config: ProviderConfigSnapshot {
+                author: ProviderName::Fake,
+                reviewer: None,
+                review_rounds: 0,
+            },
+            reviewer_enabled: false,
+        },
+    )
+    .await;
+
+    let _checkpoint = recv_until_message_complete(&mut ws).await;
+    let prompt = author_prompts
+        .lock()
+        .unwrap()
+        .first()
+        .expect("author prompt")
+        .clone();
+    assert!(
+        prompt.contains("用户补充：必须覆盖 n=10 -> 89。"),
+        "author prompt should include context note, got: {prompt}"
+    );
+
+    let lifecycle = lifecycle_json(root.path()).await;
+    let messages = lifecycle["workspace_sessions"][0]["messages"]
+        .as_array()
+        .expect("messages");
+    assert!(messages.iter().any(|message| {
+        message["role"] == "user" && message["content"] == "用户补充：必须覆盖 n=10 -> 89。"
+    }));
+
+    drop(ws);
+    server.abort();
+}
+
+#[tokio::test]
+async fn workspace_ws_author_decision_accept_starts_reviewer() {
+    let root = tempdir().expect("root");
+    create_workspace_session_fixture_with_providers(&root, "fake", "codex", 1).await;
+    let author_prompts = Arc::new(Mutex::new(Vec::new()));
+    let reviewer_prompts = Arc::new(Mutex::new(Vec::new()));
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Fake,
+        Arc::new(ScriptedStreamingProvider::new(
+            [VALID_STORY_SPEC],
+            author_prompts,
+        )),
+    );
+    registry.register(
+        ProviderName::Codex,
+        Arc::new(ScriptedStreamingProvider::new(
+            ["审核通过。\n```json\n{\"verdict\":\"pass\",\"summary\":\"可进入人工确认\"}\n```"],
+            reviewer_prompts.clone(),
+        )),
+    );
+    let app = build_web_router(WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        registry,
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(
+        &mut ws,
+        &WsInMessage::StartGeneration {
+            provider_config: ProviderConfigSnapshot {
+                author: ProviderName::Fake,
+                reviewer: Some(ProviderName::Codex),
+                review_rounds: 1,
+            },
+            reviewer_enabled: true,
+        },
+    )
+    .await;
+
+    let _checkpoint = recv_until_message_complete(&mut ws).await;
+    assert_eq!(
+        recv_until_stage(&mut ws, "author_confirm").await,
+        "author_confirm"
+    );
+
+    send_json(
+        &mut ws,
+        &WsInMessage::AuthorDecision {
+            decision: AuthorDecision::Accept,
+        },
+    )
+    .await;
+
+    assert_eq!(
+        recv_until_stage(&mut ws, "cross_review").await,
+        "cross_review"
+    );
+    assert_eq!(
+        recv_until_stage(&mut ws, "human_confirm").await,
+        "human_confirm"
+    );
+    let prompts = reviewer_prompts.lock().unwrap();
+    assert_eq!(prompts.len(), 1);
+    assert!(prompts[0].contains("当前 Artifact"));
+    assert!(prompts[0].contains("# Story Spec"));
+
+    drop(ws);
+    server.abort();
+}
+
+#[tokio::test]
+async fn workspace_ws_author_decision_reject_returns_to_prepare_and_survives_reconnect() {
+    let root = tempdir().expect("root");
+    create_workspace_session_fixture_with_providers(&root, "fake", "codex", 1).await;
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Fake,
+        Arc::new(ScriptedStreamingProvider::new(
+            [VALID_STORY_SPEC],
+            Arc::new(Mutex::new(Vec::new())),
+        )),
+    );
+    registry.register(
+        ProviderName::Codex,
+        Arc::new(ScriptedStreamingProvider::new(
+            ["reviewer should not run before author accept"],
+            Arc::new(Mutex::new(Vec::new())),
+        )),
+    );
+    let app = build_web_router(WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        registry,
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+    let (mut ws, _) = connect_async(url.clone()).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(
+        &mut ws,
+        &WsInMessage::StartGeneration {
+            provider_config: ProviderConfigSnapshot {
+                author: ProviderName::Fake,
+                reviewer: Some(ProviderName::Codex),
+                review_rounds: 1,
+            },
+            reviewer_enabled: true,
+        },
+    )
+    .await;
+
+    let _checkpoint = recv_until_message_complete(&mut ws).await;
+    assert_eq!(
+        recv_until_stage(&mut ws, "author_confirm").await,
+        "author_confirm"
+    );
+    send_json(
+        &mut ws,
+        &WsInMessage::AuthorDecision {
+            decision: AuthorDecision::Reject,
+        },
+    )
+    .await;
+
+    match recv_until_session_state(&mut ws).await {
+        WsOutMessage::SessionState {
+            stage,
+            artifact,
+            artifact_versions,
+            artifact_version_summaries,
+            messages,
+            ..
+        } => {
+            assert_eq!(stage, "prepare_context");
+            assert_eq!(artifact, None);
+            assert_eq!(artifact_versions.len(), 0);
+            assert_eq!(artifact_version_summaries.len(), 1);
+            assert!(!artifact_version_summaries[0].is_current);
+            assert!(messages.iter().any(|message| {
+                message.role == "assistant" && message.content.contains("# Story Spec")
+            }));
+        }
+        other => panic!("expected session state after reject, got {other:?}"),
+    }
+
+    drop(ws);
+    let (mut reconnected, _) = connect_async(url).await.expect("reconnect ws");
+    match recv_json(&mut reconnected).await {
+        WsOutMessage::SessionState {
+            stage, artifact, ..
+        } => {
+            assert_eq!(stage, "prepare_context");
+            assert_eq!(artifact, None);
+        }
+        other => panic!("expected reconnected session state, got {other:?}"),
+    }
+
+    drop(reconnected);
+    server.abort();
+}
+
+#[tokio::test]
 async fn workspace_ws_reconnect_restores_message_checkpoint_ids() {
     let root = tempdir().expect("root");
     let _repo = create_workspace_session_fixture(&root).await;
@@ -940,6 +1392,7 @@ async fn workspace_ws_reconnect_restores_message_checkpoint_ids() {
     )
     .await;
     let checkpoint_id = recv_until_message_complete(&mut ws).await;
+    accept_author_output(&mut ws).await;
     let _ = recv_until_stage(&mut ws, "human_confirm").await;
     drop(ws);
 
@@ -1385,6 +1838,7 @@ async fn workspace_ws_supervised_permission_allows_real_stream_to_complete() {
 
     let checkpoint = recv_until_message_complete(&mut ws).await;
     assert!(checkpoint.starts_with("cp_"));
+    accept_author_output(&mut ws).await;
     let stage = recv_until_stage(&mut ws, "human_confirm").await;
     assert_eq!(stage, "human_confirm");
 
@@ -1447,6 +1901,7 @@ async fn workspace_ws_claude_author_ask_user_question_choice_continues_same_prov
 
     let checkpoint = recv_until_message_complete(&mut ws).await;
     assert!(checkpoint.starts_with("cp_"));
+    accept_author_output(&mut ws).await;
     let stage = recv_until_stage(&mut ws, "human_confirm").await;
     assert_eq!(stage, "human_confirm");
 
@@ -1719,6 +2174,7 @@ async fn workspace_ws_human_confirm_v2_completes_workspace() {
         },
     )
     .await;
+    accept_author_output(&mut ws).await;
     assert_eq!(
         recv_until_stage(&mut ws, "human_confirm").await,
         "human_confirm"
@@ -1920,6 +2376,7 @@ async fn workspace_ws_codex_current_protocol_completes_from_repository_path() {
         "websocket did not emit command completed"
     );
     assert!(checkpoint.as_deref().unwrap_or_default().starts_with("cp_"));
+    accept_author_output(&mut ws).await;
     let stage = recv_until_stage(&mut ws, "human_confirm").await;
     assert_eq!(stage, "human_confirm");
 
@@ -1944,7 +2401,23 @@ async fn workspace_ws_reconnect_during_review_decision_can_still_run_revision() 
         ProviderName::Codex,
         Arc::new(ScriptedStreamingProvider::new(
             [
-                "需要补充失败路径。\n\n```json\n{\"verdict\":\"revise\",\"summary\":\"补充失败路径\"}\n```",
+                r#"需要补充失败路径。
+
+```json
+{
+  "verdict": "revise",
+  "summary": "补充失败路径",
+  "findings": [
+    {
+      "severity": "must_fix",
+      "message": "缺少失败路径",
+      "evidence": "Artifact 未覆盖失败路径",
+      "impact": "下一阶段无法验收异常流程",
+      "required_action": "补充失败路径说明"
+    }
+  ]
+}
+```"#,
                 "审核通过。\n\n```json\n{\"verdict\":\"pass\",\"summary\":\"可以确认\"}\n```",
             ],
             Arc::new(Mutex::new(Vec::new())),
@@ -1973,6 +2446,15 @@ async fn workspace_ws_reconnect_during_review_decision_can_still_run_revision() 
     .await;
     for _ in 0..600 {
         match recv_json(&mut ws).await {
+            WsOutMessage::StageChange { stage } if stage == "author_confirm" => {
+                send_json(
+                    &mut ws,
+                    &WsInMessage::AuthorDecision {
+                        decision: AuthorDecision::Accept,
+                    },
+                )
+                .await;
+            }
             WsOutMessage::ReviewDecisionRequired { .. } => break,
             WsOutMessage::Error { message } => panic!("ws error: {message}"),
             _ => {}
@@ -1999,6 +2481,15 @@ async fn workspace_ws_reconnect_during_review_decision_can_still_run_revision() 
                 if content.contains("# Revised After Reconnect") =>
             {
                 saw_revision = true;
+            }
+            WsOutMessage::StageChange { stage } if stage == "author_confirm" => {
+                send_json(
+                    &mut reconnected,
+                    &WsInMessage::AuthorDecision {
+                        decision: AuthorDecision::Accept,
+                    },
+                )
+                .await;
             }
             WsOutMessage::StageChange { stage } if stage == "human_confirm" => {
                 saw_human_confirm = true;
@@ -2690,6 +3181,24 @@ async fn send_json(
     ))
     .await
     .expect("send ws message");
+}
+
+async fn accept_author_output(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) {
+    assert_eq!(
+        recv_until_stage(ws, "author_confirm").await,
+        "author_confirm"
+    );
+    send_json(
+        ws,
+        &WsInMessage::AuthorDecision {
+            decision: AuthorDecision::Accept,
+        },
+    )
+    .await;
 }
 
 async fn recv_json(

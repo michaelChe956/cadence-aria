@@ -7,7 +7,7 @@ use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::cross_cutting::provider_adapter::ProviderAdapterError;
+use crate::cross_cutting::provider_adapter::{DEFAULT_PROVIDER_TIMEOUT_SECS, ProviderAdapterError};
 use crate::cross_cutting::streaming_provider::{
     ChoiceRequestData, PermissionRequestData, ProviderCommand, ProviderEvent,
     ProviderExecutionEvent, ProviderExecutionEventKind, ProviderExecutionEventStatus,
@@ -100,6 +100,29 @@ fn provider_conversation_role_for_coding_role(
     }
 }
 
+fn should_resume_provider_conversation(role: &CodingProviderRole) -> bool {
+    matches!(role, CodingProviderRole::Coder)
+}
+
+fn coding_provider_permission_mode() -> ProviderPermissionMode {
+    ProviderPermissionMode::Supervised
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodingPromptMode {
+    FullConversation,
+    DeltaOnly,
+}
+
+impl CodingPromptMode {
+    fn event_detail(self) -> &'static str {
+        match self {
+            Self::FullConversation => "发送给 Coding provider 的完整提示词",
+            Self::DeltaOnly => "发送给 Coding provider 的增量提示词",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CodingWorkspaceEngine {
     store: CodingAttemptStore,
@@ -126,6 +149,10 @@ impl CodingWorkspaceEngine {
         role: &CodingProviderRole,
         provider: &ProviderName,
     ) -> Option<String> {
+        if !should_resume_provider_conversation(role) {
+            return None;
+        }
+
         let conversation_role = provider_conversation_role_for_coding_role(role);
         attempt
             .provider_conversations
@@ -290,20 +317,42 @@ impl CodingWorkspaceEngine {
             .send(CodingWsOutMessage::CodingTimelineNodeCreated { node: node.clone() })
             .await;
 
+        let coder_provider = self
+            .store
+            .get_role_provider_config_snapshot(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+            .coder;
+        let resume_provider_session_id = self.provider_resume_session_id_for_attempt(
+            &attempt,
+            &CodingProviderRole::Coder,
+            &coder_provider,
+        );
         let rework_instruction = self.store.latest_unconsumed_rework_instruction(
             &attempt.project_id,
             &attempt.issue_id,
             &attempt.id,
         )?;
-        let prompt = build_coding_prompt(&attempt, context, rework_instruction.as_ref());
-        let coder_provider = self
-            .store
-            .get_role_provider_config_snapshot(&attempt.project_id, &attempt.issue_id, &attempt.id)?
-            .coder;
+        let prompt_mode = if resume_provider_session_id.is_some() {
+            CodingPromptMode::DeltaOnly
+        } else {
+            CodingPromptMode::FullConversation
+        };
+        let prompt = match prompt_mode {
+            CodingPromptMode::FullConversation => {
+                build_coding_prompt(&attempt, context, rework_instruction.as_ref())
+            }
+            CodingPromptMode::DeltaOnly => {
+                build_coding_delta_prompt(&attempt, context, rework_instruction.as_ref())
+            }
+        };
         let _ = self
             .event_tx
             .send(CodingWsOutMessage::CodingExecutionEvent {
-                event: provider_prompt_event(&node.id, &coder_provider, prompt.clone()),
+                event: provider_prompt_event(
+                    &node.id,
+                    &coder_provider,
+                    prompt.clone(),
+                    prompt_mode.event_detail(),
+                ),
             })
             .await;
         if let Some(instruction) = rework_instruction.as_ref() {
@@ -323,14 +372,9 @@ impl CodingWorkspaceEngine {
             prompt,
             context_files: Vec::new(),
             output_schema: "coding_workspace_markdown".to_string(),
-            timeout: 2400,
+            timeout: DEFAULT_PROVIDER_TIMEOUT_SECS,
             max_retries: 0,
         };
-        let resume_provider_session_id = self.provider_resume_session_id_for_attempt(
-            &attempt,
-            &CodingProviderRole::Coder,
-            &coder_provider,
-        );
         let input = StreamingProviderInput {
             provider_type: legacy_input.provider_type.clone(),
             role: legacy_input.role.clone(),
@@ -338,7 +382,7 @@ impl CodingWorkspaceEngine {
             working_dir: worktree_path.clone(),
             workspace_session_id: Some(attempt.id.clone()),
             resume_provider_session_id,
-            permission_mode: ProviderPermissionMode::Auto,
+            permission_mode: coding_provider_permission_mode(),
             env_vars: BTreeMap::new(),
             timeout_secs: legacy_input.timeout,
         };
@@ -828,7 +872,12 @@ impl CodingWorkspaceEngine {
         let _ = self
             .event_tx
             .send(CodingWsOutMessage::CodingExecutionEvent {
-                event: provider_prompt_event(&node.id, &tester_provider, prompt.clone()),
+                event: provider_prompt_event(
+                    &node.id,
+                    &tester_provider,
+                    prompt.clone(),
+                    CodingPromptMode::FullConversation.event_detail(),
+                ),
             })
             .await;
 
@@ -844,7 +893,7 @@ impl CodingWorkspaceEngine {
             working_dir: worktree_path.clone(),
             workspace_session_id: Some(attempt.id.clone()),
             resume_provider_session_id,
-            permission_mode: ProviderPermissionMode::Auto,
+            permission_mode: coding_provider_permission_mode(),
             env_vars: BTreeMap::new(),
             timeout_secs: options.timeout.as_secs().max(1),
         };
@@ -1176,7 +1225,12 @@ impl CodingWorkspaceEngine {
         let _ = self
             .event_tx
             .send(CodingWsOutMessage::CodingExecutionEvent {
-                event: provider_prompt_event(&node.id, &reviewer, prompt.clone()),
+                event: provider_prompt_event(
+                    &node.id,
+                    &reviewer,
+                    prompt.clone(),
+                    CodingPromptMode::FullConversation.event_detail(),
+                ),
             })
             .await;
         let input = AdapterInput {
@@ -1186,7 +1240,7 @@ impl CodingWorkspaceEngine {
             prompt,
             context_files: Vec::new(),
             output_schema: "coding_workspace_code_review_json".to_string(),
-            timeout: 2400,
+            timeout: DEFAULT_PROVIDER_TIMEOUT_SECS,
             max_retries: 0,
         };
         let resume_provider_session_id = self.provider_resume_session_id_for_attempt(
@@ -1323,7 +1377,12 @@ impl CodingWorkspaceEngine {
         let _ = self
             .event_tx
             .send(CodingWsOutMessage::CodingExecutionEvent {
-                event: provider_prompt_event(&node.id, &analyst_provider, prompt.clone()),
+                event: provider_prompt_event(
+                    &node.id,
+                    &analyst_provider,
+                    prompt.clone(),
+                    CodingPromptMode::FullConversation.event_detail(),
+                ),
             })
             .await;
 
@@ -1334,7 +1393,7 @@ impl CodingWorkspaceEngine {
             prompt,
             context_files: Vec::new(),
             output_schema: "coding_workspace_analyst_verdict_json".to_string(),
-            timeout: 2400,
+            timeout: DEFAULT_PROVIDER_TIMEOUT_SECS,
             max_retries: 0,
         };
         let resume_provider_session_id = self.provider_resume_session_id_for_attempt(
@@ -1433,7 +1492,12 @@ impl CodingWorkspaceEngine {
         let _ = self
             .event_tx
             .send(CodingWsOutMessage::CodingExecutionEvent {
-                event: provider_prompt_event(&node.id, &reviewer, prompt.clone()),
+                event: provider_prompt_event(
+                    &node.id,
+                    &reviewer,
+                    prompt.clone(),
+                    CodingPromptMode::FullConversation.event_detail(),
+                ),
             })
             .await;
         let input = AdapterInput {
@@ -1443,7 +1507,7 @@ impl CodingWorkspaceEngine {
             prompt,
             context_files: Vec::new(),
             output_schema: "coding_workspace_internal_pr_review_json".to_string(),
-            timeout: 2400,
+            timeout: DEFAULT_PROVIDER_TIMEOUT_SECS,
             max_retries: 0,
         };
         let resume_provider_session_id = self.provider_resume_session_id_for_attempt(
@@ -2551,6 +2615,7 @@ fn build_coding_prompt(
             "\n本轮必须优先修复上述问题。完成前请检查 git diff/status，确认 reviewer 指出的文件或行为已处理。\n",
         );
     }
+    prompt.push_str(dependency_bootstrap_guidance());
     prompt.push_str(
         "\n执行要求:\n\
          - 遵循仓库规则和 TDD 流程。\n\
@@ -2558,6 +2623,80 @@ fn build_coding_prompt(
          - 完成后报告修改文件、测试命令和结果。\n",
     );
     prompt
+}
+
+fn build_coding_delta_prompt(
+    attempt: &CodingExecutionAttempt,
+    context: &CodingExecutionContext,
+    rework_instruction: Option<&CodingReworkInstruction>,
+) -> String {
+    let mut prompt = format!(
+        "Coding Workspace\n\
+         你是 Coding Workspace Coder。请继续在指定 worktree 中完成真实代码修改和测试，不要只输出计划。\n\
+         Project: {}\n\
+         Issue: {}\n\
+         Work Item: {}\n\
+         Attempt: {}\n\
+         Branch: {}\n",
+        attempt.project_id, attempt.issue_id, attempt.work_item_id, attempt.id, attempt.branch_name
+    );
+    if let Some(worktree_path) = attempt.worktree_path.as_ref() {
+        prompt.push_str(&format!("Worktree Path: {}\n", worktree_path.display()));
+    }
+    prompt.push_str(
+        "\n这是对当前 provider 会话的增量代码编写指令。不要重新发送或复述完整 Work Item；请基于本会话已有上下文、当前 worktree 状态和以下新增要求，直接继续修改代码。\n",
+    );
+    if !context.verification_commands.is_empty() {
+        prompt.push_str("\n验证命令:\n");
+        for command in &context.verification_commands {
+            prompt.push_str("- ");
+            prompt.push_str(command);
+            prompt.push('\n');
+        }
+    }
+
+    if let Some(instruction) = rework_instruction {
+        prompt.push_str("\n本轮返修要求:\n");
+        prompt.push_str(&format!(
+            "- 来源阶段: {:?}\n- 摘要: {}\n",
+            instruction.source_stage, instruction.summary
+        ));
+        if !instruction.fix_hints.is_empty() {
+            prompt.push_str("- 修复提示:\n");
+            for (index, hint) in instruction.fix_hints.iter().enumerate() {
+                prompt.push_str(&format!("  {}. {}\n", index + 1, hint));
+            }
+        }
+        if !instruction.questions.is_empty() {
+            prompt.push_str("- 待澄清问题:\n");
+            for (index, question) in instruction.questions.iter().enumerate() {
+                prompt.push_str(&format!("  {}. {}\n", index + 1, question));
+            }
+        }
+        prompt.push_str(
+            "\n本轮必须优先修复上述问题。完成前请检查 git diff/status，确认 reviewer 指出的文件或行为已处理。\n",
+        );
+    } else {
+        prompt.push_str(
+            "\n本轮没有新增返修要求。请基于当前会话和 worktree 状态继续完成未结束的代码编写任务。\n",
+        );
+    }
+    prompt.push_str(dependency_bootstrap_guidance());
+    prompt.push_str(
+        "\n执行要求:\n\
+         - 遵循仓库规则和 TDD 流程。\n\
+         - 不要重新生成 Story/Design/Work Item 文档。\n\
+         - 完成后报告修改文件、测试命令和结果。\n",
+    );
+    prompt
+}
+
+fn dependency_bootstrap_guidance() -> &'static str {
+    "\n依赖初始化诊断要求:\n\
+     - 如果前端命令出现 `Local package.json exists, but node_modules missing`、`tsc EACCES`、`vitest EACCES`、`Permission denied` 或 `spawn ... EACCES`，先不要判定 pnpm 环境不可用。\n\
+     - 先运行 `pnpm --version` 区分 pnpm 是否存在；只有该命令失败时，才报告 pnpm 不可用。\n\
+     - 如果 pnpm 可用且对应 package 目录存在 lockfile，请先运行 `pnpm -C <package-dir> install --frozen-lockfile`，例如 Aria 前端为 `pnpm -C web install --frozen-lockfile`，然后重试 build/test。\n\
+     - 不要把缺少 node_modules 误判为 pnpm 不可用。\n"
 }
 
 fn build_rework_prompt(
@@ -2600,6 +2739,7 @@ fn provider_prompt_event(
     node_id: &str,
     provider: &ProviderName,
     prompt: String,
+    detail: &str,
 ) -> WsExecutionEvent {
     WsExecutionEvent {
         event_id: format!("{node_id}_prompt"),
@@ -2608,7 +2748,7 @@ fn provider_prompt_event(
         kind: WsExecutionEventKind::Output,
         status: WsExecutionEventStatus::Started,
         title: "Provider Prompt".to_string(),
-        detail: Some("发送给 Coding provider 的完整提示词".to_string()),
+        detail: Some(detail.to_string()),
         command: None,
         cwd: None,
         output: Some(prompt),
@@ -2627,7 +2767,7 @@ fn streaming_input_from_adapter(
         working_dir,
         workspace_session_id: None,
         resume_provider_session_id: None,
-        permission_mode: ProviderPermissionMode::Auto,
+        permission_mode: coding_provider_permission_mode(),
         env_vars: BTreeMap::new(),
         timeout_secs: input.timeout,
     }
@@ -3237,7 +3377,7 @@ mod tests {
                 &CodingProviderRole::Tester,
                 &ProviderName::ClaudeCode,
             ),
-            Some("tester-session".to_string())
+            None
         );
         assert_eq!(
             engine.provider_resume_session_id_for_attempt(
@@ -3247,6 +3387,33 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn coding_prompt_guides_pnpm_install_when_frontend_dependencies_are_missing() {
+        let attempt = test_attempt("coding_attempt_0001");
+        let context = CodingExecutionContext::default();
+
+        let prompt = build_coding_prompt(&attempt, &context, None);
+
+        assert!(prompt.contains("node_modules missing"));
+        assert!(prompt.contains("tsc EACCES"));
+        assert!(prompt.contains("vitest EACCES"));
+        assert!(prompt.contains("pnpm --version"));
+        assert!(prompt.contains("pnpm -C <package-dir> install --frozen-lockfile"));
+        assert!(prompt.contains("不要把缺少 node_modules 误判为 pnpm 不可用"));
+    }
+
+    #[test]
+    fn coding_delta_prompt_guides_pnpm_install_when_frontend_dependencies_are_missing() {
+        let attempt = test_attempt("coding_attempt_0001");
+        let context = CodingExecutionContext::default();
+
+        let prompt = build_coding_delta_prompt(&attempt, &context, None);
+
+        assert!(prompt.contains("node_modules missing"));
+        assert!(prompt.contains("pnpm -C <package-dir> install --frozen-lockfile"));
+        assert!(prompt.contains("不要把缺少 node_modules 误判为 pnpm 不可用"));
     }
 
     fn test_attempt(id: &str) -> CodingExecutionAttempt {

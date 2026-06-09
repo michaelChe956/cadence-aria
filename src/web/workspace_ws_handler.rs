@@ -21,8 +21,8 @@ use crate::product::checkpoint_store::CheckpointStore;
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::models::ProviderName;
 use crate::product::workspace_engine::{
-    EngineEvent, PendingAuthorChoiceError, ReviewDecisionOutcome, WorkspaceEngine,
-    WorkspaceSession, WorkspaceStage,
+    AuthorDecisionOutcome, EngineEvent, PendingAuthorChoiceError, ReviewDecisionOutcome,
+    WorkspaceEngine, WorkspaceSession, WorkspaceStage,
 };
 use crate::product::workspace_repository::workspace_repository_for_session;
 use crate::web::state::{WebAppState, WorkspaceActiveRun, WorkspaceRunRegistry};
@@ -153,11 +153,19 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
         session,
     )));
 
-    let session_state = {
+    let (session_state, restored_choice_request) = {
         let engine = engine.lock().await;
-        engine.build_session_state()
+        (
+            engine.build_session_state(),
+            engine.pending_author_choice_request_message(),
+        )
     };
     if let Ok(json) = serde_json::to_string(&session_state) {
+        let _ = ws_sender.send(Message::Text(json.into())).await;
+    }
+    if let Some(choice_request) = restored_choice_request
+        && let Ok(json) = serde_json::to_string(&choice_request)
+    {
         let _ = ws_sender.send(Message::Text(json.into())).await;
     }
 
@@ -335,12 +343,16 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                     verdict,
                     comments,
                     summary,
+                    findings,
+                    review_gate,
                 } => WsOutMessage::ReviewComplete {
                     node_id,
                     round,
                     verdict,
                     comments,
                     summary,
+                    findings,
+                    review_gate,
                 },
                 EngineEvent::ReviewDecisionRequired {
                     node_id,
@@ -619,6 +631,14 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                 )
                 .await;
             }
+            WsInMessage::AuthorDecision { decision } => {
+                handle_author_decision_from_handler(
+                    run_context.clone(),
+                    outbound_tx.clone(),
+                    decision,
+                )
+                .await;
+            }
             WsInMessage::Abort => {
                 if abort_active_run(&current_run, &state.workspace_runs, &session_id).await {
                     let _ = send_json_outbound(
@@ -788,6 +808,44 @@ async fn handle_review_decision_from_handler(
     }
 }
 
+async fn handle_author_decision_from_handler(
+    run_context: ProviderRunContext,
+    outbound_tx: mpsc::Sender<OutboundControl>,
+    decision: crate::web::workspace_ws_types::AuthorDecision,
+) {
+    let outcome = {
+        let mut engine = run_context.engine.lock().await;
+        engine.handle_author_decision(decision).await
+    };
+
+    match outcome {
+        Ok(AuthorDecisionOutcome::StartReview) => {
+            if let Err(message) =
+                spawn_provider_run_from_handler(run_context, ProviderRunKind::ReviewOnly).await
+            {
+                let err = WsOutMessage::Error { message };
+                let _ = send_json_outbound(&outbound_tx, &err).await;
+            }
+        }
+        Ok(AuthorDecisionOutcome::HumanConfirm) => {}
+        Ok(AuthorDecisionOutcome::PrepareContext) => {
+            let state_msg = {
+                let engine = run_context.engine.lock().await;
+                engine.build_session_state()
+            };
+            let _ = send_json_outbound(&outbound_tx, &state_msg).await;
+        }
+        Err(message) => {
+            let err = WsOutMessage::ProtocolError {
+                code: "INVALID_AUTHOR_DECISION".to_string(),
+                message,
+                context: None,
+            };
+            let _ = send_json_outbound(&outbound_tx, &err).await;
+        }
+    }
+}
+
 async fn handle_human_confirm_from_handler(
     run_context: ProviderRunContext,
     outbound_tx: mpsc::Sender<OutboundControl>,
@@ -862,6 +920,9 @@ fn is_message_valid_for_stage(msg: &WsInMessage, stage: &WorkspaceStage) -> bool
                     | WsInMessage::ChoiceResponse { .. }
             )
         }
+        WorkspaceStage::AuthorConfirm => {
+            matches!(msg, WsInMessage::AuthorDecision { .. } | WsInMessage::Abort)
+        }
         WorkspaceStage::CrossReview => {
             matches!(msg, WsInMessage::Abort | WsInMessage::ChoiceResponse { .. })
         }
@@ -907,6 +968,7 @@ fn message_type(msg: &WsInMessage) -> &'static str {
         WsInMessage::PermissionResponse { .. } => "permission_response",
         WsInMessage::ChoiceResponse { .. } => "choice_response",
         WsInMessage::ReviewDecisionResponse { .. } => "review_decision_response",
+        WsInMessage::AuthorDecision { .. } => "author_decision",
         WsInMessage::SelectRevisionPath { .. } => "select_revision_path",
         WsInMessage::RequestRevision { .. } => "request_revision",
         WsInMessage::HumanConfirm { .. } => "human_confirm",
@@ -920,7 +982,8 @@ fn message_type(msg: &WsInMessage) -> &'static str {
 mod tests {
     use super::*;
     use crate::web::workspace_ws_types::{
-        HumanConfirmDecision, ProviderConfigSnapshot, RevisionPath, StructuredFeedback,
+        AuthorDecision, HumanConfirmDecision, ProviderConfigSnapshot, RevisionPath,
+        StructuredFeedback,
     };
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -970,6 +1033,7 @@ mod tests {
         for stage in [
             WorkspaceStage::PrepareContext,
             WorkspaceStage::Running,
+            WorkspaceStage::AuthorConfirm,
             WorkspaceStage::CrossReview,
             WorkspaceStage::ReviewDecision,
             WorkspaceStage::Revision,
@@ -1061,6 +1125,28 @@ mod tests {
             &legacy_decision,
             &WorkspaceStage::HumanConfirm
         ));
+    }
+
+    #[test]
+    fn author_decision_is_only_valid_in_author_confirm() {
+        let msg = WsInMessage::AuthorDecision {
+            decision: AuthorDecision::Accept,
+        };
+
+        assert!(is_message_valid_for_stage(
+            &msg,
+            &WorkspaceStage::AuthorConfirm
+        ));
+        assert!(!is_message_valid_for_stage(
+            &msg,
+            &WorkspaceStage::PrepareContext
+        ));
+        assert!(!is_message_valid_for_stage(
+            &msg,
+            &WorkspaceStage::HumanConfirm
+        ));
+        assert!(requires_stage_validation(&msg));
+        assert_eq!(message_type(&msg), "author_decision");
     }
 
     #[test]
@@ -1208,6 +1294,7 @@ enum ProviderRunKind {
     Author { content: String },
     AuthorChoiceFollowup { content: String },
     Revision,
+    ReviewOnly,
 }
 
 async fn active_run_command_tx(
@@ -1274,7 +1361,16 @@ async fn spawn_provider_run_from_handler(
 
     let provider_name = {
         let engine = engine.lock().await;
-        engine.session().author_provider.clone()
+        match &run_kind {
+            ProviderRunKind::Author { .. }
+            | ProviderRunKind::AuthorChoiceFollowup { .. }
+            | ProviderRunKind::Revision => engine.session().author_provider.clone(),
+            ProviderRunKind::ReviewOnly => engine
+                .session()
+                .reviewer_provider
+                .clone()
+                .unwrap_or(ProviderName::Codex),
+        }
     };
     let Some(provider_for_run) = provider_registry.get(&provider_name) else {
         return Err(format!("provider unavailable: {provider_name:?}"));
@@ -1326,6 +1422,11 @@ async fn spawn_provider_run_from_handler(
             ProviderRunKind::Revision => {
                 engine
                     .drive_revision_session(provider_for_run, command_rx)
+                    .await;
+            }
+            ProviderRunKind::ReviewOnly => {
+                engine
+                    .drive_review_session(provider_for_run, command_rx)
                     .await;
             }
         }

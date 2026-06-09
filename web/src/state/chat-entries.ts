@@ -32,6 +32,12 @@ export interface ChoiceResponsePayload {
   free_text: string | null;
 }
 
+export type WorkspaceContentRef =
+  | { kind: "node_stream"; nodeId: string }
+  | { kind: "provider_prompt"; nodeId: string }
+  | { kind: "execution_output"; nodeId: string; eventId: string }
+  | { kind: "artifact_version"; version: number; sourceNodeId?: string };
+
 export interface ChatEntry {
   id: string;
   type: ChatEntryType;
@@ -40,6 +46,9 @@ export interface ChatEntry {
   timestamp: string;
   node_id?: string;
   metadata?: Record<string, unknown>;
+  content_ref?: WorkspaceContentRef;
+  content_size?: number;
+  has_full_content?: boolean;
   resolved?: boolean;
   resolution?: ChatEntryResolution;
 }

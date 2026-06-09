@@ -4,6 +4,7 @@ use serde_json::Value;
 
 pub const STRUCTURED_OUTPUT_START: &str = "<ARIA_STRUCTURED_OUTPUT>";
 pub const STRUCTURED_OUTPUT_END: &str = "</ARIA_STRUCTURED_OUTPUT>";
+pub const DEFAULT_PROVIDER_TIMEOUT_SECS: u64 = 3 * 60 * 60;
 
 pub trait ProviderAdapter {
     fn run(
@@ -81,6 +82,23 @@ impl ProviderAdapterError {
         Self::with_output(
             ProviderErrorCode::ProviderTimeout,
             "provider command timed out",
+            stdout,
+            stderr,
+            None,
+            TimeoutStatus::HardTimeoutKilled,
+            duration_ms,
+        )
+    }
+
+    pub fn timeout_with_details(
+        details: impl Into<String>,
+        stdout: impl Into<String>,
+        stderr: impl Into<String>,
+        duration_ms: u64,
+    ) -> Self {
+        Self::with_output(
+            ProviderErrorCode::ProviderTimeout,
+            details,
             stdout,
             stderr,
             None,

@@ -1,6 +1,8 @@
 export type StageAction =
   | "start_generation"
   | "abort"
+  | "accept_author"
+  | "reject_author"
   | "confirm"
   | "request_change"
   | "terminate"
@@ -23,6 +25,12 @@ const STAGE_CONFIG_MAP: Record<string, StageUIConfig> = {
   running: {
     actions: ["abort"],
     headerBadge: "运行中 · 保持本页打开",
+    showContextInput: false,
+    providerEditable: false,
+  },
+  author_confirm: {
+    actions: ["accept_author", "reject_author"],
+    headerBadge: "Author 待确认",
     showContextInput: false,
     providerEditable: false,
   },

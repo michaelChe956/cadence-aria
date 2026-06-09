@@ -128,7 +128,7 @@ fn fake_provider_task_run_completes_planning_and_writes_openspec_tasks() {
         provider
             .seen_timeouts()
             .iter()
-            .all(|timeout| *timeout == 3600),
+            .all(|timeout| *timeout == 10_800),
         "task run timeout must be passed to every provider call"
     );
 }
@@ -265,7 +265,7 @@ fn task_request(workspace: &std::path::Path) -> TaskRunRequest {
         change_id: "aria-login-jwt".to_string(),
         provider_mode: ProviderMode::Real,
         non_interactive: true,
-        timeout_secs: 3600,
+        timeout_secs: 10_800,
     }
 }
 

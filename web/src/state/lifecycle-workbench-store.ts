@@ -53,6 +53,7 @@ export type LifecycleCard =
       version: number | null;
       preview: string | null;
       sourceIds: string[];
+      artifactVersions: ArtifactVersion[];
       raw: LifecycleWorkItem;
     };
 
@@ -111,15 +112,17 @@ export function groupLifecycleCards(lifecycles: IssueLifecycleResponse[]): Lifec
       });
 
       lifecycle.work_items.forEach((item) => {
+        const artifactVersions = item.artifact_versions ?? [];
         columns.work_item.push({
           kind: "work_item",
           id: item.work_item_id,
           issueId: item.issue_id,
           title: item.title,
           status: item.execution_status,
-          version: null,
+          version: latestArtifactVersion(artifactVersions),
           preview: null,
           sourceIds: [...item.story_spec_ids, ...item.design_spec_ids],
+          artifactVersions,
           raw: item,
         });
       });
@@ -177,6 +180,13 @@ export function lifecycleBlockedReason(
   }
 
   return null;
+}
+
+function latestArtifactVersion(versions: ArtifactVersion[]): number | null {
+  if (versions.length === 0) {
+    return null;
+  }
+  return Math.max(...versions.map((version) => version.version));
 }
 
 export interface LifecycleWorkbenchState {
