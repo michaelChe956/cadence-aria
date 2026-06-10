@@ -38,6 +38,11 @@ export interface CodingLogEntry {
   nodeId?: string | null;
 }
 
+export type CodingPendingGate = CodingGateRequired & {
+  submitting?: boolean;
+  errorCode?: string | null;
+};
+
 export interface CodingWorkspaceState {
   attemptId: string | null;
   workItemId: string | null;
@@ -68,7 +73,7 @@ export interface CodingWorkspaceState {
   reviewRequest: ReviewRequest | null;
   logs: CodingLogEntry[];
   connectionStatus: CodingConnectionStatus;
-  pendingGates: CodingGateRequired[];
+  pendingGates: CodingPendingGate[];
   protocolError: CodingProtocolError | null;
   tabLockedByUser: boolean;
 }
@@ -94,6 +99,8 @@ export interface CodingWorkspaceActions {
   replacePendingEntry: (entry: ChatEntry) => void;
   addPendingGate: (gate: CodingGateRequired) => void;
   resolvePendingGate: (gateId: string) => void;
+  markGateSubmitting: (gateId: string) => void;
+  setGateError: (gateId: string, errorCode: string) => void;
   updateProviderConfig: (role: CodingProviderRole, provider: WorkspaceProviderName) => void;
   appendStreamChunk: (content: string, nodeId?: string | null) => void;
   completeStream: (nodeId?: string | null) => void;
@@ -174,7 +181,7 @@ export const useCodingWorkspaceStore = create<
         codeReviewReports: snapshot.code_review_reports,
         reviewRequest: snapshot.review_request,
         internalPrReview: snapshot.internal_pr_review,
-        pendingGates: snapshot.pending_gates,
+        pendingGates: mergeSnapshotPendingGates(snapshot.pending_gates, prev.pendingGates),
         protocolError: null,
         streamingContent: null,
         activeStreamNodeId: null,
@@ -262,12 +269,30 @@ export const useCodingWorkspaceStore = create<
 
   addPendingGate: (gate) =>
     set((state) => ({
-      pendingGates: upsertByKey(state.pendingGates, gate, "gate_id"),
+      pendingGates: upsertByKey(
+        state.pendingGates,
+        withGateUiState(gate, state.pendingGates.find((existing) => existing.gate_id === gate.gate_id)),
+        "gate_id",
+      ),
     })),
 
   resolvePendingGate: (gateId) =>
     set((state) => ({
       pendingGates: state.pendingGates.filter((gate) => gate.gate_id !== gateId),
+    })),
+
+  markGateSubmitting: (gateId) =>
+    set((state) => ({
+      pendingGates: state.pendingGates.map((gate) =>
+        gate.gate_id === gateId ? { ...gate, submitting: true, errorCode: null } : gate,
+      ),
+    })),
+
+  setGateError: (gateId, errorCode) =>
+    set((state) => ({
+      pendingGates: state.pendingGates.map((gate) =>
+        gate.gate_id === gateId ? { ...gate, submitting: false, errorCode } : gate,
+      ),
     })),
 
   updateProviderConfig: (role, provider) =>
@@ -435,6 +460,26 @@ function updateLegacyProviderConfig(
   if (role === "coder") return { ...snapshot, author: provider };
   if (role === "code_reviewer") return { ...snapshot, reviewer: provider };
   return snapshot;
+}
+
+function mergeSnapshotPendingGates(
+  gates: CodingGateRequired[],
+  previousGates: CodingPendingGate[],
+): CodingPendingGate[] {
+  return gates.map((gate) =>
+    withGateUiState(gate, previousGates.find((previous) => previous.gate_id === gate.gate_id)),
+  );
+}
+
+function withGateUiState(
+  gate: CodingGateRequired,
+  previous?: CodingPendingGate,
+): CodingPendingGate {
+  return {
+    ...gate,
+    submitting: previous?.submitting ?? false,
+    errorCode: previous?.errorCode ?? null,
+  };
 }
 
 function upsertChatEntry(entries: ChatEntry[], entry: ChatEntry): ChatEntry[] {

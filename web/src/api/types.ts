@@ -188,7 +188,12 @@ export type CodingRoleProviderConfigSnapshot = {
 };
 
 export type TestCommandStatus = "passed" | "failed" | "timed_out" | "blocked";
-export type TestingOverallStatus = "passed" | "failed" | "skipped_by_user_decision" | "blocked";
+export type TestingOverallStatus =
+  | "passed"
+  | "passed_with_warnings"
+  | "failed"
+  | "skipped_by_user_decision"
+  | "blocked";
 
 export type TestCommand = {
   command: string[];
@@ -200,6 +205,44 @@ export type TestCommand = {
   status: TestCommandStatus;
 };
 
+export type TestPlanTool =
+  | "run_command"
+  | "read_file"
+  | "list_files"
+  | "search_code"
+  | "provider_managed";
+export type TestPlanRiskLevel = "low" | "medium" | "high";
+
+export type TestPlanStep = {
+  id: string;
+  title: string;
+  intent: string;
+  required: boolean;
+  tool: TestPlanTool;
+  risk_level: TestPlanRiskLevel;
+  command_or_tool_input: unknown;
+  evidence_expectation: string;
+  related_requirements?: string[];
+  related_design_constraints?: string[];
+  related_work_item_tasks?: string[];
+};
+
+export type TestingStepResult = {
+  step_id: string;
+  status: TestCommandStatus;
+  evidence_refs?: string[];
+  command?: string[] | null;
+  provider_analysis?: string | null;
+};
+
+export type TestingUnplannedEvidence = {
+  tool_use_id: string;
+  tool_name: string;
+  status: TestCommandStatus;
+  evidence_refs?: string[];
+  provider_analysis?: string | null;
+};
+
 export type TestingReport = {
   id: string;
   attempt_id: string;
@@ -209,6 +252,15 @@ export type TestingReport = {
   backend_verified: boolean;
   started_at: string;
   completed_at: string | null;
+  plan_id?: string | null;
+  plan_summary?: string | null;
+  steps?: TestingStepResult[];
+  unplanned_commands?: TestCommand[];
+  unplanned_evidence?: TestingUnplannedEvidence[];
+  missing_required_steps?: string[];
+  skipped_required_steps?: string[];
+  context_warnings?: string[];
+  raw_provider_output_ref?: string | null;
 };
 
 export type CodingReviewVerdict = "approve" | "request_changes" | "blocked";
@@ -221,6 +273,10 @@ export type ReviewFinding = {
   message: string;
   required_action: string | null;
   source_stage: CodingExecutionStage;
+  evidence?: string[];
+  related_requirements?: string[];
+  related_design_constraints?: string[];
+  related_work_item_tasks?: string[];
 };
 
 export type CodeReviewReport = {
@@ -233,6 +289,7 @@ export type CodeReviewReport = {
   diff_refs: string[];
   summary: string;
   created_at: string;
+  raw_provider_output_ref?: string | null;
 };
 
 export type ReviewRequestKind =
@@ -272,6 +329,7 @@ export type InternalPrReview = {
   diff_refs: string[];
   summary: string;
   created_at: string;
+  raw_provider_output_ref?: string | null;
 };
 
 export type AnalystVerdict = "needs_fix" | "needs_human_input" | "no_issue";
@@ -303,7 +361,13 @@ export type CodingGateActionType =
   | "accept_risk"
   | "abort"
   | "retry_push"
-  | "manual_fix";
+  | "manual_fix"
+  | "retry_test_plan"
+  | "rerun_missing_steps"
+  | "provide_context"
+  | "manual_continue"
+  | "retry_review"
+  | "send_raw_output_to_analyst";
 export type CodingGateKind = "permission" | "stage_gate" | "blocked" | "final_confirm";
 
 export type CodingGateAction = {
@@ -322,6 +386,9 @@ export type CodingGateRequired = {
   expires_at?: string | null;
   provider_snapshot?: CodingRoleProviderConfigSnapshot | null;
   available_actions: CodingGateAction[];
+  reason_code?: string | null;
+  evidence_refs?: string[];
+  raw_provider_output_ref?: string | null;
 };
 
 export type CodingAttemptSnapshotResponse = {

@@ -269,6 +269,49 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                     if let Ok(snapshot) = build_coding_session_state(&coding_store, updated) {
                         let _ = send_coding_json(&mut socket_tx, &snapshot).await;
                     }
+                } else if let CodingWsInMessage::GateResponse {
+                    gate_id,
+                    action_id,
+                    extra_context,
+                } = inbound
+                {
+                    let engine = CodingWorkspaceEngine::new(
+                        coding_store.clone(),
+                        GitWorkspaceService::new(),
+                        event_tx.clone(),
+                    );
+                    let updated = match engine
+                        .handle_blocked_gate_response(
+                            &current_attempt.project_id,
+                            &current_attempt.issue_id,
+                            &current_attempt.id,
+                            &gate_id,
+                            &action_id,
+                            extra_context,
+                        )
+                        .await
+                    {
+                        Ok(updated) => updated,
+                        Err(error) => {
+                            let _ = send_coding_json(
+                                &mut socket_tx,
+                                &CodingWsOutMessage::CodingProtocolError {
+                                    code: "coding_gate_response_failed".to_string(),
+                                    message: error.to_string(),
+                                },
+                            )
+                            .await;
+                            continue;
+                        }
+                    };
+                    while let Ok(event) = event_rx.try_recv() {
+                        if !send_coding_json(&mut socket_tx, &event).await {
+                            break;
+                        }
+                    }
+                    if let Ok(snapshot) = build_coding_session_state(&coding_store, updated) {
+                        let _ = send_coding_json(&mut socket_tx, &snapshot).await;
+                    }
                 } else if let CodingWsInMessage::ProviderSelect { role, provider } = inbound {
                     if let Some(command_tx) = runner_command_tx.as_ref() {
                         let open_gates = coding_store
@@ -1336,11 +1379,16 @@ fn build_coding_session_state(
         .list_internal_pr_reviews(&attempt.project_id, &attempt.issue_id, &attempt.id)?
         .into_iter()
         .last();
-    let pending_gates = coding_store
+    let mut pending_gates: Vec<CodingGateRequiredModel> = coding_store
         .list_open_stage_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)?
         .into_iter()
         .map(stage_gate_required)
         .collect();
+    pending_gates.extend(coding_store.list_open_blocked_gates(
+        &attempt.project_id,
+        &attempt.issue_id,
+        &attempt.id,
+    )?);
     let role_provider_config_snapshot = coding_store.get_role_provider_config_snapshot(
         &attempt.project_id,
         &attempt.issue_id,
@@ -1400,6 +1448,9 @@ fn stage_gate_required(gate: CodingStageGateState) -> CodingGateRequiredModel {
                 action_type: CodingGateActionType::Abort,
             },
         ],
+        reason_code: None,
+        evidence_refs: Vec::new(),
+        raw_provider_output_ref: None,
     }
 }
 
@@ -1613,13 +1664,14 @@ pub fn is_coding_ws_message_allowed(
 
 #[cfg(test)]
 mod tests {
+    use crate::product::coding_models::{CodingAttemptStatus, CodingExecutionStage};
     use crate::product::models::{
         ProviderName, WorkspaceMessageRecord, WorkspaceSessionRecord, WorkspaceSessionStatus,
         WorkspaceType,
     };
     use crate::product::test_executor::planned_test_commands_from_markdown;
 
-    use super::select_work_item_markdown;
+    use super::{CodingWsInMessage, is_coding_ws_message_allowed, select_work_item_markdown};
 
     #[test]
     fn falls_back_to_assistant_artifact_when_persisted_markdown_lacks_commands() {
@@ -1659,5 +1711,23 @@ mod tests {
                 "uv", "run", "python", "-m", "unittest", "discover", "-s", "tests", "-v"
             ]
         );
+    }
+
+    #[test]
+    fn blocked_attempt_allows_gate_response_messages() {
+        assert!(is_coding_ws_message_allowed(
+            &CodingAttemptStatus::Blocked,
+            &CodingExecutionStage::Testing,
+            &CodingWsInMessage::GateResponse {
+                gate_id: "coding_blocked_gate_0001".to_string(),
+                action_id: "retry_test_plan".to_string(),
+                extra_context: None,
+            },
+        ));
+        assert!(is_coding_ws_message_allowed(
+            &CodingAttemptStatus::Blocked,
+            &CodingExecutionStage::Testing,
+            &CodingWsInMessage::AbortAttempt,
+        ));
     }
 }

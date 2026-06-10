@@ -199,6 +199,24 @@ fn coding_ws_stage_validation_matches_attempt_status_and_stage() {
 }
 
 #[test]
+fn blocked_attempt_allows_gate_response_messages() {
+    assert!(is_coding_ws_message_allowed(
+        &CodingAttemptStatus::Blocked,
+        &CodingExecutionStage::Testing,
+        &CodingWsInMessage::GateResponse {
+            gate_id: "coding_blocked_gate_0001".to_string(),
+            action_id: "retry_test_plan".to_string(),
+            extra_context: None,
+        },
+    ));
+    assert!(is_coding_ws_message_allowed(
+        &CodingAttemptStatus::Blocked,
+        &CodingExecutionStage::Testing,
+        &CodingWsInMessage::AbortAttempt,
+    ));
+}
+
+#[test]
 fn coding_gate_required_out_message_preserves_action_contract() {
     let gate = CodingGateRequired {
         gate_id: "gate_0001".to_string(),
@@ -214,6 +232,9 @@ fn coding_gate_required_out_message_preserves_action_contract() {
             label: "接受风险".to_string(),
             action_type: CodingGateActionType::AcceptRisk,
         }],
+        reason_code: None,
+        evidence_refs: Vec::new(),
+        raw_provider_output_ref: None,
     };
     let message = CodingWsOutMessage::CodingGateRequired { gate };
 

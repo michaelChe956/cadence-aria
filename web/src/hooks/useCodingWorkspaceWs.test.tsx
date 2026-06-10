@@ -1,5 +1,6 @@
 import { act, render } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { CodingGateRequired } from "../api/types";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
 import { useCodingWorkspaceWs } from "./useCodingWorkspaceWs";
 
@@ -42,6 +43,62 @@ class MockWebSocket {
 }
 
 type CodingWsApi = ReturnType<typeof useCodingWorkspaceWs>;
+
+function codingSessionState(overrides: Record<string, unknown> = {}) {
+  return {
+    type: "coding_session_state",
+    attempt_id: "coding_attempt_0001",
+    status: "running",
+    stage: "testing",
+    branch_name: "aria/work-items/work_item_0001/attempt-1",
+    base_branch: "main",
+    worktree_path: "/tmp/worktree",
+    rework_count: 0,
+    max_auto_rework: 2,
+    head_commit: null,
+    pushed_remote: null,
+    role_provider_config_snapshot: {
+      coder: "fake",
+      tester: "fake",
+      analyst: "fake",
+      code_reviewer: "fake",
+      internal_reviewer: "fake",
+      review_rounds: 1,
+    },
+    provider_config_snapshot: { author: "fake", reviewer: "fake", review_rounds: 1 },
+    chat_entries: [],
+    timeline_nodes: [],
+    active_node_id: null,
+    testing_report: null,
+    code_review_reports: [],
+    review_request: null,
+    internal_pr_review: null,
+    pending_gates: [],
+    ...overrides,
+  };
+}
+
+function blockedGate(overrides: Partial<CodingGateRequired> = {}): CodingGateRequired {
+  return {
+    gate_id: "gate_0001",
+    kind: "blocked",
+    title: "Review blocked",
+    description: "Review payload parse failed",
+    stage: "code_review",
+    role: "code_reviewer",
+    reason_code: "review_payload_parse_error",
+    evidence_refs: ["code_review_0001.json"],
+    raw_provider_output_ref: "provider-raw/code_review/code_review_0001.txt",
+    available_actions: [
+      {
+        action_id: "retry_review",
+        label: "重试审查",
+        action_type: "retry_review",
+      },
+    ],
+    ...overrides,
+  };
+}
 
 function renderCodingHook(attemptId = "coding_attempt_0001") {
   let api: CodingWsApi | undefined;
@@ -483,6 +540,102 @@ describe("useCodingWorkspaceWs", () => {
       JSON.stringify({ type: "final_confirm" }),
       JSON.stringify({ type: "abort_attempt" }),
       JSON.stringify({ type: "coding_ping" }),
+    ]);
+  });
+
+  it("respond gate waits for server snapshot before resolving gate", () => {
+    const harness = renderCodingHook();
+    useCodingWorkspaceStore.getState().addPendingGate(blockedGate());
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.sent.length = 0;
+      harness.api.respondGate("gate_0001", "retry_review");
+    });
+
+    expect(harness.ws.sent).toEqual([
+      JSON.stringify({
+        type: "gate_response",
+        gate_id: "gate_0001",
+        action_id: "retry_review",
+        extra_context: null,
+      }),
+    ]);
+    expect(useCodingWorkspaceStore.getState().pendingGates).toMatchObject([
+      {
+        gate_id: "gate_0001",
+        submitting: true,
+        errorCode: null,
+      },
+    ]);
+
+    act(() => {
+      harness.ws.receive({
+        type: "coding_protocol_error",
+        code: "coding_gate_response_failed",
+        message: "Gate response failed",
+      });
+    });
+
+    expect(useCodingWorkspaceStore.getState().pendingGates).toMatchObject([
+      {
+        gate_id: "gate_0001",
+        submitting: false,
+        errorCode: "coding_gate_response_failed",
+      },
+    ]);
+
+    act(() => {
+      harness.api.respondGate("gate_0001", "retry_review");
+      harness.ws.receive(codingSessionState({ pending_gates: [] }));
+    });
+
+    expect(useCodingWorkspaceStore.getState().pendingGates).toHaveLength(0);
+
+    act(() => {
+      useCodingWorkspaceStore.getState().addPendingGate(
+        blockedGate({
+          gate_id: "gate_0002",
+          available_actions: [
+            {
+              action_id: "manual_continue",
+              label: "人工继续",
+              action_type: "manual_continue",
+            },
+          ],
+        }),
+      );
+      harness.ws.sent.length = 0;
+      harness.api.respondGate("gate_0002", "manual_continue", "   ");
+    });
+
+    expect(harness.ws.sent).toEqual([]);
+    expect(useCodingWorkspaceStore.getState().pendingGates).toMatchObject([
+      {
+        gate_id: "gate_0002",
+        submitting: false,
+        errorCode: "coding_gate_extra_context_required",
+      },
+    ]);
+
+    act(() => {
+      harness.api.respondGate("gate_0002", "manual_continue", " operator accepted risk ");
+    });
+
+    expect(harness.ws.sent).toEqual([
+      JSON.stringify({
+        type: "gate_response",
+        gate_id: "gate_0002",
+        action_id: "manual_continue",
+        extra_context: "operator accepted risk",
+      }),
+    ]);
+    expect(useCodingWorkspaceStore.getState().pendingGates).toMatchObject([
+      {
+        gate_id: "gate_0002",
+        submitting: true,
+        errorCode: null,
+      },
     ]);
   });
 

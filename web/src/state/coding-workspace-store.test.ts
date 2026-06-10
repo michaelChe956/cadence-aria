@@ -1,8 +1,10 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type {
   CodeReviewReport,
+  CodingGateRequired,
   CodingTimelineNode,
   CodingWsOutMessage,
+  TestingReport,
 } from "../api/types";
 import { useCodingWorkspaceStore } from "./coding-workspace-store";
 
@@ -48,6 +50,58 @@ function codeReview(overrides: Partial<CodeReviewReport> = {}): CodeReviewReport
     diff_refs: [],
     summary: "review ok",
     created_at: "2026-05-23T00:01:00Z",
+    ...overrides,
+  };
+}
+
+function testingReport(overrides: Partial<TestingReport> = {}): TestingReport {
+  return {
+    id: "testing_report_0001",
+    attempt_id: "coding_attempt_0001",
+    commands: [],
+    overall_status: "passed_with_warnings",
+    provider_claim: null,
+    backend_verified: true,
+    started_at: "2026-06-10T00:00:00Z",
+    completed_at: "2026-06-10T00:00:01Z",
+    plan_id: "test_plan_0001",
+    plan_summary: "API smoke and security review",
+    steps: [
+      {
+        step_id: "api_smoke",
+        status: "passed",
+        evidence_refs: ["stdout.log"],
+        command: ["cargo", "test", "--locked", "--lib", "api_smoke"],
+        provider_analysis: "API smoke passed",
+      },
+    ],
+    unplanned_commands: [],
+    missing_required_steps: ["security"],
+    skipped_required_steps: [],
+    context_warnings: ["missing_design_spec"],
+    raw_provider_output_ref: "provider-raw/testing/execute_test_plan_0001.txt",
+    ...overrides,
+  };
+}
+
+function blockedGate(overrides: Partial<CodingGateRequired> = {}): CodingGateRequired {
+  return {
+    gate_id: "gate_0001",
+    kind: "blocked",
+    title: "Testing blocked",
+    description: "Required step missing",
+    stage: "testing",
+    role: "tester",
+    reason_code: "missing_required_test_step",
+    evidence_refs: ["stdout.log"],
+    raw_provider_output_ref: "provider-raw/testing/execute_test_plan_0001.txt",
+    available_actions: [
+      {
+        action_id: "rerun_missing_steps",
+        label: "重新执行缺失步骤",
+        action_type: "rerun_missing_steps",
+      },
+    ],
     ...overrides,
   };
 }
@@ -214,6 +268,84 @@ describe("coding workspace store", () => {
     expect(useCodingWorkspaceStore.getState().pendingGates).toHaveLength(1);
 
     store.resolvePendingGate("gate_0001");
+
+    expect(useCodingWorkspaceStore.getState().pendingGates).toHaveLength(0);
+  });
+
+  it("stores plan based testing reports and blocked gate metadata", () => {
+    const store = useCodingWorkspaceStore.getState();
+
+    store.setSessionState(
+      sessionState({
+        testing_report: testingReport(),
+        pending_gates: [blockedGate()],
+      }),
+    );
+
+    expect(useCodingWorkspaceStore.getState().testingReport).toMatchObject({
+      plan_summary: "API smoke and security review",
+      missing_required_steps: ["security"],
+      raw_provider_output_ref: "provider-raw/testing/execute_test_plan_0001.txt",
+    });
+    expect(useCodingWorkspaceStore.getState().testingReport?.steps?.[0]).toMatchObject({
+      step_id: "api_smoke",
+      evidence_refs: ["stdout.log"],
+    });
+    expect(useCodingWorkspaceStore.getState().pendingGates).toMatchObject([
+      {
+        gate_id: "gate_0001",
+        reason_code: "missing_required_test_step",
+        evidence_refs: ["stdout.log"],
+        raw_provider_output_ref: "provider-raw/testing/execute_test_plan_0001.txt",
+      },
+    ]);
+
+    store.addPendingGate(
+      blockedGate({
+        title: "Updated gate",
+        reason_code: "review_payload_parse_error",
+      }),
+    );
+
+    expect(useCodingWorkspaceStore.getState().pendingGates).toMatchObject([
+      {
+        gate_id: "gate_0001",
+        title: "Updated gate",
+        reason_code: "review_payload_parse_error",
+      },
+    ]);
+
+    store.resolvePendingGate("gate_0001");
+
+    expect(useCodingWorkspaceStore.getState().pendingGates).toHaveLength(0);
+  });
+
+  it("tracks gate submission without removing gate until snapshot confirms", () => {
+    const store = useCodingWorkspaceStore.getState();
+    store.addPendingGate(blockedGate());
+
+    store.markGateSubmitting("gate_0001");
+
+    expect(useCodingWorkspaceStore.getState().pendingGates).toMatchObject([
+      {
+        gate_id: "gate_0001",
+        submitting: true,
+        errorCode: null,
+      },
+    ]);
+
+    store.setGateError("gate_0001", "coding_gate_response_failed");
+
+    expect(useCodingWorkspaceStore.getState().pendingGates).toMatchObject([
+      {
+        gate_id: "gate_0001",
+        submitting: false,
+        errorCode: "coding_gate_response_failed",
+      },
+    ]);
+
+    store.markGateSubmitting("gate_0001");
+    store.setSessionState(sessionState({ pending_gates: [] }));
 
     expect(useCodingWorkspaceStore.getState().pendingGates).toHaveLength(0);
   });

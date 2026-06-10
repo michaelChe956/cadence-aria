@@ -134,8 +134,18 @@ async fn execute_testing_with_tool_provider_streams_tool_entries_and_persists_re
         .expect("execute testing");
 
     assert_eq!(report.overall_status, TestingOverallStatus::Passed);
-    assert_eq!(report.commands.len(), 1);
-    assert_eq!(report.commands[0].status, TestCommandStatus::Passed);
+    assert!(report.commands.is_empty());
+    assert_eq!(report.steps.len(), 1);
+    assert_eq!(report.steps[0].step_id, "planned_001");
+    assert_eq!(report.steps[0].status, TestCommandStatus::Passed);
+    assert_eq!(
+        report.steps[0].command.as_ref(),
+        Some(&vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "printf ok".to_string()
+        ])
+    );
     assert_eq!(
         report
             .provider_claim
@@ -195,15 +205,47 @@ impl StreamingProviderAdapter for ScriptedTesterProvider {
         input: StreamingProviderInput,
         _cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
+        let prompt = input.prompt.clone();
         *self.prompt.lock().expect("prompt lock") = Some(input.prompt);
         let (event_tx, event_rx) = mpsc::channel(8);
         let (command_tx, mut command_rx) = mpsc::channel(8);
         tokio::spawn(async move {
+            if prompt.contains("Phase: plan_tests") {
+                event_tx
+                    .send(ProviderEvent::Completed {
+                        full_output: serde_json::json!({
+                            "summary": "controlled shell smoke",
+                            "steps": [
+                                {
+                                    "id": "planned_001",
+                                    "title": "Shell smoke",
+                                    "intent": "prove the configured shell command succeeds",
+                                    "required": true,
+                                    "tool": "run_command",
+                                    "risk_level": "low",
+                                    "command_or_tool_input": {
+                                        "command": ["sh", "-c", "printf ok"]
+                                    },
+                                    "evidence_expectation": "exit 0"
+                                }
+                            ]
+                        })
+                        .to_string(),
+                        provider_session_id: None,
+                    })
+                    .await
+                    .expect("send test plan");
+                return;
+            }
+
             event_tx
                 .send(ProviderEvent::ToolCall(ProviderToolCall {
                     id: "tool_call_0001".to_string(),
                     tool_name: "run_command".to_string(),
-                    input: json!({"command": ["sh", "-c", "printf ok"]}),
+                    input: json!({
+                        "step_id": "planned_001",
+                        "command": ["sh", "-c", "printf ok"]
+                    }),
                 }))
                 .await
                 .expect("send tool call");

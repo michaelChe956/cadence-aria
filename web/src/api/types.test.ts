@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type {
+  CodingGateRequired,
   CodingAttempt,
   CodingAttemptSnapshotResponse,
   CodingWsInMessage,
   CodingWsOutMessage,
   IssueLifecycleResponse,
   NodeDetail,
+  TestingReport,
   TimelineNodeType,
   WsInMessage,
   WsOutMessage,
@@ -191,5 +193,57 @@ describe("workspace websocket protocol types", () => {
     expect(snapshot.active_node_id).toBe("coding_node_0001");
     expect(outbound.type).toBe("coding_session_state");
     expect(inbound.type).toBe("start_coding");
+  });
+
+  it("accepts plan based testing reports and blocked gate metadata", () => {
+    const report: TestingReport = {
+      id: "testing_report_0001",
+      attempt_id: "coding_attempt_0001",
+      commands: [],
+      plan_id: "test_plan_0001",
+      plan_summary: "API smoke and security review",
+      steps: [
+        {
+          step_id: "api_smoke",
+          status: "passed",
+          evidence_refs: ["stdout.log"],
+          command: ["cargo", "test", "--locked", "--lib", "api_smoke"],
+          provider_analysis: "API smoke passed",
+        },
+      ],
+      unplanned_commands: [],
+      missing_required_steps: ["security"],
+      skipped_required_steps: ["manual_browser"],
+      context_warnings: ["missing_design_spec"],
+      raw_provider_output_ref: "provider-raw/testing/execute_test_plan_0001.txt",
+      overall_status: "passed_with_warnings",
+      provider_claim: null,
+      backend_verified: true,
+      started_at: "2026-06-10T00:00:00Z",
+      completed_at: "2026-06-10T00:00:01Z",
+    };
+    const gate: CodingGateRequired = {
+      gate_id: "coding_gate_0001",
+      kind: "blocked",
+      title: "Testing blocked",
+      description: "Required test step missing",
+      stage: "testing",
+      role: "tester",
+      reason_code: "missing_required_test_step",
+      evidence_refs: ["stdout.log"],
+      raw_provider_output_ref: "provider-raw/testing/execute_test_plan_0001.txt",
+      available_actions: [
+        {
+          action_id: "rerun_missing_steps",
+          label: "重新执行缺失步骤",
+          action_type: "rerun_missing_steps",
+        },
+      ],
+    };
+
+    expect(report.overall_status).toBe("passed_with_warnings");
+    expect((report.steps ?? [])[0].step_id).toBe("api_smoke");
+    expect(gate.reason_code).toBe("missing_required_test_step");
+    expect(gate.available_actions[0].action_type).toBe("rerun_missing_steps");
   });
 });

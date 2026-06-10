@@ -48,6 +48,17 @@
 - Raw provider output 必须落盘。
 - Rust 验证使用宿主机 cargo，禁止 `cargo test -j 1`。
 
+## 补充强制边界
+
+- 本计划中的 OpenSpec 上下文指 Aria 产品内 Story Spec、Design Spec、Work Item 的追踪关系和 artifact version，不依赖仓库根目录存在 `openspec/changes`。如果仓库没有 OpenSpec CLI change 目录，不得阻塞 Coding Workspace QA 实现。
+- 所有新增后端 DTO 字段必须提供历史 JSON 反序列化默认值，并补充旧 `TestingReport`、旧 `CodeReviewReport`、旧 `InternalPrReview`、旧 `CodingGateRequired` 的兼容测试。
+- 所有新增前端 DTO 字段必须允许旧 snapshot 缺字段，并在页面上以空态展示，不得因为旧 attempt 缺 v2 字段导致 Coding Workspace 白屏。
+- 同一 attempt、stage、node、`reason_code` 在同一时间只能存在一个 open blocked gate；重复创建必须返回已有 gate 或刷新 metadata，不得生成多个相互竞争的恢复入口。
+- blocked gate 的 `manual_continue` / `accept_risk` 属于质量门禁绕过动作，必须持久化人工原因、被跳过的 required steps、风险说明和操作者输入，并注入后续 reviewer/internal reviewer 上下文。
+- Tester tool result 必须可追踪到 TestPlan step 或明确进入 `unplanned_commands` / `unplanned_evidence`；未绑定 `step_id` 的工具结果不得满足 required step。
+- EvaluationContextPack 必须做长度裁剪和敏感信息脱敏，避免把 secret、token、authorization header、私钥或超大 diff 直接塞进 Provider prompt。
+- P4 必须包含 deterministic controlled provider 验收路径；真实 Provider 验收只能作为补充证据，不能替代可复现回归。
+
 ## 执行方式
 
 推荐按 P1 -> P2 -> P3 -> P4 顺序执行，每个 P 作为独立 implementation session。每个阶段完成后先提交，再进入下一阶段。

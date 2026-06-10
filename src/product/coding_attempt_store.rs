@@ -3,14 +3,16 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
-use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_models::{
     CodeReviewReport, CodingAttemptStatus, CodingChatEntry, CodingContextNote,
-    CodingExecutionAttempt, CodingExecutionStage, CodingProviderRole, CodingReworkInstruction,
+    CodingExecutionAttempt, CodingExecutionStage, CodingGateAction, CodingGateKind,
+    CodingGateRequired, CodingProviderRole, CodingReworkInstruction,
     CodingRoleProviderConfigSnapshot, CodingStageGateState, CodingStageGateStatus,
-    CodingTimelineNode, CodingTimelineNodeStatus, InternalPrReview, ReviewRequest, TestingReport,
+    CodingTimelineNode, CodingTimelineNodeStatus, InternalPrReview, QualityGateBypassAudit,
+    ReviewRequest, TestPlan, TestingReport,
 };
 use crate::product::id::next_sequential_id;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
@@ -27,6 +29,47 @@ pub struct CreateCodingAttemptInput {
     pub worktree_path: Option<PathBuf>,
     pub provider_config_snapshot: ProviderConfigSnapshot,
     pub max_auto_rework: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateBlockedGateInput {
+    pub attempt_id: String,
+    pub stage: CodingExecutionStage,
+    pub node_id: Option<String>,
+    pub role: Option<CodingProviderRole>,
+    pub title: String,
+    pub description: String,
+    pub reason_code: Option<String>,
+    pub evidence_refs: Vec<String>,
+    pub raw_provider_output_ref: Option<String>,
+    pub available_actions: Vec<CodingGateAction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateQualityBypassAuditInput {
+    pub attempt_id: String,
+    pub gate_id: String,
+    pub stage: CodingExecutionStage,
+    pub reason_code: Option<String>,
+    pub skipped_required_steps: Vec<String>,
+    pub operator_context: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum BlockedGateStatus {
+    Open,
+    Resolved,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct BlockedGateRecord {
+    gate: CodingGateRequired,
+    attempt_id: String,
+    node_id: Option<String>,
+    status: BlockedGateStatus,
+    created_at: String,
+    updated_at: String,
 }
 
 #[derive(Debug, Clone)]
@@ -549,6 +592,185 @@ impl CodingAttemptStore {
             .join(file_name))
     }
 
+    pub fn save_provider_raw_output(
+        &self,
+        attempt_id: &str,
+        stage: CodingExecutionStage,
+        purpose: &str,
+        output: &str,
+    ) -> Result<String, ProductStoreError> {
+        validate_relative_id(purpose)?;
+        let attempt = self.find_attempt_by_id(attempt_id)?;
+        let stage_dir_name = coding_stage_dir_name(&stage);
+        let raw_root = self
+            .provider_raw_output_root(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .join(stage_dir_name);
+        fs::create_dir_all(&raw_root).map_err(|error| {
+            ProductStoreError::Io(format!("create {}: {error}", raw_root.display()))
+        })?;
+
+        let sequence = next_text_file_sequence(&raw_root, purpose)?;
+        let file_name = format!("{purpose}_{sequence:04}.txt");
+        let path = raw_root.join(&file_name);
+        fs::write(&path, output)
+            .map_err(|error| ProductStoreError::Io(format!("write {}: {error}", path.display())))?;
+
+        Ok(format!(
+            "provider-raw/{}/{}",
+            coding_stage_dir_name(&stage),
+            file_name
+        ))
+    }
+
+    pub fn save_test_plan(&self, plan: &TestPlan) -> Result<(), ProductStoreError> {
+        validate_relative_id(&plan.id)?;
+        let attempt = self.find_attempt_by_id(&plan.attempt_id)?;
+        write_json(
+            &self
+                .test_plans_root(&attempt.project_id, &attempt.issue_id, &attempt.id)
+                .join(format!("{}.json", plan.id)),
+            plan,
+        )
+    }
+
+    pub fn list_test_plans(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> Result<Vec<TestPlan>, ProductStoreError> {
+        list_json_records(&self.test_plans_root(project_id, issue_id, attempt_id))
+    }
+
+    pub fn create_blocked_gate(
+        &self,
+        input: CreateBlockedGateInput,
+    ) -> Result<CodingGateRequired, ProductStoreError> {
+        validate_relative_id(&input.attempt_id)?;
+        if let Some(node_id) = &input.node_id {
+            validate_relative_id(node_id)?;
+        }
+        let attempt = self.find_attempt_by_id(&input.attempt_id)?;
+        let gates_root =
+            self.blocked_gates_root(&attempt.project_id, &attempt.issue_id, &attempt.id);
+        if let Some(existing_path) = matching_open_blocked_gate_path(&gates_root, &input)? {
+            let mut record: BlockedGateRecord = read_json(&existing_path)?;
+            record.gate.title = input.title;
+            record.gate.description = input.description;
+            record.gate.role = input.role;
+            record.gate.available_actions = input.available_actions;
+            record.gate.raw_provider_output_ref = input
+                .raw_provider_output_ref
+                .or(record.gate.raw_provider_output_ref);
+            merge_unique_strings(&mut record.gate.evidence_refs, input.evidence_refs);
+            record.updated_at = Utc::now().to_rfc3339();
+            write_json(&existing_path, &record)?;
+            return Ok(record.gate);
+        }
+        let gate_count =
+            count_json_files(&gates_root)? + count_json_files(&gates_root.join("resolved"))?;
+        let gate_id = next_sequential_id("coding_blocked_gate", gate_count);
+        let now = Utc::now().to_rfc3339();
+        let gate = CodingGateRequired {
+            gate_id: gate_id.clone(),
+            kind: CodingGateKind::Blocked,
+            title: input.title,
+            description: input.description,
+            stage: Some(input.stage),
+            role: input.role,
+            expires_at: None,
+            provider_snapshot: None,
+            available_actions: input.available_actions,
+            reason_code: input.reason_code,
+            evidence_refs: input.evidence_refs,
+            raw_provider_output_ref: input.raw_provider_output_ref,
+        };
+        let record = BlockedGateRecord {
+            gate: gate.clone(),
+            attempt_id: attempt.id,
+            node_id: input.node_id,
+            status: BlockedGateStatus::Open,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        write_json(&gates_root.join(format!("{gate_id}.json")), &record)?;
+        Ok(gate)
+    }
+
+    pub fn list_open_blocked_gates(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> Result<Vec<CodingGateRequired>, ProductStoreError> {
+        let mut records: Vec<BlockedGateRecord> =
+            list_json_records(&self.blocked_gates_root(project_id, issue_id, attempt_id))?;
+        records.retain(|record| record.status == BlockedGateStatus::Open);
+        Ok(records.into_iter().map(|record| record.gate).collect())
+    }
+
+    pub fn resolve_blocked_gate(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        gate_id: &str,
+    ) -> Result<CodingGateRequired, ProductStoreError> {
+        validate_relative_id(gate_id)?;
+        let gates_root = self.blocked_gates_root(project_id, issue_id, attempt_id);
+        let path = gates_root.join(format!("{gate_id}.json"));
+        if !path_is_regular_file(&path)? {
+            return Err(ProductStoreError::NotFound {
+                kind: "coding_blocked_gate",
+                id: gate_id.to_string(),
+            });
+        }
+
+        let mut record: BlockedGateRecord = read_json(&path)?;
+        record.status = BlockedGateStatus::Resolved;
+        record.updated_at = Utc::now().to_rfc3339();
+        let gate = record.gate.clone();
+        write_json(
+            &gates_root.join("resolved").join(format!("{gate_id}.json")),
+            &record,
+        )?;
+        remove_file_if_exists(&path)?;
+        Ok(gate)
+    }
+
+    pub fn create_quality_bypass_audit(
+        &self,
+        input: CreateQualityBypassAuditInput,
+    ) -> Result<QualityGateBypassAudit, ProductStoreError> {
+        validate_relative_id(&input.attempt_id)?;
+        validate_relative_id(&input.gate_id)?;
+        let attempt = self.find_attempt_by_id(&input.attempt_id)?;
+        let root =
+            self.quality_bypass_audits_root(&attempt.project_id, &attempt.issue_id, &attempt.id);
+        let id = next_sequential_id("quality_bypass_audit", count_json_files(&root)?);
+        let audit = QualityGateBypassAudit {
+            id: id.clone(),
+            attempt_id: attempt.id,
+            gate_id: input.gate_id,
+            stage: input.stage,
+            reason_code: input.reason_code,
+            skipped_required_steps: input.skipped_required_steps,
+            operator_context: input.operator_context,
+            created_at: Utc::now().to_rfc3339(),
+        };
+        write_json(&root.join(format!("{id}.json")), &audit)?;
+        Ok(audit)
+    }
+
+    pub fn list_quality_bypass_audits(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> Result<Vec<QualityGateBypassAudit>, ProductStoreError> {
+        list_json_records(&self.quality_bypass_audits_root(project_id, issue_id, attempt_id))
+    }
+
     pub fn create_stage_gate(
         &self,
         attempt_id: &str,
@@ -940,6 +1162,36 @@ impl CodingAttemptStore {
             .join("rework-instructions")
     }
 
+    fn test_plans_root(&self, project_id: &str, issue_id: &str, attempt_id: &str) -> PathBuf {
+        self.attempt_dir(project_id, issue_id, attempt_id)
+            .join("test-plans")
+    }
+
+    fn provider_raw_output_root(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> PathBuf {
+        self.attempt_dir(project_id, issue_id, attempt_id)
+            .join("provider-raw")
+    }
+
+    fn blocked_gates_root(&self, project_id: &str, issue_id: &str, attempt_id: &str) -> PathBuf {
+        self.attempt_dir(project_id, issue_id, attempt_id)
+            .join("blocked-gates")
+    }
+
+    fn quality_bypass_audits_root(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> PathBuf {
+        self.attempt_dir(project_id, issue_id, attempt_id)
+            .join("quality-bypass-audits")
+    }
+
     fn coding_attempts_root(&self, project_id: &str, issue_id: &str) -> PathBuf {
         self.paths
             .issue_lifecycle_root(project_id, issue_id)
@@ -1018,6 +1270,77 @@ fn list_json_records<T: DeserializeOwned>(path: &Path) -> Result<Vec<T>, Product
 
 fn count_json_files(path: &Path) -> Result<usize, ProductStoreError> {
     Ok(json_file_paths(path)?.len())
+}
+
+fn next_text_file_sequence(path: &Path, purpose: &str) -> Result<usize, ProductStoreError> {
+    if !path_exists(path)? {
+        return Ok(1);
+    }
+    let prefix = format!("{purpose}_");
+    let mut count = 0;
+    for entry in fs::read_dir(path)
+        .map_err(|error| ProductStoreError::Io(format!("read {}: {error}", path.display())))?
+    {
+        let entry = entry.map_err(|error| {
+            ProductStoreError::Io(format!("read {} entry: {error}", path.display()))
+        })?;
+        let file_type = entry.file_type().map_err(|error| {
+            ProductStoreError::Io(format!(
+                "read {} entry type: {error}",
+                entry.path().display()
+            ))
+        })?;
+        if !file_type.is_file() {
+            continue;
+        }
+        let Some(file_name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if file_name.starts_with(&prefix) && file_name.ends_with(".txt") {
+            count += 1;
+        }
+    }
+    Ok(count + 1)
+}
+
+fn coding_stage_dir_name(stage: &CodingExecutionStage) -> &'static str {
+    match stage {
+        CodingExecutionStage::PrepareContext => "prepare_context",
+        CodingExecutionStage::WorktreePrepare => "worktree_prepare",
+        CodingExecutionStage::Coding => "coding",
+        CodingExecutionStage::Testing => "testing",
+        CodingExecutionStage::CodeReview => "code_review",
+        CodingExecutionStage::Rework => "rework",
+        CodingExecutionStage::ReviewRequest => "review_request",
+        CodingExecutionStage::InternalPrReview => "internal_pr_review",
+        CodingExecutionStage::FinalConfirm => "final_confirm",
+    }
+}
+
+fn matching_open_blocked_gate_path(
+    gates_root: &Path,
+    input: &CreateBlockedGateInput,
+) -> Result<Option<PathBuf>, ProductStoreError> {
+    for path in json_file_paths(gates_root)? {
+        let record: BlockedGateRecord = read_json(&path)?;
+        if record.status == BlockedGateStatus::Open
+            && record.attempt_id == input.attempt_id
+            && record.node_id.as_ref() == input.node_id.as_ref()
+            && record.gate.stage.as_ref() == Some(&input.stage)
+            && record.gate.reason_code.as_ref() == input.reason_code.as_ref()
+        {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
+
+fn merge_unique_strings(target: &mut Vec<String>, source: Vec<String>) {
+    for value in source {
+        if !target.iter().any(|existing| existing == &value) {
+            target.push(value);
+        }
+    }
 }
 
 fn json_file_paths(path: &Path) -> Result<Vec<PathBuf>, ProductStoreError> {
@@ -1114,5 +1437,189 @@ fn remove_dir_all_if_exists(path: &Path) -> Result<(), ProductStoreError> {
             "remove {}: {error}",
             path.display()
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::product::coding_models::{
+        CodingGateAction, CodingGateActionType, CodingProviderRole, TestPlan, TestPlanRiskLevel,
+        TestPlanStep, TestPlanTool,
+    };
+    use crate::product::models::ProviderName;
+
+    const PROJECT_ID: &str = "project_0001";
+    const ISSUE_ID: &str = "issue_0001";
+    const WORK_ITEM_ID: &str = "work_item_0001";
+
+    fn setup() -> (TempDir, CodingAttemptStore, CodingExecutionAttempt) {
+        let tmp = TempDir::new().unwrap();
+        let store = CodingAttemptStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
+        let attempt = store
+            .create_attempt(CreateCodingAttemptInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                work_item_id: WORK_ITEM_ID.to_string(),
+                base_branch: "main".to_string(),
+                branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+                worktree_path: None,
+                provider_config_snapshot: ProviderConfigSnapshot {
+                    author: ProviderName::Codex,
+                    reviewer: Some(ProviderName::ClaudeCode),
+                    review_rounds: 1,
+                },
+                max_auto_rework: 2,
+            })
+            .unwrap();
+        (tmp, store, attempt)
+    }
+
+    #[test]
+    fn persists_test_plan_raw_output_and_blocked_gate() {
+        let (_tmp, store, attempt) = setup();
+
+        let raw_ref = store
+            .save_provider_raw_output(
+                &attempt.id,
+                CodingExecutionStage::Testing,
+                "plan_tests",
+                "raw test plan output",
+            )
+            .unwrap();
+        assert_eq!(raw_ref, "provider-raw/testing/plan_tests_0001.txt");
+
+        let plan = TestPlan {
+            id: "test_plan_0001".to_string(),
+            attempt_id: attempt.id.clone(),
+            summary: "unit tests".to_string(),
+            context_warnings: Vec::new(),
+            assumptions: Vec::new(),
+            steps: vec![TestPlanStep {
+                id: "unit".to_string(),
+                title: "Unit tests".to_string(),
+                intent: "verify unit behavior".to_string(),
+                required: true,
+                tool: TestPlanTool::RunCommand,
+                risk_level: TestPlanRiskLevel::Low,
+                command_or_tool_input: serde_json::json!({"command": ["true"]}),
+                evidence_expectation: "exit 0".to_string(),
+                related_requirements: Vec::new(),
+                related_design_constraints: Vec::new(),
+                related_work_item_tasks: Vec::new(),
+            }],
+            created_at: "2026-06-10T00:00:00Z".to_string(),
+            raw_provider_output_ref: Some(raw_ref.clone()),
+        };
+        store.save_test_plan(&plan).unwrap();
+        let plans = store
+            .list_test_plans(PROJECT_ID, ISSUE_ID, &attempt.id)
+            .unwrap();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(
+            plans[0].raw_provider_output_ref.as_deref(),
+            Some(raw_ref.as_str())
+        );
+
+        let gate = store
+            .create_blocked_gate(CreateBlockedGateInput {
+                attempt_id: attempt.id.clone(),
+                stage: CodingExecutionStage::Testing,
+                node_id: Some("coding_node_0001".to_string()),
+                role: Some(CodingProviderRole::Tester),
+                title: "Testing blocked".to_string(),
+                description: "required step missing".to_string(),
+                reason_code: Some("missing_required_steps".to_string()),
+                evidence_refs: vec!["testing_report_0001.json".to_string()],
+                raw_provider_output_ref: Some(raw_ref),
+                available_actions: vec![CodingGateAction {
+                    action_id: "retry_test_plan".to_string(),
+                    label: "重试测试计划".to_string(),
+                    action_type: CodingGateActionType::RetryTestPlan,
+                }],
+            })
+            .unwrap();
+        let open = store
+            .list_open_blocked_gates(PROJECT_ID, ISSUE_ID, &attempt.id)
+            .unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(
+            open[0].reason_code.as_deref(),
+            Some("missing_required_steps")
+        );
+        assert_eq!(open[0].evidence_refs, vec!["testing_report_0001.json"]);
+        assert_eq!(
+            open[0].available_actions[0].action_type,
+            CodingGateActionType::RetryTestPlan
+        );
+
+        store
+            .resolve_blocked_gate(PROJECT_ID, ISSUE_ID, &attempt.id, &gate.gate_id)
+            .unwrap();
+        let open = store
+            .list_open_blocked_gates(PROJECT_ID, ISSUE_ID, &attempt.id)
+            .unwrap();
+        assert!(open.is_empty());
+    }
+
+    #[test]
+    fn blocked_gate_creation_is_idempotent_for_same_node_and_reason() {
+        let (_tmp, store, attempt) = setup();
+        let first = store
+            .create_blocked_gate(CreateBlockedGateInput {
+                attempt_id: attempt.id.clone(),
+                stage: CodingExecutionStage::Testing,
+                node_id: Some("coding_node_0001".to_string()),
+                role: Some(CodingProviderRole::Tester),
+                title: "Testing blocked".to_string(),
+                description: "required step missing".to_string(),
+                reason_code: Some("missing_required_steps".to_string()),
+                evidence_refs: vec!["testing_report_0001.json".to_string()],
+                raw_provider_output_ref: None,
+                available_actions: vec![CodingGateAction {
+                    action_id: "retry_test_plan".to_string(),
+                    label: "重试测试计划".to_string(),
+                    action_type: CodingGateActionType::RetryTestPlan,
+                }],
+            })
+            .unwrap();
+
+        let second = store
+            .create_blocked_gate(CreateBlockedGateInput {
+                attempt_id: attempt.id.clone(),
+                stage: CodingExecutionStage::Testing,
+                node_id: Some("coding_node_0001".to_string()),
+                role: Some(CodingProviderRole::Tester),
+                title: "Testing still blocked".to_string(),
+                description: "required step still missing".to_string(),
+                reason_code: Some("missing_required_steps".to_string()),
+                evidence_refs: vec![
+                    "testing_report_0001.json".to_string(),
+                    "testing_report_0002.json".to_string(),
+                ],
+                raw_provider_output_ref: None,
+                available_actions: vec![CodingGateAction {
+                    action_id: "rerun_missing_steps".to_string(),
+                    label: "补跑缺失步骤".to_string(),
+                    action_type: CodingGateActionType::RerunMissingSteps,
+                }],
+            })
+            .unwrap();
+
+        assert_eq!(second.gate_id, first.gate_id);
+        let open = store
+            .list_open_blocked_gates(PROJECT_ID, ISSUE_ID, &attempt.id)
+            .unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(
+            open[0].evidence_refs,
+            vec!["testing_report_0001.json", "testing_report_0002.json"]
+        );
+        assert_eq!(
+            open[0].available_actions[0].action_type,
+            CodingGateActionType::RerunMissingSteps
+        );
     }
 }

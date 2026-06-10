@@ -231,6 +231,15 @@ fn testing_and_review_reports_preserve_backend_evidence() {
         backend_verified: true,
         started_at: "2026-05-23T00:01:00Z".to_string(),
         completed_at: Some("2026-05-23T00:02:00Z".to_string()),
+        plan_id: None,
+        plan_summary: None,
+        steps: Vec::new(),
+        unplanned_commands: Vec::new(),
+        unplanned_evidence: Vec::new(),
+        missing_required_steps: Vec::new(),
+        skipped_required_steps: Vec::new(),
+        context_warnings: Vec::new(),
+        raw_provider_output_ref: None,
     };
     let finding = ReviewFinding {
         severity: FindingSeverity::Warning,
@@ -239,6 +248,10 @@ fn testing_and_review_reports_preserve_backend_evidence() {
         message: "需要补充边界测试".to_string(),
         required_action: Some("添加 n=0 用例".to_string()),
         source_stage: CodingExecutionStage::CodeReview,
+        evidence: Vec::new(),
+        related_requirements: Vec::new(),
+        related_design_constraints: Vec::new(),
+        related_work_item_tasks: Vec::new(),
     };
     let code_review = CodeReviewReport {
         id: "code_review_0001".to_string(),
@@ -250,6 +263,7 @@ fn testing_and_review_reports_preserve_backend_evidence() {
         diff_refs: vec!["diff_0001".to_string()],
         summary: "需要返工".to_string(),
         created_at: "2026-05-23T00:03:00Z".to_string(),
+        raw_provider_output_ref: None,
     };
     let internal = InternalPrReview {
         id: "internal_review_0001".to_string(),
@@ -264,6 +278,7 @@ fn testing_and_review_reports_preserve_backend_evidence() {
         diff_refs: vec!["diff_0001".to_string()],
         summary: "可以合入".to_string(),
         created_at: "2026-05-23T00:04:00Z".to_string(),
+        raw_provider_output_ref: None,
     };
 
     assert_eq!(
@@ -332,6 +347,9 @@ fn review_request_timeline_and_gate_actions_use_stable_wire_values() {
             label: "重试 Push".to_string(),
             action_type: CodingGateActionType::RetryPush,
         }],
+        reason_code: None,
+        evidence_refs: Vec::new(),
+        raw_provider_output_ref: None,
     };
 
     assert_eq!(
