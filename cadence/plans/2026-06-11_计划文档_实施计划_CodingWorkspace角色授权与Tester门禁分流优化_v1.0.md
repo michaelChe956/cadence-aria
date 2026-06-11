@@ -24,8 +24,6 @@
 - Modify: `src/product/coding_attempt_store.rs`
   - 读取旧 `role-provider-config.json` 时补默认 permission modes。
   - 更新 role provider config 持久化。
-- Modify: `src/product/coding_workspace_runner.rs`
-  - 扩展 `CodingRunnerCommand::ProviderSelect` 或新增 permission mode 命令。
 - Modify: `src/product/coding_workspace_engine.rs`
   - 所有 provider run 按 role 读取 permission mode。
   - 记录 auto approval 事件。
@@ -47,6 +45,12 @@
   - 传递 permission mode 更新 handler。
 - Modify: `web/src/pages/CodingWorkspacePage.test.tsx`
   - 覆盖前端权限模式 UI、blocked gate 文案。
+- Modify: `web/src/hooks/useCodingWorkspaceWs.test.tsx`
+  - 补齐 session snapshot 中的 `permission_modes` 测试数据。
+- Modify: `web/src/state/coding-workspace-store.test.ts`
+  - 补齐 role provider config fixture 的 `permission_modes`。
+- Modify: `web/src/api/types.test.ts`
+  - 补齐 API 类型 fixture 的 `permission_modes`。
 - Modify: `tests/it_product/product_coding_workspace_engine.rs`
   - 覆盖 role permission mode、Tester repair、Testing routing。
 - Modify: `tests/it_web/web_coding_ws_handler.rs`
@@ -154,6 +158,26 @@ pub struct CodingRoleProviderConfigSnapshot {
 permission_modes: CodingRolePermissionModes::default(),
 ```
 
+同步修复当前仓库内已有 `CodingRoleProviderConfigSnapshot { ... }` 字面量。执行者必须在以下文件中给每个结构体字面量补 `permission_modes: CodingRolePermissionModes::default(),`，并在对应 `use cadence_aria::product::coding_models::{ ... }` 中加入 `CodingRolePermissionModes`：
+
+- `tests/it_product/product_coding_workspace_engine.rs`
+- `tests/it_product/product_coding_attempt_store.rs`
+- `tests/it_product/product_coding_models.rs`
+
+补齐后的字面量形状：
+
+```rust
+CodingRoleProviderConfigSnapshot {
+    coder: ProviderName::Codex,
+    tester: ProviderName::Fake,
+    analyst: ProviderName::Codex,
+    code_reviewer: ProviderName::Fake,
+    internal_reviewer: ProviderName::Fake,
+    review_rounds: 1,
+    permission_modes: CodingRolePermissionModes::default(),
+}
+```
+
 在 `impl CodingRoleProviderConfigSnapshot` 中增加：
 
 ```rust
@@ -207,6 +231,7 @@ fn role_permission_modes_are_persisted_with_role_provider_config() {
                 reviewer: Some(ProviderName::ClaudeCode),
                 review_rounds: 1,
             },
+            max_auto_rework: 2,
         })
         .expect("create attempt");
 
@@ -265,6 +290,8 @@ git commit -m "feat: add coding role permission modes"
 
 - [ ] **Step 1: 写失败测试，证明 Tester 使用 role permission mode**
 
+在 `tests/it_product/product_coding_workspace_engine.rs` 的 `cadence_aria::product::coding_models` import 中加入 `CodingProviderPermissionMode`。
+
 在 `tests/it_product/product_coding_workspace_engine.rs` 的 `SessionInputCapturingProvider` 相关区域新增：
 
 ```rust
@@ -310,10 +337,6 @@ async fn coding_tester_uses_role_permission_mode_auto() {
             &attempt,
             &provider,
             &CodingExecutionContext {
-                issue_title: "issue".to_string(),
-                issue_body: "body".to_string(),
-                story_spec_markdown: None,
-                design_spec_markdown: None,
                 work_item_markdown: Some("Work Item".to_string()),
                 verification_commands: Vec::new(),
             },
@@ -470,7 +493,6 @@ git commit -m "feat: apply coding role permission modes"
 
 **Files:**
 
-- Modify: `src/product/coding_workspace_runner.rs`
 - Modify: `src/web/coding_ws_handler.rs`
 - Modify: `web/src/api/types.ts`
 - Modify: `web/src/hooks/useCodingWorkspaceWs.ts`
@@ -478,8 +500,13 @@ git commit -m "feat: apply coding role permission modes"
 - Modify: `web/src/pages/CodingWorkspacePage.tsx`
 - Test: `tests/it_web/web_coding_ws_handler.rs`
 - Test: `web/src/pages/CodingWorkspacePage.test.tsx`
+- Test: `web/src/hooks/useCodingWorkspaceWs.test.tsx`
+- Test: `web/src/state/coding-workspace-store.test.ts`
+- Test: `web/src/api/types.test.ts`
 
 - [ ] **Step 1: 写后端 WS 失败测试**
+
+在 `tests/it_web/web_coding_ws_handler.rs` 的 `cadence_aria::product::coding_models` import 中加入 `CodingProviderPermissionMode`。
 
 在 `tests/it_web/web_coding_ws_handler.rs` 新增：
 
@@ -627,7 +654,25 @@ roleProviderConfigSnapshot: {
 },
 ```
 
-新增断言：
+在 `mockCodingWs()` 返回对象中新增：
+
+```ts
+sendPermissionModeSelect: vi.fn(),
+```
+
+在 `web/src/hooks/useCodingWorkspaceWs.test.tsx`、`web/src/state/coding-workspace-store.test.ts`、`web/src/api/types.test.ts` 中，将所有 `role_provider_config_snapshot` / `roleProviderConfigSnapshot` fixture 补齐相同的 `permission_modes` 字段：
+
+```ts
+permission_modes: {
+  coder: "supervised",
+  tester: "auto",
+  analyst: "auto",
+  code_reviewer: "supervised",
+  internal_reviewer: "supervised",
+},
+```
+
+新增 role panel 断言：
 
 ```ts
 expect(screen.getByTestId("coding-provider-config-panel")).toHaveTextContent("Auto");
@@ -723,14 +768,17 @@ onPermissionModeSelect={api.sendPermissionModeSelect}
 ```bash
 cargo test --locked --test it_web coding_ws_permission_mode_select_updates_role_config
 pnpm -C web test -- CodingWorkspacePage.test.tsx
+pnpm -C web test -- useCodingWorkspaceWs.test.tsx
+pnpm -C web test -- coding-workspace-store.test.ts
+pnpm -C web test -- types.test.ts
 ```
 
-Expected: 后端 WS 测试通过；前端页面测试通过。
+Expected: 后端 WS 测试通过；前端页面、hook、store、API type 测试通过。
 
 - [ ] **Step 8: Commit Task 3**
 
 ```bash
-git add src/product/coding_workspace_runner.rs src/web/coding_ws_handler.rs web/src/api/types.ts web/src/hooks/useCodingWorkspaceWs.ts web/src/components/coding-workspace/CodingProviderConfigPanel.tsx web/src/pages/CodingWorkspacePage.tsx web/src/pages/CodingWorkspacePage.test.tsx tests/it_web/web_coding_ws_handler.rs
+git add src/web/coding_ws_handler.rs web/src/api/types.ts web/src/hooks/useCodingWorkspaceWs.ts web/src/components/coding-workspace/CodingProviderConfigPanel.tsx web/src/pages/CodingWorkspacePage.tsx web/src/pages/CodingWorkspacePage.test.tsx web/src/hooks/useCodingWorkspaceWs.test.tsx web/src/state/coding-workspace-store.test.ts web/src/api/types.test.ts tests/it_web/web_coding_ws_handler.rs
 git commit -m "feat: configure coding role permission modes"
 ```
 
@@ -809,13 +857,51 @@ pub fn build_tester_execute_repair_prompt(
 
 - [ ] **Step 3: 写集成失败测试，证明 Markdown plan 会 repair 后通过**
 
-在 `tests/it_product/product_tester_agent_loop.rs` 新增 scripted provider 输出三段：
+在 `tests/it_product/product_tester_agent_loop.rs` 顶部把 import 改为包含 `VecDeque`：
+
+```rust
+use std::collections::VecDeque;
+use std::fs;
+use std::sync::{Arc, Mutex};
+```
+
+在同一文件新增测试：
 
 ```rust
 #[tokio::test]
 async fn tester_repairs_markdown_plan_output_before_blocking() {
-    let (store, attempt, engine, mut command_rx) = tester_engine_fixture();
-    let provider = ScriptedTesterProvider {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            work_item_id: "work_item_0001".to_string(),
+            base_branch: "main".to_string(),
+            branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+            worktree_path: Some(worktree),
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Fake,
+                reviewer: Some(ProviderName::Fake),
+                review_rounds: 1,
+            },
+            max_auto_rework: 2,
+        })
+        .expect("create attempt");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    let (event_tx, _event_rx) = mpsc::channel(64);
+    let (_command_tx, mut command_rx) = mpsc::channel(64);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx);
+    let provider = RepairingTesterProvider {
         outputs: Mutex::new(VecDeque::from([
             "## 最终测试报告\n无法执行测试".to_string(),
             r#"{"summary":"repaired plan","steps":[{"id":"unit","title":"Unit","intent":"verify unit","required":true,"tool":"provider_managed","risk_level":"low","command_or_tool_input":{},"evidence_expectation":"provider evidence"}]}"#.to_string(),
@@ -829,10 +915,6 @@ async fn tester_repairs_markdown_plan_output_before_blocking() {
             &attempt,
             &provider,
             &CodingExecutionContext {
-                issue_title: "issue".to_string(),
-                issue_body: "body".to_string(),
-                story_spec_markdown: None,
-                design_spec_markdown: None,
                 work_item_markdown: Some("Work Item".to_string()),
                 verification_commands: Vec::new(),
             },
@@ -854,7 +936,68 @@ async fn tester_repairs_markdown_plan_output_before_blocking() {
 }
 ```
 
-在 `tests/it_product/product_tester_agent_loop.rs` 中创建 `tester_engine_fixture()` helper，返回 `(CodingAttemptStore, CodingExecutionAttempt, CodingWorkspaceEngine, mpsc::Receiver<CodingRunnerCommand>)`；创建 `ScriptedTesterProvider` fixture，字段为 `outputs: Mutex<VecDeque<String>>` 和 `captured_prompts: Arc<Mutex<Vec<String>>>`。
+在 `tests/it_product/product_tester_agent_loop.rs` 现有 `ScriptedTesterProvider` 下方新增独立 fixture，避免和当前文件已有 provider 重名：
+
+```rust
+struct RepairingTesterProvider {
+    outputs: Mutex<VecDeque<String>>,
+    captured_prompts: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for RepairingTesterProvider {
+    fn supports_provider_driven_testing(&self) -> bool {
+        true
+    }
+
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.captured_prompts
+            .lock()
+            .expect("prompts")
+            .push(input.prompt);
+        let output = self
+            .outputs
+            .lock()
+            .expect("outputs")
+            .pop_front()
+            .expect("scripted tester output");
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let (command_tx, _command_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            if cancel.is_cancelled() {
+                return;
+            }
+            if event_tx
+                .send(ProviderEvent::TextDelta {
+                    content: output.clone(),
+                })
+                .await
+                .is_err()
+            {
+                return;
+            }
+            if cancel.is_cancelled() {
+                return;
+            }
+            let _ = event_tx
+                .send(ProviderEvent::Completed {
+                    full_output: output,
+                    provider_session_id: None,
+                })
+                .await;
+        });
+
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+}
+```
 
 - [ ] **Step 4: 实现 plan repair flow**
 
@@ -868,31 +1011,37 @@ let plan = match parse_test_plan_payload(&attempt.id, &plan_id, &plan_output, So
     }
     Err(first_error) => {
         let repair_prompt = build_tester_plan_repair_prompt(&plan_output, &first_error.to_string());
+        let repair_adapter_input = AdapterInput {
+            provider_type: provider_type_for_name(&tester_provider),
+            role: AdapterRole::Reviewer,
+            worktree_path: Some(worktree_path.to_string_lossy().to_string()),
+            prompt: repair_prompt,
+            context_files: Vec::new(),
+            output_schema: "coding_workspace_test_plan_json".to_string(),
+            timeout: options.timeout.as_secs().max(1),
+            max_retries: 0,
+        };
+        let repair_input = StreamingProviderInput {
+            provider_type: repair_adapter_input.provider_type.clone(),
+            role: repair_adapter_input.role.clone(),
+            prompt: repair_adapter_input.prompt.clone(),
+            working_dir: worktree_path.clone(),
+            workspace_session_id: Some(attempt.id.clone()),
+            resume_provider_session_id: None,
+            permission_mode: role_permission_mode_for_attempt(
+                &self.store,
+                &attempt,
+                CodingProviderRole::Tester,
+            )?,
+            env_vars: BTreeMap::new(),
+            timeout_secs: repair_adapter_input.timeout,
+        };
         let repair_output = self.run_provider_stream_to_completion(CodingProviderStreamRun {
             attempt: &attempt,
             node_id: &node.id,
             provider,
-            legacy_input: &AdapterInput {
-                provider_type: provider_type_for_name(&tester_provider),
-                role: AdapterRole::Reviewer,
-                worktree_path: Some(worktree_path.to_string_lossy().to_string()),
-                prompt: repair_prompt.clone(),
-                context_files: Vec::new(),
-                output_schema: "coding_workspace_test_plan_json".to_string(),
-                timeout: options.timeout.as_secs().max(1),
-                max_retries: 0,
-            },
-            input: StreamingProviderInput {
-                provider_type: provider_type_for_name(&tester_provider),
-                role: AdapterRole::Reviewer,
-                prompt: repair_prompt,
-                working_dir: worktree_path.clone(),
-                workspace_session_id: Some(attempt.id.clone()),
-                resume_provider_session_id: None,
-                permission_mode: role_permission_mode_for_attempt(&self.store, &attempt, CodingProviderRole::Tester)?,
-                env_vars: BTreeMap::new(),
-                timeout_secs: options.timeout.as_secs().max(1),
-            },
+            legacy_input: &repair_adapter_input,
+            input: repair_input,
             provider_name: &tester_provider,
             provider_role: CodingProviderRole::Tester,
             command_rx,
@@ -940,9 +1089,108 @@ async fn block_invalid_test_plan(
 
 - [ ] **Step 5: 实现 execute repair/rerun**
 
-在 `build_plan_based_testing_report` 后，当 `missing_required_steps` 非空且当前 execution 尚未 repair 时，运行一次 `build_tester_execute_repair_prompt`，解析 `step_results` 后重建 report。
+在 `execute_test_plan` 完成并保存 `execute_raw_ref` 后，把当前 report 构建改为可 repair 的两段式。先用 clone 构建初始 report，避免 `step_results` / `unplanned_commands` 被 move：
 
-最小实现约束：
+```rust
+let mut report_raw_ref = execute_raw_ref.clone();
+let provider_claim = serde_json::from_str(&full_output).ok();
+let mut report = build_plan_based_testing_report(
+    &report_id,
+    &attempt.id,
+    &report_plan,
+    step_results.clone(),
+    unplanned_commands.clone(),
+    provider_claim,
+    Some(report_raw_ref.clone()),
+);
+report.unplanned_evidence = unplanned_evidence.clone();
+```
+
+当初始 report 缺 required step 且 `blocked_summary.is_none()` 时，运行一次 execute repair：
+
+```rust
+if !report.missing_required_steps.is_empty() && blocked_summary.is_none() {
+    let repair_prompt =
+        build_tester_execute_repair_prompt(&full_output, &report.missing_required_steps);
+    let repair_adapter_input = AdapterInput {
+        provider_type: provider_type_for_name(&tester_provider),
+        role: AdapterRole::Reviewer,
+        worktree_path: Some(worktree_path.to_string_lossy().to_string()),
+        prompt: repair_prompt,
+        context_files: Vec::new(),
+        output_schema: "coding_workspace_test_execution_json".to_string(),
+        timeout: options.timeout.as_secs().max(1),
+        max_retries: 0,
+    };
+    let repair_input = StreamingProviderInput {
+        provider_type: repair_adapter_input.provider_type.clone(),
+        role: repair_adapter_input.role.clone(),
+        prompt: repair_adapter_input.prompt.clone(),
+        working_dir: worktree_path.clone(),
+        workspace_session_id: Some(attempt.id.clone()),
+        resume_provider_session_id: None,
+        permission_mode: role_permission_mode_for_attempt(
+            &self.store,
+            &attempt,
+            CodingProviderRole::Tester,
+        )?,
+        env_vars: BTreeMap::new(),
+        timeout_secs: repair_adapter_input.timeout,
+    };
+    let repair_output = self
+        .run_provider_stream_to_completion(CodingProviderStreamRun {
+            attempt: &attempt,
+            node_id: &node.id,
+            provider,
+            legacy_input: &repair_adapter_input,
+            input: repair_input,
+            provider_name: &tester_provider,
+            provider_role: CodingProviderRole::Tester,
+            command_rx,
+            allow_legacy_stream_fallback: false,
+        })
+        .await?;
+    let repair_raw_ref = self.store.save_provider_raw_output(
+        &attempt.id,
+        CodingExecutionStage::Testing,
+        "execute_test_plan_repair",
+        &repair_output,
+    )?;
+    report_raw_ref = repair_raw_ref.clone();
+    for provider_step_result in parse_testing_step_results_from_provider_output(&repair_output) {
+        if !step_results
+            .iter()
+            .any(|existing| existing.step_id == provider_step_result.step_id)
+        {
+            step_results.push(provider_step_result);
+        }
+    }
+    let repair_provider_claim = serde_json::from_str(&repair_output).ok();
+    report = build_plan_based_testing_report(
+        &report_id,
+        &attempt.id,
+        &report_plan,
+        step_results.clone(),
+        unplanned_commands.clone(),
+        repair_provider_claim,
+        Some(report_raw_ref.clone()),
+    );
+    report.unplanned_evidence = unplanned_evidence.clone();
+}
+```
+
+保留 blocked summary 覆盖：
+
+```rust
+if let Some(summary) = blocked_summary {
+    report.overall_status = TestingOverallStatus::Blocked;
+    report.context_warnings.push(summary);
+}
+```
+
+后续保存 report、chat entry、`TestingReportUpdate` 和 blocked gate 的代码继续使用 `report`；blocked gate 的 `raw_provider_output_ref` 使用 `Some(report_raw_ref)`。
+
+实现约束：
 
 - 只 repair 一次。
 - repair raw output 保存为 `execute_test_plan_repair_0001.txt`。
@@ -1247,6 +1495,8 @@ impl StreamingProviderAdapter for TestingBlockedProvider {
 ```
 
 - [ ] **Step 2: 写 product helper 测试**
+
+在 `tests/it_product/product_coding_workspace_engine.rs` 的 `cadence_aria::product::coding_models` import 中加入 `TestCommandStatus`、`TestingReport`、`TestingStepResult`。
 
 在 `tests/it_product/product_coding_workspace_engine.rs` 新增：
 
