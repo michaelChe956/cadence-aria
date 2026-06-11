@@ -288,7 +288,7 @@ describe("useWorkspaceWs", () => {
 
     const promptEntry = useWorkspaceStore
       .getState()
-      .chatEntries.find((entry) => entry.id === "execution_event:timeline_node_001_prompt");
+      .chatEntries.find((entry) => entry.id === "timeline_node_001:provider-prompt");
     expect(promptEntry?.metadata?.output).toBeUndefined();
     expect(JSON.stringify(promptEntry)).not.toContain(hugePrompt.slice(0, 100));
     expect(promptEntry).toEqual(
@@ -298,6 +298,117 @@ describe("useWorkspaceWs", () => {
         has_full_content: true,
       }),
     );
+  });
+
+  it("replaces previous realtime provider prompt entry for the same node", () => {
+    const harness = renderWorkspaceHook("session_prompt_replace");
+    const firstPrompt = "delta prompt";
+    const secondPrompt = "full prompt ".repeat(200);
+
+    act(() => {
+      harness.ws.receive({
+        type: "session_state",
+        session_id: "session_prompt_replace",
+        workspace_type: "design",
+        stage: "revision",
+        superpowers_enabled: false,
+        openspec_enabled: false,
+        messages: [],
+        checkpoints: [],
+        artifact: null,
+        providers: { author: "codex", reviewer: "claude_code" },
+        timeline_nodes: [
+          {
+            node_id: "timeline_node_revision",
+            node_type: "revision",
+            agent: "codex",
+            stage: "revision",
+            round: 1,
+            status: "active",
+            title: "返修 Round 1",
+            summary: null,
+            started_at: "2026-05-21T10:00:00Z",
+            completed_at: null,
+            duration_ms: null,
+            artifact_ref: null,
+            provider_config_snapshot: {
+              author: "codex",
+              reviewer: "claude_code",
+              review_rounds: 1,
+            },
+          },
+        ],
+        active_node_id: "timeline_node_revision",
+        artifact_versions: [],
+        timeline_node_details: {
+          timeline_node_revision: {
+            node_id: "timeline_node_revision",
+            session_id: "session_prompt_replace",
+            node_type: "revision",
+            status: "active",
+            agent_role: "author",
+            provider: { name: "codex", model: "codex" },
+            prompt: null,
+            messages: [],
+            streaming_content: "",
+            execution_events: [],
+            permission_events: [],
+            verdict: null,
+            artifact_ref: null,
+            is_revision: true,
+            base_artifact_ref: null,
+            started_at: "2026-05-21T10:00:00Z",
+            ended_at: null,
+          },
+        },
+        active_run_id: "run-001",
+      });
+      harness.ws.receive({
+        type: "execution_event",
+        event: {
+          event_id: "revision_prompt_delta",
+          node_id: "timeline_node_revision",
+          agent: "codex",
+          kind: "output",
+          status: "started",
+          title: "Provider Prompt",
+          detail: "发送给 Workspace provider 的完整提示词",
+          command: null,
+          cwd: null,
+          output: firstPrompt,
+          exit_code: null,
+        },
+      });
+      harness.ws.receive({
+        type: "execution_event",
+        event: {
+          event_id: "revision_prompt_full",
+          node_id: "timeline_node_revision",
+          agent: "codex",
+          kind: "output",
+          status: "started",
+          title: "Provider Prompt",
+          detail: "发送给 Workspace provider 的完整提示词",
+          command: null,
+          cwd: null,
+          output: secondPrompt,
+          exit_code: null,
+        },
+      });
+    });
+
+    const promptEntries = useWorkspaceStore
+      .getState()
+      .chatEntries.filter(
+        (entry) => entry.type === "execution_event" && entry.content.includes("Provider Prompt"),
+      );
+    expect(promptEntries).toHaveLength(1);
+    expect(promptEntries[0]).toMatchObject({
+      id: "timeline_node_revision:provider-prompt",
+      content: `返修 Round 1 · Provider Prompt · 约 ${Math.ceil(secondPrompt.length / 1024)}KB`,
+      content_size: secondPrompt.length,
+      metadata: expect.objectContaining({ event_id: "revision_prompt_full" }),
+    });
   });
 
   it("annotates reviewer stream and tool calls with the reviewer provider", () => {

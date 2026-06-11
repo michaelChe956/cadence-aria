@@ -56,11 +56,20 @@ vi.mock("../components/shared/MonacoDiffViewer", () => ({
 
 type CodingWsApi = ReturnType<typeof useCodingWorkspaceWs>;
 
+const DEFAULT_PERMISSION_MODES = {
+  coder: "supervised",
+  tester: "auto",
+  analyst: "auto",
+  code_reviewer: "supervised",
+  internal_reviewer: "supervised",
+} as const;
+
 function mockCodingWs(overrides: Partial<CodingWsApi> = {}) {
   const api: CodingWsApi = {
     startCoding: vi.fn(),
     sendContextNote: vi.fn(),
     sendProviderSelect: vi.fn(),
+    sendPermissionModeSelect: vi.fn(),
     confirmStageGate: vi.fn(),
     respondPermission: vi.fn(),
     respondChoice: vi.fn(),
@@ -161,6 +170,49 @@ describe("CodingWorkspacePage", () => {
 
     expect(screen.getByTestId("coding-artifact-tabs")).toHaveTextContent("passed");
     expect(screen.getByTestId("coding-status-bar")).toHaveTextContent("testing");
+  });
+
+  it("renders tester assistant chat entries as bubbles", () => {
+    mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      attemptId: "coding_attempt_0001",
+      status: "running",
+      stage: "testing",
+      timelineNodes: [
+        {
+          id: "coding_node_0003",
+          attempt_id: "coding_attempt_0001",
+          stage: "testing",
+          title: "执行测试",
+          status: "running",
+          agent_role: "tester",
+          summary: null,
+          started_at: "2026-06-10T00:00:00Z",
+          completed_at: null,
+          artifact_refs: [],
+        },
+      ],
+      chatEntries: [
+        {
+          id: "tester_entry_0001",
+          type: "provider_stream",
+          role: "tester",
+          content: "TestPlan: unit checks",
+          timestamp: "2026-06-10T00:00:01Z",
+          node_id: "coding_node_0003",
+          metadata: {
+            phase: "plan_tests",
+            test_plan_id: "test_plan_0001",
+          },
+        },
+      ],
+    });
+
+    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+
+    const chatList = screen.getByTestId("chat-entry-list");
+    expect(chatList).toHaveTextContent("Tester");
+    expect(chatList).toHaveTextContent("TestPlan: unit checks");
   });
 
   it("loads and renders the coding attempt git diff in result tabs", async () => {
@@ -362,9 +414,45 @@ describe("CodingWorkspacePage", () => {
 
     expect(screen.getByTestId("coding-pending-gate")).toHaveTextContent("需要人工处理");
 
-    await userEvent.click(screen.getByRole("button", { name: "接受风险" }));
+    await userEvent.click(screen.getByRole("button", { name: "中止 Attempt" }));
 
-    expect(api.respondGate).toHaveBeenCalledWith("gate_0001", "accept_risk", undefined);
+    expect(api.respondGate).toHaveBeenCalledWith("gate_0001", "abort", undefined);
+  });
+
+  it("renders tester contract blocked gate as blocked instead of failed test", async () => {
+    mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      attemptId: "coding_attempt_0001",
+      status: "blocked",
+      stage: "testing",
+      pendingGates: [
+        {
+          gate_id: "gate_0001",
+          kind: "blocked",
+          title: "Testing blocked",
+          description: "TestPlan parse failed",
+          stage: "testing",
+          role: "tester",
+          reason_code: "test_plan_missing_json",
+          evidence_refs: ["testing_report_0001.json"],
+          raw_provider_output_ref: "provider-raw/testing/plan_tests_0001.txt",
+          available_actions: [
+            {
+              action_id: "retry_test_plan",
+              label: "重试测试计划",
+              action_type: "retry_test_plan",
+            },
+          ],
+        },
+      ],
+    });
+
+    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+
+    const gate = screen.getByTestId("coding-pending-gate");
+    expect(gate).toHaveTextContent("Tester 未返回测试计划 JSON");
+    expect(gate).toHaveTextContent("测试被阻塞");
+    expect(gate).not.toHaveTextContent("测试失败");
   });
 
   it("sends stage gate confirm for confirm-stage pending gate actions", async () => {
@@ -389,6 +477,7 @@ describe("CodingWorkspacePage", () => {
             code_reviewer: "fake",
             internal_reviewer: "fake",
             review_rounds: 1,
+            permission_modes: DEFAULT_PERMISSION_MODES,
           },
           available_actions: [
             {
@@ -431,6 +520,7 @@ describe("CodingWorkspacePage", () => {
             code_reviewer: "fake",
             internal_reviewer: "fake",
             review_rounds: 1,
+            permission_modes: DEFAULT_PERMISSION_MODES,
           },
           available_actions: [
             {
@@ -475,6 +565,13 @@ describe("CodingWorkspacePage", () => {
         code_reviewer: "fake",
         internal_reviewer: "fake",
         review_rounds: 1,
+        permission_modes: {
+          coder: "supervised",
+          tester: "auto",
+          analyst: "auto",
+          code_reviewer: "supervised",
+          internal_reviewer: "supervised",
+        },
       },
     });
 
@@ -482,10 +579,15 @@ describe("CodingWorkspacePage", () => {
 
     expect(screen.getByTestId("coding-provider-config-panel")).toHaveTextContent("Coder");
     expect(screen.getByTestId("coding-provider-config-panel")).toHaveTextContent("Tester");
+    expect(screen.getByTestId("coding-provider-config-panel")).toHaveTextContent("Auto");
 
     await userEvent.click(screen.getByRole("button", { name: "将 Tester 切换为 Codex" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "将 Tester 授权模式切换为 Supervised" }),
+    );
 
     expect(api.sendProviderSelect).toHaveBeenCalledWith("tester", "codex");
+    expect(api.sendPermissionModeSelect).toHaveBeenCalledWith("tester", "supervised");
   });
 
   it("sends coding context notes from the chat input", async () => {
@@ -541,6 +643,141 @@ describe("CodingWorkspacePage", () => {
       "manual tab stays visible",
     );
     expect(screen.getByTestId("coding-artifact-tabs")).not.toHaveTextContent("passed");
+  });
+
+  it("renders plan based testing report details", async () => {
+    mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      attemptId: "coding_attempt_0001",
+      status: "blocked",
+      stage: "testing",
+      activeTab: "tests",
+      testingReport: {
+        id: "testing_report_0001",
+        attempt_id: "coding_attempt_0001",
+        commands: [],
+        overall_status: "blocked",
+        provider_claim: null,
+        backend_verified: true,
+        started_at: "2026-06-10T00:00:00Z",
+        completed_at: "2026-06-10T00:00:01Z",
+        plan_id: "test_plan_0001",
+        plan_summary: "API smoke and security review",
+        steps: [
+          {
+            step_id: "api_smoke",
+            status: "passed",
+            evidence_refs: ["stdout.log"],
+            command: ["cargo", "test", "--locked", "--lib", "api_smoke"],
+            provider_analysis: "API smoke passed",
+          },
+        ],
+        missing_required_steps: ["security"],
+        context_warnings: ["missing_design_spec"],
+        raw_provider_output_ref: "provider-raw/testing/execute_test_plan_0001.txt",
+      },
+    });
+
+    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "运行结果" }));
+
+    const tabs = screen.getByTestId("coding-artifact-tabs");
+    expect(tabs).toHaveTextContent("API smoke and security review");
+    expect(tabs).toHaveTextContent("api_smoke");
+    expect(tabs).toHaveTextContent("missing required: security");
+    expect(tabs).toHaveTextContent("missing_design_spec");
+    expect(tabs).toHaveTextContent("provider-raw/testing/execute_test_plan_0001.txt");
+  });
+
+  it("renders legacy testing report without plan fields", async () => {
+    mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      attemptId: "coding_attempt_0001",
+      status: "running",
+      stage: "testing",
+      activeTab: "tests",
+      testingReport: {
+        id: "testing_report_0001",
+        attempt_id: "coding_attempt_0001",
+        commands: [],
+        overall_status: "passed",
+        provider_claim: null,
+        backend_verified: true,
+        started_at: "2026-06-10T00:00:00Z",
+        completed_at: "2026-06-10T00:00:01Z",
+      },
+    });
+
+    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "运行结果" }));
+
+    const tabs = screen.getByTestId("coding-artifact-tabs");
+    expect(tabs).toHaveTextContent("passed");
+    expect(tabs).not.toHaveTextContent("Test Plan");
+  });
+
+  it("renders blocked gate metadata and sends recovery action", async () => {
+    const api = mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      attemptId: "coding_attempt_0001",
+      status: "blocked",
+      stage: "code_review",
+      pendingGates: [
+        {
+          gate_id: "gate_0001",
+          kind: "blocked",
+          title: "审查输出需要处理",
+          description: "Review payload parse failed",
+          stage: "code_review",
+          role: "code_reviewer",
+          reason_code: "review_payload_parse_error",
+          evidence_refs: ["code_review_0001.json"],
+          raw_provider_output_ref: "provider-raw/code_review/code_review_0001.txt",
+          available_actions: [
+            {
+              action_id: "retry_review",
+              label: "重试审查",
+              action_type: "retry_review",
+            },
+            {
+              action_id: "manual_continue",
+              label: "人工继续",
+              action_type: "manual_continue",
+            },
+          ],
+        },
+      ],
+    });
+
+    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+
+    const gate = screen.getByTestId("coding-pending-gate");
+    expect(gate).toHaveTextContent("review_payload_parse_error");
+    expect(gate).toHaveTextContent("code_review_0001.json");
+    expect(gate).toHaveTextContent("provider-raw/code_review/code_review_0001.txt");
+
+    await userEvent.click(screen.getByRole("button", { name: "重试审查" }));
+
+    expect(api.respondGate).toHaveBeenCalledWith("gate_0001", "retry_review", undefined);
+
+    vi.mocked(api.respondGate).mockClear();
+    await userEvent.click(screen.getByRole("button", { name: "人工继续" }));
+
+    expect(api.respondGate).not.toHaveBeenCalled();
+
+    await userEvent.type(
+      screen.getByPlaceholderText("说明跳过该门禁的原因和后续风险处理"),
+      "人工确认风险可接受，后续补充真实 E2E",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "人工继续" }));
+
+    expect(api.respondGate).toHaveBeenCalledWith(
+      "gate_0001",
+      "manual_continue",
+      "人工确认风险可接受，后续补充真实 E2E",
+    );
   });
 
   it("renders review findings with severity, location, and required action", async () => {

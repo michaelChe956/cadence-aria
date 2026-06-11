@@ -1,5 +1,6 @@
 import { Lock } from "lucide-react";
 import type {
+  CodingProviderPermissionMode,
   CodingProviderRole,
   CodingRoleProviderConfigSnapshot,
   WorkspaceProviderName,
@@ -21,14 +22,24 @@ const PROVIDER_LABELS: Record<WorkspaceProviderName, string> = {
   claude_code: "Claude Code",
 };
 
+const PERMISSION_MODE_LABELS: Record<CodingProviderPermissionMode, string> = {
+  auto: "Auto",
+  supervised: "Supervised",
+};
+
 export function CodingProviderConfigPanel({
   snapshot,
   lockedRole,
   onSelect,
+  onPermissionModeSelect,
 }: {
   snapshot: CodingRoleProviderConfigSnapshot | null;
   lockedRole: CodingProviderRole | null;
   onSelect: (role: CodingProviderRole, provider: WorkspaceProviderName) => void;
+  onPermissionModeSelect: (
+    role: CodingProviderRole,
+    permissionMode: CodingProviderPermissionMode,
+  ) => void;
 }) {
   if (!snapshot) {
     return null;
@@ -42,6 +53,7 @@ export function CodingProviderConfigPanel({
       <div className="grid gap-2 lg:grid-cols-5">
         {ROLES.map(({ role, label }) => {
           const current = snapshot[role];
+          const permissionMode = snapshot.permission_modes[role];
           const locked = lockedRole === role;
           return (
             <div
@@ -70,6 +82,20 @@ export function CodingProviderConfigPanel({
                     className="inline-flex h-7 items-center rounded-md border border-[var(--aria-line)] px-2 text-[11px] font-semibold text-[var(--aria-ink-muted)] hover:bg-[var(--aria-panel-muted)] disabled:opacity-45"
                   >
                     {PROVIDER_LABELS[provider]}
+                  </button>
+                ))}
+              </div>
+              <div className="mt-2 flex min-w-0 flex-wrap gap-1">
+                {(["auto", "supervised"] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    disabled={locked || mode === permissionMode}
+                    onClick={() => onPermissionModeSelect(role, mode)}
+                    aria-label={`将 ${label} 授权模式切换为 ${PERMISSION_MODE_LABELS[mode]}`}
+                    className="inline-flex h-7 items-center rounded-md border border-[var(--aria-line)] px-2 text-[11px] font-semibold text-[var(--aria-ink-muted)] hover:bg-[var(--aria-panel-muted)] disabled:opacity-45"
+                  >
+                    {PERMISSION_MODE_LABELS[mode]}
                   </button>
                 ))}
               </div>

@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef } from "react";
 import type {
+  CodingProviderPermissionMode,
+  CodingProviderRole,
   CodingProviderSelectRole,
   CodingWsInMessage,
   CodingWsOutMessage,
@@ -64,6 +66,13 @@ export function useCodingWorkspaceWs(attemptId: string | null) {
     [sendJson],
   );
 
+  const sendPermissionModeSelect = useCallback(
+    (role: CodingProviderRole, permissionMode: CodingProviderPermissionMode) => {
+      sendJson({ type: "permission_mode_select", role, permission_mode: permissionMode });
+    },
+    [sendJson],
+  );
+
   const confirmStageGate = useCallback(
     (stage: Extract<CodingWsInMessage, { type: "stage_gate_confirm" }>["stage"]) => {
       sendJson({ type: "stage_gate_confirm", stage });
@@ -104,12 +113,22 @@ export function useCodingWorkspaceWs(attemptId: string | null) {
 
   const respondGate = useCallback(
     (gateId: string, actionId: string, extraContext?: string | null) => {
-      sendJson({
+      const trimmedExtraContext = extraContext?.trim() ?? "";
+      if (gateActionRequiresContext(actionId) && !trimmedExtraContext) {
+        useCodingWorkspaceStore
+          .getState()
+          .setGateError(gateId, "coding_gate_extra_context_required");
+        return;
+      }
+      if (!sendJson({
         type: "gate_response",
         gate_id: gateId,
         action_id: actionId,
-        extra_context: extraContext ?? null,
-      });
+        extra_context: trimmedExtraContext ? trimmedExtraContext : null,
+      })) {
+        return;
+      }
+      useCodingWorkspaceStore.getState().markGateSubmitting(gateId);
     },
     [sendJson],
   );
@@ -253,6 +272,7 @@ export function useCodingWorkspaceWs(attemptId: string | null) {
     startCoding,
     sendContextNote,
     sendProviderSelect,
+    sendPermissionModeSelect,
     confirmStageGate,
     respondPermission,
     respondChoice,
@@ -389,6 +409,7 @@ function handleCodingWsMessage(message: CodingWsServerMessage) {
         code: message.code as string,
         message: message.message as string,
       });
+      markSubmittingGateError(message.code as string);
       break;
     case "coding_pong":
       break;
@@ -405,6 +426,17 @@ function permissionRequestEntryId(id: string) {
 
 function choiceRequestEntryId(id: string) {
   return `choice_request:${id}`;
+}
+
+function gateActionRequiresContext(actionId: string) {
+  return actionId === "manual_continue" || actionId === "accept_risk";
+}
+
+function markSubmittingGateError(errorCode: string) {
+  const store = useCodingWorkspaceStore.getState();
+  const submittingGate = store.pendingGates.find((gate) => gate.submitting);
+  if (!submittingGate) return;
+  store.setGateError(submittingGate.gate_id, errorCode);
 }
 
 function permissionRequestContent(toolName: string, description: string) {

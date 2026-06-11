@@ -17,6 +17,7 @@ import type {
   CodingProviderRole,
   InternalPrReview,
   ReviewFinding,
+  TestingStepResult,
 } from "../api/types";
 import { CodingTimeline } from "../components/coding-workspace/CodingTimeline";
 import { CodingProviderConfigPanel } from "../components/coding-workspace/CodingProviderConfigPanel";
@@ -30,6 +31,7 @@ import { MonacoViewer } from "../components/shared/MonacoViewer";
 import { useCodingWorkspaceWs } from "../hooks/useCodingWorkspaceWs";
 import { useUnloadGuard } from "../hooks/useUnloadGuard";
 import {
+  type CodingPendingGate,
   type CodingArtifactTab,
   useCodingWorkspaceStore,
 } from "../state/coding-workspace-store";
@@ -43,6 +45,22 @@ type CodingDiffState = {
   diff: string;
   error: string | null;
 };
+
+const TESTING_BLOCKED_REASON_LABELS: Record<string, string> = {
+  test_plan_missing_json: "Tester 未返回测试计划 JSON",
+  test_plan_invalid_json: "Tester 返回的 JSON 无法解析",
+  test_plan_schema_invalid: "Tester 测试计划字段不完整",
+  test_plan_repair_failed: "Tester 测试计划修复失败",
+  missing_required_steps: "缺少 required 测试步骤证据",
+  high_risk_test_step_requires_permission: "高风险测试步骤需要人工确认",
+};
+
+function blockedGateDisplayTitle(gate: CodingPendingGate) {
+  if (gate.stage === "testing" && gate.reason_code) {
+    return TESTING_BLOCKED_REASON_LABELS[gate.reason_code] ?? gate.reason_code;
+  }
+  return gate.title;
+}
 
 export function CodingWorkspacePage({
   attemptId,
@@ -164,6 +182,7 @@ export function CodingWorkspacePage({
                 snapshot={store.roleProviderConfigSnapshot}
                 lockedRole={lockedProviderRole(store.stage, store.status, store.pendingGates)}
                 onSelect={api.sendProviderSelect}
+                onPermissionModeSelect={api.sendPermissionModeSelect}
               />
               <ChatEntryList
                 ref={chatListRef}
@@ -399,11 +418,14 @@ function GatePanel({
   onConfirmStage,
   onAbort,
 }: {
-  gate: CodingGateRequired | null;
+  gate: CodingPendingGate | null;
   onRespond: ReturnType<typeof useCodingWorkspaceWs>["respondGate"];
   onConfirmStage: ReturnType<typeof useCodingWorkspaceWs>["confirmStageGate"];
   onAbort: ReturnType<typeof useCodingWorkspaceWs>["abortAttempt"];
 }) {
+  const [reason, setReason] = useState("");
+  const [localError, setLocalError] = useState<string | null>(null);
+
   if (!gate) {
     return null;
   }
@@ -414,6 +436,37 @@ function GatePanel({
     );
   }
 
+  const activeGate = gate;
+  const submitting = activeGate.submitting === true;
+  const gateErrorCode = activeGate.errorCode ?? null;
+  const needsReason = activeGate.available_actions.some(actionRequiresReason);
+  const trimmedReason = reason.trim();
+  const reasonTooLong = reason.length > 2000;
+  const displayedError = reasonTooLong ? "原因不能超过 2000 字" : localError;
+  const displayTitle = blockedGateDisplayTitle(activeGate);
+  const testingBlocked = activeGate.stage === "testing";
+
+  function handleAction(action: CodingGateRequired["available_actions"][number]) {
+    if (action.action_type === "confirm_stage" && activeGate.stage) {
+      onConfirmStage(activeGate.stage);
+      return;
+    }
+    if (actionRequiresReason(action)) {
+      if (!trimmedReason) {
+        setLocalError("需要填写原因");
+        return;
+      }
+      if (reasonTooLong) {
+        return;
+      }
+      setLocalError(null);
+      onRespond(activeGate.gate_id, action.action_id, trimmedReason);
+      return;
+    }
+    setLocalError(null);
+    onRespond(activeGate.gate_id, action.action_id, undefined);
+  }
+
   return (
     <div
       data-testid="coding-pending-gate"
@@ -421,29 +474,81 @@ function GatePanel({
     >
       <div className="flex min-w-0 flex-col gap-2 md:flex-row md:items-center md:justify-between">
         <div className="min-w-0">
-          <div className="truncate text-sm font-semibold text-amber-900">{gate.title}</div>
-          <div className="mt-0.5 line-clamp-2 text-xs text-amber-800">{gate.description}</div>
+          <div className="truncate text-sm font-semibold text-amber-900">{displayTitle}</div>
+          {testingBlocked ? (
+            <div className="mt-0.5 text-xs font-semibold text-amber-900">测试被阻塞</div>
+          ) : null}
+          <div className="mt-0.5 line-clamp-2 text-xs text-amber-800">
+            {activeGate.description}
+          </div>
+          <GateMetadata gate={activeGate} />
+          {needsReason ? (
+            <div className="mt-2 grid gap-1">
+              <textarea
+                aria-label="门禁跳过原因"
+                value={reason}
+                onChange={(event) => {
+                  setReason(event.target.value);
+                  setLocalError(null);
+                }}
+                rows={2}
+                maxLength={2100}
+                placeholder="说明跳过该门禁的原因和后续风险处理"
+                className="min-h-14 w-full resize-y rounded-md border border-amber-300 bg-white px-2 py-1.5 text-xs text-amber-950 placeholder:text-amber-700"
+              />
+              {displayedError ? (
+                <div className="text-xs font-semibold text-[var(--aria-danger)]">
+                  {displayedError}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+          {gateErrorCode ? (
+            <div className="mt-1 text-xs font-semibold text-[var(--aria-danger)]">
+              {gateErrorCode}
+            </div>
+          ) : null}
         </div>
         <div className="flex shrink-0 flex-wrap gap-2">
-          {gate.available_actions.map((action) => (
+          {activeGate.available_actions.map((action) => (
             <button
               key={action.action_id}
               type="button"
-              onClick={() => {
-                if (action.action_type === "confirm_stage" && gate.stage) {
-                  onConfirmStage(gate.stage);
-                  return;
-                }
-                onRespond(gate.gate_id, action.action_id, undefined);
-              }}
+              disabled={submitting || (actionRequiresReason(action) && reasonTooLong)}
+              onClick={() => handleAction(action)}
               className="inline-flex h-8 items-center justify-center rounded-md border border-amber-300 bg-white px-3 text-xs font-semibold text-amber-900 hover:bg-amber-100"
             >
-              {action.label}
+              {submitting ? "处理中" : action.label}
             </button>
           ))}
         </div>
       </div>
     </div>
+  );
+}
+
+function actionRequiresReason(action: CodingGateRequired["available_actions"][number]) {
+  return action.action_type === "manual_continue" || action.action_type === "accept_risk";
+}
+
+function GateMetadata({ gate }: { gate: CodingPendingGate }) {
+  const rows = [
+    gate.reason_code ? ["reason", gate.reason_code] : null,
+    gate.raw_provider_output_ref ? ["raw", gate.raw_provider_output_ref] : null,
+    gate.evidence_refs?.length ? ["evidence", gate.evidence_refs.join(", ")] : null,
+  ].filter(Boolean) as [string, string][];
+  if (rows.length === 0) {
+    return null;
+  }
+  return (
+    <dl className="mt-1 grid gap-0.5 text-xs text-amber-800">
+      {rows.map(([label, value]) => (
+        <div key={label} className="grid min-w-0 grid-cols-[4.5rem_minmax(0,1fr)] gap-2">
+          <dt className="font-semibold">{label}</dt>
+          <dd className="min-w-0 break-words font-mono">{value}</dd>
+        </div>
+      ))}
+    </dl>
   );
 }
 
@@ -791,17 +896,125 @@ function TestsPanel() {
   if (!report) {
     return <div className="text-[var(--aria-ink-muted)]">暂无测试报告</div>;
   }
+  const steps = report.steps ?? [];
+  const missingRequiredSteps = report.missing_required_steps ?? [];
+  const skippedRequiredSteps = report.skipped_required_steps ?? [];
+  const contextWarnings = report.context_warnings ?? [];
+  const unplannedCommands = report.unplanned_commands ?? [];
+  const unplannedEvidence = report.unplanned_evidence ?? [];
+  const hasPlanDetails =
+    Boolean(report.plan_summary) ||
+    steps.length > 0 ||
+    missingRequiredSteps.length > 0 ||
+    skippedRequiredSteps.length > 0 ||
+    contextWarnings.length > 0 ||
+    Boolean(report.raw_provider_output_ref);
+
   return (
     <div className="space-y-3">
       <StatusBadge value={report.overall_status} />
-      {report.commands.map((command, index) => (
-        <div key={`${command.command.join(" ")}-${index}`} className="rounded-md border border-[var(--aria-line)] p-2">
-          <div className="font-mono text-xs">{command.command.join(" ")}</div>
+      {hasPlanDetails ? (
+        <div data-testid="coding-test-plan-report" className="space-y-2">
+          {report.plan_summary ? (
+            <div>
+              <div className="text-xs font-semibold text-[var(--aria-ink-muted)]">
+                Test Plan
+              </div>
+              <div className="mt-0.5 break-words text-sm font-semibold">
+                {report.plan_summary}
+              </div>
+            </div>
+          ) : null}
+          {steps.length > 0 ? (
+            <div className="space-y-2">
+              {steps.map((step) => (
+                <TestingStepResultRow key={step.step_id} step={step} />
+              ))}
+            </div>
+          ) : null}
+          <TestingList label="missing required" values={missingRequiredSteps} />
+          <TestingList label="skipped required" values={skippedRequiredSteps} />
+          <TestingList label="context warning" values={contextWarnings} />
+          {report.raw_provider_output_ref ? (
+            <EvidencePath label="raw output" value={report.raw_provider_output_ref} />
+          ) : null}
+          {unplannedEvidence.length > 0 ? (
+            <div className="space-y-1">
+              <div className="text-xs font-semibold text-[var(--aria-ink-muted)]">
+                unplanned evidence
+              </div>
+              {unplannedEvidence.map((evidence) => (
+                <div
+                  key={evidence.tool_use_id}
+                  className="rounded-md border border-[var(--aria-line)] p-2 text-xs"
+                >
+                  <div className="font-mono">{evidence.tool_name}</div>
+                  <div className="text-[var(--aria-ink-muted)]">{evidence.status}</div>
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+      {[...report.commands, ...unplannedCommands].map((command, index) => (
+        <div
+          key={`${command.command.join(" ")}-${index}`}
+          className="rounded-md border border-[var(--aria-line)] p-2"
+        >
+          <div className="break-words font-mono text-xs">{command.command.join(" ")}</div>
           <div className="mt-1 text-xs text-[var(--aria-ink-muted)]">
             {command.status} · exit {command.exit_code ?? "-"} · {command.duration_ms}ms
           </div>
         </div>
       ))}
+    </div>
+  );
+}
+
+function TestingStepResultRow({ step }: { step: TestingStepResult }) {
+  return (
+    <div className="rounded-md border border-[var(--aria-line)] p-2">
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
+        <StatusBadge value={step.status} />
+        <span className="min-w-0 break-words font-mono text-xs">{step.step_id}</span>
+      </div>
+      {step.command?.length ? (
+        <div className="mt-1 break-words font-mono text-xs text-[var(--aria-ink-muted)]">
+          {step.command.join(" ")}
+        </div>
+      ) : null}
+      {step.evidence_refs?.length ? (
+        <div className="mt-1 text-xs text-[var(--aria-ink-muted)]">
+          evidence: {step.evidence_refs.join(", ")}
+        </div>
+      ) : null}
+      {step.provider_analysis ? (
+        <div className="mt-1 break-words text-xs">{step.provider_analysis}</div>
+      ) : null}
+    </div>
+  );
+}
+
+function TestingList({ label, values }: { label: string; values: string[] }) {
+  if (values.length === 0) {
+    return null;
+  }
+  return (
+    <div className="space-y-1 text-xs">
+      {values.map((value) => (
+        <div key={`${label}:${value}`} className="break-words">
+          {label}: {value}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function EvidencePath({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="grid min-w-0 grid-cols-[5rem_minmax(0,1fr)] gap-2 text-xs text-[var(--aria-ink-muted)]">
+      <span className="font-semibold">{label}</span>
+      <span className="min-w-0 break-words font-mono">{value}</span>
     </div>
   );
 }

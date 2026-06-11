@@ -4,10 +4,10 @@ use cadence_aria::product::coding_models::{
     AnalystVerdict, CodeReviewReport, CodingAgentRole, CodingAttemptStatus, CodingChatEntry,
     CodingContextNote, CodingEntryType, CodingExecutionAttempt, CodingExecutionStage,
     CodingGateAction, CodingGateActionType, CodingGateKind, CodingGateRequired, CodingProviderRole,
-    CodingRoleProviderConfigSnapshot, CodingStageGateState, CodingStageGateStatus,
-    CodingTimelineNode, CodingTimelineNodeStatus, FindingSeverity, InternalPrReview, PushStatus,
-    RemoteKind, ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict, TestCommand,
-    TestCommandStatus, TestingOverallStatus, TestingReport,
+    CodingRolePermissionModes, CodingRoleProviderConfigSnapshot, CodingStageGateState,
+    CodingStageGateStatus, CodingTimelineNode, CodingTimelineNodeStatus, FindingSeverity,
+    InternalPrReview, PushStatus, RemoteKind, ReviewFinding, ReviewRequest, ReviewRequestKind,
+    ReviewVerdict, TestCommand, TestCommandStatus, TestingOverallStatus, TestingReport,
 };
 use cadence_aria::product::models::ProviderName;
 use cadence_aria::web::workspace_ws_types::ProviderConfigSnapshot;
@@ -74,7 +74,14 @@ fn coding_role_provider_config_snapshot_derives_from_legacy_provider_snapshot() 
             "analyst": "codex",
             "code_reviewer": "fake",
             "internal_reviewer": "fake",
-            "review_rounds": 2
+            "review_rounds": 2,
+            "permission_modes": {
+                "coder": "supervised",
+                "tester": "auto",
+                "analyst": "auto",
+                "code_reviewer": "supervised",
+                "internal_reviewer": "supervised"
+            }
         })
     );
 }
@@ -152,6 +159,7 @@ fn coding_stage_gate_state_serializes_open_gate_contract() {
             code_reviewer: ProviderName::Fake,
             internal_reviewer: ProviderName::Fake,
             review_rounds: 1,
+            permission_modes: CodingRolePermissionModes::default(),
         },
         status: CodingStageGateStatus::Open,
         created_at: "2026-05-28T00:00:00Z".to_string(),
@@ -231,6 +239,15 @@ fn testing_and_review_reports_preserve_backend_evidence() {
         backend_verified: true,
         started_at: "2026-05-23T00:01:00Z".to_string(),
         completed_at: Some("2026-05-23T00:02:00Z".to_string()),
+        plan_id: None,
+        plan_summary: None,
+        steps: Vec::new(),
+        unplanned_commands: Vec::new(),
+        unplanned_evidence: Vec::new(),
+        missing_required_steps: Vec::new(),
+        skipped_required_steps: Vec::new(),
+        context_warnings: Vec::new(),
+        raw_provider_output_ref: None,
     };
     let finding = ReviewFinding {
         severity: FindingSeverity::Warning,
@@ -239,6 +256,10 @@ fn testing_and_review_reports_preserve_backend_evidence() {
         message: "需要补充边界测试".to_string(),
         required_action: Some("添加 n=0 用例".to_string()),
         source_stage: CodingExecutionStage::CodeReview,
+        evidence: Vec::new(),
+        related_requirements: Vec::new(),
+        related_design_constraints: Vec::new(),
+        related_work_item_tasks: Vec::new(),
     };
     let code_review = CodeReviewReport {
         id: "code_review_0001".to_string(),
@@ -250,6 +271,7 @@ fn testing_and_review_reports_preserve_backend_evidence() {
         diff_refs: vec!["diff_0001".to_string()],
         summary: "需要返工".to_string(),
         created_at: "2026-05-23T00:03:00Z".to_string(),
+        raw_provider_output_ref: None,
     };
     let internal = InternalPrReview {
         id: "internal_review_0001".to_string(),
@@ -264,6 +286,7 @@ fn testing_and_review_reports_preserve_backend_evidence() {
         diff_refs: vec!["diff_0001".to_string()],
         summary: "可以合入".to_string(),
         created_at: "2026-05-23T00:04:00Z".to_string(),
+        raw_provider_output_ref: None,
     };
 
     assert_eq!(
@@ -332,6 +355,9 @@ fn review_request_timeline_and_gate_actions_use_stable_wire_values() {
             label: "重试 Push".to_string(),
             action_type: CodingGateActionType::RetryPush,
         }],
+        reason_code: None,
+        evidence_refs: Vec::new(),
+        raw_provider_output_ref: None,
     };
 
     assert_eq!(

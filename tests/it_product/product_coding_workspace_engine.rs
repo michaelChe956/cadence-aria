@@ -15,12 +15,14 @@ use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
 use cadence_aria::product::coding_models::{
     AnalystVerdict, CodingAgentRole, CodingAttemptStatus, CodingEntryType, CodingExecutionStage,
-    CodingReworkInstruction, CodingRoleProviderConfigSnapshot, CodingTimelineNode,
+    CodingProviderPermissionMode, CodingProviderRole, CodingReworkInstruction,
+    CodingRolePermissionModes, CodingRoleProviderConfigSnapshot, CodingTimelineNode,
     CodingTimelineNodeStatus, FindingSeverity, PushStatus, RemoteKind, ReviewRequest,
-    ReviewRequestKind, ReviewVerdict, TestingOverallStatus,
+    ReviewRequestKind, ReviewVerdict, TestCommandStatus, TestingOverallStatus, TestingReport,
+    TestingStepResult,
 };
 use cadence_aria::product::coding_workspace_engine::{
-    CodingExecutionContext, CodingWorkspaceEngine,
+    CodingExecutionContext, CodingWorkspaceEngine, testing_report_should_enter_analyst,
 };
 use cadence_aria::product::git_workspace_service::GitWorkspaceService;
 use cadence_aria::product::lifecycle_store::{
@@ -79,6 +81,87 @@ async fn start_attempt_moves_to_worktree_prepare_and_creates_timeline_node() {
         }
         other => panic!("expected timeline node event, got {other:?}"),
     }
+}
+
+#[test]
+fn role_permission_modes_are_persisted_with_role_provider_config() {
+    let root = tempfile::tempdir().expect("root");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            work_item_id: "work_item_0001".to_string(),
+            base_branch: "main".to_string(),
+            branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Codex,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+            },
+            max_auto_rework: 2,
+        })
+        .expect("create attempt");
+
+    let mut snapshot = store
+        .get_role_provider_config_snapshot("project_0001", "issue_0001", &attempt.id)
+        .expect("default role config");
+    snapshot.set_permission_mode_for_role(
+        &CodingProviderRole::CodeReviewer,
+        CodingProviderPermissionMode::Auto,
+    );
+    store
+        .update_role_provider_config_snapshot("project_0001", "issue_0001", &attempt.id, snapshot)
+        .expect("save role config");
+
+    let saved = store
+        .get_role_provider_config_snapshot("project_0001", "issue_0001", &attempt.id)
+        .expect("saved role config");
+    assert_eq!(
+        saved.permission_mode_for_role(&CodingProviderRole::CodeReviewer),
+        CodingProviderPermissionMode::Auto
+    );
+}
+
+#[test]
+fn testing_report_requires_evidence_before_analyst_rework() {
+    let blocked = TestingReport {
+        id: "testing_report_0001".to_string(),
+        attempt_id: "coding_attempt_0001".to_string(),
+        commands: Vec::new(),
+        overall_status: TestingOverallStatus::Blocked,
+        provider_claim: None,
+        backend_verified: true,
+        started_at: "2026-06-11T00:00:00Z".to_string(),
+        completed_at: Some("2026-06-11T00:00:01Z".to_string()),
+        plan_id: None,
+        plan_summary: None,
+        steps: Vec::new(),
+        unplanned_commands: Vec::new(),
+        unplanned_evidence: Vec::new(),
+        missing_required_steps: Vec::new(),
+        skipped_required_steps: Vec::new(),
+        context_warnings: vec!["test_plan_parse_error".to_string()],
+        raw_provider_output_ref: Some("provider-raw/testing/plan_tests_0001.txt".to_string()),
+    };
+    assert!(!testing_report_should_enter_analyst(&blocked));
+
+    let mut failed_with_evidence = blocked.clone();
+    failed_with_evidence.overall_status = TestingOverallStatus::Failed;
+    failed_with_evidence.plan_id = Some("test_plan_0001".to_string());
+    failed_with_evidence.steps = vec![TestingStepResult {
+        step_id: "unit".to_string(),
+        status: TestCommandStatus::Failed,
+        evidence_refs: vec!["unit.stderr.log".to_string()],
+        command: Some(vec![
+            "cargo".to_string(),
+            "test".to_string(),
+            "--locked".to_string(),
+        ]),
+        provider_analysis: Some("unit failed".to_string()),
+    }];
+    assert!(testing_report_should_enter_analyst(&failed_with_evidence));
 }
 
 #[tokio::test]
@@ -255,7 +338,8 @@ async fn coding_coder_run_resumes_previous_coder_provider_session() {
             CodingAttemptStatus::Running,
         )
         .expect("running");
-    let (tx, _rx) = mpsc::channel(8);
+    let (tx, mut rx) = mpsc::channel(64);
+    tokio::spawn(async move { while rx.recv().await.is_some() {} });
     let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
     let provider = SessionInputCapturingProvider::default();
 
@@ -322,7 +406,8 @@ async fn coding_coder_rework_with_resume_uses_delta_prompt() {
         ),
         verification_commands: vec!["uv run python -m unittest".to_string()],
     };
-    let (tx, _rx) = mpsc::channel(8);
+    let (tx, mut rx) = mpsc::channel(64);
+    tokio::spawn(async move { while rx.recv().await.is_some() {} });
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
     let provider = SessionInputCapturingProvider::with_outputs(
         ["first coding done", "second coding done"],
@@ -422,11 +507,15 @@ async fn coding_tester_does_not_resume_coder_provider_session() {
             CodingAttemptStatus::Running,
         )
         .expect("running");
-    let (tx, _rx) = mpsc::channel(8);
+    let (tx, mut rx) = mpsc::channel(64);
+    tokio::spawn(async move { while rx.recv().await.is_some() {} });
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
     let provider = SessionInputCapturingProvider::with_outputs(
-        [r#"{"summary":"testing ok","bugs_found":[]}"#],
-        [Some("tester-session-2".to_string())],
+        [
+            r#"{"summary":"testing plan","steps":[{"id":"provider_check","title":"Provider check","intent":"verify provider session isolation","required":true,"tool":"provider_managed","risk_level":"low","command_or_tool_input":{},"evidence_expectation":"provider evidence"}]}"#,
+            r#"{"step_results":[{"step_id":"provider_check","status":"passed","evidence_refs":["provider-session.log"],"provider_analysis":"session isolated"}]}"#,
+        ],
+        [None, Some("tester-session-2".to_string())],
     );
 
     let _report = engine
@@ -441,13 +530,14 @@ async fn coding_tester_does_not_resume_coder_provider_session() {
         .expect("testing provider run");
 
     let inputs = provider.inputs.lock().expect("inputs lock");
-    assert_eq!(inputs.len(), 1);
-    assert_eq!(
-        inputs[0].permission_mode,
-        ProviderPermissionMode::Supervised
-    );
-    assert_eq!(inputs[0].timeout_secs, 10_800);
-    assert_eq!(inputs[0].resume_provider_session_id, None);
+    assert_eq!(inputs.len(), 2);
+    assert!(inputs[0].prompt.contains("Phase: plan_tests"));
+    assert!(inputs[1].prompt.contains("Phase: execute_test_plan"));
+    for input in inputs.iter() {
+        assert_eq!(input.permission_mode, ProviderPermissionMode::Auto);
+        assert_eq!(input.timeout_secs, 10_800);
+        assert_eq!(input.resume_provider_session_id, None);
+    }
     let updated = store
         .get_attempt("project_0001", "issue_0001", &attempt.id)
         .expect("updated attempt");
@@ -456,6 +546,72 @@ async fn coding_tester_does_not_resume_coder_provider_session() {
             && conversation.provider == ProviderName::ClaudeCode
             && conversation.provider_session_id == "tester-session-2"
     }));
+}
+
+#[tokio::test]
+async fn coding_tester_uses_role_permission_mode_auto() {
+    let root = tempfile::tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    init_repo(&worktree);
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            ..create_input()
+        })
+        .expect("create attempt");
+    let mut role_config = store
+        .get_role_provider_config_snapshot("project_0001", "issue_0001", &attempt.id)
+        .expect("role config");
+    role_config.set_permission_mode_for_role(
+        &CodingProviderRole::Tester,
+        CodingProviderPermissionMode::Auto,
+    );
+    store
+        .update_role_provider_config_snapshot(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            role_config,
+        )
+        .expect("save role config");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+
+    let (tx, mut rx) = mpsc::channel(64);
+    tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
+    let provider = SessionInputCapturingProvider::with_outputs(
+        [
+            r#"{"summary":"unit","steps":[{"id":"unit","title":"Unit","intent":"verify unit","required":true,"tool":"provider_managed","risk_level":"low","command_or_tool_input":{},"evidence_expectation":"provider evidence"}]}"#,
+            r#"{"step_results":[{"step_id":"unit","status":"passed","evidence_refs":["unit.log"],"provider_analysis":"ok"}]}"#,
+        ],
+        [None, None],
+    );
+
+    engine
+        .execute_testing_with_provider(
+            &attempt,
+            &provider,
+            &CodingExecutionContext {
+                work_item_markdown: Some("Work Item".to_string()),
+                verification_commands: Vec::new(),
+            },
+            &[],
+            TesterAgentOptions::default(),
+        )
+        .await
+        .expect("testing");
+
+    let inputs = provider.inputs.lock().expect("inputs");
+    assert_eq!(inputs[0].permission_mode, ProviderPermissionMode::Auto);
+    assert_eq!(inputs[1].permission_mode, ProviderPermissionMode::Auto);
 }
 
 #[tokio::test]
@@ -603,10 +759,7 @@ async fn coding_analyst_rework_uses_fresh_provider_session() {
 
     let inputs = provider.inputs.lock().expect("inputs lock");
     assert_eq!(inputs.len(), 1);
-    assert_eq!(
-        inputs[0].permission_mode,
-        ProviderPermissionMode::Supervised
-    );
+    assert_eq!(inputs[0].permission_mode, ProviderPermissionMode::Auto);
     assert_eq!(inputs[0].timeout_secs, 10_800);
     assert_eq!(inputs[0].resume_provider_session_id, None);
 }
@@ -823,6 +976,7 @@ async fn execute_coding_emits_prompt_for_coder_provider() {
                 code_reviewer: ProviderName::Fake,
                 internal_reviewer: ProviderName::Fake,
                 review_rounds: 1,
+                permission_modes: CodingRolePermissionModes::default(),
             },
         )
         .expect("set role provider snapshot");
@@ -886,6 +1040,7 @@ async fn execute_coding_forwards_provider_execution_and_tool_events() {
                 code_reviewer: ProviderName::Fake,
                 internal_reviewer: ProviderName::Fake,
                 review_rounds: 1,
+                permission_modes: CodingRolePermissionModes::default(),
             },
         )
         .expect("set role provider snapshot");
@@ -1671,6 +1826,7 @@ async fn execute_code_review_prompt_includes_diff_work_item_rules_and_role_provi
                 code_reviewer: ProviderName::Codex,
                 internal_reviewer: ProviderName::Fake,
                 review_rounds: 1,
+                permission_modes: CodingRolePermissionModes::default(),
             },
         )
         .expect("set role provider snapshot");
@@ -2644,6 +2800,7 @@ async fn execute_internal_pr_review_prompt_includes_request_commit_diff_and_func
                 code_reviewer: ProviderName::Fake,
                 internal_reviewer: ProviderName::Codex,
                 review_rounds: 1,
+                permission_modes: CodingRolePermissionModes::default(),
             },
         )
         .expect("set role provider snapshot");
@@ -3102,6 +3259,10 @@ impl StreamingProviderAdapter for SessionInputCapturingProvider {
         true
     }
 
+    fn supports_provider_driven_testing(&self) -> bool {
+        true
+    }
+
     async fn start(
         &self,
         input: StreamingProviderInput,
@@ -3122,12 +3283,14 @@ impl StreamingProviderAdapter for SessionInputCapturingProvider {
             .unwrap_or_else(|| Some("coder-session-1".to_string()));
         let (event_tx, event_rx) = mpsc::channel(8);
         let (command_tx, _command_rx) = mpsc::channel(8);
-        event_tx
-            .try_send(ProviderEvent::Completed {
-                full_output: output,
-                provider_session_id,
-            })
-            .expect("send completed");
+        tokio::spawn(async move {
+            let _ = event_tx
+                .send(ProviderEvent::Completed {
+                    full_output: output,
+                    provider_session_id,
+                })
+                .await;
+        });
         Ok(ProviderSession {
             events: event_rx,
             commands: command_tx,

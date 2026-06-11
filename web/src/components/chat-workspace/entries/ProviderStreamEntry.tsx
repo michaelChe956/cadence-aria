@@ -4,12 +4,14 @@ import type { ChatEntry } from "../../../state/chat-entries";
 import { ChatEntryContainer } from "../ChatEntryContainer";
 
 export function ProviderStreamEntry({ entry }: { entry: ChatEntry }) {
+  const content =
+    entry.role === "reviewer" ? stripTrailingReviewJsonContract(entry.content) : entry.content;
   return (
     <ChatEntryContainer
       role={entry.role === "reviewer" ? "reviewer" : "author"}
       title={entryTitle(entry)}
     >
-      <MarkdownContent content={entry.content} />
+      <MarkdownContent content={content} />
     </ChatEntryContainer>
   );
 }
@@ -383,6 +385,24 @@ function normalizeProviderContent(content: string) {
       line.length > 80 ? line.replace(/([。！？.!?])\s+(?=\S)/g, "$1\n") : line,
     )
     .join("\n");
+}
+
+function stripTrailingReviewJsonContract(content: string) {
+  const match = content.match(/\n?```json\s*([\s\S]*?)\s*```\s*$/u);
+  if (!match || match.index === undefined) {
+    return content;
+  }
+
+  try {
+    const value = JSON.parse(match[1]);
+    if (value && typeof value === "object" && "verdict" in value && "findings" in value) {
+      return content.slice(0, match.index).trimEnd();
+    }
+  } catch {
+    return content;
+  }
+
+  return content;
 }
 
 export { MarkdownContent };

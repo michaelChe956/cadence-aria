@@ -105,9 +105,11 @@ describe("chat workspace p1 entries", () => {
     render(<ReviewVerdictEntry entry={entry} />);
 
     expect(screen.getByText("需要解决")).toBeInTheDocument();
+    expect(screen.getByText("高 · 必须修复")).toBeInTheDocument();
     expect(screen.getByText("缺少验证命令")).toBeInTheDocument();
     expect(screen.getByText("补充验证命令")).toBeInTheDocument();
     expect(screen.getByText("可选建议")).toBeInTheDocument();
+    expect(screen.getByText("低 · 可选")).toBeInTheDocument();
     expect(screen.getByText("可以补充复杂度说明")).toBeInTheDocument();
   });
 
@@ -210,6 +212,7 @@ describe("chat workspace p1 entries", () => {
     render(<GatePromptEntry entry={entry} onDecision={onDecision} />);
     fireEvent.click(screen.getByRole("button", { name: "确认使用当前版本" }));
 
+    expect(screen.queryByRole("button", { name: "采纳建议并返修" })).not.toBeInTheDocument();
     expect(onDecision).toHaveBeenCalledWith("confirm");
   });
 
@@ -223,6 +226,7 @@ describe("chat workspace p1 entries", () => {
         verdict: "needs_human",
         review_gate: "user_confirm_allowed",
         summary: "仅有可选建议",
+        comments: "Reviewer 已经在后端 latest_review_verdict 中保存，不应重复进用户补充信息。",
         findings: [
           {
             severity: "optional",
@@ -246,6 +250,8 @@ describe("chat workspace p1 entries", () => {
       }),
     );
     expect(onDecision.mock.calls[0][1].description).toContain("补充说明段落");
+    expect(onDecision.mock.calls[0][1].description).not.toContain("Review 摘要");
+    expect(onDecision.mock.calls[0][1].description).not.toContain("Review 意见");
   });
 
   it("renders reviewer-intent revision action when user triage is required", () => {

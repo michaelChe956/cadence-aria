@@ -17,12 +17,14 @@ use crate::product::coding_models::{
     CodeReviewReport, CodingAgentRole, CodingAttemptStatus, CodingChatEntry, CodingContextNote,
     CodingEntryType, CodingExecutionAttempt, CodingExecutionStage, CodingGateAction,
     CodingGateActionType, CodingGateKind, CodingGateRequired as CodingGateRequiredModel,
-    CodingProviderRole, CodingRoleProviderConfigSnapshot, CodingStageGateState,
-    CodingStageGateStatus, CodingTimelineNode, CodingTimelineNodeStatus, InternalPrReview,
-    PushStatus, ReviewRequest, ReviewVerdict, TestingReport,
+    CodingProviderPermissionMode, CodingProviderRole, CodingRoleProviderConfigSnapshot,
+    CodingStageGateState, CodingStageGateStatus, CodingTimelineNode, CodingTimelineNodeStatus,
+    InternalPrReview, PushStatus, ReviewRequest, ReviewVerdict, TestingOverallStatus,
+    TestingReport,
 };
 use crate::product::coding_workspace_engine::{
     CodingExecutionContext, CodingWorkspaceEngine, CodingWorkspaceEngineError,
+    testing_report_should_enter_analyst,
 };
 use crate::product::coding_workspace_runner::{
     CodingRunnerCommand, apply_provider_selection_to_snapshots, coding_provider_role_for_stage,
@@ -269,6 +271,49 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                     if let Ok(snapshot) = build_coding_session_state(&coding_store, updated) {
                         let _ = send_coding_json(&mut socket_tx, &snapshot).await;
                     }
+                } else if let CodingWsInMessage::GateResponse {
+                    gate_id,
+                    action_id,
+                    extra_context,
+                } = inbound
+                {
+                    let engine = CodingWorkspaceEngine::new(
+                        coding_store.clone(),
+                        GitWorkspaceService::new(),
+                        event_tx.clone(),
+                    );
+                    let updated = match engine
+                        .handle_blocked_gate_response(
+                            &current_attempt.project_id,
+                            &current_attempt.issue_id,
+                            &current_attempt.id,
+                            &gate_id,
+                            &action_id,
+                            extra_context,
+                        )
+                        .await
+                    {
+                        Ok(updated) => updated,
+                        Err(error) => {
+                            let _ = send_coding_json(
+                                &mut socket_tx,
+                                &CodingWsOutMessage::CodingProtocolError {
+                                    code: "coding_gate_response_failed".to_string(),
+                                    message: error.to_string(),
+                                },
+                            )
+                            .await;
+                            continue;
+                        }
+                    };
+                    while let Ok(event) = event_rx.try_recv() {
+                        if !send_coding_json(&mut socket_tx, &event).await {
+                            break;
+                        }
+                    }
+                    if let Ok(snapshot) = build_coding_session_state(&coding_store, updated) {
+                        let _ = send_coding_json(&mut socket_tx, &snapshot).await;
+                    }
                 } else if let CodingWsInMessage::ProviderSelect { role, provider } = inbound {
                     if let Some(command_tx) = runner_command_tx.as_ref() {
                         let open_gates = coding_store
@@ -324,6 +369,43 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                     )
                     .await;
                     if let Ok(snapshot) = build_coding_session_state(&coding_store, updated) {
+                        let _ = send_coding_json(&mut socket_tx, &snapshot).await;
+                    }
+                } else if let CodingWsInMessage::PermissionModeSelect {
+                    role,
+                    permission_mode,
+                } = inbound
+                {
+                    let (changed_role, current_provider) = match update_provider_permission_mode(
+                        &coding_store,
+                        &current_attempt,
+                        &role,
+                        permission_mode,
+                    ) {
+                        Ok(updated) => updated,
+                        Err(error) => {
+                            let _ = send_coding_json(
+                                &mut socket_tx,
+                                &CodingWsOutMessage::CodingProtocolError {
+                                    code: "coding_permission_mode_select_failed".to_string(),
+                                    message: error.to_string(),
+                                },
+                            )
+                            .await;
+                            continue;
+                        }
+                    };
+                    let _ = send_coding_json(
+                        &mut socket_tx,
+                        &CodingWsOutMessage::CodingProviderConfigUpdated {
+                            role: changed_role,
+                            provider: current_provider,
+                        },
+                    )
+                    .await;
+                    if let Ok(snapshot) =
+                        build_coding_session_state(&coding_store, current_attempt.clone())
+                    {
                         let _ = send_coding_json(&mut socket_tx, &snapshot).await;
                     }
                 } else if let CodingWsInMessage::StageGateConfirm { stage } = inbound {
@@ -576,55 +658,67 @@ async fn execute_start_coding_flow(
                 return Ok(());
             }
 
-            let Some(next) = await_stage_gate(
-                &mut command_rx,
-                coding_store,
-                engine,
-                event_tx,
-                &current,
-                CodingExecutionStage::Rework,
-            )
-            .await?
-            else {
-                return Ok(());
-            };
-            current = next;
-            let analyst_provider_name = coding_store
-                .get_role_provider_config_snapshot(
+            if testing_report_should_enter_analyst(&testing_report) {
+                let Some(next) = await_stage_gate(
+                    &mut command_rx,
+                    coding_store,
+                    engine,
+                    event_tx,
+                    &current,
+                    CodingExecutionStage::Rework,
+                )
+                .await?
+                else {
+                    return Ok(());
+                };
+                current = next;
+                let analyst_provider_name = coding_store
+                    .get_role_provider_config_snapshot(
+                        &current.project_id,
+                        &current.issue_id,
+                        &current.id,
+                    )?
+                    .analyst;
+                let analyst_provider =
+                    provider_for(state, &analyst_provider_name, "coding analyst provider")?;
+                let evidence = testing_rework_evidence(&testing_report);
+                current = engine
+                    .execute_rework_with_commands(
+                        &current,
+                        &evidence,
+                        analyst_provider.as_ref(),
+                        &mut command_rx,
+                    )
+                    .await?;
+                current = coding_store.get_attempt(
                     &current.project_id,
                     &current.issue_id,
                     &current.id,
-                )?
-                .analyst;
-            let analyst_provider =
-                provider_for(state, &analyst_provider_name, "coding analyst provider")?;
-            let evidence = testing_rework_evidence(&testing_report);
-            current = engine
-                .execute_rework_with_commands(
-                    &current,
-                    &evidence,
-                    analyst_provider.as_ref(),
+                )?;
+                if handle_pending_runner_commands(
                     &mut command_rx,
+                    coding_store,
+                    engine,
+                    event_tx,
+                    &current,
                 )
-                .await?;
-            current =
-                coding_store.get_attempt(&current.project_id, &current.issue_id, &current.id)?;
-            if handle_pending_runner_commands(
-                &mut command_rx,
-                coding_store,
-                engine,
-                event_tx,
-                &current,
-            )
-            .await?
-            {
-                return Ok(());
-            }
+                .await?
+                {
+                    return Ok(());
+                }
 
-            match current.stage {
-                CodingExecutionStage::Coding => continue 'pipeline,
-                CodingExecutionStage::CodeReview => {}
-                _ => return emit_current_session_state(event_tx, coding_store, &current).await,
+                match current.stage {
+                    CodingExecutionStage::Coding => continue 'pipeline,
+                    CodingExecutionStage::CodeReview => {}
+                    _ => return emit_current_session_state(event_tx, coding_store, &current).await,
+                }
+            } else if matches!(
+                testing_report.overall_status,
+                TestingOverallStatus::Failed
+                    | TestingOverallStatus::Blocked
+                    | TestingOverallStatus::SkippedByUserDecision
+            ) {
+                return emit_current_session_state(event_tx, coding_store, &current).await;
             }
         }
 
@@ -1127,6 +1221,30 @@ fn update_provider_selection(
     Ok((updated, changed_role, changed_provider))
 }
 
+fn update_provider_permission_mode(
+    coding_store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+    role: &str,
+    permission_mode: CodingProviderPermissionMode,
+) -> Result<(CodingProviderRole, ProviderName), ProductStoreError> {
+    let parsed_role = parse_coding_provider_role(role)
+        .ok_or_else(|| ProductStoreError::Io(format!("unknown coding role: {role}")))?;
+    let mut role_snapshot = coding_store.get_role_provider_config_snapshot(
+        &attempt.project_id,
+        &attempt.issue_id,
+        &attempt.id,
+    )?;
+    let provider = role_snapshot.provider_for_role(&parsed_role).clone();
+    role_snapshot.set_permission_mode_for_role(&parsed_role, permission_mode);
+    coding_store.update_role_provider_config_snapshot(
+        &attempt.project_id,
+        &attempt.issue_id,
+        &attempt.id,
+        role_snapshot,
+    )?;
+    Ok((parsed_role, provider))
+}
+
 fn provider_selection_targets_current_running_stage(
     attempt: &CodingExecutionAttempt,
     role: &str,
@@ -1336,11 +1454,16 @@ fn build_coding_session_state(
         .list_internal_pr_reviews(&attempt.project_id, &attempt.issue_id, &attempt.id)?
         .into_iter()
         .last();
-    let pending_gates = coding_store
+    let mut pending_gates: Vec<CodingGateRequiredModel> = coding_store
         .list_open_stage_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)?
         .into_iter()
         .map(stage_gate_required)
         .collect();
+    pending_gates.extend(coding_store.list_open_blocked_gates(
+        &attempt.project_id,
+        &attempt.issue_id,
+        &attempt.id,
+    )?);
     let role_provider_config_snapshot = coding_store.get_role_provider_config_snapshot(
         &attempt.project_id,
         &attempt.issue_id,
@@ -1400,6 +1523,9 @@ fn stage_gate_required(gate: CodingStageGateState) -> CodingGateRequiredModel {
                 action_type: CodingGateActionType::Abort,
             },
         ],
+        reason_code: None,
+        evidence_refs: Vec::new(),
+        raw_provider_output_ref: None,
     }
 }
 
@@ -1539,6 +1665,10 @@ pub enum CodingWsInMessage {
         role: String,
         provider: ProviderName,
     },
+    PermissionModeSelect {
+        role: String,
+        permission_mode: CodingProviderPermissionMode,
+    },
     StageGateConfirm {
         stage: CodingExecutionStage,
     },
@@ -1574,6 +1704,9 @@ pub fn is_coding_ws_message_allowed(
     if matches!(message, CodingWsInMessage::ProviderSelect { .. }) && status.is_active() {
         return true;
     }
+    if matches!(message, CodingWsInMessage::PermissionModeSelect { .. }) && status.is_active() {
+        return true;
+    }
     if *status == CodingAttemptStatus::Blocked {
         return matches!(
             message,
@@ -1586,6 +1719,7 @@ pub fn is_coding_ws_message_allowed(
             CodingWsInMessage::ContextNote { .. }
                 | CodingWsInMessage::StartCoding
                 | CodingWsInMessage::ProviderSelect { .. }
+                | CodingWsInMessage::PermissionModeSelect { .. }
                 | CodingWsInMessage::AbortAttempt
         ),
         CodingExecutionStage::WorktreePrepare | CodingExecutionStage::ReviewRequest => {
@@ -1613,13 +1747,14 @@ pub fn is_coding_ws_message_allowed(
 
 #[cfg(test)]
 mod tests {
+    use crate::product::coding_models::{CodingAttemptStatus, CodingExecutionStage};
     use crate::product::models::{
         ProviderName, WorkspaceMessageRecord, WorkspaceSessionRecord, WorkspaceSessionStatus,
         WorkspaceType,
     };
     use crate::product::test_executor::planned_test_commands_from_markdown;
 
-    use super::select_work_item_markdown;
+    use super::{CodingWsInMessage, is_coding_ws_message_allowed, select_work_item_markdown};
 
     #[test]
     fn falls_back_to_assistant_artifact_when_persisted_markdown_lacks_commands() {
@@ -1659,5 +1794,23 @@ mod tests {
                 "uv", "run", "python", "-m", "unittest", "discover", "-s", "tests", "-v"
             ]
         );
+    }
+
+    #[test]
+    fn blocked_attempt_allows_gate_response_messages() {
+        assert!(is_coding_ws_message_allowed(
+            &CodingAttemptStatus::Blocked,
+            &CodingExecutionStage::Testing,
+            &CodingWsInMessage::GateResponse {
+                gate_id: "coding_blocked_gate_0001".to_string(),
+                action_id: "retry_test_plan".to_string(),
+                extra_context: None,
+            },
+        ));
+        assert!(is_coding_ws_message_allowed(
+            &CodingAttemptStatus::Blocked,
+            &CodingExecutionStage::Testing,
+            &CodingWsInMessage::AbortAttempt,
+        ));
     }
 }

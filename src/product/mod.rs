@@ -2,6 +2,7 @@ pub mod app_paths;
 pub mod artifact_extraction;
 pub mod checkpoint_store;
 pub mod coding_attempt_store;
+pub mod coding_evaluation_context;
 pub mod coding_models;
 pub mod coding_workspace_engine;
 pub mod coding_workspace_runner;

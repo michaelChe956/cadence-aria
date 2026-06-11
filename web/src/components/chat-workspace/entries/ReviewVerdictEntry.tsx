@@ -104,7 +104,10 @@ function FindingGroup({
       <div className="space-y-2">
         {findings.map((finding, index) => (
           <div key={`${finding.severity}-${index}`} className="space-y-1">
-            <div className="text-sm font-medium text-[var(--aria-ink)]">{finding.message}</div>
+            <div className="flex flex-wrap items-center gap-2">
+              <SeverityBadge severity={finding.severity} />
+              <div className="text-sm font-medium text-[var(--aria-ink)]">{finding.message}</div>
+            </div>
             {finding.evidence ? (
               <div className="text-xs text-[var(--aria-ink-muted)]">{finding.evidence}</div>
             ) : null}
@@ -121,6 +124,40 @@ function FindingGroup({
       </div>
     </section>
   );
+}
+
+function SeverityBadge({ severity }: { severity: string }) {
+  const label = severityLabel(severity);
+  const toneClass = isRequiredSeverity(severity)
+    ? "border-amber-200 bg-amber-50 text-amber-800"
+    : "border-slate-200 bg-slate-50 text-slate-600";
+  return (
+    <span
+      className={`inline-flex shrink-0 rounded border px-1.5 py-0.5 text-[11px] font-semibold ${toneClass}`}
+      title={severity}
+    >
+      {label}
+    </span>
+  );
+}
+
+function severityLabel(severity: string) {
+  switch (severity) {
+    case "blocking":
+      return "高 · 阻塞";
+    case "must_fix":
+      return "高 · 必须修复";
+    case "strong_recommend_fix":
+      return "高 · 强烈建议修复";
+    case "suggestion":
+      return "中 · 建议";
+    case "minor":
+      return "低 · 轻微";
+    case "optional":
+      return "低 · 可选";
+    default:
+      return severity;
+  }
 }
 
 function verdictLabel(verdict: string | null, reviewGate: string | null) {
@@ -143,4 +180,12 @@ function verdictLabel(verdict: string | null, reviewGate: string | null) {
     return "需要人工确认";
   }
   return "审核结论";
+}
+
+function isRequiredSeverity(severity: string) {
+  return (
+    severity === "blocking" ||
+    severity === "must_fix" ||
+    severity === "strong_recommend_fix"
+  );
 }

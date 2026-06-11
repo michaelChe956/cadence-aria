@@ -49,6 +49,10 @@ impl CodexProvider {
 
 #[async_trait::async_trait]
 impl StreamingProviderAdapter for CodexProvider {
+    fn supports_provider_driven_testing(&self) -> bool {
+        true
+    }
+
     async fn start(
         &self,
         input: StreamingProviderInput,
@@ -898,6 +902,13 @@ mod tests {
     use super::CodexProvider;
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+    #[test]
+    fn codex_provider_supports_provider_driven_testing() {
+        let provider = CodexProvider::new(PathBuf::from("codex"));
+
+        assert!(provider.supports_provider_driven_testing());
+    }
 
     fn executable_fixture(relative_path: &str) -> PathBuf {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative_path);

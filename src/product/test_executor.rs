@@ -245,6 +245,15 @@ pub async fn run_all_tests(
         backend_verified: true,
         started_at,
         completed_at: Some(Utc::now().to_rfc3339()),
+        plan_id: None,
+        plan_summary: None,
+        steps: Vec::new(),
+        unplanned_commands: Vec::new(),
+        unplanned_evidence: Vec::new(),
+        missing_required_steps: Vec::new(),
+        skipped_required_steps: Vec::new(),
+        context_warnings: Vec::new(),
+        raw_provider_output_ref: None,
     })
 }
 

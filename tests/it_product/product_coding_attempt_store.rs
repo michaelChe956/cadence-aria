@@ -4,7 +4,7 @@ use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
 use cadence_aria::product::coding_models::{
     CodeReviewReport, CodingAgentRole, CodingAttemptStatus, CodingContextNote,
-    CodingExecutionStage, CodingProviderRole, CodingReworkInstruction,
+    CodingExecutionStage, CodingProviderRole, CodingReworkInstruction, CodingRolePermissionModes,
     CodingRoleProviderConfigSnapshot, CodingStageGateStatus, CodingTimelineNode,
     CodingTimelineNodeStatus, FindingSeverity, InternalPrReview, PushStatus, RemoteKind,
     ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict, TestCommand, TestCommandStatus,
@@ -416,6 +416,7 @@ fn store_persists_role_provider_config_snapshot_in_attempt_scope() {
         code_reviewer: ProviderName::Codex,
         internal_reviewer: ProviderName::Fake,
         review_rounds: 1,
+        permission_modes: CodingRolePermissionModes::default(),
     };
     store
         .update_role_provider_config_snapshot(
@@ -574,6 +575,15 @@ fn sample_testing_report(attempt_id: &str) -> TestingReport {
         backend_verified: true,
         started_at: "2026-05-23T00:00:00Z".to_string(),
         completed_at: Some("2026-05-23T00:01:00Z".to_string()),
+        plan_id: None,
+        plan_summary: None,
+        steps: Vec::new(),
+        unplanned_commands: Vec::new(),
+        unplanned_evidence: Vec::new(),
+        missing_required_steps: Vec::new(),
+        skipped_required_steps: Vec::new(),
+        context_warnings: Vec::new(),
+        raw_provider_output_ref: None,
     }
 }
 
@@ -588,6 +598,7 @@ fn sample_code_review_report(attempt_id: &str) -> CodeReviewReport {
         diff_refs: vec!["diff_0001".to_string()],
         summary: "通过".to_string(),
         created_at: "2026-05-23T00:01:00Z".to_string(),
+        raw_provider_output_ref: None,
     }
 }
 
@@ -623,6 +634,7 @@ fn sample_internal_review(attempt_id: &str, review_request_id: &str) -> Internal
         diff_refs: vec!["diff_0001".to_string()],
         summary: "最终审查通过".to_string(),
         created_at: "2026-05-23T00:03:00Z".to_string(),
+        raw_provider_output_ref: None,
     }
 }
 
@@ -634,6 +646,10 @@ fn sample_finding() -> ReviewFinding {
         message: "ok".to_string(),
         required_action: None,
         source_stage: CodingExecutionStage::CodeReview,
+        evidence: Vec::new(),
+        related_requirements: Vec::new(),
+        related_design_constraints: Vec::new(),
+        related_work_item_tasks: Vec::new(),
     }
 }
 

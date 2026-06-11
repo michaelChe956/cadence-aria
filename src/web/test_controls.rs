@@ -1,11 +1,11 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::Json;
 use axum::extract::{Path, State};
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
@@ -45,7 +45,8 @@ struct TestControlsInner {
     workspace_sockets: Mutex<HashMap<String, Vec<mpsc::Sender<WorkspaceSocketControl>>>>,
     workspace_socket_rejects: Mutex<HashMap<String, u32>>,
     permission_fixture_sessions: Mutex<HashSet<String>>,
-    review_fixture_sessions: Mutex<HashMap<String, ReviewFixture>>,
+    testing_fixture_sessions: Mutex<HashMap<String, TestingFixtureState>>,
+    review_fixture_sessions: Mutex<HashMap<String, VecDeque<ReviewFixture>>>,
     permission_timeout: Mutex<Option<Duration>>,
     server_idle_timeout: Mutex<Option<Duration>>,
 }
@@ -64,6 +65,35 @@ pub struct ReviewFixture {
     pub verdict: String,
     pub summary: String,
     pub comments: String,
+    #[serde(default)]
+    pub raw_json: Option<Value>,
+    #[serde(default)]
+    pub raw_text: Option<String>,
+    #[serde(default)]
+    pub findings: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TestingFixture {
+    pub plan_output: Value,
+    #[serde(default)]
+    pub step_results: Vec<Value>,
+    #[serde(default)]
+    pub malformed_plan_output: Option<String>,
+    #[serde(default)]
+    pub provider_failure: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct TestingFixtureState {
+    fixture: TestingFixture,
+    plan_consumed: bool,
+}
+
+#[derive(Debug, Clone)]
+enum TestingFixtureRun {
+    Output(String),
+    Failure(String),
 }
 
 #[derive(Debug, Deserialize)]
@@ -128,6 +158,18 @@ pub async fn enable_review_fixture(
     state
         .test_controls
         .enable_review_fixture(session_id, request)
+        .await;
+    Json(json!({"status": "ok"}))
+}
+
+pub async fn enable_testing_fixture(
+    State(state): State<WebAppState>,
+    Path(attempt_id): Path<String>,
+    Json(request): Json<TestingFixture>,
+) -> Json<serde_json::Value> {
+    state
+        .test_controls
+        .enable_testing_fixture(attempt_id, request)
         .await;
     Json(json!({"status": "ok"}))
 }
@@ -469,7 +511,23 @@ impl TestControls {
             .review_fixture_sessions
             .lock()
             .expect("test controls review fixture lock")
-            .insert(session_id, fixture);
+            .entry(session_id)
+            .or_default()
+            .push_back(fixture);
+    }
+
+    pub async fn enable_testing_fixture(&self, session_id: String, fixture: TestingFixture) {
+        self.inner
+            .testing_fixture_sessions
+            .lock()
+            .expect("test controls testing fixture lock")
+            .insert(
+                session_id,
+                TestingFixtureState {
+                    fixture,
+                    plan_consumed: false,
+                },
+            );
     }
 
     pub async fn consume_permission_fixture(&self, session_id: &str) -> bool {
@@ -481,11 +539,52 @@ impl TestControls {
     }
 
     pub async fn consume_review_fixture(&self, session_id: &str) -> Option<ReviewFixture> {
-        self.inner
+        let mut fixtures = self
+            .inner
             .review_fixture_sessions
             .lock()
-            .expect("test controls review fixture lock")
-            .remove(session_id)
+            .expect("test controls review fixture lock");
+        let queue = fixtures.get_mut(session_id)?;
+        let fixture = queue.pop_front();
+        if queue.is_empty() {
+            fixtures.remove(session_id);
+        }
+        fixture
+    }
+
+    async fn testing_fixture_run(
+        &self,
+        session_id: &str,
+        prompt: &str,
+    ) -> Option<TestingFixtureRun> {
+        let mut fixtures = self
+            .inner
+            .testing_fixture_sessions
+            .lock()
+            .expect("test controls testing fixture lock");
+        let state = fixtures.get_mut(session_id)?;
+        if prompt.contains("execute_test_plan") && state.plan_consumed {
+            let state = fixtures.remove(session_id)?;
+            if let Some(message) = state.fixture.provider_failure {
+                return Some(TestingFixtureRun::Failure(message));
+            }
+            return Some(TestingFixtureRun::Output(
+                json!({ "step_results": state.fixture.step_results }).to_string(),
+            ));
+        }
+        if prompt.contains("plan_tests") {
+            state.plan_consumed = true;
+            if let Some(message) = state.fixture.provider_failure.clone() {
+                return Some(TestingFixtureRun::Failure(message));
+            }
+            let output = state
+                .fixture
+                .malformed_plan_output
+                .clone()
+                .unwrap_or_else(|| state.fixture.plan_output.to_string());
+            return Some(TestingFixtureRun::Output(output));
+        }
+        None
     }
 
     pub fn permission_timeout(&self) -> Duration {
@@ -537,11 +636,29 @@ impl TestControlledFakeStreamingProvider {
 
 #[async_trait::async_trait]
 impl StreamingProviderAdapter for TestControlledFakeStreamingProvider {
+    fn supports_tool_calls(&self) -> bool {
+        true
+    }
+
+    fn supports_provider_driven_testing(&self) -> bool {
+        true
+    }
+
     async fn start(
         &self,
         input: StreamingProviderInput,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
+        if input.role == AdapterRole::Reviewer
+            && let Some(session_id) = input.workspace_session_id.as_deref()
+            && let Some(run) = self
+                .controls
+                .testing_fixture_run(session_id, &input.prompt)
+                .await
+        {
+            return Ok(start_testing_fixture_session(run, cancel));
+        }
+
         if input.role == AdapterRole::Reviewer
             && let Some(session_id) = input.workspace_session_id.as_deref()
             && let Some(fixture) = self.controls.consume_review_fixture(session_id).await
@@ -581,11 +698,18 @@ fn start_review_fixture_session(
     let (command_tx, _command_rx) = mpsc::channel(8);
 
     tokio::spawn(async move {
-        let contract = json!({
-            "verdict": fixture.verdict,
-            "summary": fixture.summary,
-        });
-        let output = format!("{}\n\n```json\n{}\n```", fixture.comments, contract);
+        let output = if let Some(raw_text) = fixture.raw_text {
+            raw_text
+        } else if let Some(raw_json) = fixture.raw_json {
+            raw_json.to_string()
+        } else {
+            let contract = json!({
+                "verdict": fixture.verdict,
+                "summary": fixture.summary,
+                "findings": fixture.findings,
+            });
+            format!("{}\n\n```json\n{}\n```", fixture.comments, contract)
+        };
         if cancel.is_cancelled() {
             return;
         }
@@ -607,6 +731,50 @@ fn start_review_fixture_session(
                 provider_session_id: None,
             })
             .await;
+    });
+
+    ProviderSession {
+        events: event_rx,
+        commands: command_tx,
+    }
+}
+
+fn start_testing_fixture_session(
+    run: TestingFixtureRun,
+    cancel: tokio_util::sync::CancellationToken,
+) -> ProviderSession {
+    let (event_tx, event_rx) = mpsc::channel(8);
+    let (command_tx, _command_rx) = mpsc::channel(8);
+
+    tokio::spawn(async move {
+        match run {
+            TestingFixtureRun::Failure(message) => {
+                let _ = event_tx.send(ProviderEvent::Failed { message }).await;
+            }
+            TestingFixtureRun::Output(output) => {
+                if cancel.is_cancelled() {
+                    return;
+                }
+                if event_tx
+                    .send(ProviderEvent::TextDelta {
+                        content: output.clone(),
+                    })
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                if cancel.is_cancelled() {
+                    return;
+                }
+                let _ = event_tx
+                    .send(ProviderEvent::Completed {
+                        full_output: output,
+                        provider_session_id: None,
+                    })
+                    .await;
+            }
+        }
     });
 
     ProviderSession {
@@ -715,6 +883,7 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
+    use serde_json::json;
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
 
@@ -727,8 +896,8 @@ mod tests {
     use crate::protocol::contracts::{AdapterRole, ProviderType};
 
     use super::{
-        ReviewFixture, TestControlledFakeStreamingProvider, TestControls, WorkspaceSocketControl,
-        create_large_workspace_fixture, test_controls_enabled,
+        ReviewFixture, TestControlledFakeStreamingProvider, TestControls, TestingFixture,
+        WorkspaceSocketControl, create_large_workspace_fixture, test_controls_enabled,
     };
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -919,6 +1088,9 @@ mod tests {
                     verdict: "revise".to_string(),
                     summary: "补充异常路径".to_string(),
                     comments: "需要补充失败路径。".to_string(),
+                    raw_json: None,
+                    raw_text: None,
+                    findings: Vec::new(),
                 },
             )
             .await;
@@ -1041,6 +1213,9 @@ mod tests {
                     verdict: "revise".to_string(),
                     summary: "补充异常路径".to_string(),
                     comments: "需要补充失败路径。".to_string(),
+                    raw_json: None,
+                    raw_text: None,
+                    findings: Vec::new(),
                 },
             )
             .await;
@@ -1078,6 +1253,272 @@ mod tests {
         assert!(output.contains("需要补充失败路径。"));
         assert!(output.contains("\"verdict\":\"revise\""));
         assert!(output.contains("\"summary\":\"补充异常路径\""));
+    }
+
+    #[tokio::test]
+    async fn testing_fixture_fake_provider_emits_plan_and_step_results() {
+        let controls = TestControls::default();
+        controls
+            .enable_testing_fixture(
+                "coding_attempt_0001".to_string(),
+                TestingFixture {
+                    plan_output: json!({
+                        "summary": "controlled QA plan",
+                        "steps": [
+                            {
+                                "id": "unit",
+                                "title": "Unit tests",
+                                "intent": "prove unit behavior",
+                                "required": true,
+                                "tool": "run_command",
+                                "risk_level": "low",
+                                "command_or_tool_input": {"command": ["true"]},
+                                "evidence_expectation": "exit 0"
+                            },
+                            {
+                                "id": "security",
+                                "title": "Security check",
+                                "intent": "prove security checklist",
+                                "required": true,
+                                "tool": "provider_managed",
+                                "risk_level": "medium",
+                                "command_or_tool_input": {"note": "controlled missing step"},
+                                "evidence_expectation": "provider evidence"
+                            }
+                        ]
+                    }),
+                    step_results: vec![json!({"step_id": "unit", "status": "passed"})],
+                    malformed_plan_output: None,
+                    provider_failure: None,
+                },
+            )
+            .await;
+        let provider = TestControlledFakeStreamingProvider::new(controls);
+        assert!(provider.supports_tool_calls());
+        let mut plan_session = provider
+            .start(
+                StreamingProviderInput {
+                    provider_type: ProviderType::Codex,
+                    role: AdapterRole::Reviewer,
+                    prompt: "plan_tests".to_string(),
+                    working_dir: std::env::current_dir().expect("current dir"),
+                    workspace_session_id: Some("coding_attempt_0001".to_string()),
+                    resume_provider_session_id: None,
+                    permission_mode: ProviderPermissionMode::Supervised,
+                    env_vars: Default::default(),
+                    timeout_secs: 60,
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .expect("plan fixture provider session");
+        let plan_output = completed_output(&mut plan_session).await;
+        assert!(plan_output.contains("controlled QA plan"));
+
+        let mut execute_session = provider
+            .start(
+                StreamingProviderInput {
+                    provider_type: ProviderType::Codex,
+                    role: AdapterRole::Reviewer,
+                    prompt: "Phase: plan_tests -> execute_test_plan\nexecute_test_plan".to_string(),
+                    working_dir: std::env::current_dir().expect("current dir"),
+                    workspace_session_id: Some("coding_attempt_0001".to_string()),
+                    resume_provider_session_id: None,
+                    permission_mode: ProviderPermissionMode::Supervised,
+                    env_vars: Default::default(),
+                    timeout_secs: 60,
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .expect("execute fixture provider session");
+        let execute_output = completed_output(&mut execute_session).await;
+        assert!(execute_output.contains("\"step_id\":\"unit\""));
+        assert!(execute_output.contains("\"status\":\"passed\""));
+    }
+
+    #[tokio::test]
+    async fn review_fixture_can_emit_alias_findings_and_malformed_json() {
+        let controls = TestControls::default();
+        controls
+            .enable_review_fixture(
+                "coding_attempt_0001".to_string(),
+                ReviewFixture {
+                    verdict: "request_changes".to_string(),
+                    summary: "alias finding".to_string(),
+                    comments: String::new(),
+                    raw_json: Some(json!({
+                        "verdict": "request_changes",
+                        "summary": "alias finding",
+                        "findings": [{
+                            "file": "src/lib.rs",
+                            "description": "missing validation",
+                            "recommendation": "add validation"
+                        }]
+                    })),
+                    raw_text: None,
+                    findings: Vec::new(),
+                },
+            )
+            .await;
+        let provider = TestControlledFakeStreamingProvider::new(controls.clone());
+        let mut session = provider
+            .start(
+                StreamingProviderInput {
+                    provider_type: ProviderType::Codex,
+                    role: AdapterRole::Reviewer,
+                    prompt: "code review".to_string(),
+                    working_dir: std::env::current_dir().expect("current dir"),
+                    workspace_session_id: Some("coding_attempt_0001".to_string()),
+                    resume_provider_session_id: None,
+                    permission_mode: ProviderPermissionMode::Supervised,
+                    env_vars: Default::default(),
+                    timeout_secs: 60,
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .expect("review fixture provider session");
+        let output = completed_output(&mut session).await;
+        assert!(output.contains("\"file\":\"src/lib.rs\""));
+        assert!(output.contains("\"description\":\"missing validation\""));
+        assert!(output.contains("\"recommendation\":\"add validation\""));
+
+        controls
+            .enable_review_fixture(
+                "coding_attempt_0001".to_string(),
+                ReviewFixture {
+                    verdict: "blocked".to_string(),
+                    summary: "malformed".to_string(),
+                    comments: String::new(),
+                    raw_json: None,
+                    raw_text: Some("not json at all".to_string()),
+                    findings: Vec::new(),
+                },
+            )
+            .await;
+        let provider = TestControlledFakeStreamingProvider::new(controls);
+        let mut malformed_session = provider
+            .start(
+                StreamingProviderInput {
+                    provider_type: ProviderType::Codex,
+                    role: AdapterRole::Reviewer,
+                    prompt: "code review".to_string(),
+                    working_dir: std::env::current_dir().expect("current dir"),
+                    workspace_session_id: Some("coding_attempt_0001".to_string()),
+                    resume_provider_session_id: None,
+                    permission_mode: ProviderPermissionMode::Supervised,
+                    env_vars: Default::default(),
+                    timeout_secs: 60,
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .expect("malformed review fixture provider session");
+        assert_eq!(
+            completed_output(&mut malformed_session).await,
+            "not json at all"
+        );
+    }
+
+    #[tokio::test]
+    async fn review_fixture_provider_consumes_queued_outputs_in_order() {
+        let controls = TestControls::default();
+        controls
+            .enable_review_fixture(
+                "coding_attempt_0001".to_string(),
+                ReviewFixture {
+                    verdict: "no_issue".to_string(),
+                    summary: "analyst pass".to_string(),
+                    comments: String::new(),
+                    raw_json: Some(json!({
+                        "verdict": "no_issue",
+                        "summary": "analyst pass"
+                    })),
+                    raw_text: None,
+                    findings: Vec::new(),
+                },
+            )
+            .await;
+        controls
+            .enable_review_fixture(
+                "coding_attempt_0001".to_string(),
+                ReviewFixture {
+                    verdict: "request_changes".to_string(),
+                    summary: "review alias".to_string(),
+                    comments: String::new(),
+                    raw_json: Some(json!({
+                        "verdict": "request_changes",
+                        "summary": "review alias",
+                        "findings": [{
+                            "file": "src/lib.rs",
+                            "description": "missing validation",
+                            "recommendation": "add validation"
+                        }]
+                    })),
+                    raw_text: None,
+                    findings: Vec::new(),
+                },
+            )
+            .await;
+
+        let provider = TestControlledFakeStreamingProvider::new(controls);
+        let mut analyst_session = provider
+            .start(
+                StreamingProviderInput {
+                    provider_type: ProviderType::Codex,
+                    role: AdapterRole::Reviewer,
+                    prompt: "analyst".to_string(),
+                    working_dir: std::env::current_dir().expect("current dir"),
+                    workspace_session_id: Some("coding_attempt_0001".to_string()),
+                    resume_provider_session_id: None,
+                    permission_mode: ProviderPermissionMode::Supervised,
+                    env_vars: Default::default(),
+                    timeout_secs: 60,
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .expect("analyst fixture provider session");
+        assert!(
+            completed_output(&mut analyst_session)
+                .await
+                .contains("\"verdict\":\"no_issue\"")
+        );
+
+        let mut review_session = provider
+            .start(
+                StreamingProviderInput {
+                    provider_type: ProviderType::Codex,
+                    role: AdapterRole::Reviewer,
+                    prompt: "code review".to_string(),
+                    working_dir: std::env::current_dir().expect("current dir"),
+                    workspace_session_id: Some("coding_attempt_0001".to_string()),
+                    resume_provider_session_id: None,
+                    permission_mode: ProviderPermissionMode::Supervised,
+                    env_vars: Default::default(),
+                    timeout_secs: 60,
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .expect("review fixture provider session");
+        let review_output = completed_output(&mut review_session).await;
+        assert!(review_output.contains("\"verdict\":\"request_changes\""));
+        assert!(review_output.contains("\"file\":\"src/lib.rs\""));
+    }
+
+    async fn completed_output(
+        session: &mut crate::cross_cutting::streaming_provider::ProviderSession,
+    ) -> String {
+        while let Some(event) = session.events.recv().await {
+            match event {
+                ProviderEvent::Completed { full_output, .. } => return full_output,
+                ProviderEvent::TextDelta { .. } => {}
+                other => panic!("unexpected provider event: {other:?}"),
+            }
+        }
+        panic!("provider session ended without completion")
     }
 
     #[tokio::test]
