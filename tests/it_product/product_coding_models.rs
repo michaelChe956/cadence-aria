@@ -4,10 +4,10 @@ use cadence_aria::product::coding_models::{
     AnalystVerdict, CodeReviewReport, CodingAgentRole, CodingAttemptStatus, CodingChatEntry,
     CodingContextNote, CodingEntryType, CodingExecutionAttempt, CodingExecutionStage,
     CodingGateAction, CodingGateActionType, CodingGateKind, CodingGateRequired, CodingProviderRole,
-    CodingRoleProviderConfigSnapshot, CodingStageGateState, CodingStageGateStatus,
-    CodingTimelineNode, CodingTimelineNodeStatus, FindingSeverity, InternalPrReview, PushStatus,
-    RemoteKind, ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict, TestCommand,
-    TestCommandStatus, TestingOverallStatus, TestingReport,
+    CodingRolePermissionModes, CodingRoleProviderConfigSnapshot, CodingStageGateState,
+    CodingStageGateStatus, CodingTimelineNode, CodingTimelineNodeStatus, FindingSeverity,
+    InternalPrReview, PushStatus, RemoteKind, ReviewFinding, ReviewRequest, ReviewRequestKind,
+    ReviewVerdict, TestCommand, TestCommandStatus, TestingOverallStatus, TestingReport,
 };
 use cadence_aria::product::models::ProviderName;
 use cadence_aria::web::workspace_ws_types::ProviderConfigSnapshot;
@@ -152,6 +152,7 @@ fn coding_stage_gate_state_serializes_open_gate_contract() {
             code_reviewer: ProviderName::Fake,
             internal_reviewer: ProviderName::Fake,
             review_rounds: 1,
+            permission_modes: CodingRolePermissionModes::default(),
         },
         status: CodingStageGateStatus::Open,
         created_at: "2026-05-28T00:00:00Z".to_string(),

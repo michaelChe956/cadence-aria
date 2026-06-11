@@ -5,10 +5,10 @@ use cadence_aria::product::coding_attempt_store::{CodingAttemptStore, CreateCodi
 use cadence_aria::product::coding_models::{
     CodeReviewReport, CodingAgentRole, CodingAttemptStatus, CodingContextNote,
     CodingExecutionStage, CodingProviderRole, CodingReworkInstruction,
-    CodingRoleProviderConfigSnapshot, CodingStageGateStatus, CodingTimelineNode,
-    CodingTimelineNodeStatus, FindingSeverity, InternalPrReview, PushStatus, RemoteKind,
-    ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict, TestCommand, TestCommandStatus,
-    TestingOverallStatus, TestingReport,
+    CodingRolePermissionModes, CodingRoleProviderConfigSnapshot, CodingStageGateStatus,
+    CodingTimelineNode, CodingTimelineNodeStatus, FindingSeverity, InternalPrReview, PushStatus,
+    RemoteKind, ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict, TestCommand,
+    TestCommandStatus, TestingOverallStatus, TestingReport,
 };
 use cadence_aria::product::models::{
     ProviderConversationRef, ProviderConversationRole, ProviderName,
@@ -416,6 +416,7 @@ fn store_persists_role_provider_config_snapshot_in_attempt_scope() {
         code_reviewer: ProviderName::Codex,
         internal_reviewer: ProviderName::Fake,
         review_rounds: 1,
+        permission_modes: CodingRolePermissionModes::default(),
     };
     store
         .update_role_provider_config_snapshot(

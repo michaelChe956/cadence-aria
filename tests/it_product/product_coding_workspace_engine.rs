@@ -15,7 +15,8 @@ use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
 use cadence_aria::product::coding_models::{
     AnalystVerdict, CodingAgentRole, CodingAttemptStatus, CodingEntryType, CodingExecutionStage,
-    CodingReworkInstruction, CodingRoleProviderConfigSnapshot, CodingTimelineNode,
+    CodingProviderPermissionMode, CodingProviderRole, CodingReworkInstruction,
+    CodingRolePermissionModes, CodingRoleProviderConfigSnapshot, CodingTimelineNode,
     CodingTimelineNodeStatus, FindingSeverity, PushStatus, RemoteKind, ReviewRequest,
     ReviewRequestKind, ReviewVerdict, TestingOverallStatus,
 };
@@ -79,6 +80,52 @@ async fn start_attempt_moves_to_worktree_prepare_and_creates_timeline_node() {
         }
         other => panic!("expected timeline node event, got {other:?}"),
     }
+}
+
+#[test]
+fn role_permission_modes_are_persisted_with_role_provider_config() {
+    let root = tempfile::tempdir().expect("root");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            work_item_id: "work_item_0001".to_string(),
+            base_branch: "main".to_string(),
+            branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Codex,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+            },
+            max_auto_rework: 2,
+        })
+        .expect("create attempt");
+
+    let mut snapshot = store
+        .get_role_provider_config_snapshot("project_0001", "issue_0001", &attempt.id)
+        .expect("default role config");
+    snapshot.set_permission_mode_for_role(
+        &CodingProviderRole::CodeReviewer,
+        CodingProviderPermissionMode::Auto,
+    );
+    store
+        .update_role_provider_config_snapshot(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            snapshot,
+        )
+        .expect("save role config");
+
+    let saved = store
+        .get_role_provider_config_snapshot("project_0001", "issue_0001", &attempt.id)
+        .expect("saved role config");
+    assert_eq!(
+        saved.permission_mode_for_role(&CodingProviderRole::CodeReviewer),
+        CodingProviderPermissionMode::Auto
+    );
 }
 
 #[tokio::test]
@@ -823,6 +870,7 @@ async fn execute_coding_emits_prompt_for_coder_provider() {
                 code_reviewer: ProviderName::Fake,
                 internal_reviewer: ProviderName::Fake,
                 review_rounds: 1,
+                permission_modes: CodingRolePermissionModes::default(),
             },
         )
         .expect("set role provider snapshot");
@@ -886,6 +934,7 @@ async fn execute_coding_forwards_provider_execution_and_tool_events() {
                 code_reviewer: ProviderName::Fake,
                 internal_reviewer: ProviderName::Fake,
                 review_rounds: 1,
+                permission_modes: CodingRolePermissionModes::default(),
             },
         )
         .expect("set role provider snapshot");
@@ -1671,6 +1720,7 @@ async fn execute_code_review_prompt_includes_diff_work_item_rules_and_role_provi
                 code_reviewer: ProviderName::Codex,
                 internal_reviewer: ProviderName::Fake,
                 review_rounds: 1,
+                permission_modes: CodingRolePermissionModes::default(),
             },
         )
         .expect("set role provider snapshot");
@@ -2644,6 +2694,7 @@ async fn execute_internal_pr_review_prompt_includes_request_commit_diff_and_func
                 code_reviewer: ProviderName::Fake,
                 internal_reviewer: ProviderName::Codex,
                 review_rounds: 1,
+                permission_modes: CodingRolePermissionModes::default(),
             },
         )
         .expect("set role provider snapshot");

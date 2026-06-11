@@ -67,6 +67,34 @@ pub enum CodingProviderRole {
     InternalReviewer,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodingProviderPermissionMode {
+    Auto,
+    Supervised,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodingRolePermissionModes {
+    pub coder: CodingProviderPermissionMode,
+    pub tester: CodingProviderPermissionMode,
+    pub analyst: CodingProviderPermissionMode,
+    pub code_reviewer: CodingProviderPermissionMode,
+    pub internal_reviewer: CodingProviderPermissionMode,
+}
+
+impl Default for CodingRolePermissionModes {
+    fn default() -> Self {
+        Self {
+            coder: CodingProviderPermissionMode::Supervised,
+            tester: CodingProviderPermissionMode::Auto,
+            analyst: CodingProviderPermissionMode::Auto,
+            code_reviewer: CodingProviderPermissionMode::Supervised,
+            internal_reviewer: CodingProviderPermissionMode::Supervised,
+        }
+    }
+}
+
 impl fmt::Display for CodingProviderRole {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let label = match self {
@@ -88,6 +116,8 @@ pub struct CodingRoleProviderConfigSnapshot {
     pub code_reviewer: ProviderName,
     pub internal_reviewer: ProviderName,
     pub review_rounds: u32,
+    #[serde(default)]
+    pub permission_modes: CodingRolePermissionModes,
 }
 
 impl From<ProviderConfigSnapshot> for CodingRoleProviderConfigSnapshot {
@@ -109,6 +139,7 @@ impl From<&ProviderConfigSnapshot> for CodingRoleProviderConfigSnapshot {
             code_reviewer: reviewer.clone(),
             internal_reviewer: reviewer,
             review_rounds: snapshot.review_rounds,
+            permission_modes: CodingRolePermissionModes::default(),
         }
     }
 }
@@ -124,6 +155,19 @@ impl CodingRoleProviderConfigSnapshot {
         }
     }
 
+    pub fn permission_mode_for_role(
+        &self,
+        role: &CodingProviderRole,
+    ) -> CodingProviderPermissionMode {
+        match role {
+            CodingProviderRole::Coder => self.permission_modes.coder,
+            CodingProviderRole::Tester => self.permission_modes.tester,
+            CodingProviderRole::Analyst => self.permission_modes.analyst,
+            CodingProviderRole::CodeReviewer => self.permission_modes.code_reviewer,
+            CodingProviderRole::InternalReviewer => self.permission_modes.internal_reviewer,
+        }
+    }
+
     pub fn set_provider_for_role(&mut self, role: &CodingProviderRole, provider: ProviderName) {
         match role {
             CodingProviderRole::Coder => self.coder = provider,
@@ -131,6 +175,20 @@ impl CodingRoleProviderConfigSnapshot {
             CodingProviderRole::Analyst => self.analyst = provider,
             CodingProviderRole::CodeReviewer => self.code_reviewer = provider,
             CodingProviderRole::InternalReviewer => self.internal_reviewer = provider,
+        }
+    }
+
+    pub fn set_permission_mode_for_role(
+        &mut self,
+        role: &CodingProviderRole,
+        mode: CodingProviderPermissionMode,
+    ) {
+        match role {
+            CodingProviderRole::Coder => self.permission_modes.coder = mode,
+            CodingProviderRole::Tester => self.permission_modes.tester = mode,
+            CodingProviderRole::Analyst => self.permission_modes.analyst = mode,
+            CodingProviderRole::CodeReviewer => self.permission_modes.code_reviewer = mode,
+            CodingProviderRole::InternalReviewer => self.permission_modes.internal_reviewer = mode,
         }
     }
 }
@@ -629,6 +687,42 @@ pub struct QualityGateBypassAudit {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn role_provider_config_deserializes_legacy_json_with_default_permission_modes() {
+        let legacy = r#"{
+          "coder": "codex",
+          "tester": "claude_code",
+          "analyst": "claude_code",
+          "code_reviewer": "codex",
+          "internal_reviewer": "claude_code",
+          "review_rounds": 1
+        }"#;
+
+        let snapshot: CodingRoleProviderConfigSnapshot =
+            serde_json::from_str(legacy).expect("legacy role config");
+
+        assert_eq!(
+            snapshot.permission_mode_for_role(&CodingProviderRole::Coder),
+            CodingProviderPermissionMode::Supervised
+        );
+        assert_eq!(
+            snapshot.permission_mode_for_role(&CodingProviderRole::Tester),
+            CodingProviderPermissionMode::Auto
+        );
+        assert_eq!(
+            snapshot.permission_mode_for_role(&CodingProviderRole::Analyst),
+            CodingProviderPermissionMode::Auto
+        );
+        assert_eq!(
+            snapshot.permission_mode_for_role(&CodingProviderRole::CodeReviewer),
+            CodingProviderPermissionMode::Supervised
+        );
+        assert_eq!(
+            snapshot.permission_mode_for_role(&CodingProviderRole::InternalReviewer),
+            CodingProviderPermissionMode::Supervised
+        );
+    }
 
     #[test]
     fn test_plan_and_testing_report_round_trip_preserve_step_evidence() {
