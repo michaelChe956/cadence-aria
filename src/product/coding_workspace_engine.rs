@@ -3815,6 +3815,27 @@ fn parse_testing_step_results_from_provider_output(output: &str) -> Vec<TestingS
         .unwrap_or_default()
 }
 
+pub fn testing_report_has_execution_evidence(report: &TestingReport) -> bool {
+    (!report.steps.is_empty() && report.plan_id.is_some())
+        || !report.commands.is_empty()
+        || report
+            .steps
+            .iter()
+            .any(|step| !step.evidence_refs.is_empty() || step.command.is_some())
+        || report
+            .unplanned_commands
+            .iter()
+            .any(|command| !command.stdout_ref.is_empty() || !command.stderr_ref.is_empty())
+}
+
+pub fn testing_report_should_enter_analyst(report: &TestingReport) -> bool {
+    match report.overall_status {
+        TestingOverallStatus::Failed => testing_report_has_execution_evidence(report),
+        TestingOverallStatus::Blocked | TestingOverallStatus::SkippedByUserDecision => false,
+        TestingOverallStatus::Passed | TestingOverallStatus::PassedWithWarnings => false,
+    }
+}
+
 fn push_unique_warning(warnings: &mut Vec<String>, warning: String) {
     if !warnings.iter().any(|existing| existing == &warning) {
         warnings.push(warning);

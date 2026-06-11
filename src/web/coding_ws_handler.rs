@@ -19,10 +19,12 @@ use crate::product::coding_models::{
     CodingGateActionType, CodingGateKind, CodingGateRequired as CodingGateRequiredModel,
     CodingProviderPermissionMode, CodingProviderRole, CodingRoleProviderConfigSnapshot,
     CodingStageGateState, CodingStageGateStatus, CodingTimelineNode, CodingTimelineNodeStatus,
-    InternalPrReview, PushStatus, ReviewRequest, ReviewVerdict, TestingReport,
+    InternalPrReview, PushStatus, ReviewRequest, ReviewVerdict, TestingOverallStatus,
+    TestingReport,
 };
 use crate::product::coding_workspace_engine::{
     CodingExecutionContext, CodingWorkspaceEngine, CodingWorkspaceEngineError,
+    testing_report_should_enter_analyst,
 };
 use crate::product::coding_workspace_runner::{
     CodingRunnerCommand, apply_provider_selection_to_snapshots, coding_provider_role_for_stage,
@@ -656,55 +658,64 @@ async fn execute_start_coding_flow(
                 return Ok(());
             }
 
-            let Some(next) = await_stage_gate(
-                &mut command_rx,
-                coding_store,
-                engine,
-                event_tx,
-                &current,
-                CodingExecutionStage::Rework,
-            )
-            .await?
-            else {
-                return Ok(());
-            };
-            current = next;
-            let analyst_provider_name = coding_store
-                .get_role_provider_config_snapshot(
-                    &current.project_id,
-                    &current.issue_id,
-                    &current.id,
-                )?
-                .analyst;
-            let analyst_provider =
-                provider_for(state, &analyst_provider_name, "coding analyst provider")?;
-            let evidence = testing_rework_evidence(&testing_report);
-            current = engine
-                .execute_rework_with_commands(
-                    &current,
-                    &evidence,
-                    analyst_provider.as_ref(),
+            if testing_report_should_enter_analyst(&testing_report) {
+                let Some(next) = await_stage_gate(
                     &mut command_rx,
+                    coding_store,
+                    engine,
+                    event_tx,
+                    &current,
+                    CodingExecutionStage::Rework,
                 )
-                .await?;
-            current =
-                coding_store.get_attempt(&current.project_id, &current.issue_id, &current.id)?;
-            if handle_pending_runner_commands(
-                &mut command_rx,
-                coding_store,
-                engine,
-                event_tx,
-                &current,
-            )
-            .await?
-            {
-                return Ok(());
-            }
+                .await?
+                else {
+                    return Ok(());
+                };
+                current = next;
+                let analyst_provider_name = coding_store
+                    .get_role_provider_config_snapshot(
+                        &current.project_id,
+                        &current.issue_id,
+                        &current.id,
+                    )?
+                    .analyst;
+                let analyst_provider =
+                    provider_for(state, &analyst_provider_name, "coding analyst provider")?;
+                let evidence = testing_rework_evidence(&testing_report);
+                current = engine
+                    .execute_rework_with_commands(
+                        &current,
+                        &evidence,
+                        analyst_provider.as_ref(),
+                        &mut command_rx,
+                    )
+                    .await?;
+                current =
+                    coding_store.get_attempt(&current.project_id, &current.issue_id, &current.id)?;
+                if handle_pending_runner_commands(
+                    &mut command_rx,
+                    coding_store,
+                    engine,
+                    event_tx,
+                    &current,
+                )
+                .await?
+                {
+                    return Ok(());
+                }
 
-            match current.stage {
-                CodingExecutionStage::Coding => continue 'pipeline,
-                CodingExecutionStage::CodeReview => {}
-                _ => return emit_current_session_state(event_tx, coding_store, &current).await,
+                match current.stage {
+                    CodingExecutionStage::Coding => continue 'pipeline,
+                    CodingExecutionStage::CodeReview => {}
+                    _ => return emit_current_session_state(event_tx, coding_store, &current).await,
+                }
+            } else if matches!(
+                testing_report.overall_status,
+                TestingOverallStatus::Failed
+                    | TestingOverallStatus::Blocked
+                    | TestingOverallStatus::SkippedByUserDecision
+            ) {
+                return emit_current_session_state(event_tx, coding_store, &current).await;
             }
         }
 

@@ -18,10 +18,11 @@ use cadence_aria::product::coding_models::{
     CodingProviderPermissionMode, CodingProviderRole, CodingReworkInstruction,
     CodingRolePermissionModes, CodingRoleProviderConfigSnapshot, CodingTimelineNode,
     CodingTimelineNodeStatus, FindingSeverity, PushStatus, RemoteKind, ReviewRequest,
-    ReviewRequestKind, ReviewVerdict, TestingOverallStatus,
+    ReviewRequestKind, ReviewVerdict, TestCommandStatus, TestingOverallStatus, TestingReport,
+    TestingStepResult,
 };
 use cadence_aria::product::coding_workspace_engine::{
-    CodingExecutionContext, CodingWorkspaceEngine,
+    CodingExecutionContext, CodingWorkspaceEngine, testing_report_should_enter_analyst,
 };
 use cadence_aria::product::git_workspace_service::GitWorkspaceService;
 use cadence_aria::product::lifecycle_store::{
@@ -126,6 +127,46 @@ fn role_permission_modes_are_persisted_with_role_provider_config() {
         saved.permission_mode_for_role(&CodingProviderRole::CodeReviewer),
         CodingProviderPermissionMode::Auto
     );
+}
+
+#[test]
+fn testing_report_requires_evidence_before_analyst_rework() {
+    let blocked = TestingReport {
+        id: "testing_report_0001".to_string(),
+        attempt_id: "coding_attempt_0001".to_string(),
+        commands: Vec::new(),
+        overall_status: TestingOverallStatus::Blocked,
+        provider_claim: None,
+        backend_verified: true,
+        started_at: "2026-06-11T00:00:00Z".to_string(),
+        completed_at: Some("2026-06-11T00:00:01Z".to_string()),
+        plan_id: None,
+        plan_summary: None,
+        steps: Vec::new(),
+        unplanned_commands: Vec::new(),
+        unplanned_evidence: Vec::new(),
+        missing_required_steps: Vec::new(),
+        skipped_required_steps: Vec::new(),
+        context_warnings: vec!["test_plan_parse_error".to_string()],
+        raw_provider_output_ref: Some("provider-raw/testing/plan_tests_0001.txt".to_string()),
+    };
+    assert!(!testing_report_should_enter_analyst(&blocked));
+
+    let mut failed_with_evidence = blocked.clone();
+    failed_with_evidence.overall_status = TestingOverallStatus::Failed;
+    failed_with_evidence.plan_id = Some("test_plan_0001".to_string());
+    failed_with_evidence.steps = vec![TestingStepResult {
+        step_id: "unit".to_string(),
+        status: TestCommandStatus::Failed,
+        evidence_refs: vec!["unit.stderr.log".to_string()],
+        command: Some(vec![
+            "cargo".to_string(),
+            "test".to_string(),
+            "--locked".to_string(),
+        ]),
+        provider_analysis: Some("unit failed".to_string()),
+    }];
+    assert!(testing_report_should_enter_analyst(&failed_with_evidence));
 }
 
 #[tokio::test]
