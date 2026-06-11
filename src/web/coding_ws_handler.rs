@@ -690,8 +690,11 @@ async fn execute_start_coding_flow(
                         &mut command_rx,
                     )
                     .await?;
-                current =
-                    coding_store.get_attempt(&current.project_id, &current.issue_id, &current.id)?;
+                current = coding_store.get_attempt(
+                    &current.project_id,
+                    &current.issue_id,
+                    &current.id,
+                )?;
                 if handle_pending_runner_commands(
                     &mut command_rx,
                     coding_store,
@@ -1224,9 +1227,8 @@ fn update_provider_permission_mode(
     role: &str,
     permission_mode: CodingProviderPermissionMode,
 ) -> Result<(CodingProviderRole, ProviderName), ProductStoreError> {
-    let parsed_role = parse_coding_provider_role(role).ok_or_else(|| {
-        ProductStoreError::Io(format!("unknown coding role: {role}"))
-    })?;
+    let parsed_role = parse_coding_provider_role(role)
+        .ok_or_else(|| ProductStoreError::Io(format!("unknown coding role: {role}")))?;
     let mut role_snapshot = coding_store.get_role_provider_config_snapshot(
         &attempt.project_id,
         &attempt.issue_id,

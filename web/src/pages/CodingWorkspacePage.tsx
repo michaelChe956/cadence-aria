@@ -46,6 +46,22 @@ type CodingDiffState = {
   error: string | null;
 };
 
+const TESTING_BLOCKED_REASON_LABELS: Record<string, string> = {
+  test_plan_missing_json: "Tester 未返回测试计划 JSON",
+  test_plan_invalid_json: "Tester 返回的 JSON 无法解析",
+  test_plan_schema_invalid: "Tester 测试计划字段不完整",
+  test_plan_repair_failed: "Tester 测试计划修复失败",
+  missing_required_steps: "缺少 required 测试步骤证据",
+  high_risk_test_step_requires_permission: "高风险测试步骤需要人工确认",
+};
+
+function blockedGateDisplayTitle(gate: CodingPendingGate) {
+  if (gate.stage === "testing" && gate.reason_code) {
+    return TESTING_BLOCKED_REASON_LABELS[gate.reason_code] ?? gate.reason_code;
+  }
+  return gate.title;
+}
+
 export function CodingWorkspacePage({
   attemptId,
   onBack,
@@ -427,6 +443,8 @@ function GatePanel({
   const trimmedReason = reason.trim();
   const reasonTooLong = reason.length > 2000;
   const displayedError = reasonTooLong ? "原因不能超过 2000 字" : localError;
+  const displayTitle = blockedGateDisplayTitle(activeGate);
+  const testingBlocked = activeGate.stage === "testing";
 
   function handleAction(action: CodingGateRequired["available_actions"][number]) {
     if (action.action_type === "confirm_stage" && activeGate.stage) {
@@ -456,7 +474,10 @@ function GatePanel({
     >
       <div className="flex min-w-0 flex-col gap-2 md:flex-row md:items-center md:justify-between">
         <div className="min-w-0">
-          <div className="truncate text-sm font-semibold text-amber-900">{activeGate.title}</div>
+          <div className="truncate text-sm font-semibold text-amber-900">{displayTitle}</div>
+          {testingBlocked ? (
+            <div className="mt-0.5 text-xs font-semibold text-amber-900">测试被阻塞</div>
+          ) : null}
           <div className="mt-0.5 line-clamp-2 text-xs text-amber-800">
             {activeGate.description}
           </div>

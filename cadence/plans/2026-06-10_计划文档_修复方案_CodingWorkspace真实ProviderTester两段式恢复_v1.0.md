@@ -93,7 +93,7 @@ if !provider.supports_tool_calls() {
 - Modify: `src/cross_cutting/codex_provider.rs`
 - Modify: `src/web/test_controls.rs`
 
-- [ ] **Step 1: 写失败测试，证明真实 Provider 应支持 provider-driven testing**
+- [x] **Step 1: 写失败测试，证明真实 Provider 应支持 provider-driven testing**
 
 在 `src/cross_cutting/claude_code_provider.rs` 的 tests 中新增：
 
@@ -121,7 +121,7 @@ fn codex_provider_supports_provider_driven_testing() {
 }
 ```
 
-- [ ] **Step 2: 运行测试确认 RED**
+- [x] **Step 2: 运行测试确认 RED**
 
 ```bash
 cargo test --locked --lib supports_provider_driven_testing
@@ -131,7 +131,7 @@ Expected:
 
 - 编译失败，提示 `supports_provider_driven_testing` 方法不存在；或测试失败，返回 `false`。
 
-- [ ] **Step 3: 在 StreamingProviderAdapter 新增默认 capability**
+- [x] **Step 3: 在 StreamingProviderAdapter 新增默认 capability**
 
 在 `src/cross_cutting/streaming_provider.rs` 的 trait 中新增：
 
@@ -154,7 +154,7 @@ fn supports_tool_calls(&self) -> bool {
 - `supports_provider_driven_testing()`：Provider 能按 `plan_tests` / `execute_test_plan` 契约输出 TestPlan 和 step results。
 - `supports_tool_calls()`：Provider 能输出 Aria 可接管执行的结构化 `ProviderEvent::ToolCall` / `ToolResult`。
 
-- [ ] **Step 4: 给真实 Provider 打开 provider-driven testing**
+- [x] **Step 4: 给真实 Provider 打开 provider-driven testing**
 
 在 `ClaudeCodeProvider` 的 `impl StreamingProviderAdapter` 中新增：
 
@@ -180,7 +180,7 @@ fn supports_provider_driven_testing(&self) -> bool {
 }
 ```
 
-- [ ] **Step 5: 运行测试确认 GREEN**
+- [x] **Step 5: 运行测试确认 GREEN**
 
 ```bash
 cargo test --locked --lib supports_provider_driven_testing
@@ -197,7 +197,7 @@ Expected:
 - Modify: `src/product/coding_workspace_engine.rs`
 - Test: `src/product/coding_workspace_engine.rs`
 
-- [ ] **Step 1: 写失败测试，证明不支持 provider-driven testing 时必须 blocked，不得 legacy fallback**
+- [x] **Step 1: 写失败测试，证明不支持 provider-driven testing 时必须 blocked，不得 legacy fallback**
 
 在 `src/product/coding_workspace_engine.rs` 的 tests 中新增 fixture：
 
@@ -272,7 +272,7 @@ async fn testing_without_provider_driven_capability_blocks_instead_of_legacy_com
 }
 ```
 
-- [ ] **Step 2: 运行测试确认 RED**
+- [x] **Step 2: 运行测试确认 RED**
 
 ```bash
 cargo test --locked --lib testing_without_provider_driven_capability_blocks_instead_of_legacy_commands
@@ -283,7 +283,7 @@ Expected:
 - 当前会走 legacy fixed command，`true` 命令使 report 通过，测试失败。
 - 失败点应证明 `commands` 非空或 `overall_status != Blocked`。
 
-- [ ] **Step 3: 写失败测试，证明无 ToolCall 但有 step_results 的 Provider 应生成 plan-based report**
+- [x] **Step 3: 写失败测试，证明无 ToolCall 但有 step_results 的 Provider 应生成 plan-based report**
 
 在 `src/product/coding_workspace_engine.rs` 的 tests 中新增一个 provider fixture：
 
@@ -406,7 +406,7 @@ async fn real_provider_driven_testing_accepts_final_step_results_without_tool_ca
 }
 ```
 
-- [ ] **Step 4: 运行测试确认 RED**
+- [x] **Step 4: 运行测试确认 RED**
 
 ```bash
 cargo test --locked --lib real_provider_driven_testing_accepts_final_step_results_without_tool_calls
@@ -416,7 +416,7 @@ Expected:
 
 - 当前会走 legacy 或无法编译新 capability，测试失败。
 
-- [ ] **Step 5: 修改 Tester 入口策略，移除 legacy fallback**
+- [x] **Step 5: 修改 Tester 入口策略，移除 legacy fallback**
 
 在 `src/product/coding_workspace_engine.rs` 中移除如下 fallback：
 
@@ -578,7 +578,7 @@ async fn block_provider_driven_testing(
 
 注意：如果现有类型名或 helper 签名不同，沿用当前文件已有命名；但行为必须保持为 blocked report/gate，且不得调用固定命令执行器。
 
-- [ ] **Step 6: 运行测试确认 GREEN**
+- [x] **Step 6: 运行测试确认 GREEN**
 
 ```bash
 cargo test --locked --lib testing_without_provider_driven_capability_blocks_instead_of_legacy_commands
@@ -600,7 +600,7 @@ Expected:
 - Modify: `src/product/coding_workspace_engine.rs`
 - Test: `src/product/coding_workspace_engine.rs`
 
-- [ ] **Step 1: 写失败测试，证明 Provider 启动失败时必须 blocked，不得向上冒泡为未恢复错误**
+- [x] **Step 1: 写失败测试，证明 Provider 启动失败时必须 blocked，不得向上冒泡为未恢复错误**
 
 新增 provider fixture：
 
@@ -682,7 +682,7 @@ async fn provider_driven_testing_blocks_when_provider_start_fails() {
 }
 ```
 
-- [ ] **Step 2: 运行测试确认 RED**
+- [x] **Step 2: 运行测试确认 RED**
 
 ```bash
 cargo test --locked --lib provider_driven_testing_blocks_when_provider_start_fails
@@ -692,7 +692,7 @@ Expected:
 
 - 当前 Provider 启动失败会通过 `?` 冒泡成 `Err`，测试失败。
 
-- [ ] **Step 3: 捕获 plan_tests 和 execute_test_plan Provider 启动失败**
+- [x] **Step 3: 捕获 plan_tests 和 execute_test_plan Provider 启动失败**
 
 在 `plan_tests` 阶段包住 `run_provider_stream_to_completion`：
 
@@ -860,7 +860,7 @@ async fn block_provider_driven_testing(
 
 注意：如果实际实现中 helper 参数名不同，应以当前文件已有类型为准；但必须保持“保存 report、更新 attempt blocked、完成 timeline blocked、创建 gate、发送事件、返回 `Ok(report)`”这一组行为一致。
 
-- [ ] **Step 4: 运行测试确认 GREEN**
+- [x] **Step 4: 运行测试确认 GREEN**
 
 ```bash
 cargo test --locked --lib provider_driven_testing_blocks_when_provider_start_fails
@@ -873,7 +873,7 @@ Expected:
 - attempt status 为 blocked。
 - 页面可收到 blocked gate。
 
-- [ ] **Step 5: 写失败测试，证明 execute 阶段缺 step_results 时必须 blocked**
+- [x] **Step 5: 写失败测试，证明 execute 阶段缺 step_results 时必须 blocked**
 
 新增 provider fixture：
 
@@ -979,7 +979,7 @@ async fn provider_driven_testing_blocks_when_execute_output_has_no_step_results(
 }
 ```
 
-- [ ] **Step 6: 运行测试确认 RED**
+- [x] **Step 6: 运行测试确认 RED**
 
 ```bash
 cargo test --locked --lib provider_driven_testing_blocks_when_execute_output_has_no_step_results
@@ -989,7 +989,7 @@ Expected:
 
 - 如果当前没有 blocked 语义或缺少 missing required step，测试失败。
 
-- [ ] **Step 7: 移除 legacy execute prompt context，并强化 execute JSON 契约**
+- [x] **Step 7: 移除 legacy execute prompt context，并强化 execute JSON 契约**
 
 删除 Tester execute 阶段的旧 prompt 注入：
 
@@ -1050,7 +1050,7 @@ If you cannot run a required step, emit status="blocked" or status="skipped" wit
 Do not claim overall success in prose without step_results JSON.
 ```
 
-- [ ] **Step 8: 确保缺失 required step 进入 blocked report/gate**
+- [x] **Step 8: 确保缺失 required step 进入 blocked report/gate**
 
 复用已有 `build_plan_based_testing_report` 和 blocked gate 创建逻辑，不新增额外状态机。确保 `step_results` 为空且 plan 有 required step 时：
 
@@ -1059,7 +1059,7 @@ Do not claim overall success in prose without step_results JSON.
 - `raw_provider_output_ref` 指向 execute raw output
 - 创建 `missing_required_steps` blocked gate
 
-- [ ] **Step 9: 运行测试确认 GREEN**
+- [x] **Step 9: 运行测试确认 GREEN**
 
 ```bash
 cargo test --locked --lib provider_driven_testing_blocks_when_provider_start_fails
@@ -1078,7 +1078,7 @@ Expected:
 - Modify: `web/src/pages/CodingWorkspacePage.tsx`
 - Test: `web/src/pages/CodingWorkspacePage.test.tsx`
 
-- [ ] **Step 1: 写前端失败测试，证明 Tester chat entry 应显示气泡**
+- [x] **Step 1: 写前端失败测试，证明 Tester chat entry 应显示气泡**
 
 在 `web/src/pages/CodingWorkspacePage.test.tsx` 新增测试，构造 `chat_entries`：
 
@@ -1109,7 +1109,7 @@ it("renders tester assistant chat entries as bubbles", () => {
 });
 ```
 
-- [ ] **Step 2: 运行前端测试确认 RED**
+- [x] **Step 2: 运行前端测试确认 RED**
 
 ```bash
 pnpm -C web test -- CodingWorkspacePage.test.tsx
@@ -1119,7 +1119,7 @@ Expected:
 
 - 当前如果 tester role 没被渲染，测试失败。
 
-- [ ] **Step 3: 后端保存 Tester plan/execute chat entry**
+- [x] **Step 3: 后端保存 Tester plan/execute chat entry**
 
 在 `execute_testing_with_provider_commands` 中：
 
@@ -1161,7 +1161,7 @@ self.save_and_emit_chat_entry(entry).await;
 
 注意：如果当前 `tester_chat_entry` 签名不同，应沿用本文件已有 helper 形态，不新增重复 helper。
 
-- [ ] **Step 4: 前端补 Tester role 展示**
+- [x] **Step 4: 前端补 Tester role 展示**
 
 如果 `CodingWorkspacePage.tsx` 的 role label/color 映射缺 Tester，补充：
 
@@ -1174,7 +1174,7 @@ tester: {
 
 若已有共享 role formatter，则在共享 formatter 中补，不在页面局部重复定义。
 
-- [ ] **Step 5: 运行前端测试确认 GREEN**
+- [x] **Step 5: 运行前端测试确认 GREEN**
 
 ```bash
 pnpm -C web test -- CodingWorkspacePage.test.tsx
@@ -1324,7 +1324,7 @@ Expected:
 
 ## Task 7: 最终验证
 
-- [ ] **Step 1: Rust fmt**
+- [x] **Step 1: Rust fmt**
 
 ```bash
 cargo fmt --check
@@ -1332,7 +1332,7 @@ cargo fmt --check
 
 Expected: 通过。
 
-- [ ] **Step 2: Rust clippy**
+- [x] **Step 2: Rust clippy**
 
 ```bash
 cargo clippy --all-targets --all-features --locked -- -D warnings
@@ -1340,7 +1340,7 @@ cargo clippy --all-targets --all-features --locked -- -D warnings
 
 Expected: 通过。
 
-- [ ] **Step 3: Rust check**
+- [x] **Step 3: Rust check**
 
 ```bash
 cargo check --locked
@@ -1348,7 +1348,7 @@ cargo check --locked
 
 Expected: 通过。
 
-- [ ] **Step 4: Rust tests**
+- [x] **Step 4: Rust tests**
 
 ```bash
 cargo test --locked
@@ -1356,7 +1356,7 @@ cargo test --locked
 
 Expected: 通过。
 
-- [ ] **Step 5: Frontend tests**
+- [x] **Step 5: Frontend tests**
 
 ```bash
 pnpm -C web test
@@ -1364,7 +1364,7 @@ pnpm -C web test
 
 Expected: 通过。
 
-- [ ] **Step 6: Frontend build**
+- [x] **Step 6: Frontend build**
 
 ```bash
 pnpm -C web build
@@ -1372,7 +1372,7 @@ pnpm -C web build
 
 Expected: 通过；如仅有 Vite chunk size warning，可记录但不视为失败。
 
-- [ ] **Step 7: Tester legacy path scan**
+- [x] **Step 7: Tester legacy path scan**
 
 ```bash
 if rg -n "return self\\.execute_testing\\(|legacy_execute_prompt|plan_legacy_input|Legacy tester context for command discovery" src/product/coding_workspace_engine.rs; then exit 1; fi
@@ -1384,7 +1384,7 @@ Expected:
 - 第一条命令无输出且退出 0。
 - 第二条命令至少命中 Tester `plan_tests` 的 `CodingProviderStreamRun` 构造。
 
-- [ ] **Step 8: Diff check**
+- [x] **Step 8: Diff check**
 
 ```bash
 git diff --check
@@ -1407,3 +1407,8 @@ Expected: 无输出。
 - Provider 输出不满足 step evidence 契约时进入 blocked gate，不伪装 passed。
 - Provider-driven Tester 不得再生成 `overall_status=passed && plan_id=null && steps=[] && raw_provider_output_ref=null` 的 report。
 - CodeReviewer 阶段流程顺序不变。
+
+## 2026-06-11 后续优化计划
+
+- 角色级权限配置已转入 `cadence/plans/2026-06-11_计划文档_实施计划_CodingWorkspace角色授权与Tester门禁分流优化_v1.0.md` 执行。
+- Tester JSON repair 与 Testing blocked 分流纳入同一计划。

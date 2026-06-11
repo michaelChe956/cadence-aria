@@ -4,11 +4,11 @@ use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
 use cadence_aria::product::coding_models::{
     CodeReviewReport, CodingAgentRole, CodingAttemptStatus, CodingContextNote,
-    CodingExecutionStage, CodingProviderRole, CodingReworkInstruction,
-    CodingRolePermissionModes, CodingRoleProviderConfigSnapshot, CodingStageGateStatus,
-    CodingTimelineNode, CodingTimelineNodeStatus, FindingSeverity, InternalPrReview, PushStatus,
-    RemoteKind, ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict, TestCommand,
-    TestCommandStatus, TestingOverallStatus, TestingReport,
+    CodingExecutionStage, CodingProviderRole, CodingReworkInstruction, CodingRolePermissionModes,
+    CodingRoleProviderConfigSnapshot, CodingStageGateStatus, CodingTimelineNode,
+    CodingTimelineNodeStatus, FindingSeverity, InternalPrReview, PushStatus, RemoteKind,
+    ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict, TestCommand, TestCommandStatus,
+    TestingOverallStatus, TestingReport,
 };
 use cadence_aria::product::models::{
     ProviderConversationRef, ProviderConversationRole, ProviderName,

@@ -56,6 +56,14 @@ vi.mock("../components/shared/MonacoDiffViewer", () => ({
 
 type CodingWsApi = ReturnType<typeof useCodingWorkspaceWs>;
 
+const DEFAULT_PERMISSION_MODES = {
+  coder: "supervised",
+  tester: "auto",
+  analyst: "auto",
+  code_reviewer: "supervised",
+  internal_reviewer: "supervised",
+} as const;
+
 function mockCodingWs(overrides: Partial<CodingWsApi> = {}) {
   const api: CodingWsApi = {
     startCoding: vi.fn(),
@@ -162,6 +170,49 @@ describe("CodingWorkspacePage", () => {
 
     expect(screen.getByTestId("coding-artifact-tabs")).toHaveTextContent("passed");
     expect(screen.getByTestId("coding-status-bar")).toHaveTextContent("testing");
+  });
+
+  it("renders tester assistant chat entries as bubbles", () => {
+    mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      attemptId: "coding_attempt_0001",
+      status: "running",
+      stage: "testing",
+      timelineNodes: [
+        {
+          id: "coding_node_0003",
+          attempt_id: "coding_attempt_0001",
+          stage: "testing",
+          title: "执行测试",
+          status: "running",
+          agent_role: "tester",
+          summary: null,
+          started_at: "2026-06-10T00:00:00Z",
+          completed_at: null,
+          artifact_refs: [],
+        },
+      ],
+      chatEntries: [
+        {
+          id: "tester_entry_0001",
+          type: "provider_stream",
+          role: "tester",
+          content: "TestPlan: unit checks",
+          timestamp: "2026-06-10T00:00:01Z",
+          node_id: "coding_node_0003",
+          metadata: {
+            phase: "plan_tests",
+            test_plan_id: "test_plan_0001",
+          },
+        },
+      ],
+    });
+
+    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+
+    const chatList = screen.getByTestId("chat-entry-list");
+    expect(chatList).toHaveTextContent("Tester");
+    expect(chatList).toHaveTextContent("TestPlan: unit checks");
   });
 
   it("loads and renders the coding attempt git diff in result tabs", async () => {
@@ -368,6 +419,42 @@ describe("CodingWorkspacePage", () => {
     expect(api.respondGate).toHaveBeenCalledWith("gate_0001", "abort", undefined);
   });
 
+  it("renders tester contract blocked gate as blocked instead of failed test", async () => {
+    mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      attemptId: "coding_attempt_0001",
+      status: "blocked",
+      stage: "testing",
+      pendingGates: [
+        {
+          gate_id: "gate_0001",
+          kind: "blocked",
+          title: "Testing blocked",
+          description: "TestPlan parse failed",
+          stage: "testing",
+          role: "tester",
+          reason_code: "test_plan_missing_json",
+          evidence_refs: ["testing_report_0001.json"],
+          raw_provider_output_ref: "provider-raw/testing/plan_tests_0001.txt",
+          available_actions: [
+            {
+              action_id: "retry_test_plan",
+              label: "重试测试计划",
+              action_type: "retry_test_plan",
+            },
+          ],
+        },
+      ],
+    });
+
+    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+
+    const gate = screen.getByTestId("coding-pending-gate");
+    expect(gate).toHaveTextContent("Tester 未返回测试计划 JSON");
+    expect(gate).toHaveTextContent("测试被阻塞");
+    expect(gate).not.toHaveTextContent("测试失败");
+  });
+
   it("sends stage gate confirm for confirm-stage pending gate actions", async () => {
     const api = mockCodingWs();
     useCodingWorkspaceStore.setState({
@@ -390,6 +477,7 @@ describe("CodingWorkspacePage", () => {
             code_reviewer: "fake",
             internal_reviewer: "fake",
             review_rounds: 1,
+            permission_modes: DEFAULT_PERMISSION_MODES,
           },
           available_actions: [
             {
@@ -432,6 +520,7 @@ describe("CodingWorkspacePage", () => {
             code_reviewer: "fake",
             internal_reviewer: "fake",
             review_rounds: 1,
+            permission_modes: DEFAULT_PERMISSION_MODES,
           },
           available_actions: [
             {

@@ -112,12 +112,7 @@ fn role_permission_modes_are_persisted_with_role_provider_config() {
         CodingProviderPermissionMode::Auto,
     );
     store
-        .update_role_provider_config_snapshot(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            snapshot,
-        )
+        .update_role_provider_config_snapshot("project_0001", "issue_0001", &attempt.id, snapshot)
         .expect("save role config");
 
     let saved = store
@@ -539,7 +534,7 @@ async fn coding_tester_does_not_resume_coder_provider_session() {
     assert!(inputs[0].prompt.contains("Phase: plan_tests"));
     assert!(inputs[1].prompt.contains("Phase: execute_test_plan"));
     for input in inputs.iter() {
-        assert_eq!(input.permission_mode, ProviderPermissionMode::Supervised);
+        assert_eq!(input.permission_mode, ProviderPermissionMode::Auto);
         assert_eq!(input.timeout_secs, 10_800);
         assert_eq!(input.resume_provider_session_id, None);
     }
@@ -764,10 +759,7 @@ async fn coding_analyst_rework_uses_fresh_provider_session() {
 
     let inputs = provider.inputs.lock().expect("inputs lock");
     assert_eq!(inputs.len(), 1);
-    assert_eq!(
-        inputs[0].permission_mode,
-        ProviderPermissionMode::Supervised
-    );
+    assert_eq!(inputs[0].permission_mode, ProviderPermissionMode::Auto);
     assert_eq!(inputs[0].timeout_secs, 10_800);
     assert_eq!(inputs[0].resume_provider_session_id, None);
 }

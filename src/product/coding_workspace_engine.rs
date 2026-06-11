@@ -962,7 +962,9 @@ impl CodingWorkspaceEngine {
         );
         report.id = report_id;
         report.raw_provider_output_ref = Some(raw_provider_output_ref.clone());
-        report.context_warnings.push(format!("{reason_code}:{error}"));
+        report
+            .context_warnings
+            .push(format!("{reason_code}:{error}"));
         self.save_blocked_testing_report_and_gate(
             attempt,
             node,
@@ -2007,11 +2009,8 @@ impl CodingWorkspaceEngine {
         let mut provider_input = streaming_input_from_adapter(&input, worktree_path.clone());
         provider_input.workspace_session_id = Some(attempt.id.clone());
         provider_input.resume_provider_session_id = resume_provider_session_id;
-        provider_input.permission_mode = role_permission_mode_for_attempt(
-            &self.store,
-            &attempt,
-            CodingProviderRole::Analyst,
-        )?;
+        provider_input.permission_mode =
+            role_permission_mode_for_attempt(&self.store, &attempt, CodingProviderRole::Analyst)?;
         let full_output = self
             .run_provider_stream_to_completion(CodingProviderStreamRun {
                 attempt: &attempt,

@@ -7,8 +7,8 @@ use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
 use cadence_aria::product::coding_models::{
     CodingAgentRole, CodingAttemptStatus, CodingEntryType, CodingExecutionStage, CodingGateAction,
-    CodingGateActionType, CodingGateKind, CodingGateRequired, CodingProviderRole,
-    CodingProviderPermissionMode, CodingRoleProviderConfigSnapshot, CodingTimelineNode,
+    CodingGateActionType, CodingGateKind, CodingGateRequired, CodingProviderPermissionMode,
+    CodingProviderRole, CodingRoleProviderConfigSnapshot, CodingTimelineNode,
     CodingTimelineNodeStatus, PushStatus, TestingOverallStatus,
 };
 use cadence_aria::product::lifecycle_store::{
@@ -1078,7 +1078,8 @@ async fn coding_ws_testing_blocked_does_not_start_analyst_automatically() {
     let _guard = WS_TEST_LOCK.lock().await;
     let root = tempdir().expect("root");
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
-    let app = app_with_full_chain_attempt_and_provider(root.path(), Arc::new(TestingBlockedProvider));
+    let app =
+        app_with_full_chain_attempt_and_provider(root.path(), Arc::new(TestingBlockedProvider));
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
     let server = tokio::spawn(async move {
@@ -1169,7 +1170,11 @@ async fn coding_ws_testing_blocked_does_not_start_analyst_automatically() {
     let nodes = store
         .get_timeline_nodes("project_0001", "issue_0001", "coding_attempt_0001")
         .expect("nodes");
-    assert!(!nodes.iter().any(|node| node.stage == CodingExecutionStage::Rework));
+    assert!(
+        !nodes
+            .iter()
+            .any(|node| node.stage == CodingExecutionStage::Rework)
+    );
 
     ws.close(None).await.expect("close ws");
     server.abort();
@@ -2291,7 +2296,9 @@ impl StreamingProviderAdapter for TestingBlockedProvider {
         input: &AdapterInput,
         _cancel: CancellationToken,
     ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
-        FullChainStreamingProvider.run_streaming(input, CancellationToken::new()).await
+        FullChainStreamingProvider
+            .run_streaming(input, CancellationToken::new())
+            .await
     }
 }
 
@@ -2366,7 +2373,7 @@ impl StreamingProviderAdapter for InternalReviewReworkProvider {
                     state.analyst_calls += 1;
                     state.analyst_calls
                 };
-                let full_output = if analyst_call == 3 {
+                let full_output = if analyst_call == 2 {
                     r#"{"verdict":"needs_fix","summary":"internal review 要求修复","fix_hints":["补充 internal_fix.rs"]}"#
                 } else {
                     r#"{"verdict":"no_issue","summary":"ok"}"#

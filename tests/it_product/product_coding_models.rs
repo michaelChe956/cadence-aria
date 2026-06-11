@@ -74,7 +74,14 @@ fn coding_role_provider_config_snapshot_derives_from_legacy_provider_snapshot() 
             "analyst": "codex",
             "code_reviewer": "fake",
             "internal_reviewer": "fake",
-            "review_rounds": 2
+            "review_rounds": 2,
+            "permission_modes": {
+                "coder": "supervised",
+                "tester": "auto",
+                "analyst": "auto",
+                "code_reviewer": "supervised",
+                "internal_reviewer": "supervised"
+            }
         })
     );
 }
