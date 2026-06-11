@@ -23,11 +23,11 @@ use crate::product::coding_evaluation_context::{
 use crate::product::coding_models::{
     AnalystVerdict, CodeReviewReport, CodingAgentRole, CodingAttemptStatus, CodingChatEntry,
     CodingContextNote, CodingEntryType, CodingExecutionAttempt, CodingExecutionStage,
-    CodingGateAction, CodingGateActionType, CodingProviderRole, CodingReworkInstruction,
-    CodingTimelineNode, CodingTimelineNodeStatus, InternalPrReview, PushStatus, ReviewFinding,
-    ReviewRequest, ReviewRequestKind, ReviewVerdict, TestCommand, TestCommandStatus, TestPlan,
-    TestPlanRiskLevel, TestingOverallStatus, TestingReport, TestingStepResult,
-    TestingUnplannedEvidence,
+    CodingGateAction, CodingGateActionType, CodingProviderPermissionMode, CodingProviderRole,
+    CodingReworkInstruction, CodingTimelineNode, CodingTimelineNodeStatus, InternalPrReview,
+    PushStatus, ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict, TestCommand,
+    TestCommandStatus, TestPlan, TestPlanRiskLevel, TestingOverallStatus, TestingReport,
+    TestingStepResult, TestingUnplannedEvidence,
 };
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::git_workspace_service::{GitWorkspaceError, GitWorkspaceService};
@@ -113,8 +113,26 @@ fn should_resume_provider_conversation(role: &CodingProviderRole) -> bool {
     matches!(role, CodingProviderRole::Coder)
 }
 
-fn coding_provider_permission_mode() -> ProviderPermissionMode {
-    ProviderPermissionMode::Supervised
+fn coding_provider_permission_mode(mode: CodingProviderPermissionMode) -> ProviderPermissionMode {
+    match mode {
+        CodingProviderPermissionMode::Auto => ProviderPermissionMode::Auto,
+        CodingProviderPermissionMode::Supervised => ProviderPermissionMode::Supervised,
+    }
+}
+
+fn role_permission_mode_for_attempt(
+    store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+    role: CodingProviderRole,
+) -> Result<ProviderPermissionMode, CodingWorkspaceEngineError> {
+    let snapshot = store.get_role_provider_config_snapshot(
+        &attempt.project_id,
+        &attempt.issue_id,
+        &attempt.id,
+    )?;
+    Ok(coding_provider_permission_mode(
+        snapshot.permission_mode_for_role(&role),
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -391,7 +409,11 @@ impl CodingWorkspaceEngine {
             working_dir: worktree_path.clone(),
             workspace_session_id: Some(attempt.id.clone()),
             resume_provider_session_id,
-            permission_mode: coding_provider_permission_mode(),
+            permission_mode: role_permission_mode_for_attempt(
+                &self.store,
+                &attempt,
+                CodingProviderRole::Coder,
+            )?,
             env_vars: BTreeMap::new(),
             timeout_secs: legacy_input.timeout,
         };
@@ -926,7 +948,11 @@ impl CodingWorkspaceEngine {
             working_dir: worktree_path.clone(),
             workspace_session_id: Some(attempt.id.clone()),
             resume_provider_session_id,
-            permission_mode: coding_provider_permission_mode(),
+            permission_mode: role_permission_mode_for_attempt(
+                &self.store,
+                &attempt,
+                CodingProviderRole::Tester,
+            )?,
             env_vars: BTreeMap::new(),
             timeout_secs: plan_legacy_input.timeout,
         };
@@ -1053,7 +1079,11 @@ impl CodingWorkspaceEngine {
             working_dir: worktree_path.clone(),
             workspace_session_id: Some(attempt.id.clone()),
             resume_provider_session_id,
-            permission_mode: coding_provider_permission_mode(),
+            permission_mode: role_permission_mode_for_attempt(
+                &self.store,
+                &attempt,
+                CodingProviderRole::Tester,
+            )?,
             env_vars: BTreeMap::new(),
             timeout_secs: options.timeout.as_secs().max(1),
         };
@@ -1504,6 +1534,11 @@ impl CodingWorkspaceEngine {
         let mut provider_input = streaming_input_from_adapter(&input, worktree_path.clone());
         provider_input.workspace_session_id = Some(attempt.id.clone());
         provider_input.resume_provider_session_id = resume_provider_session_id;
+        provider_input.permission_mode = role_permission_mode_for_attempt(
+            &self.store,
+            &attempt,
+            CodingProviderRole::CodeReviewer,
+        )?;
         let full_output = self
             .run_provider_stream_to_completion(CodingProviderStreamRun {
                 attempt: &attempt,
@@ -1686,6 +1721,11 @@ impl CodingWorkspaceEngine {
         let mut provider_input = streaming_input_from_adapter(&input, worktree_path.clone());
         provider_input.workspace_session_id = Some(attempt.id.clone());
         provider_input.resume_provider_session_id = resume_provider_session_id;
+        provider_input.permission_mode = role_permission_mode_for_attempt(
+            &self.store,
+            &attempt,
+            CodingProviderRole::Analyst,
+        )?;
         let full_output = self
             .run_provider_stream_to_completion(CodingProviderStreamRun {
                 attempt: &attempt,
@@ -1800,6 +1840,11 @@ impl CodingWorkspaceEngine {
         let mut provider_input = streaming_input_from_adapter(&input, worktree_path.clone());
         provider_input.workspace_session_id = Some(attempt.id.clone());
         provider_input.resume_provider_session_id = resume_provider_session_id;
+        provider_input.permission_mode = role_permission_mode_for_attempt(
+            &self.store,
+            &attempt,
+            CodingProviderRole::InternalReviewer,
+        )?;
         let full_output = self
             .run_provider_stream_to_completion(CodingProviderStreamRun {
                 attempt: &attempt,
@@ -3270,7 +3315,7 @@ fn streaming_input_from_adapter(
         working_dir,
         workspace_session_id: None,
         resume_provider_session_id: None,
-        permission_mode: coding_provider_permission_mode(),
+        permission_mode: ProviderPermissionMode::Supervised,
         env_vars: BTreeMap::new(),
         timeout_secs: input.timeout,
     }

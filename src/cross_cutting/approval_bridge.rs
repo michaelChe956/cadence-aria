@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
     ChoiceRequestData, PermissionRequestData, ProviderCommand, ProviderEvent,
+    ProviderExecutionEvent, ProviderExecutionEventKind, ProviderExecutionEventStatus,
     ProviderPermissionMode, RiskLevel,
 };
 
@@ -161,9 +162,32 @@ impl ApprovalBridge {
         cancel: CancellationToken,
     ) -> Result<PermissionDecision, ProviderAdapterError> {
         if self.mode == ProviderPermissionMode::Auto {
+            let event_id = next_permission_id();
+            let _ = self
+                .event_tx
+                .send(ProviderEvent::Execution(ProviderExecutionEvent {
+                    event_id,
+                    kind: ProviderExecutionEventKind::Provider,
+                    status: ProviderExecutionEventStatus::Completed,
+                    title: "Auto approval".to_string(),
+                    detail: Some(format!("{tool_name}: {description}")),
+                    command: None,
+                    cwd: None,
+                    output: Some(
+                        serde_json::json!({
+                            "auto_approved": true,
+                            "tool_name": tool_name,
+                            "description": description,
+                            "risk_level": format!("{risk_level:?}"),
+                        })
+                        .to_string(),
+                    ),
+                    exit_code: None,
+                }))
+                .await;
             return Ok(PermissionDecision {
                 approved: true,
-                reason: None,
+                reason: Some("auto_approved".to_string()),
             });
         }
 
@@ -468,23 +492,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn approval_bridge_auto_approves_without_emitting_request() {
+    async fn approval_bridge_auto_emits_auto_approval_event() {
         let (event_tx, mut event_rx) = mpsc::channel(8);
         let bridge = ApprovalBridge::new(ProviderPermissionMode::Auto, event_tx);
 
         let decision = bridge
             .request_tool(
-                "git status",
-                "查看当前工作区状态",
-                RiskLevel::Low,
+                "Bash",
+                "cargo test --locked",
+                RiskLevel::Medium,
                 CancellationToken::new(),
             )
             .await
             .unwrap();
 
         assert!(decision.approved);
-        assert_eq!(decision.reason, None);
-        assert!(event_rx.try_recv().is_err());
+        assert_eq!(decision.reason, Some("auto_approved".to_string()));
+        let event = tokio::time::timeout(TEST_TIMEOUT, event_rx.recv())
+            .await
+            .expect("auto approval event")
+            .expect("event");
+        match event {
+            ProviderEvent::Execution(event) => {
+                assert_eq!(event.title, "Auto approval");
+                assert!(
+                    event
+                        .detail
+                        .as_deref()
+                        .unwrap_or_default()
+                        .contains("cargo test --locked")
+                );
+                assert!(
+                    event
+                        .output
+                        .as_deref()
+                        .unwrap_or_default()
+                        .contains("\"auto_approved\":true")
+                );
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 
     #[tokio::test]

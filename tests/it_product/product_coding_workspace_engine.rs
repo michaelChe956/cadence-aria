@@ -506,6 +506,72 @@ async fn coding_tester_does_not_resume_coder_provider_session() {
 }
 
 #[tokio::test]
+async fn coding_tester_uses_role_permission_mode_auto() {
+    let root = tempfile::tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    init_repo(&worktree);
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            ..create_input()
+        })
+        .expect("create attempt");
+    let mut role_config = store
+        .get_role_provider_config_snapshot("project_0001", "issue_0001", &attempt.id)
+        .expect("role config");
+    role_config.set_permission_mode_for_role(
+        &CodingProviderRole::Tester,
+        CodingProviderPermissionMode::Auto,
+    );
+    store
+        .update_role_provider_config_snapshot(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            role_config,
+        )
+        .expect("save role config");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+
+    let (tx, mut rx) = mpsc::channel(64);
+    tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
+    let provider = SessionInputCapturingProvider::with_outputs(
+        [
+            r#"{"summary":"unit","steps":[{"id":"unit","title":"Unit","intent":"verify unit","required":true,"tool":"provider_managed","risk_level":"low","command_or_tool_input":{},"evidence_expectation":"provider evidence"}]}"#,
+            r#"{"step_results":[{"step_id":"unit","status":"passed","evidence_refs":["unit.log"],"provider_analysis":"ok"}]}"#,
+        ],
+        [None, None],
+    );
+
+    engine
+        .execute_testing_with_provider(
+            &attempt,
+            &provider,
+            &CodingExecutionContext {
+                work_item_markdown: Some("Work Item".to_string()),
+                verification_commands: Vec::new(),
+            },
+            &[],
+            TesterAgentOptions::default(),
+        )
+        .await
+        .expect("testing");
+
+    let inputs = provider.inputs.lock().expect("inputs");
+    assert_eq!(inputs[0].permission_mode, ProviderPermissionMode::Auto);
+    assert_eq!(inputs[1].permission_mode, ProviderPermissionMode::Auto);
+}
+
+#[tokio::test]
 async fn coding_code_reviewer_run_uses_fresh_provider_session() {
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
