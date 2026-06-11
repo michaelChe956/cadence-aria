@@ -27,6 +27,7 @@ pub struct CodexProvider {
 }
 
 const CODEX_RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+const CODEX_DEFAULT_SANDBOX_MODE: &str = "danger-full-access";
 const CODEX_RESUME_STALL_ERROR: &str = "Codex resume stalled before provider progress";
 #[cfg(not(test))]
 const CODEX_RESUME_STALL_TIMEOUT: Duration = Duration::from_secs(60);
@@ -295,6 +296,7 @@ where
                             ProviderPermissionMode::Auto => "never",
                             ProviderPermissionMode::Supervised => "on-request",
                         },
+                        "sandbox": CODEX_DEFAULT_SANDBOX_MODE,
                     },
                 }),
                 CODEX_RPC_REQUEST_TIMEOUT,
@@ -318,6 +320,7 @@ where
                             ProviderPermissionMode::Auto => "never",
                             ProviderPermissionMode::Supervised => "on-request",
                         },
+                        "sandbox": CODEX_DEFAULT_SANDBOX_MODE,
                     },
                 }),
                 CODEX_RPC_REQUEST_TIMEOUT,
@@ -1015,6 +1018,40 @@ mod tests {
         let completed = recv_completed(&mut session.events).await;
 
         assert_eq!(completed, "persistent thread done");
+    }
+
+    #[tokio::test]
+    async fn codex_thread_start_requests_danger_full_access_sandbox() {
+        let fixture =
+            executable_fixture("tests/fixtures/provider/codex_app_server_sandbox_fixture.sh");
+        let provider = CodexProvider::new(fixture);
+        let input = streaming_input(ProviderType::Codex, ProviderPermissionMode::Supervised);
+        let mut session = provider
+            .start(input, CancellationToken::new())
+            .await
+            .unwrap();
+
+        let completed = recv_completed(&mut session.events).await;
+
+        assert_eq!(completed, "sandbox disabled done");
+    }
+
+    #[tokio::test]
+    async fn codex_thread_resume_requests_danger_full_access_sandbox() {
+        let fixture = executable_fixture(
+            "tests/fixtures/provider/codex_app_server_resume_sandbox_fixture.sh",
+        );
+        let provider = CodexProvider::new(fixture);
+        let mut input = streaming_input(ProviderType::Codex, ProviderPermissionMode::Auto);
+        input.resume_provider_session_id = Some("codex-thread-123".to_string());
+        let mut session = provider
+            .start(input, CancellationToken::new())
+            .await
+            .unwrap();
+
+        let completed = recv_completed(&mut session.events).await;
+
+        assert_eq!(completed, "resume sandbox disabled done");
     }
 
     #[tokio::test]

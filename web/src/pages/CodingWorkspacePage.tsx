@@ -52,6 +52,8 @@ const TESTING_BLOCKED_REASON_LABELS: Record<string, string> = {
   test_plan_schema_invalid: "Tester 测试计划字段不完整",
   test_plan_repair_failed: "Tester 测试计划修复失败",
   missing_required_steps: "缺少 required 测试步骤证据",
+  skipped_required_steps: "required 测试步骤被阻塞（无法执行）",
+  testing_blocked: "测试被阻塞",
   high_risk_test_step_requires_permission: "高风险测试步骤需要人工确认",
 };
 

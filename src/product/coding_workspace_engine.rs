@@ -1728,9 +1728,10 @@ impl CodingWorkspaceEngine {
                 role: Some(CodingProviderRole::Tester),
                 title: "Testing blocked".to_string(),
                 description: "Required testing steps are missing or blocked".to_string(),
-                reason_code: Some(
-                    blocked_reason_code.unwrap_or_else(|| "missing_required_steps".to_string()),
-                ),
+                reason_code: Some(derive_testing_blocked_reason_code(
+                    blocked_reason_code,
+                    &report,
+                )),
                 evidence_refs: vec![format!("{}.json", report.id)],
                 raw_provider_output_ref: Some(report_raw_ref),
                 available_actions: testing_blocked_gate_actions(),
@@ -2551,13 +2552,25 @@ impl CodingWorkspaceEngine {
         &self,
         attempt: &CodingExecutionAttempt,
     ) -> Result<Vec<String>, ProductStoreError> {
-        Ok(self
+        let Some(report) = self
             .store
             .list_testing_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)?
             .into_iter()
             .last()
-            .map(|report| report.missing_required_steps)
-            .unwrap_or_default())
+        else {
+            return Ok(Vec::new());
+        };
+        let mut steps = Vec::new();
+        for step in report
+            .missing_required_steps
+            .into_iter()
+            .chain(report.skipped_required_steps)
+        {
+            if !steps.contains(&step) {
+                steps.push(step);
+            }
+        }
+        Ok(steps)
     }
 
     fn resume_blocked_attempt_at_stage(
@@ -3799,6 +3812,24 @@ fn high_risk_test_step_block_reason(
         .then_some("high_risk_test_step_requires_permission")
 }
 
+/// 区分 `skipped_required_steps`（步骤被阻塞/跳过）与 `missing_required_steps`
+/// （步骤缺失），避免归因错误误导排查。显式 reason_code（如高风险权限）优先。
+fn derive_testing_blocked_reason_code(
+    explicit_reason_code: Option<String>,
+    report: &TestingReport,
+) -> String {
+    if let Some(reason_code) = explicit_reason_code {
+        return reason_code;
+    }
+    if !report.missing_required_steps.is_empty() {
+        return "missing_required_steps".to_string();
+    }
+    if !report.skipped_required_steps.is_empty() {
+        return "skipped_required_steps".to_string();
+    }
+    "testing_blocked".to_string()
+}
+
 #[derive(Debug, Deserialize)]
 struct ProviderTestingStepResultsPayload {
     #[serde(default)]
@@ -4458,6 +4489,65 @@ mod tests {
     use crate::product::models::{ProviderConversationRef, ProviderConversationRole};
     use crate::web::workspace_ws_types::ProviderConfigSnapshot;
     use tempfile::tempdir;
+
+    fn blocked_report_with(missing: Vec<String>, skipped: Vec<String>) -> TestingReport {
+        TestingReport {
+            id: "testing_report_0001".to_string(),
+            attempt_id: "coding_attempt_0001".to_string(),
+            commands: Vec::new(),
+            overall_status: TestingOverallStatus::Blocked,
+            provider_claim: None,
+            backend_verified: true,
+            started_at: "2026-06-10T00:00:00Z".to_string(),
+            completed_at: Some("2026-06-10T00:00:01Z".to_string()),
+            plan_id: Some("test_plan_0001".to_string()),
+            plan_summary: Some("plan".to_string()),
+            steps: Vec::new(),
+            unplanned_commands: Vec::new(),
+            unplanned_evidence: Vec::new(),
+            missing_required_steps: missing,
+            skipped_required_steps: skipped,
+            context_warnings: Vec::new(),
+            raw_provider_output_ref: None,
+        }
+    }
+
+    #[test]
+    fn derive_reason_code_prefers_explicit() {
+        let report = blocked_report_with(Vec::new(), vec!["S018".to_string()]);
+        let reason = derive_testing_blocked_reason_code(
+            Some("high_risk_test_step_requires_permission".to_string()),
+            &report,
+        );
+        assert_eq!(reason, "high_risk_test_step_requires_permission");
+    }
+
+    #[test]
+    fn derive_reason_code_uses_missing_when_present() {
+        let report = blocked_report_with(vec!["unit".to_string()], vec!["S018".to_string()]);
+        assert_eq!(
+            derive_testing_blocked_reason_code(None, &report),
+            "missing_required_steps"
+        );
+    }
+
+    #[test]
+    fn derive_reason_code_uses_skipped_when_only_skipped() {
+        let report = blocked_report_with(Vec::new(), vec!["S018".to_string(), "S027".to_string()]);
+        assert_eq!(
+            derive_testing_blocked_reason_code(None, &report),
+            "skipped_required_steps"
+        );
+    }
+
+    #[test]
+    fn derive_reason_code_falls_back_to_testing_blocked() {
+        let report = blocked_report_with(Vec::new(), Vec::new());
+        assert_eq!(
+            derive_testing_blocked_reason_code(None, &report),
+            "testing_blocked"
+        );
+    }
 
     struct NonProviderDrivenTestingProvider;
 

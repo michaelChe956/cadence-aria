@@ -455,6 +455,41 @@ describe("CodingWorkspacePage", () => {
     expect(gate).not.toHaveTextContent("测试失败");
   });
 
+  it("renders skipped_required_steps blocked gate with dedicated label", async () => {
+    mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      attemptId: "coding_attempt_0001",
+      status: "blocked",
+      stage: "testing",
+      pendingGates: [
+        {
+          gate_id: "gate_0001",
+          kind: "blocked",
+          title: "Testing blocked",
+          description: "Required testing steps are missing or blocked",
+          stage: "testing",
+          role: "tester",
+          reason_code: "skipped_required_steps",
+          evidence_refs: ["testing_report_0001.json"],
+          raw_provider_output_ref: "provider-raw/testing/execute_test_plan_0001.txt",
+          available_actions: [
+            {
+              action_id: "retry_test_plan",
+              label: "重试测试计划",
+              action_type: "retry_test_plan",
+            },
+          ],
+        },
+      ],
+    });
+
+    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+
+    const gate = screen.getByTestId("coding-pending-gate");
+    expect(gate).toHaveTextContent("required 测试步骤被阻塞（无法执行）");
+    expect(gate).not.toHaveTextContent("缺少 required 测试步骤证据");
+  });
+
   it("sends stage gate confirm for confirm-stage pending gate actions", async () => {
     const api = mockCodingWs();
     useCodingWorkspaceStore.setState({

@@ -72,7 +72,7 @@ fn default_matrix_contains_claude_code_and_codex_cli_entries() {
         vec![
             "exec".to_string(),
             "-s".to_string(),
-            "workspace-write".to_string()
+            "danger-full-access".to_string()
         ]
     );
     assert!(!claude.pass_worktree_path_as_arg);
