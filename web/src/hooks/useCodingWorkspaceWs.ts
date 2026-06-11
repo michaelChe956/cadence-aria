@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef } from "react";
 import type {
+  CodingProviderPermissionMode,
+  CodingProviderRole,
   CodingProviderSelectRole,
   CodingWsInMessage,
   CodingWsOutMessage,
@@ -60,6 +62,13 @@ export function useCodingWorkspaceWs(attemptId: string | null) {
   const sendProviderSelect = useCallback(
     (role: CodingProviderSelectRole, provider: WorkspaceProviderName) => {
       sendJson({ type: "provider_select", role, provider });
+    },
+    [sendJson],
+  );
+
+  const sendPermissionModeSelect = useCallback(
+    (role: CodingProviderRole, permissionMode: CodingProviderPermissionMode) => {
+      sendJson({ type: "permission_mode_select", role, permission_mode: permissionMode });
     },
     [sendJson],
   );
@@ -263,6 +272,7 @@ export function useCodingWorkspaceWs(attemptId: string | null) {
     startCoding,
     sendContextNote,
     sendProviderSelect,
+    sendPermissionModeSelect,
     confirmStageGate,
     respondPermission,
     respondChoice,

@@ -6,8 +6,8 @@ use cadence_aria::product::coding_attempt_store::{CodingAttemptStore, CreateCodi
 use cadence_aria::product::coding_models::{
     CodingAgentRole, CodingAttemptStatus, CodingEntryType, CodingExecutionStage, CodingGateAction,
     CodingGateActionType, CodingGateKind, CodingGateRequired, CodingProviderRole,
-    CodingRoleProviderConfigSnapshot, CodingTimelineNode, CodingTimelineNodeStatus, PushStatus,
-    TestingOverallStatus,
+    CodingProviderPermissionMode, CodingRoleProviderConfigSnapshot, CodingTimelineNode,
+    CodingTimelineNodeStatus, PushStatus, TestingOverallStatus,
 };
 use cadence_aria::product::lifecycle_store::{
     CreateWorkItemInput, CreateWorkspaceSessionInput, LifecycleStore,
@@ -679,6 +679,63 @@ async fn coding_ws_provider_select_during_stage_gate_updates_roles_and_refreshes
             .expect("role provider snapshot")
             .tester,
         ProviderName::Codex
+    );
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+#[tokio::test]
+async fn coding_ws_permission_mode_select_updates_role_config() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let app = app_with_attempt(root.path());
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(
+        &mut ws,
+        &CodingWsInMessage::PermissionModeSelect {
+            role: "tester".to_string(),
+            permission_mode: CodingProviderPermissionMode::Supervised,
+        },
+    )
+    .await;
+
+    assert_eq!(
+        wait_for_provider_config_update(&mut ws).await,
+        CodingWsOutMessage::CodingProviderConfigUpdated {
+            role: CodingProviderRole::Tester,
+            provider: ProviderName::Fake,
+        }
+    );
+    match recv_json(&mut ws).await {
+        CodingWsOutMessage::CodingSessionState {
+            role_provider_config_snapshot,
+            ..
+        } => {
+            assert_eq!(
+                role_provider_config_snapshot.permission_mode_for_role(&CodingProviderRole::Tester),
+                CodingProviderPermissionMode::Supervised
+            );
+        }
+        other => panic!("expected updated coding session state, got {other:?}"),
+    }
+
+    let snapshot = store
+        .get_role_provider_config_snapshot("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("role config");
+    assert_eq!(
+        snapshot.permission_mode_for_role(&CodingProviderRole::Tester),
+        CodingProviderPermissionMode::Supervised
     );
 
     ws.close(None).await.expect("close ws");

@@ -64,6 +64,13 @@ function codingSessionState(overrides: Record<string, unknown> = {}) {
       code_reviewer: "fake",
       internal_reviewer: "fake",
       review_rounds: 1,
+      permission_modes: {
+        coder: "supervised",
+        tester: "auto",
+        analyst: "auto",
+        code_reviewer: "supervised",
+        internal_reviewer: "supervised",
+      },
     },
     provider_config_snapshot: { author: "fake", reviewer: "fake", review_rounds: 1 },
     chat_entries: [],
@@ -176,6 +183,13 @@ describe("useCodingWorkspaceWs", () => {
           code_reviewer: "fake",
           internal_reviewer: "fake",
           review_rounds: 1,
+          permission_modes: {
+            coder: "supervised",
+            tester: "auto",
+            analyst: "auto",
+            code_reviewer: "supervised",
+            internal_reviewer: "supervised",
+          },
         },
         provider_config_snapshot: { author: "fake", reviewer: "fake", review_rounds: 1 },
         chat_entries: [],
@@ -289,6 +303,13 @@ describe("useCodingWorkspaceWs", () => {
           code_reviewer: "fake",
           internal_reviewer: "fake",
           review_rounds: 1,
+          permission_modes: {
+            coder: "supervised",
+            tester: "auto",
+            analyst: "auto",
+            code_reviewer: "supervised",
+            internal_reviewer: "supervised",
+          },
         },
         provider_config_snapshot: { author: "fake", reviewer: "fake", review_rounds: 1 },
         chat_entries: [],
@@ -525,6 +546,7 @@ describe("useCodingWorkspaceWs", () => {
       harness.api.sendContextNote("补充上下文");
       harness.api.sendProviderSelect("author", "codex");
       harness.api.sendProviderSelect("tester", "fake");
+      harness.api.sendPermissionModeSelect("tester", "supervised");
       harness.api.confirmStageGate("testing");
       harness.api.finalConfirm();
       harness.api.abortAttempt();
@@ -536,6 +558,11 @@ describe("useCodingWorkspaceWs", () => {
       JSON.stringify({ type: "context_note", content: "补充上下文" }),
       JSON.stringify({ type: "provider_select", role: "author", provider: "codex" }),
       JSON.stringify({ type: "provider_select", role: "tester", provider: "fake" }),
+      JSON.stringify({
+        type: "permission_mode_select",
+        role: "tester",
+        permission_mode: "supervised",
+      }),
       JSON.stringify({ type: "stage_gate_confirm", stage: "testing" }),
       JSON.stringify({ type: "final_confirm" }),
       JSON.stringify({ type: "abort_attempt" }),

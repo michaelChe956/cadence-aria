@@ -166,6 +166,7 @@ export function CodingWorkspacePage({
                 snapshot={store.roleProviderConfigSnapshot}
                 lockedRole={lockedProviderRole(store.stage, store.status, store.pendingGates)}
                 onSelect={api.sendProviderSelect}
+                onPermissionModeSelect={api.sendPermissionModeSelect}
               />
               <ChatEntryList
                 ref={chatListRef}

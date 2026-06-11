@@ -21,6 +21,13 @@ const roleProviderConfig = {
   code_reviewer: "fake" as const,
   internal_reviewer: "fake" as const,
   review_rounds: 1,
+  permission_modes: {
+    coder: "supervised" as const,
+    tester: "auto" as const,
+    analyst: "auto" as const,
+    code_reviewer: "supervised" as const,
+    internal_reviewer: "supervised" as const,
+  },
 };
 
 function codingNode(overrides: Partial<CodingTimelineNode> = {}): CodingTimelineNode {

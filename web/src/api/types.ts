@@ -164,6 +164,15 @@ export type CodingProviderRole =
   | "code_reviewer"
   | "internal_reviewer";
 export type CodingProviderSelectRole = "author" | "reviewer" | CodingProviderRole;
+export type CodingProviderPermissionMode = "auto" | "supervised";
+
+export type CodingRolePermissionModes = {
+  coder: CodingProviderPermissionMode;
+  tester: CodingProviderPermissionMode;
+  analyst: CodingProviderPermissionMode;
+  code_reviewer: CodingProviderPermissionMode;
+  internal_reviewer: CodingProviderPermissionMode;
+};
 
 export type CodingTimelineNode = {
   id: string;
@@ -185,6 +194,7 @@ export type CodingRoleProviderConfigSnapshot = {
   code_reviewer: WorkspaceProviderName;
   internal_reviewer: WorkspaceProviderName;
   review_rounds: number;
+  permission_modes: CodingRolePermissionModes;
 };
 
 export type TestCommandStatus = "passed" | "failed" | "timed_out" | "blocked";
@@ -437,6 +447,11 @@ export type CodingWsInMessage =
       extra_context?: string | null;
     }
   | { type: "provider_select"; role: CodingProviderSelectRole; provider: WorkspaceProviderName }
+  | {
+      type: "permission_mode_select";
+      role: CodingProviderRole;
+      permission_mode: CodingProviderPermissionMode;
+    }
   | { type: "stage_gate_confirm"; stage: CodingExecutionStage }
   | { type: "final_confirm" }
   | { type: "abort_attempt" }

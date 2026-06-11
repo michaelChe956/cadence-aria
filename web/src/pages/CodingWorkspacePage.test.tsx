@@ -61,6 +61,7 @@ function mockCodingWs(overrides: Partial<CodingWsApi> = {}) {
     startCoding: vi.fn(),
     sendContextNote: vi.fn(),
     sendProviderSelect: vi.fn(),
+    sendPermissionModeSelect: vi.fn(),
     confirmStageGate: vi.fn(),
     respondPermission: vi.fn(),
     respondChoice: vi.fn(),
@@ -475,6 +476,13 @@ describe("CodingWorkspacePage", () => {
         code_reviewer: "fake",
         internal_reviewer: "fake",
         review_rounds: 1,
+        permission_modes: {
+          coder: "supervised",
+          tester: "auto",
+          analyst: "auto",
+          code_reviewer: "supervised",
+          internal_reviewer: "supervised",
+        },
       },
     });
 
@@ -482,10 +490,15 @@ describe("CodingWorkspacePage", () => {
 
     expect(screen.getByTestId("coding-provider-config-panel")).toHaveTextContent("Coder");
     expect(screen.getByTestId("coding-provider-config-panel")).toHaveTextContent("Tester");
+    expect(screen.getByTestId("coding-provider-config-panel")).toHaveTextContent("Auto");
 
     await userEvent.click(screen.getByRole("button", { name: "将 Tester 切换为 Codex" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "将 Tester 授权模式切换为 Supervised" }),
+    );
 
     expect(api.sendProviderSelect).toHaveBeenCalledWith("tester", "codex");
+    expect(api.sendPermissionModeSelect).toHaveBeenCalledWith("tester", "supervised");
   });
 
   it("sends coding context notes from the chat input", async () => {

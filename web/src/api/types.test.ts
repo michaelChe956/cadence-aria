@@ -177,6 +177,13 @@ describe("workspace websocket protocol types", () => {
         code_reviewer: "fake",
         internal_reviewer: "fake",
         review_rounds: 1,
+        permission_modes: {
+          coder: "supervised",
+          tester: "auto",
+          analyst: "auto",
+          code_reviewer: "supervised",
+          internal_reviewer: "supervised",
+        },
       },
       provider_config_snapshot: { author: "fake", reviewer: "fake", review_rounds: 1 },
       chat_entries: [],

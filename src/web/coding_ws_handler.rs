@@ -17,9 +17,9 @@ use crate::product::coding_models::{
     CodeReviewReport, CodingAgentRole, CodingAttemptStatus, CodingChatEntry, CodingContextNote,
     CodingEntryType, CodingExecutionAttempt, CodingExecutionStage, CodingGateAction,
     CodingGateActionType, CodingGateKind, CodingGateRequired as CodingGateRequiredModel,
-    CodingProviderRole, CodingRoleProviderConfigSnapshot, CodingStageGateState,
-    CodingStageGateStatus, CodingTimelineNode, CodingTimelineNodeStatus, InternalPrReview,
-    PushStatus, ReviewRequest, ReviewVerdict, TestingReport,
+    CodingProviderPermissionMode, CodingProviderRole, CodingRoleProviderConfigSnapshot,
+    CodingStageGateState, CodingStageGateStatus, CodingTimelineNode, CodingTimelineNodeStatus,
+    InternalPrReview, PushStatus, ReviewRequest, ReviewVerdict, TestingReport,
 };
 use crate::product::coding_workspace_engine::{
     CodingExecutionContext, CodingWorkspaceEngine, CodingWorkspaceEngineError,
@@ -367,6 +367,43 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                     )
                     .await;
                     if let Ok(snapshot) = build_coding_session_state(&coding_store, updated) {
+                        let _ = send_coding_json(&mut socket_tx, &snapshot).await;
+                    }
+                } else if let CodingWsInMessage::PermissionModeSelect {
+                    role,
+                    permission_mode,
+                } = inbound
+                {
+                    let (changed_role, current_provider) = match update_provider_permission_mode(
+                        &coding_store,
+                        &current_attempt,
+                        &role,
+                        permission_mode,
+                    ) {
+                        Ok(updated) => updated,
+                        Err(error) => {
+                            let _ = send_coding_json(
+                                &mut socket_tx,
+                                &CodingWsOutMessage::CodingProtocolError {
+                                    code: "coding_permission_mode_select_failed".to_string(),
+                                    message: error.to_string(),
+                                },
+                            )
+                            .await;
+                            continue;
+                        }
+                    };
+                    let _ = send_coding_json(
+                        &mut socket_tx,
+                        &CodingWsOutMessage::CodingProviderConfigUpdated {
+                            role: changed_role,
+                            provider: current_provider,
+                        },
+                    )
+                    .await;
+                    if let Ok(snapshot) =
+                        build_coding_session_state(&coding_store, current_attempt.clone())
+                    {
                         let _ = send_coding_json(&mut socket_tx, &snapshot).await;
                     }
                 } else if let CodingWsInMessage::StageGateConfirm { stage } = inbound {
@@ -1170,6 +1207,31 @@ fn update_provider_selection(
     Ok((updated, changed_role, changed_provider))
 }
 
+fn update_provider_permission_mode(
+    coding_store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+    role: &str,
+    permission_mode: CodingProviderPermissionMode,
+) -> Result<(CodingProviderRole, ProviderName), ProductStoreError> {
+    let parsed_role = parse_coding_provider_role(role).ok_or_else(|| {
+        ProductStoreError::Io(format!("unknown coding role: {role}"))
+    })?;
+    let mut role_snapshot = coding_store.get_role_provider_config_snapshot(
+        &attempt.project_id,
+        &attempt.issue_id,
+        &attempt.id,
+    )?;
+    let provider = role_snapshot.provider_for_role(&parsed_role).clone();
+    role_snapshot.set_permission_mode_for_role(&parsed_role, permission_mode);
+    coding_store.update_role_provider_config_snapshot(
+        &attempt.project_id,
+        &attempt.issue_id,
+        &attempt.id,
+        role_snapshot,
+    )?;
+    Ok((parsed_role, provider))
+}
+
 fn provider_selection_targets_current_running_stage(
     attempt: &CodingExecutionAttempt,
     role: &str,
@@ -1590,6 +1652,10 @@ pub enum CodingWsInMessage {
         role: String,
         provider: ProviderName,
     },
+    PermissionModeSelect {
+        role: String,
+        permission_mode: CodingProviderPermissionMode,
+    },
     StageGateConfirm {
         stage: CodingExecutionStage,
     },
@@ -1625,6 +1691,9 @@ pub fn is_coding_ws_message_allowed(
     if matches!(message, CodingWsInMessage::ProviderSelect { .. }) && status.is_active() {
         return true;
     }
+    if matches!(message, CodingWsInMessage::PermissionModeSelect { .. }) && status.is_active() {
+        return true;
+    }
     if *status == CodingAttemptStatus::Blocked {
         return matches!(
             message,
@@ -1637,6 +1706,7 @@ pub fn is_coding_ws_message_allowed(
             CodingWsInMessage::ContextNote { .. }
                 | CodingWsInMessage::StartCoding
                 | CodingWsInMessage::ProviderSelect { .. }
+                | CodingWsInMessage::PermissionModeSelect { .. }
                 | CodingWsInMessage::AbortAttempt
         ),
         CodingExecutionStage::WorktreePrepare | CodingExecutionStage::ReviewRequest => {
