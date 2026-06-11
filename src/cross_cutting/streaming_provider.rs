@@ -285,6 +285,10 @@ pub trait StreamingProviderAdapter: Send + Sync {
         false
     }
 
+    fn supports_provider_driven_testing(&self) -> bool {
+        false
+    }
+
     async fn start(
         &self,
         _input: StreamingProviderInput,
@@ -373,6 +377,10 @@ pub struct FakeStreamingProvider;
 
 #[async_trait::async_trait]
 impl StreamingProviderAdapter for FakeStreamingProvider {
+    fn supports_provider_driven_testing(&self) -> bool {
+        true
+    }
+
     async fn start(
         &self,
         input: StreamingProviderInput,
@@ -498,6 +506,34 @@ impl StreamingProviderAdapter for FakeStreamingProvider {
 }
 
 fn fake_workspace_markdown(prompt: &str) -> String {
+    if prompt.contains("Tester Provider Runtime") && prompt.contains("Phase: plan_tests") {
+        return serde_json::json!({
+            "summary": "fake provider smoke test plan",
+            "steps": [{
+                "id": "fake_smoke",
+                "title": "Fake provider smoke",
+                "intent": "prove fake provider can satisfy provider-driven testing",
+                "required": true,
+                "tool": "provider_managed",
+                "risk_level": "low",
+                "command_or_tool_input": {},
+                "evidence_expectation": "fake provider emits deterministic step evidence"
+            }]
+        })
+        .to_string();
+    }
+    if prompt.contains("Tester Provider Runtime") && prompt.contains("Phase: execute_test_plan") {
+        return serde_json::json!({
+            "step_results": [{
+                "step_id": "fake_smoke",
+                "status": "passed",
+                "evidence_refs": ["fake-provider-smoke.log"],
+                "provider_analysis": "fake provider deterministic testing passed"
+            }]
+        })
+        .to_string();
+    }
+
     let issue = extract_prompt_field(prompt, "Issue")
         .or_else(|| extract_prompt_field(prompt, "Issue 描述"))
         .unwrap_or_else(|| "当前 Issue".to_string());

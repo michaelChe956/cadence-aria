@@ -640,6 +640,10 @@ impl StreamingProviderAdapter for TestControlledFakeStreamingProvider {
         true
     }
 
+    fn supports_provider_driven_testing(&self) -> bool {
+        true
+    }
+
     async fn start(
         &self,
         input: StreamingProviderInput,

@@ -360,6 +360,10 @@ impl ClaudeCodeProvider {
 
 #[async_trait::async_trait]
 impl StreamingProviderAdapter for ClaudeCodeProvider {
+    fn supports_provider_driven_testing(&self) -> bool {
+        true
+    }
+
     async fn start(
         &self,
         input: StreamingProviderInput,
@@ -1248,6 +1252,13 @@ mod tests {
     use super::ClaudeCodeProvider;
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+    #[test]
+    fn claude_code_provider_supports_provider_driven_testing() {
+        let provider = ClaudeCodeProvider::new(PathBuf::from("claude"));
+
+        assert!(provider.supports_provider_driven_testing());
+    }
 
     #[test]
     fn claude_args_include_resume_when_provider_session_is_available() {

@@ -302,7 +302,8 @@ async fn coding_coder_run_resumes_previous_coder_provider_session() {
             CodingAttemptStatus::Running,
         )
         .expect("running");
-    let (tx, _rx) = mpsc::channel(8);
+    let (tx, mut rx) = mpsc::channel(64);
+    tokio::spawn(async move { while rx.recv().await.is_some() {} });
     let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
     let provider = SessionInputCapturingProvider::default();
 
@@ -369,7 +370,8 @@ async fn coding_coder_rework_with_resume_uses_delta_prompt() {
         ),
         verification_commands: vec!["uv run python -m unittest".to_string()],
     };
-    let (tx, _rx) = mpsc::channel(8);
+    let (tx, mut rx) = mpsc::channel(64);
+    tokio::spawn(async move { while rx.recv().await.is_some() {} });
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
     let provider = SessionInputCapturingProvider::with_outputs(
         ["first coding done", "second coding done"],
@@ -469,11 +471,15 @@ async fn coding_tester_does_not_resume_coder_provider_session() {
             CodingAttemptStatus::Running,
         )
         .expect("running");
-    let (tx, _rx) = mpsc::channel(8);
+    let (tx, mut rx) = mpsc::channel(64);
+    tokio::spawn(async move { while rx.recv().await.is_some() {} });
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
     let provider = SessionInputCapturingProvider::with_outputs(
-        [r#"{"summary":"testing ok","bugs_found":[]}"#],
-        [Some("tester-session-2".to_string())],
+        [
+            r#"{"summary":"testing plan","steps":[{"id":"provider_check","title":"Provider check","intent":"verify provider session isolation","required":true,"tool":"provider_managed","risk_level":"low","command_or_tool_input":{},"evidence_expectation":"provider evidence"}]}"#,
+            r#"{"step_results":[{"step_id":"provider_check","status":"passed","evidence_refs":["provider-session.log"],"provider_analysis":"session isolated"}]}"#,
+        ],
+        [None, Some("tester-session-2".to_string())],
     );
 
     let _report = engine
@@ -488,13 +494,14 @@ async fn coding_tester_does_not_resume_coder_provider_session() {
         .expect("testing provider run");
 
     let inputs = provider.inputs.lock().expect("inputs lock");
-    assert_eq!(inputs.len(), 1);
-    assert_eq!(
-        inputs[0].permission_mode,
-        ProviderPermissionMode::Supervised
-    );
-    assert_eq!(inputs[0].timeout_secs, 10_800);
-    assert_eq!(inputs[0].resume_provider_session_id, None);
+    assert_eq!(inputs.len(), 2);
+    assert!(inputs[0].prompt.contains("Phase: plan_tests"));
+    assert!(inputs[1].prompt.contains("Phase: execute_test_plan"));
+    for input in inputs.iter() {
+        assert_eq!(input.permission_mode, ProviderPermissionMode::Supervised);
+        assert_eq!(input.timeout_secs, 10_800);
+        assert_eq!(input.resume_provider_session_id, None);
+    }
     let updated = store
         .get_attempt("project_0001", "issue_0001", &attempt.id)
         .expect("updated attempt");
@@ -3219,6 +3226,10 @@ impl StreamingProviderAdapter for SessionInputCapturingProvider {
         true
     }
 
+    fn supports_provider_driven_testing(&self) -> bool {
+        true
+    }
+
     async fn start(
         &self,
         input: StreamingProviderInput,
@@ -3239,12 +3250,14 @@ impl StreamingProviderAdapter for SessionInputCapturingProvider {
             .unwrap_or_else(|| Some("coder-session-1".to_string()));
         let (event_tx, event_rx) = mpsc::channel(8);
         let (command_tx, _command_rx) = mpsc::channel(8);
-        event_tx
-            .try_send(ProviderEvent::Completed {
-                full_output: output,
-                provider_session_id,
-            })
-            .expect("send completed");
+        tokio::spawn(async move {
+            let _ = event_tx
+                .send(ProviderEvent::Completed {
+                    full_output: output,
+                    provider_session_id,
+                })
+                .await;
+        });
         Ok(ProviderSession {
             events: event_rx,
             commands: command_tx,

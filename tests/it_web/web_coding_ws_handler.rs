@@ -1,6 +1,8 @@
 use cadence_aria::cross_cutting::provider_adapter::ProviderAdapterError;
 use cadence_aria::cross_cutting::provider_registry::ProviderRegistry;
-use cadence_aria::cross_cutting::streaming_provider::{StreamChunk, StreamingProviderAdapter};
+use cadence_aria::cross_cutting::streaming_provider::{
+    ProviderEvent, ProviderSession, StreamChunk, StreamingProviderAdapter, StreamingProviderInput,
+};
 use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
 use cadence_aria::product::coding_models::{
@@ -946,6 +948,13 @@ async fn coding_ws_start_coding_drives_full_happy_path_to_final_confirm() {
                 stages.push(node.stage);
             }
             CodingWsOutMessage::CodingGateRequired { gate } => {
+                assert_eq!(
+                    gate.kind,
+                    CodingGateKind::StageGate,
+                    "unexpected non-stage gate: {:?} {:?}",
+                    gate.reason_code,
+                    gate.description
+                );
                 if let Some(stage) = gate.stage.clone()
                     && confirmed_gates.insert(gate.gate_id)
                 {
@@ -1087,6 +1096,13 @@ async fn internal_review_rework_creates_new_review_request_commit() {
     for _ in 0..140 {
         match recv_json(&mut ws).await {
             CodingWsOutMessage::CodingGateRequired { gate } => {
+                assert_eq!(
+                    gate.kind,
+                    CodingGateKind::StageGate,
+                    "unexpected non-stage gate: {:?} {:?}",
+                    gate.reason_code,
+                    gate.description
+                );
                 if let Some(stage) = gate.stage.clone()
                     && confirmed_gates.insert(gate.gate_id)
                 {
@@ -1161,6 +1177,13 @@ async fn code_review_findings_are_injected_into_next_coding_round() {
     for _ in 0..140 {
         match recv_json(&mut ws).await {
             CodingWsOutMessage::CodingGateRequired { gate } => {
+                assert_eq!(
+                    gate.kind,
+                    CodingGateKind::StageGate,
+                    "unexpected non-stage gate: {:?} {:?}",
+                    gate.reason_code,
+                    gate.description
+                );
                 if let Some(stage) = gate.stage.clone()
                     && confirmed_gates.insert(gate.gate_id)
                 {
@@ -2033,6 +2056,18 @@ struct FullChainStreamingProvider;
 
 #[async_trait::async_trait]
 impl StreamingProviderAdapter for FullChainStreamingProvider {
+    fn supports_provider_driven_testing(&self) -> bool {
+        true
+    }
+
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        start_web_test_provider_driven_testing_session(&input.prompt, cancel)
+    }
+
     async fn run_streaming(
         &self,
         input: &AdapterInput,
@@ -2098,6 +2133,18 @@ struct InternalReviewReworkState {
 
 #[async_trait::async_trait]
 impl StreamingProviderAdapter for InternalReviewReworkProvider {
+    fn supports_provider_driven_testing(&self) -> bool {
+        true
+    }
+
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        start_web_test_provider_driven_testing_session(&input.prompt, cancel)
+    }
+
     async fn run_streaming(
         &self,
         input: &AdapterInput,
@@ -2214,6 +2261,18 @@ impl CodeReviewReworkProvider {
 
 #[async_trait::async_trait]
 impl StreamingProviderAdapter for CodeReviewReworkProvider {
+    fn supports_provider_driven_testing(&self) -> bool {
+        true
+    }
+
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        start_web_test_provider_driven_testing_session(&input.prompt, cancel)
+    }
+
     async fn run_streaming(
         &self,
         input: &AdapterInput,
@@ -2311,6 +2370,88 @@ impl StreamingProviderAdapter for CodeReviewReworkProvider {
         }
         Ok(rx)
     }
+}
+
+fn start_web_test_provider_driven_testing_session(
+    prompt: &str,
+    cancel: CancellationToken,
+) -> Result<ProviderSession, ProviderAdapterError> {
+    let Some(output) = web_test_provider_driven_testing_output(prompt) else {
+        return Err(ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "streaming provider start is not implemented",
+            0,
+        ));
+    };
+    let (event_tx, event_rx) = mpsc::channel(8);
+    let (command_tx, _command_rx) = mpsc::channel(8);
+
+    tokio::spawn(async move {
+        if cancel.is_cancelled() {
+            return;
+        }
+        if event_tx
+            .send(ProviderEvent::TextDelta {
+                content: output.clone(),
+            })
+            .await
+            .is_err()
+        {
+            return;
+        }
+        if cancel.is_cancelled() {
+            return;
+        }
+        let _ = event_tx
+            .send(ProviderEvent::Completed {
+                full_output: output,
+                provider_session_id: None,
+            })
+            .await;
+    });
+
+    Ok(ProviderSession {
+        events: event_rx,
+        commands: command_tx,
+    })
+}
+
+fn web_test_provider_driven_testing_output(prompt: &str) -> Option<String> {
+    if prompt.contains("Tester Provider Runtime") && prompt.contains("Phase: plan_tests") {
+        return Some(
+            json!({
+                "summary": "web integration provider-driven test plan",
+                "steps": [{
+                    "id": "cargo_test",
+                    "title": "Cargo test",
+                    "intent": "verify the coding worktree with the provider-managed test fixture",
+                    "required": true,
+                    "tool": "provider_managed",
+                    "risk_level": "low",
+                    "command_or_tool_input": {
+                        "command": "cargo test --locked"
+                    },
+                    "evidence_expectation": "provider reports deterministic cargo test evidence"
+                }]
+            })
+            .to_string(),
+        );
+    }
+    if prompt.contains("Tester Provider Runtime") && prompt.contains("Phase: execute_test_plan") {
+        return Some(
+            json!({
+                "step_results": [{
+                    "step_id": "cargo_test",
+                    "status": "passed",
+                    "evidence_refs": ["web-it-provider-driven-testing.log"],
+                    "provider_analysis": "web integration fixture completed deterministic provider-managed testing"
+                }]
+            })
+            .to_string(),
+        );
+    }
+    None
 }
 
 struct HangingCodingProvider;

@@ -201,6 +201,35 @@ pub fn build_tester_plan_prompt(
     )
 }
 
+pub fn build_tester_plan_repair_prompt(raw_output: &str, parse_error: &str) -> String {
+    format!(
+        "Tester Provider Runtime\n\
+         Phase: plan_tests_repair\n\
+         The previous plan_tests output could not be parsed as TestPlan JSON.\n\
+         Parse error: {parse_error}\n\
+         只返回合法 JSON。不要使用 Markdown 代码块，不要解释。\n\
+         Required shape:\n\
+         {{\"summary\":\"...\",\"context_warnings\":[],\"assumptions\":[],\"steps\":[{{\"id\":\"...\",\"title\":\"...\",\"intent\":\"...\",\"required\":true,\"tool\":\"run_command|read_file|list_files|search_code|provider_managed\",\"risk_level\":\"low|medium|high\",\"command_or_tool_input\":{{}},\"evidence_expectation\":\"...\"}}]}}\n\
+         Previous output:\n\
+         {raw_output}"
+    )
+}
+
+pub fn build_tester_execute_repair_prompt(
+    raw_output: &str,
+    missing_required_steps: &[String],
+) -> String {
+    format!(
+        "Tester Provider Runtime\n\
+         Phase: execute_test_plan_repair\n\
+         The previous execute_test_plan output did not provide valid step_results for every required step.\n\
+         Missing required steps: {missing_required_steps:?}\n\
+         Return only JSON: {{\"step_results\":[{{\"step_id\":\"...\",\"status\":\"passed|failed|blocked|skipped\",\"evidence_refs\":[\"...\"],\"provider_analysis\":\"...\"}}]}}\n\
+         Previous output:\n\
+         {raw_output}"
+    )
+}
+
 pub async fn execute_tester_tool_call(
     call: &ProviderToolCall,
     worktree_path: impl AsRef<Path>,
@@ -837,6 +866,21 @@ Tester plan:
         assert_eq!(report.overall_status, TestingOverallStatus::Blocked);
         assert_eq!(report.plan_id.as_deref(), Some("test_plan_0001"));
         assert_eq!(report.missing_required_steps, vec!["security"]);
+    }
+
+    #[test]
+    fn tester_plan_repair_prompt_includes_raw_output_and_schema_error() {
+        let prompt = build_tester_plan_repair_prompt(
+            "## 最终测试报告\n无法执行 cargo",
+            "missing_json_object",
+        );
+
+        assert!(prompt.contains("Phase: plan_tests_repair"));
+        assert!(prompt.contains("missing_json_object"));
+        assert!(prompt.contains("## 最终测试报告"));
+        assert!(prompt.contains("\"summary\""));
+        assert!(prompt.contains("\"steps\""));
+        assert!(prompt.contains("只返回合法 JSON"));
     }
 
     #[test]

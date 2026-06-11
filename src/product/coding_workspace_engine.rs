@@ -39,9 +39,9 @@ use crate::product::models::{
 };
 use crate::product::test_executor::{TestCommandSpec, TestExecutorError, run_all_tests};
 use crate::product::tester_agent_loop::{
-    TesterAgentOptions, build_plan_based_testing_report, build_tester_plan_prompt,
-    build_tester_system_prompt, build_testing_report, execute_tester_tool_call,
-    parse_test_plan_payload,
+    TesterAgentOptions, build_plan_based_testing_report, build_tester_execute_repair_prompt,
+    build_tester_plan_prompt, build_tester_plan_repair_prompt, build_testing_report,
+    execute_tester_tool_call, parse_test_plan_payload,
 };
 use crate::protocol::contracts::{AdapterInput, AdapterRole, ProviderType};
 use crate::web::coding_ws_handler::CodingWsOutMessage;
@@ -95,6 +95,7 @@ struct CodingProviderStreamRun<'a> {
     provider_name: &'a ProviderName,
     provider_role: CodingProviderRole,
     command_rx: &'a mut mpsc::Receiver<CodingRunnerCommand>,
+    allow_legacy_stream_fallback: bool,
 }
 
 fn provider_conversation_role_for_coding_role(
@@ -427,6 +428,7 @@ impl CodingWorkspaceEngine {
                 provider_name: &coder_provider,
                 provider_role: CodingProviderRole::Coder,
                 command_rx,
+                allow_legacy_stream_fallback: true,
             })
             .await?;
         self.complete_timeline_node(
@@ -454,14 +456,20 @@ impl CodingWorkspaceEngine {
             provider_name,
             provider_role,
             command_rx,
+            allow_legacy_stream_fallback,
         } = run;
         let cancel = CancellationToken::new();
         let mut session = match provider.start(input, cancel.clone()).await {
             Ok(session) => session,
-            Err(error) if provider_start_is_not_implemented(&error) => {
+            Err(error)
+                if provider_start_is_not_implemented(&error) && allow_legacy_stream_fallback =>
+            {
                 return self
                     .run_legacy_stream_to_completion(attempt, node_id, provider, legacy_input)
                     .await;
+            }
+            Err(error) if !allow_legacy_stream_fallback => {
+                return Err(CodingWorkspaceEngineError::ProviderStream(error.details));
             }
             Err(error) => {
                 return self
@@ -850,6 +858,122 @@ impl CodingWorkspaceEngine {
         Ok(report)
     }
 
+    async fn save_blocked_testing_report_and_gate(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        node: &CodingTimelineNode,
+        report: TestingReport,
+        reason_code: &str,
+        description: &str,
+        raw_provider_output_ref: Option<String>,
+    ) -> Result<TestingReport, CodingWorkspaceEngineError> {
+        self.store.save_testing_report(&report)?;
+        let _ = self
+            .event_tx
+            .send(CodingWsOutMessage::TestingReportUpdate {
+                report: Box::new(report.clone()),
+            })
+            .await;
+        self.store.update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::Blocked,
+        )?;
+        self.complete_timeline_node(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &node.id,
+            CodingTimelineNodeStatus::Blocked,
+            Some("测试被阻塞".to_string()),
+        )
+        .await?;
+        let gate = self.store.create_blocked_gate(CreateBlockedGateInput {
+            attempt_id: attempt.id.clone(),
+            stage: CodingExecutionStage::Testing,
+            node_id: Some(node.id.clone()),
+            role: Some(CodingProviderRole::Tester),
+            title: "Testing blocked".to_string(),
+            description: description.to_string(),
+            reason_code: Some(reason_code.to_string()),
+            evidence_refs: vec![format!("{}.json", report.id)],
+            raw_provider_output_ref,
+            available_actions: testing_blocked_gate_actions(),
+        })?;
+        let _ = self
+            .event_tx
+            .send(CodingWsOutMessage::CodingGateRequired { gate })
+            .await;
+        Ok(report)
+    }
+
+    async fn block_provider_driven_testing(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        node: &CodingTimelineNode,
+        reason_code: &str,
+        description: &str,
+        raw_provider_output_ref: Option<String>,
+    ) -> Result<TestingReport, CodingWorkspaceEngineError> {
+        let report_id = next_sequential_id(
+            "testing_report",
+            self.store
+                .list_testing_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+                .len(),
+        );
+        let mut report =
+            build_testing_report(&attempt.id, Vec::new(), "", Some(description.to_string()));
+        report.id = report_id;
+        report.overall_status = TestingOverallStatus::Blocked;
+        report.raw_provider_output_ref = raw_provider_output_ref.clone();
+        report.context_warnings.push(reason_code.to_string());
+        self.save_blocked_testing_report_and_gate(
+            attempt,
+            node,
+            report,
+            reason_code,
+            description,
+            raw_provider_output_ref,
+        )
+        .await
+    }
+
+    async fn block_invalid_test_plan(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        node: &CodingTimelineNode,
+        provider_output: &str,
+        raw_provider_output_ref: String,
+        reason_code: &str,
+        error: String,
+    ) -> Result<TestingReport, CodingWorkspaceEngineError> {
+        let report_id = next_sequential_id(
+            "testing_report",
+            self.store
+                .list_testing_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+                .len(),
+        );
+        let mut report = build_testing_report(
+            &attempt.id,
+            Vec::new(),
+            provider_output,
+            Some(format!("TestPlan parse failed: {error}")),
+        );
+        report.id = report_id;
+        report.raw_provider_output_ref = Some(raw_provider_output_ref.clone());
+        report.context_warnings.push(format!("{reason_code}:{error}"));
+        self.save_blocked_testing_report_and_gate(
+            attempt,
+            node,
+            report,
+            reason_code,
+            "TestPlan parse failed",
+            Some(raw_provider_output_ref),
+        )
+        .await
+    }
+
     pub async fn execute_testing_with_provider(
         &self,
         attempt: &CodingExecutionAttempt,
@@ -874,14 +998,11 @@ impl CodingWorkspaceEngine {
         &self,
         attempt: &CodingExecutionAttempt,
         provider: &dyn StreamingProviderAdapter,
-        context: &CodingExecutionContext,
-        specs: &[TestCommandSpec],
+        _context: &CodingExecutionContext,
+        _specs: &[TestCommandSpec],
         options: TesterAgentOptions,
         command_rx: &mut mpsc::Receiver<CodingRunnerCommand>,
     ) -> Result<TestingReport, CodingWorkspaceEngineError> {
-        if !provider.supports_tool_calls() {
-            return self.execute_testing(attempt, specs).await;
-        }
         let Some(worktree_path) = attempt.worktree_path.as_ref() else {
             return Err(CodingWorkspaceEngineError::MissingWorktree(
                 attempt.id.clone(),
@@ -898,6 +1019,18 @@ impl CodingWorkspaceEngine {
             .event_tx
             .send(CodingWsOutMessage::CodingTimelineNodeCreated { node: node.clone() })
             .await;
+
+        if !provider.supports_provider_driven_testing() {
+            return self
+                .block_provider_driven_testing(
+                    &attempt,
+                    &node,
+                    "provider_driven_testing_not_supported",
+                    "Tester provider does not support provider-driven testing",
+                    None,
+                )
+                .await;
+        }
 
         let tester_provider = self
             .store
@@ -931,7 +1064,8 @@ impl CodingWorkspaceEngine {
             &CodingProviderRole::Tester,
             &tester_provider,
         );
-        let plan_legacy_input = AdapterInput {
+        let mut chat_entry_sequence = 1usize;
+        let plan_adapter_input = AdapterInput {
             provider_type: provider_type_for_name(&tester_provider),
             role: AdapterRole::Reviewer,
             worktree_path: Some(worktree_path.to_string_lossy().to_string()),
@@ -942,9 +1076,9 @@ impl CodingWorkspaceEngine {
             max_retries: 0,
         };
         let plan_input = StreamingProviderInput {
-            provider_type: plan_legacy_input.provider_type.clone(),
-            role: plan_legacy_input.role.clone(),
-            prompt: plan_legacy_input.prompt.clone(),
+            provider_type: plan_adapter_input.provider_type.clone(),
+            role: plan_adapter_input.role.clone(),
+            prompt: plan_adapter_input.prompt.clone(),
             working_dir: worktree_path.clone(),
             workspace_session_id: Some(attempt.id.clone()),
             resume_provider_session_id,
@@ -954,20 +1088,35 @@ impl CodingWorkspaceEngine {
                 CodingProviderRole::Tester,
             )?,
             env_vars: BTreeMap::new(),
-            timeout_secs: plan_legacy_input.timeout,
+            timeout_secs: plan_adapter_input.timeout,
         };
-        let plan_output = self
+        let plan_output = match self
             .run_provider_stream_to_completion(CodingProviderStreamRun {
                 attempt: &attempt,
                 node_id: &node.id,
                 provider,
-                legacy_input: &plan_legacy_input,
+                legacy_input: &plan_adapter_input,
                 input: plan_input,
                 provider_name: &tester_provider,
                 provider_role: CodingProviderRole::Tester,
                 command_rx,
+                allow_legacy_stream_fallback: false,
             })
-            .await?;
+            .await
+        {
+            Ok(output) => output,
+            Err(error) => {
+                return self
+                    .block_provider_driven_testing(
+                        &attempt,
+                        &node,
+                        "provider_start_failed",
+                        &format!("Tester provider failed during plan_tests: {error}"),
+                        None,
+                    )
+                    .await;
+            }
+        };
         let plan_raw_ref = self.store.save_provider_raw_output(
             &attempt.id,
             CodingExecutionStage::Testing,
@@ -990,72 +1139,92 @@ impl CodingWorkspaceEngine {
                 self.store.save_test_plan(&plan)?;
                 plan
             }
-            Err(error) => {
-                let report_id = next_sequential_id(
-                    "testing_report",
-                    self.store
-                        .list_testing_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)?
-                        .len(),
-                );
-                let mut report = build_testing_report(
-                    &attempt.id,
-                    Vec::new(),
-                    &plan_output,
-                    Some(format!("TestPlan parse failed: {error}")),
-                );
-                report.id = report_id;
-                report.raw_provider_output_ref = Some(plan_raw_ref.clone());
-                report
-                    .context_warnings
-                    .push(format!("test_plan_parse_error:{error}"));
-                self.store.save_testing_report(&report)?;
-                let _ = self
-                    .event_tx
-                    .send(CodingWsOutMessage::TestingReportUpdate {
-                        report: Box::new(report.clone()),
+            Err(first_error) => {
+                let repair_prompt =
+                    build_tester_plan_repair_prompt(&plan_output, &first_error.to_string());
+                let repair_adapter_input = AdapterInput {
+                    provider_type: provider_type_for_name(&tester_provider),
+                    role: AdapterRole::Reviewer,
+                    worktree_path: Some(worktree_path.to_string_lossy().to_string()),
+                    prompt: repair_prompt,
+                    context_files: Vec::new(),
+                    output_schema: "coding_workspace_test_plan_json".to_string(),
+                    timeout: options.timeout.as_secs().max(1),
+                    max_retries: 0,
+                };
+                let repair_input = StreamingProviderInput {
+                    provider_type: repair_adapter_input.provider_type.clone(),
+                    role: repair_adapter_input.role.clone(),
+                    prompt: repair_adapter_input.prompt.clone(),
+                    working_dir: worktree_path.clone(),
+                    workspace_session_id: Some(attempt.id.clone()),
+                    resume_provider_session_id: None,
+                    permission_mode: role_permission_mode_for_attempt(
+                        &self.store,
+                        &attempt,
+                        CodingProviderRole::Tester,
+                    )?,
+                    env_vars: BTreeMap::new(),
+                    timeout_secs: repair_adapter_input.timeout,
+                };
+                let repair_output = self
+                    .run_provider_stream_to_completion(CodingProviderStreamRun {
+                        attempt: &attempt,
+                        node_id: &node.id,
+                        provider,
+                        legacy_input: &repair_adapter_input,
+                        input: repair_input,
+                        provider_name: &tester_provider,
+                        provider_role: CodingProviderRole::Tester,
+                        command_rx,
+                        allow_legacy_stream_fallback: false,
                     })
-                    .await;
-                self.store.update_attempt_status(
-                    &attempt.project_id,
-                    &attempt.issue_id,
+                    .await?;
+                let repair_raw_ref = self.store.save_provider_raw_output(
                     &attempt.id,
-                    CodingAttemptStatus::Blocked,
+                    CodingExecutionStage::Testing,
+                    "plan_tests_repair",
+                    &repair_output,
                 )?;
-                self.complete_timeline_node(
-                    &attempt.project_id,
-                    &attempt.issue_id,
+                match parse_test_plan_payload(
                     &attempt.id,
-                    &node.id,
-                    CodingTimelineNodeStatus::Blocked,
-                    Some("测试计划解析失败".to_string()),
-                )
-                .await?;
-                let gate = self.store.create_blocked_gate(CreateBlockedGateInput {
-                    attempt_id: attempt.id.clone(),
-                    stage: CodingExecutionStage::Testing,
-                    node_id: Some(node.id.clone()),
-                    role: Some(CodingProviderRole::Tester),
-                    title: "Testing blocked".to_string(),
-                    description: "TestPlan parse failed".to_string(),
-                    reason_code: Some("test_plan_parse_failed".to_string()),
-                    evidence_refs: vec![format!("{}.json", report.id)],
-                    raw_provider_output_ref: Some(plan_raw_ref),
-                    available_actions: testing_blocked_gate_actions(),
-                })?;
-                let _ = self
-                    .event_tx
-                    .send(CodingWsOutMessage::CodingGateRequired { gate })
-                    .await;
-                return Ok(report);
+                    &plan_id,
+                    &repair_output,
+                    Some(repair_raw_ref.clone()),
+                ) {
+                    Ok(plan) => {
+                        self.store.save_test_plan(&plan)?;
+                        plan
+                    }
+                    Err(repair_error) => {
+                        return self
+                            .block_invalid_test_plan(
+                                &attempt,
+                                &node,
+                                &repair_output,
+                                repair_raw_ref,
+                                "test_plan_repair_failed",
+                                repair_error.to_string(),
+                            )
+                            .await;
+                    }
+                }
             }
         };
-        let legacy_execute_prompt = build_tester_system_prompt(&attempt, context, specs);
-        let prompt = build_tester_execute_plan_prompt(
+        let entry = tester_chat_entry(
             &attempt,
-            &plan,
-            &evaluation_context_json,
-            &legacy_execute_prompt,
+            &node.id,
+            &mut chat_entry_sequence,
+            CodingEntryType::AssistantMessage,
+            Some(plan_output.clone()),
+            Some(serde_json::json!({
+                "phase": "plan_tests",
+                "test_plan_id": plan.id.clone(),
+                "raw_provider_output_ref": plan.raw_provider_output_ref.clone()
+            })),
         );
+        self.save_and_emit_chat_entry(entry).await;
+        let prompt = build_tester_execute_plan_prompt(&attempt, &plan, &evaluation_context_json);
         let _ = self
             .event_tx
             .send(CodingWsOutMessage::CodingExecutionEvent {
@@ -1088,7 +1257,40 @@ impl CodingWorkspaceEngine {
             timeout_secs: options.timeout.as_secs().max(1),
         };
         let cancel = CancellationToken::new();
-        let mut session = provider.start(input, cancel.clone()).await?;
+        let mut session = match provider.start(input, cancel.clone()).await {
+            Ok(session) => session,
+            Err(error) => {
+                let report_id = next_sequential_id(
+                    "testing_report",
+                    self.store
+                        .list_testing_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+                        .len(),
+                );
+                let mut report = build_plan_based_testing_report(
+                    &report_id,
+                    &attempt.id,
+                    &plan,
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                    None,
+                );
+                report.overall_status = TestingOverallStatus::Blocked;
+                report
+                    .context_warnings
+                    .push(format!("provider_start_failed:{error}"));
+                return self
+                    .save_blocked_testing_report_and_gate(
+                        &attempt,
+                        &node,
+                        report,
+                        "provider_start_failed",
+                        "Tester provider failed during execute_test_plan",
+                        None,
+                    )
+                    .await;
+            }
+        };
         let timeout = tokio::time::sleep(options.timeout);
         tokio::pin!(timeout);
         let mut full_output = String::new();
@@ -1099,7 +1301,6 @@ impl CodingWorkspaceEngine {
         let mut consecutive_failures = 0usize;
         let mut blocked_summary = None;
         let mut blocked_reason_code = None;
-        let mut chat_entry_sequence = 1usize;
         let mut commands_open = true;
         let mut tool_call_titles = BTreeMap::new();
         let mut tool_call_commands = BTreeMap::new();
@@ -1377,22 +1578,106 @@ impl CodingWorkspaceEngine {
                 .list_testing_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)?
                 .len(),
         );
+        let mut report_raw_ref = execute_raw_ref.clone();
         let provider_claim = serde_json::from_str(&full_output).ok();
         let mut report = build_plan_based_testing_report(
             &report_id,
             &attempt.id,
             &report_plan,
-            step_results,
-            unplanned_commands,
+            step_results.clone(),
+            unplanned_commands.clone(),
             provider_claim,
-            Some(execute_raw_ref.clone()),
+            Some(report_raw_ref.clone()),
         );
-        report.unplanned_evidence = unplanned_evidence;
+        report.unplanned_evidence = unplanned_evidence.clone();
+        if !report.missing_required_steps.is_empty() && blocked_summary.is_none() {
+            let repair_prompt =
+                build_tester_execute_repair_prompt(&full_output, &report.missing_required_steps);
+            let repair_adapter_input = AdapterInput {
+                provider_type: provider_type_for_name(&tester_provider),
+                role: AdapterRole::Reviewer,
+                worktree_path: Some(worktree_path.to_string_lossy().to_string()),
+                prompt: repair_prompt,
+                context_files: Vec::new(),
+                output_schema: "coding_workspace_test_execution_json".to_string(),
+                timeout: options.timeout.as_secs().max(1),
+                max_retries: 0,
+            };
+            let repair_input = StreamingProviderInput {
+                provider_type: repair_adapter_input.provider_type.clone(),
+                role: repair_adapter_input.role.clone(),
+                prompt: repair_adapter_input.prompt.clone(),
+                working_dir: worktree_path.clone(),
+                workspace_session_id: Some(attempt.id.clone()),
+                resume_provider_session_id: None,
+                permission_mode: role_permission_mode_for_attempt(
+                    &self.store,
+                    &attempt,
+                    CodingProviderRole::Tester,
+                )?,
+                env_vars: BTreeMap::new(),
+                timeout_secs: repair_adapter_input.timeout,
+            };
+            let repair_output = self
+                .run_provider_stream_to_completion(CodingProviderStreamRun {
+                    attempt: &attempt,
+                    node_id: &node.id,
+                    provider,
+                    legacy_input: &repair_adapter_input,
+                    input: repair_input,
+                    provider_name: &tester_provider,
+                    provider_role: CodingProviderRole::Tester,
+                    command_rx,
+                    allow_legacy_stream_fallback: false,
+                })
+                .await?;
+            let repair_raw_ref = self.store.save_provider_raw_output(
+                &attempt.id,
+                CodingExecutionStage::Testing,
+                "execute_test_plan_repair",
+                &repair_output,
+            )?;
+            report_raw_ref = repair_raw_ref;
+            for provider_step_result in
+                parse_testing_step_results_from_provider_output(&repair_output)
+            {
+                if !step_results
+                    .iter()
+                    .any(|existing| existing.step_id == provider_step_result.step_id)
+                {
+                    step_results.push(provider_step_result);
+                }
+            }
+            let repair_provider_claim = serde_json::from_str(&repair_output).ok();
+            report = build_plan_based_testing_report(
+                &report_id,
+                &attempt.id,
+                &report_plan,
+                step_results.clone(),
+                unplanned_commands.clone(),
+                repair_provider_claim,
+                Some(report_raw_ref.clone()),
+            );
+            report.unplanned_evidence = unplanned_evidence.clone();
+        }
         if let Some(summary) = blocked_summary {
             report.overall_status = TestingOverallStatus::Blocked;
             report.context_warnings.push(summary);
         }
         self.store.save_testing_report(&report)?;
+        let entry = tester_chat_entry(
+            &attempt,
+            &node.id,
+            &mut chat_entry_sequence,
+            CodingEntryType::AssistantMessage,
+            Some(full_output.clone()),
+            Some(serde_json::json!({
+                "phase": "execute_test_plan",
+                "testing_report_id": report.id.clone(),
+                "raw_provider_output_ref": report.raw_provider_output_ref.clone()
+            })),
+        );
+        self.save_and_emit_chat_entry(entry).await;
         let _ = self
             .event_tx
             .send(CodingWsOutMessage::TestingReportUpdate {
@@ -1445,7 +1730,7 @@ impl CodingWorkspaceEngine {
                     blocked_reason_code.unwrap_or_else(|| "missing_required_steps".to_string()),
                 ),
                 evidence_refs: vec![format!("{}.json", report.id)],
-                raw_provider_output_ref: Some(execute_raw_ref),
+                raw_provider_output_ref: Some(report_raw_ref),
                 available_actions: testing_blocked_gate_actions(),
             })?;
             let _ = self
@@ -1549,6 +1834,7 @@ impl CodingWorkspaceEngine {
                 provider_name: &reviewer,
                 provider_role: CodingProviderRole::CodeReviewer,
                 command_rx,
+                allow_legacy_stream_fallback: true,
             })
             .await?;
         let raw_provider_output_ref = self.store.save_provider_raw_output(
@@ -1736,6 +2022,7 @@ impl CodingWorkspaceEngine {
                 provider_name: &analyst_provider,
                 provider_role: CodingProviderRole::Analyst,
                 command_rx,
+                allow_legacy_stream_fallback: true,
             })
             .await?;
         if !note_ids.is_empty() {
@@ -1855,6 +2142,7 @@ impl CodingWorkspaceEngine {
                 provider_name: &reviewer,
                 provider_role: CodingProviderRole::InternalReviewer,
                 command_rx,
+                allow_legacy_stream_fallback: true,
             })
             .await?;
         let raw_provider_output_ref = self.store.save_provider_raw_output(
@@ -3325,7 +3613,6 @@ fn build_tester_execute_plan_prompt(
     attempt: &CodingExecutionAttempt,
     plan: &TestPlan,
     evaluation_context_json: &str,
-    legacy_prompt_context: &str,
 ) -> String {
     let plan_json = serde_json::to_string_pretty(plan).unwrap_or_else(|_| "{}".to_string());
     format!(
@@ -3334,14 +3621,18 @@ fn build_tester_execute_plan_prompt(
          Attempt: {}\n\
          Work Item: {}\n\
          \n\
-         Execute the following TestPlan. Every tool call that is meant to satisfy a plan step must include the exact step_id in its input. Tool calls without step_id are unplanned evidence and cannot satisfy required steps.\n\
+         Execute the following TestPlan. You may execute commands or inspect files yourself.\n\
+         Every required TestPlan step must have exactly one corresponding step_results item.\n\
+         If you cannot run a required step, emit status=\"blocked\" or status=\"skipped\" with provider_analysis explaining why.\n\
+         Do not claim overall success in prose without step_results JSON.\n\
+         Tool calls meant to satisfy a plan step must include the exact step_id in their input. Tool calls without step_id are unplanned evidence and cannot satisfy required steps.\n\
+         At the end of execute_test_plan, output a JSON object with:\n\
+         {{\"step_results\":[{{\"step_id\":\"...\",\"status\":\"passed|failed|blocked|skipped\",\"evidence_refs\":[\"...\"],\"provider_analysis\":\"...\"}}]}}\n\
          \n\
          TestPlan:\n```json\n{}\n```\n\
          \n\
-         Evaluation Context JSON:\n```json\n{}\n```\n\
-         \n\
-         Legacy tester context for command discovery:\n{}\n",
-        attempt.id, attempt.work_item_id, plan_json, evaluation_context_json, legacy_prompt_context
+         Evaluation Context JSON:\n```json\n{}\n```\n",
+        attempt.id, attempt.work_item_id, plan_json, evaluation_context_json
     )
 }
 
@@ -4140,11 +4431,148 @@ fn truncate_prompt_section(value: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cross_cutting::streaming_provider::ProviderSession;
     use crate::product::app_paths::ProductAppPaths;
+    use crate::product::coding_attempt_store::CreateCodingAttemptInput;
     use crate::product::coding_models::CodingProviderRole;
     use crate::product::models::{ProviderConversationRef, ProviderConversationRole};
     use crate::web::workspace_ws_types::ProviderConfigSnapshot;
     use tempfile::tempdir;
+
+    struct NonProviderDrivenTestingProvider;
+
+    #[async_trait::async_trait]
+    impl StreamingProviderAdapter for NonProviderDrivenTestingProvider {}
+
+    struct ProviderDrivenTestingNoToolCallProvider;
+
+    #[async_trait::async_trait]
+    impl StreamingProviderAdapter for ProviderDrivenTestingNoToolCallProvider {
+        fn supports_provider_driven_testing(&self) -> bool {
+            true
+        }
+
+        async fn start(
+            &self,
+            input: StreamingProviderInput,
+            _cancel: CancellationToken,
+        ) -> Result<ProviderSession, ProviderAdapterError> {
+            let (event_tx, event_rx) = mpsc::channel(8);
+            let (command_tx, _command_rx) = mpsc::channel(8);
+            tokio::spawn(async move {
+                let output = if input.prompt.contains("Phase: plan_tests") {
+                    serde_json::json!({
+                        "summary": "provider planned tests",
+                        "steps": [{
+                            "id": "unit",
+                            "title": "Unit tests",
+                            "intent": "verify unit behavior",
+                            "required": true,
+                            "tool": "provider_managed",
+                            "risk_level": "low",
+                            "command_or_tool_input": {
+                                "command": ["cargo", "test", "--locked", "--lib", "some_filter"]
+                            },
+                            "evidence_expectation": "provider supplies evidence"
+                        }]
+                    })
+                    .to_string()
+                } else {
+                    serde_json::json!({
+                        "step_results": [{
+                            "step_id": "unit",
+                            "status": "passed",
+                            "evidence_refs": ["provider-managed-unit.log"],
+                            "provider_analysis": "unit evidence accepted"
+                        }]
+                    })
+                    .to_string()
+                };
+                let _ = event_tx
+                    .send(ProviderEvent::TextDelta {
+                        content: output.clone(),
+                    })
+                    .await;
+                let _ = event_tx
+                    .send(ProviderEvent::Completed {
+                        full_output: output,
+                        provider_session_id: None,
+                    })
+                    .await;
+            });
+            Ok(ProviderSession {
+                events: event_rx,
+                commands: command_tx,
+            })
+        }
+    }
+
+    struct ProviderDrivenTestingStartFailsProvider;
+
+    #[async_trait::async_trait]
+    impl StreamingProviderAdapter for ProviderDrivenTestingStartFailsProvider {
+        fn supports_provider_driven_testing(&self) -> bool {
+            true
+        }
+
+        async fn start(
+            &self,
+            _input: StreamingProviderInput,
+            _cancel: CancellationToken,
+        ) -> Result<ProviderSession, ProviderAdapterError> {
+            Err(ProviderAdapterError::command_missing(
+                "tester provider command not found".to_string(),
+            ))
+        }
+    }
+
+    struct ProviderDrivenTestingMissingStepResultsProvider;
+
+    #[async_trait::async_trait]
+    impl StreamingProviderAdapter for ProviderDrivenTestingMissingStepResultsProvider {
+        fn supports_provider_driven_testing(&self) -> bool {
+            true
+        }
+
+        async fn start(
+            &self,
+            input: StreamingProviderInput,
+            _cancel: CancellationToken,
+        ) -> Result<ProviderSession, ProviderAdapterError> {
+            let (event_tx, event_rx) = mpsc::channel(8);
+            let (command_tx, _command_rx) = mpsc::channel(8);
+            tokio::spawn(async move {
+                let output = if input.prompt.contains("Phase: plan_tests") {
+                    serde_json::json!({
+                        "summary": "provider planned tests",
+                        "steps": [{
+                            "id": "unit",
+                            "title": "Unit tests",
+                            "intent": "verify unit behavior",
+                            "required": true,
+                            "tool": "provider_managed",
+                            "risk_level": "low",
+                            "command_or_tool_input": {"command": ["cargo", "test"]},
+                            "evidence_expectation": "provider supplies evidence"
+                        }]
+                    })
+                    .to_string()
+                } else {
+                    "I ran the tests and they passed.".to_string()
+                };
+                let _ = event_tx
+                    .send(ProviderEvent::Completed {
+                        full_output: output,
+                        provider_session_id: None,
+                    })
+                    .await;
+            });
+            Ok(ProviderSession {
+                events: event_rx,
+                commands: command_tx,
+            })
+        }
+    }
 
     #[test]
     fn coding_provider_role_maps_to_provider_conversation_role() {
@@ -4219,6 +4647,161 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn testing_without_provider_driven_capability_blocks_instead_of_legacy_commands() {
+        let (_root, store, attempt) = running_attempt_with_worktree();
+        let specs = vec![TestCommandSpec {
+            id: "legacy_true".to_string(),
+            command: vec!["true".to_string()],
+        }];
+        let (tx, _rx) = mpsc::channel(16);
+        let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+
+        let report = engine
+            .execute_testing_with_provider(
+                &attempt,
+                &NonProviderDrivenTestingProvider,
+                &CodingExecutionContext::default(),
+                &specs,
+                TesterAgentOptions::default(),
+            )
+            .await
+            .expect("blocked testing report");
+
+        assert_eq!(report.overall_status, TestingOverallStatus::Blocked);
+        assert!(report.commands.is_empty());
+        assert_eq!(report.plan_id, None);
+        assert!(report.steps.is_empty());
+        assert_eq!(report.raw_provider_output_ref, None);
+        assert!(
+            report
+                .context_warnings
+                .iter()
+                .any(|warning| warning.contains("provider_driven_testing_not_supported"))
+        );
+        let updated = store
+            .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("attempt");
+        assert_eq!(updated.status, CodingAttemptStatus::Blocked);
+        assert_eq!(
+            store
+                .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+                .expect("open gates")
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn real_provider_driven_testing_accepts_final_step_results_without_tool_calls() {
+        let (_root, store, attempt) = running_attempt_with_worktree();
+        let (tx, _rx) = mpsc::channel(16);
+        let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+
+        let report = engine
+            .execute_testing_with_provider(
+                &attempt,
+                &ProviderDrivenTestingNoToolCallProvider,
+                &CodingExecutionContext::default(),
+                &[],
+                TesterAgentOptions::default(),
+            )
+            .await
+            .expect("provider-driven testing");
+
+        assert_eq!(report.overall_status, TestingOverallStatus::Passed);
+        assert!(report.plan_id.is_some());
+        assert_eq!(report.steps.len(), 1);
+        assert_eq!(report.steps[0].step_id, "unit");
+        assert_eq!(
+            report.steps[0].evidence_refs,
+            vec!["provider-managed-unit.log"]
+        );
+        assert!(report.commands.is_empty());
+        assert!(report.raw_provider_output_ref.is_some());
+
+        let chat_entries = store
+            .list_chat_entries(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("chat entries");
+        assert!(chat_entries.iter().any(|entry| {
+            entry.role == CodingAgentRole::Tester
+                && entry.entry_type == CodingEntryType::AssistantMessage
+                && entry
+                    .content
+                    .as_deref()
+                    .is_some_and(|content| content.contains("provider planned tests"))
+                && entry
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("phase"))
+                    .and_then(|phase| phase.as_str())
+                    == Some("plan_tests")
+        }));
+        assert!(chat_entries.iter().any(|entry| {
+            entry.role == CodingAgentRole::Tester
+                && entry.entry_type == CodingEntryType::AssistantMessage
+                && entry
+                    .content
+                    .as_deref()
+                    .is_some_and(|content| content.contains("step_results"))
+                && entry
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("phase"))
+                    .and_then(|phase| phase.as_str())
+                    == Some("execute_test_plan")
+        }));
+    }
+
+    #[tokio::test]
+    async fn provider_driven_testing_blocks_when_provider_start_fails() {
+        let (_root, store, attempt) = running_attempt_with_worktree();
+        let (tx, _rx) = mpsc::channel(16);
+        let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
+
+        let report = engine
+            .execute_testing_with_provider(
+                &attempt,
+                &ProviderDrivenTestingStartFailsProvider,
+                &CodingExecutionContext::default(),
+                &[],
+                TesterAgentOptions::default(),
+            )
+            .await
+            .expect("blocked testing report");
+
+        assert_eq!(report.overall_status, TestingOverallStatus::Blocked);
+        assert!(report.commands.is_empty());
+        assert!(
+            report
+                .context_warnings
+                .iter()
+                .any(|warning| warning.contains("provider_start_failed"))
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_driven_testing_blocks_when_execute_output_has_no_step_results() {
+        let (_root, _store, attempt) = running_attempt_with_worktree();
+        let (tx, _rx) = mpsc::channel(16);
+        let engine = CodingWorkspaceEngine::new(_store, GitWorkspaceService::new(), tx);
+
+        let report = engine
+            .execute_testing_with_provider(
+                &attempt,
+                &ProviderDrivenTestingMissingStepResultsProvider,
+                &CodingExecutionContext::default(),
+                &[],
+                TesterAgentOptions::default(),
+            )
+            .await
+            .expect("provider-driven testing");
+
+        assert_eq!(report.overall_status, TestingOverallStatus::Blocked);
+        assert_eq!(report.missing_required_steps, vec!["unit"]);
+        assert!(report.raw_provider_output_ref.is_some());
     }
 
     #[test]
@@ -4677,6 +5260,42 @@ mod tests {
             high_risk_test_step_block_reason(&plan, &call),
             Some("high_risk_test_step_requires_permission")
         );
+    }
+
+    fn running_attempt_with_worktree() -> (
+        tempfile::TempDir,
+        CodingAttemptStore,
+        CodingExecutionAttempt,
+    ) {
+        let root = tempdir().expect("tempdir");
+        let worktree = root.path().join("worktree");
+        std::fs::create_dir_all(&worktree).expect("worktree dir");
+        let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+        let attempt = store
+            .create_attempt(CreateCodingAttemptInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                work_item_id: "work_item_0001".to_string(),
+                base_branch: "HEAD".to_string(),
+                branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+                worktree_path: Some(worktree),
+                provider_config_snapshot: ProviderConfigSnapshot {
+                    author: ProviderName::Codex,
+                    reviewer: Some(ProviderName::ClaudeCode),
+                    review_rounds: 1,
+                },
+                max_auto_rework: 2,
+            })
+            .expect("create attempt");
+        let attempt = store
+            .update_attempt_status(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                CodingAttemptStatus::Running,
+            )
+            .expect("running attempt");
+        (root, store, attempt)
     }
 
     fn test_attempt(id: &str) -> CodingExecutionAttempt {
