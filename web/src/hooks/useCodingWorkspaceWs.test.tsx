@@ -241,6 +241,43 @@ describe("useCodingWorkspaceWs", () => {
     expect(state.roleProviderConfigSnapshot?.tester).toBe("codex");
   });
 
+  it("stores role runs from coding session snapshots", () => {
+    const harness = renderCodingHook();
+
+    act(() => {
+      harness.ws.receive(
+        codingSessionState({
+          role_runs: [
+            {
+              id: "coding_role_run_0001",
+              attempt_id: "coding_attempt_0001",
+              stage: "testing",
+              role: "tester",
+              run_no: 1,
+              status: "running",
+              trigger: "initial",
+              node_id: "coding_node_0003",
+              started_at: "2026-06-12T00:00:00Z",
+              completed_at: null,
+              supersedes_run_id: null,
+              superseded_by_run_id: null,
+              reason_code: null,
+              raw_provider_output_refs: [],
+              artifact_refs: [],
+            },
+          ],
+        }),
+      );
+    });
+
+    expect(useCodingWorkspaceStore.getState().roleRuns).toHaveLength(1);
+    expect(useCodingWorkspaceStore.getState().roleRuns[0]).toMatchObject({
+      id: "coding_role_run_0001",
+      role: "tester",
+      run_no: 1,
+    });
+  });
+
   it("records coding execution events from websocket messages", () => {
     const harness = renderCodingHook();
 

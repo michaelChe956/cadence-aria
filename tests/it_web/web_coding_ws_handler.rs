@@ -9,7 +9,7 @@ use cadence_aria::product::coding_models::{
     AnalystDecisionNextStage, AnalystDecisionRecord, AnalystDecisionVerdict, CodingAgentRole,
     CodingAttemptStatus, CodingEntryType, CodingExecutionStage, CodingGateAction,
     CodingGateActionType, CodingGateKind, CodingGateRequired, CodingProviderPermissionMode,
-    CodingProviderRole, CodingRoleProviderConfigSnapshot, CodingTimelineNode,
+    CodingProviderRole, CodingRoleProviderConfigSnapshot, CodingRoleRunTrigger, CodingTimelineNode,
     CodingTimelineNodeStatus, PushStatus, ReviewVerdict, TestingOverallStatus,
 };
 use cadence_aria::product::lifecycle_store::{
@@ -293,6 +293,47 @@ async fn coding_ws_sends_session_state_on_connect_and_responds_to_ping() {
 
     send_json(&mut ws, &CodingWsInMessage::CodingPing).await;
     assert_eq!(recv_json(&mut ws).await, CodingWsOutMessage::CodingPong);
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+#[tokio::test]
+async fn coding_session_snapshot_includes_role_runs() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let app = app_with_attempt(root.path());
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("attempt");
+    store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::Testing,
+            CodingProviderRole::Tester,
+            CodingRoleRunTrigger::Initial,
+            Some("coding_node_0003".to_string()),
+        )
+        .expect("role run");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+
+    match recv_json(&mut ws).await {
+        CodingWsOutMessage::CodingSessionState { role_runs, .. } => {
+            assert_eq!(role_runs.len(), 1);
+            assert_eq!(role_runs[0].role, CodingProviderRole::Tester);
+            assert_eq!(role_runs[0].run_no, 1);
+            assert_eq!(role_runs[0].node_id.as_deref(), Some("coding_node_0003"));
+        }
+        other => panic!("expected coding session state, got {other:?}"),
+    }
 
     ws.close(None).await.expect("close ws");
     server.abort();

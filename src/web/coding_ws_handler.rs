@@ -18,7 +18,7 @@ use crate::product::coding_models::{
     CodingContextNote, CodingEntryType, CodingExecutionAttempt, CodingExecutionStage,
     CodingGateAction, CodingGateActionType, CodingGateKind,
     CodingGateRequired as CodingGateRequiredModel, CodingProviderPermissionMode,
-    CodingProviderRole, CodingRoleProviderConfigSnapshot, CodingStageGateState,
+    CodingProviderRole, CodingRoleProviderConfigSnapshot, CodingRoleRun, CodingStageGateState,
     CodingStageGateStatus, CodingTimelineNode, CodingTimelineNodeStatus, InternalPrReview,
     PushStatus, ReviewRequest, TestingOverallStatus, TestingReport,
 };
@@ -1515,6 +1515,8 @@ fn build_coding_session_state(
     )?;
     let chat_entries =
         coding_store.list_chat_entries(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+    let role_runs =
+        coding_store.list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
 
     Ok(CodingWsOutMessage::CodingSessionState {
         attempt_id: attempt.id,
@@ -1538,6 +1540,7 @@ fn build_coding_session_state(
         internal_pr_review: Box::new(internal_pr_review),
         pending_gates,
         latest_analyst_decision: Box::new(latest_analyst_decision),
+        role_runs,
         work_item_markdown: execution_context.work_item_markdown,
         verification_commands: execution_context.verification_commands,
     })
@@ -1614,6 +1617,7 @@ pub enum CodingWsOutMessage {
         internal_pr_review: Box<Option<InternalPrReview>>,
         pending_gates: Vec<CodingGateRequiredModel>,
         latest_analyst_decision: Box<Option<AnalystDecisionRecord>>,
+        role_runs: Vec<CodingRoleRun>,
         work_item_markdown: Option<String>,
         verification_commands: Vec<String>,
     },
