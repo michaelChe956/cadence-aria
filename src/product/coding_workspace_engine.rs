@@ -1,5 +1,8 @@
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::time::Duration;
 
 use chrono::Utc;
 use serde::Deserialize;
@@ -25,8 +28,8 @@ use crate::product::coding_models::{
     AnalystHumanGateRecommendation, AnalystReworkInstructions, AnalystVerdict, CodeReviewReport,
     CodingAgentRole, CodingAttemptStatus, CodingChatEntry, CodingContextNote, CodingEntryType,
     CodingExecutionAttempt, CodingExecutionStage, CodingGateAction, CodingGateActionType,
-    CodingProviderPermissionMode, CodingProviderRole, CodingReworkInstruction, CodingTimelineNode,
-    CodingTimelineNodeStatus, CodingRoleRun, CodingRoleRunStatus, CodingRoleRunTrigger,
+    CodingProviderPermissionMode, CodingProviderRole, CodingReworkInstruction, CodingRoleRun,
+    CodingRoleRunStatus, CodingRoleRunTrigger, CodingTimelineNode, CodingTimelineNodeStatus,
     InternalPrReview, PushStatus, ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict,
     TestCommand, TestCommandStatus, TestPlan, TestPlanRiskLevel, TestingOverallStatus,
     TestingReport, TestingStepResult, TestingUnplannedEvidence,
@@ -99,6 +102,15 @@ struct CodingProviderStreamRun<'a> {
     provider_role: CodingProviderRole,
     command_rx: &'a mut mpsc::Receiver<CodingRunnerCommand>,
     allow_legacy_stream_fallback: bool,
+    timeout: Option<Duration>,
+    timeout_reason_code: Option<&'static str>,
+}
+
+fn run_timeout_sleep(timeout: Option<Duration>) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+    match timeout {
+        Some(duration) => Box::pin(tokio::time::sleep(duration)),
+        None => Box::pin(std::future::pending()),
+    }
 }
 
 fn provider_conversation_role_for_coding_role(
@@ -432,6 +444,8 @@ impl CodingWorkspaceEngine {
                 provider_role: CodingProviderRole::Coder,
                 command_rx,
                 allow_legacy_stream_fallback: true,
+                timeout: None,
+                timeout_reason_code: None,
             })
             .await?;
         self.complete_timeline_node(
@@ -460,6 +474,8 @@ impl CodingWorkspaceEngine {
             provider_role,
             command_rx,
             allow_legacy_stream_fallback,
+            timeout,
+            timeout_reason_code,
         } = run;
         let cancel = CancellationToken::new();
         let mut session = match provider.start(input, cancel.clone()).await {
@@ -484,8 +500,18 @@ impl CodingWorkspaceEngine {
         let mut full_output = String::new();
         let mut tool_call_titles = BTreeMap::new();
         let mut tool_call_commands = BTreeMap::new();
+        let timeout = run_timeout_sleep(timeout);
+        tokio::pin!(timeout);
         loop {
             tokio::select! {
+                _ = &mut timeout => {
+                    cancel.cancel();
+                    return Err(CodingWorkspaceEngineError::ProviderStream(
+                        timeout_reason_code
+                            .unwrap_or("provider_stream_timeout")
+                            .to_string(),
+                    ));
+                }
                 command = command_rx.recv(), if commands_open => {
                     let Some(command) = command else {
                         commands_open = false;
@@ -891,7 +917,7 @@ impl CodingWorkspaceEngine {
             Some("测试被阻塞".to_string()),
         )
         .await?;
-        if !testing_report_should_enter_analyst(&report) {
+        if testing_blocked_report_needs_gate(&report, reason_code) {
             self.store.update_attempt_status(
                 &attempt.project_id,
                 &attempt.issue_id,
@@ -1135,21 +1161,28 @@ impl CodingWorkspaceEngine {
                 provider_role: CodingProviderRole::Tester,
                 command_rx,
                 allow_legacy_stream_fallback: false,
+                timeout: Some(options.timeout),
+                timeout_reason_code: Some("plan_tests_timeout"),
             })
             .await
         {
             Ok(output) => output,
             Err(error) => {
+                let reason_code = if error.to_string().contains("plan_tests_timeout") {
+                    "plan_tests_timeout"
+                } else {
+                    "provider_start_failed"
+                };
                 return self
                     .block_provider_driven_testing(
                         &attempt,
                         &node,
-                    "provider_start_failed",
-                    &format!("Tester provider failed during plan_tests: {error}"),
-                    None,
-                    Some(&role_run),
-                )
-                .await;
+                        reason_code,
+                        &format!("Tester provider failed during plan_tests: {error}"),
+                        None,
+                        Some(&role_run),
+                    )
+                    .await;
             }
         };
         let plan_raw_ref = self.store.save_provider_raw_output(
@@ -1203,7 +1236,7 @@ impl CodingWorkspaceEngine {
                     env_vars: BTreeMap::new(),
                     timeout_secs: repair_adapter_input.timeout,
                 };
-                let repair_output = self
+                let repair_output = match self
                     .run_provider_stream_to_completion(CodingProviderStreamRun {
                         attempt: &attempt,
                         node_id: &node.id,
@@ -1214,8 +1247,32 @@ impl CodingWorkspaceEngine {
                         provider_role: CodingProviderRole::Tester,
                         command_rx,
                         allow_legacy_stream_fallback: false,
+                        timeout: Some(options.timeout),
+                        timeout_reason_code: Some("plan_tests_timeout"),
                     })
-                    .await?;
+                    .await
+                {
+                    Ok(output) => output,
+                    Err(error) => {
+                        let reason_code = if error.to_string().contains("plan_tests_timeout") {
+                            "plan_tests_timeout"
+                        } else {
+                            "provider_start_failed"
+                        };
+                        return self
+                            .block_provider_driven_testing(
+                                &attempt,
+                                &node,
+                                reason_code,
+                                &format!(
+                                    "Tester provider failed during plan_tests_repair: {error}"
+                                ),
+                                None,
+                                Some(&role_run),
+                            )
+                            .await;
+                    }
+                };
                 let repair_raw_ref = self.store.save_provider_raw_output(
                     &attempt.id,
                     CodingExecutionStage::Testing,
@@ -1676,6 +1733,8 @@ impl CodingWorkspaceEngine {
                     provider_role: CodingProviderRole::Tester,
                     command_rx,
                     allow_legacy_stream_fallback: false,
+                    timeout: None,
+                    timeout_reason_code: None,
                 })
                 .await?;
             let repair_raw_ref = self.store.save_provider_raw_output(
@@ -1897,6 +1956,8 @@ impl CodingWorkspaceEngine {
                 provider_role: CodingProviderRole::CodeReviewer,
                 command_rx,
                 allow_legacy_stream_fallback: true,
+                timeout: None,
+                timeout_reason_code: None,
             })
             .await?;
         let raw_provider_output_ref = self.store.save_provider_raw_output(
@@ -2058,6 +2119,8 @@ impl CodingWorkspaceEngine {
                 provider_role: CodingProviderRole::Analyst,
                 command_rx,
                 allow_legacy_stream_fallback: true,
+                timeout: None,
+                timeout_reason_code: None,
             })
             .await?;
         let analyst_raw_ref = self.store.save_provider_raw_output(
@@ -2215,6 +2278,8 @@ impl CodingWorkspaceEngine {
                 provider_role: CodingProviderRole::InternalReviewer,
                 command_rx,
                 allow_legacy_stream_fallback: true,
+                timeout: None,
+                timeout_reason_code: None,
             })
             .await?;
         let raw_provider_output_ref = self.store.save_provider_raw_output(
@@ -4047,6 +4112,10 @@ pub fn testing_report_should_enter_analyst(report: &TestingReport) -> bool {
         | TestingOverallStatus::Passed
         | TestingOverallStatus::PassedWithWarnings => true,
     }
+}
+
+fn testing_blocked_report_needs_gate(report: &TestingReport, reason_code: &str) -> bool {
+    !testing_report_should_enter_analyst(report) || reason_code == "plan_tests_timeout"
 }
 
 fn push_unique_warning(warnings: &mut Vec<String>, warning: String) {

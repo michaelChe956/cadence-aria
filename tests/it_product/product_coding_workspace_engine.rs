@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use cadence_aria::cross_cutting::provider_adapter::ProviderAdapterError;
 use cadence_aria::cross_cutting::streaming_provider::{
@@ -17,9 +18,10 @@ use cadence_aria::product::coding_models::{
     AnalystDecisionNextStage, AnalystDecisionVerdict, AnalystVerdict, CodingAgentRole,
     CodingAttemptStatus, CodingEntryType, CodingExecutionStage, CodingProviderPermissionMode,
     CodingProviderRole, CodingReworkInstruction, CodingRolePermissionModes,
-    CodingRoleProviderConfigSnapshot, CodingRoleRunStatus, CodingTimelineNode, CodingTimelineNodeStatus,
-    FindingSeverity, PushStatus, RemoteKind, ReviewRequest, ReviewRequestKind, ReviewVerdict,
-    TestCommandStatus, TestingOverallStatus, TestingReport, TestingStepResult,
+    CodingRoleProviderConfigSnapshot, CodingRoleRunStatus, CodingTimelineNode,
+    CodingTimelineNodeStatus, FindingSeverity, PushStatus, RemoteKind, ReviewRequest,
+    ReviewRequestKind, ReviewVerdict, TestCommandStatus, TestingOverallStatus, TestingReport,
+    TestingStepResult,
 };
 use cadence_aria::product::coding_workspace_engine::{
     CodingExecutionContext, CodingWorkspaceEngine, testing_report_should_enter_analyst,
@@ -706,6 +708,65 @@ async fn execute_testing_binds_plan_report_and_chat_entries_to_tester_role_run()
     }
     assert!(saw_plan_entry);
     assert!(saw_result_entry);
+}
+
+#[tokio::test]
+async fn tester_plan_timeout_blocks_with_retry_test_plan_gate() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            ..create_input()
+        })
+        .expect("create attempt");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    let (tx, _rx) = mpsc::channel(64);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+
+    let result = tokio::time::timeout(
+        Duration::from_millis(250),
+        engine.execute_testing_with_provider(
+            &attempt,
+            &HangingPlanTesterProvider,
+            &CodingExecutionContext::default(),
+            &[],
+            TesterAgentOptions {
+                timeout: Duration::from_millis(20),
+                failure_limit: 3,
+            },
+        ),
+    )
+    .await
+    .expect("engine should return before outer timeout");
+    let report = result.expect("timeout becomes blocked report");
+
+    assert_eq!(report.overall_status, TestingOverallStatus::Blocked);
+    assert!(
+        report
+            .context_warnings
+            .contains(&"plan_tests_timeout".to_string())
+    );
+    let gates = store
+        .list_open_blocked_gates("project_0001", "issue_0001", &attempt.id)
+        .expect("gates");
+    assert_eq!(gates.len(), 1);
+    assert_eq!(gates[0].reason_code.as_deref(), Some("plan_tests_timeout"));
+    assert!(
+        gates[0]
+            .available_actions
+            .iter()
+            .any(|action| action.action_id == "retry_test_plan")
+    );
 }
 
 #[tokio::test]
@@ -3926,6 +3987,46 @@ impl StreamingProviderAdapter for SessionInputCapturingProvider {
             "run_streaming is not used by this test provider",
             0,
         ))
+    }
+}
+
+struct HangingPlanTesterProvider;
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for HangingPlanTesterProvider {
+    fn supports_provider_driven_testing(&self) -> bool {
+        true
+    }
+
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let (command_tx, _command_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            if input.prompt.contains("Phase: plan_tests") {
+                let _ = event_tx
+                    .send(ProviderEvent::Execution(ProviderExecutionEvent {
+                        event_id: "task_update_0001".to_string(),
+                        kind: ProviderExecutionEventKind::Command,
+                        status: ProviderExecutionEventStatus::Running,
+                        title: "Task update".to_string(),
+                        detail: Some("planning tests".to_string()),
+                        command: None,
+                        cwd: None,
+                        output: None,
+                        exit_code: None,
+                    }))
+                    .await;
+                cancel.cancelled().await;
+            }
+        });
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
     }
 }
 
