@@ -26,9 +26,10 @@ use crate::product::coding_models::{
     CodingAgentRole, CodingAttemptStatus, CodingChatEntry, CodingContextNote, CodingEntryType,
     CodingExecutionAttempt, CodingExecutionStage, CodingGateAction, CodingGateActionType,
     CodingProviderPermissionMode, CodingProviderRole, CodingReworkInstruction, CodingTimelineNode,
-    CodingTimelineNodeStatus, InternalPrReview, PushStatus, ReviewFinding, ReviewRequest,
-    ReviewRequestKind, ReviewVerdict, TestCommand, TestCommandStatus, TestPlan, TestPlanRiskLevel,
-    TestingOverallStatus, TestingReport, TestingStepResult, TestingUnplannedEvidence,
+    CodingTimelineNodeStatus, CodingRoleRun, CodingRoleRunStatus, CodingRoleRunTrigger,
+    InternalPrReview, PushStatus, ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict,
+    TestCommand, TestCommandStatus, TestPlan, TestPlanRiskLevel, TestingOverallStatus,
+    TestingReport, TestingStepResult, TestingUnplannedEvidence,
 };
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::git_workspace_service::{GitWorkspaceError, GitWorkspaceService};
@@ -42,7 +43,8 @@ use crate::product::test_executor::{TestCommandSpec, TestExecutorError, run_all_
 use crate::product::tester_agent_loop::{
     TesterAgentOptions, build_plan_based_testing_report, build_tester_execute_repair_prompt,
     build_tester_plan_prompt, build_tester_plan_repair_prompt, build_testing_report,
-    execute_tester_tool_call, parse_test_plan_payload,
+    execute_tester_tool_call, format_test_plan_chat_summary, format_testing_report_chat_summary,
+    parse_test_plan_payload,
 };
 use crate::protocol::contracts::{AdapterInput, AdapterRole, ProviderType};
 use crate::web::coding_ws_handler::CodingWsOutMessage;
@@ -864,11 +866,15 @@ impl CodingWorkspaceEngine {
         &self,
         attempt: &CodingExecutionAttempt,
         node: &CodingTimelineNode,
-        report: TestingReport,
+        mut report: TestingReport,
         reason_code: &str,
         description: &str,
         raw_provider_output_ref: Option<String>,
+        role_run: Option<&CodingRoleRun>,
     ) -> Result<TestingReport, CodingWorkspaceEngineError> {
+        if let Some(role_run) = role_run {
+            bind_testing_report_role_run(&mut report, role_run);
+        }
         self.store.save_testing_report(&report)?;
         let _ = self
             .event_tx
@@ -909,6 +915,16 @@ impl CodingWorkspaceEngine {
                 .send(CodingWsOutMessage::CodingGateRequired { gate })
                 .await;
         }
+        if let Some(role_run) = role_run {
+            self.store.update_role_run_status(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &role_run.id,
+                testing_role_run_status(&report),
+                derive_testing_role_run_reason(&report).or_else(|| Some(reason_code.to_string())),
+            )?;
+        }
         Ok(report)
     }
 
@@ -919,6 +935,7 @@ impl CodingWorkspaceEngine {
         reason_code: &str,
         description: &str,
         raw_provider_output_ref: Option<String>,
+        role_run: Option<&CodingRoleRun>,
     ) -> Result<TestingReport, CodingWorkspaceEngineError> {
         let report_id = next_sequential_id(
             "testing_report",
@@ -939,6 +956,7 @@ impl CodingWorkspaceEngine {
             reason_code,
             description,
             raw_provider_output_ref,
+            role_run,
         )
         .await
     }
@@ -951,6 +969,7 @@ impl CodingWorkspaceEngine {
         raw_provider_output_ref: String,
         reason_code: &str,
         error: String,
+        role_run: Option<&CodingRoleRun>,
     ) -> Result<TestingReport, CodingWorkspaceEngineError> {
         let report_id = next_sequential_id(
             "testing_report",
@@ -976,6 +995,7 @@ impl CodingWorkspaceEngine {
             reason_code,
             "TestPlan parse failed",
             Some(raw_provider_output_ref),
+            role_run,
         )
         .await
     }
@@ -1025,6 +1045,13 @@ impl CodingWorkspaceEngine {
             .event_tx
             .send(CodingWsOutMessage::CodingTimelineNodeCreated { node: node.clone() })
             .await;
+        let role_run = self.store.create_role_run(
+            &attempt,
+            CodingExecutionStage::Testing,
+            CodingProviderRole::Tester,
+            CodingRoleRunTrigger::Initial,
+            Some(node.id.clone()),
+        )?;
 
         if !provider.supports_provider_driven_testing() {
             return self
@@ -1034,6 +1061,7 @@ impl CodingWorkspaceEngine {
                     "provider_driven_testing_not_supported",
                     "Tester provider does not support provider-driven testing",
                     None,
+                    Some(&role_run),
                 )
                 .await;
         }
@@ -1116,11 +1144,12 @@ impl CodingWorkspaceEngine {
                     .block_provider_driven_testing(
                         &attempt,
                         &node,
-                        "provider_start_failed",
-                        &format!("Tester provider failed during plan_tests: {error}"),
-                        None,
-                    )
-                    .await;
+                    "provider_start_failed",
+                    &format!("Tester provider failed during plan_tests: {error}"),
+                    None,
+                    Some(&role_run),
+                )
+                .await;
             }
         };
         let plan_raw_ref = self.store.save_provider_raw_output(
@@ -1141,7 +1170,8 @@ impl CodingWorkspaceEngine {
             &plan_output,
             Some(plan_raw_ref.clone()),
         ) {
-            Ok(plan) => {
+            Ok(mut plan) => {
+                bind_test_plan_role_run(&mut plan, &role_run);
                 self.store.save_test_plan(&plan)?;
                 plan
             }
@@ -1198,7 +1228,8 @@ impl CodingWorkspaceEngine {
                     &repair_output,
                     Some(repair_raw_ref.clone()),
                 ) {
-                    Ok(plan) => {
+                    Ok(mut plan) => {
+                        bind_test_plan_role_run(&mut plan, &role_run);
                         self.store.save_test_plan(&plan)?;
                         plan
                     }
@@ -1211,6 +1242,7 @@ impl CodingWorkspaceEngine {
                                 repair_raw_ref,
                                 "test_plan_repair_failed",
                                 repair_error.to_string(),
+                                Some(&role_run),
                             )
                             .await;
                     }
@@ -1222,10 +1254,12 @@ impl CodingWorkspaceEngine {
             &node.id,
             &mut chat_entry_sequence,
             CodingEntryType::AssistantMessage,
-            Some(plan_output.clone()),
+            Some(format_test_plan_chat_summary(&plan)),
             Some(serde_json::json!({
-                "phase": "plan_tests",
+                "phase": "test_plan",
                 "test_plan_id": plan.id.clone(),
+                "role_run_id": role_run.id.clone(),
+                "run_no": role_run.run_no,
                 "raw_provider_output_ref": plan.raw_provider_output_ref.clone()
             })),
         );
@@ -1293,6 +1327,7 @@ impl CodingWorkspaceEngine {
                         "provider_start_failed",
                         "Tester provider failed during execute_test_plan",
                         None,
+                        Some(&role_run),
                     )
                     .await;
             }
@@ -1382,7 +1417,11 @@ impl CodingWorkspaceEngine {
                                     input: call.input.clone(),
                                 },
                                 None,
-                                Some(serde_json::json!({ "tool_use_id": call.id.clone() })),
+                                Some(serde_json::json!({
+                                    "tool_use_id": call.id.clone(),
+                                    "role_run_id": role_run.id.clone(),
+                                    "run_no": role_run.run_no
+                                })),
                             );
                             self.save_and_emit_chat_entry(entry).await;
 
@@ -1440,6 +1479,7 @@ impl CodingWorkspaceEngine {
                                 &attempt,
                                 &node.id,
                                 &mut chat_entry_sequence,
+                                Some(&role_run),
                                 result,
                             )
                             .await;
@@ -1480,6 +1520,7 @@ impl CodingWorkspaceEngine {
                                 &attempt,
                                 &node.id,
                                 &mut chat_entry_sequence,
+                                Some(&role_run),
                                 result,
                             )
                             .await;
@@ -1670,20 +1711,31 @@ impl CodingWorkspaceEngine {
             report.overall_status = TestingOverallStatus::Blocked;
             report.context_warnings.push(summary);
         }
+        bind_testing_report_role_run(&mut report, &role_run);
         self.store.save_testing_report(&report)?;
         let entry = tester_chat_entry(
             &attempt,
             &node.id,
             &mut chat_entry_sequence,
             CodingEntryType::AssistantMessage,
-            Some(full_output.clone()),
+            Some(format_testing_report_chat_summary(&report)),
             Some(serde_json::json!({
-                "phase": "execute_test_plan",
+                "phase": "testing_result",
                 "testing_report_id": report.id.clone(),
+                "role_run_id": role_run.id.clone(),
+                "run_no": role_run.run_no,
                 "raw_provider_output_ref": report.raw_provider_output_ref.clone()
             })),
         );
         self.save_and_emit_chat_entry(entry).await;
+        self.store.update_role_run_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &role_run.id,
+            testing_role_run_status(&report),
+            derive_testing_role_run_reason(&report),
+        )?;
         let _ = self
             .event_tx
             .send(CodingWsOutMessage::TestingReportUpdate {
@@ -2008,6 +2060,12 @@ impl CodingWorkspaceEngine {
                 allow_legacy_stream_fallback: true,
             })
             .await?;
+        let analyst_raw_ref = self.store.save_provider_raw_output(
+            &attempt.id,
+            CodingExecutionStage::Rework,
+            "analyst_decision",
+            &full_output,
+        )?;
         if !note_ids.is_empty() {
             self.store.mark_context_notes_consumed(
                 &attempt.project_id,
@@ -2017,7 +2075,15 @@ impl CodingWorkspaceEngine {
                 rework_round,
             )?;
         }
-        let decision = parse_analyst_verdict(&full_output, &source_stage);
+        let mut decision = parse_analyst_verdict(&full_output, &source_stage);
+        if decision.parse_error.is_some()
+            && !decision
+                .raw_provider_output_refs
+                .iter()
+                .any(|reference| reference == &analyst_raw_ref)
+        {
+            decision.raw_provider_output_refs.push(analyst_raw_ref);
+        }
         let existing_decisions = self.store.list_analyst_decisions(
             &attempt.project_id,
             &attempt.issue_id,
@@ -3116,6 +3182,37 @@ impl CodingWorkspaceEngine {
             "rework_round": rework_round,
         });
         if let Some(object) = metadata.as_object_mut() {
+            object.insert(
+                "structured_verdict".to_string(),
+                serde_json::json!(&decision.structured_verdict),
+            );
+            object.insert(
+                "next_stage".to_string(),
+                serde_json::json!(decision.next_stage.clone().unwrap_or_else(|| {
+                    default_next_stage_for_legacy_verdict(
+                        &decision.structured_verdict,
+                        source_stage,
+                    )
+                })),
+            );
+            object.insert("reason".to_string(), serde_json::json!(&decision.reason));
+            object.insert(
+                "evidence_refs".to_string(),
+                serde_json::json!(&decision.evidence_refs),
+            );
+            object.insert(
+                "raw_provider_output_refs".to_string(),
+                serde_json::json!(&decision.raw_provider_output_refs),
+            );
+            if let Some(instructions) = decision.rework_instructions.as_ref() {
+                object.insert(
+                    "rework_instructions".to_string(),
+                    serde_json::json!(instructions),
+                );
+            }
+            if let Some(human_gate) = decision.human_gate.as_ref() {
+                object.insert("human_gate".to_string(), serde_json::json!(human_gate));
+            }
             if !decision.fix_hints.is_empty() {
                 object.insert(
                     "fix_hints".to_string(),
@@ -3426,8 +3523,16 @@ impl CodingWorkspaceEngine {
         attempt: &CodingExecutionAttempt,
         node_id: &str,
         sequence: &mut usize,
+        role_run: Option<&CodingRoleRun>,
         result: ProviderToolResult,
     ) {
+        let metadata = role_run.map(|role_run| {
+            serde_json::json!({
+                "tool_use_id": result.tool_use_id.clone(),
+                "role_run_id": role_run.id.clone(),
+                "run_no": role_run.run_no
+            })
+        });
         let entry = tester_chat_entry(
             attempt,
             node_id,
@@ -3438,7 +3543,7 @@ impl CodingWorkspaceEngine {
                 is_error: result.is_error,
             },
             None,
-            None,
+            metadata,
         );
         self.save_and_emit_chat_entry(entry).await;
     }
@@ -3607,12 +3712,15 @@ fn build_rework_prompt(
     evaluation_context_json: &str,
 ) -> String {
     format!(
-        "Coding Workspace Rework 分析官\n\
+        "CRITICAL: Return ONLY a single JSON object. No markdown, no explanations, no validation reports, no tables.\n\
+         Coding Workspace Rework 分析官\n\
          {}\n\
          你是 Coding Workspace Rework 分析官，只做分析和路由决策。\n\
          严格要求：不要修改代码，不要调用 tool_use，不要执行命令。\n\
-         仅根据上一阶段 summary/evidence 与本轮新增 ContextNote 输出 JSON AnalystVerdict。\n\
-         JSON 格式：{{\"verdict\":\"needs_fix|needs_human_input|no_issue\",\"summary\":\"...\",\"fix_hints\":[\"...\"],\"questions\":[\"...\"]}}\n\
+         仅根据上一阶段 summary/evidence、本轮新增 ContextNote 与 EvaluationContextPack 输出 AnalystDecision JSON。\n\
+         JSON 必须以 {{ 开头，以 }} 结尾。\n\
+         JSON 格式：{{\"verdict\":\"needs_fix|rerun_testing|proceed|human_required|blocked\",\"next_stage\":\"coding|testing|code_review|review_request|internal_pr_review|final_confirm|human_gate\",\"reason\":\"...\",\"evidence_refs\":[\"...\"],\"raw_provider_output_refs\":[\"...\"],\"rework_instructions\":null,\"human_gate\":null}}\n\
+         路由规则：TestingReport 因 test_plan_missing_json、test_plan_invalid_json 或 test_plan_repair_failed 阻塞时，优先判断为 Tester 输出契约问题；若可重试，输出 verdict=rerun_testing,next_stage=testing；只有环境、权限或需求缺失不可自动处理时才 next_stage=human_gate。\n\
          Project: {}\n\
          Issue: {}\n\
          Work Item: {}\n\
@@ -3623,7 +3731,9 @@ fn build_rework_prompt(
          ContextNotes Truncated: {}\n\
          \n上一阶段 summary/evidence:\n{}\n\
          \n本轮新增 ContextNote:\n{}\n\
-         \nEvaluationContextPack:\n````json\n{}\n````\n",
+         \nEvaluationContextPack:\n````json\n{}\n````\n\
+         \nCRITICAL: Return ONLY a single JSON object. Do not summarize validation. Do not include markdown.\n\
+         END OF INSTRUCTIONS: output JSON only.",
         provider_runtime_contract("Analyst"),
         attempt.project_id,
         attempt.issue_id,
@@ -4314,6 +4424,35 @@ fn tester_chat_entry(
     };
     *sequence += 1;
     entry
+}
+
+fn bind_test_plan_role_run(plan: &mut TestPlan, role_run: &CodingRoleRun) {
+    plan.role_run_id = Some(role_run.id.clone());
+    plan.run_no = Some(role_run.run_no);
+}
+
+fn bind_testing_report_role_run(report: &mut TestingReport, role_run: &CodingRoleRun) {
+    report.role_run_id = Some(role_run.id.clone());
+    report.run_no = Some(role_run.run_no);
+}
+
+fn testing_role_run_status(report: &TestingReport) -> CodingRoleRunStatus {
+    match report.overall_status {
+        TestingOverallStatus::Passed | TestingOverallStatus::PassedWithWarnings => {
+            CodingRoleRunStatus::Completed
+        }
+        TestingOverallStatus::Failed => CodingRoleRunStatus::Failed,
+        TestingOverallStatus::Blocked => CodingRoleRunStatus::Blocked,
+        TestingOverallStatus::SkippedByUserDecision => CodingRoleRunStatus::Completed,
+    }
+}
+
+fn derive_testing_role_run_reason(report: &TestingReport) -> Option<String> {
+    report
+        .context_warnings
+        .iter()
+        .find(|warning| warning.contains("provider_start_failed") || warning.contains("timeout"))
+        .cloned()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5084,7 +5223,7 @@ mod tests {
                     .as_ref()
                     .and_then(|metadata| metadata.get("phase"))
                     .and_then(|phase| phase.as_str())
-                    == Some("plan_tests")
+                    == Some("test_plan")
         }));
         assert!(chat_entries.iter().any(|entry| {
             entry.role == CodingAgentRole::Tester
@@ -5092,13 +5231,13 @@ mod tests {
                 && entry
                     .content
                     .as_deref()
-                    .is_some_and(|content| content.contains("step_results"))
+                    .is_some_and(|content| content.contains("provider-managed-unit.log"))
                 && entry
                     .metadata
                     .as_ref()
                     .and_then(|metadata| metadata.get("phase"))
                     .and_then(|phase| phase.as_str())
-                    == Some("execute_test_plan")
+                    == Some("testing_result")
         }));
     }
 

@@ -5,10 +5,12 @@ import { ChatEntryContainer } from "../ChatEntryContainer";
 
 export function ProviderStreamEntry({ entry }: { entry: ChatEntry }) {
   const content =
-    entry.role === "reviewer" ? stripTrailingReviewJsonContract(entry.content) : entry.content;
+    entry.role === "reviewer" || entry.role === "code_reviewer"
+      ? stripTrailingReviewJsonContract(entry.content)
+      : entry.content;
   return (
     <ChatEntryContainer
-      role={entry.role === "reviewer" ? "reviewer" : "author"}
+      role={entry.role}
       title={entryTitle(entry)}
     >
       <MarkdownContent content={content} />
@@ -26,10 +28,22 @@ const LARGE_MARKDOWN_COLLAPSE_CHARS = 80_000;
 const LARGE_MARKDOWN_PREVIEW_CHARS = 8_000;
 
 function entryTitle(entry: ChatEntry) {
-  const base = entry.role === "reviewer" ? "审核者" : "作者";
+  const base = ROLE_LABELS[entry.role] ?? entry.role;
   const provider = metadataProvider(entry.metadata);
   return provider ? `${base} · ${providerLabel(provider)}` : base;
 }
+
+const ROLE_LABELS: Record<string, string> = {
+  user: "用户",
+  author: "作者",
+  coder: "Coder",
+  tester: "Tester",
+  analyst: "Analyst",
+  reviewer: "审核者",
+  code_reviewer: "Code Reviewer",
+  internal_reviewer: "Internal Reviewer",
+  system: "系统",
+};
 
 function metadataProvider(metadata: ChatEntry["metadata"]) {
   const provider = metadata?.provider ?? metadata?.agent;

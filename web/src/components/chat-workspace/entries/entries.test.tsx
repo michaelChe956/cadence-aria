@@ -37,6 +37,32 @@ describe("chat workspace entries", () => {
     expect(screen.getByText("支持手机号登录。")).toBeInTheDocument();
   });
 
+  it("labels tester and analyst provider stream entries by role", () => {
+    render(
+      <ProviderStreamEntry
+        entry={makeEntry({
+          id: "tester-stream",
+          type: "provider_stream",
+          role: "tester",
+          content: "测试计划",
+        })}
+      />,
+    );
+    expect(screen.getByText("Tester")).toBeInTheDocument();
+
+    render(
+      <ProviderStreamEntry
+        entry={makeEntry({
+          id: "analyst-stream",
+          type: "provider_stream",
+          role: "analyst",
+          content: "路由判断",
+        })}
+      />,
+    );
+    expect(screen.getByText("Analyst")).toBeInTheDocument();
+  });
+
   it("renders provider stream content with escaped and single newlines as readable blocks", () => {
     const entry = makeEntry({
       type: "provider_stream",
@@ -246,6 +272,33 @@ describe("chat workspace entries", () => {
 
     expect(screen.getByText("需要人工输入")).toBeInTheDocument();
     expect(screen.getByText("n 的输入范围是多少？")).toBeInTheDocument();
+  });
+
+  it("renders analyst routing decisions with parse diagnostics", () => {
+    render(
+      <ChatEntryRenderer
+        entry={makeEntry({
+          type: "analyst_verdict",
+          role: "analyst",
+          content: "Analyst 输出不是有效 JSON，已转人工确认。",
+          metadata: {
+            verdict: "needs_human_input",
+            structured_verdict: "human_required",
+            next_stage: "human_gate",
+            reason: "Analyst 输出不是有效 JSON，已转人工确认。",
+            evidence_refs: ["testing_report_0001.json"],
+            raw_provider_output_refs: ["provider-raw/rework/analyst_decision_0001.txt"],
+            parse_error: "key must be a string at line 1 column 2",
+          },
+        })}
+      />,
+    );
+
+    const entry = screen.getByTestId("analyst-verdict-entry");
+    expect(entry).toHaveTextContent("human_required");
+    expect(entry).toHaveTextContent("human_gate");
+    expect(entry).toHaveTextContent("key must be a string at line 1 column 2");
+    expect(entry).toHaveTextContent("provider-raw/rework/analyst_decision_0001.txt");
   });
 
   it("dispatches entries through the renderer", () => {

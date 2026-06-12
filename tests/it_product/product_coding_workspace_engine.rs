@@ -17,7 +17,7 @@ use cadence_aria::product::coding_models::{
     AnalystDecisionNextStage, AnalystDecisionVerdict, AnalystVerdict, CodingAgentRole,
     CodingAttemptStatus, CodingEntryType, CodingExecutionStage, CodingProviderPermissionMode,
     CodingProviderRole, CodingReworkInstruction, CodingRolePermissionModes,
-    CodingRoleProviderConfigSnapshot, CodingTimelineNode, CodingTimelineNodeStatus,
+    CodingRoleProviderConfigSnapshot, CodingRoleRunStatus, CodingTimelineNode, CodingTimelineNodeStatus,
     FindingSeverity, PushStatus, RemoteKind, ReviewRequest, ReviewRequestKind, ReviewVerdict,
     TestCommandStatus, TestingOverallStatus, TestingReport, TestingStepResult,
 };
@@ -624,6 +624,88 @@ async fn coding_tester_uses_role_permission_mode_auto() {
     let inputs = provider.inputs.lock().expect("inputs");
     assert_eq!(inputs[0].permission_mode, ProviderPermissionMode::Auto);
     assert_eq!(inputs[1].permission_mode, ProviderPermissionMode::Auto);
+}
+
+#[tokio::test]
+async fn execute_testing_binds_plan_report_and_chat_entries_to_tester_role_run() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            ..create_input()
+        })
+        .expect("create attempt");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    let (tx, mut rx) = mpsc::channel(64);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let provider = SessionInputCapturingProvider::with_outputs(
+        [
+            r#"{"summary":"unit plan","steps":[{"id":"unit","title":"Unit","intent":"run unit checks","required":true,"tool":"provider_managed","risk_level":"low","command_or_tool_input":{},"evidence_expectation":"unit evidence"}]}"#,
+            r#"{"step_results":[{"step_id":"unit","status":"passed","evidence_refs":["unit.log"],"provider_analysis":"ok"}]}"#,
+        ],
+        [None, None],
+    );
+
+    let report = engine
+        .execute_testing_with_provider(
+            &attempt,
+            &provider,
+            &CodingExecutionContext::default(),
+            &[],
+            TesterAgentOptions::default(),
+        )
+        .await
+        .expect("testing");
+
+    let runs = store
+        .list_role_runs("project_0001", "issue_0001", &attempt.id)
+        .expect("role runs");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].role, CodingProviderRole::Tester);
+    assert_eq!(runs[0].status, CodingRoleRunStatus::Completed);
+    assert_eq!(report.role_run_id.as_deref(), Some(runs[0].id.as_str()));
+    assert_eq!(report.run_no, Some(1));
+
+    let plans = store
+        .list_test_plans("project_0001", "issue_0001", &attempt.id)
+        .expect("plans");
+    assert_eq!(plans[0].role_run_id.as_deref(), Some(runs[0].id.as_str()));
+    assert_eq!(plans[0].run_no, Some(1));
+
+    let mut saw_plan_entry = false;
+    let mut saw_result_entry = false;
+    while let Ok(message) = rx.try_recv() {
+        if let CodingWsOutMessage::CodingChatEntryCreated { entry } = message {
+            let metadata = entry.metadata.unwrap_or_default();
+            let content = entry.content.unwrap_or_default();
+            if metadata.get("role_run_id").and_then(|value| value.as_str())
+                == Some(runs[0].id.as_str())
+                && metadata.get("phase").and_then(|value| value.as_str()) == Some("test_plan")
+            {
+                saw_plan_entry = true;
+                assert!(content.contains("unit plan"));
+            }
+            if metadata.get("role_run_id").and_then(|value| value.as_str())
+                == Some(runs[0].id.as_str())
+                && metadata.get("phase").and_then(|value| value.as_str()) == Some("testing_result")
+            {
+                saw_result_entry = true;
+                assert!(content.contains("passed"));
+            }
+        }
+    }
+    assert!(saw_plan_entry);
+    assert!(saw_result_entry);
 }
 
 #[tokio::test]
@@ -2761,6 +2843,28 @@ async fn execute_rework_invalid_json_falls_back_to_human_gate() {
     assert_eq!(gates[0].stage, Some(CodingExecutionStage::Rework));
     assert_eq!(gates[0].role, Some(CodingProviderRole::Analyst));
     assert_eq!(gates[0].reason_code.as_deref(), Some("analyst_human_gate"));
+    assert_eq!(
+        gates[0].raw_provider_output_ref.as_deref(),
+        Some("provider-raw/rework/analyst_decision_0001.txt")
+    );
+    let decision = store
+        .latest_analyst_decision("project_0001", "issue_0001", &attempt.id)
+        .expect("latest decision")
+        .expect("persisted decision");
+    assert_eq!(
+        decision.raw_provider_output_refs,
+        vec!["provider-raw/rework/analyst_decision_0001.txt".to_string()]
+    );
+    let raw_path = store
+        .paths()
+        .root()
+        .join("projects/project_0001/issues/issue_0001/coding-attempts")
+        .join(&attempt.id)
+        .join("provider-raw/rework/analyst_decision_0001.txt");
+    assert_eq!(
+        std::fs::read_to_string(raw_path).expect("raw output"),
+        "不是 JSON"
+    );
     let events = drain_events(&mut rx);
     assert!(events.iter().any(|event| {
         matches!(

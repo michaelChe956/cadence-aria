@@ -163,7 +163,8 @@ pub fn build_tester_plan_prompt(
     evaluation_context_json: &str,
 ) -> String {
     format!(
-        "Tester Provider Runtime\n\
+        "CRITICAL: Return ONLY a single JSON object. No markdown, no explanations, no validation reports, no tables.\n\
+         Tester Provider Runtime\n\
          Phase: plan_tests -> execute_test_plan\n\
          Project: {}\n\
          Issue: {}\n\
@@ -190,8 +191,16 @@ pub fn build_tester_plan_prompt(
          - Aria 是通用项目工作台，不要硬编码某种语言或包管理器。\n\
          - 不要默认 pnpm、cargo、pytest、npm 或任何单一生态；必须从上下文和仓库证据中决策。\n\
          \n\
+         输出契约:\n\
+         - 只返回一个原始 JSON object；不要输出 Markdown 标题、代码块、表格或验证报告。\n\
+         - JSON 必须以 {{ 开头，以 }} 结尾。\n\
+         - Required shape: {{\"summary\":\"...\",\"context_warnings\":[],\"assumptions\":[],\"steps\":[{{\"id\":\"...\",\"title\":\"...\",\"intent\":\"...\",\"required\":true,\"tool\":\"run_command|read_file|list_files|search_code|provider_managed\",\"risk_level\":\"low|medium|high\",\"command_or_tool_input\":{{}},\"evidence_expectation\":\"...\"}}]}}\n\
+         \n\
          Evaluation Context JSON:\n\
-         ```json\n{}\n```\n",
+         ```json\n{}\n```\n\
+         \n\
+         CRITICAL: Return ONLY a single JSON object. Do not summarize validation. Do not include markdown.\n\
+         END OF INSTRUCTIONS: output JSON only.",
         attempt.project_id,
         attempt.issue_id,
         attempt.work_item_id,
@@ -202,17 +211,36 @@ pub fn build_tester_plan_prompt(
 }
 
 pub fn build_tester_plan_repair_prompt(raw_output: &str, parse_error: &str) -> String {
+    let truncated_raw = truncate_for_prompt(raw_output, 800);
     format!(
-        "Tester Provider Runtime\n\
+        "CRITICAL: Return ONLY a single JSON object. No markdown, no explanations, no validation reports, no tables.\n\
+         Tester Provider Runtime\n\
          Phase: plan_tests_repair\n\
          The previous plan_tests output could not be parsed as TestPlan JSON.\n\
          Parse error: {parse_error}\n\
-         只返回合法 JSON。不要使用 Markdown 代码块，不要解释。\n\
+         \n\
+         DO NOT output markdown headers (##), code fences (```), validation report tables, or repair summaries.\n\
+         DO NOT summarize what you are doing.\n\
+         Output MUST be a single raw JSON object starting with {{ and ending with }}.\n\
+         \n\
          Required shape:\n\
          {{\"summary\":\"...\",\"context_warnings\":[],\"assumptions\":[],\"steps\":[{{\"id\":\"...\",\"title\":\"...\",\"intent\":\"...\",\"required\":true,\"tool\":\"run_command|read_file|list_files|search_code|provider_managed\",\"risk_level\":\"low|medium|high\",\"command_or_tool_input\":{{}},\"evidence_expectation\":\"...\"}}]}}\n\
-         Previous output:\n\
-         {raw_output}"
+         \n\
+         Previous output (ERROR - this format was wrong, do not repeat it):\n\
+         {truncated_raw}\n\
+         \n\
+         END OF INSTRUCTIONS: output JSON only."
     )
+}
+
+fn truncate_for_prompt(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let truncated = chars.by_ref().take(max_chars).collect::<String>();
+    let remaining = chars.count();
+    if remaining == 0 {
+        return truncated;
+    }
+    format!("{truncated}\n...[truncated {remaining} chars]")
 }
 
 pub fn build_tester_execute_repair_prompt(
@@ -393,6 +421,87 @@ pub fn build_plan_based_testing_report(
         context_warnings: plan.context_warnings.clone(),
         raw_provider_output_ref,
     }
+}
+
+pub fn format_test_plan_chat_summary(plan: &TestPlan) -> String {
+    let mut output = format!("## Tester 测试计划\n\n{}\n\n", plan.summary.trim());
+    if !plan.assumptions.is_empty() {
+        output.push_str("### 假设\n");
+        for assumption in &plan.assumptions {
+            output.push_str("- ");
+            output.push_str(assumption);
+            output.push('\n');
+        }
+        output.push('\n');
+    }
+    output.push_str("### 步骤\n");
+    for step in &plan.steps {
+        output.push_str("- ");
+        output.push_str(&step.id);
+        output.push_str(" · ");
+        output.push_str(&step.title);
+        output.push_str(" · ");
+        output.push_str(if step.required {
+            "required"
+        } else {
+            "optional"
+        });
+        output.push_str(" · ");
+        output.push_str(&format!("{:?}", step.risk_level).to_ascii_lowercase());
+        output.push('\n');
+        output.push_str("  - 证据预期：");
+        output.push_str(&step.evidence_expectation);
+        output.push('\n');
+    }
+    output
+}
+
+pub fn format_testing_report_chat_summary(report: &TestingReport) -> String {
+    let mut output = format!(
+        "## Tester 测试结果\n\n状态：`{:?}`\n",
+        report.overall_status
+    );
+    if let Some(summary) = report.plan_summary.as_deref() {
+        output.push_str("\n计划：");
+        output.push_str(summary);
+        output.push('\n');
+    }
+    if !report.missing_required_steps.is_empty() {
+        output.push_str("\n### 缺失 required steps\n");
+        for step in &report.missing_required_steps {
+            output.push_str("- ");
+            output.push_str(step);
+            output.push('\n');
+        }
+    }
+    if !report.skipped_required_steps.is_empty() {
+        output.push_str("\n### 跳过 required steps\n");
+        for step in &report.skipped_required_steps {
+            output.push_str("- ");
+            output.push_str(step);
+            output.push('\n');
+        }
+    }
+    if !report.steps.is_empty() {
+        output.push_str("\n### 执行证据\n");
+        for step in &report.steps {
+            output.push_str("- ");
+            output.push_str(&step.step_id);
+            output.push_str(" · ");
+            output.push_str(&format!("{:?}", step.status).to_ascii_lowercase());
+            if !step.evidence_refs.is_empty() {
+                output.push_str(" · ");
+                output.push_str(&step.evidence_refs.join(", "));
+            }
+            output.push('\n');
+        }
+    }
+    if let Some(raw_ref) = report.raw_provider_output_ref.as_deref() {
+        output.push_str("\nraw：`");
+        output.push_str(raw_ref);
+        output.push_str("`\n");
+    }
+    output
 }
 
 fn extract_json_payload(raw_output: &str) -> Option<String> {
@@ -795,6 +904,12 @@ mod tests {
         assert!(prompt.contains("Work Item"));
         assert!(prompt.contains("step_id"));
         assert!(prompt.contains("不要硬编码某种语言或包管理器"));
+        assert!(prompt.contains("CRITICAL: Return ONLY a single JSON object"));
+        assert!(
+            prompt
+                .trim_end()
+                .ends_with("END OF INSTRUCTIONS: output JSON only.")
+        );
     }
 
     #[test]
@@ -886,7 +1001,23 @@ Tester plan:
         assert!(prompt.contains("## 最终测试报告"));
         assert!(prompt.contains("\"summary\""));
         assert!(prompt.contains("\"steps\""));
-        assert!(prompt.contains("只返回合法 JSON"));
+        assert!(prompt.contains("CRITICAL: Return ONLY a single JSON object"));
+        assert!(prompt.contains("DO NOT output markdown headers"));
+        assert!(prompt.contains("ERROR - this format was wrong"));
+        assert!(
+            prompt
+                .trim_end()
+                .ends_with("END OF INSTRUCTIONS: output JSON only.")
+        );
+    }
+
+    #[test]
+    fn tester_plan_repair_prompt_truncates_long_raw_output_without_utf8_boundary_panic() {
+        let long_output = "测试报告".repeat(400);
+        let prompt = build_tester_plan_repair_prompt(&long_output, "invalid_json");
+
+        assert!(prompt.contains("...[truncated"));
+        assert!(!prompt.contains(&"测试报告".repeat(300)));
     }
 
     #[test]
