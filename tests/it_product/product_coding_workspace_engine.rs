@@ -14,12 +14,12 @@ use cadence_aria::cross_cutting::streaming_provider::{
 use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
 use cadence_aria::product::coding_models::{
-    AnalystVerdict, CodingAgentRole, CodingAttemptStatus, CodingEntryType, CodingExecutionStage,
-    CodingProviderPermissionMode, CodingProviderRole, CodingReworkInstruction,
-    CodingRolePermissionModes, CodingRoleProviderConfigSnapshot, CodingTimelineNode,
-    CodingTimelineNodeStatus, FindingSeverity, PushStatus, RemoteKind, ReviewRequest,
-    ReviewRequestKind, ReviewVerdict, TestCommandStatus, TestingOverallStatus, TestingReport,
-    TestingStepResult,
+    AnalystDecisionNextStage, AnalystDecisionVerdict, AnalystVerdict, CodingAgentRole,
+    CodingAttemptStatus, CodingEntryType, CodingExecutionStage, CodingProviderPermissionMode,
+    CodingProviderRole, CodingReworkInstruction, CodingRolePermissionModes,
+    CodingRoleProviderConfigSnapshot, CodingTimelineNode, CodingTimelineNodeStatus,
+    FindingSeverity, PushStatus, RemoteKind, ReviewRequest, ReviewRequestKind, ReviewVerdict,
+    TestCommandStatus, TestingOverallStatus, TestingReport, TestingStepResult,
 };
 use cadence_aria::product::coding_workspace_engine::{
     CodingExecutionContext, CodingWorkspaceEngine, testing_report_should_enter_analyst,
@@ -2006,6 +2006,143 @@ async fn execute_rework_needs_fix_uses_analyst_prompt_consumes_notes_and_routes_
             } if node_id == "coding_node_0001" && summary == "NeedsFix: 测试仍失败"
         )
     }));
+}
+
+#[tokio::test]
+async fn execute_rework_persists_structured_analyst_decision() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            ..create_input()
+        })
+        .expect("create attempt");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    store
+        .update_attempt_stage(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingExecutionStage::Testing,
+        )
+        .expect("testing stage");
+    let (tx, _rx) = mpsc::channel(16);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let provider = AnalystStreamingProvider {
+        prompt: Arc::new(Mutex::new(None)),
+        output: r#"{
+            "verdict":"needs_fix",
+            "next_stage":"coding",
+            "reason":"required 测试步骤被跳过",
+            "evidence_refs":["testing_report_0001.json"],
+            "raw_provider_output_refs":["provider-raw/testing/execute_test_plan_0001.txt"],
+            "rework_instructions":{
+                "summary":"补齐 required 测试覆盖",
+                "required_changes":["补充 B6 浏览器测试"],
+                "verification_expectations":["B6 不再出现在 skipped_required_steps"]
+            },
+            "human_gate":null
+        }"#
+        .to_string(),
+    };
+
+    let updated = engine
+        .execute_rework(&attempt, "testing blocked", &provider)
+        .await
+        .expect("execute rework");
+
+    assert_eq!(updated.stage, CodingExecutionStage::Coding);
+    let decision = store
+        .latest_analyst_decision("project_0001", "issue_0001", &attempt.id)
+        .expect("latest decision")
+        .expect("persisted decision");
+    assert_eq!(decision.id, "analyst_decision_0001");
+    assert_eq!(decision.source_stage, CodingExecutionStage::Testing);
+    assert_eq!(decision.rework_round, 1);
+    assert_eq!(decision.verdict, AnalystDecisionVerdict::NeedsFix);
+    assert_eq!(decision.next_stage, AnalystDecisionNextStage::Coding);
+    assert_eq!(decision.reason, "required 测试步骤被跳过");
+    assert_eq!(
+        decision.evidence_refs,
+        vec!["testing_report_0001.json".to_string()]
+    );
+    assert_eq!(
+        decision.raw_provider_output_refs,
+        vec!["provider-raw/testing/execute_test_plan_0001.txt".to_string()]
+    );
+    let rework = decision.rework_instructions.expect("rework instructions");
+    assert_eq!(rework.summary, "补齐 required 测试覆盖");
+    assert_eq!(
+        rework.required_changes,
+        vec!["补充 B6 浏览器测试".to_string()]
+    );
+    assert_eq!(
+        rework.verification_expectations,
+        vec!["B6 不再出现在 skipped_required_steps".to_string()]
+    );
+    assert_eq!(decision.parse_error, None);
+}
+
+#[tokio::test]
+async fn execute_rework_persists_legacy_analyst_verdict_as_decision() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            ..create_input()
+        })
+        .expect("create attempt");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    store
+        .update_attempt_stage(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingExecutionStage::CodeReview,
+        )
+        .expect("code review stage");
+    let (tx, _rx) = mpsc::channel(16);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let provider = AnalystStreamingProvider {
+        prompt: Arc::new(Mutex::new(None)),
+        output: r#"{"verdict":"no_issue","summary":"审查通过"}"#.to_string(),
+    };
+
+    let updated = engine
+        .execute_rework(&attempt, "code review approve", &provider)
+        .await
+        .expect("execute rework");
+
+    assert_eq!(updated.stage, CodingExecutionStage::ReviewRequest);
+    let decision = store
+        .latest_analyst_decision("project_0001", "issue_0001", &attempt.id)
+        .expect("latest decision")
+        .expect("persisted decision");
+    assert_eq!(decision.verdict, AnalystDecisionVerdict::Proceed);
+    assert_eq!(decision.next_stage, AnalystDecisionNextStage::ReviewRequest);
+    assert_eq!(decision.reason, "审查通过");
+    assert_eq!(decision.rework_instructions, None);
+    assert_eq!(decision.human_gate, None);
 }
 
 #[tokio::test]

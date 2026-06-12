@@ -3,12 +3,13 @@ use std::path::PathBuf;
 use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
 use cadence_aria::product::coding_models::{
-    CodeReviewReport, CodingAgentRole, CodingAttemptStatus, CodingContextNote,
-    CodingExecutionStage, CodingProviderRole, CodingReworkInstruction, CodingRolePermissionModes,
-    CodingRoleProviderConfigSnapshot, CodingStageGateStatus, CodingTimelineNode,
-    CodingTimelineNodeStatus, FindingSeverity, InternalPrReview, PushStatus, RemoteKind,
-    ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict, TestCommand, TestCommandStatus,
-    TestingOverallStatus, TestingReport,
+    AnalystDecisionNextStage, AnalystDecisionRecord, AnalystDecisionVerdict,
+    AnalystReworkInstructions, CodeReviewReport, CodingAgentRole, CodingAttemptStatus,
+    CodingContextNote, CodingExecutionStage, CodingProviderRole, CodingReworkInstruction,
+    CodingRolePermissionModes, CodingRoleProviderConfigSnapshot, CodingStageGateStatus,
+    CodingTimelineNode, CodingTimelineNodeStatus, FindingSeverity, InternalPrReview, PushStatus,
+    RemoteKind, ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict, TestCommand,
+    TestCommandStatus, TestingOverallStatus, TestingReport,
 };
 use cadence_aria::product::models::{
     ProviderConversationRef, ProviderConversationRole, ProviderName,
@@ -391,6 +392,67 @@ fn saves_reads_and_consumes_latest_coding_rework_instruction() {
             .latest_unconsumed_rework_instruction("project_0001", "issue_0001", &attempt.id)
             .expect("latest after consume"),
         None
+    );
+}
+
+#[test]
+fn saves_reads_and_lists_latest_analyst_decision() {
+    let root = tempdir().expect("tempdir");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(create_input("work_item_0001"))
+        .expect("create attempt");
+    let first = AnalystDecisionRecord {
+        id: "analyst_decision_0001".to_string(),
+        attempt_id: attempt.id.clone(),
+        source_stage: CodingExecutionStage::Testing,
+        rework_round: 1,
+        verdict: AnalystDecisionVerdict::NeedsFix,
+        next_stage: AnalystDecisionNextStage::Coding,
+        reason: "测试失败，需要返修".to_string(),
+        evidence_refs: vec!["testing_report_0001.json".to_string()],
+        raw_provider_output_refs: Vec::new(),
+        rework_instructions: Some(AnalystReworkInstructions {
+            summary: "修复 failing test".to_string(),
+            required_changes: vec!["补充边界输入处理".to_string()],
+            verification_expectations: vec!["cargo test --locked --test it_product".to_string()],
+        }),
+        human_gate: None,
+        created_at: "2026-06-12T00:00:00Z".to_string(),
+        parse_error: None,
+    };
+    let second = AnalystDecisionRecord {
+        id: "analyst_decision_0002".to_string(),
+        attempt_id: attempt.id.clone(),
+        source_stage: CodingExecutionStage::CodeReview,
+        rework_round: 2,
+        verdict: AnalystDecisionVerdict::Proceed,
+        next_stage: AnalystDecisionNextStage::ReviewRequest,
+        reason: "审查通过，可以创建 review request".to_string(),
+        evidence_refs: vec!["code_review_0001.json".to_string()],
+        raw_provider_output_refs: vec!["provider-raw/code_review/code_review_0001.txt".to_string()],
+        rework_instructions: None,
+        human_gate: None,
+        created_at: "2026-06-12T00:01:00Z".to_string(),
+        parse_error: None,
+    };
+
+    store
+        .save_analyst_decision(&first)
+        .expect("save first decision");
+    store
+        .save_analyst_decision(&second)
+        .expect("save second decision");
+
+    let decisions = store
+        .list_analyst_decisions("project_0001", "issue_0001", &attempt.id)
+        .expect("list decisions");
+    assert_eq!(decisions, vec![first.clone(), second.clone()]);
+    assert_eq!(
+        store
+            .latest_analyst_decision("project_0001", "issue_0001", &attempt.id)
+            .expect("latest decision"),
+        Some(second)
     );
 }
 

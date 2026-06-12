@@ -1181,6 +1181,94 @@ async fn coding_ws_testing_blocked_does_not_start_analyst_automatically() {
 }
 
 #[tokio::test]
+async fn coding_ws_manual_continue_after_testing_blocked_resumes_code_review() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let app =
+        app_with_full_chain_attempt_and_provider(root.path(), Arc::new(TestingBlockedProvider));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(&mut ws, &CodingWsInMessage::StartCoding).await;
+
+    let blocked_gate = loop {
+        match recv_json(&mut ws).await {
+            CodingWsOutMessage::CodingGateRequired { gate }
+                if gate.kind == CodingGateKind::StageGate =>
+            {
+                if let Some(stage) = gate.stage.clone() {
+                    send_json(&mut ws, &CodingWsInMessage::StageGateConfirm { stage }).await;
+                }
+            }
+            CodingWsOutMessage::CodingGateRequired { gate }
+                if gate.kind == CodingGateKind::Blocked
+                    && gate.stage.as_ref() == Some(&CodingExecutionStage::Testing) =>
+            {
+                break gate;
+            }
+            CodingWsOutMessage::CodingProtocolError { code, message } => {
+                panic!("unexpected coding protocol error {code}: {message}");
+            }
+            _ => {}
+        }
+    };
+
+    send_json(
+        &mut ws,
+        &CodingWsInMessage::GateResponse {
+            gate_id: blocked_gate.gate_id,
+            action_id: "manual_continue".to_string(),
+            extra_context: Some("accept skipped required testing steps for review".to_string()),
+        },
+    )
+    .await;
+
+    let mut saw_code_review = false;
+    for _ in 0..80 {
+        match recv_json(&mut ws).await {
+            CodingWsOutMessage::CodingGateRequired { gate }
+                if gate.kind == CodingGateKind::StageGate
+                    && gate.stage.as_ref() == Some(&CodingExecutionStage::CodeReview) =>
+            {
+                saw_code_review = true;
+                break;
+            }
+            CodingWsOutMessage::CodingTimelineNodeCreated { node }
+                if node.stage == CodingExecutionStage::CodeReview =>
+            {
+                saw_code_review = true;
+                break;
+            }
+            CodingWsOutMessage::CodingProtocolError { code, message } => {
+                panic!("unexpected coding protocol error {code}: {message}");
+            }
+            _ => {}
+        }
+    }
+
+    assert!(
+        saw_code_review,
+        "manual continue did not resume code review"
+    );
+    let attempt = store
+        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("attempt");
+    assert_eq!(attempt.status, CodingAttemptStatus::Running);
+    assert_eq!(attempt.stage, CodingExecutionStage::CodeReview);
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+#[tokio::test]
 async fn internal_review_rework_creates_new_review_request_commit() {
     let _guard = WS_TEST_LOCK.lock().await;
     let root = tempdir().expect("root");

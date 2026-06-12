@@ -7,9 +7,9 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_models::{
-    CodeReviewReport, CodingAttemptStatus, CodingChatEntry, CodingContextNote,
-    CodingExecutionAttempt, CodingExecutionStage, CodingGateAction, CodingGateKind,
-    CodingGateRequired, CodingProviderRole, CodingReworkInstruction,
+    AnalystDecisionRecord, CodeReviewReport, CodingAttemptStatus, CodingChatEntry,
+    CodingContextNote, CodingExecutionAttempt, CodingExecutionStage, CodingGateAction,
+    CodingGateKind, CodingGateRequired, CodingProviderRole, CodingReworkInstruction,
     CodingRoleProviderConfigSnapshot, CodingStageGateState, CodingStageGateStatus,
     CodingTimelineNode, CodingTimelineNodeStatus, InternalPrReview, QualityGateBypassAudit,
     ReviewRequest, TestPlan, TestingReport,
@@ -509,6 +509,41 @@ impl CodingAttemptStore {
                 .join(format!("{}.json", instruction.id)),
             instruction,
         )
+    }
+
+    pub fn save_analyst_decision(
+        &self,
+        decision: &AnalystDecisionRecord,
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(&decision.id)?;
+        let attempt = self.find_attempt_by_id(&decision.attempt_id)?;
+        write_json(
+            &self
+                .analyst_decisions_root(&attempt.project_id, &attempt.issue_id, &attempt.id)
+                .join(format!("{}.json", decision.id)),
+            decision,
+        )
+    }
+
+    pub fn list_analyst_decisions(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> Result<Vec<AnalystDecisionRecord>, ProductStoreError> {
+        list_json_records(&self.analyst_decisions_root(project_id, issue_id, attempt_id))
+    }
+
+    pub fn latest_analyst_decision(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> Result<Option<AnalystDecisionRecord>, ProductStoreError> {
+        Ok(self
+            .list_analyst_decisions(project_id, issue_id, attempt_id)?
+            .into_iter()
+            .last())
     }
 
     pub fn list_rework_instructions(
@@ -1160,6 +1195,16 @@ impl CodingAttemptStore {
     ) -> PathBuf {
         self.attempt_dir(project_id, issue_id, attempt_id)
             .join("rework-instructions")
+    }
+
+    fn analyst_decisions_root(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> PathBuf {
+        self.attempt_dir(project_id, issue_id, attempt_id)
+            .join("analyst-decisions")
     }
 
     fn test_plans_root(&self, project_id: &str, issue_id: &str, attempt_id: &str) -> PathBuf {

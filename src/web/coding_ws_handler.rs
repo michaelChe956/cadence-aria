@@ -154,39 +154,12 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                         continue;
                     }
                     runner_started = true;
-                    let runner_state = state.clone();
-                    let runner_store = coding_store.clone();
-                    let runner_attempt = current_attempt.clone();
-                    let runner_event_tx = event_tx.clone();
-                    let (command_tx, command_rx) = mpsc::channel(32);
-                    runner_command_tx = Some(command_tx);
-                    tokio::spawn(async move {
-                    let engine = CodingWorkspaceEngine::new(
-                            runner_store.clone(),
-                        GitWorkspaceService::new(),
-                            runner_event_tx.clone(),
-                    );
-                        if let Err(error) = execute_start_coding_flow(
-                            &runner_state,
-                            &runner_store,
-                        &engine,
-                            &runner_event_tx,
-                            command_rx,
-                            &runner_attempt,
-                    )
-                    .await
-                    {
-                            if matches!(error, CodingWorkspaceEngineError::Aborted) {
-                                return;
-                            }
-                            let _ = runner_event_tx
-                                .send(CodingWsOutMessage::CodingProtocolError {
-                                    code: "coding_start_failed".to_string(),
-                                    message: error.to_string(),
-                                })
-                                .await;
-                        }
-                    });
+                    runner_command_tx = Some(spawn_coding_runner(
+                        state.clone(),
+                        coding_store.clone(),
+                        event_tx.clone(),
+                        current_attempt.clone(),
+                    ));
                 } else if inbound == CodingWsInMessage::FinalConfirm {
                     let engine = CodingWorkspaceEngine::new(
                         coding_store.clone(),
@@ -313,6 +286,22 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                     }
                     if let Ok(snapshot) = build_coding_session_state(&coding_store, updated) {
                         let _ = send_coding_json(&mut socket_tx, &snapshot).await;
+                    }
+                    if should_resume_runner_after_gate_response(&action_id, &current_attempt) {
+                        runner_started = true;
+                        if let Ok(updated) = coding_store.get_attempt(
+                            &current_attempt.project_id,
+                            &current_attempt.issue_id,
+                            &current_attempt.id,
+                        ) && updated.status == CodingAttemptStatus::Running
+                        {
+                            runner_command_tx = Some(spawn_coding_runner(
+                                state.clone(),
+                                coding_store.clone(),
+                                event_tx.clone(),
+                                updated,
+                            ));
+                        }
                     }
                 } else if let CodingWsInMessage::ProviderSelect { role, provider } = inbound {
                     if let Some(command_tx) = runner_command_tx.as_ref() {
@@ -539,6 +528,58 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
     }
 }
 
+fn spawn_coding_runner(
+    state: WebAppState,
+    coding_store: CodingAttemptStore,
+    event_tx: mpsc::Sender<CodingWsOutMessage>,
+    attempt: CodingExecutionAttempt,
+) -> mpsc::Sender<CodingRunnerCommand> {
+    let (command_tx, command_rx) = mpsc::channel(32);
+    tokio::spawn(async move {
+        let engine = CodingWorkspaceEngine::new(
+            coding_store.clone(),
+            GitWorkspaceService::new(),
+            event_tx.clone(),
+        );
+        if let Err(error) = execute_start_coding_flow(
+            &state,
+            &coding_store,
+            &engine,
+            &event_tx,
+            command_rx,
+            &attempt,
+        )
+        .await
+        {
+            if matches!(error, CodingWorkspaceEngineError::Aborted) {
+                return;
+            }
+            let _ = event_tx
+                .send(CodingWsOutMessage::CodingProtocolError {
+                    code: "coding_start_failed".to_string(),
+                    message: error.to_string(),
+                })
+                .await;
+        }
+    });
+    command_tx
+}
+
+fn should_resume_runner_after_gate_response(
+    action_id: &str,
+    previous_attempt: &CodingExecutionAttempt,
+) -> bool {
+    matches!(
+        action_id,
+        "retry_test_plan"
+            | "rerun_missing_steps"
+            | "retry_review"
+            | "send_raw_output_to_analyst"
+            | "manual_continue"
+            | "accept_risk"
+    ) && previous_attempt.status == CodingAttemptStatus::Blocked
+}
+
 async fn execute_start_coding_flow(
     state: &WebAppState,
     coding_store: &CodingAttemptStore,
@@ -551,24 +592,30 @@ async fn execute_start_coding_flow(
     let repo_path = repository_path_for_attempt(&app_paths, attempt)?;
     let execution_context = coding_execution_context(&app_paths, attempt)?;
 
-    let mut current = engine
-        .start_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
-        .await?;
-    if handle_pending_runner_commands(&mut command_rx, coding_store, engine, event_tx, &current)
-        .await?
-    {
-        return Ok(());
+    let mut current =
+        coding_store.get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+    if matches!(current.stage, CodingExecutionStage::PrepareContext) {
+        current = engine
+            .start_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .await?;
+        if handle_pending_runner_commands(&mut command_rx, coding_store, engine, event_tx, &current)
+            .await?
+        {
+            return Ok(());
+        }
     }
-    current = engine
-        .execute_worktree_prepare(&current, &repo_path)
-        .await?;
-    if handle_pending_runner_commands(&mut command_rx, coding_store, engine, event_tx, &current)
-        .await?
-    {
-        return Ok(());
+    if matches!(current.stage, CodingExecutionStage::WorktreePrepare) {
+        current = engine
+            .execute_worktree_prepare(&current, &repo_path)
+            .await?;
+        if handle_pending_runner_commands(&mut command_rx, coding_store, engine, event_tx, &current)
+            .await?
+        {
+            return Ok(());
+        }
     }
     'pipeline: loop {
-        {
+        if current.stage.order() <= CodingExecutionStage::Coding.order() {
             let Some(next) = await_stage_gate(
                 &mut command_rx,
                 coding_store,
@@ -610,7 +657,9 @@ async fn execute_start_coding_flow(
             {
                 return Ok(());
             }
+        }
 
+        if current.stage.order() <= CodingExecutionStage::Testing.order() {
             let Some(next) = await_stage_gate(
                 &mut command_rx,
                 coding_store,

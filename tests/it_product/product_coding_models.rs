@@ -1,17 +1,78 @@
 use std::path::PathBuf;
 
 use cadence_aria::product::coding_models::{
-    AnalystVerdict, CodeReviewReport, CodingAgentRole, CodingAttemptStatus, CodingChatEntry,
-    CodingContextNote, CodingEntryType, CodingExecutionAttempt, CodingExecutionStage,
-    CodingGateAction, CodingGateActionType, CodingGateKind, CodingGateRequired, CodingProviderRole,
-    CodingRolePermissionModes, CodingRoleProviderConfigSnapshot, CodingStageGateState,
-    CodingStageGateStatus, CodingTimelineNode, CodingTimelineNodeStatus, FindingSeverity,
-    InternalPrReview, PushStatus, RemoteKind, ReviewFinding, ReviewRequest, ReviewRequestKind,
-    ReviewVerdict, TestCommand, TestCommandStatus, TestingOverallStatus, TestingReport,
+    AnalystDecisionNextStage, AnalystDecisionRecord, AnalystDecisionVerdict,
+    AnalystHumanGateRecommendation, AnalystReworkInstructions, AnalystVerdict, CodeReviewReport,
+    CodingAgentRole, CodingAttemptStatus, CodingChatEntry, CodingContextNote, CodingEntryType,
+    CodingExecutionAttempt, CodingExecutionStage, CodingGateAction, CodingGateActionType,
+    CodingGateKind, CodingGateRequired, CodingProviderRole, CodingRolePermissionModes,
+    CodingRoleProviderConfigSnapshot, CodingStageGateState, CodingStageGateStatus,
+    CodingTimelineNode, CodingTimelineNodeStatus, FindingSeverity, InternalPrReview, PushStatus,
+    RemoteKind, ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict, TestCommand,
+    TestCommandStatus, TestingOverallStatus, TestingReport,
 };
 use cadence_aria::product::models::ProviderName;
 use cadence_aria::web::workspace_ws_types::ProviderConfigSnapshot;
 use serde_json::json;
+
+#[test]
+fn analyst_decision_record_uses_stable_wire_values() {
+    let record = AnalystDecisionRecord {
+        id: "analyst_decision_0001".to_string(),
+        attempt_id: "coding_attempt_0001".to_string(),
+        source_stage: CodingExecutionStage::Testing,
+        rework_round: 1,
+        verdict: AnalystDecisionVerdict::NeedsFix,
+        next_stage: AnalystDecisionNextStage::Coding,
+        reason: "required 测试步骤被跳过".to_string(),
+        evidence_refs: vec!["testing_report_0001.json".to_string()],
+        raw_provider_output_refs: vec![
+            "provider-raw/testing/execute_test_plan_0001.txt".to_string(),
+        ],
+        rework_instructions: Some(AnalystReworkInstructions {
+            summary: "补齐 required 测试覆盖".to_string(),
+            required_changes: vec!["补充 B6 浏览器测试".to_string()],
+            verification_expectations: vec!["B6 不再出现在 skipped_required_steps".to_string()],
+        }),
+        human_gate: Some(AnalystHumanGateRecommendation {
+            reason_code: Some("external_browser_required".to_string()),
+            available_actions: vec!["provide_context".to_string(), "manual_continue".to_string()],
+        }),
+        created_at: "2026-06-12T00:00:00Z".to_string(),
+        parse_error: None,
+    };
+
+    let value = serde_json::to_value(&record).expect("serialize decision");
+    assert_eq!(
+        value,
+        json!({
+            "id": "analyst_decision_0001",
+            "attempt_id": "coding_attempt_0001",
+            "source_stage": "testing",
+            "rework_round": 1,
+            "verdict": "needs_fix",
+            "next_stage": "coding",
+            "reason": "required 测试步骤被跳过",
+            "evidence_refs": ["testing_report_0001.json"],
+            "raw_provider_output_refs": ["provider-raw/testing/execute_test_plan_0001.txt"],
+            "rework_instructions": {
+                "summary": "补齐 required 测试覆盖",
+                "required_changes": ["补充 B6 浏览器测试"],
+                "verification_expectations": ["B6 不再出现在 skipped_required_steps"]
+            },
+            "human_gate": {
+                "reason_code": "external_browser_required",
+                "available_actions": ["provide_context", "manual_continue"]
+            },
+            "created_at": "2026-06-12T00:00:00Z",
+            "parse_error": null
+        })
+    );
+
+    let parsed: AnalystDecisionRecord =
+        serde_json::from_value(value).expect("deserialize decision");
+    assert_eq!(parsed, record);
+}
 
 #[test]
 fn coding_provider_roles_use_stable_wire_values_and_display_names() {
