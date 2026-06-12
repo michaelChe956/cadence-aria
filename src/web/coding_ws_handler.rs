@@ -19,8 +19,7 @@ use crate::product::coding_models::{
     CodingGateActionType, CodingGateKind, CodingGateRequired as CodingGateRequiredModel,
     CodingProviderPermissionMode, CodingProviderRole, CodingRoleProviderConfigSnapshot,
     CodingStageGateState, CodingStageGateStatus, CodingTimelineNode, CodingTimelineNodeStatus,
-    InternalPrReview, PushStatus, ReviewRequest, ReviewVerdict, TestingOverallStatus,
-    TestingReport,
+    InternalPrReview, PushStatus, ReviewRequest, TestingOverallStatus, TestingReport,
 };
 use crate::product::coding_workspace_engine::{
     CodingExecutionContext, CodingWorkspaceEngine, CodingWorkspaceEngineError,
@@ -815,10 +814,6 @@ async fn execute_start_coding_flow(
             {
                 return Ok(());
             }
-            if review_report.verdict == ReviewVerdict::Blocked {
-                return emit_current_session_state(event_tx, coding_store, &current).await;
-            }
-
             let Some(next) = await_stage_gate(
                 &mut command_rx,
                 coding_store,
@@ -936,10 +931,6 @@ async fn execute_start_coding_flow(
             {
                 return Ok(());
             }
-            if internal_review.verdict == ReviewVerdict::Blocked {
-                return emit_current_session_state(event_tx, coding_store, &current).await;
-            }
-
             let Some(next) = await_stage_gate(
                 &mut command_rx,
                 coding_store,

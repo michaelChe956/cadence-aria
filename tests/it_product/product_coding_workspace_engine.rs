@@ -1717,7 +1717,7 @@ async fn parses_real_provider_review_finding_aliases() {
 }
 
 #[tokio::test]
-async fn review_payload_parse_failure_blocks_instead_of_approves() {
+async fn review_payload_parse_failure_records_blocked_evidence_for_analyst() {
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
     init_repo(&worktree);
@@ -1755,7 +1755,64 @@ async fn review_payload_parse_failure_blocks_instead_of_approves() {
     let updated = store
         .get_attempt("project_0001", "issue_0001", &attempt.id)
         .expect("updated attempt");
-    assert_eq!(updated.status, CodingAttemptStatus::Blocked);
+    assert_eq!(updated.status, CodingAttemptStatus::Running);
+    assert_eq!(updated.stage, CodingExecutionStage::CodeReview);
+    let gates = store
+        .list_open_blocked_gates("project_0001", "issue_0001", &attempt.id)
+        .expect("open blocked gates");
+    assert!(gates.is_empty());
+}
+
+#[tokio::test]
+async fn execute_code_review_blocked_keeps_attempt_running_for_analyst() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    init_repo(&worktree);
+    fs::write(worktree.join("src.txt"), "hello\nreviewed\n").expect("modify file");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            base_branch: "HEAD".to_string(),
+            ..create_input()
+        })
+        .expect("create attempt");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let provider = InputCapturingProvider {
+        input: Arc::new(Mutex::new(None)),
+        output: r#"{
+            "verdict": "blocked",
+            "summary": "缺少人工测试账号，无法完成 review",
+            "findings": []
+        }"#
+        .to_string(),
+    };
+
+    let report = engine
+        .execute_code_review(&attempt, &provider)
+        .await
+        .expect("execute code review");
+
+    assert_eq!(report.verdict, ReviewVerdict::Blocked);
+    assert_eq!(report.summary, "缺少人工测试账号，无法完成 review");
+    let updated = store
+        .get_attempt("project_0001", "issue_0001", &attempt.id)
+        .expect("updated attempt");
+    assert_eq!(updated.status, CodingAttemptStatus::Running);
+    assert_eq!(updated.stage, CodingExecutionStage::CodeReview);
+    let gates = store
+        .list_open_blocked_gates("project_0001", "issue_0001", &attempt.id)
+        .expect("open blocked gates");
+    assert!(gates.is_empty());
 }
 
 #[tokio::test]
@@ -3128,6 +3185,73 @@ async fn execute_internal_pr_review_persists_review_and_waits_for_final_rework()
         other => panic!("expected internal review node completed, got {other:?}"),
     }
     assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn execute_internal_pr_review_blocked_keeps_attempt_running_for_analyst() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    init_repo(&worktree);
+    fs::write(worktree.join("src.txt"), "hello\ninternal review\n").expect("modify file");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            base_branch: "HEAD".to_string(),
+            ..create_input()
+        })
+        .expect("create attempt");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    store
+        .update_attempt_stage(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingExecutionStage::ReviewRequest,
+        )
+        .expect("review request stage");
+    let request = sample_review_request(&attempt.id);
+    store
+        .save_review_request(&request)
+        .expect("save review request");
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let provider = InputCapturingProvider {
+        input: Arc::new(Mutex::new(None)),
+        output: r#"{
+            "verdict": "blocked",
+            "summary": "内部 review 需要人工确认发布窗口",
+            "findings": [],
+            "impact_scope": ["release"],
+            "pr_description": "实现 work item",
+            "commit_message_suggestion": "feat: implement work item"
+        }"#
+        .to_string(),
+    };
+
+    let review = engine
+        .execute_internal_pr_review(&attempt, &provider)
+        .await
+        .expect("execute internal pr review");
+
+    assert_eq!(review.verdict, ReviewVerdict::Blocked);
+    assert_eq!(review.summary, "内部 review 需要人工确认发布窗口");
+    let updated = store
+        .get_attempt("project_0001", "issue_0001", &attempt.id)
+        .expect("updated attempt");
+    assert_eq!(updated.status, CodingAttemptStatus::Running);
+    assert_eq!(updated.stage, CodingExecutionStage::InternalPrReview);
+    let gates = store
+        .list_open_blocked_gates("project_0001", "issue_0001", &attempt.id)
+        .expect("open blocked gates");
+    assert!(gates.is_empty());
 }
 
 #[tokio::test]

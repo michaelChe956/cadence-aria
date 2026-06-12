@@ -1876,34 +1876,10 @@ impl CodingWorkspaceEngine {
                 CodingTimelineNodeStatus::Failed,
                 Some("code review 要求修改".to_string()),
             ),
-            ReviewVerdict::Blocked => {
-                self.store.update_attempt_status(
-                    &attempt.project_id,
-                    &attempt.issue_id,
-                    &attempt.id,
-                    CodingAttemptStatus::Blocked,
-                )?;
-                let gate = self.store.create_blocked_gate(CreateBlockedGateInput {
-                    attempt_id: attempt.id.clone(),
-                    stage: CodingExecutionStage::CodeReview,
-                    node_id: Some(node.id.clone()),
-                    role: Some(CodingProviderRole::CodeReviewer),
-                    title: "Review blocked".to_string(),
-                    description: report.summary.clone(),
-                    reason_code: Some("review_blocked".to_string()),
-                    evidence_refs: vec![format!("{}.json", report.id)],
-                    raw_provider_output_ref: Some(raw_provider_output_ref.clone()),
-                    available_actions: review_blocked_gate_actions(),
-                })?;
-                let _ = self
-                    .event_tx
-                    .send(CodingWsOutMessage::CodingGateRequired { gate })
-                    .await;
-                (
-                    CodingTimelineNodeStatus::Blocked,
-                    Some("code review 被阻塞".to_string()),
-                )
-            }
+            ReviewVerdict::Blocked => (
+                CodingTimelineNodeStatus::Blocked,
+                Some("code review 被阻塞".to_string()),
+            ),
         };
         self.complete_timeline_node(
             &attempt.project_id,
@@ -2205,34 +2181,10 @@ impl CodingWorkspaceEngine {
                 CodingTimelineNodeStatus::Failed,
                 Some("internal PR review 要求修改".to_string()),
             ),
-            ReviewVerdict::Blocked => {
-                self.store.update_attempt_status(
-                    &attempt.project_id,
-                    &attempt.issue_id,
-                    &attempt.id,
-                    CodingAttemptStatus::Blocked,
-                )?;
-                let gate = self.store.create_blocked_gate(CreateBlockedGateInput {
-                    attempt_id: attempt.id.clone(),
-                    stage: CodingExecutionStage::InternalPrReview,
-                    node_id: Some(node.id.clone()),
-                    role: Some(CodingProviderRole::InternalReviewer),
-                    title: "Internal review blocked".to_string(),
-                    description: review.summary.clone(),
-                    reason_code: Some("internal_review_blocked".to_string()),
-                    evidence_refs: vec![format!("{}.json", review.id)],
-                    raw_provider_output_ref: Some(raw_provider_output_ref.clone()),
-                    available_actions: review_blocked_gate_actions(),
-                })?;
-                let _ = self
-                    .event_tx
-                    .send(CodingWsOutMessage::CodingGateRequired { gate })
-                    .await;
-                (
-                    CodingTimelineNodeStatus::Blocked,
-                    Some("internal PR review 被阻塞".to_string()),
-                )
-            }
+            ReviewVerdict::Blocked => (
+                CodingTimelineNodeStatus::Blocked,
+                Some("internal PR review 被阻塞".to_string()),
+            ),
         };
         self.complete_timeline_node(
             &attempt.project_id,
@@ -3997,36 +3949,6 @@ fn testing_blocked_gate_actions() -> Vec<CodingGateAction> {
             action_id: "rerun_missing_steps".to_string(),
             label: "补跑缺失步骤".to_string(),
             action_type: CodingGateActionType::RerunMissingSteps,
-        },
-        CodingGateAction {
-            action_id: "provide_context".to_string(),
-            label: "补充上下文".to_string(),
-            action_type: CodingGateActionType::ProvideContext,
-        },
-        CodingGateAction {
-            action_id: "manual_continue".to_string(),
-            label: "人工继续".to_string(),
-            action_type: CodingGateActionType::ManualContinue,
-        },
-        CodingGateAction {
-            action_id: "abort".to_string(),
-            label: "终止".to_string(),
-            action_type: CodingGateActionType::Abort,
-        },
-    ]
-}
-
-fn review_blocked_gate_actions() -> Vec<CodingGateAction> {
-    vec![
-        CodingGateAction {
-            action_id: "retry_review".to_string(),
-            label: "重试审查".to_string(),
-            action_type: CodingGateActionType::RetryReview,
-        },
-        CodingGateAction {
-            action_id: "send_raw_output_to_analyst".to_string(),
-            label: "转交分析官".to_string(),
-            action_type: CodingGateActionType::SendRawOutputToAnalyst,
         },
         CodingGateAction {
             action_id: "provide_context".to_string(),

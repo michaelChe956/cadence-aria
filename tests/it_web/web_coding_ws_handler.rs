@@ -9,7 +9,7 @@ use cadence_aria::product::coding_models::{
     CodingAgentRole, CodingAttemptStatus, CodingEntryType, CodingExecutionStage, CodingGateAction,
     CodingGateActionType, CodingGateKind, CodingGateRequired, CodingProviderPermissionMode,
     CodingProviderRole, CodingRoleProviderConfigSnapshot, CodingTimelineNode,
-    CodingTimelineNodeStatus, PushStatus, TestingOverallStatus,
+    CodingTimelineNodeStatus, PushStatus, ReviewVerdict, TestingOverallStatus,
 };
 use cadence_aria::product::lifecycle_store::{
     CreateWorkItemInput, CreateWorkspaceSessionInput, LifecycleStore,
@@ -1162,6 +1162,252 @@ async fn coding_ws_testing_blocked_enters_analyst_before_code_review() {
             .iter()
             .any(|node| node.stage == CodingExecutionStage::Rework)
     );
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+#[tokio::test]
+async fn coding_ws_code_review_blocked_enters_analyst_before_coding() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let provider = Arc::new(ReviewerBlockedProvider::code_review());
+    let app = app_with_full_chain_attempt_and_provider(root.path(), provider.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(&mut ws, &CodingWsInMessage::StartCoding).await;
+
+    let mut confirmed_gates = HashSet::new();
+    let mut saw_code_review_blocked = false;
+    let mut saw_analyst_after_code_review = false;
+    let mut saw_coding_gate_after_analyst = false;
+    for _ in 0..160 {
+        match recv_json(&mut ws).await {
+            CodingWsOutMessage::CodingGateRequired { gate }
+                if gate.kind == CodingGateKind::Blocked
+                    && gate.stage.as_ref() == Some(&CodingExecutionStage::CodeReview) =>
+            {
+                panic!("code review blocked should be routed to analyst, got gate {gate:?}");
+            }
+            CodingWsOutMessage::CodingSessionState { pending_gates, .. } => {
+                if let Some(gate) = pending_gates.iter().find(|gate| {
+                    gate.kind == CodingGateKind::Blocked
+                        && gate.stage.as_ref() == Some(&CodingExecutionStage::CodeReview)
+                }) {
+                    panic!("code review blocked should be routed to analyst, got gate {gate:?}");
+                }
+                let stage_gates = pending_gates
+                    .iter()
+                    .filter(|gate| gate.kind == CodingGateKind::StageGate)
+                    .filter_map(|gate| {
+                        gate.stage
+                            .clone()
+                            .map(|stage| (gate.gate_id.clone(), stage))
+                    })
+                    .collect::<Vec<_>>();
+                if saw_analyst_after_code_review
+                    && stage_gates
+                        .iter()
+                        .any(|(_, stage)| *stage == CodingExecutionStage::Coding)
+                {
+                    saw_coding_gate_after_analyst = true;
+                    break;
+                }
+                for (gate_id, stage) in stage_gates {
+                    if confirmed_gates.insert(gate_id) {
+                        send_json(&mut ws, &CodingWsInMessage::StageGateConfirm { stage }).await;
+                    }
+                }
+            }
+            CodingWsOutMessage::CodingGateRequired { gate }
+                if gate.kind == CodingGateKind::StageGate =>
+            {
+                if saw_analyst_after_code_review
+                    && gate.stage.as_ref() == Some(&CodingExecutionStage::Coding)
+                {
+                    saw_coding_gate_after_analyst = true;
+                    break;
+                }
+                if let Some(stage) = gate.stage.clone()
+                    && confirmed_gates.insert(gate.gate_id)
+                {
+                    send_json(&mut ws, &CodingWsInMessage::StageGateConfirm { stage }).await;
+                }
+            }
+            CodingWsOutMessage::CodeReviewComplete { report }
+                if report.verdict == ReviewVerdict::Blocked =>
+            {
+                saw_code_review_blocked = true;
+            }
+            CodingWsOutMessage::CodingTimelineNodeCreated { node }
+                if saw_code_review_blocked && node.stage == CodingExecutionStage::Rework =>
+            {
+                saw_analyst_after_code_review = true;
+            }
+            CodingWsOutMessage::CodingProtocolError { code, message } => {
+                panic!("unexpected coding protocol error {code}: {message}");
+            }
+            _ => {}
+        }
+    }
+
+    assert!(
+        saw_code_review_blocked,
+        "code review blocked report missing"
+    );
+    assert!(
+        saw_analyst_after_code_review,
+        "code review blocked did not enter analyst"
+    );
+    assert!(
+        saw_coding_gate_after_analyst,
+        "analyst next_stage=coding did not route back to coder"
+    );
+    assert!(
+        provider
+            .analyst_prompts()
+            .iter()
+            .any(|prompt| prompt.contains("Previous Stage: CodeReview")),
+        "analyst did not receive code review evidence"
+    );
+
+    let attempt = store
+        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("attempt");
+    assert_eq!(attempt.status, CodingAttemptStatus::Running);
+    assert_eq!(attempt.stage, CodingExecutionStage::Coding);
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+#[tokio::test]
+async fn coding_ws_internal_pr_review_blocked_enters_analyst_before_final_confirm() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let provider = Arc::new(ReviewerBlockedProvider::internal_pr_review());
+    let app = app_with_full_chain_attempt_and_provider(root.path(), provider.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(&mut ws, &CodingWsInMessage::StartCoding).await;
+
+    let mut confirmed_gates = HashSet::new();
+    let mut saw_internal_review_blocked = false;
+    let mut saw_analyst_after_internal_review = false;
+    let mut completed = false;
+    for _ in 0..220 {
+        match recv_json(&mut ws).await {
+            CodingWsOutMessage::CodingGateRequired { gate }
+                if gate.kind == CodingGateKind::Blocked
+                    && gate.stage.as_ref() == Some(&CodingExecutionStage::InternalPrReview) =>
+            {
+                panic!("internal review blocked should be routed to analyst, got gate {gate:?}");
+            }
+            CodingWsOutMessage::CodingSessionState {
+                status,
+                stage,
+                pending_gates,
+                ..
+            } => {
+                if let Some(gate) = pending_gates.iter().find(|gate| {
+                    gate.kind == CodingGateKind::Blocked
+                        && gate.stage.as_ref() == Some(&CodingExecutionStage::InternalPrReview)
+                }) {
+                    panic!(
+                        "internal review blocked should be routed to analyst, got gate {gate:?}"
+                    );
+                }
+                let stage_gates = pending_gates
+                    .iter()
+                    .filter(|gate| gate.kind == CodingGateKind::StageGate)
+                    .filter_map(|gate| {
+                        gate.stage
+                            .clone()
+                            .map(|stage| (gate.gate_id.clone(), stage))
+                    })
+                    .collect::<Vec<_>>();
+                for (gate_id, stage) in stage_gates {
+                    if confirmed_gates.insert(gate_id) {
+                        send_json(&mut ws, &CodingWsInMessage::StageGateConfirm { stage }).await;
+                    }
+                }
+                if saw_analyst_after_internal_review
+                    && status == CodingAttemptStatus::Completed
+                    && stage == CodingExecutionStage::FinalConfirm
+                {
+                    completed = true;
+                    break;
+                }
+            }
+            CodingWsOutMessage::CodingGateRequired { gate }
+                if gate.kind == CodingGateKind::StageGate =>
+            {
+                if let Some(stage) = gate.stage.clone()
+                    && confirmed_gates.insert(gate.gate_id)
+                {
+                    send_json(&mut ws, &CodingWsInMessage::StageGateConfirm { stage }).await;
+                }
+            }
+            CodingWsOutMessage::InternalPrReviewComplete { review }
+                if review.verdict == ReviewVerdict::Blocked =>
+            {
+                saw_internal_review_blocked = true;
+            }
+            CodingWsOutMessage::CodingTimelineNodeCreated { node }
+                if saw_internal_review_blocked && node.stage == CodingExecutionStage::Rework =>
+            {
+                saw_analyst_after_internal_review = true;
+            }
+            CodingWsOutMessage::CodingProtocolError { code, message } => {
+                panic!("unexpected coding protocol error {code}: {message}");
+            }
+            _ => {}
+        }
+    }
+
+    assert!(
+        saw_internal_review_blocked,
+        "internal review blocked report missing"
+    );
+    assert!(
+        saw_analyst_after_internal_review,
+        "internal review blocked did not enter analyst"
+    );
+    assert!(
+        completed,
+        "analyst next_stage=final_confirm did not complete final confirm path"
+    );
+    assert!(
+        provider
+            .analyst_prompts()
+            .iter()
+            .any(|prompt| prompt.contains("Previous Stage: InternalPrReview")),
+        "analyst did not receive internal review evidence"
+    );
+
+    let attempt = store
+        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("attempt");
+    assert_eq!(attempt.status, CodingAttemptStatus::Completed);
+    assert_eq!(attempt.stage, CodingExecutionStage::FinalConfirm);
 
     ws.close(None).await.expect("close ws");
     server.abort();
@@ -2365,6 +2611,144 @@ impl StreamingProviderAdapter for TestingBlockedProvider {
         FullChainStreamingProvider
             .run_streaming(input, CancellationToken::new())
             .await
+    }
+}
+
+#[derive(Clone, Copy)]
+enum BlockedReviewerStage {
+    CodeReview,
+    InternalPrReview,
+}
+
+struct ReviewerBlockedProvider {
+    blocked_stage: BlockedReviewerStage,
+    analyst_prompts: Mutex<Vec<String>>,
+}
+
+impl ReviewerBlockedProvider {
+    fn code_review() -> Self {
+        Self {
+            blocked_stage: BlockedReviewerStage::CodeReview,
+            analyst_prompts: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn internal_pr_review() -> Self {
+        Self {
+            blocked_stage: BlockedReviewerStage::InternalPrReview,
+            analyst_prompts: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn analyst_prompts(&self) -> Vec<String> {
+        self.analyst_prompts
+            .lock()
+            .expect("analyst prompts lock")
+            .clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for ReviewerBlockedProvider {
+    fn supports_provider_driven_testing(&self) -> bool {
+        true
+    }
+
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        start_web_test_provider_driven_testing_session(&input.prompt, cancel)
+    }
+
+    async fn run_streaming(
+        &self,
+        input: &AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+        let (tx, rx) = mpsc::channel(8);
+        match input.role {
+            AdapterRole::Executor => {
+                let worktree = input
+                    .worktree_path
+                    .as_ref()
+                    .map(PathBuf::from)
+                    .expect("worktree path");
+                fs::write(worktree.join("src/lib.rs"), CLIMB_STAIRS_LIB).map_err(|error| {
+                    ProviderAdapterError::incompatible_output(error.to_string(), "", "")
+                })?;
+                tx.try_send(StreamChunk::Done {
+                    full_output: "implemented climb_stairs".to_string(),
+                })
+                .expect("send coding done");
+            }
+            AdapterRole::Reviewer
+                if input.output_schema == "coding_workspace_analyst_verdict_json" =>
+            {
+                self.analyst_prompts
+                    .lock()
+                    .expect("analyst prompts lock")
+                    .push(input.prompt.clone());
+                let full_output = if input.prompt.contains("Previous Stage: Testing") {
+                    r#"{"verdict":"proceed","next_stage":"code_review","reason":"testing evidence accepted"}"#
+                } else if input.prompt.contains("Previous Stage: CodeReview") {
+                    match self.blocked_stage {
+                        BlockedReviewerStage::CodeReview => {
+                            r#"{"verdict":"needs_fix","next_stage":"coding","reason":"code review blocked requires coder follow-up","fix_hints":["补充 review 所需上下文"]}"#
+                        }
+                        BlockedReviewerStage::InternalPrReview => {
+                            r#"{"verdict":"proceed","next_stage":"review_request","reason":"code review accepted"}"#
+                        }
+                    }
+                } else if input.prompt.contains("Previous Stage: InternalPrReview") {
+                    r#"{"verdict":"proceed","next_stage":"final_confirm","reason":"internal review blocked is accepted for final confirmation"}"#
+                } else {
+                    r#"{"verdict":"no_issue","summary":"ok"}"#
+                };
+                tx.try_send(StreamChunk::Done {
+                    full_output: full_output.to_string(),
+                })
+                .expect("send analyst done");
+            }
+            AdapterRole::Reviewer if input.output_schema == "coding_workspace_code_review_json" => {
+                let full_output = match self.blocked_stage {
+                    BlockedReviewerStage::CodeReview => {
+                        r#"{"verdict":"blocked","summary":"code review 缺少人工确认信息","findings":[]}"#
+                    }
+                    BlockedReviewerStage::InternalPrReview => {
+                        r#"{"verdict":"approve","summary":"code review ok","findings":[]}"#
+                    }
+                };
+                tx.try_send(StreamChunk::Done {
+                    full_output: full_output.to_string(),
+                })
+                .expect("send code review done");
+            }
+            AdapterRole::Reviewer
+                if input.output_schema == "coding_workspace_internal_pr_review_json" =>
+            {
+                let full_output = match self.blocked_stage {
+                    BlockedReviewerStage::CodeReview => {
+                        r#"{"verdict":"approve","summary":"internal review ok","findings":[],"impact_scope":["src"],"pr_description":"实现 work item","commit_message_suggestion":"feat: implement work item"}"#
+                    }
+                    BlockedReviewerStage::InternalPrReview => {
+                        r#"{"verdict":"blocked","summary":"internal review 需要人工确认发布窗口","findings":[],"impact_scope":["release"],"pr_description":"实现 work item","commit_message_suggestion":"feat: implement work item"}"#
+                    }
+                };
+                tx.try_send(StreamChunk::Done {
+                    full_output: full_output.to_string(),
+                })
+                .expect("send internal review done");
+            }
+            _ => {
+                tx.try_send(StreamChunk::Done {
+                    full_output: "ok".to_string(),
+                })
+                .expect("send done");
+            }
+        }
+        Ok(rx)
     }
 }
 
