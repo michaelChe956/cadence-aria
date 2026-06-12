@@ -11,6 +11,7 @@ import {
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { deleteCodingAttempt, getCodingAttemptDiff } from "../api/client";
 import type {
+  AnalystDecisionRecord,
   CodeReviewReport,
   CodingExecutionStage,
   CodingGateRequired,
@@ -164,6 +165,7 @@ export function CodingWorkspacePage({
           nodes={store.timelineNodes}
           activeNodeId={store.activeNodeId}
           selectedNodeId={store.selectedNodeId}
+          latestAnalystDecision={store.latestAnalystDecision}
           onSelectNode={(nodeId) => {
             useCodingWorkspaceStore.getState().setSelectedNode(nodeId);
             const targetEntry = useCodingWorkspaceStore
@@ -447,6 +449,8 @@ function GatePanel({
   const displayedError = reasonTooLong ? "原因不能超过 2000 字" : localError;
   const displayTitle = blockedGateDisplayTitle(activeGate);
   const testingBlocked = activeGate.stage === "testing";
+  const analystGate = activeGate.role === "analyst";
+  const hasQualityBypassAction = activeGate.available_actions.some(actionRequiresReason);
 
   function handleAction(action: CodingGateRequired["available_actions"][number]) {
     if (action.action_type === "confirm_stage" && activeGate.stage) {
@@ -480,9 +484,19 @@ function GatePanel({
           {testingBlocked ? (
             <div className="mt-0.5 text-xs font-semibold text-amber-900">测试被阻塞</div>
           ) : null}
+          {analystGate ? (
+            <div className="mt-0.5 text-xs font-semibold text-amber-900">
+              Analyst 建议人工决策
+            </div>
+          ) : null}
           <div className="mt-0.5 line-clamp-2 text-xs text-amber-800">
             {activeGate.description}
           </div>
+          {hasQualityBypassAction ? (
+            <div className="mt-1 text-xs font-semibold text-amber-900">
+              人工放行会记录质量豁免；请说明跳过该门禁的原因和后续风险处理
+            </div>
+          ) : null}
           <GateMetadata gate={activeGate} />
           {needsReason ? (
             <div className="mt-2 grid gap-1">
@@ -895,6 +909,10 @@ function languageForPath(path: string) {
 
 function TestsPanel() {
   const report = useCodingWorkspaceStore((state) => state.testingReport);
+  const stage = useCodingWorkspaceStore((state) => state.stage);
+  const latestAnalystDecision = useCodingWorkspaceStore(
+    (state) => state.latestAnalystDecision,
+  );
   if (!report) {
     return <div className="text-[var(--aria-ink-muted)]">暂无测试报告</div>;
   }
@@ -915,6 +933,10 @@ function TestsPanel() {
   return (
     <div className="space-y-3">
       <StatusBadge value={report.overall_status} />
+      <AnalystDecisionStatus
+        decision={latestAnalystDecision}
+        waiting={stage === "rework" && !latestAnalystDecision}
+      />
       {hasPlanDetails ? (
         <div data-testid="coding-test-plan-report" className="space-y-2">
           {report.plan_summary ? (
@@ -969,6 +991,36 @@ function TestsPanel() {
           </div>
         </div>
       ))}
+    </div>
+  );
+}
+
+function AnalystDecisionStatus({
+  decision,
+  waiting,
+}: {
+  decision: AnalystDecisionRecord | null;
+  waiting: boolean;
+}) {
+  if (!decision) {
+    return waiting ? (
+      <div className="rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-2 text-xs font-semibold text-[var(--aria-ink-muted)]">
+        等待 Analyst 决策
+      </div>
+    ) : null;
+  }
+
+  return (
+    <div className="rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-2 text-xs">
+      <div className="font-semibold text-[var(--aria-ink)]">Analyst 已决策</div>
+      <div className="mt-1 font-mono text-[var(--aria-ink-muted)]">
+        {decision.verdict} {"->"} {decision.next_stage}
+      </div>
+      <div className="mt-1 break-words text-[var(--aria-ink)]">{decision.reason}</div>
+      <TestingList label="analyst evidence" values={decision.evidence_refs} />
+      {decision.raw_provider_output_refs.length > 0 ? (
+        <TestingList label="analyst raw" values={decision.raw_provider_output_refs} />
+      ) : null}
     </div>
   );
 }

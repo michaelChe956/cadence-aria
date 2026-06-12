@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type {
+  AnalystDecisionRecord,
   CodeReviewReport,
   CodingGateRequired,
   CodingTimelineNode,
@@ -91,6 +92,27 @@ function testingReport(overrides: Partial<TestingReport> = {}): TestingReport {
   };
 }
 
+function analystDecision(
+  overrides: Partial<AnalystDecisionRecord> = {},
+): AnalystDecisionRecord {
+  return {
+    id: "analyst_decision_0001",
+    attempt_id: "coding_attempt_0001",
+    source_stage: "testing",
+    rework_round: 1,
+    verdict: "needs_fix",
+    next_stage: "coding",
+    reason: "required 测试步骤被跳过，需要回到 Coder",
+    evidence_refs: ["testing_report_0001.json"],
+    raw_provider_output_refs: ["provider-raw/testing/execute_test_plan_0001.txt"],
+    rework_instructions: null,
+    human_gate: null,
+    created_at: "2026-06-12T00:00:00Z",
+    parse_error: null,
+    ...overrides,
+  };
+}
+
 function blockedGate(overrides: Partial<CodingGateRequired> = {}): CodingGateRequired {
   return {
     gate_id: "gate_0001",
@@ -137,6 +159,7 @@ function sessionState(
     review_request: null,
     internal_pr_review: null,
     pending_gates: [],
+    latest_analyst_decision: null,
     chat_entries: [],
     ...overrides,
   };
@@ -325,6 +348,31 @@ describe("coding workspace store", () => {
     store.resolvePendingGate("gate_0001");
 
     expect(useCodingWorkspaceStore.getState().pendingGates).toHaveLength(0);
+  });
+
+  it("stores latest analyst decision from session snapshots", () => {
+    const store = useCodingWorkspaceStore.getState();
+
+    store.setSessionState(
+      sessionState({
+        testing_report: testingReport(),
+        latest_analyst_decision: analystDecision({
+          reason: "测试阻塞已归因，要求 Coder 补齐浏览器步骤",
+        }),
+      }),
+    );
+
+    expect(useCodingWorkspaceStore.getState().latestAnalystDecision).toMatchObject({
+      id: "analyst_decision_0001",
+      source_stage: "testing",
+      verdict: "needs_fix",
+      next_stage: "coding",
+      reason: "测试阻塞已归因，要求 Coder 补齐浏览器步骤",
+    });
+
+    store.setSessionState(sessionState({ latest_analyst_decision: null }));
+
+    expect(useCodingWorkspaceStore.getState().latestAnalystDecision).toBeNull();
   });
 
   it("tracks gate submission without removing gate until snapshot confirms", () => {

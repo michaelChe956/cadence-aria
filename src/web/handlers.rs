@@ -661,6 +661,9 @@ pub async fn get_coding_attempt(
         .map_err(product_store_api_error)?
         .into_iter()
         .last();
+    let latest_analyst_decision = coding_store
+        .latest_analyst_decision(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .map_err(product_store_api_error)?;
     let active_node_id = active_coding_timeline_node_id(&timeline_nodes);
 
     Ok(Json(CodingAttemptSnapshotResponse {
@@ -673,6 +676,7 @@ pub async fn get_coding_attempt(
         review_request,
         internal_pr_review,
         pending_gates: Vec::new(),
+        latest_analyst_decision,
     }))
 }
 

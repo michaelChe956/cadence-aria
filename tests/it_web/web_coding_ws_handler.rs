@@ -6,7 +6,8 @@ use cadence_aria::cross_cutting::streaming_provider::{
 use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
 use cadence_aria::product::coding_models::{
-    CodingAgentRole, CodingAttemptStatus, CodingEntryType, CodingExecutionStage, CodingGateAction,
+    AnalystDecisionNextStage, AnalystDecisionRecord, AnalystDecisionVerdict, CodingAgentRole,
+    CodingAttemptStatus, CodingEntryType, CodingExecutionStage, CodingGateAction,
     CodingGateActionType, CodingGateKind, CodingGateRequired, CodingProviderPermissionMode,
     CodingProviderRole, CodingRoleProviderConfigSnapshot, CodingTimelineNode,
     CodingTimelineNodeStatus, PushStatus, ReviewVerdict, TestingOverallStatus,
@@ -341,6 +342,59 @@ async fn coding_ws_session_state_includes_persisted_open_stage_gates() {
                 pending_gates[0].available_actions[0].action_type,
                 CodingGateActionType::ConfirmStage
             );
+        }
+        other => panic!("expected coding session state, got {other:?}"),
+    }
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+#[tokio::test]
+async fn coding_ws_session_state_includes_latest_analyst_decision() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let app = app_with_attempt(root.path());
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    store
+        .save_analyst_decision(&AnalystDecisionRecord {
+            id: "analyst_decision_0001".to_string(),
+            attempt_id: "coding_attempt_0001".to_string(),
+            source_stage: CodingExecutionStage::Testing,
+            rework_round: 1,
+            verdict: AnalystDecisionVerdict::NeedsFix,
+            next_stage: AnalystDecisionNextStage::Coding,
+            reason: "required 测试步骤被跳过，需要回到 Coder".to_string(),
+            evidence_refs: vec!["testing_report_0001.json".to_string()],
+            raw_provider_output_refs: vec![
+                "provider-raw/testing/execute_test_plan_0001.txt".to_string(),
+            ],
+            rework_instructions: None,
+            human_gate: None,
+            created_at: "2026-06-12T00:00:00Z".to_string(),
+            parse_error: None,
+        })
+        .expect("save analyst decision");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+
+    match recv_json(&mut ws).await {
+        CodingWsOutMessage::CodingSessionState {
+            latest_analyst_decision,
+            ..
+        } => {
+            let decision = latest_analyst_decision.expect("latest analyst decision");
+            assert_eq!(decision.id, "analyst_decision_0001");
+            assert_eq!(decision.source_stage, CodingExecutionStage::Testing);
+            assert_eq!(decision.verdict, AnalystDecisionVerdict::NeedsFix);
+            assert_eq!(decision.next_stage, AnalystDecisionNextStage::Coding);
+            assert_eq!(decision.evidence_refs, vec!["testing_report_0001.json"]);
         }
         other => panic!("expected coding session state, got {other:?}"),
     }

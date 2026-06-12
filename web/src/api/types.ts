@@ -343,6 +343,47 @@ export type InternalPrReview = {
 };
 
 export type AnalystVerdict = "needs_fix" | "needs_human_input" | "no_issue";
+export type AnalystDecisionVerdict =
+  | "needs_fix"
+  | "rerun_testing"
+  | "proceed"
+  | "human_required"
+  | "blocked";
+export type AnalystDecisionNextStage =
+  | "coding"
+  | "testing"
+  | "code_review"
+  | "review_request"
+  | "internal_pr_review"
+  | "final_confirm"
+  | "human_gate";
+
+export type AnalystReworkInstructions = {
+  summary: string;
+  required_changes: string[];
+  verification_expectations: string[];
+};
+
+export type AnalystHumanGateRecommendation = {
+  reason_code?: string | null;
+  available_actions: string[];
+};
+
+export type AnalystDecisionRecord = {
+  id: string;
+  attempt_id: string;
+  source_stage: CodingExecutionStage;
+  rework_round: number;
+  verdict: AnalystDecisionVerdict;
+  next_stage: AnalystDecisionNextStage;
+  reason: string;
+  evidence_refs: string[];
+  raw_provider_output_refs: string[];
+  rework_instructions?: AnalystReworkInstructions | null;
+  human_gate?: AnalystHumanGateRecommendation | null;
+  created_at: string;
+  parse_error?: string | null;
+};
 
 export type CodingEntryType =
   | { type: "user_message" }
@@ -411,6 +452,7 @@ export type CodingAttemptSnapshotResponse = {
   review_request: ReviewRequest | null;
   internal_pr_review: InternalPrReview | null;
   pending_gates: CodingGateRequired[];
+  latest_analyst_decision: AnalystDecisionRecord | null;
 };
 
 export type CodingAttemptDiffResponse = {

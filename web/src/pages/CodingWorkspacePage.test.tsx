@@ -725,6 +725,79 @@ describe("CodingWorkspacePage", () => {
     expect(tabs).toHaveTextContent("provider-raw/testing/execute_test_plan_0001.txt");
   });
 
+  it("renders analyst decision state beside testing report", async () => {
+    mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      attemptId: "coding_attempt_0001",
+      status: "running",
+      stage: "rework",
+      activeTab: "tests",
+      timelineNodes: [
+        {
+          id: "coding_node_analyst_0001",
+          attempt_id: "coding_attempt_0001",
+          stage: "rework",
+          title: "Analyst 路由决策",
+          status: "running",
+          agent_role: "system",
+          summary: null,
+          started_at: "2026-06-12T00:00:01Z",
+          completed_at: null,
+          artifact_refs: [],
+        },
+      ],
+      testingReport: {
+        id: "testing_report_0001",
+        attempt_id: "coding_attempt_0001",
+        commands: [],
+        overall_status: "blocked",
+        provider_claim: null,
+        backend_verified: true,
+        started_at: "2026-06-12T00:00:00Z",
+        completed_at: "2026-06-12T00:00:01Z",
+        skipped_required_steps: ["browser_e2e"],
+        raw_provider_output_ref: "provider-raw/testing/execute_test_plan_0001.txt",
+      },
+      latestAnalystDecision: null,
+    });
+
+    const { rerender } = render(
+      <CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "运行结果" }));
+
+    expect(screen.getByTestId("coding-artifact-tabs")).toHaveTextContent(
+      "等待 Analyst 决策",
+    );
+
+    useCodingWorkspaceStore.setState({
+      latestAnalystDecision: {
+        id: "analyst_decision_0001",
+        attempt_id: "coding_attempt_0001",
+        source_stage: "testing",
+        rework_round: 1,
+        verdict: "needs_fix",
+        next_stage: "coding",
+        reason: "required 测试步骤被跳过，需要回到 Coder",
+        evidence_refs: ["testing_report_0001.json"],
+        raw_provider_output_refs: ["provider-raw/testing/execute_test_plan_0001.txt"],
+        rework_instructions: null,
+        human_gate: null,
+        created_at: "2026-06-12T00:00:02Z",
+        parse_error: null,
+      },
+    });
+    rerender(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+
+    const tabs = screen.getByTestId("coding-artifact-tabs");
+    expect(tabs).toHaveTextContent("Analyst 已决策");
+    expect(tabs).toHaveTextContent("needs_fix -> coding");
+    expect(tabs).toHaveTextContent("required 测试步骤被跳过，需要回到 Coder");
+    expect(tabs).toHaveTextContent("testing_report_0001.json");
+    expect(screen.getByTestId("coding-timeline")).toHaveTextContent("needs_fix -> coding");
+  });
+
   it("renders legacy testing report without plan fields", async () => {
     mockCodingWs();
     useCodingWorkspaceStore.setState({
@@ -813,6 +886,46 @@ describe("CodingWorkspacePage", () => {
       "manual_continue",
       "人工确认风险可接受，后续补充真实 E2E",
     );
+  });
+
+  it("renders analyst human gate manual continue as quality bypass risk", async () => {
+    mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      attemptId: "coding_attempt_0001",
+      status: "blocked",
+      stage: "rework",
+      pendingGates: [
+        {
+          gate_id: "gate_0001",
+          kind: "blocked",
+          title: "Rework limit reached",
+          description: "已达到自动重写上限",
+          stage: "rework",
+          role: "analyst",
+          reason_code: "max_auto_rework_exceeded",
+          evidence_refs: ["testing_report_0001.json"],
+          available_actions: [
+            {
+              action_id: "manual_continue",
+              label: "人工继续",
+              action_type: "manual_continue",
+            },
+            {
+              action_id: "abort",
+              label: "中止 Attempt",
+              action_type: "abort",
+            },
+          ],
+        },
+      ],
+    });
+
+    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+
+    const gate = screen.getByTestId("coding-pending-gate");
+    expect(gate).toHaveTextContent("Analyst 建议人工决策");
+    expect(gate).toHaveTextContent("人工放行会记录质量豁免");
+    expect(gate).toHaveTextContent("max_auto_rework_exceeded");
   });
 
   it("renders review findings with severity, location, and required action", async () => {

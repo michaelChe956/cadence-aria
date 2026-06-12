@@ -14,12 +14,13 @@ use crate::product::app_paths::ProductAppPaths;
 use crate::product::artifact_extraction::extract_artifact_content;
 use crate::product::coding_attempt_store::CodingAttemptStore;
 use crate::product::coding_models::{
-    CodeReviewReport, CodingAgentRole, CodingAttemptStatus, CodingChatEntry, CodingContextNote,
-    CodingEntryType, CodingExecutionAttempt, CodingExecutionStage, CodingGateAction,
-    CodingGateActionType, CodingGateKind, CodingGateRequired as CodingGateRequiredModel,
-    CodingProviderPermissionMode, CodingProviderRole, CodingRoleProviderConfigSnapshot,
-    CodingStageGateState, CodingStageGateStatus, CodingTimelineNode, CodingTimelineNodeStatus,
-    InternalPrReview, PushStatus, ReviewRequest, TestingOverallStatus, TestingReport,
+    AnalystDecisionRecord, CodeReviewReport, CodingAgentRole, CodingAttemptStatus, CodingChatEntry,
+    CodingContextNote, CodingEntryType, CodingExecutionAttempt, CodingExecutionStage,
+    CodingGateAction, CodingGateActionType, CodingGateKind,
+    CodingGateRequired as CodingGateRequiredModel, CodingProviderPermissionMode,
+    CodingProviderRole, CodingRoleProviderConfigSnapshot, CodingStageGateState,
+    CodingStageGateStatus, CodingTimelineNode, CodingTimelineNodeStatus, InternalPrReview,
+    PushStatus, ReviewRequest, TestingOverallStatus, TestingReport,
 };
 use crate::product::coding_workspace_engine::{
     CodingExecutionContext, CodingWorkspaceEngine, CodingWorkspaceEngineError,
@@ -1492,6 +1493,11 @@ fn build_coding_session_state(
         .list_internal_pr_reviews(&attempt.project_id, &attempt.issue_id, &attempt.id)?
         .into_iter()
         .last();
+    let latest_analyst_decision = coding_store.latest_analyst_decision(
+        &attempt.project_id,
+        &attempt.issue_id,
+        &attempt.id,
+    )?;
     let mut pending_gates: Vec<CodingGateRequiredModel> = coding_store
         .list_open_stage_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)?
         .into_iter()
@@ -1531,6 +1537,7 @@ fn build_coding_session_state(
         review_request: Box::new(review_request),
         internal_pr_review: Box::new(internal_pr_review),
         pending_gates,
+        latest_analyst_decision: Box::new(latest_analyst_decision),
         work_item_markdown: execution_context.work_item_markdown,
         verification_commands: execution_context.verification_commands,
     })
@@ -1606,6 +1613,7 @@ pub enum CodingWsOutMessage {
         review_request: Box<Option<ReviewRequest>>,
         internal_pr_review: Box<Option<InternalPrReview>>,
         pending_gates: Vec<CodingGateRequiredModel>,
+        latest_analyst_decision: Box<Option<AnalystDecisionRecord>>,
         work_item_markdown: Option<String>,
         verification_commands: Vec<String>,
     },

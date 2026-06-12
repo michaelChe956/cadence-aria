@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type {
+  AnalystDecisionRecord,
   CodeReviewReport,
   CodingAttemptStatus,
   CodingExecutionStage,
@@ -71,6 +72,7 @@ export interface CodingWorkspaceState {
   codeReviewReports: CodeReviewReport[];
   internalPrReview: InternalPrReview | null;
   reviewRequest: ReviewRequest | null;
+  latestAnalystDecision: AnalystDecisionRecord | null;
   logs: CodingLogEntry[];
   connectionStatus: CodingConnectionStatus;
   pendingGates: CodingPendingGate[];
@@ -139,6 +141,7 @@ const initialState: CodingWorkspaceState = {
   codeReviewReports: [],
   internalPrReview: null,
   reviewRequest: null,
+  latestAnalystDecision: null,
   logs: [],
   connectionStatus: "disconnected",
   pendingGates: [],
@@ -181,6 +184,7 @@ export const useCodingWorkspaceStore = create<
         codeReviewReports: snapshot.code_review_reports,
         reviewRequest: snapshot.review_request,
         internalPrReview: snapshot.internal_pr_review,
+        latestAnalystDecision: snapshot.latest_analyst_decision ?? null,
         pendingGates: mergeSnapshotPendingGates(snapshot.pending_gates, prev.pendingGates),
         protocolError: null,
         streamingContent: null,

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type {
+  AnalystDecisionRecord,
   CodingGateRequired,
   CodingAttempt,
   CodingAttemptSnapshotResponse,
@@ -157,6 +158,21 @@ describe("workspace websocket protocol types", () => {
       review_request: null,
       internal_pr_review: null,
       pending_gates: [],
+      latest_analyst_decision: {
+        id: "analyst_decision_0001",
+        attempt_id: "coding_attempt_0001",
+        source_stage: "testing",
+        rework_round: 1,
+        verdict: "needs_fix",
+        next_stage: "coding",
+        reason: "required 测试步骤被跳过，需要回到 Coder",
+        evidence_refs: ["testing_report_0001.json"],
+        raw_provider_output_refs: ["provider-raw/testing/execute_test_plan_0001.txt"],
+        rework_instructions: null,
+        human_gate: null,
+        created_at: "2026-06-12T00:00:00Z",
+        parse_error: null,
+      },
     };
     const outbound: CodingWsOutMessage = {
       type: "coding_session_state",
@@ -194,12 +210,39 @@ describe("workspace websocket protocol types", () => {
       review_request: null,
       internal_pr_review: null,
       pending_gates: [],
+      latest_analyst_decision: snapshot.latest_analyst_decision,
     };
     const inbound: CodingWsInMessage = { type: "start_coding" };
 
     expect(snapshot.active_node_id).toBe("coding_node_0001");
     expect(outbound.type).toBe("coding_session_state");
+    expect(outbound.latest_analyst_decision?.next_stage).toBe("coding");
     expect(inbound.type).toBe("start_coding");
+  });
+
+  it("accepts analyst decision records for coding workspace display", () => {
+    const decision: AnalystDecisionRecord = {
+      id: "analyst_decision_0002",
+      attempt_id: "coding_attempt_0001",
+      source_stage: "code_review",
+      rework_round: 2,
+      verdict: "proceed",
+      next_stage: "review_request",
+      reason: "CodeReviewer 通过，进入 ReviewRequest",
+      evidence_refs: ["code_review_0001.json"],
+      raw_provider_output_refs: ["provider-raw/code_review/code_review_0001.txt"],
+      rework_instructions: null,
+      human_gate: {
+        reason_code: "manual_triage",
+        available_actions: ["provide_context", "manual_continue", "abort"],
+      },
+      created_at: "2026-06-12T00:01:00Z",
+      parse_error: null,
+    };
+
+    expect(decision.verdict).toBe("proceed");
+    expect(decision.next_stage).toBe("review_request");
+    expect(decision.human_gate?.available_actions).toContain("manual_continue");
   });
 
   it("accepts plan based testing reports and blocked gate metadata", () => {
