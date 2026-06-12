@@ -744,6 +744,8 @@ fn sample_testing_report(attempt_id: &str) -> TestingReport {
     TestingReport {
         id: "testing_report_0001".to_string(),
         attempt_id: attempt_id.to_string(),
+        role_run_id: None,
+        run_no: None,
         commands: vec![TestCommand {
             command: vec!["cargo".to_string(), "test".to_string()],
             cwd: PathBuf::from("/tmp/worktree"),

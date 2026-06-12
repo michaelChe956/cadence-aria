@@ -294,6 +294,8 @@ fn testing_and_review_reports_preserve_backend_evidence() {
     let testing = TestingReport {
         id: "testing_report_0001".to_string(),
         attempt_id: "coding_attempt_0001".to_string(),
+        role_run_id: None,
+        run_no: None,
         commands: vec![command],
         overall_status: TestingOverallStatus::Passed,
         provider_claim: Some(json!({"claimed": true})),

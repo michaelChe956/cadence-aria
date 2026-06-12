@@ -6,10 +6,11 @@ use cadence_aria::product::coding_models::{
     AnalystDecisionNextStage, AnalystDecisionRecord, AnalystDecisionVerdict,
     AnalystReworkInstructions, CodeReviewReport, CodingAgentRole, CodingAttemptStatus,
     CodingContextNote, CodingExecutionStage, CodingProviderRole, CodingReworkInstruction,
-    CodingRolePermissionModes, CodingRoleProviderConfigSnapshot, CodingStageGateStatus,
-    CodingTimelineNode, CodingTimelineNodeStatus, FindingSeverity, InternalPrReview, PushStatus,
-    RemoteKind, ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict, TestCommand,
-    TestCommandStatus, TestingOverallStatus, TestingReport,
+    CodingRolePermissionModes, CodingRoleProviderConfigSnapshot, CodingRoleRunStatus,
+    CodingRoleRunTrigger, CodingStageGateStatus, CodingTimelineNode, CodingTimelineNodeStatus,
+    FindingSeverity, InternalPrReview, PushStatus, RemoteKind, ReviewFinding, ReviewRequest,
+    ReviewRequestKind, ReviewVerdict, TestCommand, TestCommandStatus, TestingOverallStatus,
+    TestingReport,
 };
 use cadence_aria::product::models::{
     ProviderConversationRef, ProviderConversationRole, ProviderName,
@@ -457,6 +458,70 @@ fn saves_reads_and_lists_latest_analyst_decision() {
 }
 
 #[test]
+fn saves_reads_and_supersedes_coding_role_runs() {
+    let root = tempfile::tempdir().expect("root");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(create_input("work_item_0001"))
+        .expect("create attempt");
+
+    let first = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::Testing,
+            CodingProviderRole::Tester,
+            CodingRoleRunTrigger::Initial,
+            Some("coding_node_0003".to_string()),
+        )
+        .expect("first role run");
+    assert_eq!(first.id, "coding_role_run_0001");
+    assert_eq!(first.run_no, 1);
+    assert_eq!(first.status, CodingRoleRunStatus::Running);
+    assert_eq!(first.role, CodingProviderRole::Tester);
+
+    let second = store
+        .supersede_latest_role_run_and_create(
+            &attempt,
+            CodingExecutionStage::Testing,
+            CodingProviderRole::Tester,
+            CodingRoleRunTrigger::RetryTestPlan,
+            Some("coding_node_0004".to_string()),
+            Some("plan_tests_timeout".to_string()),
+        )
+        .expect("second role run");
+
+    assert_eq!(second.id, "coding_role_run_0002");
+    assert_eq!(second.run_no, 2);
+    assert_eq!(
+        second.supersedes_run_id.as_deref(),
+        Some("coding_role_run_0001")
+    );
+
+    let runs = store
+        .list_role_runs("project_0001", "issue_0001", &attempt.id)
+        .expect("role runs");
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[0].status, CodingRoleRunStatus::Superseded);
+    assert_eq!(
+        runs[0].superseded_by_run_id.as_deref(),
+        Some("coding_role_run_0002")
+    );
+    assert_eq!(runs[1].status, CodingRoleRunStatus::Running);
+
+    let latest = store
+        .latest_role_run(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingExecutionStage::Testing,
+            CodingProviderRole::Tester,
+        )
+        .expect("latest")
+        .expect("latest role run");
+    assert_eq!(latest.id, "coding_role_run_0002");
+}
+
+#[test]
 fn store_persists_role_provider_config_snapshot_in_attempt_scope() {
     let root = tempdir().expect("tempdir");
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
@@ -623,6 +688,8 @@ fn sample_testing_report(attempt_id: &str) -> TestingReport {
     TestingReport {
         id: "testing_report_0001".to_string(),
         attempt_id: attempt_id.to_string(),
+        role_run_id: None,
+        run_no: None,
         commands: vec![TestCommand {
             command: vec!["cargo".to_string(), "test".to_string()],
             cwd: PathBuf::from("/tmp/worktree"),

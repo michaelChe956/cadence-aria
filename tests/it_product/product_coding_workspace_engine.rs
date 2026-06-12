@@ -129,6 +129,8 @@ fn testing_report_routes_terminal_statuses_to_analyst_rework() {
     let blocked = TestingReport {
         id: "testing_report_0001".to_string(),
         attempt_id: "coding_attempt_0001".to_string(),
+        role_run_id: None,
+        run_no: None,
         commands: Vec::new(),
         overall_status: TestingOverallStatus::Blocked,
         provider_claim: None,

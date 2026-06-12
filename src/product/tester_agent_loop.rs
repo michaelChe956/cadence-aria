@@ -278,6 +278,8 @@ pub fn build_testing_report(
     TestingReport {
         id: "testing_report_0001".to_string(),
         attempt_id: attempt_id.to_string(),
+        role_run_id: None,
+        run_no: None,
         commands,
         overall_status,
         provider_claim,
@@ -310,6 +312,8 @@ pub fn parse_test_plan_payload(
     Ok(TestPlan {
         id: plan_id.to_string(),
         attempt_id: attempt_id.to_string(),
+        role_run_id: None,
+        run_no: None,
         summary: payload.summary,
         context_warnings: payload.context_warnings,
         assumptions: payload.assumptions,
@@ -371,6 +375,8 @@ pub fn build_plan_based_testing_report(
     TestingReport {
         id: report_id.to_string(),
         attempt_id: attempt_id.to_string(),
+        role_run_id: None,
+        run_no: None,
         commands: unplanned_commands.clone(),
         overall_status,
         provider_claim,
@@ -888,6 +894,8 @@ Tester plan:
         let plan = TestPlan {
             id: "test_plan_0001".to_string(),
             attempt_id: "coding_attempt_0001".to_string(),
+            role_run_id: None,
+            run_no: None,
             summary: "unit checks".to_string(),
             context_warnings: Vec::new(),
             assumptions: Vec::new(),

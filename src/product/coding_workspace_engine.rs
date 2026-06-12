@@ -4729,6 +4729,8 @@ mod tests {
         TestingReport {
             id: "testing_report_0001".to_string(),
             attempt_id: "coding_attempt_0001".to_string(),
+            role_run_id: None,
+            run_no: None,
             commands: Vec::new(),
             overall_status: TestingOverallStatus::Blocked,
             provider_claim: None,
@@ -5244,6 +5246,8 @@ mod tests {
         let plan = TestPlan {
             id: "test_plan_0001".to_string(),
             attempt_id: "coding_attempt_0001".to_string(),
+            role_run_id: None,
+            run_no: None,
             summary: "unit checks".to_string(),
             context_warnings: Vec::new(),
             assumptions: Vec::new(),
@@ -5485,6 +5489,8 @@ mod tests {
             .save_testing_report(&TestingReport {
                 id: "testing_report_0001".to_string(),
                 attempt_id: attempt.id.clone(),
+                role_run_id: None,
+                run_no: None,
                 commands: Vec::new(),
                 overall_status: TestingOverallStatus::Blocked,
                 provider_claim: None,
@@ -5573,6 +5579,8 @@ mod tests {
         let plan = TestPlan {
             id: "test_plan_0001".to_string(),
             attempt_id: "coding_attempt_0001".to_string(),
+            role_run_id: None,
+            run_no: None,
             summary: "dangerous checks".to_string(),
             context_warnings: Vec::new(),
             assumptions: Vec::new(),

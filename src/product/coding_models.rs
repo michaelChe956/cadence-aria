@@ -67,6 +67,53 @@ pub enum CodingProviderRole {
     InternalReviewer,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodingRoleRunStatus {
+    Running,
+    Completed,
+    Failed,
+    Blocked,
+    Superseded,
+    Aborted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodingRoleRunTrigger {
+    Initial,
+    RetryTestPlan,
+    RerunMissingSteps,
+    RetryReview,
+    RetryAnalyst,
+    RetryInternalReview,
+    ManualRerun,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodingRoleRun {
+    pub id: String,
+    pub attempt_id: String,
+    pub stage: CodingExecutionStage,
+    pub role: CodingProviderRole,
+    pub run_no: u32,
+    pub status: CodingRoleRunStatus,
+    pub trigger: CodingRoleRunTrigger,
+    pub node_id: Option<String>,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+    #[serde(default)]
+    pub supersedes_run_id: Option<String>,
+    #[serde(default)]
+    pub superseded_by_run_id: Option<String>,
+    #[serde(default)]
+    pub reason_code: Option<String>,
+    #[serde(default)]
+    pub raw_provider_output_refs: Vec<String>,
+    #[serde(default)]
+    pub artifact_refs: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CodingProviderPermissionMode {
@@ -459,6 +506,10 @@ pub struct TestPlanStep {
 pub struct TestPlan {
     pub id: String,
     pub attempt_id: String,
+    #[serde(default)]
+    pub role_run_id: Option<String>,
+    #[serde(default)]
+    pub run_no: Option<u32>,
     pub summary: String,
     #[serde(default)]
     pub context_warnings: Vec<String>,
@@ -507,6 +558,10 @@ pub enum TestingOverallStatus {
 pub struct TestingReport {
     pub id: String,
     pub attempt_id: String,
+    #[serde(default)]
+    pub role_run_id: Option<String>,
+    #[serde(default)]
+    pub run_no: Option<u32>,
     pub commands: Vec<TestCommand>,
     pub overall_status: TestingOverallStatus,
     pub provider_claim: Option<serde_json::Value>,
@@ -814,6 +869,8 @@ mod tests {
         let plan = TestPlan {
             id: "test_plan_0001".to_string(),
             attempt_id: "coding_attempt_0001".to_string(),
+            role_run_id: None,
+            run_no: None,
             summary: "unit and smoke checks".to_string(),
             context_warnings: vec!["missing_design_spec".to_string()],
             assumptions: vec!["target repo is already checked out".to_string()],
@@ -839,6 +896,8 @@ mod tests {
         let report = TestingReport {
             id: "testing_report_0001".to_string(),
             attempt_id: "coding_attempt_0001".to_string(),
+            role_run_id: None,
+            run_no: None,
             commands: Vec::new(),
             overall_status: TestingOverallStatus::PassedWithWarnings,
             provider_claim: Some(json!({"summary": "passed with warnings"})),
