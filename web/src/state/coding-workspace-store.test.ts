@@ -3,6 +3,7 @@ import type {
   AnalystDecisionRecord,
   CodeReviewReport,
   CodingGateRequired,
+  CodingRoleRun,
   CodingTimelineNode,
   CodingWsOutMessage,
   TestingReport,
@@ -135,6 +136,27 @@ function blockedGate(overrides: Partial<CodingGateRequired> = {}): CodingGateReq
   };
 }
 
+function roleRun(overrides: Partial<CodingRoleRun> = {}): CodingRoleRun {
+  return {
+    id: "coding_role_run_0001",
+    attempt_id: "coding_attempt_0001",
+    stage: "testing",
+    role: "tester",
+    run_no: 1,
+    status: "running",
+    trigger: "initial",
+    node_id: "coding_node_0003",
+    started_at: "2026-06-12T00:00:00Z",
+    completed_at: null,
+    supersedes_run_id: null,
+    superseded_by_run_id: null,
+    reason_code: null,
+    raw_provider_output_refs: [],
+    artifact_refs: [],
+    ...overrides,
+  };
+}
+
 function sessionState(
   overrides: Partial<Extract<CodingWsOutMessage, { type: "coding_session_state" }>> = {},
 ): Extract<CodingWsOutMessage, { type: "coding_session_state" }> {
@@ -257,6 +279,18 @@ describe("coding workspace store", () => {
         metadata: { source: "internal_pr_review", impact_scope: ["src/lib.rs"] },
       },
     ]);
+  });
+
+  it("stores role runs from websocket session snapshots", () => {
+    const store = useCodingWorkspaceStore.getState();
+    store.setSessionState(sessionState({ role_runs: [roleRun()] }));
+
+    expect(useCodingWorkspaceStore.getState().roleRuns).toHaveLength(1);
+    expect(useCodingWorkspaceStore.getState().roleRuns[0]).toMatchObject({
+      id: "coding_role_run_0001",
+      role: "tester",
+      run_no: 1,
+    });
   });
 
   it("adds and updates timeline nodes while clearing inactive active node", () => {

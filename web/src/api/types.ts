@@ -165,6 +165,21 @@ export type CodingProviderRole =
   | "internal_reviewer";
 export type CodingProviderSelectRole = "author" | "reviewer" | CodingProviderRole;
 export type CodingProviderPermissionMode = "auto" | "supervised";
+export type CodingRoleRunStatus =
+  | "running"
+  | "completed"
+  | "failed"
+  | "blocked"
+  | "superseded"
+  | "aborted";
+export type CodingRoleRunTrigger =
+  | "initial"
+  | "retry_test_plan"
+  | "rerun_missing_steps"
+  | "retry_review"
+  | "retry_analyst"
+  | "retry_internal_review"
+  | "manual_rerun";
 
 export type CodingRolePermissionModes = {
   coder: CodingProviderPermissionMode;
@@ -195,6 +210,24 @@ export type CodingRoleProviderConfigSnapshot = {
   internal_reviewer: WorkspaceProviderName;
   review_rounds: number;
   permission_modes: CodingRolePermissionModes;
+};
+
+export type CodingRoleRun = {
+  id: string;
+  attempt_id: string;
+  stage: CodingExecutionStage;
+  role: CodingProviderRole;
+  run_no: number;
+  status: CodingRoleRunStatus;
+  trigger: CodingRoleRunTrigger;
+  node_id: string | null;
+  started_at: string;
+  completed_at: string | null;
+  supersedes_run_id?: string | null;
+  superseded_by_run_id?: string | null;
+  reason_code?: string | null;
+  raw_provider_output_refs: string[];
+  artifact_refs: string[];
 };
 
 export type TestCommandStatus = "passed" | "failed" | "timed_out" | "blocked";
@@ -256,6 +289,8 @@ export type TestingUnplannedEvidence = {
 export type TestingReport = {
   id: string;
   attempt_id: string;
+  role_run_id?: string | null;
+  run_no?: number | null;
   commands: TestCommand[];
   overall_status: TestingOverallStatus;
   provider_claim: unknown | null;
@@ -453,6 +488,7 @@ export type CodingAttemptSnapshotResponse = {
   internal_pr_review: InternalPrReview | null;
   pending_gates: CodingGateRequired[];
   latest_analyst_decision: AnalystDecisionRecord | null;
+  role_runs?: CodingRoleRun[];
 };
 
 export type CodingAttemptDiffResponse = {

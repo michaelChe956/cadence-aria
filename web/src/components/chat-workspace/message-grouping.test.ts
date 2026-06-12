@@ -98,6 +98,23 @@ describe("groupEntries", () => {
     });
     expect(items[2].group.role).toBe("code_reviewer");
   });
+
+  it("separates rerun tester messages by role run id", () => {
+    const entries = [
+      makeEntry("run-1-plan", "provider_stream", "tester", "old plan", "coding_node_0003", {
+        role_run_id: "coding_role_run_0001",
+      }),
+      makeEntry("run-2-plan", "provider_stream", "tester", "new plan", "coding_node_0003", {
+        role_run_id: "coding_role_run_0002",
+      }),
+    ];
+
+    const items = groupEntries(entries);
+
+    expect(items).toHaveLength(2);
+    expect(items[0]).toMatchObject({ kind: "group" });
+    expect(items[1]).toMatchObject({ kind: "group" });
+  });
 });
 
 function makeEntry(
@@ -106,6 +123,7 @@ function makeEntry(
   role: ChatEntry["role"],
   content: string,
   nodeId?: string,
+  metadata?: Record<string, unknown>,
 ): ChatEntry {
   return {
     id,
@@ -114,5 +132,6 @@ function makeEntry(
     content,
     timestamp: "2026-05-26T10:00:00Z",
     node_id: nodeId,
+    metadata,
   };
 }

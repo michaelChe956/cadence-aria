@@ -7,6 +7,7 @@ import type {
   CodingGateRequired,
   CodingProviderRole,
   CodingRoleProviderConfigSnapshot,
+  CodingRoleRun,
   CodingTimelineNode,
   CodingTimelineNodeStatus,
   CodingWsOutMessage,
@@ -73,6 +74,7 @@ export interface CodingWorkspaceState {
   internalPrReview: InternalPrReview | null;
   reviewRequest: ReviewRequest | null;
   latestAnalystDecision: AnalystDecisionRecord | null;
+  roleRuns: CodingRoleRun[];
   logs: CodingLogEntry[];
   connectionStatus: CodingConnectionStatus;
   pendingGates: CodingPendingGate[];
@@ -142,6 +144,7 @@ const initialState: CodingWorkspaceState = {
   internalPrReview: null,
   reviewRequest: null,
   latestAnalystDecision: null,
+  roleRuns: [],
   logs: [],
   connectionStatus: "disconnected",
   pendingGates: [],
@@ -185,6 +188,7 @@ export const useCodingWorkspaceStore = create<
         reviewRequest: snapshot.review_request,
         internalPrReview: snapshot.internal_pr_review,
         latestAnalystDecision: snapshot.latest_analyst_decision ?? null,
+        roleRuns: snapshot.role_runs ?? [],
         pendingGates: mergeSnapshotPendingGates(snapshot.pending_gates, prev.pendingGates),
         protocolError: null,
         streamingContent: null,

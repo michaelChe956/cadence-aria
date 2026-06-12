@@ -102,6 +102,29 @@ describe("chat workspace entries", () => {
     );
   });
 
+  it("renders tester plan summaries as readable markdown", () => {
+    render(
+      <ProviderStreamEntry
+        entry={makeEntry({
+          id: "tester-plan",
+          type: "provider_stream",
+          role: "tester",
+          content:
+            "## Tester 测试计划\n\nunit plan\n\n### 步骤\n- unit · Unit · required · low\n  - 证据预期：unit evidence",
+          node_id: "coding_node_0003",
+          metadata: {
+            phase: "test_plan",
+            role_run_id: "coding_role_run_0001",
+          },
+        })}
+      />,
+    );
+
+    expect(screen.getByText("Tester 测试计划")).toBeInTheDocument();
+    expect(screen.getByText(/unit plan/)).toBeInTheDocument();
+    expect(screen.getByText(/证据预期/)).toBeInTheDocument();
+  });
+
   it("hides reviewer trailing JSON contract from provider stream bubbles", () => {
     const entry = makeEntry({
       type: "provider_stream",
