@@ -125,7 +125,7 @@ fn role_permission_modes_are_persisted_with_role_provider_config() {
 }
 
 #[test]
-fn testing_report_requires_evidence_before_analyst_rework() {
+fn testing_report_routes_terminal_statuses_to_analyst_rework() {
     let blocked = TestingReport {
         id: "testing_report_0001".to_string(),
         attempt_id: "coding_attempt_0001".to_string(),
@@ -145,7 +145,13 @@ fn testing_report_requires_evidence_before_analyst_rework() {
         context_warnings: vec!["test_plan_parse_error".to_string()],
         raw_provider_output_ref: Some("provider-raw/testing/plan_tests_0001.txt".to_string()),
     };
-    assert!(!testing_report_should_enter_analyst(&blocked));
+    assert!(testing_report_should_enter_analyst(&blocked));
+
+    let mut failed_without_evidence = blocked.clone();
+    failed_without_evidence.overall_status = TestingOverallStatus::Failed;
+    assert!(testing_report_should_enter_analyst(
+        &failed_without_evidence
+    ));
 
     let mut failed_with_evidence = blocked.clone();
     failed_with_evidence.overall_status = TestingOverallStatus::Failed;
@@ -162,6 +168,10 @@ fn testing_report_requires_evidence_before_analyst_rework() {
         provider_analysis: Some("unit failed".to_string()),
     }];
     assert!(testing_report_should_enter_analyst(&failed_with_evidence));
+
+    let mut passed = blocked.clone();
+    passed.overall_status = TestingOverallStatus::Passed;
+    assert!(testing_report_should_enter_analyst(&passed));
 }
 
 #[tokio::test]
@@ -1489,7 +1499,7 @@ async fn execute_testing_runs_commands_persists_report_and_emits_update() {
 }
 
 #[tokio::test]
-async fn execute_testing_marks_attempt_blocked_when_no_commands_are_available() {
+async fn execute_testing_keeps_attempt_running_when_no_commands_are_available_for_analyst() {
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
     fs::create_dir_all(&worktree).expect("worktree");
@@ -1520,7 +1530,7 @@ async fn execute_testing_marks_attempt_blocked_when_no_commands_are_available() 
     let updated = store
         .get_attempt("project_0001", "issue_0001", &attempt.id)
         .expect("updated attempt");
-    assert_eq!(updated.status, CodingAttemptStatus::Blocked);
+    assert_eq!(updated.status, CodingAttemptStatus::Running);
     assert_eq!(updated.stage, CodingExecutionStage::Testing);
 }
 
@@ -2146,6 +2156,206 @@ async fn execute_rework_persists_legacy_analyst_verdict_as_decision() {
 }
 
 #[tokio::test]
+async fn execute_rework_consumes_next_stage_testing_without_coding_rework() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            ..create_input()
+        })
+        .expect("create attempt");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    store
+        .update_attempt_stage(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingExecutionStage::Testing,
+        )
+        .expect("testing stage");
+    let (tx, _rx) = mpsc::channel(16);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let provider = AnalystStreamingProvider {
+        prompt: Arc::new(Mutex::new(None)),
+        output: r#"{
+            "verdict":"rerun_testing",
+            "next_stage":"testing",
+            "reason":"Tester evidence is incomplete; rerun required browser steps",
+            "evidence_refs":["testing_report_0001.json"]
+        }"#
+        .to_string(),
+    };
+
+    let updated = engine
+        .execute_rework(&attempt, "testing evidence incomplete", &provider)
+        .await
+        .expect("execute rework");
+
+    assert_eq!(updated.status, CodingAttemptStatus::Running);
+    assert_eq!(updated.stage, CodingExecutionStage::Testing);
+    assert_eq!(updated.rework_count, 0);
+    assert!(
+        store
+            .latest_unconsumed_rework_instruction("project_0001", "issue_0001", &attempt.id)
+            .expect("latest rework instruction")
+            .is_none()
+    );
+    let decision = store
+        .latest_analyst_decision("project_0001", "issue_0001", &attempt.id)
+        .expect("latest decision")
+        .expect("persisted decision");
+    assert_eq!(decision.verdict, AnalystDecisionVerdict::RerunTesting);
+    assert_eq!(decision.next_stage, AnalystDecisionNextStage::Testing);
+}
+
+#[tokio::test]
+async fn execute_rework_consumes_next_stage_code_review() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            ..create_input()
+        })
+        .expect("create attempt");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    store
+        .update_attempt_stage(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingExecutionStage::CodeReview,
+        )
+        .expect("code review stage");
+    let (tx, _rx) = mpsc::channel(16);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let provider = AnalystStreamingProvider {
+        prompt: Arc::new(Mutex::new(None)),
+        output: r#"{
+            "verdict":"proceed",
+            "next_stage":"code_review",
+            "reason":"Run CodeReviewer again after context-only clarification"
+        }"#
+        .to_string(),
+    };
+
+    let updated = engine
+        .execute_rework(&attempt, "review clarification", &provider)
+        .await
+        .expect("execute rework");
+
+    assert_eq!(updated.status, CodingAttemptStatus::Running);
+    assert_eq!(updated.stage, CodingExecutionStage::CodeReview);
+    let decision = store
+        .latest_analyst_decision("project_0001", "issue_0001", &attempt.id)
+        .expect("latest decision")
+        .expect("persisted decision");
+    assert_eq!(decision.verdict, AnalystDecisionVerdict::Proceed);
+    assert_eq!(decision.next_stage, AnalystDecisionNextStage::CodeReview);
+}
+
+#[tokio::test]
+async fn execute_rework_consumes_next_stage_human_gate() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            ..create_input()
+        })
+        .expect("create attempt");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    store
+        .update_attempt_stage(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingExecutionStage::Testing,
+        )
+        .expect("testing stage");
+    let (tx, mut rx) = mpsc::channel(16);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let provider = AnalystStreamingProvider {
+        prompt: Arc::new(Mutex::new(None)),
+        output: r#"{
+            "verdict":"human_required",
+            "next_stage":"human_gate",
+            "reason":"External browser credentials are required",
+            "evidence_refs":["testing_report_0001.json"],
+            "human_gate":{
+                "reason_code":"external_browser_required",
+                "available_actions":["provide_context","manual_continue"]
+            }
+        }"#
+        .to_string(),
+    };
+
+    let updated = engine
+        .execute_rework(&attempt, "testing blocked", &provider)
+        .await
+        .expect("execute rework");
+
+    assert_eq!(updated.status, CodingAttemptStatus::Blocked);
+    assert_eq!(updated.stage, CodingExecutionStage::Rework);
+    let gates = store
+        .list_open_blocked_gates("project_0001", "issue_0001", &attempt.id)
+        .expect("open blocked gates");
+    assert_eq!(gates.len(), 1);
+    assert_eq!(gates[0].stage, Some(CodingExecutionStage::Rework));
+    assert_eq!(gates[0].role, Some(CodingProviderRole::Analyst));
+    assert_eq!(
+        gates[0].reason_code.as_deref(),
+        Some("external_browser_required")
+    );
+    assert_eq!(gates[0].evidence_refs, vec!["testing_report_0001.json"]);
+    assert_eq!(
+        gates[0]
+            .available_actions
+            .iter()
+            .map(|action| action.action_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["provide_context", "manual_continue"]
+    );
+    let events = drain_events(&mut rx);
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            CodingWsOutMessage::CodingGateRequired { gate }
+                if gate.stage.as_ref() == Some(&CodingExecutionStage::Rework)
+                    && gate.role == Some(CodingProviderRole::Analyst)
+        )
+    }));
+}
+
+#[tokio::test]
 async fn execute_rework_needs_fix_at_limit_routes_to_code_review_with_warning() {
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
@@ -2210,7 +2420,7 @@ async fn execute_rework_needs_fix_at_limit_routes_to_code_review_with_warning() 
 }
 
 #[tokio::test]
-async fn execute_rework_needs_human_input_waits_for_human() {
+async fn execute_rework_needs_human_input_opens_human_gate() {
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
     fs::create_dir_all(&worktree).expect("worktree");
@@ -2249,8 +2459,15 @@ async fn execute_rework_needs_human_input_waits_for_human() {
         .await
         .expect("execute rework");
 
-    assert_eq!(updated.status, CodingAttemptStatus::WaitingForHuman);
+    assert_eq!(updated.status, CodingAttemptStatus::Blocked);
     assert_eq!(updated.stage, CodingExecutionStage::Rework);
+    let gates = store
+        .list_open_blocked_gates("project_0001", "issue_0001", &attempt.id)
+        .expect("open blocked gates");
+    assert_eq!(gates.len(), 1);
+    assert_eq!(gates[0].stage, Some(CodingExecutionStage::Rework));
+    assert_eq!(gates[0].role, Some(CodingProviderRole::Analyst));
+    assert_eq!(gates[0].reason_code.as_deref(), Some("analyst_human_gate"));
     let events = drain_events(&mut rx);
     assert!(events.iter().any(|event| {
         matches!(
@@ -2410,7 +2627,7 @@ async fn execute_rework_no_issue_after_internal_review_completes_attempt() {
 }
 
 #[tokio::test]
-async fn execute_rework_invalid_json_falls_back_to_human_input() {
+async fn execute_rework_invalid_json_falls_back_to_human_gate() {
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
     fs::create_dir_all(&worktree).expect("worktree");
@@ -2449,8 +2666,15 @@ async fn execute_rework_invalid_json_falls_back_to_human_input() {
         .await
         .expect("execute rework");
 
-    assert_eq!(updated.status, CodingAttemptStatus::WaitingForHuman);
+    assert_eq!(updated.status, CodingAttemptStatus::Blocked);
     assert_eq!(updated.stage, CodingExecutionStage::Rework);
+    let gates = store
+        .list_open_blocked_gates("project_0001", "issue_0001", &attempt.id)
+        .expect("open blocked gates");
+    assert_eq!(gates.len(), 1);
+    assert_eq!(gates[0].stage, Some(CodingExecutionStage::Rework));
+    assert_eq!(gates[0].role, Some(CodingProviderRole::Analyst));
+    assert_eq!(gates[0].reason_code.as_deref(), Some("analyst_human_gate"));
     let events = drain_events(&mut rx);
     assert!(events.iter().any(|event| {
         matches!(

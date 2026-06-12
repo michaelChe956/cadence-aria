@@ -829,7 +829,8 @@ impl CodingWorkspaceEngine {
         if matches!(
             report.overall_status,
             TestingOverallStatus::Failed | TestingOverallStatus::Blocked
-        ) {
+        ) && !testing_report_should_enter_analyst(&report)
+        {
             self.store.update_attempt_status(
                 &attempt.project_id,
                 &attempt.issue_id,
@@ -875,12 +876,6 @@ impl CodingWorkspaceEngine {
                 report: Box::new(report.clone()),
             })
             .await;
-        self.store.update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Blocked,
-        )?;
         self.complete_timeline_node(
             &attempt.project_id,
             &attempt.issue_id,
@@ -890,22 +885,30 @@ impl CodingWorkspaceEngine {
             Some("测试被阻塞".to_string()),
         )
         .await?;
-        let gate = self.store.create_blocked_gate(CreateBlockedGateInput {
-            attempt_id: attempt.id.clone(),
-            stage: CodingExecutionStage::Testing,
-            node_id: Some(node.id.clone()),
-            role: Some(CodingProviderRole::Tester),
-            title: "Testing blocked".to_string(),
-            description: description.to_string(),
-            reason_code: Some(reason_code.to_string()),
-            evidence_refs: vec![format!("{}.json", report.id)],
-            raw_provider_output_ref,
-            available_actions: testing_blocked_gate_actions(),
-        })?;
-        let _ = self
-            .event_tx
-            .send(CodingWsOutMessage::CodingGateRequired { gate })
-            .await;
+        if !testing_report_should_enter_analyst(&report) {
+            self.store.update_attempt_status(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                CodingAttemptStatus::Blocked,
+            )?;
+            let gate = self.store.create_blocked_gate(CreateBlockedGateInput {
+                attempt_id: attempt.id.clone(),
+                stage: CodingExecutionStage::Testing,
+                node_id: Some(node.id.clone()),
+                role: Some(CodingProviderRole::Tester),
+                title: "Testing blocked".to_string(),
+                description: description.to_string(),
+                reason_code: Some(reason_code.to_string()),
+                evidence_refs: vec![format!("{}.json", report.id)],
+                raw_provider_output_ref,
+                available_actions: testing_blocked_gate_actions(),
+            })?;
+            let _ = self
+                .event_tx
+                .send(CodingWsOutMessage::CodingGateRequired { gate })
+                .await;
+        }
         Ok(report)
     }
 
@@ -1713,7 +1716,8 @@ impl CodingWorkspaceEngine {
         if matches!(
             report.overall_status,
             TestingOverallStatus::Failed | TestingOverallStatus::Blocked
-        ) {
+        ) && !testing_report_should_enter_analyst(&report)
+        {
             self.store.update_attempt_status(
                 &attempt.project_id,
                 &attempt.issue_id,
@@ -1721,7 +1725,9 @@ impl CodingWorkspaceEngine {
                 CodingAttemptStatus::Blocked,
             )?;
         }
-        if report.overall_status == TestingOverallStatus::Blocked {
+        if report.overall_status == TestingOverallStatus::Blocked
+            && !testing_report_should_enter_analyst(&report)
+        {
             let gate = self.store.create_blocked_gate(CreateBlockedGateInput {
                 attempt_id: attempt.id.clone(),
                 stage: CodingExecutionStage::Testing,
@@ -3284,8 +3290,12 @@ impl CodingWorkspaceEngine {
         (CodingExecutionAttempt, CodingTimelineNodeStatus, String),
         CodingWorkspaceEngineError,
     > {
-        match decision.verdict {
-            AnalystVerdict::NeedsFix => {
+        let next_stage = decision.next_stage.clone().unwrap_or_else(|| {
+            default_next_stage_for_legacy_verdict(&decision.structured_verdict, source_stage)
+        });
+
+        match next_stage {
+            AnalystDecisionNextStage::Coding => {
                 if attempt.rework_count < attempt.max_auto_rework {
                     let existing = self.store.list_rework_instructions(
                         &attempt.project_id,
@@ -3355,47 +3365,98 @@ impl CodingWorkspaceEngine {
                     ))
                 }
             }
-            AnalystVerdict::NeedsHumanInput => {
+            AnalystDecisionNextStage::Testing => {
+                let updated = self.store.update_attempt_stage(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &attempt.id,
+                    CodingExecutionStage::Testing,
+                )?;
+                Ok((
+                    updated,
+                    CodingTimelineNodeStatus::Completed,
+                    format!("RerunTesting: {}", decision.summary),
+                ))
+            }
+            AnalystDecisionNextStage::CodeReview => {
+                let updated = self.store.update_attempt_stage(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &attempt.id,
+                    CodingExecutionStage::CodeReview,
+                )?;
+                Ok((
+                    updated,
+                    CodingTimelineNodeStatus::Completed,
+                    format!("NextStage CodeReview: {}", decision.summary),
+                ))
+            }
+            AnalystDecisionNextStage::ReviewRequest => {
+                let updated = self.store.update_attempt_stage(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &attempt.id,
+                    CodingExecutionStage::ReviewRequest,
+                )?;
+                Ok((
+                    updated,
+                    CodingTimelineNodeStatus::Completed,
+                    format!("NextStage ReviewRequest: {}", decision.summary),
+                ))
+            }
+            AnalystDecisionNextStage::InternalPrReview => {
+                let updated = self.store.update_attempt_stage(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &attempt.id,
+                    CodingExecutionStage::InternalPrReview,
+                )?;
+                Ok((
+                    updated,
+                    CodingTimelineNodeStatus::Completed,
+                    format!("NextStage InternalPrReview: {}", decision.summary),
+                ))
+            }
+            AnalystDecisionNextStage::FinalConfirm => {
+                let updated = self.complete_attempt_after_final_rework(attempt).await?;
+                Ok((
+                    updated,
+                    CodingTimelineNodeStatus::Completed,
+                    format!("NextStage FinalConfirm: {}", decision.summary),
+                ))
+            }
+            AnalystDecisionNextStage::HumanGate => {
                 let updated = self.store.update_attempt_status(
                     &attempt.project_id,
                     &attempt.issue_id,
                     &attempt.id,
-                    CodingAttemptStatus::WaitingForHuman,
+                    CodingAttemptStatus::Blocked,
                 )?;
+                let reason_code = decision
+                    .human_gate
+                    .as_ref()
+                    .and_then(|gate| gate.reason_code.clone())
+                    .unwrap_or_else(|| "analyst_human_gate".to_string());
+                let gate = self.store.create_blocked_gate(CreateBlockedGateInput {
+                    attempt_id: attempt.id.clone(),
+                    stage: CodingExecutionStage::Rework,
+                    node_id: Some(node_id.to_string()),
+                    role: Some(CodingProviderRole::Analyst),
+                    title: "Analyst human gate".to_string(),
+                    description: decision.reason.clone(),
+                    reason_code: Some(reason_code),
+                    evidence_refs: decision.evidence_refs.clone(),
+                    raw_provider_output_ref: decision.raw_provider_output_refs.first().cloned(),
+                    available_actions: analyst_human_gate_actions(decision.human_gate.as_ref()),
+                })?;
+                let _ = self
+                    .event_tx
+                    .send(CodingWsOutMessage::CodingGateRequired { gate })
+                    .await;
                 Ok((
                     updated,
                     CodingTimelineNodeStatus::Blocked,
-                    format!("NeedsHumanInput: {}", decision.summary),
-                ))
-            }
-            AnalystVerdict::NoIssue => {
-                let updated = match source_stage {
-                    CodingExecutionStage::Testing => self.store.update_attempt_stage(
-                        &attempt.project_id,
-                        &attempt.issue_id,
-                        &attempt.id,
-                        CodingExecutionStage::CodeReview,
-                    )?,
-                    CodingExecutionStage::CodeReview => self.store.update_attempt_stage(
-                        &attempt.project_id,
-                        &attempt.issue_id,
-                        &attempt.id,
-                        CodingExecutionStage::ReviewRequest,
-                    )?,
-                    CodingExecutionStage::InternalPrReview => {
-                        self.complete_attempt_after_final_rework(attempt).await?
-                    }
-                    _ => self.store.update_attempt_stage(
-                        &attempt.project_id,
-                        &attempt.issue_id,
-                        &attempt.id,
-                        CodingExecutionStage::CodeReview,
-                    )?,
-                };
-                Ok((
-                    updated,
-                    CodingTimelineNodeStatus::Completed,
-                    format!("NoIssue: {}", decision.summary),
+                    format!("HumanGate: {}", decision.summary),
                 ))
             }
         }
@@ -3911,9 +3972,11 @@ pub fn testing_report_has_execution_evidence(report: &TestingReport) -> bool {
 
 pub fn testing_report_should_enter_analyst(report: &TestingReport) -> bool {
     match report.overall_status {
-        TestingOverallStatus::Failed => testing_report_has_execution_evidence(report),
-        TestingOverallStatus::Blocked | TestingOverallStatus::SkippedByUserDecision => false,
-        TestingOverallStatus::Passed | TestingOverallStatus::PassedWithWarnings => false,
+        TestingOverallStatus::Failed
+        | TestingOverallStatus::Blocked
+        | TestingOverallStatus::SkippedByUserDecision
+        | TestingOverallStatus::Passed
+        | TestingOverallStatus::PassedWithWarnings => true,
     }
 }
 
@@ -3981,6 +4044,87 @@ fn review_blocked_gate_actions() -> Vec<CodingGateAction> {
             action_type: CodingGateActionType::Abort,
         },
     ]
+}
+
+fn analyst_human_gate_actions(
+    recommendation: Option<&AnalystHumanGateRecommendation>,
+) -> Vec<CodingGateAction> {
+    let mut actions = Vec::new();
+    if let Some(recommendation) = recommendation {
+        for action_id in &recommendation.available_actions {
+            if let Some(action) = coding_gate_action_for_id(action_id)
+                && !actions
+                    .iter()
+                    .any(|existing: &CodingGateAction| existing.action_id == action.action_id)
+            {
+                actions.push(action);
+            }
+        }
+    }
+    if actions.is_empty() {
+        actions.push(CodingGateAction {
+            action_id: "provide_context".to_string(),
+            label: "补充上下文".to_string(),
+            action_type: CodingGateActionType::ProvideContext,
+        });
+        actions.push(CodingGateAction {
+            action_id: "manual_continue".to_string(),
+            label: "人工继续".to_string(),
+            action_type: CodingGateActionType::ManualContinue,
+        });
+        actions.push(CodingGateAction {
+            action_id: "abort".to_string(),
+            label: "终止".to_string(),
+            action_type: CodingGateActionType::Abort,
+        });
+    }
+    actions
+}
+
+fn coding_gate_action_for_id(action_id: &str) -> Option<CodingGateAction> {
+    match action_id {
+        "provide_context" => Some(CodingGateAction {
+            action_id: "provide_context".to_string(),
+            label: "补充上下文".to_string(),
+            action_type: CodingGateActionType::ProvideContext,
+        }),
+        "manual_continue" => Some(CodingGateAction {
+            action_id: "manual_continue".to_string(),
+            label: "人工继续".to_string(),
+            action_type: CodingGateActionType::ManualContinue,
+        }),
+        "accept_risk" => Some(CodingGateAction {
+            action_id: "accept_risk".to_string(),
+            label: "接受风险".to_string(),
+            action_type: CodingGateActionType::AcceptRisk,
+        }),
+        "retry_test_plan" => Some(CodingGateAction {
+            action_id: "retry_test_plan".to_string(),
+            label: "重试测试计划".to_string(),
+            action_type: CodingGateActionType::RetryTestPlan,
+        }),
+        "rerun_missing_steps" => Some(CodingGateAction {
+            action_id: "rerun_missing_steps".to_string(),
+            label: "补跑缺失步骤".to_string(),
+            action_type: CodingGateActionType::RerunMissingSteps,
+        }),
+        "retry_review" => Some(CodingGateAction {
+            action_id: "retry_review".to_string(),
+            label: "重试审查".to_string(),
+            action_type: CodingGateActionType::RetryReview,
+        }),
+        "send_raw_output_to_analyst" => Some(CodingGateAction {
+            action_id: "send_raw_output_to_analyst".to_string(),
+            label: "转交分析官".to_string(),
+            action_type: CodingGateActionType::SendRawOutputToAnalyst,
+        }),
+        "abort" => Some(CodingGateAction {
+            action_id: "abort".to_string(),
+            label: "终止".to_string(),
+            action_type: CodingGateActionType::Abort,
+        }),
+        _ => None,
+    }
 }
 
 fn provider_start_is_not_implemented(error: &ProviderAdapterError) -> bool {
@@ -4922,7 +5066,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn testing_without_provider_driven_capability_blocks_instead_of_legacy_commands() {
+    async fn testing_without_provider_driven_capability_routes_blocked_report_to_analyst() {
         let (_root, store, attempt) = running_attempt_with_worktree();
         let specs = vec![TestCommandSpec {
             id: "legacy_true".to_string(),
@@ -4956,13 +5100,13 @@ mod tests {
         let updated = store
             .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
             .expect("attempt");
-        assert_eq!(updated.status, CodingAttemptStatus::Blocked);
+        assert_eq!(updated.status, CodingAttemptStatus::Running);
         assert_eq!(
             store
                 .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
                 .expect("open gates")
                 .len(),
-            1
+            0
         );
     }
 

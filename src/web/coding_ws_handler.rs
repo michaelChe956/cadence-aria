@@ -758,6 +758,7 @@ async fn execute_start_coding_flow(
 
                 match current.stage {
                     CodingExecutionStage::Coding => continue 'pipeline,
+                    CodingExecutionStage::Testing => continue 'pipeline,
                     CodingExecutionStage::CodeReview => {}
                     _ => return emit_current_session_state(event_tx, coding_store, &current).await,
                 }
@@ -863,7 +864,9 @@ async fn execute_start_coding_flow(
                 return Ok(());
             }
             match current.stage {
-                CodingExecutionStage::Coding => continue 'pipeline,
+                CodingExecutionStage::Coding
+                | CodingExecutionStage::Testing
+                | CodingExecutionStage::CodeReview => continue 'pipeline,
                 CodingExecutionStage::ReviewRequest => {}
                 _ => return emit_current_session_state(event_tx, coding_store, &current).await,
             }
