@@ -570,12 +570,7 @@ fn should_resume_runner_after_gate_response(
 ) -> bool {
     matches!(
         action_id,
-        "retry_test_plan"
-            | "rerun_missing_steps"
-            | "retry_review"
-            | "send_raw_output_to_analyst"
-            | "manual_continue"
-            | "accept_risk"
+        "retry_test_plan" | "rerun_missing_steps" | "retry_review" | "send_raw_output_to_analyst"
     ) && previous_attempt.status == CodingAttemptStatus::Blocked
 }
 
@@ -1797,7 +1792,11 @@ mod tests {
     };
     use crate::product::test_executor::planned_test_commands_from_markdown;
 
-    use super::{CodingWsInMessage, is_coding_ws_message_allowed, select_work_item_markdown};
+    use super::{
+        CodingExecutionAttempt, CodingWsInMessage, ProviderConfigSnapshot,
+        is_coding_ws_message_allowed, select_work_item_markdown,
+        should_resume_runner_after_gate_response,
+    };
 
     #[test]
     fn falls_back_to_assistant_artifact_when_persisted_markdown_lacks_commands() {
@@ -1854,6 +1853,55 @@ mod tests {
             &CodingAttemptStatus::Blocked,
             &CodingExecutionStage::Testing,
             &CodingWsInMessage::AbortAttempt,
+        ));
+    }
+
+    #[test]
+    fn manual_continue_gate_response_does_not_auto_resume_runner() {
+        let mut attempt = CodingExecutionAttempt {
+            id: "coding_attempt_0001".to_string(),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            work_item_id: "work_item_0001".to_string(),
+            attempt_no: 1,
+            status: CodingAttemptStatus::Blocked,
+            stage: CodingExecutionStage::Rework,
+            base_branch: "HEAD".to_string(),
+            branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Fake,
+                reviewer: Some(ProviderName::Fake),
+                review_rounds: 1,
+            },
+            provider_conversations: Vec::new(),
+            rework_count: 2,
+            max_auto_rework: 2,
+            head_commit: None,
+            pushed_remote: None,
+            review_request_id: None,
+            created_at: "2026-06-12T00:00:00Z".to_string(),
+            updated_at: "2026-06-12T00:00:00Z".to_string(),
+            completed_at: None,
+        };
+
+        assert!(!should_resume_runner_after_gate_response(
+            "manual_continue",
+            &attempt
+        ));
+        assert!(!should_resume_runner_after_gate_response(
+            "accept_risk",
+            &attempt
+        ));
+        assert!(should_resume_runner_after_gate_response(
+            "retry_test_plan",
+            &attempt
+        ));
+
+        attempt.status = CodingAttemptStatus::Running;
+        assert!(!should_resume_runner_after_gate_response(
+            "retry_test_plan",
+            &attempt
         ));
     }
 }

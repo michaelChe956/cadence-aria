@@ -2508,7 +2508,7 @@ impl CodingWorkspaceEngine {
                         skipped_required_steps: self.latest_missing_required_steps(&current)?,
                         operator_context,
                     })?;
-                let mut running = if current.status == CodingAttemptStatus::Blocked {
+                if current.status == CodingAttemptStatus::Blocked {
                     self.store.update_attempt_status(
                         project_id,
                         issue_id,
@@ -2517,16 +2517,7 @@ impl CodingWorkspaceEngine {
                     )?
                 } else {
                     current
-                };
-                if matches!(gate.stage, Some(CodingExecutionStage::Testing)) {
-                    running = self.store.update_attempt_stage(
-                        &running.project_id,
-                        &running.issue_id,
-                        &running.id,
-                        CodingExecutionStage::CodeReview,
-                    )?;
                 }
-                running
             }
             _ => {
                 return Err(CodingWorkspaceEngineError::ProviderStream(
@@ -3304,15 +3295,31 @@ impl CodingWorkspaceEngine {
                 } else {
                     self.emit_rewrite_limit_warning_entry(attempt, node_id, rework_round, decision)
                         .await;
-                    let updated = self.store.update_attempt_stage(
+                    let updated = self.store.update_attempt_status(
                         &attempt.project_id,
                         &attempt.issue_id,
                         &attempt.id,
-                        CodingExecutionStage::CodeReview,
+                        CodingAttemptStatus::Blocked,
                     )?;
+                    let gate = self.store.create_blocked_gate(CreateBlockedGateInput {
+                        attempt_id: attempt.id.clone(),
+                        stage: CodingExecutionStage::Rework,
+                        node_id: Some(node_id.to_string()),
+                        role: Some(CodingProviderRole::Analyst),
+                        title: "Rework limit reached".to_string(),
+                        description: format!("{}；已达到自动重写上限", decision.summary),
+                        reason_code: Some("max_auto_rework_exceeded".to_string()),
+                        evidence_refs: decision.evidence_refs.clone(),
+                        raw_provider_output_ref: decision.raw_provider_output_refs.first().cloned(),
+                        available_actions: analyst_human_gate_actions(None),
+                    })?;
+                    let _ = self
+                        .event_tx
+                        .send(CodingWsOutMessage::CodingGateRequired { gate })
+                        .await;
                     Ok((
                         updated,
-                        CodingTimelineNodeStatus::Completed,
+                        CodingTimelineNodeStatus::Blocked,
                         format!("NeedsFix: {}；已达到自动重写上限", decision.summary),
                     ))
                 }
@@ -5395,7 +5402,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(8);
         let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
 
-        engine
+        let _updated = engine
             .handle_blocked_gate_response(
                 &attempt.project_id,
                 &attempt.issue_id,
@@ -5526,7 +5533,7 @@ mod tests {
                 .is_err()
         );
 
-        engine
+        let updated = engine
             .handle_blocked_gate_response(
                 &attempt.project_id,
                 &attempt.issue_id,
@@ -5537,6 +5544,8 @@ mod tests {
             )
             .await
             .expect("manual continue");
+        assert_eq!(updated.status, CodingAttemptStatus::Running);
+        assert_eq!(updated.stage, CodingExecutionStage::Testing);
 
         let audits = store
             .list_quality_bypass_audits(&attempt.project_id, &attempt.issue_id, &attempt.id)

@@ -2413,7 +2413,7 @@ async fn execute_rework_consumes_next_stage_human_gate() {
 }
 
 #[tokio::test]
-async fn execute_rework_needs_fix_at_limit_routes_to_code_review_with_warning() {
+async fn execute_rework_needs_fix_at_limit_opens_human_gate_with_warning() {
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
     fs::create_dir_all(&worktree).expect("worktree");
@@ -2459,9 +2459,27 @@ async fn execute_rework_needs_fix_at_limit_routes_to_code_review_with_warning() 
         .await
         .expect("execute rework");
 
-    assert_eq!(updated.status, CodingAttemptStatus::Running);
-    assert_eq!(updated.stage, CodingExecutionStage::CodeReview);
+    assert_eq!(updated.status, CodingAttemptStatus::Blocked);
+    assert_eq!(updated.stage, CodingExecutionStage::Rework);
     assert_eq!(updated.rework_count, 2);
+    let gates = store
+        .list_open_blocked_gates("project_0001", "issue_0001", &attempt.id)
+        .expect("open blocked gates");
+    assert_eq!(gates.len(), 1);
+    assert_eq!(gates[0].stage, Some(CodingExecutionStage::Rework));
+    assert_eq!(gates[0].role, Some(CodingProviderRole::Analyst));
+    assert_eq!(
+        gates[0].reason_code.as_deref(),
+        Some("max_auto_rework_exceeded")
+    );
+    assert_eq!(
+        gates[0]
+            .available_actions
+            .iter()
+            .map(|action| action.action_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["provide_context", "manual_continue", "abort"]
+    );
     let events = drain_events(&mut rx);
     assert!(events.iter().any(|event| {
         matches!(
@@ -2472,6 +2490,15 @@ async fn execute_rework_needs_fix_at_limit_routes_to_code_review_with_warning() 
                     CodingEntryType::SystemEvent { event_type, .. }
                     if event_type == "exceeded_rewrite_limit"
                 )
+        )
+    }));
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            CodingWsOutMessage::CodingGateRequired { gate }
+                if gate.stage.as_ref() == Some(&CodingExecutionStage::Rework)
+                    && gate.role == Some(CodingProviderRole::Analyst)
+                    && gate.reason_code.as_deref() == Some("max_auto_rework_exceeded")
         )
     }));
 }
