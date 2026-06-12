@@ -106,6 +106,13 @@ struct CodingProviderStreamRun<'a> {
     timeout_reason_code: Option<&'static str>,
 }
 
+struct BlockedTestingGateContext<'a> {
+    reason_code: String,
+    description: String,
+    raw_provider_output_ref: Option<String>,
+    role_run: Option<&'a CodingRoleRun>,
+}
+
 fn run_timeout_sleep(timeout: Option<Duration>) -> Pin<Box<dyn Future<Output = ()> + Send>> {
     match timeout {
         Some(duration) => Box::pin(tokio::time::sleep(duration)),
@@ -893,11 +900,14 @@ impl CodingWorkspaceEngine {
         attempt: &CodingExecutionAttempt,
         node: &CodingTimelineNode,
         mut report: TestingReport,
-        reason_code: &str,
-        description: &str,
-        raw_provider_output_ref: Option<String>,
-        role_run: Option<&CodingRoleRun>,
+        gate_context: BlockedTestingGateContext<'_>,
     ) -> Result<TestingReport, CodingWorkspaceEngineError> {
+        let BlockedTestingGateContext {
+            reason_code,
+            description,
+            raw_provider_output_ref,
+            role_run,
+        } = gate_context;
         if let Some(role_run) = role_run {
             bind_testing_report_role_run(&mut report, role_run);
         }
@@ -917,7 +927,7 @@ impl CodingWorkspaceEngine {
             Some("测试被阻塞".to_string()),
         )
         .await?;
-        if testing_blocked_report_needs_gate(&report, reason_code) {
+        if testing_blocked_report_needs_gate(&report, &reason_code) {
             self.store.update_attempt_status(
                 &attempt.project_id,
                 &attempt.issue_id,
@@ -930,8 +940,8 @@ impl CodingWorkspaceEngine {
                 node_id: Some(node.id.clone()),
                 role: Some(CodingProviderRole::Tester),
                 title: "Testing blocked".to_string(),
-                description: description.to_string(),
-                reason_code: Some(reason_code.to_string()),
+                description,
+                reason_code: Some(reason_code.clone()),
                 evidence_refs: vec![format!("{}.json", report.id)],
                 raw_provider_output_ref,
                 available_actions: testing_blocked_gate_actions(),
@@ -958,33 +968,24 @@ impl CodingWorkspaceEngine {
         &self,
         attempt: &CodingExecutionAttempt,
         node: &CodingTimelineNode,
-        reason_code: &str,
-        description: &str,
-        raw_provider_output_ref: Option<String>,
-        role_run: Option<&CodingRoleRun>,
+        gate_context: BlockedTestingGateContext<'_>,
     ) -> Result<TestingReport, CodingWorkspaceEngineError> {
+        let raw_provider_output_ref = gate_context.raw_provider_output_ref.clone();
+        let reason_code = gate_context.reason_code.clone();
+        let description = gate_context.description.clone();
         let report_id = next_sequential_id(
             "testing_report",
             self.store
                 .list_testing_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)?
                 .len(),
         );
-        let mut report =
-            build_testing_report(&attempt.id, Vec::new(), "", Some(description.to_string()));
+        let mut report = build_testing_report(&attempt.id, Vec::new(), "", Some(description));
         report.id = report_id;
         report.overall_status = TestingOverallStatus::Blocked;
         report.raw_provider_output_ref = raw_provider_output_ref.clone();
         report.context_warnings.push(reason_code.to_string());
-        self.save_blocked_testing_report_and_gate(
-            attempt,
-            node,
-            report,
-            reason_code,
-            description,
-            raw_provider_output_ref,
-            role_run,
-        )
-        .await
+        self.save_blocked_testing_report_and_gate(attempt, node, report, gate_context)
+            .await
     }
 
     async fn block_invalid_test_plan(
@@ -992,11 +993,11 @@ impl CodingWorkspaceEngine {
         attempt: &CodingExecutionAttempt,
         node: &CodingTimelineNode,
         provider_output: &str,
-        raw_provider_output_ref: String,
-        reason_code: &str,
         error: String,
-        role_run: Option<&CodingRoleRun>,
+        gate_context: BlockedTestingGateContext<'_>,
     ) -> Result<TestingReport, CodingWorkspaceEngineError> {
+        let raw_provider_output_ref = gate_context.raw_provider_output_ref.clone();
+        let reason_code = gate_context.reason_code.clone();
         let report_id = next_sequential_id(
             "testing_report",
             self.store
@@ -1010,20 +1011,12 @@ impl CodingWorkspaceEngine {
             Some(format!("TestPlan parse failed: {error}")),
         );
         report.id = report_id;
-        report.raw_provider_output_ref = Some(raw_provider_output_ref.clone());
+        report.raw_provider_output_ref = raw_provider_output_ref;
         report
             .context_warnings
             .push(format!("{reason_code}:{error}"));
-        self.save_blocked_testing_report_and_gate(
-            attempt,
-            node,
-            report,
-            reason_code,
-            "TestPlan parse failed",
-            Some(raw_provider_output_ref),
-            role_run,
-        )
-        .await
+        self.save_blocked_testing_report_and_gate(attempt, node, report, gate_context)
+            .await
     }
 
     pub async fn execute_testing_with_provider(
@@ -1101,10 +1094,13 @@ impl CodingWorkspaceEngine {
                 .block_provider_driven_testing(
                     &attempt,
                     &node,
-                    "provider_driven_testing_not_supported",
-                    "Tester provider does not support provider-driven testing",
-                    None,
-                    Some(&role_run),
+                    BlockedTestingGateContext {
+                        reason_code: "provider_driven_testing_not_supported".to_string(),
+                        description: "Tester provider does not support provider-driven testing"
+                            .to_string(),
+                        raw_provider_output_ref: None,
+                        role_run: Some(&role_run),
+                    },
                 )
                 .await;
         }
@@ -1194,10 +1190,14 @@ impl CodingWorkspaceEngine {
                     .block_provider_driven_testing(
                         &attempt,
                         &node,
-                        reason_code,
-                        &format!("Tester provider failed during plan_tests: {error}"),
-                        None,
-                        Some(&role_run),
+                        BlockedTestingGateContext {
+                            reason_code: reason_code.to_string(),
+                            description: format!(
+                                "Tester provider failed during plan_tests: {error}"
+                            ),
+                            raw_provider_output_ref: None,
+                            role_run: Some(&role_run),
+                        },
                     )
                     .await;
             }
@@ -1280,12 +1280,14 @@ impl CodingWorkspaceEngine {
                             .block_provider_driven_testing(
                                 &attempt,
                                 &node,
-                                reason_code,
-                                &format!(
-                                    "Tester provider failed during plan_tests_repair: {error}"
-                                ),
-                                None,
-                                Some(&role_run),
+                                BlockedTestingGateContext {
+                                    reason_code: reason_code.to_string(),
+                                    description: format!(
+                                        "Tester provider failed during plan_tests_repair: {error}"
+                                    ),
+                                    raw_provider_output_ref: None,
+                                    role_run: Some(&role_run),
+                                },
                             )
                             .await;
                     }
@@ -1313,10 +1315,13 @@ impl CodingWorkspaceEngine {
                                 &attempt,
                                 &node,
                                 &repair_output,
-                                repair_raw_ref,
-                                "test_plan_repair_failed",
                                 repair_error.to_string(),
-                                Some(&role_run),
+                                BlockedTestingGateContext {
+                                    reason_code: "test_plan_repair_failed".to_string(),
+                                    description: "TestPlan parse failed".to_string(),
+                                    raw_provider_output_ref: Some(repair_raw_ref),
+                                    role_run: Some(&role_run),
+                                },
                             )
                             .await;
                     }
@@ -1398,10 +1403,13 @@ impl CodingWorkspaceEngine {
                         &attempt,
                         &node,
                         report,
-                        "provider_start_failed",
-                        "Tester provider failed during execute_test_plan",
-                        None,
-                        Some(&role_run),
+                        BlockedTestingGateContext {
+                            reason_code: "provider_start_failed".to_string(),
+                            description: "Tester provider failed during execute_test_plan"
+                                .to_string(),
+                            raw_provider_output_ref: None,
+                            role_run: Some(&role_run),
+                        },
                     )
                     .await;
             }
