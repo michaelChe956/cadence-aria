@@ -1071,13 +1071,30 @@ impl CodingWorkspaceEngine {
             .event_tx
             .send(CodingWsOutMessage::CodingTimelineNodeCreated { node: node.clone() })
             .await;
-        let role_run = self.store.create_role_run(
-            &attempt,
+        let role_run = match self.store.latest_role_run(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
             CodingExecutionStage::Testing,
             CodingProviderRole::Tester,
-            CodingRoleRunTrigger::Initial,
-            Some(node.id.clone()),
-        )?;
+        )? {
+            Some(run) if run.status == CodingRoleRunStatus::Running && run.node_id.is_none() => {
+                self.store.attach_role_run_node(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &attempt.id,
+                    &run.id,
+                    node.id.clone(),
+                )?
+            }
+            _ => self.store.create_role_run(
+                &attempt,
+                CodingExecutionStage::Testing,
+                CodingProviderRole::Tester,
+                CodingRoleRunTrigger::Initial,
+                Some(node.id.clone()),
+            )?,
+        };
 
         if !provider.supports_provider_driven_testing() {
             return self
@@ -2588,7 +2605,24 @@ impl CodingWorkspaceEngine {
                 self.handle_abort(project_id, issue_id, attempt_id).await?
             }
             CodingGateActionType::RetryTestPlan | CodingGateActionType::RerunMissingSteps => {
-                self.resume_blocked_attempt_at_stage(&current, CodingExecutionStage::Testing)?
+                let trigger = match action.action_type {
+                    CodingGateActionType::RetryTestPlan => CodingRoleRunTrigger::RetryTestPlan,
+                    CodingGateActionType::RerunMissingSteps => {
+                        CodingRoleRunTrigger::RerunMissingSteps
+                    }
+                    _ => CodingRoleRunTrigger::ManualRerun,
+                };
+                let resumed =
+                    self.resume_blocked_attempt_at_stage(&current, CodingExecutionStage::Testing)?;
+                self.store.supersede_latest_role_run_and_create(
+                    &resumed,
+                    CodingExecutionStage::Testing,
+                    CodingProviderRole::Tester,
+                    trigger,
+                    None,
+                    gate.reason_code.clone(),
+                )?;
+                resumed
             }
             CodingGateActionType::RetryReview => {
                 self.resume_blocked_attempt_at_stage(&current, CodingExecutionStage::CodeReview)?

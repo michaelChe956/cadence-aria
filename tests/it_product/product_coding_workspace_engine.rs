@@ -13,15 +13,17 @@ use cadence_aria::cross_cutting::streaming_provider::{
     RiskLevel, StreamChunk, StreamingProviderAdapter, StreamingProviderInput,
 };
 use cadence_aria::product::app_paths::ProductAppPaths;
-use cadence_aria::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
+use cadence_aria::product::coding_attempt_store::{
+    CodingAttemptStore, CreateBlockedGateInput, CreateCodingAttemptInput,
+};
 use cadence_aria::product::coding_models::{
     AnalystDecisionNextStage, AnalystDecisionVerdict, AnalystVerdict, CodingAgentRole,
-    CodingAttemptStatus, CodingEntryType, CodingExecutionStage, CodingProviderPermissionMode,
-    CodingProviderRole, CodingReworkInstruction, CodingRolePermissionModes,
-    CodingRoleProviderConfigSnapshot, CodingRoleRunStatus, CodingTimelineNode,
-    CodingTimelineNodeStatus, FindingSeverity, PushStatus, RemoteKind, ReviewRequest,
-    ReviewRequestKind, ReviewVerdict, TestCommandStatus, TestingOverallStatus, TestingReport,
-    TestingStepResult,
+    CodingAttemptStatus, CodingEntryType, CodingExecutionStage, CodingGateAction,
+    CodingGateActionType, CodingProviderPermissionMode, CodingProviderRole,
+    CodingReworkInstruction, CodingRolePermissionModes, CodingRoleProviderConfigSnapshot,
+    CodingRoleRunStatus, CodingRoleRunTrigger, CodingTimelineNode, CodingTimelineNodeStatus,
+    FindingSeverity, PushStatus, RemoteKind, ReviewRequest, ReviewRequestKind, ReviewVerdict,
+    TestCommandStatus, TestingOverallStatus, TestingReport, TestingStepResult,
 };
 use cadence_aria::product::coding_workspace_engine::{
     CodingExecutionContext, CodingWorkspaceEngine, testing_report_should_enter_analyst,
@@ -767,6 +769,145 @@ async fn tester_plan_timeout_blocks_with_retry_test_plan_gate() {
             .iter()
             .any(|action| action.action_id == "retry_test_plan")
     );
+}
+
+#[tokio::test]
+async fn retry_test_plan_supersedes_latest_testing_role_run_and_resumes_testing() {
+    let root = tempdir().expect("root");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let worktree = root.path().join("worktree");
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            ..create_input()
+        })
+        .expect("create attempt");
+    fs::create_dir_all(attempt.worktree_path.as_ref().expect("worktree")).expect("worktree dir");
+    let attempt = store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    let attempt = store
+        .update_attempt_stage(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingExecutionStage::Testing,
+        )
+        .expect("testing");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Blocked,
+        )
+        .expect("blocked");
+    let first_run = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::Testing,
+            CodingProviderRole::Tester,
+            CodingRoleRunTrigger::Initial,
+            Some("coding_node_0003".to_string()),
+        )
+        .expect("first run");
+    store
+        .update_role_run_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            &first_run.id,
+            CodingRoleRunStatus::Blocked,
+            Some("plan_tests_timeout".to_string()),
+        )
+        .expect("blocked run");
+    let gate = store
+        .create_blocked_gate(CreateBlockedGateInput {
+            attempt_id: attempt.id.clone(),
+            stage: CodingExecutionStage::Testing,
+            node_id: Some("coding_node_0003".to_string()),
+            role: Some(CodingProviderRole::Tester),
+            title: "Testing blocked".to_string(),
+            description: "Tester plan timeout".to_string(),
+            reason_code: Some("plan_tests_timeout".to_string()),
+            evidence_refs: vec![],
+            raw_provider_output_ref: None,
+            available_actions: vec![
+                CodingGateAction {
+                    action_id: "retry_test_plan".to_string(),
+                    label: "重新执行 Tester".to_string(),
+                    action_type: CodingGateActionType::RetryTestPlan,
+                },
+                CodingGateAction {
+                    action_id: "send_raw_output_to_analyst".to_string(),
+                    label: "发送给 Analyst 决策".to_string(),
+                    action_type: CodingGateActionType::SendRawOutputToAnalyst,
+                },
+                CodingGateAction {
+                    action_id: "abort".to_string(),
+                    label: "终止".to_string(),
+                    action_type: CodingGateActionType::Abort,
+                },
+            ],
+        })
+        .expect("gate");
+    let (tx, mut rx) = mpsc::channel(64);
+    tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+
+    let updated = engine
+        .handle_blocked_gate_response(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            &gate.gate_id,
+            "retry_test_plan",
+            None,
+        )
+        .await
+        .expect("gate response");
+
+    assert_eq!(updated.status, CodingAttemptStatus::Running);
+    assert_eq!(updated.stage, CodingExecutionStage::Testing);
+    let runs = store
+        .list_role_runs("project_0001", "issue_0001", &attempt.id)
+        .expect("runs");
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[0].status, CodingRoleRunStatus::Superseded);
+    assert_eq!(runs[1].trigger, CodingRoleRunTrigger::RetryTestPlan);
+    assert_eq!(runs[1].run_no, 2);
+    assert_eq!(runs[1].node_id, None);
+
+    let provider = SessionInputCapturingProvider::with_outputs(
+        [
+            r#"{"summary":"retry plan","steps":[{"id":"unit","title":"Unit","intent":"run unit checks","required":true,"tool":"provider_managed","risk_level":"low","command_or_tool_input":{},"evidence_expectation":"unit evidence"}]}"#,
+            r#"{"step_results":[{"step_id":"unit","status":"passed","evidence_refs":["unit.log"],"provider_analysis":"ok"}]}"#,
+        ],
+        [None, None],
+    );
+    let report = engine
+        .execute_testing_with_provider(
+            &updated,
+            &provider,
+            &CodingExecutionContext::default(),
+            &[],
+            TesterAgentOptions::default(),
+        )
+        .await
+        .expect("rerun testing");
+
+    let runs = store
+        .list_role_runs("project_0001", "issue_0001", &attempt.id)
+        .expect("runs after rerun");
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[1].status, CodingRoleRunStatus::Completed);
+    assert_eq!(report.role_run_id.as_deref(), Some(runs[1].id.as_str()));
+    assert!(runs[1].node_id.is_some());
 }
 
 #[tokio::test]
