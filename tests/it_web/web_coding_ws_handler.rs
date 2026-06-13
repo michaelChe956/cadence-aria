@@ -342,6 +342,16 @@ async fn coding_session_snapshot_includes_role_runs() {
             }),
         )
         .expect("execution event");
+    store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::Aborted,
+            serde_json::json!({
+                "reason": "abort_attempt"
+            }),
+        )
+        .expect("aborted event");
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
     let server = tokio::spawn(async move {
@@ -358,14 +368,19 @@ async fn coding_session_snapshot_includes_role_runs() {
             assert_eq!(role_runs[0].run_no, 1);
             assert_eq!(role_runs[0].node_id.as_deref(), Some("coding_node_0003"));
             let summary = role_runs[0].event_summary.as_ref().expect("event summary");
-            assert_eq!(summary.event_count, 2);
+            assert_eq!(summary.event_count, 3);
             assert_eq!(
                 summary.last_event_type,
-                Some(CodingRoleRunEventType::ExecutionEvent)
+                Some(CodingRoleRunEventType::Aborted)
             );
-            assert_eq!(summary.last_event_title.as_deref(), Some("Task update"));
-            assert_eq!(summary.last_event_status.as_deref(), Some("running"));
-            assert_eq!(role_runs[0].recent_events.len(), 2);
+            assert_eq!(summary.last_event_title.as_deref(), Some("Aborted"));
+            assert_eq!(summary.last_event_status.as_deref(), None);
+            assert_eq!(
+                summary.terminal_event_type,
+                Some(CodingRoleRunEventType::Aborted)
+            );
+            assert_eq!(summary.terminal_reason.as_deref(), Some("abort_attempt"));
+            assert_eq!(role_runs[0].recent_events.len(), 3);
             assert_eq!(
                 role_runs[0].recent_events[1].title.as_deref(),
                 Some("Task update")

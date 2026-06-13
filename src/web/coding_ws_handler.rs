@@ -1815,6 +1815,7 @@ fn role_run_event_reason(event: &CodingRoleRunEvent) -> Option<String> {
         .payload
         .get("reason_code")
         .and_then(|value| value.as_str())
+        .or_else(|| event.payload.get("reason").and_then(|value| value.as_str()))
         .or_else(|| {
             event
                 .payload
