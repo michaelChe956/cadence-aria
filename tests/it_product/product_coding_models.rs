@@ -67,7 +67,9 @@ fn analyst_decision_record_uses_stable_wire_values() {
                 "available_actions": ["provide_context", "manual_continue"]
             },
             "created_at": "2026-06-12T00:00:00Z",
-            "parse_error": null
+            "parse_error": null,
+            "role_run_id": null,
+            "run_no": null
         })
     );
 
@@ -337,6 +339,8 @@ fn testing_and_review_reports_preserve_backend_evidence() {
         summary: "需要返工".to_string(),
         created_at: "2026-05-23T00:03:00Z".to_string(),
         raw_provider_output_ref: None,
+        role_run_id: None,
+        run_no: None,
     };
     let internal = InternalPrReview {
         id: "internal_review_0001".to_string(),
@@ -352,6 +356,8 @@ fn testing_and_review_reports_preserve_backend_evidence() {
         summary: "可以合入".to_string(),
         created_at: "2026-05-23T00:04:00Z".to_string(),
         raw_provider_output_ref: None,
+        role_run_id: None,
+        run_no: None,
     };
 
     assert_eq!(
@@ -475,5 +481,53 @@ fn analyst_decision_round_trips_role_run_metadata() {
     assert_eq!(value["run_no"], 1);
     let decoded: AnalystDecisionRecord = serde_json::from_value(value).expect("decode decision");
     assert_eq!(decoded.role_run_id.as_deref(), Some("coding_role_run_0001"));
+    assert_eq!(decoded.run_no, Some(1));
+}
+
+#[test]
+fn review_reports_round_trip_role_run_metadata() {
+    let code_review = CodeReviewReport {
+        id: "code_review_0001".to_string(),
+        attempt_id: "coding_attempt_0001".to_string(),
+        round: 1,
+        verdict: ReviewVerdict::Approve,
+        findings: Vec::new(),
+        tested_evidence_refs: Vec::new(),
+        diff_refs: Vec::new(),
+        summary: "review ok".to_string(),
+        created_at: "2026-06-13T00:00:00Z".to_string(),
+        raw_provider_output_ref: Some("provider-raw/code_review/code_review_0001.txt".to_string()),
+        role_run_id: Some("coding_role_run_0001".to_string()),
+        run_no: Some(1),
+    };
+    let value = serde_json::to_value(&code_review).expect("serialize code review");
+    assert_eq!(value["role_run_id"], "coding_role_run_0001");
+    let decoded: CodeReviewReport = serde_json::from_value(value).expect("decode code review");
+    assert_eq!(decoded.role_run_id.as_deref(), Some("coding_role_run_0001"));
+    assert_eq!(decoded.run_no, Some(1));
+
+    let internal_review = InternalPrReview {
+        id: "internal_review_0001".to_string(),
+        attempt_id: "coding_attempt_0001".to_string(),
+        review_request_id: "review_request_0001".to_string(),
+        verdict: ReviewVerdict::Approve,
+        findings: Vec::new(),
+        impact_scope: vec!["src/lib.rs".to_string()],
+        pr_description: "PR".to_string(),
+        commit_message_suggestion: "feat: work".to_string(),
+        tested_evidence_refs: Vec::new(),
+        diff_refs: Vec::new(),
+        summary: "internal ok".to_string(),
+        created_at: "2026-06-13T00:00:01Z".to_string(),
+        raw_provider_output_ref: Some(
+            "provider-raw/internal_pr_review/internal_pr_review_0001.txt".to_string(),
+        ),
+        role_run_id: Some("coding_role_run_0002".to_string()),
+        run_no: Some(1),
+    };
+    let value = serde_json::to_value(&internal_review).expect("serialize internal review");
+    assert_eq!(value["role_run_id"], "coding_role_run_0002");
+    let decoded: InternalPrReview = serde_json::from_value(value).expect("decode internal review");
+    assert_eq!(decoded.role_run_id.as_deref(), Some("coding_role_run_0002"));
     assert_eq!(decoded.run_no, Some(1));
 }

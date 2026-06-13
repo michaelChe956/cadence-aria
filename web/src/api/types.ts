@@ -335,6 +335,8 @@ export type CodeReviewReport = {
   summary: string;
   created_at: string;
   raw_provider_output_ref?: string | null;
+  role_run_id?: string | null;
+  run_no?: number | null;
 };
 
 export type ReviewRequestKind =
@@ -375,6 +377,8 @@ export type InternalPrReview = {
   summary: string;
   created_at: string;
   raw_provider_output_ref?: string | null;
+  role_run_id?: string | null;
+  run_no?: number | null;
 };
 
 export type AnalystVerdict = "needs_fix" | "needs_human_input" | "no_issue";

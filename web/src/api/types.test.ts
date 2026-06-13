@@ -306,4 +306,62 @@ describe("workspace websocket protocol types", () => {
 
     expect(action.action_type).toBe("retry_analyst");
   });
+
+  it("accepts role run metadata on analyst decisions", () => {
+    const decision: AnalystDecisionRecord = {
+      id: "analyst_decision_0001",
+      attempt_id: "coding_attempt_0001",
+      source_stage: "testing",
+      rework_round: 1,
+      verdict: "human_required",
+      next_stage: "human_gate",
+      reason: "Analyst 输出不是有效 JSON",
+      evidence_refs: [],
+      raw_provider_output_refs: [],
+      created_at: "2026-06-13T00:00:00Z",
+      role_run_id: "coding_role_run_0001",
+      run_no: 1,
+    };
+
+    expect(decision.role_run_id).toBe("coding_role_run_0001");
+    expect(decision.run_no).toBe(1);
+  });
+
+  it("accepts role run metadata on review reports", () => {
+    const report: CodeReviewReport = {
+      id: "code_review_0001",
+      attempt_id: "coding_attempt_0001",
+      round: 1,
+      verdict: "approve",
+      findings: [],
+      tested_evidence_refs: [],
+      diff_refs: [],
+      summary: "review ok",
+      created_at: "2026-06-13T00:00:00Z",
+      raw_provider_output_ref: "provider-raw/code_review/code_review_0001.txt",
+      role_run_id: "coding_role_run_0001",
+      run_no: 1,
+    };
+
+    const internal: InternalPrReview = {
+      id: "internal_review_0001",
+      attempt_id: "coding_attempt_0001",
+      review_request_id: "review_request_0001",
+      verdict: "approve",
+      findings: [],
+      impact_scope: ["src/lib.rs"],
+      pr_description: "PR",
+      commit_message_suggestion: "feat: work",
+      tested_evidence_refs: [],
+      diff_refs: [],
+      summary: "internal ok",
+      created_at: "2026-06-13T00:00:01Z",
+      raw_provider_output_ref: "provider-raw/internal_pr_review/internal_pr_review_0001.txt",
+      role_run_id: "coding_role_run_0002",
+      run_no: 1,
+    };
+
+    expect(report.run_no).toBe(1);
+    expect(internal.role_run_id).toBe("coding_role_run_0002");
+  });
 });

@@ -707,6 +707,10 @@ pub struct CodeReviewReport {
     pub created_at: String,
     #[serde(default)]
     pub raw_provider_output_ref: Option<String>,
+    #[serde(default)]
+    pub role_run_id: Option<String>,
+    #[serde(default)]
+    pub run_no: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -725,6 +729,10 @@ pub struct InternalPrReview {
     pub created_at: String,
     #[serde(default)]
     pub raw_provider_output_ref: Option<String>,
+    #[serde(default)]
+    pub role_run_id: Option<String>,
+    #[serde(default)]
+    pub run_no: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
