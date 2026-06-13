@@ -1244,3 +1244,69 @@ fn role_run_retry_diagnostic_summary_keeps_recent_metadata_and_payload_refs() {
         "retry diagnostic summary must stay prompt-safe"
     );
 }
+
+#[test]
+fn role_run_retry_diagnostic_summary_preserves_refs_when_inline_detail_is_long() {
+    let root = tempdir().expect("tempdir");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(create_input("work_item_0001"))
+        .expect("create attempt");
+    let run = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::Testing,
+            CodingProviderRole::Tester,
+            CodingRoleRunTrigger::Initial,
+            Some("coding_node_0005".to_string()),
+        )
+        .expect("role run");
+    let long_detail = format!("{}DETAIL_SHOULD_BE_TRUNCATED", "x".repeat(10_000));
+    store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::ExecutionEvent,
+            serde_json::json!({
+                "title": "Long diagnostic detail",
+                "status": "blocked",
+                "detail": long_detail
+            }),
+        )
+        .expect("event");
+    store
+        .update_role_run_refs(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            &run.id,
+            vec!["provider-raw/testing/long_detail_0001.txt".to_string()],
+            vec!["artifacts/role-run-events/coding_role_run_0001/0001_detail.txt".to_string()],
+        )
+        .expect("refs");
+    store
+        .update_role_run_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            &run.id,
+            CodingRoleRunStatus::Blocked,
+            Some("long_detail_blocked".to_string()),
+        )
+        .expect("blocked");
+
+    let summary = store
+        .role_run_retry_diagnostic_summary("project_0001", "issue_0001", &attempt.id, &run.id)
+        .expect("summary")
+        .expect("summary text");
+
+    assert!(summary.contains("Long diagnostic detail"));
+    assert!(summary.contains("reason_code: long_detail_blocked"));
+    assert!(summary.contains("provider-raw/testing/long_detail_0001.txt"));
+    assert!(summary.contains("artifacts/role-run-events/coding_role_run_0001/0001_detail.txt"));
+    assert!(!summary.contains("DETAIL_SHOULD_BE_TRUNCATED"));
+    assert!(
+        summary.len() <= 8_000,
+        "retry diagnostic summary must stay prompt-safe"
+    );
+}

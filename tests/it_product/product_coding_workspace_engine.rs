@@ -1312,6 +1312,121 @@ async fn retry_test_plan_prompt_includes_previous_role_run_diagnostic() {
 }
 
 #[tokio::test]
+async fn retry_code_review_prompt_includes_previous_role_run_diagnostic() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    init_repo(&worktree);
+    fs::write(worktree.join("src.txt"), "hello\nreviewed\n").expect("modify file");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            base_branch: "HEAD".to_string(),
+            ..create_input()
+        })
+        .expect("create attempt");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    store
+        .update_attempt_stage(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingExecutionStage::CodeReview,
+        )
+        .expect("code review stage");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Blocked,
+        )
+        .expect("blocked");
+
+    let first_run = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::CodeReview,
+            CodingProviderRole::CodeReviewer,
+            CodingRoleRunTrigger::Initial,
+            Some("coding_node_0003".to_string()),
+        )
+        .expect("first run");
+    store
+        .append_role_run_event(
+            &attempt,
+            &first_run,
+            CodingRoleRunEventType::ExecutionEvent,
+            serde_json::json!({
+                "title": "Code reviewer task update",
+                "status": "blocked",
+                "detail": "Review context was missing"
+            }),
+        )
+        .expect("event");
+    store
+        .update_role_run_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            &first_run.id,
+            CodingRoleRunStatus::Blocked,
+            Some("code_review_blocked".to_string()),
+        )
+        .expect("block first run");
+    let resumed = store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("resume status");
+    let retry_run = store
+        .supersede_latest_role_run_and_create(
+            &resumed,
+            CodingExecutionStage::CodeReview,
+            CodingProviderRole::CodeReviewer,
+            CodingRoleRunTrigger::RetryReview,
+            None,
+            Some("code_review_blocked".to_string()),
+        )
+        .expect("retry run");
+    assert_eq!(
+        retry_run.supersedes_run_id.as_deref(),
+        Some(first_run.id.as_str())
+    );
+
+    let provider = SessionInputCapturingProvider::with_outputs(
+        [r#"{"verdict":"approve","summary":"code review ok","findings":[]}"#],
+        [None],
+    );
+    let (tx, _rx) = mpsc::channel(16);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+
+    engine
+        .execute_code_review(&resumed, &provider)
+        .await
+        .expect("execute retry code review");
+
+    let inputs = provider.inputs.lock().expect("inputs");
+    let prompt = &inputs.first().expect("first input").prompt;
+    assert!(prompt.contains("[previous_role_run_diagnostic]"));
+    assert!(prompt.contains("reason_code: code_review_blocked"));
+    assert!(prompt.contains("Code reviewer task update"));
+    assert!(prompt.contains("Review context was missing"));
+    assert!(prompt.contains("只输出 JSON"));
+    assert!(!prompt.contains(&format!("role_run_id: {}", retry_run.id)));
+}
+
+#[tokio::test]
 async fn coding_code_reviewer_run_uses_fresh_provider_session() {
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");

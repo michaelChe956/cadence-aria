@@ -77,6 +77,8 @@ struct BlockedGateRecord {
 }
 
 const ROLE_RUN_EVENT_INLINE_STRING_LIMIT: usize = 16_384;
+const ROLE_RUN_RETRY_DIAGNOSTIC_LIMIT: usize = 8_000;
+const ROLE_RUN_RETRY_DIAGNOSTIC_FIELD_LIMIT: usize = 512;
 static ROLE_RUN_EVENT_LOG_MUTEX: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone)]
@@ -679,29 +681,8 @@ impl CodingAttemptStore {
                 "terminal_event: {}",
                 coding_role_run_event_type_name(event.event_type)
             ));
-            if let Some(reason) = role_run_event_payload_reason(event) {
+            if let Some(reason) = role_run_event_payload_reason_summary(event) {
                 lines.push(format!("terminal_reason: {reason}"));
-            }
-        }
-        lines.push("recent_events:".to_string());
-        for event in events
-            .iter()
-            .rev()
-            .take(5)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-        {
-            lines.push(format!(
-                "- #{} {} title={} status={} detail={}",
-                event.sequence,
-                coding_role_run_event_type_name(event.event_type),
-                role_run_event_payload_text(event, "title").unwrap_or("-"),
-                role_run_event_payload_text(event, "status").unwrap_or("-"),
-                role_run_event_payload_text(event, "detail").unwrap_or("-")
-            ));
-            for artifact_ref in role_run_event_artifact_refs(event) {
-                lines.push(format!("  event_artifact_ref: {artifact_ref}"));
             }
         }
         if !run.raw_provider_output_refs.is_empty() {
@@ -713,7 +694,38 @@ impl CodingAttemptStore {
         if !run.artifact_refs.is_empty() {
             lines.push(format!("artifact_refs: {}", run.artifact_refs.join(", ")));
         }
-        let summary = truncate_utf8(&lines.join("\n"), 8_000);
+        let recent_events = events
+            .iter()
+            .rev()
+            .take(5)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>();
+        let mut event_artifact_refs = Vec::new();
+        for event in &recent_events {
+            for artifact_ref in role_run_event_artifact_refs(event) {
+                push_unique_artifact_ref(&mut event_artifact_refs, &artifact_ref);
+            }
+        }
+        if !event_artifact_refs.is_empty() {
+            lines.push(format!(
+                "event_artifact_refs: {}",
+                event_artifact_refs.join(", ")
+            ));
+        }
+        lines.push("recent_events:".to_string());
+        for event in recent_events {
+            lines.push(format!(
+                "- #{} {} title={} status={} detail={}",
+                event.sequence,
+                coding_role_run_event_type_name(event.event_type),
+                role_run_event_payload_summary_text(event, "title"),
+                role_run_event_payload_summary_text(event, "status"),
+                role_run_event_payload_summary_text(event, "detail")
+            ));
+        }
+        let summary = truncate_utf8(&lines.join("\n"), ROLE_RUN_RETRY_DIAGNOSTIC_LIMIT);
         Ok(Some(summary))
     }
 
@@ -1909,9 +1921,20 @@ fn role_run_event_payload_text<'a>(event: &'a CodingRoleRunEvent, field: &str) -
     event.payload.get(field).and_then(|value| value.as_str())
 }
 
+fn role_run_event_payload_summary_text(event: &CodingRoleRunEvent, field: &str) -> String {
+    role_run_event_payload_text(event, field)
+        .map(|value| truncate_utf8(value, ROLE_RUN_RETRY_DIAGNOSTIC_FIELD_LIMIT))
+        .unwrap_or_else(|| "-".to_string())
+}
+
 fn role_run_event_payload_reason(event: &CodingRoleRunEvent) -> Option<&str> {
     role_run_event_payload_text(event, "reason_code")
         .or_else(|| role_run_event_payload_text(event, "message"))
+}
+
+fn role_run_event_payload_reason_summary(event: &CodingRoleRunEvent) -> Option<String> {
+    role_run_event_payload_reason(event)
+        .map(|value| truncate_utf8(value, ROLE_RUN_RETRY_DIAGNOSTIC_FIELD_LIMIT))
 }
 
 fn role_run_event_artifact_refs(event: &CodingRoleRunEvent) -> Vec<String> {
