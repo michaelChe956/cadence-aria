@@ -15,6 +15,13 @@ test("coding role run history renders seeded runs and chat badges", async ({ pag
   await expect(history).toContainText("Analyst #1");
   await expect(history).toContainText("阻塞");
   await expect(history).toContainText("provider-raw/rework/analyst_evidence");
+  await expect(history).toContainText("events");
+  await expect(history).toContainText("Tester task update");
+  await expect(history).toContainText("No tasks found");
+  await page.reload();
+  const refreshedHistory = page.getByTestId("coding-role-run-history");
+  await expect(refreshedHistory).toContainText("Tester task update");
+  await expect(refreshedHistory).toContainText("No tasks found");
   await expect(page.getByTestId("chat-entry-list")).toContainText("Run #1");
   await expect(page.getByTestId("coding-pending-gate")).toContainText("重试 Analyst");
 });
@@ -35,6 +42,7 @@ test("retry analyst from browser gate creates a new visible run", async ({ page 
   const history = page.getByTestId("coding-role-run-history");
   await expect(history).toContainText("Analyst #2", { timeout: 30_000 });
   await expect(history).toContainText("retry_analyst");
+  await expect(history).toContainText("Analyst task update");
   await expect(page.getByTestId("chat-entry-list")).toContainText("retry analyst accepted from browser", {
     timeout: 30_000,
   });
@@ -57,6 +65,7 @@ test("retry internal reviewer from browser gate stays on internal review run", a
   const history = page.getByTestId("coding-role-run-history");
   await expect(history).toContainText("Internal Reviewer #2", { timeout: 30_000 });
   await expect(history).toContainText("retry_internal_review");
+  await expect(history).toContainText("Internal reviewer task update");
   await expect(history).not.toContainText("Code Reviewer #2");
   await expect(page.getByTestId("chat-entry-list")).toContainText("internal reviewer retry accepted", {
     timeout: 30_000,

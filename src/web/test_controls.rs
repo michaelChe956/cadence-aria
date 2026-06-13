@@ -19,8 +19,9 @@ use crate::product::coding_attempt_store::{CodingAttemptStore, CreateBlockedGate
 use crate::product::coding_models::{
     CodingAgentRole, CodingAttemptStatus, CodingChatEntry, CodingEntryType, CodingExecutionAttempt,
     CodingExecutionStage as FixtureStage, CodingGateAction, CodingGateActionType,
-    CodingProviderRole, CodingRoleRunStatus, CodingRoleRunTrigger, CodingTimelineNode,
-    CodingTimelineNodeStatus, PushStatus, RemoteKind, ReviewRequest, ReviewRequestKind,
+    CodingProviderRole, CodingRoleRunEventType, CodingRoleRunStatus, CodingRoleRunTrigger,
+    CodingTimelineNode, CodingTimelineNodeStatus, PushStatus, RemoteKind, ReviewRequest,
+    ReviewRequestKind,
 };
 use crate::product::issue_store::{CreateProductIssueInput, IssueStore};
 use crate::product::lifecycle_store::{
@@ -561,6 +562,16 @@ fn create_coding_role_run_fixture(
         CodingRoleRunTrigger::Initial,
         Some("coding_node_0001".to_string()),
     )?;
+    store.append_role_run_event(
+        &attempt,
+        &tester_run,
+        CodingRoleRunEventType::ExecutionEvent,
+        json!({
+            "title": "Tester task update",
+            "status": "running",
+            "detail": "No tasks found"
+        }),
+    )?;
     store.update_role_run_refs(
         &project.id,
         &issue.id,
@@ -637,6 +648,16 @@ fn create_coding_role_run_fixture(
             CodingProviderRole::InternalReviewer,
             CodingRoleRunTrigger::Initial,
             Some("coding_node_0002".to_string()),
+        )?;
+        store.append_role_run_event(
+            &attempt,
+            &internal_run,
+            CodingRoleRunEventType::ExecutionEvent,
+            json!({
+                "title": "Internal reviewer task update",
+                "status": "blocked",
+                "detail": "Inspecting pushed review request"
+            }),
         )?;
         store.update_role_run_refs(
             &project.id,
@@ -725,6 +746,16 @@ fn create_coding_role_run_fixture(
             CodingProviderRole::Analyst,
             CodingRoleRunTrigger::Initial,
             Some("coding_node_0002".to_string()),
+        )?;
+        store.append_role_run_event(
+            &attempt,
+            &analyst_run,
+            CodingRoleRunEventType::ExecutionEvent,
+            json!({
+                "title": "Analyst task update",
+                "status": "blocked",
+                "detail": "Inspecting previous testing evidence"
+            }),
         )?;
         store.update_role_run_refs(
             &project.id,
