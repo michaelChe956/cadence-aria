@@ -1043,4 +1043,34 @@ describe("CodingWorkspacePage", () => {
     expect(tabs).toHaveTextContent("打开平台创建 PR");
     expect(tabs).toHaveTextContent("选择 attempt 分支");
   });
+
+  it("renders analyst chat with role run metadata present", () => {
+    mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      attemptId: "coding_attempt_0001",
+      status: "blocked",
+      stage: "rework",
+      chatEntries: [
+        {
+          id: "coding_node_0004_analyst_verdict",
+          type: "analyst_verdict",
+          role: "analyst",
+          content: "Analyst 输出不是有效 JSON，已转人工确认。",
+          timestamp: "2026-06-13T00:00:01Z",
+          node_id: "coding_node_0004",
+          metadata: {
+            role_run_id: "coding_role_run_0001",
+            run_no: 1,
+            reason: "Analyst 输出不是有效 JSON，已转人工确认。",
+          },
+        },
+      ],
+    });
+
+    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+
+    const chatList = screen.getByTestId("chat-entry-list");
+    expect(chatList).toHaveTextContent("Analyst");
+    expect(chatList).toHaveTextContent("Analyst 输出不是有效 JSON");
+  });
 });

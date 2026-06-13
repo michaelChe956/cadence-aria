@@ -4502,3 +4502,61 @@ async fn analyst_human_gate_offers_retry_analyst_action() {
             && action.action_type == CodingGateActionType::RetryAnalyst
     }));
 }
+
+#[tokio::test]
+async fn execute_rework_binds_analyst_decision_chat_and_gate_to_role_run() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    init_repo(&worktree);
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let mut input = create_input();
+    input.worktree_path = Some(worktree);
+    let attempt = store.create_attempt(input).expect("create attempt");
+    store
+        .update_attempt_status("project_0001", "issue_0001", &attempt.id, CodingAttemptStatus::Running)
+        .expect("running");
+    let (tx, _rx) = mpsc::channel(32);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let provider = InputCapturingProvider {
+        input: Arc::new(Mutex::new(None)),
+        output: "not json".to_string(),
+    };
+
+    engine
+        .execute_rework(&attempt, "testing blocked evidence", &provider)
+        .await
+        .expect("execute analyst");
+
+    let runs = store
+        .list_role_runs("project_0001", "issue_0001", &attempt.id)
+        .expect("role runs");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].stage, CodingExecutionStage::Rework);
+    assert_eq!(runs[0].role, CodingProviderRole::Analyst);
+    assert_eq!(runs[0].status, CodingRoleRunStatus::Blocked);
+    assert!(runs[0]
+        .raw_provider_output_refs
+        .iter()
+        .any(|value| value.contains("analyst_decision")));
+    assert!(runs[0]
+        .artifact_refs
+        .iter()
+        .any(|value| value.contains("analyst_evidence")));
+
+    let decision = store
+        .latest_analyst_decision("project_0001", "issue_0001", &attempt.id)
+        .expect("latest decision")
+        .expect("decision");
+    assert_eq!(decision.role_run_id.as_deref(), Some(runs[0].id.as_str()));
+    assert_eq!(decision.run_no, Some(1));
+
+    let entries = store
+        .list_chat_entries("project_0001", "issue_0001", &attempt.id)
+        .expect("chat entries");
+    assert!(entries.iter().any(|entry| {
+        entry.metadata.as_ref().is_some_and(|metadata| {
+            metadata.get("role_run_id").and_then(|value| value.as_str()) == Some(runs[0].id.as_str())
+                && metadata.get("run_no").and_then(|value| value.as_u64()) == Some(1)
+        })
+    }));
+}

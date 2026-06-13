@@ -2079,6 +2079,42 @@ impl CodingWorkspaceEngine {
             .send(CodingWsOutMessage::CodingTimelineNodeCreated { node: node.clone() })
             .await;
 
+        let role_run = match self.store.latest_role_run(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingExecutionStage::Rework,
+            CodingProviderRole::Analyst,
+        )? {
+            Some(run)
+                if run.status == CodingRoleRunStatus::Running && run.node_id.is_none() =>
+            {
+                self.store.attach_role_run_node(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &attempt.id,
+                    &run.id,
+                    node.id.clone(),
+                )?
+            }
+            _ => self.store.create_role_run(
+                &attempt,
+                CodingExecutionStage::Rework,
+                CodingProviderRole::Analyst,
+                CodingRoleRunTrigger::Initial,
+                Some(node.id.clone()),
+            )?,
+        };
+        let evidence_ref = self.store.save_analyst_evidence(&attempt.id, evidence)?;
+        self.store.update_role_run_refs(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &role_run.id,
+            Vec::new(),
+            vec![evidence_ref.clone()],
+        )?;
+
         let notes = self.store.list_unconsumed_context_notes(
             &attempt.project_id,
             &attempt.issue_id,
@@ -2154,6 +2190,14 @@ impl CodingWorkspaceEngine {
             "analyst_decision",
             &full_output,
         )?;
+        self.store.update_role_run_refs(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &role_run.id,
+            vec![analyst_raw_ref.clone()],
+            Vec::new(),
+        )?;
         if !note_ids.is_empty() {
             self.store.mark_context_notes_consumed(
                 &attempt.project_id,
@@ -2193,13 +2237,41 @@ impl CodingWorkspaceEngine {
             human_gate: decision.human_gate.clone(),
             created_at: Utc::now().to_rfc3339(),
             parse_error: decision.parse_error.clone(),
+            role_run_id: Some(role_run.id.clone()),
+            run_no: Some(role_run.run_no),
         };
         self.store.save_analyst_decision(&decision_record)?;
-        self.emit_analyst_verdict_entry(&attempt, &node.id, rework_round, &source_stage, &decision)
-            .await;
+        self.emit_analyst_verdict_entry(
+            &attempt,
+            &node.id,
+            rework_round,
+            &source_stage,
+            &decision,
+            &role_run,
+        )
+        .await;
         let (updated, node_status, summary) = self
             .apply_analyst_decision(&attempt, &node.id, &source_stage, rework_round, &decision)
             .await?;
+        let role_run_status = if node_status == CodingTimelineNodeStatus::Blocked {
+            CodingRoleRunStatus::Blocked
+        } else {
+            CodingRoleRunStatus::Completed
+        };
+        self.store.update_role_run_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &role_run.id,
+            role_run_status,
+            decision.parse_error.clone().or_else(|| {
+                if node_status == CodingTimelineNodeStatus::Blocked {
+                    Some("analyst_human_gate".to_string())
+                } else {
+                    None
+                }
+            }),
+        )?;
         self.complete_timeline_node(
             &attempt.project_id,
             &attempt.issue_id,
@@ -3282,11 +3354,14 @@ impl CodingWorkspaceEngine {
         rework_round: u32,
         source_stage: &CodingExecutionStage,
         decision: &AnalystDecision,
+        role_run: &CodingRoleRun,
     ) {
         let mut metadata = serde_json::json!({
             "source": "analyst",
             "source_stage": source_stage,
             "rework_round": rework_round,
+            "role_run_id": role_run.id,
+            "run_no": role_run.run_no,
         });
         if let Some(object) = metadata.as_object_mut() {
             object.insert(

@@ -836,6 +836,29 @@ impl CodingAttemptStore {
         ))
     }
 
+    pub fn save_analyst_evidence(
+        &self,
+        attempt_id: &str,
+        evidence: &str,
+    ) -> Result<String, ProductStoreError> {
+        let attempt = self.find_attempt_by_id(attempt_id)?;
+        let evidence_root = self
+            .attempt_dir(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .join("artifacts")
+            .join("rework");
+        fs::create_dir_all(&evidence_root).map_err(|error| {
+            ProductStoreError::Io(format!("create {}: {error}", evidence_root.display()))
+        })?;
+
+        let sequence = next_text_file_sequence(&evidence_root, "analyst_evidence")?;
+        let file_name = format!("analyst_evidence_{sequence:04}.txt");
+        let path = evidence_root.join(&file_name);
+        fs::write(&path, evidence)
+            .map_err(|error| ProductStoreError::Io(format!("write {}: {error}", path.display())))?;
+
+        Ok(format!("artifacts/rework/{}", file_name))
+    }
+
     pub fn save_test_plan(&self, plan: &TestPlan) -> Result<(), ProductStoreError> {
         validate_relative_id(&plan.id)?;
         let attempt = self.find_attempt_by_id(&plan.attempt_id)?;
