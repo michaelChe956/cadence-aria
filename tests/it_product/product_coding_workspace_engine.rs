@@ -653,13 +653,7 @@ async fn execute_testing_binds_plan_report_and_chat_entries_to_tester_role_run()
         .expect("running");
     let (tx, mut rx) = mpsc::channel(64);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = SessionInputCapturingProvider::with_outputs(
-        [
-            r#"{"summary":"unit plan","steps":[{"id":"unit","title":"Unit","intent":"run unit checks","required":true,"tool":"provider_managed","risk_level":"low","command_or_tool_input":{},"evidence_expectation":"unit evidence"}]}"#,
-            r#"{"step_results":[{"step_id":"unit","status":"passed","evidence_refs":["unit.log"],"provider_analysis":"ok"}]}"#,
-        ],
-        [None, None],
-    );
+    let provider = ExecutePlanToolCallTesterProvider::new();
 
     let report = engine
         .execute_testing_with_provider(
@@ -680,6 +674,41 @@ async fn execute_testing_binds_plan_report_and_chat_entries_to_tester_role_run()
     assert_eq!(runs[0].status, CodingRoleRunStatus::Completed);
     assert_eq!(report.role_run_id.as_deref(), Some(runs[0].id.as_str()));
     assert_eq!(report.run_no, Some(1));
+    let events = store
+        .list_role_run_events("project_0001", "issue_0001", &attempt.id, &runs[0].id)
+        .expect("role run events");
+    let provider_prompts = events
+        .iter()
+        .filter(|event| event.event_type == CodingRoleRunEventType::ProviderPrompt)
+        .collect::<Vec<_>>();
+    assert_eq!(provider_prompts.len(), 2);
+    assert!(provider_prompts.iter().any(|event| {
+        event.payload["output_schema"] == "coding_workspace_test_plan_json"
+            && event.payload["prompt"]
+                .as_str()
+                .is_some_and(|prompt| prompt.contains("Phase: plan_tests"))
+    }));
+    assert!(provider_prompts.iter().any(|event| {
+        event.payload["output_schema"] == "coding_workspace_execute_test_plan_json"
+            && event.payload["prompt"]
+                .as_str()
+                .is_some_and(|prompt| prompt.contains("Phase: execute_test_plan"))
+    }));
+    assert!(events.iter().any(|event| {
+        event.event_type == CodingRoleRunEventType::ToolCall
+            && event.payload["id"] == "execute_tool_0001"
+            && event.payload["tool_name"] == "run_command"
+    }));
+    assert!(events.iter().any(|event| {
+        event.event_type == CodingRoleRunEventType::ToolResult
+            && event.payload["tool_use_id"] == "execute_tool_0001"
+            && event.payload["is_error"] == false
+    }));
+    assert!(
+        events
+            .iter()
+            .any(|event| event.event_type == CodingRoleRunEventType::MessageComplete)
+    );
 
     let plans = store
         .list_test_plans("project_0001", "issue_0001", &attempt.id)
@@ -4425,6 +4454,94 @@ impl StreamingProviderAdapter for SessionInputCapturingProvider {
             "run_streaming is not used by this test provider",
             0,
         ))
+    }
+}
+
+struct ExecutePlanToolCallTesterProvider {
+    inputs: Arc<Mutex<Vec<StreamingProviderInput>>>,
+    starts: Arc<Mutex<usize>>,
+}
+
+impl ExecutePlanToolCallTesterProvider {
+    fn new() -> Self {
+        Self {
+            inputs: Arc::new(Mutex::new(Vec::new())),
+            starts: Arc::new(Mutex::new(0)),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for ExecutePlanToolCallTesterProvider {
+    fn supports_tool_calls(&self) -> bool {
+        true
+    }
+
+    fn supports_provider_driven_testing(&self) -> bool {
+        true
+    }
+
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.inputs.lock().expect("inputs lock").push(input.clone());
+        let mut starts = self.starts.lock().expect("starts lock");
+        *starts += 1;
+        let start_no = *starts;
+        drop(starts);
+
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let (command_tx, mut command_rx) = mpsc::channel(8);
+        if start_no == 1 {
+            event_tx
+                .try_send(ProviderEvent::Completed {
+                    full_output: r#"{"summary":"unit plan","steps":[{"id":"unit","title":"Unit","intent":"run unit checks","required":true,"tool":"run_command","risk_level":"low","command_or_tool_input":{"command":["true"]},"evidence_expectation":"unit evidence"}]}"#.to_string(),
+                    provider_session_id: None,
+                })
+                .expect("send plan completed");
+            return Ok(ProviderSession {
+                events: event_rx,
+                commands: command_tx,
+            });
+        }
+
+        tokio::spawn(async move {
+            let _ = event_tx
+                .send(ProviderEvent::ToolCall(ProviderToolCall {
+                    id: "execute_tool_0001".to_string(),
+                    tool_name: "run_command".to_string(),
+                    input: serde_json::json!({
+                        "step_id": "unit",
+                        "command": ["true"]
+                    }),
+                }))
+                .await;
+            while let Some(command) = command_rx.recv().await {
+                match command {
+                    cadence_aria::cross_cutting::streaming_provider::ProviderCommand::ToolResult(
+                        result,
+                    ) if result.tool_use_id == "execute_tool_0001" => {
+                        let _ = event_tx
+                            .send(ProviderEvent::Completed {
+                                full_output: r#"{"step_results":[{"step_id":"unit","status":"passed","evidence_refs":["unit.log"],"provider_analysis":"ok"}]}"#.to_string(),
+                                provider_session_id: None,
+                            })
+                            .await;
+                        return;
+                    }
+                    cadence_aria::cross_cutting::streaming_provider::ProviderCommand::Abort => {
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        });
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
     }
 }
 
