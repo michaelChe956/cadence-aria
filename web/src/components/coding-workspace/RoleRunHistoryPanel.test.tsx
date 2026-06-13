@@ -19,6 +19,38 @@ describe("RoleRunHistoryPanel", () => {
             superseded_by_run_id: "coding_role_run_0002",
             reason_code: "test_plan_missing_json",
             raw_provider_output_refs: ["provider-raw/testing/plan_tests_0001.txt"],
+            event_summary: {
+              event_count: 3,
+              last_event_at: "2026-06-13T00:00:03Z",
+              last_event_type: "execution_event",
+              last_event_title: "Task update",
+              last_event_status: "running",
+              terminal_event_type: "timeout",
+              terminal_reason: "plan_tests_timeout",
+            },
+            recent_events: [
+              {
+                sequence: 2,
+                event_type: "text_delta",
+                created_at: "2026-06-13T00:00:02Z",
+                title: "text_delta",
+                status: null,
+                detail: "No tasks found",
+                truncated: false,
+                artifact_ref: null,
+              },
+              {
+                sequence: 3,
+                event_type: "execution_event",
+                created_at: "2026-06-13T00:00:03Z",
+                title: "Task update",
+                status: "running",
+                detail: "Planning tests",
+                truncated: true,
+                artifact_ref:
+                  "artifacts/role-run-events/coding_role_run_0001/0003_output.txt",
+              },
+            ],
           }),
           roleRun({
             id: "coding_role_run_0002",
@@ -46,6 +78,13 @@ describe("RoleRunHistoryPanel", () => {
     expect(panel).toHaveTextContent("已被替代");
     expect(panel).toHaveTextContent("initial");
     expect(panel).toHaveTextContent("test_plan_missing_json");
+    expect(panel).toHaveTextContent("3 events");
+    expect(panel).toHaveTextContent("Task update");
+    expect(panel).toHaveTextContent("running");
+    expect(panel).toHaveTextContent("No tasks found");
+    expect(panel).toHaveTextContent(
+      "artifacts/role-run-events/coding_role_run_0001/0003_output.txt",
+    );
     expect(panel).toHaveTextContent("provider-raw/testing/plan_tests_0001.txt");
     expect(panel).toHaveTextContent("Tester #2");
     expect(panel).toHaveTextContent("已完成");

@@ -65,6 +65,8 @@ export function RoleRunHistoryPanel({
                 {run.reason_code ? (
                   <div className="truncate text-[var(--aria-ink-muted)]">{run.reason_code}</div>
                 ) : null}
+                <EventSummary run={run} />
+                <RecentEvents run={run} />
                 <RefsSummary run={run} />
               </button>
             );
@@ -72,6 +74,55 @@ export function RoleRunHistoryPanel({
         </div>
       )}
     </section>
+  );
+}
+
+function EventSummary({ run }: { run: CodingRoleRun }) {
+  const summary = run.event_summary;
+  if (!summary || summary.event_count === 0) return null;
+  return (
+    <div className="grid gap-0.5 text-[10px] text-[var(--aria-ink-muted)]">
+      <div className="flex min-w-0 items-center gap-1">
+        <span className="font-mono">{summary.event_count} events</span>
+        {summary.last_event_title ? (
+          <span className="truncate">{summary.last_event_title}</span>
+        ) : null}
+        {summary.last_event_status ? (
+          <span className="shrink-0 font-mono">{summary.last_event_status}</span>
+        ) : null}
+      </div>
+      {summary.terminal_reason ? (
+        <div className="truncate">{summary.terminal_reason}</div>
+      ) : null}
+    </div>
+  );
+}
+
+function RecentEvents({ run }: { run: CodingRoleRun }) {
+  const events = run.recent_events ?? [];
+  if (events.length === 0) return null;
+  return (
+    <div className="grid gap-0.5 border-t border-[var(--aria-line)] pt-1">
+      {events.slice(-3).map((event) => (
+        <div key={`${run.id}:${event.sequence}`} className="grid min-w-0 gap-0.5">
+          <div className="flex min-w-0 items-center gap-1 text-[10px] text-[var(--aria-ink-muted)]">
+            <span className="shrink-0 font-mono">#{event.sequence}</span>
+            <span className="truncate">{event.title ?? event.event_type}</span>
+            {event.status ? <span className="shrink-0 font-mono">{event.status}</span> : null}
+          </div>
+          {event.detail ? (
+            <div className="truncate text-[10px] text-[var(--aria-ink-muted)]">
+              {event.detail}
+            </div>
+          ) : null}
+          {event.artifact_ref ? (
+            <div className="truncate font-mono text-[10px] text-[var(--aria-ink-muted)]">
+              {event.artifact_ref}
+            </div>
+          ) : null}
+        </div>
+      ))}
+    </div>
   );
 }
 
