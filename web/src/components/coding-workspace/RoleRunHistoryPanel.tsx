@@ -81,7 +81,7 @@ function EventSummary({ run }: { run: CodingRoleRun }) {
   const summary = run.event_summary;
   if (!summary || summary.event_count === 0) return null;
   return (
-    <div className="grid gap-0.5 text-[10px] text-[var(--aria-ink-muted)]">
+    <div className="grid min-w-0 gap-0.5 text-[10px] text-[var(--aria-ink-muted)]">
       <div className="flex min-w-0 items-center gap-1">
         <span className="font-mono">{summary.event_count} events</span>
         {summary.last_event_title ? (
@@ -102,7 +102,7 @@ function RecentEvents({ run }: { run: CodingRoleRun }) {
   const events = run.recent_events ?? [];
   if (events.length === 0) return null;
   return (
-    <div className="grid gap-0.5 border-t border-[var(--aria-line)] pt-1">
+    <div className="grid min-w-0 gap-0.5 border-t border-[var(--aria-line)] pt-1">
       {events.slice(-3).map((event) => (
         <div key={`${run.id}:${event.sequence}`} className="grid min-w-0 gap-0.5">
           <div className="flex min-w-0 items-center gap-1 text-[10px] text-[var(--aria-ink-muted)]">

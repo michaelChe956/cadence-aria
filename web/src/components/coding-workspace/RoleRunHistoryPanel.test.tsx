@@ -81,6 +81,9 @@ describe("RoleRunHistoryPanel", () => {
     expect(panel).toHaveTextContent("3 events");
     expect(panel).toHaveTextContent("Task update");
     expect(panel).toHaveTextContent("running");
+    expect(panel).toHaveTextContent("plan_tests_timeout");
+    expect(panel).toHaveTextContent("#2");
+    expect(panel).toHaveTextContent("#3");
     expect(panel).toHaveTextContent("No tasks found");
     expect(panel).toHaveTextContent(
       "artifacts/role-run-events/coding_role_run_0001/0003_output.txt",
@@ -106,6 +109,32 @@ describe("RoleRunHistoryPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: /Analyst #1/ }));
 
     expect(onSelectNode).toHaveBeenCalledWith("coding_node_0005");
+  });
+
+  it("renders only the latest three recent events", () => {
+    render(
+      <RoleRunHistoryPanel
+        roleRuns={[
+          roleRun({
+            recent_events: [
+              recentEvent(1, "Dropped oldest event"),
+              recentEvent(2, "Visible event 2"),
+              recentEvent(3, "Visible event 3"),
+              recentEvent(4, "Visible event 4"),
+            ],
+          }),
+        ]}
+        timelineNodes={[node("coding_node_0005", "Analyst 路由决策")]}
+        selectedNodeId={null}
+        onSelectNode={vi.fn()}
+      />,
+    );
+
+    const panel = screen.getByTestId("coding-role-run-history");
+    expect(panel).not.toHaveTextContent("Dropped oldest event");
+    expect(panel).toHaveTextContent("Visible event 2");
+    expect(panel).toHaveTextContent("Visible event 3");
+    expect(panel).toHaveTextContent("Visible event 4");
   });
 });
 
@@ -142,5 +171,18 @@ function node(id: string, title: string): CodingTimelineNode {
     started_at: "2026-06-13T00:00:00Z",
     completed_at: null,
     artifact_refs: [],
+  };
+}
+
+function recentEvent(sequence: number, detail: string): CodingRoleRun["recent_events"][number] {
+  return {
+    sequence,
+    event_type: "execution_event",
+    created_at: `2026-06-13T00:00:0${sequence}Z`,
+    title: detail,
+    status: null,
+    detail,
+    truncated: false,
+    artifact_ref: null,
   };
 }
