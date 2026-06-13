@@ -116,6 +116,40 @@ pub struct CodingRoleRun {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum CodingRoleRunEventType {
+    ProviderPrompt,
+    ProviderStart,
+    TextDelta,
+    ExecutionEvent,
+    ToolCall,
+    ToolResult,
+    StatusChanged,
+    PermissionRequest,
+    ChoiceRequest,
+    MessageComplete,
+    ProviderFailed,
+    Timeout,
+    Aborted,
+    PersistenceWarning,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CodingRoleRunEvent {
+    pub attempt_id: String,
+    pub role_run_id: String,
+    pub node_id: Option<String>,
+    pub stage: CodingExecutionStage,
+    pub role: CodingProviderRole,
+    pub sequence: u64,
+    pub event_type: CodingRoleRunEventType,
+    pub created_at: String,
+    pub payload: serde_json::Value,
+    pub truncated: bool,
+    pub artifact_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CodingProviderPermissionMode {
     Auto,
     Supervised,

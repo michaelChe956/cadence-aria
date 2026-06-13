@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
@@ -10,9 +10,10 @@ use crate::product::coding_models::{
     AnalystDecisionRecord, CodeReviewReport, CodingAttemptStatus, CodingChatEntry,
     CodingContextNote, CodingExecutionAttempt, CodingExecutionStage, CodingGateAction,
     CodingGateKind, CodingGateRequired, CodingProviderRole, CodingReworkInstruction,
-    CodingRoleProviderConfigSnapshot, CodingRoleRun, CodingRoleRunStatus, CodingRoleRunTrigger,
-    CodingStageGateState, CodingStageGateStatus, CodingTimelineNode, CodingTimelineNodeStatus,
-    InternalPrReview, QualityGateBypassAudit, ReviewRequest, TestPlan, TestingReport,
+    CodingRoleProviderConfigSnapshot, CodingRoleRun, CodingRoleRunEvent, CodingRoleRunEventType,
+    CodingRoleRunStatus, CodingRoleRunTrigger, CodingStageGateState, CodingStageGateStatus,
+    CodingTimelineNode, CodingTimelineNodeStatus, InternalPrReview, QualityGateBypassAudit,
+    ReviewRequest, TestPlan, TestingReport,
 };
 use crate::product::id::next_sequential_id;
 use crate::product::json_store::{
@@ -73,6 +74,8 @@ struct BlockedGateRecord {
     created_at: String,
     updated_at: String,
 }
+
+const ROLE_RUN_EVENT_INLINE_STRING_LIMIT: usize = 16_384;
 
 #[derive(Debug, Clone)]
 pub struct CodingAttemptStore {
@@ -558,6 +561,73 @@ impl CodingAttemptStore {
         }
         self.save_role_run(project_id, issue_id, &run)?;
         Ok(run)
+    }
+
+    pub fn append_role_run_event(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        role_run: &CodingRoleRun,
+        event_type: CodingRoleRunEventType,
+        payload: serde_json::Value,
+    ) -> Result<CodingRoleRunEvent, ProductStoreError> {
+        validate_relative_id(&attempt.project_id)?;
+        validate_relative_id(&attempt.issue_id)?;
+        validate_relative_id(&attempt.id)?;
+        validate_relative_id(&role_run.id)?;
+        if attempt.id != role_run.attempt_id {
+            return Err(ProductStoreError::NotFound {
+                kind: "coding_role_run_attempt",
+                id: role_run.id.clone(),
+            });
+        }
+
+        let path = self.role_run_event_log_path(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &role_run.id,
+        );
+        let sequence = next_jsonl_sequence(&path)?;
+        let (payload, truncated, artifact_ref) = self.normalize_role_run_event_payload(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &role_run.id,
+            sequence,
+            payload,
+        )?;
+        let event = CodingRoleRunEvent {
+            attempt_id: attempt.id.clone(),
+            role_run_id: role_run.id.clone(),
+            node_id: role_run.node_id.clone(),
+            stage: role_run.stage.clone(),
+            role: role_run.role.clone(),
+            sequence,
+            event_type,
+            created_at: Utc::now().to_rfc3339(),
+            payload,
+            truncated,
+            artifact_ref,
+        };
+        append_jsonl(&path, &event)?;
+        Ok(event)
+    }
+
+    pub fn list_role_run_events(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        role_run_id: &str,
+    ) -> Result<Vec<CodingRoleRunEvent>, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(attempt_id)?;
+        validate_relative_id(role_run_id)?;
+        let path = self.role_run_event_log_path(project_id, issue_id, attempt_id, role_run_id);
+        let mut events: Vec<CodingRoleRunEvent> = read_jsonl_records(&path)?;
+        events.sort_by_key(|event| event.sequence);
+        Ok(events)
     }
 
     pub fn read_attempt_artifact_text(
@@ -1441,6 +1511,104 @@ impl CodingAttemptStore {
             .join("role-runs")
     }
 
+    fn role_run_events_root(&self, project_id: &str, issue_id: &str, attempt_id: &str) -> PathBuf {
+        self.attempt_dir(project_id, issue_id, attempt_id)
+            .join("role-run-events")
+    }
+
+    fn role_run_event_log_path(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        role_run_id: &str,
+    ) -> PathBuf {
+        self.role_run_events_root(project_id, issue_id, attempt_id)
+            .join(format!("{role_run_id}.jsonl"))
+    }
+
+    fn role_run_event_artifact_root(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        role_run_id: &str,
+    ) -> PathBuf {
+        self.attempt_dir(project_id, issue_id, attempt_id)
+            .join("artifacts")
+            .join("role-run-events")
+            .join(role_run_id)
+    }
+
+    fn normalize_role_run_event_payload(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        role_run_id: &str,
+        sequence: u64,
+        payload: serde_json::Value,
+    ) -> Result<(serde_json::Value, bool, Option<String>), ProductStoreError> {
+        let mut payload = payload;
+        let Some(object) = payload.as_object_mut() else {
+            return Ok((payload, false, None));
+        };
+
+        for field in [
+            "prompt", "content", "output", "stdout", "stderr", "detail", "message",
+        ] {
+            let Some(value) = object.get_mut(field) else {
+                continue;
+            };
+            let Some(text) = value.as_str() else {
+                continue;
+            };
+            if text.len() <= ROLE_RUN_EVENT_INLINE_STRING_LIMIT {
+                continue;
+            }
+
+            let artifact_root =
+                self.role_run_event_artifact_root(project_id, issue_id, attempt_id, role_run_id);
+            let artifact_ref = self.save_role_run_event_artifact(
+                &artifact_root,
+                role_run_id,
+                sequence,
+                field,
+                text,
+            )?;
+            *value = serde_json::json!({
+                "preview": truncate_utf8(text, ROLE_RUN_EVENT_INLINE_STRING_LIMIT),
+                "artifact_ref": artifact_ref,
+                "truncated": true
+            });
+            return Ok((payload, true, Some(artifact_ref)));
+        }
+
+        Ok((payload, false, None))
+    }
+
+    fn save_role_run_event_artifact(
+        &self,
+        root: &Path,
+        role_run_id: &str,
+        sequence: u64,
+        field: &str,
+        content: &str,
+    ) -> Result<String, ProductStoreError> {
+        validate_relative_id(role_run_id)?;
+        validate_relative_id(field)?;
+        fs::create_dir_all(root).map_err(|error| {
+            ProductStoreError::Io(format!("create {}: {error}", root.display()))
+        })?;
+        let file_name = format!("{sequence:04}_{field}.txt");
+        let path = root.join(&file_name);
+        fs::write(&path, content)
+            .map_err(|error| ProductStoreError::Io(format!("write {}: {error}", path.display())))?;
+        let artifact_ref = format!("artifacts/role-run-events/{role_run_id}/{file_name}");
+        validate_relative_artifact_ref(&artifact_ref)?;
+        Ok(artifact_ref)
+    }
+
     fn role_run_path(&self, project_id: &str, issue_id: &str, run: &CodingRoleRun) -> PathBuf {
         self.role_runs_root(project_id, issue_id, &run.attempt_id)
             .join(format!("{}.json", run.id))
@@ -1570,6 +1738,59 @@ fn list_json_records<T: DeserializeOwned>(path: &Path) -> Result<Vec<T>, Product
         records.push(read_json(&entry)?);
     }
     Ok(records)
+}
+
+fn append_jsonl<T: Serialize>(path: &Path, value: &T) -> Result<(), ProductStoreError> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent).map_err(|error| {
+            ProductStoreError::Io(format!("create {}: {error}", parent.display()))
+        })?;
+    }
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|error| ProductStoreError::Io(format!("open {}: {error}", path.display())))?;
+    serde_json::to_writer(&mut file, value)
+        .map_err(|error| ProductStoreError::Json(error.to_string()))?;
+    file.write_all(b"\n")
+        .map_err(|error| ProductStoreError::Io(format!("write {}: {error}", path.display())))?;
+    file.flush()
+        .map_err(|error| ProductStoreError::Io(format!("flush {}: {error}", path.display())))?;
+    Ok(())
+}
+
+fn read_jsonl_records<T: DeserializeOwned>(path: &Path) -> Result<Vec<T>, ProductStoreError> {
+    if !path_exists(path)? {
+        return Ok(Vec::new());
+    }
+    let content = fs::read_to_string(path)
+        .map_err(|error| ProductStoreError::Io(format!("read {}: {error}", path.display())))?;
+    let mut records = Vec::new();
+    for line in content.lines().filter(|line| !line.trim().is_empty()) {
+        records.push(
+            serde_json::from_str(line)
+                .map_err(|error| ProductStoreError::Json(error.to_string()))?,
+        );
+    }
+    Ok(records)
+}
+
+fn next_jsonl_sequence(path: &Path) -> Result<u64, ProductStoreError> {
+    Ok(read_jsonl_records::<serde_json::Value>(path)?.len() as u64 + 1)
+}
+
+fn truncate_utf8(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_string()
 }
 
 fn count_json_files(path: &Path) -> Result<usize, ProductStoreError> {

@@ -6,11 +6,11 @@ use cadence_aria::product::coding_models::{
     AnalystDecisionNextStage, AnalystDecisionRecord, AnalystDecisionVerdict,
     AnalystReworkInstructions, CodeReviewReport, CodingAgentRole, CodingAttemptStatus,
     CodingContextNote, CodingExecutionStage, CodingProviderRole, CodingReworkInstruction,
-    CodingRolePermissionModes, CodingRoleProviderConfigSnapshot, CodingRoleRunStatus,
-    CodingRoleRunTrigger, CodingStageGateStatus, CodingTimelineNode, CodingTimelineNodeStatus,
-    FindingSeverity, InternalPrReview, PushStatus, RemoteKind, ReviewFinding, ReviewRequest,
-    ReviewRequestKind, ReviewVerdict, TestCommand, TestCommandStatus, TestingOverallStatus,
-    TestingReport,
+    CodingRolePermissionModes, CodingRoleProviderConfigSnapshot, CodingRoleRunEventType,
+    CodingRoleRunStatus, CodingRoleRunTrigger, CodingStageGateStatus, CodingTimelineNode,
+    CodingTimelineNodeStatus, FindingSeverity, InternalPrReview, PushStatus, RemoteKind,
+    ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict, TestCommand, TestCommandStatus,
+    TestingOverallStatus, TestingReport,
 };
 use cadence_aria::product::models::{
     ProviderConversationRef, ProviderConversationRole, ProviderName,
@@ -850,4 +850,104 @@ fn updates_coding_role_run_refs_without_duplicates() {
         .expect("update refs again");
     assert_eq!(updated.raw_provider_output_refs.len(), 1);
     assert_eq!(updated.artifact_refs.len(), 1);
+}
+
+#[test]
+fn appends_and_lists_coding_role_run_events_in_sequence() {
+    let root = tempdir().expect("tempdir");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(create_input("work_item_0001"))
+        .expect("create attempt");
+    let run = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::Testing,
+            CodingProviderRole::Tester,
+            CodingRoleRunTrigger::Initial,
+            Some("coding_node_0003".to_string()),
+        )
+        .expect("role run");
+
+    let first = store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::ProviderPrompt,
+            serde_json::json!({
+                "mode": "plan_tests",
+                "prompt": "plan tests as JSON"
+            }),
+        )
+        .expect("append first event");
+    let second = store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::TextDelta,
+            serde_json::json!({
+                "content": "No tasks found"
+            }),
+        )
+        .expect("append second event");
+
+    assert_eq!(first.sequence, 1);
+    assert_eq!(second.sequence, 2);
+    assert_eq!(first.role_run_id, run.id);
+    assert_eq!(second.node_id.as_deref(), Some("coding_node_0003"));
+
+    let events = store
+        .list_role_run_events("project_0001", "issue_0001", &attempt.id, &run.id)
+        .expect("events");
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].event_type, CodingRoleRunEventType::ProviderPrompt);
+    assert_eq!(events[1].event_type, CodingRoleRunEventType::TextDelta);
+    assert_eq!(events[1].payload["content"], "No tasks found");
+}
+
+#[test]
+fn role_run_event_large_string_payload_is_moved_to_artifact() {
+    let root = tempdir().expect("tempdir");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(create_input("work_item_0001"))
+        .expect("create attempt");
+    let run = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::CodeReview,
+            CodingProviderRole::CodeReviewer,
+            CodingRoleRunTrigger::Initial,
+            Some("coding_node_0007".to_string()),
+        )
+        .expect("role run");
+    let long_prompt = "review this diff\n".repeat(2_000);
+
+    let event = store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::ProviderPrompt,
+            serde_json::json!({
+                "mode": "full_conversation",
+                "prompt": long_prompt
+            }),
+        )
+        .expect("append event");
+
+    assert!(event.truncated);
+    assert_eq!(
+        event.artifact_ref.as_deref(),
+        Some("artifacts/role-run-events/coding_role_run_0001/0001_prompt.txt")
+    );
+    assert_eq!(
+        event.payload["prompt"]["artifact_ref"],
+        "artifacts/role-run-events/coding_role_run_0001/0001_prompt.txt"
+    );
+    assert_eq!(event.payload["prompt"]["truncated"], true);
+
+    let artifact = store
+        .read_attempt_artifact_text(&attempt.id, event.artifact_ref.as_deref().expect("ref"))
+        .expect("artifact text");
+    assert_eq!(artifact, long_prompt);
 }
