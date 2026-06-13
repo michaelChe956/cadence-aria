@@ -965,3 +965,77 @@ fn role_run_event_large_string_payload_is_moved_to_artifact() {
         .expect("artifact text");
     assert_eq!(artifact, long_prompt);
 }
+
+#[test]
+fn role_run_event_truncates_each_large_payload_field() {
+    let root = tempdir().expect("tempdir");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(create_input("work_item_0001"))
+        .expect("create attempt");
+    let run = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::Testing,
+            CodingProviderRole::Tester,
+            CodingRoleRunTrigger::Initial,
+            Some("coding_node_0011".to_string()),
+        )
+        .expect("role run");
+    let long_stdout = "stdout line\n".repeat(2_000);
+    let long_stderr = "stderr line\n".repeat(2_000);
+
+    let event = store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::ExecutionEvent,
+            serde_json::json!({
+                "command": "cargo test --locked",
+                "stdout": long_stdout,
+                "stderr": long_stderr
+            }),
+        )
+        .expect("append event");
+
+    assert!(event.truncated);
+    assert_eq!(
+        event.artifact_ref.as_deref(),
+        Some("artifacts/role-run-events/coding_role_run_0001/0001_stdout.txt")
+    );
+
+    let stdout_payload = event.payload["stdout"].as_object().expect("stdout object");
+    let stderr_payload = event.payload["stderr"].as_object().expect("stderr object");
+    assert!(
+        stdout_payload["preview"]
+            .as_str()
+            .expect("stdout preview")
+            .len()
+            <= 16_384
+    );
+    assert!(
+        stderr_payload["preview"]
+            .as_str()
+            .expect("stderr preview")
+            .len()
+            <= 16_384
+    );
+    assert_eq!(stdout_payload["truncated"], true);
+    assert_eq!(stderr_payload["truncated"], true);
+    let stdout_ref = stdout_payload["artifact_ref"]
+        .as_str()
+        .expect("stdout artifact ref");
+    let stderr_ref = stderr_payload["artifact_ref"]
+        .as_str()
+        .expect("stderr artifact ref");
+    assert_ne!(stdout_ref, stderr_ref);
+
+    let stdout_artifact = store
+        .read_attempt_artifact_text(&attempt.id, stdout_ref)
+        .expect("stdout artifact text");
+    let stderr_artifact = store
+        .read_attempt_artifact_text(&attempt.id, stderr_ref)
+        .expect("stderr artifact text");
+    assert_eq!(stdout_artifact, long_stdout);
+    assert_eq!(stderr_artifact, long_stderr);
+}

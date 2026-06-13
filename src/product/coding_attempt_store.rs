@@ -1,6 +1,7 @@
 use std::fs;
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -76,6 +77,7 @@ struct BlockedGateRecord {
 }
 
 const ROLE_RUN_EVENT_INLINE_STRING_LIMIT: usize = 16_384;
+static ROLE_RUN_EVENT_LOG_MUTEX: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone)]
 pub struct CodingAttemptStore {
@@ -587,6 +589,9 @@ impl CodingAttemptStore {
             &attempt.id,
             &role_run.id,
         );
+        let _event_log_guard = ROLE_RUN_EVENT_LOG_MUTEX
+            .lock()
+            .map_err(|error| ProductStoreError::Io(format!("lock role run event log: {error}")))?;
         let sequence = next_jsonl_sequence(&path)?;
         let (payload, truncated, artifact_ref) = self.normalize_role_run_event_payload(
             &attempt.project_id,
@@ -1554,6 +1559,7 @@ impl CodingAttemptStore {
             return Ok((payload, false, None));
         };
 
+        let mut first_artifact_ref = None;
         for field in [
             "prompt", "content", "output", "stdout", "stderr", "detail", "message",
         ] {
@@ -1576,15 +1582,19 @@ impl CodingAttemptStore {
                 field,
                 text,
             )?;
+            let preview = truncate_utf8(text, ROLE_RUN_EVENT_INLINE_STRING_LIMIT);
+            if first_artifact_ref.is_none() {
+                first_artifact_ref = Some(artifact_ref.clone());
+            }
             *value = serde_json::json!({
-                "preview": truncate_utf8(text, ROLE_RUN_EVENT_INLINE_STRING_LIMIT),
+                "preview": preview,
                 "artifact_ref": artifact_ref,
                 "truncated": true
             });
-            return Ok((payload, true, Some(artifact_ref)));
         }
 
-        Ok((payload, false, None))
+        let truncated = first_artifact_ref.is_some();
+        Ok((payload, truncated, first_artifact_ref))
     }
 
     fn save_role_run_event_artifact(
@@ -1753,9 +1763,10 @@ fn append_jsonl<T: Serialize>(path: &Path, value: &T) -> Result<(), ProductStore
         .append(true)
         .open(path)
         .map_err(|error| ProductStoreError::Io(format!("open {}: {error}", path.display())))?;
-    serde_json::to_writer(&mut file, value)
-        .map_err(|error| ProductStoreError::Json(error.to_string()))?;
-    file.write_all(b"\n")
+    let mut line =
+        serde_json::to_vec(value).map_err(|error| ProductStoreError::Json(error.to_string()))?;
+    line.push(b'\n');
+    file.write_all(&line)
         .map_err(|error| ProductStoreError::Io(format!("write {}: {error}", path.display())))?;
     file.flush()
         .map_err(|error| ProductStoreError::Io(format!("flush {}: {error}", path.display())))?;
