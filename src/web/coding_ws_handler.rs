@@ -18,9 +18,11 @@ use crate::product::coding_models::{
     CodingContextNote, CodingEntryType, CodingExecutionAttempt, CodingExecutionStage,
     CodingGateAction, CodingGateActionType, CodingGateKind,
     CodingGateRequired as CodingGateRequiredModel, CodingProviderPermissionMode,
-    CodingProviderRole, CodingRoleProviderConfigSnapshot, CodingRoleRun, CodingStageGateState,
-    CodingStageGateStatus, CodingTimelineNode, CodingTimelineNodeStatus, InternalPrReview,
-    PushStatus, ReviewRequest, TestingOverallStatus, TestingReport,
+    CodingProviderRole, CodingRoleProviderConfigSnapshot, CodingRoleRunEvent,
+    CodingRoleRunEventPreview, CodingRoleRunEventSummary, CodingRoleRunEventType,
+    CodingRoleRunSnapshot, CodingStageGateState, CodingStageGateStatus, CodingTimelineNode,
+    CodingTimelineNodeStatus, InternalPrReview, PushStatus, ReviewRequest, TestingOverallStatus,
+    TestingReport,
 };
 use crate::product::coding_workspace_engine::{
     CodingExecutionContext, CodingWorkspaceEngine, CodingWorkspaceEngineError,
@@ -1683,8 +1685,7 @@ fn build_coding_session_state(
     )?;
     let chat_entries =
         coding_store.list_chat_entries(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
-    let role_runs =
-        coding_store.list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+    let role_runs = coding_role_run_snapshots(coding_store, &attempt)?;
 
     Ok(CodingWsOutMessage::CodingSessionState {
         attempt_id: attempt.id,
@@ -1712,6 +1713,115 @@ fn build_coding_session_state(
         work_item_markdown: execution_context.work_item_markdown,
         verification_commands: execution_context.verification_commands,
     })
+}
+
+fn coding_role_run_snapshots(
+    coding_store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+) -> Result<Vec<CodingRoleRunSnapshot>, ProductStoreError> {
+    coding_store
+        .list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+        .into_iter()
+        .map(|run| {
+            let events = coding_store.list_role_run_events(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &run.id,
+            )?;
+            let event_summary = role_run_event_summary(&events);
+            let recent_events = recent_role_run_events(&events, 10);
+            Ok(CodingRoleRunSnapshot {
+                run,
+                event_summary,
+                recent_events,
+            })
+        })
+        .collect()
+}
+
+fn role_run_event_summary(events: &[CodingRoleRunEvent]) -> Option<CodingRoleRunEventSummary> {
+    let last = events.last()?;
+    let terminal = events.iter().rev().find(|event| {
+        matches!(
+            event.event_type,
+            CodingRoleRunEventType::MessageComplete
+                | CodingRoleRunEventType::ProviderFailed
+                | CodingRoleRunEventType::Timeout
+                | CodingRoleRunEventType::Aborted
+        )
+    });
+    Some(CodingRoleRunEventSummary {
+        event_count: events.len(),
+        last_event_at: Some(last.created_at.clone()),
+        last_event_type: Some(last.event_type),
+        last_event_title: role_run_event_title(last),
+        last_event_status: role_run_event_status(last),
+        terminal_event_type: terminal.map(|event| event.event_type),
+        terminal_reason: terminal.and_then(role_run_event_reason),
+    })
+}
+
+fn recent_role_run_events(
+    events: &[CodingRoleRunEvent],
+    limit: usize,
+) -> Vec<CodingRoleRunEventPreview> {
+    let start = events.len().saturating_sub(limit);
+    events[start..]
+        .iter()
+        .map(|event| CodingRoleRunEventPreview {
+            sequence: event.sequence,
+            event_type: event.event_type,
+            created_at: event.created_at.clone(),
+            title: role_run_event_title(event),
+            status: role_run_event_status(event),
+            detail: event
+                .payload
+                .get("detail")
+                .and_then(|value| value.as_str())
+                .map(ToOwned::to_owned),
+            truncated: event.truncated,
+            artifact_ref: event.artifact_ref.clone(),
+        })
+        .collect()
+}
+
+fn role_run_event_title(event: &CodingRoleRunEvent) -> Option<String> {
+    event
+        .payload
+        .get("title")
+        .and_then(|value| value.as_str())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            event
+                .payload
+                .get("mode")
+                .and_then(|value| value.as_str())
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| Some(format!("{:?}", event.event_type)))
+}
+
+fn role_run_event_status(event: &CodingRoleRunEvent) -> Option<String> {
+    event
+        .payload
+        .get("status")
+        .and_then(|value| value.as_str())
+        .map(ToOwned::to_owned)
+}
+
+fn role_run_event_reason(event: &CodingRoleRunEvent) -> Option<String> {
+    event
+        .payload
+        .get("reason_code")
+        .and_then(|value| value.as_str())
+        .or_else(|| {
+            event
+                .payload
+                .get("message")
+                .and_then(|value| value.as_str())
+        })
+        .map(ToOwned::to_owned)
 }
 
 fn stage_gate_required(gate: CodingStageGateState) -> CodingGateRequiredModel {
@@ -1785,7 +1895,7 @@ pub enum CodingWsOutMessage {
         internal_pr_review: Box<Option<InternalPrReview>>,
         pending_gates: Vec<CodingGateRequiredModel>,
         latest_analyst_decision: Box<Option<AnalystDecisionRecord>>,
-        role_runs: Vec<CodingRoleRun>,
+        role_runs: Vec<CodingRoleRunSnapshot>,
         work_item_markdown: Option<String>,
         verification_commands: Vec<String>,
     },

@@ -11,9 +11,9 @@ use cadence_aria::product::coding_models::{
     AnalystDecisionNextStage, AnalystDecisionRecord, AnalystDecisionVerdict, CodingAgentRole,
     CodingAttemptStatus, CodingEntryType, CodingExecutionStage, CodingGateAction,
     CodingGateActionType, CodingGateKind, CodingGateRequired, CodingProviderPermissionMode,
-    CodingProviderRole, CodingRoleProviderConfigSnapshot, CodingRoleRunStatus,
-    CodingRoleRunTrigger, CodingTimelineNode, CodingTimelineNodeStatus, PushStatus, RemoteKind,
-    ReviewRequest, ReviewRequestKind, ReviewVerdict, TestingOverallStatus,
+    CodingProviderRole, CodingRoleProviderConfigSnapshot, CodingRoleRunEventType,
+    CodingRoleRunStatus, CodingRoleRunTrigger, CodingTimelineNode, CodingTimelineNodeStatus,
+    PushStatus, RemoteKind, ReviewRequest, ReviewRequestKind, ReviewVerdict, TestingOverallStatus,
 };
 use cadence_aria::product::lifecycle_store::{
     CreateWorkItemInput, CreateWorkspaceSessionInput, LifecycleStore,
@@ -310,7 +310,7 @@ async fn coding_session_snapshot_includes_role_runs() {
     let attempt = store
         .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
         .expect("attempt");
-    store
+    let run = store
         .create_role_run(
             &attempt,
             CodingExecutionStage::Testing,
@@ -319,6 +319,29 @@ async fn coding_session_snapshot_includes_role_runs() {
             Some("coding_node_0003".to_string()),
         )
         .expect("role run");
+    store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::ProviderPrompt,
+            serde_json::json!({
+                "mode": "plan_tests",
+                "prompt": "plan tests"
+            }),
+        )
+        .expect("prompt event");
+    store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::ExecutionEvent,
+            serde_json::json!({
+                "title": "Task update",
+                "status": "running",
+                "detail": "No tasks found"
+            }),
+        )
+        .expect("execution event");
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
     let server = tokio::spawn(async move {
@@ -334,6 +357,19 @@ async fn coding_session_snapshot_includes_role_runs() {
             assert_eq!(role_runs[0].role, CodingProviderRole::Tester);
             assert_eq!(role_runs[0].run_no, 1);
             assert_eq!(role_runs[0].node_id.as_deref(), Some("coding_node_0003"));
+            let summary = role_runs[0].event_summary.as_ref().expect("event summary");
+            assert_eq!(summary.event_count, 2);
+            assert_eq!(
+                summary.last_event_type,
+                Some(CodingRoleRunEventType::ExecutionEvent)
+            );
+            assert_eq!(summary.last_event_title.as_deref(), Some("Task update"));
+            assert_eq!(summary.last_event_status.as_deref(), Some("running"));
+            assert_eq!(role_runs[0].recent_events.len(), 2);
+            assert_eq!(
+                role_runs[0].recent_events[1].title.as_deref(),
+                Some("Task update")
+            );
         }
         other => panic!("expected coding session state, got {other:?}"),
     }
