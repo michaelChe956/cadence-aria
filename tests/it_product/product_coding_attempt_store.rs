@@ -893,13 +893,22 @@ fn appends_and_lists_coding_role_run_events_in_sequence() {
 
     assert_eq!(first.sequence, 1);
     assert_eq!(second.sequence, 2);
+    assert_eq!(first.attempt_id, attempt.id);
     assert_eq!(first.role_run_id, run.id);
+    assert_eq!(first.node_id.as_deref(), Some("coding_node_0003"));
+    assert_eq!(first.stage, CodingExecutionStage::Testing);
+    assert_eq!(first.role, CodingProviderRole::Tester);
     assert_eq!(second.node_id.as_deref(), Some("coding_node_0003"));
 
     let events = store
         .list_role_run_events("project_0001", "issue_0001", &attempt.id, &run.id)
         .expect("events");
     assert_eq!(events.len(), 2);
+    assert_eq!(events[0].attempt_id, attempt.id);
+    assert_eq!(events[0].role_run_id, run.id);
+    assert_eq!(events[0].node_id.as_deref(), Some("coding_node_0003"));
+    assert_eq!(events[0].stage, CodingExecutionStage::Testing);
+    assert_eq!(events[0].role, CodingProviderRole::Tester);
     assert_eq!(events[0].event_type, CodingRoleRunEventType::ProviderPrompt);
     assert_eq!(events[1].event_type, CodingRoleRunEventType::TextDelta);
     assert_eq!(events[1].payload["content"], "No tasks found");
@@ -945,6 +954,11 @@ fn role_run_event_large_string_payload_is_moved_to_artifact() {
         "artifacts/role-run-events/coding_role_run_0001/0001_prompt.txt"
     );
     assert_eq!(event.payload["prompt"]["truncated"], true);
+    let preview = event.payload["prompt"]["preview"]
+        .as_str()
+        .expect("preview string");
+    assert!(preview.starts_with("review this diff"));
+    assert!(preview.len() <= 16_384);
 
     let artifact = store
         .read_attempt_artifact_text(&attempt.id, event.artifact_ref.as_deref().expect("ref"))
