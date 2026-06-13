@@ -1174,6 +1174,137 @@ async fn retry_test_plan_supersedes_latest_testing_role_run_and_resumes_testing(
 }
 
 #[tokio::test]
+async fn retry_test_plan_prompt_includes_previous_role_run_diagnostic() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            ..create_input()
+        })
+        .expect("create attempt");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Blocked,
+        )
+        .expect("blocked");
+    store
+        .update_attempt_stage(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingExecutionStage::Testing,
+        )
+        .expect("testing");
+
+    let first_run = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::Testing,
+            CodingProviderRole::Tester,
+            CodingRoleRunTrigger::Initial,
+            Some("coding_node_0001".to_string()),
+        )
+        .expect("first run");
+    store
+        .append_role_run_event(
+            &attempt,
+            &first_run,
+            CodingRoleRunEventType::ExecutionEvent,
+            serde_json::json!({
+                "title": "Task update",
+                "status": "running",
+                "detail": "No tasks found"
+            }),
+        )
+        .expect("event");
+    store
+        .append_role_run_event(
+            &attempt,
+            &first_run,
+            CodingRoleRunEventType::Timeout,
+            serde_json::json!({
+                "reason_code": "plan_tests_timeout",
+                "message": "timed out"
+            }),
+        )
+        .expect("timeout");
+    store
+        .update_role_run_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            &first_run.id,
+            CodingRoleRunStatus::Blocked,
+            Some("plan_tests_timeout".to_string()),
+        )
+        .expect("block first run");
+    let resumed = store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("resume status");
+    let retry_run = store
+        .supersede_latest_role_run_and_create(
+            &resumed,
+            CodingExecutionStage::Testing,
+            CodingProviderRole::Tester,
+            CodingRoleRunTrigger::RetryTestPlan,
+            None,
+            Some("plan_tests_timeout".to_string()),
+        )
+        .expect("retry run");
+    assert_eq!(
+        retry_run.supersedes_run_id.as_deref(),
+        Some(first_run.id.as_str())
+    );
+
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let provider = TesterRetryPromptCaptureProvider {
+        prompts: prompts.clone(),
+    };
+    let (tx, _rx) = mpsc::channel(16);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+
+    engine
+        .execute_testing_with_provider(
+            &resumed,
+            &provider,
+            &CodingExecutionContext::default(),
+            &[],
+            TesterAgentOptions {
+                timeout: Duration::from_secs(5),
+                failure_limit: 3,
+            },
+        )
+        .await
+        .expect("execute retry tester");
+
+    let captured = prompts.lock().expect("prompts");
+    let prompt = captured.first().expect("first prompt");
+    assert!(prompt.contains("[previous_role_run_diagnostic]"));
+    assert!(prompt.contains("reason_code: plan_tests_timeout"));
+    assert!(prompt.contains("No tasks found"));
+    assert!(prompt.contains("CRITICAL: Return ONLY a single JSON object"));
+}
+
+#[tokio::test]
 async fn coding_code_reviewer_run_uses_fresh_provider_session() {
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
@@ -4502,6 +4633,40 @@ impl StreamingProviderAdapter for PromptCapturingProvider {
         })
         .expect("send done chunk");
         Ok(rx)
+    }
+}
+
+struct TesterRetryPromptCaptureProvider {
+    prompts: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for TesterRetryPromptCaptureProvider {
+    fn supports_provider_driven_testing(&self) -> bool {
+        true
+    }
+
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.prompts
+            .lock()
+            .expect("prompts")
+            .push(input.prompt.clone());
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let (command_tx, _command_rx) = mpsc::channel(8);
+        event_tx
+            .try_send(ProviderEvent::Completed {
+                full_output: r#"{"summary":"retry plan","context_warnings":[],"assumptions":[],"steps":[{"id":"unit","title":"unit","intent":"run unit tests","required":true,"tool":"provider_managed","risk_level":"low","command_or_tool_input":{},"evidence_expectation":"provider evidence"}]}"#.to_string(),
+                provider_session_id: None,
+            })
+            .expect("send completed");
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
     }
 }
 

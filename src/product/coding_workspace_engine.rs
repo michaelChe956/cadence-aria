@@ -1351,7 +1351,12 @@ impl CodingWorkspaceEngine {
                     "serialize_evaluation_context_failed: {error}"
                 ))
             })?;
-        let plan_prompt = build_tester_plan_prompt(&attempt, &evaluation_context_json);
+        let retry_diagnostic = self.retry_diagnostic_for_previous_run(&attempt, &role_run)?;
+        let plan_prompt = build_tester_plan_prompt(
+            &attempt,
+            &evaluation_context_json,
+            retry_diagnostic.as_deref(),
+        );
         let _ = self
             .event_tx
             .send(CodingWsOutMessage::CodingExecutionEvent {
@@ -2437,8 +2442,9 @@ impl CodingWorkspaceEngine {
             .store
             .get_role_provider_config_snapshot(&attempt.project_id, &attempt.issue_id, &attempt.id)?
             .code_reviewer;
+        let retry_diagnostic = self.retry_diagnostic_for_previous_run(&attempt, &role_run)?;
         let prompt = self
-            .build_code_review_prompt(&attempt, worktree_path)
+            .build_code_review_prompt(&attempt, worktree_path, retry_diagnostic.as_deref())
             .await?;
         let _ = self
             .event_tx
@@ -2652,6 +2658,7 @@ impl CodingWorkspaceEngine {
             .store
             .get_role_provider_config_snapshot(&attempt.project_id, &attempt.issue_id, &attempt.id)?
             .analyst;
+        let retry_diagnostic = self.retry_diagnostic_for_previous_run(&attempt, &role_run)?;
         let prompt = build_rework_prompt(
             &attempt,
             evidence,
@@ -2659,6 +2666,7 @@ impl CodingWorkspaceEngine {
             rework_round,
             &context_note_input,
             &evaluation_context_json,
+            retry_diagnostic.as_deref(),
         );
         let _ = self
             .event_tx
@@ -2876,8 +2884,14 @@ impl CodingWorkspaceEngine {
             .store
             .get_role_provider_config_snapshot(&attempt.project_id, &attempt.issue_id, &attempt.id)?
             .internal_reviewer;
+        let retry_diagnostic = self.retry_diagnostic_for_previous_run(&attempt, &role_run)?;
         let prompt = self
-            .build_internal_pr_review_prompt(&attempt, &review_request, worktree_path)
+            .build_internal_pr_review_prompt(
+                &attempt,
+                &review_request,
+                worktree_path,
+                retry_diagnostic.as_deref(),
+            )
             .await?;
         let _ = self
             .event_tx
@@ -3664,6 +3678,7 @@ impl CodingWorkspaceEngine {
         &self,
         attempt: &CodingExecutionAttempt,
         worktree_path: &Path,
+        retry_diagnostic: Option<&str>,
     ) -> Result<String, CodingWorkspaceEngineError> {
         let diff = self
             ._git_service
@@ -3672,6 +3687,9 @@ impl CodingWorkspaceEngine {
         let work_item = self.work_item_markdown_for_attempt(attempt)?;
         let evaluation_context_json =
             self.evaluation_context_json_for_role(attempt, EvaluationContextRole::CodeReviewer)?;
+        let retry_diagnostic_section = retry_diagnostic
+            .map(|summary| format!("\n上一轮 role run 诊断摘要:\n{}\n", summary))
+            .unwrap_or_default();
         Ok(format!(
             "Coding Workspace CodeReviewer\n\
              {}\n\
@@ -3689,6 +3707,7 @@ impl CodingWorkspaceEngine {
              \n原始需求上下文:\n````markdown\n{}\n````\n\
              \nEvaluationContextPack:\n````json\n{}\n````\n\
              \ngit diff:\n````diff\n{}\n````\n\
+             {}\
              \n只输出 JSON：{{\"verdict\":\"approve|request_changes|blocked\",\"summary\":\"...\",\"findings\":[...]}}\n",
             provider_runtime_contract("CodeReviewer"),
             attempt.project_id,
@@ -3701,7 +3720,8 @@ impl CodingWorkspaceEngine {
                 || "未找到 Work Item markdown，上下文仅包含 attempt 元数据。".to_string()
             ),
             evaluation_context_json,
-            truncate_prompt_section(&diff, 30_000)
+            truncate_prompt_section(&diff, 30_000),
+            retry_diagnostic_section
         ))
     }
 
@@ -3710,6 +3730,7 @@ impl CodingWorkspaceEngine {
         attempt: &CodingExecutionAttempt,
         review_request: &ReviewRequest,
         worktree_path: &Path,
+        retry_diagnostic: Option<&str>,
     ) -> Result<String, CodingWorkspaceEngineError> {
         let diff = self
             ._git_service
@@ -3718,6 +3739,9 @@ impl CodingWorkspaceEngine {
         let work_item = self.work_item_markdown_for_attempt(attempt)?;
         let evaluation_context_json = self
             .evaluation_context_json_for_role(attempt, EvaluationContextRole::InternalReviewer)?;
+        let retry_diagnostic_section = retry_diagnostic
+            .map(|summary| format!("\n上一轮 role run 诊断摘要:\n{}\n", summary))
+            .unwrap_or_default();
         Ok(format!(
             "Coding Workspace InternalReviewer\n\
              {}\n\
@@ -3733,6 +3757,7 @@ impl CodingWorkspaceEngine {
              \n功能需求上下文:\n````markdown\n{}\n````\n\
              \nEvaluationContextPack:\n````json\n{}\n````\n\
              \n完整变更 git diff:\n````diff\n{}\n````\n\
+             {}\
              \n输出要求:\n\
              - 分析影响范围（影响范围/impact_scope）。\n\
              - 给出 PR description 预览。\n\
@@ -3752,7 +3777,8 @@ impl CodingWorkspaceEngine {
                 || "未找到 Work Item markdown，上下文仅包含 attempt 元数据。".to_string()
             ),
             evaluation_context_json,
-            truncate_prompt_section(&diff, 30_000)
+            truncate_prompt_section(&diff, 30_000),
+            retry_diagnostic_section
         ))
     }
 
@@ -3767,6 +3793,24 @@ impl CodingWorkspaceEngine {
                 "serialize_evaluation_context_failed: {error}"
             ))
         })
+    }
+
+    fn retry_diagnostic_for_previous_run(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        role_run: &CodingRoleRun,
+    ) -> Result<Option<String>, CodingWorkspaceEngineError> {
+        let Some(previous_run_id) = role_run.supersedes_run_id.as_deref() else {
+            return Ok(None);
+        };
+        self.store
+            .role_run_retry_diagnostic_summary(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                previous_run_id,
+            )
+            .map_err(CodingWorkspaceEngineError::Store)
     }
 
     fn work_item_markdown_for_attempt(
@@ -4556,7 +4600,11 @@ fn build_rework_prompt(
     rework_round: u32,
     context_notes: &ReworkContextNoteInput,
     evaluation_context_json: &str,
+    retry_diagnostic: Option<&str>,
 ) -> String {
+    let retry_diagnostic_section = retry_diagnostic
+        .map(|summary| format!("\n上一轮 Analyst role run 诊断摘要:\n{}\n", summary))
+        .unwrap_or_default();
     format!(
         "CRITICAL: Return ONLY a single JSON object. No markdown, no explanations, no validation reports, no tables.\n\
          Coding Workspace Rework 分析官\n\
@@ -4578,6 +4626,7 @@ fn build_rework_prompt(
          \n上一阶段 summary/evidence:\n{}\n\
          \n本轮新增 ContextNote:\n{}\n\
          \nEvaluationContextPack:\n````json\n{}\n````\n\
+         {}\
          \nCRITICAL: Return ONLY a single JSON object. Do not summarize validation. Do not include markdown.\n\
          END OF INSTRUCTIONS: output JSON only.",
         provider_runtime_contract("Analyst"),
@@ -4591,7 +4640,8 @@ fn build_rework_prompt(
         context_notes.truncated,
         evidence,
         context_notes.text,
-        evaluation_context_json
+        evaluation_context_json,
+        retry_diagnostic_section
     )
 }
 
@@ -6219,6 +6269,7 @@ mod tests {
             1,
             &context_notes,
             "{}",
+            None,
         );
 
         assert!(prompt.contains("[openspec_contract]"));

@@ -161,7 +161,19 @@ pub fn build_tester_system_prompt(
 pub fn build_tester_plan_prompt(
     attempt: &CodingExecutionAttempt,
     evaluation_context_json: &str,
+    retry_diagnostic: Option<&str>,
 ) -> String {
+    let retry_diagnostic_section = retry_diagnostic
+        .map(|summary| {
+            format!(
+                "[retry_diagnostic]\n\
+                 以下为上一轮 role run 的压缩诊断摘要，只用于规划本轮测试；不要把这段内容原样放入最终 JSON。\n\
+                 过程进度通过 provider events 实时输出，最终回答仍必须是 TestPlan JSON。\n\
+                 \n{}\n",
+                summary
+            )
+        })
+        .unwrap_or_default();
     format!(
         "CRITICAL: Return ONLY a single JSON object. No markdown, no explanations, no validation reports, no tables.\n\
          Tester Provider Runtime\n\
@@ -199,6 +211,8 @@ pub fn build_tester_plan_prompt(
          Evaluation Context JSON:\n\
          ```json\n{}\n```\n\
          \n\
+         {}\
+         \n\
          CRITICAL: Return ONLY a single JSON object. Do not summarize validation. Do not include markdown.\n\
          END OF INSTRUCTIONS: output JSON only.",
         attempt.project_id,
@@ -206,7 +220,8 @@ pub fn build_tester_plan_prompt(
         attempt.work_item_id,
         attempt.id,
         attempt.branch_name,
-        evaluation_context_json
+        evaluation_context_json,
+        retry_diagnostic_section
     )
 }
 
@@ -893,6 +908,7 @@ mod tests {
         let prompt = build_tester_plan_prompt(
             &test_attempt(),
             r#"{"story_specs":[],"design_specs":[],"work_item":{}}"#,
+            None,
         );
 
         assert!(prompt.contains("plan_tests"));

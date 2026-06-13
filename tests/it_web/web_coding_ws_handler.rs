@@ -3711,6 +3711,20 @@ async fn coding_ws_retry_analyst_resumes_rework_from_persisted_evidence() {
             vec!["artifacts/rework/analyst_evidence_0001.txt".to_string()],
         )
         .expect("add evidence ref");
+    store
+        .append_role_run_event(
+            &store
+                .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+                .expect("get attempt"),
+            &first_run,
+            CodingRoleRunEventType::ExecutionEvent,
+            serde_json::json!({
+                "title": "Analyst task update",
+                "status": "running",
+                "detail": "No tasks found"
+            }),
+        )
+        .expect("append analyst event");
 
     store
         .create_blocked_gate(CreateBlockedGateInput {
@@ -3777,8 +3791,11 @@ async fn coding_ws_retry_analyst_resumes_rework_from_persisted_evidence() {
         assert!(
             prompts
                 .iter()
-                .any(|prompt| prompt.contains("persisted testing evidence")),
-            "expected analyst prompt to contain persisted evidence"
+                .any(|prompt| prompt.contains("persisted testing evidence")
+                    && prompt.contains("[previous_role_run_diagnostic]")
+                    && prompt.contains("Analyst task update")
+                    && prompt.contains("No tasks found")),
+            "expected analyst prompt to contain persisted evidence and retry diagnostic"
         );
     }
 
@@ -3865,6 +3882,20 @@ async fn coding_ws_retry_internal_review_resumes_internal_reviewer_run() {
             Some("internal_review_blocked".to_string()),
         )
         .expect("block first run");
+    store
+        .append_role_run_event(
+            &store
+                .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+                .expect("get attempt"),
+            &first_run,
+            CodingRoleRunEventType::ExecutionEvent,
+            serde_json::json!({
+                "title": "Internal reviewer task update",
+                "status": "blocked",
+                "detail": "internal_review_blocked"
+            }),
+        )
+        .expect("append internal reviewer event");
     store
         .create_blocked_gate(CreateBlockedGateInput {
             attempt_id: "coding_attempt_0001".to_string(),
@@ -3959,8 +3990,10 @@ async fn coding_ws_retry_internal_review_resumes_internal_reviewer_run() {
         assert!(
             prompts
                 .iter()
-                .any(|prompt| prompt.contains("review_request_0001")),
-            "expected internal reviewer prompt to contain review request"
+                .any(|prompt| prompt.contains("review_request_0001")
+                    && prompt.contains("[previous_role_run_diagnostic]")
+                    && prompt.contains("internal_review_blocked")),
+            "expected internal reviewer prompt to contain review request and retry diagnostic"
         );
     }
 
