@@ -1,6 +1,10 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import type { CodingRoleRun, CodingTimelineNode } from "../../api/types";
+import type {
+  CodingRoleRun,
+  CodingRoleRunEventPreview,
+  CodingTimelineNode,
+} from "../../api/types";
 import { RoleRunHistoryPanel } from "./RoleRunHistoryPanel";
 
 describe("RoleRunHistoryPanel", () => {
@@ -174,7 +178,7 @@ function node(id: string, title: string): CodingTimelineNode {
   };
 }
 
-function recentEvent(sequence: number, detail: string): CodingRoleRun["recent_events"][number] {
+function recentEvent(sequence: number, detail: string): CodingRoleRunEventPreview {
   return {
     sequence,
     event_type: "execution_event",
