@@ -453,6 +453,8 @@ export type CodingGateActionType =
   | "provide_context"
   | "manual_continue"
   | "retry_review"
+  | "retry_analyst"
+  | "retry_internal_review"
   | "send_raw_output_to_analyst";
 export type CodingGateKind = "permission" | "stage_gate" | "blocked" | "final_confirm";
 

@@ -4212,21 +4212,10 @@ fn analyst_human_gate_actions(
         }
     }
     if actions.is_empty() {
-        actions.push(CodingGateAction {
-            action_id: "provide_context".to_string(),
-            label: "补充上下文".to_string(),
-            action_type: CodingGateActionType::ProvideContext,
-        });
-        actions.push(CodingGateAction {
-            action_id: "manual_continue".to_string(),
-            label: "人工继续".to_string(),
-            action_type: CodingGateActionType::ManualContinue,
-        });
-        actions.push(CodingGateAction {
-            action_id: "abort".to_string(),
-            label: "终止".to_string(),
-            action_type: CodingGateActionType::Abort,
-        });
+        actions.push(coding_gate_action_for_id("retry_analyst").expect("retry analyst action"));
+        actions.push(coding_gate_action_for_id("provide_context").expect("provide context action"));
+        actions.push(coding_gate_action_for_id("manual_continue").expect("manual continue action"));
+        actions.push(coding_gate_action_for_id("abort").expect("abort action"));
     }
     actions
 }
@@ -4262,6 +4251,16 @@ fn coding_gate_action_for_id(action_id: &str) -> Option<CodingGateAction> {
             action_id: "retry_review".to_string(),
             label: "重试审查".to_string(),
             action_type: CodingGateActionType::RetryReview,
+        }),
+        "retry_analyst" => Some(CodingGateAction {
+            action_id: "retry_analyst".to_string(),
+            label: "重试 Analyst".to_string(),
+            action_type: CodingGateActionType::RetryAnalyst,
+        }),
+        "retry_internal_review" => Some(CodingGateAction {
+            action_id: "retry_internal_review".to_string(),
+            label: "重试 Internal Review".to_string(),
+            action_type: CodingGateActionType::RetryInternalReview,
         }),
         "send_raw_output_to_analyst" => Some(CodingGateAction {
             action_id: "send_raw_output_to_analyst".to_string(),

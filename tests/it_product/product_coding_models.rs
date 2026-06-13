@@ -433,3 +433,17 @@ fn review_request_timeline_and_gate_actions_use_stable_wire_values() {
         "retry_push"
     );
 }
+
+#[test]
+fn coding_gate_action_type_round_trips_retry_analyst() {
+    let action = CodingGateAction {
+        action_id: "retry_analyst".to_string(),
+        label: "重试 Analyst".to_string(),
+        action_type: CodingGateActionType::RetryAnalyst,
+    };
+
+    let value = serde_json::to_value(&action).expect("serialize action");
+    assert_eq!(value["action_type"], "retry_analyst");
+    let decoded: CodingGateAction = serde_json::from_value(value).expect("decode action");
+    assert_eq!(decoded.action_type, CodingGateActionType::RetryAnalyst);
+}

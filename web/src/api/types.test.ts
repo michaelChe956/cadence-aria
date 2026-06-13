@@ -296,4 +296,14 @@ describe("workspace websocket protocol types", () => {
     expect(gate.reason_code).toBe("missing_required_test_step");
     expect(gate.available_actions[0].action_type).toBe("rerun_missing_steps");
   });
+
+  it("accepts retry analyst gate actions", () => {
+    const action: import("./types").CodingGateAction = {
+      action_id: "retry_analyst",
+      label: "重试 Analyst",
+      action_type: "retry_analyst",
+    };
+
+    expect(action.action_type).toBe("retry_analyst");
+  });
 });

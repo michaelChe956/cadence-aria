@@ -778,6 +778,8 @@ pub enum CodingGateActionType {
     ProvideContext,
     ManualContinue,
     RetryReview,
+    RetryAnalyst,
+    RetryInternalReview,
     SendRawOutputToAnalyst,
 }
 

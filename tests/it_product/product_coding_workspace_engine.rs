@@ -4467,3 +4467,38 @@ impl StreamingProviderAdapter for InternalReviewStreamingProvider {
         Ok(rx)
     }
 }
+
+#[tokio::test]
+async fn analyst_human_gate_offers_retry_analyst_action() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    init_repo(&worktree);
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let mut input = create_input();
+    input.worktree_path = Some(worktree);
+    let attempt = store.create_attempt(input).expect("create attempt");
+    store
+        .update_attempt_status("project_0001", "issue_0001", &attempt.id, CodingAttemptStatus::Running)
+        .expect("running");
+    let (tx, _rx) = mpsc::channel(16);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let provider = InputCapturingProvider {
+        input: Arc::new(Mutex::new(None)),
+        output: "Analyst prose without JSON".to_string(),
+    };
+
+    engine
+        .execute_rework(&attempt, "testing blocked evidence", &provider)
+        .await
+        .expect("execute analyst");
+
+    let gates = store
+        .list_open_blocked_gates("project_0001", "issue_0001", &attempt.id)
+        .expect("gates");
+    assert_eq!(gates.len(), 1);
+    assert_eq!(gates[0].role, Some(CodingProviderRole::Analyst));
+    assert!(gates[0].available_actions.iter().any(|action| {
+        action.action_id == "retry_analyst"
+            && action.action_type == CodingGateActionType::RetryAnalyst
+    }));
+}
