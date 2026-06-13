@@ -772,6 +772,71 @@ async fn tester_plan_timeout_blocks_with_retry_test_plan_gate() {
 }
 
 #[tokio::test]
+async fn tester_plan_start_timeout_blocks_with_retry_test_plan_gate() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            ..create_input()
+        })
+        .expect("create attempt");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    let (tx, _rx) = mpsc::channel(64);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+
+    let result = tokio::time::timeout(
+        Duration::from_millis(250),
+        engine.execute_testing_with_provider(
+            &attempt,
+            &NeverStartingTesterProvider,
+            &CodingExecutionContext::default(),
+            &[],
+            TesterAgentOptions {
+                timeout: Duration::from_millis(20),
+                failure_limit: 3,
+            },
+        ),
+    )
+    .await
+    .expect("engine should return before outer timeout");
+    let report = result.expect("start timeout becomes blocked report");
+
+    assert_eq!(report.overall_status, TestingOverallStatus::Blocked);
+    assert!(
+        report
+            .context_warnings
+            .contains(&"plan_tests_timeout".to_string())
+    );
+    let runs = store
+        .list_role_runs("project_0001", "issue_0001", &attempt.id)
+        .expect("role runs");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].status, CodingRoleRunStatus::Blocked);
+    assert_eq!(runs[0].reason_code.as_deref(), Some("plan_tests_timeout"));
+    let gates = store
+        .list_open_blocked_gates("project_0001", "issue_0001", &attempt.id)
+        .expect("gates");
+    assert_eq!(gates.len(), 1);
+    assert_eq!(gates[0].reason_code.as_deref(), Some("plan_tests_timeout"));
+    assert!(
+        gates[0]
+            .available_actions
+            .iter()
+            .any(|action| action.action_id == "retry_test_plan")
+    );
+}
+
+#[tokio::test]
 async fn retry_test_plan_supersedes_latest_testing_role_run_and_resumes_testing() {
     let root = tempdir().expect("root");
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
@@ -4171,6 +4236,29 @@ impl StreamingProviderAdapter for HangingPlanTesterProvider {
     }
 }
 
+struct NeverStartingTesterProvider;
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for NeverStartingTesterProvider {
+    fn supports_provider_driven_testing(&self) -> bool {
+        true
+    }
+
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        cancel.cancelled().await;
+        Err(ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "provider start was cancelled",
+            1,
+        ))
+    }
+}
+
 struct EventEmittingCodingProvider;
 
 #[async_trait::async_trait]
@@ -4478,7 +4566,12 @@ async fn analyst_human_gate_offers_retry_analyst_action() {
     input.worktree_path = Some(worktree);
     let attempt = store.create_attempt(input).expect("create attempt");
     store
-        .update_attempt_status("project_0001", "issue_0001", &attempt.id, CodingAttemptStatus::Running)
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
         .expect("running");
     let (tx, _rx) = mpsc::channel(16);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
@@ -4513,7 +4606,12 @@ async fn execute_rework_binds_analyst_decision_chat_and_gate_to_role_run() {
     input.worktree_path = Some(worktree);
     let attempt = store.create_attempt(input).expect("create attempt");
     store
-        .update_attempt_status("project_0001", "issue_0001", &attempt.id, CodingAttemptStatus::Running)
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
         .expect("running");
     let (tx, _rx) = mpsc::channel(32);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
@@ -4534,14 +4632,18 @@ async fn execute_rework_binds_analyst_decision_chat_and_gate_to_role_run() {
     assert_eq!(runs[0].stage, CodingExecutionStage::Rework);
     assert_eq!(runs[0].role, CodingProviderRole::Analyst);
     assert_eq!(runs[0].status, CodingRoleRunStatus::Blocked);
-    assert!(runs[0]
-        .raw_provider_output_refs
-        .iter()
-        .any(|value| value.contains("analyst_decision")));
-    assert!(runs[0]
-        .artifact_refs
-        .iter()
-        .any(|value| value.contains("analyst_evidence")));
+    assert!(
+        runs[0]
+            .raw_provider_output_refs
+            .iter()
+            .any(|value| value.contains("analyst_decision"))
+    );
+    assert!(
+        runs[0]
+            .artifact_refs
+            .iter()
+            .any(|value| value.contains("analyst_evidence"))
+    );
 
     let decision = store
         .latest_analyst_decision("project_0001", "issue_0001", &attempt.id)
@@ -4555,7 +4657,8 @@ async fn execute_rework_binds_analyst_decision_chat_and_gate_to_role_run() {
         .expect("chat entries");
     assert!(entries.iter().any(|entry| {
         entry.metadata.as_ref().is_some_and(|metadata| {
-            metadata.get("role_run_id").and_then(|value| value.as_str()) == Some(runs[0].id.as_str())
+            metadata.get("role_run_id").and_then(|value| value.as_str())
+                == Some(runs[0].id.as_str())
                 && metadata.get("run_no").and_then(|value| value.as_u64()) == Some(1)
         })
     }));
@@ -4571,7 +4674,12 @@ async fn retry_analyst_gate_response_supersedes_latest_analyst_run() {
     input.worktree_path = Some(worktree);
     let attempt = store.create_attempt(input).expect("create attempt");
     store
-        .update_attempt_status("project_0001", "issue_0001", &attempt.id, CodingAttemptStatus::Running)
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
         .expect("running");
     let (tx, _rx) = mpsc::channel(32);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
@@ -4626,7 +4734,12 @@ async fn retry_analyst_gate_response_supersedes_latest_analyst_run() {
         .expect("create gate");
 
     store
-        .update_attempt_status("project_0001", "issue_0001", &attempt.id, CodingAttemptStatus::Blocked)
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Blocked,
+        )
         .expect("block attempt");
 
     let updated = engine
@@ -4648,11 +4761,176 @@ async fn retry_analyst_gate_response_supersedes_latest_analyst_run() {
         .list_role_runs("project_0001", "issue_0001", &attempt.id)
         .expect("role runs");
     assert_eq!(runs.len(), 2);
-    let first = runs.iter().find(|run| run.id == first_run.id).expect("first run");
+    let first = runs
+        .iter()
+        .find(|run| run.id == first_run.id)
+        .expect("first run");
     assert_eq!(first.status, CodingRoleRunStatus::Superseded);
-    let second = runs.iter().find(|run| run.id != first_run.id).expect("second run");
+    let second = runs
+        .iter()
+        .find(|run| run.id != first_run.id)
+        .expect("second run");
     assert_eq!(second.status, CodingRoleRunStatus::Running);
     assert_eq!(second.trigger, CodingRoleRunTrigger::RetryAnalyst);
-    assert_eq!(second.supersedes_run_id.as_deref(), Some(first_run.id.as_str()));
-    assert_eq!(second.artifact_refs, vec!["artifacts/rework/analyst_evidence_0001.txt".to_string()]);
+    assert_eq!(
+        second.supersedes_run_id.as_deref(),
+        Some(first_run.id.as_str())
+    );
+    assert_eq!(
+        second.artifact_refs,
+        vec!["artifacts/rework/analyst_evidence_0001.txt".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn execute_code_review_binds_report_chat_and_status_to_role_run() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    init_repo(&worktree);
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let mut input = create_input();
+    input.worktree_path = Some(worktree);
+    let attempt = store.create_attempt(input).expect("create attempt");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    store
+        .update_attempt_stage(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingExecutionStage::CodeReview,
+        )
+        .expect("set stage");
+    let (tx, _rx) = mpsc::channel(32);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let provider = InputCapturingProvider {
+        input: Arc::new(Mutex::new(None)),
+        output: r#"{"verdict":"approve","summary":"review ok","findings":[]}"#.to_string(),
+    };
+
+    engine
+        .execute_code_review(&attempt, &provider)
+        .await
+        .expect("execute code review");
+
+    let runs = store
+        .list_role_runs("project_0001", "issue_0001", &attempt.id)
+        .expect("role runs");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].stage, CodingExecutionStage::CodeReview);
+    assert_eq!(runs[0].role, CodingProviderRole::CodeReviewer);
+    assert_eq!(runs[0].status, CodingRoleRunStatus::Completed);
+    assert_eq!(runs[0].run_no, 1);
+    assert!(
+        runs[0]
+            .raw_provider_output_refs
+            .iter()
+            .any(|value| value.contains("code_review"))
+    );
+
+    let reports = store
+        .list_code_review_reports("project_0001", "issue_0001", &attempt.id)
+        .expect("reports");
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0].role_run_id.as_deref(), Some(runs[0].id.as_str()));
+    assert_eq!(reports[0].run_no, Some(1));
+
+    let entries = store
+        .list_chat_entries("project_0001", "issue_0001", &attempt.id)
+        .expect("chat entries");
+    assert!(entries.iter().any(|entry| {
+        entry.metadata.as_ref().is_some_and(|metadata| {
+            metadata.get("source").and_then(|value| value.as_str()) == Some("code_review")
+                && metadata.get("role_run_id").and_then(|value| value.as_str())
+                    == Some(runs[0].id.as_str())
+                && metadata.get("run_no").and_then(|value| value.as_u64()) == Some(1)
+        })
+    }));
+}
+
+#[tokio::test]
+async fn execute_internal_pr_review_binds_review_chat_and_status_to_role_run() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    init_repo(&worktree);
+    fs::write(worktree.join("src.txt"), "hello\ninternal reviewed\n").expect("modify file");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let mut input = create_input();
+    input.worktree_path = Some(worktree);
+    input.base_branch = "HEAD".to_string();
+    let attempt = store.create_attempt(input).expect("create attempt");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    store
+        .update_attempt_stage(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingExecutionStage::InternalPrReview,
+        )
+        .expect("set stage");
+    store
+        .save_review_request(&sample_review_request(&attempt.id))
+        .expect("save review request");
+    let (tx, _rx) = mpsc::channel(32);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let provider = InputCapturingProvider {
+        input: Arc::new(Mutex::new(None)),
+        output: r#"{"verdict":"approve","summary":"internal ok","findings":[],"impact_scope":["src/lib.rs"],"pr_description":"PR body","commit_message_suggestion":"feat: work"}"#.to_string(),
+    };
+
+    engine
+        .execute_internal_pr_review(&attempt, &provider)
+        .await
+        .expect("execute internal review");
+
+    let runs = store
+        .list_role_runs("project_0001", "issue_0001", &attempt.id)
+        .expect("role runs");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].stage, CodingExecutionStage::InternalPrReview);
+    assert_eq!(runs[0].role, CodingProviderRole::InternalReviewer);
+    assert_eq!(runs[0].status, CodingRoleRunStatus::Completed);
+    assert_eq!(runs[0].run_no, 1);
+    assert!(
+        runs[0]
+            .raw_provider_output_refs
+            .iter()
+            .any(|value| value.contains("internal_pr_review"))
+    );
+
+    let reviews = store
+        .list_internal_pr_reviews("project_0001", "issue_0001", &attempt.id)
+        .expect("internal reviews");
+    assert_eq!(reviews.len(), 1);
+    assert_eq!(reviews[0].role_run_id.as_deref(), Some(runs[0].id.as_str()));
+    assert_eq!(reviews[0].run_no, Some(1));
+
+    let entries = store
+        .list_chat_entries("project_0001", "issue_0001", &attempt.id)
+        .expect("chat entries");
+    assert!(entries.iter().any(|entry| {
+        entry.metadata.as_ref().is_some_and(|metadata| {
+            metadata.get("source").and_then(|value| value.as_str()) == Some("internal_pr_review")
+                && metadata.get("role_run_id").and_then(|value| value.as_str())
+                    == Some(runs[0].id.as_str())
+                && metadata.get("run_no").and_then(|value| value.as_u64()) == Some(1)
+                && metadata
+                    .get("impact_scope")
+                    .and_then(|value| value.as_array())
+                    .is_some_and(|scope| scope.iter().any(|value| value == "src/lib.rs"))
+        })
+    }));
 }

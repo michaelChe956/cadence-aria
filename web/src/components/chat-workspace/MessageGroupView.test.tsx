@@ -112,6 +112,39 @@ describe("MessageGroupView", () => {
     fireEvent.click(screen.getByRole("button", { name: /git diff --stat/ }));
     expect(screen.getByText("changed files")).toBeInTheDocument();
   });
+
+  it.each([
+    ["tester", "Tester · Fake · Run #2"],
+    ["analyst", "Analyst · Fake · Run #3"],
+    ["code_reviewer", "Code Reviewer · Fake · Run #4"],
+    ["internal_reviewer", "Internal Reviewer · Fake · Run #5"],
+  ] as const)("shows run number in %s group title", (role, expectedTitle) => {
+    const runNo = Number(expectedTitle.match(/#(\d+)/)?.[1]);
+    render(
+      <MessageGroupView
+        group={{
+          id: `group-${role}`,
+          nodeId: "coding_node_0001",
+          role,
+          primaryEntry: makeEntry(
+            `entry-${role}`,
+            "provider_stream",
+            role,
+            "Readable provider output",
+            {
+              provider: "fake",
+              role_run_id: `coding_role_run_${runNo}`,
+              run_no: runNo,
+            },
+          ),
+          inlineEvents: [],
+          interruptEntries: [],
+        }}
+      />,
+    );
+
+    expect(screen.getByText(expectedTitle)).toBeInTheDocument();
+  });
 });
 
 function makeEntry(

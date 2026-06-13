@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -14,12 +15,19 @@ use crate::cross_cutting::streaming_provider::{
     RiskLevel, StreamChunk, StreamingProviderAdapter, StreamingProviderInput,
 };
 use crate::product::app_paths::ProductAppPaths;
+use crate::product::coding_attempt_store::{CodingAttemptStore, CreateBlockedGateInput};
+use crate::product::coding_models::{
+    CodingAgentRole, CodingAttemptStatus, CodingChatEntry, CodingEntryType, CodingExecutionAttempt,
+    CodingExecutionStage as FixtureStage, CodingGateAction, CodingGateActionType,
+    CodingProviderRole, CodingRoleRunStatus, CodingRoleRunTrigger, CodingTimelineNode,
+    CodingTimelineNodeStatus, PushStatus, RemoteKind, ReviewRequest, ReviewRequestKind,
+};
 use crate::product::issue_store::{CreateProductIssueInput, IssueStore};
 use crate::product::lifecycle_store::{
     CreateStorySpecInput, CreateWorkspaceSessionInput, LifecycleStore,
 };
 use crate::product::models::{
-    AgentRole, NodeDetail, ProviderName, ProviderSnapshot, WorkspaceType,
+    AgentRole, NodeDetail, ProviderName, ProviderSnapshot, WorkItemPlanStatus, WorkspaceType,
 };
 use crate::product::project_store::{CreateProjectInput, ProjectStore};
 use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
@@ -409,6 +417,431 @@ fn provider_name(provider: &ProviderName) -> &'static str {
         ProviderName::Codex => "codex",
         ProviderName::Fake => "fake",
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CodingRoleRunFixtureRequest {
+    #[serde(default = "default_blocked_stage")]
+    pub blocked_stage: String,
+}
+
+fn default_blocked_stage() -> String {
+    "rework".to_string()
+}
+
+static CODING_FIXTURE_ATTEMPT_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+pub async fn seed_coding_role_run_fixture(
+    State(state): State<WebAppState>,
+    Json(request): Json<CodingRoleRunFixtureRequest>,
+) -> Json<serde_json::Value> {
+    match create_coding_role_run_fixture(
+        ProductAppPaths::new(state.workspace_root.join(".aria")),
+        &state.workspace_root,
+        &request.blocked_stage,
+    ) {
+        Ok(value) => Json(value),
+        Err(error) => Json(json!({"error": error.to_string()})),
+    }
+}
+
+fn create_coding_role_run_fixture(
+    app_paths: ProductAppPaths,
+    workspace_root: &std::path::Path,
+    blocked_stage: &str,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let repo_path = workspace_root.join("coding-role-run-fixture-repo");
+    init_git_repo(&repo_path)?;
+
+    let project = ProjectStore::new(app_paths.clone()).create(CreateProjectInput {
+        name: "Coding Role Run Fixture".to_string(),
+        description: Some("Role run history E2E fixture".to_string()),
+    })?;
+    let repository = RepositoryStore::new(app_paths.clone()).create(CreateRepositoryInput {
+        project_id: project.id.clone(),
+        name: "Fixture Repo".to_string(),
+        path: repo_path.clone(),
+        default_policy_preset: Some("manual-write".to_string()),
+        default_provider_mode: Some("fake".to_string()),
+    })?;
+    let issue = IssueStore::new(app_paths.clone()).create(CreateProductIssueInput {
+        project_id: project.id.clone(),
+        repo_id: Some(repository.id.clone()),
+        title: "Coding Role Run Issue".to_string(),
+        description: Some("Issue for role run history E2E".to_string()),
+        change_id: None,
+    })?;
+
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    let story = lifecycle.create_story_spec(CreateStorySpecInput {
+        project_id: project.id.clone(),
+        issue_id: issue.id.clone(),
+        repository_id: repository.id.clone(),
+        title: "Fixture Story".to_string(),
+    })?;
+    let work_item =
+        lifecycle.create_work_item(crate::product::lifecycle_store::CreateWorkItemInput {
+            project_id: project.id.clone(),
+            issue_id: issue.id.clone(),
+            repository_id: repository.id.clone(),
+            story_spec_ids: vec![story.id],
+            design_spec_ids: Vec::new(),
+            title: "Fixture Work Item".to_string(),
+        })?;
+    lifecycle.update_work_item_plan_status(
+        &project.id,
+        &issue.id,
+        &work_item.id,
+        WorkItemPlanStatus::Confirmed,
+    )?;
+
+    let store = CodingAttemptStore::new(app_paths);
+    let provider_snapshot = ProviderConfigSnapshot {
+        author: ProviderName::Fake,
+        reviewer: Some(ProviderName::Fake),
+        review_rounds: 1,
+    };
+    let attempt_index = CODING_FIXTURE_ATTEMPT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let attempt_id = format!("coding_attempt_{attempt_index:04}");
+    let now = chrono::Utc::now().to_rfc3339();
+    let blocked_stage_internal = blocked_stage == "internal_pr_review";
+    let attempt = CodingExecutionAttempt {
+        id: attempt_id,
+        project_id: project.id.clone(),
+        issue_id: issue.id.clone(),
+        work_item_id: work_item.id.clone(),
+        attempt_no: 1,
+        status: CodingAttemptStatus::Blocked,
+        stage: if blocked_stage_internal {
+            FixtureStage::InternalPrReview
+        } else {
+            FixtureStage::Rework
+        },
+        base_branch: "HEAD".to_string(),
+        branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+        worktree_path: Some(repo_path.clone()),
+        provider_config_snapshot: provider_snapshot.clone(),
+        rework_count: if blocked_stage_internal { 0 } else { 1 },
+        max_auto_rework: 2,
+        head_commit: None,
+        pushed_remote: None,
+        review_request_id: None,
+        provider_conversations: Vec::new(),
+        created_at: now.clone(),
+        updated_at: now.clone(),
+        completed_at: None,
+    };
+    store.save_coding_attempt(&attempt)?;
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let testing_node = CodingTimelineNode {
+        id: "coding_node_0001".to_string(),
+        attempt_id: attempt.id.clone(),
+        stage: FixtureStage::Testing,
+        title: "执行测试".to_string(),
+        status: CodingTimelineNodeStatus::Completed,
+        agent_role: Some(CodingAgentRole::Tester),
+        summary: Some("测试完成".to_string()),
+        started_at: now.clone(),
+        completed_at: Some(now.clone()),
+        artifact_refs: Vec::new(),
+    };
+    store.save_timeline_node(testing_node.clone())?;
+
+    let tester_raw = store.save_provider_raw_output(
+        &attempt.id,
+        FixtureStage::Testing,
+        "plan_tests",
+        "fixture tester raw output",
+    )?;
+    let tester_run = store.create_role_run(
+        &attempt,
+        FixtureStage::Testing,
+        CodingProviderRole::Tester,
+        CodingRoleRunTrigger::Initial,
+        Some("coding_node_0001".to_string()),
+    )?;
+    store.update_role_run_refs(
+        &project.id,
+        &issue.id,
+        &attempt.id,
+        &tester_run.id,
+        vec![tester_raw],
+        Vec::new(),
+    )?;
+    store.update_role_run_status(
+        &project.id,
+        &issue.id,
+        &attempt.id,
+        &tester_run.id,
+        CodingRoleRunStatus::Completed,
+        None,
+    )?;
+
+    store.save_chat_entry(&CodingChatEntry {
+        id: "coding_node_0001_tester_report".to_string(),
+        attempt_id: attempt.id.clone(),
+        node_id: Some("coding_node_0001".to_string()),
+        role: CodingAgentRole::Tester,
+        entry_type: CodingEntryType::AssistantMessage,
+        content: Some("fixture tester output".to_string()),
+        metadata: Some(json!({
+            "source": "testing_result",
+            "role_run_id": tester_run.id,
+            "run_no": tester_run.run_no,
+        })),
+        created_at: now.clone(),
+    })?;
+
+    if blocked_stage == "internal_pr_review" {
+        let review_request = ReviewRequest {
+            id: "review_request_0001".to_string(),
+            attempt_id: attempt.id.clone(),
+            kind: ReviewRequestKind::GitBranchOnly,
+            remote_kind: RemoteKind::GenericGit,
+            remote: "origin".to_string(),
+            base_branch: "HEAD".to_string(),
+            branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+            commit_sha: "e2e-fixture-commit".to_string(),
+            push_status: PushStatus::Pushed,
+            external_url: None,
+            manual_instructions: vec!["E2E fixture review request".to_string()],
+            created_at: now.clone(),
+            updated_at: now.clone(),
+        };
+        store.save_review_request(&review_request)?;
+
+        let internal_node = CodingTimelineNode {
+            id: "coding_node_0002".to_string(),
+            attempt_id: attempt.id.clone(),
+            stage: FixtureStage::InternalPrReview,
+            title: "内部 PR 审查".to_string(),
+            status: CodingTimelineNodeStatus::Blocked,
+            agent_role: Some(CodingAgentRole::Reviewer),
+            summary: Some("内部审查阻塞".to_string()),
+            started_at: now.clone(),
+            completed_at: None,
+            artifact_refs: Vec::new(),
+        };
+        store.save_timeline_node(internal_node.clone())?;
+
+        let internal_raw = store.save_provider_raw_output(
+            &attempt.id,
+            FixtureStage::InternalPrReview,
+            "internal_pr_review",
+            "fixture internal review raw output",
+        )?;
+        let internal_run = store.create_role_run(
+            &attempt,
+            FixtureStage::InternalPrReview,
+            CodingProviderRole::InternalReviewer,
+            CodingRoleRunTrigger::Initial,
+            Some("coding_node_0002".to_string()),
+        )?;
+        store.update_role_run_refs(
+            &project.id,
+            &issue.id,
+            &attempt.id,
+            &internal_run.id,
+            vec![internal_raw],
+            Vec::new(),
+        )?;
+        store.update_role_run_status(
+            &project.id,
+            &issue.id,
+            &attempt.id,
+            &internal_run.id,
+            CodingRoleRunStatus::Blocked,
+            Some("internal_review_blocked".to_string()),
+        )?;
+
+        store.save_chat_entry(&CodingChatEntry {
+            id: "coding_node_0002_internal_review".to_string(),
+            attempt_id: attempt.id.clone(),
+            node_id: Some("coding_node_0002".to_string()),
+            role: CodingAgentRole::Reviewer,
+            entry_type: CodingEntryType::AssistantMessage,
+            content: Some("fixture internal review blocked".to_string()),
+            metadata: Some(json!({
+                "source": "internal_pr_review",
+                "role_run_id": internal_run.id,
+                "run_no": internal_run.run_no,
+            })),
+            created_at: now.clone(),
+        })?;
+
+        store.create_blocked_gate(CreateBlockedGateInput {
+            attempt_id: attempt.id.clone(),
+            stage: FixtureStage::InternalPrReview,
+            node_id: Some("coding_node_0002".to_string()),
+            role: Some(CodingProviderRole::InternalReviewer),
+            title: "内部 PR 审查阻塞".to_string(),
+            description: "需要重试内部审查".to_string(),
+            reason_code: Some("internal_review_blocked".to_string()),
+            evidence_refs: Vec::new(),
+            raw_provider_output_ref: None,
+            available_actions: vec![
+                CodingGateAction {
+                    action_id: "retry_internal_review".to_string(),
+                    label: "重试审查".to_string(),
+                    action_type: CodingGateActionType::RetryInternalReview,
+                },
+                CodingGateAction {
+                    action_id: "manual_continue".to_string(),
+                    label: "人工继续".to_string(),
+                    action_type: CodingGateActionType::ManualContinue,
+                },
+                CodingGateAction {
+                    action_id: "abort".to_string(),
+                    label: "终止".to_string(),
+                    action_type: CodingGateActionType::Abort,
+                },
+            ],
+        })?;
+    } else {
+        let analyst_node = CodingTimelineNode {
+            id: "coding_node_0002".to_string(),
+            attempt_id: attempt.id.clone(),
+            stage: FixtureStage::Rework,
+            title: "Analyst 路由决策".to_string(),
+            status: CodingTimelineNodeStatus::Blocked,
+            agent_role: Some(CodingAgentRole::System),
+            summary: Some("需要人工处理".to_string()),
+            started_at: now.clone(),
+            completed_at: None,
+            artifact_refs: Vec::new(),
+        };
+        store.save_timeline_node(analyst_node.clone())?;
+
+        let analyst_evidence = store.save_provider_raw_output(
+            &attempt.id,
+            FixtureStage::Rework,
+            "analyst_evidence",
+            "fixture analyst evidence",
+        )?;
+        let analyst_run = store.create_role_run(
+            &attempt,
+            FixtureStage::Rework,
+            CodingProviderRole::Analyst,
+            CodingRoleRunTrigger::Initial,
+            Some("coding_node_0002".to_string()),
+        )?;
+        store.update_role_run_refs(
+            &project.id,
+            &issue.id,
+            &attempt.id,
+            &analyst_run.id,
+            Vec::new(),
+            vec![analyst_evidence],
+        )?;
+        store.update_role_run_status(
+            &project.id,
+            &issue.id,
+            &attempt.id,
+            &analyst_run.id,
+            CodingRoleRunStatus::Blocked,
+            Some("analyst_human_gate".to_string()),
+        )?;
+
+        store.save_chat_entry(&CodingChatEntry {
+            id: "coding_node_0002_analyst_verdict".to_string(),
+            attempt_id: attempt.id.clone(),
+            node_id: Some("coding_node_0002".to_string()),
+            role: CodingAgentRole::System,
+            entry_type: CodingEntryType::AnalystVerdict {
+                verdict: crate::product::coding_models::AnalystVerdict::NeedsFix,
+            },
+            content: Some("fixture analyst verdict".to_string()),
+            metadata: Some(json!({
+                "source": "rework",
+                "role_run_id": analyst_run.id,
+                "run_no": analyst_run.run_no,
+            })),
+            created_at: now.clone(),
+        })?;
+
+        store.create_blocked_gate(CreateBlockedGateInput {
+            attempt_id: attempt.id.clone(),
+            stage: FixtureStage::Rework,
+            node_id: Some("coding_node_0002".to_string()),
+            role: Some(CodingProviderRole::Analyst),
+            title: "Analyst human gate".to_string(),
+            description: "需要重跑 Analyst".to_string(),
+            reason_code: Some("analyst_human_gate".to_string()),
+            evidence_refs: vec!["provider-raw/rework/analyst_evidence_0001.txt".to_string()],
+            raw_provider_output_ref: None,
+            available_actions: vec![
+                CodingGateAction {
+                    action_id: "retry_analyst".to_string(),
+                    label: "重试 Analyst".to_string(),
+                    action_type: CodingGateActionType::RetryAnalyst,
+                },
+                CodingGateAction {
+                    action_id: "manual_continue".to_string(),
+                    label: "人工继续".to_string(),
+                    action_type: CodingGateActionType::ManualContinue,
+                },
+                CodingGateAction {
+                    action_id: "abort".to_string(),
+                    label: "终止".to_string(),
+                    action_type: CodingGateActionType::Abort,
+                },
+            ],
+        })?;
+    }
+
+    Ok(json!({
+        "status": "ok",
+        "project_id": project.id,
+        "issue_id": issue.id,
+        "attempt_id": attempt.id
+    }))
+}
+
+fn init_git_repo(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if !path.exists() {
+        std::fs::create_dir_all(path)?;
+    }
+    let has_commits = run_git_command_silent(path, &["rev-parse", "HEAD"]).is_ok();
+    if has_commits {
+        return Ok(());
+    }
+    run_git_command(path, &["init"])?;
+    run_git_command(path, &["config", "user.email", "fixture@example.com"])?;
+    run_git_command(path, &["config", "user.name", "Fixture"])?;
+    std::fs::write(path.join("README.md"), "# fixture\n")?;
+    run_git_command(path, &["add", "."])?;
+    run_git_command(path, &["commit", "-m", "initial"])?;
+    Ok(())
+}
+
+fn run_git_command_silent(
+    cwd: &std::path::Path,
+    args: &[&str],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let output = std::process::Command::new("git")
+        .current_dir(cwd)
+        .args(args)
+        .output()?;
+    if !output.status.success() {
+        return Err("git command failed".into());
+    }
+    Ok(())
+}
+
+fn run_git_command(
+    cwd: &std::path::Path,
+    args: &[&str],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let output = std::process::Command::new("git")
+        .current_dir(cwd)
+        .args(args)
+        .output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git {:?} failed: {stderr}", args).into());
+    }
+    Ok(())
 }
 
 impl TestControls {

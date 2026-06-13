@@ -22,6 +22,7 @@ import type {
 } from "../api/types";
 import { CodingTimeline } from "../components/coding-workspace/CodingTimeline";
 import { CodingProviderConfigPanel } from "../components/coding-workspace/CodingProviderConfigPanel";
+import { RoleRunHistoryPanel } from "../components/coding-workspace/RoleRunHistoryPanel";
 import { StageGateEntry } from "../components/coding-workspace/StageGateEntry";
 import {
   ChatEntryList,
@@ -181,12 +182,26 @@ export function CodingWorkspacePage({
           {activePanel === "results" ? (
             <CodingArtifactTabs activeTab={activeTab} className="min-h-0" />
           ) : (
-            <div className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)_auto_auto]">
+            <div className="grid min-h-0 grid-rows-[auto_auto_minmax(0,1fr)_auto_auto]">
               <CodingProviderConfigPanel
                 snapshot={store.roleProviderConfigSnapshot}
                 lockedRole={lockedProviderRole(store.stage, store.status, store.pendingGates)}
                 onSelect={api.sendProviderSelect}
                 onPermissionModeSelect={api.sendPermissionModeSelect}
+              />
+              <RoleRunHistoryPanel
+                roleRuns={store.roleRuns}
+                timelineNodes={store.timelineNodes}
+                selectedNodeId={store.selectedNodeId}
+                onSelectNode={(nodeId) => {
+                  useCodingWorkspaceStore.getState().setSelectedNode(nodeId);
+                  const targetEntry = useCodingWorkspaceStore
+                    .getState()
+                    .chatEntries.find((entry) => entry.node_id === nodeId);
+                  if (targetEntry) {
+                    chatListRef.current?.scrollToEntry(targetEntry.id);
+                  }
+                }}
               />
               <ChatEntryList
                 ref={chatListRef}

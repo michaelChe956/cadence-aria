@@ -485,7 +485,22 @@ impl CodingWorkspaceEngine {
             timeout_reason_code,
         } = run;
         let cancel = CancellationToken::new();
-        let mut session = match provider.start(input, cancel.clone()).await {
+        let start_result = if let Some(duration) = timeout {
+            tokio::select! {
+                result = provider.start(input, cancel.clone()) => result,
+                _ = tokio::time::sleep(duration) => {
+                    cancel.cancel();
+                    return Err(CodingWorkspaceEngineError::ProviderStream(
+                        timeout_reason_code
+                            .unwrap_or("provider_stream_timeout")
+                            .to_string(),
+                    ));
+                }
+            }
+        } else {
+            provider.start(input, cancel.clone()).await
+        };
+        let mut session = match start_result {
             Ok(session) => session,
             Err(error)
                 if provider_start_is_not_implemented(&error) && allow_legacy_stream_fallback =>
@@ -1929,6 +1944,31 @@ impl CodingWorkspaceEngine {
             .send(CodingWsOutMessage::CodingTimelineNodeCreated { node: node.clone() })
             .await;
 
+        let role_run = match self.store.latest_role_run(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingExecutionStage::CodeReview,
+            CodingProviderRole::CodeReviewer,
+        )? {
+            Some(run) if run.status == CodingRoleRunStatus::Running && run.node_id.is_none() => {
+                self.store.attach_role_run_node(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &attempt.id,
+                    &run.id,
+                    node.id.clone(),
+                )?
+            }
+            _ => self.store.create_role_run(
+                &attempt,
+                CodingExecutionStage::CodeReview,
+                CodingProviderRole::CodeReviewer,
+                CodingRoleRunTrigger::Initial,
+                Some(node.id.clone()),
+            )?,
+        };
+
         let reviewer = self
             .store
             .get_role_provider_config_snapshot(&attempt.project_id, &attempt.issue_id, &attempt.id)?
@@ -1991,10 +2031,19 @@ impl CodingWorkspaceEngine {
             "code_review",
             &full_output,
         )?;
+        self.store.update_role_run_refs(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &role_run.id,
+            vec![raw_provider_output_ref.clone()],
+            Vec::new(),
+        )?;
         let report = self.build_code_review_report(
             &attempt,
             &full_output,
             Some(raw_provider_output_ref.clone()),
+            &role_run,
         )?;
         self.store.save_code_review_report(&report)?;
         self.emit_code_review_chat_entry(&attempt, &node.id, &report)
@@ -2005,18 +2054,21 @@ impl CodingWorkspaceEngine {
                 report: Box::new(report.clone()),
             })
             .await;
-        let (node_status, summary) = match report.verdict {
+        let (node_status, summary, role_run_status) = match report.verdict {
             ReviewVerdict::Approve => (
                 CodingTimelineNodeStatus::Completed,
                 Some("code review 通过".to_string()),
+                CodingRoleRunStatus::Completed,
             ),
             ReviewVerdict::RequestChanges => (
                 CodingTimelineNodeStatus::Failed,
                 Some("code review 要求修改".to_string()),
+                CodingRoleRunStatus::Completed,
             ),
             ReviewVerdict::Blocked => (
                 CodingTimelineNodeStatus::Blocked,
                 Some("code review 被阻塞".to_string()),
+                CodingRoleRunStatus::Blocked,
             ),
         };
         self.complete_timeline_node(
@@ -2028,6 +2080,14 @@ impl CodingWorkspaceEngine {
             summary,
         )
         .await?;
+        self.store.update_role_run_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &role_run.id,
+            role_run_status,
+            None,
+        )?;
         Ok(report)
     }
 
@@ -2086,9 +2146,7 @@ impl CodingWorkspaceEngine {
             CodingExecutionStage::Rework,
             CodingProviderRole::Analyst,
         )? {
-            Some(run)
-                if run.status == CodingRoleRunStatus::Running && run.node_id.is_none() =>
-            {
+            Some(run) if run.status == CodingRoleRunStatus::Running && run.node_id.is_none() => {
                 self.store.attach_role_run_node(
                     &attempt.project_id,
                     &attempt.issue_id,
@@ -2323,6 +2381,31 @@ impl CodingWorkspaceEngine {
             .send(CodingWsOutMessage::CodingTimelineNodeCreated { node: node.clone() })
             .await;
 
+        let role_run = match self.store.latest_role_run(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingExecutionStage::InternalPrReview,
+            CodingProviderRole::InternalReviewer,
+        )? {
+            Some(run) if run.status == CodingRoleRunStatus::Running && run.node_id.is_none() => {
+                self.store.attach_role_run_node(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &attempt.id,
+                    &run.id,
+                    node.id.clone(),
+                )?
+            }
+            _ => self.store.create_role_run(
+                &attempt,
+                CodingExecutionStage::InternalPrReview,
+                CodingProviderRole::InternalReviewer,
+                CodingRoleRunTrigger::Initial,
+                Some(node.id.clone()),
+            )?,
+        };
+
         let reviewer = self
             .store
             .get_role_provider_config_snapshot(&attempt.project_id, &attempt.issue_id, &attempt.id)?
@@ -2385,11 +2468,20 @@ impl CodingWorkspaceEngine {
             "internal_pr_review",
             &full_output,
         )?;
+        self.store.update_role_run_refs(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &role_run.id,
+            vec![raw_provider_output_ref.clone()],
+            Vec::new(),
+        )?;
         let review = self.build_internal_pr_review(
             &attempt,
             &review_request,
             &full_output,
             Some(raw_provider_output_ref.clone()),
+            &role_run,
         )?;
         self.store.save_internal_pr_review(&review)?;
         self.emit_internal_pr_review_chat_entry(&attempt, &node.id, &review)
@@ -2400,18 +2492,24 @@ impl CodingWorkspaceEngine {
                 review: Box::new(review.clone()),
             })
             .await;
-        let (node_status, summary) = match review.verdict {
+        let (node_status, summary, role_run_status, reason_code) = match review.verdict {
             ReviewVerdict::Approve => (
                 CodingTimelineNodeStatus::Completed,
                 Some("internal PR review 通过".to_string()),
+                CodingRoleRunStatus::Completed,
+                None,
             ),
             ReviewVerdict::RequestChanges => (
                 CodingTimelineNodeStatus::Failed,
                 Some("internal PR review 要求修改".to_string()),
+                CodingRoleRunStatus::Completed,
+                None,
             ),
             ReviewVerdict::Blocked => (
                 CodingTimelineNodeStatus::Blocked,
                 Some("internal PR review 被阻塞".to_string()),
+                CodingRoleRunStatus::Blocked,
+                Some("internal_review_blocked".to_string()),
             ),
         };
         self.complete_timeline_node(
@@ -2423,6 +2521,14 @@ impl CodingWorkspaceEngine {
             summary,
         )
         .await?;
+        self.store.update_role_run_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &role_run.id,
+            role_run_status,
+            reason_code,
+        )?;
         Ok(review)
     }
 
@@ -2705,7 +2811,52 @@ impl CodingWorkspaceEngine {
                 resumed
             }
             CodingGateActionType::RetryReview => {
-                self.resume_blocked_attempt_at_stage(&current, CodingExecutionStage::CodeReview)?
+                if gate.stage == Some(CodingExecutionStage::InternalPrReview)
+                    || gate.role == Some(CodingProviderRole::InternalReviewer)
+                {
+                    let resumed = self.resume_blocked_attempt_at_stage(
+                        &current,
+                        CodingExecutionStage::InternalPrReview,
+                    )?;
+                    self.store.supersede_latest_role_run_and_create(
+                        &resumed,
+                        CodingExecutionStage::InternalPrReview,
+                        CodingProviderRole::InternalReviewer,
+                        CodingRoleRunTrigger::RetryInternalReview,
+                        None,
+                        gate.reason_code.clone(),
+                    )?;
+                    resumed
+                } else {
+                    let resumed = self.resume_blocked_attempt_at_stage(
+                        &current,
+                        CodingExecutionStage::CodeReview,
+                    )?;
+                    self.store.supersede_latest_role_run_and_create(
+                        &resumed,
+                        CodingExecutionStage::CodeReview,
+                        CodingProviderRole::CodeReviewer,
+                        CodingRoleRunTrigger::RetryReview,
+                        None,
+                        gate.reason_code.clone(),
+                    )?;
+                    resumed
+                }
+            }
+            CodingGateActionType::RetryInternalReview => {
+                let resumed = self.resume_blocked_attempt_at_stage(
+                    &current,
+                    CodingExecutionStage::InternalPrReview,
+                )?;
+                self.store.supersede_latest_role_run_and_create(
+                    &resumed,
+                    CodingExecutionStage::InternalPrReview,
+                    CodingProviderRole::InternalReviewer,
+                    CodingRoleRunTrigger::RetryInternalReview,
+                    None,
+                    gate.reason_code.clone(),
+                )?;
+                resumed
             }
             CodingGateActionType::RetryAnalyst => {
                 let previous = self.store.latest_role_run(
@@ -2715,10 +2866,8 @@ impl CodingWorkspaceEngine {
                     CodingExecutionStage::Rework,
                     CodingProviderRole::Analyst,
                 )?;
-                let resumed = self.resume_blocked_attempt_at_stage(
-                    &current,
-                    CodingExecutionStage::Rework,
-                )?;
+                let resumed =
+                    self.resume_blocked_attempt_at_stage(&current, CodingExecutionStage::Rework)?;
                 let new_run = self.store.supersede_latest_role_run_and_create(
                     &resumed,
                     CodingExecutionStage::Rework,
@@ -3177,6 +3326,7 @@ impl CodingWorkspaceEngine {
         attempt: &CodingExecutionAttempt,
         full_output: &str,
         raw_provider_output_ref: Option<String>,
+        role_run: &CodingRoleRun,
     ) -> Result<CodeReviewReport, ProductStoreError> {
         let existing = self.store.list_code_review_reports(
             &attempt.project_id,
@@ -3195,6 +3345,8 @@ impl CodingWorkspaceEngine {
             summary: payload.summary,
             created_at: Utc::now().to_rfc3339(),
             raw_provider_output_ref,
+            role_run_id: Some(role_run.id.clone()),
+            run_no: Some(role_run.run_no),
         })
     }
 
@@ -3204,6 +3356,7 @@ impl CodingWorkspaceEngine {
         review_request: &ReviewRequest,
         full_output: &str,
         raw_provider_output_ref: Option<String>,
+        role_run: &CodingRoleRun,
     ) -> Result<InternalPrReview, ProductStoreError> {
         let existing = self.store.list_internal_pr_reviews(
             &attempt.project_id,
@@ -3225,6 +3378,8 @@ impl CodingWorkspaceEngine {
             summary: payload.summary,
             created_at: Utc::now().to_rfc3339(),
             raw_provider_output_ref,
+            role_run_id: Some(role_run.id.clone()),
+            run_no: Some(role_run.run_no),
         })
     }
 
@@ -3246,6 +3401,8 @@ impl CodingWorkspaceEngine {
                 "review_id": &report.id,
                 "verdict": &report.verdict,
                 "findings_count": report.findings.len(),
+                "role_run_id": report.role_run_id,
+                "run_no": report.run_no,
             })),
             created_at: Utc::now().to_rfc3339(),
         };
@@ -3271,6 +3428,8 @@ impl CodingWorkspaceEngine {
                 "review_request_id": &review.review_request_id,
                 "verdict": &review.verdict,
                 "impact_scope": &review.impact_scope,
+                "role_run_id": review.role_run_id,
+                "run_no": review.run_no,
             })),
             created_at: Utc::now().to_rfc3339(),
         };
@@ -3622,7 +3781,13 @@ impl CodingWorkspaceEngine {
                         reason_code: Some("max_auto_rework_exceeded".to_string()),
                         evidence_refs: decision.evidence_refs.clone(),
                         raw_provider_output_ref: decision.raw_provider_output_refs.first().cloned(),
-                        available_actions: analyst_human_gate_actions(None),
+                        available_actions: vec![
+                            coding_gate_action_for_id("provide_context")
+                                .expect("provide context action"),
+                            coding_gate_action_for_id("manual_continue")
+                                .expect("manual continue action"),
+                            coding_gate_action_for_id("abort").expect("abort action"),
+                        ],
                     })?;
                     let _ = self
                         .event_tx

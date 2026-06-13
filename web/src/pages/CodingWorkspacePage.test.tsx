@@ -1073,4 +1073,83 @@ describe("CodingWorkspacePage", () => {
     expect(chatList).toHaveTextContent("Analyst");
     expect(chatList).toHaveTextContent("Analyst 输出不是有效 JSON");
   });
+
+  it("renders role run history and selects linked timeline nodes", async () => {
+    mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      attemptId: "coding_attempt_0001",
+      status: "blocked",
+      stage: "rework",
+      timelineNodes: [
+        {
+          id: "coding_node_0003",
+          attempt_id: "coding_attempt_0001",
+          stage: "testing",
+          title: "执行测试",
+          status: "completed",
+          agent_role: "tester",
+          summary: "测试阻塞",
+          started_at: "2026-06-13T00:00:00Z",
+          completed_at: "2026-06-13T00:00:01Z",
+          artifact_refs: [],
+        },
+        {
+          id: "coding_node_0004",
+          attempt_id: "coding_attempt_0001",
+          stage: "rework",
+          title: "Analyst 路由决策",
+          status: "blocked",
+          agent_role: "system",
+          summary: "需要人工处理",
+          started_at: "2026-06-13T00:00:02Z",
+          completed_at: null,
+          artifact_refs: [],
+        },
+      ],
+      roleRuns: [
+        {
+          id: "coding_role_run_0001",
+          attempt_id: "coding_attempt_0001",
+          stage: "testing",
+          role: "tester",
+          run_no: 1,
+          status: "completed",
+          trigger: "initial",
+          node_id: "coding_node_0003",
+          started_at: "2026-06-13T00:00:00Z",
+          completed_at: "2026-06-13T00:00:01Z",
+          reason_code: null,
+          raw_provider_output_refs: ["provider-raw/testing/plan_tests_0001.txt"],
+          artifact_refs: [],
+        },
+        {
+          id: "coding_role_run_0002",
+          attempt_id: "coding_attempt_0001",
+          stage: "rework",
+          role: "analyst",
+          run_no: 1,
+          status: "blocked",
+          trigger: "retry_analyst",
+          node_id: "coding_node_0004",
+          started_at: "2026-06-13T00:00:02Z",
+          completed_at: null,
+          reason_code: "analyst_human_gate",
+          raw_provider_output_refs: [],
+          artifact_refs: ["provider-raw/rework/analyst_evidence_0001.txt"],
+        },
+      ],
+    });
+
+    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+
+    const panel = screen.getByTestId("coding-role-run-history");
+    expect(panel).toHaveTextContent("Tester #1");
+    expect(panel).toHaveTextContent("provider-raw/testing/plan_tests_0001.txt");
+    expect(panel).toHaveTextContent("Analyst #1");
+    expect(panel).toHaveTextContent("analyst_human_gate");
+
+    await userEvent.click(screen.getByRole("button", { name: /Analyst #1/ }));
+
+    expect(useCodingWorkspaceStore.getState().selectedNodeId).toBe("coding_node_0004");
+  });
 });

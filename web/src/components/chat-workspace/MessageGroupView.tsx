@@ -100,7 +100,10 @@ const PROVIDER_LABELS: Record<string, string> = {
 function groupTitle(group: MessageGroup) {
   const base = ROLE_LABELS[group.role] ?? group.role;
   const provider = providerForGroup(group);
-  return provider ? `${base} · ${providerLabel(provider)}` : base;
+  const runNo = runNoForGroup(group);
+  return [base, provider ? providerLabel(provider) : null, runNo ? `Run #${runNo}` : null]
+    .filter(Boolean)
+    .join(" · ");
 }
 
 const ROLE_LABELS: Record<string, string> = {
@@ -125,6 +128,21 @@ function providerForGroup(group: MessageGroup) {
     const provider = metadataProvider(entry.metadata);
     if (provider) {
       return provider;
+    }
+  }
+  return null;
+}
+
+function runNoForGroup(group: MessageGroup) {
+  const entries = [
+    group.primaryEntry,
+    ...group.inlineEvents,
+    ...group.interruptEntries,
+  ].filter((entry): entry is ChatEntry => Boolean(entry));
+  for (const entry of entries) {
+    const runNo = entry.metadata?.run_no;
+    if (typeof runNo === "number" && Number.isFinite(runNo)) {
+      return runNo;
     }
   }
   return null;

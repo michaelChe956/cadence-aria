@@ -574,6 +574,7 @@ fn should_resume_runner_after_gate_response(
         "retry_test_plan"
             | "rerun_missing_steps"
             | "retry_review"
+            | "retry_internal_review"
             | "retry_analyst"
             | "send_raw_output_to_analyst"
     ) && previous_attempt.status == CodingAttemptStatus::Blocked
@@ -803,6 +804,105 @@ async fn execute_start_coding_flow(
                     | TestingOverallStatus::SkippedByUserDecision
             ) {
                 return emit_current_session_state(event_tx, coding_store, &current).await;
+            }
+        }
+
+        if current.stage == CodingExecutionStage::InternalPrReview {
+            let Some(next) = await_stage_gate(
+                &mut command_rx,
+                coding_store,
+                engine,
+                event_tx,
+                &current,
+                CodingExecutionStage::InternalPrReview,
+            )
+            .await?
+            else {
+                return Ok(());
+            };
+            current = next;
+            let internal_reviewer_provider_name = coding_store
+                .get_role_provider_config_snapshot(
+                    &current.project_id,
+                    &current.issue_id,
+                    &current.id,
+                )?
+                .internal_reviewer;
+            let internal_reviewer_provider = provider_for(
+                state,
+                &internal_reviewer_provider_name,
+                "coding internal reviewer provider",
+            )?;
+            let internal_review = engine
+                .execute_internal_pr_review_with_commands(
+                    &current,
+                    internal_reviewer_provider.as_ref(),
+                    &mut command_rx,
+                )
+                .await?;
+            current =
+                coding_store.get_attempt(&current.project_id, &current.issue_id, &current.id)?;
+            if handle_pending_runner_commands(
+                &mut command_rx,
+                coding_store,
+                engine,
+                event_tx,
+                &current,
+            )
+            .await?
+            {
+                return Ok(());
+            }
+            let Some(next) = await_stage_gate(
+                &mut command_rx,
+                coding_store,
+                engine,
+                event_tx,
+                &current,
+                CodingExecutionStage::Rework,
+            )
+            .await?
+            else {
+                return Ok(());
+            };
+            current = next;
+            let analyst_provider_name = coding_store
+                .get_role_provider_config_snapshot(
+                    &current.project_id,
+                    &current.issue_id,
+                    &current.id,
+                )?
+                .analyst;
+            let analyst_provider =
+                provider_for(state, &analyst_provider_name, "coding analyst provider")?;
+            let evidence = internal_pr_review_rework_evidence(&internal_review);
+            current = engine
+                .execute_rework_with_commands(
+                    &current,
+                    &evidence,
+                    analyst_provider.as_ref(),
+                    &mut command_rx,
+                )
+                .await?;
+            current =
+                coding_store.get_attempt(&current.project_id, &current.issue_id, &current.id)?;
+            if handle_pending_runner_commands(
+                &mut command_rx,
+                coding_store,
+                engine,
+                event_tx,
+                &current,
+            )
+            .await?
+            {
+                return Ok(());
+            }
+            match current.stage {
+                CodingExecutionStage::Coding => continue 'pipeline,
+                CodingExecutionStage::FinalConfirm => {
+                    return emit_current_session_state(event_tx, coding_store, &current).await;
+                }
+                _ => return emit_current_session_state(event_tx, coding_store, &current).await,
             }
         }
 
@@ -1975,6 +2075,10 @@ mod tests {
         ));
         assert!(should_resume_runner_after_gate_response(
             "retry_test_plan",
+            &attempt
+        ));
+        assert!(should_resume_runner_after_gate_response(
+            "retry_internal_review",
             &attempt
         ));
 

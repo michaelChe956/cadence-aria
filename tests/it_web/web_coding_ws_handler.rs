@@ -11,8 +11,9 @@ use cadence_aria::product::coding_models::{
     AnalystDecisionNextStage, AnalystDecisionRecord, AnalystDecisionVerdict, CodingAgentRole,
     CodingAttemptStatus, CodingEntryType, CodingExecutionStage, CodingGateAction,
     CodingGateActionType, CodingGateKind, CodingGateRequired, CodingProviderPermissionMode,
-    CodingProviderRole, CodingRoleProviderConfigSnapshot, CodingRoleRunStatus, CodingRoleRunTrigger,
-    CodingTimelineNode, CodingTimelineNodeStatus, PushStatus, ReviewVerdict, TestingOverallStatus,
+    CodingProviderRole, CodingRoleProviderConfigSnapshot, CodingRoleRunStatus,
+    CodingRoleRunTrigger, CodingTimelineNode, CodingTimelineNodeStatus, PushStatus, RemoteKind,
+    ReviewRequest, ReviewRequestKind, ReviewVerdict, TestingOverallStatus,
 };
 use cadence_aria::product::lifecycle_store::{
     CreateWorkItemInput, CreateWorkspaceSessionInput, LifecycleStore,
@@ -3373,6 +3374,37 @@ impl StreamingProviderAdapter for RetryAnalystCaptureProvider {
     }
 }
 
+struct RetryInternalReviewCaptureProvider {
+    captured_prompts: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for RetryInternalReviewCaptureProvider {
+    async fn run_streaming(
+        &self,
+        input: &AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+        self.captured_prompts
+            .lock()
+            .expect("lock")
+            .push(input.prompt.clone());
+        let (tx, rx) = mpsc::channel(8);
+        let full_output = if input.output_schema == "coding_workspace_internal_pr_review_json" {
+            r#"{"verdict":"approve","summary":"internal reviewer retry accepted","findings":[],"impact_scope":["src"],"pr_description":"PR body","commit_message_suggestion":"feat: work"}"#
+        } else if input.output_schema == "coding_workspace_analyst_verdict_json" {
+            r#"{"verdict":"proceed","next_stage":"final_confirm","reason":"internal reviewer retry accepted"}"#
+        } else {
+            r#"{"verdict":"approve","summary":"review ok","findings":[]}"#
+        };
+        tx.try_send(StreamChunk::Done {
+            full_output: full_output.to_string(),
+        })
+        .expect("send done");
+        Ok(rx)
+    }
+}
+
 fn app_with_blocked_analyst_attempt(
     root_path: &Path,
     provider: Arc<dyn StreamingProviderAdapter>,
@@ -3450,10 +3482,20 @@ async fn coding_ws_retry_analyst_resumes_rework_from_persisted_evidence() {
     );
 
     store
-        .update_attempt_status("project_0001", "issue_0001", "coding_attempt_0001", CodingAttemptStatus::Running)
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            "coding_attempt_0001",
+            CodingAttemptStatus::Running,
+        )
         .expect("running");
     store
-        .update_attempt_status("project_0001", "issue_0001", "coding_attempt_0001", CodingAttemptStatus::Blocked)
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            "coding_attempt_0001",
+            CodingAttemptStatus::Blocked,
+        )
         .expect("block attempt");
     store
         .update_attempt_stage(
@@ -3486,8 +3528,19 @@ async fn coding_ws_retry_analyst_resumes_rework_from_persisted_evidence() {
         )
         .expect("block first run");
 
-    fs::create_dir_all(root.path().join(".aria").join("projects").join("project_0001").join("issues").join("issue_0001").join("coding-attempts").join("coding_attempt_0001").join("artifacts").join("rework"))
-        .expect("create evidence dir");
+    fs::create_dir_all(
+        root.path()
+            .join(".aria")
+            .join("projects")
+            .join("project_0001")
+            .join("issues")
+            .join("issue_0001")
+            .join("coding-attempts")
+            .join("coding_attempt_0001")
+            .join("artifacts")
+            .join("rework"),
+    )
+    .expect("create evidence dir");
     fs::write(
         root.path()
             .join(".aria")
@@ -3574,16 +3627,211 @@ async fn coding_ws_retry_analyst_resumes_rework_from_persisted_evidence() {
     }
     assert!(saw_rework_node, "expected new rework timeline node");
 
-    let prompts = captured.lock().expect("lock");
-    assert!(
-        prompts.iter().any(|prompt| prompt.contains("persisted testing evidence")),
-        "expected analyst prompt to contain persisted evidence"
-    );
+    {
+        let prompts = captured.lock().expect("lock");
+        assert!(
+            prompts
+                .iter()
+                .any(|prompt| prompt.contains("persisted testing evidence")),
+            "expected analyst prompt to contain persisted evidence"
+        );
+    }
 
     let runs = store
         .list_role_runs("project_0001", "issue_0001", "coding_attempt_0001")
         .expect("role runs");
     assert_eq!(runs.len(), 2);
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+#[tokio::test]
+async fn coding_ws_retry_internal_review_resumes_internal_reviewer_run() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (app, store) = app_with_blocked_analyst_attempt(
+        root.path(),
+        Arc::new(RetryInternalReviewCaptureProvider {
+            captured_prompts: captured.clone(),
+        }),
+    );
+
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            "coding_attempt_0001",
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    store
+        .update_attempt_stage(
+            "project_0001",
+            "issue_0001",
+            "coding_attempt_0001",
+            CodingExecutionStage::InternalPrReview,
+        )
+        .expect("set internal review stage");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            "coding_attempt_0001",
+            CodingAttemptStatus::Blocked,
+        )
+        .expect("block attempt");
+    store
+        .save_review_request(&ReviewRequest {
+            id: "review_request_0001".to_string(),
+            attempt_id: "coding_attempt_0001".to_string(),
+            kind: ReviewRequestKind::GitBranchOnly,
+            remote_kind: RemoteKind::GenericGit,
+            remote: "origin".to_string(),
+            base_branch: "HEAD".to_string(),
+            branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+            commit_sha: "abc123".to_string(),
+            push_status: PushStatus::Pushed,
+            external_url: None,
+            manual_instructions: Vec::new(),
+            created_at: "2026-06-13T00:00:00Z".to_string(),
+            updated_at: "2026-06-13T00:00:00Z".to_string(),
+        })
+        .expect("save review request");
+    let first_run = store
+        .create_role_run(
+            &store
+                .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+                .expect("get attempt"),
+            CodingExecutionStage::InternalPrReview,
+            CodingProviderRole::InternalReviewer,
+            CodingRoleRunTrigger::Initial,
+            Some("coding_node_0001".to_string()),
+        )
+        .expect("create first run");
+    store
+        .update_role_run_status(
+            "project_0001",
+            "issue_0001",
+            "coding_attempt_0001",
+            &first_run.id,
+            CodingRoleRunStatus::Blocked,
+            Some("internal_review_blocked".to_string()),
+        )
+        .expect("block first run");
+    store
+        .create_blocked_gate(CreateBlockedGateInput {
+            attempt_id: "coding_attempt_0001".to_string(),
+            stage: CodingExecutionStage::InternalPrReview,
+            node_id: Some("coding_node_0001".to_string()),
+            role: Some(CodingProviderRole::InternalReviewer),
+            title: "Internal Reviewer blocked".to_string(),
+            description: "需要重跑 Internal Reviewer".to_string(),
+            reason_code: Some("internal_review_blocked".to_string()),
+            evidence_refs: Vec::new(),
+            raw_provider_output_ref: None,
+            available_actions: vec![CodingGateAction {
+                action_id: "retry_internal_review".to_string(),
+                label: "重试 Internal Reviewer".to_string(),
+                action_type: CodingGateActionType::RetryInternalReview,
+            }],
+        })
+        .expect("create gate");
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(
+        &mut ws,
+        &CodingWsInMessage::GateResponse {
+            gate_id: "coding_blocked_gate_0001".to_string(),
+            action_id: "retry_internal_review".to_string(),
+            extra_context: None,
+        },
+    )
+    .await;
+
+    let mut saw_internal_node = false;
+    let mut saw_internal_complete = false;
+    let mut saw_internal_chat = false;
+    for _ in 0..40 {
+        match timeout(Duration::from_millis(250), recv_json(&mut ws)).await {
+            Ok(CodingWsOutMessage::CodingTimelineNodeCreated { node })
+                if node.stage == CodingExecutionStage::InternalPrReview =>
+            {
+                saw_internal_node = true;
+            }
+            Ok(CodingWsOutMessage::CodingTimelineNodeCreated { node })
+                if node.stage == CodingExecutionStage::CodeReview =>
+            {
+                panic!("retry_internal_review should not resume CodeReview first");
+            }
+            Ok(CodingWsOutMessage::InternalPrReviewComplete { review }) => {
+                assert_eq!(review.summary, "internal reviewer retry accepted");
+                saw_internal_complete = true;
+            }
+            Ok(CodingWsOutMessage::CodingChatEntryCreated { entry })
+                if entry.content.as_deref().is_some_and(|content| {
+                    content.contains("internal reviewer retry accepted")
+                }) =>
+            {
+                let metadata = entry.metadata.unwrap_or_default();
+                assert_eq!(
+                    metadata.get("source").and_then(|value| value.as_str()),
+                    Some("internal_pr_review")
+                );
+                saw_internal_chat = true;
+            }
+            Ok(CodingWsOutMessage::CodingProtocolError { code, message }) => {
+                panic!("unexpected protocol error {code}: {message}");
+            }
+            _ => {}
+        }
+        if saw_internal_node && saw_internal_complete && saw_internal_chat {
+            break;
+        }
+    }
+    assert!(saw_internal_node, "expected new internal review node");
+    assert!(
+        saw_internal_complete,
+        "expected internal reviewer completion"
+    );
+    assert!(
+        saw_internal_chat,
+        "expected readable internal reviewer chat"
+    );
+
+    {
+        let prompts = captured.lock().expect("lock");
+        assert!(
+            prompts
+                .iter()
+                .any(|prompt| prompt.contains("review_request_0001")),
+            "expected internal reviewer prompt to contain review request"
+        );
+    }
+
+    let runs = store
+        .list_role_runs("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("role runs");
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[0].status, CodingRoleRunStatus::Superseded);
+    assert_eq!(runs[1].role, CodingProviderRole::InternalReviewer);
+    assert_eq!(runs[1].trigger, CodingRoleRunTrigger::RetryInternalReview);
+    assert_eq!(runs[1].status, CodingRoleRunStatus::Completed);
+    let reviews = store
+        .list_internal_pr_reviews("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("internal reviews");
+    assert_eq!(reviews.len(), 1);
+    assert_eq!(reviews[0].role_run_id.as_deref(), Some(runs[1].id.as_str()));
 
     ws.close(None).await.expect("close ws");
     server.abort();

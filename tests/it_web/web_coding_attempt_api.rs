@@ -784,6 +784,8 @@ fn sample_code_review_report(attempt_id: &str) -> CodeReviewReport {
         summary: "基础 code review 通过".to_string(),
         created_at: "2026-05-23T00:01:00Z".to_string(),
         raw_provider_output_ref: None,
+        role_run_id: None,
+        run_no: None,
     }
 }
 
@@ -820,6 +822,8 @@ fn sample_internal_review(attempt_id: &str, review_request_id: &str) -> Internal
         summary: "最终审查通过".to_string(),
         created_at: "2026-05-23T00:03:00Z".to_string(),
         raw_provider_output_ref: None,
+        role_run_id: None,
+        run_no: None,
     }
 }
 

@@ -149,6 +149,24 @@ impl CodingAttemptStore {
         Ok(attempt)
     }
 
+    pub fn save_coding_attempt(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(&attempt.project_id)?;
+        validate_relative_id(&attempt.issue_id)?;
+        validate_relative_id(&attempt.id)?;
+        write_json(
+            &self.attempt_path(&attempt.project_id, &attempt.issue_id, &attempt.id),
+            attempt,
+        )?;
+        write_json(
+            &self.role_provider_config_path(&attempt.project_id, &attempt.issue_id, &attempt.id),
+            &CodingRoleProviderConfigSnapshot::from(&attempt.provider_config_snapshot),
+        )?;
+        Ok(())
+    }
+
     pub fn get_attempt(
         &self,
         project_id: &str,
@@ -530,7 +548,11 @@ impl CodingAttemptStore {
         }
         for reference in artifact_refs {
             validate_relative_artifact_ref(&reference)?;
-            if !run.artifact_refs.iter().any(|existing| existing == &reference) {
+            if !run
+                .artifact_refs
+                .iter()
+                .any(|existing| existing == &reference)
+            {
                 run.artifact_refs.push(reference);
             }
         }

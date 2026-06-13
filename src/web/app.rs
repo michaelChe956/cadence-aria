@@ -221,6 +221,10 @@ pub fn build_web_router(state: WebAppState) -> Router {
                 post(test_controls::seed_large_workspace_fixture),
             )
             .route(
+                "/api/test/coding-attempts/role-run-fixture",
+                post(test_controls::seed_coding_role_run_fixture),
+            )
+            .route(
                 "/api/test/permission-timeout",
                 post(test_controls::set_permission_timeout),
             )
