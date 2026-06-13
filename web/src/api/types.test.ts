@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
 import type {
   AnalystDecisionRecord,
+  CodeReviewReport,
   CodingGateRequired,
   CodingAttempt,
   CodingAttemptSnapshotResponse,
   CodingWsInMessage,
   CodingWsOutMessage,
   IssueLifecycleResponse,
+  InternalPrReview,
   NodeDetail,
   TestingReport,
   TimelineNodeType,
@@ -174,7 +176,7 @@ describe("workspace websocket protocol types", () => {
         parse_error: null,
       },
     };
-    const outbound: CodingWsOutMessage = {
+    const outbound: Extract<CodingWsOutMessage, { type: "coding_session_state" }> = {
       type: "coding_session_state",
       attempt_id: "coding_attempt_0001",
       status: "running",
@@ -204,6 +206,44 @@ describe("workspace websocket protocol types", () => {
       provider_config_snapshot: { author: "fake", reviewer: "fake", review_rounds: 1 },
       chat_entries: [],
       timeline_nodes: snapshot.timeline_nodes,
+      role_runs: [
+        {
+          id: "coding_role_run_0001",
+          attempt_id: "coding_attempt_0001",
+          stage: "testing",
+          role: "tester",
+          run_no: 1,
+          status: "running",
+          trigger: "initial",
+          node_id: "coding_node_0003",
+          started_at: "2026-06-13T00:00:00Z",
+          completed_at: null,
+          reason_code: null,
+          raw_provider_output_refs: [],
+          artifact_refs: [],
+          event_summary: {
+            event_count: 2,
+            last_event_at: "2026-06-13T00:00:02Z",
+            last_event_type: "execution_event",
+            last_event_title: "Task update",
+            last_event_status: "running",
+            terminal_event_type: null,
+            terminal_reason: null,
+          },
+          recent_events: [
+            {
+              sequence: 2,
+              event_type: "execution_event",
+              created_at: "2026-06-13T00:00:02Z",
+              title: "Task update",
+              status: "running",
+              detail: "No tasks found",
+              truncated: false,
+              artifact_ref: null,
+            },
+          ],
+        },
+      ],
       active_node_id: "coding_node_0001",
       testing_report: null,
       code_review_reports: [],
@@ -216,6 +256,8 @@ describe("workspace websocket protocol types", () => {
 
     expect(snapshot.active_node_id).toBe("coding_node_0001");
     expect(outbound.type).toBe("coding_session_state");
+    expect(outbound.role_runs?.[0].event_summary?.event_count).toBe(2);
+    expect(outbound.role_runs?.[0].recent_events?.[0].detail).toBe("No tasks found");
     expect(outbound.latest_analyst_decision?.next_stage).toBe("coding");
     expect(inbound.type).toBe("start_coding");
   });

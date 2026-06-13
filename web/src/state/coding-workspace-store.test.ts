@@ -153,6 +153,27 @@ function roleRun(overrides: Partial<CodingRoleRun> = {}): CodingRoleRun {
     reason_code: null,
     raw_provider_output_refs: [],
     artifact_refs: [],
+    event_summary: {
+      event_count: 2,
+      last_event_at: "2026-06-13T00:00:02Z",
+      last_event_type: "execution_event",
+      last_event_title: "Task update",
+      last_event_status: "running",
+      terminal_event_type: null,
+      terminal_reason: null,
+    },
+    recent_events: [
+      {
+        sequence: 2,
+        event_type: "execution_event",
+        created_at: "2026-06-13T00:00:02Z",
+        title: "Task update",
+        status: "running",
+        detail: "No tasks found",
+        truncated: false,
+        artifact_ref: null,
+      },
+    ],
     ...overrides,
   };
 }
@@ -290,6 +311,13 @@ describe("coding workspace store", () => {
       id: "coding_role_run_0001",
       role: "tester",
       run_no: 1,
+    });
+    expect(useCodingWorkspaceStore.getState().roleRuns[0].event_summary).toMatchObject({
+      event_count: 2,
+      last_event_title: "Task update",
+    });
+    expect(useCodingWorkspaceStore.getState().roleRuns[0].recent_events?.[0]).toMatchObject({
+      detail: "No tasks found",
     });
   });
 

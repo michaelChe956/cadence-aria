@@ -181,6 +181,43 @@ export type CodingRoleRunTrigger =
   | "retry_internal_review"
   | "manual_rerun";
 
+export type CodingRoleRunEventType =
+  | "provider_prompt"
+  | "provider_start"
+  | "text_delta"
+  | "execution_event"
+  | "tool_call"
+  | "tool_result"
+  | "status_changed"
+  | "permission_request"
+  | "choice_request"
+  | "message_complete"
+  | "provider_failed"
+  | "timeout"
+  | "aborted"
+  | "persistence_warning";
+
+export type CodingRoleRunEventSummary = {
+  event_count: number;
+  last_event_at?: string | null;
+  last_event_type?: CodingRoleRunEventType | null;
+  last_event_title?: string | null;
+  last_event_status?: string | null;
+  terminal_event_type?: CodingRoleRunEventType | null;
+  terminal_reason?: string | null;
+};
+
+export type CodingRoleRunEventPreview = {
+  sequence: number;
+  event_type: CodingRoleRunEventType;
+  created_at: string;
+  title?: string | null;
+  status?: string | null;
+  detail?: string | null;
+  truncated: boolean;
+  artifact_ref?: string | null;
+};
+
 export type CodingRolePermissionModes = {
   coder: CodingProviderPermissionMode;
   tester: CodingProviderPermissionMode;
@@ -228,6 +265,8 @@ export type CodingRoleRun = {
   reason_code?: string | null;
   raw_provider_output_refs: string[];
   artifact_refs: string[];
+  event_summary?: CodingRoleRunEventSummary | null;
+  recent_events?: CodingRoleRunEventPreview[];
 };
 
 export type TestCommandStatus = "passed" | "failed" | "timed_out" | "blocked";
