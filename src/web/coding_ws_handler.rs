@@ -1723,12 +1723,27 @@ fn coding_role_run_snapshots(
         .list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)?
         .into_iter()
         .map(|run| {
-            let events = coding_store.list_role_run_events(
+            let events = match coding_store.list_role_run_events(
                 &attempt.project_id,
                 &attempt.issue_id,
                 &attempt.id,
                 &run.id,
-            )?;
+            ) {
+                Ok(events) => events,
+                Err(error) => {
+                    tracing::warn!(
+                        attempt_id = %attempt.id,
+                        role_run_id = %run.id,
+                        error = ?error,
+                        "failed to read coding role run events for snapshot"
+                    );
+                    return Ok(CodingRoleRunSnapshot {
+                        run,
+                        event_summary: None,
+                        recent_events: Vec::new(),
+                    });
+                }
+            };
             let event_summary = role_run_event_summary(&events);
             let recent_events = recent_role_run_events(&events, 10);
             Ok(CodingRoleRunSnapshot {
@@ -1775,11 +1790,7 @@ fn recent_role_run_events(
             created_at: event.created_at.clone(),
             title: role_run_event_title(event),
             status: role_run_event_status(event),
-            detail: event
-                .payload
-                .get("detail")
-                .and_then(|value| value.as_str())
-                .map(ToOwned::to_owned),
+            detail: role_run_event_payload_text(event, "detail"),
             truncated: event.truncated,
             artifact_ref: event.artifact_ref.clone(),
         })
@@ -1787,42 +1798,27 @@ fn recent_role_run_events(
 }
 
 fn role_run_event_title(event: &CodingRoleRunEvent) -> Option<String> {
-    event
-        .payload
-        .get("title")
-        .and_then(|value| value.as_str())
-        .map(ToOwned::to_owned)
-        .or_else(|| {
-            event
-                .payload
-                .get("mode")
-                .and_then(|value| value.as_str())
-                .map(ToOwned::to_owned)
-        })
+    role_run_event_payload_text(event, "title")
+        .or_else(|| role_run_event_payload_text(event, "mode"))
         .or_else(|| Some(format!("{:?}", event.event_type)))
 }
 
 fn role_run_event_status(event: &CodingRoleRunEvent) -> Option<String> {
-    event
-        .payload
-        .get("status")
-        .and_then(|value| value.as_str())
-        .map(ToOwned::to_owned)
+    role_run_event_payload_text(event, "status")
 }
 
 fn role_run_event_reason(event: &CodingRoleRunEvent) -> Option<String> {
-    event
-        .payload
-        .get("reason_code")
-        .and_then(|value| value.as_str())
-        .or_else(|| event.payload.get("reason").and_then(|value| value.as_str()))
-        .or_else(|| {
-            event
-                .payload
-                .get("message")
-                .and_then(|value| value.as_str())
-        })
+    role_run_event_payload_text(event, "reason_code")
+        .or_else(|| role_run_event_payload_text(event, "reason"))
+        .or_else(|| role_run_event_payload_text(event, "message"))
+}
+
+fn role_run_event_payload_text(event: &CodingRoleRunEvent, field: &str) -> Option<String> {
+    let value = event.payload.get(field)?;
+    value
+        .as_str()
         .map(ToOwned::to_owned)
+        .or_else(|| value.get("preview")?.as_str().map(ToOwned::to_owned))
 }
 
 fn stage_gate_required(gate: CodingStageGateState) -> CodingGateRequiredModel {

@@ -352,6 +352,110 @@ async fn coding_session_snapshot_includes_role_runs() {
             }),
         )
         .expect("aborted event");
+    let provider_failed_detail = format!("provider failed detail: {}", "d".repeat(16_500));
+    let provider_failed_detail_preview = provider_failed_detail[..16_384].to_string();
+    let provider_failed_message = format!("provider failed: {}", "x".repeat(16_500));
+    let provider_failed_preview = provider_failed_message[..16_384].to_string();
+    store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::ProviderFailed,
+            serde_json::json!({
+                "detail": provider_failed_detail,
+                "message": provider_failed_message
+            }),
+        )
+        .expect("provider failed event");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+
+    let raw_state = recv_json_value(&mut ws).await;
+    assert_eq!(raw_state["role_runs"][0]["role"], "tester");
+    assert!(raw_state["role_runs"][0].get("run").is_none());
+
+    match serde_json::from_value(raw_state).expect("coding session state") {
+        CodingWsOutMessage::CodingSessionState { role_runs, .. } => {
+            assert_eq!(role_runs.len(), 1);
+            assert_eq!(role_runs[0].role, CodingProviderRole::Tester);
+            assert_eq!(role_runs[0].run_no, 1);
+            assert_eq!(role_runs[0].node_id.as_deref(), Some("coding_node_0003"));
+            let summary = role_runs[0].event_summary.as_ref().expect("event summary");
+            assert_eq!(summary.event_count, 4);
+            assert_eq!(
+                summary.last_event_type,
+                Some(CodingRoleRunEventType::ProviderFailed)
+            );
+            assert_eq!(summary.last_event_title.as_deref(), Some("ProviderFailed"));
+            assert_eq!(summary.last_event_status.as_deref(), None);
+            assert_eq!(
+                summary.terminal_event_type,
+                Some(CodingRoleRunEventType::ProviderFailed)
+            );
+            assert_eq!(
+                summary.terminal_reason.as_deref(),
+                Some(provider_failed_preview.as_str())
+            );
+            assert_eq!(role_runs[0].recent_events.len(), 4);
+            assert_eq!(
+                role_runs[0].recent_events[1].title.as_deref(),
+                Some("Task update")
+            );
+            assert_eq!(
+                role_runs[0].recent_events[3].detail.as_deref(),
+                Some(provider_failed_detail_preview.as_str())
+            );
+            assert!(role_runs[0].recent_events[3].truncated);
+        }
+        other => panic!("expected coding session state, got {other:?}"),
+    }
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+#[tokio::test]
+async fn coding_session_snapshot_ignores_corrupt_role_run_events() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let app = app_with_attempt(root.path());
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("attempt");
+    let run = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::Testing,
+            CodingProviderRole::Tester,
+            CodingRoleRunTrigger::Initial,
+            Some("coding_node_0003".to_string()),
+        )
+        .expect("role run");
+    store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::ExecutionEvent,
+            serde_json::json!({
+                "title": "Task update",
+                "status": "running",
+                "detail": "No tasks found"
+            }),
+        )
+        .expect("execution event");
+    let event_log = root
+        .path()
+        .join(".aria/projects/project_0001/issues/issue_0001/coding-attempts/coding_attempt_0001/role-run-events")
+        .join(format!("{}.jsonl", run.id));
+    fs::write(&event_log, "{not valid jsonl\n").expect("corrupt role run event log");
+
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
     let server = tokio::spawn(async move {
@@ -365,26 +469,8 @@ async fn coding_session_snapshot_includes_role_runs() {
         CodingWsOutMessage::CodingSessionState { role_runs, .. } => {
             assert_eq!(role_runs.len(), 1);
             assert_eq!(role_runs[0].role, CodingProviderRole::Tester);
-            assert_eq!(role_runs[0].run_no, 1);
-            assert_eq!(role_runs[0].node_id.as_deref(), Some("coding_node_0003"));
-            let summary = role_runs[0].event_summary.as_ref().expect("event summary");
-            assert_eq!(summary.event_count, 3);
-            assert_eq!(
-                summary.last_event_type,
-                Some(CodingRoleRunEventType::Aborted)
-            );
-            assert_eq!(summary.last_event_title.as_deref(), Some("Aborted"));
-            assert_eq!(summary.last_event_status.as_deref(), None);
-            assert_eq!(
-                summary.terminal_event_type,
-                Some(CodingRoleRunEventType::Aborted)
-            );
-            assert_eq!(summary.terminal_reason.as_deref(), Some("abort_attempt"));
-            assert_eq!(role_runs[0].recent_events.len(), 3);
-            assert_eq!(
-                role_runs[0].recent_events[1].title.as_deref(),
-                Some("Task update")
-            );
+            assert!(role_runs[0].event_summary.is_none());
+            assert!(role_runs[0].recent_events.is_empty());
         }
         other => panic!("expected coding session state, got {other:?}"),
     }
@@ -2553,6 +2639,14 @@ async fn recv_json(
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
 ) -> CodingWsOutMessage {
+    serde_json::from_value(recv_json_value(ws).await).expect("ws json")
+}
+
+async fn recv_json_value(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> serde_json::Value {
     let message = timeout(Duration::from_secs(10), ws.next())
         .await
         .expect("ws message timeout")
