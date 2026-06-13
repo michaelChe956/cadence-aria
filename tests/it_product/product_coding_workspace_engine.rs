@@ -21,9 +21,10 @@ use cadence_aria::product::coding_models::{
     CodingAttemptStatus, CodingEntryType, CodingExecutionStage, CodingGateAction,
     CodingGateActionType, CodingProviderPermissionMode, CodingProviderRole,
     CodingReworkInstruction, CodingRolePermissionModes, CodingRoleProviderConfigSnapshot,
-    CodingRoleRunStatus, CodingRoleRunTrigger, CodingTimelineNode, CodingTimelineNodeStatus,
-    FindingSeverity, PushStatus, RemoteKind, ReviewRequest, ReviewRequestKind, ReviewVerdict,
-    TestCommandStatus, TestingOverallStatus, TestingReport, TestingStepResult,
+    CodingRoleRunEventType, CodingRoleRunStatus, CodingRoleRunTrigger, CodingTimelineNode,
+    CodingTimelineNodeStatus, FindingSeverity, PushStatus, RemoteKind, ReviewRequest,
+    ReviewRequestKind, ReviewVerdict, TestCommandStatus, TestingOverallStatus, TestingReport,
+    TestingStepResult,
 };
 use cadence_aria::product::coding_workspace_engine::{
     CodingExecutionContext, CodingWorkspaceEngine, testing_report_should_enter_analyst,
@@ -823,6 +824,19 @@ async fn tester_plan_start_timeout_blocks_with_retry_test_plan_gate() {
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].status, CodingRoleRunStatus::Blocked);
     assert_eq!(runs[0].reason_code.as_deref(), Some("plan_tests_timeout"));
+    let events = store
+        .list_role_run_events("project_0001", "issue_0001", &attempt.id, &runs[0].id)
+        .expect("role run events");
+    assert!(
+        events
+            .iter()
+            .any(|event| event.event_type == CodingRoleRunEventType::ProviderPrompt)
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event.event_type == CodingRoleRunEventType::Timeout)
+    );
     let gates = store
         .list_open_blocked_gates("project_0001", "issue_0001", &attempt.id)
         .expect("gates");
@@ -1696,6 +1710,64 @@ async fn execute_code_review_forwards_provider_execution_events() {
         .expect("execute code review");
 
     assert_provider_command_event(&drain_events(&mut rx));
+}
+
+#[tokio::test]
+async fn execute_code_review_persists_role_run_events_while_forwarding_realtime_events() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    init_repo(&worktree);
+    fs::write(worktree.join("src.txt"), "hello\nreviewed\n").expect("modify file");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            base_branch: "HEAD".to_string(),
+            ..create_input()
+        })
+        .expect("create attempt");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    let provider = EventThenCompletedProvider {
+        output: r#"{"verdict":"approve","summary":"review ok","findings":[]}"#.to_string(),
+    };
+    let (tx, mut rx) = mpsc::channel(16);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+
+    engine
+        .execute_code_review(&attempt, &provider)
+        .await
+        .expect("execute code review");
+
+    assert_provider_command_event(&drain_events(&mut rx));
+    let runs = store
+        .list_role_runs("project_0001", "issue_0001", &attempt.id)
+        .expect("role runs");
+    assert_eq!(runs.len(), 1);
+    let events = store
+        .list_role_run_events("project_0001", "issue_0001", &attempt.id, &runs[0].id)
+        .expect("role run events");
+    let event_types = events
+        .iter()
+        .map(|event| event.event_type)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        event_types,
+        vec![
+            CodingRoleRunEventType::ProviderPrompt,
+            CodingRoleRunEventType::ProviderStart,
+            CodingRoleRunEventType::ExecutionEvent,
+            CodingRoleRunEventType::MessageComplete,
+        ]
+    );
+    assert_eq!(events[2].payload["title"], "Provider command");
+    assert_eq!(events[2].payload["output"], "changed files");
 }
 
 #[tokio::test]

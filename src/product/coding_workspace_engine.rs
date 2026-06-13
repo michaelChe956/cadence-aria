@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use serde::Deserialize;
+use serde_json::json;
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -29,10 +30,10 @@ use crate::product::coding_models::{
     CodingAgentRole, CodingAttemptStatus, CodingChatEntry, CodingContextNote, CodingEntryType,
     CodingExecutionAttempt, CodingExecutionStage, CodingGateAction, CodingGateActionType,
     CodingProviderPermissionMode, CodingProviderRole, CodingReworkInstruction, CodingRoleRun,
-    CodingRoleRunStatus, CodingRoleRunTrigger, CodingTimelineNode, CodingTimelineNodeStatus,
-    InternalPrReview, PushStatus, ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict,
-    TestCommand, TestCommandStatus, TestPlan, TestPlanRiskLevel, TestingOverallStatus,
-    TestingReport, TestingStepResult, TestingUnplannedEvidence,
+    CodingRoleRunEventType, CodingRoleRunStatus, CodingRoleRunTrigger, CodingTimelineNode,
+    CodingTimelineNodeStatus, InternalPrReview, PushStatus, ReviewFinding, ReviewRequest,
+    ReviewRequestKind, ReviewVerdict, TestCommand, TestCommandStatus, TestPlan, TestPlanRiskLevel,
+    TestingOverallStatus, TestingReport, TestingStepResult, TestingUnplannedEvidence,
 };
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::git_workspace_service::{GitWorkspaceError, GitWorkspaceService};
@@ -95,6 +96,7 @@ pub struct CodingExecutionContext {
 struct CodingProviderStreamRun<'a> {
     attempt: &'a CodingExecutionAttempt,
     node_id: &'a str,
+    role_run: Option<&'a CodingRoleRun>,
     provider: &'a dyn StreamingProviderAdapter,
     legacy_input: &'a AdapterInput,
     input: StreamingProviderInput,
@@ -444,6 +446,7 @@ impl CodingWorkspaceEngine {
             .run_provider_stream_to_completion(CodingProviderStreamRun {
                 attempt: &attempt,
                 node_id: &node.id,
+                role_run: None,
                 provider,
                 legacy_input: &legacy_input,
                 input,
@@ -467,6 +470,29 @@ impl CodingWorkspaceEngine {
         Ok(attempt)
     }
 
+    fn record_role_run_event(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        role_run: Option<&CodingRoleRun>,
+        event_type: CodingRoleRunEventType,
+        payload: serde_json::Value,
+    ) {
+        let Some(role_run) = role_run else {
+            return;
+        };
+        if let Err(error) = self
+            .store
+            .append_role_run_event(attempt, role_run, event_type, payload)
+        {
+            tracing::warn!(
+                role_run_id = role_run.id.as_str(),
+                event_type = ?event_type,
+                error = %error,
+                "failed to persist coding role run event"
+            );
+        }
+    }
+
     async fn run_provider_stream_to_completion(
         &self,
         run: CodingProviderStreamRun<'_>,
@@ -474,6 +500,7 @@ impl CodingWorkspaceEngine {
         let CodingProviderStreamRun {
             attempt,
             node_id,
+            role_run,
             provider,
             legacy_input,
             input,
@@ -485,11 +512,32 @@ impl CodingWorkspaceEngine {
             timeout_reason_code,
         } = run;
         let cancel = CancellationToken::new();
+        self.record_role_run_event(
+            attempt,
+            role_run,
+            CodingRoleRunEventType::ProviderPrompt,
+            json!({
+                "provider": provider_name,
+                "role": format!("{provider_role:?}"),
+                "output_schema": legacy_input.output_schema.clone(),
+                "prompt": legacy_input.prompt.clone()
+            }),
+        );
         let start_result = if let Some(duration) = timeout {
             tokio::select! {
                 result = provider.start(input, cancel.clone()) => result,
                 _ = tokio::time::sleep(duration) => {
                     cancel.cancel();
+                    self.record_role_run_event(
+                        attempt,
+                        role_run,
+                        CodingRoleRunEventType::Timeout,
+                        json!({
+                            "phase": "provider_start",
+                            "reason_code": timeout_reason_code
+                                .unwrap_or("provider_stream_timeout")
+                        }),
+                    );
                     return Err(CodingWorkspaceEngineError::ProviderStream(
                         timeout_reason_code
                             .unwrap_or("provider_stream_timeout")
@@ -501,7 +549,18 @@ impl CodingWorkspaceEngine {
             provider.start(input, cancel.clone()).await
         };
         let mut session = match start_result {
-            Ok(session) => session,
+            Ok(session) => {
+                self.record_role_run_event(
+                    attempt,
+                    role_run,
+                    CodingRoleRunEventType::ProviderStart,
+                    json!({
+                        "provider": provider_name,
+                        "role": format!("{provider_role:?}")
+                    }),
+                );
+                session
+            }
             Err(error)
                 if provider_start_is_not_implemented(&error) && allow_legacy_stream_fallback =>
             {
@@ -510,12 +569,30 @@ impl CodingWorkspaceEngine {
                     .await;
             }
             Err(error) if !allow_legacy_stream_fallback => {
-                return Err(CodingWorkspaceEngineError::ProviderStream(error.details));
+                let message = error.details;
+                self.record_role_run_event(
+                    attempt,
+                    role_run,
+                    CodingRoleRunEventType::ProviderFailed,
+                    json!({
+                        "phase": "provider_start",
+                        "message": message.clone()
+                    }),
+                );
+                return Err(CodingWorkspaceEngineError::ProviderStream(message));
             }
             Err(error) => {
-                return self
-                    .fail_provider_stream(attempt, node_id, error.details)
-                    .await;
+                let message = error.details;
+                self.record_role_run_event(
+                    attempt,
+                    role_run,
+                    CodingRoleRunEventType::ProviderFailed,
+                    json!({
+                        "phase": "provider_start",
+                        "message": message.clone()
+                    }),
+                );
+                return self.fail_provider_stream(attempt, node_id, message).await;
             }
         };
         let mut commands_open = true;
@@ -528,6 +605,16 @@ impl CodingWorkspaceEngine {
             tokio::select! {
                 _ = &mut timeout => {
                     cancel.cancel();
+                    self.record_role_run_event(
+                        attempt,
+                        role_run,
+                        CodingRoleRunEventType::Timeout,
+                        json!({
+                            "phase": "provider_stream",
+                            "reason_code": timeout_reason_code
+                                .unwrap_or("provider_stream_timeout")
+                        }),
+                    );
                     return Err(CodingWorkspaceEngineError::ProviderStream(
                         timeout_reason_code
                             .unwrap_or("provider_stream_timeout")
@@ -543,6 +630,14 @@ impl CodingWorkspaceEngine {
                         CodingRunnerCommand::AbortAttempt => {
                             let _ = session.commands.send(ProviderCommand::Abort).await;
                             cancel.cancel();
+                            self.record_role_run_event(
+                                attempt,
+                                role_run,
+                                CodingRoleRunEventType::Aborted,
+                                json!({
+                                    "reason": "abort_attempt"
+                                }),
+                            );
                             let _ = self
                                 .event_tx
                                 .send(CodingWsOutMessage::CodingExecutionEvent {
@@ -568,6 +663,14 @@ impl CodingWorkspaceEngine {
                     };
                     match event {
                         ProviderEvent::TextDelta { content } => {
+                            self.record_role_run_event(
+                                attempt,
+                                role_run,
+                                CodingRoleRunEventType::TextDelta,
+                                json!({
+                                    "content": content.clone()
+                                }),
+                            );
                             full_output.push_str(&content);
                             let _ = self
                                 .event_tx
@@ -578,6 +681,22 @@ impl CodingWorkspaceEngine {
                                 .await;
                         }
                         ProviderEvent::Execution(event) => {
+                            self.record_role_run_event(
+                                attempt,
+                                role_run,
+                                CodingRoleRunEventType::ExecutionEvent,
+                                json!({
+                                    "event_id": event.event_id.clone(),
+                                    "kind": format!("{:?}", &event.kind),
+                                    "status": format!("{:?}", &event.status),
+                                    "title": event.title.clone(),
+                                    "detail": event.detail.clone(),
+                                    "command": event.command.clone(),
+                                    "cwd": event.cwd.clone(),
+                                    "output": event.output.clone(),
+                                    "exit_code": event.exit_code
+                                }),
+                            );
                             let _ = self
                                 .event_tx
                                 .send(CodingWsOutMessage::CodingExecutionEvent {
@@ -590,6 +709,16 @@ impl CodingWorkspaceEngine {
                                 .await;
                         }
                         ProviderEvent::ToolCall(call) => {
+                            self.record_role_run_event(
+                                attempt,
+                                role_run,
+                                CodingRoleRunEventType::ToolCall,
+                                json!({
+                                    "id": call.id.clone(),
+                                    "tool_name": call.tool_name.clone(),
+                                    "input": call.input.clone()
+                                }),
+                            );
                             tool_call_titles.insert(call.id.clone(), call.tool_name.clone());
                             if let Some(command) = extract_tool_command(&call.input) {
                                 tool_call_commands.insert(call.id.clone(), command);
@@ -602,6 +731,16 @@ impl CodingWorkspaceEngine {
                                 .await;
                         }
                         ProviderEvent::ToolResult(result) => {
+                            self.record_role_run_event(
+                                attempt,
+                                role_run,
+                                CodingRoleRunEventType::ToolResult,
+                                json!({
+                                    "tool_use_id": result.tool_use_id.clone(),
+                                    "output": result.output.clone(),
+                                    "is_error": result.is_error
+                                }),
+                            );
                             let title = tool_call_titles
                                 .get(&result.tool_use_id)
                                 .cloned()
@@ -621,12 +760,42 @@ impl CodingWorkspaceEngine {
                                 .await;
                         }
                         ProviderEvent::PermissionRequest(request) => {
+                            self.record_role_run_event(
+                                attempt,
+                                role_run,
+                                CodingRoleRunEventType::PermissionRequest,
+                                json!({
+                                    "id": request.id.clone(),
+                                    "tool_name": request.tool_name.clone(),
+                                    "description": request.description.clone(),
+                                    "risk_level": format!("{:?}", &request.risk_level)
+                                }),
+                            );
                             self.emit_permission_request(node_id, provider_name, request).await;
                         }
                         ProviderEvent::ChoiceRequest(request) => {
+                            self.record_role_run_event(
+                                attempt,
+                                role_run,
+                                CodingRoleRunEventType::ChoiceRequest,
+                                json!({
+                                    "id": request.id.clone(),
+                                    "prompt": request.prompt.clone(),
+                                    "allow_multiple": request.allow_multiple,
+                                    "allow_free_text": request.allow_free_text
+                                }),
+                            );
                             self.emit_choice_request(node_id, provider_name, request).await;
                         }
                         ProviderEvent::StatusChanged(status) => {
+                            self.record_role_run_event(
+                                attempt,
+                                role_run,
+                                CodingRoleRunEventType::StatusChanged,
+                                json!({
+                                    "status": format!("{status:?}")
+                                }),
+                            );
                             let _ = self
                                 .event_tx
                                 .send(CodingWsOutMessage::CodingExecutionEvent {
@@ -642,6 +811,15 @@ impl CodingWorkspaceEngine {
                             full_output: completed_output,
                             provider_session_id,
                         } => {
+                            self.record_role_run_event(
+                                attempt,
+                                role_run,
+                                CodingRoleRunEventType::MessageComplete,
+                                json!({
+                                    "provider_session_id": provider_session_id.clone(),
+                                    "output_bytes": completed_output.len()
+                                }),
+                            );
                             self.record_attempt_provider_session(
                                 attempt,
                                 &provider_role,
@@ -661,18 +839,46 @@ impl CodingWorkspaceEngine {
                             return Ok(full_output);
                         }
                         ProviderEvent::Failed { message } => {
+                            self.record_role_run_event(
+                                attempt,
+                                role_run,
+                                CodingRoleRunEventType::ProviderFailed,
+                                json!({
+                                    "message": message.clone()
+                                }),
+                            );
                             return self.fail_provider_stream(attempt, node_id, message).await;
                         }
-                        ProviderEvent::ProtocolError { message, .. } => {
+                        ProviderEvent::ProtocolError {
+                            code,
+                            message,
+                            context,
+                        } => {
+                            self.record_role_run_event(
+                                attempt,
+                                role_run,
+                                CodingRoleRunEventType::ProviderFailed,
+                                json!({
+                                    "code": code,
+                                    "message": message.clone(),
+                                    "context": context
+                                }),
+                            );
                             return self.fail_provider_stream(attempt, node_id, message).await;
                         }
                         ProviderEvent::PermissionTimeout { permission_id } => {
+                            let message = format!("Permission request {permission_id} timed out");
+                            self.record_role_run_event(
+                                attempt,
+                                role_run,
+                                CodingRoleRunEventType::ProviderFailed,
+                                json!({
+                                    "permission_id": permission_id,
+                                    "message": message.clone()
+                                }),
+                            );
                             return self
-                                .fail_provider_stream(
-                                    attempt,
-                                    node_id,
-                                    format!("Permission request {permission_id} timed out"),
-                                )
+                                .fail_provider_stream(attempt, node_id, message)
                                 .await;
                         }
                     }
@@ -1182,6 +1388,7 @@ impl CodingWorkspaceEngine {
             .run_provider_stream_to_completion(CodingProviderStreamRun {
                 attempt: &attempt,
                 node_id: &node.id,
+                role_run: Some(&role_run),
                 provider,
                 legacy_input: &plan_adapter_input,
                 input: plan_input,
@@ -1272,6 +1479,7 @@ impl CodingWorkspaceEngine {
                     .run_provider_stream_to_completion(CodingProviderStreamRun {
                         attempt: &attempt,
                         node_id: &node.id,
+                        role_run: Some(&role_run),
                         provider,
                         legacy_input: &repair_adapter_input,
                         input: repair_input,
@@ -1766,6 +1974,7 @@ impl CodingWorkspaceEngine {
                 .run_provider_stream_to_completion(CodingProviderStreamRun {
                     attempt: &attempt,
                     node_id: &node.id,
+                    role_run: Some(&role_run),
                     provider,
                     legacy_input: &repair_adapter_input,
                     input: repair_input,
@@ -2014,6 +2223,7 @@ impl CodingWorkspaceEngine {
             .run_provider_stream_to_completion(CodingProviderStreamRun {
                 attempt: &attempt,
                 node_id: &node.id,
+                role_run: Some(&role_run),
                 provider,
                 legacy_input: &input,
                 input: provider_input,
@@ -2231,6 +2441,7 @@ impl CodingWorkspaceEngine {
             .run_provider_stream_to_completion(CodingProviderStreamRun {
                 attempt: &attempt,
                 node_id: &node.id,
+                role_run: Some(&role_run),
                 provider,
                 legacy_input: &input,
                 input: provider_input,
@@ -2451,6 +2662,7 @@ impl CodingWorkspaceEngine {
             .run_provider_stream_to_completion(CodingProviderStreamRun {
                 attempt: &attempt,
                 node_id: &node.id,
+                role_run: Some(&role_run),
                 provider,
                 legacy_input: &input,
                 input: provider_input,
