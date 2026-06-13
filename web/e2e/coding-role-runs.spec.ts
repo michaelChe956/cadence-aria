@@ -42,7 +42,8 @@ test("retry analyst from browser gate creates a new visible run", async ({ page 
   const history = page.getByTestId("coding-role-run-history");
   await expect(history).toContainText("Analyst #2", { timeout: 30_000 });
   await expect(history).toContainText("retry_analyst");
-  await expect(history).toContainText("Analyst task update");
+  const previousAnalystRun = history.getByRole("button").filter({ hasText: "Analyst #1" });
+  await expect(previousAnalystRun).toContainText("Analyst task update");
   await expect(page.getByTestId("chat-entry-list")).toContainText("retry analyst accepted from browser", {
     timeout: 30_000,
   });
@@ -65,7 +66,10 @@ test("retry internal reviewer from browser gate stays on internal review run", a
   const history = page.getByTestId("coding-role-run-history");
   await expect(history).toContainText("Internal Reviewer #2", { timeout: 30_000 });
   await expect(history).toContainText("retry_internal_review");
-  await expect(history).toContainText("Internal reviewer task update");
+  const previousInternalReviewerRun = history
+    .getByRole("button")
+    .filter({ hasText: "Internal Reviewer #1" });
+  await expect(previousInternalReviewerRun).toContainText("Internal reviewer task update");
   await expect(history).not.toContainText("Code Reviewer #2");
   await expect(page.getByTestId("chat-entry-list")).toContainText("internal reviewer retry accepted", {
     timeout: 30_000,
