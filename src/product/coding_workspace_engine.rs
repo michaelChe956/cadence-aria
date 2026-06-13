@@ -1189,7 +1189,7 @@ impl CodingWorkspaceEngine {
                 &attempt.id,
                 &role_run.id,
                 testing_role_run_status(&report),
-                derive_testing_role_run_reason(&report).or_else(|| Some(reason_code.to_string())),
+                Some(reason_code.clone()),
             )?;
         }
         Ok(report)

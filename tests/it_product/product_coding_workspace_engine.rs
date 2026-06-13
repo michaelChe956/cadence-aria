@@ -966,6 +966,75 @@ async fn tester_execute_plan_start_timeout_blocks_with_retry_gate() {
 }
 
 #[tokio::test]
+async fn blocked_testing_gate_reason_overrides_report_warning_for_role_run() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            ..create_input()
+        })
+        .expect("create attempt");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    let (tx, _rx) = mpsc::channel(64);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+
+    let report = tokio::time::timeout(
+        Duration::from_millis(250),
+        engine.execute_testing_with_provider(
+            &attempt,
+            &HangingExecutePlanStartTesterProvider::with_plan_warning("timeout budget risk"),
+            &CodingExecutionContext::default(),
+            &[],
+            TesterAgentOptions {
+                timeout: Duration::from_millis(20),
+                failure_limit: 3,
+            },
+        ),
+    )
+    .await
+    .expect("engine should return before outer timeout")
+    .expect("execute start timeout becomes blocked report");
+
+    assert_eq!(report.overall_status, TestingOverallStatus::Blocked);
+    assert!(
+        report
+            .context_warnings
+            .contains(&"timeout budget risk".to_string())
+    );
+    assert!(
+        report
+            .context_warnings
+            .contains(&"execute_test_plan_timeout".to_string())
+    );
+    let gates = store
+        .list_open_blocked_gates("project_0001", "issue_0001", &attempt.id)
+        .expect("gates");
+    assert_eq!(gates.len(), 1);
+    assert_eq!(
+        gates[0].reason_code.as_deref(),
+        Some("execute_test_plan_timeout")
+    );
+    let runs = store
+        .list_role_runs("project_0001", "issue_0001", &attempt.id)
+        .expect("role runs");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(
+        runs[0].reason_code.as_deref(),
+        Some("execute_test_plan_timeout")
+    );
+}
+
+#[tokio::test]
 async fn retry_test_plan_supersedes_latest_testing_role_run_and_resumes_testing() {
     let root = tempdir().expect("root");
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
@@ -4635,6 +4704,16 @@ impl StreamingProviderAdapter for ExecutePlanToolCallTesterProvider {
 #[derive(Default)]
 struct HangingExecutePlanStartTesterProvider {
     starts: Arc<Mutex<usize>>,
+    plan_warning: Option<String>,
+}
+
+impl HangingExecutePlanStartTesterProvider {
+    fn with_plan_warning(plan_warning: &str) -> Self {
+        Self {
+            starts: Arc::new(Mutex::new(0)),
+            plan_warning: Some(plan_warning.to_string()),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -4661,9 +4740,28 @@ impl StreamingProviderAdapter for HangingExecutePlanStartTesterProvider {
         if start_no == 1 {
             let (event_tx, event_rx) = mpsc::channel(8);
             let (command_tx, _command_rx) = mpsc::channel(8);
+            let context_warnings = self
+                .plan_warning
+                .as_ref()
+                .map(|warning| serde_json::json!([warning]))
+                .unwrap_or_else(|| serde_json::json!([]));
             event_tx
                 .try_send(ProviderEvent::Completed {
-                    full_output: r#"{"summary":"unit plan","steps":[{"id":"unit","title":"Unit","intent":"run unit checks","required":true,"tool":"provider_managed","risk_level":"low","command_or_tool_input":{},"evidence_expectation":"unit evidence"}]}"#.to_string(),
+                    full_output: serde_json::json!({
+                        "summary": "unit plan",
+                        "context_warnings": context_warnings,
+                        "steps": [{
+                            "id": "unit",
+                            "title": "Unit",
+                            "intent": "run unit checks",
+                            "required": true,
+                            "tool": "provider_managed",
+                            "risk_level": "low",
+                            "command_or_tool_input": {},
+                            "evidence_expectation": "unit evidence"
+                        }]
+                    })
+                    .to_string(),
                     provider_session_id: None,
                 })
                 .expect("send plan completed");
