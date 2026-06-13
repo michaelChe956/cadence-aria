@@ -642,6 +642,10 @@ impl CodingAttemptStore {
         attempt_id: &str,
         role_run_id: &str,
     ) -> Result<Option<String>, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(attempt_id)?;
+        validate_relative_id(role_run_id)?;
         let run = self.get_role_run(project_id, issue_id, attempt_id, role_run_id)?;
         let events = self.list_role_run_events(project_id, issue_id, attempt_id, role_run_id)?;
         if events.is_empty()
@@ -694,11 +698,9 @@ impl CodingAttemptStore {
                 coding_role_run_event_type_name(event.event_type),
                 role_run_event_payload_text(event, "title").unwrap_or("-"),
                 role_run_event_payload_text(event, "status").unwrap_or("-"),
-                role_run_event_payload_text(event, "detail")
-                    .or_else(|| role_run_event_payload_text(event, "content"))
-                    .unwrap_or("-")
+                role_run_event_payload_text(event, "detail").unwrap_or("-")
             ));
-            if let Some(artifact_ref) = event.artifact_ref.as_deref() {
+            for artifact_ref in role_run_event_artifact_refs(event) {
                 lines.push(format!("  event_artifact_ref: {artifact_ref}"));
             }
         }
@@ -1910,6 +1912,44 @@ fn role_run_event_payload_text<'a>(event: &'a CodingRoleRunEvent, field: &str) -
 fn role_run_event_payload_reason(event: &CodingRoleRunEvent) -> Option<&str> {
     role_run_event_payload_text(event, "reason_code")
         .or_else(|| role_run_event_payload_text(event, "message"))
+}
+
+fn role_run_event_artifact_refs(event: &CodingRoleRunEvent) -> Vec<String> {
+    let mut artifact_refs = Vec::new();
+    if let Some(artifact_ref) = event.artifact_ref.as_deref() {
+        push_unique_artifact_ref(&mut artifact_refs, artifact_ref);
+    }
+    collect_payload_artifact_refs(&event.payload, &mut artifact_refs);
+    artifact_refs
+}
+
+fn collect_payload_artifact_refs(value: &serde_json::Value, artifact_refs: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Object(object) => {
+            if let Some(artifact_ref) = object.get("artifact_ref").and_then(|value| value.as_str())
+            {
+                push_unique_artifact_ref(artifact_refs, artifact_ref);
+            }
+            for nested in object.values() {
+                collect_payload_artifact_refs(nested, artifact_refs);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for nested in values {
+                collect_payload_artifact_refs(nested, artifact_refs);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn push_unique_artifact_ref(artifact_refs: &mut Vec<String>, artifact_ref: &str) {
+    if !artifact_refs
+        .iter()
+        .any(|existing| existing == artifact_ref)
+    {
+        artifact_refs.push(artifact_ref.to_string());
+    }
 }
 
 fn count_json_files(path: &Path) -> Result<usize, ProductStoreError> {

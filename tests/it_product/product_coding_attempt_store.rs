@@ -1117,3 +1117,130 @@ fn role_run_retry_diagnostic_summary_compacts_events_and_refs() {
         "retry diagnostic summary must stay prompt-safe"
     );
 }
+
+#[test]
+fn role_run_retry_diagnostic_summary_keeps_recent_metadata_and_payload_refs() {
+    let root = tempdir().expect("tempdir");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(create_input("work_item_0001"))
+        .expect("create attempt");
+    let run = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::Testing,
+            CodingProviderRole::Tester,
+            CodingRoleRunTrigger::Initial,
+            Some("coding_node_0004".to_string()),
+        )
+        .expect("role run");
+
+    store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::ExecutionEvent,
+            serde_json::json!({
+                "title": "Old event",
+                "status": "running",
+                "detail": "Dropped old event"
+            }),
+        )
+        .expect("old event");
+    store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::TextDelta,
+            serde_json::json!({
+                "content": "DROPPED_TEXT_DELTA_BODY"
+            }),
+        )
+        .expect("old text delta");
+    store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::ExecutionEvent,
+            serde_json::json!({
+                "title": "Recent setup",
+                "status": "running",
+                "detail": "Preparing test run"
+            }),
+        )
+        .expect("recent setup");
+    store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::TextDelta,
+            serde_json::json!({
+                "content": "DO_NOT_INJECT_TEXT_DELTA_BODY"
+            }),
+        )
+        .expect("recent text delta");
+    store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::ExecutionEvent,
+            serde_json::json!({
+                "title": "Recent event 5",
+                "status": "running",
+                "detail": "Still running"
+            }),
+        )
+        .expect("recent event 5");
+    store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::ExecutionEvent,
+            serde_json::json!({
+                "title": "Recent event 6",
+                "status": "running",
+                "detail": "Almost done"
+            }),
+        )
+        .expect("recent event 6");
+    let long_stdout = "stdout line\n".repeat(2_000);
+    let long_stderr = "stderr line\n".repeat(2_000);
+    store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::ExecutionEvent,
+            serde_json::json!({
+                "title": "Cargo test",
+                "status": "failed",
+                "detail": "Captured command output",
+                "stdout": long_stdout,
+                "stderr": long_stderr
+            }),
+        )
+        .expect("captured output");
+    store
+        .update_role_run_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            &run.id,
+            CodingRoleRunStatus::Blocked,
+            Some("tests_failed".to_string()),
+        )
+        .expect("blocked");
+
+    let summary = store
+        .role_run_retry_diagnostic_summary("project_0001", "issue_0001", &attempt.id, &run.id)
+        .expect("summary")
+        .expect("summary text");
+
+    assert!(!summary.contains("DO_NOT_INJECT_TEXT_DELTA_BODY"));
+    assert!(!summary.contains("Dropped old event"));
+    assert!(summary.contains("artifacts/role-run-events/coding_role_run_0001/0007_stdout.txt"));
+    assert!(summary.contains("artifacts/role-run-events/coding_role_run_0001/0007_stderr.txt"));
+    assert!(
+        summary.len() <= 8_000,
+        "retry diagnostic summary must stay prompt-safe"
+    );
+}
