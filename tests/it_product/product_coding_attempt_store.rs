@@ -1039,3 +1039,81 @@ fn role_run_event_truncates_each_large_payload_field() {
     assert_eq!(stdout_artifact, long_stdout);
     assert_eq!(stderr_artifact, long_stderr);
 }
+
+#[test]
+fn role_run_retry_diagnostic_summary_compacts_events_and_refs() {
+    let root = tempdir().expect("tempdir");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(create_input("work_item_0001"))
+        .expect("create attempt");
+    let run = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::Testing,
+            CodingProviderRole::Tester,
+            CodingRoleRunTrigger::Initial,
+            Some("coding_node_0003".to_string()),
+        )
+        .expect("role run");
+    store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::ExecutionEvent,
+            serde_json::json!({
+                "title": "Task update",
+                "status": "running",
+                "detail": "No tasks found"
+            }),
+        )
+        .expect("event");
+    store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::Timeout,
+            serde_json::json!({
+                "reason_code": "plan_tests_timeout",
+                "message": "Tester provider timed out"
+            }),
+        )
+        .expect("timeout");
+    store
+        .update_role_run_refs(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            &run.id,
+            vec!["provider-raw/testing/plan_tests_0001.txt".to_string()],
+            vec!["artifacts/role-run-events/coding_role_run_0001/0001_output.txt".to_string()],
+        )
+        .expect("refs");
+    store
+        .update_role_run_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            &run.id,
+            CodingRoleRunStatus::Blocked,
+            Some("plan_tests_timeout".to_string()),
+        )
+        .expect("blocked");
+
+    let summary = store
+        .role_run_retry_diagnostic_summary("project_0001", "issue_0001", &attempt.id, &run.id)
+        .expect("summary")
+        .expect("summary text");
+
+    assert!(summary.contains("role_run_id: coding_role_run_0001"));
+    assert!(summary.contains("reason_code: plan_tests_timeout"));
+    assert!(summary.contains("terminal_event: timeout"));
+    assert!(summary.contains("Task update"));
+    assert!(summary.contains("No tasks found"));
+    assert!(summary.contains("provider-raw/testing/plan_tests_0001.txt"));
+    assert!(summary.contains("artifacts/role-run-events/coding_role_run_0001/0001_output.txt"));
+    assert!(
+        summary.len() < 8_000,
+        "retry diagnostic summary must stay prompt-safe"
+    );
+}

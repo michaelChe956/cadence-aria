@@ -635,6 +635,86 @@ impl CodingAttemptStore {
         Ok(events)
     }
 
+    pub fn role_run_retry_diagnostic_summary(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        role_run_id: &str,
+    ) -> Result<Option<String>, ProductStoreError> {
+        let run = self.get_role_run(project_id, issue_id, attempt_id, role_run_id)?;
+        let events = self.list_role_run_events(project_id, issue_id, attempt_id, role_run_id)?;
+        if events.is_empty()
+            && run.reason_code.is_none()
+            && run.raw_provider_output_refs.is_empty()
+            && run.artifact_refs.is_empty()
+        {
+            return Ok(None);
+        }
+
+        let terminal = events.iter().rev().find(|event| {
+            matches!(
+                event.event_type,
+                CodingRoleRunEventType::MessageComplete
+                    | CodingRoleRunEventType::ProviderFailed
+                    | CodingRoleRunEventType::Timeout
+                    | CodingRoleRunEventType::Aborted
+            )
+        });
+        let mut lines = Vec::new();
+        lines.push("[previous_role_run_diagnostic]".to_string());
+        lines.push(format!("role_run_id: {}", run.id));
+        lines.push(format!("stage: {:?}", run.stage));
+        lines.push(format!("role: {:?}", run.role));
+        lines.push(format!("status: {:?}", run.status));
+        if let Some(reason_code) = run.reason_code.as_deref() {
+            lines.push(format!("reason_code: {reason_code}"));
+        }
+        if let Some(event) = terminal {
+            lines.push(format!(
+                "terminal_event: {}",
+                coding_role_run_event_type_name(event.event_type)
+            ));
+            if let Some(reason) = role_run_event_payload_reason(event) {
+                lines.push(format!("terminal_reason: {reason}"));
+            }
+        }
+        lines.push("recent_events:".to_string());
+        for event in events
+            .iter()
+            .rev()
+            .take(5)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+        {
+            lines.push(format!(
+                "- #{} {} title={} status={} detail={}",
+                event.sequence,
+                coding_role_run_event_type_name(event.event_type),
+                role_run_event_payload_text(event, "title").unwrap_or("-"),
+                role_run_event_payload_text(event, "status").unwrap_or("-"),
+                role_run_event_payload_text(event, "detail")
+                    .or_else(|| role_run_event_payload_text(event, "content"))
+                    .unwrap_or("-")
+            ));
+            if let Some(artifact_ref) = event.artifact_ref.as_deref() {
+                lines.push(format!("  event_artifact_ref: {artifact_ref}"));
+            }
+        }
+        if !run.raw_provider_output_refs.is_empty() {
+            lines.push(format!(
+                "raw_provider_output_refs: {}",
+                run.raw_provider_output_refs.join(", ")
+            ));
+        }
+        if !run.artifact_refs.is_empty() {
+            lines.push(format!("artifact_refs: {}", run.artifact_refs.join(", ")));
+        }
+        let summary = truncate_utf8(&lines.join("\n"), 8_000);
+        Ok(Some(summary))
+    }
+
     pub fn read_attempt_artifact_text(
         &self,
         attempt_id: &str,
@@ -1802,6 +1882,34 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> String {
         end -= 1;
     }
     value[..end].to_string()
+}
+
+fn coding_role_run_event_type_name(event_type: CodingRoleRunEventType) -> &'static str {
+    match event_type {
+        CodingRoleRunEventType::ProviderPrompt => "provider_prompt",
+        CodingRoleRunEventType::ProviderStart => "provider_start",
+        CodingRoleRunEventType::TextDelta => "text_delta",
+        CodingRoleRunEventType::ExecutionEvent => "execution_event",
+        CodingRoleRunEventType::ToolCall => "tool_call",
+        CodingRoleRunEventType::ToolResult => "tool_result",
+        CodingRoleRunEventType::StatusChanged => "status_changed",
+        CodingRoleRunEventType::PermissionRequest => "permission_request",
+        CodingRoleRunEventType::ChoiceRequest => "choice_request",
+        CodingRoleRunEventType::MessageComplete => "message_complete",
+        CodingRoleRunEventType::ProviderFailed => "provider_failed",
+        CodingRoleRunEventType::Timeout => "timeout",
+        CodingRoleRunEventType::Aborted => "aborted",
+        CodingRoleRunEventType::PersistenceWarning => "persistence_warning",
+    }
+}
+
+fn role_run_event_payload_text<'a>(event: &'a CodingRoleRunEvent, field: &str) -> Option<&'a str> {
+    event.payload.get(field).and_then(|value| value.as_str())
+}
+
+fn role_run_event_payload_reason(event: &CodingRoleRunEvent) -> Option<&str> {
+    role_run_event_payload_text(event, "reason_code")
+        .or_else(|| role_run_event_payload_text(event, "message"))
 }
 
 fn count_json_files(path: &Path) -> Result<usize, ProductStoreError> {
