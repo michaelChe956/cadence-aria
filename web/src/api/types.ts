@@ -418,6 +418,8 @@ export type AnalystDecisionRecord = {
   human_gate?: AnalystHumanGateRecommendation | null;
   created_at: string;
   parse_error?: string | null;
+  role_run_id?: string | null;
+  run_no?: number | null;
 };
 
 export type CodingEntryType =

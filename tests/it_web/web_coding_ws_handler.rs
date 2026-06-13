@@ -414,6 +414,8 @@ async fn coding_ws_session_state_includes_latest_analyst_decision() {
             human_gate: None,
             created_at: "2026-06-12T00:00:00Z".to_string(),
             parse_error: None,
+            role_run_id: None,
+            run_no: None,
         })
         .expect("save analyst decision");
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");

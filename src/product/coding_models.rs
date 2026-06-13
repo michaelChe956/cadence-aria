@@ -356,6 +356,10 @@ pub struct AnalystDecisionRecord {
     pub created_at: String,
     #[serde(default)]
     pub parse_error: Option<String>,
+    #[serde(default)]
+    pub role_run_id: Option<String>,
+    #[serde(default)]
+    pub run_no: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

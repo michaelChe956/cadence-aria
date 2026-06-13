@@ -15,7 +15,9 @@ use crate::product::coding_models::{
     InternalPrReview, QualityGateBypassAudit, ReviewRequest, TestPlan, TestingReport,
 };
 use crate::product::id::next_sequential_id;
-use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
+use crate::product::json_store::{
+    ProductStoreError, read_json, validate_relative_artifact_ref, validate_relative_id, write_json,
+};
 use crate::product::models::ProviderConversationRef;
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
@@ -500,6 +502,54 @@ impl CodingAttemptStore {
             self.save_role_run(&attempt.project_id, &attempt.issue_id, &previous_run)?;
         }
         Ok(next)
+    }
+
+    pub fn update_role_run_refs(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        role_run_id: &str,
+        raw_provider_output_refs: Vec<String>,
+        artifact_refs: Vec<String>,
+    ) -> Result<CodingRoleRun, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(attempt_id)?;
+        validate_relative_id(role_run_id)?;
+        let mut run = self.get_role_run(project_id, issue_id, attempt_id, role_run_id)?;
+        for reference in raw_provider_output_refs {
+            validate_relative_artifact_ref(&reference)?;
+            if !run
+                .raw_provider_output_refs
+                .iter()
+                .any(|existing| existing == &reference)
+            {
+                run.raw_provider_output_refs.push(reference);
+            }
+        }
+        for reference in artifact_refs {
+            validate_relative_artifact_ref(&reference)?;
+            if !run.artifact_refs.iter().any(|existing| existing == &reference) {
+                run.artifact_refs.push(reference);
+            }
+        }
+        self.save_role_run(project_id, issue_id, &run)?;
+        Ok(run)
+    }
+
+    pub fn read_attempt_artifact_text(
+        &self,
+        attempt_id: &str,
+        artifact_ref: &str,
+    ) -> Result<String, ProductStoreError> {
+        validate_relative_artifact_ref(artifact_ref)?;
+        let attempt = self.find_attempt_by_id(attempt_id)?;
+        let path = self
+            .attempt_dir(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .join(artifact_ref);
+        fs::read_to_string(&path)
+            .map_err(|error| ProductStoreError::Io(format!("read {}: {error}", path.display())))
     }
 
     pub fn increment_attempt_rework_count(

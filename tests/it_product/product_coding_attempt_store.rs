@@ -421,6 +421,8 @@ fn saves_reads_and_lists_latest_analyst_decision() {
         human_gate: None,
         created_at: "2026-06-12T00:00:00Z".to_string(),
         parse_error: None,
+        role_run_id: None,
+        run_no: None,
     };
     let second = AnalystDecisionRecord {
         id: "analyst_decision_0002".to_string(),
@@ -436,6 +438,8 @@ fn saves_reads_and_lists_latest_analyst_decision() {
         human_gate: None,
         created_at: "2026-06-12T00:01:00Z".to_string(),
         parse_error: None,
+        role_run_id: None,
+        run_no: None,
     };
 
     store
@@ -795,4 +799,51 @@ fn sample_node(attempt_id: &str) -> CodingTimelineNode {
         completed_at: None,
         artifact_refs: vec![],
     }
+}
+
+#[test]
+fn updates_coding_role_run_refs_without_duplicates() {
+    let root = tempfile::tempdir().expect("root");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: None,
+            ..create_input("work_item_0001")
+        })
+        .expect("create attempt");
+    let run = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::Rework,
+            CodingProviderRole::Analyst,
+            CodingRoleRunTrigger::Initial,
+            None,
+        )
+        .expect("role run");
+
+    let updated = store
+        .update_role_run_refs(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            &run.id,
+            vec!["provider-raw/rework/analyst_decision_0001.txt".to_string()],
+            vec!["provider-raw/rework/analyst_evidence_0001.txt".to_string()],
+        )
+        .expect("update refs");
+    assert_eq!(updated.raw_provider_output_refs.len(), 1);
+    assert_eq!(updated.artifact_refs.len(), 1);
+
+    let updated = store
+        .update_role_run_refs(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            &run.id,
+            vec!["provider-raw/rework/analyst_decision_0001.txt".to_string()],
+            vec!["provider-raw/rework/analyst_evidence_0001.txt".to_string()],
+        )
+        .expect("update refs again");
+    assert_eq!(updated.raw_provider_output_refs.len(), 1);
+    assert_eq!(updated.artifact_refs.len(), 1);
 }

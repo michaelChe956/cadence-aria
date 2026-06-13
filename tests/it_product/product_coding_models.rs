@@ -40,6 +40,8 @@ fn analyst_decision_record_uses_stable_wire_values() {
         }),
         created_at: "2026-06-12T00:00:00Z".to_string(),
         parse_error: None,
+        role_run_id: None,
+        run_no: None,
     };
 
     let value = serde_json::to_value(&record).expect("serialize decision");
@@ -446,4 +448,32 @@ fn coding_gate_action_type_round_trips_retry_analyst() {
     assert_eq!(value["action_type"], "retry_analyst");
     let decoded: CodingGateAction = serde_json::from_value(value).expect("decode action");
     assert_eq!(decoded.action_type, CodingGateActionType::RetryAnalyst);
+}
+
+#[test]
+fn analyst_decision_round_trips_role_run_metadata() {
+    let decision = AnalystDecisionRecord {
+        id: "analyst_decision_0001".to_string(),
+        attempt_id: "coding_attempt_0001".to_string(),
+        source_stage: CodingExecutionStage::Testing,
+        rework_round: 1,
+        verdict: AnalystDecisionVerdict::HumanRequired,
+        next_stage: AnalystDecisionNextStage::HumanGate,
+        reason: "Analyst 输出不是有效 JSON".to_string(),
+        evidence_refs: vec!["testing_report_0001.json".to_string()],
+        raw_provider_output_refs: vec!["provider-raw/rework/analyst_decision_0001.txt".to_string()],
+        rework_instructions: None,
+        human_gate: None,
+        created_at: "2026-06-13T00:00:00Z".to_string(),
+        parse_error: Some("expected JSON".to_string()),
+        role_run_id: Some("coding_role_run_0001".to_string()),
+        run_no: Some(1),
+    };
+
+    let value = serde_json::to_value(&decision).expect("serialize decision");
+    assert_eq!(value["role_run_id"], "coding_role_run_0001");
+    assert_eq!(value["run_no"], 1);
+    let decoded: AnalystDecisionRecord = serde_json::from_value(value).expect("decode decision");
+    assert_eq!(decoded.role_run_id.as_deref(), Some("coding_role_run_0001"));
+    assert_eq!(decoded.run_no, Some(1));
 }
