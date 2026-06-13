@@ -630,14 +630,6 @@ impl CodingWorkspaceEngine {
                         CodingRunnerCommand::AbortAttempt => {
                             let _ = session.commands.send(ProviderCommand::Abort).await;
                             cancel.cancel();
-                            self.record_role_run_event(
-                                attempt,
-                                role_run,
-                                CodingRoleRunEventType::Aborted,
-                                json!({
-                                    "reason": "abort_attempt"
-                                }),
-                            );
                             let _ = self
                                 .event_tx
                                 .send(CodingWsOutMessage::CodingExecutionEvent {
@@ -648,6 +640,14 @@ impl CodingWorkspaceEngine {
                                     ),
                                 })
                                 .await;
+                            self.record_role_run_event(
+                                attempt,
+                                role_run,
+                                CodingRoleRunEventType::Aborted,
+                                json!({
+                                    "reason": "abort_attempt"
+                                }),
+                            );
                             return Err(CodingWorkspaceEngineError::Aborted);
                         }
                         command => {
@@ -1620,7 +1620,55 @@ impl CodingWorkspaceEngine {
             timeout_secs: options.timeout.as_secs().max(1),
         };
         let cancel = CancellationToken::new();
-        let mut session = match provider.start(input, cancel.clone()).await {
+        let start_result = tokio::select! {
+            result = provider.start(input, cancel.clone()) => result,
+            _ = tokio::time::sleep(options.timeout) => {
+                cancel.cancel();
+                self.record_role_run_event(
+                    &attempt,
+                    Some(&role_run),
+                    CodingRoleRunEventType::Timeout,
+                    json!({
+                        "phase": "execute_test_plan_start",
+                        "reason_code": "execute_test_plan_timeout"
+                    }),
+                );
+                let report_id = next_sequential_id(
+                    "testing_report",
+                    self.store
+                        .list_testing_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+                        .len(),
+                );
+                let mut report = build_plan_based_testing_report(
+                    &report_id,
+                    &attempt.id,
+                    &plan,
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                    None,
+                );
+                report.overall_status = TestingOverallStatus::Blocked;
+                report
+                    .context_warnings
+                    .push("execute_test_plan_timeout".to_string());
+                return self
+                    .save_blocked_testing_report_and_gate(
+                        &attempt,
+                        &node,
+                        report,
+                        BlockedTestingGateContext {
+                            reason_code: "execute_test_plan_timeout".to_string(),
+                            description: "Tester provider timed out starting execute_test_plan"
+                                .to_string(),
+                            raw_provider_output_ref: None,
+                            role_run: Some(&role_run),
+                        },
+                    )
+                    .await;
+            }
+        };
+        let mut session = match start_result {
             Ok(session) => {
                 self.record_role_run_event(
                     &attempt,
@@ -4848,7 +4896,11 @@ pub fn testing_report_should_enter_analyst(report: &TestingReport) -> bool {
 }
 
 fn testing_blocked_report_needs_gate(report: &TestingReport, reason_code: &str) -> bool {
-    !testing_report_should_enter_analyst(report) || reason_code == "plan_tests_timeout"
+    !testing_report_should_enter_analyst(report)
+        || matches!(
+            reason_code,
+            "plan_tests_timeout" | "execute_test_plan_timeout"
+        )
 }
 
 fn push_unique_warning(warnings: &mut Vec<String>, warning: String) {

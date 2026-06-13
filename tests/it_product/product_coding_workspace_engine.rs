@@ -880,6 +880,92 @@ async fn tester_plan_start_timeout_blocks_with_retry_test_plan_gate() {
 }
 
 #[tokio::test]
+async fn tester_execute_plan_start_timeout_blocks_with_retry_gate() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            ..create_input()
+        })
+        .expect("create attempt");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    let (tx, _rx) = mpsc::channel(64);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+
+    let result = tokio::time::timeout(
+        Duration::from_millis(250),
+        engine.execute_testing_with_provider(
+            &attempt,
+            &HangingExecutePlanStartTesterProvider::default(),
+            &CodingExecutionContext::default(),
+            &[],
+            TesterAgentOptions {
+                timeout: Duration::from_millis(20),
+                failure_limit: 3,
+            },
+        ),
+    )
+    .await
+    .expect("engine should return before outer timeout");
+    let report = result.expect("execute start timeout becomes blocked report");
+
+    assert_eq!(report.overall_status, TestingOverallStatus::Blocked);
+    assert!(
+        report
+            .context_warnings
+            .contains(&"execute_test_plan_timeout".to_string())
+    );
+    let runs = store
+        .list_role_runs("project_0001", "issue_0001", &attempt.id)
+        .expect("role runs");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].status, CodingRoleRunStatus::Blocked);
+    assert_eq!(
+        runs[0].reason_code.as_deref(),
+        Some("execute_test_plan_timeout")
+    );
+    let events = store
+        .list_role_run_events("project_0001", "issue_0001", &attempt.id, &runs[0].id)
+        .expect("role run events");
+    assert!(events.iter().any(|event| {
+        event.event_type == CodingRoleRunEventType::ProviderPrompt
+            && event.payload["output_schema"] == "coding_workspace_execute_test_plan_json"
+            && event.payload["prompt"]
+                .as_str()
+                .is_some_and(|prompt| prompt.contains("Phase: execute_test_plan"))
+    }));
+    assert!(events.iter().any(|event| {
+        event.event_type == CodingRoleRunEventType::Timeout
+            && event.payload["phase"] == "execute_test_plan_start"
+            && event.payload["reason_code"] == "execute_test_plan_timeout"
+    }));
+    let gates = store
+        .list_open_blocked_gates("project_0001", "issue_0001", &attempt.id)
+        .expect("gates");
+    assert_eq!(gates.len(), 1);
+    assert_eq!(
+        gates[0].reason_code.as_deref(),
+        Some("execute_test_plan_timeout")
+    );
+    assert!(
+        gates[0]
+            .available_actions
+            .iter()
+            .any(|action| action.action_id == "retry_test_plan")
+    );
+}
+
+#[tokio::test]
 async fn retry_test_plan_supersedes_latest_testing_role_run_and_resumes_testing() {
     let root = tempdir().expect("root");
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
@@ -4487,10 +4573,11 @@ impl StreamingProviderAdapter for ExecutePlanToolCallTesterProvider {
         _cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
         self.inputs.lock().expect("inputs lock").push(input.clone());
-        let mut starts = self.starts.lock().expect("starts lock");
-        *starts += 1;
-        let start_no = *starts;
-        drop(starts);
+        let start_no = {
+            let mut starts = self.starts.lock().expect("starts lock");
+            *starts += 1;
+            *starts
+        };
 
         let (event_tx, event_rx) = mpsc::channel(8);
         let (command_tx, mut command_rx) = mpsc::channel(8);
@@ -4542,6 +4629,57 @@ impl StreamingProviderAdapter for ExecutePlanToolCallTesterProvider {
             events: event_rx,
             commands: command_tx,
         })
+    }
+}
+
+#[derive(Default)]
+struct HangingExecutePlanStartTesterProvider {
+    starts: Arc<Mutex<usize>>,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for HangingExecutePlanStartTesterProvider {
+    fn supports_tool_calls(&self) -> bool {
+        true
+    }
+
+    fn supports_provider_driven_testing(&self) -> bool {
+        true
+    }
+
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let start_no = {
+            let mut starts = self.starts.lock().expect("starts lock");
+            *starts += 1;
+            *starts
+        };
+
+        if start_no == 1 {
+            let (event_tx, event_rx) = mpsc::channel(8);
+            let (command_tx, _command_rx) = mpsc::channel(8);
+            event_tx
+                .try_send(ProviderEvent::Completed {
+                    full_output: r#"{"summary":"unit plan","steps":[{"id":"unit","title":"Unit","intent":"run unit checks","required":true,"tool":"provider_managed","risk_level":"low","command_or_tool_input":{},"evidence_expectation":"unit evidence"}]}"#.to_string(),
+                    provider_session_id: None,
+                })
+                .expect("send plan completed");
+            return Ok(ProviderSession {
+                events: event_rx,
+                commands: command_tx,
+            });
+        }
+
+        cancel.cancelled().await;
+        Err(ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "provider execute start was cancelled",
+            1,
+        ))
     }
 }
 
