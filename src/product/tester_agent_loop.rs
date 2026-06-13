@@ -920,6 +920,8 @@ mod tests {
         assert!(prompt.contains("Work Item"));
         assert!(prompt.contains("step_id"));
         assert!(prompt.contains("不要硬编码某种语言或包管理器"));
+        assert!(!prompt.contains("[retry_diagnostic]"));
+        assert!(!prompt.contains("[previous_role_run_diagnostic]"));
         assert!(prompt.contains("CRITICAL: Return ONLY a single JSON object"));
         assert!(
             prompt

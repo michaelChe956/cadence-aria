@@ -1147,21 +1147,9 @@ fn latest_analyst_role_run_evidence(
         .ok_or_else(|| {
             CodingWorkspaceEngineError::ProviderStream("analyst_retry_missing_evidence".to_string())
         })?;
-    let evidence = coding_store
+    coding_store
         .read_attempt_artifact_text(&attempt.id, &evidence_ref)
-        .map_err(CodingWorkspaceEngineError::Store)?;
-    let diagnostic = coding_store
-        .role_run_retry_diagnostic_summary(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            &run.id,
-        )
-        .map_err(CodingWorkspaceEngineError::Store)?;
-    Ok(match diagnostic {
-        Some(summary) => format!("{evidence}\n\n{summary}"),
-        None => evidence,
-    })
+        .map_err(CodingWorkspaceEngineError::Store)
 }
 
 async fn await_stage_gate(

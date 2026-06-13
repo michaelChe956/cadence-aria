@@ -3786,23 +3786,22 @@ async fn coding_ws_retry_analyst_resumes_rework_from_persisted_evidence() {
     }
     assert!(saw_rework_node, "expected new rework timeline node");
 
-    {
-        let prompts = captured.lock().expect("lock");
-        assert!(
-            prompts
-                .iter()
-                .any(|prompt| prompt.contains("persisted testing evidence")
-                    && prompt.contains("[previous_role_run_diagnostic]")
-                    && prompt.contains("Analyst task update")
-                    && prompt.contains("No tasks found")),
-            "expected analyst prompt to contain persisted evidence and retry diagnostic"
-        );
-    }
-
     let runs = store
         .list_role_runs("project_0001", "issue_0001", "coding_attempt_0001")
         .expect("role runs");
     assert_eq!(runs.len(), 2);
+    {
+        let prompts = captured.lock().expect("lock");
+        let prompt = prompts
+            .iter()
+            .find(|prompt| prompt.contains("persisted testing evidence"))
+            .expect("expected analyst prompt to contain persisted evidence");
+        assert!(prompt.contains("[previous_role_run_diagnostic]"));
+        assert!(prompt.contains("Analyst task update"));
+        assert!(prompt.contains("No tasks found"));
+        assert_eq!(prompt.matches("[previous_role_run_diagnostic]").count(), 1);
+        assert!(!prompt.contains(&format!("role_run_id: {}", runs[1].id)));
+    }
 
     ws.close(None).await.expect("close ws");
     server.abort();

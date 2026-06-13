@@ -1302,6 +1302,13 @@ async fn retry_test_plan_prompt_includes_previous_role_run_diagnostic() {
     assert!(prompt.contains("reason_code: plan_tests_timeout"));
     assert!(prompt.contains("No tasks found"));
     assert!(prompt.contains("CRITICAL: Return ONLY a single JSON object"));
+    let diagnostic_index = prompt
+        .find("[previous_role_run_diagnostic]")
+        .expect("diagnostic marker");
+    let final_critical_index = prompt
+        .find("CRITICAL: Return ONLY a single JSON object. Do not summarize validation.")
+        .expect("final critical instruction");
+    assert!(diagnostic_index < final_critical_index);
 }
 
 #[tokio::test]
