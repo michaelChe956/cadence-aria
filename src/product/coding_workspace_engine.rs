@@ -663,14 +663,7 @@ impl CodingWorkspaceEngine {
                     };
                     match event {
                         ProviderEvent::TextDelta { content } => {
-                            self.record_role_run_event(
-                                attempt,
-                                role_run,
-                                CodingRoleRunEventType::TextDelta,
-                                json!({
-                                    "content": content.clone()
-                                }),
-                            );
+                            let content_for_event = content.clone();
                             full_output.push_str(&content);
                             let _ = self
                                 .event_tx
@@ -679,24 +672,17 @@ impl CodingWorkspaceEngine {
                                     node_id: Some(node_id.to_string()),
                                 })
                                 .await;
-                        }
-                        ProviderEvent::Execution(event) => {
                             self.record_role_run_event(
                                 attempt,
                                 role_run,
-                                CodingRoleRunEventType::ExecutionEvent,
+                                CodingRoleRunEventType::TextDelta,
                                 json!({
-                                    "event_id": event.event_id.clone(),
-                                    "kind": format!("{:?}", &event.kind),
-                                    "status": format!("{:?}", &event.status),
-                                    "title": event.title.clone(),
-                                    "detail": event.detail.clone(),
-                                    "command": event.command.clone(),
-                                    "cwd": event.cwd.clone(),
-                                    "output": event.output.clone(),
-                                    "exit_code": event.exit_code
+                                    "content": content_for_event
                                 }),
                             );
+                        }
+                        ProviderEvent::Execution(event) => {
+                            let event_for_record = event.clone();
                             let _ = self
                                 .event_tx
                                 .send(CodingWsOutMessage::CodingExecutionEvent {
@@ -707,18 +693,25 @@ impl CodingWorkspaceEngine {
                                     ),
                                 })
                                 .await;
-                        }
-                        ProviderEvent::ToolCall(call) => {
                             self.record_role_run_event(
                                 attempt,
                                 role_run,
-                                CodingRoleRunEventType::ToolCall,
+                                CodingRoleRunEventType::ExecutionEvent,
                                 json!({
-                                    "id": call.id.clone(),
-                                    "tool_name": call.tool_name.clone(),
-                                    "input": call.input.clone()
+                                    "event_id": event_for_record.event_id,
+                                    "kind": format!("{:?}", event_for_record.kind),
+                                    "status": format!("{:?}", event_for_record.status),
+                                    "title": event_for_record.title,
+                                    "detail": event_for_record.detail,
+                                    "command": event_for_record.command,
+                                    "cwd": event_for_record.cwd,
+                                    "output": event_for_record.output,
+                                    "exit_code": event_for_record.exit_code
                                 }),
                             );
+                        }
+                        ProviderEvent::ToolCall(call) => {
+                            let call_for_record = call.clone();
                             tool_call_titles.insert(call.id.clone(), call.tool_name.clone());
                             if let Some(command) = extract_tool_command(&call.input) {
                                 tool_call_commands.insert(call.id.clone(), command);
@@ -729,18 +722,19 @@ impl CodingWorkspaceEngine {
                                     event: ws_event_from_tool_call(node_id, provider_name, call),
                                 })
                                 .await;
-                        }
-                        ProviderEvent::ToolResult(result) => {
                             self.record_role_run_event(
                                 attempt,
                                 role_run,
-                                CodingRoleRunEventType::ToolResult,
+                                CodingRoleRunEventType::ToolCall,
                                 json!({
-                                    "tool_use_id": result.tool_use_id.clone(),
-                                    "output": result.output.clone(),
-                                    "is_error": result.is_error
+                                    "id": call_for_record.id,
+                                    "tool_name": call_for_record.tool_name,
+                                    "input": call_for_record.input
                                 }),
                             );
+                        }
+                        ProviderEvent::ToolResult(result) => {
+                            let result_for_record = result.clone();
                             let title = tool_call_titles
                                 .get(&result.tool_use_id)
                                 .cloned()
@@ -758,44 +752,49 @@ impl CodingWorkspaceEngine {
                                     ),
                                 })
                                 .await;
+                            self.record_role_run_event(
+                                attempt,
+                                role_run,
+                                CodingRoleRunEventType::ToolResult,
+                                json!({
+                                    "tool_use_id": result_for_record.tool_use_id,
+                                    "output": result_for_record.output,
+                                    "is_error": result_for_record.is_error
+                                }),
+                            );
                         }
                         ProviderEvent::PermissionRequest(request) => {
+                            let request_for_record = request.clone();
+                            self.emit_permission_request(node_id, provider_name, request).await;
                             self.record_role_run_event(
                                 attempt,
                                 role_run,
                                 CodingRoleRunEventType::PermissionRequest,
                                 json!({
-                                    "id": request.id.clone(),
-                                    "tool_name": request.tool_name.clone(),
-                                    "description": request.description.clone(),
-                                    "risk_level": format!("{:?}", &request.risk_level)
+                                    "id": request_for_record.id,
+                                    "tool_name": request_for_record.tool_name,
+                                    "description": request_for_record.description,
+                                    "risk_level": format!("{:?}", request_for_record.risk_level)
                                 }),
                             );
-                            self.emit_permission_request(node_id, provider_name, request).await;
                         }
                         ProviderEvent::ChoiceRequest(request) => {
+                            let request_for_record = request.clone();
+                            self.emit_choice_request(node_id, provider_name, request).await;
                             self.record_role_run_event(
                                 attempt,
                                 role_run,
                                 CodingRoleRunEventType::ChoiceRequest,
                                 json!({
-                                    "id": request.id.clone(),
-                                    "prompt": request.prompt.clone(),
-                                    "allow_multiple": request.allow_multiple,
-                                    "allow_free_text": request.allow_free_text
+                                    "id": request_for_record.id,
+                                    "prompt": request_for_record.prompt,
+                                    "allow_multiple": request_for_record.allow_multiple,
+                                    "allow_free_text": request_for_record.allow_free_text
                                 }),
                             );
-                            self.emit_choice_request(node_id, provider_name, request).await;
                         }
                         ProviderEvent::StatusChanged(status) => {
-                            self.record_role_run_event(
-                                attempt,
-                                role_run,
-                                CodingRoleRunEventType::StatusChanged,
-                                json!({
-                                    "status": format!("{status:?}")
-                                }),
-                            );
+                            let status_for_record = status.clone();
                             let _ = self
                                 .event_tx
                                 .send(CodingWsOutMessage::CodingExecutionEvent {
@@ -806,20 +805,21 @@ impl CodingWorkspaceEngine {
                                     ),
                                 })
                                 .await;
+                            self.record_role_run_event(
+                                attempt,
+                                role_run,
+                                CodingRoleRunEventType::StatusChanged,
+                                json!({
+                                    "status": format!("{status_for_record:?}")
+                                }),
+                            );
                         }
                         ProviderEvent::Completed {
                             full_output: completed_output,
                             provider_session_id,
                         } => {
-                            self.record_role_run_event(
-                                attempt,
-                                role_run,
-                                CodingRoleRunEventType::MessageComplete,
-                                json!({
-                                    "provider_session_id": provider_session_id.clone(),
-                                    "output_bytes": completed_output.len()
-                                }),
-                            );
+                            let provider_session_id_for_record = provider_session_id.clone();
+                            let output_bytes = completed_output.len();
                             self.record_attempt_provider_session(
                                 attempt,
                                 &provider_role,
@@ -836,6 +836,15 @@ impl CodingWorkspaceEngine {
                                     node_id: Some(node_id.to_string()),
                                 })
                                 .await;
+                            self.record_role_run_event(
+                                attempt,
+                                role_run,
+                                CodingRoleRunEventType::MessageComplete,
+                                json!({
+                                    "provider_session_id": provider_session_id_for_record,
+                                    "output_bytes": output_bytes
+                                }),
+                            );
                             return Ok(full_output);
                         }
                         ProviderEvent::Failed { message } => {
@@ -871,9 +880,10 @@ impl CodingWorkspaceEngine {
                             self.record_role_run_event(
                                 attempt,
                                 role_run,
-                                CodingRoleRunEventType::ProviderFailed,
+                                CodingRoleRunEventType::Timeout,
                                 json!({
                                     "permission_id": permission_id,
+                                    "reason": "permission_timeout",
                                     "message": message.clone()
                                 }),
                             );

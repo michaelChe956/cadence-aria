@@ -1771,6 +1771,166 @@ async fn execute_code_review_persists_role_run_events_while_forwarding_realtime_
 }
 
 #[tokio::test]
+async fn execute_code_review_persists_provider_control_and_tool_event_payloads() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    init_repo(&worktree);
+    fs::write(worktree.join("src.txt"), "hello\nreviewed\n").expect("modify file");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            base_branch: "HEAD".to_string(),
+            ..create_input()
+        })
+        .expect("create attempt");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    let provider = ReviewControlEventProvider;
+    let (tx, mut rx) = mpsc::channel(32);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+
+    engine
+        .execute_code_review(&attempt, &provider)
+        .await
+        .expect("execute code review");
+
+    let realtime_events = drain_events(&mut rx);
+    assert!(
+        realtime_events.iter().any(|event| {
+            matches!(
+                event,
+                CodingWsOutMessage::CodingPermissionRequest { id, .. }
+                    if id == "permission_review_0001"
+            )
+        }),
+        "expected realtime permission request, got {realtime_events:?}"
+    );
+    assert!(
+        realtime_events.iter().any(|event| {
+            matches!(
+                event,
+                CodingWsOutMessage::CodingChoiceRequest { id, .. }
+                    if id == "choice_review_0001"
+            )
+        }),
+        "expected realtime choice request, got {realtime_events:?}"
+    );
+
+    let runs = store
+        .list_role_runs("project_0001", "issue_0001", &attempt.id)
+        .expect("role runs");
+    assert_eq!(runs.len(), 1);
+    let events = store
+        .list_role_run_events("project_0001", "issue_0001", &attempt.id, &runs[0].id)
+        .expect("role run events");
+    let event_types = events
+        .iter()
+        .map(|event| event.event_type)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        event_types,
+        vec![
+            CodingRoleRunEventType::ProviderPrompt,
+            CodingRoleRunEventType::ProviderStart,
+            CodingRoleRunEventType::TextDelta,
+            CodingRoleRunEventType::ExecutionEvent,
+            CodingRoleRunEventType::ToolCall,
+            CodingRoleRunEventType::ToolResult,
+            CodingRoleRunEventType::StatusChanged,
+            CodingRoleRunEventType::PermissionRequest,
+            CodingRoleRunEventType::ChoiceRequest,
+            CodingRoleRunEventType::MessageComplete,
+        ]
+    );
+    assert_eq!(events[2].payload["content"], "reviewing");
+    assert_eq!(events[3].payload["event_id"], "review_command_0001");
+    assert_eq!(events[3].payload["kind"], "Command");
+    assert_eq!(events[3].payload["status"], "Completed");
+    assert_eq!(events[3].payload["title"], "Review command");
+    assert_eq!(events[3].payload["output"], "review ok");
+    assert_eq!(events[4].payload["id"], "review_tool_0001");
+    assert_eq!(events[4].payload["tool_name"], "run_command");
+    assert_eq!(events[4].payload["input"]["command"], "cargo test --locked");
+    assert_eq!(events[5].payload["tool_use_id"], "review_tool_0001");
+    assert_eq!(events[5].payload["output"], "tool ok");
+    assert_eq!(events[5].payload["is_error"], false);
+    assert_eq!(events[6].payload["status"], "Running");
+    assert_eq!(events[7].payload["id"], "permission_review_0001");
+    assert_eq!(events[7].payload["tool_name"], "shell");
+    assert_eq!(events[7].payload["risk_level"], "High");
+    assert_eq!(events[8].payload["id"], "choice_review_0001");
+    assert_eq!(events[8].payload["prompt"], "Select review action");
+    assert_eq!(events[8].payload["allow_multiple"], false);
+    assert_eq!(events[8].payload["allow_free_text"], true);
+    assert_eq!(
+        events[9].payload["provider_session_id"],
+        "review-session-0001"
+    );
+}
+
+#[tokio::test]
+async fn execute_code_review_records_permission_timeout_as_timeout_event() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    init_repo(&worktree);
+    fs::write(worktree.join("src.txt"), "hello\nreviewed\n").expect("modify file");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            base_branch: "HEAD".to_string(),
+            ..create_input()
+        })
+        .expect("create attempt");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    let provider = ReviewPermissionTimeoutProvider;
+    let (tx, _rx) = mpsc::channel(16);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+
+    let error = engine
+        .execute_code_review(&attempt, &provider)
+        .await
+        .expect_err("permission timeout should fail code review");
+
+    assert!(
+        error
+            .to_string()
+            .contains("Permission request permission_review_timeout timed out")
+    );
+    let runs = store
+        .list_role_runs("project_0001", "issue_0001", &attempt.id)
+        .expect("role runs");
+    assert_eq!(runs.len(), 1);
+    let events = store
+        .list_role_run_events("project_0001", "issue_0001", &attempt.id, &runs[0].id)
+        .expect("role run events");
+    let timeout = events
+        .iter()
+        .find(|event| event.payload["permission_id"] == "permission_review_timeout")
+        .expect("permission timeout event");
+    assert_eq!(timeout.event_type, CodingRoleRunEventType::Timeout);
+    assert_eq!(timeout.payload["reason"], "permission_timeout");
+    assert_eq!(
+        timeout.payload["message"],
+        "Permission request permission_review_timeout timed out"
+    );
+}
+
+#[tokio::test]
 async fn execute_rework_forwards_provider_execution_events() {
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
@@ -4519,6 +4679,111 @@ impl StreamingProviderAdapter for EventThenCompletedProvider {
                 provider_session_id: None,
             })
             .expect("send completed");
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+}
+
+struct ReviewControlEventProvider;
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for ReviewControlEventProvider {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let (event_tx, event_rx) = mpsc::channel(16);
+        let (command_tx, _command_rx) = mpsc::channel(8);
+        event_tx
+            .try_send(ProviderEvent::TextDelta {
+                content: "reviewing".to_string(),
+            })
+            .expect("send text");
+        event_tx
+            .try_send(ProviderEvent::Execution(ProviderExecutionEvent {
+                event_id: "review_command_0001".to_string(),
+                kind: ProviderExecutionEventKind::Command,
+                status: ProviderExecutionEventStatus::Completed,
+                title: "Review command".to_string(),
+                detail: Some("Ran review helper".to_string()),
+                command: Some("cargo test --locked".to_string()),
+                cwd: Some(input.working_dir.display().to_string()),
+                output: Some("review ok".to_string()),
+                exit_code: Some(0),
+            }))
+            .expect("send execution");
+        event_tx
+            .try_send(ProviderEvent::ToolCall(ProviderToolCall {
+                id: "review_tool_0001".to_string(),
+                tool_name: "run_command".to_string(),
+                input: serde_json::json!({ "command": "cargo test --locked" }),
+            }))
+            .expect("send tool call");
+        event_tx
+            .try_send(ProviderEvent::ToolResult(ProviderToolResult {
+                tool_use_id: "review_tool_0001".to_string(),
+                output: "tool ok".to_string(),
+                is_error: false,
+            }))
+            .expect("send tool result");
+        event_tx
+            .try_send(ProviderEvent::StatusChanged(ProviderStatus::Running))
+            .expect("send status");
+        event_tx
+            .try_send(ProviderEvent::PermissionRequest(PermissionRequestData {
+                id: "permission_review_0001".to_string(),
+                tool_name: "shell".to_string(),
+                description: "Inspect diff".to_string(),
+                risk_level: RiskLevel::High,
+            }))
+            .expect("send permission");
+        event_tx
+            .try_send(ProviderEvent::ChoiceRequest(ChoiceRequestData {
+                id: "choice_review_0001".to_string(),
+                prompt: "Select review action".to_string(),
+                options: vec![ChoiceOptionData {
+                    id: "approve".to_string(),
+                    label: "Approve".to_string(),
+                    description: Some("Approve changes".to_string()),
+                }],
+                allow_multiple: false,
+                allow_free_text: true,
+                source: ChoiceRequestSource::ProviderChoice,
+            }))
+            .expect("send choice");
+        event_tx
+            .try_send(ProviderEvent::Completed {
+                full_output: r#"{"verdict":"approve","summary":"review ok","findings":[]}"#
+                    .to_string(),
+                provider_session_id: Some("review-session-0001".to_string()),
+            })
+            .expect("send completed");
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+}
+
+struct ReviewPermissionTimeoutProvider;
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for ReviewPermissionTimeoutProvider {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let (command_tx, _command_rx) = mpsc::channel(8);
+        event_tx
+            .try_send(ProviderEvent::PermissionTimeout {
+                permission_id: "permission_review_timeout".to_string(),
+            })
+            .expect("send permission timeout");
         Ok(ProviderSession {
             events: event_rx,
             commands: command_tx,
