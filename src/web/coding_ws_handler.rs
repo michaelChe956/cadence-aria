@@ -571,7 +571,11 @@ fn should_resume_runner_after_gate_response(
 ) -> bool {
     matches!(
         action_id,
-        "retry_test_plan" | "rerun_missing_steps" | "retry_review" | "send_raw_output_to_analyst"
+        "retry_test_plan"
+            | "rerun_missing_steps"
+            | "retry_review"
+            | "retry_analyst"
+            | "send_raw_output_to_analyst"
     ) && previous_attempt.status == CodingAttemptStatus::Blocked
 }
 
@@ -610,6 +614,41 @@ async fn execute_start_coding_flow(
         }
     }
     'pipeline: loop {
+        if current.stage == CodingExecutionStage::Rework {
+            let analyst_provider_name = coding_store
+                .get_role_provider_config_snapshot(
+                    &current.project_id,
+                    &current.issue_id,
+                    &current.id,
+                )?
+                .analyst;
+            let analyst_provider =
+                provider_for(state, &analyst_provider_name, "coding analyst provider")?;
+            let evidence = latest_analyst_role_run_evidence(coding_store, &current)?;
+            current = engine
+                .execute_rework_with_commands(
+                    &current,
+                    &evidence,
+                    analyst_provider.as_ref(),
+                    &mut command_rx,
+                )
+                .await?;
+            current =
+                coding_store.get_attempt(&current.project_id, &current.issue_id, &current.id)?;
+            if handle_pending_runner_commands(
+                &mut command_rx,
+                coding_store,
+                engine,
+                event_tx,
+                &current,
+            )
+            .await?
+            {
+                return Ok(());
+            }
+            continue 'pipeline;
+        }
+
         if current.stage.order() <= CodingExecutionStage::Coding.order() {
             let Some(next) = await_stage_gate(
                 &mut command_rx,
@@ -980,6 +1019,35 @@ async fn execute_start_coding_flow(
             }
         }
     }
+}
+
+fn latest_analyst_role_run_evidence(
+    coding_store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+) -> Result<String, CodingWorkspaceEngineError> {
+    let run = coding_store
+        .latest_role_run(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingExecutionStage::Rework,
+            CodingProviderRole::Analyst,
+        )?
+        .ok_or_else(|| {
+            CodingWorkspaceEngineError::ProviderStream("analyst_retry_missing_evidence".to_string())
+        })?;
+    let evidence_ref = run
+        .artifact_refs
+        .iter()
+        .rev()
+        .find(|reference| reference.contains("analyst_evidence"))
+        .cloned()
+        .ok_or_else(|| {
+            CodingWorkspaceEngineError::ProviderStream("analyst_retry_missing_evidence".to_string())
+        })?;
+    coding_store
+        .read_attempt_artifact_text(&attempt.id, &evidence_ref)
+        .map_err(CodingWorkspaceEngineError::Store)
 }
 
 async fn await_stage_gate(

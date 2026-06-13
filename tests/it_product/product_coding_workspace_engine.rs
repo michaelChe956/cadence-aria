@@ -4560,3 +4560,99 @@ async fn execute_rework_binds_analyst_decision_chat_and_gate_to_role_run() {
         })
     }));
 }
+
+#[tokio::test]
+async fn retry_analyst_gate_response_supersedes_latest_analyst_run() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    init_repo(&worktree);
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let mut input = create_input();
+    input.worktree_path = Some(worktree);
+    let attempt = store.create_attempt(input).expect("create attempt");
+    store
+        .update_attempt_status("project_0001", "issue_0001", &attempt.id, CodingAttemptStatus::Running)
+        .expect("running");
+    let (tx, _rx) = mpsc::channel(32);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+
+    let first_run = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::Rework,
+            CodingProviderRole::Analyst,
+            CodingRoleRunTrigger::Initial,
+            None,
+        )
+        .expect("create first run");
+    store
+        .update_role_run_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            &first_run.id,
+            CodingRoleRunStatus::Blocked,
+            Some("analyst_human_gate".to_string()),
+        )
+        .expect("block first run");
+    store
+        .update_role_run_refs(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            &first_run.id,
+            Vec::new(),
+            vec!["artifacts/rework/analyst_evidence_0001.txt".to_string()],
+        )
+        .expect("add evidence ref");
+
+    store
+        .create_blocked_gate(CreateBlockedGateInput {
+            attempt_id: attempt.id.clone(),
+            stage: CodingExecutionStage::Rework,
+            node_id: Some("coding_node_0002".to_string()),
+            role: Some(CodingProviderRole::Analyst),
+            title: "Analyst human gate".to_string(),
+            description: "需要重跑 Analyst".to_string(),
+            reason_code: Some("analyst_human_gate".to_string()),
+            evidence_refs: vec!["artifacts/rework/analyst_evidence_0001.txt".to_string()],
+            raw_provider_output_ref: None,
+            available_actions: vec![CodingGateAction {
+                action_id: "retry_analyst".to_string(),
+                label: "重试 Analyst".to_string(),
+                action_type: CodingGateActionType::RetryAnalyst,
+            }],
+        })
+        .expect("create gate");
+
+    store
+        .update_attempt_status("project_0001", "issue_0001", &attempt.id, CodingAttemptStatus::Blocked)
+        .expect("block attempt");
+
+    let updated = engine
+        .handle_blocked_gate_response(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            "coding_blocked_gate_0001",
+            "retry_analyst",
+            None,
+        )
+        .await
+        .expect("retry analyst");
+
+    assert_eq!(updated.status, CodingAttemptStatus::Running);
+    assert_eq!(updated.stage, CodingExecutionStage::Rework);
+
+    let runs = store
+        .list_role_runs("project_0001", "issue_0001", &attempt.id)
+        .expect("role runs");
+    assert_eq!(runs.len(), 2);
+    let first = runs.iter().find(|run| run.id == first_run.id).expect("first run");
+    assert_eq!(first.status, CodingRoleRunStatus::Superseded);
+    let second = runs.iter().find(|run| run.id != first_run.id).expect("second run");
+    assert_eq!(second.status, CodingRoleRunStatus::Running);
+    assert_eq!(second.trigger, CodingRoleRunTrigger::RetryAnalyst);
+    assert_eq!(second.supersedes_run_id.as_deref(), Some(first_run.id.as_str()));
+    assert_eq!(second.artifact_refs, vec!["artifacts/rework/analyst_evidence_0001.txt".to_string()]);
+}

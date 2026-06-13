@@ -2707,6 +2707,38 @@ impl CodingWorkspaceEngine {
             CodingGateActionType::RetryReview => {
                 self.resume_blocked_attempt_at_stage(&current, CodingExecutionStage::CodeReview)?
             }
+            CodingGateActionType::RetryAnalyst => {
+                let previous = self.store.latest_role_run(
+                    &current.project_id,
+                    &current.issue_id,
+                    &current.id,
+                    CodingExecutionStage::Rework,
+                    CodingProviderRole::Analyst,
+                )?;
+                let resumed = self.resume_blocked_attempt_at_stage(
+                    &current,
+                    CodingExecutionStage::Rework,
+                )?;
+                let new_run = self.store.supersede_latest_role_run_and_create(
+                    &resumed,
+                    CodingExecutionStage::Rework,
+                    CodingProviderRole::Analyst,
+                    CodingRoleRunTrigger::RetryAnalyst,
+                    None,
+                    gate.reason_code.clone(),
+                )?;
+                if let Some(previous) = previous {
+                    self.store.update_role_run_refs(
+                        &resumed.project_id,
+                        &resumed.issue_id,
+                        &resumed.id,
+                        &new_run.id,
+                        Vec::new(),
+                        previous.artifact_refs,
+                    )?;
+                }
+                resumed
+            }
             CodingGateActionType::SendRawOutputToAnalyst => {
                 self.resume_blocked_attempt_at_stage(&current, CodingExecutionStage::Rework)?
             }
