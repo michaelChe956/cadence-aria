@@ -632,7 +632,10 @@ fn should_resume_runner_after_gate_response(
             | "send_raw_output_to_analyst"
             | "accept_testing_result"
             | "rerun_testing"
-    ) && previous_attempt.status == CodingAttemptStatus::Blocked
+    ) && matches!(
+        previous_attempt.status,
+        CodingAttemptStatus::Blocked | CodingAttemptStatus::WaitingForHuman
+    )
 }
 
 async fn execute_start_coding_flow(
@@ -2306,6 +2309,12 @@ mod tests {
         ));
         assert!(should_resume_runner_after_gate_response(
             "retry_internal_review",
+            &attempt
+        ));
+
+        attempt.status = CodingAttemptStatus::WaitingForHuman;
+        assert!(should_resume_runner_after_gate_response(
+            "retry_analyst",
             &attempt
         ));
 

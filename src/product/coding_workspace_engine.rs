@@ -4065,7 +4065,10 @@ impl CodingWorkspaceEngine {
         current: &CodingExecutionAttempt,
         stage: CodingExecutionStage,
     ) -> Result<CodingExecutionAttempt, ProductStoreError> {
-        let mut updated = if current.status == CodingAttemptStatus::Blocked {
+        let mut updated = if matches!(
+            current.status,
+            CodingAttemptStatus::Blocked | CodingAttemptStatus::WaitingForHuman
+        ) {
             self.store.update_attempt_status(
                 &current.project_id,
                 &current.issue_id,

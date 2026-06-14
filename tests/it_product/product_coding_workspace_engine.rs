@@ -6367,9 +6367,9 @@ async fn retry_analyst_gate_response_supersedes_latest_analyst_run() {
             "project_0001",
             "issue_0001",
             &attempt.id,
-            CodingAttemptStatus::Blocked,
+            CodingAttemptStatus::WaitingForHuman,
         )
-        .expect("block attempt");
+        .expect("wait for human");
 
     let updated = engine
         .handle_blocked_gate_response(
