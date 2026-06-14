@@ -1831,6 +1831,71 @@ async fn coding_prompt_includes_rework_fix_hints() {
 }
 
 #[tokio::test]
+async fn execute_coding_includes_unconsumed_context_notes_and_consumes_them() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let mut attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            ..create_input()
+        })
+        .expect("create attempt");
+    attempt = store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    attempt = store
+        .increment_attempt_rework_count("project_0001", "issue_0001", &attempt.id)
+        .expect("first rework");
+    let old_note = store
+        .create_context_note(&attempt.id, "不要带入本轮 Coder prompt".to_string())
+        .expect("old context note");
+    store
+        .mark_context_notes_consumed("project_0001", "issue_0001", &attempt.id, &[old_note.id], 1)
+        .expect("consume old note");
+    let new_note = store
+        .create_context_note(
+            &attempt.id,
+            "请优先修复 provider_install SSE 订阅".to_string(),
+        )
+        .expect("new context note");
+    let captured_prompt = Arc::new(Mutex::new(None));
+    let provider = PromptCapturingProvider {
+        prompt: Arc::clone(&captured_prompt),
+    };
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+
+    engine
+        .execute_coding(&attempt, &provider, &CodingExecutionContext::default())
+        .await
+        .expect("execute coding");
+
+    let prompt = captured_prompt
+        .lock()
+        .expect("prompt lock")
+        .clone()
+        .expect("captured prompt");
+    assert!(prompt.contains("本轮补充上下文"));
+    assert!(prompt.contains("请优先修复 provider_install SSE 订阅"));
+    assert!(!prompt.contains("不要带入本轮 Coder prompt"));
+    let notes = store
+        .list_context_notes("project_0001", "issue_0001", &attempt.id)
+        .expect("context notes");
+    let consumed_note = notes
+        .iter()
+        .find(|note| note.id == new_note.id)
+        .expect("new note persisted");
+    assert_eq!(consumed_note.consumed_by_rework_round, Some(1));
+}
+
+#[tokio::test]
 async fn execute_coding_emits_prompt_for_coder_provider() {
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");

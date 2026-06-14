@@ -387,18 +387,36 @@ impl CodingWorkspaceEngine {
             &attempt.issue_id,
             &attempt.id,
         )?;
+        let context_notes = self.store.list_unconsumed_context_notes(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+        )?;
+        let context_note_ids = context_notes
+            .iter()
+            .map(|note| note.id.clone())
+            .collect::<Vec<_>>();
+        let context_note_input =
+            format_rework_context_notes(&context_notes, REWORK_CONTEXT_NOTE_CHAR_LIMIT);
+        let coding_context_notes = (!context_note_ids.is_empty()).then_some(&context_note_input);
         let prompt_mode = if resume_provider_session_id.is_some() {
             CodingPromptMode::DeltaOnly
         } else {
             CodingPromptMode::FullConversation
         };
         let prompt = match prompt_mode {
-            CodingPromptMode::FullConversation => {
-                build_coding_prompt(&attempt, context, rework_instruction.as_ref())
-            }
-            CodingPromptMode::DeltaOnly => {
-                build_coding_delta_prompt(&attempt, context, rework_instruction.as_ref())
-            }
+            CodingPromptMode::FullConversation => build_coding_prompt(
+                &attempt,
+                context,
+                rework_instruction.as_ref(),
+                coding_context_notes,
+            ),
+            CodingPromptMode::DeltaOnly => build_coding_delta_prompt(
+                &attempt,
+                context,
+                rework_instruction.as_ref(),
+                coding_context_notes,
+            ),
         };
         let _ = self
             .event_tx
@@ -418,6 +436,15 @@ impl CodingWorkspaceEngine {
                 &attempt.id,
                 &instruction.id,
                 &node.id,
+            )?;
+        }
+        if !context_note_ids.is_empty() {
+            self.store.mark_context_notes_consumed(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &context_note_ids,
+                attempt.rework_count,
             )?;
         }
 
@@ -5028,6 +5055,7 @@ fn build_coding_prompt(
     attempt: &CodingExecutionAttempt,
     context: &CodingExecutionContext,
     rework_instruction: Option<&CodingReworkInstruction>,
+    context_notes: Option<&ReworkContextNoteInput>,
 ) -> String {
     let mut prompt = format!(
         "Coding Workspace\n\
@@ -5078,6 +5106,7 @@ fn build_coding_prompt(
             "\n本轮必须优先修复上述问题。完成前请检查 git diff/status，确认 reviewer 指出的文件或行为已处理。\n",
         );
     }
+    append_coding_context_notes(&mut prompt, context_notes);
     prompt.push_str(dependency_bootstrap_guidance());
     prompt.push_str(
         "\n执行要求:\n\
@@ -5092,6 +5121,7 @@ fn build_coding_delta_prompt(
     attempt: &CodingExecutionAttempt,
     context: &CodingExecutionContext,
     rework_instruction: Option<&CodingReworkInstruction>,
+    context_notes: Option<&ReworkContextNoteInput>,
 ) -> String {
     let mut prompt = format!(
         "Coding Workspace\n\
@@ -5144,6 +5174,7 @@ fn build_coding_delta_prompt(
             "\n本轮没有新增返修要求。请基于当前会话和 worktree 状态继续完成未结束的代码编写任务。\n",
         );
     }
+    append_coding_context_notes(&mut prompt, context_notes);
     prompt.push_str(dependency_bootstrap_guidance());
     prompt.push_str(
         "\n执行要求:\n\
@@ -5152,6 +5183,26 @@ fn build_coding_delta_prompt(
          - 完成后报告修改文件、测试命令和结果。\n",
     );
     prompt
+}
+
+fn append_coding_context_notes(
+    prompt: &mut String,
+    context_notes: Option<&ReworkContextNoteInput>,
+) {
+    let Some(context_notes) = context_notes else {
+        return;
+    };
+    if context_notes.text.trim().is_empty() || context_notes.text.trim() == "无" {
+        return;
+    }
+    prompt.push_str("\n本轮补充上下文:\n");
+    prompt.push_str(&format!(
+        "ContextNotes Truncated: {}\n{}\n",
+        context_notes.truncated, context_notes.text
+    ));
+    prompt.push_str(
+        "请将这些人工补充要求与本轮返修要求一起执行；如有冲突，优先遵循更具体的人工补充上下文。\n",
+    );
 }
 
 fn dependency_bootstrap_guidance() -> &'static str {
@@ -6895,7 +6946,7 @@ mod tests {
         let attempt = test_attempt("coding_attempt_0001");
         let context = CodingExecutionContext::default();
 
-        let prompt = build_coding_prompt(&attempt, &context, None);
+        let prompt = build_coding_prompt(&attempt, &context, None, None);
 
         assert!(prompt.contains("node_modules missing"));
         assert!(prompt.contains("tsc EACCES"));
@@ -6910,7 +6961,7 @@ mod tests {
         let attempt = test_attempt("coding_attempt_0001");
         let context = CodingExecutionContext::default();
 
-        let prompt = build_coding_delta_prompt(&attempt, &context, None);
+        let prompt = build_coding_delta_prompt(&attempt, &context, None, None);
 
         assert!(prompt.contains("node_modules missing"));
         assert!(prompt.contains("pnpm -C <package-dir> install --frozen-lockfile"));
