@@ -2147,6 +2147,11 @@ pub fn is_coding_ws_message_allowed(
         return *status == CodingAttemptStatus::WaitingForHuman
             && *stage == CodingExecutionStage::Rework;
     }
+    if matches!(message, CodingWsInMessage::GateResponse { .. })
+        && *status == CodingAttemptStatus::WaitingForHuman
+    {
+        return true;
+    }
     if *status == CodingAttemptStatus::Blocked {
         return matches!(
             message,

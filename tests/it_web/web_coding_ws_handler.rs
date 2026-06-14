@@ -223,6 +223,28 @@ fn blocked_attempt_allows_gate_response_messages() {
 }
 
 #[test]
+fn waiting_for_human_rework_allows_blocked_gate_responses() {
+    assert!(is_coding_ws_message_allowed(
+        &CodingAttemptStatus::WaitingForHuman,
+        &CodingExecutionStage::Rework,
+        &CodingWsInMessage::GateResponse {
+            gate_id: "coding_blocked_gate_0007".to_string(),
+            action_id: "retry_analyst".to_string(),
+            extra_context: None,
+        },
+    ));
+    assert!(is_coding_ws_message_allowed(
+        &CodingAttemptStatus::WaitingForHuman,
+        &CodingExecutionStage::Testing,
+        &CodingWsInMessage::GateResponse {
+            gate_id: "coding_blocked_gate_0008".to_string(),
+            action_id: "accept_testing_result".to_string(),
+            extra_context: None,
+        },
+    ));
+}
+
+#[test]
 fn coding_gate_required_out_message_preserves_action_contract() {
     let gate = CodingGateRequired {
         gate_id: "gate_0001".to_string(),
