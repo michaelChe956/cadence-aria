@@ -868,6 +868,8 @@ pub enum CodingGateActionType {
     RetryAnalyst,
     RetryInternalReview,
     SendRawOutputToAnalyst,
+    AcceptTestingResult,
+    RerunTesting,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

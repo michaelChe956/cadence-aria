@@ -20,9 +20,9 @@ use crate::product::coding_models::{
     CodingGateRequired as CodingGateRequiredModel, CodingProviderPermissionMode,
     CodingProviderRole, CodingRoleProviderConfigSnapshot, CodingRoleRunEvent,
     CodingRoleRunEventPreview, CodingRoleRunEventSummary, CodingRoleRunEventType,
-    CodingRoleRunSnapshot, CodingStageGateState, CodingStageGateStatus, CodingTimelineNode,
-    CodingTimelineNodeStatus, InternalPrReview, PushStatus, ReviewRequest, TestingOverallStatus,
-    TestingReport,
+    CodingRoleRunSnapshot, CodingRoleRunStatus, CodingStageGateState, CodingStageGateStatus,
+    CodingTimelineNode, CodingTimelineNodeStatus, InternalPrReview, PushStatus, ReviewRequest,
+    TestingOverallStatus, TestingReport,
 };
 use crate::product::coding_workspace_engine::{
     CodingExecutionContext, CodingWorkspaceEngine, CodingWorkspaceEngineError,
@@ -579,6 +579,8 @@ fn should_resume_runner_after_gate_response(
             | "retry_internal_review"
             | "retry_analyst"
             | "send_raw_output_to_analyst"
+            | "accept_testing_result"
+            | "rerun_testing"
     ) && previous_attempt.status == CodingAttemptStatus::Blocked
 }
 
@@ -617,7 +619,9 @@ async fn execute_start_coding_flow(
         }
     }
     'pipeline: loop {
-        if current.stage == CodingExecutionStage::Rework {
+        if current.stage == CodingExecutionStage::Rework
+            || testing_result_acceptance_pending_analyst(coding_store, &current)?
+        {
             let analyst_provider_name = coding_store
                 .get_role_provider_config_snapshot(
                     &current.project_id,
@@ -742,6 +746,24 @@ async fn execute_start_coding_flow(
             .await?
             {
                 return Ok(());
+            }
+
+            if engine
+                .create_testing_result_review_gate(&current, &testing_report)
+                .await?
+                .is_some()
+            {
+                current = coding_store.get_attempt(
+                    &current.project_id,
+                    &current.issue_id,
+                    &current.id,
+                )?;
+                return emit_current_session_state(event_tx, coding_store, &current).await;
+            }
+            current =
+                coding_store.get_attempt(&current.project_id, &current.issue_id, &current.id)?;
+            if current.status == CodingAttemptStatus::Blocked {
+                return emit_current_session_state(event_tx, coding_store, &current).await;
             }
 
             if testing_report_should_enter_analyst(&testing_report) {
@@ -1150,6 +1172,31 @@ fn latest_analyst_role_run_evidence(
     coding_store
         .read_attempt_artifact_text(&attempt.id, &evidence_ref)
         .map_err(CodingWorkspaceEngineError::Store)
+}
+
+fn testing_result_acceptance_pending_analyst(
+    coding_store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+) -> Result<bool, CodingWorkspaceEngineError> {
+    if attempt.stage != CodingExecutionStage::Testing {
+        return Ok(false);
+    }
+    let Some(run) = coding_store.latest_role_run(
+        &attempt.project_id,
+        &attempt.issue_id,
+        &attempt.id,
+        CodingExecutionStage::Rework,
+        CodingProviderRole::Analyst,
+    )?
+    else {
+        return Ok(false);
+    };
+    Ok(run.status == CodingRoleRunStatus::Running
+        && run.node_id.is_none()
+        && run
+            .artifact_refs
+            .iter()
+            .any(|reference| reference.contains("analyst_evidence")))
 }
 
 async fn await_stage_gate(

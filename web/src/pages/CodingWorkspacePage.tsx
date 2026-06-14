@@ -59,7 +59,12 @@ const TESTING_BLOCKED_REASON_LABELS: Record<string, string> = {
   high_risk_test_step_requires_permission: "高风险测试步骤需要人工确认",
 };
 
+const TESTING_RESULT_REVIEW_REASON_CODE = "testing_result_review_required";
+
 function blockedGateDisplayTitle(gate: CodingPendingGate) {
+  if (gate.reason_code === TESTING_RESULT_REVIEW_REASON_CODE) {
+    return gate.title;
+  }
   if (gate.stage === "testing" && gate.reason_code) {
     return TESTING_BLOCKED_REASON_LABELS[gate.reason_code] ?? gate.reason_code;
   }
@@ -463,7 +468,8 @@ function GatePanel({
   const reasonTooLong = reason.length > 2000;
   const displayedError = reasonTooLong ? "原因不能超过 2000 字" : localError;
   const displayTitle = blockedGateDisplayTitle(activeGate);
-  const testingBlocked = activeGate.stage === "testing";
+  const testingResultReview = activeGate.reason_code === TESTING_RESULT_REVIEW_REASON_CODE;
+  const testingBlocked = activeGate.stage === "testing" && !testingResultReview;
   const analystGate = activeGate.role === "analyst";
   const hasQualityBypassAction = activeGate.available_actions.some(actionRequiresReason);
 
@@ -498,6 +504,11 @@ function GatePanel({
           <div className="truncate text-sm font-semibold text-amber-900">{displayTitle}</div>
           {testingBlocked ? (
             <div className="mt-0.5 text-xs font-semibold text-amber-900">测试被阻塞</div>
+          ) : null}
+          {testingResultReview ? (
+            <div className="mt-0.5 text-xs font-semibold text-amber-900">
+              等待确认 Tester 结果
+            </div>
           ) : null}
           {analystGate ? (
             <div className="mt-0.5 text-xs font-semibold text-amber-900">

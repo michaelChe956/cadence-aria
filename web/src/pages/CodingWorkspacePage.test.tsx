@@ -455,6 +455,58 @@ describe("CodingWorkspacePage", () => {
     expect(gate).not.toHaveTextContent("测试失败");
   });
 
+  it("renders testing result review gate as human confirmation instead of blocked", async () => {
+    const api = mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      attemptId: "coding_attempt_0001",
+      status: "blocked",
+      stage: "testing",
+      pendingGates: [
+        {
+          gate_id: "gate_0001",
+          kind: "blocked",
+          title: "确认 Tester 测试结果",
+          description:
+            "Tester 已完成测试报告 testing_report_0001（测试通过）。请确认是否进入 Analyst 或重新测试。",
+          stage: "testing",
+          role: "tester",
+          reason_code: "testing_result_review_required",
+          evidence_refs: ["testing_report_0001.json"],
+          raw_provider_output_ref: "provider-raw/testing/execute_test_plan_0001.txt",
+          available_actions: [
+            {
+              action_id: "accept_testing_result",
+              label: "结果可用，进入 Analyst",
+              action_type: "accept_testing_result",
+            },
+            {
+              action_id: "rerun_testing",
+              label: "不满意，重新测试",
+              action_type: "rerun_testing",
+            },
+          ],
+        },
+      ],
+    });
+
+    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+
+    const gate = screen.getByTestId("coding-pending-gate");
+    expect(gate).toHaveTextContent("确认 Tester 测试结果");
+    expect(gate).toHaveTextContent("等待确认 Tester 结果");
+    expect(gate).not.toHaveTextContent("测试被阻塞");
+
+    await userEvent.click(screen.getByRole("button", { name: "结果可用，进入 Analyst" }));
+    expect(api.respondGate).toHaveBeenCalledWith(
+      "gate_0001",
+      "accept_testing_result",
+      undefined,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "不满意，重新测试" }));
+    expect(api.respondGate).toHaveBeenCalledWith("gate_0001", "rerun_testing", undefined);
+  });
+
   it("renders skipped_required_steps blocked gate with dedicated label", async () => {
     mockCodingWs();
     useCodingWorkspaceStore.setState({

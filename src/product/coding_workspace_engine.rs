@@ -29,11 +29,12 @@ use crate::product::coding_models::{
     AnalystHumanGateRecommendation, AnalystReworkInstructions, AnalystVerdict, CodeReviewReport,
     CodingAgentRole, CodingAttemptStatus, CodingChatEntry, CodingContextNote, CodingEntryType,
     CodingExecutionAttempt, CodingExecutionStage, CodingGateAction, CodingGateActionType,
-    CodingProviderPermissionMode, CodingProviderRole, CodingReworkInstruction, CodingRoleRun,
-    CodingRoleRunEventType, CodingRoleRunStatus, CodingRoleRunTrigger, CodingTimelineNode,
-    CodingTimelineNodeStatus, InternalPrReview, PushStatus, ReviewFinding, ReviewRequest,
-    ReviewRequestKind, ReviewVerdict, TestCommand, TestCommandStatus, TestPlan, TestPlanRiskLevel,
-    TestingOverallStatus, TestingReport, TestingStepResult, TestingUnplannedEvidence,
+    CodingGateRequired, CodingProviderPermissionMode, CodingProviderRole, CodingReworkInstruction,
+    CodingRoleRun, CodingRoleRunEventType, CodingRoleRunStatus, CodingRoleRunTrigger,
+    CodingTimelineNode, CodingTimelineNodeStatus, InternalPrReview, PushStatus, ReviewFinding,
+    ReviewRequest, ReviewRequestKind, ReviewVerdict, TestCommand, TestCommandStatus, TestPlan,
+    TestPlanRiskLevel, TestingOverallStatus, TestingReport, TestingStepResult,
+    TestingUnplannedEvidence,
 };
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::git_workspace_service::{GitWorkspaceError, GitWorkspaceService};
@@ -56,6 +57,8 @@ use crate::web::workspace_ws_types::{
     ChoiceOption, WsExecutionEvent, WsExecutionEventKind, WsExecutionEventStatus,
     WsPermissionRiskLevel,
 };
+
+pub const TESTING_RESULT_REVIEW_REASON_CODE: &str = "testing_result_review_required";
 
 const REWORK_CONTEXT_NOTE_CHAR_LIMIT: usize = 10_000;
 
@@ -1124,6 +1127,64 @@ impl CodingWorkspaceEngine {
             })
             .await;
         Ok(report)
+    }
+
+    pub async fn create_testing_result_review_gate(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        report: &TestingReport,
+    ) -> Result<Option<CodingGateRequired>, CodingWorkspaceEngineError> {
+        let current =
+            self.store
+                .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+        let open_testing_gate_exists = self
+            .store
+            .list_open_blocked_gates(&current.project_id, &current.issue_id, &current.id)?
+            .into_iter()
+            .any(|gate| {
+                gate.stage == Some(CodingExecutionStage::Testing)
+                    && gate.reason_code.as_deref() != Some(TESTING_RESULT_REVIEW_REASON_CODE)
+            });
+        if open_testing_gate_exists {
+            return Ok(None);
+        }
+
+        if current.status != CodingAttemptStatus::Blocked {
+            self.store.update_attempt_status(
+                &current.project_id,
+                &current.issue_id,
+                &current.id,
+                CodingAttemptStatus::Blocked,
+            )?;
+        }
+
+        let node_id = self
+            .store
+            .latest_role_run(
+                &current.project_id,
+                &current.issue_id,
+                &current.id,
+                CodingExecutionStage::Testing,
+                CodingProviderRole::Tester,
+            )?
+            .and_then(|run| run.node_id);
+        let gate = self.store.create_blocked_gate(CreateBlockedGateInput {
+            attempt_id: current.id.clone(),
+            stage: CodingExecutionStage::Testing,
+            node_id,
+            role: Some(CodingProviderRole::Tester),
+            title: "确认 Tester 测试结果".to_string(),
+            description: testing_result_review_description(report),
+            reason_code: Some(TESTING_RESULT_REVIEW_REASON_CODE.to_string()),
+            evidence_refs: vec![format!("{}.json", report.id)],
+            raw_provider_output_ref: report.raw_provider_output_ref.clone(),
+            available_actions: testing_result_review_gate_actions(),
+        })?;
+        let _ = self
+            .event_tx
+            .send(CodingWsOutMessage::CodingGateRequired { gate: gate.clone() })
+            .await;
+        Ok(Some(gate))
     }
 
     async fn save_blocked_testing_report_and_gate(
@@ -3271,12 +3332,15 @@ impl CodingWorkspaceEngine {
             CodingGateActionType::Abort => {
                 self.handle_abort(project_id, issue_id, attempt_id).await?
             }
-            CodingGateActionType::RetryTestPlan | CodingGateActionType::RerunMissingSteps => {
+            CodingGateActionType::RetryTestPlan
+            | CodingGateActionType::RerunMissingSteps
+            | CodingGateActionType::RerunTesting => {
                 let trigger = match action.action_type {
                     CodingGateActionType::RetryTestPlan => CodingRoleRunTrigger::RetryTestPlan,
                     CodingGateActionType::RerunMissingSteps => {
                         CodingRoleRunTrigger::RerunMissingSteps
                     }
+                    CodingGateActionType::RerunTesting => CodingRoleRunTrigger::ManualRerun,
                     _ => CodingRoleRunTrigger::ManualRerun,
                 };
                 let resumed =
@@ -3369,6 +3433,9 @@ impl CodingWorkspaceEngine {
                 }
                 resumed
             }
+            CodingGateActionType::AcceptTestingResult => {
+                self.accept_testing_result_for_analyst(&current, &gate)?
+            }
             CodingGateActionType::SendRawOutputToAnalyst => {
                 self.resume_blocked_attempt_at_stage(&current, CodingExecutionStage::Rework)?
             }
@@ -3460,6 +3527,71 @@ impl CodingWorkspaceEngine {
             }
         }
         Ok(steps)
+    }
+
+    fn accept_testing_result_for_analyst(
+        &self,
+        current: &CodingExecutionAttempt,
+        gate: &CodingGateRequired,
+    ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
+        let report = self.testing_report_for_gate(current, gate)?;
+        let running = if current.status == CodingAttemptStatus::Blocked {
+            self.store.update_attempt_status(
+                &current.project_id,
+                &current.issue_id,
+                &current.id,
+                CodingAttemptStatus::Running,
+            )?
+        } else {
+            current.clone()
+        };
+        let role_run = self.store.create_role_run(
+            &running,
+            CodingExecutionStage::Rework,
+            CodingProviderRole::Analyst,
+            CodingRoleRunTrigger::Initial,
+            None,
+        )?;
+        let evidence = testing_report_to_analyst_evidence(&report);
+        let evidence_ref = self.store.save_analyst_evidence(&running.id, &evidence)?;
+        self.store.update_role_run_refs(
+            &running.project_id,
+            &running.issue_id,
+            &running.id,
+            &role_run.id,
+            Vec::new(),
+            vec![evidence_ref],
+        )?;
+        Ok(running)
+    }
+
+    fn testing_report_for_gate(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        gate: &CodingGateRequired,
+    ) -> Result<TestingReport, CodingWorkspaceEngineError> {
+        if let Some(report_id) = gate
+            .evidence_refs
+            .iter()
+            .rev()
+            .find_map(|reference| reference.strip_suffix(".json"))
+        {
+            return Ok(self.store.get_testing_report(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                report_id,
+            )?);
+        }
+        self.store
+            .list_testing_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+            .into_iter()
+            .last()
+            .ok_or_else(|| {
+                CodingWorkspaceEngineError::ProviderStream(
+                    "testing_result_review_missing_report".to_string(),
+                )
+            })
     }
 
     fn resume_blocked_attempt_at_stage(
@@ -4989,6 +5121,59 @@ fn testing_blocked_gate_actions() -> Vec<CodingGateAction> {
     ]
 }
 
+fn testing_result_review_gate_actions() -> Vec<CodingGateAction> {
+    vec![
+        CodingGateAction {
+            action_id: "accept_testing_result".to_string(),
+            label: "结果可用，进入 Analyst".to_string(),
+            action_type: CodingGateActionType::AcceptTestingResult,
+        },
+        CodingGateAction {
+            action_id: "rerun_testing".to_string(),
+            label: "不满意，重新测试".to_string(),
+            action_type: CodingGateActionType::RerunTesting,
+        },
+        CodingGateAction {
+            action_id: "abort".to_string(),
+            label: "终止".to_string(),
+            action_type: CodingGateActionType::Abort,
+        },
+    ]
+}
+
+fn testing_result_review_description(report: &TestingReport) -> String {
+    let status = match report.overall_status {
+        TestingOverallStatus::Passed => "测试通过",
+        TestingOverallStatus::PassedWithWarnings => "测试通过但有警告",
+        TestingOverallStatus::Failed => "测试失败",
+        TestingOverallStatus::SkippedByUserDecision => "测试由用户决策跳过",
+        TestingOverallStatus::Blocked => "测试被阻塞",
+    };
+    match report.plan_summary.as_deref() {
+        Some(summary) if !summary.trim().is_empty() => {
+            format!(
+                "Tester 已完成测试报告 {}（{}）：{}。请确认是否进入 Analyst 或重新测试。",
+                report.id,
+                status,
+                summary.trim()
+            )
+        }
+        _ => format!(
+            "Tester 已完成测试报告 {}（{}）。请确认是否进入 Analyst 或重新测试。",
+            report.id, status
+        ),
+    }
+}
+
+fn testing_report_to_analyst_evidence(report: &TestingReport) -> String {
+    serde_json::to_string_pretty(report).unwrap_or_else(|_| {
+        format!(
+            "TestingReport serialization failed; overall_status={:?}",
+            report.overall_status
+        )
+    })
+}
+
 fn analyst_human_gate_actions(
     recommendation: Option<&AnalystHumanGateRecommendation>,
 ) -> Vec<CodingGateAction> {
@@ -5059,6 +5244,16 @@ fn coding_gate_action_for_id(action_id: &str) -> Option<CodingGateAction> {
             action_id: "send_raw_output_to_analyst".to_string(),
             label: "转交分析官".to_string(),
             action_type: CodingGateActionType::SendRawOutputToAnalyst,
+        }),
+        "accept_testing_result" => Some(CodingGateAction {
+            action_id: "accept_testing_result".to_string(),
+            label: "结果可用，进入 Analyst".to_string(),
+            action_type: CodingGateActionType::AcceptTestingResult,
+        }),
+        "rerun_testing" => Some(CodingGateAction {
+            action_id: "rerun_testing".to_string(),
+            label: "不满意，重新测试".to_string(),
+            action_type: CodingGateActionType::RerunTesting,
         }),
         "abort" => Some(CodingGateAction {
             action_id: "abort".to_string(),

@@ -1185,6 +1185,9 @@ async fn coding_ws_start_coding_drives_full_happy_path_to_final_confirm() {
                 stages.push(node.stage);
             }
             CodingWsOutMessage::CodingGateRequired { gate } => {
+                if respond_to_testing_result_review_gate(&mut ws, &gate).await {
+                    continue;
+                }
                 assert_eq!(
                     gate.kind,
                     CodingGateKind::StageGate,
@@ -1311,7 +1314,7 @@ async fn coding_ws_start_coding_drives_full_happy_path_to_final_confirm() {
 }
 
 #[tokio::test]
-async fn coding_ws_testing_blocked_enters_analyst_before_code_review() {
+async fn coding_ws_testing_blocked_waits_for_human_result_review_before_analyst() {
     let _guard = WS_TEST_LOCK.lock().await;
     let root = tempdir().expect("root");
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
@@ -1329,47 +1332,37 @@ async fn coding_ws_testing_blocked_enters_analyst_before_code_review() {
 
     send_json(&mut ws, &CodingWsInMessage::StartCoding).await;
 
+    let gate = wait_for_testing_result_review_gate(&mut ws).await;
+    assert_eq!(gate.kind, CodingGateKind::Blocked);
+    assert_eq!(gate.stage, Some(CodingExecutionStage::Testing));
+    assert_eq!(gate.role, Some(CodingProviderRole::Tester));
+    assert_eq!(
+        gate.reason_code.as_deref(),
+        Some("testing_result_review_required")
+    );
+    assert!(
+        gate.description.contains("测试被阻塞"),
+        "expected blocked testing summary, got {}",
+        gate.description
+    );
+
+    send_json(
+        &mut ws,
+        &CodingWsInMessage::GateResponse {
+            gate_id: gate.gate_id,
+            action_id: "accept_testing_result".to_string(),
+            extra_context: None,
+        },
+    )
+    .await;
+
     let mut saw_analyst = false;
-    let mut saw_code_review = false;
-    for _ in 0..120 {
+    for _ in 0..80 {
         match recv_json(&mut ws).await {
-            CodingWsOutMessage::CodingGateRequired { gate }
-                if gate.kind == CodingGateKind::StageGate =>
-            {
-                if let Some(stage) = gate.stage.clone() {
-                    send_json(&mut ws, &CodingWsInMessage::StageGateConfirm { stage }).await;
-                }
-            }
-            CodingWsOutMessage::CodingGateRequired { gate }
-                if gate.kind == CodingGateKind::Blocked
-                    && gate.stage.as_ref() == Some(&CodingExecutionStage::Testing) =>
-            {
-                panic!("testing blocked should be routed to analyst, got gate {gate:?}");
-            }
-            CodingWsOutMessage::CodingSessionState { pending_gates, .. } => {
-                if let Some(gate) = pending_gates.into_iter().find(|gate| {
-                    gate.kind == CodingGateKind::Blocked
-                        && gate.stage.as_ref() == Some(&CodingExecutionStage::Testing)
-                }) {
-                    panic!("testing blocked should be routed to analyst, got gate {gate:?}");
-                }
-            }
             CodingWsOutMessage::CodingTimelineNodeCreated { node }
                 if node.stage == CodingExecutionStage::Rework =>
             {
                 saw_analyst = true;
-            }
-            CodingWsOutMessage::CodingGateRequired { gate }
-                if gate.kind == CodingGateKind::StageGate
-                    && gate.stage.as_ref() == Some(&CodingExecutionStage::CodeReview) =>
-            {
-                saw_code_review = true;
-                break;
-            }
-            CodingWsOutMessage::CodingTimelineNodeCreated { node }
-                if node.stage == CodingExecutionStage::CodeReview =>
-            {
-                saw_code_review = true;
                 break;
             }
             CodingWsOutMessage::CodingProtocolError { code, message } => {
@@ -1379,17 +1372,23 @@ async fn coding_ws_testing_blocked_enters_analyst_before_code_review() {
         }
     }
 
-    assert!(saw_analyst, "testing blocked did not enter analyst");
     assert!(
-        saw_code_review,
-        "analyst no_issue did not advance blocked testing to code review"
+        saw_analyst,
+        "testing blocked did not enter analyst after accept"
     );
 
     let attempt = store
         .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
         .expect("attempt");
     assert_eq!(attempt.status, CodingAttemptStatus::Running);
-    assert_eq!(attempt.stage, CodingExecutionStage::CodeReview);
+    assert!(
+        matches!(
+            attempt.stage,
+            CodingExecutionStage::Rework | CodingExecutionStage::CodeReview
+        ),
+        "expected Rework or CodeReview after accept, got {:?}",
+        attempt.stage
+    );
 
     let nodes = store
         .get_timeline_nodes("project_0001", "issue_0001", "coding_attempt_0001")
@@ -1399,6 +1398,256 @@ async fn coding_ws_testing_blocked_enters_analyst_before_code_review() {
             .iter()
             .any(|node| node.stage == CodingExecutionStage::Rework)
     );
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+#[tokio::test]
+async fn coding_ws_testing_completion_waits_for_human_result_review() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let app = app_with_full_chain_attempt(root.path());
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(&mut ws, &CodingWsInMessage::StartCoding).await;
+
+    let gate = wait_for_testing_result_review_gate(&mut ws).await;
+    assert_eq!(gate.kind, CodingGateKind::Blocked);
+    assert_eq!(gate.stage, Some(CodingExecutionStage::Testing));
+    assert_eq!(gate.role, Some(CodingProviderRole::Tester));
+    assert_eq!(
+        gate.reason_code.as_deref(),
+        Some("testing_result_review_required")
+    );
+    assert!(
+        gate.available_actions
+            .iter()
+            .any(|action| action.action_id == "accept_testing_result"
+                && action.action_type == CodingGateActionType::AcceptTestingResult),
+        "expected accept_testing_result action, got {:?}",
+        gate.available_actions
+    );
+    assert!(
+        gate.available_actions
+            .iter()
+            .any(|action| action.action_id == "rerun_testing"
+                && action.action_type == CodingGateActionType::RerunTesting),
+        "expected rerun_testing action, got {:?}",
+        gate.available_actions
+    );
+    assert!(
+        gate.evidence_refs
+            .iter()
+            .any(|reference| reference == "testing_report_0001.json"),
+        "expected testing report evidence ref, got {:?}",
+        gate.evidence_refs
+    );
+
+    assert!(
+        store
+            .list_open_blocked_gates("project_0001", "issue_0001", "coding_attempt_0001")
+            .expect("open gates")
+            .iter()
+            .any(|gate| gate.reason_code.as_deref() == Some("testing_result_review_required"))
+    );
+    let attempt = store
+        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("attempt");
+    assert_eq!(attempt.status, CodingAttemptStatus::Blocked);
+    assert_eq!(attempt.stage, CodingExecutionStage::Testing);
+    assert!(
+        store
+            .list_role_runs("project_0001", "issue_0001", "coding_attempt_0001")
+            .expect("role runs")
+            .iter()
+            .all(|run| run.role != CodingProviderRole::Analyst),
+        "analyst must not start before human accepts tester result"
+    );
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+#[tokio::test]
+async fn coding_ws_accept_testing_result_enters_analyst_with_testing_report_evidence() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let app = app_with_full_chain_attempt(root.path());
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(&mut ws, &CodingWsInMessage::StartCoding).await;
+    let gate = wait_for_testing_result_review_gate(&mut ws).await;
+
+    send_json(
+        &mut ws,
+        &CodingWsInMessage::GateResponse {
+            gate_id: gate.gate_id,
+            action_id: "accept_testing_result".to_string(),
+            extra_context: None,
+        },
+    )
+    .await;
+
+    let mut saw_analyst = false;
+    for _ in 0..80 {
+        match recv_json(&mut ws).await {
+            CodingWsOutMessage::CodingTimelineNodeCreated { node }
+                if node.stage == CodingExecutionStage::Rework =>
+            {
+                saw_analyst = true;
+                break;
+            }
+            CodingWsOutMessage::CodingProtocolError { code, message } => {
+                panic!("unexpected coding protocol error {code}: {message}");
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_analyst, "accepting tester result did not start analyst");
+
+    let runs = store
+        .list_role_runs("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("role runs");
+    let analyst_run = runs
+        .iter()
+        .find(|run| run.role == CodingProviderRole::Analyst)
+        .expect("analyst role run");
+    let evidence_ref = analyst_run
+        .artifact_refs
+        .iter()
+        .find(|reference| reference.contains("analyst_evidence"))
+        .expect("analyst evidence ref");
+    let evidence = store
+        .read_attempt_artifact_text("coding_attempt_0001", evidence_ref)
+        .expect("analyst evidence");
+    assert!(
+        evidence.contains("\"id\": \"testing_report_0001\""),
+        "expected TestingReport JSON evidence, got {evidence}"
+    );
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+#[tokio::test]
+async fn coding_ws_rerun_testing_result_review_reexecutes_tester() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let provider = Arc::new(RerunTestingProvider::default());
+    let app = app_with_full_chain_attempt_and_provider(root.path(), provider.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(&mut ws, &CodingWsInMessage::StartCoding).await;
+    let first_gate = wait_for_testing_result_review_gate(&mut ws).await;
+    assert_eq!(provider.testing_execute_calls(), 1);
+
+    send_json(
+        &mut ws,
+        &CodingWsInMessage::GateResponse {
+            gate_id: first_gate.gate_id,
+            action_id: "rerun_testing".to_string(),
+            extra_context: None,
+        },
+    )
+    .await;
+
+    let mut confirmed_stage_gates = HashSet::new();
+    let mut second_gate = None;
+    for _ in 0..120 {
+        match recv_json(&mut ws).await {
+            CodingWsOutMessage::CodingGateRequired { gate }
+                if gate.kind == CodingGateKind::StageGate =>
+            {
+                if let Some(stage) = gate.stage
+                    && confirmed_stage_gates.insert(gate.gate_id)
+                {
+                    send_json(&mut ws, &CodingWsInMessage::StageGateConfirm { stage }).await;
+                }
+            }
+            CodingWsOutMessage::CodingGateRequired { gate }
+                if gate.reason_code.as_deref() == Some("testing_result_review_required")
+                    && gate
+                        .evidence_refs
+                        .iter()
+                        .any(|reference| reference == "testing_report_0002.json") =>
+            {
+                second_gate = Some(gate);
+                break;
+            }
+            CodingWsOutMessage::CodingSessionState { pending_gates, .. } => {
+                if let Some(gate) = pending_gates.iter().find(|gate| {
+                    gate.reason_code.as_deref() == Some("testing_result_review_required")
+                        && gate
+                            .evidence_refs
+                            .iter()
+                            .any(|reference| reference == "testing_report_0002.json")
+                }) {
+                    second_gate = Some(gate.clone());
+                    break;
+                }
+                for gate in pending_gates
+                    .into_iter()
+                    .filter(|gate| gate.kind == CodingGateKind::StageGate)
+                {
+                    if let Some(stage) = gate.stage
+                        && confirmed_stage_gates.insert(gate.gate_id)
+                    {
+                        send_json(&mut ws, &CodingWsInMessage::StageGateConfirm { stage }).await;
+                    }
+                }
+            }
+            CodingWsOutMessage::CodingProtocolError { code, message } => {
+                panic!("unexpected coding protocol error {code}: {message}");
+            }
+            _ => {}
+        }
+    }
+
+    let second_gate = second_gate.expect("second testing result review gate");
+    assert_eq!(second_gate.stage, Some(CodingExecutionStage::Testing));
+    assert_eq!(provider.testing_execute_calls(), 2);
+    let reports = store
+        .list_testing_reports("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("testing reports");
+    assert_eq!(reports.len(), 2);
+    let runs = store
+        .list_role_runs("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("role runs");
+    let tester_runs = runs
+        .iter()
+        .filter(|run| run.role == CodingProviderRole::Tester)
+        .collect::<Vec<_>>();
+    assert_eq!(tester_runs.len(), 2);
+    assert_eq!(tester_runs[0].status, CodingRoleRunStatus::Superseded);
+    assert_eq!(tester_runs[1].trigger, CodingRoleRunTrigger::ManualRerun);
 
     ws.close(None).await.expect("close ws");
     server.abort();
@@ -1427,6 +1676,7 @@ async fn coding_ws_code_review_blocked_enters_analyst_before_coding() {
     let mut saw_code_review_blocked = false;
     let mut saw_analyst_after_code_review = false;
     let mut saw_coding_gate_after_analyst = false;
+    let mut accepted_testing_result_gates = HashSet::new();
     for _ in 0..160 {
         match recv_json(&mut ws).await {
             CodingWsOutMessage::CodingGateRequired { gate }
@@ -1435,12 +1685,37 @@ async fn coding_ws_code_review_blocked_enters_analyst_before_coding() {
             {
                 panic!("code review blocked should be routed to analyst, got gate {gate:?}");
             }
-            CodingWsOutMessage::CodingSessionState { pending_gates, .. } => {
+            CodingWsOutMessage::CodingGateRequired { gate }
+                if is_testing_result_review_gate(&gate)
+                    && accepted_testing_result_gates.insert(gate.gate_id.clone()) =>
+            {
+                respond_to_testing_result_review_gate(&mut ws, &gate).await;
+            }
+            CodingWsOutMessage::CodingSessionState {
+                status,
+                pending_gates,
+                ..
+            } => {
                 if let Some(gate) = pending_gates.iter().find(|gate| {
                     gate.kind == CodingGateKind::Blocked
                         && gate.stage.as_ref() == Some(&CodingExecutionStage::CodeReview)
                 }) {
                     panic!("code review blocked should be routed to analyst, got gate {gate:?}");
+                }
+                let mut responded_to_testing_result = false;
+                if status == CodingAttemptStatus::Blocked {
+                    for gate in pending_gates
+                        .iter()
+                        .filter(|gate| is_testing_result_review_gate(gate))
+                    {
+                        if accepted_testing_result_gates.insert(gate.gate_id.clone()) {
+                            respond_to_testing_result_review_gate(&mut ws, gate).await;
+                            responded_to_testing_result = true;
+                        }
+                    }
+                }
+                if responded_to_testing_result {
+                    continue;
                 }
                 let stage_gates = pending_gates
                     .iter()
@@ -1550,6 +1825,7 @@ async fn coding_ws_internal_pr_review_blocked_enters_analyst_before_final_confir
     let mut saw_internal_review_blocked = false;
     let mut saw_analyst_after_internal_review = false;
     let mut completed = false;
+    let mut accepted_testing_result_gates = HashSet::new();
     for _ in 0..220 {
         match recv_json(&mut ws).await {
             CodingWsOutMessage::CodingGateRequired { gate }
@@ -1557,6 +1833,12 @@ async fn coding_ws_internal_pr_review_blocked_enters_analyst_before_final_confir
                     && gate.stage.as_ref() == Some(&CodingExecutionStage::InternalPrReview) =>
             {
                 panic!("internal review blocked should be routed to analyst, got gate {gate:?}");
+            }
+            CodingWsOutMessage::CodingGateRequired { gate }
+                if is_testing_result_review_gate(&gate)
+                    && accepted_testing_result_gates.insert(gate.gate_id.clone()) =>
+            {
+                respond_to_testing_result_review_gate(&mut ws, &gate).await;
             }
             CodingWsOutMessage::CodingSessionState {
                 status,
@@ -1571,6 +1853,21 @@ async fn coding_ws_internal_pr_review_blocked_enters_analyst_before_final_confir
                     panic!(
                         "internal review blocked should be routed to analyst, got gate {gate:?}"
                     );
+                }
+                let mut responded_to_testing_result = false;
+                if status == CodingAttemptStatus::Blocked {
+                    for gate in pending_gates
+                        .iter()
+                        .filter(|gate| is_testing_result_review_gate(gate))
+                    {
+                        if accepted_testing_result_gates.insert(gate.gate_id.clone()) {
+                            respond_to_testing_result_review_gate(&mut ws, gate).await;
+                            responded_to_testing_result = true;
+                        }
+                    }
+                }
+                if responded_to_testing_result {
+                    continue;
                 }
                 let stage_gates = pending_gates
                     .iter()
@@ -1675,6 +1972,9 @@ async fn coding_ws_analyst_next_stage_testing_reruns_tester_before_code_review()
     for _ in 0..180 {
         match recv_json(&mut ws).await {
             CodingWsOutMessage::CodingGateRequired { gate } => {
+                if respond_to_testing_result_review_gate(&mut ws, &gate).await {
+                    continue;
+                }
                 assert_eq!(
                     gate.kind,
                     CodingGateKind::StageGate,
@@ -1752,6 +2052,9 @@ async fn internal_review_rework_creates_new_review_request_commit() {
     for _ in 0..140 {
         match recv_json(&mut ws).await {
             CodingWsOutMessage::CodingGateRequired { gate } => {
+                if respond_to_testing_result_review_gate(&mut ws, &gate).await {
+                    continue;
+                }
                 assert_eq!(
                     gate.kind,
                     CodingGateKind::StageGate,
@@ -1833,6 +2136,9 @@ async fn code_review_findings_are_injected_into_next_coding_round() {
     for _ in 0..140 {
         match recv_json(&mut ws).await {
             CodingWsOutMessage::CodingGateRequired { gate } => {
+                if respond_to_testing_result_review_gate(&mut ws, &gate).await {
+                    continue;
+                }
                 assert_eq!(
                     gate.kind,
                     CodingGateKind::StageGate,
@@ -2560,15 +2866,15 @@ async fn wait_for_stage_gate(
     for _ in 0..50 {
         match recv_json(ws).await {
             CodingWsOutMessage::CodingGateRequired { gate }
-                if gate.stage.as_ref() == Some(&stage) =>
+                if gate.kind == CodingGateKind::StageGate
+                    && gate.stage.as_ref() == Some(&stage) =>
             {
                 return gate;
             }
             CodingWsOutMessage::CodingSessionState { pending_gates, .. } => {
-                if let Some(gate) = pending_gates
-                    .into_iter()
-                    .find(|gate| gate.stage.as_ref() == Some(&stage))
-                {
+                if let Some(gate) = pending_gates.into_iter().find(|gate| {
+                    gate.kind == CodingGateKind::StageGate && gate.stage.as_ref() == Some(&stage)
+                }) {
                     return gate;
                 }
             }
@@ -2582,6 +2888,84 @@ async fn wait_for_stage_gate(
         }
     }
     panic!("expected stage gate for {stage:?}");
+}
+
+fn is_testing_result_review_gate(gate: &CodingGateRequired) -> bool {
+    gate.reason_code.as_deref() == Some("testing_result_review_required")
+}
+
+async fn respond_to_testing_result_review_gate(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    gate: &CodingGateRequired,
+) -> bool {
+    if !is_testing_result_review_gate(gate) {
+        return false;
+    }
+    send_json(
+        ws,
+        &CodingWsInMessage::GateResponse {
+            gate_id: gate.gate_id.clone(),
+            action_id: "accept_testing_result".to_string(),
+            extra_context: None,
+        },
+    )
+    .await;
+    true
+}
+
+async fn wait_for_testing_result_review_gate(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> CodingGateRequired {
+    let mut confirmed_stage_gates = HashSet::new();
+    for _ in 0..80 {
+        match recv_json(ws).await {
+            CodingWsOutMessage::CodingGateRequired { gate }
+                if gate.reason_code.as_deref() == Some("testing_result_review_required") =>
+            {
+                return gate;
+            }
+            CodingWsOutMessage::CodingSessionState { pending_gates, .. } => {
+                if let Some(gate) = pending_gates.iter().find(|gate| {
+                    gate.reason_code.as_deref() == Some("testing_result_review_required")
+                }) {
+                    return gate.clone();
+                }
+                for gate in pending_gates
+                    .into_iter()
+                    .filter(|gate| gate.kind == CodingGateKind::StageGate)
+                {
+                    if let Some(stage) = gate.stage
+                        && confirmed_stage_gates.insert(gate.gate_id)
+                    {
+                        send_json(ws, &CodingWsInMessage::StageGateConfirm { stage }).await;
+                    }
+                }
+            }
+            CodingWsOutMessage::CodingGateRequired { gate }
+                if gate.kind == CodingGateKind::StageGate =>
+            {
+                if let Some(stage) = gate.stage
+                    && confirmed_stage_gates.insert(gate.gate_id)
+                {
+                    send_json(ws, &CodingWsInMessage::StageGateConfirm { stage }).await;
+                }
+            }
+            CodingWsOutMessage::CodingTimelineNodeCreated { node }
+                if node.stage == CodingExecutionStage::Rework =>
+            {
+                panic!("analyst started before tester result review gate was accepted");
+            }
+            CodingWsOutMessage::CodingProtocolError { code, message } => {
+                panic!("unexpected coding protocol error {code}: {message}");
+            }
+            _ => {}
+        }
+    }
+    panic!("expected testing result review gate");
 }
 
 async fn wait_for_timeline_node(
