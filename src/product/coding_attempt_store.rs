@@ -839,11 +839,17 @@ impl CodingAttemptStore {
         issue_id: &str,
         attempt_id: &str,
     ) -> Result<Vec<CodingChatEntry>, ProductStoreError> {
-        list_json_records(
+        let mut entries: Vec<CodingChatEntry> = list_json_records(
             &self
                 .attempt_dir(project_id, issue_id, attempt_id)
                 .join("chat-entries"),
-        )
+        )?;
+        entries.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        Ok(entries)
     }
 
     pub fn list_unconsumed_context_notes(

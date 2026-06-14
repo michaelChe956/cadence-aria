@@ -7,13 +7,13 @@ use cadence_aria::product::coding_attempt_store::{
 use cadence_aria::product::coding_models::{
     AnalystDecisionNextStage, AnalystDecisionRecord, AnalystDecisionVerdict,
     AnalystReworkInstructions, CodeReviewReport, CodingAgentRole, CodingAttemptStatus,
-    CodingChoiceGateStatus, CodingChoiceOption, CodingContextNote, CodingExecutionStage,
-    CodingProviderRole, CodingReworkInstruction, CodingRolePermissionModes,
-    CodingRoleProviderConfigSnapshot, CodingRoleRunEventType, CodingRoleRunStatus,
-    CodingRoleRunTrigger, CodingStageGateStatus, CodingTimelineNode, CodingTimelineNodeStatus,
-    FindingSeverity, InternalPrReview, PushStatus, RemoteKind, ReviewFinding, ReviewRequest,
-    ReviewRequestKind, ReviewVerdict, TestCommand, TestCommandStatus, TestingOverallStatus,
-    TestingReport,
+    CodingChatEntry, CodingChoiceGateStatus, CodingChoiceOption, CodingContextNote,
+    CodingEntryType, CodingExecutionStage, CodingProviderRole, CodingReworkInstruction,
+    CodingRolePermissionModes, CodingRoleProviderConfigSnapshot, CodingRoleRunEventType,
+    CodingRoleRunStatus, CodingRoleRunTrigger, CodingStageGateStatus, CodingTimelineNode,
+    CodingTimelineNodeStatus, FindingSeverity, InternalPrReview, PushStatus, RemoteKind,
+    ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict, TestCommand, TestCommandStatus,
+    TestingOverallStatus, TestingReport,
 };
 use cadence_aria::product::models::{
     ProviderConversationRef, ProviderConversationRole, ProviderName,
@@ -253,6 +253,70 @@ fn store_persists_context_notes_in_attempt_scope() {
             .list_context_notes("project_0001", "issue_0001", &attempt.id)
             .expect("list context notes"),
         vec![note]
+    );
+}
+
+#[test]
+fn store_lists_chat_entries_by_created_at_not_filename() {
+    let root = tempdir().expect("tempdir");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(create_input("work_item_0001"))
+        .expect("create attempt");
+
+    let earlier = CodingChatEntry {
+        id: "coding_node_0019_analyst_verdict".to_string(),
+        attempt_id: attempt.id.clone(),
+        node_id: Some("coding_node_0019".to_string()),
+        role: CodingAgentRole::Author,
+        entry_type: CodingEntryType::UserMessage,
+        content: Some("Analyst human gate".to_string()),
+        metadata: None,
+        created_at: "2026-06-14T15:02:43Z".to_string(),
+    };
+    let later_context_note = CodingChatEntry {
+        id: "coding_chat_entry_0003".to_string(),
+        attempt_id: attempt.id.clone(),
+        node_id: Some("coding_node_0019".to_string()),
+        role: CodingAgentRole::Author,
+        entry_type: CodingEntryType::UserMessage,
+        content: Some("请重试 Analyst，并严格只返回系统支持的 JSON schema。".to_string()),
+        metadata: Some(serde_json::json!({
+            "context_note_id": "coding_context_note_0003",
+        })),
+        created_at: "2026-06-14T15:48:40Z".to_string(),
+    };
+    let latest = CodingChatEntry {
+        id: "coding_node_0020_analyst_verdict".to_string(),
+        attempt_id: attempt.id.clone(),
+        node_id: Some("coding_node_0020".to_string()),
+        role: CodingAgentRole::Author,
+        entry_type: CodingEntryType::UserMessage,
+        content: Some("Analyst retry".to_string()),
+        metadata: None,
+        created_at: "2026-06-14T16:00:00Z".to_string(),
+    };
+
+    store
+        .save_chat_entry(&later_context_note)
+        .expect("save later context note");
+    store.save_chat_entry(&latest).expect("save latest");
+    store.save_chat_entry(&earlier).expect("save earlier");
+
+    let ids = store
+        .list_chat_entries("project_0001", "issue_0001", &attempt.id)
+        .expect("list chat entries")
+        .into_iter()
+        .map(|entry| entry.id)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        ids,
+        vec![
+            "coding_node_0019_analyst_verdict",
+            "coding_chat_entry_0003",
+            "coding_node_0020_analyst_verdict",
+        ]
     );
 }
 
