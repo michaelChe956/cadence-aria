@@ -50,6 +50,56 @@ fn web_runtime_fake_create_advance_confirm_and_projection() {
 }
 
 #[test]
+fn web_runtime_fake_default_confirm_provider_uses_availability_fallback() {
+    let workspace = tempdir().expect("workspace");
+    let mut runtime = WebRuntime::new_fake_with_provider_availability(
+        workspace.path().to_path_buf(),
+        |provider| {
+            matches!(
+                provider,
+                cadence_aria::protocol::contracts::ProviderType::ClaudeCode
+            )
+        },
+    );
+
+    let created = runtime
+        .create_task(CreateTaskRequest {
+            request_text: "实现 Fibonacci square sum".to_string(),
+            change_id: "aria-fibonacci-square".to_string(),
+            policy_preset: "manual-write".to_string(),
+            provider_mode: "fake".to_string(),
+            timeout_secs: 2400,
+        })
+        .expect("create");
+    let pending = runtime
+        .advance_task(&created.task_id)
+        .expect("advance")
+        .expect_pending_step()
+        .expect("pending");
+
+    runtime
+        .confirm_task(
+            &created.task_id,
+            ConfirmTaskRequest {
+                checkpoint_id: pending.checkpoint_id,
+                prompt: "确认执行 N16".to_string(),
+                policy_override: None,
+                provider_type: None,
+            },
+        )
+        .expect("confirm");
+
+    let turn = fs::read_to_string(
+        workspace
+            .path()
+            .join(".aria/runtime/tasks/task_0001/turns/turn_0001.json"),
+    )
+    .expect("turn");
+    assert!(turn.contains("\"provider_type\": \"claude_code\""));
+    assert!(!turn.contains("\"provider_type\": \"codex\""));
+}
+
+#[test]
 fn web_runtime_fake_rollback_preview_and_execute_restores_workspace_history() {
     let workspace = tempdir().expect("workspace");
     git(workspace.path(), &["init", "-b", "main"]);

@@ -5,7 +5,7 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use chrono::Utc;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::json;
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -5455,7 +5455,10 @@ struct AnalystProviderPayload {
     evidence_refs: Vec<String>,
     #[serde(default)]
     raw_provider_output_refs: Vec<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_analyst_rework_instructions"
+    )]
     rework_instructions: Option<AnalystReworkInstructions>,
     #[serde(default)]
     human_gate: Option<AnalystHumanGateRecommendation>,
@@ -5463,6 +5466,39 @@ struct AnalystProviderPayload {
     fix_hints: Vec<String>,
     #[serde(default)]
     questions: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum AnalystReworkInstructionsInput {
+    Structured(AnalystReworkInstructions),
+    Summary(String),
+}
+
+fn deserialize_optional_analyst_rework_instructions<'de, D>(
+    deserializer: D,
+) -> Result<Option<AnalystReworkInstructions>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let Some(input) = Option::<AnalystReworkInstructionsInput>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    match input {
+        AnalystReworkInstructionsInput::Structured(instructions) => Ok(Some(instructions)),
+        AnalystReworkInstructionsInput::Summary(summary) => {
+            let summary = summary.trim();
+            if summary.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(AnalystReworkInstructions {
+                    summary: summary.to_string(),
+                    required_changes: vec![summary.to_string()],
+                    verification_expectations: Vec::new(),
+                }))
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -5862,7 +5898,10 @@ mod tests {
                             "command_or_tool_input": {
                                 "command": ["cargo", "test", "--locked", "--lib", "some_filter"]
                             },
-                            "evidence_expectation": "provider supplies evidence"
+                            "evidence_expectation": "provider supplies evidence",
+                            "related_requirements": ["REQ-UNIT"],
+                            "related_design_constraints": ["DEC-UNIT"],
+                            "related_work_item_tasks": ["TASK-UNIT"]
                         }]
                     })
                     .to_string()
@@ -5942,7 +5981,10 @@ mod tests {
                             "tool": "provider_managed",
                             "risk_level": "low",
                             "command_or_tool_input": {"command": ["cargo", "test"]},
-                            "evidence_expectation": "provider supplies evidence"
+                            "evidence_expectation": "provider supplies evidence",
+                            "related_requirements": ["REQ-UNIT"],
+                            "related_design_constraints": ["DEC-UNIT"],
+                            "related_work_item_tasks": ["TASK-UNIT"]
                         }]
                     })
                     .to_string()

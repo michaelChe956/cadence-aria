@@ -7,7 +7,7 @@ export function ProviderStreamEntry({ entry }: { entry: ChatEntry }) {
   const content =
     entry.role === "reviewer" || entry.role === "code_reviewer"
       ? stripTrailingReviewJsonContract(entry.content)
-      : entry.content;
+      : normalizeEntryContent(entry);
   return (
     <ChatEntryContainer
       role={entry.role}
@@ -17,6 +17,23 @@ export function ProviderStreamEntry({ entry }: { entry: ChatEntry }) {
     </ChatEntryContainer>
   );
 }
+
+type TesterPlanStep = {
+  id?: unknown;
+  title?: unknown;
+  required?: unknown;
+  risk_level?: unknown;
+  evidence_expectation?: unknown;
+  related_requirements?: unknown;
+  related_design_constraints?: unknown;
+  related_work_item_tasks?: unknown;
+};
+
+type TesterPlanPayload = {
+  summary?: unknown;
+  assumptions?: unknown;
+  steps?: unknown;
+};
 
 const PROVIDER_LABELS: Record<string, string> = {
   claude_code: "Claude Code",
@@ -399,6 +416,95 @@ function normalizeProviderContent(content: string) {
       line.length > 80 ? line.replace(/([。！？.!?])\s+(?=\S)/g, "$1\n") : line,
     )
     .join("\n");
+}
+
+function normalizeEntryContent(entry: ChatEntry) {
+  if (entry.role === "tester") {
+    const formattedPlan = formatRawTesterPlanJson(entry.content, entry.metadata);
+    if (formattedPlan) {
+      return formattedPlan;
+    }
+  }
+  return entry.content;
+}
+
+function formatRawTesterPlanJson(
+  content: string,
+  metadata: ChatEntry["metadata"],
+): string | null {
+  const phase = typeof metadata?.phase === "string" ? metadata.phase : "";
+  if (phase && !["plan_tests", "test_plan"].includes(phase)) {
+    return null;
+  }
+
+  let payload: TesterPlanPayload;
+  try {
+    const parsed = JSON.parse(content.trim());
+    if (!isRecord(parsed)) {
+      return null;
+    }
+    payload = parsed;
+  } catch {
+    return null;
+  }
+
+  if (typeof payload.summary !== "string" || !Array.isArray(payload.steps)) {
+    return null;
+  }
+
+  const lines = ["## Tester 测试计划", "", payload.summary.trim(), ""];
+  if (Array.isArray(payload.assumptions) && payload.assumptions.length > 0) {
+    lines.push("### 假设");
+    for (const assumption of payload.assumptions) {
+      if (typeof assumption === "string" && assumption.trim()) {
+        lines.push(`- ${assumption.trim()}`);
+      }
+    }
+    lines.push("");
+  }
+
+  lines.push("### 步骤");
+  for (const rawStep of payload.steps) {
+    if (!isRecord(rawStep)) {
+      continue;
+    }
+    const step = rawStep as TesterPlanStep;
+    const id = stringValue(step.id) ?? "unnamed_step";
+    const title = stringValue(step.title) ?? "未命名步骤";
+    const required = step.required === false ? "optional" : "required";
+    const risk = stringValue(step.risk_level) ?? "medium";
+    lines.push(`- ${id} · ${title} · ${required} · ${risk}`);
+
+    const evidence = stringValue(step.evidence_expectation);
+    if (evidence) {
+      lines.push(`  - 证据预期：${evidence}`);
+    }
+
+    const traceRefs = [
+      ...stringArray(step.related_requirements),
+      ...stringArray(step.related_design_constraints),
+      ...stringArray(step.related_work_item_tasks),
+    ];
+    if (traceRefs.length > 0) {
+      lines.push(`  - 追踪：${traceRefs.join(", ")}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function stringValue(value: unknown) {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+function stringArray(value: unknown) {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
 }
 
 function stripTrailingReviewJsonContract(content: string) {

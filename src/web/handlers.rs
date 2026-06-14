@@ -45,6 +45,9 @@ use crate::product::runtime_binding_store::RuntimeBindingStore;
 use crate::web::error::{ApiError, ApiResult};
 use crate::web::events::WebEventType;
 use crate::web::issue_registry::{CreateIssueInput, IssueRecord, IssueRegistry, IssueStatus};
+use crate::web::provider_availability::{
+    provider_name_key, resolve_default_coding_provider, resolve_explicit_provider_name,
+};
 use crate::web::redaction::redact_sensitive_lines;
 use crate::web::runtime::WebRuntime;
 use crate::web::state::WebAppState;
@@ -382,6 +385,7 @@ pub async fn generate_story_specs(
         request.review_rounds,
         request.superpowers_enabled,
         request.openspec_enabled,
+        &*state.provider_availability,
     )?;
     let app_paths = product_app_paths(&state);
     let issue = IssueStore::new(app_paths.clone())
@@ -435,6 +439,7 @@ pub async fn generate_design_specs(
         request.review_rounds,
         request.superpowers_enabled,
         request.openspec_enabled,
+        &*state.provider_availability,
     )?;
     let app_paths = product_app_paths(&state);
     IssueStore::new(app_paths.clone())
@@ -486,6 +491,7 @@ pub async fn generate_work_items(
         request.review_rounds,
         request.superpowers_enabled,
         request.openspec_enabled,
+        &*state.provider_availability,
     )?;
     let app_paths = product_app_paths(&state);
     let issue = IssueStore::new(app_paths.clone())
@@ -585,8 +591,12 @@ pub async fn create_coding_attempt(
         + 1;
     let branch_name = format!("aria/work-items/{}/attempt-{attempt_no}", work_item.id);
     let base_branch = current_git_branch(&repository.path).unwrap_or_else(|| "HEAD".to_string());
-    let provider_config_snapshot =
-        coding_provider_config_snapshot(&lifecycle, &work_item, &repository.default_provider_mode)?;
+    let provider_config_snapshot = coding_provider_config_snapshot(
+        &lifecycle,
+        &work_item,
+        &repository.default_provider_mode,
+        &*state.provider_availability,
+    )?;
     let attempt = coding_store
         .create_attempt(CreateCodingAttemptInput {
             project_id,
@@ -607,6 +617,7 @@ fn coding_provider_config_snapshot(
     lifecycle: &LifecycleStore,
     work_item: &LifecycleWorkItemRecord,
     repository_default_provider: &str,
+    provider_availability: &dyn Fn(&ProviderName) -> bool,
 ) -> ApiResult<ProviderConfigSnapshot> {
     let sessions = lifecycle
         .list_workspace_sessions(&work_item.project_id, &work_item.issue_id)
@@ -616,14 +627,26 @@ fn coding_provider_config_snapshot(
             && session.workspace_type == WorkspaceType::WorkItem
             && session.status == WorkspaceSessionStatus::Confirmed
     }) {
+        let author = resolve_explicit_provider_name(
+            provider_name_key(&session.author_provider),
+            provider_availability,
+        )?
+        .provider;
+        let reviewer = resolve_explicit_provider_name(
+            provider_name_key(&session.reviewer_provider),
+            provider_availability,
+        )?
+        .provider;
         return Ok(ProviderConfigSnapshot {
-            author: session.author_provider.clone(),
-            reviewer: Some(session.reviewer_provider.clone()),
+            author,
+            reviewer: Some(reviewer),
             review_rounds: session.review_rounds,
         });
     }
 
-    let author = parse_provider_name(repository_default_provider)?;
+    let author =
+        resolve_default_coding_provider(repository_default_provider, provider_availability)?
+            .provider;
     Ok(ProviderConfigSnapshot {
         author: author.clone(),
         reviewer: Some(author),
@@ -2383,6 +2406,7 @@ fn provider_workspace_config(
     review_rounds: Option<u32>,
     superpowers_enabled: Option<bool>,
     openspec_enabled: Option<bool>,
+    provider_availability: &dyn Fn(&ProviderName) -> bool,
 ) -> ApiResult<ProviderWorkspaceConfig> {
     let review_rounds = review_rounds.unwrap_or(1);
     if !(1..=5).contains(&review_rounds) {
@@ -2393,24 +2417,22 @@ fn provider_workspace_config(
     }
 
     Ok(ProviderWorkspaceConfig {
-        author_provider: parse_provider_name(author_provider.unwrap_or("codex"))?,
-        reviewer_provider: parse_provider_name(reviewer_provider.unwrap_or("claude_code"))?,
+        author_provider: match author_provider {
+            Some(provider) => {
+                resolve_explicit_provider_name(provider, provider_availability)?.provider
+            }
+            None => resolve_default_coding_provider("codex", provider_availability)?.provider,
+        },
+        reviewer_provider: match reviewer_provider {
+            Some(provider) => {
+                resolve_explicit_provider_name(provider, provider_availability)?.provider
+            }
+            None => resolve_default_coding_provider("claude_code", provider_availability)?.provider,
+        },
         review_rounds,
         superpowers_enabled: superpowers_enabled.unwrap_or(true),
         openspec_enabled: openspec_enabled.unwrap_or(true),
     })
-}
-
-fn parse_provider_name(value: &str) -> ApiResult<ProviderName> {
-    match value {
-        "claude_code" => Ok(ProviderName::ClaudeCode),
-        "codex" => Ok(ProviderName::Codex),
-        "fake" => Ok(ProviderName::Fake),
-        _ => Err(ApiError::validation(
-            "invalid_provider",
-            "provider must be claude_code, codex, or fake",
-        )),
-    }
 }
 
 fn parse_design_kind(value: &str) -> ApiResult<DesignKind> {

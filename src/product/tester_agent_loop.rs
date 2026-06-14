@@ -185,9 +185,12 @@ pub fn build_tester_plan_prompt(
          Branch: {}\n\
          \n\
          [openspec_contract]\n\
-         - 依据 Story Spec、Design Spec、Work Item、diff 与 project rules 设计验证计划。\n\
+         - 依据 Evaluation Context 中的 actual Work Item、Story Spec、Design Spec、diff 与 project rules 设计验证计划。\n\
+         - 不要按通用模板生成固定步骤；每个 required 验证步骤都必须服务于实际 Work Item / story / design / diff 变更。\n\
+         - 仅允许仓库规则、diff 收集等前置上下文步骤没有业务追踪；其他 required 步骤必须填写 related_requirements、related_design_constraints 或 related_work_item_tasks，优先绑定 TASK/REQ/DEC/AC ID。\n\
          - 如果 Story Spec、Design Spec、Work Item 之间存在冲突，必须 blocked 或请求人工澄清。\n\
          - 先输出 TestPlan JSON，不要直接声称测试通过。\n\
+         - 对 Rust 单元测试，定向快反馈只能使用单个过滤词，例如 `cargo test --locked --lib provider_catalog`；禁止生成 `cargo test --locked --lib filter_a filter_b` 或等价单次多个过滤词命令。\n\
          \n\
          [superpowers_contract]\n\
          - 先证据后结论；不要用未执行的推断替代验证证据。\n\
@@ -206,7 +209,7 @@ pub fn build_tester_plan_prompt(
          输出契约:\n\
          - 只返回一个原始 JSON object；不要输出 Markdown 标题、代码块、表格或验证报告。\n\
          - JSON 必须以 {{ 开头，以 }} 结尾。\n\
-         - Required shape: {{\"summary\":\"...\",\"context_warnings\":[],\"assumptions\":[],\"steps\":[{{\"id\":\"...\",\"title\":\"...\",\"intent\":\"...\",\"required\":true,\"tool\":\"run_command|read_file|list_files|search_code|provider_managed\",\"risk_level\":\"low|medium|high\",\"command_or_tool_input\":{{}},\"evidence_expectation\":\"...\"}}]}}\n\
+         - Required shape: {{\"summary\":\"...\",\"context_warnings\":[],\"assumptions\":[],\"steps\":[{{\"id\":\"...\",\"title\":\"...\",\"intent\":\"...\",\"required\":true,\"tool\":\"run_command|read_file|list_files|search_code|provider_managed\",\"risk_level\":\"low|medium|high\",\"command_or_tool_input\":{{}},\"evidence_expectation\":\"...\",\"related_requirements\":[\"REQ-...\"],\"related_design_constraints\":[\"DEC-...\"],\"related_work_item_tasks\":[\"TASK-...\"]}}]}}\n\
          \n\
          Evaluation Context JSON:\n\
          ```json\n{}\n```\n\
@@ -570,8 +573,95 @@ fn validate_test_plan_payload(payload: &ProviderTestPlanPayload) -> Result<(), T
         require_non_empty("step.title", &step.title)?;
         require_non_empty("step.intent", &step.intent)?;
         require_non_empty("step.evidence_expectation", &step.evidence_expectation)?;
+        validate_step_traceability(step)?;
+        validate_step_command(step)?;
     }
     Ok(())
+}
+
+fn validate_step_traceability(step: &TestPlanStep) -> Result<(), TesterAgentError> {
+    if !step.required || is_context_gathering_step(step) {
+        return Ok(());
+    }
+    let has_trace = !step.related_requirements.is_empty()
+        || !step.related_design_constraints.is_empty()
+        || !step.related_work_item_tasks.is_empty();
+    if has_trace {
+        return Ok(());
+    }
+    Err(TesterAgentError::Plan(format!(
+        "step_traceability_empty: {}",
+        step.id
+    )))
+}
+
+fn is_context_gathering_step(step: &TestPlanStep) -> bool {
+    let text = format!(
+        "{} {} {} {}",
+        step.id, step.title, step.intent, step.evidence_expectation
+    )
+    .to_ascii_lowercase();
+    matches!(
+        step.tool,
+        crate::product::coding_models::TestPlanTool::ReadFile
+    ) || text.contains("rules")
+        || text.contains("规则")
+        || text.contains("diff")
+        || text.contains("status")
+        || text.contains("上下文")
+        || text.contains("context")
+        || text.contains("search")
+        || text.contains("锚点")
+}
+
+fn validate_step_command(step: &TestPlanStep) -> Result<(), TesterAgentError> {
+    if let Some(parts) = command_parts_from_value(&step.command_or_tool_input)
+        && is_cargo_lib_command_with_multiple_filters(&parts)
+    {
+        return Err(TesterAgentError::Plan(format!(
+            "cargo_lib_multiple_filters: {}",
+            step.id
+        )));
+    }
+    Ok(())
+}
+
+fn command_parts_from_value(input: &Value) -> Option<Vec<String>> {
+    let command = input.get("command")?;
+    match command {
+        Value::String(value) => Some(split_shell_words(value)),
+        Value::Array(values) => Some(
+            values
+                .iter()
+                .filter_map(|value| value.as_str().map(ToString::to_string))
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+fn split_shell_words(value: &str) -> Vec<String> {
+    value.split_whitespace().map(ToString::to_string).collect()
+}
+
+fn is_cargo_lib_command_with_multiple_filters(parts: &[String]) -> bool {
+    if parts.len() < 5 {
+        return false;
+    }
+    if parts.first().map(String::as_str) != Some("cargo") {
+        return false;
+    }
+    if parts.get(1).map(String::as_str) != Some("test") {
+        return false;
+    }
+    let Some(lib_index) = parts.iter().position(|part| part == "--lib") else {
+        return false;
+    };
+    let filters = parts[lib_index + 1..]
+        .iter()
+        .filter(|part| !part.starts_with('-'))
+        .count();
+    filters > 1
 }
 
 fn require_non_empty(field: &str, value: &str) -> Result<(), TesterAgentError> {
@@ -918,6 +1008,10 @@ mod tests {
         assert!(prompt.contains("Story Spec"));
         assert!(prompt.contains("Design Spec"));
         assert!(prompt.contains("Work Item"));
+        assert!(prompt.contains("actual Work Item"));
+        assert!(prompt.contains("related_work_item_tasks"));
+        assert!(prompt.contains("不要按通用模板生成固定步骤"));
+        assert!(prompt.contains("禁止生成 `cargo test --locked --lib filter_a filter_b`"));
         assert!(prompt.contains("step_id"));
         assert!(prompt.contains("不要硬编码某种语言或包管理器"));
         assert!(!prompt.contains("[retry_diagnostic]"));
@@ -928,6 +1022,74 @@ mod tests {
                 .trim_end()
                 .ends_with("END OF INSTRUCTIONS: output JSON only.")
         );
+    }
+
+    #[test]
+    fn rejects_test_plan_steps_without_work_item_traceability() {
+        let raw_output = r#"
+{
+  "summary": "generic checks",
+  "context_warnings": [],
+  "assumptions": [],
+  "steps": [
+    {
+      "id": "unit",
+      "title": "Run generic unit tests",
+      "intent": "run a generic test command without linking it to the work item",
+      "required": true,
+      "tool": "run_command",
+      "risk_level": "low",
+      "command_or_tool_input": { "command": "cargo test --locked" },
+      "evidence_expectation": "tests pass",
+      "related_requirements": [],
+      "related_design_constraints": [],
+      "related_work_item_tasks": []
+    }
+  ]
+}
+"#;
+
+        let error =
+            parse_test_plan_payload("coding_attempt_0001", "test_plan_0001", raw_output, None)
+                .expect_err("generic plan should be rejected")
+                .to_string();
+
+        assert!(error.contains("step_traceability_empty: unit"));
+    }
+
+    #[test]
+    fn rejects_cargo_lib_command_with_multiple_test_filters() {
+        let raw_output = r#"
+{
+  "summary": "invalid cargo command",
+  "context_warnings": [],
+  "assumptions": [],
+  "steps": [
+    {
+      "id": "unit",
+      "title": "Unit tests",
+      "intent": "run targeted tests",
+      "required": true,
+      "tool": "run_command",
+      "risk_level": "low",
+      "command_or_tool_input": {
+        "command": "cargo test --locked --lib provider_catalog provider_probe"
+      },
+      "evidence_expectation": "exit 0",
+      "related_requirements": ["REQ-001"],
+      "related_design_constraints": ["DEC-001"],
+      "related_work_item_tasks": ["TASK-001"]
+    }
+  ]
+}
+"#;
+
+        let error =
+            parse_test_plan_payload("coding_attempt_0001", "test_plan_0001", raw_output, None)
+                .expect_err("cargo command with multiple filters should be rejected")
+                .to_string();
+
+        assert!(error.contains("cargo_lib_multiple_filters: unit"));
     }
 
     #[test]
@@ -949,7 +1111,10 @@ Tester plan:
       "tool": "run_command",
       "risk_level": "low",
       "command_or_tool_input": { "command": ["cargo", "test", "--locked", "--lib", "unit"] },
-      "evidence_expectation": "exit 0"
+      "evidence_expectation": "exit 0",
+      "related_requirements": ["REQ-UNIT"],
+      "related_design_constraints": ["DEC-UNIT"],
+      "related_work_item_tasks": ["TASK-UNIT"]
     },
     {
       "id": "security",
@@ -959,7 +1124,10 @@ Tester plan:
       "tool": "provider_managed",
       "risk_level": "medium",
       "command_or_tool_input": { "check": "manual" },
-      "evidence_expectation": "provider analysis with evidence"
+      "evidence_expectation": "provider analysis with evidence",
+      "related_requirements": ["REQ-SECURITY"],
+      "related_design_constraints": ["DEC-SECURITY"],
+      "related_work_item_tasks": ["TASK-SECURITY"]
     }
   ]
 }

@@ -529,7 +529,7 @@ async fn coding_tester_does_not_resume_coder_provider_session() {
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
     let provider = SessionInputCapturingProvider::with_outputs(
         [
-            r#"{"summary":"testing plan","steps":[{"id":"provider_check","title":"Provider check","intent":"verify provider session isolation","required":true,"tool":"provider_managed","risk_level":"low","command_or_tool_input":{},"evidence_expectation":"provider evidence"}]}"#,
+            r#"{"summary":"testing plan","steps":[{"id":"provider_check","title":"Provider check","intent":"verify provider session isolation","required":true,"tool":"provider_managed","risk_level":"low","command_or_tool_input":{},"evidence_expectation":"provider evidence","related_requirements":["REQ-TEST"],"related_design_constraints":["DEC-TEST"],"related_work_item_tasks":["TASK-TEST"]}]}"#,
             r#"{"step_results":[{"step_id":"provider_check","status":"passed","evidence_refs":["provider-session.log"],"provider_analysis":"session isolated"}]}"#,
         ],
         [None, Some("tester-session-2".to_string())],
@@ -606,7 +606,7 @@ async fn coding_tester_uses_role_permission_mode_auto() {
     let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
     let provider = SessionInputCapturingProvider::with_outputs(
         [
-            r#"{"summary":"unit","steps":[{"id":"unit","title":"Unit","intent":"verify unit","required":true,"tool":"provider_managed","risk_level":"low","command_or_tool_input":{},"evidence_expectation":"provider evidence"}]}"#,
+            r#"{"summary":"unit","steps":[{"id":"unit","title":"Unit","intent":"verify unit","required":true,"tool":"provider_managed","risk_level":"low","command_or_tool_input":{},"evidence_expectation":"provider evidence","related_requirements":["REQ-UNIT"],"related_design_constraints":["DEC-UNIT"],"related_work_item_tasks":["TASK-UNIT"]}]}"#,
             r#"{"step_results":[{"step_id":"unit","status":"passed","evidence_refs":["unit.log"],"provider_analysis":"ok"}]}"#,
         ],
         [None, None],
@@ -1148,7 +1148,7 @@ async fn retry_test_plan_supersedes_latest_testing_role_run_and_resumes_testing(
 
     let provider = SessionInputCapturingProvider::with_outputs(
         [
-            r#"{"summary":"retry plan","steps":[{"id":"unit","title":"Unit","intent":"run unit checks","required":true,"tool":"provider_managed","risk_level":"low","command_or_tool_input":{},"evidence_expectation":"unit evidence"}]}"#,
+            r#"{"summary":"retry plan","steps":[{"id":"unit","title":"Unit","intent":"run unit checks","required":true,"tool":"provider_managed","risk_level":"low","command_or_tool_input":{},"evidence_expectation":"unit evidence","related_requirements":["REQ-UNIT"],"related_design_constraints":["DEC-UNIT"],"related_work_item_tasks":["TASK-UNIT"]}]}"#,
             r#"{"step_results":[{"step_id":"unit","status":"passed","evidence_refs":["unit.log"],"provider_analysis":"ok"}]}"#,
         ],
         [None, None],
@@ -3181,6 +3181,78 @@ async fn execute_rework_persists_structured_analyst_decision() {
 }
 
 #[tokio::test]
+async fn execute_rework_normalizes_string_rework_instructions() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            ..create_input()
+        })
+        .expect("create attempt");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    store
+        .update_attempt_stage(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingExecutionStage::Testing,
+        )
+        .expect("testing stage");
+    let (tx, _rx) = mpsc::channel(16);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let provider = AnalystStreamingProvider {
+        prompt: Arc::new(Mutex::new(None)),
+        output: r#"{
+            "verdict":"needs_fix",
+            "next_stage":"coding",
+            "reason":"仍有静默 Codex 默认",
+            "evidence_refs":["testing_report_0001.steps.step_003_search_anchors"],
+            "raw_provider_output_refs":["provider-raw/testing/execute_test_plan_0001.txt"],
+            "rework_instructions":"修复 src/web/handlers.rs 和 src/web/runtime.rs 中残留的 codex 默认，并补充回归测试。",
+            "human_gate":null
+        }"#
+        .to_string(),
+    };
+
+    let updated = engine
+        .execute_rework(&attempt, "testing blocked", &provider)
+        .await
+        .expect("execute rework");
+
+    assert_eq!(updated.stage, CodingExecutionStage::Coding);
+    let decision = store
+        .latest_analyst_decision("project_0001", "issue_0001", &attempt.id)
+        .expect("latest decision")
+        .expect("persisted decision");
+    assert_eq!(decision.verdict, AnalystDecisionVerdict::NeedsFix);
+    assert_eq!(decision.next_stage, AnalystDecisionNextStage::Coding);
+    assert_eq!(decision.parse_error, None);
+    let rework = decision.rework_instructions.expect("rework instructions");
+    assert_eq!(
+        rework.summary,
+        "修复 src/web/handlers.rs 和 src/web/runtime.rs 中残留的 codex 默认，并补充回归测试。"
+    );
+    assert_eq!(
+        rework.required_changes,
+        vec![
+            "修复 src/web/handlers.rs 和 src/web/runtime.rs 中残留的 codex 默认，并补充回归测试。"
+                .to_string()
+        ]
+    );
+    assert!(rework.verification_expectations.is_empty());
+}
+
+#[tokio::test]
 async fn execute_rework_persists_legacy_analyst_verdict_as_decision() {
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
@@ -4781,7 +4853,7 @@ impl StreamingProviderAdapter for TesterRetryPromptCaptureProvider {
         let (command_tx, _command_rx) = mpsc::channel(8);
         event_tx
             .try_send(ProviderEvent::Completed {
-                full_output: r#"{"summary":"retry plan","context_warnings":[],"assumptions":[],"steps":[{"id":"unit","title":"unit","intent":"run unit tests","required":true,"tool":"provider_managed","risk_level":"low","command_or_tool_input":{},"evidence_expectation":"provider evidence"}]}"#.to_string(),
+                full_output: r#"{"summary":"retry plan","context_warnings":[],"assumptions":[],"steps":[{"id":"unit","title":"unit","intent":"run unit tests","required":true,"tool":"provider_managed","risk_level":"low","command_or_tool_input":{},"evidence_expectation":"provider evidence","related_requirements":["REQ-UNIT"],"related_design_constraints":["DEC-UNIT"],"related_work_item_tasks":["TASK-UNIT"]}]}"#.to_string(),
                 provider_session_id: None,
             })
             .expect("send completed");
@@ -4940,7 +5012,7 @@ impl StreamingProviderAdapter for ExecutePlanToolCallTesterProvider {
         if start_no == 1 {
             event_tx
                 .try_send(ProviderEvent::Completed {
-                    full_output: r#"{"summary":"unit plan","steps":[{"id":"unit","title":"Unit","intent":"run unit checks","required":true,"tool":"run_command","risk_level":"low","command_or_tool_input":{"command":["true"]},"evidence_expectation":"unit evidence"}]}"#.to_string(),
+                    full_output: r#"{"summary":"unit plan","steps":[{"id":"unit","title":"Unit","intent":"run unit checks","required":true,"tool":"run_command","risk_level":"low","command_or_tool_input":{"command":["true"]},"evidence_expectation":"unit evidence","related_requirements":["REQ-UNIT"],"related_design_constraints":["DEC-UNIT"],"related_work_item_tasks":["TASK-UNIT"]}]}"#.to_string(),
                     provider_session_id: None,
                 })
                 .expect("send plan completed");
@@ -5045,7 +5117,10 @@ impl StreamingProviderAdapter for HangingExecutePlanStartTesterProvider {
                             "tool": "provider_managed",
                             "risk_level": "low",
                             "command_or_tool_input": {},
-                            "evidence_expectation": "unit evidence"
+                            "evidence_expectation": "unit evidence",
+                            "related_requirements": ["REQ-UNIT"],
+                            "related_design_constraints": ["DEC-UNIT"],
+                            "related_work_item_tasks": ["TASK-UNIT"]
                         }]
                     })
                     .to_string(),

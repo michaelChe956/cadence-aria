@@ -1737,7 +1737,10 @@ mod tests {
                                 "tool": "run_command",
                                 "risk_level": "low",
                                 "command_or_tool_input": {"command": ["true"]},
-                                "evidence_expectation": "exit 0"
+                                "evidence_expectation": "exit 0",
+                                "related_requirements": ["REQ-UNIT"],
+                                "related_design_constraints": ["DEC-UNIT"],
+                                "related_work_item_tasks": ["TASK-UNIT"]
                             },
                             {
                                 "id": "security",
@@ -1747,7 +1750,10 @@ mod tests {
                                 "tool": "provider_managed",
                                 "risk_level": "medium",
                                 "command_or_tool_input": {"note": "controlled missing step"},
-                                "evidence_expectation": "provider evidence"
+                                "evidence_expectation": "provider evidence",
+                                "related_requirements": ["REQ-SECURITY"],
+                                "related_design_constraints": ["DEC-SECURITY"],
+                                "related_work_item_tasks": ["TASK-SECURITY"]
                             }
                         ]
                     }),

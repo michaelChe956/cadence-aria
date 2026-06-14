@@ -3400,7 +3400,10 @@ fn web_test_provider_driven_testing_output(prompt: &str) -> Option<String> {
                     "command_or_tool_input": {
                         "command": "cargo test --locked"
                     },
-                    "evidence_expectation": "provider reports deterministic cargo test evidence"
+                    "evidence_expectation": "provider reports deterministic cargo test evidence",
+                    "related_requirements": ["REQ-CARGO"],
+                    "related_design_constraints": ["DEC-CARGO"],
+                    "related_work_item_tasks": ["TASK-CARGO"]
                 }]
             })
             .to_string(),

@@ -120,9 +120,54 @@ describe("chat workspace entries", () => {
       />,
     );
 
-    expect(screen.getByText("Tester 测试计划")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Tester 测试计划" })).toBeInTheDocument();
     expect(screen.getByText(/unit plan/)).toBeInTheDocument();
     expect(screen.getByText(/证据预期/)).toBeInTheDocument();
+  });
+
+  it("formats raw tester TestPlan JSON streams instead of showing escaped JSON", () => {
+    const testPlanJson = JSON.stringify({
+      summary: "覆盖 work item 的 provider 门禁变更",
+      context_warnings: [],
+      assumptions: [],
+      steps: [
+        {
+          id: "step_001_gate",
+          title: "验证 Provider 门禁",
+          intent: "检查不可用 provider 不会被静默默认使用",
+          required: true,
+          tool: "run_command",
+          risk_level: "high",
+          command_or_tool_input: { command: "cargo test --locked --lib provider_gate" },
+          evidence_expectation: "provider_unavailable / provider_fallback 契约稳定",
+          related_requirements: ["REQ-014"],
+          related_design_constraints: ["DEC-014"],
+          related_work_item_tasks: ["TASK-007"],
+        },
+      ],
+    });
+
+    const { container } = render(
+      <ProviderStreamEntry
+        entry={makeEntry({
+          id: "tester-raw-json",
+          type: "provider_stream",
+          role: "tester",
+          content: testPlanJson,
+          metadata: {
+            phase: "plan_tests",
+          },
+        })}
+      />,
+    );
+
+    expect(screen.getByText("Tester 测试计划")).toBeInTheDocument();
+    expect(screen.getByText(/覆盖 work item 的 provider 门禁变更/)).toBeInTheDocument();
+    expect(screen.getByText(/step_001_gate/)).toBeInTheDocument();
+    expect(screen.getByText(/REQ-014/)).toBeInTheDocument();
+    expect(screen.getByText(/TASK-007/)).toBeInTheDocument();
+    expect(container.textContent).not.toContain("&quot;");
+    expect(container.textContent).not.toContain('"summary"');
   });
 
   it("hides reviewer trailing JSON contract from provider stream bubbles", () => {

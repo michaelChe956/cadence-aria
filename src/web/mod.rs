@@ -4,6 +4,7 @@ pub mod error;
 pub mod events;
 pub mod handlers;
 pub mod issue_registry;
+pub mod provider_availability;
 pub mod provider_probe;
 pub mod redaction;
 pub mod runtime;
