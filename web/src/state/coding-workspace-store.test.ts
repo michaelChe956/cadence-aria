@@ -202,6 +202,7 @@ function sessionState(
     review_request: null,
     internal_pr_review: null,
     pending_gates: [],
+    pending_choices: [],
     latest_analyst_decision: null,
     chat_entries: [],
     ...overrides,

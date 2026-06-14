@@ -19,7 +19,8 @@ use crate::cross_cutting::streaming_provider::{
     StreamChunk, StreamingProviderAdapter, StreamingProviderInput,
 };
 use crate::product::coding_attempt_store::{
-    CodingAttemptStore, CreateBlockedGateInput, CreateQualityBypassAuditInput,
+    CodingAttemptStore, CreateBlockedGateInput, CreateChoiceGateInput,
+    CreateQualityBypassAuditInput,
 };
 use crate::product::coding_evaluation_context::{
     EvaluationContextRole, build_evaluation_context_pack,
@@ -27,14 +28,14 @@ use crate::product::coding_evaluation_context::{
 use crate::product::coding_models::{
     AnalystDecisionNextStage, AnalystDecisionRecord, AnalystDecisionVerdict,
     AnalystHumanGateRecommendation, AnalystReworkInstructions, AnalystVerdict, CodeReviewReport,
-    CodingAgentRole, CodingAttemptStatus, CodingChatEntry, CodingContextNote, CodingEntryType,
-    CodingExecutionAttempt, CodingExecutionStage, CodingGateAction, CodingGateActionType,
-    CodingGateRequired, CodingProviderPermissionMode, CodingProviderRole, CodingReworkInstruction,
-    CodingRoleRun, CodingRoleRunEventType, CodingRoleRunStatus, CodingRoleRunTrigger,
-    CodingTimelineNode, CodingTimelineNodeStatus, InternalPrReview, PushStatus, ReviewFinding,
-    ReviewRequest, ReviewRequestKind, ReviewVerdict, TestCommand, TestCommandStatus, TestPlan,
-    TestPlanRiskLevel, TestingOverallStatus, TestingReport, TestingStepResult,
-    TestingUnplannedEvidence,
+    CodingAgentRole, CodingAttemptStatus, CodingChatEntry, CodingChoiceOption, CodingContextNote,
+    CodingEntryType, CodingExecutionAttempt, CodingExecutionStage, CodingGateAction,
+    CodingGateActionType, CodingGateRequired, CodingProviderPermissionMode, CodingProviderRole,
+    CodingReworkInstruction, CodingRoleRun, CodingRoleRunEventType, CodingRoleRunStatus,
+    CodingRoleRunTrigger, CodingTimelineNode, CodingTimelineNodeStatus, InternalPrReview,
+    PushStatus, ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict, TestCommand,
+    TestCommandStatus, TestPlan, TestPlanRiskLevel, TestingOverallStatus, TestingReport,
+    TestingStepResult, TestingUnplannedEvidence,
 };
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::git_workspace_service::{GitWorkspaceError, GitWorkspaceService};
@@ -496,6 +497,27 @@ impl CodingWorkspaceEngine {
         }
     }
 
+    fn unresolved_provider_choice_error(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        role_run: Option<&CodingRoleRun>,
+        phase: &str,
+        open_choice_ids: &[String],
+    ) -> CodingWorkspaceEngineError {
+        self.record_role_run_event(
+            attempt,
+            role_run,
+            CodingRoleRunEventType::ProviderFailed,
+            json!({
+                "phase": phase,
+                "code": "provider_choice_unresolved",
+                "message": "provider continued before required user choice was resolved",
+                "choice_ids": open_choice_ids
+            }),
+        );
+        CodingWorkspaceEngineError::ProviderStream("provider_choice_unresolved".to_string())
+    }
+
     async fn run_provider_stream_to_completion(
         &self,
         run: CodingProviderStreamRun<'_>,
@@ -602,6 +624,7 @@ impl CodingWorkspaceEngine {
         let mut full_output = String::new();
         let mut tool_call_titles = BTreeMap::new();
         let mut tool_call_commands = BTreeMap::new();
+        let mut open_choice_ids = Vec::<String>::new();
         let timeout = run_timeout_sleep(timeout);
         tokio::pin!(timeout);
         loop {
@@ -653,6 +676,69 @@ impl CodingWorkspaceEngine {
                             );
                             return Err(CodingWorkspaceEngineError::Aborted);
                         }
+                        CodingRunnerCommand::ChoiceResponse {
+                            id,
+                            selected_option_ids,
+                            free_text,
+                        } => {
+                            if !open_choice_ids.iter().any(|choice_id| choice_id == &id) {
+                                let _ = self
+                                    .event_tx
+                                    .send(CodingWsOutMessage::CodingProtocolError {
+                                        code: "coding_choice_gate_not_found".to_string(),
+                                        message: format!(
+                                            "ChoiceResponse id={id} not found in open coding choice gates"
+                                        ),
+                                    })
+                                    .await;
+                                continue;
+                            }
+                            if session
+                                .commands
+                                .send(ProviderCommand::ChoiceResponse {
+                                    id: id.clone(),
+                                    selected_option_ids: selected_option_ids.clone(),
+                                    free_text: free_text.clone(),
+                                })
+                                .await
+                                .is_ok()
+                            {
+                                let ack_selected_option_ids = selected_option_ids.clone();
+                                let ack_free_text = free_text.clone();
+                                let _ = self.store.resolve_choice_gate(
+                                    &attempt.project_id,
+                                    &attempt.issue_id,
+                                    &attempt.id,
+                                    &id,
+                                    selected_option_ids,
+                                    free_text,
+                                )?;
+                                open_choice_ids.retain(|choice_id| choice_id != &id);
+                                let current = self.store.get_attempt(
+                                    &attempt.project_id,
+                                    &attempt.issue_id,
+                                    &attempt.id,
+                                )?;
+                                if current.status == CodingAttemptStatus::WaitingForHuman {
+                                    self.store.update_attempt_status(
+                                        &attempt.project_id,
+                                        &attempt.issue_id,
+                                        &attempt.id,
+                                        CodingAttemptStatus::Running,
+                                    )?;
+                                }
+                                let _ = self
+                                    .event_tx
+                                    .send(CodingWsOutMessage::CodingChoiceResponseAck {
+                                        id,
+                                        selected_option_ids: ack_selected_option_ids,
+                                        free_text: ack_free_text,
+                                    })
+                                    .await;
+                            } else {
+                                commands_open = false;
+                            }
+                        }
                         command => {
                             if !forward_runner_command_to_provider(command, &session.commands).await {
                                 commands_open = false;
@@ -662,10 +748,26 @@ impl CodingWorkspaceEngine {
                 }
                 event = session.events.recv() => {
                     let Some(event) = event else {
+                        if !open_choice_ids.is_empty() {
+                            return Err(self.unresolved_provider_choice_error(
+                                attempt,
+                                role_run,
+                                "provider_stream_closed",
+                                &open_choice_ids,
+                            ));
+                        }
                         return self.fail_provider_stream_ended(attempt, node_id).await;
                     };
                     match event {
                         ProviderEvent::TextDelta { content } => {
+                            if !open_choice_ids.is_empty() {
+                                return Err(self.unresolved_provider_choice_error(
+                                    attempt,
+                                    role_run,
+                                    "provider_text_delta",
+                                    &open_choice_ids,
+                                ));
+                            }
                             let content_for_event = content.clone();
                             full_output.push_str(&content);
                             let _ = self
@@ -685,6 +787,14 @@ impl CodingWorkspaceEngine {
                             );
                         }
                         ProviderEvent::Execution(event) => {
+                            if !open_choice_ids.is_empty() {
+                                return Err(self.unresolved_provider_choice_error(
+                                    attempt,
+                                    role_run,
+                                    "provider_execution",
+                                    &open_choice_ids,
+                                ));
+                            }
                             let event_for_record = event.clone();
                             let _ = self
                                 .event_tx
@@ -714,6 +824,14 @@ impl CodingWorkspaceEngine {
                             );
                         }
                         ProviderEvent::ToolCall(call) => {
+                            if !open_choice_ids.is_empty() {
+                                return Err(self.unresolved_provider_choice_error(
+                                    attempt,
+                                    role_run,
+                                    "provider_tool_call",
+                                    &open_choice_ids,
+                                ));
+                            }
                             let call_for_record = call.clone();
                             tool_call_titles.insert(call.id.clone(), call.tool_name.clone());
                             if let Some(command) = extract_tool_command(&call.input) {
@@ -737,6 +855,14 @@ impl CodingWorkspaceEngine {
                             );
                         }
                         ProviderEvent::ToolResult(result) => {
+                            if !open_choice_ids.is_empty() {
+                                return Err(self.unresolved_provider_choice_error(
+                                    attempt,
+                                    role_run,
+                                    "provider_tool_result",
+                                    &open_choice_ids,
+                                ));
+                            }
                             let result_for_record = result.clone();
                             let title = tool_call_titles
                                 .get(&result.tool_use_id)
@@ -767,6 +893,14 @@ impl CodingWorkspaceEngine {
                             );
                         }
                         ProviderEvent::PermissionRequest(request) => {
+                            if !open_choice_ids.is_empty() {
+                                return Err(self.unresolved_provider_choice_error(
+                                    attempt,
+                                    role_run,
+                                    "provider_permission_request",
+                                    &open_choice_ids,
+                                ));
+                            }
                             let request_for_record = request.clone();
                             self.emit_permission_request(node_id, provider_name, request).await;
                             self.record_role_run_event(
@@ -783,7 +917,16 @@ impl CodingWorkspaceEngine {
                         }
                         ProviderEvent::ChoiceRequest(request) => {
                             let request_for_record = request.clone();
-                            self.emit_choice_request(node_id, provider_name, request).await;
+                            self.emit_choice_request(
+                                attempt,
+                                node_id,
+                                attempt.stage.clone(),
+                                provider_role.clone(),
+                                provider_name,
+                                request,
+                            )
+                            .await?;
+                            open_choice_ids.push(request_for_record.id.clone());
                             self.record_role_run_event(
                                 attempt,
                                 role_run,
@@ -792,7 +935,8 @@ impl CodingWorkspaceEngine {
                                     "id": request_for_record.id,
                                     "prompt": request_for_record.prompt,
                                     "allow_multiple": request_for_record.allow_multiple,
-                                    "allow_free_text": request_for_record.allow_free_text
+                                    "allow_free_text": request_for_record.allow_free_text,
+                                    "source": request_for_record.source.as_str()
                                 }),
                             );
                         }
@@ -821,6 +965,14 @@ impl CodingWorkspaceEngine {
                             full_output: completed_output,
                             provider_session_id,
                         } => {
+                            if !open_choice_ids.is_empty() {
+                                return Err(self.unresolved_provider_choice_error(
+                                    attempt,
+                                    role_run,
+                                    "provider_completed",
+                                    &open_choice_ids,
+                                ));
+                            }
                             let provider_session_id_for_record = provider_session_id.clone();
                             let output_bytes = completed_output.len();
                             self.record_attempt_provider_session(
@@ -879,6 +1031,14 @@ impl CodingWorkspaceEngine {
                             return self.fail_provider_stream(attempt, node_id, message).await;
                         }
                         ProviderEvent::PermissionTimeout { permission_id } => {
+                            if !open_choice_ids.is_empty() {
+                                return Err(self.unresolved_provider_choice_error(
+                                    attempt,
+                                    role_run,
+                                    "provider_permission_timeout",
+                                    &open_choice_ids,
+                                ));
+                            }
                             let message = format!("Permission request {permission_id} timed out");
                             self.record_role_run_event(
                                 attempt,
@@ -1008,10 +1168,46 @@ impl CodingWorkspaceEngine {
 
     async fn emit_choice_request(
         &self,
+        attempt: &CodingExecutionAttempt,
         node_id: &str,
+        stage: CodingExecutionStage,
+        role: CodingProviderRole,
         provider: &ProviderName,
         request: ChoiceRequestData,
-    ) {
+    ) -> Result<(), CodingWorkspaceEngineError> {
+        let source = request.source.as_str().to_string();
+        self.store.create_choice_gate(CreateChoiceGateInput {
+            attempt_id: attempt.id.clone(),
+            choice_id: request.id.clone(),
+            stage,
+            node_id: Some(node_id.to_string()),
+            role,
+            provider: provider.clone(),
+            source: source.clone(),
+            prompt: request.prompt.clone(),
+            options: request
+                .options
+                .iter()
+                .map(|option| CodingChoiceOption {
+                    id: option.id.clone(),
+                    label: option.label.clone(),
+                    description: option.description.clone(),
+                })
+                .collect(),
+            allow_multiple: request.allow_multiple,
+            allow_free_text: request.allow_free_text,
+        })?;
+        let current =
+            self.store
+                .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+        if current.status == CodingAttemptStatus::Running {
+            self.store.update_attempt_status(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                CodingAttemptStatus::WaitingForHuman,
+            )?;
+        }
         let _ = self
             .event_tx
             .send(CodingWsOutMessage::CodingExecutionEvent {
@@ -1023,6 +1219,7 @@ impl CodingWorkspaceEngine {
             .send(CodingWsOutMessage::CodingChoiceRequest {
                 id: request.id,
                 prompt: request.prompt,
+                source,
                 options: request
                     .options
                     .into_iter()
@@ -1036,6 +1233,7 @@ impl CodingWorkspaceEngine {
                 allow_free_text: request.allow_free_text,
             })
             .await;
+        Ok(())
     }
 
     pub async fn execute_testing(
@@ -1806,6 +2004,7 @@ impl CodingWorkspaceEngine {
         let mut commands_open = true;
         let mut tool_call_titles = BTreeMap::new();
         let mut tool_call_commands = BTreeMap::new();
+        let mut open_choice_ids = Vec::<String>::new();
 
         loop {
             tokio::select! {
@@ -1853,6 +2052,69 @@ impl CodingWorkspaceEngine {
                             );
                             return Err(CodingWorkspaceEngineError::Aborted);
                         }
+                        CodingRunnerCommand::ChoiceResponse {
+                            id,
+                            selected_option_ids,
+                            free_text,
+                        } => {
+                            if !open_choice_ids.iter().any(|choice_id| choice_id == &id) {
+                                let _ = self
+                                    .event_tx
+                                    .send(CodingWsOutMessage::CodingProtocolError {
+                                        code: "coding_choice_gate_not_found".to_string(),
+                                        message: format!(
+                                            "ChoiceResponse id={id} not found in open coding choice gates"
+                                        ),
+                                    })
+                                    .await;
+                                continue;
+                            }
+                            if session
+                                .commands
+                                .send(ProviderCommand::ChoiceResponse {
+                                    id: id.clone(),
+                                    selected_option_ids: selected_option_ids.clone(),
+                                    free_text: free_text.clone(),
+                                })
+                                .await
+                                .is_ok()
+                            {
+                                let ack_selected_option_ids = selected_option_ids.clone();
+                                let ack_free_text = free_text.clone();
+                                let _ = self.store.resolve_choice_gate(
+                                    &attempt.project_id,
+                                    &attempt.issue_id,
+                                    &attempt.id,
+                                    &id,
+                                    selected_option_ids,
+                                    free_text,
+                                )?;
+                                open_choice_ids.retain(|choice_id| choice_id != &id);
+                                let current = self.store.get_attempt(
+                                    &attempt.project_id,
+                                    &attempt.issue_id,
+                                    &attempt.id,
+                                )?;
+                                if current.status == CodingAttemptStatus::WaitingForHuman {
+                                    self.store.update_attempt_status(
+                                        &attempt.project_id,
+                                        &attempt.issue_id,
+                                        &attempt.id,
+                                        CodingAttemptStatus::Running,
+                                    )?;
+                                }
+                                let _ = self
+                                    .event_tx
+                                    .send(CodingWsOutMessage::CodingChoiceResponseAck {
+                                        id,
+                                        selected_option_ids: ack_selected_option_ids,
+                                        free_text: ack_free_text,
+                                    })
+                                    .await;
+                            } else {
+                                commands_open = false;
+                            }
+                        }
                         command => {
                             if !forward_runner_command_to_provider(command, &session.commands).await {
                                 commands_open = false;
@@ -1862,11 +2124,27 @@ impl CodingWorkspaceEngine {
                 }
                 event = session.events.recv() => {
                     let Some(event) = event else {
+                        if !open_choice_ids.is_empty() {
+                            return Err(self.unresolved_provider_choice_error(
+                                &attempt,
+                                Some(&role_run),
+                                "execute_test_plan_stream_closed",
+                                &open_choice_ids,
+                            ));
+                        }
                         blocked_summary = Some("Tester Provider stream ended before completion".to_string());
                         break;
                     };
                     match event {
                         ProviderEvent::TextDelta { content } => {
+                            if !open_choice_ids.is_empty() {
+                                return Err(self.unresolved_provider_choice_error(
+                                    &attempt,
+                                    Some(&role_run),
+                                    "execute_test_plan_text_delta",
+                                    &open_choice_ids,
+                                ));
+                            }
                             let content_for_event = content.clone();
                             full_output.push_str(&content);
                             let _ = self
@@ -1887,6 +2165,14 @@ impl CodingWorkspaceEngine {
                             );
                         }
                         ProviderEvent::ToolCall(call) => {
+                            if !open_choice_ids.is_empty() {
+                                return Err(self.unresolved_provider_choice_error(
+                                    &attempt,
+                                    Some(&role_run),
+                                    "execute_test_plan_tool_call",
+                                    &open_choice_ids,
+                                ));
+                            }
                             let call_for_event = call.clone();
                             tool_call_titles.insert(call.id.clone(), call.tool_name.clone());
                             if let Some(command) = extract_tool_command(&call.input) {
@@ -2012,6 +2298,14 @@ impl CodingWorkspaceEngine {
                             }
                         }
                         ProviderEvent::ToolResult(result) => {
+                            if !open_choice_ids.is_empty() {
+                                return Err(self.unresolved_provider_choice_error(
+                                    &attempt,
+                                    Some(&role_run),
+                                    "execute_test_plan_tool_result",
+                                    &open_choice_ids,
+                                ));
+                            }
                             let result_for_event = result.clone();
                             let title = tool_call_titles
                                 .get(&result.tool_use_id)
@@ -2051,6 +2345,14 @@ impl CodingWorkspaceEngine {
                             );
                         }
                         ProviderEvent::Execution(event) => {
+                            if !open_choice_ids.is_empty() {
+                                return Err(self.unresolved_provider_choice_error(
+                                    &attempt,
+                                    Some(&role_run),
+                                    "execute_test_plan_execution",
+                                    &open_choice_ids,
+                                ));
+                            }
                             let event_for_record = event.clone();
                             let _ = self
                                 .event_tx
@@ -2084,6 +2386,14 @@ impl CodingWorkspaceEngine {
                             full_output: completed_output,
                             provider_session_id,
                         } => {
+                            if !open_choice_ids.is_empty() {
+                                return Err(self.unresolved_provider_choice_error(
+                                    &attempt,
+                                    Some(&role_run),
+                                    "execute_test_plan_completed",
+                                    &open_choice_ids,
+                                ));
+                            }
                             let provider_session_id_for_event = provider_session_id.clone();
                             let output_bytes = completed_output.len();
                             self.record_attempt_provider_session(
@@ -2147,6 +2457,14 @@ impl CodingWorkspaceEngine {
                             break;
                         }
                         ProviderEvent::PermissionTimeout { permission_id } => {
+                            if !open_choice_ids.is_empty() {
+                                return Err(self.unresolved_provider_choice_error(
+                                    &attempt,
+                                    Some(&role_run),
+                                    "execute_test_plan_permission_timeout",
+                                    &open_choice_ids,
+                                ));
+                            }
                             let message = format!("Permission request {permission_id} timed out");
                             self.record_role_run_event(
                                 &attempt,
@@ -2163,6 +2481,14 @@ impl CodingWorkspaceEngine {
                             break;
                         }
                         ProviderEvent::PermissionRequest(request) => {
+                            if !open_choice_ids.is_empty() {
+                                return Err(self.unresolved_provider_choice_error(
+                                    &attempt,
+                                    Some(&role_run),
+                                    "execute_test_plan_permission_request",
+                                    &open_choice_ids,
+                                ));
+                            }
                             let request_for_event = request.clone();
                             self.emit_permission_request(&node.id, &tester_provider, request).await;
                             self.record_role_run_event(
@@ -2180,7 +2506,16 @@ impl CodingWorkspaceEngine {
                         }
                         ProviderEvent::ChoiceRequest(request) => {
                             let request_for_event = request.clone();
-                            self.emit_choice_request(&node.id, &tester_provider, request).await;
+                            self.emit_choice_request(
+                                &attempt,
+                                &node.id,
+                                CodingExecutionStage::Testing,
+                                CodingProviderRole::Tester,
+                                &tester_provider,
+                                request,
+                            )
+                            .await?;
+                            open_choice_ids.push(request_for_event.id.clone());
                             self.record_role_run_event(
                                 &attempt,
                                 Some(&role_run),
@@ -2190,6 +2525,7 @@ impl CodingWorkspaceEngine {
                                     "prompt": request_for_event.prompt,
                                     "allow_multiple": request_for_event.allow_multiple,
                                     "allow_free_text": request_for_event.allow_free_text,
+                                    "source": request_for_event.source.as_str(),
                                     "phase": "execute_test_plan"
                                 }),
                             );

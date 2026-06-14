@@ -15,8 +15,8 @@ use crate::product::artifact_extraction::extract_artifact_content;
 use crate::product::coding_attempt_store::CodingAttemptStore;
 use crate::product::coding_models::{
     AnalystDecisionRecord, CodeReviewReport, CodingAgentRole, CodingAttemptStatus, CodingChatEntry,
-    CodingContextNote, CodingEntryType, CodingExecutionAttempt, CodingExecutionStage,
-    CodingGateAction, CodingGateActionType, CodingGateKind,
+    CodingChoiceGate, CodingContextNote, CodingEntryType, CodingExecutionAttempt,
+    CodingExecutionStage, CodingGateAction, CodingGateActionType, CodingGateKind,
     CodingGateRequired as CodingGateRequiredModel, CodingProviderPermissionMode,
     CodingProviderRole, CodingRoleProviderConfigSnapshot, CodingRoleRunEvent,
     CodingRoleRunEventPreview, CodingRoleRunEventSummary, CodingRoleRunEventType,
@@ -475,6 +475,17 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                                 free_text,
                             })
                             .await;
+                    } else {
+                        let _ = send_coding_json(
+                            &mut socket_tx,
+                            &CodingWsOutMessage::CodingProtocolError {
+                                code: "coding_choice_runner_not_active".to_string(),
+                                message: format!(
+                                    "ChoiceResponse id={id} cannot be delivered because no coding runner is active"
+                                ),
+                            },
+                        )
+                        .await;
                     }
                 } else if let CodingWsInMessage::ContextNote { content } = inbound {
                     let note = match coding_store.create_context_note(&current_attempt.id, content)
@@ -1730,6 +1741,8 @@ fn build_coding_session_state(
         &attempt.issue_id,
         &attempt.id,
     )?;
+    let pending_choices =
+        coding_store.list_open_choice_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
     let chat_entries =
         coding_store.list_chat_entries(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
     let role_runs = coding_role_run_snapshots(coding_store, &attempt)?;
@@ -1745,20 +1758,21 @@ fn build_coding_session_state(
         max_auto_rework: attempt.max_auto_rework,
         head_commit: attempt.head_commit,
         pushed_remote: attempt.pushed_remote,
-        role_provider_config_snapshot,
-        provider_config_snapshot: attempt.provider_config_snapshot,
-        chat_entries,
-        timeline_nodes,
+        role_provider_config_snapshot: Box::new(role_provider_config_snapshot),
+        provider_config_snapshot: Box::new(attempt.provider_config_snapshot),
+        chat_entries: Box::new(chat_entries),
+        timeline_nodes: Box::new(timeline_nodes),
         active_node_id,
         testing_report: Box::new(testing_report),
-        code_review_reports,
+        code_review_reports: Box::new(code_review_reports),
         review_request: Box::new(review_request),
         internal_pr_review: Box::new(internal_pr_review),
-        pending_gates,
+        pending_gates: Box::new(pending_gates),
+        pending_choices: Box::new(pending_choices),
         latest_analyst_decision: Box::new(latest_analyst_decision),
-        role_runs,
+        role_runs: Box::new(role_runs),
         work_item_markdown: execution_context.work_item_markdown,
-        verification_commands: execution_context.verification_commands,
+        verification_commands: Box::new(execution_context.verification_commands),
     })
 }
 
@@ -1928,20 +1942,21 @@ pub enum CodingWsOutMessage {
         max_auto_rework: u32,
         head_commit: Option<String>,
         pushed_remote: Option<String>,
-        role_provider_config_snapshot: CodingRoleProviderConfigSnapshot,
-        provider_config_snapshot: ProviderConfigSnapshot,
-        chat_entries: Vec<CodingChatEntry>,
-        timeline_nodes: Vec<CodingTimelineNode>,
+        role_provider_config_snapshot: Box<CodingRoleProviderConfigSnapshot>,
+        provider_config_snapshot: Box<ProviderConfigSnapshot>,
+        chat_entries: Box<Vec<CodingChatEntry>>,
+        timeline_nodes: Box<Vec<CodingTimelineNode>>,
         active_node_id: Option<String>,
         testing_report: Box<Option<TestingReport>>,
-        code_review_reports: Vec<CodeReviewReport>,
+        code_review_reports: Box<Vec<CodeReviewReport>>,
         review_request: Box<Option<ReviewRequest>>,
         internal_pr_review: Box<Option<InternalPrReview>>,
-        pending_gates: Vec<CodingGateRequiredModel>,
+        pending_gates: Box<Vec<CodingGateRequiredModel>>,
+        pending_choices: Box<Vec<CodingChoiceGate>>,
         latest_analyst_decision: Box<Option<AnalystDecisionRecord>>,
-        role_runs: Vec<CodingRoleRunSnapshot>,
+        role_runs: Box<Vec<CodingRoleRunSnapshot>>,
         work_item_markdown: Option<String>,
-        verification_commands: Vec<String>,
+        verification_commands: Box<Vec<String>>,
     },
     CodingStageChange {
         stage: CodingExecutionStage,
@@ -1967,9 +1982,15 @@ pub enum CodingWsOutMessage {
     CodingChoiceRequest {
         id: String,
         prompt: String,
+        source: String,
         options: Vec<ChoiceOption>,
         allow_multiple: bool,
         allow_free_text: bool,
+    },
+    CodingChoiceResponseAck {
+        id: String,
+        selected_option_ids: Vec<String>,
+        free_text: Option<String>,
     },
     CodingStreamChunk {
         content: String,

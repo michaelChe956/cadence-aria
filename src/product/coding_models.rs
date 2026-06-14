@@ -526,6 +526,54 @@ pub struct CodingStageGateState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodingChoiceOption {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodingChoiceGateStatus {
+    Open,
+    Resolved,
+    Stale,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodingChoiceGateResponse {
+    pub selected_option_ids: Vec<String>,
+    #[serde(default)]
+    pub free_text: Option<String>,
+    pub responded_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodingChoiceGate {
+    pub gate_id: String,
+    pub choice_id: String,
+    pub attempt_id: String,
+    #[serde(default)]
+    pub node_id: Option<String>,
+    pub stage: CodingExecutionStage,
+    pub role: CodingProviderRole,
+    pub provider: ProviderName,
+    pub source: String,
+    pub prompt: String,
+    #[serde(default)]
+    pub options: Vec<CodingChoiceOption>,
+    pub allow_multiple: bool,
+    pub allow_free_text: bool,
+    pub status: CodingChoiceGateStatus,
+    #[serde(default)]
+    pub response: Option<CodingChoiceGateResponse>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TestCommandStatus {
     Passed,

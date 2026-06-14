@@ -5,12 +5,13 @@ use std::process::Command;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use cadence_aria::product::app_paths::ProductAppPaths;
-use cadence_aria::product::coding_attempt_store::CodingAttemptStore;
+use cadence_aria::product::coding_attempt_store::{CodingAttemptStore, CreateChoiceGateInput};
 use cadence_aria::product::coding_models::{
-    CodeReviewReport, CodingAgentRole, CodingExecutionAttempt, CodingExecutionStage,
-    CodingTimelineNode, CodingTimelineNodeStatus, FindingSeverity, InternalPrReview, PushStatus,
-    RemoteKind, ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict, TestCommand,
-    TestCommandStatus, TestingOverallStatus, TestingReport,
+    CodeReviewReport, CodingAgentRole, CodingChoiceOption, CodingExecutionAttempt,
+    CodingExecutionStage, CodingProviderRole, CodingTimelineNode, CodingTimelineNodeStatus,
+    FindingSeverity, InternalPrReview, PushStatus, RemoteKind, ReviewFinding, ReviewRequest,
+    ReviewRequestKind, ReviewVerdict, TestCommand, TestCommandStatus, TestingOverallStatus,
+    TestingReport,
 };
 use cadence_aria::product::models::ProviderName;
 use cadence_aria::web::app::build_web_router;
@@ -215,6 +216,25 @@ async fn returns_coding_attempt_snapshot_with_persisted_execution_state() {
     store
         .save_timeline_node(sample_running_node(attempt_id))
         .expect("save running node");
+    store
+        .create_choice_gate(CreateChoiceGateInput {
+            attempt_id: attempt_id.to_string(),
+            choice_id: "choice_0001".to_string(),
+            stage: CodingExecutionStage::Coding,
+            node_id: Some("coding_node_0002".to_string()),
+            role: CodingProviderRole::Coder,
+            provider: ProviderName::Codex,
+            source: "request_user_input".to_string(),
+            prompt: "请选择实现范围".to_string(),
+            options: vec![CodingChoiceOption {
+                id: "backend_first".to_string(),
+                label: "先做后端".to_string(),
+                description: None,
+            }],
+            allow_multiple: false,
+            allow_free_text: true,
+        })
+        .expect("create choice gate");
 
     let (status, snapshot) = request_json(
         app,
@@ -241,6 +261,11 @@ async fn returns_coding_attempt_snapshot_with_persisted_execution_state() {
     assert_eq!(
         snapshot["internal_pr_review"]["summary"],
         internal_review.summary.as_str()
+    );
+    assert_eq!(snapshot["pending_choices"][0]["choice_id"], "choice_0001");
+    assert_eq!(
+        snapshot["pending_choices"][0]["source"],
+        "request_user_input"
     );
 }
 

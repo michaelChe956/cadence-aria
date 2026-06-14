@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_models::{
     AnalystDecisionRecord, CodeReviewReport, CodingAttemptStatus, CodingChatEntry,
+    CodingChoiceGate, CodingChoiceGateResponse, CodingChoiceGateStatus, CodingChoiceOption,
     CodingContextNote, CodingExecutionAttempt, CodingExecutionStage, CodingGateAction,
     CodingGateKind, CodingGateRequired, CodingProviderRole, CodingReworkInstruction,
     CodingRoleProviderConfigSnapshot, CodingRoleRun, CodingRoleRunEvent, CodingRoleRunEventType,
@@ -20,7 +21,7 @@ use crate::product::id::next_sequential_id;
 use crate::product::json_store::{
     ProductStoreError, read_json, validate_relative_artifact_ref, validate_relative_id, write_json,
 };
-use crate::product::models::ProviderConversationRef;
+use crate::product::models::{ProviderConversationRef, ProviderName};
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +48,21 @@ pub struct CreateBlockedGateInput {
     pub evidence_refs: Vec<String>,
     pub raw_provider_output_ref: Option<String>,
     pub available_actions: Vec<CodingGateAction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateChoiceGateInput {
+    pub attempt_id: String,
+    pub choice_id: String,
+    pub stage: CodingExecutionStage,
+    pub node_id: Option<String>,
+    pub role: CodingProviderRole,
+    pub provider: ProviderName,
+    pub source: String,
+    pub prompt: String,
+    pub options: Vec<CodingChoiceOption>,
+    pub allow_multiple: bool,
+    pub allow_free_text: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1166,6 +1182,107 @@ impl CodingAttemptStore {
         Ok(gate)
     }
 
+    pub fn create_choice_gate(
+        &self,
+        input: CreateChoiceGateInput,
+    ) -> Result<CodingChoiceGate, ProductStoreError> {
+        validate_relative_id(&input.attempt_id)?;
+        if let Some(node_id) = &input.node_id {
+            validate_relative_id(node_id)?;
+        }
+        let attempt = self.find_attempt_by_id(&input.attempt_id)?;
+        let gates_root =
+            self.choice_gates_root(&attempt.project_id, &attempt.issue_id, &attempt.id);
+        if let Some(existing_path) = matching_open_choice_gate_path(&gates_root, &input.choice_id)?
+        {
+            let mut gate: CodingChoiceGate = read_json(&existing_path)?;
+            gate.stage = input.stage;
+            gate.node_id = input.node_id;
+            gate.role = input.role;
+            gate.provider = input.provider;
+            gate.source = input.source;
+            gate.prompt = input.prompt;
+            gate.options = input.options;
+            gate.allow_multiple = input.allow_multiple;
+            gate.allow_free_text = input.allow_free_text;
+            gate.updated_at = Utc::now().to_rfc3339();
+            write_json(&existing_path, &gate)?;
+            return Ok(gate);
+        }
+
+        let gate_count =
+            count_json_files(&gates_root)? + count_json_files(&gates_root.join("resolved"))?;
+        let gate_id = next_sequential_id("coding_choice_gate", gate_count);
+        let now = Utc::now().to_rfc3339();
+        let gate = CodingChoiceGate {
+            gate_id: gate_id.clone(),
+            choice_id: input.choice_id,
+            attempt_id: attempt.id,
+            node_id: input.node_id,
+            stage: input.stage,
+            role: input.role,
+            provider: input.provider,
+            source: input.source,
+            prompt: input.prompt,
+            options: input.options,
+            allow_multiple: input.allow_multiple,
+            allow_free_text: input.allow_free_text,
+            status: CodingChoiceGateStatus::Open,
+            response: None,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        write_json(&gates_root.join(format!("{gate_id}.json")), &gate)?;
+        Ok(gate)
+    }
+
+    pub fn list_open_choice_gates(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> Result<Vec<CodingChoiceGate>, ProductStoreError> {
+        let mut gates: Vec<CodingChoiceGate> =
+            list_json_records(&self.choice_gates_root(project_id, issue_id, attempt_id))?;
+        gates.retain(|gate| gate.status == CodingChoiceGateStatus::Open);
+        Ok(gates)
+    }
+
+    pub fn resolve_choice_gate(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        choice_id: &str,
+        selected_option_ids: Vec<String>,
+        free_text: Option<String>,
+    ) -> Result<CodingChoiceGate, ProductStoreError> {
+        let gates_root = self.choice_gates_root(project_id, issue_id, attempt_id);
+        let Some(path) = matching_open_choice_gate_path(&gates_root, choice_id)? else {
+            return Err(ProductStoreError::NotFound {
+                kind: "coding_choice_gate",
+                id: choice_id.to_string(),
+            });
+        };
+
+        let mut gate: CodingChoiceGate = read_json(&path)?;
+        gate.status = CodingChoiceGateStatus::Resolved;
+        gate.response = Some(CodingChoiceGateResponse {
+            selected_option_ids,
+            free_text,
+            responded_at: Utc::now().to_rfc3339(),
+        });
+        gate.updated_at = Utc::now().to_rfc3339();
+        write_json(
+            &gates_root
+                .join("resolved")
+                .join(format!("{}.json", gate.gate_id)),
+            &gate,
+        )?;
+        remove_file_if_exists(&path)?;
+        Ok(gate)
+    }
+
     pub fn create_quality_bypass_audit(
         &self,
         input: CreateQualityBypassAuditInput,
@@ -1758,6 +1875,11 @@ impl CodingAttemptStore {
             .join("blocked-gates")
     }
 
+    fn choice_gates_root(&self, project_id: &str, issue_id: &str, attempt_id: &str) -> PathBuf {
+        self.attempt_dir(project_id, issue_id, attempt_id)
+            .join("choice-gates")
+    }
+
     fn quality_bypass_audits_root(
         &self,
         project_id: &str,
@@ -2036,6 +2158,19 @@ fn matching_open_blocked_gate_path(
             && record.gate.stage.as_ref() == Some(&input.stage)
             && record.gate.reason_code.as_ref() == input.reason_code.as_ref()
         {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
+
+fn matching_open_choice_gate_path(
+    gates_root: &Path,
+    choice_id: &str,
+) -> Result<Option<PathBuf>, ProductStoreError> {
+    for path in json_file_paths(gates_root)? {
+        let gate: CodingChoiceGate = read_json(&path)?;
+        if gate.status == CodingChoiceGateStatus::Open && gate.choice_id == choice_id {
             return Ok(Some(path));
         }
     }

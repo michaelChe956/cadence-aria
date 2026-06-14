@@ -3,8 +3,8 @@ use serde_json::Value;
 use std::path::PathBuf;
 
 use crate::product::coding_models::{
-    AnalystDecisionRecord, CodeReviewReport, CodingGateRequired, CodingTimelineNode,
-    InternalPrReview, ReviewRequest, TestingReport,
+    AnalystDecisionRecord, CodeReviewReport, CodingChoiceGate, CodingGateRequired,
+    CodingTimelineNode, InternalPrReview, ReviewRequest, TestingReport,
 };
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
@@ -467,6 +467,7 @@ pub struct CodingAttemptSnapshotResponse {
     pub review_request: Option<ReviewRequest>,
     pub internal_pr_review: Option<InternalPrReview>,
     pub pending_gates: Vec<CodingGateRequired>,
+    pub pending_choices: Vec<CodingChoiceGate>,
     pub latest_analyst_decision: Option<AnalystDecisionRecord>,
 }
 

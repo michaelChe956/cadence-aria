@@ -160,6 +160,7 @@ describe("workspace websocket protocol types", () => {
       review_request: null,
       internal_pr_review: null,
       pending_gates: [],
+      pending_choices: [],
       latest_analyst_decision: {
         id: "analyst_decision_0001",
         attempt_id: "coding_attempt_0001",
@@ -250,6 +251,7 @@ describe("workspace websocket protocol types", () => {
       review_request: null,
       internal_pr_review: null,
       pending_gates: [],
+      pending_choices: [],
       latest_analyst_decision: snapshot.latest_analyst_decision,
     };
     const inbound: CodingWsInMessage = { type: "start_coding" };

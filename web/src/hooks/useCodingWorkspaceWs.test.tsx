@@ -81,6 +81,7 @@ function codingSessionState(overrides: Record<string, unknown> = {}) {
     review_request: null,
     internal_pr_review: null,
     pending_gates: [],
+    pending_choices: [],
     ...overrides,
   };
 }
@@ -200,6 +201,7 @@ describe("useCodingWorkspaceWs", () => {
         review_request: null,
         internal_pr_review: null,
         pending_gates: [],
+        pending_choices: [],
       });
       harness.ws.receive({
         type: "coding_timeline_node_created",
@@ -371,6 +373,7 @@ describe("useCodingWorkspaceWs", () => {
         review_request: null,
         internal_pr_review: null,
         pending_gates: [],
+        pending_choices: [],
       });
       harness.ws.receive({
         type: "coding_stream_chunk",
@@ -449,6 +452,7 @@ describe("useCodingWorkspaceWs", () => {
         review_request: null,
         internal_pr_review: null,
         pending_gates: [],
+        pending_choices: [],
       });
       harness.ws.receive({
         type: "coding_stream_chunk",
@@ -493,12 +497,19 @@ describe("useCodingWorkspaceWs", () => {
         type: "coding_choice_request",
         id: "choice_0001",
         prompt: "Select implementation strategy",
+        source: "provider_choice",
         options: [{ id: "dp", label: "Dynamic programming", description: "Iterative" }],
         allow_multiple: false,
         allow_free_text: true,
       });
       harness.api.respondPermission("permission_0001", true);
       harness.api.respondChoice("choice_0001", ["dp"], "use iterative dp");
+      harness.ws.receive({
+        type: "coding_choice_response_ack",
+        id: "choice_0001",
+        selected_option_ids: ["dp"],
+        free_text: "use iterative dp",
+      });
     });
 
     expect(useCodingWorkspaceStore.getState().chatEntries).toMatchObject([
@@ -524,6 +535,7 @@ describe("useCodingWorkspaceWs", () => {
         metadata: {
           request_id: "choice_0001",
           prompt: "Select implementation strategy",
+          source: "provider_choice",
           options: [{ id: "dp", label: "Dynamic programming", description: "Iterative" }],
           allow_multiple: false,
           allow_free_text: true,
@@ -793,6 +805,117 @@ describe("useCodingWorkspaceWs", () => {
         errorCode: null,
       },
     ]);
+  });
+
+  it("restores pending coding choices from session snapshots", () => {
+    const harness = renderCodingHook();
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.receive(
+        codingSessionState({
+          status: "waiting_for_human",
+          stage: "coding",
+          pending_choices: [
+            {
+              gate_id: "coding_choice_gate_0001",
+              choice_id: "choice_0001",
+              attempt_id: "coding_attempt_0001",
+              node_id: "coding_node_0001",
+              stage: "coding",
+              role: "coder",
+              provider: "codex",
+              source: "request_user_input",
+              prompt: "请选择实现范围",
+              options: [
+                {
+                  id: "backend_first",
+                  label: "先做后端",
+                  description: "TASK-001 到 TASK-009",
+                },
+              ],
+              allow_multiple: false,
+              allow_free_text: true,
+              status: "open",
+              response: null,
+              created_at: "2026-06-14T00:00:00Z",
+              updated_at: "2026-06-14T00:00:00Z",
+            },
+          ],
+        }),
+      );
+    });
+
+    expect(useCodingWorkspaceStore.getState().chatEntries).toMatchObject([
+      {
+        id: "choice_request:choice_0001",
+        type: "choice_request",
+        role: "coder",
+        content: "请选择实现范围",
+        resolved: false,
+        metadata: {
+          request_id: "choice_0001",
+          source: "request_user_input",
+          allow_free_text: true,
+        },
+      },
+    ]);
+  });
+
+  it("waits for coding choice ack before resolving the choice entry", () => {
+    const harness = renderCodingHook();
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.receive({
+        type: "coding_choice_request",
+        id: "choice_0001",
+        prompt: "请选择实现范围",
+        source: "request_user_input",
+        options: [{ id: "backend_first", label: "先做后端" }],
+        allow_multiple: false,
+        allow_free_text: true,
+      });
+      harness.ws.sent.length = 0;
+      harness.api.respondChoice("choice_0001", ["backend_first"], "先控制范围");
+    });
+
+    expect(harness.ws.sent).toEqual([
+      JSON.stringify({
+        type: "choice_response",
+        id: "choice_0001",
+        selected_option_ids: ["backend_first"],
+        free_text: "先控制范围",
+      }),
+    ]);
+    expect(
+      useCodingWorkspaceStore
+        .getState()
+        .chatEntries.find((entry) => entry.id === "choice_request:choice_0001")?.resolved,
+    ).not.toBe(true);
+
+    act(() => {
+      harness.ws.receive({
+        type: "coding_choice_response_ack",
+        id: "choice_0001",
+        selected_option_ids: ["backend_first"],
+        free_text: "先控制范围",
+      });
+    });
+
+    expect(
+      useCodingWorkspaceStore
+        .getState()
+        .chatEntries.find((entry) => entry.id === "choice_request:choice_0001"),
+    ).toMatchObject({
+      resolved: true,
+      metadata: {
+        response: {
+          selected_option_ids: ["backend_first"],
+          free_text: "先控制范围",
+        },
+      },
+    });
   });
 
   it("sends heartbeat pings while connected", () => {

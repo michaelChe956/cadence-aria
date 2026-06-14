@@ -163,6 +163,7 @@ function codingAttemptSnapshotResponse() {
         ],
       },
     ],
+    pending_choices: [],
   };
 }
 

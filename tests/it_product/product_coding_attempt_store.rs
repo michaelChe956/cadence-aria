@@ -1,16 +1,19 @@
 use std::path::PathBuf;
 
 use cadence_aria::product::app_paths::ProductAppPaths;
-use cadence_aria::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
+use cadence_aria::product::coding_attempt_store::{
+    CodingAttemptStore, CreateChoiceGateInput, CreateCodingAttemptInput,
+};
 use cadence_aria::product::coding_models::{
     AnalystDecisionNextStage, AnalystDecisionRecord, AnalystDecisionVerdict,
     AnalystReworkInstructions, CodeReviewReport, CodingAgentRole, CodingAttemptStatus,
-    CodingContextNote, CodingExecutionStage, CodingProviderRole, CodingReworkInstruction,
-    CodingRolePermissionModes, CodingRoleProviderConfigSnapshot, CodingRoleRunEventType,
-    CodingRoleRunStatus, CodingRoleRunTrigger, CodingStageGateStatus, CodingTimelineNode,
-    CodingTimelineNodeStatus, FindingSeverity, InternalPrReview, PushStatus, RemoteKind,
-    ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict, TestCommand, TestCommandStatus,
-    TestingOverallStatus, TestingReport,
+    CodingChoiceGateStatus, CodingChoiceOption, CodingContextNote, CodingExecutionStage,
+    CodingProviderRole, CodingReworkInstruction, CodingRolePermissionModes,
+    CodingRoleProviderConfigSnapshot, CodingRoleRunEventType, CodingRoleRunStatus,
+    CodingRoleRunTrigger, CodingStageGateStatus, CodingTimelineNode, CodingTimelineNodeStatus,
+    FindingSeverity, InternalPrReview, PushStatus, RemoteKind, ReviewFinding, ReviewRequest,
+    ReviewRequestKind, ReviewVerdict, TestCommand, TestCommandStatus, TestingOverallStatus,
+    TestingReport,
 };
 use cadence_aria::product::models::{
     ProviderConversationRef, ProviderConversationRole, ProviderName,
@@ -618,6 +621,76 @@ fn store_persists_and_resolves_stage_gates_in_attempt_scope() {
         store
             .list_open_stage_gates("project_0001", "issue_0001", &attempt.id)
             .expect("open stage gates")
+            .is_empty()
+    );
+}
+
+#[test]
+fn store_persists_and_resolves_choice_gates_in_attempt_scope() {
+    let root = tempdir().expect("tempdir");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(create_input("work_item_0001"))
+        .expect("create attempt");
+
+    let gate = store
+        .create_choice_gate(CreateChoiceGateInput {
+            attempt_id: attempt.id.clone(),
+            choice_id: "choice_0001".to_string(),
+            stage: CodingExecutionStage::Coding,
+            node_id: Some("coding_node_0001".to_string()),
+            role: CodingProviderRole::Coder,
+            provider: ProviderName::Codex,
+            source: "request_user_input".to_string(),
+            prompt: "请选择实现范围".to_string(),
+            options: vec![CodingChoiceOption {
+                id: "backend_first".to_string(),
+                label: "先做后端".to_string(),
+                description: Some("TASK-001 到 TASK-009".to_string()),
+            }],
+            allow_multiple: false,
+            allow_free_text: true,
+        })
+        .expect("create choice gate");
+
+    assert_eq!(gate.gate_id, "coding_choice_gate_0001");
+    assert_eq!(gate.choice_id, "choice_0001");
+    assert_eq!(gate.attempt_id, attempt.id);
+    assert_eq!(gate.status, CodingChoiceGateStatus::Open);
+    assert_eq!(gate.provider, ProviderName::Codex);
+    assert_eq!(gate.source, "request_user_input");
+    assert_eq!(
+        store
+            .list_open_choice_gates("project_0001", "issue_0001", &attempt.id)
+            .expect("open choice gates")
+            .len(),
+        1
+    );
+
+    let resolved = store
+        .resolve_choice_gate(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            "choice_0001",
+            vec!["backend_first".to_string()],
+            Some("先控制范围".to_string()),
+        )
+        .expect("resolve choice gate");
+
+    assert_eq!(resolved.status, CodingChoiceGateStatus::Resolved);
+    assert_eq!(
+        resolved
+            .response
+            .as_ref()
+            .expect("response")
+            .selected_option_ids,
+        vec!["backend_first"]
+    );
+    assert!(
+        store
+            .list_open_choice_gates("project_0001", "issue_0001", &attempt.id)
+            .expect("open choice gates")
             .is_empty()
     );
 }

@@ -526,6 +526,33 @@ export type CodingGateRequired = {
   raw_provider_output_ref?: string | null;
 };
 
+export type CodingChoiceGateStatus = "open" | "resolved" | "stale" | "cancelled";
+
+export type CodingChoiceGateResponse = {
+  selected_option_ids: string[];
+  free_text?: string | null;
+  responded_at: string;
+};
+
+export type CodingChoiceGate = {
+  gate_id: string;
+  choice_id: string;
+  attempt_id: string;
+  node_id?: string | null;
+  stage: CodingExecutionStage;
+  role: CodingProviderRole;
+  provider: WorkspaceProviderName;
+  source: WorkspaceChoiceRequestSource;
+  prompt: string;
+  options: ChoiceOption[];
+  allow_multiple: boolean;
+  allow_free_text: boolean;
+  status: CodingChoiceGateStatus;
+  response?: CodingChoiceGateResponse | null;
+  created_at: string;
+  updated_at: string;
+};
+
 export type CodingAttemptSnapshotResponse = {
   attempt: CodingAttempt;
   provider_config_snapshot: ProviderConfigSnapshot;
@@ -536,6 +563,7 @@ export type CodingAttemptSnapshotResponse = {
   review_request: ReviewRequest | null;
   internal_pr_review: InternalPrReview | null;
   pending_gates: CodingGateRequired[];
+  pending_choices: CodingChoiceGate[];
   latest_analyst_decision: AnalystDecisionRecord | null;
   role_runs?: CodingRoleRun[];
 };
@@ -622,9 +650,16 @@ export type CodingWsOutMessage =
       type: "coding_choice_request";
       id: string;
       prompt: string;
+      source: WorkspaceChoiceRequestSource;
       options: ChoiceOption[];
       allow_multiple: boolean;
       allow_free_text: boolean;
+    }
+  | {
+      type: "coding_choice_response_ack";
+      id: string;
+      selected_option_ids: string[];
+      free_text?: string | null;
     }
   | { type: "coding_stream_chunk"; content: string; node_id?: string | null }
   | { type: "coding_message_complete"; node_id?: string | null }

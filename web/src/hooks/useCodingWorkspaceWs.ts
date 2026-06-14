@@ -105,10 +105,6 @@ export function useCodingWorkspaceWs(attemptId: string | null) {
       ) {
         return;
       }
-      resolveCodingChoiceRequest(id, {
-        selected_option_ids: selectedOptionIds,
-        free_text: trimmedText ? trimmedText : null,
-      });
     },
     [sendJson],
   );
@@ -433,10 +429,22 @@ function handleCodingWsMessage(message: CodingWsServerMessage, streamBatcher: Co
         metadata: {
           request_id: request.id,
           prompt: request.prompt,
+          source: request.source,
           options: request.options,
           allow_multiple: request.allow_multiple,
           allow_free_text: request.allow_free_text,
         },
+      });
+      break;
+    }
+    case "coding_choice_response_ack": {
+      const response = message as Extract<
+        CodingWsOutMessage,
+        { type: "coding_choice_response_ack" }
+      >;
+      resolveCodingChoiceRequest(response.id, {
+        selected_option_ids: response.selected_option_ids,
+        free_text: response.free_text ?? null,
       });
       break;
     }
@@ -484,6 +492,7 @@ function handleCodingWsMessage(message: CodingWsServerMessage, streamBatcher: Co
         message: message.message as string,
       });
       markSubmittingGateError(message.code as string);
+      rejectCodingChoiceRequestFromError(message.message as string);
       break;
     case "coding_pong":
       break;
@@ -549,4 +558,27 @@ function resolveCodingChoiceRequest(id: string, response: ChoiceResponsePayload)
       response,
     },
   });
+}
+
+function rejectCodingChoiceRequestFromError(message: string) {
+  const id = choiceIdFromProtocolError(message);
+  if (!id) return;
+  const store = useCodingWorkspaceStore.getState();
+  const entry = store.chatEntries.find(
+    (candidate) => candidate.type === "choice_request" && candidate.metadata?.request_id === id,
+  );
+  if (!entry) return;
+  store.appendChatEntry({
+    ...entry,
+    resolved: true,
+    metadata: {
+      ...entry.metadata,
+      rejected: true,
+      rejection_reason: message,
+    },
+  });
+}
+
+function choiceIdFromProtocolError(message: string) {
+  return message.match(/^ChoiceResponse id=([^ ]+)/)?.[1] ?? null;
 }

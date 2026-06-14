@@ -3,6 +3,7 @@ import type {
   AnalystDecisionRecord,
   CodeReviewReport,
   CodingAttemptStatus,
+  CodingChoiceGate,
   CodingExecutionStage,
   CodingGateRequired,
   CodingProviderRole,
@@ -182,7 +183,10 @@ export const useCodingWorkspaceStore = create<
         timelineNodes: snapshot.timeline_nodes,
         activeNodeId: snapshot.active_node_id,
         selectedNodeId,
-        chatEntries: (snapshot.chat_entries ?? []).map(codingChatEntryToChatEntry),
+        chatEntries: mergePendingChoiceEntries(
+          (snapshot.chat_entries ?? []).map(codingChatEntryToChatEntry),
+          snapshot.pending_choices ?? [],
+        ),
         testingReport: snapshot.testing_report,
         codeReviewReports: snapshot.code_review_reports,
         reviewRequest: snapshot.review_request,
@@ -488,6 +492,59 @@ function withGateUiState(
     submitting: previous?.submitting ?? false,
     errorCode: previous?.errorCode ?? null,
   };
+}
+
+function mergePendingChoiceEntries(
+  entries: ChatEntry[],
+  choices: CodingChoiceGate[],
+): ChatEntry[] {
+  return choices.reduce(
+    (current, choice) => upsertChatEntry(current, pendingChoiceEntry(choice)),
+    entries,
+  );
+}
+
+function pendingChoiceEntry(choice: CodingChoiceGate): ChatEntry {
+  return {
+    id: choiceRequestEntryId(choice.choice_id),
+    type: "choice_request",
+    role: chatRoleForChoiceRole(choice.role),
+    content: choice.prompt,
+    timestamp: choice.created_at,
+    node_id: choice.node_id ?? undefined,
+    resolved: choice.status !== "open",
+    metadata: {
+      request_id: choice.choice_id,
+      choice_gate_id: choice.gate_id,
+      prompt: choice.prompt,
+      source: choice.source,
+      provider: choice.provider,
+      options: choice.options,
+      allow_multiple: choice.allow_multiple,
+      allow_free_text: choice.allow_free_text,
+      status: choice.status,
+      ...(choice.response ? { response: choice.response } : {}),
+    },
+  };
+}
+
+function choiceRequestEntryId(id: string) {
+  return `choice_request:${id}`;
+}
+
+function chatRoleForChoiceRole(role: CodingProviderRole): ChatEntryRole {
+  switch (role) {
+    case "coder":
+      return "coder";
+    case "tester":
+      return "tester";
+    case "analyst":
+      return "analyst";
+    case "code_reviewer":
+      return "code_reviewer";
+    case "internal_reviewer":
+      return "internal_reviewer";
+  }
 }
 
 function upsertChatEntry(entries: ChatEntry[], entry: ChatEntry): ChatEntry[] {

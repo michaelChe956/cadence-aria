@@ -668,8 +668,8 @@ async fn coding_ws_prepare_context_sends_work_item_context_and_updates_provider_
             assert!(markdown.contains("实现爬楼梯问题"));
             assert!(markdown.contains("climb_stairs"));
             assert_eq!(
-                verification_commands,
-                vec!["uv run python -m unittest discover -s tests -v"]
+                verification_commands.as_ref(),
+                &vec!["uv run python -m unittest discover -s tests -v".to_string()]
             );
             assert_eq!(provider_config_snapshot.author, ProviderName::Fake);
         }
@@ -1209,7 +1209,7 @@ async fn coding_ws_start_coding_drives_full_happy_path_to_final_confirm() {
             } if status == CodingAttemptStatus::Completed
                 && stage == CodingExecutionStage::FinalConfirm =>
             {
-                final_chat_entries = chat_entries;
+                final_chat_entries = *chat_entries;
                 final_snapshot_seen = true;
                 break;
             }

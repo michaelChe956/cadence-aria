@@ -119,6 +119,21 @@ pub async fn health() -> Json<serde_json::Value> {
     Json(json!({"status":"ok"}))
 }
 
+pub async fn runtime_info(State(state): State<WebAppState>) -> Json<serde_json::Value> {
+    Json(json!({
+        "status": "ok",
+        "package_version": env!("CARGO_PKG_VERSION"),
+        "git_sha": option_env!("ARIA_GIT_SHA").unwrap_or("unknown"),
+        "branch": option_env!("ARIA_GIT_BRANCH").unwrap_or("unknown"),
+        "built_at_unix": option_env!("ARIA_BUILT_AT_UNIX").unwrap_or("unknown"),
+        "workspace_root": state.workspace_root.display().to_string(),
+        "features": {
+            "testing_result_review_gate": true,
+            "coding_choice_gate": true
+        }
+    }))
+}
+
 pub async fn create_task(
     State(state): State<WebAppState>,
     Json(request): Json<CreateTaskRequest>,
@@ -687,6 +702,9 @@ pub async fn get_coding_attempt(
     let latest_analyst_decision = coding_store
         .latest_analyst_decision(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .map_err(product_store_api_error)?;
+    let pending_choices = coding_store
+        .list_open_choice_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .map_err(product_store_api_error)?;
     let active_node_id = active_coding_timeline_node_id(&timeline_nodes);
 
     Ok(Json(CodingAttemptSnapshotResponse {
@@ -699,6 +717,7 @@ pub async fn get_coding_attempt(
         review_request,
         internal_pr_review,
         pending_gates: Vec::new(),
+        pending_choices,
         latest_analyst_decision,
     }))
 }

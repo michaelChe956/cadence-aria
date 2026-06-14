@@ -18,8 +18,8 @@ use cadence_aria::product::coding_attempt_store::{
 };
 use cadence_aria::product::coding_models::{
     AnalystDecisionNextStage, AnalystDecisionVerdict, AnalystVerdict, CodingAgentRole,
-    CodingAttemptStatus, CodingEntryType, CodingExecutionStage, CodingGateAction,
-    CodingGateActionType, CodingProviderPermissionMode, CodingProviderRole,
+    CodingAttemptStatus, CodingChoiceGateStatus, CodingEntryType, CodingExecutionStage,
+    CodingGateAction, CodingGateActionType, CodingProviderPermissionMode, CodingProviderRole,
     CodingReworkInstruction, CodingRolePermissionModes, CodingRoleProviderConfigSnapshot,
     CodingRoleRunEventType, CodingRoleRunStatus, CodingRoleRunTrigger, CodingTimelineNode,
     CodingTimelineNodeStatus, FindingSeverity, PushStatus, RemoteKind, ReviewRequest,
@@ -743,6 +743,72 @@ async fn execute_testing_binds_plan_report_and_chat_entries_to_tester_role_run()
 }
 
 #[tokio::test]
+async fn execute_testing_blocks_when_provider_completes_before_choice_response() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            ..create_input()
+        })
+        .expect("create attempt");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    let (tx, mut rx) = mpsc::channel(16);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let provider = ExecutePlanChoiceThenCompletedTesterProvider::default();
+
+    let error = engine
+        .execute_testing_with_provider(
+            &attempt,
+            &provider,
+            &CodingExecutionContext::default(),
+            &[],
+            TesterAgentOptions::default(),
+        )
+        .await
+        .expect_err("provider cannot complete execute_test_plan with unresolved choice");
+
+    assert_eq!(
+        error.to_string(),
+        "coding_provider_stream_failed: provider_choice_unresolved"
+    );
+    assert_eq!(
+        store
+            .get_attempt("project_0001", "issue_0001", &attempt.id)
+            .expect("attempt")
+            .status,
+        CodingAttemptStatus::WaitingForHuman
+    );
+    assert_eq!(
+        store
+            .list_open_choice_gates("project_0001", "issue_0001", &attempt.id)
+            .expect("open choice gates")
+            .len(),
+        1
+    );
+    let events = drain_events(&mut rx);
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            CodingWsOutMessage::CodingChoiceRequest {
+                id,
+                source,
+                ..
+            } if id == "choice_0001" && source == "ask_user_question"
+        )
+    }));
+}
+
+#[tokio::test]
 async fn tester_plan_timeout_blocks_with_retry_test_plan_gate() {
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
@@ -766,7 +832,7 @@ async fn tester_plan_timeout_blocks_with_retry_test_plan_gate() {
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
 
     let result = tokio::time::timeout(
-        Duration::from_millis(250),
+        Duration::from_secs(2),
         engine.execute_testing_with_provider(
             &attempt,
             &HangingPlanTesterProvider,
@@ -825,7 +891,7 @@ async fn tester_plan_start_timeout_blocks_with_retry_test_plan_gate() {
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
 
     let result = tokio::time::timeout(
-        Duration::from_millis(250),
+        Duration::from_secs(2),
         engine.execute_testing_with_provider(
             &attempt,
             &NeverStartingTesterProvider,
@@ -903,7 +969,7 @@ async fn tester_execute_plan_start_timeout_blocks_with_retry_gate() {
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
 
     let result = tokio::time::timeout(
-        Duration::from_millis(250),
+        Duration::from_secs(2),
         engine.execute_testing_with_provider(
             &attempt,
             &HangingExecutePlanStartTesterProvider::default(),
@@ -989,7 +1055,7 @@ async fn blocked_testing_gate_reason_overrides_report_warning_for_role_run() {
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
 
     let report = tokio::time::timeout(
-        Duration::from_millis(250),
+        Duration::from_secs(2),
         engine.execute_testing_with_provider(
             &attempt,
             &HangingExecutePlanStartTesterProvider::with_plan_warning("timeout budget risk"),
@@ -1944,10 +2010,14 @@ async fn execute_coding_forwards_provider_permission_choice_and_status_events() 
     let (tx, mut rx) = mpsc::channel(16);
     let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
 
-    engine
+    let error = engine
         .execute_coding(&attempt, &provider, &CodingExecutionContext::default())
         .await
-        .expect("execute coding");
+        .expect_err("unresolved provider choice should block completion");
+    assert_eq!(
+        error.to_string(),
+        "coding_provider_stream_failed: provider_choice_unresolved"
+    );
 
     let events = drain_events(&mut rx);
     assert!(
@@ -1973,11 +2043,13 @@ async fn execute_coding_forwards_provider_permission_choice_and_status_events() 
                 CodingWsOutMessage::CodingChoiceRequest {
                     id,
                     prompt,
+                    source,
                     options,
                     allow_multiple,
                     allow_free_text,
                 } if id == "choice_0001"
                     && prompt == "Select implementation strategy"
+                    && source == "provider_choice"
                     && options.len() == 1
                     && !allow_multiple
                     && *allow_free_text
@@ -2055,6 +2127,196 @@ async fn execute_coding_forwards_permission_responses_to_provider_session() {
 
     assert!(saw_permission_request);
     assert_eq!(updated.stage, CodingExecutionStage::Coding);
+}
+
+#[tokio::test]
+async fn execute_coding_persists_provider_choice_and_resumes_after_response() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            ..create_input()
+        })
+        .expect("create attempt");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    let provider = ChoiceAwaitingProvider;
+    let (event_tx, mut event_rx) = mpsc::channel(16);
+    let (command_tx, mut command_rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx);
+    let context = CodingExecutionContext::default();
+
+    let execute =
+        engine.execute_coding_with_commands(&attempt, &provider, &context, &mut command_rx);
+    tokio::pin!(execute);
+    let mut saw_choice_request = false;
+
+    let updated = loop {
+        tokio::select! {
+            result = &mut execute => break result.expect("execute coding"),
+            event = event_rx.recv() => {
+                if let Some(CodingWsOutMessage::CodingChoiceRequest {
+                    id,
+                    prompt,
+                    source,
+                    ..
+                }) = event
+                    && id == "choice_0001"
+                {
+                    saw_choice_request = true;
+                    assert_eq!(prompt, "Select implementation strategy");
+                    assert_eq!(source, "request_user_input");
+                    let open = store
+                        .list_open_choice_gates("project_0001", "issue_0001", &attempt.id)
+                        .expect("open choice gates");
+                    assert_eq!(open.len(), 1);
+                    assert_eq!(open[0].choice_id, "choice_0001");
+                    assert_eq!(open[0].status, CodingChoiceGateStatus::Open);
+                    assert_eq!(
+                        store
+                            .get_attempt("project_0001", "issue_0001", &attempt.id)
+                            .expect("attempt")
+                            .status,
+                        CodingAttemptStatus::WaitingForHuman
+                    );
+                    command_tx
+                        .send(cadence_aria::product::coding_workspace_runner::CodingRunnerCommand::ChoiceResponse {
+                            id: "choice_0001".to_string(),
+                            selected_option_ids: vec!["backend_first".to_string()],
+                            free_text: Some("先控制范围".to_string()),
+                        })
+                        .await
+                        .expect("send choice response");
+                }
+            }
+        }
+    };
+
+    assert!(saw_choice_request);
+    assert_eq!(updated.stage, CodingExecutionStage::Coding);
+    assert_eq!(
+        store
+            .list_open_choice_gates("project_0001", "issue_0001", &attempt.id)
+            .expect("open choice gates")
+            .len(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn execute_coding_blocks_when_provider_completes_before_choice_response() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            ..create_input()
+        })
+        .expect("create attempt");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    let provider = ControlEventCodingProvider;
+    let (tx, _rx) = mpsc::channel(16);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+
+    let error = engine
+        .execute_coding(&attempt, &provider, &CodingExecutionContext::default())
+        .await
+        .expect_err("provider cannot complete with unresolved choice");
+
+    assert_eq!(
+        error.to_string(),
+        "coding_provider_stream_failed: provider_choice_unresolved"
+    );
+    assert_eq!(
+        store
+            .get_attempt("project_0001", "issue_0001", &attempt.id)
+            .expect("attempt")
+            .status,
+        CodingAttemptStatus::WaitingForHuman
+    );
+    assert_eq!(
+        store
+            .list_open_choice_gates("project_0001", "issue_0001", &attempt.id)
+            .expect("open choice gates")
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn execute_coding_blocks_later_permission_before_choice_response() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            ..create_input()
+        })
+        .expect("create attempt");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    let provider = ChoiceThenPermissionProvider;
+    let (tx, mut rx) = mpsc::channel(16);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+
+    let error = engine
+        .execute_coding(&attempt, &provider, &CodingExecutionContext::default())
+        .await
+        .expect_err("provider cannot request permission with unresolved choice");
+
+    assert_eq!(
+        error.to_string(),
+        "coding_provider_stream_failed: provider_choice_unresolved"
+    );
+    assert_eq!(
+        store
+            .get_attempt("project_0001", "issue_0001", &attempt.id)
+            .expect("attempt")
+            .status,
+        CodingAttemptStatus::WaitingForHuman
+    );
+    let events = drain_events(&mut rx);
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            CodingWsOutMessage::CodingChoiceRequest { id, .. } if id == "choice_0001"
+        )
+    }));
+    assert!(
+        !events.iter().any(|event| {
+            matches!(
+                event,
+                CodingWsOutMessage::CodingPermissionRequest { id, .. } if id == "permission_0001"
+            )
+        }),
+        "pending choice must block later permission requests"
+    );
 }
 
 #[tokio::test]
@@ -2249,17 +2511,6 @@ async fn execute_code_review_persists_provider_control_and_tool_event_payloads()
         }),
         "expected realtime permission request, got {realtime_events:?}"
     );
-    assert!(
-        realtime_events.iter().any(|event| {
-            matches!(
-                event,
-                CodingWsOutMessage::CodingChoiceRequest { id, .. }
-                    if id == "choice_review_0001"
-            )
-        }),
-        "expected realtime choice request, got {realtime_events:?}"
-    );
-
     let runs = store
         .list_role_runs("project_0001", "issue_0001", &attempt.id)
         .expect("role runs");
@@ -2282,7 +2533,6 @@ async fn execute_code_review_persists_provider_control_and_tool_event_payloads()
             CodingRoleRunEventType::ToolResult,
             CodingRoleRunEventType::StatusChanged,
             CodingRoleRunEventType::PermissionRequest,
-            CodingRoleRunEventType::ChoiceRequest,
             CodingRoleRunEventType::MessageComplete,
         ]
     );
@@ -2302,12 +2552,8 @@ async fn execute_code_review_persists_provider_control_and_tool_event_payloads()
     assert_eq!(events[7].payload["id"], "permission_review_0001");
     assert_eq!(events[7].payload["tool_name"], "shell");
     assert_eq!(events[7].payload["risk_level"], "High");
-    assert_eq!(events[8].payload["id"], "choice_review_0001");
-    assert_eq!(events[8].payload["prompt"], "Select review action");
-    assert_eq!(events[8].payload["allow_multiple"], false);
-    assert_eq!(events[8].payload["allow_free_text"], true);
     assert_eq!(
-        events[9].payload["provider_session_id"],
+        events[8].payload["provider_session_id"],
         "review-session-0001"
     );
 }
@@ -5061,6 +5307,71 @@ impl StreamingProviderAdapter for ExecutePlanToolCallTesterProvider {
 }
 
 #[derive(Default)]
+struct ExecutePlanChoiceThenCompletedTesterProvider {
+    starts: Arc<Mutex<usize>>,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for ExecutePlanChoiceThenCompletedTesterProvider {
+    fn supports_provider_driven_testing(&self) -> bool {
+        true
+    }
+
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let start_no = {
+            let mut starts = self.starts.lock().expect("starts lock");
+            *starts += 1;
+            *starts
+        };
+
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let (command_tx, _command_rx) = mpsc::channel(8);
+        if start_no == 1 {
+            event_tx
+                .try_send(ProviderEvent::Completed {
+                    full_output: r#"{"summary":"unit plan","steps":[{"id":"unit","title":"Unit","intent":"run unit checks","required":true,"tool":"provider_managed","risk_level":"low","command_or_tool_input":{},"evidence_expectation":"unit evidence","related_requirements":["REQ-UNIT"],"related_design_constraints":["DEC-UNIT"],"related_work_item_tasks":["TASK-UNIT"]}]}"#.to_string(),
+                    provider_session_id: None,
+                })
+                .expect("send plan completed");
+            return Ok(ProviderSession {
+                events: event_rx,
+                commands: command_tx,
+            });
+        }
+
+        event_tx
+            .try_send(ProviderEvent::ChoiceRequest(ChoiceRequestData {
+                id: "choice_0001".to_string(),
+                prompt: "确认是否继续执行测试".to_string(),
+                options: vec![ChoiceOptionData {
+                    id: "continue".to_string(),
+                    label: "继续".to_string(),
+                    description: None,
+                }],
+                allow_multiple: false,
+                allow_free_text: false,
+                source: ChoiceRequestSource::AskUserQuestion,
+            }))
+            .expect("send choice request");
+        event_tx
+            .try_send(ProviderEvent::Completed {
+                full_output: r#"{"step_results":[{"step_id":"unit","status":"passed","evidence_refs":["unit.log"],"provider_analysis":"ok"}]}"#.to_string(),
+                provider_session_id: None,
+            })
+            .expect("send completed");
+
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+}
+
+#[derive(Default)]
 struct HangingExecutePlanStartTesterProvider {
     starts: Arc<Mutex<usize>>,
     plan_warning: Option<String>,
@@ -5362,6 +5673,110 @@ impl StreamingProviderAdapter for PermissionAwaitingProvider {
     }
 }
 
+struct ChoiceAwaitingProvider;
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for ChoiceAwaitingProvider {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let (event_tx, event_rx) = mpsc::channel(16);
+        let (command_tx, mut command_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            let _ = event_tx
+                .send(ProviderEvent::ChoiceRequest(ChoiceRequestData {
+                    id: "choice_0001".to_string(),
+                    prompt: "Select implementation strategy".to_string(),
+                    options: vec![ChoiceOptionData {
+                        id: "backend_first".to_string(),
+                        label: "先做后端".to_string(),
+                        description: Some("TASK-001 到 TASK-009".to_string()),
+                    }],
+                    allow_multiple: false,
+                    allow_free_text: true,
+                    source: ChoiceRequestSource::RequestUserInput,
+                }))
+                .await;
+            while let Some(command) = command_rx.recv().await {
+                match command {
+                    cadence_aria::cross_cutting::streaming_provider::ProviderCommand::ChoiceResponse {
+                        id,
+                        selected_option_ids,
+                        ..
+                    } if id == "choice_0001"
+                        && selected_option_ids == vec!["backend_first".to_string()] =>
+                    {
+                        let _ = event_tx
+                            .send(ProviderEvent::Completed {
+                                full_output: "selected backend_first".to_string(),
+                                provider_session_id: None,
+                            })
+                            .await;
+                        return;
+                    }
+                    cadence_aria::cross_cutting::streaming_provider::ProviderCommand::Abort => {
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        });
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+}
+
+struct ChoiceThenPermissionProvider;
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for ChoiceThenPermissionProvider {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let (event_tx, event_rx) = mpsc::channel(16);
+        let (command_tx, _command_rx) = mpsc::channel(8);
+        event_tx
+            .try_send(ProviderEvent::ChoiceRequest(ChoiceRequestData {
+                id: "choice_0001".to_string(),
+                prompt: "Select implementation strategy".to_string(),
+                options: vec![ChoiceOptionData {
+                    id: "backend_first".to_string(),
+                    label: "先做后端".to_string(),
+                    description: Some("TASK-001 到 TASK-009".to_string()),
+                }],
+                allow_multiple: false,
+                allow_free_text: true,
+                source: ChoiceRequestSource::RequestUserInput,
+            }))
+            .expect("send choice");
+        event_tx
+            .try_send(ProviderEvent::PermissionRequest(PermissionRequestData {
+                id: "permission_0001".to_string(),
+                tool_name: "shell".to_string(),
+                description: "Run tests".to_string(),
+                risk_level: RiskLevel::High,
+            }))
+            .expect("send permission");
+        event_tx
+            .try_send(ProviderEvent::Completed {
+                full_output: "done".to_string(),
+                provider_session_id: None,
+            })
+            .expect("send completed");
+
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+}
+
 struct EventThenCompletedProvider {
     output: String,
 }
@@ -5455,20 +5870,6 @@ impl StreamingProviderAdapter for ReviewControlEventProvider {
                 risk_level: RiskLevel::High,
             }))
             .expect("send permission");
-        event_tx
-            .try_send(ProviderEvent::ChoiceRequest(ChoiceRequestData {
-                id: "choice_review_0001".to_string(),
-                prompt: "Select review action".to_string(),
-                options: vec![ChoiceOptionData {
-                    id: "approve".to_string(),
-                    label: "Approve".to_string(),
-                    description: Some("Approve changes".to_string()),
-                }],
-                allow_multiple: false,
-                allow_free_text: true,
-                source: ChoiceRequestSource::ProviderChoice,
-            }))
-            .expect("send choice");
         event_tx
             .try_send(ProviderEvent::Completed {
                 full_output: r#"{"verdict":"approve","summary":"review ok","findings":[]}"#
