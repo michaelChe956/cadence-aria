@@ -148,7 +148,7 @@ export function CodingWorkspacePage({
         </div>
       </div>
 
-      <header className="grid min-h-16 shrink-0 gap-2 border-b border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-4 py-3 md:grid-cols-[minmax(0,1fr)_auto]">
+      <header className="grid min-h-16 min-w-0 shrink-0 gap-2 overflow-hidden border-b border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-4 py-3 md:grid-cols-[minmax(0,1fr)_auto]">
         <div className="min-w-0">
           <div className="flex min-w-0 flex-wrap items-center gap-2">
             <span className="text-xs font-semibold uppercase text-[var(--aria-ink-muted)]">
@@ -162,12 +162,12 @@ export function CodingWorkspacePage({
             {store.worktreePath ?? "worktree pending"}
           </div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 items-center justify-end gap-2">
           <ActionButtons api={api} stage={store.stage} status={store.status} />
         </div>
       </header>
 
-      <main className="grid min-h-0 flex-1 grid-cols-1 md:grid-cols-[16rem_minmax(0,1fr)]">
+      <main className="grid min-h-0 min-w-0 flex-1 grid-cols-1 overflow-hidden md:grid-cols-[16rem_minmax(0,1fr)]">
         <CodingTimeline
           nodes={store.timelineNodes}
           activeNodeId={store.activeNodeId}
@@ -183,12 +183,12 @@ export function CodingWorkspacePage({
             }
           }}
         />
-        <section className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] bg-[var(--aria-panel)]">
+        <section className="grid min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden bg-[var(--aria-panel)]">
           <CodingPanelTabs activePanel={activePanel} onSelectPanel={setActivePanel} />
           {activePanel === "results" ? (
             <CodingArtifactTabs activeTab={activeTab} className="min-h-0" />
           ) : (
-            <div className="grid min-h-0 grid-rows-[auto_auto_minmax(0,1fr)_auto_auto]">
+            <div className="grid min-h-0 min-w-0 grid-rows-[auto_auto_minmax(0,1fr)_auto_auto] overflow-hidden">
               <CodingProviderConfigPanel
                 snapshot={store.roleProviderConfigSnapshot}
                 lockedRole={lockedProviderRole(store.stage, store.status, store.pendingGates)}
