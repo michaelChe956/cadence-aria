@@ -5,7 +5,10 @@ import { ChatEntryRenderer } from "./ChatEntryRenderer";
 import { InlineEventRow } from "./InlineEventRow";
 import { ChoiceRequestEntry } from "./entries/ChoiceRequestEntry";
 import { PermissionRequestEntry } from "./entries/PermissionRequestEntry";
-import { MarkdownContent } from "./entries/ProviderStreamEntry";
+import {
+  MarkdownContent,
+  normalizeProviderStreamEntryContent,
+} from "./entries/ProviderStreamEntry";
 import type { MessageGroup } from "./message-grouping";
 
 interface MessageGroupViewProps {
@@ -41,7 +44,9 @@ export function MessageGroupView({
       testId="message-group"
     >
       <div className="space-y-3">
-        {group.primaryEntry ? <MarkdownContent content={group.primaryEntry.content} /> : null}
+        {group.primaryEntry ? (
+          <MarkdownContent content={normalizeProviderStreamEntryContent(group.primaryEntry)} />
+        ) : null}
         {group.inlineEvents.length > 0 ? (
           <div className="space-y-2">
             {group.inlineEvents.map((entry) => (

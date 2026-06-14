@@ -4,10 +4,7 @@ import type { ChatEntry } from "../../../state/chat-entries";
 import { ChatEntryContainer } from "../ChatEntryContainer";
 
 export function ProviderStreamEntry({ entry }: { entry: ChatEntry }) {
-  const content =
-    entry.role === "reviewer" || entry.role === "code_reviewer"
-      ? stripTrailingReviewJsonContract(entry.content)
-      : normalizeEntryContent(entry);
+  const content = normalizeProviderStreamEntryContent(entry);
   return (
     <ChatEntryContainer
       role={entry.role}
@@ -439,7 +436,7 @@ function formatRawTesterPlanJson(
 
   let payload: TesterPlanPayload;
   try {
-    const parsed = JSON.parse(content.trim());
+    const parsed = JSON.parse(decodeJsonHtmlEntities(content.trim()));
     if (!isRecord(parsed)) {
       return null;
     }
@@ -493,6 +490,23 @@ function formatRawTesterPlanJson(
   return lines.join("\n");
 }
 
+function decodeJsonHtmlEntities(content: string) {
+  if (!content.includes("&")) {
+    return content;
+  }
+
+  return content
+    .replace(/&quot;/g, '"')
+    .replace(/&#34;/g, '"')
+    .replace(/&#x22;/gi, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&#39;/g, "'")
+    .replace(/&#x27;/gi, "'")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -525,4 +539,10 @@ function stripTrailingReviewJsonContract(content: string) {
   return content;
 }
 
-export { MarkdownContent };
+function normalizeProviderStreamEntryContent(entry: ChatEntry) {
+  return entry.role === "reviewer" || entry.role === "code_reviewer"
+    ? stripTrailingReviewJsonContract(entry.content)
+    : normalizeEntryContent(entry);
+}
+
+export { MarkdownContent, normalizeProviderStreamEntryContent };

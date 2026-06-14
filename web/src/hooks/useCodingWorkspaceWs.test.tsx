@@ -317,6 +317,98 @@ describe("useCodingWorkspaceWs", () => {
     ]);
   });
 
+  it("batches rapid coding stream chunks before updating chat entries", () => {
+    vi.useFakeTimers();
+    const harness = renderCodingHook();
+
+    act(() => {
+      harness.ws.receive({
+        type: "coding_session_state",
+        attempt_id: "coding_attempt_0001",
+        status: "running",
+        stage: "testing",
+        branch_name: "aria/work-items/work_item_0001/attempt-1",
+        base_branch: "main",
+        worktree_path: "/tmp/worktree",
+        rework_count: 0,
+        max_auto_rework: 2,
+        head_commit: null,
+        pushed_remote: null,
+        role_provider_config_snapshot: {
+          coder: "fake",
+          tester: "fake",
+          analyst: "fake",
+          code_reviewer: "fake",
+          internal_reviewer: "fake",
+          review_rounds: 1,
+          permission_modes: {
+            coder: "supervised",
+            tester: "auto",
+            analyst: "auto",
+            code_reviewer: "supervised",
+            internal_reviewer: "supervised",
+          },
+        },
+        provider_config_snapshot: { author: "fake", reviewer: "fake", review_rounds: 1 },
+        chat_entries: [],
+        timeline_nodes: [
+          {
+            id: "coding_node_0003",
+            attempt_id: "coding_attempt_0001",
+            stage: "testing",
+            title: "测试执行",
+            status: "running",
+            agent_role: "tester",
+            summary: null,
+            started_at: "2026-06-14T00:00:00Z",
+            completed_at: null,
+            artifact_refs: [],
+          },
+        ],
+        active_node_id: "coding_node_0003",
+        testing_report: null,
+        code_review_reports: [],
+        review_request: null,
+        internal_pr_review: null,
+        pending_gates: [],
+      });
+      harness.ws.receive({
+        type: "coding_stream_chunk",
+        content: "hel",
+        node_id: "coding_node_0003",
+      });
+      harness.ws.receive({
+        type: "coding_stream_chunk",
+        content: "lo",
+        node_id: "coding_node_0003",
+      });
+    });
+
+    expect(useCodingWorkspaceStore.getState().chatEntries).toHaveLength(0);
+
+    act(() => {
+      vi.advanceTimersByTime(49);
+    });
+
+    expect(useCodingWorkspaceStore.getState().chatEntries).toHaveLength(0);
+
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+
+    expect(useCodingWorkspaceStore.getState().chatEntries).toMatchObject([
+      {
+        type: "provider_stream",
+        role: "tester",
+        content: "hello",
+        node_id: "coding_node_0003",
+      },
+    ]);
+
+    harness.unmount();
+    vi.useRealTimers();
+  });
+
   it("ignores late provider output after a coding attempt is aborted", () => {
     const harness = renderCodingHook();
 
