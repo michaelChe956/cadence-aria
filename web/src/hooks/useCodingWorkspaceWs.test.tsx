@@ -807,6 +807,23 @@ describe("useCodingWorkspaceWs", () => {
     ]);
   });
 
+  it("sends continue rework message with trimmed context", () => {
+    const harness = renderCodingHook();
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.sent.length = 0;
+      harness.api.continueRework("  继续按 analyst findings 返修  ");
+    });
+
+    expect(harness.ws.sent).toEqual([
+      JSON.stringify({
+        type: "continue_rework",
+        extra_context: "继续按 analyst findings 返修",
+      }),
+    ]);
+  });
+
   it("restores pending coding choices from session snapshots", () => {
     const harness = renderCodingHook();
 

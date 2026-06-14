@@ -305,6 +305,45 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                             ));
                         }
                     }
+                } else if let CodingWsInMessage::ContinueRework { extra_context } = inbound {
+                    let engine = CodingWorkspaceEngine::new(
+                        coding_store.clone(),
+                        GitWorkspaceService::new(),
+                        event_tx.clone(),
+                    );
+                    let updated = match engine.continue_rework_after_limit(
+                        &current_attempt.project_id,
+                        &current_attempt.issue_id,
+                        &current_attempt.id,
+                        extra_context,
+                    ) {
+                        Ok(updated) => updated,
+                        Err(error) => {
+                            let _ = send_coding_json(
+                                &mut socket_tx,
+                                &CodingWsOutMessage::CodingProtocolError {
+                                    code: "coding_continue_rework_failed".to_string(),
+                                    message: error.to_string(),
+                                },
+                            )
+                            .await;
+                            continue;
+                        }
+                    };
+                    if let Ok(snapshot) =
+                        build_coding_session_state(&coding_store, updated.clone())
+                    {
+                        let _ = send_coding_json(&mut socket_tx, &snapshot).await;
+                    }
+                    if updated.status == CodingAttemptStatus::Running {
+                        runner_started = true;
+                        runner_command_tx = Some(spawn_coding_runner(
+                            state.clone(),
+                            coding_store.clone(),
+                            event_tx.clone(),
+                            updated,
+                        ));
+                    }
                 } else if let CodingWsInMessage::ProviderSelect { role, provider } = inbound {
                     if let Some(command_tx) = runner_command_tx.as_ref() {
                         let open_gates = coding_store
@@ -585,6 +624,7 @@ fn should_resume_runner_after_gate_response(
     matches!(
         action_id,
         "retry_test_plan"
+            | "continue_rework"
             | "rerun_missing_steps"
             | "retry_review"
             | "retry_internal_review"
@@ -2054,6 +2094,9 @@ pub enum CodingWsInMessage {
         action_id: String,
         extra_context: Option<String>,
     },
+    ContinueRework {
+        extra_context: Option<String>,
+    },
     ProviderSelect {
         role: String,
         provider: ProviderName,
@@ -2099,6 +2142,10 @@ pub fn is_coding_ws_message_allowed(
     }
     if matches!(message, CodingWsInMessage::PermissionModeSelect { .. }) && status.is_active() {
         return true;
+    }
+    if matches!(message, CodingWsInMessage::ContinueRework { .. }) {
+        return *status == CodingAttemptStatus::WaitingForHuman
+            && *stage == CodingExecutionStage::Rework;
     }
     if *status == CodingAttemptStatus::Blocked {
         return matches!(
@@ -2261,6 +2308,17 @@ mod tests {
         assert!(!should_resume_runner_after_gate_response(
             "retry_test_plan",
             &attempt
+        ));
+    }
+
+    #[test]
+    fn waiting_rework_attempt_allows_continue_rework_message() {
+        assert!(is_coding_ws_message_allowed(
+            &CodingAttemptStatus::WaitingForHuman,
+            &CodingExecutionStage::Rework,
+            &CodingWsInMessage::ContinueRework {
+                extra_context: None,
+            },
         ));
     }
 }

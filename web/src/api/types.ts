@@ -601,6 +601,7 @@ export type CodingWsInMessage =
       action_id: string;
       extra_context?: string | null;
     }
+  | { type: "continue_rework"; extra_context?: string | null }
   | { type: "provider_select"; role: CodingProviderSelectRole; provider: WorkspaceProviderName }
   | {
       type: "permission_mode_select";

@@ -3772,6 +3772,9 @@ impl CodingWorkspaceEngine {
             CodingGateActionType::AcceptTestingResult => {
                 self.accept_testing_result_for_analyst(&current, &gate)?
             }
+            CodingGateActionType::ContinueRework => {
+                self.continue_rework_after_limit_for_attempt(&current, extra_context)?
+            }
             CodingGateActionType::SendRawOutputToAnalyst => {
                 self.resume_blocked_attempt_at_stage(&current, CodingExecutionStage::Rework)?
             }
@@ -3838,6 +3841,102 @@ impl CodingWorkspaceEngine {
         self.store
             .resolve_blocked_gate(project_id, issue_id, attempt_id, gate_id)?;
         Ok(updated)
+    }
+
+    pub fn continue_rework_after_limit(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        extra_context: Option<String>,
+    ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
+        let current = self.store.get_attempt(project_id, issue_id, attempt_id)?;
+        self.continue_rework_after_limit_for_attempt(&current, extra_context)
+    }
+
+    fn continue_rework_after_limit_for_attempt(
+        &self,
+        current: &CodingExecutionAttempt,
+        extra_context: Option<String>,
+    ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
+        if current.stage != CodingExecutionStage::Rework
+            || !matches!(
+                current.status,
+                CodingAttemptStatus::Blocked | CodingAttemptStatus::WaitingForHuman
+            )
+            || current.rework_count < current.max_auto_rework
+        {
+            return Err(CodingWorkspaceEngineError::ProviderStream(
+                "continue_rework_not_available".to_string(),
+            ));
+        }
+
+        if let Some(content) = extra_context
+            && !content.trim().is_empty()
+        {
+            self.store
+                .create_context_note(&current.id, content.trim().to_string())?;
+        }
+
+        let decision = self
+            .store
+            .latest_analyst_decision(&current.project_id, &current.issue_id, &current.id)?
+            .ok_or_else(|| {
+                CodingWorkspaceEngineError::ProviderStream(
+                    "continue_rework_missing_analyst_decision".to_string(),
+                )
+            })?;
+        if decision.verdict != AnalystDecisionVerdict::NeedsFix
+            || decision.next_stage != AnalystDecisionNextStage::Coding
+        {
+            return Err(CodingWorkspaceEngineError::ProviderStream(
+                "continue_rework_latest_decision_not_coding".to_string(),
+            ));
+        }
+
+        let existing = self.store.list_rework_instructions(
+            &current.project_id,
+            &current.issue_id,
+            &current.id,
+        )?;
+        let (summary, fix_hints) = rework_instruction_fields_from_analyst_record(&decision);
+        let instruction = CodingReworkInstruction {
+            id: next_sequential_id("coding_rework_instruction", existing.len()),
+            attempt_id: current.id.clone(),
+            source_stage: decision.source_stage.clone(),
+            rework_round: decision.rework_round,
+            summary,
+            fix_hints,
+            questions: Vec::new(),
+            created_at: Utc::now().to_rfc3339(),
+            consumed_by_node_id: None,
+            consumed_at: None,
+        };
+        self.store.save_rework_instruction(&instruction)?;
+
+        let running = if current.status == CodingAttemptStatus::Running {
+            current.clone()
+        } else {
+            self.store.update_attempt_status(
+                &current.project_id,
+                &current.issue_id,
+                &current.id,
+                CodingAttemptStatus::Running,
+            )?
+        };
+        let updated = self.store.increment_attempt_rework_count(
+            &running.project_id,
+            &running.issue_id,
+            &running.id,
+        )?;
+        self.store
+            .update_attempt_stage(
+                &updated.project_id,
+                &updated.issue_id,
+                &updated.id,
+                CodingExecutionStage::Coding,
+            )
+            .map_err(CodingWorkspaceEngineError::from)
     }
 
     fn latest_missing_required_steps(
@@ -4761,6 +4860,8 @@ impl CodingWorkspaceEngine {
                         evidence_refs: decision.evidence_refs.clone(),
                         raw_provider_output_ref: decision.raw_provider_output_refs.first().cloned(),
                         available_actions: vec![
+                            coding_gate_action_for_id("continue_rework")
+                                .expect("continue rework action"),
                             coding_gate_action_for_id("provide_context")
                                 .expect("provide context action"),
                             coding_gate_action_for_id("manual_continue")
@@ -5510,6 +5611,24 @@ fn testing_report_to_analyst_evidence(report: &TestingReport) -> String {
     })
 }
 
+fn rework_instruction_fields_from_analyst_record(
+    decision: &AnalystDecisionRecord,
+) -> (String, Vec<String>) {
+    if let Some(instructions) = &decision.rework_instructions {
+        let mut fix_hints = instructions
+            .required_changes
+            .iter()
+            .chain(instructions.verification_expectations.iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        if fix_hints.is_empty() {
+            fix_hints.push(decision.reason.clone());
+        }
+        return (instructions.summary.clone(), fix_hints);
+    }
+    (decision.reason.clone(), vec![decision.reason.clone()])
+}
+
 fn analyst_human_gate_actions(
     recommendation: Option<&AnalystHumanGateRecommendation>,
 ) -> Vec<CodingGateAction> {
@@ -5540,6 +5659,11 @@ fn coding_gate_action_for_id(action_id: &str) -> Option<CodingGateAction> {
             action_id: "provide_context".to_string(),
             label: "补充上下文".to_string(),
             action_type: CodingGateActionType::ProvideContext,
+        }),
+        "continue_rework" => Some(CodingGateAction {
+            action_id: "continue_rework".to_string(),
+            label: "继续返修".to_string(),
+            action_type: CodingGateActionType::ContinueRework,
         }),
         "manual_continue" => Some(CodingGateAction {
             action_id: "manual_continue".to_string(),
@@ -7187,6 +7311,146 @@ mod tests {
         assert_eq!(
             pack.quality_bypass_audits[0].skipped_required_steps,
             vec!["unit"]
+        );
+    }
+
+    #[tokio::test]
+    async fn continue_rework_after_limit_persists_instruction_without_quality_bypass() {
+        let paths = ProductAppPaths::new(tempdir().expect("tempdir").path().join(".aria"));
+        let store = CodingAttemptStore::new(paths);
+        let attempt = store
+            .create_attempt(CreateCodingAttemptInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                work_item_id: "work_item_0001".to_string(),
+                base_branch: "main".to_string(),
+                branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+                worktree_path: None,
+                provider_config_snapshot: ProviderConfigSnapshot {
+                    author: ProviderName::Codex,
+                    reviewer: Some(ProviderName::ClaudeCode),
+                    review_rounds: 1,
+                },
+                max_auto_rework: 2,
+            })
+            .expect("create attempt");
+        let mut attempt = store
+            .update_attempt_status(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                CodingAttemptStatus::Running,
+            )
+            .expect("running");
+        attempt = store
+            .increment_attempt_rework_count(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("first rework");
+        attempt = store
+            .increment_attempt_rework_count(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("second rework");
+        attempt = store
+            .update_attempt_stage(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                CodingExecutionStage::Rework,
+            )
+            .expect("rework stage");
+        attempt = store
+            .update_attempt_status(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                CodingAttemptStatus::Blocked,
+            )
+            .expect("blocked");
+        store
+            .save_analyst_decision(&AnalystDecisionRecord {
+                id: "analyst_decision_0001".to_string(),
+                attempt_id: attempt.id.clone(),
+                source_stage: CodingExecutionStage::CodeReview,
+                rework_round: 3,
+                verdict: AnalystDecisionVerdict::NeedsFix,
+                next_stage: AnalystDecisionNextStage::Coding,
+                reason: "CodeReview 仍有阻塞问题".to_string(),
+                evidence_refs: vec!["code_review_0001/findings[0]".to_string()],
+                raw_provider_output_refs: vec![
+                    "provider-raw/code_review/code_review_0001.txt".to_string(),
+                ],
+                rework_instructions: Some(AnalystReworkInstructions {
+                    summary: "修复 provider install 契约".to_string(),
+                    required_changes: vec!["改为 202 installing".to_string()],
+                    verification_expectations: vec!["补并发安装测试".to_string()],
+                }),
+                human_gate: None,
+                created_at: "2026-06-14T00:00:00Z".to_string(),
+                parse_error: None,
+                role_run_id: None,
+                run_no: Some(1),
+            })
+            .expect("analyst decision");
+        let gate = store
+            .create_blocked_gate(CreateBlockedGateInput {
+                attempt_id: attempt.id.clone(),
+                stage: CodingExecutionStage::Rework,
+                node_id: Some("coding_node_0001".to_string()),
+                role: Some(CodingProviderRole::Analyst),
+                title: "Rework limit reached".to_string(),
+                description: "已达到自动重写上限".to_string(),
+                reason_code: Some("max_auto_rework_exceeded".to_string()),
+                evidence_refs: vec!["code_review_0001/findings[0]".to_string()],
+                raw_provider_output_ref: Some(
+                    "provider-raw/code_review/code_review_0001.txt".to_string(),
+                ),
+                available_actions: vec![
+                    coding_gate_action_for_id("continue_rework").expect("continue rework action"),
+                    coding_gate_action_for_id("abort").expect("abort action"),
+                ],
+            })
+            .expect("blocked gate");
+        let (tx, _rx) = mpsc::channel(8);
+        let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+
+        let updated = engine
+            .handle_blocked_gate_response(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &gate.gate_id,
+                "continue_rework",
+                Some("继续修 CodeReview findings".to_string()),
+            )
+            .await
+            .expect("continue rework");
+
+        assert_eq!(updated.status, CodingAttemptStatus::Running);
+        assert_eq!(updated.stage, CodingExecutionStage::Coding);
+        assert_eq!(updated.rework_count, 3);
+        assert!(
+            store
+                .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+                .expect("open gates")
+                .is_empty()
+        );
+        let instructions = store
+            .list_rework_instructions(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("rework instructions");
+        assert_eq!(instructions.len(), 1);
+        assert_eq!(instructions[0].summary, "修复 provider install 契约");
+        assert_eq!(
+            instructions[0].fix_hints,
+            vec!["改为 202 installing", "补并发安装测试"]
+        );
+        let notes = store
+            .list_context_notes(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("context notes");
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].content, "继续修 CodeReview findings");
+        assert!(
+            store
+                .list_quality_bypass_audits(&attempt.project_id, &attempt.issue_id, &attempt.id)
+                .expect("quality bypass audits")
+                .is_empty()
         );
     }
 

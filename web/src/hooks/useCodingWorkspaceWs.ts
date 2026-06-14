@@ -131,6 +131,17 @@ export function useCodingWorkspaceWs(attemptId: string | null) {
     [sendJson],
   );
 
+  const continueRework = useCallback(
+    (extraContext?: string | null) => {
+      const trimmedExtraContext = extraContext?.trim() ?? "";
+      sendJson({
+        type: "continue_rework",
+        extra_context: trimmedExtraContext ? trimmedExtraContext : null,
+      });
+    },
+    [sendJson],
+  );
+
   const finalConfirm = useCallback(() => {
     sendJson({ type: "final_confirm" });
   }, [sendJson]);
@@ -279,6 +290,7 @@ export function useCodingWorkspaceWs(attemptId: string | null) {
     respondPermission,
     respondChoice,
     respondGate,
+    continueRework,
     finalConfirm,
     abortAttempt,
     requestManualPause,

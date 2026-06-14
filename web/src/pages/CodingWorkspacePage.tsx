@@ -2,6 +2,7 @@ import {
   ArrowLeft,
   Check,
   Play,
+  RotateCcw,
   Send,
   Trash2,
   Wifi,
@@ -405,6 +406,31 @@ function ActionButtons({
         >
           <Check className="h-3.5 w-3.5" />
           确认完成
+        </button>
+        <button
+          type="button"
+          onClick={api.abortAttempt}
+          className={buttonClass}
+          aria-label={compact ? "底部中止" : undefined}
+        >
+          <X className="h-3.5 w-3.5" />
+          中止
+        </button>
+      </div>
+    );
+  }
+
+  if (stage === "rework" && status === "waiting_for_human") {
+    return (
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => api.continueRework(null)}
+          className={buttonClass}
+          aria-label={compact ? "底部继续返修" : undefined}
+        >
+          <RotateCcw className="h-3.5 w-3.5" />
+          继续返修
         </button>
         <button
           type="button"

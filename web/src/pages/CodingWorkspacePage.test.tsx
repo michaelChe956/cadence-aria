@@ -74,6 +74,7 @@ function mockCodingWs(overrides: Partial<CodingWsApi> = {}) {
     respondPermission: vi.fn(),
     respondChoice: vi.fn(),
     respondGate: vi.fn(),
+    continueRework: vi.fn(),
     finalConfirm: vi.fn(),
     abortAttempt: vi.fn(),
     requestManualPause: vi.fn(),
@@ -978,6 +979,22 @@ describe("CodingWorkspacePage", () => {
     expect(gate).toHaveTextContent("Analyst 建议人工决策");
     expect(gate).toHaveTextContent("人工放行会记录质量豁免");
     expect(gate).toHaveTextContent("max_auto_rework_exceeded");
+  });
+
+  it("renders continue rework action for waiting rework attempts", async () => {
+    const api = mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      attemptId: "coding_attempt_0001",
+      status: "waiting_for_human",
+      stage: "rework",
+    });
+
+    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "继续返修" }));
+
+    expect(api.continueRework).toHaveBeenCalledWith(null);
+    expect(api.abortAttempt).not.toHaveBeenCalled();
   });
 
   it("renders review findings with severity, location, and required action", async () => {

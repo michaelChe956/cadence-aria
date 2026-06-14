@@ -3816,7 +3816,12 @@ async fn execute_rework_needs_fix_at_limit_opens_human_gate_with_warning() {
             .iter()
             .map(|action| action.action_id.as_str())
             .collect::<Vec<_>>(),
-        vec!["provide_context", "manual_continue", "abort"]
+        vec![
+            "continue_rework",
+            "provide_context",
+            "manual_continue",
+            "abort",
+        ]
     );
     let events = drain_events(&mut rx);
     assert!(events.iter().any(|event| {
