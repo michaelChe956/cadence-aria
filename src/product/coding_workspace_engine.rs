@@ -3689,6 +3689,8 @@ impl CodingWorkspaceEngine {
                     "coding_gate_action_not_allowed".to_string(),
                 )
             })?;
+        let should_resolve_gate =
+            !matches!(action.action_type, CodingGateActionType::ProvideContext);
 
         let current = self.store.get_attempt(project_id, issue_id, attempt_id)?;
         let updated = match action.action_type {
@@ -3865,8 +3867,10 @@ impl CodingWorkspaceEngine {
                 ));
             }
         };
-        self.store
-            .resolve_blocked_gate(project_id, issue_id, attempt_id, gate_id)?;
+        if should_resolve_gate {
+            self.store
+                .resolve_blocked_gate(project_id, issue_id, attempt_id, gate_id)?;
+        }
         Ok(updated)
     }
 

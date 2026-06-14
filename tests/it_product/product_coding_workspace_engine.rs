@@ -6096,6 +6096,14 @@ async fn analyst_human_gate_offers_retry_analyst_action() {
             CodingAttemptStatus::Running,
         )
         .expect("running");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
     let (tx, _rx) = mpsc::channel(16);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
     let provider = InputCapturingProvider {
@@ -6113,6 +6121,104 @@ async fn analyst_human_gate_offers_retry_analyst_action() {
         .expect("gates");
     assert_eq!(gates.len(), 1);
     assert_eq!(gates[0].role, Some(CodingProviderRole::Analyst));
+    assert!(gates[0].available_actions.iter().any(|action| {
+        action.action_id == "retry_analyst"
+            && action.action_type == CodingGateActionType::RetryAnalyst
+    }));
+}
+
+#[tokio::test]
+async fn provide_context_keeps_analyst_human_gate_open_for_retry() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    init_repo(&worktree);
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let mut input = create_input();
+    input.worktree_path = Some(worktree);
+    let attempt = store.create_attempt(input).expect("create attempt");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Blocked,
+        )
+        .expect("blocked");
+    store
+        .update_attempt_stage(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingExecutionStage::Rework,
+        )
+        .expect("rework");
+    store
+        .create_blocked_gate(CreateBlockedGateInput {
+            attempt_id: attempt.id.clone(),
+            stage: CodingExecutionStage::Rework,
+            node_id: Some("coding_node_0002".to_string()),
+            role: Some(CodingProviderRole::Analyst),
+            title: "Analyst human gate".to_string(),
+            description: "需要重跑 Analyst".to_string(),
+            reason_code: Some("analyst_human_gate".to_string()),
+            evidence_refs: Vec::new(),
+            raw_provider_output_ref: Some(
+                "provider-raw/rework/analyst_decision_0001.txt".to_string(),
+            ),
+            available_actions: vec![
+                CodingGateAction {
+                    action_id: "retry_analyst".to_string(),
+                    label: "重试 Analyst".to_string(),
+                    action_type: CodingGateActionType::RetryAnalyst,
+                },
+                CodingGateAction {
+                    action_id: "provide_context".to_string(),
+                    label: "补充上下文".to_string(),
+                    action_type: CodingGateActionType::ProvideContext,
+                },
+                CodingGateAction {
+                    action_id: "abort".to_string(),
+                    label: "终止".to_string(),
+                    action_type: CodingGateActionType::Abort,
+                },
+            ],
+        })
+        .expect("create gate");
+    let (tx, _rx) = mpsc::channel(16);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+
+    let updated = engine
+        .handle_blocked_gate_response(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            "coding_blocked_gate_0001",
+            "provide_context",
+            Some("请按系统支持的 Analyst JSON schema 重试".to_string()),
+        )
+        .await
+        .expect("provide context");
+
+    assert_eq!(updated.status, CodingAttemptStatus::WaitingForHuman);
+    assert_eq!(updated.stage, CodingExecutionStage::Rework);
+    let notes = store
+        .list_context_notes("project_0001", "issue_0001", &attempt.id)
+        .expect("context notes");
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0].consumed_by_rework_round, None);
+    let gates = store
+        .list_open_blocked_gates("project_0001", "issue_0001", &attempt.id)
+        .expect("open gates");
+    assert_eq!(gates.len(), 1);
+    assert_eq!(gates[0].gate_id, "coding_blocked_gate_0001");
     assert!(gates[0].available_actions.iter().any(|action| {
         action.action_id == "retry_analyst"
             && action.action_type == CodingGateActionType::RetryAnalyst
