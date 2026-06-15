@@ -718,10 +718,11 @@ async fn read_claude_stream(
                                 "AskUserQuestion control_request unresolved: {}",
                                 error.details
                             );
+                            // 直接使用 event_tx.send，因为失败原因可能是 cancel，send_provider_event 会在 cancel 时放弃发送。
                             let _ = event_tx
                                 .send(ProviderEvent::ProtocolError {
                                     code: "ask_user_question_unresolved".to_string(),
-                                    message: message.clone(),
+                                    message,
                                     context: Some(json!({
                                         "request_id": request.request_id,
                                         "tool_use_id": request.tool_use_id,
@@ -800,10 +801,11 @@ async fn read_claude_stream(
                                         "AskUserQuestion tool_use unresolved: {}",
                                         error.details
                                     );
+                                    // 直接使用 event_tx.send，因为失败原因可能是 cancel，send_provider_event 会在 cancel 时放弃发送。
                                     let _ = event_tx
                                         .send(ProviderEvent::ProtocolError {
                                             code: "ask_user_question_unresolved".to_string(),
-                                            message: message.clone(),
+                                            message,
                                             context: Some(json!({ "tool_use_id": tool_use.id })),
                                         })
                                         .await;
@@ -2308,6 +2310,56 @@ done
         assert!(
             saw_protocol_error,
             "expected ask_user_question_unresolved protocol error after bridge failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn claude_provider_ask_user_question_tool_use_emits_protocol_error_on_bridge_failure() {
+        let fixture = executable_fixture(
+            "tests/fixtures/provider/claude_ask_user_question_tool_use_bridge_failure_fixture.sh",
+        );
+        let provider = ClaudeCodeProvider::new(fixture);
+        let input = streaming_input(ProviderType::ClaudeCode, ProviderPermissionMode::Supervised);
+        let cancel = CancellationToken::new();
+
+        let mut session = provider
+            .start(input, cancel.clone())
+            .await
+            .expect("start provider");
+
+        let _choice = loop {
+            match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+                .await
+                .expect("provider should emit choice")
+                .expect("provider event channel should stay open")
+            {
+                ProviderEvent::ChoiceRequest(choice) => break choice,
+                ProviderEvent::Failed { message } => {
+                    panic!("provider failed before choice: {message}")
+                }
+                ProviderEvent::ProtocolError { message, .. } => {
+                    panic!("provider protocol error before choice: {message}")
+                }
+                _ => {}
+            }
+        };
+
+        cancel.cancel();
+
+        let mut saw_protocol_error = false;
+        while let Some(event) = tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+            .await
+            .unwrap_or(None)
+        {
+            if matches!(event, ProviderEvent::ProtocolError { code, .. } if code == "ask_user_question_unresolved")
+            {
+                saw_protocol_error = true;
+                break;
+            }
+        }
+        assert!(
+            saw_protocol_error,
+            "expected ask_user_question_unresolved protocol error after tool_use bridge failure"
         );
     }
 }
