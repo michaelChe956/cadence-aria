@@ -718,7 +718,8 @@ async fn read_claude_stream(
                                 "AskUserQuestion control_request unresolved: {}",
                                 error.details
                             );
-                            // 直接使用 event_tx.send，因为失败原因可能是 cancel，send_provider_event 会在 cancel 时放弃发送。
+                            // Send directly via event_tx because the failure may be due to cancellation;
+                            // send_provider_event would drop the event when cancelled.
                             let _ = event_tx
                                 .send(ProviderEvent::ProtocolError {
                                     code: "ask_user_question_unresolved".to_string(),
@@ -801,7 +802,8 @@ async fn read_claude_stream(
                                         "AskUserQuestion tool_use unresolved: {}",
                                         error.details
                                     );
-                                    // 直接使用 event_tx.send，因为失败原因可能是 cancel，send_provider_event 会在 cancel 时放弃发送。
+                                    // Send directly via event_tx because the failure may be due to cancellation;
+                                    // send_provider_event would drop the event when cancelled.
                                     let _ = event_tx
                                         .send(ProviderEvent::ProtocolError {
                                             code: "ask_user_question_unresolved".to_string(),
@@ -2301,8 +2303,24 @@ done
             .await
             .unwrap_or(None)
         {
-            if matches!(event, ProviderEvent::ProtocolError { code, .. } if code == "ask_user_question_unresolved")
+            if let ProviderEvent::ProtocolError {
+                code,
+                message,
+                context,
+            } = event
             {
+                assert_eq!(code, "ask_user_question_unresolved");
+                assert!(
+                    message.contains("AskUserQuestion"),
+                    "message should mention AskUserQuestion: {message}"
+                );
+                assert!(
+                    message.contains("unresolved"),
+                    "message should mention unresolved: {message}"
+                );
+                let ctx = context.expect("context should be present");
+                assert_eq!(ctx["request_id"], "ask_req_001");
+                assert_eq!(ctx["tool_use_id"], "toolu_question");
                 saw_protocol_error = true;
                 break;
             }
@@ -2351,8 +2369,23 @@ done
             .await
             .unwrap_or(None)
         {
-            if matches!(event, ProviderEvent::ProtocolError { code, .. } if code == "ask_user_question_unresolved")
+            if let ProviderEvent::ProtocolError {
+                code,
+                message,
+                context,
+            } = event
             {
+                assert_eq!(code, "ask_user_question_unresolved");
+                assert!(
+                    message.contains("AskUserQuestion"),
+                    "message should mention AskUserQuestion: {message}"
+                );
+                assert!(
+                    message.contains("unresolved"),
+                    "message should mention unresolved: {message}"
+                );
+                let ctx = context.expect("context should be present");
+                assert_eq!(ctx["tool_use_id"], "toolu_question");
                 saw_protocol_error = true;
                 break;
             }
