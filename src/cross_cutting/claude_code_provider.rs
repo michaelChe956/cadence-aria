@@ -629,6 +629,23 @@ async fn terminate_aborted_child(child: &mut AsyncGroupChild) {
     }
 }
 
+async fn emit_ask_user_question_protocol_error(
+    event_tx: &mpsc::Sender<ProviderEvent>,
+    source: &str,
+    context: Value,
+    details: &str,
+) {
+    let message = format!("AskUserQuestion {source} unresolved: {details}");
+    // 直接使用 event_tx.send，因为失败原因可能是 cancel；send_provider_event 会在 cancel 时丢弃事件。
+    let _ = event_tx
+        .send(ProviderEvent::ProtocolError {
+            code: "ask_user_question_unresolved".to_string(),
+            message,
+            context: Some(context),
+        })
+        .await;
+}
+
 async fn read_claude_stream(
     stdout: tokio::process::ChildStdout,
     stdin: Arc<Mutex<ChildStdin>>,
@@ -714,22 +731,16 @@ async fn read_claude_stream(
                     match bridge.request_choice(choice_request, cancel.clone()).await {
                         Ok(decision) => decision,
                         Err(error) => {
-                            let message = format!(
-                                "AskUserQuestion control_request unresolved: {}",
-                                error.details
-                            );
-                            // Send directly via event_tx because the failure may be due to cancellation;
-                            // send_provider_event would drop the event when cancelled.
-                            let _ = event_tx
-                                .send(ProviderEvent::ProtocolError {
-                                    code: "ask_user_question_unresolved".to_string(),
-                                    message,
-                                    context: Some(json!({
-                                        "request_id": request.request_id,
-                                        "tool_use_id": request.tool_use_id,
-                                    })),
-                                })
-                                .await;
+                            emit_ask_user_question_protocol_error(
+                                &event_tx,
+                                "control_request",
+                                json!({
+                                    "request_id": request.request_id,
+                                    "tool_use_id": request.tool_use_id,
+                                }),
+                                &error.details,
+                            )
+                            .await;
                             return Err(error);
                         }
                     };
@@ -792,28 +803,20 @@ async fn read_claude_stream(
                         None => {
                             let choice_request =
                                 parse_ask_user_question_from_input(&tool_use.input, &tool_use.id);
-                            let choice_decision = match bridge
-                                .request_choice(choice_request, cancel.clone())
-                                .await
-                            {
-                                Ok(decision) => decision,
-                                Err(error) => {
-                                    let message = format!(
-                                        "AskUserQuestion tool_use unresolved: {}",
-                                        error.details
-                                    );
-                                    // Send directly via event_tx because the failure may be due to cancellation;
-                                    // send_provider_event would drop the event when cancelled.
-                                    let _ = event_tx
-                                        .send(ProviderEvent::ProtocolError {
-                                            code: "ask_user_question_unresolved".to_string(),
-                                            message,
-                                            context: Some(json!({ "tool_use_id": tool_use.id })),
-                                        })
+                            let choice_decision =
+                                match bridge.request_choice(choice_request, cancel.clone()).await {
+                                    Ok(decision) => decision,
+                                    Err(error) => {
+                                        emit_ask_user_question_protocol_error(
+                                            &event_tx,
+                                            "tool_use",
+                                            json!({ "tool_use_id": tool_use.id }),
+                                            &error.details,
+                                        )
                                         .await;
-                                    return Err(error);
-                                }
-                            };
+                                        return Err(error);
+                                    }
+                                };
                             eprintln!(
                                 "[aria-choice-diag] claude got choice decision for assistant tool_use tool_use_id={} selected={:?} free_text_present={}",
                                 tool_use.id,
