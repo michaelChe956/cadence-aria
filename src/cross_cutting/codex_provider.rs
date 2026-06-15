@@ -1504,6 +1504,9 @@ mod tests {
                 ProviderEvent::Completed { .. } => {
                     panic!("expected protocol error before completion")
                 }
+                ProviderEvent::Failed { message } => {
+                    panic!("expected protocol error before failure: {message}")
+                }
                 _ => {}
             }
         }
@@ -1579,6 +1582,9 @@ mod tests {
                 }
                 ProviderEvent::Completed { .. } => {
                     panic!("expected protocol error before completion")
+                }
+                ProviderEvent::Failed { message } => {
+                    panic!("expected protocol error before failure: {message}")
                 }
                 _ => {}
             }
