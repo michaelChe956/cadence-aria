@@ -25,6 +25,7 @@ description: Use when the user asks to prepare or start a Cadence Aria worktree 
    - 目标路径默认 `.worktrees/<branch>`。
    - 不存在时执行 `git fetch origin <branch>`，再 `git worktree add .worktrees/<branch> origin/<branch>`。
    - 已存在时进入该 worktree；不要主动 pull、reset 或 stash，只汇报工作区和 ahead/behind 状态。需要更新分支时先问用户。
+   - **必须确保 worktree 处于受 Git 管控的本地分支**：进入 worktree 后检查 `git status --short --branch`，若显示 `detached HEAD` 或没有本地 `<branch>` 分支，必须执行 `git switch -C <branch> origin/<branch>`，切出本地分支并关联远程。
 3. 后续所有命令都切换到目标 worktree 根目录。
 4. 重新读取目标 worktree 内规则：`AGENTS.md`、`CLAUDE.md`、相关 `.claude/rules/`、`cadence/project-rules/README.md` 及其“已启用项目规则”列出的文件。
 5. 摸底项目：
