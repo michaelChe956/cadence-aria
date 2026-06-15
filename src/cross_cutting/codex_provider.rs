@@ -467,16 +467,13 @@ where
             {
                 Ok(decision) => decision,
                 Err(error) => {
-                    let message =
-                        format!("requestUserInput choice bridge failed: {}", error.details);
-                    // 直接使用 event_tx.send，因为失败原因可能是 cancel；send_provider_event 会在 cancel 时丢弃事件。
-                    let _ = event_tx
-                        .send(ProviderEvent::ProtocolError {
-                            code: "request_user_input_unresolved".to_string(),
-                            message: message.clone(),
-                            context: Some(json!({ "question_id": request.question_id })),
-                        })
-                        .await;
+                    emit_request_user_input_protocol_error(
+                        &event_tx,
+                        "choice bridge",
+                        &request.question_id,
+                        &error.details,
+                    )
+                    .await;
                     return Err(error);
                 }
             };
@@ -484,15 +481,13 @@ where
                 write_user_input_response(&peer, request.rpc_id, &request.question_id, decision)
                     .await
             {
-                let message = format!("requestUserInput response write failed: {}", error.details);
-                // 直接使用 event_tx.send，因为失败原因可能是 cancel；send_provider_event 会在 cancel 时丢弃事件。
-                let _ = event_tx
-                    .send(ProviderEvent::ProtocolError {
-                        code: "request_user_input_unresolved".to_string(),
-                        message: message.clone(),
-                        context: Some(json!({ "question_id": request.question_id })),
-                    })
-                    .await;
+                emit_request_user_input_protocol_error(
+                    &event_tx,
+                    "response write",
+                    &request.question_id,
+                    &error.details,
+                )
+                .await;
                 return Err(error);
             }
             continue;
@@ -887,6 +882,23 @@ async fn send_provider_event(
     }
 }
 
+async fn emit_request_user_input_protocol_error(
+    event_tx: &mpsc::Sender<ProviderEvent>,
+    source: &str,
+    question_id: &str,
+    details: &str,
+) {
+    let message = format!("requestUserInput {source} unresolved: {details}");
+    // 直接使用 event_tx.send，因为失败原因可能是 cancel；send_provider_event 会在 cancel 时丢弃事件。
+    let _ = event_tx
+        .send(ProviderEvent::ProtocolError {
+            code: "request_user_input_unresolved".to_string(),
+            message,
+            context: Some(json!({ "question_id": question_id })),
+        })
+        .await;
+}
+
 fn provider_error(message: impl Into<String>) -> ProviderAdapterError {
     ProviderAdapterError::parse_error(message, String::new(), String::new())
 }
@@ -922,6 +934,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
+    use serde_json::Value;
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
 
@@ -1466,10 +1479,32 @@ mod tests {
             .await
             .unwrap_or(None)
         {
-            if matches!(event, ProviderEvent::ProtocolError { code, .. } if code == "request_user_input_unresolved")
-            {
-                saw_protocol_error = true;
-                break;
+            match event {
+                ProviderEvent::ProtocolError {
+                    code,
+                    message,
+                    context,
+                } if code == "request_user_input_unresolved" => {
+                    assert!(
+                        message.contains("requestUserInput"),
+                        "unexpected message: {message}"
+                    );
+                    assert!(
+                        message.contains("unresolved"),
+                        "unexpected message: {message}"
+                    );
+                    let context = context.expect("protocol error should include context");
+                    assert_eq!(
+                        context.get("question_id").and_then(Value::as_str),
+                        Some("complexity")
+                    );
+                    saw_protocol_error = true;
+                    break;
+                }
+                ProviderEvent::Completed { .. } => {
+                    panic!("expected protocol error before completion")
+                }
+                _ => {}
             }
         }
         assert!(
@@ -1520,10 +1555,32 @@ mod tests {
             .await
             .expect("provider should emit events")
         {
-            if matches!(event, ProviderEvent::ProtocolError { code, .. } if code == "request_user_input_unresolved")
-            {
-                saw_protocol_error = true;
-                break;
+            match event {
+                ProviderEvent::ProtocolError {
+                    code,
+                    message,
+                    context,
+                } if code == "request_user_input_unresolved" => {
+                    assert!(
+                        message.contains("requestUserInput"),
+                        "unexpected message: {message}"
+                    );
+                    assert!(
+                        message.contains("unresolved"),
+                        "unexpected message: {message}"
+                    );
+                    let context = context.expect("protocol error should include context");
+                    assert_eq!(
+                        context.get("question_id").and_then(Value::as_str),
+                        Some("confirm")
+                    );
+                    saw_protocol_error = true;
+                    break;
+                }
+                ProviderEvent::Completed { .. } => {
+                    panic!("expected protocol error before completion")
+                }
+                _ => {}
             }
         }
         assert!(
