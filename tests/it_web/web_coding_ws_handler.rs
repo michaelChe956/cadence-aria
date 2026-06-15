@@ -4,12 +4,16 @@ use cadence_aria::cross_cutting::streaming_provider::{
     ProviderEvent, ProviderSession, StreamChunk, StreamingProviderAdapter, StreamingProviderInput,
 };
 use cadence_aria::product::app_paths::ProductAppPaths;
-use cadence_aria::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
+use cadence_aria::product::coding_attempt_store::{
+    CodingAttemptStore, CreateBlockedGateInput, CreateCodingAttemptInput,
+};
 use cadence_aria::product::coding_models::{
-    CodingAgentRole, CodingAttemptStatus, CodingEntryType, CodingExecutionStage, CodingGateAction,
+    AnalystDecisionNextStage, AnalystDecisionRecord, AnalystDecisionVerdict, CodingAgentRole,
+    CodingAttemptStatus, CodingEntryType, CodingExecutionStage, CodingGateAction,
     CodingGateActionType, CodingGateKind, CodingGateRequired, CodingProviderPermissionMode,
-    CodingProviderRole, CodingRoleProviderConfigSnapshot, CodingTimelineNode,
-    CodingTimelineNodeStatus, PushStatus, TestingOverallStatus,
+    CodingProviderRole, CodingRoleProviderConfigSnapshot, CodingRoleRunEventType,
+    CodingRoleRunStatus, CodingRoleRunTrigger, CodingTimelineNode, CodingTimelineNodeStatus,
+    PushStatus, RemoteKind, ReviewRequest, ReviewRequestKind, ReviewVerdict, TestingOverallStatus,
 };
 use cadence_aria::product::lifecycle_store::{
     CreateWorkItemInput, CreateWorkspaceSessionInput, LifecycleStore,
@@ -219,6 +223,28 @@ fn blocked_attempt_allows_gate_response_messages() {
 }
 
 #[test]
+fn waiting_for_human_rework_allows_blocked_gate_responses() {
+    assert!(is_coding_ws_message_allowed(
+        &CodingAttemptStatus::WaitingForHuman,
+        &CodingExecutionStage::Rework,
+        &CodingWsInMessage::GateResponse {
+            gate_id: "coding_blocked_gate_0007".to_string(),
+            action_id: "retry_analyst".to_string(),
+            extra_context: None,
+        },
+    ));
+    assert!(is_coding_ws_message_allowed(
+        &CodingAttemptStatus::WaitingForHuman,
+        &CodingExecutionStage::Testing,
+        &CodingWsInMessage::GateResponse {
+            gate_id: "coding_blocked_gate_0008".to_string(),
+            action_id: "accept_testing_result".to_string(),
+            extra_context: None,
+        },
+    ));
+}
+
+#[test]
 fn coding_gate_required_out_message_preserves_action_contract() {
     let gate = CodingGateRequired {
         gate_id: "gate_0001".to_string(),
@@ -298,6 +324,184 @@ async fn coding_ws_sends_session_state_on_connect_and_responds_to_ping() {
 }
 
 #[tokio::test]
+async fn coding_session_snapshot_includes_role_runs() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let app = app_with_attempt(root.path());
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("attempt");
+    let run = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::Testing,
+            CodingProviderRole::Tester,
+            CodingRoleRunTrigger::Initial,
+            Some("coding_node_0003".to_string()),
+        )
+        .expect("role run");
+    store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::ProviderPrompt,
+            serde_json::json!({
+                "mode": "plan_tests",
+                "prompt": "plan tests"
+            }),
+        )
+        .expect("prompt event");
+    store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::ExecutionEvent,
+            serde_json::json!({
+                "title": "Task update",
+                "status": "running",
+                "detail": "No tasks found"
+            }),
+        )
+        .expect("execution event");
+    store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::Aborted,
+            serde_json::json!({
+                "reason": "abort_attempt"
+            }),
+        )
+        .expect("aborted event");
+    let provider_failed_detail = format!("provider failed detail: {}", "d".repeat(16_500));
+    let provider_failed_detail_preview = provider_failed_detail[..16_384].to_string();
+    let provider_failed_message = format!("provider failed: {}", "x".repeat(16_500));
+    let provider_failed_preview = provider_failed_message[..16_384].to_string();
+    store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::ProviderFailed,
+            serde_json::json!({
+                "detail": provider_failed_detail,
+                "message": provider_failed_message
+            }),
+        )
+        .expect("provider failed event");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+
+    let raw_state = recv_json_value(&mut ws).await;
+    assert_eq!(raw_state["role_runs"][0]["role"], "tester");
+    assert!(raw_state["role_runs"][0].get("run").is_none());
+
+    match serde_json::from_value(raw_state).expect("coding session state") {
+        CodingWsOutMessage::CodingSessionState { role_runs, .. } => {
+            assert_eq!(role_runs.len(), 1);
+            assert_eq!(role_runs[0].role, CodingProviderRole::Tester);
+            assert_eq!(role_runs[0].run_no, 1);
+            assert_eq!(role_runs[0].node_id.as_deref(), Some("coding_node_0003"));
+            let summary = role_runs[0].event_summary.as_ref().expect("event summary");
+            assert_eq!(summary.event_count, 4);
+            assert_eq!(
+                summary.last_event_type,
+                Some(CodingRoleRunEventType::ProviderFailed)
+            );
+            assert_eq!(summary.last_event_title.as_deref(), Some("ProviderFailed"));
+            assert_eq!(summary.last_event_status.as_deref(), None);
+            assert_eq!(
+                summary.terminal_event_type,
+                Some(CodingRoleRunEventType::ProviderFailed)
+            );
+            assert_eq!(
+                summary.terminal_reason.as_deref(),
+                Some(provider_failed_preview.as_str())
+            );
+            assert_eq!(role_runs[0].recent_events.len(), 4);
+            assert_eq!(
+                role_runs[0].recent_events[1].title.as_deref(),
+                Some("Task update")
+            );
+            assert_eq!(
+                role_runs[0].recent_events[3].detail.as_deref(),
+                Some(provider_failed_detail_preview.as_str())
+            );
+            assert!(role_runs[0].recent_events[3].truncated);
+        }
+        other => panic!("expected coding session state, got {other:?}"),
+    }
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+#[tokio::test]
+async fn coding_session_snapshot_ignores_corrupt_role_run_events() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let app = app_with_attempt(root.path());
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("attempt");
+    let run = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::Testing,
+            CodingProviderRole::Tester,
+            CodingRoleRunTrigger::Initial,
+            Some("coding_node_0003".to_string()),
+        )
+        .expect("role run");
+    store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::ExecutionEvent,
+            serde_json::json!({
+                "title": "Task update",
+                "status": "running",
+                "detail": "No tasks found"
+            }),
+        )
+        .expect("execution event");
+    let event_log = root
+        .path()
+        .join(".aria/projects/project_0001/issues/issue_0001/coding-attempts/coding_attempt_0001/role-run-events")
+        .join(format!("{}.jsonl", run.id));
+    fs::write(&event_log, "{not valid jsonl\n").expect("corrupt role run event log");
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+
+    match recv_json(&mut ws).await {
+        CodingWsOutMessage::CodingSessionState { role_runs, .. } => {
+            assert_eq!(role_runs.len(), 1);
+            assert_eq!(role_runs[0].role, CodingProviderRole::Tester);
+            assert!(role_runs[0].event_summary.is_none());
+            assert!(role_runs[0].recent_events.is_empty());
+        }
+        other => panic!("expected coding session state, got {other:?}"),
+    }
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+#[tokio::test]
 async fn coding_ws_session_state_includes_persisted_open_stage_gates() {
     let _guard = WS_TEST_LOCK.lock().await;
     let root = tempdir().expect("root");
@@ -341,6 +545,61 @@ async fn coding_ws_session_state_includes_persisted_open_stage_gates() {
                 pending_gates[0].available_actions[0].action_type,
                 CodingGateActionType::ConfirmStage
             );
+        }
+        other => panic!("expected coding session state, got {other:?}"),
+    }
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+#[tokio::test]
+async fn coding_ws_session_state_includes_latest_analyst_decision() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let app = app_with_attempt(root.path());
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    store
+        .save_analyst_decision(&AnalystDecisionRecord {
+            id: "analyst_decision_0001".to_string(),
+            attempt_id: "coding_attempt_0001".to_string(),
+            source_stage: CodingExecutionStage::Testing,
+            rework_round: 1,
+            verdict: AnalystDecisionVerdict::NeedsFix,
+            next_stage: AnalystDecisionNextStage::Coding,
+            reason: "required 测试步骤被跳过，需要回到 Coder".to_string(),
+            evidence_refs: vec!["testing_report_0001.json".to_string()],
+            raw_provider_output_refs: vec![
+                "provider-raw/testing/execute_test_plan_0001.txt".to_string(),
+            ],
+            rework_instructions: None,
+            human_gate: None,
+            created_at: "2026-06-12T00:00:00Z".to_string(),
+            parse_error: None,
+            role_run_id: None,
+            run_no: None,
+        })
+        .expect("save analyst decision");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+
+    match recv_json(&mut ws).await {
+        CodingWsOutMessage::CodingSessionState {
+            latest_analyst_decision,
+            ..
+        } => {
+            let decision = latest_analyst_decision.expect("latest analyst decision");
+            assert_eq!(decision.id, "analyst_decision_0001");
+            assert_eq!(decision.source_stage, CodingExecutionStage::Testing);
+            assert_eq!(decision.verdict, AnalystDecisionVerdict::NeedsFix);
+            assert_eq!(decision.next_stage, AnalystDecisionNextStage::Coding);
+            assert_eq!(decision.evidence_refs, vec!["testing_report_0001.json"]);
         }
         other => panic!("expected coding session state, got {other:?}"),
     }
@@ -431,8 +690,8 @@ async fn coding_ws_prepare_context_sends_work_item_context_and_updates_provider_
             assert!(markdown.contains("实现爬楼梯问题"));
             assert!(markdown.contains("climb_stairs"));
             assert_eq!(
-                verification_commands,
-                vec!["uv run python -m unittest discover -s tests -v"]
+                verification_commands.as_ref(),
+                &vec!["uv run python -m unittest discover -s tests -v".to_string()]
             );
             assert_eq!(provider_config_snapshot.author, ProviderName::Fake);
         }
@@ -948,6 +1207,9 @@ async fn coding_ws_start_coding_drives_full_happy_path_to_final_confirm() {
                 stages.push(node.stage);
             }
             CodingWsOutMessage::CodingGateRequired { gate } => {
+                if respond_to_testing_result_review_gate(&mut ws, &gate).await {
+                    continue;
+                }
                 assert_eq!(
                     gate.kind,
                     CodingGateKind::StageGate,
@@ -969,7 +1231,7 @@ async fn coding_ws_start_coding_drives_full_happy_path_to_final_confirm() {
             } if status == CodingAttemptStatus::Completed
                 && stage == CodingExecutionStage::FinalConfirm =>
             {
-                final_chat_entries = chat_entries;
+                final_chat_entries = *chat_entries;
                 final_snapshot_seen = true;
                 break;
             }
@@ -1004,8 +1266,8 @@ async fn coding_ws_start_coding_drives_full_happy_path_to_final_confirm() {
             .iter()
             .filter(|stage| **stage == CodingExecutionStage::Rework)
             .count(),
-        2,
-        "expected rework after code review and internal review only; got {stages:?}"
+        3,
+        "expected rework after testing, code review, and internal review; got {stages:?}"
     );
     assert!(
         final_chat_entries
@@ -1074,7 +1336,7 @@ async fn coding_ws_start_coding_drives_full_happy_path_to_final_confirm() {
 }
 
 #[tokio::test]
-async fn coding_ws_testing_blocked_does_not_start_analyst_automatically() {
+async fn coding_ws_testing_blocked_waits_for_human_result_review_before_analyst() {
     let _guard = WS_TEST_LOCK.lock().await;
     let root = tempdir().expect("root");
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
@@ -1092,37 +1354,39 @@ async fn coding_ws_testing_blocked_does_not_start_analyst_automatically() {
 
     send_json(&mut ws, &CodingWsInMessage::StartCoding).await;
 
-    let mut blocked_gate = None;
-    for _ in 0..120 {
+    let gate = wait_for_testing_result_review_gate(&mut ws).await;
+    assert_eq!(gate.kind, CodingGateKind::Blocked);
+    assert_eq!(gate.stage, Some(CodingExecutionStage::Testing));
+    assert_eq!(gate.role, Some(CodingProviderRole::Tester));
+    assert_eq!(
+        gate.reason_code.as_deref(),
+        Some("testing_result_review_required")
+    );
+    assert!(
+        gate.description.contains("测试被阻塞"),
+        "expected blocked testing summary, got {}",
+        gate.description
+    );
+
+    send_json(
+        &mut ws,
+        &CodingWsInMessage::GateResponse {
+            gate_id: gate.gate_id,
+            action_id: "accept_testing_result".to_string(),
+            extra_context: None,
+        },
+    )
+    .await;
+
+    let mut saw_analyst = false;
+    for _ in 0..80 {
         match recv_json(&mut ws).await {
-            CodingWsOutMessage::CodingGateRequired { gate }
-                if gate.kind == CodingGateKind::StageGate =>
+            CodingWsOutMessage::CodingTimelineNodeCreated { node }
+                if node.stage == CodingExecutionStage::Rework =>
             {
-                if let Some(stage) = gate.stage.clone() {
-                    send_json(&mut ws, &CodingWsInMessage::StageGateConfirm { stage }).await;
-                }
-            }
-            CodingWsOutMessage::CodingGateRequired { gate }
-                if gate.kind == CodingGateKind::Blocked
-                    && gate.stage.as_ref() == Some(&CodingExecutionStage::Testing) =>
-            {
-                blocked_gate = Some(gate);
+                saw_analyst = true;
                 break;
             }
-            CodingWsOutMessage::CodingSessionState { pending_gates, .. } => {
-                if let Some(gate) = pending_gates.into_iter().find(|gate| {
-                    gate.kind == CodingGateKind::Blocked
-                        && gate.stage.as_ref() == Some(&CodingExecutionStage::Testing)
-                }) {
-                    blocked_gate = Some(gate);
-                    break;
-                }
-            }
-            CodingWsOutMessage::CodingTimelineNodeCreated { node }
-                if node.stage == CodingExecutionStage::Rework =>
-            {
-                panic!("rework started after testing blocked");
-            }
             CodingWsOutMessage::CodingProtocolError { code, message } => {
                 panic!("unexpected coding protocol error {code}: {message}");
             }
@@ -1130,50 +1394,657 @@ async fn coding_ws_testing_blocked_does_not_start_analyst_automatically() {
         }
     }
 
-    let gate = blocked_gate.expect("testing blocked gate");
-    assert_eq!(gate.stage, Some(CodingExecutionStage::Testing));
-    assert_eq!(gate.reason_code.as_deref(), Some("test_plan_repair_failed"));
-
-    for _ in 0..20 {
-        let next = match timeout(Duration::from_millis(200), ws.next()).await {
-            Ok(Some(Ok(Message::Text(text)))) => {
-                serde_json::from_str::<CodingWsOutMessage>(&text).expect("ws json")
-            }
-            Ok(Some(Ok(_))) => continue,
-            Ok(Some(Err(error))) => panic!("unexpected ws error: {error}"),
-            Ok(None) | Err(_) => break,
-        };
-        match next {
-            CodingWsOutMessage::CodingGateRequired { gate }
-                if gate.stage.as_ref() == Some(&CodingExecutionStage::Rework) =>
-            {
-                panic!("rework gate created after testing blocked");
-            }
-            CodingWsOutMessage::CodingTimelineNodeCreated { node }
-                if node.stage == CodingExecutionStage::Rework =>
-            {
-                panic!("rework started after testing blocked");
-            }
-            CodingWsOutMessage::CodingProtocolError { code, message } => {
-                panic!("unexpected coding protocol error {code}: {message}");
-            }
-            _ => {}
-        }
-    }
+    assert!(
+        saw_analyst,
+        "testing blocked did not enter analyst after accept"
+    );
 
     let attempt = store
         .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
         .expect("attempt");
-    assert_eq!(attempt.status, CodingAttemptStatus::Blocked);
-    assert_eq!(attempt.stage, CodingExecutionStage::Testing);
+    assert_eq!(attempt.status, CodingAttemptStatus::Running);
+    assert!(
+        matches!(
+            attempt.stage,
+            CodingExecutionStage::Rework | CodingExecutionStage::CodeReview
+        ),
+        "expected Rework or CodeReview after accept, got {:?}",
+        attempt.stage
+    );
 
     let nodes = store
         .get_timeline_nodes("project_0001", "issue_0001", "coding_attempt_0001")
         .expect("nodes");
     assert!(
-        !nodes
+        nodes
             .iter()
             .any(|node| node.stage == CodingExecutionStage::Rework)
+    );
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+#[tokio::test]
+async fn coding_ws_testing_completion_waits_for_human_result_review() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let app = app_with_full_chain_attempt(root.path());
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(&mut ws, &CodingWsInMessage::StartCoding).await;
+
+    let gate = wait_for_testing_result_review_gate(&mut ws).await;
+    assert_eq!(gate.kind, CodingGateKind::Blocked);
+    assert_eq!(gate.stage, Some(CodingExecutionStage::Testing));
+    assert_eq!(gate.role, Some(CodingProviderRole::Tester));
+    assert_eq!(
+        gate.reason_code.as_deref(),
+        Some("testing_result_review_required")
+    );
+    assert!(
+        gate.available_actions
+            .iter()
+            .any(|action| action.action_id == "accept_testing_result"
+                && action.action_type == CodingGateActionType::AcceptTestingResult),
+        "expected accept_testing_result action, got {:?}",
+        gate.available_actions
+    );
+    assert!(
+        gate.available_actions
+            .iter()
+            .any(|action| action.action_id == "rerun_testing"
+                && action.action_type == CodingGateActionType::RerunTesting),
+        "expected rerun_testing action, got {:?}",
+        gate.available_actions
+    );
+    assert!(
+        gate.evidence_refs
+            .iter()
+            .any(|reference| reference == "testing_report_0001.json"),
+        "expected testing report evidence ref, got {:?}",
+        gate.evidence_refs
+    );
+
+    assert!(
+        store
+            .list_open_blocked_gates("project_0001", "issue_0001", "coding_attempt_0001")
+            .expect("open gates")
+            .iter()
+            .any(|gate| gate.reason_code.as_deref() == Some("testing_result_review_required"))
+    );
+    let attempt = store
+        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("attempt");
+    assert_eq!(attempt.status, CodingAttemptStatus::Blocked);
+    assert_eq!(attempt.stage, CodingExecutionStage::Testing);
+    assert!(
+        store
+            .list_role_runs("project_0001", "issue_0001", "coding_attempt_0001")
+            .expect("role runs")
+            .iter()
+            .all(|run| run.role != CodingProviderRole::Analyst),
+        "analyst must not start before human accepts tester result"
+    );
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+#[tokio::test]
+async fn coding_ws_accept_testing_result_enters_analyst_with_testing_report_evidence() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let app = app_with_full_chain_attempt(root.path());
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(&mut ws, &CodingWsInMessage::StartCoding).await;
+    let gate = wait_for_testing_result_review_gate(&mut ws).await;
+
+    send_json(
+        &mut ws,
+        &CodingWsInMessage::GateResponse {
+            gate_id: gate.gate_id,
+            action_id: "accept_testing_result".to_string(),
+            extra_context: None,
+        },
+    )
+    .await;
+
+    let mut saw_analyst = false;
+    for _ in 0..80 {
+        match recv_json(&mut ws).await {
+            CodingWsOutMessage::CodingTimelineNodeCreated { node }
+                if node.stage == CodingExecutionStage::Rework =>
+            {
+                saw_analyst = true;
+                break;
+            }
+            CodingWsOutMessage::CodingProtocolError { code, message } => {
+                panic!("unexpected coding protocol error {code}: {message}");
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_analyst, "accepting tester result did not start analyst");
+
+    let runs = store
+        .list_role_runs("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("role runs");
+    let analyst_run = runs
+        .iter()
+        .find(|run| run.role == CodingProviderRole::Analyst)
+        .expect("analyst role run");
+    let evidence_ref = analyst_run
+        .artifact_refs
+        .iter()
+        .find(|reference| reference.contains("analyst_evidence"))
+        .expect("analyst evidence ref");
+    let evidence = store
+        .read_attempt_artifact_text("coding_attempt_0001", evidence_ref)
+        .expect("analyst evidence");
+    assert!(
+        evidence.contains("\"id\": \"testing_report_0001\""),
+        "expected TestingReport JSON evidence, got {evidence}"
+    );
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+#[tokio::test]
+async fn coding_ws_rerun_testing_result_review_reexecutes_tester() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let provider = Arc::new(RerunTestingProvider::default());
+    let app = app_with_full_chain_attempt_and_provider(root.path(), provider.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(&mut ws, &CodingWsInMessage::StartCoding).await;
+    let first_gate = wait_for_testing_result_review_gate(&mut ws).await;
+    assert_eq!(provider.testing_execute_calls(), 1);
+
+    send_json(
+        &mut ws,
+        &CodingWsInMessage::GateResponse {
+            gate_id: first_gate.gate_id,
+            action_id: "rerun_testing".to_string(),
+            extra_context: None,
+        },
+    )
+    .await;
+
+    let mut confirmed_stage_gates = HashSet::new();
+    let mut second_gate = None;
+    for _ in 0..120 {
+        match recv_json(&mut ws).await {
+            CodingWsOutMessage::CodingGateRequired { gate }
+                if gate.kind == CodingGateKind::StageGate =>
+            {
+                if let Some(stage) = gate.stage
+                    && confirmed_stage_gates.insert(gate.gate_id)
+                {
+                    send_json(&mut ws, &CodingWsInMessage::StageGateConfirm { stage }).await;
+                }
+            }
+            CodingWsOutMessage::CodingGateRequired { gate }
+                if gate.reason_code.as_deref() == Some("testing_result_review_required")
+                    && gate
+                        .evidence_refs
+                        .iter()
+                        .any(|reference| reference == "testing_report_0002.json") =>
+            {
+                second_gate = Some(gate);
+                break;
+            }
+            CodingWsOutMessage::CodingSessionState { pending_gates, .. } => {
+                if let Some(gate) = pending_gates.iter().find(|gate| {
+                    gate.reason_code.as_deref() == Some("testing_result_review_required")
+                        && gate
+                            .evidence_refs
+                            .iter()
+                            .any(|reference| reference == "testing_report_0002.json")
+                }) {
+                    second_gate = Some(gate.clone());
+                    break;
+                }
+                for gate in pending_gates
+                    .into_iter()
+                    .filter(|gate| gate.kind == CodingGateKind::StageGate)
+                {
+                    if let Some(stage) = gate.stage
+                        && confirmed_stage_gates.insert(gate.gate_id)
+                    {
+                        send_json(&mut ws, &CodingWsInMessage::StageGateConfirm { stage }).await;
+                    }
+                }
+            }
+            CodingWsOutMessage::CodingProtocolError { code, message } => {
+                panic!("unexpected coding protocol error {code}: {message}");
+            }
+            _ => {}
+        }
+    }
+
+    let second_gate = second_gate.expect("second testing result review gate");
+    assert_eq!(second_gate.stage, Some(CodingExecutionStage::Testing));
+    assert_eq!(provider.testing_execute_calls(), 2);
+    let reports = store
+        .list_testing_reports("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("testing reports");
+    assert_eq!(reports.len(), 2);
+    let runs = store
+        .list_role_runs("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("role runs");
+    let tester_runs = runs
+        .iter()
+        .filter(|run| run.role == CodingProviderRole::Tester)
+        .collect::<Vec<_>>();
+    assert_eq!(tester_runs.len(), 2);
+    assert_eq!(tester_runs[0].status, CodingRoleRunStatus::Superseded);
+    assert_eq!(tester_runs[1].trigger, CodingRoleRunTrigger::ManualRerun);
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+#[tokio::test]
+async fn coding_ws_code_review_blocked_enters_analyst_before_coding() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let provider = Arc::new(ReviewerBlockedProvider::code_review());
+    let app = app_with_full_chain_attempt_and_provider(root.path(), provider.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(&mut ws, &CodingWsInMessage::StartCoding).await;
+
+    let mut confirmed_gates = HashSet::new();
+    let mut saw_code_review_blocked = false;
+    let mut saw_analyst_after_code_review = false;
+    let mut saw_coding_gate_after_analyst = false;
+    let mut accepted_testing_result_gates = HashSet::new();
+    for _ in 0..160 {
+        match recv_json(&mut ws).await {
+            CodingWsOutMessage::CodingGateRequired { gate }
+                if gate.kind == CodingGateKind::Blocked
+                    && gate.stage.as_ref() == Some(&CodingExecutionStage::CodeReview) =>
+            {
+                panic!("code review blocked should be routed to analyst, got gate {gate:?}");
+            }
+            CodingWsOutMessage::CodingGateRequired { gate }
+                if is_testing_result_review_gate(&gate)
+                    && accepted_testing_result_gates.insert(gate.gate_id.clone()) =>
+            {
+                respond_to_testing_result_review_gate(&mut ws, &gate).await;
+            }
+            CodingWsOutMessage::CodingSessionState {
+                status,
+                pending_gates,
+                ..
+            } => {
+                if let Some(gate) = pending_gates.iter().find(|gate| {
+                    gate.kind == CodingGateKind::Blocked
+                        && gate.stage.as_ref() == Some(&CodingExecutionStage::CodeReview)
+                }) {
+                    panic!("code review blocked should be routed to analyst, got gate {gate:?}");
+                }
+                let mut responded_to_testing_result = false;
+                if status == CodingAttemptStatus::Blocked {
+                    for gate in pending_gates
+                        .iter()
+                        .filter(|gate| is_testing_result_review_gate(gate))
+                    {
+                        if accepted_testing_result_gates.insert(gate.gate_id.clone()) {
+                            respond_to_testing_result_review_gate(&mut ws, gate).await;
+                            responded_to_testing_result = true;
+                        }
+                    }
+                }
+                if responded_to_testing_result {
+                    continue;
+                }
+                let stage_gates = pending_gates
+                    .iter()
+                    .filter(|gate| gate.kind == CodingGateKind::StageGate)
+                    .filter_map(|gate| {
+                        gate.stage
+                            .clone()
+                            .map(|stage| (gate.gate_id.clone(), stage))
+                    })
+                    .collect::<Vec<_>>();
+                if saw_analyst_after_code_review
+                    && stage_gates
+                        .iter()
+                        .any(|(_, stage)| *stage == CodingExecutionStage::Coding)
+                {
+                    saw_coding_gate_after_analyst = true;
+                    break;
+                }
+                for (gate_id, stage) in stage_gates {
+                    if confirmed_gates.insert(gate_id) {
+                        send_json(&mut ws, &CodingWsInMessage::StageGateConfirm { stage }).await;
+                    }
+                }
+            }
+            CodingWsOutMessage::CodingGateRequired { gate }
+                if gate.kind == CodingGateKind::StageGate =>
+            {
+                if saw_analyst_after_code_review
+                    && gate.stage.as_ref() == Some(&CodingExecutionStage::Coding)
+                {
+                    saw_coding_gate_after_analyst = true;
+                    break;
+                }
+                if let Some(stage) = gate.stage.clone()
+                    && confirmed_gates.insert(gate.gate_id)
+                {
+                    send_json(&mut ws, &CodingWsInMessage::StageGateConfirm { stage }).await;
+                }
+            }
+            CodingWsOutMessage::CodeReviewComplete { report }
+                if report.verdict == ReviewVerdict::Blocked =>
+            {
+                saw_code_review_blocked = true;
+            }
+            CodingWsOutMessage::CodingTimelineNodeCreated { node }
+                if saw_code_review_blocked && node.stage == CodingExecutionStage::Rework =>
+            {
+                saw_analyst_after_code_review = true;
+            }
+            CodingWsOutMessage::CodingProtocolError { code, message } => {
+                panic!("unexpected coding protocol error {code}: {message}");
+            }
+            _ => {}
+        }
+    }
+
+    assert!(
+        saw_code_review_blocked,
+        "code review blocked report missing"
+    );
+    assert!(
+        saw_analyst_after_code_review,
+        "code review blocked did not enter analyst"
+    );
+    assert!(
+        saw_coding_gate_after_analyst,
+        "analyst next_stage=coding did not route back to coder"
+    );
+    assert!(
+        provider
+            .analyst_prompts()
+            .iter()
+            .any(|prompt| prompt.contains("Previous Stage: CodeReview")),
+        "analyst did not receive code review evidence"
+    );
+
+    let attempt = store
+        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("attempt");
+    assert_eq!(attempt.status, CodingAttemptStatus::Running);
+    assert_eq!(attempt.stage, CodingExecutionStage::Coding);
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+#[tokio::test]
+async fn coding_ws_internal_pr_review_blocked_enters_analyst_before_final_confirm() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let provider = Arc::new(ReviewerBlockedProvider::internal_pr_review());
+    let app = app_with_full_chain_attempt_and_provider(root.path(), provider.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(&mut ws, &CodingWsInMessage::StartCoding).await;
+
+    let mut confirmed_gates = HashSet::new();
+    let mut saw_internal_review_blocked = false;
+    let mut saw_analyst_after_internal_review = false;
+    let mut completed = false;
+    let mut accepted_testing_result_gates = HashSet::new();
+    for _ in 0..220 {
+        match recv_json(&mut ws).await {
+            CodingWsOutMessage::CodingGateRequired { gate }
+                if gate.kind == CodingGateKind::Blocked
+                    && gate.stage.as_ref() == Some(&CodingExecutionStage::InternalPrReview) =>
+            {
+                panic!("internal review blocked should be routed to analyst, got gate {gate:?}");
+            }
+            CodingWsOutMessage::CodingGateRequired { gate }
+                if is_testing_result_review_gate(&gate)
+                    && accepted_testing_result_gates.insert(gate.gate_id.clone()) =>
+            {
+                respond_to_testing_result_review_gate(&mut ws, &gate).await;
+            }
+            CodingWsOutMessage::CodingSessionState {
+                status,
+                stage,
+                pending_gates,
+                ..
+            } => {
+                if let Some(gate) = pending_gates.iter().find(|gate| {
+                    gate.kind == CodingGateKind::Blocked
+                        && gate.stage.as_ref() == Some(&CodingExecutionStage::InternalPrReview)
+                }) {
+                    panic!(
+                        "internal review blocked should be routed to analyst, got gate {gate:?}"
+                    );
+                }
+                let mut responded_to_testing_result = false;
+                if status == CodingAttemptStatus::Blocked {
+                    for gate in pending_gates
+                        .iter()
+                        .filter(|gate| is_testing_result_review_gate(gate))
+                    {
+                        if accepted_testing_result_gates.insert(gate.gate_id.clone()) {
+                            respond_to_testing_result_review_gate(&mut ws, gate).await;
+                            responded_to_testing_result = true;
+                        }
+                    }
+                }
+                if responded_to_testing_result {
+                    continue;
+                }
+                let stage_gates = pending_gates
+                    .iter()
+                    .filter(|gate| gate.kind == CodingGateKind::StageGate)
+                    .filter_map(|gate| {
+                        gate.stage
+                            .clone()
+                            .map(|stage| (gate.gate_id.clone(), stage))
+                    })
+                    .collect::<Vec<_>>();
+                for (gate_id, stage) in stage_gates {
+                    if confirmed_gates.insert(gate_id) {
+                        send_json(&mut ws, &CodingWsInMessage::StageGateConfirm { stage }).await;
+                    }
+                }
+                if saw_analyst_after_internal_review
+                    && status == CodingAttemptStatus::Completed
+                    && stage == CodingExecutionStage::FinalConfirm
+                {
+                    completed = true;
+                    break;
+                }
+            }
+            CodingWsOutMessage::CodingGateRequired { gate }
+                if gate.kind == CodingGateKind::StageGate =>
+            {
+                if let Some(stage) = gate.stage.clone()
+                    && confirmed_gates.insert(gate.gate_id)
+                {
+                    send_json(&mut ws, &CodingWsInMessage::StageGateConfirm { stage }).await;
+                }
+            }
+            CodingWsOutMessage::InternalPrReviewComplete { review }
+                if review.verdict == ReviewVerdict::Blocked =>
+            {
+                saw_internal_review_blocked = true;
+            }
+            CodingWsOutMessage::CodingTimelineNodeCreated { node }
+                if saw_internal_review_blocked && node.stage == CodingExecutionStage::Rework =>
+            {
+                saw_analyst_after_internal_review = true;
+            }
+            CodingWsOutMessage::CodingProtocolError { code, message } => {
+                panic!("unexpected coding protocol error {code}: {message}");
+            }
+            _ => {}
+        }
+    }
+
+    assert!(
+        saw_internal_review_blocked,
+        "internal review blocked report missing"
+    );
+    assert!(
+        saw_analyst_after_internal_review,
+        "internal review blocked did not enter analyst"
+    );
+    assert!(
+        completed,
+        "analyst next_stage=final_confirm did not complete final confirm path"
+    );
+    assert!(
+        provider
+            .analyst_prompts()
+            .iter()
+            .any(|prompt| prompt.contains("Previous Stage: InternalPrReview")),
+        "analyst did not receive internal review evidence"
+    );
+
+    let attempt = store
+        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("attempt");
+    assert_eq!(attempt.status, CodingAttemptStatus::Completed);
+    assert_eq!(attempt.stage, CodingExecutionStage::FinalConfirm);
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+#[tokio::test]
+async fn coding_ws_analyst_next_stage_testing_reruns_tester_before_code_review() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let provider = Arc::new(RerunTestingProvider::default());
+    let app = app_with_full_chain_attempt_and_provider(root.path(), provider.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(&mut ws, &CodingWsInMessage::StartCoding).await;
+
+    let mut confirmed_gates = HashSet::new();
+    let mut completed = false;
+    let mut testing_nodes = 0;
+    for _ in 0..180 {
+        match recv_json(&mut ws).await {
+            CodingWsOutMessage::CodingGateRequired { gate } => {
+                if respond_to_testing_result_review_gate(&mut ws, &gate).await {
+                    continue;
+                }
+                assert_eq!(
+                    gate.kind,
+                    CodingGateKind::StageGate,
+                    "unexpected non-stage gate: {:?} {:?}",
+                    gate.reason_code,
+                    gate.description
+                );
+                if let Some(stage) = gate.stage.clone()
+                    && confirmed_gates.insert(gate.gate_id)
+                {
+                    send_json(&mut ws, &CodingWsInMessage::StageGateConfirm { stage }).await;
+                }
+            }
+            CodingWsOutMessage::CodingTimelineNodeCreated { node }
+                if node.stage == CodingExecutionStage::Testing =>
+            {
+                testing_nodes += 1;
+            }
+            CodingWsOutMessage::CodingSessionState { status, stage, .. }
+                if status == CodingAttemptStatus::Completed
+                    && stage == CodingExecutionStage::FinalConfirm =>
+            {
+                completed = true;
+                break;
+            }
+            CodingWsOutMessage::CodingProtocolError { code, message } => {
+                panic!("unexpected coding protocol error {code}: {message}");
+            }
+            _ => {}
+        }
+    }
+
+    assert!(
+        completed,
+        "expected completed attempt after analyst requested tester rerun"
+    );
+    assert_eq!(
+        provider.testing_execute_calls(),
+        2,
+        "analyst next_stage=testing should rerun Tester"
+    );
+    assert_eq!(testing_nodes, 2);
+    assert_eq!(
+        store
+            .list_testing_reports("project_0001", "issue_0001", "coding_attempt_0001")
+            .expect("testing reports")
+            .len(),
+        2
     );
 
     ws.close(None).await.expect("close ws");
@@ -1203,6 +2074,9 @@ async fn internal_review_rework_creates_new_review_request_commit() {
     for _ in 0..140 {
         match recv_json(&mut ws).await {
             CodingWsOutMessage::CodingGateRequired { gate } => {
+                if respond_to_testing_result_review_gate(&mut ws, &gate).await {
+                    continue;
+                }
                 assert_eq!(
                     gate.kind,
                     CodingGateKind::StageGate,
@@ -1284,6 +2158,9 @@ async fn code_review_findings_are_injected_into_next_coding_round() {
     for _ in 0..140 {
         match recv_json(&mut ws).await {
             CodingWsOutMessage::CodingGateRequired { gate } => {
+                if respond_to_testing_result_review_gate(&mut ws, &gate).await {
+                    continue;
+                }
                 assert_eq!(
                     gate.kind,
                     CodingGateKind::StageGate,
@@ -2011,15 +2888,15 @@ async fn wait_for_stage_gate(
     for _ in 0..50 {
         match recv_json(ws).await {
             CodingWsOutMessage::CodingGateRequired { gate }
-                if gate.stage.as_ref() == Some(&stage) =>
+                if gate.kind == CodingGateKind::StageGate
+                    && gate.stage.as_ref() == Some(&stage) =>
             {
                 return gate;
             }
             CodingWsOutMessage::CodingSessionState { pending_gates, .. } => {
-                if let Some(gate) = pending_gates
-                    .into_iter()
-                    .find(|gate| gate.stage.as_ref() == Some(&stage))
-                {
+                if let Some(gate) = pending_gates.into_iter().find(|gate| {
+                    gate.kind == CodingGateKind::StageGate && gate.stage.as_ref() == Some(&stage)
+                }) {
                     return gate;
                 }
             }
@@ -2033,6 +2910,84 @@ async fn wait_for_stage_gate(
         }
     }
     panic!("expected stage gate for {stage:?}");
+}
+
+fn is_testing_result_review_gate(gate: &CodingGateRequired) -> bool {
+    gate.reason_code.as_deref() == Some("testing_result_review_required")
+}
+
+async fn respond_to_testing_result_review_gate(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    gate: &CodingGateRequired,
+) -> bool {
+    if !is_testing_result_review_gate(gate) {
+        return false;
+    }
+    send_json(
+        ws,
+        &CodingWsInMessage::GateResponse {
+            gate_id: gate.gate_id.clone(),
+            action_id: "accept_testing_result".to_string(),
+            extra_context: None,
+        },
+    )
+    .await;
+    true
+}
+
+async fn wait_for_testing_result_review_gate(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> CodingGateRequired {
+    let mut confirmed_stage_gates = HashSet::new();
+    for _ in 0..80 {
+        match recv_json(ws).await {
+            CodingWsOutMessage::CodingGateRequired { gate }
+                if gate.reason_code.as_deref() == Some("testing_result_review_required") =>
+            {
+                return gate;
+            }
+            CodingWsOutMessage::CodingSessionState { pending_gates, .. } => {
+                if let Some(gate) = pending_gates.iter().find(|gate| {
+                    gate.reason_code.as_deref() == Some("testing_result_review_required")
+                }) {
+                    return gate.clone();
+                }
+                for gate in pending_gates
+                    .into_iter()
+                    .filter(|gate| gate.kind == CodingGateKind::StageGate)
+                {
+                    if let Some(stage) = gate.stage
+                        && confirmed_stage_gates.insert(gate.gate_id)
+                    {
+                        send_json(ws, &CodingWsInMessage::StageGateConfirm { stage }).await;
+                    }
+                }
+            }
+            CodingWsOutMessage::CodingGateRequired { gate }
+                if gate.kind == CodingGateKind::StageGate =>
+            {
+                if let Some(stage) = gate.stage
+                    && confirmed_stage_gates.insert(gate.gate_id)
+                {
+                    send_json(ws, &CodingWsInMessage::StageGateConfirm { stage }).await;
+                }
+            }
+            CodingWsOutMessage::CodingTimelineNodeCreated { node }
+                if node.stage == CodingExecutionStage::Rework =>
+            {
+                panic!("analyst started before tester result review gate was accepted");
+            }
+            CodingWsOutMessage::CodingProtocolError { code, message } => {
+                panic!("unexpected coding protocol error {code}: {message}");
+            }
+            _ => {}
+        }
+    }
+    panic!("expected testing result review gate");
 }
 
 async fn wait_for_timeline_node(
@@ -2090,6 +3045,14 @@ async fn recv_json(
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
 ) -> CodingWsOutMessage {
+    serde_json::from_value(recv_json_value(ws).await).expect("ws json")
+}
+
+async fn recv_json_value(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> serde_json::Value {
     let message = timeout(Duration::from_secs(10), ws.next())
         .await
         .expect("ws message timeout")
@@ -2302,6 +3265,238 @@ impl StreamingProviderAdapter for TestingBlockedProvider {
     }
 }
 
+#[derive(Clone, Copy)]
+enum BlockedReviewerStage {
+    CodeReview,
+    InternalPrReview,
+}
+
+struct ReviewerBlockedProvider {
+    blocked_stage: BlockedReviewerStage,
+    analyst_prompts: Mutex<Vec<String>>,
+}
+
+impl ReviewerBlockedProvider {
+    fn code_review() -> Self {
+        Self {
+            blocked_stage: BlockedReviewerStage::CodeReview,
+            analyst_prompts: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn internal_pr_review() -> Self {
+        Self {
+            blocked_stage: BlockedReviewerStage::InternalPrReview,
+            analyst_prompts: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn analyst_prompts(&self) -> Vec<String> {
+        self.analyst_prompts
+            .lock()
+            .expect("analyst prompts lock")
+            .clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for ReviewerBlockedProvider {
+    fn supports_provider_driven_testing(&self) -> bool {
+        true
+    }
+
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        start_web_test_provider_driven_testing_session(&input.prompt, cancel)
+    }
+
+    async fn run_streaming(
+        &self,
+        input: &AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+        let (tx, rx) = mpsc::channel(8);
+        match input.role {
+            AdapterRole::Executor => {
+                let worktree = input
+                    .worktree_path
+                    .as_ref()
+                    .map(PathBuf::from)
+                    .expect("worktree path");
+                fs::write(worktree.join("src/lib.rs"), CLIMB_STAIRS_LIB).map_err(|error| {
+                    ProviderAdapterError::incompatible_output(error.to_string(), "", "")
+                })?;
+                tx.try_send(StreamChunk::Done {
+                    full_output: "implemented climb_stairs".to_string(),
+                })
+                .expect("send coding done");
+            }
+            AdapterRole::Reviewer
+                if input.output_schema == "coding_workspace_analyst_verdict_json" =>
+            {
+                self.analyst_prompts
+                    .lock()
+                    .expect("analyst prompts lock")
+                    .push(input.prompt.clone());
+                let full_output = if input.prompt.contains("Previous Stage: Testing") {
+                    r#"{"verdict":"proceed","next_stage":"code_review","reason":"testing evidence accepted"}"#
+                } else if input.prompt.contains("Previous Stage: CodeReview") {
+                    match self.blocked_stage {
+                        BlockedReviewerStage::CodeReview => {
+                            r#"{"verdict":"needs_fix","next_stage":"coding","reason":"code review blocked requires coder follow-up","fix_hints":["补充 review 所需上下文"]}"#
+                        }
+                        BlockedReviewerStage::InternalPrReview => {
+                            r#"{"verdict":"proceed","next_stage":"review_request","reason":"code review accepted"}"#
+                        }
+                    }
+                } else if input.prompt.contains("Previous Stage: InternalPrReview") {
+                    r#"{"verdict":"proceed","next_stage":"final_confirm","reason":"internal review blocked is accepted for final confirmation"}"#
+                } else {
+                    r#"{"verdict":"no_issue","summary":"ok"}"#
+                };
+                tx.try_send(StreamChunk::Done {
+                    full_output: full_output.to_string(),
+                })
+                .expect("send analyst done");
+            }
+            AdapterRole::Reviewer if input.output_schema == "coding_workspace_code_review_json" => {
+                let full_output = match self.blocked_stage {
+                    BlockedReviewerStage::CodeReview => {
+                        r#"{"verdict":"blocked","summary":"code review 缺少人工确认信息","findings":[]}"#
+                    }
+                    BlockedReviewerStage::InternalPrReview => {
+                        r#"{"verdict":"approve","summary":"code review ok","findings":[]}"#
+                    }
+                };
+                tx.try_send(StreamChunk::Done {
+                    full_output: full_output.to_string(),
+                })
+                .expect("send code review done");
+            }
+            AdapterRole::Reviewer
+                if input.output_schema == "coding_workspace_internal_pr_review_json" =>
+            {
+                let full_output = match self.blocked_stage {
+                    BlockedReviewerStage::CodeReview => {
+                        r#"{"verdict":"approve","summary":"internal review ok","findings":[],"impact_scope":["src"],"pr_description":"实现 work item","commit_message_suggestion":"feat: implement work item"}"#
+                    }
+                    BlockedReviewerStage::InternalPrReview => {
+                        r#"{"verdict":"blocked","summary":"internal review 需要人工确认发布窗口","findings":[],"impact_scope":["release"],"pr_description":"实现 work item","commit_message_suggestion":"feat: implement work item"}"#
+                    }
+                };
+                tx.try_send(StreamChunk::Done {
+                    full_output: full_output.to_string(),
+                })
+                .expect("send internal review done");
+            }
+            _ => {
+                tx.try_send(StreamChunk::Done {
+                    full_output: "ok".to_string(),
+                })
+                .expect("send done");
+            }
+        }
+        Ok(rx)
+    }
+}
+
+#[derive(Default)]
+struct RerunTestingProvider {
+    state: Mutex<RerunTestingProviderState>,
+}
+
+#[derive(Default)]
+struct RerunTestingProviderState {
+    analyst_calls: usize,
+    testing_execute_calls: usize,
+}
+
+impl RerunTestingProvider {
+    fn testing_execute_calls(&self) -> usize {
+        self.state.lock().expect("state lock").testing_execute_calls
+    }
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for RerunTestingProvider {
+    fn supports_provider_driven_testing(&self) -> bool {
+        true
+    }
+
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        if input.prompt.contains("Phase: execute_test_plan") {
+            self.state.lock().expect("state lock").testing_execute_calls += 1;
+        }
+        start_web_test_provider_driven_testing_session(&input.prompt, cancel)
+    }
+
+    async fn run_streaming(
+        &self,
+        input: &AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+        let (tx, rx) = mpsc::channel(8);
+        match input.role {
+            AdapterRole::Executor => {
+                let worktree = input
+                    .worktree_path
+                    .as_ref()
+                    .map(PathBuf::from)
+                    .expect("worktree path");
+                fs::write(worktree.join("src/lib.rs"), CLIMB_STAIRS_LIB).map_err(|error| {
+                    ProviderAdapterError::incompatible_output(error.to_string(), "", "")
+                })?;
+                tx.try_send(StreamChunk::Done {
+                    full_output: "implemented climb_stairs".to_string(),
+                })
+                .expect("send coding done");
+            }
+            AdapterRole::Reviewer
+                if input.output_schema == "coding_workspace_analyst_verdict_json" =>
+            {
+                let testing_analyst_call =
+                    input.prompt.contains("Previous Stage: Testing").then(|| {
+                        let mut state = self.state.lock().expect("state lock");
+                        state.analyst_calls += 1;
+                        state.analyst_calls
+                    });
+                let full_output = if testing_analyst_call == Some(1) {
+                    r#"{"verdict":"rerun_testing","next_stage":"testing","reason":"rerun Tester before review"}"#
+                } else if testing_analyst_call.is_some() {
+                    r#"{"verdict":"proceed","next_stage":"code_review","reason":"testing evidence accepted"}"#
+                } else {
+                    r#"{"verdict":"no_issue","summary":"ok"}"#
+                };
+                tx.try_send(StreamChunk::Done {
+                    full_output: full_output.to_string(),
+                })
+                .expect("send analyst done");
+            }
+            AdapterRole::Reviewer => {
+                tx.try_send(StreamChunk::Done {
+                    full_output: r#"{"verdict":"approve","summary":"review ok","findings":[]}"#
+                        .to_string(),
+                })
+                .expect("send review done");
+            }
+            _ => {
+                tx.try_send(StreamChunk::Done {
+                    full_output: "ok".to_string(),
+                })
+                .expect("send done");
+            }
+        }
+        Ok(rx)
+    }
+}
+
 #[derive(Default)]
 struct InternalReviewReworkProvider {
     state: Mutex<InternalReviewReworkState>,
@@ -2310,7 +3505,6 @@ struct InternalReviewReworkProvider {
 #[derive(Default)]
 struct InternalReviewReworkState {
     coding_calls: usize,
-    analyst_calls: usize,
     internal_review_calls: usize,
 }
 
@@ -2368,12 +3562,9 @@ impl StreamingProviderAdapter for InternalReviewReworkProvider {
             AdapterRole::Reviewer
                 if input.output_schema == "coding_workspace_analyst_verdict_json" =>
             {
-                let analyst_call = {
-                    let mut state = self.state.lock().expect("state lock");
-                    state.analyst_calls += 1;
-                    state.analyst_calls
-                };
-                let full_output = if analyst_call == 2 {
+                let full_output = if input.prompt.contains("Previous Stage: InternalPrReview")
+                    && input.prompt.contains(r#""verdict": "request_changes""#)
+                {
                     r#"{"verdict":"needs_fix","summary":"internal review 要求修复","fix_hints":["补充 internal_fix.rs"]}"#
                 } else {
                     r#"{"verdict":"no_issue","summary":"ok"}"#
@@ -2615,7 +3806,10 @@ fn web_test_provider_driven_testing_output(prompt: &str) -> Option<String> {
                     "command_or_tool_input": {
                         "command": "cargo test --locked"
                     },
-                    "evidence_expectation": "provider reports deterministic cargo test evidence"
+                    "evidence_expectation": "provider reports deterministic cargo test evidence",
+                    "related_requirements": ["REQ-CARGO"],
+                    "related_design_constraints": ["DEC-CARGO"],
+                    "related_work_item_tasks": ["TASK-CARGO"]
                 }]
             })
             .to_string(),
@@ -2709,3 +3903,522 @@ const CLIMB_STAIRS_WORK_ITEM: &str = r#"# 实现爬楼梯问题 Work Item
 uv run python -m unittest discover -s tests -v
 ```
 "#;
+
+struct RetryAnalystCaptureProvider {
+    captured_prompts: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for RetryAnalystCaptureProvider {
+    async fn run_streaming(
+        &self,
+        input: &AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+        self.captured_prompts
+            .lock()
+            .expect("lock")
+            .push(input.prompt.clone());
+        let (tx, rx) = mpsc::channel(8);
+        tx.try_send(StreamChunk::Done {
+            full_output: r#"{"verdict":"proceed","next_stage":"code_review","reason":"retry analyst accepted from test","evidence_refs":["artifacts/rework/analyst_evidence_0001.txt"],"raw_provider_output_refs":[]}"#.to_string(),
+        })
+        .expect("send done");
+        Ok(rx)
+    }
+}
+
+struct RetryInternalReviewCaptureProvider {
+    captured_prompts: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for RetryInternalReviewCaptureProvider {
+    async fn run_streaming(
+        &self,
+        input: &AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+        self.captured_prompts
+            .lock()
+            .expect("lock")
+            .push(input.prompt.clone());
+        let (tx, rx) = mpsc::channel(8);
+        let full_output = if input.output_schema == "coding_workspace_internal_pr_review_json" {
+            r#"{"verdict":"approve","summary":"internal reviewer retry accepted","findings":[],"impact_scope":["src"],"pr_description":"PR body","commit_message_suggestion":"feat: work"}"#
+        } else if input.output_schema == "coding_workspace_analyst_verdict_json" {
+            r#"{"verdict":"proceed","next_stage":"final_confirm","reason":"internal reviewer retry accepted"}"#
+        } else {
+            r#"{"verdict":"approve","summary":"review ok","findings":[]}"#
+        };
+        tx.try_send(StreamChunk::Done {
+            full_output: full_output.to_string(),
+        })
+        .expect("send done");
+        Ok(rx)
+    }
+}
+
+fn app_with_blocked_analyst_attempt(
+    root_path: &Path,
+    provider: Arc<dyn StreamingProviderAdapter>,
+) -> (axum::Router, CodingAttemptStore) {
+    let repo = root_path.join("repo");
+    init_cargo_repo(&repo);
+
+    let app_paths = ProductAppPaths::new(root_path.join(".aria"));
+    let repository = RepositoryStore::new(app_paths.clone())
+        .create(CreateRepositoryInput {
+            project_id: "project_0001".to_string(),
+            name: "repo".to_string(),
+            path: repo.clone(),
+            default_policy_preset: Some("manual-write".to_string()),
+            default_provider_mode: Some("fake".to_string()),
+        })
+        .expect("create repository");
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    lifecycle
+        .create_work_item(CreateWorkItemInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: repository.id,
+            story_spec_ids: Vec::new(),
+            design_spec_ids: Vec::new(),
+            title: "实现爬楼梯".to_string(),
+        })
+        .expect("create work item");
+    lifecycle
+        .update_work_item_plan_status(
+            "project_0001",
+            "issue_0001",
+            "work_item_0001",
+            WorkItemPlanStatus::Confirmed,
+        )
+        .expect("confirm work item");
+    let store = CodingAttemptStore::new(app_paths.clone());
+    store
+        .create_attempt(CreateCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            work_item_id: "work_item_0001".to_string(),
+            base_branch: "HEAD".to_string(),
+            branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+            worktree_path: Some(repo),
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Fake,
+                reviewer: Some(ProviderName::Fake),
+                review_rounds: 1,
+            },
+            max_auto_rework: 2,
+        })
+        .expect("create attempt");
+
+    let mut registry = ProviderRegistry::new();
+    registry.register(ProviderName::Fake, provider);
+    let router = build_web_router(WebAppState::with_provider_registry(
+        root_path.to_path_buf(),
+        WebRuntime::new_fake(root_path.to_path_buf()),
+        registry,
+    ));
+    (router, store)
+}
+
+#[tokio::test]
+async fn coding_ws_retry_analyst_resumes_rework_from_persisted_evidence() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (app, store) = app_with_blocked_analyst_attempt(
+        root.path(),
+        Arc::new(RetryAnalystCaptureProvider {
+            captured_prompts: captured.clone(),
+        }),
+    );
+
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            "coding_attempt_0001",
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            "coding_attempt_0001",
+            CodingAttemptStatus::Blocked,
+        )
+        .expect("block attempt");
+    store
+        .update_attempt_stage(
+            "project_0001",
+            "issue_0001",
+            "coding_attempt_0001",
+            CodingExecutionStage::Rework,
+        )
+        .expect("set rework stage");
+
+    let first_run = store
+        .create_role_run(
+            &store
+                .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+                .expect("get attempt"),
+            CodingExecutionStage::Rework,
+            CodingProviderRole::Analyst,
+            CodingRoleRunTrigger::Initial,
+            Some("coding_node_0001".to_string()),
+        )
+        .expect("create first run");
+    store
+        .update_role_run_status(
+            "project_0001",
+            "issue_0001",
+            "coding_attempt_0001",
+            &first_run.id,
+            CodingRoleRunStatus::Blocked,
+            Some("analyst_human_gate".to_string()),
+        )
+        .expect("block first run");
+
+    fs::create_dir_all(
+        root.path()
+            .join(".aria")
+            .join("projects")
+            .join("project_0001")
+            .join("issues")
+            .join("issue_0001")
+            .join("coding-attempts")
+            .join("coding_attempt_0001")
+            .join("artifacts")
+            .join("rework"),
+    )
+    .expect("create evidence dir");
+    fs::write(
+        root.path()
+            .join(".aria")
+            .join("projects")
+            .join("project_0001")
+            .join("issues")
+            .join("issue_0001")
+            .join("coding-attempts")
+            .join("coding_attempt_0001")
+            .join("artifacts")
+            .join("rework")
+            .join("analyst_evidence_0001.txt"),
+        "persisted testing evidence",
+    )
+    .expect("write evidence");
+    store
+        .update_role_run_refs(
+            "project_0001",
+            "issue_0001",
+            "coding_attempt_0001",
+            &first_run.id,
+            Vec::new(),
+            vec!["artifacts/rework/analyst_evidence_0001.txt".to_string()],
+        )
+        .expect("add evidence ref");
+    store
+        .append_role_run_event(
+            &store
+                .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+                .expect("get attempt"),
+            &first_run,
+            CodingRoleRunEventType::ExecutionEvent,
+            serde_json::json!({
+                "title": "Analyst task update",
+                "status": "running",
+                "detail": "No tasks found"
+            }),
+        )
+        .expect("append analyst event");
+
+    store
+        .create_blocked_gate(CreateBlockedGateInput {
+            attempt_id: "coding_attempt_0001".to_string(),
+            stage: CodingExecutionStage::Rework,
+            node_id: Some("coding_node_0001".to_string()),
+            role: Some(CodingProviderRole::Analyst),
+            title: "Analyst human gate".to_string(),
+            description: "需要重跑 Analyst".to_string(),
+            reason_code: Some("analyst_human_gate".to_string()),
+            evidence_refs: vec!["artifacts/rework/analyst_evidence_0001.txt".to_string()],
+            raw_provider_output_ref: None,
+            available_actions: vec![CodingGateAction {
+                action_id: "retry_analyst".to_string(),
+                label: "重试 Analyst".to_string(),
+                action_type: CodingGateActionType::RetryAnalyst,
+            }],
+        })
+        .expect("create gate");
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(
+        &mut ws,
+        &CodingWsInMessage::GateResponse {
+            gate_id: "coding_blocked_gate_0001".to_string(),
+            action_id: "retry_analyst".to_string(),
+            extra_context: None,
+        },
+    )
+    .await;
+
+    let mut saw_rework_node = false;
+    for _ in 0..240 {
+        match timeout(Duration::from_millis(500), recv_json(&mut ws)).await {
+            Ok(CodingWsOutMessage::CodingTimelineNodeCreated { node })
+                if node.stage == CodingExecutionStage::Rework =>
+            {
+                saw_rework_node = true;
+            }
+            Ok(CodingWsOutMessage::CodingSessionState { ref stage, .. })
+                if saw_rework_node && stage == &CodingExecutionStage::CodeReview =>
+            {
+                break;
+            }
+            Ok(CodingWsOutMessage::CodingProtocolError { code, message }) => {
+                panic!("unexpected protocol error {code}: {message}");
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_rework_node, "expected new rework timeline node");
+
+    let runs = store
+        .list_role_runs("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("role runs");
+    assert_eq!(runs.len(), 2);
+    {
+        let prompts = captured.lock().expect("lock");
+        let prompt = prompts
+            .iter()
+            .find(|prompt| prompt.contains("persisted testing evidence"))
+            .expect("expected analyst prompt to contain persisted evidence");
+        assert!(prompt.contains("[previous_role_run_diagnostic]"));
+        assert!(prompt.contains("Analyst task update"));
+        assert!(prompt.contains("No tasks found"));
+        assert_eq!(prompt.matches("[previous_role_run_diagnostic]").count(), 1);
+        assert!(!prompt.contains(&format!("role_run_id: {}", runs[1].id)));
+    }
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+#[tokio::test]
+async fn coding_ws_retry_internal_review_resumes_internal_reviewer_run() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (app, store) = app_with_blocked_analyst_attempt(
+        root.path(),
+        Arc::new(RetryInternalReviewCaptureProvider {
+            captured_prompts: captured.clone(),
+        }),
+    );
+
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            "coding_attempt_0001",
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    store
+        .update_attempt_stage(
+            "project_0001",
+            "issue_0001",
+            "coding_attempt_0001",
+            CodingExecutionStage::InternalPrReview,
+        )
+        .expect("set internal review stage");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            "coding_attempt_0001",
+            CodingAttemptStatus::Blocked,
+        )
+        .expect("block attempt");
+    store
+        .save_review_request(&ReviewRequest {
+            id: "review_request_0001".to_string(),
+            attempt_id: "coding_attempt_0001".to_string(),
+            kind: ReviewRequestKind::GitBranchOnly,
+            remote_kind: RemoteKind::GenericGit,
+            remote: "origin".to_string(),
+            base_branch: "HEAD".to_string(),
+            branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+            commit_sha: "abc123".to_string(),
+            push_status: PushStatus::Pushed,
+            external_url: None,
+            manual_instructions: Vec::new(),
+            created_at: "2026-06-13T00:00:00Z".to_string(),
+            updated_at: "2026-06-13T00:00:00Z".to_string(),
+        })
+        .expect("save review request");
+    let first_run = store
+        .create_role_run(
+            &store
+                .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+                .expect("get attempt"),
+            CodingExecutionStage::InternalPrReview,
+            CodingProviderRole::InternalReviewer,
+            CodingRoleRunTrigger::Initial,
+            Some("coding_node_0001".to_string()),
+        )
+        .expect("create first run");
+    store
+        .update_role_run_status(
+            "project_0001",
+            "issue_0001",
+            "coding_attempt_0001",
+            &first_run.id,
+            CodingRoleRunStatus::Blocked,
+            Some("internal_review_blocked".to_string()),
+        )
+        .expect("block first run");
+    store
+        .append_role_run_event(
+            &store
+                .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+                .expect("get attempt"),
+            &first_run,
+            CodingRoleRunEventType::ExecutionEvent,
+            serde_json::json!({
+                "title": "Internal reviewer task update",
+                "status": "blocked",
+                "detail": "internal_review_blocked"
+            }),
+        )
+        .expect("append internal reviewer event");
+    store
+        .create_blocked_gate(CreateBlockedGateInput {
+            attempt_id: "coding_attempt_0001".to_string(),
+            stage: CodingExecutionStage::InternalPrReview,
+            node_id: Some("coding_node_0001".to_string()),
+            role: Some(CodingProviderRole::InternalReviewer),
+            title: "Internal Reviewer blocked".to_string(),
+            description: "需要重跑 Internal Reviewer".to_string(),
+            reason_code: Some("internal_review_blocked".to_string()),
+            evidence_refs: Vec::new(),
+            raw_provider_output_ref: None,
+            available_actions: vec![CodingGateAction {
+                action_id: "retry_internal_review".to_string(),
+                label: "重试 Internal Reviewer".to_string(),
+                action_type: CodingGateActionType::RetryInternalReview,
+            }],
+        })
+        .expect("create gate");
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(
+        &mut ws,
+        &CodingWsInMessage::GateResponse {
+            gate_id: "coding_blocked_gate_0001".to_string(),
+            action_id: "retry_internal_review".to_string(),
+            extra_context: None,
+        },
+    )
+    .await;
+
+    let mut saw_internal_node = false;
+    let mut saw_internal_complete = false;
+    let mut saw_internal_chat = false;
+    for _ in 0..40 {
+        match timeout(Duration::from_millis(250), recv_json(&mut ws)).await {
+            Ok(CodingWsOutMessage::CodingTimelineNodeCreated { node })
+                if node.stage == CodingExecutionStage::InternalPrReview =>
+            {
+                saw_internal_node = true;
+            }
+            Ok(CodingWsOutMessage::CodingTimelineNodeCreated { node })
+                if node.stage == CodingExecutionStage::CodeReview =>
+            {
+                panic!("retry_internal_review should not resume CodeReview first");
+            }
+            Ok(CodingWsOutMessage::InternalPrReviewComplete { review }) => {
+                assert_eq!(review.summary, "internal reviewer retry accepted");
+                saw_internal_complete = true;
+            }
+            Ok(CodingWsOutMessage::CodingChatEntryCreated { entry })
+                if entry.content.as_deref().is_some_and(|content| {
+                    content.contains("internal reviewer retry accepted")
+                }) =>
+            {
+                let metadata = entry.metadata.unwrap_or_default();
+                assert_eq!(
+                    metadata.get("source").and_then(|value| value.as_str()),
+                    Some("internal_pr_review")
+                );
+                saw_internal_chat = true;
+            }
+            Ok(CodingWsOutMessage::CodingProtocolError { code, message }) => {
+                panic!("unexpected protocol error {code}: {message}");
+            }
+            _ => {}
+        }
+        if saw_internal_node && saw_internal_complete && saw_internal_chat {
+            break;
+        }
+    }
+    assert!(saw_internal_node, "expected new internal review node");
+    assert!(
+        saw_internal_complete,
+        "expected internal reviewer completion"
+    );
+    assert!(
+        saw_internal_chat,
+        "expected readable internal reviewer chat"
+    );
+
+    {
+        let prompts = captured.lock().expect("lock");
+        assert!(
+            prompts
+                .iter()
+                .any(|prompt| prompt.contains("review_request_0001")
+                    && prompt.contains("[previous_role_run_diagnostic]")
+                    && prompt.contains("internal_review_blocked")),
+            "expected internal reviewer prompt to contain review request and retry diagnostic"
+        );
+    }
+
+    let runs = store
+        .list_role_runs("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("role runs");
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[0].status, CodingRoleRunStatus::Superseded);
+    assert_eq!(runs[1].role, CodingProviderRole::InternalReviewer);
+    assert_eq!(runs[1].trigger, CodingRoleRunTrigger::RetryInternalReview);
+    assert_eq!(runs[1].status, CodingRoleRunStatus::Completed);
+    let reviews = store
+        .list_internal_pr_reviews("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("internal reviews");
+    assert_eq!(reviews.len(), 1);
+    assert_eq!(reviews[0].role_run_id.as_deref(), Some(runs[1].id.as_str()));
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}

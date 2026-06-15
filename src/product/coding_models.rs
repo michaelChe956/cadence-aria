@@ -67,6 +67,128 @@ pub enum CodingProviderRole {
     InternalReviewer,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodingRoleRunStatus {
+    Running,
+    Completed,
+    Failed,
+    Blocked,
+    Superseded,
+    Aborted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodingRoleRunTrigger {
+    Initial,
+    RetryTestPlan,
+    RerunMissingSteps,
+    RetryReview,
+    RetryAnalyst,
+    RetryInternalReview,
+    ManualRerun,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodingRoleRun {
+    pub id: String,
+    pub attempt_id: String,
+    pub stage: CodingExecutionStage,
+    pub role: CodingProviderRole,
+    pub run_no: u32,
+    pub status: CodingRoleRunStatus,
+    pub trigger: CodingRoleRunTrigger,
+    pub node_id: Option<String>,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+    #[serde(default)]
+    pub supersedes_run_id: Option<String>,
+    #[serde(default)]
+    pub superseded_by_run_id: Option<String>,
+    #[serde(default)]
+    pub reason_code: Option<String>,
+    #[serde(default)]
+    pub raw_provider_output_refs: Vec<String>,
+    #[serde(default)]
+    pub artifact_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodingRoleRunEventType {
+    ProviderPrompt,
+    ProviderStart,
+    TextDelta,
+    ExecutionEvent,
+    ToolCall,
+    ToolResult,
+    StatusChanged,
+    PermissionRequest,
+    ChoiceRequest,
+    MessageComplete,
+    ProviderFailed,
+    Timeout,
+    Aborted,
+    PersistenceWarning,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CodingRoleRunEvent {
+    pub attempt_id: String,
+    pub role_run_id: String,
+    pub node_id: Option<String>,
+    pub stage: CodingExecutionStage,
+    pub role: CodingProviderRole,
+    pub sequence: u64,
+    pub event_type: CodingRoleRunEventType,
+    pub created_at: String,
+    pub payload: serde_json::Value,
+    pub truncated: bool,
+    pub artifact_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CodingRoleRunEventSummary {
+    pub event_count: usize,
+    pub last_event_at: Option<String>,
+    pub last_event_type: Option<CodingRoleRunEventType>,
+    pub last_event_title: Option<String>,
+    pub last_event_status: Option<String>,
+    pub terminal_event_type: Option<CodingRoleRunEventType>,
+    pub terminal_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CodingRoleRunEventPreview {
+    pub sequence: u64,
+    pub event_type: CodingRoleRunEventType,
+    pub created_at: String,
+    pub title: Option<String>,
+    pub status: Option<String>,
+    pub detail: Option<String>,
+    pub truncated: bool,
+    pub artifact_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CodingRoleRunSnapshot {
+    #[serde(flatten)]
+    pub run: CodingRoleRun,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_summary: Option<CodingRoleRunEventSummary>,
+    #[serde(default)]
+    pub recent_events: Vec<CodingRoleRunEventPreview>,
+}
+
+impl std::ops::Deref for CodingRoleRunSnapshot {
+    type Target = CodingRoleRun;
+
+    fn deref(&self) -> &Self::Target {
+        &self.run
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CodingProviderPermissionMode {
@@ -227,6 +349,95 @@ pub enum AnalystVerdict {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnalystDecisionVerdict {
+    NeedsFix,
+    RerunTesting,
+    Proceed,
+    HumanRequired,
+    Blocked,
+}
+
+impl AnalystDecisionVerdict {
+    pub fn legacy_chat_verdict(&self) -> AnalystVerdict {
+        match self {
+            Self::NeedsFix | Self::RerunTesting => AnalystVerdict::NeedsFix,
+            Self::Proceed => AnalystVerdict::NoIssue,
+            Self::HumanRequired | Self::Blocked => AnalystVerdict::NeedsHumanInput,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnalystDecisionNextStage {
+    Coding,
+    Testing,
+    CodeReview,
+    ReviewRequest,
+    InternalPrReview,
+    FinalConfirm,
+    HumanGate,
+}
+
+impl AnalystDecisionNextStage {
+    pub fn execution_stage(&self) -> Option<CodingExecutionStage> {
+        match self {
+            Self::Coding => Some(CodingExecutionStage::Coding),
+            Self::Testing => Some(CodingExecutionStage::Testing),
+            Self::CodeReview => Some(CodingExecutionStage::CodeReview),
+            Self::ReviewRequest => Some(CodingExecutionStage::ReviewRequest),
+            Self::InternalPrReview => Some(CodingExecutionStage::InternalPrReview),
+            Self::FinalConfirm => Some(CodingExecutionStage::FinalConfirm),
+            Self::HumanGate => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnalystReworkInstructions {
+    pub summary: String,
+    #[serde(default)]
+    pub required_changes: Vec<String>,
+    #[serde(default)]
+    pub verification_expectations: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnalystHumanGateRecommendation {
+    #[serde(default)]
+    pub reason_code: Option<String>,
+    #[serde(default)]
+    pub available_actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnalystDecisionRecord {
+    pub id: String,
+    pub attempt_id: String,
+    pub source_stage: CodingExecutionStage,
+    pub rework_round: u32,
+    pub verdict: AnalystDecisionVerdict,
+    pub next_stage: AnalystDecisionNextStage,
+    pub reason: String,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+    #[serde(default)]
+    pub raw_provider_output_refs: Vec<String>,
+    #[serde(default)]
+    pub rework_instructions: Option<AnalystReworkInstructions>,
+    #[serde(default)]
+    pub human_gate: Option<AnalystHumanGateRecommendation>,
+    pub created_at: String,
+    #[serde(default)]
+    pub parse_error: Option<String>,
+    #[serde(default)]
+    pub role_run_id: Option<String>,
+    #[serde(default)]
+    pub run_no: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CodingEntryType {
     UserMessage,
@@ -315,6 +526,54 @@ pub struct CodingStageGateState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodingChoiceOption {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodingChoiceGateStatus {
+    Open,
+    Resolved,
+    Stale,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodingChoiceGateResponse {
+    pub selected_option_ids: Vec<String>,
+    #[serde(default)]
+    pub free_text: Option<String>,
+    pub responded_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodingChoiceGate {
+    pub gate_id: String,
+    pub choice_id: String,
+    pub attempt_id: String,
+    #[serde(default)]
+    pub node_id: Option<String>,
+    pub stage: CodingExecutionStage,
+    pub role: CodingProviderRole,
+    pub provider: ProviderName,
+    pub source: String,
+    pub prompt: String,
+    #[serde(default)]
+    pub options: Vec<CodingChoiceOption>,
+    pub allow_multiple: bool,
+    pub allow_free_text: bool,
+    pub status: CodingChoiceGateStatus,
+    #[serde(default)]
+    pub response: Option<CodingChoiceGateResponse>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TestCommandStatus {
     Passed,
@@ -374,6 +633,10 @@ pub struct TestPlanStep {
 pub struct TestPlan {
     pub id: String,
     pub attempt_id: String,
+    #[serde(default)]
+    pub role_run_id: Option<String>,
+    #[serde(default)]
+    pub run_no: Option<u32>,
     pub summary: String,
     #[serde(default)]
     pub context_warnings: Vec<String>,
@@ -422,6 +685,10 @@ pub enum TestingOverallStatus {
 pub struct TestingReport {
     pub id: String,
     pub attempt_id: String,
+    #[serde(default)]
+    pub role_run_id: Option<String>,
+    #[serde(default)]
+    pub run_no: Option<u32>,
     pub commands: Vec<TestCommand>,
     pub overall_status: TestingOverallStatus,
     pub provider_claim: Option<serde_json::Value>,
@@ -563,6 +830,10 @@ pub struct CodeReviewReport {
     pub created_at: String,
     #[serde(default)]
     pub raw_provider_output_ref: Option<String>,
+    #[serde(default)]
+    pub role_run_id: Option<String>,
+    #[serde(default)]
+    pub run_no: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -581,6 +852,10 @@ pub struct InternalPrReview {
     pub created_at: String,
     #[serde(default)]
     pub raw_provider_output_ref: Option<String>,
+    #[serde(default)]
+    pub role_run_id: Option<String>,
+    #[serde(default)]
+    pub run_no: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -638,7 +913,11 @@ pub enum CodingGateActionType {
     ProvideContext,
     ManualContinue,
     RetryReview,
+    RetryAnalyst,
+    RetryInternalReview,
     SendRawOutputToAnalyst,
+    AcceptTestingResult,
+    RerunTesting,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -729,6 +1008,8 @@ mod tests {
         let plan = TestPlan {
             id: "test_plan_0001".to_string(),
             attempt_id: "coding_attempt_0001".to_string(),
+            role_run_id: None,
+            run_no: None,
             summary: "unit and smoke checks".to_string(),
             context_warnings: vec!["missing_design_spec".to_string()],
             assumptions: vec!["target repo is already checked out".to_string()],
@@ -754,6 +1035,8 @@ mod tests {
         let report = TestingReport {
             id: "testing_report_0001".to_string(),
             attempt_id: "coding_attempt_0001".to_string(),
+            role_run_id: None,
+            run_no: None,
             commands: Vec::new(),
             overall_status: TestingOverallStatus::PassedWithWarnings,
             provider_claim: Some(json!({"summary": "passed with warnings"})),
@@ -810,6 +1093,8 @@ mod tests {
             raw_provider_output_ref: Some(
                 "provider-raw/code_review/code_review_0001.txt".to_string(),
             ),
+            role_run_id: None,
+            run_no: None,
         };
         let review_value = serde_json::to_value(&review).expect("serialize code review");
         assert_eq!(

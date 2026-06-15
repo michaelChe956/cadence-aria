@@ -8,6 +8,7 @@ use crate::cross_cutting::provider_registry::ProviderRegistry;
 use crate::cross_cutting::streaming_provider::ProviderCommand;
 use crate::product::models::ProviderName;
 use crate::web::events::EventHub;
+use crate::web::provider_availability::provider_name_available;
 use crate::web::runtime::WebRuntime;
 use crate::web::test_controls::{TestControlledFakeStreamingProvider, TestControls};
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
@@ -85,6 +86,7 @@ pub struct WebAppState {
     pub runtime: Arc<StdMutex<WebRuntime>>,
     pub events: EventHub,
     pub provider_registry: Arc<ProviderRegistry>,
+    pub provider_availability: Arc<dyn Fn(&ProviderName) -> bool + Send + Sync>,
     pub test_controls: TestControls,
     pub workspace_runs: WorkspaceRunRegistry,
 }
@@ -96,14 +98,34 @@ impl WebAppState {
 
     pub fn with_events(workspace_root: PathBuf, runtime: WebRuntime, events: EventHub) -> Self {
         let test_controls = TestControls::default();
+        let provider_availability: Arc<dyn Fn(&ProviderName) -> bool + Send + Sync> =
+            if runtime.enforces_real_provider_availability() {
+                Arc::new(provider_name_available)
+            } else {
+                Arc::new(|_| true)
+            };
         Self {
             workspace_root,
             runtime: Arc::new(StdMutex::new(runtime)),
             events,
             provider_registry: default_provider_registry(test_controls.clone()),
+            provider_availability,
             test_controls,
             workspace_runs: WorkspaceRunRegistry::default(),
         }
+    }
+
+    pub fn with_provider_availability<F>(
+        workspace_root: PathBuf,
+        runtime: WebRuntime,
+        provider_availability: F,
+    ) -> Self
+    where
+        F: Fn(&ProviderName) -> bool + Send + Sync + 'static,
+    {
+        let mut state = Self::new(workspace_root, runtime);
+        state.provider_availability = Arc::new(provider_availability);
+        state
     }
 
     pub fn with_provider_registry(
@@ -125,11 +147,18 @@ impl WebAppState {
         events: EventHub,
         provider_registry: Arc<ProviderRegistry>,
     ) -> Self {
+        let provider_availability: Arc<dyn Fn(&ProviderName) -> bool + Send + Sync> =
+            if runtime.enforces_real_provider_availability() {
+                Arc::new(provider_name_available)
+            } else {
+                Arc::new(|_| true)
+            };
         Self {
             workspace_root,
             runtime: Arc::new(StdMutex::new(runtime)),
             events,
             provider_registry,
+            provider_availability,
             test_controls: TestControls::default(),
             workspace_runs: WorkspaceRunRegistry::default(),
         }

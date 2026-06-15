@@ -25,6 +25,8 @@ mod web_policy_runtime;
 mod web_product_api;
 #[path = "it_web/web_projection.rs"]
 mod web_projection;
+#[path = "it_web/web_provider_availability.rs"]
+mod web_provider_availability;
 #[path = "it_web/web_provider_execution_events.rs"]
 mod web_provider_execution_events;
 #[path = "it_web/web_provider_output_events.rs"]

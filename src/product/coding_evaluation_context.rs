@@ -1,4 +1,6 @@
 use std::collections::BTreeMap;
+use std::path::Path;
+use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
@@ -15,6 +17,7 @@ use crate::product::models::{
 use crate::web::workspace_ws_types::ArtifactVersion;
 
 const MAX_CONTEXT_SECTION_CHARS: usize = 30_000;
+const MAX_DIFF_CONTEXT_CHARS: usize = 12_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -69,6 +72,9 @@ pub struct EvaluationRepoContext {
     pub branch_name: String,
     pub base_branch: String,
     pub worktree_path: Option<String>,
+    pub changed_files: Vec<String>,
+    pub diff_stat: String,
+    pub diff_truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,7 +129,7 @@ pub fn build_evaluation_context_pack(
                 raw_markdown_or_sections: String::new(),
                 workspace_session_id: None,
             },
-            repo_context: repo_context(attempt, None),
+            repo_context: repo_context(attempt, None, &mut context_warnings),
             openspec_context: OpenSpecContext {
                 enabled: false,
                 active_change_id: None,
@@ -177,7 +183,7 @@ pub fn build_evaluation_context_pack(
         story_specs,
         design_specs,
         work_item: work_item_context,
-        repo_context: repo_context(attempt, Some(&work_item)),
+        repo_context: repo_context(attempt, Some(&work_item), &mut context_warnings),
         openspec_context: OpenSpecContext {
             enabled: openspec_enabled,
             active_change_id: None,
@@ -410,7 +416,14 @@ fn push_warning_once(warnings: &mut Vec<String>, warning: &str) {
 fn repo_context(
     attempt: &CodingExecutionAttempt,
     work_item: Option<&LifecycleWorkItemRecord>,
+    warnings: &mut Vec<String>,
 ) -> EvaluationRepoContext {
+    let (changed_files, diff_stat, diff_truncated) = attempt
+        .worktree_path
+        .as_ref()
+        .map_or((Vec::new(), String::new(), false), |worktree_path| {
+            diff_context(worktree_path, &attempt.base_branch, warnings)
+        });
     EvaluationRepoContext {
         repository_id: work_item.map(|work_item| work_item.repository_id.clone()),
         branch_name: attempt.branch_name.clone(),
@@ -419,7 +432,68 @@ fn repo_context(
             .worktree_path
             .as_ref()
             .map(|path| path.display().to_string()),
+        changed_files,
+        diff_stat,
+        diff_truncated,
     }
+}
+
+fn diff_context(
+    worktree_path: &Path,
+    base_branch: &str,
+    warnings: &mut Vec<String>,
+) -> (Vec<String>, String, bool) {
+    let Some(name_only) = git_stdout(worktree_path, &["diff", "--name-only", base_branch]) else {
+        push_warning_once(warnings, "diff_unavailable");
+        return (Vec::new(), String::new(), false);
+    };
+    let stat = git_stdout(worktree_path, &["diff", "--stat", base_branch]).unwrap_or_default();
+    let untracked = git_stdout(
+        worktree_path,
+        &["ls-files", "--others", "--exclude-standard"],
+    )
+    .unwrap_or_default();
+
+    let mut changed_files = name_only
+        .lines()
+        .chain(untracked.lines())
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    changed_files.sort();
+    changed_files.dedup();
+
+    let combined_stat = if untracked.trim().is_empty() {
+        stat
+    } else {
+        format!("{stat}\nUntracked files:\n{untracked}")
+    };
+    let (diff_stat, diff_truncated) = sanitize_diff_text(&combined_stat);
+    (changed_files, diff_stat, diff_truncated)
+}
+
+fn git_stdout(worktree_path: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(worktree_path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn sanitize_diff_text(input: &str) -> (String, bool) {
+    let (sanitized, redaction_truncated) = sanitize_context_text(input);
+    if sanitized.len() <= MAX_DIFF_CONTEXT_CHARS {
+        return (sanitized, redaction_truncated);
+    }
+    (
+        truncate_to_char_boundary(&sanitized, MAX_DIFF_CONTEXT_CHARS),
+        true,
+    )
 }
 
 fn required_methods_by_role() -> BTreeMap<String, Vec<String>> {
@@ -469,6 +543,10 @@ fn role_key(role: &CodingProviderRole) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::Path;
+    use std::process::Command as StdCommand;
+
     use tempfile::TempDir;
 
     use crate::product::app_paths::ProductAppPaths;
@@ -665,6 +743,66 @@ mod tests {
     }
 
     #[test]
+    fn evaluation_context_pack_includes_attempt_diff_context() {
+        let tmp = TempDir::new().unwrap();
+        let worktree = tmp.path().join("worktree");
+        fs::create_dir_all(&worktree).unwrap();
+        fs::write(worktree.join("src.txt"), "before\n").unwrap();
+        init_repo(&worktree);
+        fs::write(worktree.join("src.txt"), "before\nafter\n").unwrap();
+        fs::write(worktree.join("new.txt"), "new file\n").unwrap();
+
+        let paths = ProductAppPaths::new(tmp.path().join(".aria"));
+        let lifecycle = LifecycleStore::new(paths.clone());
+        let work_item = lifecycle
+            .create_work_item(CreateWorkItemInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                repository_id: REPOSITORY_ID.to_string(),
+                story_spec_ids: Vec::new(),
+                design_spec_ids: Vec::new(),
+                title: "Diff Work Item".to_string(),
+            })
+            .unwrap();
+
+        let attempt = CodingExecutionAttempt {
+            id: "coding_attempt_0001".to_string(),
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            work_item_id: work_item.id,
+            attempt_no: 1,
+            status: CodingAttemptStatus::Running,
+            stage: CodingExecutionStage::Testing,
+            base_branch: "HEAD".to_string(),
+            branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+            worktree_path: Some(worktree),
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Codex,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+            },
+            rework_count: 0,
+            max_auto_rework: 2,
+            head_commit: None,
+            pushed_remote: None,
+            review_request_id: None,
+            provider_conversations: Vec::new(),
+            created_at: "2026-06-10T00:00:00Z".to_string(),
+            updated_at: "2026-06-10T00:00:00Z".to_string(),
+            completed_at: None,
+        };
+
+        let pack =
+            build_evaluation_context_pack(paths, &attempt, EvaluationContextRole::Tester).unwrap();
+
+        assert_eq!(pack.repo_context.changed_files, vec!["new.txt", "src.txt"]);
+        assert!(pack.repo_context.diff_stat.contains("src.txt"));
+        assert!(pack.repo_context.diff_stat.contains("Untracked files"));
+        assert!(pack.repo_context.diff_stat.contains("new.txt"));
+        assert!(!pack.repo_context.diff_truncated);
+    }
+
+    #[test]
     fn evaluation_context_pack_truncates_and_redacts_sensitive_lines() {
         let tmp = TempDir::new().unwrap();
         let paths = ProductAppPaths::new(tmp.path().join(".aria"));
@@ -758,5 +896,29 @@ mod tests {
                 .iter()
                 .any(|warning| warning == "context_truncated")
         );
+    }
+
+    fn init_repo(repo: &Path) {
+        run_git(repo, &["init"]);
+        run_git(repo, &["config", "user.email", "aria@example.com"]);
+        run_git(repo, &["config", "user.name", "Aria Test"]);
+        run_git(repo, &["add", "."]);
+        run_git(repo, &["commit", "-m", "initial"]);
+    }
+
+    fn run_git(cwd: &Path, args: &[&str]) {
+        let output = StdCommand::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .unwrap_or_else(|error| panic!("git {} failed to start: {error}", args.join(" ")));
+        if !output.status.success() {
+            panic!(
+                "git {} failed\nstdout:\n{}\nstderr:\n{}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 }

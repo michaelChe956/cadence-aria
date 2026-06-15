@@ -115,7 +115,7 @@ pub fn default_compatibility_matrix() -> AdapterCompatibilityMatrix {
                     vec![
                         "exec".to_string(),
                         "-s".to_string(),
-                        "workspace-write".to_string(),
+                        "danger-full-access".to_string(),
                     ],
                 ),
                 unauthorized_patterns: vec![

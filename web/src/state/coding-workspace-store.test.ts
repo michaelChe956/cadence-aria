@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type {
+  AnalystDecisionRecord,
   CodeReviewReport,
   CodingGateRequired,
+  CodingRoleRun,
   CodingTimelineNode,
   CodingWsOutMessage,
   TestingReport,
@@ -91,6 +93,27 @@ function testingReport(overrides: Partial<TestingReport> = {}): TestingReport {
   };
 }
 
+function analystDecision(
+  overrides: Partial<AnalystDecisionRecord> = {},
+): AnalystDecisionRecord {
+  return {
+    id: "analyst_decision_0001",
+    attempt_id: "coding_attempt_0001",
+    source_stage: "testing",
+    rework_round: 1,
+    verdict: "needs_fix",
+    next_stage: "coding",
+    reason: "required 测试步骤被跳过，需要回到 Coder",
+    evidence_refs: ["testing_report_0001.json"],
+    raw_provider_output_refs: ["provider-raw/testing/execute_test_plan_0001.txt"],
+    rework_instructions: null,
+    human_gate: null,
+    created_at: "2026-06-12T00:00:00Z",
+    parse_error: null,
+    ...overrides,
+  };
+}
+
 function blockedGate(overrides: Partial<CodingGateRequired> = {}): CodingGateRequired {
   return {
     gate_id: "gate_0001",
@@ -107,6 +130,48 @@ function blockedGate(overrides: Partial<CodingGateRequired> = {}): CodingGateReq
         action_id: "rerun_missing_steps",
         label: "重新执行缺失步骤",
         action_type: "rerun_missing_steps",
+      },
+    ],
+    ...overrides,
+  };
+}
+
+function roleRun(overrides: Partial<CodingRoleRun> = {}): CodingRoleRun {
+  return {
+    id: "coding_role_run_0001",
+    attempt_id: "coding_attempt_0001",
+    stage: "testing",
+    role: "tester",
+    run_no: 1,
+    status: "running",
+    trigger: "initial",
+    node_id: "coding_node_0003",
+    started_at: "2026-06-12T00:00:00Z",
+    completed_at: null,
+    supersedes_run_id: null,
+    superseded_by_run_id: null,
+    reason_code: null,
+    raw_provider_output_refs: [],
+    artifact_refs: [],
+    event_summary: {
+      event_count: 2,
+      last_event_at: "2026-06-13T00:00:02Z",
+      last_event_type: "execution_event",
+      last_event_title: "Task update",
+      last_event_status: "running",
+      terminal_event_type: null,
+      terminal_reason: null,
+    },
+    recent_events: [
+      {
+        sequence: 2,
+        event_type: "execution_event",
+        created_at: "2026-06-13T00:00:02Z",
+        title: "Task update",
+        status: "running",
+        detail: "No tasks found",
+        truncated: false,
+        artifact_ref: null,
       },
     ],
     ...overrides,
@@ -137,6 +202,8 @@ function sessionState(
     review_request: null,
     internal_pr_review: null,
     pending_gates: [],
+    pending_choices: [],
+    latest_analyst_decision: null,
     chat_entries: [],
     ...overrides,
   };
@@ -236,6 +303,25 @@ describe("coding workspace store", () => {
     ]);
   });
 
+  it("stores role runs from websocket session snapshots", () => {
+    const store = useCodingWorkspaceStore.getState();
+    store.setSessionState(sessionState({ role_runs: [roleRun()] }));
+
+    expect(useCodingWorkspaceStore.getState().roleRuns).toHaveLength(1);
+    expect(useCodingWorkspaceStore.getState().roleRuns[0]).toMatchObject({
+      id: "coding_role_run_0001",
+      role: "tester",
+      run_no: 1,
+    });
+    expect(useCodingWorkspaceStore.getState().roleRuns[0].event_summary).toMatchObject({
+      event_count: 2,
+      last_event_title: "Task update",
+    });
+    expect(useCodingWorkspaceStore.getState().roleRuns[0].recent_events?.[0]).toMatchObject({
+      detail: "No tasks found",
+    });
+  });
+
   it("adds and updates timeline nodes while clearing inactive active node", () => {
     const store = useCodingWorkspaceStore.getState();
     store.addTimelineNode(codingNode());
@@ -325,6 +411,31 @@ describe("coding workspace store", () => {
     store.resolvePendingGate("gate_0001");
 
     expect(useCodingWorkspaceStore.getState().pendingGates).toHaveLength(0);
+  });
+
+  it("stores latest analyst decision from session snapshots", () => {
+    const store = useCodingWorkspaceStore.getState();
+
+    store.setSessionState(
+      sessionState({
+        testing_report: testingReport(),
+        latest_analyst_decision: analystDecision({
+          reason: "测试阻塞已归因，要求 Coder 补齐浏览器步骤",
+        }),
+      }),
+    );
+
+    expect(useCodingWorkspaceStore.getState().latestAnalystDecision).toMatchObject({
+      id: "analyst_decision_0001",
+      source_stage: "testing",
+      verdict: "needs_fix",
+      next_stage: "coding",
+      reason: "测试阻塞已归因，要求 Coder 补齐浏览器步骤",
+    });
+
+    store.setSessionState(sessionState({ latest_analyst_decision: null }));
+
+    expect(useCodingWorkspaceStore.getState().latestAnalystDecision).toBeNull();
   });
 
   it("tracks gate submission without removing gate until snapshot confirms", () => {

@@ -2,6 +2,7 @@ import {
   ArrowLeft,
   Check,
   Play,
+  RotateCcw,
   Send,
   Trash2,
   Wifi,
@@ -11,6 +12,7 @@ import {
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { deleteCodingAttempt, getCodingAttemptDiff } from "../api/client";
 import type {
+  AnalystDecisionRecord,
   CodeReviewReport,
   CodingExecutionStage,
   CodingGateRequired,
@@ -21,6 +23,7 @@ import type {
 } from "../api/types";
 import { CodingTimeline } from "../components/coding-workspace/CodingTimeline";
 import { CodingProviderConfigPanel } from "../components/coding-workspace/CodingProviderConfigPanel";
+import { RoleRunHistoryPanel } from "../components/coding-workspace/RoleRunHistoryPanel";
 import { StageGateEntry } from "../components/coding-workspace/StageGateEntry";
 import {
   ChatEntryList,
@@ -52,10 +55,17 @@ const TESTING_BLOCKED_REASON_LABELS: Record<string, string> = {
   test_plan_schema_invalid: "Tester 测试计划字段不完整",
   test_plan_repair_failed: "Tester 测试计划修复失败",
   missing_required_steps: "缺少 required 测试步骤证据",
+  skipped_required_steps: "required 测试步骤被阻塞（无法执行）",
+  testing_blocked: "测试被阻塞",
   high_risk_test_step_requires_permission: "高风险测试步骤需要人工确认",
 };
 
+const TESTING_RESULT_REVIEW_REASON_CODE = "testing_result_review_required";
+
 function blockedGateDisplayTitle(gate: CodingPendingGate) {
+  if (gate.reason_code === TESTING_RESULT_REVIEW_REASON_CODE) {
+    return gate.title;
+  }
   if (gate.stage === "testing" && gate.reason_code) {
     return TESTING_BLOCKED_REASON_LABELS[gate.reason_code] ?? gate.reason_code;
   }
@@ -138,7 +148,7 @@ export function CodingWorkspacePage({
         </div>
       </div>
 
-      <header className="grid min-h-16 shrink-0 gap-2 border-b border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-4 py-3 md:grid-cols-[minmax(0,1fr)_auto]">
+      <header className="grid min-h-16 min-w-0 shrink-0 gap-2 overflow-hidden border-b border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-4 py-3 md:grid-cols-[minmax(0,1fr)_auto]">
         <div className="min-w-0">
           <div className="flex min-w-0 flex-wrap items-center gap-2">
             <span className="text-xs font-semibold uppercase text-[var(--aria-ink-muted)]">
@@ -152,16 +162,17 @@ export function CodingWorkspacePage({
             {store.worktreePath ?? "worktree pending"}
           </div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 items-center justify-end gap-2">
           <ActionButtons api={api} stage={store.stage} status={store.status} />
         </div>
       </header>
 
-      <main className="grid min-h-0 flex-1 grid-cols-1 md:grid-cols-[16rem_minmax(0,1fr)]">
+      <main className="grid min-h-0 min-w-0 flex-1 grid-cols-1 overflow-hidden md:grid-cols-[16rem_minmax(0,1fr)]">
         <CodingTimeline
           nodes={store.timelineNodes}
           activeNodeId={store.activeNodeId}
           selectedNodeId={store.selectedNodeId}
+          latestAnalystDecision={store.latestAnalystDecision}
           onSelectNode={(nodeId) => {
             useCodingWorkspaceStore.getState().setSelectedNode(nodeId);
             const targetEntry = useCodingWorkspaceStore
@@ -172,17 +183,31 @@ export function CodingWorkspacePage({
             }
           }}
         />
-        <section className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] bg-[var(--aria-panel)]">
+        <section className="grid min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden bg-[var(--aria-panel)]">
           <CodingPanelTabs activePanel={activePanel} onSelectPanel={setActivePanel} />
           {activePanel === "results" ? (
             <CodingArtifactTabs activeTab={activeTab} className="min-h-0" />
           ) : (
-            <div className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)_auto_auto]">
+            <div className="grid min-h-0 min-w-0 grid-rows-[auto_auto_minmax(0,1fr)_auto_auto] overflow-hidden">
               <CodingProviderConfigPanel
                 snapshot={store.roleProviderConfigSnapshot}
                 lockedRole={lockedProviderRole(store.stage, store.status, store.pendingGates)}
                 onSelect={api.sendProviderSelect}
                 onPermissionModeSelect={api.sendPermissionModeSelect}
+              />
+              <RoleRunHistoryPanel
+                roleRuns={store.roleRuns}
+                timelineNodes={store.timelineNodes}
+                selectedNodeId={store.selectedNodeId}
+                onSelectNode={(nodeId) => {
+                  useCodingWorkspaceStore.getState().setSelectedNode(nodeId);
+                  const targetEntry = useCodingWorkspaceStore
+                    .getState()
+                    .chatEntries.find((entry) => entry.node_id === nodeId);
+                  if (targetEntry) {
+                    chatListRef.current?.scrollToEntry(targetEntry.id);
+                  }
+                }}
               />
               <ChatEntryList
                 ref={chatListRef}
@@ -395,6 +420,31 @@ function ActionButtons({
     );
   }
 
+  if (stage === "rework" && status === "waiting_for_human") {
+    return (
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => api.continueRework(null)}
+          className={buttonClass}
+          aria-label={compact ? "底部继续返修" : undefined}
+        >
+          <RotateCcw className="h-3.5 w-3.5" />
+          继续返修
+        </button>
+        <button
+          type="button"
+          onClick={api.abortAttempt}
+          className={buttonClass}
+          aria-label={compact ? "底部中止" : undefined}
+        >
+          <X className="h-3.5 w-3.5" />
+          中止
+        </button>
+      </div>
+    );
+  }
+
   if (status && ACTIVE_ATTEMPT_STATUSES.has(status)) {
     return (
       <button
@@ -444,7 +494,10 @@ function GatePanel({
   const reasonTooLong = reason.length > 2000;
   const displayedError = reasonTooLong ? "原因不能超过 2000 字" : localError;
   const displayTitle = blockedGateDisplayTitle(activeGate);
-  const testingBlocked = activeGate.stage === "testing";
+  const testingResultReview = activeGate.reason_code === TESTING_RESULT_REVIEW_REASON_CODE;
+  const testingBlocked = activeGate.stage === "testing" && !testingResultReview;
+  const analystGate = activeGate.role === "analyst";
+  const hasQualityBypassAction = activeGate.available_actions.some(actionRequiresReason);
 
   function handleAction(action: CodingGateRequired["available_actions"][number]) {
     if (action.action_type === "confirm_stage" && activeGate.stage) {
@@ -478,9 +531,24 @@ function GatePanel({
           {testingBlocked ? (
             <div className="mt-0.5 text-xs font-semibold text-amber-900">测试被阻塞</div>
           ) : null}
+          {testingResultReview ? (
+            <div className="mt-0.5 text-xs font-semibold text-amber-900">
+              等待确认 Tester 结果
+            </div>
+          ) : null}
+          {analystGate ? (
+            <div className="mt-0.5 text-xs font-semibold text-amber-900">
+              Analyst 建议人工决策
+            </div>
+          ) : null}
           <div className="mt-0.5 line-clamp-2 text-xs text-amber-800">
             {activeGate.description}
           </div>
+          {hasQualityBypassAction ? (
+            <div className="mt-1 text-xs font-semibold text-amber-900">
+              人工放行会记录质量豁免；请说明跳过该门禁的原因和后续风险处理
+            </div>
+          ) : null}
           <GateMetadata gate={activeGate} />
           {needsReason ? (
             <div className="mt-2 grid gap-1">
@@ -893,6 +961,10 @@ function languageForPath(path: string) {
 
 function TestsPanel() {
   const report = useCodingWorkspaceStore((state) => state.testingReport);
+  const stage = useCodingWorkspaceStore((state) => state.stage);
+  const latestAnalystDecision = useCodingWorkspaceStore(
+    (state) => state.latestAnalystDecision,
+  );
   if (!report) {
     return <div className="text-[var(--aria-ink-muted)]">暂无测试报告</div>;
   }
@@ -913,6 +985,10 @@ function TestsPanel() {
   return (
     <div className="space-y-3">
       <StatusBadge value={report.overall_status} />
+      <AnalystDecisionStatus
+        decision={latestAnalystDecision}
+        waiting={stage === "rework" && !latestAnalystDecision}
+      />
       {hasPlanDetails ? (
         <div data-testid="coding-test-plan-report" className="space-y-2">
           {report.plan_summary ? (
@@ -967,6 +1043,36 @@ function TestsPanel() {
           </div>
         </div>
       ))}
+    </div>
+  );
+}
+
+function AnalystDecisionStatus({
+  decision,
+  waiting,
+}: {
+  decision: AnalystDecisionRecord | null;
+  waiting: boolean;
+}) {
+  if (!decision) {
+    return waiting ? (
+      <div className="rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-2 text-xs font-semibold text-[var(--aria-ink-muted)]">
+        等待 Analyst 决策
+      </div>
+    ) : null;
+  }
+
+  return (
+    <div className="rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-2 text-xs">
+      <div className="font-semibold text-[var(--aria-ink)]">Analyst 已决策</div>
+      <div className="mt-1 font-mono text-[var(--aria-ink-muted)]">
+        {decision.verdict} {"->"} {decision.next_stage}
+      </div>
+      <div className="mt-1 break-words text-[var(--aria-ink)]">{decision.reason}</div>
+      <TestingList label="analyst evidence" values={decision.evidence_refs} />
+      {decision.raw_provider_output_refs.length > 0 ? (
+        <TestingList label="analyst raw" values={decision.raw_provider_output_refs} />
+      ) : null}
     </div>
   );
 }

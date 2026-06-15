@@ -235,7 +235,7 @@ async fn tester_repairs_markdown_plan_output_before_blocking() {
     let provider = RepairingTesterProvider {
         outputs: Mutex::new(VecDeque::from([
             "## 最终测试报告\n无法执行测试".to_string(),
-            r#"{"summary":"repaired plan","steps":[{"id":"unit","title":"Unit","intent":"verify unit","required":true,"tool":"provider_managed","risk_level":"low","command_or_tool_input":{},"evidence_expectation":"provider evidence"}]}"#.to_string(),
+            r#"{"summary":"repaired plan","steps":[{"id":"unit","title":"Unit","intent":"verify unit","required":true,"tool":"provider_managed","risk_level":"low","command_or_tool_input":{},"evidence_expectation":"provider evidence","related_requirements":["REQ-UNIT"],"related_design_constraints":["DEC-UNIT"],"related_work_item_tasks":["TASK-UNIT"]}]}"#.to_string(),
             r#"{"step_results":[{"step_id":"unit","status":"passed","evidence_refs":["unit.log"],"provider_analysis":"ok"}]}"#.to_string(),
         ])),
         captured_prompts: Arc::new(Mutex::new(Vec::new())),
@@ -310,7 +310,10 @@ impl StreamingProviderAdapter for ScriptedTesterProvider {
                                     "command_or_tool_input": {
                                         "command": ["sh", "-c", "printf ok"]
                                     },
-                                    "evidence_expectation": "exit 0"
+                                    "evidence_expectation": "exit 0",
+                                    "related_requirements": ["REQ-SHELL"],
+                                    "related_design_constraints": ["DEC-SHELL"],
+                                    "related_work_item_tasks": ["TASK-SHELL"]
                                 }
                             ]
                         })

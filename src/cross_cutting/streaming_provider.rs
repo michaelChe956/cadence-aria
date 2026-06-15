@@ -517,7 +517,10 @@ fn fake_workspace_markdown(prompt: &str) -> String {
                 "tool": "provider_managed",
                 "risk_level": "low",
                 "command_or_tool_input": {},
-                "evidence_expectation": "fake provider emits deterministic step evidence"
+                "evidence_expectation": "fake provider emits deterministic step evidence",
+                "related_requirements": ["REQ-FAKE"],
+                "related_design_constraints": ["DEC-FAKE"],
+                "related_work_item_tasks": ["TASK-FAKE"]
             }]
         })
         .to_string();

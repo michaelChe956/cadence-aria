@@ -26,6 +26,10 @@ use crate::task_run::store::allocate_next_task_id;
 use crate::task_run::types::TaskRunError;
 use crate::task_run::types::{ProviderMode, TaskRunRequest, TaskRunStatus};
 use crate::web::events::EventHub;
+use crate::web::provider_availability::{
+    host_real_workflow_ready, provider_type_available, provider_type_key,
+    resolve_default_runtime_provider_type, resolve_runtime_provider_type,
+};
 use crate::web::redaction::redact_sensitive_lines;
 use crate::web::runtime_store::WebRuntimeStore;
 use crate::web::types::{
@@ -40,6 +44,8 @@ pub struct WebRuntime {
     workspace_root: PathBuf,
     next_projection_version: u64,
     real_provider: Option<Box<dyn ProviderAdapter + Send + Sync>>,
+    provider_availability: Arc<dyn Fn(&ProviderType) -> bool + Send + Sync>,
+    enforce_real_provider_availability: bool,
 }
 
 struct ProviderOverrideAdapter<'a> {
@@ -64,6 +70,24 @@ impl WebRuntime {
             workspace_root,
             next_projection_version: 1,
             real_provider: None,
+            provider_availability: Arc::new(|_| true),
+            enforce_real_provider_availability: false,
+        }
+    }
+
+    pub fn new_fake_with_provider_availability<F>(
+        workspace_root: PathBuf,
+        provider_availability: F,
+    ) -> Self
+    where
+        F: Fn(&ProviderType) -> bool + Send + Sync + 'static,
+    {
+        Self {
+            workspace_root,
+            next_projection_version: 1,
+            real_provider: None,
+            provider_availability: Arc::new(provider_availability),
+            enforce_real_provider_availability: false,
         }
     }
 
@@ -72,6 +96,8 @@ impl WebRuntime {
             workspace_root,
             next_projection_version: 1,
             real_provider: Some(Box::new(real_routing_provider()?)),
+            provider_availability: Arc::new(provider_type_available),
+            enforce_real_provider_availability: true,
         })
     }
 
@@ -99,6 +125,8 @@ impl WebRuntime {
             real_provider: Some(Box::new(real_routing_provider_with_output_sink(Some(
                 output_sink,
             ))?)),
+            provider_availability: Arc::new(provider_type_available),
+            enforce_real_provider_availability: true,
         })
     }
 
@@ -110,7 +138,13 @@ impl WebRuntime {
             workspace_root,
             next_projection_version: 1,
             real_provider: Some(real_provider),
+            provider_availability: Arc::new(|_| true),
+            enforce_real_provider_availability: false,
         }
+    }
+
+    pub fn enforces_real_provider_availability(&self) -> bool {
+        self.enforce_real_provider_availability
     }
 
     pub fn create_task(
@@ -210,11 +244,8 @@ impl WebRuntime {
             .and_then(serde_json::Value::as_str)
             == Some("real")
         {
-            let provider_type = request
-                .provider_type
-                .as_deref()
-                .map(parse_confirm_provider_type)
-                .transpose()?;
+            let provider_type =
+                self.resolve_real_confirm_provider(request.provider_type.as_deref())?;
             return self.persist_real_provider_execution(
                 &store,
                 &state,
@@ -227,8 +258,41 @@ impl WebRuntime {
             &store,
             request.checkpoint_id,
             request.prompt,
-            request.provider_type.as_deref().unwrap_or("codex"),
+            &self.resolve_fake_confirm_provider(request.provider_type.as_deref())?,
         )
+    }
+
+    fn resolve_real_confirm_provider(
+        &self,
+        provider_type: Option<&str>,
+    ) -> Result<Option<ProviderType>, TaskRunError> {
+        if !self.enforce_real_provider_availability {
+            return provider_type.map(parse_confirm_provider_type).transpose();
+        }
+        host_real_workflow_ready()?;
+        let is_available = |provider: &ProviderType| (self.provider_availability)(provider);
+        match provider_type {
+            Some(provider_type) => Ok(Some(
+                resolve_runtime_provider_type(provider_type, is_available)?.provider,
+            )),
+            None => Ok(Some(
+                resolve_default_runtime_provider_type(is_available)?.provider,
+            )),
+        }
+    }
+
+    fn resolve_fake_confirm_provider(
+        &self,
+        provider_type: Option<&str>,
+    ) -> Result<String, TaskRunError> {
+        if let Some(provider_type) = provider_type {
+            return parse_confirm_provider_type(provider_type)
+                .map(|provider| provider_type_key(&provider).to_string());
+        }
+        let selected = resolve_default_runtime_provider_type(|provider| {
+            (self.provider_availability)(provider)
+        })?;
+        Ok(provider_type_key(&selected.provider).to_string())
     }
 
     pub fn prepare_provider_input(

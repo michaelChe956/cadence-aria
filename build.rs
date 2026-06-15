@@ -1,6 +1,10 @@
 use std::path::Path;
+use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn main() {
+    emit_build_fingerprint();
+
     let dist = Path::new("web/dist");
     let index = dist.join("index.html");
 
@@ -22,5 +26,38 @@ fn main() {
         .unwrap_or(false);
     if !has_assets {
         panic!("web/dist 为空目录——请重新运行 pnpm -C web build 生成完整前端产物。");
+    }
+}
+
+fn emit_build_fingerprint() {
+    println!("cargo:rerun-if-changed=.git/HEAD");
+    if let Some(git_sha) = git_output(&["rev-parse", "--short=12", "HEAD"]) {
+        println!("cargo:rustc-env=ARIA_GIT_SHA={git_sha}");
+    } else {
+        println!("cargo:rustc-env=ARIA_GIT_SHA=unknown");
+    }
+    if let Some(branch) = git_output(&["branch", "--show-current"]) {
+        println!("cargo:rustc-env=ARIA_GIT_BRANCH={branch}");
+    } else {
+        println!("cargo:rustc-env=ARIA_GIT_BRANCH=unknown");
+    }
+    let built_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+    println!("cargo:rustc-env=ARIA_BUILT_AT_UNIX={built_at}");
+}
+
+fn git_output(args: &[&str]) -> Option<String> {
+    let output = Command::new("git").args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8(output.stdout).ok()?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
     }
 }

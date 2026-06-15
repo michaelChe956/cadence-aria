@@ -37,6 +37,32 @@ describe("chat workspace entries", () => {
     expect(screen.getByText("支持手机号登录。")).toBeInTheDocument();
   });
 
+  it("labels tester and analyst provider stream entries by role", () => {
+    render(
+      <ProviderStreamEntry
+        entry={makeEntry({
+          id: "tester-stream",
+          type: "provider_stream",
+          role: "tester",
+          content: "测试计划",
+        })}
+      />,
+    );
+    expect(screen.getByText("Tester")).toBeInTheDocument();
+
+    render(
+      <ProviderStreamEntry
+        entry={makeEntry({
+          id: "analyst-stream",
+          type: "provider_stream",
+          role: "analyst",
+          content: "路由判断",
+        })}
+      />,
+    );
+    expect(screen.getByText("Analyst")).toBeInTheDocument();
+  });
+
   it("renders provider stream content with escaped and single newlines as readable blocks", () => {
     const entry = makeEntry({
       type: "provider_stream",
@@ -74,6 +100,118 @@ describe("chat workspace entries", () => {
       "href",
       "https://example.com/design",
     );
+  });
+
+  it("renders tester plan summaries as readable markdown", () => {
+    render(
+      <ProviderStreamEntry
+        entry={makeEntry({
+          id: "tester-plan",
+          type: "provider_stream",
+          role: "tester",
+          content:
+            "## Tester 测试计划\n\nunit plan\n\n### 步骤\n- unit · Unit · required · low\n  - 证据预期：unit evidence",
+          node_id: "coding_node_0003",
+          metadata: {
+            phase: "test_plan",
+            role_run_id: "coding_role_run_0001",
+          },
+        })}
+      />,
+    );
+
+    expect(screen.getByRole("heading", { name: "Tester 测试计划" })).toBeInTheDocument();
+    expect(screen.getByText(/unit plan/)).toBeInTheDocument();
+    expect(screen.getByText(/证据预期/)).toBeInTheDocument();
+  });
+
+  it("formats raw tester TestPlan JSON streams instead of showing escaped JSON", () => {
+    const testPlanJson = JSON.stringify({
+      summary: "覆盖 work item 的 provider 门禁变更",
+      context_warnings: [],
+      assumptions: [],
+      steps: [
+        {
+          id: "step_001_gate",
+          title: "验证 Provider 门禁",
+          intent: "检查不可用 provider 不会被静默默认使用",
+          required: true,
+          tool: "run_command",
+          risk_level: "high",
+          command_or_tool_input: { command: "cargo test --locked --lib provider_gate" },
+          evidence_expectation: "provider_unavailable / provider_fallback 契约稳定",
+          related_requirements: ["REQ-014"],
+          related_design_constraints: ["DEC-014"],
+          related_work_item_tasks: ["TASK-007"],
+        },
+      ],
+    });
+
+    const { container } = render(
+      <ProviderStreamEntry
+        entry={makeEntry({
+          id: "tester-raw-json",
+          type: "provider_stream",
+          role: "tester",
+          content: testPlanJson,
+          metadata: {
+            phase: "plan_tests",
+          },
+        })}
+      />,
+    );
+
+    expect(screen.getByText("Tester 测试计划")).toBeInTheDocument();
+    expect(screen.getByText(/覆盖 work item 的 provider 门禁变更/)).toBeInTheDocument();
+    expect(screen.getByText(/step_001_gate/)).toBeInTheDocument();
+    expect(screen.getByText(/REQ-014/)).toBeInTheDocument();
+    expect(screen.getByText(/TASK-007/)).toBeInTheDocument();
+    expect(container.textContent).not.toContain("&quot;");
+    expect(container.textContent).not.toContain('"summary"');
+  });
+
+  it("formats HTML entity escaped tester TestPlan JSON streams", () => {
+    const testPlanJson = JSON.stringify({
+      summary: "针对本次 diff 生成后端 Provider 依赖自检验证计划",
+      context_warnings: ["context_truncated"],
+      assumptions: ["当前阶段仅生成 TestPlan，不直接执行命令。"],
+      steps: [
+        {
+          id: "step_001_rules_context",
+          title: "读取仓库验证规则",
+          intent: "确认本 worktree 的语言、TDD、Rust 构建测试命令和禁止项。",
+          required: true,
+          tool: "read_file",
+          risk_level: "low",
+          command_or_tool_input: { paths: ["CLAUDE.md"] },
+          evidence_expectation: "读取到规则文件内容。",
+          related_requirements: ["REQ-provider-gate"],
+          related_design_constraints: ["DEC-provider-gate"],
+          related_work_item_tasks: ["TASK-007"],
+        },
+      ],
+    }).replaceAll('"', "&quot;");
+
+    const { container } = render(
+      <ProviderStreamEntry
+        entry={makeEntry({
+          id: "tester-entity-json",
+          type: "provider_stream",
+          role: "tester",
+          content: testPlanJson,
+          metadata: {
+            phase: "plan_tests",
+          },
+        })}
+      />,
+    );
+
+    expect(screen.getByText("Tester 测试计划")).toBeInTheDocument();
+    expect(screen.getByText(/针对本次 diff 生成后端 Provider 依赖自检验证计划/)).toBeInTheDocument();
+    expect(screen.getByText(/step_001_rules_context/)).toBeInTheDocument();
+    expect(screen.getByText(/TASK-007/)).toBeInTheDocument();
+    expect(container.textContent).not.toContain("&quot;");
+    expect(container.textContent).not.toContain('"summary"');
   });
 
   it("hides reviewer trailing JSON contract from provider stream bubbles", () => {
@@ -246,6 +384,33 @@ describe("chat workspace entries", () => {
 
     expect(screen.getByText("需要人工输入")).toBeInTheDocument();
     expect(screen.getByText("n 的输入范围是多少？")).toBeInTheDocument();
+  });
+
+  it("renders analyst routing decisions with parse diagnostics", () => {
+    render(
+      <ChatEntryRenderer
+        entry={makeEntry({
+          type: "analyst_verdict",
+          role: "analyst",
+          content: "Analyst 输出不是有效 JSON，已转人工确认。",
+          metadata: {
+            verdict: "needs_human_input",
+            structured_verdict: "human_required",
+            next_stage: "human_gate",
+            reason: "Analyst 输出不是有效 JSON，已转人工确认。",
+            evidence_refs: ["testing_report_0001.json"],
+            raw_provider_output_refs: ["provider-raw/rework/analyst_decision_0001.txt"],
+            parse_error: "key must be a string at line 1 column 2",
+          },
+        })}
+      />,
+    );
+
+    const entry = screen.getByTestId("analyst-verdict-entry");
+    expect(entry).toHaveTextContent("human_required");
+    expect(entry).toHaveTextContent("human_gate");
+    expect(entry).toHaveTextContent("key must be a string at line 1 column 2");
+    expect(entry).toHaveTextContent("provider-raw/rework/analyst_decision_0001.txt");
   });
 
   it("dispatches entries through the renderer", () => {

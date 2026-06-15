@@ -239,6 +239,8 @@ pub async fn run_all_tests(
     Ok(TestingReport {
         id: "testing_report_0001".to_string(),
         attempt_id: attempt_id.to_string(),
+        role_run_id: None,
+        run_no: None,
         commands,
         overall_status,
         provider_claim: None,

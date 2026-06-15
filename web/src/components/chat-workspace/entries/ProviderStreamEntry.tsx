@@ -4,17 +4,33 @@ import type { ChatEntry } from "../../../state/chat-entries";
 import { ChatEntryContainer } from "../ChatEntryContainer";
 
 export function ProviderStreamEntry({ entry }: { entry: ChatEntry }) {
-  const content =
-    entry.role === "reviewer" ? stripTrailingReviewJsonContract(entry.content) : entry.content;
+  const content = normalizeProviderStreamEntryContent(entry);
   return (
     <ChatEntryContainer
-      role={entry.role === "reviewer" ? "reviewer" : "author"}
+      role={entry.role}
       title={entryTitle(entry)}
     >
       <MarkdownContent content={content} />
     </ChatEntryContainer>
   );
 }
+
+type TesterPlanStep = {
+  id?: unknown;
+  title?: unknown;
+  required?: unknown;
+  risk_level?: unknown;
+  evidence_expectation?: unknown;
+  related_requirements?: unknown;
+  related_design_constraints?: unknown;
+  related_work_item_tasks?: unknown;
+};
+
+type TesterPlanPayload = {
+  summary?: unknown;
+  assumptions?: unknown;
+  steps?: unknown;
+};
 
 const PROVIDER_LABELS: Record<string, string> = {
   claude_code: "Claude Code",
@@ -26,10 +42,22 @@ const LARGE_MARKDOWN_COLLAPSE_CHARS = 80_000;
 const LARGE_MARKDOWN_PREVIEW_CHARS = 8_000;
 
 function entryTitle(entry: ChatEntry) {
-  const base = entry.role === "reviewer" ? "审核者" : "作者";
+  const base = ROLE_LABELS[entry.role] ?? entry.role;
   const provider = metadataProvider(entry.metadata);
   return provider ? `${base} · ${providerLabel(provider)}` : base;
 }
+
+const ROLE_LABELS: Record<string, string> = {
+  user: "用户",
+  author: "作者",
+  coder: "Coder",
+  tester: "Tester",
+  analyst: "Analyst",
+  reviewer: "审核者",
+  code_reviewer: "Code Reviewer",
+  internal_reviewer: "Internal Reviewer",
+  system: "系统",
+};
 
 function metadataProvider(metadata: ChatEntry["metadata"]) {
   const provider = metadata?.provider ?? metadata?.agent;
@@ -387,6 +415,112 @@ function normalizeProviderContent(content: string) {
     .join("\n");
 }
 
+function normalizeEntryContent(entry: ChatEntry) {
+  if (entry.role === "tester") {
+    const formattedPlan = formatRawTesterPlanJson(entry.content, entry.metadata);
+    if (formattedPlan) {
+      return formattedPlan;
+    }
+  }
+  return entry.content;
+}
+
+function formatRawTesterPlanJson(
+  content: string,
+  metadata: ChatEntry["metadata"],
+): string | null {
+  const phase = typeof metadata?.phase === "string" ? metadata.phase : "";
+  if (phase && !["plan_tests", "test_plan"].includes(phase)) {
+    return null;
+  }
+
+  let payload: TesterPlanPayload;
+  try {
+    const parsed = JSON.parse(decodeJsonHtmlEntities(content.trim()));
+    if (!isRecord(parsed)) {
+      return null;
+    }
+    payload = parsed;
+  } catch {
+    return null;
+  }
+
+  if (typeof payload.summary !== "string" || !Array.isArray(payload.steps)) {
+    return null;
+  }
+
+  const lines = ["## Tester 测试计划", "", payload.summary.trim(), ""];
+  if (Array.isArray(payload.assumptions) && payload.assumptions.length > 0) {
+    lines.push("### 假设");
+    for (const assumption of payload.assumptions) {
+      if (typeof assumption === "string" && assumption.trim()) {
+        lines.push(`- ${assumption.trim()}`);
+      }
+    }
+    lines.push("");
+  }
+
+  lines.push("### 步骤");
+  for (const rawStep of payload.steps) {
+    if (!isRecord(rawStep)) {
+      continue;
+    }
+    const step = rawStep as TesterPlanStep;
+    const id = stringValue(step.id) ?? "unnamed_step";
+    const title = stringValue(step.title) ?? "未命名步骤";
+    const required = step.required === false ? "optional" : "required";
+    const risk = stringValue(step.risk_level) ?? "medium";
+    lines.push(`- ${id} · ${title} · ${required} · ${risk}`);
+
+    const evidence = stringValue(step.evidence_expectation);
+    if (evidence) {
+      lines.push(`  - 证据预期：${evidence}`);
+    }
+
+    const traceRefs = [
+      ...stringArray(step.related_requirements),
+      ...stringArray(step.related_design_constraints),
+      ...stringArray(step.related_work_item_tasks),
+    ];
+    if (traceRefs.length > 0) {
+      lines.push(`  - 追踪：${traceRefs.join(", ")}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+function decodeJsonHtmlEntities(content: string) {
+  if (!content.includes("&")) {
+    return content;
+  }
+
+  return content
+    .replace(/&quot;/g, '"')
+    .replace(/&#34;/g, '"')
+    .replace(/&#x22;/gi, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&#39;/g, "'")
+    .replace(/&#x27;/gi, "'")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function stringValue(value: unknown) {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+function stringArray(value: unknown) {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+}
+
 function stripTrailingReviewJsonContract(content: string) {
   const match = content.match(/\n?```json\s*([\s\S]*?)\s*```\s*$/u);
   if (!match || match.index === undefined) {
@@ -405,4 +539,10 @@ function stripTrailingReviewJsonContract(content: string) {
   return content;
 }
 
-export { MarkdownContent };
+function normalizeProviderStreamEntryContent(entry: ChatEntry) {
+  return entry.role === "reviewer" || entry.role === "code_reviewer"
+    ? stripTrailingReviewJsonContract(entry.content)
+    : normalizeEntryContent(entry);
+}
+
+export { MarkdownContent, normalizeProviderStreamEntryContent };

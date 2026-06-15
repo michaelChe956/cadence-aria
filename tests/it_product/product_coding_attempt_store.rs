@@ -1,11 +1,16 @@
 use std::path::PathBuf;
 
 use cadence_aria::product::app_paths::ProductAppPaths;
-use cadence_aria::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
+use cadence_aria::product::coding_attempt_store::{
+    CodingAttemptStore, CreateChoiceGateInput, CreateCodingAttemptInput,
+};
 use cadence_aria::product::coding_models::{
-    CodeReviewReport, CodingAgentRole, CodingAttemptStatus, CodingContextNote,
-    CodingExecutionStage, CodingProviderRole, CodingReworkInstruction, CodingRolePermissionModes,
-    CodingRoleProviderConfigSnapshot, CodingStageGateStatus, CodingTimelineNode,
+    AnalystDecisionNextStage, AnalystDecisionRecord, AnalystDecisionVerdict,
+    AnalystReworkInstructions, CodeReviewReport, CodingAgentRole, CodingAttemptStatus,
+    CodingChatEntry, CodingChoiceGateStatus, CodingChoiceOption, CodingContextNote,
+    CodingEntryType, CodingExecutionStage, CodingProviderRole, CodingReworkInstruction,
+    CodingRolePermissionModes, CodingRoleProviderConfigSnapshot, CodingRoleRunEventType,
+    CodingRoleRunStatus, CodingRoleRunTrigger, CodingStageGateStatus, CodingTimelineNode,
     CodingTimelineNodeStatus, FindingSeverity, InternalPrReview, PushStatus, RemoteKind,
     ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict, TestCommand, TestCommandStatus,
     TestingOverallStatus, TestingReport,
@@ -252,6 +257,70 @@ fn store_persists_context_notes_in_attempt_scope() {
 }
 
 #[test]
+fn store_lists_chat_entries_by_created_at_not_filename() {
+    let root = tempdir().expect("tempdir");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(create_input("work_item_0001"))
+        .expect("create attempt");
+
+    let earlier = CodingChatEntry {
+        id: "coding_node_0019_analyst_verdict".to_string(),
+        attempt_id: attempt.id.clone(),
+        node_id: Some("coding_node_0019".to_string()),
+        role: CodingAgentRole::Author,
+        entry_type: CodingEntryType::UserMessage,
+        content: Some("Analyst human gate".to_string()),
+        metadata: None,
+        created_at: "2026-06-14T15:02:43Z".to_string(),
+    };
+    let later_context_note = CodingChatEntry {
+        id: "coding_chat_entry_0003".to_string(),
+        attempt_id: attempt.id.clone(),
+        node_id: Some("coding_node_0019".to_string()),
+        role: CodingAgentRole::Author,
+        entry_type: CodingEntryType::UserMessage,
+        content: Some("请重试 Analyst，并严格只返回系统支持的 JSON schema。".to_string()),
+        metadata: Some(serde_json::json!({
+            "context_note_id": "coding_context_note_0003",
+        })),
+        created_at: "2026-06-14T15:48:40Z".to_string(),
+    };
+    let latest = CodingChatEntry {
+        id: "coding_node_0020_analyst_verdict".to_string(),
+        attempt_id: attempt.id.clone(),
+        node_id: Some("coding_node_0020".to_string()),
+        role: CodingAgentRole::Author,
+        entry_type: CodingEntryType::UserMessage,
+        content: Some("Analyst retry".to_string()),
+        metadata: None,
+        created_at: "2026-06-14T16:00:00Z".to_string(),
+    };
+
+    store
+        .save_chat_entry(&later_context_note)
+        .expect("save later context note");
+    store.save_chat_entry(&latest).expect("save latest");
+    store.save_chat_entry(&earlier).expect("save earlier");
+
+    let ids = store
+        .list_chat_entries("project_0001", "issue_0001", &attempt.id)
+        .expect("list chat entries")
+        .into_iter()
+        .map(|entry| entry.id)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        ids,
+        vec![
+            "coding_node_0019_analyst_verdict",
+            "coding_chat_entry_0003",
+            "coding_node_0020_analyst_verdict",
+        ]
+    );
+}
+
+#[test]
 fn store_lists_unconsumed_context_notes_and_marks_rework_round() {
     let root = tempdir().expect("tempdir");
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
@@ -395,6 +464,135 @@ fn saves_reads_and_consumes_latest_coding_rework_instruction() {
 }
 
 #[test]
+fn saves_reads_and_lists_latest_analyst_decision() {
+    let root = tempdir().expect("tempdir");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(create_input("work_item_0001"))
+        .expect("create attempt");
+    let first = AnalystDecisionRecord {
+        id: "analyst_decision_0001".to_string(),
+        attempt_id: attempt.id.clone(),
+        source_stage: CodingExecutionStage::Testing,
+        rework_round: 1,
+        verdict: AnalystDecisionVerdict::NeedsFix,
+        next_stage: AnalystDecisionNextStage::Coding,
+        reason: "测试失败，需要返修".to_string(),
+        evidence_refs: vec!["testing_report_0001.json".to_string()],
+        raw_provider_output_refs: Vec::new(),
+        rework_instructions: Some(AnalystReworkInstructions {
+            summary: "修复 failing test".to_string(),
+            required_changes: vec!["补充边界输入处理".to_string()],
+            verification_expectations: vec!["cargo test --locked --test it_product".to_string()],
+        }),
+        human_gate: None,
+        created_at: "2026-06-12T00:00:00Z".to_string(),
+        parse_error: None,
+        role_run_id: None,
+        run_no: None,
+    };
+    let second = AnalystDecisionRecord {
+        id: "analyst_decision_0002".to_string(),
+        attempt_id: attempt.id.clone(),
+        source_stage: CodingExecutionStage::CodeReview,
+        rework_round: 2,
+        verdict: AnalystDecisionVerdict::Proceed,
+        next_stage: AnalystDecisionNextStage::ReviewRequest,
+        reason: "审查通过，可以创建 review request".to_string(),
+        evidence_refs: vec!["code_review_0001.json".to_string()],
+        raw_provider_output_refs: vec!["provider-raw/code_review/code_review_0001.txt".to_string()],
+        rework_instructions: None,
+        human_gate: None,
+        created_at: "2026-06-12T00:01:00Z".to_string(),
+        parse_error: None,
+        role_run_id: None,
+        run_no: None,
+    };
+
+    store
+        .save_analyst_decision(&first)
+        .expect("save first decision");
+    store
+        .save_analyst_decision(&second)
+        .expect("save second decision");
+
+    let decisions = store
+        .list_analyst_decisions("project_0001", "issue_0001", &attempt.id)
+        .expect("list decisions");
+    assert_eq!(decisions, vec![first.clone(), second.clone()]);
+    assert_eq!(
+        store
+            .latest_analyst_decision("project_0001", "issue_0001", &attempt.id)
+            .expect("latest decision"),
+        Some(second)
+    );
+}
+
+#[test]
+fn saves_reads_and_supersedes_coding_role_runs() {
+    let root = tempfile::tempdir().expect("root");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(create_input("work_item_0001"))
+        .expect("create attempt");
+
+    let first = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::Testing,
+            CodingProviderRole::Tester,
+            CodingRoleRunTrigger::Initial,
+            Some("coding_node_0003".to_string()),
+        )
+        .expect("first role run");
+    assert_eq!(first.id, "coding_role_run_0001");
+    assert_eq!(first.run_no, 1);
+    assert_eq!(first.status, CodingRoleRunStatus::Running);
+    assert_eq!(first.role, CodingProviderRole::Tester);
+
+    let second = store
+        .supersede_latest_role_run_and_create(
+            &attempt,
+            CodingExecutionStage::Testing,
+            CodingProviderRole::Tester,
+            CodingRoleRunTrigger::RetryTestPlan,
+            Some("coding_node_0004".to_string()),
+            Some("plan_tests_timeout".to_string()),
+        )
+        .expect("second role run");
+
+    assert_eq!(second.id, "coding_role_run_0002");
+    assert_eq!(second.run_no, 2);
+    assert_eq!(
+        second.supersedes_run_id.as_deref(),
+        Some("coding_role_run_0001")
+    );
+
+    let runs = store
+        .list_role_runs("project_0001", "issue_0001", &attempt.id)
+        .expect("role runs");
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[0].status, CodingRoleRunStatus::Superseded);
+    assert_eq!(
+        runs[0].superseded_by_run_id.as_deref(),
+        Some("coding_role_run_0002")
+    );
+    assert_eq!(runs[1].status, CodingRoleRunStatus::Running);
+
+    let latest = store
+        .latest_role_run(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingExecutionStage::Testing,
+            CodingProviderRole::Tester,
+        )
+        .expect("latest")
+        .expect("latest role run");
+    assert_eq!(latest.id, "coding_role_run_0002");
+}
+
+#[test]
 fn store_persists_role_provider_config_snapshot_in_attempt_scope() {
     let root = tempdir().expect("tempdir");
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
@@ -492,6 +690,76 @@ fn store_persists_and_resolves_stage_gates_in_attempt_scope() {
 }
 
 #[test]
+fn store_persists_and_resolves_choice_gates_in_attempt_scope() {
+    let root = tempdir().expect("tempdir");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(create_input("work_item_0001"))
+        .expect("create attempt");
+
+    let gate = store
+        .create_choice_gate(CreateChoiceGateInput {
+            attempt_id: attempt.id.clone(),
+            choice_id: "choice_0001".to_string(),
+            stage: CodingExecutionStage::Coding,
+            node_id: Some("coding_node_0001".to_string()),
+            role: CodingProviderRole::Coder,
+            provider: ProviderName::Codex,
+            source: "request_user_input".to_string(),
+            prompt: "请选择实现范围".to_string(),
+            options: vec![CodingChoiceOption {
+                id: "backend_first".to_string(),
+                label: "先做后端".to_string(),
+                description: Some("TASK-001 到 TASK-009".to_string()),
+            }],
+            allow_multiple: false,
+            allow_free_text: true,
+        })
+        .expect("create choice gate");
+
+    assert_eq!(gate.gate_id, "coding_choice_gate_0001");
+    assert_eq!(gate.choice_id, "choice_0001");
+    assert_eq!(gate.attempt_id, attempt.id);
+    assert_eq!(gate.status, CodingChoiceGateStatus::Open);
+    assert_eq!(gate.provider, ProviderName::Codex);
+    assert_eq!(gate.source, "request_user_input");
+    assert_eq!(
+        store
+            .list_open_choice_gates("project_0001", "issue_0001", &attempt.id)
+            .expect("open choice gates")
+            .len(),
+        1
+    );
+
+    let resolved = store
+        .resolve_choice_gate(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            "choice_0001",
+            vec!["backend_first".to_string()],
+            Some("先控制范围".to_string()),
+        )
+        .expect("resolve choice gate");
+
+    assert_eq!(resolved.status, CodingChoiceGateStatus::Resolved);
+    assert_eq!(
+        resolved
+            .response
+            .as_ref()
+            .expect("response")
+            .selected_option_ids,
+        vec!["backend_first"]
+    );
+    assert!(
+        store
+            .list_open_choice_gates("project_0001", "issue_0001", &attempt.id)
+            .expect("open choice gates")
+            .is_empty()
+    );
+}
+
+#[test]
 fn status_and_stage_transitions_reject_invalid_backwards_moves() {
     let root = tempdir().expect("tempdir");
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
@@ -561,6 +829,8 @@ fn sample_testing_report(attempt_id: &str) -> TestingReport {
     TestingReport {
         id: "testing_report_0001".to_string(),
         attempt_id: attempt_id.to_string(),
+        role_run_id: None,
+        run_no: None,
         commands: vec![TestCommand {
             command: vec!["cargo".to_string(), "test".to_string()],
             cwd: PathBuf::from("/tmp/worktree"),
@@ -599,6 +869,8 @@ fn sample_code_review_report(attempt_id: &str) -> CodeReviewReport {
         summary: "通过".to_string(),
         created_at: "2026-05-23T00:01:00Z".to_string(),
         raw_provider_output_ref: None,
+        role_run_id: None,
+        run_no: None,
     }
 }
 
@@ -635,6 +907,8 @@ fn sample_internal_review(attempt_id: &str, review_request_id: &str) -> Internal
         summary: "最终审查通过".to_string(),
         created_at: "2026-05-23T00:03:00Z".to_string(),
         raw_provider_output_ref: None,
+        role_run_id: None,
+        run_no: None,
     }
 }
 
@@ -666,4 +940,510 @@ fn sample_node(attempt_id: &str) -> CodingTimelineNode {
         completed_at: None,
         artifact_refs: vec![],
     }
+}
+
+#[test]
+fn updates_coding_role_run_refs_without_duplicates() {
+    let root = tempfile::tempdir().expect("root");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: None,
+            ..create_input("work_item_0001")
+        })
+        .expect("create attempt");
+    let run = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::Rework,
+            CodingProviderRole::Analyst,
+            CodingRoleRunTrigger::Initial,
+            None,
+        )
+        .expect("role run");
+
+    let updated = store
+        .update_role_run_refs(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            &run.id,
+            vec!["provider-raw/rework/analyst_decision_0001.txt".to_string()],
+            vec!["provider-raw/rework/analyst_evidence_0001.txt".to_string()],
+        )
+        .expect("update refs");
+    assert_eq!(updated.raw_provider_output_refs.len(), 1);
+    assert_eq!(updated.artifact_refs.len(), 1);
+
+    let updated = store
+        .update_role_run_refs(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            &run.id,
+            vec!["provider-raw/rework/analyst_decision_0001.txt".to_string()],
+            vec!["provider-raw/rework/analyst_evidence_0001.txt".to_string()],
+        )
+        .expect("update refs again");
+    assert_eq!(updated.raw_provider_output_refs.len(), 1);
+    assert_eq!(updated.artifact_refs.len(), 1);
+}
+
+#[test]
+fn appends_and_lists_coding_role_run_events_in_sequence() {
+    let root = tempdir().expect("tempdir");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(create_input("work_item_0001"))
+        .expect("create attempt");
+    let run = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::Testing,
+            CodingProviderRole::Tester,
+            CodingRoleRunTrigger::Initial,
+            Some("coding_node_0003".to_string()),
+        )
+        .expect("role run");
+
+    let first = store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::ProviderPrompt,
+            serde_json::json!({
+                "mode": "plan_tests",
+                "prompt": "plan tests as JSON"
+            }),
+        )
+        .expect("append first event");
+    let second = store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::TextDelta,
+            serde_json::json!({
+                "content": "No tasks found"
+            }),
+        )
+        .expect("append second event");
+
+    assert_eq!(first.sequence, 1);
+    assert_eq!(second.sequence, 2);
+    assert_eq!(first.attempt_id, attempt.id);
+    assert_eq!(first.role_run_id, run.id);
+    assert_eq!(first.node_id.as_deref(), Some("coding_node_0003"));
+    assert_eq!(first.stage, CodingExecutionStage::Testing);
+    assert_eq!(first.role, CodingProviderRole::Tester);
+    assert_eq!(second.node_id.as_deref(), Some("coding_node_0003"));
+
+    let events = store
+        .list_role_run_events("project_0001", "issue_0001", &attempt.id, &run.id)
+        .expect("events");
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].attempt_id, attempt.id);
+    assert_eq!(events[0].role_run_id, run.id);
+    assert_eq!(events[0].node_id.as_deref(), Some("coding_node_0003"));
+    assert_eq!(events[0].stage, CodingExecutionStage::Testing);
+    assert_eq!(events[0].role, CodingProviderRole::Tester);
+    assert_eq!(events[0].event_type, CodingRoleRunEventType::ProviderPrompt);
+    assert_eq!(events[1].event_type, CodingRoleRunEventType::TextDelta);
+    assert_eq!(events[1].payload["content"], "No tasks found");
+}
+
+#[test]
+fn role_run_event_large_string_payload_is_moved_to_artifact() {
+    let root = tempdir().expect("tempdir");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(create_input("work_item_0001"))
+        .expect("create attempt");
+    let run = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::CodeReview,
+            CodingProviderRole::CodeReviewer,
+            CodingRoleRunTrigger::Initial,
+            Some("coding_node_0007".to_string()),
+        )
+        .expect("role run");
+    let long_prompt = "review this diff\n".repeat(2_000);
+
+    let event = store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::ProviderPrompt,
+            serde_json::json!({
+                "mode": "full_conversation",
+                "prompt": long_prompt
+            }),
+        )
+        .expect("append event");
+
+    assert!(event.truncated);
+    assert_eq!(
+        event.artifact_ref.as_deref(),
+        Some("artifacts/role-run-events/coding_role_run_0001/0001_prompt.txt")
+    );
+    assert_eq!(
+        event.payload["prompt"]["artifact_ref"],
+        "artifacts/role-run-events/coding_role_run_0001/0001_prompt.txt"
+    );
+    assert_eq!(event.payload["prompt"]["truncated"], true);
+    let preview = event.payload["prompt"]["preview"]
+        .as_str()
+        .expect("preview string");
+    assert!(preview.starts_with("review this diff"));
+    assert!(preview.len() <= 16_384);
+
+    let artifact = store
+        .read_attempt_artifact_text(&attempt.id, event.artifact_ref.as_deref().expect("ref"))
+        .expect("artifact text");
+    assert_eq!(artifact, long_prompt);
+}
+
+#[test]
+fn role_run_event_truncates_each_large_payload_field() {
+    let root = tempdir().expect("tempdir");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(create_input("work_item_0001"))
+        .expect("create attempt");
+    let run = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::Testing,
+            CodingProviderRole::Tester,
+            CodingRoleRunTrigger::Initial,
+            Some("coding_node_0011".to_string()),
+        )
+        .expect("role run");
+    let long_stdout = "stdout line\n".repeat(2_000);
+    let long_stderr = "stderr line\n".repeat(2_000);
+
+    let event = store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::ExecutionEvent,
+            serde_json::json!({
+                "command": "cargo test --locked",
+                "stdout": long_stdout,
+                "stderr": long_stderr
+            }),
+        )
+        .expect("append event");
+
+    assert!(event.truncated);
+    assert_eq!(
+        event.artifact_ref.as_deref(),
+        Some("artifacts/role-run-events/coding_role_run_0001/0001_stdout.txt")
+    );
+
+    let stdout_payload = event.payload["stdout"].as_object().expect("stdout object");
+    let stderr_payload = event.payload["stderr"].as_object().expect("stderr object");
+    assert!(
+        stdout_payload["preview"]
+            .as_str()
+            .expect("stdout preview")
+            .len()
+            <= 16_384
+    );
+    assert!(
+        stderr_payload["preview"]
+            .as_str()
+            .expect("stderr preview")
+            .len()
+            <= 16_384
+    );
+    assert_eq!(stdout_payload["truncated"], true);
+    assert_eq!(stderr_payload["truncated"], true);
+    let stdout_ref = stdout_payload["artifact_ref"]
+        .as_str()
+        .expect("stdout artifact ref");
+    let stderr_ref = stderr_payload["artifact_ref"]
+        .as_str()
+        .expect("stderr artifact ref");
+    assert_ne!(stdout_ref, stderr_ref);
+
+    let stdout_artifact = store
+        .read_attempt_artifact_text(&attempt.id, stdout_ref)
+        .expect("stdout artifact text");
+    let stderr_artifact = store
+        .read_attempt_artifact_text(&attempt.id, stderr_ref)
+        .expect("stderr artifact text");
+    assert_eq!(stdout_artifact, long_stdout);
+    assert_eq!(stderr_artifact, long_stderr);
+}
+
+#[test]
+fn role_run_retry_diagnostic_summary_compacts_events_and_refs() {
+    let root = tempdir().expect("tempdir");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(create_input("work_item_0001"))
+        .expect("create attempt");
+    let run = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::Testing,
+            CodingProviderRole::Tester,
+            CodingRoleRunTrigger::Initial,
+            Some("coding_node_0003".to_string()),
+        )
+        .expect("role run");
+    store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::ExecutionEvent,
+            serde_json::json!({
+                "title": "Task update",
+                "status": "running",
+                "detail": "No tasks found"
+            }),
+        )
+        .expect("event");
+    store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::Timeout,
+            serde_json::json!({
+                "reason_code": "plan_tests_timeout",
+                "message": "Tester provider timed out"
+            }),
+        )
+        .expect("timeout");
+    store
+        .update_role_run_refs(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            &run.id,
+            vec!["provider-raw/testing/plan_tests_0001.txt".to_string()],
+            vec!["artifacts/role-run-events/coding_role_run_0001/0001_output.txt".to_string()],
+        )
+        .expect("refs");
+    store
+        .update_role_run_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            &run.id,
+            CodingRoleRunStatus::Blocked,
+            Some("plan_tests_timeout".to_string()),
+        )
+        .expect("blocked");
+
+    let summary = store
+        .role_run_retry_diagnostic_summary("project_0001", "issue_0001", &attempt.id, &run.id)
+        .expect("summary")
+        .expect("summary text");
+
+    assert!(summary.contains("role_run_id: coding_role_run_0001"));
+    assert!(summary.contains("reason_code: plan_tests_timeout"));
+    assert!(summary.contains("terminal_event: timeout"));
+    assert!(summary.contains("Task update"));
+    assert!(summary.contains("No tasks found"));
+    assert!(summary.contains("provider-raw/testing/plan_tests_0001.txt"));
+    assert!(summary.contains("artifacts/role-run-events/coding_role_run_0001/0001_output.txt"));
+    assert!(
+        summary.len() < 8_000,
+        "retry diagnostic summary must stay prompt-safe"
+    );
+}
+
+#[test]
+fn role_run_retry_diagnostic_summary_keeps_recent_metadata_and_payload_refs() {
+    let root = tempdir().expect("tempdir");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(create_input("work_item_0001"))
+        .expect("create attempt");
+    let run = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::Testing,
+            CodingProviderRole::Tester,
+            CodingRoleRunTrigger::Initial,
+            Some("coding_node_0004".to_string()),
+        )
+        .expect("role run");
+
+    store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::ExecutionEvent,
+            serde_json::json!({
+                "title": "Old event",
+                "status": "running",
+                "detail": "Dropped old event"
+            }),
+        )
+        .expect("old event");
+    store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::TextDelta,
+            serde_json::json!({
+                "content": "DROPPED_TEXT_DELTA_BODY"
+            }),
+        )
+        .expect("old text delta");
+    store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::ExecutionEvent,
+            serde_json::json!({
+                "title": "Recent setup",
+                "status": "running",
+                "detail": "Preparing test run"
+            }),
+        )
+        .expect("recent setup");
+    store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::TextDelta,
+            serde_json::json!({
+                "content": "DO_NOT_INJECT_TEXT_DELTA_BODY"
+            }),
+        )
+        .expect("recent text delta");
+    store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::ExecutionEvent,
+            serde_json::json!({
+                "title": "Recent event 5",
+                "status": "running",
+                "detail": "Still running"
+            }),
+        )
+        .expect("recent event 5");
+    store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::ExecutionEvent,
+            serde_json::json!({
+                "title": "Recent event 6",
+                "status": "running",
+                "detail": "Almost done"
+            }),
+        )
+        .expect("recent event 6");
+    let long_stdout = "stdout line\n".repeat(2_000);
+    let long_stderr = "stderr line\n".repeat(2_000);
+    store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::ExecutionEvent,
+            serde_json::json!({
+                "title": "Cargo test",
+                "status": "failed",
+                "detail": "Captured command output",
+                "stdout": long_stdout,
+                "stderr": long_stderr
+            }),
+        )
+        .expect("captured output");
+    store
+        .update_role_run_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            &run.id,
+            CodingRoleRunStatus::Blocked,
+            Some("tests_failed".to_string()),
+        )
+        .expect("blocked");
+
+    let summary = store
+        .role_run_retry_diagnostic_summary("project_0001", "issue_0001", &attempt.id, &run.id)
+        .expect("summary")
+        .expect("summary text");
+
+    assert!(!summary.contains("DO_NOT_INJECT_TEXT_DELTA_BODY"));
+    assert!(!summary.contains("Dropped old event"));
+    assert!(summary.contains("artifacts/role-run-events/coding_role_run_0001/0007_stdout.txt"));
+    assert!(summary.contains("artifacts/role-run-events/coding_role_run_0001/0007_stderr.txt"));
+    assert!(
+        summary.len() <= 8_000,
+        "retry diagnostic summary must stay prompt-safe"
+    );
+}
+
+#[test]
+fn role_run_retry_diagnostic_summary_preserves_refs_when_inline_detail_is_long() {
+    let root = tempdir().expect("tempdir");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(create_input("work_item_0001"))
+        .expect("create attempt");
+    let run = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::Testing,
+            CodingProviderRole::Tester,
+            CodingRoleRunTrigger::Initial,
+            Some("coding_node_0005".to_string()),
+        )
+        .expect("role run");
+    let long_detail = format!("{}DETAIL_SHOULD_BE_TRUNCATED", "x".repeat(10_000));
+    store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::ExecutionEvent,
+            serde_json::json!({
+                "title": "Long diagnostic detail",
+                "status": "blocked",
+                "detail": long_detail
+            }),
+        )
+        .expect("event");
+    store
+        .update_role_run_refs(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            &run.id,
+            vec!["provider-raw/testing/long_detail_0001.txt".to_string()],
+            vec!["artifacts/role-run-events/coding_role_run_0001/0001_detail.txt".to_string()],
+        )
+        .expect("refs");
+    store
+        .update_role_run_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            &run.id,
+            CodingRoleRunStatus::Blocked,
+            Some("long_detail_blocked".to_string()),
+        )
+        .expect("blocked");
+
+    let summary = store
+        .role_run_retry_diagnostic_summary("project_0001", "issue_0001", &attempt.id, &run.id)
+        .expect("summary")
+        .expect("summary text");
+
+    assert!(summary.contains("Long diagnostic detail"));
+    assert!(summary.contains("reason_code: long_detail_blocked"));
+    assert!(summary.contains("provider-raw/testing/long_detail_0001.txt"));
+    assert!(summary.contains("artifacts/role-run-events/coding_role_run_0001/0001_detail.txt"));
+    assert!(!summary.contains("DETAIL_SHOULD_BE_TRUNCATED"));
+    assert!(
+        summary.len() <= 8_000,
+        "retry diagnostic summary must stay prompt-safe"
+    );
 }

@@ -192,6 +192,57 @@ async fn generate_endpoints_create_workspace_sessions_and_first_cards() {
 }
 
 #[tokio::test]
+async fn generate_story_specs_falls_back_from_default_codex_to_available_claude_code() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::with_provider_availability(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        |provider| matches!(provider, ProviderName::ClaudeCode),
+    ));
+
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects",
+        json!({"name":"Lifecycle","description":null}),
+    )
+    .await;
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/repositories",
+        json!({"name":"Repo","path":repo.path()}),
+    )
+    .await;
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues",
+        json!({"title":"登录会话过期","description":"描述","repository_id":"repository_0001"}),
+    )
+    .await;
+
+    let (status, story_response) = request_json(
+        app,
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/story-specs:generate",
+        json!({"title":"登录会话过期提示"}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        story_response["workspace_session"]["author_provider"],
+        "claude_code"
+    );
+    assert_eq!(
+        story_response["workspace_session"]["reviewer_provider"],
+        "claude_code"
+    );
+}
+
+#[tokio::test]
 async fn confirmed_story_and_design_can_generate_design_and_work_item_workspaces() {
     let root = tempdir().expect("root");
     let repo = git_repo();

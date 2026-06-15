@@ -115,3 +115,20 @@ pub fn validate_relative_id(value: &str) -> Result<(), ProductStoreError> {
 
     Ok(())
 }
+
+pub fn validate_relative_artifact_ref(value: &str) -> Result<(), ProductStoreError> {
+    let path = Path::new(value);
+    if value.is_empty()
+        || path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                Component::Prefix(_) | Component::RootDir | Component::ParentDir
+            )
+        })
+    {
+        return Err(ProductStoreError::PathEscape(value.to_string()));
+    }
+
+    Ok(())
+}

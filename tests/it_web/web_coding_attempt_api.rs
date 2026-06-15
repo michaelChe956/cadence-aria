@@ -5,12 +5,13 @@ use std::process::Command;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use cadence_aria::product::app_paths::ProductAppPaths;
-use cadence_aria::product::coding_attempt_store::CodingAttemptStore;
+use cadence_aria::product::coding_attempt_store::{CodingAttemptStore, CreateChoiceGateInput};
 use cadence_aria::product::coding_models::{
-    CodeReviewReport, CodingAgentRole, CodingExecutionAttempt, CodingExecutionStage,
-    CodingTimelineNode, CodingTimelineNodeStatus, FindingSeverity, InternalPrReview, PushStatus,
-    RemoteKind, ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict, TestCommand,
-    TestCommandStatus, TestingOverallStatus, TestingReport,
+    CodeReviewReport, CodingAgentRole, CodingChoiceOption, CodingExecutionAttempt,
+    CodingExecutionStage, CodingProviderRole, CodingTimelineNode, CodingTimelineNodeStatus,
+    FindingSeverity, InternalPrReview, PushStatus, RemoteKind, ReviewFinding, ReviewRequest,
+    ReviewRequestKind, ReviewVerdict, TestCommand, TestCommandStatus, TestingOverallStatus,
+    TestingReport,
 };
 use cadence_aria::product::models::ProviderName;
 use cadence_aria::web::app::build_web_router;
@@ -110,6 +111,47 @@ async fn creates_coding_attempt_with_confirmed_work_item_workspace_providers() {
 }
 
 #[tokio::test]
+async fn creates_coding_attempt_falls_back_from_unavailable_default_codex_to_claude_code() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::with_provider_availability(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        |provider| matches!(provider, ProviderName::ClaudeCode),
+    ));
+    bootstrap_confirmed_work_item_without_workspace_session(
+        app.clone(),
+        root.path(),
+        repo.path(),
+        "codex",
+    )
+    .await;
+
+    let (status, attempt) = request_json(
+        app,
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001/coding-attempts",
+        json!({}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(attempt["attempt_id"], "coding_attempt_0001");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let persisted = store
+        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("persisted attempt");
+    assert_eq!(
+        persisted.provider_config_snapshot.author,
+        ProviderName::ClaudeCode
+    );
+    assert_eq!(
+        persisted.provider_config_snapshot.reviewer,
+        Some(ProviderName::ClaudeCode)
+    );
+}
+
+#[tokio::test]
 async fn rejects_coding_attempt_when_work_item_plan_is_not_confirmed() {
     let root = tempdir().expect("root");
     let repo = git_repo();
@@ -174,6 +216,25 @@ async fn returns_coding_attempt_snapshot_with_persisted_execution_state() {
     store
         .save_timeline_node(sample_running_node(attempt_id))
         .expect("save running node");
+    store
+        .create_choice_gate(CreateChoiceGateInput {
+            attempt_id: attempt_id.to_string(),
+            choice_id: "choice_0001".to_string(),
+            stage: CodingExecutionStage::Coding,
+            node_id: Some("coding_node_0002".to_string()),
+            role: CodingProviderRole::Coder,
+            provider: ProviderName::Codex,
+            source: "request_user_input".to_string(),
+            prompt: "请选择实现范围".to_string(),
+            options: vec![CodingChoiceOption {
+                id: "backend_first".to_string(),
+                label: "先做后端".to_string(),
+                description: None,
+            }],
+            allow_multiple: false,
+            allow_free_text: true,
+        })
+        .expect("create choice gate");
 
     let (status, snapshot) = request_json(
         app,
@@ -200,6 +261,11 @@ async fn returns_coding_attempt_snapshot_with_persisted_execution_state() {
     assert_eq!(
         snapshot["internal_pr_review"]["summary"],
         internal_review.summary.as_str()
+    );
+    assert_eq!(snapshot["pending_choices"][0]["choice_id"], "choice_0001");
+    assert_eq!(
+        snapshot["pending_choices"][0]["source"],
+        "request_user_input"
     );
 }
 
@@ -597,6 +663,62 @@ async fn bootstrap_unconfirmed_work_item(app: axum::Router, repo_path: &std::pat
     assert_eq!(status, StatusCode::OK);
 }
 
+async fn bootstrap_confirmed_work_item_without_workspace_session(
+    app: axum::Router,
+    root_path: &std::path::Path,
+    repo_path: &std::path::Path,
+    default_provider_mode: &str,
+) {
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects",
+        json!({"name":"Coding","description":null}),
+    )
+    .await;
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/repositories",
+        json!({
+            "name":"Repo",
+            "path":repo_path,
+            "default_provider_mode": default_provider_mode
+        }),
+    )
+    .await;
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues",
+        json!({"title":"爬楼梯","description":"实现 O(n) 算法","repository_id":"repository_0001"}),
+    )
+    .await;
+
+    let app_paths = ProductAppPaths::new(root_path.join(".aria"));
+    let lifecycle = cadence_aria::product::lifecycle_store::LifecycleStore::new(app_paths);
+    lifecycle
+        .create_work_item(
+            cadence_aria::product::lifecycle_store::CreateWorkItemInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                repository_id: "repository_0001".to_string(),
+                story_spec_ids: Vec::new(),
+                design_spec_ids: Vec::new(),
+                title: "实现爬楼梯".to_string(),
+            },
+        )
+        .expect("create work item");
+    lifecycle
+        .update_work_item_plan_status(
+            "project_0001",
+            "issue_0001",
+            "work_item_0001",
+            cadence_aria::product::models::WorkItemPlanStatus::Confirmed,
+        )
+        .expect("confirm work item");
+}
+
 async fn bootstrap_story_and_design(app: axum::Router, repo_path: &std::path::Path) {
     request_json(
         app.clone(),
@@ -744,6 +866,8 @@ fn sample_testing_report(attempt_id: &str) -> TestingReport {
     TestingReport {
         id: "testing_report_0001".to_string(),
         attempt_id: attempt_id.to_string(),
+        role_run_id: None,
+        run_no: None,
         commands: vec![TestCommand {
             command: vec!["cargo".to_string(), "test".to_string()],
             cwd: PathBuf::from("/tmp/worktree"),
@@ -782,6 +906,8 @@ fn sample_code_review_report(attempt_id: &str) -> CodeReviewReport {
         summary: "基础 code review 通过".to_string(),
         created_at: "2026-05-23T00:01:00Z".to_string(),
         raw_provider_output_ref: None,
+        role_run_id: None,
+        run_no: None,
     }
 }
 
@@ -818,6 +944,8 @@ fn sample_internal_review(attempt_id: &str, review_request_id: &str) -> Internal
         summary: "最终审查通过".to_string(),
         created_at: "2026-05-23T00:03:00Z".to_string(),
         raw_provider_output_ref: None,
+        role_run_id: None,
+        run_no: None,
     }
 }
 

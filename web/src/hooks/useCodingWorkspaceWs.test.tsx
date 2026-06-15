@@ -81,6 +81,7 @@ function codingSessionState(overrides: Record<string, unknown> = {}) {
     review_request: null,
     internal_pr_review: null,
     pending_gates: [],
+    pending_choices: [],
     ...overrides,
   };
 }
@@ -200,6 +201,7 @@ describe("useCodingWorkspaceWs", () => {
         review_request: null,
         internal_pr_review: null,
         pending_gates: [],
+        pending_choices: [],
       });
       harness.ws.receive({
         type: "coding_timeline_node_created",
@@ -241,6 +243,43 @@ describe("useCodingWorkspaceWs", () => {
     expect(state.roleProviderConfigSnapshot?.tester).toBe("codex");
   });
 
+  it("stores role runs from coding session snapshots", () => {
+    const harness = renderCodingHook();
+
+    act(() => {
+      harness.ws.receive(
+        codingSessionState({
+          role_runs: [
+            {
+              id: "coding_role_run_0001",
+              attempt_id: "coding_attempt_0001",
+              stage: "testing",
+              role: "tester",
+              run_no: 1,
+              status: "running",
+              trigger: "initial",
+              node_id: "coding_node_0003",
+              started_at: "2026-06-12T00:00:00Z",
+              completed_at: null,
+              supersedes_run_id: null,
+              superseded_by_run_id: null,
+              reason_code: null,
+              raw_provider_output_refs: [],
+              artifact_refs: [],
+            },
+          ],
+        }),
+      );
+    });
+
+    expect(useCodingWorkspaceStore.getState().roleRuns).toHaveLength(1);
+    expect(useCodingWorkspaceStore.getState().roleRuns[0]).toMatchObject({
+      id: "coding_role_run_0001",
+      role: "tester",
+      run_no: 1,
+    });
+  });
+
   it("records coding execution events from websocket messages", () => {
     const harness = renderCodingHook();
 
@@ -278,6 +317,99 @@ describe("useCodingWorkspaceWs", () => {
         node_id: "coding_node_0001",
       },
     ]);
+  });
+
+  it("batches rapid coding stream chunks before updating chat entries", () => {
+    vi.useFakeTimers();
+    const harness = renderCodingHook();
+
+    act(() => {
+      harness.ws.receive({
+        type: "coding_session_state",
+        attempt_id: "coding_attempt_0001",
+        status: "running",
+        stage: "testing",
+        branch_name: "aria/work-items/work_item_0001/attempt-1",
+        base_branch: "main",
+        worktree_path: "/tmp/worktree",
+        rework_count: 0,
+        max_auto_rework: 2,
+        head_commit: null,
+        pushed_remote: null,
+        role_provider_config_snapshot: {
+          coder: "fake",
+          tester: "fake",
+          analyst: "fake",
+          code_reviewer: "fake",
+          internal_reviewer: "fake",
+          review_rounds: 1,
+          permission_modes: {
+            coder: "supervised",
+            tester: "auto",
+            analyst: "auto",
+            code_reviewer: "supervised",
+            internal_reviewer: "supervised",
+          },
+        },
+        provider_config_snapshot: { author: "fake", reviewer: "fake", review_rounds: 1 },
+        chat_entries: [],
+        timeline_nodes: [
+          {
+            id: "coding_node_0003",
+            attempt_id: "coding_attempt_0001",
+            stage: "testing",
+            title: "测试执行",
+            status: "running",
+            agent_role: "tester",
+            summary: null,
+            started_at: "2026-06-14T00:00:00Z",
+            completed_at: null,
+            artifact_refs: [],
+          },
+        ],
+        active_node_id: "coding_node_0003",
+        testing_report: null,
+        code_review_reports: [],
+        review_request: null,
+        internal_pr_review: null,
+        pending_gates: [],
+        pending_choices: [],
+      });
+      harness.ws.receive({
+        type: "coding_stream_chunk",
+        content: "hel",
+        node_id: "coding_node_0003",
+      });
+      harness.ws.receive({
+        type: "coding_stream_chunk",
+        content: "lo",
+        node_id: "coding_node_0003",
+      });
+    });
+
+    expect(useCodingWorkspaceStore.getState().chatEntries).toHaveLength(0);
+
+    act(() => {
+      vi.advanceTimersByTime(49);
+    });
+
+    expect(useCodingWorkspaceStore.getState().chatEntries).toHaveLength(0);
+
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+
+    expect(useCodingWorkspaceStore.getState().chatEntries).toMatchObject([
+      {
+        type: "provider_stream",
+        role: "tester",
+        content: "hello",
+        node_id: "coding_node_0003",
+      },
+    ]);
+
+    harness.unmount();
+    vi.useRealTimers();
   });
 
   it("ignores late provider output after a coding attempt is aborted", () => {
@@ -320,6 +452,7 @@ describe("useCodingWorkspaceWs", () => {
         review_request: null,
         internal_pr_review: null,
         pending_gates: [],
+        pending_choices: [],
       });
       harness.ws.receive({
         type: "coding_stream_chunk",
@@ -364,12 +497,19 @@ describe("useCodingWorkspaceWs", () => {
         type: "coding_choice_request",
         id: "choice_0001",
         prompt: "Select implementation strategy",
+        source: "provider_choice",
         options: [{ id: "dp", label: "Dynamic programming", description: "Iterative" }],
         allow_multiple: false,
         allow_free_text: true,
       });
       harness.api.respondPermission("permission_0001", true);
       harness.api.respondChoice("choice_0001", ["dp"], "use iterative dp");
+      harness.ws.receive({
+        type: "coding_choice_response_ack",
+        id: "choice_0001",
+        selected_option_ids: ["dp"],
+        free_text: "use iterative dp",
+      });
     });
 
     expect(useCodingWorkspaceStore.getState().chatEntries).toMatchObject([
@@ -395,6 +535,7 @@ describe("useCodingWorkspaceWs", () => {
         metadata: {
           request_id: "choice_0001",
           prompt: "Select implementation strategy",
+          source: "provider_choice",
           options: [{ id: "dp", label: "Dynamic programming", description: "Iterative" }],
           allow_multiple: false,
           allow_free_text: true,
@@ -664,6 +805,134 @@ describe("useCodingWorkspaceWs", () => {
         errorCode: null,
       },
     ]);
+  });
+
+  it("sends continue rework message with trimmed context", () => {
+    const harness = renderCodingHook();
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.sent.length = 0;
+      harness.api.continueRework("  继续按 analyst findings 返修  ");
+    });
+
+    expect(harness.ws.sent).toEqual([
+      JSON.stringify({
+        type: "continue_rework",
+        extra_context: "继续按 analyst findings 返修",
+      }),
+    ]);
+  });
+
+  it("restores pending coding choices from session snapshots", () => {
+    const harness = renderCodingHook();
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.receive(
+        codingSessionState({
+          status: "waiting_for_human",
+          stage: "coding",
+          pending_choices: [
+            {
+              gate_id: "coding_choice_gate_0001",
+              choice_id: "choice_0001",
+              attempt_id: "coding_attempt_0001",
+              node_id: "coding_node_0001",
+              stage: "coding",
+              role: "coder",
+              provider: "codex",
+              source: "request_user_input",
+              prompt: "请选择实现范围",
+              options: [
+                {
+                  id: "backend_first",
+                  label: "先做后端",
+                  description: "TASK-001 到 TASK-009",
+                },
+              ],
+              allow_multiple: false,
+              allow_free_text: true,
+              status: "open",
+              response: null,
+              created_at: "2026-06-14T00:00:00Z",
+              updated_at: "2026-06-14T00:00:00Z",
+            },
+          ],
+        }),
+      );
+    });
+
+    expect(useCodingWorkspaceStore.getState().chatEntries).toMatchObject([
+      {
+        id: "choice_request:choice_0001",
+        type: "choice_request",
+        role: "coder",
+        content: "请选择实现范围",
+        resolved: false,
+        metadata: {
+          request_id: "choice_0001",
+          source: "request_user_input",
+          allow_free_text: true,
+        },
+      },
+    ]);
+  });
+
+  it("waits for coding choice ack before resolving the choice entry", () => {
+    const harness = renderCodingHook();
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.receive({
+        type: "coding_choice_request",
+        id: "choice_0001",
+        prompt: "请选择实现范围",
+        source: "request_user_input",
+        options: [{ id: "backend_first", label: "先做后端" }],
+        allow_multiple: false,
+        allow_free_text: true,
+      });
+      harness.ws.sent.length = 0;
+      harness.api.respondChoice("choice_0001", ["backend_first"], "先控制范围");
+    });
+
+    expect(harness.ws.sent).toEqual([
+      JSON.stringify({
+        type: "choice_response",
+        id: "choice_0001",
+        selected_option_ids: ["backend_first"],
+        free_text: "先控制范围",
+      }),
+    ]);
+    expect(
+      useCodingWorkspaceStore
+        .getState()
+        .chatEntries.find((entry) => entry.id === "choice_request:choice_0001")?.resolved,
+    ).not.toBe(true);
+
+    act(() => {
+      harness.ws.receive({
+        type: "coding_choice_response_ack",
+        id: "choice_0001",
+        selected_option_ids: ["backend_first"],
+        free_text: "先控制范围",
+      });
+    });
+
+    expect(
+      useCodingWorkspaceStore
+        .getState()
+        .chatEntries.find((entry) => entry.id === "choice_request:choice_0001"),
+    ).toMatchObject({
+      resolved: true,
+      metadata: {
+        response: {
+          selected_option_ids: ["backend_first"],
+          free_text: "先控制范围",
+        },
+      },
+    });
   });
 
   it("sends heartbeat pings while connected", () => {

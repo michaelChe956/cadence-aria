@@ -1,22 +1,27 @@
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_models::{
-    CodeReviewReport, CodingAttemptStatus, CodingChatEntry, CodingContextNote,
-    CodingExecutionAttempt, CodingExecutionStage, CodingGateAction, CodingGateKind,
-    CodingGateRequired, CodingProviderRole, CodingReworkInstruction,
-    CodingRoleProviderConfigSnapshot, CodingStageGateState, CodingStageGateStatus,
+    AnalystDecisionRecord, CodeReviewReport, CodingAttemptStatus, CodingChatEntry,
+    CodingChoiceGate, CodingChoiceGateResponse, CodingChoiceGateStatus, CodingChoiceOption,
+    CodingContextNote, CodingExecutionAttempt, CodingExecutionStage, CodingGateAction,
+    CodingGateKind, CodingGateRequired, CodingProviderRole, CodingReworkInstruction,
+    CodingRoleProviderConfigSnapshot, CodingRoleRun, CodingRoleRunEvent, CodingRoleRunEventType,
+    CodingRoleRunStatus, CodingRoleRunTrigger, CodingStageGateState, CodingStageGateStatus,
     CodingTimelineNode, CodingTimelineNodeStatus, InternalPrReview, QualityGateBypassAudit,
     ReviewRequest, TestPlan, TestingReport,
 };
 use crate::product::id::next_sequential_id;
-use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
-use crate::product::models::ProviderConversationRef;
+use crate::product::json_store::{
+    ProductStoreError, read_json, validate_relative_artifact_ref, validate_relative_id, write_json,
+};
+use crate::product::models::{ProviderConversationRef, ProviderName};
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +51,21 @@ pub struct CreateBlockedGateInput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateChoiceGateInput {
+    pub attempt_id: String,
+    pub choice_id: String,
+    pub stage: CodingExecutionStage,
+    pub node_id: Option<String>,
+    pub role: CodingProviderRole,
+    pub provider: ProviderName,
+    pub source: String,
+    pub prompt: String,
+    pub options: Vec<CodingChoiceOption>,
+    pub allow_multiple: bool,
+    pub allow_free_text: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateQualityBypassAuditInput {
     pub attempt_id: String,
     pub gate_id: String,
@@ -71,6 +91,11 @@ struct BlockedGateRecord {
     created_at: String,
     updated_at: String,
 }
+
+const ROLE_RUN_EVENT_INLINE_STRING_LIMIT: usize = 16_384;
+const ROLE_RUN_RETRY_DIAGNOSTIC_LIMIT: usize = 8_000;
+const ROLE_RUN_RETRY_DIAGNOSTIC_FIELD_LIMIT: usize = 512;
+static ROLE_RUN_EVENT_LOG_MUTEX: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone)]
 pub struct CodingAttemptStore {
@@ -145,6 +170,24 @@ impl CodingAttemptStore {
             &CodingRoleProviderConfigSnapshot::from(&attempt.provider_config_snapshot),
         )?;
         Ok(attempt)
+    }
+
+    pub fn save_coding_attempt(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(&attempt.project_id)?;
+        validate_relative_id(&attempt.issue_id)?;
+        validate_relative_id(&attempt.id)?;
+        write_json(
+            &self.attempt_path(&attempt.project_id, &attempt.issue_id, &attempt.id),
+            attempt,
+        )?;
+        write_json(
+            &self.role_provider_config_path(&attempt.project_id, &attempt.issue_id, &attempt.id),
+            &CodingRoleProviderConfigSnapshot::from(&attempt.provider_config_snapshot),
+        )?;
+        Ok(())
     }
 
     pub fn get_attempt(
@@ -373,6 +416,349 @@ impl CodingAttemptStore {
         Ok(role_provider_config_snapshot)
     }
 
+    pub fn create_role_run(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        stage: CodingExecutionStage,
+        role: CodingProviderRole,
+        trigger: CodingRoleRunTrigger,
+        node_id: Option<String>,
+    ) -> Result<CodingRoleRun, ProductStoreError> {
+        if let Some(node_id) = &node_id {
+            validate_relative_id(node_id)?;
+        }
+        let existing = self.list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+        let id = next_sequential_id("coding_role_run", existing.len());
+        let run_no = existing
+            .iter()
+            .filter(|run| run.stage == stage && run.role == role)
+            .map(|run| run.run_no)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let run = CodingRoleRun {
+            id,
+            attempt_id: attempt.id.clone(),
+            stage,
+            role,
+            run_no,
+            status: CodingRoleRunStatus::Running,
+            trigger,
+            node_id,
+            started_at: Utc::now().to_rfc3339(),
+            completed_at: None,
+            supersedes_run_id: None,
+            superseded_by_run_id: None,
+            reason_code: None,
+            raw_provider_output_refs: Vec::new(),
+            artifact_refs: Vec::new(),
+        };
+        self.save_role_run(&attempt.project_id, &attempt.issue_id, &run)?;
+        Ok(run)
+    }
+
+    pub fn list_role_runs(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> Result<Vec<CodingRoleRun>, ProductStoreError> {
+        let mut runs: Vec<CodingRoleRun> =
+            list_json_records(&self.role_runs_root(project_id, issue_id, attempt_id))?;
+        runs.sort_by(|left, right| left.id.cmp(&right.id));
+        Ok(runs)
+    }
+
+    pub fn latest_role_run(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        stage: CodingExecutionStage,
+        role: CodingProviderRole,
+    ) -> Result<Option<CodingRoleRun>, ProductStoreError> {
+        Ok(self
+            .list_role_runs(project_id, issue_id, attempt_id)?
+            .into_iter()
+            .rev()
+            .find(|run| run.stage == stage && run.role == role))
+    }
+
+    pub fn update_role_run_status(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        role_run_id: &str,
+        status: CodingRoleRunStatus,
+        reason_code: Option<String>,
+    ) -> Result<CodingRoleRun, ProductStoreError> {
+        let mut run = self.get_role_run(project_id, issue_id, attempt_id, role_run_id)?;
+        run.status = status;
+        run.reason_code = reason_code;
+        run.completed_at = Some(Utc::now().to_rfc3339());
+        self.save_role_run(project_id, issue_id, &run)?;
+        Ok(run)
+    }
+
+    pub fn attach_role_run_node(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        role_run_id: &str,
+        node_id: String,
+    ) -> Result<CodingRoleRun, ProductStoreError> {
+        validate_relative_id(&node_id)?;
+        let mut run = self.get_role_run(project_id, issue_id, attempt_id, role_run_id)?;
+        run.node_id = Some(node_id);
+        self.save_role_run(project_id, issue_id, &run)?;
+        Ok(run)
+    }
+
+    pub fn supersede_latest_role_run_and_create(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        stage: CodingExecutionStage,
+        role: CodingProviderRole,
+        trigger: CodingRoleRunTrigger,
+        node_id: Option<String>,
+        reason_code: Option<String>,
+    ) -> Result<CodingRoleRun, ProductStoreError> {
+        let previous = self.latest_role_run(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            stage.clone(),
+            role.clone(),
+        )?;
+        let mut next = self.create_role_run(attempt, stage, role, trigger, node_id)?;
+        next.supersedes_run_id = previous.as_ref().map(|run| run.id.clone());
+        next.reason_code = reason_code;
+        self.save_role_run(&attempt.project_id, &attempt.issue_id, &next)?;
+        if let Some(mut previous_run) = previous {
+            previous_run.status = CodingRoleRunStatus::Superseded;
+            previous_run.superseded_by_run_id = Some(next.id.clone());
+            previous_run.completed_at = Some(Utc::now().to_rfc3339());
+            self.save_role_run(&attempt.project_id, &attempt.issue_id, &previous_run)?;
+        }
+        Ok(next)
+    }
+
+    pub fn update_role_run_refs(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        role_run_id: &str,
+        raw_provider_output_refs: Vec<String>,
+        artifact_refs: Vec<String>,
+    ) -> Result<CodingRoleRun, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(attempt_id)?;
+        validate_relative_id(role_run_id)?;
+        let mut run = self.get_role_run(project_id, issue_id, attempt_id, role_run_id)?;
+        for reference in raw_provider_output_refs {
+            validate_relative_artifact_ref(&reference)?;
+            if !run
+                .raw_provider_output_refs
+                .iter()
+                .any(|existing| existing == &reference)
+            {
+                run.raw_provider_output_refs.push(reference);
+            }
+        }
+        for reference in artifact_refs {
+            validate_relative_artifact_ref(&reference)?;
+            if !run
+                .artifact_refs
+                .iter()
+                .any(|existing| existing == &reference)
+            {
+                run.artifact_refs.push(reference);
+            }
+        }
+        self.save_role_run(project_id, issue_id, &run)?;
+        Ok(run)
+    }
+
+    pub fn append_role_run_event(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        role_run: &CodingRoleRun,
+        event_type: CodingRoleRunEventType,
+        payload: serde_json::Value,
+    ) -> Result<CodingRoleRunEvent, ProductStoreError> {
+        validate_relative_id(&attempt.project_id)?;
+        validate_relative_id(&attempt.issue_id)?;
+        validate_relative_id(&attempt.id)?;
+        validate_relative_id(&role_run.id)?;
+        if attempt.id != role_run.attempt_id {
+            return Err(ProductStoreError::NotFound {
+                kind: "coding_role_run_attempt",
+                id: role_run.id.clone(),
+            });
+        }
+
+        let path = self.role_run_event_log_path(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &role_run.id,
+        );
+        let _event_log_guard = ROLE_RUN_EVENT_LOG_MUTEX
+            .lock()
+            .map_err(|error| ProductStoreError::Io(format!("lock role run event log: {error}")))?;
+        let sequence = next_jsonl_sequence(&path)?;
+        let (payload, truncated, artifact_ref) = self.normalize_role_run_event_payload(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &role_run.id,
+            sequence,
+            payload,
+        )?;
+        let event = CodingRoleRunEvent {
+            attempt_id: attempt.id.clone(),
+            role_run_id: role_run.id.clone(),
+            node_id: role_run.node_id.clone(),
+            stage: role_run.stage.clone(),
+            role: role_run.role.clone(),
+            sequence,
+            event_type,
+            created_at: Utc::now().to_rfc3339(),
+            payload,
+            truncated,
+            artifact_ref,
+        };
+        append_jsonl(&path, &event)?;
+        Ok(event)
+    }
+
+    pub fn list_role_run_events(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        role_run_id: &str,
+    ) -> Result<Vec<CodingRoleRunEvent>, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(attempt_id)?;
+        validate_relative_id(role_run_id)?;
+        let path = self.role_run_event_log_path(project_id, issue_id, attempt_id, role_run_id);
+        let mut events: Vec<CodingRoleRunEvent> = read_jsonl_records(&path)?;
+        events.sort_by_key(|event| event.sequence);
+        Ok(events)
+    }
+
+    pub fn role_run_retry_diagnostic_summary(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        role_run_id: &str,
+    ) -> Result<Option<String>, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(attempt_id)?;
+        validate_relative_id(role_run_id)?;
+        let run = self.get_role_run(project_id, issue_id, attempt_id, role_run_id)?;
+        let events = self.list_role_run_events(project_id, issue_id, attempt_id, role_run_id)?;
+        if events.is_empty()
+            && run.reason_code.is_none()
+            && run.raw_provider_output_refs.is_empty()
+            && run.artifact_refs.is_empty()
+        {
+            return Ok(None);
+        }
+
+        let terminal = events.iter().rev().find(|event| {
+            matches!(
+                event.event_type,
+                CodingRoleRunEventType::MessageComplete
+                    | CodingRoleRunEventType::ProviderFailed
+                    | CodingRoleRunEventType::Timeout
+                    | CodingRoleRunEventType::Aborted
+            )
+        });
+        let mut lines = Vec::new();
+        lines.push("[previous_role_run_diagnostic]".to_string());
+        lines.push(format!("role_run_id: {}", run.id));
+        lines.push(format!("stage: {:?}", run.stage));
+        lines.push(format!("role: {:?}", run.role));
+        lines.push(format!("status: {:?}", run.status));
+        if let Some(reason_code) = run.reason_code.as_deref() {
+            lines.push(format!("reason_code: {reason_code}"));
+        }
+        if let Some(event) = terminal {
+            lines.push(format!(
+                "terminal_event: {}",
+                coding_role_run_event_type_name(event.event_type)
+            ));
+            if let Some(reason) = role_run_event_payload_reason_summary(event) {
+                lines.push(format!("terminal_reason: {reason}"));
+            }
+        }
+        if !run.raw_provider_output_refs.is_empty() {
+            lines.push(format!(
+                "raw_provider_output_refs: {}",
+                run.raw_provider_output_refs.join(", ")
+            ));
+        }
+        if !run.artifact_refs.is_empty() {
+            lines.push(format!("artifact_refs: {}", run.artifact_refs.join(", ")));
+        }
+        let recent_events = events
+            .iter()
+            .rev()
+            .take(5)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>();
+        let mut event_artifact_refs = Vec::new();
+        for event in &recent_events {
+            for artifact_ref in role_run_event_artifact_refs(event) {
+                push_unique_artifact_ref(&mut event_artifact_refs, &artifact_ref);
+            }
+        }
+        if !event_artifact_refs.is_empty() {
+            lines.push(format!(
+                "event_artifact_refs: {}",
+                event_artifact_refs.join(", ")
+            ));
+        }
+        lines.push("recent_events:".to_string());
+        for event in recent_events {
+            lines.push(format!(
+                "- #{} {} title={} status={} detail={}",
+                event.sequence,
+                coding_role_run_event_type_name(event.event_type),
+                role_run_event_payload_summary_text(event, "title"),
+                role_run_event_payload_summary_text(event, "status"),
+                role_run_event_payload_summary_text(event, "detail")
+            ));
+        }
+        let summary = truncate_utf8(&lines.join("\n"), ROLE_RUN_RETRY_DIAGNOSTIC_LIMIT);
+        Ok(Some(summary))
+    }
+
+    pub fn read_attempt_artifact_text(
+        &self,
+        attempt_id: &str,
+        artifact_ref: &str,
+    ) -> Result<String, ProductStoreError> {
+        validate_relative_artifact_ref(artifact_ref)?;
+        let attempt = self.find_attempt_by_id(attempt_id)?;
+        let path = self
+            .attempt_dir(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .join(artifact_ref);
+        fs::read_to_string(&path)
+            .map_err(|error| ProductStoreError::Io(format!("read {}: {error}", path.display())))
+    }
+
     pub fn increment_attempt_rework_count(
         &self,
         project_id: &str,
@@ -453,11 +839,17 @@ impl CodingAttemptStore {
         issue_id: &str,
         attempt_id: &str,
     ) -> Result<Vec<CodingChatEntry>, ProductStoreError> {
-        list_json_records(
+        let mut entries: Vec<CodingChatEntry> = list_json_records(
             &self
                 .attempt_dir(project_id, issue_id, attempt_id)
                 .join("chat-entries"),
-        )
+        )?;
+        entries.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        Ok(entries)
     }
 
     pub fn list_unconsumed_context_notes(
@@ -509,6 +901,41 @@ impl CodingAttemptStore {
                 .join(format!("{}.json", instruction.id)),
             instruction,
         )
+    }
+
+    pub fn save_analyst_decision(
+        &self,
+        decision: &AnalystDecisionRecord,
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(&decision.id)?;
+        let attempt = self.find_attempt_by_id(&decision.attempt_id)?;
+        write_json(
+            &self
+                .analyst_decisions_root(&attempt.project_id, &attempt.issue_id, &attempt.id)
+                .join(format!("{}.json", decision.id)),
+            decision,
+        )
+    }
+
+    pub fn list_analyst_decisions(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> Result<Vec<AnalystDecisionRecord>, ProductStoreError> {
+        list_json_records(&self.analyst_decisions_root(project_id, issue_id, attempt_id))
+    }
+
+    pub fn latest_analyst_decision(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> Result<Option<AnalystDecisionRecord>, ProductStoreError> {
+        Ok(self
+            .list_analyst_decisions(project_id, issue_id, attempt_id)?
+            .into_iter()
+            .last())
     }
 
     pub fn list_rework_instructions(
@@ -622,6 +1049,29 @@ impl CodingAttemptStore {
         ))
     }
 
+    pub fn save_analyst_evidence(
+        &self,
+        attempt_id: &str,
+        evidence: &str,
+    ) -> Result<String, ProductStoreError> {
+        let attempt = self.find_attempt_by_id(attempt_id)?;
+        let evidence_root = self
+            .attempt_dir(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .join("artifacts")
+            .join("rework");
+        fs::create_dir_all(&evidence_root).map_err(|error| {
+            ProductStoreError::Io(format!("create {}: {error}", evidence_root.display()))
+        })?;
+
+        let sequence = next_text_file_sequence(&evidence_root, "analyst_evidence")?;
+        let file_name = format!("analyst_evidence_{sequence:04}.txt");
+        let path = evidence_root.join(&file_name);
+        fs::write(&path, evidence)
+            .map_err(|error| ProductStoreError::Io(format!("write {}: {error}", path.display())))?;
+
+        Ok(format!("artifacts/rework/{}", file_name))
+    }
+
     pub fn save_test_plan(&self, plan: &TestPlan) -> Result<(), ProductStoreError> {
         validate_relative_id(&plan.id)?;
         let attempt = self.find_attempt_by_id(&plan.attempt_id)?;
@@ -733,6 +1183,107 @@ impl CodingAttemptStore {
         write_json(
             &gates_root.join("resolved").join(format!("{gate_id}.json")),
             &record,
+        )?;
+        remove_file_if_exists(&path)?;
+        Ok(gate)
+    }
+
+    pub fn create_choice_gate(
+        &self,
+        input: CreateChoiceGateInput,
+    ) -> Result<CodingChoiceGate, ProductStoreError> {
+        validate_relative_id(&input.attempt_id)?;
+        if let Some(node_id) = &input.node_id {
+            validate_relative_id(node_id)?;
+        }
+        let attempt = self.find_attempt_by_id(&input.attempt_id)?;
+        let gates_root =
+            self.choice_gates_root(&attempt.project_id, &attempt.issue_id, &attempt.id);
+        if let Some(existing_path) = matching_open_choice_gate_path(&gates_root, &input.choice_id)?
+        {
+            let mut gate: CodingChoiceGate = read_json(&existing_path)?;
+            gate.stage = input.stage;
+            gate.node_id = input.node_id;
+            gate.role = input.role;
+            gate.provider = input.provider;
+            gate.source = input.source;
+            gate.prompt = input.prompt;
+            gate.options = input.options;
+            gate.allow_multiple = input.allow_multiple;
+            gate.allow_free_text = input.allow_free_text;
+            gate.updated_at = Utc::now().to_rfc3339();
+            write_json(&existing_path, &gate)?;
+            return Ok(gate);
+        }
+
+        let gate_count =
+            count_json_files(&gates_root)? + count_json_files(&gates_root.join("resolved"))?;
+        let gate_id = next_sequential_id("coding_choice_gate", gate_count);
+        let now = Utc::now().to_rfc3339();
+        let gate = CodingChoiceGate {
+            gate_id: gate_id.clone(),
+            choice_id: input.choice_id,
+            attempt_id: attempt.id,
+            node_id: input.node_id,
+            stage: input.stage,
+            role: input.role,
+            provider: input.provider,
+            source: input.source,
+            prompt: input.prompt,
+            options: input.options,
+            allow_multiple: input.allow_multiple,
+            allow_free_text: input.allow_free_text,
+            status: CodingChoiceGateStatus::Open,
+            response: None,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        write_json(&gates_root.join(format!("{gate_id}.json")), &gate)?;
+        Ok(gate)
+    }
+
+    pub fn list_open_choice_gates(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> Result<Vec<CodingChoiceGate>, ProductStoreError> {
+        let mut gates: Vec<CodingChoiceGate> =
+            list_json_records(&self.choice_gates_root(project_id, issue_id, attempt_id))?;
+        gates.retain(|gate| gate.status == CodingChoiceGateStatus::Open);
+        Ok(gates)
+    }
+
+    pub fn resolve_choice_gate(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        choice_id: &str,
+        selected_option_ids: Vec<String>,
+        free_text: Option<String>,
+    ) -> Result<CodingChoiceGate, ProductStoreError> {
+        let gates_root = self.choice_gates_root(project_id, issue_id, attempt_id);
+        let Some(path) = matching_open_choice_gate_path(&gates_root, choice_id)? else {
+            return Err(ProductStoreError::NotFound {
+                kind: "coding_choice_gate",
+                id: choice_id.to_string(),
+            });
+        };
+
+        let mut gate: CodingChoiceGate = read_json(&path)?;
+        gate.status = CodingChoiceGateStatus::Resolved;
+        gate.response = Some(CodingChoiceGateResponse {
+            selected_option_ids,
+            free_text,
+            responded_at: Utc::now().to_rfc3339(),
+        });
+        gate.updated_at = Utc::now().to_rfc3339();
+        write_json(
+            &gates_root
+                .join("resolved")
+                .join(format!("{}.json", gate.gate_id)),
+            &gate,
         )?;
         remove_file_if_exists(&path)?;
         Ok(gate)
@@ -1162,9 +1713,157 @@ impl CodingAttemptStore {
             .join("rework-instructions")
     }
 
+    fn analyst_decisions_root(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> PathBuf {
+        self.attempt_dir(project_id, issue_id, attempt_id)
+            .join("analyst-decisions")
+    }
+
     fn test_plans_root(&self, project_id: &str, issue_id: &str, attempt_id: &str) -> PathBuf {
         self.attempt_dir(project_id, issue_id, attempt_id)
             .join("test-plans")
+    }
+
+    fn role_runs_root(&self, project_id: &str, issue_id: &str, attempt_id: &str) -> PathBuf {
+        self.attempt_dir(project_id, issue_id, attempt_id)
+            .join("role-runs")
+    }
+
+    fn role_run_events_root(&self, project_id: &str, issue_id: &str, attempt_id: &str) -> PathBuf {
+        self.attempt_dir(project_id, issue_id, attempt_id)
+            .join("role-run-events")
+    }
+
+    fn role_run_event_log_path(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        role_run_id: &str,
+    ) -> PathBuf {
+        self.role_run_events_root(project_id, issue_id, attempt_id)
+            .join(format!("{role_run_id}.jsonl"))
+    }
+
+    fn role_run_event_artifact_root(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        role_run_id: &str,
+    ) -> PathBuf {
+        self.attempt_dir(project_id, issue_id, attempt_id)
+            .join("artifacts")
+            .join("role-run-events")
+            .join(role_run_id)
+    }
+
+    fn normalize_role_run_event_payload(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        role_run_id: &str,
+        sequence: u64,
+        payload: serde_json::Value,
+    ) -> Result<(serde_json::Value, bool, Option<String>), ProductStoreError> {
+        let mut payload = payload;
+        let Some(object) = payload.as_object_mut() else {
+            return Ok((payload, false, None));
+        };
+
+        let mut first_artifact_ref = None;
+        for field in [
+            "prompt", "content", "output", "stdout", "stderr", "detail", "message",
+        ] {
+            let Some(value) = object.get_mut(field) else {
+                continue;
+            };
+            let Some(text) = value.as_str() else {
+                continue;
+            };
+            if text.len() <= ROLE_RUN_EVENT_INLINE_STRING_LIMIT {
+                continue;
+            }
+
+            let artifact_root =
+                self.role_run_event_artifact_root(project_id, issue_id, attempt_id, role_run_id);
+            let artifact_ref = self.save_role_run_event_artifact(
+                &artifact_root,
+                role_run_id,
+                sequence,
+                field,
+                text,
+            )?;
+            let preview = truncate_utf8(text, ROLE_RUN_EVENT_INLINE_STRING_LIMIT);
+            if first_artifact_ref.is_none() {
+                first_artifact_ref = Some(artifact_ref.clone());
+            }
+            *value = serde_json::json!({
+                "preview": preview,
+                "artifact_ref": artifact_ref,
+                "truncated": true
+            });
+        }
+
+        let truncated = first_artifact_ref.is_some();
+        Ok((payload, truncated, first_artifact_ref))
+    }
+
+    fn save_role_run_event_artifact(
+        &self,
+        root: &Path,
+        role_run_id: &str,
+        sequence: u64,
+        field: &str,
+        content: &str,
+    ) -> Result<String, ProductStoreError> {
+        validate_relative_id(role_run_id)?;
+        validate_relative_id(field)?;
+        fs::create_dir_all(root).map_err(|error| {
+            ProductStoreError::Io(format!("create {}: {error}", root.display()))
+        })?;
+        let file_name = format!("{sequence:04}_{field}.txt");
+        let path = root.join(&file_name);
+        fs::write(&path, content)
+            .map_err(|error| ProductStoreError::Io(format!("write {}: {error}", path.display())))?;
+        let artifact_ref = format!("artifacts/role-run-events/{role_run_id}/{file_name}");
+        validate_relative_artifact_ref(&artifact_ref)?;
+        Ok(artifact_ref)
+    }
+
+    fn role_run_path(&self, project_id: &str, issue_id: &str, run: &CodingRoleRun) -> PathBuf {
+        self.role_runs_root(project_id, issue_id, &run.attempt_id)
+            .join(format!("{}.json", run.id))
+    }
+
+    fn save_role_run(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        run: &CodingRoleRun,
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(&run.id)?;
+        write_json(&self.role_run_path(project_id, issue_id, run), run)
+    }
+
+    fn get_role_run(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        role_run_id: &str,
+    ) -> Result<CodingRoleRun, ProductStoreError> {
+        validate_relative_id(role_run_id)?;
+        read_json(
+            &self
+                .role_runs_root(project_id, issue_id, attempt_id)
+                .join(format!("{role_run_id}.json")),
+        )
     }
 
     fn provider_raw_output_root(
@@ -1180,6 +1879,11 @@ impl CodingAttemptStore {
     fn blocked_gates_root(&self, project_id: &str, issue_id: &str, attempt_id: &str) -> PathBuf {
         self.attempt_dir(project_id, issue_id, attempt_id)
             .join("blocked-gates")
+    }
+
+    fn choice_gates_root(&self, project_id: &str, issue_id: &str, attempt_id: &str) -> PathBuf {
+        self.attempt_dir(project_id, issue_id, attempt_id)
+            .join("choice-gates")
     }
 
     fn quality_bypass_audits_root(
@@ -1268,6 +1972,137 @@ fn list_json_records<T: DeserializeOwned>(path: &Path) -> Result<Vec<T>, Product
     Ok(records)
 }
 
+fn append_jsonl<T: Serialize>(path: &Path, value: &T) -> Result<(), ProductStoreError> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent).map_err(|error| {
+            ProductStoreError::Io(format!("create {}: {error}", parent.display()))
+        })?;
+    }
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|error| ProductStoreError::Io(format!("open {}: {error}", path.display())))?;
+    let mut line =
+        serde_json::to_vec(value).map_err(|error| ProductStoreError::Json(error.to_string()))?;
+    line.push(b'\n');
+    file.write_all(&line)
+        .map_err(|error| ProductStoreError::Io(format!("write {}: {error}", path.display())))?;
+    file.flush()
+        .map_err(|error| ProductStoreError::Io(format!("flush {}: {error}", path.display())))?;
+    Ok(())
+}
+
+fn read_jsonl_records<T: DeserializeOwned>(path: &Path) -> Result<Vec<T>, ProductStoreError> {
+    if !path_exists(path)? {
+        return Ok(Vec::new());
+    }
+    let content = fs::read_to_string(path)
+        .map_err(|error| ProductStoreError::Io(format!("read {}: {error}", path.display())))?;
+    let mut records = Vec::new();
+    for line in content.lines().filter(|line| !line.trim().is_empty()) {
+        records.push(
+            serde_json::from_str(line)
+                .map_err(|error| ProductStoreError::Json(error.to_string()))?,
+        );
+    }
+    Ok(records)
+}
+
+fn next_jsonl_sequence(path: &Path) -> Result<u64, ProductStoreError> {
+    Ok(read_jsonl_records::<serde_json::Value>(path)?.len() as u64 + 1)
+}
+
+fn truncate_utf8(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_string()
+}
+
+fn coding_role_run_event_type_name(event_type: CodingRoleRunEventType) -> &'static str {
+    match event_type {
+        CodingRoleRunEventType::ProviderPrompt => "provider_prompt",
+        CodingRoleRunEventType::ProviderStart => "provider_start",
+        CodingRoleRunEventType::TextDelta => "text_delta",
+        CodingRoleRunEventType::ExecutionEvent => "execution_event",
+        CodingRoleRunEventType::ToolCall => "tool_call",
+        CodingRoleRunEventType::ToolResult => "tool_result",
+        CodingRoleRunEventType::StatusChanged => "status_changed",
+        CodingRoleRunEventType::PermissionRequest => "permission_request",
+        CodingRoleRunEventType::ChoiceRequest => "choice_request",
+        CodingRoleRunEventType::MessageComplete => "message_complete",
+        CodingRoleRunEventType::ProviderFailed => "provider_failed",
+        CodingRoleRunEventType::Timeout => "timeout",
+        CodingRoleRunEventType::Aborted => "aborted",
+        CodingRoleRunEventType::PersistenceWarning => "persistence_warning",
+    }
+}
+
+fn role_run_event_payload_text<'a>(event: &'a CodingRoleRunEvent, field: &str) -> Option<&'a str> {
+    event.payload.get(field).and_then(|value| value.as_str())
+}
+
+fn role_run_event_payload_summary_text(event: &CodingRoleRunEvent, field: &str) -> String {
+    role_run_event_payload_text(event, field)
+        .map(|value| truncate_utf8(value, ROLE_RUN_RETRY_DIAGNOSTIC_FIELD_LIMIT))
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn role_run_event_payload_reason(event: &CodingRoleRunEvent) -> Option<&str> {
+    role_run_event_payload_text(event, "reason_code")
+        .or_else(|| role_run_event_payload_text(event, "message"))
+}
+
+fn role_run_event_payload_reason_summary(event: &CodingRoleRunEvent) -> Option<String> {
+    role_run_event_payload_reason(event)
+        .map(|value| truncate_utf8(value, ROLE_RUN_RETRY_DIAGNOSTIC_FIELD_LIMIT))
+}
+
+fn role_run_event_artifact_refs(event: &CodingRoleRunEvent) -> Vec<String> {
+    let mut artifact_refs = Vec::new();
+    if let Some(artifact_ref) = event.artifact_ref.as_deref() {
+        push_unique_artifact_ref(&mut artifact_refs, artifact_ref);
+    }
+    collect_payload_artifact_refs(&event.payload, &mut artifact_refs);
+    artifact_refs
+}
+
+fn collect_payload_artifact_refs(value: &serde_json::Value, artifact_refs: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Object(object) => {
+            if let Some(artifact_ref) = object.get("artifact_ref").and_then(|value| value.as_str())
+            {
+                push_unique_artifact_ref(artifact_refs, artifact_ref);
+            }
+            for nested in object.values() {
+                collect_payload_artifact_refs(nested, artifact_refs);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for nested in values {
+                collect_payload_artifact_refs(nested, artifact_refs);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn push_unique_artifact_ref(artifact_refs: &mut Vec<String>, artifact_ref: &str) {
+    if !artifact_refs
+        .iter()
+        .any(|existing| existing == artifact_ref)
+    {
+        artifact_refs.push(artifact_ref.to_string());
+    }
+}
+
 fn count_json_files(path: &Path) -> Result<usize, ProductStoreError> {
     Ok(json_file_paths(path)?.len())
 }
@@ -1329,6 +2164,19 @@ fn matching_open_blocked_gate_path(
             && record.gate.stage.as_ref() == Some(&input.stage)
             && record.gate.reason_code.as_ref() == input.reason_code.as_ref()
         {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
+
+fn matching_open_choice_gate_path(
+    gates_root: &Path,
+    choice_id: &str,
+) -> Result<Option<PathBuf>, ProductStoreError> {
+    for path in json_file_paths(gates_root)? {
+        let gate: CodingChoiceGate = read_json(&path)?;
+        if gate.status == CodingChoiceGateStatus::Open && gate.choice_id == choice_id {
             return Ok(Some(path));
         }
     }
@@ -1494,6 +2342,8 @@ mod tests {
         let plan = TestPlan {
             id: "test_plan_0001".to_string(),
             attempt_id: attempt.id.clone(),
+            role_run_id: None,
+            run_no: None,
             summary: "unit tests".to_string(),
             context_warnings: Vec::new(),
             assumptions: Vec::new(),

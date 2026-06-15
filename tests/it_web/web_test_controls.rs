@@ -2,6 +2,9 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
+use cadence_aria::product::app_paths::ProductAppPaths;
+use cadence_aria::product::coding_attempt_store::CodingAttemptStore;
+use cadence_aria::product::coding_models::CodingProviderRole;
 use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::runtime::WebRuntime;
 use cadence_aria::web::state::WebAppState;
@@ -112,4 +115,48 @@ async fn request_status(app: axum::Router, method: Method, uri: &str, body: Valu
         .body(Body::from(body.to_string()))
         .expect("request");
     app.oneshot(request).await.expect("response").status()
+}
+
+#[tokio::test]
+async fn coding_role_run_fixture_seed_route_creates_attempt_with_runs() {
+    let _guard = ENV_LOCK.lock().await;
+    unsafe {
+        std::env::set_var("ARIA_E2E_TEST_CONTROLS", "1");
+    }
+    let root = tempdir().expect("root");
+    let state = WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    );
+    let app = build_web_router(state);
+
+    let body = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/test/coding-attempts/role-run-fixture",
+        json!({"blocked_stage":"rework"}),
+    )
+    .await;
+
+    assert_eq!(body["attempt_id"], "coding_attempt_0001");
+    assert_eq!(body["project_id"], "project_0001");
+    assert_eq!(body["issue_id"], "issue_0001");
+
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let runs = store
+        .list_role_runs("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("role runs");
+    assert_eq!(runs.len(), 2);
+    assert!(
+        runs.iter()
+            .any(|run| run.role == CodingProviderRole::Tester)
+    );
+    assert!(
+        runs.iter()
+            .any(|run| run.role == CodingProviderRole::Analyst)
+    );
+
+    unsafe {
+        std::env::remove_var("ARIA_E2E_TEST_CONTROLS");
+    }
 }

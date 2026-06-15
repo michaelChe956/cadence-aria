@@ -13,6 +13,7 @@ use crate::web::workspace_ws_handler;
 pub fn build_web_router(state: WebAppState) -> Router {
     let router = Router::new()
         .route("/api/health", get(handlers::health))
+        .route("/api/runtime-info", get(handlers::runtime_info))
         .route("/api/events", get(handlers::events))
         .route("/api/projection", get(handlers::projection))
         .route(
@@ -219,6 +220,10 @@ pub fn build_web_router(state: WebAppState) -> Router {
             .route(
                 "/api/test/workspace-sessions/large-fixture",
                 post(test_controls::seed_large_workspace_fixture),
+            )
+            .route(
+                "/api/test/coding-attempts/role-run-fixture",
+                post(test_controls::seed_coding_role_run_fixture),
             )
             .route(
                 "/api/test/permission-timeout",

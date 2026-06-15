@@ -1,4 +1,0 @@
-interface:
-  display_name: "Start Aria E2E Worktree"
-  short_description: "Prepare a Cadence Aria worktree for real E2E testing"
-  default_prompt: "Use this skill when a user asks to guide Cadence Aria full end-to-end testing from a specific worktree branch."

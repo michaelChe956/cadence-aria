@@ -16,6 +16,8 @@ interface CodingWsServerMessage {
   [key: string]: unknown;
 }
 
+const STREAM_CHUNK_FLUSH_MS = 50;
+
 export function useCodingWorkspaceWs(attemptId: string | null) {
   const wsRef = useRef<WebSocket | null>(null);
   const heartbeatTimerRef = useRef<ReturnType<typeof window.setInterval> | null>(null);
@@ -103,10 +105,6 @@ export function useCodingWorkspaceWs(attemptId: string | null) {
       ) {
         return;
       }
-      resolveCodingChoiceRequest(id, {
-        selected_option_ids: selectedOptionIds,
-        free_text: trimmedText ? trimmedText : null,
-      });
     },
     [sendJson],
   );
@@ -129,6 +127,17 @@ export function useCodingWorkspaceWs(attemptId: string | null) {
         return;
       }
       useCodingWorkspaceStore.getState().markGateSubmitting(gateId);
+    },
+    [sendJson],
+  );
+
+  const continueRework = useCallback(
+    (extraContext?: string | null) => {
+      const trimmedExtraContext = extraContext?.trim() ?? "";
+      sendJson({
+        type: "continue_rework",
+        extra_context: trimmedExtraContext ? trimmedExtraContext : null,
+      });
     },
     [sendJson],
   );
@@ -157,6 +166,7 @@ export function useCodingWorkspaceWs(attemptId: string | null) {
 
     let disposed = false;
     let reconnectAttempt = 0;
+    const streamBatcher = createCodingStreamBatcher();
 
     function clearHeartbeat() {
       if (heartbeatTimerRef.current !== null) {
@@ -226,6 +236,7 @@ export function useCodingWorkspaceWs(attemptId: string | null) {
 
       ws.onclose = (event) => {
         if (wsRef.current !== ws) return;
+        streamBatcher.flushAll();
         clearHeartbeat();
         wsRef.current = null;
         if (disposed || event.code === 1000) {
@@ -237,6 +248,7 @@ export function useCodingWorkspaceWs(attemptId: string | null) {
 
       ws.onerror = () => {
         if (wsRef.current !== ws) return;
+        streamBatcher.flushAll();
         clearHeartbeat();
         wsRef.current = null;
         const store = useCodingWorkspaceStore.getState();
@@ -249,7 +261,7 @@ export function useCodingWorkspaceWs(attemptId: string | null) {
 
       ws.onmessage = (event) => {
         try {
-          handleCodingWsMessage(JSON.parse(event.data) as CodingWsServerMessage);
+          handleCodingWsMessage(JSON.parse(event.data) as CodingWsServerMessage, streamBatcher);
         } catch {
           // Ignore malformed websocket messages; backend protocol errors are handled explicitly.
         }
@@ -262,6 +274,7 @@ export function useCodingWorkspaceWs(attemptId: string | null) {
       disposed = true;
       clearHeartbeat();
       clearReconnect();
+      streamBatcher.clear();
       const ws = wsRef.current;
       wsRef.current = null;
       ws?.close(1000);
@@ -277,6 +290,7 @@ export function useCodingWorkspaceWs(attemptId: string | null) {
     respondPermission,
     respondChoice,
     respondGate,
+    continueRework,
     finalConfirm,
     abortAttempt,
     requestManualPause,
@@ -285,10 +299,76 @@ export function useCodingWorkspaceWs(attemptId: string | null) {
   };
 }
 
-function handleCodingWsMessage(message: CodingWsServerMessage) {
+type CodingStreamBatcher = ReturnType<typeof createCodingStreamBatcher>;
+
+function createCodingStreamBatcher() {
+  let timer: ReturnType<typeof window.setTimeout> | null = null;
+  const pending = new Map<string, { nodeId: string | null; content: string }>();
+
+  function keyFor(nodeId?: string | null) {
+    return nodeId ?? "__global__";
+  }
+
+  function clearTimer() {
+    if (timer !== null) {
+      window.clearTimeout(timer);
+      timer = null;
+    }
+  }
+
+  function flushKey(key: string) {
+    const item = pending.get(key);
+    if (!item) return;
+    pending.delete(key);
+    if (item.content && useCodingWorkspaceStore.getState().status !== "aborted") {
+      useCodingWorkspaceStore.getState().appendStreamChunk(item.content, item.nodeId);
+    }
+  }
+
+  function flushAll() {
+    clearTimer();
+    for (const key of Array.from(pending.keys())) {
+      flushKey(key);
+    }
+  }
+
+  function schedule() {
+    if (timer !== null) return;
+    timer = window.setTimeout(() => {
+      timer = null;
+      flushAll();
+    }, STREAM_CHUNK_FLUSH_MS);
+  }
+
+  return {
+    append(content: string, nodeId?: string | null) {
+      const key = keyFor(nodeId);
+      const existing = pending.get(key);
+      pending.set(key, {
+        nodeId: nodeId ?? null,
+        content: `${existing?.content ?? ""}${content}`,
+      });
+      schedule();
+    },
+    flush(nodeId?: string | null) {
+      flushKey(keyFor(nodeId));
+      if (pending.size === 0) {
+        clearTimer();
+      }
+    },
+    flushAll,
+    clear() {
+      clearTimer();
+      pending.clear();
+    },
+  };
+}
+
+function handleCodingWsMessage(message: CodingWsServerMessage, streamBatcher: CodingStreamBatcher) {
   const store = useCodingWorkspaceStore.getState();
   switch (message.type) {
     case "coding_session_state":
+      streamBatcher.clear();
       store.setSessionState(message as Extract<CodingWsOutMessage, { type: "coding_session_state" }>);
       break;
     case "coding_stage_change":
@@ -311,18 +391,20 @@ function handleCodingWsMessage(message: CodingWsServerMessage) {
       if (store.status === "aborted") {
         break;
       }
-      store.appendStreamChunk(
+      streamBatcher.append(
         message.content as string,
         (message.node_id as string | null | undefined) ?? null,
       );
       break;
     case "coding_message_complete":
+      streamBatcher.flush((message.node_id as string | null | undefined) ?? null);
       store.completeStream((message.node_id as string | null | undefined) ?? null);
       break;
     case "coding_execution_event":
       if (store.status === "aborted") {
         break;
       }
+      streamBatcher.flushAll();
       store.addExecutionEvent(
         (message as Extract<CodingWsOutMessage, { type: "coding_execution_event" }>).event,
       );
@@ -359,10 +441,22 @@ function handleCodingWsMessage(message: CodingWsServerMessage) {
         metadata: {
           request_id: request.id,
           prompt: request.prompt,
+          source: request.source,
           options: request.options,
           allow_multiple: request.allow_multiple,
           allow_free_text: request.allow_free_text,
         },
+      });
+      break;
+    }
+    case "coding_choice_response_ack": {
+      const response = message as Extract<
+        CodingWsOutMessage,
+        { type: "coding_choice_response_ack" }
+      >;
+      resolveCodingChoiceRequest(response.id, {
+        selected_option_ids: response.selected_option_ids,
+        free_text: response.free_text ?? null,
       });
       break;
     }
@@ -410,6 +504,7 @@ function handleCodingWsMessage(message: CodingWsServerMessage) {
         message: message.message as string,
       });
       markSubmittingGateError(message.code as string);
+      rejectCodingChoiceRequestFromError(message.message as string);
       break;
     case "coding_pong":
       break;
@@ -475,4 +570,27 @@ function resolveCodingChoiceRequest(id: string, response: ChoiceResponsePayload)
       response,
     },
   });
+}
+
+function rejectCodingChoiceRequestFromError(message: string) {
+  const id = choiceIdFromProtocolError(message);
+  if (!id) return;
+  const store = useCodingWorkspaceStore.getState();
+  const entry = store.chatEntries.find(
+    (candidate) => candidate.type === "choice_request" && candidate.metadata?.request_id === id,
+  );
+  if (!entry) return;
+  store.appendChatEntry({
+    ...entry,
+    resolved: true,
+    metadata: {
+      ...entry.metadata,
+      rejected: true,
+      rejection_reason: message,
+    },
+  });
+}
+
+function choiceIdFromProtocolError(message: string) {
+  return message.match(/^ChoiceResponse id=([^ ]+)/)?.[1] ?? null;
 }

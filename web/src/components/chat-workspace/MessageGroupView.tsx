@@ -5,7 +5,10 @@ import { ChatEntryRenderer } from "./ChatEntryRenderer";
 import { InlineEventRow } from "./InlineEventRow";
 import { ChoiceRequestEntry } from "./entries/ChoiceRequestEntry";
 import { PermissionRequestEntry } from "./entries/PermissionRequestEntry";
-import { MarkdownContent } from "./entries/ProviderStreamEntry";
+import {
+  MarkdownContent,
+  normalizeProviderStreamEntryContent,
+} from "./entries/ProviderStreamEntry";
 import type { MessageGroup } from "./message-grouping";
 
 interface MessageGroupViewProps {
@@ -41,7 +44,9 @@ export function MessageGroupView({
       testId="message-group"
     >
       <div className="space-y-3">
-        {group.primaryEntry ? <MarkdownContent content={group.primaryEntry.content} /> : null}
+        {group.primaryEntry ? (
+          <MarkdownContent content={normalizeProviderStreamEntryContent(group.primaryEntry)} />
+        ) : null}
         {group.inlineEvents.length > 0 ? (
           <div className="space-y-2">
             {group.inlineEvents.map((entry) => (
@@ -100,7 +105,10 @@ const PROVIDER_LABELS: Record<string, string> = {
 function groupTitle(group: MessageGroup) {
   const base = ROLE_LABELS[group.role] ?? group.role;
   const provider = providerForGroup(group);
-  return provider ? `${base} · ${providerLabel(provider)}` : base;
+  const runNo = runNoForGroup(group);
+  return [base, provider ? providerLabel(provider) : null, runNo ? `Run #${runNo}` : null]
+    .filter(Boolean)
+    .join(" · ");
 }
 
 const ROLE_LABELS: Record<string, string> = {
@@ -125,6 +133,21 @@ function providerForGroup(group: MessageGroup) {
     const provider = metadataProvider(entry.metadata);
     if (provider) {
       return provider;
+    }
+  }
+  return null;
+}
+
+function runNoForGroup(group: MessageGroup) {
+  const entries = [
+    group.primaryEntry,
+    ...group.inlineEvents,
+    ...group.interruptEntries,
+  ].filter((entry): entry is ChatEntry => Boolean(entry));
+  for (const entry of entries) {
+    const runNo = entry.metadata?.run_no;
+    if (typeof runNo === "number" && Number.isFinite(runNo)) {
+      return runNo;
     }
   }
   return null;

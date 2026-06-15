@@ -165,6 +165,58 @@ export type CodingProviderRole =
   | "internal_reviewer";
 export type CodingProviderSelectRole = "author" | "reviewer" | CodingProviderRole;
 export type CodingProviderPermissionMode = "auto" | "supervised";
+export type CodingRoleRunStatus =
+  | "running"
+  | "completed"
+  | "failed"
+  | "blocked"
+  | "superseded"
+  | "aborted";
+export type CodingRoleRunTrigger =
+  | "initial"
+  | "retry_test_plan"
+  | "rerun_missing_steps"
+  | "retry_review"
+  | "retry_analyst"
+  | "retry_internal_review"
+  | "manual_rerun";
+
+export type CodingRoleRunEventType =
+  | "provider_prompt"
+  | "provider_start"
+  | "text_delta"
+  | "execution_event"
+  | "tool_call"
+  | "tool_result"
+  | "status_changed"
+  | "permission_request"
+  | "choice_request"
+  | "message_complete"
+  | "provider_failed"
+  | "timeout"
+  | "aborted"
+  | "persistence_warning";
+
+export type CodingRoleRunEventSummary = {
+  event_count: number;
+  last_event_at?: string | null;
+  last_event_type?: CodingRoleRunEventType | null;
+  last_event_title?: string | null;
+  last_event_status?: string | null;
+  terminal_event_type?: CodingRoleRunEventType | null;
+  terminal_reason?: string | null;
+};
+
+export type CodingRoleRunEventPreview = {
+  sequence: number;
+  event_type: CodingRoleRunEventType;
+  created_at: string;
+  title?: string | null;
+  status?: string | null;
+  detail?: string | null;
+  truncated: boolean;
+  artifact_ref?: string | null;
+};
 
 export type CodingRolePermissionModes = {
   coder: CodingProviderPermissionMode;
@@ -195,6 +247,26 @@ export type CodingRoleProviderConfigSnapshot = {
   internal_reviewer: WorkspaceProviderName;
   review_rounds: number;
   permission_modes: CodingRolePermissionModes;
+};
+
+export type CodingRoleRun = {
+  id: string;
+  attempt_id: string;
+  stage: CodingExecutionStage;
+  role: CodingProviderRole;
+  run_no: number;
+  status: CodingRoleRunStatus;
+  trigger: CodingRoleRunTrigger;
+  node_id: string | null;
+  started_at: string;
+  completed_at: string | null;
+  supersedes_run_id?: string | null;
+  superseded_by_run_id?: string | null;
+  reason_code?: string | null;
+  raw_provider_output_refs: string[];
+  artifact_refs: string[];
+  event_summary?: CodingRoleRunEventSummary | null;
+  recent_events?: CodingRoleRunEventPreview[];
 };
 
 export type TestCommandStatus = "passed" | "failed" | "timed_out" | "blocked";
@@ -256,6 +328,8 @@ export type TestingUnplannedEvidence = {
 export type TestingReport = {
   id: string;
   attempt_id: string;
+  role_run_id?: string | null;
+  run_no?: number | null;
   commands: TestCommand[];
   overall_status: TestingOverallStatus;
   provider_claim: unknown | null;
@@ -300,6 +374,8 @@ export type CodeReviewReport = {
   summary: string;
   created_at: string;
   raw_provider_output_ref?: string | null;
+  role_run_id?: string | null;
+  run_no?: number | null;
 };
 
 export type ReviewRequestKind =
@@ -340,9 +416,54 @@ export type InternalPrReview = {
   summary: string;
   created_at: string;
   raw_provider_output_ref?: string | null;
+  role_run_id?: string | null;
+  run_no?: number | null;
 };
 
 export type AnalystVerdict = "needs_fix" | "needs_human_input" | "no_issue";
+export type AnalystDecisionVerdict =
+  | "needs_fix"
+  | "rerun_testing"
+  | "proceed"
+  | "human_required"
+  | "blocked";
+export type AnalystDecisionNextStage =
+  | "coding"
+  | "testing"
+  | "code_review"
+  | "review_request"
+  | "internal_pr_review"
+  | "final_confirm"
+  | "human_gate";
+
+export type AnalystReworkInstructions = {
+  summary: string;
+  required_changes: string[];
+  verification_expectations: string[];
+};
+
+export type AnalystHumanGateRecommendation = {
+  reason_code?: string | null;
+  available_actions: string[];
+};
+
+export type AnalystDecisionRecord = {
+  id: string;
+  attempt_id: string;
+  source_stage: CodingExecutionStage;
+  rework_round: number;
+  verdict: AnalystDecisionVerdict;
+  next_stage: AnalystDecisionNextStage;
+  reason: string;
+  evidence_refs: string[];
+  raw_provider_output_refs: string[];
+  rework_instructions?: AnalystReworkInstructions | null;
+  human_gate?: AnalystHumanGateRecommendation | null;
+  created_at: string;
+  parse_error?: string | null;
+  role_run_id?: string | null;
+  run_no?: number | null;
+};
 
 export type CodingEntryType =
   | { type: "user_message" }
@@ -377,7 +498,11 @@ export type CodingGateActionType =
   | "provide_context"
   | "manual_continue"
   | "retry_review"
-  | "send_raw_output_to_analyst";
+  | "retry_analyst"
+  | "retry_internal_review"
+  | "send_raw_output_to_analyst"
+  | "accept_testing_result"
+  | "rerun_testing";
 export type CodingGateKind = "permission" | "stage_gate" | "blocked" | "final_confirm";
 
 export type CodingGateAction = {
@@ -401,6 +526,33 @@ export type CodingGateRequired = {
   raw_provider_output_ref?: string | null;
 };
 
+export type CodingChoiceGateStatus = "open" | "resolved" | "stale" | "cancelled";
+
+export type CodingChoiceGateResponse = {
+  selected_option_ids: string[];
+  free_text?: string | null;
+  responded_at: string;
+};
+
+export type CodingChoiceGate = {
+  gate_id: string;
+  choice_id: string;
+  attempt_id: string;
+  node_id?: string | null;
+  stage: CodingExecutionStage;
+  role: CodingProviderRole;
+  provider: WorkspaceProviderName;
+  source: WorkspaceChoiceRequestSource;
+  prompt: string;
+  options: ChoiceOption[];
+  allow_multiple: boolean;
+  allow_free_text: boolean;
+  status: CodingChoiceGateStatus;
+  response?: CodingChoiceGateResponse | null;
+  created_at: string;
+  updated_at: string;
+};
+
 export type CodingAttemptSnapshotResponse = {
   attempt: CodingAttempt;
   provider_config_snapshot: ProviderConfigSnapshot;
@@ -411,6 +563,9 @@ export type CodingAttemptSnapshotResponse = {
   review_request: ReviewRequest | null;
   internal_pr_review: InternalPrReview | null;
   pending_gates: CodingGateRequired[];
+  pending_choices: CodingChoiceGate[];
+  latest_analyst_decision: AnalystDecisionRecord | null;
+  role_runs?: CodingRoleRun[];
 };
 
 export type CodingAttemptDiffResponse = {
@@ -446,6 +601,7 @@ export type CodingWsInMessage =
       action_id: string;
       extra_context?: string | null;
     }
+  | { type: "continue_rework"; extra_context?: string | null }
   | { type: "provider_select"; role: CodingProviderSelectRole; provider: WorkspaceProviderName }
   | {
       type: "permission_mode_select";
@@ -495,9 +651,16 @@ export type CodingWsOutMessage =
       type: "coding_choice_request";
       id: string;
       prompt: string;
+      source: WorkspaceChoiceRequestSource;
       options: ChoiceOption[];
       allow_multiple: boolean;
       allow_free_text: boolean;
+    }
+  | {
+      type: "coding_choice_response_ack";
+      id: string;
+      selected_option_ids: string[];
+      free_text?: string | null;
     }
   | { type: "coding_stream_chunk"; content: string; node_id?: string | null }
   | { type: "coding_message_complete"; node_id?: string | null }

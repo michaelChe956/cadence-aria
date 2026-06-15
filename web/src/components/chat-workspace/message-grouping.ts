@@ -54,7 +54,7 @@ export function groupEntries(entries: ChatEntry[]): GroupedItem[] {
       continue;
     }
 
-    const nodeKey = entry.node_id ?? "global";
+    const nodeKey = groupKeyForEntry(entry);
     if (!currentGroup || currentGroupKey !== nodeKey) {
       flushGroup();
       groupIndex += 1;
@@ -84,6 +84,12 @@ export function groupEntries(entries: ChatEntry[]): GroupedItem[] {
 
 function isGroupableEntry(type: string) {
   return type === "provider_stream" || type === "execution_event" || INTERRUPT_ENTRY_TYPES.has(type);
+}
+
+function groupKeyForEntry(entry: ChatEntry) {
+  const roleRunId = entry.metadata?.role_run_id;
+  const roleRunKey = typeof roleRunId === "string" && roleRunId.length > 0 ? roleRunId : "legacy";
+  return `${entry.node_id ?? "global"}:${roleRunKey}`;
 }
 
 function roleForEntry(entry: ChatEntry): ChatEntry["role"] {

@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
 import type {
+  AnalystDecisionRecord,
+  CodeReviewReport,
   CodingGateRequired,
   CodingAttempt,
   CodingAttemptSnapshotResponse,
   CodingWsInMessage,
   CodingWsOutMessage,
   IssueLifecycleResponse,
+  InternalPrReview,
   NodeDetail,
   TestingReport,
   TimelineNodeType,
@@ -157,8 +160,24 @@ describe("workspace websocket protocol types", () => {
       review_request: null,
       internal_pr_review: null,
       pending_gates: [],
+      pending_choices: [],
+      latest_analyst_decision: {
+        id: "analyst_decision_0001",
+        attempt_id: "coding_attempt_0001",
+        source_stage: "testing",
+        rework_round: 1,
+        verdict: "needs_fix",
+        next_stage: "coding",
+        reason: "required 测试步骤被跳过，需要回到 Coder",
+        evidence_refs: ["testing_report_0001.json"],
+        raw_provider_output_refs: ["provider-raw/testing/execute_test_plan_0001.txt"],
+        rework_instructions: null,
+        human_gate: null,
+        created_at: "2026-06-12T00:00:00Z",
+        parse_error: null,
+      },
     };
-    const outbound: CodingWsOutMessage = {
+    const outbound: Extract<CodingWsOutMessage, { type: "coding_session_state" }> = {
       type: "coding_session_state",
       attempt_id: "coding_attempt_0001",
       status: "running",
@@ -188,18 +207,86 @@ describe("workspace websocket protocol types", () => {
       provider_config_snapshot: { author: "fake", reviewer: "fake", review_rounds: 1 },
       chat_entries: [],
       timeline_nodes: snapshot.timeline_nodes,
+      role_runs: [
+        {
+          id: "coding_role_run_0001",
+          attempt_id: "coding_attempt_0001",
+          stage: "testing",
+          role: "tester",
+          run_no: 1,
+          status: "running",
+          trigger: "initial",
+          node_id: "coding_node_0003",
+          started_at: "2026-06-13T00:00:00Z",
+          completed_at: null,
+          reason_code: null,
+          raw_provider_output_refs: [],
+          artifact_refs: [],
+          event_summary: {
+            event_count: 2,
+            last_event_at: "2026-06-13T00:00:02Z",
+            last_event_type: "execution_event",
+            last_event_title: "Task update",
+            last_event_status: "running",
+            terminal_event_type: null,
+            terminal_reason: null,
+          },
+          recent_events: [
+            {
+              sequence: 2,
+              event_type: "execution_event",
+              created_at: "2026-06-13T00:00:02Z",
+              title: "Task update",
+              status: "running",
+              detail: "No tasks found",
+              truncated: false,
+              artifact_ref: null,
+            },
+          ],
+        },
+      ],
       active_node_id: "coding_node_0001",
       testing_report: null,
       code_review_reports: [],
       review_request: null,
       internal_pr_review: null,
       pending_gates: [],
+      pending_choices: [],
+      latest_analyst_decision: snapshot.latest_analyst_decision,
     };
     const inbound: CodingWsInMessage = { type: "start_coding" };
 
     expect(snapshot.active_node_id).toBe("coding_node_0001");
     expect(outbound.type).toBe("coding_session_state");
+    expect(outbound.role_runs?.[0].event_summary?.event_count).toBe(2);
+    expect(outbound.role_runs?.[0].recent_events?.[0].detail).toBe("No tasks found");
+    expect(outbound.latest_analyst_decision?.next_stage).toBe("coding");
     expect(inbound.type).toBe("start_coding");
+  });
+
+  it("accepts analyst decision records for coding workspace display", () => {
+    const decision: AnalystDecisionRecord = {
+      id: "analyst_decision_0002",
+      attempt_id: "coding_attempt_0001",
+      source_stage: "code_review",
+      rework_round: 2,
+      verdict: "proceed",
+      next_stage: "review_request",
+      reason: "CodeReviewer 通过，进入 ReviewRequest",
+      evidence_refs: ["code_review_0001.json"],
+      raw_provider_output_refs: ["provider-raw/code_review/code_review_0001.txt"],
+      rework_instructions: null,
+      human_gate: {
+        reason_code: "manual_triage",
+        available_actions: ["provide_context", "manual_continue", "abort"],
+      },
+      created_at: "2026-06-12T00:01:00Z",
+      parse_error: null,
+    };
+
+    expect(decision.verdict).toBe("proceed");
+    expect(decision.next_stage).toBe("review_request");
+    expect(decision.human_gate?.available_actions).toContain("manual_continue");
   });
 
   it("accepts plan based testing reports and blocked gate metadata", () => {
@@ -252,5 +339,73 @@ describe("workspace websocket protocol types", () => {
     expect((report.steps ?? [])[0].step_id).toBe("api_smoke");
     expect(gate.reason_code).toBe("missing_required_test_step");
     expect(gate.available_actions[0].action_type).toBe("rerun_missing_steps");
+  });
+
+  it("accepts retry analyst gate actions", () => {
+    const action: import("./types").CodingGateAction = {
+      action_id: "retry_analyst",
+      label: "重试 Analyst",
+      action_type: "retry_analyst",
+    };
+
+    expect(action.action_type).toBe("retry_analyst");
+  });
+
+  it("accepts role run metadata on analyst decisions", () => {
+    const decision: AnalystDecisionRecord = {
+      id: "analyst_decision_0001",
+      attempt_id: "coding_attempt_0001",
+      source_stage: "testing",
+      rework_round: 1,
+      verdict: "human_required",
+      next_stage: "human_gate",
+      reason: "Analyst 输出不是有效 JSON",
+      evidence_refs: [],
+      raw_provider_output_refs: [],
+      created_at: "2026-06-13T00:00:00Z",
+      role_run_id: "coding_role_run_0001",
+      run_no: 1,
+    };
+
+    expect(decision.role_run_id).toBe("coding_role_run_0001");
+    expect(decision.run_no).toBe(1);
+  });
+
+  it("accepts role run metadata on review reports", () => {
+    const report: CodeReviewReport = {
+      id: "code_review_0001",
+      attempt_id: "coding_attempt_0001",
+      round: 1,
+      verdict: "approve",
+      findings: [],
+      tested_evidence_refs: [],
+      diff_refs: [],
+      summary: "review ok",
+      created_at: "2026-06-13T00:00:00Z",
+      raw_provider_output_ref: "provider-raw/code_review/code_review_0001.txt",
+      role_run_id: "coding_role_run_0001",
+      run_no: 1,
+    };
+
+    const internal: InternalPrReview = {
+      id: "internal_review_0001",
+      attempt_id: "coding_attempt_0001",
+      review_request_id: "review_request_0001",
+      verdict: "approve",
+      findings: [],
+      impact_scope: ["src/lib.rs"],
+      pr_description: "PR",
+      commit_message_suggestion: "feat: work",
+      tested_evidence_refs: [],
+      diff_refs: [],
+      summary: "internal ok",
+      created_at: "2026-06-13T00:00:01Z",
+      raw_provider_output_ref: "provider-raw/internal_pr_review/internal_pr_review_0001.txt",
+      role_run_id: "coding_role_run_0002",
+      run_no: 1,
+    };
+
+    expect(report.run_no).toBe(1);
+    expect(internal.role_run_id).toBe("coding_role_run_0002");
   });
 });

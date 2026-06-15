@@ -1,0 +1,4 @@
+interface:
+  display_name: "Prepare Aria Worktree Dev"
+  short_description: "准备 Aria worktree 并启动开发服务"
+  default_prompt: "使用 $prepare-aria-worktree-dev 准备并启动 worktree【bugfix_branch】，只启动服务，等我操作。"

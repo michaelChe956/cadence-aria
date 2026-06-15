@@ -108,6 +108,27 @@ async fn api_issue_start_endpoint_is_removed() {
 }
 
 #[tokio::test]
+async fn api_runtime_info_reports_build_and_gate_features() {
+    let workspace = tempdir().expect("workspace");
+    let state = WebAppState::new(
+        workspace.path().to_path_buf(),
+        WebRuntime::new_fake(workspace.path().to_path_buf()),
+    );
+    let app = build_web_router(state);
+
+    let info = request_json(app, Method::GET, "/api/runtime-info", json!({})).await;
+
+    assert_eq!(
+        info["workspace_root"],
+        workspace.path().display().to_string()
+    );
+    assert_eq!(info["features"]["testing_result_review_gate"], true);
+    assert_eq!(info["features"]["coding_choice_gate"], true);
+    assert!(info["git_sha"].is_string());
+    assert!(info["package_version"].is_string());
+}
+
+#[tokio::test]
 async fn api_workspace_start_no_longer_creates_task_runtime() {
     let app_root = tempdir().expect("app root");
     let workspace = git_repo();

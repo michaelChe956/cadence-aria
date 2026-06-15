@@ -89,6 +89,48 @@ describe("MessageGroupView", () => {
     expect(screen.getByText("pnpm test").tagName).toBe("CODE");
   });
 
+  it("formats grouped tester TestPlan JSON streams before rendering markdown", () => {
+    const escapedPlan = JSON.stringify({
+      summary: "针对本次 diff 生成 Provider 依赖自检验证计划",
+      assumptions: ["当前阶段仅生成 TestPlan，不直接执行命令。"],
+      steps: [
+        {
+          id: "step_001_rules_context",
+          title: "读取仓库验证规则",
+          required: true,
+          risk_level: "low",
+          evidence_expectation: "读取到规则文件内容。",
+          related_requirements: ["REQ-provider-gate"],
+          related_work_item_tasks: ["TASK-007"],
+        },
+      ],
+    }).replaceAll('"', "&quot;");
+
+    const { container } = render(
+      <MessageGroupView
+        group={{
+          id: "group-tester-plan",
+          nodeId: "coding_node_0003",
+          role: "tester",
+          primaryEntry: makeEntry("tester-plan", "provider_stream", "tester", escapedPlan, {
+            provider: "codex",
+            phase: "plan_tests",
+          }),
+          inlineEvents: [],
+          interruptEntries: [],
+        }}
+      />,
+    );
+
+    expect(screen.getByText("Tester · Codex")).toBeInTheDocument();
+    expect(screen.getByText("Tester 测试计划")).toBeInTheDocument();
+    expect(screen.getByText(/针对本次 diff 生成 Provider 依赖自检验证计划/)).toBeInTheDocument();
+    expect(screen.getByText(/step_001_rules_context/)).toBeInTheDocument();
+    expect(screen.getByText(/TASK-007/)).toBeInTheDocument();
+    expect(container.textContent).not.toContain("&quot;");
+    expect(container.textContent).not.toContain('"summary"');
+  });
+
   it("shows reviewer tool calls even when no stream text has arrived", () => {
     render(
       <MessageGroupView
@@ -111,6 +153,39 @@ describe("MessageGroupView", () => {
     expect(screen.getByText("审核者 · Codex")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /git diff --stat/ }));
     expect(screen.getByText("changed files")).toBeInTheDocument();
+  });
+
+  it.each([
+    ["tester", "Tester · Fake · Run #2"],
+    ["analyst", "Analyst · Fake · Run #3"],
+    ["code_reviewer", "Code Reviewer · Fake · Run #4"],
+    ["internal_reviewer", "Internal Reviewer · Fake · Run #5"],
+  ] as const)("shows run number in %s group title", (role, expectedTitle) => {
+    const runNo = Number(expectedTitle.match(/#(\d+)/)?.[1]);
+    render(
+      <MessageGroupView
+        group={{
+          id: `group-${role}`,
+          nodeId: "coding_node_0001",
+          role,
+          primaryEntry: makeEntry(
+            `entry-${role}`,
+            "provider_stream",
+            role,
+            "Readable provider output",
+            {
+              provider: "fake",
+              role_run_id: `coding_role_run_${runNo}`,
+              run_no: runNo,
+            },
+          ),
+          inlineEvents: [],
+          interruptEntries: [],
+        }}
+      />,
+    );
+
+    expect(screen.getByText(expectedTitle)).toBeInTheDocument();
   });
 });
 
