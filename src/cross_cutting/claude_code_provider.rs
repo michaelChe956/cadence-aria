@@ -48,6 +48,7 @@ struct ToolUseBlock {
 struct ToolResultBlock {
     tool_use_id: String,
     output: String,
+    is_error: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -180,6 +181,10 @@ impl ClaudeCodeProvider {
             .filter(|item| item.get("type").and_then(Value::as_str) == Some("tool_result"))
             .filter_map(|item| {
                 let tool_use_id = item.get("tool_use_id")?.as_str()?.to_string();
+                let is_error = item
+                    .get("is_error")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
                 let output = match item.get("content") {
                     Some(Value::String(s)) => s.clone(),
                     Some(Value::Array(arr)) => arr
@@ -192,6 +197,7 @@ impl ClaudeCodeProvider {
                 Some(ToolResultBlock {
                     tool_use_id,
                     output,
+                    is_error,
                 })
             })
             .collect();
@@ -870,6 +876,25 @@ async fn read_claude_stream(
 
         if let Some(results) = ClaudeCodeProvider::parse_tool_result(&value) {
             for result in results {
+                if result.is_error && resolved_ask_user_questions.contains_key(&result.tool_use_id)
+                {
+                    emit_ask_user_question_protocol_error(
+                        &event_tx,
+                        "tool_result",
+                        json!({
+                            "tool_use_id": result.tool_use_id,
+                            "output": result.output,
+                        }),
+                        &result.output,
+                    )
+                    .await;
+                    return Err(ProviderAdapterError::execution_failed(
+                        None,
+                        result.output,
+                        "AskUserQuestion tool_result reported error",
+                        0,
+                    ));
+                }
                 if let Some(tool_use) = pending_tool_uses.remove(&result.tool_use_id) {
                     let output_preview =
                         output_preview(&result.output, TOOL_RESULT_PREVIEW_MAX_BYTES);
@@ -2396,6 +2421,68 @@ done
         assert!(
             saw_protocol_error,
             "expected ask_user_question_unresolved protocol error after tool_use bridge failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn claude_provider_ask_user_question_emits_protocol_error_on_tool_result_error() {
+        let fixture = executable_fixture(
+            "tests/fixtures/provider/claude_ask_user_question_tool_error_fixture.sh",
+        );
+        let provider = ClaudeCodeProvider::new(fixture);
+        let input = streaming_input(ProviderType::ClaudeCode, ProviderPermissionMode::Supervised);
+
+        let mut session = provider
+            .start(input, CancellationToken::new())
+            .await
+            .expect("start provider");
+
+        let choice = loop {
+            match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+                .await
+                .expect("provider should emit choice")
+                .expect("provider event channel should stay open")
+            {
+                ProviderEvent::ChoiceRequest(choice) => break choice,
+                ProviderEvent::Failed { message } => {
+                    panic!("provider failed before choice: {message}")
+                }
+                _ => {}
+            }
+        };
+        assert_eq!(choice.id, "toolu_question");
+
+        session
+            .commands
+            .send(ProviderCommand::ChoiceResponse {
+                id: choice.id,
+                selected_option_ids: vec!["opt_0".to_string()],
+                free_text: None,
+            })
+            .await
+            .expect("send choice response");
+
+        let mut saw_protocol_error = false;
+        while let Some(event) = tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+            .await
+            .expect("provider should emit events")
+        {
+            match event {
+                ProviderEvent::ProtocolError { code, .. }
+                    if code == "ask_user_question_unresolved" =>
+                {
+                    saw_protocol_error = true;
+                    break;
+                }
+                ProviderEvent::Completed { .. } => {
+                    panic!("provider should not complete after AskUserQuestion tool_result error")
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            saw_protocol_error,
+            "expected ask_user_question_unresolved protocol error on tool_result is_error"
         );
     }
 }
