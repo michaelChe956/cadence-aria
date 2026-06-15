@@ -710,9 +710,27 @@ async fn read_claude_stream(
                 }
                 let choice_request =
                     parse_ask_user_question_from_input(&request.input, &request.request_id);
-                let choice_decision = bridge
-                    .request_choice(choice_request, cancel.clone())
-                    .await?;
+                let choice_decision =
+                    match bridge.request_choice(choice_request, cancel.clone()).await {
+                        Ok(decision) => decision,
+                        Err(error) => {
+                            let message = format!(
+                                "AskUserQuestion control_request unresolved: {}",
+                                error.details
+                            );
+                            let _ = event_tx
+                                .send(ProviderEvent::ProtocolError {
+                                    code: "ask_user_question_unresolved".to_string(),
+                                    message: message.clone(),
+                                    context: Some(json!({
+                                        "request_id": request.request_id,
+                                        "tool_use_id": request.tool_use_id,
+                                    })),
+                                })
+                                .await;
+                            return Err(error);
+                        }
+                    };
                 eprintln!(
                     "[aria-choice-diag] claude got choice decision for control_request request_id={} selected={:?} free_text_present={}",
                     request.request_id,
@@ -772,9 +790,26 @@ async fn read_claude_stream(
                         None => {
                             let choice_request =
                                 parse_ask_user_question_from_input(&tool_use.input, &tool_use.id);
-                            let choice_decision = bridge
+                            let choice_decision = match bridge
                                 .request_choice(choice_request, cancel.clone())
-                                .await?;
+                                .await
+                            {
+                                Ok(decision) => decision,
+                                Err(error) => {
+                                    let message = format!(
+                                        "AskUserQuestion tool_use unresolved: {}",
+                                        error.details
+                                    );
+                                    let _ = event_tx
+                                        .send(ProviderEvent::ProtocolError {
+                                            code: "ask_user_question_unresolved".to_string(),
+                                            message: message.clone(),
+                                            context: Some(json!({ "tool_use_id": tool_use.id })),
+                                        })
+                                        .await;
+                                    return Err(error);
+                                }
+                            };
                             eprintln!(
                                 "[aria-choice-diag] claude got choice decision for assistant tool_use tool_use_id={} selected={:?} free_text_present={}",
                                 tool_use.id,
@@ -2223,5 +2258,56 @@ done
         tokio::time::timeout(TEST_TIMEOUT, wait_for_receiver_closed(&rx))
             .await
             .expect("stream receiver should close after cancellation");
+    }
+
+    #[tokio::test]
+    async fn claude_provider_ask_user_question_emits_protocol_error_on_bridge_failure() {
+        let fixture =
+            executable_fixture("tests/fixtures/provider/claude_ask_user_question_fixture.sh");
+        let provider = ClaudeCodeProvider::new(fixture);
+        let input = streaming_input(ProviderType::ClaudeCode, ProviderPermissionMode::Supervised);
+        let cancel = CancellationToken::new();
+
+        let mut session = provider
+            .start(input, cancel.clone())
+            .await
+            .expect("start provider");
+
+        let _choice = loop {
+            match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+                .await
+                .expect("provider should emit choice")
+                .expect("provider event channel should stay open")
+            {
+                ProviderEvent::ChoiceRequest(choice) => break choice,
+                ProviderEvent::Failed { message } => {
+                    panic!("provider failed before choice: {message}")
+                }
+                ProviderEvent::ProtocolError { message, .. } => {
+                    panic!("provider protocol error before choice: {message}")
+                }
+                _ => {}
+            }
+        };
+
+        // 取消会话，让 bridge 的 request_choice 返回错误，同时保持 receiver 打开以接收 ProtocolError。
+        cancel.cancel();
+
+        // provider 应该抛出 ProtocolError，而不是通用的 Failed。
+        let mut saw_protocol_error = false;
+        while let Some(event) = tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+            .await
+            .unwrap_or(None)
+        {
+            if matches!(event, ProviderEvent::ProtocolError { code, .. } if code == "ask_user_question_unresolved")
+            {
+                saw_protocol_error = true;
+                break;
+            }
+        }
+        assert!(
+            saw_protocol_error,
+            "expected ask_user_question_unresolved protocol error after bridge failure"
+        );
     }
 }
