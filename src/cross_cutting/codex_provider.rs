@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::ExitStatus;
 use std::sync::Arc;
@@ -16,10 +16,9 @@ use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
     ChoiceOptionData, ChoiceRequestData, ChoiceRequestSource, ProviderEvent,
     ProviderExecutionEvent, ProviderExecutionEventKind, ProviderExecutionEventStatus,
-    ProviderPermissionMode, ProviderSession, ProviderStatus, RiskLevel, StreamChunk,
-    StreamingProviderAdapter, StreamingProviderInput,
+    ProviderPermissionMode, ProviderSession, ProviderStatus, RiskLevel, StreamingProviderAdapter,
+    StreamingProviderInput,
 };
-use crate::protocol::contracts::AdapterInput;
 
 #[derive(Debug, Clone)]
 pub struct CodexProvider {
@@ -149,74 +148,6 @@ impl StreamingProviderAdapter for CodexProvider {
             events: event_rx,
             commands,
         })
-    }
-
-    async fn run_streaming(
-        &self,
-        input: &AdapterInput,
-        cancel: CancellationToken,
-    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
-        let working_dir = input.worktree_path.as_ref().map(PathBuf::from).unwrap_or(
-            std::env::current_dir().map_err(|error| {
-                ProviderAdapterError::execution_failed(None, String::new(), error.to_string(), 0)
-            })?,
-        );
-        let provider_input = StreamingProviderInput {
-            provider_type: input.provider_type.clone(),
-            role: input.role.clone(),
-            prompt: input.prompt.clone(),
-            working_dir,
-            workspace_session_id: None,
-            resume_provider_session_id: None,
-            permission_mode: ProviderPermissionMode::Auto,
-            env_vars: BTreeMap::new(),
-            timeout_secs: input.timeout,
-        };
-        let bridge_cancel = cancel.clone();
-        let mut session = self.start(provider_input, cancel).await?;
-        let (tx, rx) = mpsc::channel(32);
-
-        tokio::spawn(async move {
-            let _commands = session.commands;
-            loop {
-                let event = tokio::select! {
-                    _ = bridge_cancel.cancelled() => return,
-                    event = session.events.recv() => match event {
-                        Some(event) => event,
-                        None => return,
-                    },
-                };
-                let chunk = match event {
-                    ProviderEvent::TextDelta { content } => StreamChunk::Text(content),
-                    ProviderEvent::Completed { full_output, .. } => {
-                        StreamChunk::Done { full_output }
-                    }
-                    ProviderEvent::Failed { message } => StreamChunk::Error(message),
-                    ProviderEvent::ProtocolError { message, .. } => StreamChunk::Error(message),
-                    ProviderEvent::PermissionTimeout { permission_id } => {
-                        StreamChunk::Error(format!("Permission request {permission_id} timed out"))
-                    }
-                    ProviderEvent::PermissionRequest(_)
-                    | ProviderEvent::ChoiceRequest(_)
-                    | ProviderEvent::StatusChanged(_)
-                    | ProviderEvent::Execution(_)
-                    | ProviderEvent::ToolCall(_)
-                    | ProviderEvent::ToolResult(_) => {
-                        continue;
-                    }
-                };
-                tokio::select! {
-                    _ = bridge_cancel.cancelled() => return,
-                    send_result = tx.send(chunk) => {
-                        if send_result.is_err() {
-                            return;
-                        }
-                    }
-                }
-            }
-        });
-
-        Ok(rx)
     }
 }
 
@@ -451,7 +382,7 @@ where
 
         if let Some(request) = parse_user_input_request(&incoming) {
             waiting_for_resume_progress = false;
-            let decision = bridge
+            let decision = match bridge
                 .request_choice(
                     ChoiceRequestData {
                         id: request.id,
@@ -463,9 +394,33 @@ where
                     },
                     cancel.clone(),
                 )
-                .await?;
-            write_user_input_response(&peer, request.rpc_id, &request.question_id, decision)
-                .await?;
+                .await
+            {
+                Ok(decision) => decision,
+                Err(error) => {
+                    emit_request_user_input_protocol_error(
+                        &event_tx,
+                        "choice bridge",
+                        &request.question_id,
+                        &error.details,
+                    )
+                    .await;
+                    return Err(error);
+                }
+            };
+            if let Err(error) =
+                write_user_input_response(&peer, request.rpc_id, &request.question_id, decision)
+                    .await
+            {
+                emit_request_user_input_protocol_error(
+                    &event_tx,
+                    "response write",
+                    &request.question_id,
+                    &error.details,
+                )
+                .await;
+                return Err(error);
+            }
             continue;
         }
 
@@ -858,6 +813,23 @@ async fn send_provider_event(
     }
 }
 
+async fn emit_request_user_input_protocol_error(
+    event_tx: &mpsc::Sender<ProviderEvent>,
+    source: &str,
+    question_id: &str,
+    details: &str,
+) {
+    let message = format!("requestUserInput {source} unresolved: {details}");
+    // 直接使用 event_tx.send，因为失败原因可能是 cancel；send_provider_event 会在 cancel 时丢弃事件。
+    let _ = event_tx
+        .send(ProviderEvent::ProtocolError {
+            code: "request_user_input_unresolved".to_string(),
+            message,
+            context: Some(json!({ "question_id": question_id })),
+        })
+        .await;
+}
+
 fn provider_error(message: impl Into<String>) -> ProviderAdapterError {
     ProviderAdapterError::parse_error(message, String::new(), String::new())
 }
@@ -893,6 +865,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
+    use serde_json::Value;
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
 
@@ -1404,5 +1377,152 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn codex_provider_request_user_input_emits_protocol_error_on_bridge_failure() {
+        let fixture =
+            executable_fixture("tests/fixtures/provider/codex_app_server_user_input_fixture.sh");
+        let provider = CodexProvider::new(fixture);
+        let input = streaming_input(ProviderType::Codex, ProviderPermissionMode::Auto);
+        let cancel = CancellationToken::new();
+        let mut session = provider.start(input, cancel.clone()).await.unwrap();
+
+        let _choice = loop {
+            match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+                .await
+                .expect("provider should emit choice")
+                .expect("provider event channel should stay open")
+            {
+                ProviderEvent::ChoiceRequest(choice) => break choice,
+                ProviderEvent::Failed { message } => {
+                    panic!("provider failed before choice: {message}")
+                }
+                _ => {}
+            }
+        };
+
+        // 取消 provider 以强制 bridge 失败。
+        cancel.cancel();
+
+        let mut saw_protocol_error = false;
+        while let Some(event) = tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+            .await
+            .unwrap_or(None)
+        {
+            match event {
+                ProviderEvent::ProtocolError {
+                    code,
+                    message,
+                    context,
+                } if code == "request_user_input_unresolved" => {
+                    assert!(
+                        message.contains("requestUserInput"),
+                        "unexpected message: {message}"
+                    );
+                    assert!(
+                        message.contains("unresolved"),
+                        "unexpected message: {message}"
+                    );
+                    let context = context.expect("protocol error should include context");
+                    assert_eq!(
+                        context.get("question_id").and_then(Value::as_str),
+                        Some("complexity")
+                    );
+                    saw_protocol_error = true;
+                    break;
+                }
+                ProviderEvent::Completed { .. } => {
+                    panic!("expected protocol error before completion")
+                }
+                ProviderEvent::Failed { message } => {
+                    panic!("expected protocol error before failure: {message}")
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            saw_protocol_error,
+            "expected request_user_input_unresolved protocol error after bridge failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_provider_request_user_input_emits_protocol_error_on_write_failure() {
+        let fixture = executable_fixture(
+            "tests/fixtures/provider/codex_request_user_input_peer_closes_fixture.sh",
+        );
+        let provider = CodexProvider::new(fixture);
+        let input = streaming_input(ProviderType::Codex, ProviderPermissionMode::Auto);
+
+        let mut session = provider
+            .start(input, CancellationToken::new())
+            .await
+            .unwrap();
+
+        let choice = loop {
+            match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+                .await
+                .expect("provider should emit choice")
+                .expect("provider event channel should stay open")
+            {
+                ProviderEvent::ChoiceRequest(choice) => break choice,
+                ProviderEvent::Failed { message } => {
+                    panic!("provider failed before choice: {message}")
+                }
+                _ => {}
+            }
+        };
+
+        session
+            .commands
+            .send(ProviderCommand::ChoiceResponse {
+                id: choice.id,
+                selected_option_ids: vec!["是".to_string()],
+                free_text: None,
+            })
+            .await
+            .expect("send choice response");
+
+        let mut saw_protocol_error = false;
+        while let Some(event) = tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+            .await
+            .expect("provider should emit events")
+        {
+            match event {
+                ProviderEvent::ProtocolError {
+                    code,
+                    message,
+                    context,
+                } if code == "request_user_input_unresolved" => {
+                    assert!(
+                        message.contains("requestUserInput"),
+                        "unexpected message: {message}"
+                    );
+                    assert!(
+                        message.contains("unresolved"),
+                        "unexpected message: {message}"
+                    );
+                    let context = context.expect("protocol error should include context");
+                    assert_eq!(
+                        context.get("question_id").and_then(Value::as_str),
+                        Some("confirm")
+                    );
+                    saw_protocol_error = true;
+                    break;
+                }
+                ProviderEvent::Completed { .. } => {
+                    panic!("expected protocol error before completion")
+                }
+                ProviderEvent::Failed { message } => {
+                    panic!("expected protocol error before failure: {message}")
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            saw_protocol_error,
+            "expected request_user_input_unresolved protocol error when JSON-RPC response write fails"
+        );
     }
 }

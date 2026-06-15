@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::ExitStatus;
 use std::sync::Arc;
@@ -16,10 +16,9 @@ use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
     ChoiceOptionData, ChoiceRequestData, ChoiceRequestSource, ProviderEvent,
     ProviderExecutionEvent, ProviderExecutionEventKind, ProviderExecutionEventStatus,
-    ProviderPermissionMode, ProviderSession, ProviderStatus, RiskLevel, StreamChunk,
-    StreamingProviderAdapter, StreamingProviderInput,
+    ProviderPermissionMode, ProviderSession, ProviderStatus, RiskLevel, StreamingProviderAdapter,
+    StreamingProviderInput,
 };
-use crate::protocol::contracts::AdapterInput;
 
 const TOOL_RESULT_PREVIEW_MAX_BYTES: usize = 500;
 #[derive(Debug, Clone)]
@@ -48,6 +47,7 @@ struct ToolUseBlock {
 struct ToolResultBlock {
     tool_use_id: String,
     output: String,
+    is_error: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -180,6 +180,10 @@ impl ClaudeCodeProvider {
             .filter(|item| item.get("type").and_then(Value::as_str) == Some("tool_result"))
             .filter_map(|item| {
                 let tool_use_id = item.get("tool_use_id")?.as_str()?.to_string();
+                let is_error = item
+                    .get("is_error")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
                 let output = match item.get("content") {
                     Some(Value::String(s)) => s.clone(),
                     Some(Value::Array(arr)) => arr
@@ -192,6 +196,7 @@ impl ClaudeCodeProvider {
                 Some(ToolResultBlock {
                     tool_use_id,
                     output,
+                    is_error,
                 })
             })
             .collect();
@@ -545,74 +550,6 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
             commands,
         })
     }
-
-    async fn run_streaming(
-        &self,
-        input: &AdapterInput,
-        cancel: CancellationToken,
-    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
-        let working_dir = input.worktree_path.as_ref().map(PathBuf::from).unwrap_or(
-            std::env::current_dir().map_err(|error| {
-                ProviderAdapterError::execution_failed(None, String::new(), error.to_string(), 0)
-            })?,
-        );
-        let provider_input = StreamingProviderInput {
-            provider_type: input.provider_type.clone(),
-            role: input.role.clone(),
-            prompt: input.prompt.clone(),
-            working_dir,
-            workspace_session_id: None,
-            resume_provider_session_id: None,
-            permission_mode: ProviderPermissionMode::Auto,
-            env_vars: BTreeMap::new(),
-            timeout_secs: input.timeout,
-        };
-        let bridge_cancel = cancel.clone();
-        let mut session = self.start(provider_input, cancel).await?;
-        let (tx, rx) = mpsc::channel(32);
-
-        tokio::spawn(async move {
-            let _commands = session.commands;
-            loop {
-                let event = tokio::select! {
-                    _ = bridge_cancel.cancelled() => return,
-                    event = session.events.recv() => match event {
-                        Some(event) => event,
-                        None => return,
-                    },
-                };
-                let chunk = match event {
-                    ProviderEvent::TextDelta { content } => StreamChunk::Text(content),
-                    ProviderEvent::Completed { full_output, .. } => {
-                        StreamChunk::Done { full_output }
-                    }
-                    ProviderEvent::Failed { message } => StreamChunk::Error(message),
-                    ProviderEvent::ProtocolError { message, .. } => StreamChunk::Error(message),
-                    ProviderEvent::PermissionTimeout { permission_id } => {
-                        StreamChunk::Error(format!("Permission request {permission_id} timed out"))
-                    }
-                    ProviderEvent::PermissionRequest(_)
-                    | ProviderEvent::ChoiceRequest(_)
-                    | ProviderEvent::StatusChanged(_)
-                    | ProviderEvent::Execution(_)
-                    | ProviderEvent::ToolCall(_)
-                    | ProviderEvent::ToolResult(_) => {
-                        continue;
-                    }
-                };
-                tokio::select! {
-                    _ = bridge_cancel.cancelled() => return,
-                    send_result = tx.send(chunk) => {
-                        if send_result.is_err() {
-                            return;
-                        }
-                    }
-                }
-            }
-        });
-
-        Ok(rx)
-    }
 }
 
 async fn terminate_aborted_child(child: &mut AsyncGroupChild) {
@@ -627,6 +564,23 @@ async fn terminate_aborted_child(child: &mut AsyncGroupChild) {
     if let Err(error) = child.wait().await {
         tracing::warn!(%error, "failed to wait for aborted Claude Code provider process");
     }
+}
+
+async fn emit_ask_user_question_protocol_error(
+    event_tx: &mpsc::Sender<ProviderEvent>,
+    source: &str,
+    context: Value,
+    details: &str,
+) {
+    let message = format!("AskUserQuestion {source} unresolved: {details}");
+    // 直接使用 event_tx.send，因为失败原因可能是 cancel；send_provider_event 会在 cancel 时丢弃事件。
+    let _ = event_tx
+        .send(ProviderEvent::ProtocolError {
+            code: "ask_user_question_unresolved".to_string(),
+            message,
+            context: Some(context),
+        })
+        .await;
 }
 
 async fn read_claude_stream(
@@ -710,9 +664,23 @@ async fn read_claude_stream(
                 }
                 let choice_request =
                     parse_ask_user_question_from_input(&request.input, &request.request_id);
-                let choice_decision = bridge
-                    .request_choice(choice_request, cancel.clone())
-                    .await?;
+                let choice_decision =
+                    match bridge.request_choice(choice_request, cancel.clone()).await {
+                        Ok(decision) => decision,
+                        Err(error) => {
+                            emit_ask_user_question_protocol_error(
+                                &event_tx,
+                                "control_request",
+                                json!({
+                                    "request_id": request.request_id,
+                                    "tool_use_id": request.tool_use_id,
+                                }),
+                                &error.details,
+                            )
+                            .await;
+                            return Err(error);
+                        }
+                    };
                 eprintln!(
                     "[aria-choice-diag] claude got choice decision for control_request request_id={} selected={:?} free_text_present={}",
                     request.request_id,
@@ -772,9 +740,20 @@ async fn read_claude_stream(
                         None => {
                             let choice_request =
                                 parse_ask_user_question_from_input(&tool_use.input, &tool_use.id);
-                            let choice_decision = bridge
-                                .request_choice(choice_request, cancel.clone())
-                                .await?;
+                            let choice_decision =
+                                match bridge.request_choice(choice_request, cancel.clone()).await {
+                                    Ok(decision) => decision,
+                                    Err(error) => {
+                                        emit_ask_user_question_protocol_error(
+                                            &event_tx,
+                                            "tool_use",
+                                            json!({ "tool_use_id": tool_use.id }),
+                                            &error.details,
+                                        )
+                                        .await;
+                                        return Err(error);
+                                    }
+                                };
                             eprintln!(
                                 "[aria-choice-diag] claude got choice decision for assistant tool_use tool_use_id={} selected={:?} free_text_present={}",
                                 tool_use.id,
@@ -828,6 +807,25 @@ async fn read_claude_stream(
 
         if let Some(results) = ClaudeCodeProvider::parse_tool_result(&value) {
             for result in results {
+                if result.is_error && resolved_ask_user_questions.contains_key(&result.tool_use_id)
+                {
+                    emit_ask_user_question_protocol_error(
+                        &event_tx,
+                        "tool_result",
+                        json!({
+                            "tool_use_id": result.tool_use_id,
+                            "output": result.output,
+                        }),
+                        &result.output,
+                    )
+                    .await;
+                    return Err(ProviderAdapterError::execution_failed(
+                        None,
+                        result.output,
+                        "AskUserQuestion tool_result reported error",
+                        0,
+                    ));
+                }
                 if let Some(tool_use) = pending_tool_uses.remove(&result.tool_use_id) {
                     let output_preview =
                         output_preview(&result.output, TOOL_RESULT_PREVIEW_MAX_BYTES);
@@ -2223,5 +2221,212 @@ done
         tokio::time::timeout(TEST_TIMEOUT, wait_for_receiver_closed(&rx))
             .await
             .expect("stream receiver should close after cancellation");
+    }
+
+    #[tokio::test]
+    async fn claude_provider_ask_user_question_emits_protocol_error_on_bridge_failure() {
+        let fixture =
+            executable_fixture("tests/fixtures/provider/claude_ask_user_question_fixture.sh");
+        let provider = ClaudeCodeProvider::new(fixture);
+        let input = streaming_input(ProviderType::ClaudeCode, ProviderPermissionMode::Supervised);
+        let cancel = CancellationToken::new();
+
+        let mut session = provider
+            .start(input, cancel.clone())
+            .await
+            .expect("start provider");
+
+        let _choice = loop {
+            match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+                .await
+                .expect("provider should emit choice")
+                .expect("provider event channel should stay open")
+            {
+                ProviderEvent::ChoiceRequest(choice) => break choice,
+                ProviderEvent::Failed { message } => {
+                    panic!("provider failed before choice: {message}")
+                }
+                ProviderEvent::ProtocolError { message, .. } => {
+                    panic!("provider protocol error before choice: {message}")
+                }
+                _ => {}
+            }
+        };
+
+        // 取消会话，让 bridge 的 request_choice 返回错误，同时保持 receiver 打开以接收 ProtocolError。
+        cancel.cancel();
+
+        // provider 应该抛出 ProtocolError，而不是通用的 Failed。
+        let mut saw_protocol_error = false;
+        while let Some(event) = tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+            .await
+            .unwrap_or(None)
+        {
+            if let ProviderEvent::ProtocolError {
+                code,
+                message,
+                context,
+            } = event
+            {
+                assert_eq!(code, "ask_user_question_unresolved");
+                assert!(
+                    message.contains("AskUserQuestion"),
+                    "message should mention AskUserQuestion: {message}"
+                );
+                assert!(
+                    message.contains("unresolved"),
+                    "message should mention unresolved: {message}"
+                );
+                let ctx = context.expect("context should be present");
+                assert_eq!(ctx["request_id"], "ask_req_001");
+                assert_eq!(ctx["tool_use_id"], "toolu_question");
+                saw_protocol_error = true;
+                break;
+            }
+        }
+        assert!(
+            saw_protocol_error,
+            "expected ask_user_question_unresolved protocol error after bridge failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn claude_provider_ask_user_question_tool_use_emits_protocol_error_on_bridge_failure() {
+        let fixture = executable_fixture(
+            "tests/fixtures/provider/claude_ask_user_question_tool_use_bridge_failure_fixture.sh",
+        );
+        let provider = ClaudeCodeProvider::new(fixture);
+        let input = streaming_input(ProviderType::ClaudeCode, ProviderPermissionMode::Supervised);
+        let cancel = CancellationToken::new();
+
+        let mut session = provider
+            .start(input, cancel.clone())
+            .await
+            .expect("start provider");
+
+        let _choice = loop {
+            match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+                .await
+                .expect("provider should emit choice")
+                .expect("provider event channel should stay open")
+            {
+                ProviderEvent::ChoiceRequest(choice) => break choice,
+                ProviderEvent::Failed { message } => {
+                    panic!("provider failed before choice: {message}")
+                }
+                ProviderEvent::ProtocolError { message, .. } => {
+                    panic!("provider protocol error before choice: {message}")
+                }
+                _ => {}
+            }
+        };
+
+        cancel.cancel();
+
+        let mut saw_protocol_error = false;
+        while let Some(event) = tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+            .await
+            .unwrap_or(None)
+        {
+            if let ProviderEvent::ProtocolError {
+                code,
+                message,
+                context,
+            } = event
+            {
+                assert_eq!(code, "ask_user_question_unresolved");
+                assert!(
+                    message.contains("AskUserQuestion"),
+                    "message should mention AskUserQuestion: {message}"
+                );
+                assert!(
+                    message.contains("unresolved"),
+                    "message should mention unresolved: {message}"
+                );
+                let ctx = context.expect("context should be present");
+                assert_eq!(ctx["tool_use_id"], "toolu_question");
+                saw_protocol_error = true;
+                break;
+            }
+        }
+        assert!(
+            saw_protocol_error,
+            "expected ask_user_question_unresolved protocol error after tool_use bridge failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn claude_provider_ask_user_question_emits_protocol_error_on_tool_result_error() {
+        let fixture = executable_fixture(
+            "tests/fixtures/provider/claude_ask_user_question_tool_error_fixture.sh",
+        );
+        let provider = ClaudeCodeProvider::new(fixture);
+        let input = streaming_input(ProviderType::ClaudeCode, ProviderPermissionMode::Supervised);
+
+        let mut session = provider
+            .start(input, CancellationToken::new())
+            .await
+            .expect("start provider");
+
+        let choice = loop {
+            match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+                .await
+                .expect("provider should emit choice")
+                .expect("provider event channel should stay open")
+            {
+                ProviderEvent::ChoiceRequest(choice) => break choice,
+                ProviderEvent::Failed { message } => {
+                    panic!("provider failed before choice: {message}")
+                }
+                _ => {}
+            }
+        };
+        assert_eq!(choice.id, "toolu_question");
+
+        session
+            .commands
+            .send(ProviderCommand::ChoiceResponse {
+                id: choice.id,
+                selected_option_ids: vec!["opt_0".to_string()],
+                free_text: None,
+            })
+            .await
+            .expect("send choice response");
+
+        let mut saw_protocol_error = false;
+        while let Some(event) = tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+            .await
+            .expect("provider should emit events")
+        {
+            match event {
+                ProviderEvent::ProtocolError {
+                    code,
+                    message,
+                    context,
+                } if code == "ask_user_question_unresolved" => {
+                    assert!(
+                        message.contains("AskUserQuestion"),
+                        "message should mention AskUserQuestion: {message}"
+                    );
+                    assert!(
+                        message.contains("unresolved"),
+                        "message should mention unresolved: {message}"
+                    );
+                    let ctx = context.expect("context should be present");
+                    assert_eq!(ctx["tool_use_id"], "toolu_question");
+                    assert_eq!(ctx["output"], "User refused to answer");
+                    saw_protocol_error = true;
+                    break;
+                }
+                ProviderEvent::Completed { .. } => {
+                    panic!("provider should not complete after AskUserQuestion tool_result error")
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            saw_protocol_error,
+            "expected ask_user_question_unresolved protocol error on tool_result is_error"
+        );
     }
 }

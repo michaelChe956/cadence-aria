@@ -328,7 +328,6 @@ pub trait StreamingProviderAdapter: Send + Sync {
         let (tx, rx) = mpsc::channel(32);
 
         tokio::spawn(async move {
-            let _commands = session.commands;
             loop {
                 let event = tokio::select! {
                     _ = bridge_cancel.cancelled() => return,
@@ -349,9 +348,43 @@ pub trait StreamingProviderAdapter: Send + Sync {
                     ProviderEvent::PermissionTimeout { permission_id } => {
                         StreamChunk::Error(format!("Permission request {permission_id} timed out"))
                     }
-                    ProviderEvent::PermissionRequest(_)
-                    | ProviderEvent::ChoiceRequest(_)
-                    | ProviderEvent::StatusChanged(_)
+                    ProviderEvent::PermissionRequest(request) => {
+                        let _ = session
+                            .commands
+                            .send(ProviderCommand::PermissionResponse {
+                                id: request.id,
+                                approved: false,
+                                reason: Some(
+                                    "run_streaming does not support interactive permission requests".to_string(),
+                                ),
+                            })
+                            .await;
+                        let _ = tx
+                            .send(StreamChunk::Error(
+                                "interactive permission request is not supported in run_streaming"
+                                    .to_string(),
+                            ))
+                            .await;
+                        return;
+                    }
+                    ProviderEvent::ChoiceRequest(request) => {
+                        let _ = session
+                            .commands
+                            .send(ProviderCommand::ChoiceResponse {
+                                id: request.id,
+                                selected_option_ids: vec![],
+                                free_text: Some("aborted".to_string()),
+                            })
+                            .await;
+                        let _ = tx
+                            .send(StreamChunk::Error(
+                                "interactive choice request is not supported in run_streaming"
+                                    .to_string(),
+                            ))
+                            .await;
+                        return;
+                    }
+                    ProviderEvent::StatusChanged(_)
                     | ProviderEvent::Execution(_)
                     | ProviderEvent::ToolCall(_)
                     | ProviderEvent::ToolResult(_) => {
@@ -432,76 +465,6 @@ impl StreamingProviderAdapter for FakeStreamingProvider {
             events: event_rx,
             commands: command_tx,
         })
-    }
-
-    async fn run_streaming(
-        &self,
-        input: &AdapterInput,
-        cancel: CancellationToken,
-    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
-        let working_dir = input.worktree_path.as_ref().map(PathBuf::from).unwrap_or(
-            std::env::current_dir().map_err(|error| {
-                ProviderAdapterError::execution_failed(None, String::new(), error.to_string(), 0)
-            })?,
-        );
-        let provider_input = StreamingProviderInput {
-            provider_type: input.provider_type.clone(),
-            role: input.role.clone(),
-            prompt: input.prompt.clone(),
-            working_dir,
-            workspace_session_id: None,
-            resume_provider_session_id: None,
-            permission_mode: ProviderPermissionMode::Auto,
-            env_vars: BTreeMap::new(),
-            timeout_secs: input.timeout,
-        };
-        let bridge_cancel = cancel.clone();
-        let mut session = self.start(provider_input, cancel).await?;
-        let (tx, rx) = mpsc::channel(32);
-
-        tokio::spawn(async move {
-            let _commands = session.commands;
-            loop {
-                let event = tokio::select! {
-                    _ = bridge_cancel.cancelled() => return,
-                    event = session.events.recv() => {
-                        match event {
-                            Some(event) => event,
-                            None => return,
-                        }
-                    }
-                };
-                let chunk = match event {
-                    ProviderEvent::TextDelta { content } => StreamChunk::Text(content),
-                    ProviderEvent::Completed { full_output, .. } => {
-                        StreamChunk::Done { full_output }
-                    }
-                    ProviderEvent::Failed { message } => StreamChunk::Error(message),
-                    ProviderEvent::ProtocolError { message, .. } => StreamChunk::Error(message),
-                    ProviderEvent::PermissionTimeout { permission_id } => {
-                        StreamChunk::Error(format!("Permission request {permission_id} timed out"))
-                    }
-                    ProviderEvent::PermissionRequest(_)
-                    | ProviderEvent::ChoiceRequest(_)
-                    | ProviderEvent::StatusChanged(_)
-                    | ProviderEvent::Execution(_)
-                    | ProviderEvent::ToolCall(_)
-                    | ProviderEvent::ToolResult(_) => {
-                        continue;
-                    }
-                };
-                tokio::select! {
-                    _ = bridge_cancel.cancelled() => return,
-                    send_result = tx.send(chunk) => {
-                        if send_result.is_err() {
-                            return;
-                        }
-                    }
-                }
-            }
-        });
-
-        Ok(rx)
     }
 }
 
@@ -941,5 +904,61 @@ mod tests {
         }
 
         panic!("cancelled provider should close before emitting the full stream");
+    }
+
+    use crate::cross_cutting::streaming_provider::{
+        ChoiceRequestData, ChoiceRequestSource, ProviderCommand, ProviderEvent, ProviderSession,
+        StreamingProviderAdapter, StreamingProviderInput,
+    };
+    use async_trait::async_trait;
+
+    struct ChoiceEmittingProvider;
+
+    #[async_trait]
+    impl StreamingProviderAdapter for ChoiceEmittingProvider {
+        async fn start(
+            &self,
+            _input: StreamingProviderInput,
+            _cancel: CancellationToken,
+        ) -> Result<ProviderSession, crate::cross_cutting::provider_adapter::ProviderAdapterError>
+        {
+            let (event_tx, event_rx) = mpsc::channel(8);
+            let (command_tx, _command_rx) = mpsc::channel(8);
+            tokio::spawn(async move {
+                let _ = event_tx
+                    .send(ProviderEvent::ChoiceRequest(ChoiceRequestData {
+                        id: "choice_001".to_string(),
+                        prompt: "Continue?".to_string(),
+                        options: vec![],
+                        allow_multiple: false,
+                        allow_free_text: true,
+                        source: ChoiceRequestSource::AskUserQuestion,
+                    }))
+                    .await;
+            });
+            Ok(ProviderSession {
+                events: event_rx,
+                commands: command_tx,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn run_streaming_declines_choice_request_instead_of_hanging() {
+        let provider = ChoiceEmittingProvider;
+        let mut rx = provider
+            .run_streaming(&make_input("test"), CancellationToken::new())
+            .await
+            .unwrap();
+
+        let chunk = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("run_streaming 不应在 ChoiceRequest 上挂起")
+            .expect("stream 应该发出错误块");
+
+        assert!(
+            matches!(chunk, StreamChunk::Error(ref msg) if msg.contains("choice")),
+            "expected error chunk, got {chunk:?}"
+        );
     }
 }
