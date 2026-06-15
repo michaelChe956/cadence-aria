@@ -21,6 +21,7 @@ while IFS= read -r line; do
   fi
   if [[ "$line" == *'"tool_result"'* ]]; then
     echo '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_question","is_error":true,"content":"User refused to answer"}]}}'
+    # 正常不会走到这里：provider 在识别到 is_error 后会立即返回错误。
     echo '{"type":"result","subtype":"success","is_error":false,"result":"should not reach here","session_id":"claude_error_session"}'
     exit 0
   fi

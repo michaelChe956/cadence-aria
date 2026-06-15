@@ -2468,9 +2468,22 @@ done
             .expect("provider should emit events")
         {
             match event {
-                ProviderEvent::ProtocolError { code, .. }
-                    if code == "ask_user_question_unresolved" =>
-                {
+                ProviderEvent::ProtocolError {
+                    code,
+                    message,
+                    context,
+                } if code == "ask_user_question_unresolved" => {
+                    assert!(
+                        message.contains("AskUserQuestion"),
+                        "message should mention AskUserQuestion: {message}"
+                    );
+                    assert!(
+                        message.contains("unresolved"),
+                        "message should mention unresolved: {message}"
+                    );
+                    let ctx = context.expect("context should be present");
+                    assert_eq!(ctx["tool_use_id"], "toolu_question");
+                    assert_eq!(ctx["output"], "User refused to answer");
                     saw_protocol_error = true;
                     break;
                 }
