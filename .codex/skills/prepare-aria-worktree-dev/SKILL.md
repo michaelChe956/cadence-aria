@@ -56,19 +56,45 @@ cargo watch --version
 pnpm --version
 ```
 
-后端在 worktree 根目录启动：
+### 1. 先构建前端产物
+
+后端 `build.rs` 通过 `rust-embed` 在编译期嵌入 `web/dist`，干净 checkout 后必须先构建前端产物，否则后端编译会 panic：
+
+```bash
+cd web/
+pnpm install   # 仅当 node_modules 缺失且用户确认后执行
+pnpm build
+```
+
+### 2. 先启动后端并等待就绪
+
+在 worktree 根目录以后台任务启动后端，**必须设置无超时**（dev server 需要长期运行）：
 
 ```bash
 cargo watch -w src -w Cargo.toml -w Cargo.lock -x "run --locked -- web --workspace . --host 127.0.0.1 --port 4317"
+# run_in_background=true, disable_timeout=true
 ```
 
-前端在 `web/` 目录启动：
+然后轮询后端 `/api/health`，直到返回 `{"status":"ok"}`：
+
+```bash
+until curl --noproxy '*' -sS http://127.0.0.1:4317/api/health | grep -q '"status":"ok"'; do sleep 2; done
+```
+
+> **必须先等后端就绪再启动前端**。前端 dev server 会反向代理 `/api` 到 `127.0.0.1:4317`；若后端未就绪，前端会长时间报 `ECONNREFUSED` 代理错误，背景任务可能因默认超时（约 10 分钟）被 kill。
+
+### 3. 再启动前端
+
+在后端就绪后，于 `web/` 目录以后台任务启动前端 dev server，**同样设置无超时**：
 
 ```bash
 pnpm dev --port 5173
+# run_in_background=true, disable_timeout=true
 ```
 
-启动后只做就绪检查：
+### 4. 就绪检查
+
+只做以下检查：
 
 ```bash
 curl --noproxy '*' -sS http://127.0.0.1:4317/api/health
