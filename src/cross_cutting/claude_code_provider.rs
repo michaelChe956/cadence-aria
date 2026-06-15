@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::ExitStatus;
 use std::sync::Arc;
@@ -16,10 +16,9 @@ use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
     ChoiceOptionData, ChoiceRequestData, ChoiceRequestSource, ProviderEvent,
     ProviderExecutionEvent, ProviderExecutionEventKind, ProviderExecutionEventStatus,
-    ProviderPermissionMode, ProviderSession, ProviderStatus, RiskLevel, StreamChunk,
-    StreamingProviderAdapter, StreamingProviderInput,
+    ProviderPermissionMode, ProviderSession, ProviderStatus, RiskLevel, StreamingProviderAdapter,
+    StreamingProviderInput,
 };
-use crate::protocol::contracts::AdapterInput;
 
 const TOOL_RESULT_PREVIEW_MAX_BYTES: usize = 500;
 #[derive(Debug, Clone)]
@@ -550,74 +549,6 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
             events: event_rx,
             commands,
         })
-    }
-
-    async fn run_streaming(
-        &self,
-        input: &AdapterInput,
-        cancel: CancellationToken,
-    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
-        let working_dir = input.worktree_path.as_ref().map(PathBuf::from).unwrap_or(
-            std::env::current_dir().map_err(|error| {
-                ProviderAdapterError::execution_failed(None, String::new(), error.to_string(), 0)
-            })?,
-        );
-        let provider_input = StreamingProviderInput {
-            provider_type: input.provider_type.clone(),
-            role: input.role.clone(),
-            prompt: input.prompt.clone(),
-            working_dir,
-            workspace_session_id: None,
-            resume_provider_session_id: None,
-            permission_mode: ProviderPermissionMode::Auto,
-            env_vars: BTreeMap::new(),
-            timeout_secs: input.timeout,
-        };
-        let bridge_cancel = cancel.clone();
-        let mut session = self.start(provider_input, cancel).await?;
-        let (tx, rx) = mpsc::channel(32);
-
-        tokio::spawn(async move {
-            let _commands = session.commands;
-            loop {
-                let event = tokio::select! {
-                    _ = bridge_cancel.cancelled() => return,
-                    event = session.events.recv() => match event {
-                        Some(event) => event,
-                        None => return,
-                    },
-                };
-                let chunk = match event {
-                    ProviderEvent::TextDelta { content } => StreamChunk::Text(content),
-                    ProviderEvent::Completed { full_output, .. } => {
-                        StreamChunk::Done { full_output }
-                    }
-                    ProviderEvent::Failed { message } => StreamChunk::Error(message),
-                    ProviderEvent::ProtocolError { message, .. } => StreamChunk::Error(message),
-                    ProviderEvent::PermissionTimeout { permission_id } => {
-                        StreamChunk::Error(format!("Permission request {permission_id} timed out"))
-                    }
-                    ProviderEvent::PermissionRequest(_)
-                    | ProviderEvent::ChoiceRequest(_)
-                    | ProviderEvent::StatusChanged(_)
-                    | ProviderEvent::Execution(_)
-                    | ProviderEvent::ToolCall(_)
-                    | ProviderEvent::ToolResult(_) => {
-                        continue;
-                    }
-                };
-                tokio::select! {
-                    _ = bridge_cancel.cancelled() => return,
-                    send_result = tx.send(chunk) => {
-                        if send_result.is_err() {
-                            return;
-                        }
-                    }
-                }
-            }
-        });
-
-        Ok(rx)
     }
 }
 
