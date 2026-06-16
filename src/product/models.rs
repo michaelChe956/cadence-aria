@@ -389,6 +389,170 @@ pub struct LifecycleWorkItemRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum IssueWorkItemPlanStatus {
+    Draft,
+    Confirmed,
+    ChangeRequested,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct IssueWorkItemPlanOptions {
+    pub include_integration_tests: bool,
+    pub include_e2e_tests: bool,
+    pub force_frontend_backend_split: bool,
+    pub require_execution_plan_confirm: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct IssueWorkItemDependencyEdge {
+    pub from_work_item_id: String,
+    pub to_work_item_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkItemSplitFindingSeverity {
+    Error,
+    Warning,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkItemSplitFinding {
+    pub severity: WorkItemSplitFindingSeverity,
+    pub code: String,
+    pub message: String,
+    pub work_item_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryProfileConfidence {
+    Low,
+    Medium,
+    High,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RepositoryProfile {
+    pub id: String,
+    pub project_id: String,
+    pub issue_id: String,
+    pub repository_id: String,
+    pub provider_run_ref: Option<String>,
+    pub languages: Vec<String>,
+    pub frameworks: Vec<String>,
+    pub package_managers: Vec<String>,
+    pub test_frameworks: Vec<String>,
+    pub build_systems: Vec<String>,
+    pub verification_capabilities: Vec<String>,
+    pub confidence: RepositoryProfileConfidence,
+    pub uncertainties: Vec<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationScope {
+    Unit,
+    Integration,
+    E2e,
+    Build,
+    Lint,
+    Manual,
+    Custom,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationCommandSource {
+    Provider,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationCommandSafety {
+    Approved,
+    NeedsManualReview,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationFallbackPolicy {
+    ManualGate,
+    RepairProviderOutput,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct VerificationCommand {
+    pub id: String,
+    pub label: String,
+    pub command: String,
+    pub cwd: String,
+    pub purpose: String,
+    pub required: bool,
+    pub timeout_seconds: u64,
+    pub source: VerificationCommandSource,
+    pub safety: VerificationCommandSafety,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct VerificationManualCheck {
+    pub id: String,
+    pub label: String,
+    pub instructions: String,
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct VerificationPlan {
+    pub id: String,
+    pub project_id: String,
+    pub issue_id: String,
+    pub work_item_id: String,
+    pub repository_profile_ref: Option<String>,
+    pub provider_run_ref: Option<String>,
+    pub scope: VerificationScope,
+    pub commands: Vec<VerificationCommand>,
+    pub manual_checks: Vec<VerificationManualCheck>,
+    pub required_gates: Vec<String>,
+    pub risk_notes: Vec<String>,
+    pub confidence: RepositoryProfileConfidence,
+    pub fallback_policy: VerificationFallbackPolicy,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct IssueWorkItemPlan {
+    pub id: String,
+    pub project_id: String,
+    pub issue_id: String,
+    pub source_story_spec_ids: Vec<String>,
+    pub source_design_spec_ids: Vec<String>,
+    pub options: IssueWorkItemPlanOptions,
+    pub status: IssueWorkItemPlanStatus,
+    pub work_item_ids: Vec<String>,
+    pub repository_profile_ref: Option<String>,
+    pub verification_plan_ids: Vec<String>,
+    pub dependency_graph: Vec<IssueWorkItemDependencyEdge>,
+    pub created_from_provider_run: Option<String>,
+    pub validator_findings: Vec<WorkItemSplitFinding>,
+    pub review_summary: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct SpecVersionRecord {
     pub id: String,
     pub project_id: String,

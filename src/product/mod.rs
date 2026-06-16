@@ -21,6 +21,7 @@ pub mod repository_store;
 pub mod runtime_binding_store;
 pub mod test_executor;
 pub mod tester_agent_loop;
+pub mod work_item_split_validator;
 pub mod workspace_engine;
 pub mod workspace_repository;
 pub mod worktree_scheduler;
