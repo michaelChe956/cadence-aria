@@ -10,7 +10,7 @@
 
 **版本：** v1.1
 
-> **v1.1 修订摘要：** 1) 在「前置交付摘要」补回 P1 实际新增并测试的 `sequence_hint` 字段；2) 新增「任务 0：测试脚手架」，给出全文 Task2/3/4 都依赖却从未定义的 `work_item(...)` 与 `split_plan(...)` 两个 test helper 的可编译骨架；3) Task 4 为 `write_scope_required` 规则补一个失败测试，并说明 `forbidden_write_scopes` 暂不纳入本计划校验范围；4) 在 validator 实现描述中明确依赖来源以 `work_item.depends_on` 为准、`plan.dependency_graph` 仅做一致性校验。
+> **v1.1 修订摘要：** 1) 在「前置交付摘要」补回 P1 实际新增并测试的 `sequence_hint` 字段；2) 新增「任务 0：测试脚手架」，给出全文 Task2/3/4 都依赖却从未定义的 `work_item(...)` 与 `split_plan(...)` 两个 test helper 的可编译骨架；3) Task 4 为 `write_scope_required` 规则补一个失败测试，并说明 `forbidden_write_scopes` 暂不纳入本计划校验范围；4) 在 validator 实现描述中明确依赖来源以 `work_item.depends_on` 为准、`plan.dependency_graph` 仅做一致性校验；5) Task 4 新增 `integration_or_e2e_skipped_risk` Warning finding，用于 P9 验收跳过 Integration/E2E 时记录风险。
 
 ---
 
@@ -601,6 +601,25 @@ fn validator_requires_non_empty_exclusive_write_scopes() {
     assert!(report.has_errors());
     assert!(report.findings.iter().any(|finding| finding.code == "write_scope_required"));
 }
+
+#[test]
+fn validator_records_risk_when_integration_or_e2e_skipped() {
+    let mut plan = split_plan(vec!["work_item_0001", "work_item_0002"], vec![]);
+    plan.options.include_integration_tests = false;
+    plan.options.include_e2e_tests = false;
+    let items = vec![
+        work_item("work_item_0001", WorkItemKind::Backend, vec![], vec!["src/**"]),
+        work_item("work_item_0002", WorkItemKind::Frontend, vec!["work_item_0001"], vec!["web/src/**"]),
+    ];
+
+    let report = WorkItemSplitValidator::validate(&plan, &items);
+
+    assert!(!report.has_errors());
+    assert!(report.findings.iter().any(|finding| {
+        finding.code == "integration_or_e2e_skipped_risk"
+            && finding.severity == WorkItemSplitFindingSeverity::Warning
+    }));
+}
 ```
 
 - [ ] **步骤 2：运行 semantic tests 并确认失败**
@@ -612,6 +631,7 @@ cargo test --locked --test it_product validator_requires_backend_and_frontend_wh
 cargo test --locked --test it_product validator_requires_integration_item_when_option_enabled
 cargo test --locked --test it_product validator_requires_traceability_refs_on_every_work_item
 cargo test --locked --test it_product validator_requires_non_empty_exclusive_write_scopes
+cargo test --locked --test it_product validator_records_risk_when_integration_or_e2e_skipped
 ```
 
 预期: tests fail because semantic checks are not implemented.
@@ -626,10 +646,11 @@ Rules:
 - Every Work Item requires at least one `story_spec_id` and at least one `design_spec_id`.
 - Empty `exclusive_write_scopes` is an error with code `write_scope_required`（对应步骤 1 的 `validator_requires_non_empty_exclusive_write_scopes` 失败测试）。
 - **`forbidden_write_scopes` 不纳入本计划校验范围**：本计划只做「写入范围必须非空」与「并行写入范围不得重叠」两类校验，`forbidden_write_scopes`（禁写范围）与 `exclusive_write_scopes` 的交叉一致性校验留待 P3 接入生成流时设计，本版 validator 不读取该字段。
+- 当 `include_integration_tests=false` 或 `include_e2e_tests=false` 时，分别添加 `Warning` 级别 finding，code 为 `integration_or_e2e_skipped_risk`，message 说明跳过的测试类型及建议后续手工验证。该 finding 不阻塞计划确认（`has_errors()` 仍为 false），但会被 P9 验收用例断言。
 
 - [ ] **步骤 4：运行 semantic tests 并确认通过**
 
-Run the four commands from Step 2 again.
+Run the five commands from Step 2 again.
 
 预期：全部通过。
 

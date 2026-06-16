@@ -2,7 +2,7 @@
 
 > **文档版本：** v1.1
 >
-> **v1.1 修订摘要：** 修复 active lock 在异常终态/attempt 被取代时不释放导致的死锁（新增任务 3 的异常终态释放步骤）；修正最终验证过滤名为本计划实际新增测试函数名；补充新增 test helper 的显式步骤；点名 branch 改为 `aria/issues/{issue_id}` 后需同步更新基于 `aria-work-items/{work_item}/attempt-{n}` 的既有断言测试；明确严格依赖 P1/P3/P4 已合并并要求字段名与上游逐字对齐（注意 `exclusive_write_scopes` 与现有 `WorkItemRecord.allowed_write_scope` 命名漂移）。
+> **v1.1 修订摘要：** 修复 active lock 在异常终态/attempt 被取代时不释放导致的死锁（新增任务 3 的异常终态释放步骤，并将原先引用的不存在方法 `handle_attempt_failure` 修正为需新增的 `handle_attempt_failed`）；修正最终验证过滤名为本计划实际新增测试函数名；补充新增 test helper 的显式步骤；点名 branch 改为 `aria/issues/{issue_id}` 后需同步更新基于 `aria-work-items/{work_item}/attempt-{n}` 的既有断言测试；明确严格依赖 P1/P3/P4 已合并并要求字段名与上游逐字对齐（注意 `exclusive_write_scopes` 与现有 `WorkItemRecord.allowed_write_scope` 命名漂移）。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -80,6 +80,7 @@
 - `git_repo_in(path)`：在指定路径初始化 git repo（与现有 `git_repo()` 行为一致，但可指定根目录）。
 - `coding_store_with_attempt(root, work_item_id, branch_name)`：构造 `CodingAttemptStore` 并写入一个指定 branch 的 attempt，返回 `(store, attempt)`。
 - `final_confirm_attempt(paths, work_item_id)`：构造一个处于 final confirm 前置状态的 attempt，返回 `(store, attempt)`。
+- `failed_attempt(paths, work_item_id)`：构造一个 `status` 为 `CodingAttemptStatus::Failed` 的 attempt，返回 `(store, attempt)`，用于验证异常终态释放锁。
 
 - [ ] **步骤 3：编译确认**
 
@@ -371,7 +372,9 @@ Abort should not fail solely because there is no shared worktree record; treat m
 
 - [ ] **步骤 5：异常终态/attempt 被取代时释放锁（v1.1 新增阻塞修复）**
 
-先编写失败态测试，覆盖「attempt 进入非完成/非中止终态后锁仍被持有」的死锁场景。追加到 `tests/it_product/product_coding_workspace_engine.rs`：
+> **注意：当前源码不存在 `handle_attempt_failure` 方法。** 本步骤改为新增 `CodingWorkspaceEngine::handle_attempt_failed(project_id, issue_id, attempt_id)` 作为 `CodingAttemptStatus::Failed` 终态的统一处理入口，并在其中释放 Issue shared worktree 锁。
+
+先编写失败态测试，覆盖「attempt 进入 Failed 终态后锁仍被持有」的死锁场景。追加到 `tests/it_product/product_coding_workspace_engine.rs`：
 
 ```rust
 #[tokio::test]
@@ -392,15 +395,15 @@ async fn failed_attempt_releases_issue_shared_worktree_lock() {
     lifecycle
         .try_acquire_issue_worktree_lock("project_0001", "issue_0001", "work_item_0001")
         .expect("lock");
-    let (store, attempt) = final_confirm_attempt(paths.clone(), "work_item_0001");
+    let (store, attempt) = failed_attempt(paths.clone(), "work_item_0001");
     let (tx, _rx) = tokio::sync::mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
 
-    // attempt 进入失败终态（而非完成/中止）。
+    // 处理 Failed 终态，应释放 active lock。
     engine
-        .handle_attempt_failure("project_0001", "issue_0001", &attempt.id)
+        .handle_attempt_failed("project_0001", "issue_0001", &attempt.id)
         .await
-        .expect("handle failure");
+        .expect("handle failed");
 
     let shared = lifecycle
         .get_issue_shared_worktree("project_0001", "issue_0001")
@@ -412,10 +415,14 @@ async fn failed_attempt_releases_issue_shared_worktree_lock() {
 
 随后在实现中，确保**所有 attempt 终态收敛点**都释放锁（而非仅完成/中止）：
 
-1. 定位 attempt 状态机收敛到终态的统一出口（失败、被取代、provider 异常退出等）。
-2. 在该出口调用 `release_issue_worktree_lock(project_id, issue_id, &work_item_id)`，仅当当前持锁 Work Item 与本 attempt 的 Work Item 一致时才释放，避免误释放后续 attempt 的锁。
-3. 新 attempt 抢占（取代旧 attempt）时，应在创建新 attempt 的锁获取逻辑中处理旧持锁项的释放/接管，避免旧项残留锁。
-4. 缺少 shared worktree 记录时按 backward-compatible no-op 处理。
+1. 新增 `pub async fn handle_attempt_failed(&self, project_id: &str, issue_id: &str, attempt_id: &str) -> Result<(), CodingWorkspaceError>`：
+   - 加载 attempt 及对应 Work Item。
+   - 将 attempt 状态置为 `CodingAttemptStatus::Failed`（若尚未置为 Failed）。
+   - 调用 `release_issue_worktree_lock(project_id, issue_id, &work_item_id)`，仅当当前持锁 Work Item 与本 attempt 的 Work Item 一致时才释放，避免误释放后续 attempt 的锁。
+   - 缺少 shared worktree 记录时按 backward-compatible no-op 处理。
+2. 在已有 `handle_final_confirm`（Completed）和 `handle_abort`（Aborted）路径中保留并复核锁释放逻辑。
+3. 其他收敛到 Failed/Superseded/Blocked 等终态的代码路径（如 provider run 异常退出、attempt 被新 attempt 取代）应统一调用 `handle_attempt_failed` 或在本地执行同样的「仅当持锁者匹配才释放」逻辑。
+4. 新 attempt 抢占（取代旧 attempt）时，应在创建新 attempt 的锁获取逻辑中处理旧持锁项的释放/接管，避免旧项残留锁。
 
 > 若团队决定将「异常终态释放锁」收口到统一状态机改造而不在本计划内完成，则必须显式将其列为已知后续项并在 P6 或后续计划承接；本 v1.1 推荐直接在本步骤补齐实现。
 
