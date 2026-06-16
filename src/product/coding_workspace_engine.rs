@@ -1143,7 +1143,7 @@ impl CodingWorkspaceEngine {
             &attempt.project_id,
             &attempt.issue_id,
             &attempt.id,
-            CodingAttemptStatus::Blocked,
+            CodingAttemptStatus::Failed,
         )?;
         self.complete_timeline_node(
             &attempt.project_id,
@@ -1154,6 +1154,8 @@ impl CodingWorkspaceEngine {
             Some(message.clone()),
         )
         .await?;
+        self.handle_attempt_failed(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .await?;
         Err(CodingWorkspaceEngineError::ProviderStream(message))
     }
 
@@ -3601,6 +3603,11 @@ impl CodingWorkspaceEngine {
             &updated.work_item_id,
             WorkItemStatus::Completed,
         )?;
+        let _ = LifecycleStore::new(self.store.paths()).mark_issue_worktree_completed_item(
+            project_id,
+            issue_id,
+            &updated.work_item_id,
+        );
         if let Some(node_id) =
             self.active_final_confirm_node_id(project_id, issue_id, attempt_id)?
         {
@@ -3633,12 +3640,18 @@ impl CodingWorkspaceEngine {
         issue_id: &str,
         attempt_id: &str,
     ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
+        let _current = self.store.get_attempt(project_id, issue_id, attempt_id)?;
         let updated = self.store.update_attempt_status(
             project_id,
             issue_id,
             attempt_id,
             CodingAttemptStatus::Aborted,
         )?;
+        let _ = self.release_issue_shared_worktree_lock_if_holder(
+            project_id,
+            issue_id,
+            &updated.work_item_id,
+        );
         if let Some(node_id) = self.active_timeline_node_id(project_id, issue_id, attempt_id)? {
             let completed_at = Utc::now().to_rfc3339();
             self.store.update_timeline_node_status(
@@ -3661,6 +3674,70 @@ impl CodingWorkspaceEngine {
                 .await;
         }
         Ok(updated)
+    }
+
+    pub async fn handle_attempt_failed(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
+        let current = self.store.get_attempt(project_id, issue_id, attempt_id)?;
+        let updated = if current.status != CodingAttemptStatus::Failed {
+            self.store.update_attempt_status(
+                project_id,
+                issue_id,
+                attempt_id,
+                CodingAttemptStatus::Failed,
+            )?
+        } else {
+            current
+        };
+
+        self.release_issue_shared_worktree_lock_if_holder(
+            project_id,
+            issue_id,
+            &updated.work_item_id,
+        )?;
+        Ok(updated)
+    }
+
+    pub async fn handle_delete_attempt(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> Result<(), CodingWorkspaceEngineError> {
+        let _current = self.store.get_attempt(project_id, issue_id, attempt_id)?;
+        let updated = self.store.update_attempt_status(
+            project_id,
+            issue_id,
+            attempt_id,
+            CodingAttemptStatus::Aborted,
+        )?;
+        self.release_issue_shared_worktree_lock_if_holder(
+            project_id,
+            issue_id,
+            &updated.work_item_id,
+        )?;
+        Ok(())
+    }
+
+    fn release_issue_shared_worktree_lock_if_holder(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        work_item_id: &str,
+    ) -> Result<(), CodingWorkspaceEngineError> {
+        let lifecycle = LifecycleStore::new(self.store.paths());
+        let shared = match lifecycle.get_issue_shared_worktree(project_id, issue_id)? {
+            Some(shared) => shared,
+            None => return Ok(()),
+        };
+        if shared.current_active_work_item_id.as_deref() == Some(work_item_id) {
+            lifecycle.release_issue_worktree_lock(project_id, issue_id, work_item_id)?;
+        }
+        Ok(())
     }
 
     pub async fn handle_blocked_gate_response(
@@ -4776,6 +4853,11 @@ impl CodingWorkspaceEngine {
             CodingAttemptStatus::Completed,
         )?;
         self.mark_work_item_completed_if_present(&completed)?;
+        let _ = LifecycleStore::new(self.store.paths()).mark_issue_worktree_completed_item(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.work_item_id,
+        );
         let node = self.create_completed_final_confirm_timeline_node(&completed)?;
         let _ = self
             .event_tx
@@ -5043,6 +5125,12 @@ impl CodingWorkspaceEngine {
 }
 
 fn worktree_path_for_attempt(repo_path: &Path, attempt: &CodingExecutionAttempt) -> PathBuf {
+    if let Some(issue_id) = attempt.branch_name.strip_prefix("aria/issues/") {
+        return repo_path
+            .join(".worktrees")
+            .join("aria-issues")
+            .join(issue_id);
+    }
     repo_path
         .join(".worktrees")
         .join("aria-work-items")

@@ -18,13 +18,13 @@ use cadence_aria::product::coding_attempt_store::{
 };
 use cadence_aria::product::coding_models::{
     AnalystDecisionNextStage, AnalystDecisionVerdict, AnalystVerdict, CodingAgentRole,
-    CodingAttemptStatus, CodingChoiceGateStatus, CodingEntryType, CodingExecutionStage,
-    CodingGateAction, CodingGateActionType, CodingProviderPermissionMode, CodingProviderRole,
-    CodingReworkInstruction, CodingRolePermissionModes, CodingRoleProviderConfigSnapshot,
-    CodingRoleRunEventType, CodingRoleRunStatus, CodingRoleRunTrigger, CodingTimelineNode,
-    CodingTimelineNodeStatus, FindingSeverity, PushStatus, RemoteKind, ReviewRequest,
-    ReviewRequestKind, ReviewVerdict, TestCommandStatus, TestingOverallStatus, TestingReport,
-    TestingStepResult,
+    CodingAttemptStatus, CodingChoiceGateStatus, CodingEntryType, CodingExecutionAttempt,
+    CodingExecutionStage, CodingGateAction, CodingGateActionType, CodingProviderPermissionMode,
+    CodingProviderRole, CodingReworkInstruction, CodingRolePermissionModes,
+    CodingRoleProviderConfigSnapshot, CodingRoleRunEventType, CodingRoleRunStatus,
+    CodingRoleRunTrigger, CodingTimelineNode, CodingTimelineNodeStatus, FindingSeverity,
+    PushStatus, RemoteKind, ReviewRequest, ReviewRequestKind, ReviewVerdict, TestCommandStatus,
+    TestingOverallStatus, TestingReport, TestingStepResult,
 };
 use cadence_aria::product::coding_workspace_engine::{
     CodingExecutionContext, CodingWorkspaceEngine, testing_report_should_enter_analyst,
@@ -32,6 +32,7 @@ use cadence_aria::product::coding_workspace_engine::{
 use cadence_aria::product::git_workspace_service::GitWorkspaceService;
 use cadence_aria::product::lifecycle_store::{
     CreateWorkItemInput, CreateWorkspaceSessionInput, LifecycleStore,
+    UpsertIssueSharedWorktreeInput,
 };
 use cadence_aria::product::models::{
     ProviderConversationRef, ProviderConversationRole, ProviderName, WorkItemStatus, WorkspaceType,
@@ -234,6 +235,103 @@ async fn execute_worktree_prepare_creates_git_worktree_and_completes_timeline_no
         }
         other => panic!("expected timeline update, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn worktree_prepare_uses_issue_shared_worktree_path_for_issue_branch() {
+    let root = tempdir().expect("root");
+    let repo = git_repo_in(root.path().join("repo").as_path());
+    let (store, attempt) =
+        coding_store_with_attempt(root.path(), "work_item_0001", "aria/issues/issue_0001");
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+
+    let updated = engine
+        .execute_worktree_prepare(&attempt, &repo)
+        .await
+        .expect("prepare shared worktree");
+
+    assert_eq!(
+        updated.worktree_path.as_deref(),
+        Some(
+            repo.join(".worktrees")
+                .join("aria-issues")
+                .join("issue_0001")
+                .as_path()
+        )
+    );
+}
+
+#[tokio::test]
+async fn final_confirm_releases_issue_shared_worktree_lock() {
+    let root = tempdir().expect("root");
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let lifecycle = LifecycleStore::new(paths.clone());
+    lifecycle
+        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: root.path().join("repo/.worktrees/aria-issues/issue_0001"),
+            base_branch: "main".to_string(),
+        })
+        .expect("shared worktree");
+    lifecycle
+        .try_acquire_issue_worktree_lock("project_0001", "issue_0001", "work_item_0001")
+        .expect("lock");
+    let (store, attempt) = final_confirm_attempt(paths.clone(), "work_item_0001");
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
+
+    engine
+        .handle_final_confirm("project_0001", "issue_0001", &attempt.id)
+        .await
+        .expect("final confirm");
+
+    let shared = lifecycle
+        .get_issue_shared_worktree("project_0001", "issue_0001")
+        .expect("load shared")
+        .expect("shared exists");
+    assert_eq!(shared.current_active_work_item_id, None);
+    assert_eq!(
+        shared.last_completed_work_item_id.as_deref(),
+        Some("work_item_0001")
+    );
+}
+
+#[tokio::test]
+async fn failed_attempt_releases_issue_shared_worktree_lock() {
+    let root = tempdir().expect("root");
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let lifecycle = LifecycleStore::new(paths.clone());
+    lifecycle
+        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: root.path().join("repo/.worktrees/aria-issues/issue_0001"),
+            base_branch: "main".to_string(),
+        })
+        .expect("shared worktree");
+    lifecycle
+        .try_acquire_issue_worktree_lock("project_0001", "issue_0001", "work_item_0001")
+        .expect("lock");
+    let (store, attempt) = failed_attempt(paths.clone(), "work_item_0001");
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
+
+    engine
+        .handle_attempt_failed("project_0001", "issue_0001", &attempt.id)
+        .await
+        .expect("handle failed");
+
+    let shared = lifecycle
+        .get_issue_shared_worktree("project_0001", "issue_0001")
+        .expect("load shared")
+        .expect("shared exists");
+    assert_eq!(shared.current_active_work_item_id, None);
 }
 
 #[tokio::test]
@@ -3181,7 +3279,7 @@ async fn code_review_provider_start_failure_marks_attempt_blocked_and_node_faile
     let updated = store
         .get_attempt("project_0001", "issue_0001", &attempt.id)
         .expect("updated attempt");
-    assert_eq!(updated.status, CodingAttemptStatus::Blocked);
+    assert_eq!(updated.status, CodingAttemptStatus::Failed);
     assert_eq!(updated.stage, CodingExecutionStage::CodeReview);
     let nodes = store
         .get_timeline_nodes("project_0001", "issue_0001", &attempt.id)
@@ -5048,6 +5146,144 @@ fn init_repo(repo: &Path) {
     fs::write(repo.join("src.txt"), "hello\n").expect("seed file");
     run_git(repo, &["add", "."]);
     run_git(repo, &["commit", "-m", "initial"]);
+}
+
+fn git_repo_in(path: &Path) -> PathBuf {
+    fs::create_dir_all(path).expect("create repo dir");
+    run_git(path, &["init"]);
+    run_git(path, &["config", "user.email", "aria@example.com"]);
+    run_git(path, &["config", "user.name", "Aria Test"]);
+    fs::write(path.join("README.md"), "# repo\n").expect("seed readme");
+    run_git(path, &["add", "."]);
+    run_git(path, &["commit", "-m", "initial"]);
+    run_git(path, &["branch", "-m", "main"]);
+    path.to_path_buf()
+}
+
+fn coding_store_with_attempt(
+    root: &Path,
+    work_item_id: &str,
+    branch_name: &str,
+) -> (CodingAttemptStore, CodingExecutionAttempt) {
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            work_item_id: work_item_id.to_string(),
+            base_branch: "main".to_string(),
+            branch_name: branch_name.to_string(),
+            worktree_path: None,
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Codex,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+            },
+            max_auto_rework: 2,
+        })
+        .expect("create attempt");
+    (store, attempt)
+}
+
+fn final_confirm_attempt(
+    paths: ProductAppPaths,
+    work_item_id: &str,
+) -> (CodingAttemptStore, CodingExecutionAttempt) {
+    let lifecycle = LifecycleStore::new(paths.clone());
+    lifecycle
+        .create_work_item(CreateWorkItemInput {
+            id: Some(work_item_id.to_string()),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            story_spec_ids: Vec::new(),
+            design_spec_ids: Vec::new(),
+            title: "work item".to_string(),
+            ..Default::default()
+        })
+        .expect("create work item");
+    let store = CodingAttemptStore::new(paths);
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            work_item_id: work_item_id.to_string(),
+            base_branch: "main".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Codex,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+            },
+            max_auto_rework: 2,
+        })
+        .expect("create attempt");
+    let attempt = store
+        .update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("set running");
+    let attempt = store
+        .update_attempt_stage(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingExecutionStage::FinalConfirm,
+        )
+        .expect("set final confirm stage");
+    let attempt = store
+        .update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::WaitingForHuman,
+        )
+        .expect("set waiting for human");
+    (store, attempt)
+}
+
+fn failed_attempt(
+    paths: ProductAppPaths,
+    work_item_id: &str,
+) -> (CodingAttemptStore, CodingExecutionAttempt) {
+    let store = CodingAttemptStore::new(paths);
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            work_item_id: work_item_id.to_string(),
+            base_branch: "main".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Codex,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+            },
+            max_auto_rework: 2,
+        })
+        .expect("create attempt");
+    let attempt = store
+        .update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("set running");
+    let attempt = store
+        .update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::Failed,
+        )
+        .expect("set failed");
+    (store, attempt)
 }
 
 fn run_git(cwd: &Path, args: &[&str]) {

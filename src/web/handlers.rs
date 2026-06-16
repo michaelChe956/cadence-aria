@@ -1,6 +1,10 @@
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::http::StatusCode;
+use axum::response::{
+    IntoResponse, Response,
+    sse::{Event, KeepAlive, Sse},
+};
 use futures_util::stream::{self, Stream, StreamExt};
 use serde::Deserialize;
 use serde_json::json;
@@ -20,6 +24,7 @@ use crate::product::coding_models::{
     CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage, CodingTimelineNode,
     CodingTimelineNodeStatus, PushStatus,
 };
+use crate::product::coding_workspace_engine::{CodingWorkspaceEngine, CodingWorkspaceEngineError};
 use crate::product::gate_store::GateStore;
 use crate::product::git_workspace_service::{GitWorkspaceError, GitWorkspaceService};
 use crate::product::issue_store::{CreateProductIssueWithRepositoryInput, IssueStore};
@@ -28,6 +33,7 @@ use crate::product::lifecycle_store::{
     AppendSpecVersionInput, CreateDesignSpecInput, CreateIssueWorkItemPlanInput,
     CreateRepositoryProfileInput, CreateStorySpecInput, CreateVerificationPlanInput,
     CreateWorkItemInput, CreateWorkspaceSessionInput, LifecycleStore,
+    UpsertIssueSharedWorktreeInput,
 };
 use crate::product::models::{
     DesignKind, DesignSpecRecord, GateStatus, IssuePhase as ProductIssuePhase,
@@ -922,18 +928,65 @@ pub async fn create_coding_attempt(
 ) -> ApiResult<Json<CodingAttemptDto>> {
     let app_paths = product_app_paths(&state);
     let lifecycle = LifecycleStore::new(app_paths.clone());
-    let work_item = lifecycle
+    let work_items = lifecycle
         .list_work_items(&project_id, &issue_id)
-        .map_err(product_store_api_error)?
-        .into_iter()
-        .find(|work_item| work_item.id == work_item_id)
-        .ok_or_else(|| {
-            ApiError::runtime("work_item_not_found", "work item not found", json!({}))
-        })?;
+        .map_err(product_store_api_error)?;
+    let work_item = work_item_by_id(&work_items, &work_item_id).ok_or_else(|| {
+        ApiError::runtime("work_item_not_found", "work item not found", json!({}))
+    })?;
     if work_item.plan_status != WorkItemPlanStatus::Confirmed {
         return Err(ApiError::validation(
             "work_item_plan_not_confirmed",
             "work item plan must be confirmed before coding",
+        ));
+    }
+
+    let missing_dependencies: Vec<String> = work_item
+        .depends_on
+        .iter()
+        .filter(|dep_id| {
+            work_items
+                .iter()
+                .find(|item| &item.id == *dep_id)
+                .map(|item| item.execution_status != WorkItemStatus::Completed)
+                .unwrap_or(true)
+        })
+        .cloned()
+        .collect();
+    if !missing_dependencies.is_empty() {
+        return Err(ApiError::validation_with_details(
+            "work_item_dependency_not_completed",
+            "one or more dependency work items are not completed",
+            json!({ "missing_dependencies": missing_dependencies }),
+        ));
+    }
+
+    let missing_handoffs: Vec<String> = work_item
+        .required_handoff_from
+        .iter()
+        .filter(|handoff_id| {
+            work_items
+                .iter()
+                .find(|item| &item.id == *handoff_id)
+                .map(|item| item.handoff_summary_ref.is_none())
+                .unwrap_or(true)
+        })
+        .cloned()
+        .collect();
+    if !missing_handoffs.is_empty() {
+        return Err(ApiError::validation_with_details(
+            "work_item_handoff_missing",
+            "required dependency handoff summary is missing",
+            json!({ "missing_handoffs": missing_handoffs }),
+        ));
+    }
+
+    if work_item.require_execution_plan_confirm
+        && work_item.execution_plan_status != WorkItemExecutionPlanStatus::Confirmed
+    {
+        return Err(ApiError::validation(
+            "work_item_execution_plan_not_confirmed",
+            "work item execution plan must be confirmed before coding",
         ));
     }
 
@@ -945,7 +998,7 @@ pub async fn create_coding_attempt(
         ));
     }
 
-    let coding_store = CodingAttemptStore::new(app_paths);
+    let coding_store = CodingAttemptStore::new(app_paths.clone());
     if coding_store
         .get_active_attempt(&project_id, &issue_id, &work_item.id)
         .map_err(product_store_api_error)?
@@ -958,36 +1011,66 @@ pub async fn create_coding_attempt(
         ));
     }
 
-    let attempt_no = coding_store
-        .list_attempts_for_work_item(&project_id, &issue_id, &work_item.id)
-        .map_err(product_store_api_error)?
-        .iter()
-        .map(|attempt| attempt.attempt_no)
-        .max()
-        .unwrap_or(0)
-        + 1;
-    let branch_name = format!("aria/work-items/{}/attempt-{attempt_no}", work_item.id);
+    let branch_name = format!("aria/issues/{issue_id}");
     let base_branch = current_git_branch(&repository.path).unwrap_or_else(|| "HEAD".to_string());
+    let shared_worktree_path = repository
+        .path
+        .join(".worktrees")
+        .join("aria-issues")
+        .join(&issue_id);
+    lifecycle
+        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
+            project_id: project_id.clone(),
+            issue_id: issue_id.clone(),
+            repository_id: repository.id.clone(),
+            branch_name: branch_name.clone(),
+            worktree_path: shared_worktree_path,
+            base_branch: base_branch.clone(),
+        })
+        .map_err(product_store_api_error)?;
+    let _ = lifecycle
+        .try_acquire_issue_worktree_lock(&project_id, &issue_id, &work_item_id)
+        .map_err(|error| match error {
+            ProductStoreError::Io(ref msg) if msg.contains("issue_worktree_active") => {
+                ApiError::runtime(
+                    "issue_worktree_active",
+                    "another work item is already active on the issue shared worktree",
+                    json!({}),
+                )
+            }
+            _ => product_store_api_error(error),
+        })?;
+
     let provider_config_snapshot = coding_provider_config_snapshot(
         &lifecycle,
-        &work_item,
+        work_item,
         &repository.default_provider_mode,
         &*state.provider_availability,
     )?;
-    let attempt = coding_store
-        .create_attempt(CreateCodingAttemptInput {
-            project_id,
-            issue_id,
-            work_item_id: work_item.id,
-            base_branch,
-            branch_name,
-            worktree_path: None,
-            provider_config_snapshot,
-            max_auto_rework: 2,
-        })
-        .map_err(product_store_api_error)?;
+    let attempt_result = coding_store.create_attempt(CreateCodingAttemptInput {
+        project_id: project_id.clone(),
+        issue_id: issue_id.clone(),
+        work_item_id: work_item.id.clone(),
+        base_branch,
+        branch_name,
+        worktree_path: None,
+        provider_config_snapshot,
+        max_auto_rework: 2,
+    });
+
+    if attempt_result.is_err() {
+        let _ = lifecycle.release_issue_worktree_lock(&project_id, &issue_id, &work_item_id);
+    }
+    let attempt = attempt_result.map_err(product_store_api_error)?;
 
     Ok(Json(coding_attempt_dto(&attempt)))
+}
+
+fn work_item_by_id<'a>(
+    work_items: &'a [LifecycleWorkItemRecord],
+    work_item_id: &str,
+) -> Option<&'a LifecycleWorkItemRecord> {
+    work_items.iter().find(|item| item.id == work_item_id)
 }
 
 fn coding_provider_config_snapshot(
@@ -1118,25 +1201,22 @@ pub async fn abort_coding_attempt(
     Path(attempt_id): Path<String>,
 ) -> ApiResult<Json<CodingAttemptDto>> {
     let app_paths = product_app_paths(&state);
-    let coding_store = CodingAttemptStore::new(app_paths);
+    let coding_store = CodingAttemptStore::new(app_paths.clone());
     let attempt = coding_store
         .get_attempt_by_id(&attempt_id)
         .map_err(product_store_api_error)?;
-    let aborted = coding_store
-        .update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Aborted,
-        )
-        .map_err(product_store_api_error)?;
+    let engine = coding_workspace_engine_with_dummy_events(coding_store);
+    let aborted = engine
+        .handle_abort(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .await
+        .map_err(coding_workspace_api_error)?;
     Ok(Json(coding_attempt_dto(&aborted)))
 }
 
 pub async fn delete_coding_attempt(
     State(state): State<WebAppState>,
     Path(attempt_id): Path<String>,
-) -> ApiResult<Json<serde_json::Value>> {
+) -> ApiResult<Response> {
     let app_paths = product_app_paths(&state);
     let coding_store = CodingAttemptStore::new(app_paths.clone());
     let lifecycle = LifecycleStore::new(app_paths.clone());
@@ -1155,12 +1235,23 @@ pub async fn delete_coding_attempt(
             })
         })?;
     let repository = find_repository(&app_paths, &attempt.project_id, &work_item.repository_id)?;
-    let attempt = abort_attempt_if_active(&coding_store, attempt)?;
+
+    if let Ok(Some(shared)) =
+        lifecycle.get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)
+        && shared.current_active_work_item_id.as_deref() == Some(&attempt.work_item_id)
+    {
+        let engine = coding_workspace_engine_with_dummy_events(coding_store.clone());
+        engine
+            .handle_delete_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .await
+            .map_err(coding_workspace_api_error)?;
+    }
+
     cleanup_coding_attempt_workspace(&repository, &attempt).await?;
     coding_store
         .delete_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .map_err(product_store_api_error)?;
-    Ok(Json(json!({"status":"deleted"})))
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 pub async fn coding_attempt_artifact_content(
@@ -2616,6 +2707,20 @@ fn git_workspace_api_error(error: GitWorkspaceError) -> ApiError {
         "git_workspace_cleanup_failed",
         "git workspace cleanup failed",
         json!({"details": error.to_string()}),
+    )
+}
+
+fn coding_workspace_engine_with_dummy_events(store: CodingAttemptStore) -> CodingWorkspaceEngine {
+    let (event_tx, _event_rx) = tokio::sync::mpsc::channel(8);
+    CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), event_tx)
+}
+
+fn coding_workspace_api_error(error: CodingWorkspaceEngineError) -> ApiError {
+    let error_message = error.to_string();
+    ApiError::runtime(
+        "coding_workspace_engine_failed",
+        "coding workspace engine operation failed",
+        json!({"details": error_message}),
     )
 }
 

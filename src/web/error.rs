@@ -85,8 +85,12 @@ impl IntoResponse for ApiError {
             | "workspace_path_not_directory"
             | "workspace_path_not_git_repo"
             | "work_item_plan_not_confirmed"
+            | "work_item_dependency_not_completed"
+            | "work_item_handoff_missing"
+            | "work_item_execution_plan_not_confirmed"
             | "repository_path_not_git_repo"
             | "work_item_split_invalid" => StatusCode::BAD_REQUEST,
+            "issue_worktree_active" => StatusCode::CONFLICT,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, Json(self)).into_response()

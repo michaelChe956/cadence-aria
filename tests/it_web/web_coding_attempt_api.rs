@@ -13,7 +13,10 @@ use cadence_aria::product::coding_models::{
     ReviewRequestKind, ReviewVerdict, TestCommand, TestCommandStatus, TestingOverallStatus,
     TestingReport,
 };
-use cadence_aria::product::models::ProviderName;
+use cadence_aria::product::lifecycle_store::{CreateWorkItemInput, LifecycleStore};
+use cadence_aria::product::models::{
+    ProviderName, WorkItemKind, WorkItemPlanStatus, WorkItemStatus,
+};
 use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::runtime::WebRuntime;
 use cadence_aria::web::state::WebAppState;
@@ -45,10 +48,7 @@ async fn creates_coding_attempt_for_confirmed_work_item_and_surfaces_latest_atte
     assert_eq!(attempt["attempt_no"], 1);
     assert_eq!(attempt["status"], "created");
     assert_eq!(attempt["stage"], "prepare_context");
-    assert_eq!(
-        attempt["branch_name"],
-        "aria/work-items/work_item_0001/attempt-1"
-    );
+    assert_eq!(attempt["branch_name"], "aria/issues/issue_0001");
 
     let (status, duplicate) = request_json(
         app.clone(),
@@ -171,6 +171,170 @@ async fn rejects_coding_attempt_when_work_item_plan_is_not_confirmed() {
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["code"], "work_item_plan_not_confirmed");
+}
+
+#[tokio::test]
+async fn rejects_coding_attempt_when_dependency_work_item_is_not_completed() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    bootstrap_confirmed_split_work_items(app.clone(), root.path(), repo.path()).await;
+
+    let (status, body) = request_json(
+        app,
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0002/coding-attempts",
+        json!({}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "work_item_dependency_not_completed");
+    assert_eq!(
+        body["details"]["missing_dependencies"],
+        json!(["work_item_0001"])
+    );
+}
+
+#[tokio::test]
+async fn rejects_second_active_work_item_on_same_issue_shared_worktree() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    bootstrap_two_ready_confirmed_work_items(app.clone(), root.path(), repo.path()).await;
+
+    let (status, first) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001/coding-attempts",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(first["branch_name"], "aria/issues/issue_0001");
+
+    let (status, body) = request_json(
+        app,
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0002/coding-attempts",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["code"], "issue_worktree_active");
+}
+
+#[tokio::test]
+async fn rejects_coding_attempt_when_required_dependency_handoff_is_missing() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    bootstrap_completed_dependency_without_handoff(app.clone(), root.path(), repo.path()).await;
+
+    let (status, body) = request_json(
+        app,
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0002/coding-attempts",
+        json!({}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "work_item_handoff_missing");
+    assert_eq!(
+        body["details"]["missing_handoffs"],
+        json!(["work_item_0001"])
+    );
+}
+
+#[tokio::test]
+async fn abort_coding_attempt_releases_issue_shared_worktree_lock() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    bootstrap_two_ready_confirmed_work_items(app.clone(), root.path(), repo.path()).await;
+
+    let (status, first) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001/coding-attempts",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _body) = request_json(
+        app.clone(),
+        Method::POST,
+        &format!(
+            "/api/coding-attempts/{}/abort",
+            first["attempt_id"].as_str().unwrap()
+        ),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, second) = request_json(
+        app,
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0002/coding-attempts",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(second["work_item_id"], "work_item_0002");
+}
+
+#[tokio::test]
+async fn delete_coding_attempt_releases_active_lock_when_clean() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    bootstrap_two_ready_confirmed_work_items(app.clone(), root.path(), repo.path()).await;
+
+    let (status, first) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001/coding-attempts",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let attempt_id = first["attempt_id"].as_str().unwrap();
+
+    let (status, _body) = request_json(
+        app.clone(),
+        Method::DELETE,
+        &format!("/api/coding-attempts/{}", attempt_id),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, _second) = request_json(
+        app,
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0002/coding-attempts",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
 }
 
 #[tokio::test]
@@ -359,7 +523,7 @@ async fn deletes_coding_attempt_and_preserves_work_item() {
     assert!(worktree_path.exists());
     assert!(branch_exists(repo.path(), &attempt.branch_name));
 
-    let (status, body) = request_json(
+    let (status, _body) = request_json(
         app.clone(),
         Method::DELETE,
         "/api/coding-attempts/coding_attempt_0001",
@@ -367,8 +531,7 @@ async fn deletes_coding_attempt_and_preserves_work_item() {
     )
     .await;
 
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["status"], "deleted");
+    assert_eq!(status, StatusCode::NO_CONTENT);
     assert!(!attempt_dir.exists());
     assert!(!worktree_path.exists());
     assert!(!branch_exists(repo.path(), &attempt.branch_name));
@@ -696,28 +859,217 @@ async fn bootstrap_confirmed_work_item_without_workspace_session(
     .await;
 
     let app_paths = ProductAppPaths::new(root_path.join(".aria"));
-    let lifecycle = cadence_aria::product::lifecycle_store::LifecycleStore::new(app_paths);
+    let lifecycle = LifecycleStore::new(app_paths);
     lifecycle
-        .create_work_item(
-            cadence_aria::product::lifecycle_store::CreateWorkItemInput {
-                project_id: "project_0001".to_string(),
-                issue_id: "issue_0001".to_string(),
-                repository_id: "repository_0001".to_string(),
-                story_spec_ids: Vec::new(),
-                design_spec_ids: Vec::new(),
-                title: "实现爬楼梯".to_string(),
-                ..Default::default()
-            },
-        )
+        .create_work_item(CreateWorkItemInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            story_spec_ids: Vec::new(),
+            design_spec_ids: Vec::new(),
+            title: "实现爬楼梯".to_string(),
+            ..Default::default()
+        })
         .expect("create work item");
     lifecycle
         .update_work_item_plan_status(
             "project_0001",
             "issue_0001",
             "work_item_0001",
-            cadence_aria::product::models::WorkItemPlanStatus::Confirmed,
+            WorkItemPlanStatus::Confirmed,
         )
         .expect("confirm work item");
+}
+
+async fn bootstrap_confirmed_split_work_items(
+    app: axum::Router,
+    root_path: &std::path::Path,
+    repo_path: &std::path::Path,
+) {
+    bootstrap_story_and_design(app.clone(), repo_path).await;
+    let (status, _) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items:generate",
+        json!({
+            "title":"实现爬楼梯",
+            "story_spec_ids":["story_spec_0001"],
+            "design_spec_ids":["design_spec_0001"],
+            "author_provider":"fake",
+            "reviewer_provider":"fake"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/workspace-sessions/workspace_session_0003/confirm",
+        json!({"confirmed_by":"human"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let app_paths = ProductAppPaths::new(root_path.join(".aria"));
+    let lifecycle = LifecycleStore::new(app_paths);
+    lifecycle
+        .update_work_item_plan_status(
+            "project_0001",
+            "issue_0001",
+            "work_item_0001",
+            WorkItemPlanStatus::Confirmed,
+        )
+        .expect("confirm item1");
+
+    lifecycle
+        .create_work_item(CreateWorkItemInput {
+            id: Some("work_item_0002".to_string()),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            story_spec_ids: vec!["story_spec_0001".to_string()],
+            design_spec_ids: vec!["design_spec_0001".to_string()],
+            title: "实现爬楼梯 part 2".to_string(),
+            work_item_set_id: None,
+            kind: WorkItemKind::Backend,
+            sequence_hint: Some(20),
+            depends_on: vec!["work_item_0001".to_string()],
+            exclusive_write_scopes: vec!["src/".to_string()],
+            forbidden_write_scopes: Vec::new(),
+            context_budget: Default::default(),
+            required_handoff_from: Vec::new(),
+            verification_plan_ref: None,
+            require_execution_plan_confirm: false,
+            plan_status: WorkItemPlanStatus::Confirmed,
+        })
+        .expect("create item2 with dependency");
+}
+
+async fn bootstrap_two_ready_confirmed_work_items(
+    app: axum::Router,
+    root_path: &std::path::Path,
+    repo_path: &std::path::Path,
+) {
+    bootstrap_story_and_design(app.clone(), repo_path).await;
+    let (status, _) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items:generate",
+        json!({
+            "title":"实现爬楼梯",
+            "story_spec_ids":["story_spec_0001"],
+            "design_spec_ids":["design_spec_0001"],
+            "author_provider":"fake",
+            "reviewer_provider":"fake"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/workspace-sessions/workspace_session_0003/confirm",
+        json!({"confirmed_by":"human"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let app_paths = ProductAppPaths::new(root_path.join(".aria"));
+    let lifecycle = LifecycleStore::new(app_paths);
+    lifecycle
+        .create_work_item(CreateWorkItemInput {
+            id: Some("work_item_0002".to_string()),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            story_spec_ids: vec!["story_spec_0001".to_string()],
+            design_spec_ids: vec!["design_spec_0001".to_string()],
+            title: "实现爬楼梯 part 2".to_string(),
+            work_item_set_id: None,
+            kind: WorkItemKind::Backend,
+            sequence_hint: Some(20),
+            depends_on: Vec::new(),
+            exclusive_write_scopes: vec!["src/".to_string()],
+            forbidden_write_scopes: Vec::new(),
+            context_budget: Default::default(),
+            required_handoff_from: Vec::new(),
+            verification_plan_ref: None,
+            require_execution_plan_confirm: false,
+            plan_status: WorkItemPlanStatus::Confirmed,
+        })
+        .expect("create item2");
+}
+
+async fn bootstrap_completed_dependency_without_handoff(
+    app: axum::Router,
+    root_path: &std::path::Path,
+    repo_path: &std::path::Path,
+) {
+    bootstrap_story_and_design(app.clone(), repo_path).await;
+    let (status, _) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items:generate",
+        json!({
+            "title":"实现爬楼梯",
+            "story_spec_ids":["story_spec_0001"],
+            "design_spec_ids":["design_spec_0001"],
+            "author_provider":"fake",
+            "reviewer_provider":"fake"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/workspace-sessions/workspace_session_0003/confirm",
+        json!({"confirmed_by":"human"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let app_paths = ProductAppPaths::new(root_path.join(".aria"));
+    let lifecycle = LifecycleStore::new(app_paths);
+    lifecycle
+        .update_work_item_plan_status(
+            "project_0001",
+            "issue_0001",
+            "work_item_0001",
+            WorkItemPlanStatus::Confirmed,
+        )
+        .expect("confirm item1");
+    lifecycle
+        .update_work_item_execution_status(
+            "project_0001",
+            "issue_0001",
+            "work_item_0001",
+            WorkItemStatus::Completed,
+        )
+        .expect("complete item1");
+
+    lifecycle
+        .create_work_item(CreateWorkItemInput {
+            id: Some("work_item_0002".to_string()),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            story_spec_ids: vec!["story_spec_0001".to_string()],
+            design_spec_ids: vec!["design_spec_0001".to_string()],
+            title: "实现爬楼梯 part 2".to_string(),
+            work_item_set_id: None,
+            kind: WorkItemKind::Backend,
+            sequence_hint: Some(20),
+            depends_on: vec!["work_item_0001".to_string()],
+            exclusive_write_scopes: vec!["src/".to_string()],
+            forbidden_write_scopes: Vec::new(),
+            context_budget: Default::default(),
+            required_handoff_from: vec!["work_item_0001".to_string()],
+            verification_plan_ref: None,
+            require_execution_plan_confirm: false,
+            plan_status: WorkItemPlanStatus::Confirmed,
+        })
+        .expect("create item2 with handoff dependency");
 }
 
 async fn bootstrap_story_and_design(app: axum::Router, repo_path: &std::path::Path) {
@@ -829,21 +1181,32 @@ fn prepare_attempt_with_worktree(
     let attempt = store
         .get_attempt(project_id, issue_id, attempt_id)
         .expect("attempt");
-    run_git(repo_path, &["branch", &attempt.branch_name, "HEAD"]);
-    let worktree_path = repo_path
-        .join(".worktrees")
-        .join("aria-work-items")
-        .join(&attempt.work_item_id)
-        .join(format!("attempt-{}", attempt.attempt_no));
-    run_git(
-        repo_path,
-        &[
-            "worktree",
-            "add",
-            worktree_path.to_str().expect("worktree path"),
-            &attempt.branch_name,
-        ],
-    );
+    if !branch_exists(repo_path, &attempt.branch_name) {
+        run_git(repo_path, &["branch", &attempt.branch_name, "HEAD"]);
+    }
+    let worktree_path = if let Some(issue_id) = attempt.branch_name.strip_prefix("aria/issues/") {
+        repo_path
+            .join(".worktrees")
+            .join("aria-issues")
+            .join(issue_id)
+    } else {
+        repo_path
+            .join(".worktrees")
+            .join("aria-work-items")
+            .join(&attempt.work_item_id)
+            .join(format!("attempt-{}", attempt.attempt_no))
+    };
+    if !worktree_path.exists() {
+        run_git(
+            repo_path,
+            &[
+                "worktree",
+                "add",
+                worktree_path.to_str().expect("worktree path"),
+                &attempt.branch_name,
+            ],
+        );
+    }
     store
         .update_attempt_worktree_path(project_id, issue_id, attempt_id, worktree_path)
         .expect("update worktree path")
