@@ -96,6 +96,36 @@
 
 每个计划仍应控制在单 Coding session 范围内，TDD 先写测试。
 
+## 七、架构评审后已纳入 v1.2 计划的修复
+
+针对 `.worktrees/feat-b-0616` 上的实施计划 v1.1 进行架构评审后，以下阻塞问题已在对应详细计划 v1.2 中明确要求修复：
+
+1. **`ProviderAdapter` `Send + Sync` bound 与初始化（P3 / P6）**
+   - 已在 P3 v1.2 中要求 `WebAppState` 注入 `Arc<dyn ProviderAdapter + Send + Sync>`，并明确 fake/test/real 模式初始化来源。
+   - 已在 P6 v1.2 中要求 `CodingWorkspaceEngine` 构造器同步接收 `Arc<dyn ProviderAdapter + Send + Sync>`。
+
+2. **Git branch/worktree 幂等复用（P4）**
+   - 已在 P4 v1.2 中要求 `create_branch` 检查 branch 是否已存在、`create_worktree` 检查 worktree list；同一 Issue branch/worktree 已存在时返回 `Ok(())`。
+   - 新增 `git_workspace_service_reuses_existing_issue_branch_and_worktree` 测试覆盖第二次调用复用。
+
+3. **`abort_coding_attempt` / `delete_coding_attempt` 必须经 engine 释放 active lock（P5）**
+   - 已在 P5 v1.2 中新增任务 1B：handler 必须构造 `CodingWorkspaceEngine` 并调用 `handle_abort` / `handle_delete_attempt`，在 dirty worktree 时保持锁，clean 时释放锁。
+   - 新增 `abort_coding_attempt_releases_issue_shared_worktree_lock` 与 `delete_coding_attempt_releases_active_lock_when_clean` 测试。
+
+4. **`complete_attempt_after_final_rework` 复用 `handle_final_confirm` 的 completion gates（P6）**
+   - 已在 P6 v1.2 中新增任务 4B：抽取 `run_completion_gates` helper，要求 `handle_final_confirm` 与 `complete_attempt_after_final_rework` 共用 diff-scope、required verification、handoff、shared worktree clean gate。
+   - 新增 `complete_attempt_after_final_rework_requires_handoff_and_diff_scope` 回归测试。
+
+5. **P3 校验器调用签名与 P2 对齐（P2 / P3）**
+   - 已在 P2 v1.2 中重申 `WorkItemSplitValidator::validate` 签名并明确要求 P3 传入 `Some(&repository_profile)` 与 `&verification_plans`。
+   - 已在 P3 v1.2 中修正 `validate_work_item_generation_candidates` helper 及其测试调用。
+
+6. **P9 不做浏览器 E2E（范围调整）**
+   - P9 v1.2 已删除浏览器 E2E 验收任务与 `web/e2e/helpers/work_item_split.ts`。
+   - P9 仅保留后端 `it_web` 贯通测试与前端 Vitest 集成测试；浏览器 E2E 由用户自行测试。
+
+---
+
 ## 六、参考：关键现有实现位置
 
 | 主题 | 位置 |

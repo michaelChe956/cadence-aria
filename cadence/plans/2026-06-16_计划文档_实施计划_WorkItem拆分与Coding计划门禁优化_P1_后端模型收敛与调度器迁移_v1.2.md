@@ -8,9 +8,11 @@
 
 **Tech Stack:** Rust 1.95.0、Serde JSON、Cargo integration tests、TDD、OpenSpec、Superpowers。
 
-**版本：** v1.1
+**版本：** v1.2
 
 > **v1.1 修订摘要：** 1) 将 `src/product/lifecycle_store.rs` 补进 File Structure 写入范围与 Task 4 的 `git add` 提交清单（给 `LifecycleWorkItemRecord` 加字段必须同步改 `lifecycle_store.rs:254` 的字面量构造点，否则编译失败却漏提交）；2) 在前置上下文与 Task 4 记录两项已评估风险：迁移后 `product::models::ExecutionMode` 成为无使用者的孤儿 `pub enum`（不触发 `dead_code`），以及新 scheduler 保留的 `ReadyDecision::NotAgentExecutable` variant 无构造分支，二者均确认 `-D warnings` 仍可通过。
+>
+> **v1.2 修订摘要（架构评审修复）：** 强调 `CreateWorkItemInput` 若由后续 P3 引入 `Default`，则 `Default` 仅允许用于 legacy/test 占位；生产代码与 split engine 在生成真实 Work Item 时必须显式设置所有 split 字段，P3 批量创建真实 Work Item 时禁止依赖 `Default` 生成真实记录。
 
 ---
 
@@ -34,7 +36,7 @@
 
 - 设计方案：`cadence/designs/2026-06-16_技术方案_WorkItem拆分与Coding计划门禁优化_v1.1.md`
 - 设计评审：`cadence/designs-reviews/2026-06-16_设计评审_WorkItem拆分与Coding计划门禁优化_v1.0.md`
-- 拆分总览：`cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_拆分总览_v1.1.md`
+- 拆分总览：`cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_拆分总览_v1.2.md`
 
 当前代码事实：
 
@@ -339,6 +341,8 @@ Also update the imports at the top of `src/product/lifecycle_store.rs` to includ
 ```rust
 WorkItemContextBudget, WorkItemExecutionPlanStatus, WorkItemKind,
 ```
+
+> **⚠️ `Default` 使用警告（v1.2）：** 上述显式默认值仅用于 legacy/test 占位，保证旧调用点继续编译。生产代码与 split engine 在生成真实 Work Item 时必须显式设置所有 split 字段；`Default` 仅允许用于 legacy/test 占位。P3 实现批量创建 Work Item 时禁止用 `Default` 生成真实记录。
 
 - [ ] **Step 6: Run model tests and confirm pass**
 

@@ -8,11 +8,11 @@
 
 **Tech Stack:** Rust 1.95.0、Serde JSON、Cargo integration tests、TDD、OpenSpec、Superpowers。
 
-**版本：** v1.1
+**版本：** v1.2
 
 > **v1.1 修订摘要：** 1) 在「前置交付摘要」补回 P1 实际新增并测试的 `sequence_hint` 字段；2) 新增「任务 0：测试脚手架」，给出全文 Task2/3/4 都依赖却从未定义的 `work_item(...)` 与 `split_plan(...)` 两个 test helper 的可编译骨架；3) Task 4 为 `write_scope_required` 规则补一个失败测试，并说明 `forbidden_write_scopes` 暂不纳入本计划校验范围；4) 在 validator 实现描述中明确依赖来源以 `work_item.depends_on` 为准、`plan.dependency_graph` 仅做一致性校验；5) Task 4 新增 `integration_or_e2e_skipped_risk` Warning finding，用于 P9 验收跳过 Integration/E2E 时记录风险。
 >
-> **v1.2 评审修复补充：** 本计划同时定义 provider-based `RepositoryProfile` / `VerificationPlan`。Cadence Aria 是多项目平台，P2/P3/P6 均不得按当前仓库或 `WorkItemKind` 硬编码 `cargo`、`pnpm`、Playwright 等目标项目验证命令；平台 validator 只校验验证计划的结构、关联、cwd/path、安全黑名单、required gate 和置信度。
+> **v1.2 修订摘要（架构评审修复）：** 1) 重申 `RepositoryProfile` / `VerificationPlan` 只校验结构、关联、cwd/path、危险命令、required gate 与置信度，不得按当前仓库或 `WorkItemKind` 合成 `cargo`、`pnpm`、Playwright 等目标项目验证命令；2) 明确 P3 调用 `WorkItemSplitValidator::validate` 时必须传入 `Some(&repository_profile)` 与 `&verification_plans`，签名与 P2 定义严格一致。
 
 ---
 
@@ -387,6 +387,8 @@ cargo test --locked --test it_product split_finding_severity_serializes_as_snake
 - Modify: `tests/it_product/product_work_item_split_validator.rs`
 
 > **平台边界：** 这些模型只承载 provider 对目标项目的识别结果和验证计划。P2 不写任何“默认 cargo/pnpm 命令”，也不根据 `WorkItemKind` 推导命令。
+>
+> **v1.2 强调：** `RepositoryProfile` / `VerificationPlan` 必须仅用于描述 provider 已输出的识别结果与验证计划。P2 validator 只能校验其结构、关联、cwd 不越 repo、危险命令黑名单、required gate 存在性和置信度；禁止根据 Rust/pnpm/Playwright 等当前仓库技术栈合成或补写任何验证命令。
 
 - [ ] **步骤 1：编写失败态 provider verification model tests**
 
@@ -1004,6 +1006,8 @@ cargo test --locked --test it_product validator_rejects_unsafe_verification_comm
 - `required_gates` 必须引用同 plan 内 command 或 manual check。
 - 命中平台危险命令黑名单时报 `verification_command_unsafe`。
 - `RepositoryProfile.confidence=Low` 或 command `safety=NeedsManualReview` 时生成 warning，后续 P3/P6 必须进入 manual gate 或 provider repair。
+
+> **v1.2 调用约定：** P3 调用 `WorkItemSplitValidator::validate` 时必须传入 `Some(&repository_profile)` 与 `&verification_plans`，参数类型需与 P2 签名 `validate(plan, candidates, Option<&RepositoryProfile>, &[VerificationPlan])` 保持一致；禁止以 `validate(plan, candidates)` 等缺失参数的调用方式编译。
 
 - [ ] **步骤 4：运行 verification plan tests 并确认通过**
 

@@ -1,8 +1,10 @@
 # WorkItem 拆分 P3 后端多 WorkItem 生成与 Artifact 关联 Implementation Plan
 
-> **文档版本：** v1.1
+> **文档版本：** v1.2
 >
 > **v1.1 修订摘要：** 依据设计评审对照真实源码修订：(1) 新增"任务 0：修正全部 legacy `create_work_item` 调用点"，列出全仓 12+ 处调用文件并建议 `CreateWorkItemInput` 实现 `Default` 以缩小改动面；(2) `GenerateWorkItemsResponse` 改为兼容方案——保留旧字段 `workspace_session`（单数，取主 session）并新增 `workspace_sessions`（复数），维持"不改前端"边界且不破坏 `web_lifecycle_api.rs:350` 的既有断言；(3) 新增显式步骤：从 `web_lifecycle_api.rs` 移植 `request_json` 并定义 `app_with_confirmed_story_and_design` 两个 helper 到新测试文件；(4) 新增计划拆分点说明与 P1/P2 强依赖提示。
+>
+> **v1.2 修订摘要（架构评审修复）：** 1) `WebAppState` 中 `provider_adapter` 类型改为 `Arc<dyn ProviderAdapter + Send + Sync>`，并明确 fake/test/real 模式初始化来源；2) `split_engine.generate` 中同步 `provider.run(&input)` 必须用 `tokio::task::spawn_blocking` 包裹；3) 修正 `WorkItemSplitValidator::validate` 调用签名，与 P2 严格对齐；4) 新增 `AdapterRole::WorkItemSplitter` exhaustive match 检查提醒；5) candidate 持久化前 `sequence_hint`/ID 需与 `LifecycleStore::next_sequential_id` 方案对齐。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -55,7 +57,7 @@
   - 扩展 `GenerateWorkItemsResponse`：**保留旧字段 `workspace_session`（单数，兼容）**，新增 `workspace_sessions`（复数）、`work_item_plan`、`repository_profile`、`verification_plans` 与 `validator_findings`。
   - 扩展 `LifecycleWorkItemDto`，透出 P1/P2 新增字段。
 - Modify: `src/web/state.rs`
-  - 在 `WebAppState` 中新增 `provider_adapter: Arc<dyn ProviderAdapter>` 字段。
+  - 在 `WebAppState` 中新增 `provider_adapter: Arc<dyn ProviderAdapter + Send + Sync>` 字段。
   - 更新 `WebAppState::new` 及测试构造 helper，注入默认或 fake provider adapter。
 - Modify: `src/web/handlers.rs`
   - `generate_work_items` 调用 `WorkItemSplitEngine`。
@@ -83,6 +85,8 @@
 > **🔴 阻塞前置：** 给 `CreateWorkItemInput` 增加必填字段后，全仓约 12+ 处既有 `create_work_item(CreateWorkItemInput{...})` 调用点会编译失败。本任务负责把它们全部补齐，必须先于（或紧随）任务 2 的字段扩展完成，否则全仓无法编译。
 
 **降风险建议（强烈推荐）：** 为 `CreateWorkItemInput` 新增字段实现 `Default`（或对整个结构体 `#[derive(Default)]`，注意 `WorkItemKind` 需有 `Default`），legacy 调用点即可用 `..Default::default()` 收尾，把改动面从"每处补 9 个字段"缩小为"每处补一行"。
+
+> **⚠️ `Default` 使用警告（v1.2）：** 生产代码与 split engine 在生成真实 Work Item 时必须显式设置所有 split 字段；`Default` 仅允许用于 legacy/test 占位。P3 实现批量创建 Work Item 时禁止用 `Default` 生成真实记录。
 
 **已确认需要同步修改的调用点文件清单（源码 + 测试）：**
 
@@ -467,19 +471,26 @@ cargo test --locked --test it_web generate_work_items_creates_backend_frontend_a
 
    - `plan.work_item_ids` 必须与顶层 `work_items[].id` 一致；`plan.verification_plan_ids` 必须与顶层 `verification_plans[].id` 一致；每个 Work Item 的 `verification_plan_ref` 必须指向同 `work_item_id` 的 `VerificationPlan`。`IssueWorkItemPlan` 自身不包含 `work_items` 字段。
    - `worktree_path`：当前 repository path（仅作 provider 工作目录，不写入目标仓库）。
+   - **v1.2 提醒：** 新增 `AdapterRole::WorkItemSplitter` 后，必须全仓搜索对 `AdapterRole` 的 exhaustive `match`（包括 `cross_cutting/provider_adapter.rs`、测试、fake provider 等），为现有 match 增加新变体处理或补 `unknown`/wildcard arm，避免编译失败。
 
-3. **调用 provider run**：
-   - 通过注入的 `Arc<dyn ProviderAdapter>` 调用 `provider.run(&input)`。
+3. **Provider adapter 来源与初始化**：
+   - `WebAppState` 新增 `provider_adapter: Arc<dyn ProviderAdapter + Send + Sync>`。
+   - Fake/test 构造函数使用 `Arc::new(FakeProviderAdapter)` 初始化；测试可用 `FakeProviderAdapter::with_structured_output(...)` 预设 provider 输出。
+   - Real mode 必须从 `WebRuntime::real_provider` 复用或调用 `real_routing_provider()` 构建；禁止为 `None`。
+   - 更新所有 `WebAppState` 构造函数和测试 helper，保证 `provider_adapter` 始终有值。
+
+4. **调用 provider run（不得阻塞 async runtime）**：
+   - `ProviderAdapter::run` 是同步调用；在 async 函数中通过 `tokio::task::spawn_blocking` 包裹 `provider_adapter.run(&input)`，await 其 `JoinHandle` 后再继续处理。
+   - 注入字段类型为 `Arc<dyn ProviderAdapter + Send + Sync>`。
    - 保存 provider run record 到 `.aria` 目录，ref 写入 `IssueWorkItemPlan.created_from_provider_run`。
-   - **Provider adapter 来源：** 在 `WebAppState` 中新增 `provider_adapter: Arc<dyn ProviderAdapter>` 字段。P3 和 P6 共用同一个同步 provider adapter 注入点，避免重复构造。
 
-4. **解析输出**：
+5. **解析输出**：
    - 从 `AdapterOutput.structured_output` 解析 `WorkItemSplitProviderOutput`。
    - 从顶层 `output.work_items` 解析为 `LifecycleWorkItemRecord` 候选列表。
    - 从顶层 `output.repository_profile` 和 `output.verification_plans` 解析验证契约。
    - 若解析失败，返回 `work_item_split_provider_output_invalid`。
 
-5. **注入 engine 到 handler**：
+6. **注入 engine 到 handler**：
    - 修改 `WebAppState` 或 `generate_work_items` 参数，使 `WorkItemSplitEngine` 可访问 `ProviderAdapter` 和 `LifecycleStore`。
 
 - [ ] **步骤 4：在 handler 中调用 split engine 并持久化**
@@ -533,8 +544,15 @@ cargo test --locked --test it_web generate_work_items_creates_backend_frontend_a
 fn validate_work_item_generation_candidates(
     plan: &IssueWorkItemPlan,
     candidates: &[LifecycleWorkItemRecord],
+    repository_profile: Option<&RepositoryProfile>,
+    verification_plans: &[VerificationPlan],
 ) -> Result<(), ApiError> {
-    let report = WorkItemSplitValidator::validate(plan, candidates);
+    let report = WorkItemSplitValidator::validate(
+        plan,
+        candidates,
+        repository_profile,
+        verification_plans,
+    );
     if report.has_errors() {
         return Err(ApiError::validation_with_details(
             "work_item_split_invalid",
@@ -546,7 +564,7 @@ fn validate_work_item_generation_candidates(
 }
 ```
 
-Call this helper before the first `lifecycle.create_work_item(...)` call.
+Call this helper before the first `lifecycle.create_work_item(...)` call.调用时必须传入 `Some(&repository_profile)` 与 `&verification_plans`，与 P2 签名严格对齐。
 
 - [ ] **步骤 2：编写失败态 invalid candidate unit test**
 
@@ -574,8 +592,17 @@ fn validate_work_item_generation_candidates_rejects_required_e2e_when_e2e_item_i
         ),
     ];
 
-    let error = validate_work_item_generation_candidates(&plan, &candidates)
-        .expect_err("missing e2e item should be rejected");
+    let repository_profile = repository_profile_for_test();
+    let verification_plans: Vec<VerificationPlan> =
+        candidates.iter().map(default_verification_plan_for).collect();
+
+    let error = validate_work_item_generation_candidates(
+        &plan,
+        &candidates,
+        Some(&repository_profile),
+        &verification_plans,
+    )
+    .expect_err("missing e2e item should be rejected");
 
     assert_eq!(error.code(), "work_item_split_invalid");
 }
@@ -594,6 +621,8 @@ cargo test --locked --test it_web validate_work_item_generation_candidates_rejec
 - [ ] **步骤 4：校验 before persistence**
 
 Build candidate `LifecycleWorkItemRecord` values in memory with predicted sequential IDs before writing JSON. Validate candidates. Persist only after `report.has_errors()` is false.
+
+> **v1.2 说明：** candidate 的 `id` 与 `sequence_hint` 必须在持久化前与 `LifecycleStore::next_sequential_id`（或当前 store 使用的 ID 生成方案）对齐，避免 provider 输出顺序与持久化顺序不一致导致 plan/work_item 关联错位。
 
 - [ ] **步骤 5：添加 HTTP no-half-created regression**
 

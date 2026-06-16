@@ -1,8 +1,10 @@
 # WorkItem 拆分 P6 后端 WorkItemExecutionPlan 与 Handoff Provider Run Implementation Plan
 
-> **文档版本：** v1.1
+> **文档版本：** v1.2
 >
 > **v1.1 修订摘要：** 预设拆分点（execution plan 任务 1-3 / handoff 与 diff scope 任务 4-5 分两段提交）；修正最终验证过滤名为实际测试函数子串；纠正 `CodingWsOutMessage::CodingSessionState` 实际定义在 `src/web/coding_ws_handler.rs`（非 `workspace_ws_types.rs`）；补全 `completion_commit`/`handoff_summary_ref`/`execution_plan_status` 字段来源（P3/P4）并明确 `completion_commit` 取 `head_commit`；明确 diff scope 与 handoff 校验必须在 P5 的状态更新/锁释放之前执行；将 diff scope completion gate 纳入任务 4，复用 `validate_write_path` 并增加越界阻断测试。
+>
+> **v1.2 修订摘要（架构评审修复）：** 1) 新增任务 4B：抽取 `run_completion_gates` helper，强制 `handle_final_confirm` 与 `complete_attempt_after_final_rework` 共用同一完成门禁；2) `ProviderAdapter` 注入类型统一为 `Arc<dyn ProviderAdapter + Send + Sync>`；3) handoff provider run 必须包裹在 `tokio::task::spawn_blocking` 中；4) 新增 `AdapterRole::Handoff` exhaustive match 检查；5) `head_commit` 为 `None` 时返回 `completion_commit_missing`。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -60,7 +62,7 @@
   - final confirm 前检查 diff scope 和 handoff。
   - 增加 handoff provider run 调用，解析输出并保存 `WorkItemHandoff`。
 - Modify: `src/product/coding_workspace_engine.rs` 构造函数
-  - 注入 `Arc<dyn ProviderAdapter>`，用于 handoff provider run。
+  - 注入 `Arc<dyn ProviderAdapter + Send + Sync>`，用于 handoff provider run。
   - **Provider adapter 来源：** 复用 P3 在 `WebAppState` 中新增的 `provider_adapter` 字段，通过 `CodingWorkspaceEngine::new(..., provider_adapter, ...)` 传入。
 - Create: `src/product/handoff_provider.rs`（或内联于 coding_workspace_engine.rs）
   - 定义 handoff provider 的 prompt template 与输出 schema。
@@ -539,6 +541,87 @@ async fn final_confirm_requires_required_verification_gate_result() {
 - required gate 缺失、失败且未人工接受时，返回 `verification_gate_result_missing` 或 `verification_gate_failed`。
 - manual accepted 必须记录操作者、时间、说明和关联 gate ID，供 handoff provider 输入消费。
 
+## 任务 4B：抽取 completion gate helper 并覆盖 `complete_attempt_after_final_rework`
+
+> **v1.2 新增任务：** 架构评审发现 `complete_attempt_after_final_rework` 直接置 `Completed` 并绕过 `handle_final_confirm` 的门禁。本任务抽取统一 `run_completion_gates` helper，要求 `handle_final_confirm` 与 `complete_attempt_after_final_rework` 共用同一套完成门禁。
+
+**文件：**
+
+- Modify: `src/product/coding_workspace_engine.rs`
+- Modify: `tests/it_product/product_coding_workspace_engine.rs`
+
+- [ ] **步骤 1：抽取 `run_completion_gates` helper**
+
+在 `src/product/coding_workspace_engine.rs` 新增：
+
+```rust
+async fn run_completion_gates(
+    &self,
+    attempt: &CodingExecutionAttempt,
+) -> Result<CompletionGateReport, CodingWorkspaceEngineError>
+```
+
+运行顺序（任一失败提前返回，不得修改任何状态）：
+
+1. **diff-scope gate**：复用 `validate_write_path`，检查 attempt 的 changed files 是否全部落在 `LifecycleWorkItemRecord.exclusive_write_scopes` 内且未命中 `forbidden_write_scopes`。
+2. **required verification gate result**：检查 `VerificationPlan.required_gates` 是否全部通过或被人工接受。
+3. **handoff existence**：检查是否已保存 `WorkItemHandoff`。
+4. **shared worktree clean gate**：调用 `ensure_issue_shared_worktree_clean(...)`，dirty 时返回错误。
+
+额外约束：
+
+- 若 `attempt.head_commit` 为 `None`，直接返回 `CodingWorkspaceEngineError::completion_commit_missing`（diff gate 无法确定基线）。
+- helper 内部只做读取与校验，不修改 attempt、Work Item 或 shared worktree 状态。
+
+- [ ] **步骤 2：`handle_final_confirm` 复用 helper**
+
+在 `handle_final_confirm()` 函数最开头调用 `self.run_completion_gates(&attempt).await?`；只有成功后才继续执行 Completed 落库、`mark_issue_worktree_completed_item` 与 active lock 释放。
+
+- [ ] **步骤 3：`complete_attempt_after_final_rework` 复用 helper**
+
+在 `complete_attempt_after_final_rework()` 函数最开头调用 `self.run_completion_gates(&attempt).await?`；只有成功后才允许：
+
+- 将 attempt/Work Item 置为 `Completed`。
+- 调用 `mark_issue_worktree_completed_item(...)` 释放 active lock。
+- 若 helper 失败（包括 diff scope、verification、handoff、dirty worktree 或 `head_commit` 缺失），不得置 Completed，不得释放锁。
+
+- [ ] **步骤 4：新增回归测试**
+
+追加到 `tests/it_product/product_coding_workspace_engine.rs`：
+
+```rust
+#[tokio::test]
+async fn complete_attempt_after_final_rework_requires_handoff_and_diff_scope() {
+    let root = tempdir().expect("root");
+    let (store, attempt) =
+        complete_attempt_after_final_rework_fixture(root.path(), "work_item_0001");
+    // fixture 中已设置越界 changed files，且未保存 handoff
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
+
+    let error = engine
+        .complete_attempt_after_final_rework("project_0001", "issue_0001", &attempt.id)
+        .await
+        .expect_err("missing completion gates blocks auto-complete");
+
+    assert!(
+        format!("{error}").contains("work_item_handoff_missing")
+            || format!("{error}").contains("work_item_diff_scope_violation")
+            || format!("{error}").contains("completion_commit_missing")
+    );
+}
+```
+
+- [ ] **步骤 5：运行回归测试并确认失败/通过**
+
+运行:
+
+```bash
+cargo test --locked --test it_product complete_attempt_after_final_rework_requires_handoff_and_diff_scope
+```
+
+预期：先失败（helper 尚未接入），接入 helper 后通过。
+
 - [ ] **步骤 6：编写失败态 diff scope gate test（v1.1 阻塞修复）**
 
 Append to `tests/it_product/product_coding_workspace_engine.rs`:
@@ -626,7 +709,7 @@ cargo test --locked --test it_product final_confirm_rejects_diff_outside_work_it
 pub fn new(
     store: CodingAttemptStore,
     git_service: GitWorkspaceService,
-    provider: Arc<dyn ProviderAdapter>,
+    provider: Arc<dyn ProviderAdapter + Send + Sync>,
     event_tx: mpsc::Sender<CodingWsOutMessage>,
 ) -> Self
 ```
@@ -695,7 +778,8 @@ cargo test --locked --test it_product generates_handoff_from_extra_provider_run_
    - `prompt`：包含上述输入的 prompt template
    - `output_schema`：定义 `WorkItemHandoff` 核心字段的 JSON schema
    - `worktree_path`：attempt worktree path
-3. 调用 `provider.run(&input)`，得到 `AdapterOutput`。
+   - **v1.2 提醒：** 新增 `AdapterRole::Handoff` 后，必须全仓搜索对 `AdapterRole` 的 exhaustive `match`，为现有 match 增加新变体或补 `unknown`/wildcard arm，避免编译失败。
+3. 调用 `provider.run(&input)`，得到 `AdapterOutput`。**必须**用 `tokio::task::spawn_blocking` 包裹同步 `provider.run(&input)` 调用，避免阻塞 tokio worker。
 4. 解析 `structured_output` 为 `WorkItemHandoff`；若解析失败，返回 `work_item_handoff_provider_output_invalid`。
 5. 保存 provider run record（复用 `provider_run_record_from_output`）到 `.aria` 目录，并将 ref 写入 `WorkItemHandoff.provider_run_ref`。
 
@@ -703,12 +787,13 @@ cargo test --locked --test it_product generates_handoff_from_extra_provider_run_
 
 - [ ] **步骤 5：在 final confirm 路径调用 handoff provider run**
 
-在 `handle_final_confirm()` 中，diff scope 校验通过后、状态置 Completed 前：
+在 `handle_final_confirm()` 中：
 
-1. 调用 `engine.generate_work_item_handoff(&attempt).await`。
+1. 若 handoff 尚未生成，调用 `engine.generate_work_item_handoff(&attempt).await`。
 2. 将生成的 `WorkItemHandoff` 通过 `CodingAttemptStore::save_work_item_handoff` 持久化。
 3. 更新 `LifecycleWorkItemRecord.handoff_summary_ref` 和 `completion_commit`。
-4. 再继续 P5 的 Completed 落库与 active lock 释放。
+4. 调用任务 4B 抽取的 `self.run_completion_gates(&attempt).await?`；只有通过后才继续 P5 的 Completed 落库与 active lock 释放。
+5. 在 `complete_attempt_after_final_rework()` 中同样先保证 handoff 已生成，再调用 `run_completion_gates` 校验，成功后置 Completed 并释放锁。
 
 - [ ] **步骤 6：运行 handoff generation test 并确认通过**
 

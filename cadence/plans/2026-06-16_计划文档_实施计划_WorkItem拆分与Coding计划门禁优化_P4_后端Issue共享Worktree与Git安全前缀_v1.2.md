@@ -1,8 +1,10 @@
 # WorkItem 拆分 P4 后端 Issue 共享 Worktree 与 Git 安全前缀 Implementation Plan
 
-> **文档版本：** v1.1
+> **文档版本：** v1.2
 >
 > **v1.1 修订摘要：** 依据设计评审对照真实源码修订：(1) 真实 `create_branch()`（`git_workspace_service.rs:74-84`）根本不调用任何 `ensure_safe_*` 校验（仅 `delete_local_branch` 校验），故 reject 测试无法通过——任务 2 显式新增步骤：把分支名安全校验注入 `create_branch` 与 `create_worktree` 的 branch 参数路径；(2) 测试断言的 `issue_worktree_active` 在 `ProductStoreError`（`json_store.rs:8-17`，仅 Io/Json/NotFound/PathEscape）无对应变体，明确统一改用 `Io(format!("issue_worktree_active..."))`；(3) 最终验证过滤名 `issue_shared_worktree` 匹配不到 `rejects_lock_when_another_work_item_is_active` 等用例，改用更宽的过滤名以覆盖本计划全部新增用例。
+>
+> **v1.2 修订摘要（架构评审修复）：** 为 `create_branch`/`create_worktree` 补充幂等语义——branch 已存在或 worktree 已注册同一 branch 时返回 `Ok(())`，不同 branch 时报错；新增 `git_workspace_service_reuses_existing_issue_branch_and_worktree` 测试覆盖第二次调用复用；明确 P5 `execute_worktree_prepare` 依赖此幂等性直接复用 Issue 共享 worktree。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -266,6 +268,39 @@ async fn git_workspace_service_still_rejects_unsafe_issue_branch_names() {
 
     assert!(format!("{error}").contains("outside allowed aria branch prefixes"));
 }
+
+#[tokio::test]
+async fn git_workspace_service_reuses_existing_issue_branch_and_worktree() {
+    let root = tempdir().expect("tempdir");
+    let repo = root.path().join("repo");
+    init_repo(&repo);
+    let service = GitWorkspaceService::new();
+
+    service
+        .create_branch(&repo, "aria/issues/issue_0001", "HEAD")
+        .await
+        .expect("create issue branch first time");
+    let worktree = repo
+        .join(".worktrees")
+        .join("aria-issues")
+        .join("issue_0001");
+    service
+        .create_worktree(&repo, "aria/issues/issue_0001", &worktree)
+        .await
+        .expect("create issue worktree first time");
+
+    // 第二次调用必须幂等复用，不得报错。
+    service
+        .create_branch(&repo, "aria/issues/issue_0001", "HEAD")
+        .await
+        .expect("reuse existing issue branch");
+    service
+        .create_worktree(&repo, "aria/issues/issue_0001", &worktree)
+        .await
+        .expect("reuse existing issue worktree");
+
+    assert!(worktree.join(".git").exists());
+}
 ```
 
 - [ ] **步骤 2：运行 Git safety tests 并确认失败**
@@ -275,9 +310,10 @@ async fn git_workspace_service_still_rejects_unsafe_issue_branch_names() {
 ```bash
 cargo test --locked --test it_product git_workspace_service_allows_issue_shared_branch_and_worktree_prefix
 cargo test --locked --test it_product git_workspace_service_still_rejects_unsafe_issue_branch_names
+cargo test --locked --test it_product git_workspace_service_reuses_existing_issue_branch_and_worktree
 ```
 
-预期：第一条测试失败，因为 only `aria/work-items/` and `.worktrees/aria-work-items` are allowed.
+预期：第一条测试失败，因为 only `aria/work-items/` and `.worktrees/aria-work-items` are allowed；幂等复用测试同样失败，因为当前实现会直接再次创建。
 
 - [ ] **步骤 3：实现 prefix allow-list**
 
@@ -331,6 +367,11 @@ pub async fn create_worktree(
     // ...既有逻辑...
 }
 ```
+
+- **幂等复用要求（v1.2）：** P5 要求同一 Issue 下多次 Coding attempt 复用同一个 `aria/issues/{issue_id}` branch 与 `.worktrees/aria-issues/{issue_id}` worktree，因此 `create_branch` 与 `create_worktree` 必须具备幂等语义：
+  - `create_branch` 在执行 `git branch` 前先检查 branch 是否已存在（例如 `git show-ref --verify --quiet refs/heads/{branch}`）。若已存在，返回 `Ok(())`；仅当创建失败且 branch 不存在时才返回错误。
+  - `create_worktree` 在执行 `git worktree add` 前先运行 `git worktree list --porcelain`；若目标 path 已注册且绑定同一 branch，返回 `Ok(())`；若 path 已注册但绑定不同 branch，返回错误。
+  - P5 的 `execute_worktree_prepare` 依赖此幂等性：它只需按 Issue branch 计算 worktree path，然后直接调用 `create_branch`/`create_worktree`，无需额外实现复用逻辑。
 
 并确认 `ensure_safe_aria_branch_name()` 在 prefix 不匹配时返回的错误信息包含 `outside allowed aria branch prefixes`，使 reject 测试断言成立。
 

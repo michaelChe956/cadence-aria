@@ -1,8 +1,10 @@
 # WorkItem 拆分 P8 前端 Coding Prepare 执行计划展示 Implementation Plan
 
-> **版本：v1.1**（修订自 v1.0）
+> **版本：v1.2**（修订自 v1.1）
 >
 > **v1.1 修订摘要：**（1）任务1 store 测试由不存在的 `applySnapshot` 改为真实方法 `setSessionState`，入参类型修正为 `coding_session_state` 消息（`Extract<CodingWsOutMessage, { type: "coding_session_state" }>`），并说明 hydration 经由 `useCodingWorkspaceWs.ts` 的 `case "coding_session_state"` 分支落库；（2）门禁开关统一为来自 work item/snapshot 的 `require_execution_plan_confirm`，不再使用 plan 上的 `require_confirmation`，测试样例与类型定义对齐；（3）前置交付摘要补充 P7→P8 串行约束（共享 `types.ts`，禁止并行）。
+>
+> **v1.2 修订摘要（架构评审修复）：** 补充 P6 字段暴露前置：P6 必须在 `CodingAttemptSnapshotResponse` 与 `CodingWsOutMessage::CodingSessionState` 中暴露 `work_item_execution_plan`、`work_item_handoff`、`require_execution_plan_confirm`；P8 只负责前端展示。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -19,6 +21,7 @@
 执行本计划前确认：
 
 - P6 `CodingAttemptSnapshotResponse` 已包含 `work_item_execution_plan` 和 `work_item_handoff`。
+- **P6 字段暴露前置（v1.2）：** P6 必须在 `CodingAttemptSnapshotResponse` 与 `CodingWsOutMessage::CodingSessionState` 中暴露 `work_item_execution_plan`、`work_item_handoff`、`require_execution_plan_confirm`；P8 只负责前端展示。
 - P6 `WorkItemExecutionPlan` 通过 `verification_plan_ref` 引用 P3 保存的 `VerificationPlan`；前端不得用 Work Item kind 或当前仓库技术栈推导验证命令。
 - P6 已增加 confirm/change-request HTTP API，前端需要在 `web/src/api/client.ts` 增加调用。
 - 后端表达门禁的规则是：`require_execution_plan_confirm=false` 时 draft 不阻塞；为 true 时必须确认后才能进入 Coder。门禁标志的唯一来源是 work item / snapshot 上的 `require_execution_plan_confirm`（由 P6 后端字段透出），前端不在 plan 对象上自造 `require_confirmation`。

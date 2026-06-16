@@ -1,16 +1,18 @@
 # WorkItem 拆分 P9 贯通测试与 WorkItem 验收 Implementation Plan
 
-> **版本：v1.1**（修订自 v1.0）
+> **版本：v1.2**（修订自 v1.1）
 >
-> **v1.1 修订摘要：** 任务4 浏览器 E2E 首屏强断言改为"先确定性 seed/setup 再断言"：现有 e2e 无 work item 种子数据（`start-api.mjs` 仅设 `ARIA_PROVIDER_MODE=fake`，无 seed），原先 `page.goto("/workbench")` 后无条件 `expect(getByText("Work Item")).toBeVisible()` 可能必失败；改为先经 `web/e2e/helpers/coding.ts` / `workspace.ts` 完成确定性 setup/seed，再做断言。计划边界（不改生产代码除非暴露真实缺陷、修复超 1-2 文件须另开计划、不创建真实远端 PR）保留不变。
+> **v1.1 修订摘要：** 原任务包含浏览器 E2E 首屏断言；已识别到缺少确定性 seed/setup，存在首屏断言失败风险。
+>
+> **v1.2 修订摘要（架构评审修复 + 范围调整）：** 去掉浏览器 E2E 验收，改为后端/前端贯通测试。P9 只验证后端状态机、API 流程、前端 Vitest 集成；浏览器 E2E 由用户自行测试，不在本计划内实现。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 验证后端 Work Item、前端 Work Item、可选 Integration/E2E Work Item 的端到端关系：provider 输出 RepositoryProfile/VerificationPlan，IssueWorkItemPlan 组级确认后 Work Item 才可编码，后端 handoff 被前端消费，Integration/E2E 等待前后端完成，dirty shared worktree 被 clean gate 阻断，用户跳过时记录风险但不阻塞。
+**Goal:** 验证后端 Work Item、前端 Work Item 的端到端关系：provider 输出 RepositoryProfile/VerificationPlan，IssueWorkItemPlan 组级确认后 Work Item 才可编码，后端 handoff 被前端消费，Integration/E2E Work Item 等待前后端完成，dirty shared worktree 被 clean gate 阻断，用户跳过时记录风险但不阻塞。
 
-**Architecture:** 本计划以测试为主，只在测试暴露真实缺陷时做最小生产修复。后端使用 `it_web` 贯通测试覆盖 API/状态机；前端使用 Vitest 覆盖 lifecycle 和 Coding Prepare；浏览器 E2E 放在现有 `web/e2e` 目录，复用仓库 Playwright 配置。
+**Architecture:** 本计划以测试为主，只在测试暴露真实缺陷时做最小生产修复。后端使用 `it_web` 贯通测试覆盖 API/状态机；前端使用 Vitest 覆盖 lifecycle 和 Coding Prepare。不新增 Playwright 浏览器 E2E。
 
-**Tech Stack:** Rust 1.95.0、Axum integration tests、Vitest、Playwright、pnpm、Cargo。
+**Tech Stack:** Rust 1.95.0、Axum integration tests、Vitest、pnpm、Cargo。
 
 ---
 
@@ -29,6 +31,7 @@
 
 - 不主动改生产后端代码。
 - 不主动改生产前端代码。
+- 不新增 Playwright 浏览器 E2E spec 或 helper。
 - 如果测试暴露生产缺陷，先把失败、根因、建议修复范围写入当前执行汇报；若修复超过 1-2 个文件，新增修复计划，不把 P9 扩成开发计划。
 - 不创建真实远端 PR 或外部仓库数据。
 
@@ -42,12 +45,6 @@
   - 前端 lifecycle 贯通状态测试。
 - Modify: `web/src/pages/CodingWorkspacePage.test.tsx`
   - execution plan/handoff 展示联动测试。
-- Create: `web/e2e/work-item-split-flow.spec.ts`
-  - 浏览器 E2E 验收。
-- Modify: `web/e2e/helpers/coding.ts` 或 `web/e2e/helpers/workspace.ts`
-  - 增加确定性 seed/setup helper。
-
-> 说明：本计划包含浏览器 E2E 验收，但必须先做确定性 seed/setup，再断言 Work Item UI；不得无种子直接访问 `/workbench` 后断言首屏已有 Work Item。
 
 ## 任务 1：Backend Flow Test For Split Generation And Dependency Gates
 
@@ -340,7 +337,7 @@ pnpm -C web test -- --run CodingWorkspacePage
 
 预期：通过。
 
-## 任务 2A：Backend Flow Test For Dirty Shared Worktree Clean Gate
+## 任务 4：Backend Flow Test For Dirty Shared Worktree Clean Gate
 
 **文件：**
 
@@ -392,7 +389,6 @@ cargo test --locked --test it_web work_item_split_flow
 cargo test --locked --test it_web dirty_shared_worktree_blocks_next_work_item_until_manual_gate_resolved
 pnpm -C web test -- --run IssueLifecycleWorkbench
 pnpm -C web test -- --run CodingWorkspacePage
-pnpm -C web test:e2e -- work-item-split-flow.spec.ts
 cargo fmt --check
 cargo clippy --all-targets --all-features --locked -- -D warnings
 cargo check --locked
@@ -402,12 +398,11 @@ cargo check --locked
 
 - Backend flow tests pass.
 - Frontend Vitest tests pass.
-- Browser E2E passes after deterministic seed/setup.
 - Rust formatting, clippy and check pass.
 
 ## 提交
 
 ```bash
-git add tests/it_web.rs tests/it_web/web_work_item_split_flow.rs web/src/components/lifecycle/IssueLifecycleWorkbench.test.tsx web/src/pages/CodingWorkspacePage.test.tsx web/e2e/work-item-split-flow.spec.ts web/e2e/helpers/coding.ts web/e2e/helpers/workspace.ts
+git add tests/it_web.rs tests/it_web/web_work_item_split_flow.rs web/src/components/lifecycle/IssueLifecycleWorkbench.test.tsx web/src/pages/CodingWorkspacePage.test.tsx
 git commit -m "test: verify split work item flow"
 ```

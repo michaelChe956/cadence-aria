@@ -1,8 +1,10 @@
 # WorkItem 拆分 P7 前端 Work Item 生成选项与 DAG 展示 Implementation Plan
 
-> **版本：v1.1**（修订自 v1.0）
+> **版本：v1.2**（修订自 v1.1）
 >
 > **v1.1 修订摘要：**（1）强化硬前置：当前 `web/src/api/types.ts` 的 `LifecycleWorkItem`（约行 108-119）仅含基础字段、`GenerateWorkItemsRequest`（约行 749-753）仅含 title/story_spec_ids/design_spec_ids，拆分相关字段必须由后端 P3 先落地并反映到前端类型，执行前必须确认 P3 已交付对应 DTO 字段；（2）测试伪代码对齐真实 props：`LifecycleCardDrawer` 实际 props 为 `{entity,onClose,onOpenWorkspace,onOpenCodingWorkspace?,onGenerateNext?,onDelete?}`（无 `open`），`DrawerEntityKind` 现为 `issue|story_spec|design_spec|work_item`（不含 `backend`），`LifecycleCard` 用 `onGenerateStorySpec` 而非 `onOpenFullIssue`，并明确需扩展 `DrawerEntity` 透传 work item 的 kind/scope；（3）预设拆分点：任务1-2（类型+store）与任务3-4（UI 组件）分两次提交或允许中途 checkpoint；（4）前置交付摘要补充 P7→P8 串行约束（共享 `types.ts`，禁止并行）。
+>
+> **v1.2 修订摘要（架构评审修复）：** 补充 P6 字段暴露前置：P6 必须已将 `work_item_execution_plan` / `work_item_handoff` 暴露给后端 snapshot/WS；P7 不消费它们，但禁止在 `types.ts` 中删除或重命名相关字段，避免破坏 P8。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -23,6 +25,7 @@
 - P3 后端 `GenerateWorkItemsResponse` 已返回 `work_item_plan`、`repository_profile`、`verification_plans`、`work_items` 和 `validator_findings`。
 - `LifecycleWorkItemDto` 已透出 `kind`、`depends_on`、`exclusive_write_scopes`、`forbidden_write_scopes`、`context_budget`、`required_handoff_from`、`verification_plan_ref`、`handoff_summary_ref`、`completion_commit`、`completion_diff_summary_ref`。
 - P5/P6 后端会通过 `latest_attempt`、status 和 handoff 字段表达等待/完成状态。
+- **P6 字段暴露前置（v1.2）：** P6 必须已把 `work_item_execution_plan` / `work_item_handoff` 暴露给后端 snapshot/WS；虽然 P7 不消费它们，但 P8 依赖，P7 不应在 `types.ts` 中删除或重命名相关字段。
 - **P7→P8 串行约束**：P7 与 P8 共享并修改 `web/src/api/types.ts`（P7 扩 `LifecycleWorkItem`/`GenerateWorkItemsRequest`，P8 新增 `WorkItemExecutionPlan`/`WorkItemHandoff` 并扩 `CodingAttemptSnapshotResponse`）。必须先完成 P7、再执行 P8，不得并行，避免 `types.ts` 合并冲突。
 
 ## 计划大小边界

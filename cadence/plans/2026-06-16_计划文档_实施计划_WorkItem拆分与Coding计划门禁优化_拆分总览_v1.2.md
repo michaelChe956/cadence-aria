@@ -6,7 +6,24 @@
 
 **Architecture:** 先收敛 Work Item 活跃模型和调度基础，再实现拆分校验、生成流、共享 worktree、Coding 门禁、handoff 和前端展示。每个 Work Item 只拥有一个清晰上下文边界；存在依赖的后序计划必须消费前序交付摘要，互不依赖的计划只在写入范围可证明不冲突时允许并行。
 
-**Tech Stack:** Rust 1.95.0、Cargo、Serde JSON、Axum、React、TypeScript、Zustand、Vitest、Playwright、OpenSpec、Superpowers。
+**Tech Stack:** Rust 1.95.0、Cargo、Serde JSON、Axum、React、TypeScript、Zustand、Vitest、OpenSpec、Superpowers。本计划不做 Playwright 浏览器 E2E。
+
+**版本：** v1.2
+
+> **v1.2 修订摘要：** 本版本依据架构评审意见，在 P1-P9 各详细计划中补齐了 5 项阻塞性修复：`ProviderAdapter` 的 `Send + Sync` bound 与初始化方案（P3/P6）、Git branch/worktree 幂等复用（P4）、`abort/delete_coding_attempt` 经 engine 释放 active lock（P5）、`complete_attempt_after_final_rework` 复用 completion gate helper（P6）、P3 校验器调用签名与 P2 对齐。P9 不再包含浏览器 E2E，仅保留后端/前端贯通测试。
+
+---
+
+## 架构评审后关键修复（v1.2）
+
+架构评审识别到以下阻塞问题，已在本拆分总览及对应详细计划 v1.2 中给出实现要求：
+
+- **`ProviderAdapter` `Send + Sync` bound 与初始化（P3 / P6）**：P3 要求 `WebAppState` 注入的 `provider_adapter` 类型为 `Arc<dyn ProviderAdapter + Send + Sync>`，并在 fake/test/real 模式下统一初始化；P6 的 `CodingWorkspaceEngine` 构造器同步接收同一类型，避免跨 tokio task 传递与阻塞 runtime 问题。
+- **Git branch/worktree 幂等复用（P4）**：`git_workspace_service::create_branch` 与 `create_worktree` 必须先检查 branch/worktree 是否已存在；已存在且属于同一 Issue branch 时返回 `Ok(())`，属于不同 branch 时报错。P5 `execute_worktree_prepare` 依赖此幂等性直接复用 Issue 共享 worktree。
+- **`abort_coding_attempt` / `delete_coding_attempt` 必须经 engine 释放 active lock（P5）**：handler 不得直接修改 attempt 状态后返回；必须构造 `CodingWorkspaceEngine` 并调用 `handle_abort` / `handle_delete_attempt`，在 dirty worktree 时保持锁，clean 时释放锁。
+- **`complete_attempt_after_final_rework` 复用 `handle_final_confirm` 的 completion gates（P6）**：抽取 `run_completion_gates` helper，要求 `handle_final_confirm` 与 `complete_attempt_after_final_rework` 都先通过 diff-scope、required verification、handoff、shared worktree clean gate 后再进入 Completed 与锁释放。
+- **P3 校验器调用签名与 P2 对齐（P2 / P3）**：P3 调用 `WorkItemSplitValidator::validate` 时必须传入 `Some(&repository_profile)` 与 `&verification_plans`，与 P2 签名 `validate(plan, candidates, Option<&RepositoryProfile>, &[VerificationPlan])` 一致。
+- **P9 不做浏览器 E2E**：P9 仅保留后端 `it_web` 贯通测试与前端 Vitest 集成测试；浏览器 E2E 验收不在本计划内实现。
 
 ---
 
@@ -14,7 +31,7 @@
 
 - 单个详细 plan 必须能在一个实现 session 内完成；目标是实现者在读取 plan、读代码、写测试、写实现、验证和提交时仍保留充足上下文。
 - 单个详细 plan 的实现范围建议控制在 30k-50k tokens 等价上下文内；如果计划需要同时阅读大量旧实现、跨后端和前端、或需要 6 个以上核心源码文件协同改动，必须继续拆分。
-- 详细 plan 不允许同时承载后端实现、前端实现和贯通测试；前端、后端、贯通/E2E 必须拆成不同计划。
+- 详细 plan 不允许同时承载后端实现、前端实现和贯通测试；前端、后端、贯通测试必须拆成不同计划。
 - 后序详细 plan 必须包含“前置交付摘要”章节，明确依赖哪些已完成计划、需要读取哪些提交摘要、哪些接口已经稳定。
 - 非依赖计划只有在写入范围互斥时才可并行；只要会修改同一文件、同一 store、同一 handler 或同一 UI 状态模块，就必须建立顺序依赖。
 - 实现过程中如果发现当前 plan 实际超出单 session 范围，执行者必须停止扩大范围，先提交已完成的可验证子集，再产出下一份更小的计划。
@@ -38,7 +55,7 @@
 
 ## 拆分原则
 
-- 后端模型、后端生成流程、后端 Coding 门禁、前端 UI、贯通/E2E 分别成计划，不混写。
+- 后端模型、后端生成流程、后端 Coding 门禁、前端 UI、贯通测试分别成计划，不混写。
 - 每个计划都使用 TDD：先写失败测试，再写最小实现，再跑定向验证。
 - 每个计划都必须说明 OpenSpec、Superpowers、TDD 和验证命令要求。
 - 每个计划必须只修改自己声明的写入范围；若实现时发现需要越界修改，先更新拆分总览或新增计划，不在当前计划内临时扩大范围。
@@ -93,7 +110,7 @@
 
 **详细计划文档：**
 
-- `cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_P1_后端模型收敛与调度器迁移_v1.1.md`
+- `cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_P1_后端模型收敛与调度器迁移_v1.2.md`
 
 ## P2：后端 IssueWorkItemPlan 与 SplitValidator
 
@@ -127,7 +144,7 @@
 
 **详细计划文档：**
 
-- `cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_P2_后端IssueWorkItemPlan与SplitValidator_v1.1.md`
+- `cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_P2_后端IssueWorkItemPlan与SplitValidator_v1.2.md`
 
 ## P3：后端 generate_work_items 多 Work Item 与 artifact 关联
 
@@ -167,7 +184,7 @@
 
 **详细计划文档：**
 
-- `cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_P3_后端多WorkItem生成与Artifact关联_v1.1.md`
+- `cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_P3_后端多WorkItem生成与Artifact关联_v1.2.md`
 
 ## P4：后端 Issue 共享 worktree 数据与 Git 安全前缀
 
@@ -201,7 +218,7 @@
 
 **详细计划文档：**
 
-- `cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_P4_后端Issue共享Worktree与Git安全前缀_v1.1.md`
+- `cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_P4_后端Issue共享Worktree与Git安全前缀_v1.2.md`
 
 ## P5：后端 Coding 启动门禁与共享 worktree 复用
 
@@ -241,7 +258,7 @@
 
 **详细计划文档：**
 
-- `cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_P5_后端Coding启动门禁与共享Worktree复用_v1.1.md`
+- `cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_P5_后端Coding启动门禁与共享Worktree复用_v1.2.md`
 
 ## P6：后端 WorkItemExecutionPlan 与 Handoff Provider Run
 
@@ -287,7 +304,7 @@
 
 **详细计划文档：**
 
-- `cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_P6_后端ExecutionPlan与HandoffProviderRun_v1.1.md`
+- `cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_P6_后端ExecutionPlan与HandoffProviderRun_v1.2.md`
 
 ## P7：前端 Work Item 生成选项与 DAG 展示
 
@@ -328,7 +345,7 @@
 
 **详细计划文档：**
 
-- `cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_P7_前端WorkItem生成选项与DAG展示_v1.1.md`
+- `cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_P7_前端WorkItem生成选项与DAG展示_v1.2.md`
 
 ## P8：前端 Coding Prepare 执行计划展示
 
@@ -366,9 +383,9 @@
 
 **详细计划文档：**
 
-- `cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_P8_前端CodingPrepare执行计划展示_v1.1.md`
+- `cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_P8_前端CodingPrepare执行计划展示_v1.2.md`
 
-## P9：贯通测试与可选 E2E Work Item 验收
+## P9：贯通测试与 WorkItem 验收
 
 **目标：** 验证后端 Work Item、前端 Work Item、可选 Integration/E2E Work Item 的端到端关系：provider 输出 RepositoryProfile/VerificationPlan，IssueWorkItemPlan 组级确认后 Work Item 才可编码，后端 handoff 被前端消费，Integration/E2E 等待前后端完成，dirty shared worktree 被 clean gate 阻断，用户跳过时记录风险但不阻塞。
 
@@ -382,27 +399,26 @@
 - `tests/it_web/web_work_item_split_flow.rs`
 - `web/src/components/lifecycle/IssueLifecycleWorkbench.test.tsx`
 - `web/src/pages/CodingWorkspacePage.test.tsx`
-- `web/e2e/work-item-split-flow.spec.ts`
-- `web/e2e/helpers/coding.ts` 或 `web/e2e/helpers/workspace.ts`
 
 **不做：**
 
 - 不改生产后端代码，除非测试暴露真实缺陷；若需要改生产代码，先新增修复计划。
 - 不改生产前端代码，除非测试暴露真实缺陷；若需要改生产代码，先新增修复计划。
+- 不新增 Playwright 浏览器 E2E spec 或 helper；浏览器 E2E 由用户自行测试。
 
 **验证：**
 
 - `cargo test --locked --test it_web work_item_split_flow`
+- `cargo test --locked --test it_web dirty_shared_worktree_blocks_next_work_item_until_manual_gate_resolved`
 - `pnpm -C web test -- --run IssueLifecycleWorkbench`
 - `pnpm -C web test -- --run CodingWorkspacePage`
-- `pnpm -C web test:e2e -- work-item-split-flow.spec.ts`
 - `cargo fmt --check`
 - `cargo clippy --all-targets --all-features --locked -- -D warnings`
 - `cargo check --locked`
 
 **详细计划文档：**
 
-- `cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_P9_贯通测试与可选E2EWorkItem验收_v1.1.md`
+- `cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_P9_贯通测试与WorkItem验收_v1.2.md`
 
 ## 推荐执行顺序
 
@@ -413,7 +429,7 @@
 5. 执行 P5，让 Coding 启动真正受 Work Item DAG、共享 worktree 和 active lock 约束。
 6. 执行 P6，加入 execution plan 与 handoff。
 7. 执行 P7 和 P8；二者都改 `web/src/api/types.ts`，因此不能并行修改同一分支，建议先 P7 后 P8。
-8. 最后执行 P9；P9 只做贯通/E2E 验收，发现生产缺陷时新建修复计划。
+8. 最后执行 P9；P9 只做贯通测试验收，发现生产缺陷时新建修复计划。
 
 ## 验收标准
 
@@ -432,4 +448,4 @@
 - 后序 Work Item 可以消费前序 handoff summary，不需要完整历史上下文。
 - `WorkItemExecutionPlan` 默认展示但不阻塞；开启确认门禁时才阻塞。
 - Work Item 状态、拆分计划、执行计划和 handoff 都只存 Aria 内部数据，不写入目标项目代码库。
-- 后端、前端和贯通/E2E 各自有独立计划与验证结果。
+- 后端、前端和贯通测试各自有独立计划与验证结果。

@@ -1,8 +1,10 @@
 # WorkItem 拆分 P5 后端 Coding 启动门禁与共享 Worktree 复用 Implementation Plan
 
-> **文档版本：** v1.1
+> **文档版本：** v1.2
 >
 > **v1.1 修订摘要：** 修复 active lock 在异常终态/attempt 被取代时不释放导致的死锁（新增任务 3 的异常终态释放步骤，并将原先引用的不存在方法 `handle_attempt_failure` 修正为需新增的 `handle_attempt_failed`）；修正最终验证过滤名为本计划实际新增测试函数名；补充新增 test helper 的显式步骤；点名 branch 改为 `aria/issues/{issue_id}` 后需同步更新基于 `aria-work-items/{work_item}/attempt-{n}` 的既有断言测试；明确严格依赖 P1/P3/P4 已合并并要求字段名与上游逐字对齐（注意 `exclusive_write_scopes` 与现有 `WorkItemRecord.allowed_write_scope` 命名漂移）。
+>
+> **v1.2 修订摘要（架构评审修复）：** 1) `abort_coding_attempt` / `delete_coding_attempt` 必须经 `CodingWorkspaceEngine` 释放 active lock；2) `create_coding_attempt` 禁止 supersede 已有 active attempt，改为直接拒绝；3) `execute_worktree_prepare` 依赖 P4 的幂等 `create_branch`/`create_worktree`；4) `max_auto_rework_exceeded` 保持 `Blocked` 可恢复状态，但在进入 Blocked 后统一执行 clean-gate helper，clean 时释放锁、dirty 时保持锁并创建人工 gate。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -193,11 +195,163 @@ base_branch: current_git_branch(&repository.path).unwrap_or_else(|| "HEAD".to_st
 
 Attempt branch must be `aria/issues/{issue_id}`.
 
+> **v1.2 明确规则：** 不允许 supersede 已有 active attempt。如果同一 work item 已存在 active attempt，直接拒绝创建新 attempt。同一 Issue 的 active lock 机制已经阻止另一个 work item 在已有 active 时创建新 attempt；本规则针对的是“同一 work item 内部”的重复创建。返回错误码 `coding_attempt_already_active`（或复用现有 `ApiError::Conflict` 格式）。
+
 - [ ] **步骤 5：运行 gate tests 并确认通过**
 
 Run the two commands from Step 3 again.
 
 预期：两条测试都通过。
+
+## 任务 1B：修复 abort/delete coding attempt 以释放 active lock
+
+> **v1.2 新增任务：** 当前 `handlers::abort_coding_attempt` 与 `handlers::delete_coding_attempt` 直接修改 `CodingAttemptStore`，不经过 `CodingWorkspaceEngine`，导致 Issue 共享 worktree 的 active lock 泄漏。本任务要求两个 handler 都必须经 engine 走统一的 clean-gate + 锁释放路径。
+
+**文件：**
+
+- Modify: `src/web/handlers.rs`
+- Modify: `src/product/coding_workspace_engine.rs`
+- Modify: `tests/it_web/web_coding_attempt_api.rs`
+
+- [ ] **步骤 1：修改 `handlers::abort_coding_attempt`**
+
+在 `src/web/handlers.rs` 的 `abort_coding_attempt` 中：
+
+1. 先通过 `coding_store.get_attempt(attempt_id)` 加载 attempt 及对应 Work Item。
+2. 构造 `CodingWorkspaceEngine`（复用与 `create_coding_attempt` / 最终确认相同的构造方式）。
+3. 调用 `engine.handle_abort(project_id, issue_id, attempt_id).await`，由 engine 统一设置 attempt 状态为 `Aborted`、执行 shared worktree clean gate、释放 active lock。
+4. 最后返回 abort 后的 attempt DTO。
+
+> 不得直接调用 `coding_store.update_attempt_status(..., Aborted)` 后返回。
+
+- [ ] **步骤 2：新增 engine helper `handle_delete_attempt`**
+
+在 `src/product/coding_workspace_engine.rs` 新增：
+
+```rust
+pub async fn handle_delete_attempt(
+    &self,
+    project_id: &str,
+    issue_id: &str,
+    attempt_id: &str,
+) -> Result<(), CodingWorkspaceError>
+```
+
+逻辑：
+
+1. 加载 attempt 及 Work Item。
+2. 若该 Work Item 当前持有 Issue shared worktree active lock：
+   - 将 attempt 状态置为 `Aborted`（或保持原状态，但后续清理路径按 Aborted 处理）。
+   - 调用 `ensure_issue_shared_worktree_clean(...)`。
+   - clean 时调用 `release_issue_worktree_lock(...)` 释放 active lock。
+   - dirty 时返回 `shared_worktree_dirty_manual_gate`，不删除 attempt 记录。
+3. 若未持锁，直接允许删除。
+
+- [ ] **步骤 3：修改 `handlers::delete_coding_attempt`**
+
+在 `src/web/handlers.rs` 的 `delete_coding_attempt` 中：
+
+1. 加载 attempt 及对应 Work Item。
+2. 若该 Work Item 是当前 Issue shared worktree 的 active holder，必须先调用 `engine.handle_delete_attempt(...).await`。
+3. `handle_delete_attempt` 成功（clean 并释放锁）后，再执行文件系统/记录删除。
+4. 删除顺序：**engine 释放锁必须先于文件系统删除**，避免删除后仍残留 active lock 记录。
+
+- [ ] **步骤 4：新增 lock 释放测试**
+
+在 `tests/it_web/web_coding_attempt_api.rs` 追加：
+
+```rust
+#[tokio::test]
+async fn abort_coding_attempt_releases_issue_shared_worktree_lock() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    bootstrap_two_ready_confirmed_work_items(app.clone(), repo.path()).await;
+
+    let (status, first) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001/coding-attempts",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _body) = request_json(
+        app.clone(),
+        Method::POST,
+        &format!("/api/coding-attempts/{}/abort", first["attempt_id"].as_str().unwrap()),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // 锁释放后，第二个 work item 应能创建 attempt。
+    let (status, second) = request_json(
+        app,
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0002/coding-attempts",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(second["work_item_id"], "work_item_0002");
+}
+
+#[tokio::test]
+async fn delete_coding_attempt_releases_active_lock_when_clean() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    bootstrap_two_ready_confirmed_work_items(app.clone(), repo.path()).await;
+
+    let (status, first) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001/coding-attempts",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let attempt_id = first["attempt_id"].as_str().unwrap();
+
+    let (status, _body) = request_json(
+        app.clone(),
+        Method::DELETE,
+        &format!("/api/coding-attempts/{}", attempt_id),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // 锁释放后，第二个 work item 应能创建 attempt。
+    let (status, second) = request_json(
+        app,
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0002/coding-attempts",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+```
+
+- [ ] **步骤 5：运行新增测试并确认通过**
+
+运行:
+
+```bash
+cargo test --locked --test it_web abort_coding_attempt_releases_issue_shared_worktree_lock
+cargo test --locked --test it_web delete_coding_attempt_releases_active_lock_when_clean
+```
+
+预期：通过；若失败，检查 handler 是否确实调用了 engine 的 clean-gate 与锁释放路径。
 
 ## 任务 2：Reuse Issue Shared Worktree During Worktree Prepare
 
@@ -271,6 +425,8 @@ fn worktree_path_for_attempt(repo_path: &Path, attempt: &CodingExecutionAttempt)
 ```
 
 不要 remove old behavior; it preserves compatibility for stored attempts。
+
+> **v1.2 幂等依赖：** `execute_worktree_prepare` 只需按上述规则计算 Issue shared worktree path，然后直接调用 `git_workspace_service::create_branch` 与 `create_worktree`。P4 已为这两个方法实现幂等语义：branch 已存在或 worktree 已注册同一 branch 时返回 `Ok(())`。因此本步骤不需要额外实现「检查并复用」逻辑。
 
 > **⚠️ 既有断言测试影响（v1.1 新增）：** 当前 `worktree_path_for_attempt`（`src/product/coding_workspace_engine.rs:5045`）及既有测试断言基于 `aria-work-items/{work_item}/attempt-{n}` 路径。本任务保留旧分支逻辑，但当 Coding attempt 改用 `aria/issues/{issue_id}` branch 后，凡断言 attempt worktree 落在 `aria-work-items/.../attempt-{n}` 的既有测试将不再适用于 Issue branch 场景。实施时需：
 >
@@ -446,16 +602,17 @@ async fn failed_attempt_releases_issue_shared_worktree_lock() {
    - 调用 `self.handle_attempt_failed(project_id, issue_id, attempt_id).await?` 后返回错误。
 
 2. **`max_auto_rework_exceeded` 路径（约 line 4880）**
-   - 当前将 attempt 置为 `Blocked` 并创建 blocked gate。
-   - 改为置为 `CodingAttemptStatus::Failed`。
-   - 调用 `handle_attempt_failed`。
+   - 保持 `Blocked`（可恢复人工 gate），保留用户继续/提供上下文的选项。
+   - 但在进入 `Blocked` 后调用统一 clean-gate helper：clean 时释放 active lock；dirty 时保持锁并创建 `shared_worktree_dirty_manual_gate`。
 
 3. **其他 provider stream 失败且无法 retry 的路径**
    - 搜索所有 `update_attempt_status(..., CodingAttemptStatus::Blocked)` 的调用点。
    - 若该路径不是人工 gate（无 retry/continue 选项），改为 `Failed` 并调用 `handle_attempt_failed`。
 
 4. **新 attempt 取代旧 attempt**
-   - 在 `create_coding_attempt`（`src/web/handlers.rs`）中，若已存在 active attempt，需要先调用 `engine.handle_attempt_failed(project_id, issue_id, &old_attempt.id).await`（或等价释放锁逻辑），再为新 attempt 获取 active lock。
+   - 在 `create_coding_attempt`（`src/web/handlers.rs`）中，若同一 work item 已存在 active attempt，直接拒绝（见任务 1 步骤 4）。
+   - 不允许“先失败旧 attempt 再创建新 attempt”的 supersede 逻辑；旧 attempt 必须由用户显式 abort/delete 或由其自身终态路径释放锁后，新 attempt 才能创建。
+   - 同 Issue 不同 work item 之间的 active lock 竞争仍由 `try_acquire_issue_worktree_lock` 处理。
 
 5. **Blocked 路径也需要 clean-gate 释放**
    - 对于保持 `Blocked` 的可恢复路径（如 testing 失败但可 retry），在进入 `Blocked` 后调用统一 clean-gate helper。
@@ -464,8 +621,9 @@ async fn failed_attempt_releases_issue_shared_worktree_lock() {
 
 6. **`complete_attempt_after_final_rework()`（`coding_workspace_engine.rs:4762`）**
    - 该函数内部直接置 `Completed` 并调用 `mark_work_item_completed_if_present`，**不经过 `handle_final_confirm`**。
-   - 必须在该函数内先执行 diff/verification/handoff 前置门禁（P6 接管更完整门禁）和 shared worktree clean gate；clean 后才补充 `mark_issue_worktree_completed_item` 调用，确保锁释放。
+   - 必须在该函数内先执行 shared worktree clean gate；clean 后才补充 `mark_issue_worktree_completed_item` 调用，确保锁释放。
    - dirty 时返回 `shared_worktree_dirty_manual_gate`，不得置 Completed，不得释放锁。
+   - diff/verification/handoff 完整 completion gate 由 P6 抽取为 `run_completion_gates` helper 后接入；本步骤只负责 shared worktree clean gate 与锁释放。
 
 - [ ] **步骤 6：dirty shared worktree blocks lock release**
 
