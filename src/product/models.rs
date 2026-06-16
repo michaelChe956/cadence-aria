@@ -88,6 +88,16 @@ pub enum WorkItemStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum IssueSharedWorktreeStatus {
+    NotCreated,
+    Ready,
+    Running,
+    Blocked,
+    Completed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct ProjectRecord {
     pub id: String,
     pub name: String,
@@ -393,6 +403,23 @@ pub enum IssueWorkItemPlanStatus {
     Draft,
     Confirmed,
     ChangeRequested,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct IssueSharedWorktree {
+    pub id: String,
+    pub project_id: String,
+    pub issue_id: String,
+    pub repository_id: String,
+    pub branch_name: String,
+    pub worktree_path: PathBuf,
+    pub base_branch: String,
+    pub status: IssueSharedWorktreeStatus,
+    pub current_active_work_item_id: Option<String>,
+    pub last_completed_work_item_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

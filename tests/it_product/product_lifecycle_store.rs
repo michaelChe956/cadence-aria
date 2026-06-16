@@ -5,11 +5,12 @@ use cadence_aria::product::json_store::ProductStoreError;
 use cadence_aria::product::lifecycle_store::{
     AppendSpecVersionInput, CreateDesignSpecInput, CreateProjectProviderDefaultsInput,
     CreateStorySpecInput, CreateWorkItemInput, CreateWorkspaceSessionInput, LifecycleStore,
+    UpsertIssueSharedWorktreeInput,
 };
 use cadence_aria::product::models::{
-    AgentRole, DesignKind, LifecycleConfirmationStatus, NodeDetail, ProviderConversationRef,
-    ProviderConversationRole, ProviderName, ProviderSnapshot, WorkItemStatus,
-    WorkspaceSessionStatus, WorkspaceType,
+    AgentRole, DesignKind, IssueSharedWorktreeStatus, LifecycleConfirmationStatus, NodeDetail,
+    ProviderConversationRef, ProviderConversationRole, ProviderName, ProviderSnapshot,
+    WorkItemStatus, WorkspaceSessionStatus, WorkspaceType,
 };
 use cadence_aria::web::workspace_ws_types::{
     ArtifactVersion, ProviderConfigSnapshot, TimelineNode, TimelineNodeStatus, TimelineNodeType,
@@ -622,4 +623,96 @@ fn workspace_session_lookup_ignores_unrelated_json_files() {
         .expect("second session");
 
     assert_eq!(second.id, "workspace_session_0002");
+}
+
+#[test]
+fn persists_issue_shared_worktree_and_active_lock() {
+    let root = tempdir().expect("tempdir");
+    let store = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")));
+
+    let shared = store
+        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: PathBuf::from("/tmp/repo/.worktrees/aria-issues/issue_0001"),
+            base_branch: "main".to_string(),
+        })
+        .expect("shared worktree");
+
+    assert_eq!(shared.status, IssueSharedWorktreeStatus::Ready);
+    assert_eq!(shared.current_active_work_item_id, None);
+
+    let locked = store
+        .try_acquire_issue_worktree_lock("project_0001", "issue_0001", "work_item_0001")
+        .expect("lock");
+    assert_eq!(
+        locked.current_active_work_item_id.as_deref(),
+        Some("work_item_0001")
+    );
+
+    let reloaded = store
+        .get_issue_shared_worktree("project_0001", "issue_0001")
+        .expect("reload")
+        .expect("shared worktree exists");
+    assert_eq!(
+        reloaded.current_active_work_item_id.as_deref(),
+        Some("work_item_0001")
+    );
+
+    let released = store
+        .release_issue_worktree_lock("project_0001", "issue_0001", "work_item_0001")
+        .expect("release");
+    assert_eq!(released.current_active_work_item_id, None);
+}
+
+#[test]
+fn rejects_lock_when_another_work_item_is_active() {
+    let root = tempdir().expect("tempdir");
+    let store = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    store
+        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: PathBuf::from("/tmp/repo/.worktrees/aria-issues/issue_0001"),
+            base_branch: "main".to_string(),
+        })
+        .expect("shared worktree");
+    store
+        .try_acquire_issue_worktree_lock("project_0001", "issue_0001", "work_item_0001")
+        .expect("first lock");
+
+    let error = store
+        .try_acquire_issue_worktree_lock("project_0001", "issue_0001", "work_item_0002")
+        .expect_err("second lock should fail");
+
+    assert!(format!("{error}").contains("issue_worktree_active"));
+}
+
+#[test]
+fn marks_issue_shared_worktree_last_completed_work_item() {
+    let root = tempdir().expect("tempdir");
+    let store = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    store
+        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: PathBuf::from("/tmp/repo/.worktrees/aria-issues/issue_0001"),
+            base_branch: "main".to_string(),
+        })
+        .expect("shared worktree");
+
+    let updated = store
+        .mark_issue_worktree_completed_item("project_0001", "issue_0001", "work_item_0001")
+        .expect("mark completed");
+
+    assert_eq!(
+        updated.last_completed_work_item_id.as_deref(),
+        Some("work_item_0001")
+    );
 }
