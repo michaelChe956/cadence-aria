@@ -14,10 +14,12 @@ use cadence_aria::product::coding_models::{
     CodingProviderRole, CodingRoleProviderConfigSnapshot, CodingRoleRunEventType,
     CodingRoleRunStatus, CodingRoleRunTrigger, CodingTimelineNode, CodingTimelineNodeStatus,
     PushStatus, RemoteKind, ReviewRequest, ReviewRequestKind, ReviewVerdict, TestingOverallStatus,
+    WorkItemExecutionPlan,
 };
 use cadence_aria::product::lifecycle_store::{
     CreateWorkItemInput, CreateWorkspaceSessionInput, LifecycleStore,
 };
+use cadence_aria::product::models::WorkItemExecutionPlanStatus;
 use cadence_aria::product::models::WorkItemStatus;
 use cadence_aria::product::models::{
     ProviderName, WorkItemPlanStatus, WorkspaceSessionStatus, WorkspaceType,
@@ -2399,6 +2401,54 @@ fn app_with_attempt(root_path: &std::path::Path) -> axum::Router {
     ))
 }
 
+fn app_with_attempt_requiring_execution_plan_confirm(root_path: &std::path::Path) -> axum::Router {
+    let app = app_with_attempt(root_path);
+    let app_paths = ProductAppPaths::new(root_path.join(".aria"));
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    let mut work_item = lifecycle
+        .list_work_items("project_0001", "issue_0001")
+        .expect("list work items")
+        .into_iter()
+        .find(|item| item.id == "work_item_0001")
+        .expect("work item");
+    work_item.require_execution_plan_confirm = true;
+    let path = app_paths
+        .issue_lifecycle_root("project_0001", "issue_0001")
+        .join("work-items/work_item_0001.json");
+    serde_json::to_writer_pretty(std::fs::File::create(path).expect("open"), &work_item)
+        .expect("write work item");
+
+    let store = CodingAttemptStore::new(app_paths);
+    let attempt = store
+        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("attempt");
+    store
+        .save_work_item_execution_plan(&WorkItemExecutionPlan {
+            id: "work_item_execution_plan_0001".to_string(),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            work_item_id: "work_item_0001".to_string(),
+            attempt_id: attempt.id.clone(),
+            status: WorkItemExecutionPlanStatus::Draft,
+            goal: work_item.title.clone(),
+            allowed_write_scopes: Vec::new(),
+            forbidden_write_scopes: Vec::new(),
+            dependency_handoffs: Vec::new(),
+            story_refs: Vec::new(),
+            design_refs: Vec::new(),
+            openspec_refs: Vec::new(),
+            superpowers_contract: String::new(),
+            tdd_contract: String::new(),
+            verification_plan_ref: None,
+            verification_summary: None,
+            risk_notes: Vec::new(),
+            created_at: attempt.created_at.clone(),
+            updated_at: attempt.updated_at.clone(),
+        })
+        .expect("save plan");
+    app
+}
+
 fn app_with_confirmed_work_item_context(root_path: &std::path::Path) -> axum::Router {
     let app_paths = ProductAppPaths::new(root_path.join(".aria"));
     let repo = root_path.join("repo");
@@ -4426,6 +4476,44 @@ async fn coding_ws_retry_internal_review_resumes_internal_reviewer_run() {
         .expect("internal reviews");
     assert_eq!(reviews.len(), 1);
     assert_eq!(reviews[0].role_run_id.as_deref(), Some(runs[1].id.as_str()));
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+#[tokio::test]
+async fn coding_ws_blocks_coder_stage_when_execution_plan_requires_confirmation() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let app = app_with_attempt_requiring_execution_plan_confirm(root.path());
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(&mut ws, &CodingWsInMessage::StartCoding).await;
+
+    let mut code = None;
+    for _ in 0..20 {
+        let result = timeout(Duration::from_secs(5), recv_json(&mut ws)).await;
+        match result {
+            Ok(CodingWsOutMessage::CodingProtocolError { code: c, .. }) => {
+                code = Some(c);
+                break;
+            }
+            Ok(_) => continue,
+            Err(_) => panic!("timed out waiting for execution plan error"),
+        }
+    }
+    assert_eq!(
+        code,
+        Some("work_item_execution_plan_not_confirmed".to_string())
+    );
 
     ws.close(None).await.expect("close ws");
     server.abort();

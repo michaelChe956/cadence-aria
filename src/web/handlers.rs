@@ -22,7 +22,7 @@ use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
 use crate::product::coding_models::{
     CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage, CodingTimelineNode,
-    CodingTimelineNodeStatus, PushStatus,
+    CodingTimelineNodeStatus, PushStatus, WorkItemDependencyHandoffRef, WorkItemExecutionPlan,
 };
 use crate::product::coding_workspace_engine::{CodingWorkspaceEngine, CodingWorkspaceEngineError};
 use crate::product::gate_store::GateStore;
@@ -75,11 +75,11 @@ use crate::web::types::{
     IssueRollbackPreviewRequest, IssueRollbackRequest, LifecycleWorkItemDto,
     ProductIssueArtifactDto, ProductIssueDto, ProductIssueListResponse, ProjectDto,
     ProjectListResponse, ProviderInputContentResponse, RepositoryDto, RepositoryListResponse,
-    ResolveGateRequest, ResolveGateResponse, RollbackPreviewRequest, RollbackPreviewResponse,
-    RollbackRequest, RollbackResponse, StopTaskResponse, StorySpecDto, TaskListResponse, WebEvent,
-    WorkItemContextBudgetDto, WorkspaceDto, WorkspaceListResponse, WorkspaceMessageDto,
-    WorkspaceSessionConfirmRequest, WorkspaceSessionDto, WorkspaceSessionMessageRequest,
-    WorkspaceSessionRunNextRequest,
+    RequestExecutionPlanChangeRequest, ResolveGateRequest, ResolveGateResponse,
+    RollbackPreviewRequest, RollbackPreviewResponse, RollbackRequest, RollbackResponse,
+    StopTaskResponse, StorySpecDto, TaskListResponse, WebEvent, WorkItemContextBudgetDto,
+    WorkspaceDto, WorkspaceListResponse, WorkspaceMessageDto, WorkspaceSessionConfirmRequest,
+    WorkspaceSessionDto, WorkspaceSessionMessageRequest, WorkspaceSessionRunNextRequest,
 };
 use crate::web::workspace_context::ensure_workspace_context_message;
 use crate::web::workspace_registry::{CreateWorkspaceInput, WorkspaceRecord, WorkspaceRegistry};
@@ -1063,7 +1063,99 @@ pub async fn create_coding_attempt(
     }
     let attempt = attempt_result.map_err(product_store_api_error)?;
 
+    let _ = save_work_item_execution_plan_for_attempt(
+        &coding_store,
+        &lifecycle,
+        &attempt,
+        work_item,
+        &work_items,
+    );
+
     Ok(Json(coding_attempt_dto(&attempt)))
+}
+
+fn save_work_item_execution_plan_for_attempt(
+    coding_store: &CodingAttemptStore,
+    lifecycle: &LifecycleStore,
+    attempt: &CodingExecutionAttempt,
+    work_item: &LifecycleWorkItemRecord,
+    all_work_items: &[LifecycleWorkItemRecord],
+) -> Result<(), ApiError> {
+    let verification_summary = work_item
+        .verification_plan_ref
+        .as_ref()
+        .and_then(|plan_id| {
+            lifecycle
+                .get_verification_plan(&attempt.project_id, &attempt.issue_id, plan_id)
+                .ok()
+                .map(|plan| {
+                    let gates = plan.required_gates.join(", ");
+                    format!("provider supplied required gate {}", gates)
+                })
+        });
+
+    let dependency_handoffs: Vec<WorkItemDependencyHandoffRef> = work_item
+        .required_handoff_from
+        .iter()
+        .filter_map(|dep_id| {
+            all_work_items
+                .iter()
+                .find(|item| &item.id == dep_id)
+                .map(|dep| WorkItemDependencyHandoffRef {
+                    work_item_id: dep.id.clone(),
+                    summary_ref: dep.handoff_summary_ref.clone(),
+                    summary: dep
+                        .handoff_summary_ref
+                        .clone()
+                        .map(|r| format!("handoff summary available at {}", r)),
+                    commit_sha: dep.completion_commit.clone(),
+                })
+        })
+        .collect();
+
+    let plan = WorkItemExecutionPlan {
+        id: next_execution_plan_id(
+            coding_store,
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+        ),
+        project_id: attempt.project_id.clone(),
+        issue_id: attempt.issue_id.clone(),
+        work_item_id: attempt.work_item_id.clone(),
+        attempt_id: attempt.id.clone(),
+        status: WorkItemExecutionPlanStatus::Draft,
+        goal: work_item.title.clone(),
+        allowed_write_scopes: work_item.exclusive_write_scopes.clone(),
+        forbidden_write_scopes: work_item.forbidden_write_scopes.clone(),
+        dependency_handoffs,
+        story_refs: work_item.story_spec_ids.clone(),
+        design_refs: work_item.design_spec_ids.clone(),
+        openspec_refs: Vec::new(),
+        superpowers_contract: String::new(),
+        tdd_contract: String::new(),
+        verification_plan_ref: work_item.verification_plan_ref.clone(),
+        verification_summary,
+        risk_notes: Vec::new(),
+        created_at: attempt.created_at.clone(),
+        updated_at: attempt.updated_at.clone(),
+    };
+
+    coding_store
+        .save_work_item_execution_plan(&plan)
+        .map_err(product_store_api_error)
+}
+
+fn next_execution_plan_id(
+    _coding_store: &CodingAttemptStore,
+    project_id: &str,
+    issue_id: &str,
+    attempt_id: &str,
+) -> String {
+    format!(
+        "work_item_execution_plan_{}_{}_{}",
+        project_id, issue_id, attempt_id
+    )
 }
 
 fn work_item_by_id<'a>(
@@ -1151,6 +1243,12 @@ pub async fn get_coding_attempt(
         .list_open_choice_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .map_err(product_store_api_error)?;
     let active_node_id = active_coding_timeline_node_id(&timeline_nodes);
+    let work_item_execution_plan = coding_store
+        .get_work_item_execution_plan(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .map_err(product_store_api_error)?;
+    let work_item_handoff = coding_store
+        .get_work_item_handoff(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .map_err(product_store_api_error)?;
 
     Ok(Json(CodingAttemptSnapshotResponse {
         attempt: coding_attempt_dto(&attempt),
@@ -1164,6 +1262,8 @@ pub async fn get_coding_attempt(
         pending_gates: Vec::new(),
         pending_choices,
         latest_analyst_decision,
+        work_item_execution_plan,
+        work_item_handoff,
     }))
 }
 
@@ -1252,6 +1352,79 @@ pub async fn delete_coding_attempt(
         .delete_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .map_err(product_store_api_error)?;
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+pub async fn confirm_work_item_execution_plan(
+    State(state): State<WebAppState>,
+    Path(attempt_id): Path<String>,
+) -> ApiResult<Json<WorkItemExecutionPlan>> {
+    let app_paths = product_app_paths(&state);
+    let coding_store = CodingAttemptStore::new(app_paths.clone());
+    let lifecycle = LifecycleStore::new(app_paths);
+    let attempt = coding_store
+        .get_attempt_by_id(&attempt_id)
+        .map_err(product_store_api_error)?;
+
+    let plan = coding_store
+        .update_work_item_execution_plan_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            WorkItemExecutionPlanStatus::Confirmed,
+        )
+        .map_err(product_store_api_error)?;
+
+    let _ = lifecycle.update_work_item_execution_plan_status(
+        &attempt.project_id,
+        &attempt.issue_id,
+        &attempt.work_item_id,
+        WorkItemExecutionPlanStatus::Confirmed,
+    );
+
+    Ok(Json(plan))
+}
+
+pub async fn request_work_item_execution_plan_change(
+    State(state): State<WebAppState>,
+    Path(attempt_id): Path<String>,
+    Json(payload): Json<RequestExecutionPlanChangeRequest>,
+) -> ApiResult<Json<WorkItemExecutionPlan>> {
+    let app_paths = product_app_paths(&state);
+    let coding_store = CodingAttemptStore::new(app_paths.clone());
+    let lifecycle = LifecycleStore::new(app_paths);
+    let attempt = coding_store
+        .get_attempt_by_id(&attempt_id)
+        .map_err(product_store_api_error)?;
+
+    let mut plan = coding_store
+        .get_work_item_execution_plan(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .map_err(product_store_api_error)?
+        .ok_or_else(|| {
+            ApiError::runtime(
+                "work_item_execution_plan_not_found",
+                "execution plan not found",
+                json!({}),
+            )
+        })?;
+
+    plan.status = WorkItemExecutionPlanStatus::ChangeRequested;
+    if !payload.note.is_empty() {
+        plan.risk_notes.push(payload.note);
+    }
+    plan.updated_at = chrono::Utc::now().to_rfc3339();
+
+    coding_store
+        .save_work_item_execution_plan(&plan)
+        .map_err(product_store_api_error)?;
+
+    let _ = lifecycle.update_work_item_execution_plan_status(
+        &attempt.project_id,
+        &attempt.issue_id,
+        &attempt.work_item_id,
+        WorkItemExecutionPlanStatus::ChangeRequested,
+    );
+
+    Ok(Json(plan))
 }
 
 pub async fn coding_attempt_artifact_content(

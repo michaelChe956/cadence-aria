@@ -91,6 +91,8 @@ pub enum CodingWorkspaceEngineError {
     NoReviewableChanges(String),
     #[error("shared_worktree_dirty_manual_gate: {0}")]
     SharedWorktreeDirtyManualGate(String),
+    #[error("work_item_execution_plan_not_confirmed: {0}")]
+    ExecutionPlanNotConfirmed(String),
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

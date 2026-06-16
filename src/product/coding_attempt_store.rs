@@ -15,12 +15,13 @@ use crate::product::coding_models::{
     CodingRoleProviderConfigSnapshot, CodingRoleRun, CodingRoleRunEvent, CodingRoleRunEventType,
     CodingRoleRunStatus, CodingRoleRunTrigger, CodingStageGateState, CodingStageGateStatus,
     CodingTimelineNode, CodingTimelineNodeStatus, InternalPrReview, QualityGateBypassAudit,
-    ReviewRequest, TestPlan, TestingReport,
+    ReviewRequest, TestPlan, TestingReport, WorkItemExecutionPlan, WorkItemHandoff,
 };
 use crate::product::id::next_sequential_id;
 use crate::product::json_store::{
     ProductStoreError, read_json, validate_relative_artifact_ref, validate_relative_id, write_json,
 };
+use crate::product::models::WorkItemExecutionPlanStatus;
 use crate::product::models::{ProviderConversationRef, ProviderName};
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
@@ -207,6 +208,87 @@ impl CodingAttemptStore {
             });
         }
         read_json(&path)
+    }
+
+    pub fn save_work_item_execution_plan(
+        &self,
+        plan: &WorkItemExecutionPlan,
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(&plan.project_id)?;
+        validate_relative_id(&plan.issue_id)?;
+        validate_relative_id(&plan.attempt_id)?;
+        write_json(
+            &self.work_item_execution_plan_path(&plan.project_id, &plan.issue_id, &plan.attempt_id),
+            plan,
+        )
+    }
+
+    pub fn get_work_item_execution_plan(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> Result<Option<WorkItemExecutionPlan>, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(attempt_id)?;
+        let path = self.work_item_execution_plan_path(project_id, issue_id, attempt_id);
+        if !path_is_regular_file(&path)? {
+            return Ok(None);
+        }
+        read_json(&path).map(Some)
+    }
+
+    pub fn update_work_item_execution_plan_status(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        status: WorkItemExecutionPlanStatus,
+    ) -> Result<WorkItemExecutionPlan, ProductStoreError> {
+        let mut plan = self
+            .get_work_item_execution_plan(project_id, issue_id, attempt_id)?
+            .ok_or_else(|| ProductStoreError::NotFound {
+                kind: "work_item_execution_plan",
+                id: attempt_id.to_string(),
+            })?;
+        plan.status = status;
+        plan.updated_at = Utc::now().to_rfc3339();
+        self.save_work_item_execution_plan(&plan)?;
+        Ok(plan)
+    }
+
+    pub fn save_work_item_handoff(
+        &self,
+        handoff: &WorkItemHandoff,
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(&handoff.project_id)?;
+        validate_relative_id(&handoff.issue_id)?;
+        validate_relative_id(&handoff.attempt_id)?;
+        write_json(
+            &self.work_item_handoff_path(
+                &handoff.project_id,
+                &handoff.issue_id,
+                &handoff.attempt_id,
+            ),
+            handoff,
+        )
+    }
+
+    pub fn get_work_item_handoff(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> Result<Option<WorkItemHandoff>, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(attempt_id)?;
+        let path = self.work_item_handoff_path(project_id, issue_id, attempt_id);
+        if !path_is_regular_file(&path)? {
+            return Ok(None);
+        }
+        read_json(&path).map(Some)
     }
 
     pub fn get_attempt_by_id(
@@ -1691,6 +1773,26 @@ impl CodingAttemptStore {
     fn attempt_dir(&self, project_id: &str, issue_id: &str, attempt_id: &str) -> PathBuf {
         self.coding_attempts_root(project_id, issue_id)
             .join(attempt_id)
+    }
+
+    fn work_item_execution_plan_path(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> PathBuf {
+        self.attempt_dir(project_id, issue_id, attempt_id)
+            .join("work-item-execution-plan.json")
+    }
+
+    fn work_item_handoff_path(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> PathBuf {
+        self.attempt_dir(project_id, issue_id, attempt_id)
+            .join("work-item-handoff.json")
     }
 
     fn role_provider_config_path(

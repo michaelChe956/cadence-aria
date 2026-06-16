@@ -109,6 +109,14 @@ pub fn build_web_router(state: WebAppState) -> Router {
             post(handlers::abort_coding_attempt),
         )
         .route(
+            "/api/coding-attempts/{attempt_id}/execution-plan/confirm",
+            post(handlers::confirm_work_item_execution_plan),
+        )
+        .route(
+            "/api/coding-attempts/{attempt_id}/execution-plan/change-request",
+            post(handlers::request_work_item_execution_plan_change),
+        )
+        .route(
             "/api/coding-attempts/{attempt_id}/artifacts/{artifact_id}",
             get(handlers::coding_attempt_artifact_content),
         )

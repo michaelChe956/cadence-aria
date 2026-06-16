@@ -4,7 +4,8 @@ use std::path::PathBuf;
 
 use crate::product::coding_models::{
     AnalystDecisionRecord, CodeReviewReport, CodingChoiceGate, CodingGateRequired,
-    CodingTimelineNode, InternalPrReview, ReviewRequest, TestingReport,
+    CodingTimelineNode, InternalPrReview, ReviewRequest, TestingReport, WorkItemExecutionPlan,
+    WorkItemHandoff,
 };
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
@@ -495,6 +496,13 @@ pub struct CodingAttemptDto {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RequestExecutionPlanChangeRequest {
+    #[serde(default)]
+    pub note: String,
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct CodingAttemptSnapshotResponse {
@@ -509,6 +517,10 @@ pub struct CodingAttemptSnapshotResponse {
     pub pending_gates: Vec<CodingGateRequired>,
     pub pending_choices: Vec<CodingChoiceGate>,
     pub latest_analyst_decision: Option<AnalystDecisionRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_item_execution_plan: Option<WorkItemExecutionPlan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_item_handoff: Option<WorkItemHandoff>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

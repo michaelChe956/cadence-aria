@@ -22,7 +22,7 @@ use crate::product::coding_models::{
     CodingRoleRunEventPreview, CodingRoleRunEventSummary, CodingRoleRunEventType,
     CodingRoleRunSnapshot, CodingRoleRunStatus, CodingStageGateState, CodingStageGateStatus,
     CodingTimelineNode, CodingTimelineNodeStatus, InternalPrReview, PushStatus, ReviewRequest,
-    TestingOverallStatus, TestingReport,
+    TestingOverallStatus, TestingReport, WorkItemExecutionPlan, WorkItemHandoff,
 };
 use crate::product::coding_workspace_engine::{
     CodingExecutionContext, CodingWorkspaceEngine, CodingWorkspaceEngineError,
@@ -36,7 +36,8 @@ use crate::product::git_workspace_service::GitWorkspaceService;
 use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::models::{
-    ProviderName, WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType,
+    ProviderName, WorkItemExecutionPlanStatus, WorkspaceSessionRecord, WorkspaceSessionStatus,
+    WorkspaceType,
 };
 use crate::product::repository_store::RepositoryStore;
 use crate::product::test_executor::{
@@ -606,9 +607,15 @@ fn spawn_coding_runner(
             if matches!(error, CodingWorkspaceEngineError::Aborted) {
                 return;
             }
+            let code = match &error {
+                CodingWorkspaceEngineError::ExecutionPlanNotConfirmed(_) => {
+                    "work_item_execution_plan_not_confirmed".to_string()
+                }
+                _ => "coding_start_failed".to_string(),
+            };
             let _ = event_tx
                 .send(CodingWsOutMessage::CodingProtocolError {
-                    code: "coding_start_failed".to_string(),
+                    code,
                     message: error.to_string(),
                 })
                 .await;
@@ -638,6 +645,36 @@ fn should_resume_runner_after_gate_response(
     )
 }
 
+fn ensure_work_item_execution_plan_confirmed(
+    app_paths: &ProductAppPaths,
+    attempt: &CodingExecutionAttempt,
+) -> Result<(), CodingWorkspaceEngineError> {
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    let work_items = lifecycle.list_work_items(&attempt.project_id, &attempt.issue_id)?;
+    let Some(work_item) = work_items
+        .iter()
+        .find(|item| item.id == attempt.work_item_id)
+    else {
+        return Ok(());
+    };
+    if !work_item.require_execution_plan_confirm {
+        return Ok(());
+    }
+
+    let coding_store = CodingAttemptStore::new(app_paths.clone());
+    let plan = coding_store.get_work_item_execution_plan(
+        &attempt.project_id,
+        &attempt.issue_id,
+        &attempt.id,
+    )?;
+    match plan.map(|p| p.status) {
+        Some(WorkItemExecutionPlanStatus::Confirmed) => Ok(()),
+        _ => Err(CodingWorkspaceEngineError::ExecutionPlanNotConfirmed(
+            attempt.id.clone(),
+        )),
+    }
+}
+
 async fn execute_start_coding_flow(
     state: &WebAppState,
     coding_store: &CodingAttemptStore,
@@ -647,6 +684,8 @@ async fn execute_start_coding_flow(
     attempt: &CodingExecutionAttempt,
 ) -> Result<(), CodingWorkspaceEngineError> {
     let app_paths = ProductAppPaths::new(state.workspace_root.join(".aria"));
+    ensure_work_item_execution_plan_confirmed(&app_paths, attempt)?;
+
     let repo_path = repository_path_for_attempt(&app_paths, attempt)?;
     let execution_context = coding_execution_context(&app_paths, attempt)?;
 
@@ -1789,6 +1828,13 @@ fn build_coding_session_state(
     let chat_entries =
         coding_store.list_chat_entries(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
     let role_runs = coding_role_run_snapshots(coding_store, &attempt)?;
+    let work_item_execution_plan = coding_store.get_work_item_execution_plan(
+        &attempt.project_id,
+        &attempt.issue_id,
+        &attempt.id,
+    )?;
+    let work_item_handoff =
+        coding_store.get_work_item_handoff(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
 
     Ok(CodingWsOutMessage::CodingSessionState {
         attempt_id: attempt.id,
@@ -1816,6 +1862,8 @@ fn build_coding_session_state(
         role_runs: Box::new(role_runs),
         work_item_markdown: execution_context.work_item_markdown,
         verification_commands: Box::new(execution_context.verification_commands),
+        work_item_execution_plan: Box::new(work_item_execution_plan),
+        work_item_handoff: Box::new(work_item_handoff),
     })
 }
 
@@ -2000,6 +2048,8 @@ pub enum CodingWsOutMessage {
         role_runs: Box<Vec<CodingRoleRunSnapshot>>,
         work_item_markdown: Option<String>,
         verification_commands: Box<Vec<String>>,
+        work_item_execution_plan: Box<Option<WorkItemExecutionPlan>>,
+        work_item_handoff: Box<Option<WorkItemHandoff>>,
     },
     CodingStageChange {
         stage: CodingExecutionStage,

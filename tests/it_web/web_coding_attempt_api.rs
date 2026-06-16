@@ -1357,3 +1357,50 @@ fn sample_running_node(attempt_id: &str) -> CodingTimelineNode {
         artifact_refs: vec![],
     }
 }
+
+#[tokio::test]
+async fn coding_attempt_snapshot_includes_generated_work_item_execution_plan() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    bootstrap_confirmed_work_item(app.clone(), repo.path()).await;
+
+    let (_status, attempt) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001/coding-attempts",
+        json!({}),
+    )
+    .await;
+    assert_eq!(attempt["attempt_id"], "coding_attempt_0001");
+
+    let (status, snapshot) = request_json(
+        app,
+        Method::GET,
+        "/api/coding-attempts/coding_attempt_0001",
+        json!({}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        snapshot["work_item_execution_plan"]["work_item_id"],
+        "work_item_0001"
+    );
+    assert_eq!(snapshot["work_item_execution_plan"]["status"], "draft");
+    assert!(
+        snapshot["work_item_execution_plan"]["verification_plan_ref"]
+            .as_str()
+            .unwrap()
+            .starts_with("verification_plan_")
+    );
+    assert!(
+        snapshot["work_item_execution_plan"]["verification_summary"]
+            .as_str()
+            .unwrap()
+            .contains("provider supplied required gate")
+    );
+}

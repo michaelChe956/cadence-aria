@@ -1200,6 +1200,21 @@ impl LifecycleStore {
         Ok(record)
     }
 
+    pub fn update_work_item_execution_plan_status(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        work_item_id: &str,
+        execution_plan_status: WorkItemExecutionPlanStatus,
+    ) -> Result<LifecycleWorkItemRecord, ProductStoreError> {
+        let path = self.work_item_path(project_id, issue_id, work_item_id)?;
+        let mut record: LifecycleWorkItemRecord = read_json(&path)?;
+        record.execution_plan_status = execution_plan_status;
+        record.updated_at = Utc::now().to_rfc3339();
+        write_json(&path, &record)?;
+        Ok(record)
+    }
+
     pub fn update_work_item_worktree_path(
         &self,
         project_id: &str,
