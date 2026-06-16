@@ -1,6 +1,6 @@
-use crate::protocol::contracts::{AdapterOutput, TimeoutStatus};
+use crate::protocol::contracts::{AdapterOutput, AdapterRole, TimeoutStatus};
 use crate::protocol::provider_errors::ProviderErrorCode;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 pub const STRUCTURED_OUTPUT_START: &str = "<ARIA_STRUCTURED_OUTPUT>";
 pub const STRUCTURED_OUTPUT_END: &str = "</ARIA_STRUCTURED_OUTPUT>";
@@ -181,7 +181,18 @@ impl ProviderAdapter for FakeProviderAdapter {
         &self,
         input: &crate::protocol::contracts::AdapterInput,
     ) -> Result<AdapterOutput, ProviderAdapterError> {
-        let structured_output = parse_last_structured_output(&input.prompt)?;
+        let structured_output = match parse_last_structured_output(&input.prompt) {
+            Ok(output) => output,
+            Err(error) => {
+                if input.role == AdapterRole::WorkItemSplitter {
+                    None
+                } else {
+                    return Err(error);
+                }
+            }
+        };
+        let structured_output =
+            structured_output.or_else(|| default_structured_output_for_role(&input.role));
         Ok(AdapterOutput {
             exit_code: Some(0),
             stdout: input.prompt.clone(),
@@ -246,4 +257,58 @@ fn extract_json_candidate(text: &str) -> Option<&str> {
     };
     let end = text.rfind(close)?;
     (end >= start).then_some(&text[start..=end])
+}
+
+fn default_structured_output_for_role(role: &AdapterRole) -> Option<Value> {
+    if role != &AdapterRole::WorkItemSplitter {
+        return None;
+    }
+    Some(json!({
+        "repository_profile": {
+            "confidence": "high",
+            "detected_layers": ["backend"],
+            "split_recommendation": "single_work_item",
+            "languages": ["rust"],
+            "frameworks": [],
+            "package_managers": [],
+            "test_frameworks": [],
+            "build_systems": [],
+            "verification_capabilities": [],
+            "uncertainties": []
+        },
+        "work_items": [
+            {
+                "title": "Implement work item",
+                "kind": "backend",
+                "sequence_hint": 10,
+                "depends_on": [],
+                "exclusive_write_scopes": ["src/"],
+                "forbidden_write_scopes": [],
+                "required_handoff_from": [],
+                "require_execution_plan_confirm": false
+            }
+        ],
+        "verification_plans": [
+            {
+                "scope": "unit",
+                "commands": [
+                    {
+                        "id": "cmd_001",
+                        "label": "Run tests",
+                        "command": "cargo test",
+                        "cwd": "",
+                        "purpose": "Run unit tests",
+                        "required": true,
+                        "timeout_seconds": 300,
+                        "safety": "approved"
+                    }
+                ],
+                "manual_checks": [],
+                "required_gates": [],
+                "risk_notes": [],
+                "confidence": "high",
+                "fallback_policy": "manual_gate"
+            }
+        ]
+    }))
 }
