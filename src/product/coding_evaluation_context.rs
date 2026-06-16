@@ -645,6 +645,7 @@ mod tests {
                 story_spec_ids: vec![story.id.clone()],
                 design_spec_ids: vec![design.id.clone()],
                 title: "Work Item".to_string(),
+                ..Default::default()
             })
             .unwrap();
         let work_item_session = lifecycle
@@ -762,6 +763,7 @@ mod tests {
                 story_spec_ids: Vec::new(),
                 design_spec_ids: Vec::new(),
                 title: "Diff Work Item".to_string(),
+                ..Default::default()
             })
             .unwrap();
 
@@ -815,6 +817,7 @@ mod tests {
                 story_spec_ids: Vec::new(),
                 design_spec_ids: Vec::new(),
                 title: "Sensitive Work Item".to_string(),
+                ..Default::default()
             })
             .unwrap();
         let work_item_session = lifecycle

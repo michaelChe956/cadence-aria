@@ -2373,6 +2373,7 @@ fn app_with_attempt(root_path: &std::path::Path) -> axum::Router {
             story_spec_ids: Vec::new(),
             design_spec_ids: Vec::new(),
             title: "Coding work item".to_string(),
+            ..Default::default()
         })
         .expect("create work item");
     let store = CodingAttemptStore::new(app_paths);
@@ -2420,6 +2421,7 @@ fn app_with_confirmed_work_item_context(root_path: &std::path::Path) -> axum::Ro
             story_spec_ids: Vec::new(),
             design_spec_ids: Vec::new(),
             title: "实现爬楼梯问题".to_string(),
+            ..Default::default()
         })
         .expect("create work item");
     let session = lifecycle
@@ -2512,6 +2514,7 @@ fn app_with_full_chain_attempt_and_provider(
             story_spec_ids: Vec::new(),
             design_spec_ids: Vec::new(),
             title: "实现爬楼梯".to_string(),
+            ..Default::default()
         })
         .expect("create work item");
     lifecycle
@@ -2577,6 +2580,7 @@ fn app_with_internal_review_rework_attempt(root_path: &Path) -> axum::Router {
             story_spec_ids: Vec::new(),
             design_spec_ids: Vec::new(),
             title: "实现爬楼梯".to_string(),
+            ..Default::default()
         })
         .expect("create work item");
     lifecycle
@@ -2648,6 +2652,7 @@ fn app_with_code_review_rework_attempt(
             story_spec_ids: Vec::new(),
             design_spec_ids: Vec::new(),
             title: "实现爬楼梯".to_string(),
+            ..Default::default()
         })
         .expect("create work item");
     lifecycle
@@ -2707,6 +2712,7 @@ fn app_with_hanging_coding_attempt(root_path: &Path) -> axum::Router {
             story_spec_ids: Vec::new(),
             design_spec_ids: Vec::new(),
             title: "实现爬楼梯".to_string(),
+            ..Default::default()
         })
         .expect("create work item");
     lifecycle
@@ -2808,6 +2814,7 @@ fn app_with_final_confirm_attempt(root_path: &std::path::Path) -> axum::Router {
             story_spec_ids: Vec::new(),
             design_spec_ids: Vec::new(),
             title: "Coding work item".to_string(),
+            ..Default::default()
         })
         .expect("create work item");
     lifecycle
@@ -3985,6 +3992,7 @@ fn app_with_blocked_analyst_attempt(
             story_spec_ids: Vec::new(),
             design_spec_ids: Vec::new(),
             title: "实现爬楼梯".to_string(),
+            ..Default::default()
         })
         .expect("create work item");
     lifecycle

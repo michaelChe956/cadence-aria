@@ -488,6 +488,7 @@ fn create_coding_role_run_fixture(
             story_spec_ids: vec![story.id],
             design_spec_ids: Vec::new(),
             title: "Fixture Work Item".to_string(),
+            ..Default::default()
         })?;
     lifecycle.update_work_item_plan_status(
         &project.id,

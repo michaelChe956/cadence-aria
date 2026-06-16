@@ -69,6 +69,7 @@ fn creates_story_design_work_item_and_versions_with_source_links() {
             story_spec_ids: vec![story.id.clone()],
             design_spec_ids: vec![design.id.clone()],
             title: "实现会话过期提示".to_string(),
+            ..Default::default()
         })
         .expect("work item");
     assert_eq!(work_item.story_spec_ids, vec![story.id]);
@@ -88,6 +89,7 @@ fn updates_work_item_execution_status_and_worktree_path() {
             story_spec_ids: vec!["story_spec_0001".to_string()],
             design_spec_ids: vec!["design_spec_0001".to_string()],
             title: "实现爬楼梯".to_string(),
+            ..Default::default()
         })
         .expect("work item");
 

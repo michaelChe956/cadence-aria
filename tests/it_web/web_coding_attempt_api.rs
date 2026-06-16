@@ -706,6 +706,7 @@ async fn bootstrap_confirmed_work_item_without_workspace_session(
                 story_spec_ids: Vec::new(),
                 design_spec_ids: Vec::new(),
                 title: "实现爬楼梯".to_string(),
+                ..Default::default()
             },
         )
         .expect("create work item");

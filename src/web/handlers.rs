@@ -528,6 +528,7 @@ pub async fn generate_work_items(
             story_spec_ids: request.story_spec_ids,
             design_spec_ids: request.design_spec_ids,
             title: request.title,
+            ..Default::default()
         })
         .map_err(product_store_api_error)?;
     let session = lifecycle

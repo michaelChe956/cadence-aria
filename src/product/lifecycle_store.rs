@@ -35,7 +35,7 @@ pub struct CreateDesignSpecInput {
     pub title: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CreateWorkItemInput {
     pub project_id: String,
     pub issue_id: String,
@@ -43,6 +43,16 @@ pub struct CreateWorkItemInput {
     pub story_spec_ids: Vec<String>,
     pub design_spec_ids: Vec<String>,
     pub title: String,
+    pub work_item_set_id: Option<String>,
+    pub kind: WorkItemKind,
+    pub sequence_hint: Option<u32>,
+    pub depends_on: Vec<String>,
+    pub exclusive_write_scopes: Vec<String>,
+    pub forbidden_write_scopes: Vec<String>,
+    pub context_budget: WorkItemContextBudget,
+    pub required_handoff_from: Vec<String>,
+    pub verification_plan_ref: Option<String>,
+    pub require_execution_plan_confirm: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -273,16 +283,16 @@ impl LifecycleStore {
             plan_status: WorkItemPlanStatus::NotStarted,
             execution_status: WorkItemStatus::Pending,
             worktree_path: None,
-            work_item_set_id: None,
-            kind: WorkItemKind::Other,
-            sequence_hint: None,
-            depends_on: Vec::new(),
-            exclusive_write_scopes: Vec::new(),
-            forbidden_write_scopes: Vec::new(),
-            context_budget: WorkItemContextBudget::default(),
-            required_handoff_from: Vec::new(),
-            verification_plan_ref: None,
-            require_execution_plan_confirm: false,
+            work_item_set_id: input.work_item_set_id,
+            kind: input.kind,
+            sequence_hint: input.sequence_hint,
+            depends_on: input.depends_on,
+            exclusive_write_scopes: input.exclusive_write_scopes,
+            forbidden_write_scopes: input.forbidden_write_scopes,
+            context_budget: input.context_budget,
+            required_handoff_from: input.required_handoff_from,
+            verification_plan_ref: input.verification_plan_ref,
+            require_execution_plan_confirm: input.require_execution_plan_confirm,
             execution_plan_status: WorkItemExecutionPlanStatus::NotStarted,
             handoff_summary_ref: None,
             completion_commit: None,
@@ -1513,6 +1523,7 @@ mod tests {
                 story_spec_ids: vec!["story_spec_0001".to_string()],
                 design_spec_ids: vec!["design_spec_0001".to_string()],
                 title: "Implement prompt component".to_string(),
+                ..Default::default()
             })
             .unwrap();
         let session = create_session(&store, &work_item.id, WorkspaceType::WorkItem);

@@ -4817,6 +4817,7 @@ async fn handle_final_confirm_completes_waiting_attempt_and_timeline_node() {
             story_spec_ids: Vec::new(),
             design_spec_ids: Vec::new(),
             title: "Coding work item".to_string(),
+            ..Default::default()
         })
         .expect("create work item");
     lifecycle
@@ -5005,6 +5006,7 @@ fn seed_work_item_markdown(app_paths: &ProductAppPaths, markdown: &str) {
             story_spec_ids: Vec::new(),
             design_spec_ids: Vec::new(),
             title: "Coding work item".to_string(),
+            ..Default::default()
         })
         .expect("create work item");
     let session = lifecycle

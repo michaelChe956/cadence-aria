@@ -783,6 +783,7 @@ mod tests {
                 story_spec_ids: vec![story.id],
                 design_spec_ids: vec![design.id],
                 title: "实现爬楼梯问题".to_string(),
+                ..Default::default()
             })
             .expect("work item");
         let session = lifecycle
