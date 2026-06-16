@@ -89,7 +89,7 @@
 
 **详细计划文档：**
 
-- `cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_P1_后端模型收敛与调度器迁移_v1.0.md`
+- `cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_P1_后端模型收敛与调度器迁移_v1.1.md`
 
 ## P2：后端 IssueWorkItemPlan 与 SplitValidator
 
@@ -122,7 +122,7 @@
 
 **详细计划文档：**
 
-- `cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_P2_后端IssueWorkItemPlan与SplitValidator_v1.0.md`
+- `cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_P2_后端IssueWorkItemPlan与SplitValidator_v1.1.md`
 
 ## P3：后端 generate_work_items 多 Work Item 与 artifact 关联
 
@@ -159,7 +159,7 @@
 
 **详细计划文档：**
 
-- `cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_P3_后端多WorkItem生成与Artifact关联_v1.0.md`
+- `cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_P3_后端多WorkItem生成与Artifact关联_v1.1.md`
 
 ## P4：后端 Issue 共享 worktree 数据与 Git 安全前缀
 
@@ -186,14 +186,14 @@
 **验证：**
 
 - `cargo test --locked --test it_product git_workspace_service`
-- `cargo test --locked --test it_product issue_shared_worktree`
+- `cargo test --locked --test it_product issue`
 - `cargo fmt --check`
 - `cargo clippy --all-targets --all-features --locked -- -D warnings`
 - `cargo check --locked`
 
 **详细计划文档：**
 
-- `cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_P4_后端Issue共享Worktree与Git安全前缀_v1.0.md`
+- `cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_P4_后端Issue共享Worktree与Git安全前缀_v1.1.md`
 
 ## P5：后端 Coding 启动门禁与共享 worktree 复用
 
@@ -219,19 +219,23 @@
 
 **验证：**
 
-- `cargo test --locked --test it_web start_work_item_attempt`
-- `cargo test --locked --test it_product shared_worktree`
+- `cargo test --locked --test it_web rejects_coding_attempt_when_dependency_work_item_is_not_completed`
+- `cargo test --locked --test it_web rejects_second_active_work_item_on_same_issue_shared_worktree`
+- `cargo test --locked --test it_web rejects_coding_attempt_when_required_dependency_handoff_is_missing`
+- `cargo test --locked --test it_product worktree_prepare_uses_issue_shared_worktree_path_for_issue_branch`
+- `cargo test --locked --test it_product final_confirm_releases_issue_shared_worktree_lock`
+- `cargo test --locked --test it_product failed_attempt_releases_issue_shared_worktree_lock`
 - `cargo fmt --check`
 - `cargo clippy --all-targets --all-features --locked -- -D warnings`
 - `cargo check --locked`
 
 **详细计划文档：**
 
-- `cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_P5_后端Coding启动门禁与共享Worktree复用_v1.0.md`
+- `cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_P5_后端Coding启动门禁与共享Worktree复用_v1.1.md`
 
 ## P6：后端 WorkItemExecutionPlan 与 Handoff Provider Run
 
-**目标：** Coding 前生成内部 `WorkItemExecutionPlan`，默认展示但不阻塞；Work Item 完成后运行额外 provider handoff run，缺 handoff 不允许完成或解锁依赖项。
+**目标：** Coding 前生成内部 `WorkItemExecutionPlan`，默认展示但不阻塞；Work Item 完成前执行 diff scope 校验并运行额外 provider handoff run，越界 diff 或缺 handoff 都不允许完成或解锁依赖项。
 
 **依赖：** P1、P5。
 
@@ -242,6 +246,7 @@
 - `src/product/coding_models.rs`
 - `src/product/coding_attempt_store.rs`
 - `src/product/coding_workspace_engine.rs`
+- `src/cross_cutting/worktree.rs`（仅在需要暴露既有路径安全 helper 时修改）
 - `src/web/types.rs`
 - `src/web/handlers.rs`
 - `tests/it_product/product_coding_attempt_store.rs`
@@ -256,15 +261,20 @@
 
 **验证：**
 
-- `cargo test --locked --test it_product work_item_execution_plan`
-- `cargo test --locked --test it_product work_item_handoff`
+- `cargo test --locked --test it_product saves_and_loads_work_item_execution_plan`
+- `cargo test --locked --test it_product saves_and_loads_work_item_handoff`
+- `cargo test --locked --test it_product final_confirm_requires_work_item_handoff`
+- `cargo test --locked --test it_product final_confirm_rejects_diff_outside_work_item_write_scope`
+- `cargo test --locked --test it_product generates_handoff_from_review_and_test_summaries_before_final_confirm`
+- `cargo test --locked --test it_web coding_attempt_snapshot_includes_generated_work_item_execution_plan`
+- `cargo test --locked --test it_web coding_ws_blocks_coder_stage_when_execution_plan_requires_confirmation`
 - `cargo fmt --check`
 - `cargo clippy --all-targets --all-features --locked -- -D warnings`
 - `cargo check --locked`
 
 **详细计划文档：**
 
-- `cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_P6_后端ExecutionPlan与HandoffProviderRun_v1.0.md`
+- `cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_P6_后端ExecutionPlan与HandoffProviderRun_v1.1.md`
 
 ## P7：前端 Work Item 生成选项与 DAG 展示
 
@@ -305,7 +315,7 @@
 
 **详细计划文档：**
 
-- `cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_P7_前端WorkItem生成选项与DAG展示_v1.0.md`
+- `cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_P7_前端WorkItem生成选项与DAG展示_v1.1.md`
 
 ## P8：前端 Coding Prepare 执行计划展示
 
@@ -343,7 +353,7 @@
 
 **详细计划文档：**
 
-- `cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_P8_前端CodingPrepare执行计划展示_v1.0.md`
+- `cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_P8_前端CodingPrepare执行计划展示_v1.1.md`
 
 ## P9：贯通测试与可选 E2E Work Item 验收
 
@@ -379,7 +389,7 @@
 
 **详细计划文档：**
 
-- `cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_P9_贯通测试与可选E2EWorkItem验收_v1.0.md`
+- `cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_P9_贯通测试与可选E2EWorkItem验收_v1.1.md`
 
 ## 推荐执行顺序
 

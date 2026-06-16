@@ -34,7 +34,7 @@
 
 - 设计方案：`cadence/designs/2026-06-16_技术方案_WorkItem拆分与Coding计划门禁优化_v1.1.md`
 - 设计评审：`cadence/designs-reviews/2026-06-16_设计评审_WorkItem拆分与Coding计划门禁优化_v1.0.md`
-- 拆分总览：`cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_拆分总览_v1.0.md`
+- 拆分总览：`cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_拆分总览_v1.1.md`
 
 当前代码事实：
 

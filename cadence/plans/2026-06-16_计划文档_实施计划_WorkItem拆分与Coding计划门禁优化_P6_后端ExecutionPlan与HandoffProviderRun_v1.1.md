@@ -2,13 +2,13 @@
 
 > **文档版本：** v1.1
 >
-> **v1.1 修订摘要：** 预设拆分点（execution plan 任务 1-3 / handoff 任务 4-5 分两段提交）；修正最终验证过滤名为实际测试函数子串；纠正 `CodingWsOutMessage::CodingSessionState` 实际定义在 `src/web/coding_ws_handler.rs`（非 `workspace_ws_types.rs`）；补全 `completion_commit`/`handoff_summary_ref`/`execution_plan_status` 字段来源（P3/P4）并明确 `completion_commit` 取 `head_commit`；明确 handoff 校验必须在 P5 的状态更新/锁释放之前执行；补充 diff scope 校验应复用 `validate_write_path` 的说明（否则显式标注为后续遗漏项）。
+> **v1.1 修订摘要：** 预设拆分点（execution plan 任务 1-3 / handoff 与 diff scope 任务 4-5 分两段提交）；修正最终验证过滤名为实际测试函数子串；纠正 `CodingWsOutMessage::CodingSessionState` 实际定义在 `src/web/coding_ws_handler.rs`（非 `workspace_ws_types.rs`）；补全 `completion_commit`/`handoff_summary_ref`/`execution_plan_status` 字段来源（P3/P4）并明确 `completion_commit` 取 `head_commit`；明确 diff scope 与 handoff 校验必须在 P5 的状态更新/锁释放之前执行；将 diff scope completion gate 纳入任务 4，复用 `validate_write_path` 并增加越界阻断测试。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Coding 前生成内部 `WorkItemExecutionPlan`，默认展示但不阻塞；Work Item 完成前运行额外 provider handoff run，缺 handoff 不允许完成或解锁依赖项。
+**Goal:** Coding 前生成内部 `WorkItemExecutionPlan`，默认展示但不阻塞；Work Item 完成前执行 diff scope 校验并运行额外 provider handoff run，越界 diff 或缺 handoff 都不允许完成或解锁依赖项。
 
-**Architecture:** Execution plan 与 handoff 都存 Aria 内部数据。`WorkItemExecutionPlan` 作为 Coding prompt 的结构化来源，只有 `require_execution_plan_confirm=true` 时阻塞；`WorkItemHandoff` 在 review/final confirm 前由额外 provider run 或 fake provider 摘要生成，并成为 Work Item 完成门禁。
+**Architecture:** Execution plan 与 handoff 都存 Aria 内部数据。`WorkItemExecutionPlan` 作为 Coding prompt 的结构化来源，只有 `require_execution_plan_confirm=true` 时阻塞；diff scope gate 在 final confirm 临界路径内复用 `validate_write_path` 阻断越界改动；`WorkItemHandoff` 在 review/final confirm 前由额外 provider run 或 fake provider 摘要生成，并成为 Work Item 完成门禁。
 
 **Tech Stack:** Rust 1.95.0、CodingAttemptStore、CodingWorkspaceEngine、Provider adapter、Serde JSON、Cargo integration tests、TDD。
 
@@ -30,7 +30,7 @@
 
 ## 计划大小边界
 
-本计划只做后端 execution plan 与 handoff：
+本计划只做后端 execution plan、diff scope completion gate 与 handoff：
 
 - 不修改 Product Workbench Work Item DAG UI。
 - 不修改 Coding Prepare 前端展示。
@@ -39,10 +39,10 @@
 
 如果需要前端展示字段，后端只扩展 DTO/WS payload；UI 渲染留给 P8。
 
-> **拆分点预设（v1.1 新增）：** 本计划偏大（5 任务 / 8 文件 / 两个新模型 + 两条新路由 + 改动约 89KB 的 `coding_ws_handler.rs`）。为降低单次提交风险，**至少拆为两段提交**：
+> **拆分点预设（v1.1 新增）：** 本计划偏大（5 任务 / 多个后端文件 / 两个新模型 + 两条新路由 + 改动约 89KB 的 `coding_ws_handler.rs`）。为降低单次提交风险，**至少拆为两段提交**：
 >
 > - **段一「execution plan」（任务 1-3）**：`WorkItemExecutionPlan` 模型与 store、attempt 启动时生成、snapshot/WS 暴露、可配置 confirm 门禁。完成后独立提交并通过该段的最终验证。
-> - **段二「handoff」（任务 4-5）**：`WorkItemHandoff` 模型与 store、完成门禁、handoff 生成 helper。在段一合并基础上提交。
+> - **段二「handoff-diff-scope」（任务 4-5）**：`WorkItemHandoff` 模型与 store、diff scope completion gate、完成门禁、handoff 生成 helper。在段一合并基础上提交。
 >
 > 两段各自保持可编译、可测试、可独立 review。下方「提交」章节给出对应的两条提交命令。
 
@@ -54,8 +54,10 @@
   - 增加 execution plan 与 handoff 存取 API。
 - Modify: `src/product/coding_workspace_engine.rs`
   - Prepare/Coding prompt 注入 execution plan。
-  - final confirm 前检查 handoff。
+  - final confirm 前检查 diff scope 和 handoff。
   - 增加 handoff generation step/helper。
+- Modify: `src/cross_cutting/worktree.rs`
+  - 必要时将禁止运行时路径判断提升为 `pub(crate)` 以复用既有安全规则，不另写路径安全逻辑。
 - Modify: `src/web/types.rs`
   - `CodingAttemptSnapshotResponse` 包含 `work_item_execution_plan` 和 `work_item_handoff`。
 - Modify: `src/web/workspace_ws_types.rs`
@@ -344,6 +346,7 @@ cargo test --locked --test it_product execution_plan
 - Modify: `src/product/coding_models.rs`
 - Modify: `src/product/coding_attempt_store.rs`
 - Modify: `src/product/coding_workspace_engine.rs`
+- Modify: `src/cross_cutting/worktree.rs`
 - Modify: `tests/it_product/product_coding_attempt_store.rs`
 - Modify: `tests/it_product/product_coding_workspace_engine.rs`
 
@@ -433,16 +436,74 @@ Before setting attempt/work item completed in `handle_final_confirm()`, require 
 
 > **🔴 执行顺序约束（v1.1 新增）：** P5 已让 `handle_final_confirm()` 承担「置 Completed + 释放 active lock + 记录 last_completed」。本步骤插入的 handoff 校验**必须位于 P5 的状态更新与锁释放之前**：即进入函数后先校验 handoff 是否存在，缺失则提前 `return Err("work_item_handoff_missing")` 阻断，之后才执行 P5 的 Completed 落库与锁释放。否则会出现「Work Item 已置 Completed、锁已释放，但 handoff 缺失」的不一致状态，且锁释放后同 Issue 下一个 Work Item 可能已抢占，无法回滚。实现时确保校验、状态更新、锁释放三者在同一临界路径内按此顺序串行。
 
-- [ ] **步骤 6：运行 handoff tests 并确认通过**
+- [ ] **步骤 6：编写失败态 diff scope gate test（v1.1 阻塞修复）**
+
+Append to `tests/it_product/product_coding_workspace_engine.rs`:
+
+```rust
+#[tokio::test]
+async fn final_confirm_rejects_diff_outside_work_item_write_scope() {
+    let root = tempdir().expect("root");
+    let (store, attempt) =
+        final_confirm_attempt_with_changed_files(root.path(), "work_item_0001", vec!["web/src/App.tsx"]);
+    store
+        .save_work_item_handoff(&handoff_for_attempt(&attempt))
+        .expect("save handoff");
+    store
+        .set_work_item_write_scopes(
+            "project_0001",
+            "issue_0001",
+            "work_item_0001",
+            vec!["src/product/**".to_string()],
+            vec!["web/**".to_string()],
+        )
+        .expect("write scopes");
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
+
+    let error = engine
+        .handle_final_confirm("project_0001", "issue_0001", &attempt.id)
+        .await
+        .expect_err("out-of-scope diff blocks completion");
+
+    assert!(format!("{error}").contains("work_item_diff_scope_violation"));
+}
+```
+
+预期：测试先失败，因为 `handle_final_confirm()` 尚未在完成前校验改动文件范围。
+
+- [ ] **步骤 7：实现 diff scope completion gate（v1.1 阻塞修复）**
+
+在 `handle_final_confirm()` 中，顺序必须是：
+
+1. 读取当前 attempt 对应的 `LifecycleWorkItemRecord`。
+2. 读取 attempt 的 changed files / diff files 清单；若当前代码只持久化 diff summary，需要在本步骤补一个内部 helper，从 review request、testing report 或 Git status 结果中得到相对路径列表，测试 helper 可直接提供该列表。
+3. 对每个相对路径调用 `crate::cross_cutting::worktree::validate_write_path(worktree_root, &work_item.exclusive_write_scopes, path, true)`。
+4. 若路径匹配任一 `work_item.forbidden_write_scopes`，返回 `work_item_diff_scope_violation`。
+5. 任一路径不在允许范围或命中禁止范围时，必须在 handoff 校验、Completed 落库、active lock 释放之前提前返回错误。
+6. 只有 diff scope 校验通过后，才继续执行步骤 5 的 handoff 校验和 P5 的完成/解锁逻辑。
+
+若需要在 `cross_cutting/worktree.rs` 中复用禁止运行时路径判断，可将私有 `is_forbidden_runtime_path` 提升为 `pub(crate)`；不要另写一套路径安全规则。
+
+运行:
+
+```bash
+cargo test --locked --test it_product final_confirm_rejects_diff_outside_work_item_write_scope
+```
+
+预期：测试通过，越界改动不会标记 Work Item completed，也不会释放同 Issue active lock。
+
+- [ ] **步骤 8：运行 handoff and diff scope tests 并确认通过**
 
 运行:
 
 ```bash
 cargo test --locked --test it_product saves_and_loads_work_item_handoff
 cargo test --locked --test it_product final_confirm_requires_work_item_handoff
+cargo test --locked --test it_product final_confirm_rejects_diff_outside_work_item_write_scope
 ```
 
-预期：两条测试都通过。
+预期：三条测试都通过。
 
 ## 任务 5：Generate Handoff From Provider Or Fake Summary
 
@@ -506,6 +567,7 @@ cargo test --locked --test it_product generates_handoff_from_review_and_test_sum
 cargo test --locked --test it_product saves_and_loads_work_item_execution_plan
 cargo test --locked --test it_product saves_and_loads_work_item_handoff
 cargo test --locked --test it_product final_confirm_requires_work_item_handoff
+cargo test --locked --test it_product final_confirm_rejects_diff_outside_work_item_write_scope
 cargo test --locked --test it_product generates_handoff_from_review_and_test_summaries_before_final_confirm
 cargo test --locked --test it_web coding_attempt_snapshot_includes_generated_work_item_execution_plan
 cargo test --locked --test it_web coding_ws_blocks_coder_stage_when_execution_plan_requires_confirmation
@@ -518,21 +580,12 @@ cargo check --locked
 
 - Execution plan tests pass.
 - Handoff tests pass.
+- Diff scope completion gate test passes.
 - Formatting, clippy and check pass.
 
-## Diff Scope 校验说明（v1.1 新增）
+## Diff Scope 校验说明（v1.1 修复）
 
-> 设计要求 Coder 结束后对改动文件做 diff scope 校验，复用 `src/cross_cutting/worktree.rs` 的工具函数：
->
-> - `validate_write_path`（`:270`，`pub`，可直接调用）。
-> - `is_forbidden_runtime_path`（`:417`，私有 `fn`；若需在本模块外单独使用，需先改为 `pub`）。
->
-> 当前 P5/P6 正文均未给出 diff scope 校验的可执行步骤。处理方式二选一：
->
-> - **若设计要求在本阶段落地**：在 handoff 生成（任务 5）或完成门禁（任务 4）前新增一步——收集 attempt 的改动文件清单，逐个调用 `validate_write_path`（结合 Work Item 的 `exclusive_write_scopes` / `forbidden_write_scopes`），命中禁止路径则阻断完成。
-> - **若暂不在本阶段落地**：在此**显式标注为已知遗漏项**，并指明由后续计划承接，避免被默认实现已覆盖。
->
-> 本 v1.1 暂将其标注为**已知遗漏 / 待后续计划承接**，除非 reviewer 决定在本阶段补步骤。
+本计划在任务 4 步骤 6-8 中落地 diff scope completion gate。实现必须复用 `src/cross_cutting/worktree.rs` 的 `validate_write_path`，并在 handoff 校验、Completed 落库、active lock 释放之前阻断越界改动。该门禁已在本计划内处理。
 
 ## 提交
 
