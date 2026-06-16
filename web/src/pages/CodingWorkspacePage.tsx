@@ -1385,10 +1385,20 @@ function PrepareExecutionPlanPanel({
           <InfoRow label="禁止写入" value={plan.forbidden_write_scopes.join(", ")} />
         ) : null}
         {plan.dependency_handoffs.length > 0 ? (
-          <InfoRow
-            label="依赖交接"
-            value={plan.dependency_handoffs.map((handoff) => handoff.work_item_id).join(", ")}
-          />
+          <div className="grid gap-1">
+            <dt className="text-[var(--aria-ink-muted)]">依赖交接</dt>
+            {plan.dependency_handoffs.map((handoff) => (
+              <dd key={handoff.work_item_id} className="min-w-0 break-words font-mono">
+                <span>{handoff.work_item_id}</span>
+                {handoff.summary ? (
+                  <span className="ml-2 text-[var(--aria-ink)]">{handoff.summary}</span>
+                ) : null}
+                {handoff.commit_sha ? (
+                  <span className="ml-2 text-[var(--aria-ink-muted)]">{handoff.commit_sha}</span>
+                ) : null}
+              </dd>
+            ))}
+          </div>
         ) : null}
         <InfoRow label="验证计划" value={plan.verification_plan_ref} />
         <InfoRow label="验证摘要" value={plan.verification_summary} />

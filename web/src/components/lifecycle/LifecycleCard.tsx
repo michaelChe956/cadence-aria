@@ -115,6 +115,14 @@ export function LifecycleCard({
                   {workItemStatusLabel.text}
                 </span>
               ) : null}
+              {card.kind === "work_item" &&
+              card.raw.validator_findings?.some(
+                (finding) => finding.code === "integration_or_e2e_skipped_risk",
+              ) ? (
+                <span className="rounded border border-rose-200 bg-rose-50 px-1.5 py-0.5 text-rose-700">
+                  跳过贯通测试
+                </span>
+              ) : null}
             </span>
           </span>
         </span>

@@ -122,7 +122,9 @@ export type WorkItemExecutionPlanStatus =
 
 export type WorkItemDependencyHandoffRef = {
   work_item_id: string;
-  handoff_summary_ref: string;
+  summary_ref: string | null;
+  summary: string | null;
+  commit_sha: string | null;
 };
 
 export type WorkItemHandoff = {
@@ -194,6 +196,7 @@ export type LifecycleWorkItem = {
   handoff_summary_ref: string | null;
   completion_commit: string | null;
   completion_diff_summary_ref: string | null;
+  validator_findings?: WorkItemSplitFinding[];
 };
 
 export type CodingAttemptStatus =
@@ -852,6 +855,7 @@ export type VerificationPlan = {
 export type WorkItemSplitFinding = {
   finding_id: string;
   level: string;
+  code?: string;
   message: string;
   affected_scopes: string[];
 };

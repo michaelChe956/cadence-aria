@@ -386,6 +386,29 @@ describe("CodingWorkspacePage", () => {
     expect(api.startCoding).toHaveBeenCalled();
   });
 
+  it("shows dependency handoff summary in execution plan", () => {
+    mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      ...readyCodingState(),
+      stage: "prepare_context",
+      workItemExecutionPlan: executionPlan({
+        dependency_handoffs: [
+          {
+            work_item_id: "work_item_0001",
+            summary_ref: "handoffs/work_item_0001.json",
+            summary: "后端 API 已完成",
+            commit_sha: "abc123",
+          },
+        ],
+      }),
+    });
+
+    render(<CodingWorkspacePage attemptId="coding_attempt_0002" onBack={vi.fn()} />);
+
+    expect(screen.getByText("后端 API 已完成")).toBeInTheDocument();
+    expect(screen.getByText("abc123")).toBeInTheDocument();
+  });
+
   it("deletes the coding workspace after confirmation and navigates back", async () => {
     mockCodingWs();
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);

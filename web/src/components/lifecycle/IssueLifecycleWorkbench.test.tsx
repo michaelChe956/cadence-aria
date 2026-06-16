@@ -843,6 +843,20 @@ describe("IssueLifecycleWorkbench", () => {
     });
     expect(workItemColumn).toHaveTextContent("可编码");
   });
+
+  it("shows generated split work items and skipped integration risk", async () => {
+    vi.stubGlobal(
+      "fetch",
+      lifecycleFetch({ splitWorkItems: true, skippedIntegrationRisk: true }),
+    );
+
+    render(<IssueLifecycleWorkbench />);
+
+    expect(await screen.findByText("后端 API")).toBeInTheDocument();
+    expect(screen.getByText("前端 UI")).toBeInTheDocument();
+    expect(screen.getByText(/等待依赖完成/)).toBeInTheDocument();
+    expect(screen.getByText(/跳过贯通测试/)).toBeInTheDocument();
+  });
 });
 
 describe("CreateLifecycleIssueDialog", () => {
@@ -885,6 +899,8 @@ function lifecycleFetch(options?: {
   projects?: Array<ReturnType<typeof projectRecord>>;
   repositoriesByProject?: Record<string, ReturnType<typeof repositoryRecord>[]>;
   projectResponses?: Array<Promise<Response>>;
+  splitWorkItems?: boolean;
+  skippedIntegrationRisk?: boolean;
 }) {
   const projects = [
     ...(options?.projects ?? [projectRecord("project_0001", "Aria")]),
@@ -913,6 +929,8 @@ function lifecycleFetch(options?: {
       options?.duplicateCardIds,
       options?.emptyLifecycle,
       options?.confirmedWorkItem,
+      options?.splitWorkItems,
+      options?.skippedIntegrationRisk,
     );
     lifecycleByIssue.set(issueId, initial);
     return initial;
@@ -1582,6 +1600,8 @@ function initialLifecycleData(
   duplicate: boolean | undefined,
   empty: boolean | undefined,
   confirmedWorkItem: boolean | undefined,
+  splitWorkItems: boolean | undefined,
+  skippedIntegrationRisk: boolean | undefined,
 ): MockLifecycleData {
   if (empty) {
     return {
@@ -1594,6 +1614,57 @@ function initialLifecycleData(
   }
 
   const storyId = duplicate ? "shared_id" : "story_spec_0001";
+  const workItems = splitWorkItems
+    ? [
+        workItemRecord({
+          work_item_id: "work_item_backend",
+          issue_id: issueId,
+          title: "后端 API",
+          kind: "backend",
+          plan_status: "confirmed",
+          execution_status: "pending",
+          depends_on: [],
+          validator_findings: skippedIntegrationRisk
+            ? [
+                {
+                  finding_id: "finding_0001",
+                  level: "warning",
+                  code: "integration_or_e2e_skipped_risk",
+                  message: "integration or e2e work item was skipped",
+                  affected_scopes: [],
+                },
+              ]
+            : undefined,
+        }),
+        workItemRecord({
+          work_item_id: "work_item_frontend",
+          issue_id: issueId,
+          title: "前端 UI",
+          kind: "frontend",
+          plan_status: "confirmed",
+          execution_status: "pending",
+          depends_on: ["work_item_backend"],
+        }),
+      ]
+    : [
+        workItemRecord({
+          issue_id: issueId,
+          plan_status: confirmedWorkItem ? "confirmed" : "draft",
+          artifact_versions: [
+            {
+              version: 1,
+              markdown: "## 实施计划\n\n[TASK-001] 实现会话过期提示组件。",
+              generated_by: "claude_code",
+              reviewed_by: "codex",
+              review_verdict: "pass",
+              confirmed_by: confirmedWorkItem ? "human" : null,
+              created_at: "2026-05-20T00:02:00Z",
+              source_node_id: "timeline_node_work_item_001",
+            },
+          ],
+        }),
+      ];
+
   return {
     story_specs: [
       {
@@ -1620,24 +1691,7 @@ function initialLifecycleData(
         artifact_versions: [],
       },
     ],
-    work_items: [
-      workItemRecord({
-        issue_id: issueId,
-        plan_status: confirmedWorkItem ? "confirmed" : "draft",
-        artifact_versions: [
-          {
-            version: 1,
-            markdown: "## 实施计划\n\n[TASK-001] 实现会话过期提示组件。",
-            generated_by: "claude_code",
-            reviewed_by: "codex",
-            review_verdict: "pass",
-            confirmed_by: confirmedWorkItem ? "human" : null,
-            created_at: "2026-05-20T00:02:00Z",
-            source_node_id: "timeline_node_work_item_001",
-          },
-        ],
-      }),
-    ],
+    work_items: workItems,
     workspace_sessions: [
       workspaceSessionRecord("story", storyId, "workspace_session_story_0001"),
       workspaceSessionRecord(
