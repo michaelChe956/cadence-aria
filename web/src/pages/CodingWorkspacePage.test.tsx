@@ -1,15 +1,22 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { deleteCodingAttempt, getCodingAttemptDiff } from "../api/client";
+import {
+  confirmWorkItemExecutionPlan,
+  deleteCodingAttempt,
+  getCodingAttemptDiff,
+  requestWorkItemExecutionPlanChange,
+} from "../api/client";
 import { useCodingWorkspaceWs } from "../hooks/useCodingWorkspaceWs";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
 import type { WorkItemExecutionPlan } from "../api/types";
 import { CodingWorkspacePage } from "./CodingWorkspacePage";
 
 vi.mock("../api/client", () => ({
+  confirmWorkItemExecutionPlan: vi.fn(),
   deleteCodingAttempt: vi.fn(),
   getCodingAttemptDiff: vi.fn(),
+  requestWorkItemExecutionPlanChange: vi.fn(),
 }));
 
 vi.mock("../hooks/useCodingWorkspaceWs", () => ({
