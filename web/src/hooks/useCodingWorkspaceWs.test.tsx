@@ -1,6 +1,6 @@
 import { act, render } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { CodingGateRequired } from "../api/types";
+import type { CodingGateRequired, WorkItemExecutionPlan } from "../api/types";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
 import { useCodingWorkspaceWs } from "./useCodingWorkspaceWs";
 
@@ -105,6 +105,31 @@ function blockedGate(overrides: Partial<CodingGateRequired> = {}): CodingGateReq
       },
     ],
     ...overrides,
+  };
+}
+
+function executionPlan(): WorkItemExecutionPlan {
+  return {
+    id: "work_item_execution_plan_0001",
+    project_id: "project_0001",
+    issue_id: "issue_0001",
+    work_item_id: "work_item_0001",
+    attempt_id: "coding_attempt_0001",
+    status: "draft",
+    goal: "实现后端 API",
+    allowed_write_scopes: ["src/product/**"],
+    forbidden_write_scopes: ["web/**"],
+    dependency_handoffs: [],
+    story_refs: ["story_spec_0001"],
+    design_refs: ["design_spec_0001"],
+    openspec_refs: ["REQ-001"],
+    superpowers_contract: "use superpowers:test-driven-development",
+    tdd_contract: "先写失败测试，再写实现",
+    verification_plan_ref: "verification_plan_work_item_0001",
+    verification_summary: "provider supplied required gate verify_backend_unit",
+    risk_notes: [],
+    created_at: "2026-06-16T00:00:00Z",
+    updated_at: "2026-06-16T00:00:00Z",
   };
 }
 
@@ -981,5 +1006,20 @@ describe("useCodingWorkspaceWs", () => {
     ]);
     harness.unmount();
     vi.useRealTimers();
+  });
+
+  it("hydrates work item execution plan from coding session state", () => {
+    const harness = renderCodingHook();
+
+    act(() => {
+      harness.ws.receive({
+        type: "coding_session_state",
+        ...codingSessionState(),
+        work_item_execution_plan: executionPlan(),
+        work_item_handoff: null,
+      });
+    });
+
+    expect(useCodingWorkspaceStore.getState().workItemExecutionPlan?.status).toBe("draft");
   });
 });
