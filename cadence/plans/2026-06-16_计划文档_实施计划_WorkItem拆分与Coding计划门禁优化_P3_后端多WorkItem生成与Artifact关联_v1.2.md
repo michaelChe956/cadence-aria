@@ -452,7 +452,7 @@ cargo test --locked --test it_web generate_work_items_creates_backend_frontend_a
    - 读取 confirmed Design Spec 正文与 artifact refs。
    - 读取 OpenSpec 约束摘要（通过 `ProviderContextBuilder` 或现有 helper）。
    - 生成仓库结构摘要（顶层目录、关键文件列表）。
-   - 用户选项：`include_integration_tests`、`include_e2e_tests`、`force_frontend_backend_split`、`require_execution_plan_confirm`。
+   - 用户选项：`include_integration_tests`（默认 `true`）、`include_e2e_tests`（默认 `false`）、`force_frontend_backend_split`、`require_execution_plan_confirm`。
 
 2. **构造 `AdapterInput`**：
    - `provider_type`：使用当前项目配置的 author provider（复用 Coding Workspace 的 provider 选择逻辑）。

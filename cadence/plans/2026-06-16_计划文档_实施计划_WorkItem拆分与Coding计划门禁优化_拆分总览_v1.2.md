@@ -45,7 +45,7 @@
 - 关键约束：
   - Work Item 状态、拆分计划、执行计划和 handoff 都是 Aria 内部数据，不写入目标项目代码库。
   - 跨端 Issue 必须强制拆分后端 Work Item 与前端 Work Item。
-  - 用户可选择是否生成贯通测试或 E2E Work Item。
+  - 用户可选择是否生成贯通测试或 E2E Work Item；E2E Work Item 默认不生成。
   - 同一 Issue 的多个 Work Item 使用同一个共享 worktree branch。
   - Work Item 之间只对真实依赖排序；并行项必须写入范围互斥。
   - Coding 执行前必须具备单 session 可控的输入包；超限时继续拆分或摘要化。
@@ -436,7 +436,7 @@
 - Design Spec 生成 Work Item 时不再只能生成单个大 Work Item。
 - 跨端 Issue 中后端与前端 Work Item 被强制拆分。
 - 纯后端或纯前端 Issue 不会被误要求生成另一端 Work Item。
-- 用户可选择是否生成贯通测试或 E2E Work Item。
+- 用户可选择是否生成贯通测试或 E2E Work Item；E2E Work Item 默认不生成。
 - Work Item 之间有 DAG；只有真实依赖才排序。
 - 无依赖并行项的写入范围必须互斥，无法证明互斥时必须建立依赖或继续拆分。
 - 每个 Work Item 的执行上下文受 30k-50k 等价预算代理指标约束。
