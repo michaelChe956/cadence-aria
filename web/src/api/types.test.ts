@@ -7,8 +7,10 @@ import type {
   CodingAttemptSnapshotResponse,
   CodingWsInMessage,
   CodingWsOutMessage,
+  GenerateWorkItemsRequest,
   IssueLifecycleResponse,
   InternalPrReview,
+  LifecycleWorkItem,
   NodeDetail,
   TestingReport,
   TimelineNodeType,
@@ -407,5 +409,57 @@ describe("workspace websocket protocol types", () => {
 
     expect(report.run_no).toBe(1);
     expect(internal.role_run_id).toBe("coding_role_run_0002");
+  });
+});
+
+describe("work item split lifecycle types", () => {
+  it("describes split work item lifecycle metadata", () => {
+    const workItem = {
+      work_item_id: "work_item_0001",
+      issue_id: "issue_0001",
+      repository_id: "repository_0001",
+      story_spec_ids: ["story_spec_0001"],
+      design_spec_ids: ["design_spec_0001"],
+      title: "后端 API",
+      plan_status: "confirmed",
+      execution_status: "pending",
+      latest_attempt: null,
+      artifact_versions: [],
+      work_item_set_id: "work_item_set_0001",
+      kind: "backend",
+      sequence_hint: 10,
+      depends_on: [],
+      exclusive_write_scopes: ["src/product/**"],
+      forbidden_write_scopes: ["web/**"],
+      context_budget: {
+        target_context_k: "30-50",
+        max_summary_chars: 20000,
+        max_handoff_chars: 12000,
+        max_code_context_chars: 30000,
+        max_context_file_refs: 80,
+        max_traceability_refs: 40,
+        max_dependency_handoffs: 3,
+      },
+      required_handoff_from: [],
+      verification_plan_ref: "verification_plan_work_item_0001",
+      require_execution_plan_confirm: false,
+      execution_plan_status: "not_started",
+      handoff_summary_ref: null,
+      completion_commit: null,
+      completion_diff_summary_ref: null,
+    } satisfies LifecycleWorkItem;
+
+    const request = {
+      title: "登录会话拆分实现",
+      story_spec_ids: ["story_spec_0001"],
+      design_spec_ids: ["design_spec_0001"],
+      include_integration_tests: true,
+      include_e2e_tests: false,
+      force_frontend_backend_split: true,
+      require_execution_plan_confirm: false,
+    } satisfies GenerateWorkItemsRequest;
+
+    expect(workItem.kind).toBe("backend");
+    expect(request.include_integration_tests).toBe(true);
   });
 });

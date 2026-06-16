@@ -6,6 +6,7 @@ import type {
   LifecycleWorkItem,
   ProductIssue,
   StorySpec,
+  WorkItemKind,
 } from "../api/types";
 
 export type LifecycleCard =
@@ -177,6 +178,61 @@ export function lifecycleBlockedReason(
     !lifecycle.work_items.some((item) => item.plan_status === "confirmed")
   ) {
     return "需要先确认 Work Item Plan";
+  }
+
+  return null;
+}
+
+export function workItemKindLabel(kind: WorkItemKind): string {
+  switch (kind) {
+    case "backend":
+      return "后端";
+    case "frontend":
+      return "前端";
+    case "integration":
+      return "贯通";
+    case "e2e":
+      return "E2E";
+    case "docs":
+      return "文档";
+    case "infra":
+      return "基础设施";
+    case "other":
+      return "其他";
+  }
+}
+
+export function workItemWaitingReason(
+  item: LifecycleWorkItem,
+  allItems: LifecycleWorkItem[],
+): string | null {
+  const pendingDependencies = item.depends_on
+    .map((id) => allItems.find((candidate) => candidate.work_item_id === id))
+    .filter(
+      (dependency): dependency is LifecycleWorkItem =>
+        dependency !== undefined && dependency.execution_status !== "completed",
+    );
+  if (pendingDependencies.length > 0) {
+    const titles = pendingDependencies.map((dependency) => dependency.title).join("、");
+    return `等待依赖完成：${titles}`;
+  }
+
+  const missingHandoffs = item.required_handoff_from
+    .map((id) => allItems.find((candidate) => candidate.work_item_id === id))
+    .filter(
+      (dependency): dependency is LifecycleWorkItem =>
+        dependency !== undefined && dependency.handoff_summary_ref === null,
+    );
+  if (missingHandoffs.length > 0) {
+    const titles = missingHandoffs.map((dependency) => dependency.title).join("、");
+    return `等待交接摘要：${titles}`;
+  }
+
+  if (
+    item.latest_attempt &&
+    ["created", "running"].includes(item.latest_attempt.status)
+  ) {
+    return "正在编码";
   }
 
   return null;

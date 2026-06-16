@@ -105,6 +105,31 @@ export type DesignSpec = {
   artifact_versions: ArtifactVersion[];
 };
 
+export type WorkItemKind =
+  | "backend"
+  | "frontend"
+  | "integration"
+  | "e2e"
+  | "docs"
+  | "infra"
+  | "other";
+
+export type WorkItemExecutionPlanStatus =
+  | "not_started"
+  | "draft"
+  | "confirmed"
+  | "change_requested";
+
+export type WorkItemContextBudget = {
+  target_context_k: string;
+  max_summary_chars: number;
+  max_handoff_chars: number;
+  max_code_context_chars: number;
+  max_context_file_refs: number;
+  max_traceability_refs: number;
+  max_dependency_handoffs: number;
+};
+
 export type LifecycleWorkItem = {
   work_item_id: string;
   issue_id: string;
@@ -116,6 +141,20 @@ export type LifecycleWorkItem = {
   execution_status: "pending" | "planning" | "coding" | "completed" | "blocked";
   latest_attempt: CodingAttempt | null;
   artifact_versions: ArtifactVersion[];
+  work_item_set_id: string | null;
+  kind: WorkItemKind;
+  sequence_hint: number | null;
+  depends_on: string[];
+  exclusive_write_scopes: string[];
+  forbidden_write_scopes: string[];
+  context_budget: WorkItemContextBudget;
+  required_handoff_from: string[];
+  verification_plan_ref: string | null;
+  require_execution_plan_confirm: boolean;
+  execution_plan_status: WorkItemExecutionPlanStatus;
+  handoff_summary_ref: string | null;
+  completion_commit: string | null;
+  completion_diff_summary_ref: string | null;
 };
 
 export type CodingAttemptStatus =
@@ -746,15 +785,66 @@ export type GenerateDesignSpecsResponse = {
   workspace_session: WorkspaceSession;
 };
 
+export type RepositoryProfileConfidence = "low" | "medium" | "high";
+
+export type RepositoryProfile = {
+  profile_id: string;
+  repository_id: string;
+  confidence: RepositoryProfileConfidence;
+  detected_layers: string[];
+  split_recommendation: string;
+};
+
+export type VerificationPlan = {
+  plan_ref: string;
+  work_item_id: string;
+  title: string;
+  kind: string;
+  scope_summary: string;
+  required_checks: string[];
+};
+
+export type WorkItemSplitFinding = {
+  finding_id: string;
+  level: string;
+  message: string;
+  affected_scopes: string[];
+};
+
+export type WorkItemSplitOptions = {
+  include_integration_tests: boolean;
+  include_e2e_tests: boolean;
+  force_frontend_backend_split: boolean;
+  require_execution_plan_confirm: boolean;
+};
+
+export type IssueWorkItemPlan = {
+  plan_id: string;
+  issue_id: string;
+  status: string;
+  options: WorkItemSplitOptions;
+  created_at: string;
+  updated_at: string;
+};
+
 export type GenerateWorkItemsRequest = ProviderWorkspaceConfigInput & {
   title: string;
   story_spec_ids: string[];
   design_spec_ids: string[];
+  include_integration_tests?: boolean;
+  include_e2e_tests?: boolean;
+  force_frontend_backend_split?: boolean;
+  require_execution_plan_confirm?: boolean;
 };
 
 export type GenerateWorkItemsResponse = {
   work_items: LifecycleWorkItem[];
   workspace_session: WorkspaceSession;
+  workspace_sessions: WorkspaceSession[];
+  work_item_plan: IssueWorkItemPlan;
+  repository_profile: RepositoryProfile;
+  verification_plans: VerificationPlan[];
+  validator_findings: WorkItemSplitFinding[];
 };
 
 export type ProviderConfigSnapshot = {
