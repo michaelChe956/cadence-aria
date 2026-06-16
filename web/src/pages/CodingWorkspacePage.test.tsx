@@ -94,6 +94,10 @@ function mockCodingWs(overrides: Partial<CodingWsApi> = {}) {
   return api;
 }
 
+function mockCodingWsApi(overrides: Partial<CodingWsApi> = {}) {
+  return mockCodingWs(overrides);
+}
+
 function readyCodingState() {
   return {
     attemptId: "coding_attempt_0001",
@@ -1344,5 +1348,50 @@ describe("CodingWorkspacePage", () => {
 
     expect(screen.getByRole("button", { name: "确认执行计划" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "请求修改" })).toBeInTheDocument();
+  });
+
+  it("confirms execution plan and updates store", async () => {
+    const user = userEvent.setup();
+    const api = mockCodingWsApi();
+    vi.mocked(confirmWorkItemExecutionPlan).mockResolvedValue(
+      executionPlan({ status: "confirmed" }),
+    );
+    useCodingWorkspaceStore.setState({
+      ...readyCodingState(),
+      requireExecutionPlanConfirm: true,
+      workItemExecutionPlan: executionPlan({ status: "draft" }),
+    });
+
+    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+
+    await user.click(screen.getByRole("button", { name: "确认执行计划" }));
+
+    expect(confirmWorkItemExecutionPlan).toHaveBeenCalledWith("coding_attempt_0001");
+    expect(useCodingWorkspaceStore.getState().workItemExecutionPlan?.status).toBe("confirmed");
+  });
+
+  it("requests execution plan change and updates store", async () => {
+    const user = userEvent.setup();
+    const api = mockCodingWsApi();
+    vi.mocked(requestWorkItemExecutionPlanChange).mockResolvedValue(
+      executionPlan({ status: "change_requested" }),
+    );
+    useCodingWorkspaceStore.setState({
+      ...readyCodingState(),
+      requireExecutionPlanConfirm: true,
+      workItemExecutionPlan: executionPlan({ status: "draft" }),
+    });
+
+    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+
+    await user.type(screen.getByLabelText("修改说明"), "需要补充边界条件测试");
+    await user.click(screen.getByRole("button", { name: "请求修改" }));
+
+    expect(requestWorkItemExecutionPlanChange).toHaveBeenCalledWith("coding_attempt_0001", {
+      note: "需要补充边界条件测试",
+    });
+    expect(useCodingWorkspaceStore.getState().workItemExecutionPlan?.status).toBe(
+      "change_requested",
+    );
   });
 });

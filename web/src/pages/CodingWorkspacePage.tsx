@@ -92,7 +92,9 @@ export function CodingWorkspacePage({
   const [activePanel, setActivePanel] = useState<"chat" | "results">("chat");
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [planError, setPlanError] = useState<string | null>(null);
   const chatListRef = useRef<ChatEntryListHandle | null>(null);
+  const pageError = planError ?? deleteError;
 
   useUnloadGuard({
     enabled: store.status === "running",
@@ -207,6 +209,7 @@ export function CodingWorkspacePage({
                   attemptId={attemptId}
                   plan={store.workItemExecutionPlan}
                   requireConfirm={store.requireExecutionPlanConfirm}
+                  onError={setPlanError}
                 />
               ) : null}
               <CodingProviderConfigPanel
@@ -261,8 +264,8 @@ export function CodingWorkspacePage({
         className="flex h-8 shrink-0 items-center justify-between gap-3 border-t border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 text-xs text-[var(--aria-ink-muted)]"
       >
         <span>{store.stage ?? "prepare_context"}</span>
-        <span className={deleteError ? "text-[var(--aria-danger)]" : undefined}>
-          {deleteError ?? store.connectionStatus}
+        <span className={pageError ? "text-[var(--aria-danger)]" : undefined}>
+          {pageError ?? store.connectionStatus}
         </span>
         <span>rework {store.reworkCount}/{store.maxAutoRework}</span>
       </div>
@@ -1326,24 +1329,25 @@ function PrepareExecutionPlanPanel({
   attemptId,
   plan,
   requireConfirm,
+  onError,
 }: {
   attemptId: string;
   plan: WorkItemExecutionPlan;
   requireConfirm: boolean;
+  onError: (error: string | null) => void;
 }) {
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [changeNote, setChangeNote] = useState("");
   const showActions = requireConfirm && plan.status !== "confirmed";
 
   async function handleConfirm() {
     setBusy(true);
-    setError(null);
+    onError(null);
     try {
       const updated = await confirmWorkItemExecutionPlan(attemptId);
       useCodingWorkspaceStore.setState({ workItemExecutionPlan: updated });
     } catch (reason) {
-      setError(errorMessage(reason, "确认执行计划失败"));
+      onError(errorMessage(reason, "确认执行计划失败"));
     } finally {
       setBusy(false);
     }
@@ -1352,17 +1356,17 @@ function PrepareExecutionPlanPanel({
   async function handleRequestChange() {
     const note = changeNote.trim();
     if (!note) {
-      setError("请填写修改说明");
+      onError("请填写修改说明");
       return;
     }
     setBusy(true);
-    setError(null);
+    onError(null);
     try {
       const updated = await requestWorkItemExecutionPlanChange(attemptId, { note });
       useCodingWorkspaceStore.setState({ workItemExecutionPlan: updated });
       setChangeNote("");
     } catch (reason) {
-      setError(errorMessage(reason, "请求修改执行计划失败"));
+      onError(errorMessage(reason, "请求修改执行计划失败"));
     } finally {
       setBusy(false);
     }
@@ -1399,7 +1403,7 @@ function PrepareExecutionPlanPanel({
             value={changeNote}
             onChange={(event) => {
               setChangeNote(event.target.value);
-              setError(null);
+              onError(null);
             }}
             rows={2}
             placeholder="请求修改的原因或补充说明"
@@ -1424,9 +1428,6 @@ function PrepareExecutionPlanPanel({
               请求修改
             </button>
           </div>
-          {error ? (
-            <div className="text-xs font-semibold text-[var(--aria-danger)]">{error}</div>
-          ) : null}
         </div>
       ) : null}
     </div>
