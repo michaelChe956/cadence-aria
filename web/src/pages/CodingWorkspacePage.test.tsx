@@ -94,10 +94,6 @@ function mockCodingWs(overrides: Partial<CodingWsApi> = {}) {
   return api;
 }
 
-function mockCodingWsApi(overrides: Partial<CodingWsApi> = {}) {
-  return mockCodingWs(overrides);
-}
-
 function readyCodingState() {
   return {
     attemptId: "coding_attempt_0001",
@@ -1352,7 +1348,7 @@ describe("CodingWorkspacePage", () => {
 
   it("confirms execution plan and updates store", async () => {
     const user = userEvent.setup();
-    const api = mockCodingWsApi();
+    mockCodingWs();
     vi.mocked(confirmWorkItemExecutionPlan).mockResolvedValue(
       executionPlan({ status: "confirmed" }),
     );
@@ -1372,7 +1368,7 @@ describe("CodingWorkspacePage", () => {
 
   it("requests execution plan change and updates store", async () => {
     const user = userEvent.setup();
-    const api = mockCodingWsApi();
+    mockCodingWs();
     vi.mocked(requestWorkItemExecutionPlanChange).mockResolvedValue(
       executionPlan({ status: "change_requested" }),
     );
@@ -1393,5 +1389,59 @@ describe("CodingWorkspacePage", () => {
     expect(useCodingWorkspaceStore.getState().workItemExecutionPlan?.status).toBe(
       "change_requested",
     );
+  });
+
+  it("shows page error when confirming execution plan fails", async () => {
+    const user = userEvent.setup();
+    mockCodingWs();
+    vi.mocked(confirmWorkItemExecutionPlan).mockRejectedValue(new Error("confirm failed"));
+    useCodingWorkspaceStore.setState({
+      ...readyCodingState(),
+      requireExecutionPlanConfirm: true,
+      workItemExecutionPlan: executionPlan({ status: "draft" }),
+    });
+
+    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+
+    await user.click(screen.getByRole("button", { name: "确认执行计划" }));
+
+    expect(screen.getByText("confirm failed")).toBeInTheDocument();
+    expect(useCodingWorkspaceStore.getState().workItemExecutionPlan?.status).toBe("draft");
+  });
+
+  it("shows page error when requesting change with empty note", async () => {
+    const user = userEvent.setup();
+    mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      ...readyCodingState(),
+      requireExecutionPlanConfirm: true,
+      workItemExecutionPlan: executionPlan({ status: "draft" }),
+    });
+
+    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+
+    await user.click(screen.getByRole("button", { name: "请求修改" }));
+
+    expect(requestWorkItemExecutionPlanChange).not.toHaveBeenCalled();
+    expect(screen.getByText("请填写修改说明")).toBeInTheDocument();
+  });
+
+  it("shows page error when requesting execution plan change fails", async () => {
+    const user = userEvent.setup();
+    mockCodingWs();
+    vi.mocked(requestWorkItemExecutionPlanChange).mockRejectedValue(new Error("change failed"));
+    useCodingWorkspaceStore.setState({
+      ...readyCodingState(),
+      requireExecutionPlanConfirm: true,
+      workItemExecutionPlan: executionPlan({ status: "draft" }),
+    });
+
+    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+
+    await user.type(screen.getByLabelText("修改说明"), "说明");
+    await user.click(screen.getByRole("button", { name: "请求修改" }));
+
+    expect(screen.getByText("change failed")).toBeInTheDocument();
+    expect(useCodingWorkspaceStore.getState().workItemExecutionPlan?.status).toBe("draft");
   });
 });
