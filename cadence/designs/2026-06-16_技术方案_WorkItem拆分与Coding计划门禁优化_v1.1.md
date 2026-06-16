@@ -22,6 +22,8 @@
 - 明确 `WorkItemHandoff` 由额外 provider run 生成，独立预算，不占用下一个 Work Item 的执行包预算。
 - 将 30k-50k 上下文预算从不可测的 token 估算，改为可执行的代理指标：摘要字符数、refs 数、文件路径数、代码片段字符数与 handoff 数量。
 - 明确跨端 Issue 判定标准，避免纯后端或纯前端 Issue 被误拆。
+- 明确共享同一源码文件的后端计划必须严格串行：P3、P4、P5 都修改 `src/product/lifecycle_store.rs`，必须按 P3 → P4 → P5 顺序执行，不得并行；具体落地编排以拆分总览为准。
+- 明确每个实现计划的验证链必须包含项目强制 clippy 检查（`cargo clippy --all-targets --all-features --locked -- -D warnings`），不允许只跑 `fmt + check`。
 
 ## 背景
 
@@ -558,6 +560,27 @@ Work Item 进入 Coding Workspace 后，Prepare 阶段优先展示 `WorkItemExec
 7. P7：贯通测试/E2E Work Item 与端到端验收。
 
 每个计划都应控制在单个 Coding session 可完成的范围内，并使用 TDD 先写对应测试。
+
+> **说明：** 上述 P1-P7 为方案级粗粒度建议。实际可执行的细粒度拆分以 `cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_拆分总览_v1.0.md`（P1-P9）为准。
+
+### 计划间写入范围与串行约束
+
+多个后端计划共享同一批源码文件，必须按依赖顺序严格串行，禁止并行修改同一文件：
+
+- `src/product/lifecycle_store.rs` 被 Issue 共享 worktree、Coding 启动门禁与 generate_work_items 相关计划共同修改，因此这些计划必须严格串行，不得并行准备。
+- `src/web/handlers.rs`、`src/product/models.rs`、`src/product/coding_workspace_engine.rs` 同样存在跨计划共享，凡共享同一文件的计划一律按依赖顺序串行。
+- 只有写入范围可证明完全互斥的计划才允许并行。
+
+### 验证链强制要求
+
+每个实现计划的验证链必须包含项目强制检查命令（详见 `cadence/project-rules/build-test-commands.md`）：
+
+- `cargo fmt --check`
+- `cargo clippy --all-targets --all-features --locked -- -D warnings`
+- `cargo check --locked`
+- 该计划的定向测试
+
+不允许只跑 `fmt + check` 而省略 clippy，尤其在删除死代码或迁移模块后必须用 clippy 拦截新引入的 `unused import` 等告警。
 
 ## 验收标准
 

@@ -595,7 +595,19 @@ cargo check --locked
 
 Expected: pass.
 
-- [ ] **Step 4: Inspect git diff**
+- [ ] **Step 4: Run clippy with warnings denied**
+
+项目强制规则要求验证链包含 clippy（`cadence/project-rules/build-test-commands.md`）。删除死代码与迁移调度器后，必须确认未引入新告警。
+
+Run:
+
+```bash
+cargo clippy --all-targets --all-features --locked -- -D warnings
+```
+
+Expected: pass，无任何 warning。若出现 `unused import`（如 `ExecutionMode` 在迁移后不再被 `worktree_scheduler.rs` 使用）或可简化构造的告警，必须在本计划内修复后重跑，不得遗留到后续计划。
+
+- [ ] **Step 5: Inspect git diff**
 
 Run:
 
@@ -609,7 +621,7 @@ Expected:
 - Diff only contains model defaults, scheduler migration, dead store removal, and tests.
 - No `src/web/**`, `src/product/coding_workspace_engine.rs`, or `web/**` changes.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 Run:
 
@@ -627,4 +639,5 @@ Expected: commit succeeds.
 - [ ] `ready_work_items()` 不再依赖旧 `WorkItemRecord`。
 - [ ] `WorkItemRecord` 与 `WorkItemStore` 已删除，且 `rg` 无引用。
 - [ ] 本计划未修改生成流、Coding Workspace、共享 worktree 或前端。
-- [ ] 定向测试、格式检查和 `cargo check --locked` 已通过。
+- [ ] 定向测试、`cargo fmt --check`、`cargo clippy --all-targets --all-features --locked -- -D warnings` 和 `cargo check --locked` 均已通过。
+- [ ] 删除 `WorkItemRecord` 后，确认 `src/product/models.rs:71` 的 `product::models::ExecutionMode` 是否仍有使用者；若已无生产代码引用，在本计划记录该孤儿现状或在后续计划评估清理（注意它与 `protocol::projections::ExecutionMode` 是不同类型）。

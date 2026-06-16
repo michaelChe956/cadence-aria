@@ -40,6 +40,20 @@
 - 每个计划都必须说明 OpenSpec、Superpowers、TDD 和验证命令要求。
 - 每个计划必须只修改自己声明的写入范围；若实现时发现需要越界修改，先更新拆分总览或新增计划，不在当前计划内临时扩大范围。
 - 依赖计划的开头必须提供前置交付摘要，避免后序 session 重新吞入前序完整上下文。
+- 每个计划的验证链必须包含项目强制检查命令，至少包含 `cargo fmt --check`、`cargo clippy --all-targets --all-features --locked -- -D warnings` 和 `cargo check --locked`，外加该计划的定向测试；不允许只跑 `fmt + check` 而省略 clippy（详见 `cadence/project-rules/build-test-commands.md`）。
+
+### 写入范围共享与串行约束
+
+多个后端计划共享同一批源码文件，必须按依赖顺序严格串行，禁止并行修改同一文件：
+
+| 共享文件 | 涉及计划 |
+|---|---|
+| `src/product/models.rs` | P1、P2、P4 |
+| `src/product/lifecycle_store.rs` | P3、P4、P5 |
+| `src/web/handlers.rs` | P3、P5 |
+| `src/product/coding_workspace_engine.rs` | P5、P6 |
+
+因此 P3、P4、P5 三者都修改 `lifecycle_store.rs`，必须严格串行（P3 → P4 → P5），不得并行。只有写入范围可证明完全互斥的计划才允许并行准备。
 
 ## P1：后端活跃模型收敛与调度器迁移
 
@@ -70,6 +84,7 @@
 - `cargo test --locked --test it_core work_item_scheduler`
 - `cargo test --locked --test it_product lifecycle_work_item_deserializes_legacy_json_with_split_defaults`
 - `cargo fmt --check`
+- `cargo clippy --all-targets --all-features --locked -- -D warnings`
 - `cargo check --locked`
 
 **详细计划文档：**
@@ -102,6 +117,7 @@
 
 - `cargo test --locked --test it_product work_item_split_validator`
 - `cargo fmt --check`
+- `cargo clippy --all-targets --all-features --locked -- -D warnings`
 - `cargo check --locked`
 
 ## P3：后端 generate_work_items 多 Work Item 与 artifact 关联
@@ -132,6 +148,7 @@
 - `cargo test --locked --test it_web generate_work_items`
 - `cargo test --locked --test it_product lifecycle_store`
 - `cargo fmt --check`
+- `cargo clippy --all-targets --all-features --locked -- -D warnings`
 - `cargo check --locked`
 
 ## P4：后端 Issue 共享 worktree 数据与 Git 安全前缀
@@ -161,6 +178,7 @@
 - `cargo test --locked --test it_product git_workspace_service`
 - `cargo test --locked --test it_product issue_shared_worktree`
 - `cargo fmt --check`
+- `cargo clippy --all-targets --all-features --locked -- -D warnings`
 - `cargo check --locked`
 
 ## P5：后端 Coding 启动门禁与共享 worktree 复用
@@ -190,6 +208,7 @@
 - `cargo test --locked --test it_web start_work_item_attempt`
 - `cargo test --locked --test it_product shared_worktree`
 - `cargo fmt --check`
+- `cargo clippy --all-targets --all-features --locked -- -D warnings`
 - `cargo check --locked`
 
 ## P6：后端 WorkItemExecutionPlan 与 Handoff Provider Run
@@ -219,6 +238,7 @@
 - `cargo test --locked --test it_product work_item_execution_plan`
 - `cargo test --locked --test it_product work_item_handoff`
 - `cargo fmt --check`
+- `cargo clippy --all-targets --all-features --locked -- -D warnings`
 - `cargo check --locked`
 
 ## P7：前端 Work Item 生成选项与 DAG 展示
@@ -306,7 +326,7 @@
 1. 执行 P1，完成活跃模型收敛和调度器迁移。
 2. 执行 P2，完成纯后端 SplitValidator。
 3. 执行 P3，接入 `generate_work_items` 多 Work Item 创建。
-4. P4 可在 P3 后执行；如果确认 P4 不修改 P3 文件，也可在 P2 后并行准备，但合并前必须重新跑 P3/P4 相关测试。
+4. 执行 P4；P4 依赖 P1，但其写入范围与 P3、P5 共享 `src/product/lifecycle_store.rs`，因此必须在 P3 之后、P5 之前串行执行，不得与 P3 并行。
 5. 执行 P5，让 Coding 启动真正受 Work Item DAG、共享 worktree 和 active lock 约束。
 6. 执行 P6，加入 execution plan 与 handoff。
 7. 执行 P7 和 P8；二者都改 `web/src/api/types.ts`，因此不能并行修改同一分支，建议先 P7 后 P8。
