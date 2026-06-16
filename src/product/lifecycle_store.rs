@@ -11,9 +11,9 @@ use crate::product::json_store::{ProductStoreError, read_json, validate_relative
 use crate::product::models::{
     DesignKind, DesignSpecRecord, LifecycleConfirmationStatus, LifecycleWorkItemRecord, NodeDetail,
     ProjectProviderDefaultsRecord, ProviderConversationRef, ProviderName,
-    ProviderReviewRoundRecord, SpecVersionRecord, StorySpecRecord, WorkItemPlanStatus,
-    WorkItemStatus, WorkspaceMessageRecord, WorkspaceSessionRecord, WorkspaceSessionStatus,
-    WorkspaceType,
+    ProviderReviewRoundRecord, SpecVersionRecord, StorySpecRecord, WorkItemContextBudget,
+    WorkItemExecutionPlanStatus, WorkItemKind, WorkItemPlanStatus, WorkItemStatus,
+    WorkspaceMessageRecord, WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType,
 };
 use crate::web::workspace_ws_types::{ArtifactVersion, TimelineNode};
 
@@ -262,6 +262,20 @@ impl LifecycleStore {
             plan_status: WorkItemPlanStatus::NotStarted,
             execution_status: WorkItemStatus::Pending,
             worktree_path: None,
+            work_item_set_id: None,
+            kind: WorkItemKind::Other,
+            sequence_hint: None,
+            depends_on: Vec::new(),
+            exclusive_write_scopes: Vec::new(),
+            forbidden_write_scopes: Vec::new(),
+            context_budget: WorkItemContextBudget::default(),
+            required_handoff_from: Vec::new(),
+            verification_plan_ref: None,
+            require_execution_plan_confirm: false,
+            execution_plan_status: WorkItemExecutionPlanStatus::NotStarted,
+            handoff_summary_ref: None,
+            completion_commit: None,
+            completion_diff_summary_ref: None,
             created_at: now.clone(),
             updated_at: now,
         };

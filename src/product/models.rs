@@ -66,6 +66,8 @@ pub enum AgentType {
     Fake,
 }
 
+// TODO(P1): WorkItemRecord 删除后该枚举暂无字段使用者，但它是 pub enum 不触发 dead_code lint。
+// 需与 protocol::projections::ExecutionMode 区分，后续评估清理。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionMode {
@@ -177,21 +179,6 @@ pub struct ExecutionRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub struct WorkItemRecord {
-    pub id: String,
-    pub issue_id: String,
-    pub repo_id: String,
-    pub title: String,
-    pub allowed_write_scope: Vec<String>,
-    pub depends_on: Vec<String>,
-    pub execution_mode: ExecutionMode,
-    pub status: WorkItemStatus,
-    pub worktree_path: Option<PathBuf>,
-    pub worktree_branch: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum LifecycleConfirmationStatus {
     Draft,
     InReview,
@@ -277,6 +264,55 @@ impl WorkItemPlanStatus {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkItemKind {
+    Backend,
+    Frontend,
+    Integration,
+    E2e,
+    Docs,
+    Infra,
+    #[default]
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkItemExecutionPlanStatus {
+    #[default]
+    NotStarted,
+    Draft,
+    Confirmed,
+    ChangeRequested,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkItemContextBudget {
+    pub target_context_k: String,
+    pub max_summary_chars: usize,
+    pub max_handoff_chars: usize,
+    pub max_code_context_chars: usize,
+    pub max_context_file_refs: usize,
+    pub max_traceability_refs: usize,
+    pub max_dependency_handoffs: usize,
+}
+
+impl Default for WorkItemContextBudget {
+    fn default() -> Self {
+        Self {
+            target_context_k: "30-50".to_string(),
+            max_summary_chars: 20_000,
+            max_handoff_chars: 12_000,
+            max_code_context_chars: 30_000,
+            max_context_file_refs: 80,
+            max_traceability_refs: 40,
+            max_dependency_handoffs: 3,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct StorySpecRecord {
@@ -319,6 +355,34 @@ pub struct LifecycleWorkItemRecord {
     pub plan_status: WorkItemPlanStatus,
     pub execution_status: WorkItemStatus,
     pub worktree_path: Option<PathBuf>,
+    #[serde(default)]
+    pub work_item_set_id: Option<String>,
+    #[serde(default)]
+    pub kind: WorkItemKind,
+    #[serde(default)]
+    pub sequence_hint: Option<u32>,
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+    #[serde(default)]
+    pub exclusive_write_scopes: Vec<String>,
+    #[serde(default)]
+    pub forbidden_write_scopes: Vec<String>,
+    #[serde(default)]
+    pub context_budget: WorkItemContextBudget,
+    #[serde(default)]
+    pub required_handoff_from: Vec<String>,
+    #[serde(default)]
+    pub verification_plan_ref: Option<String>,
+    #[serde(default)]
+    pub require_execution_plan_confirm: bool,
+    #[serde(default)]
+    pub execution_plan_status: WorkItemExecutionPlanStatus,
+    #[serde(default)]
+    pub handoff_summary_ref: Option<String>,
+    #[serde(default)]
+    pub completion_commit: Option<String>,
+    #[serde(default)]
+    pub completion_diff_summary_ref: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
