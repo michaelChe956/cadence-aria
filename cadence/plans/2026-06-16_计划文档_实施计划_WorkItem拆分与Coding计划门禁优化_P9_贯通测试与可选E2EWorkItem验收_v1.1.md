@@ -6,7 +6,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 验证后端 Work Item、前端 Work Item、可选 Integration/E2E Work Item 的端到端关系：后端 handoff 被前端消费，Integration/E2E 等待前后端完成，用户跳过时记录风险但不阻塞。
+**Goal:** 验证后端 Work Item、前端 Work Item、可选 Integration/E2E Work Item 的端到端关系：provider 输出 RepositoryProfile/VerificationPlan，IssueWorkItemPlan 组级确认后 Work Item 才可编码，后端 handoff 被前端消费，Integration/E2E 等待前后端完成，dirty shared worktree 被 clean gate 阻断，用户跳过时记录风险但不阻塞。
 
 **Architecture:** 本计划以测试为主，只在测试暴露真实缺陷时做最小生产修复。后端使用 `it_web` 贯通测试覆盖 API/状态机；前端使用 Vitest 覆盖 lifecycle 和 Coding Prepare；浏览器 E2E 放在现有 `web/e2e` 目录，复用仓库 Playwright 配置。
 
@@ -18,10 +18,10 @@
 
 执行本计划前确认：
 
-- P3 已能生成 Backend/Frontend/Integration/E2E Work Items，并保证每项有 session/artifact 关联。
-- P5 已让 Coding attempt 受依赖和 handoff 门禁约束，并复用 Issue shared worktree。
-- P6 已生成 execution plan 和 handoff，并在 completion 前强制 handoff 存在。
-- P7/P8 已在前端展示 DAG、handoff 和 execution plan。
+- P3 已能生成 Backend/Frontend/Integration/E2E Work Items，并保证每项有 session/artifact 关联；生成响应包含 `repository_profile`、`verification_plans`，且 draft `IssueWorkItemPlan` 必须经组级 confirm 后关联 Work Item 才 confirmed。
+- P5 已让 Coding attempt 受依赖、handoff、VerificationPlan 和 active lock 门禁约束，并复用 Issue shared worktree；dirty shared worktree 会进入人工 gate 并保持锁。
+- P6 已生成 execution plan 和 handoff，并在 completion 前强制 handoff、required verification gate result、diff scope 和 clean gate 存在。
+- P7/P8 已在前端展示 DAG、handoff、execution plan 和 provider-based VerificationPlan。
 
 ## 计划大小边界
 
@@ -42,8 +42,12 @@
   - 前端 lifecycle 贯通状态测试。
 - Modify: `web/src/pages/CodingWorkspacePage.test.tsx`
   - execution plan/handoff 展示联动测试。
+- Create: `web/e2e/work-item-split-flow.spec.ts`
+  - 浏览器 E2E 验收。
+- Modify: `web/e2e/helpers/coding.ts` 或 `web/e2e/helpers/workspace.ts`
+  - 增加确定性 seed/setup helper。
 
-> 说明：本计划不做浏览器 E2E 测试。
+> 说明：本计划包含浏览器 E2E 验收，但必须先做确定性 seed/setup，再断言 Work Item UI；不得无种子直接访问 `/workbench` 后断言首屏已有 Work Item。
 
 ## 任务 1：Backend Flow Test For Split Generation And Dependency Gates
 
@@ -93,6 +97,22 @@ async fn work_item_split_flow_blocks_frontend_until_backend_handoff_exists() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(generated["work_items"].as_array().unwrap().len(), 3);
+    assert_eq!(generated["work_item_plan"]["status"], "draft");
+    assert_eq!(generated["repository_profile"]["confidence"], "high");
+    assert_eq!(generated["verification_plans"].as_array().unwrap().len(), 3);
+    let plan_id = generated["work_item_plan"]["id"].as_str().unwrap();
+
+    let (status, confirmed) = request_json(
+        app.clone(),
+        Method::POST,
+        &format!("/api/projects/project_0001/issues/issue_0001/work-item-plans/{plan_id}/confirm"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(confirmed["work_items"].as_array().unwrap().iter().all(|item| {
+        item["plan_status"] == "confirmed" && item["verification_plan_ref"].is_string()
+    }));
 
     let (status, blocked) = request_json(
         app.clone(),
@@ -320,14 +340,59 @@ pnpm -C web test -- --run CodingWorkspacePage
 
 预期：通过。
 
+## 任务 2A：Backend Flow Test For Dirty Shared Worktree Clean Gate
+
+**文件：**
+
+- Modify: `tests/it_web/web_work_item_split_flow.rs`
+
+- [ ] **步骤 1：编写 dirty gate 贯通测试**
+
+追加:
+
+```rust
+#[tokio::test]
+async fn dirty_shared_worktree_blocks_next_work_item_until_manual_gate_resolved() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    bootstrap_confirmed_split_plan_with_two_ready_work_items(app.clone(), repo.path()).await;
+    let (_status, first) = create_coding_attempt(app.clone(), "work_item_0001").await;
+    dirty_issue_shared_worktree(root.path(), "issue_0001");
+
+    let (status, failed) = mark_attempt_failed(app.clone(), first["attempt_id"].as_str().unwrap()).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(failed["code"], "shared_worktree_dirty_manual_gate");
+
+    let (status, second) = create_coding_attempt(app, "work_item_0002").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(second["code"], "issue_worktree_active");
+}
+```
+
+- [ ] **步骤 2：运行 dirty gate test 并确认通过**
+
+运行:
+
+```bash
+cargo test --locked --test it_web dirty_shared_worktree_blocks_next_work_item_until_manual_gate_resolved
+```
+
+预期：dirty shared worktree 保持 active lock，后续 Work Item 不会接管。
+
 ## 最终验证
 
 运行:
 
 ```bash
 cargo test --locked --test it_web work_item_split_flow
+cargo test --locked --test it_web dirty_shared_worktree_blocks_next_work_item_until_manual_gate_resolved
 pnpm -C web test -- --run IssueLifecycleWorkbench
 pnpm -C web test -- --run CodingWorkspacePage
+pnpm -C web test:e2e -- work-item-split-flow.spec.ts
 cargo fmt --check
 cargo clippy --all-targets --all-features --locked -- -D warnings
 cargo check --locked
@@ -337,11 +402,12 @@ cargo check --locked
 
 - Backend flow tests pass.
 - Frontend Vitest tests pass.
+- Browser E2E passes after deterministic seed/setup.
 - Rust formatting, clippy and check pass.
 
 ## 提交
 
 ```bash
-git add tests/it_web.rs tests/it_web/web_work_item_split_flow.rs web/src/components/lifecycle/IssueLifecycleWorkbench.test.tsx web/src/pages/CodingWorkspacePage.test.tsx
+git add tests/it_web.rs tests/it_web/web_work_item_split_flow.rs web/src/components/lifecycle/IssueLifecycleWorkbench.test.tsx web/src/pages/CodingWorkspacePage.test.tsx web/e2e/work-item-split-flow.spec.ts web/e2e/helpers/coding.ts web/e2e/helpers/workspace.ts
 git commit -m "test: verify split work item flow"
 ```

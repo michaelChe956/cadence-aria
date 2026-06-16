@@ -119,6 +119,7 @@ fn lifecycle_work_item_deserializes_legacy_json_with_split_defaults() {
     assert!(record.forbidden_write_scopes.is_empty());
     assert_eq!(record.context_budget, WorkItemContextBudget::default());
     assert!(record.required_handoff_from.is_empty());
+    assert_eq!(record.verification_plan_ref, None);
     assert!(!record.require_execution_plan_confirm);
     assert_eq!(
         record.execution_plan_status,
@@ -163,6 +164,7 @@ fn lifecycle_work_item_serializes_new_split_fields_as_snake_case() {
         forbidden_write_scopes: vec!["web/**".to_string()],
         context_budget: WorkItemContextBudget::default(),
         required_handoff_from: vec!["work_item_0001".to_string()],
+        verification_plan_ref: Some("verification_plan_work_item_0002".to_string()),
         require_execution_plan_confirm: true,
         execution_plan_status: WorkItemExecutionPlanStatus::Draft,
         handoff_summary_ref: Some("handoffs/work_item_0001.json".to_string()),
@@ -176,6 +178,7 @@ fn lifecycle_work_item_serializes_new_split_fields_as_snake_case() {
 
     assert_eq!(value["kind"], "backend");
     assert_eq!(value["execution_plan_status"], "draft");
+    assert_eq!(value["verification_plan_ref"], "verification_plan_work_item_0002");
     assert_eq!(value["work_item_set_id"], "work_item_set_0001");
     assert_eq!(value["depends_on"], serde_json::json!(["work_item_0001"]));
     assert_eq!(
@@ -296,6 +299,8 @@ In `src/product/models.rs`, extend `LifecycleWorkItemRecord` after `worktree_pat
     #[serde(default)]
     pub required_handoff_from: Vec<String>,
     #[serde(default)]
+    pub verification_plan_ref: Option<String>,
+    #[serde(default)]
     pub require_execution_plan_confirm: bool,
     #[serde(default)]
     pub execution_plan_status: WorkItemExecutionPlanStatus,
@@ -321,6 +326,7 @@ In `src/product/lifecycle_store.rs`, update the `LifecycleWorkItemRecord` litera
             forbidden_write_scopes: Vec::new(),
             context_budget: WorkItemContextBudget::default(),
             required_handoff_from: Vec::new(),
+            verification_plan_ref: None,
             require_execution_plan_confirm: false,
             execution_plan_status: WorkItemExecutionPlanStatus::NotStarted,
             handoff_summary_ref: None,
@@ -384,6 +390,7 @@ fn work_item(id: &str, depends_on: Vec<&str>, scope: Vec<&str>) -> LifecycleWork
         forbidden_write_scopes: Vec::new(),
         context_budget: WorkItemContextBudget::default(),
         required_handoff_from: Vec::new(),
+        verification_plan_ref: None,
         require_execution_plan_confirm: false,
         execution_plan_status: WorkItemExecutionPlanStatus::NotStarted,
         handoff_summary_ref: None,

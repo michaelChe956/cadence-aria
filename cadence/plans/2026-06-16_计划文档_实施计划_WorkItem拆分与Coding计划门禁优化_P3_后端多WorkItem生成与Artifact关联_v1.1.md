@@ -6,9 +6,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 将 `generate_work_items` 从单 Work Item 创建升级为 Issue Work Item Set 创建，确保每个 Work Item 都拥有独立 workspace session 与 artifact versions，并把 P2 validator 接入生成期校验。
+**Goal:** 将 `generate_work_items` 从单 Work Item 创建升级为 provider-based Issue Work Item Set 创建，确保每个 Work Item 都拥有独立 workspace session 与 artifact versions，保存 provider 输出的 `RepositoryProfile` / `VerificationPlan`，并提供 `IssueWorkItemPlan` 级 confirm/change-request 流。
 
-**Architecture:** 后端 handler 接收用户拆分选项，调用 `WorkItemSplitEngine` 运行 provider-based split generation，得到 `IssueWorkItemPlan` 和多个 `LifecycleWorkItemRecord` 草稿，通过 `WorkItemSplitValidator` 后再持久化。本计划必须实现真实 provider split run，不使用硬编码 deterministic builder。
+**Architecture:** 后端 handler 接收用户拆分选项，调用 `WorkItemSplitEngine` 运行 provider-based split generation，得到 `WorkItemSplitProviderOutput { repository_profile, plan, work_items, verification_plans }`，通过 `WorkItemSplitValidator` 后持久化为 draft plan、draft Work Items 和验证计划。本计划必须实现真实 provider split run，不使用硬编码 deterministic builder；生成期不得让 Work Item 可编码，只有 IssueWorkItemPlan 级 confirm 后才批量置为 confirmed。
 
 **Tech Stack:** Rust 1.95.0、Axum、Serde JSON、LifecycleStore、Cargo integration tests、TDD。
 
@@ -18,8 +18,8 @@
 
 执行本计划前确认 P2 已交付：
 
-- `IssueWorkItemPlan`、`IssueWorkItemPlanOptions`、`IssueWorkItemDependencyEdge`、`WorkItemSplitFinding` 已在 `src/product/models.rs` 中定义。
-- `WorkItemSplitValidator::validate()` 会返回 `WorkItemSplitValidationReport`，并覆盖 DAG、scope、预算、跨端、Integration/E2E 与 traceability 校验。
+- `IssueWorkItemPlan`、`IssueWorkItemPlanOptions`、`IssueWorkItemDependencyEdge`、`WorkItemSplitFinding`、`RepositoryProfile`、`VerificationPlan` 已在 `src/product/models.rs` 中定义。
+- `WorkItemSplitValidator::validate()` 会返回 `WorkItemSplitValidationReport`，并覆盖 DAG、scope、预算、跨端、Integration/E2E、traceability 与 verification plan 结构/安全边界校验。
 - P2 不创建真实 Work Item，因此本计划负责持久化和 HTTP response 契约。
 
 > **🔴 强依赖提示：** 本计划强依赖 P1/P2 产物——`LifecycleWorkItemRecord` 的新增字段（P1）、`IssueWorkItemPlan` 与 `WorkItemSplitValidator`（P2）。执行前必须确认 P1、P2 已合并到当前分支，否则任务 1/3/4 引用的类型与校验器不存在，无法编译。
@@ -38,6 +38,7 @@
 - 不实现 Issue 共享 worktree。
 - 不修改 `create_coding_attempt` 启动门禁。
 - 不修改 Coding Workspace engine。
+- 不按当前仓库或 WorkItemKind 生成验证命令；只解析、保存、展示 provider 输出的 `VerificationPlan`。
 - 不修改前端。
 - 不写 Playwright E2E。
 
@@ -46,12 +47,12 @@
 ## 文件结构
 
 - Create: `src/product/work_item_split_engine.rs`
-  - 负责构造 split provider 上下文并运行 provider，解析输出为 `IssueWorkItemPlan` 和 `LifecycleWorkItemRecord` 候选列表。
+  - 负责构造 split provider 上下文并运行 provider，解析输出为 `WorkItemSplitProviderOutput { repository_profile, plan, work_items, verification_plans }`。
 - Modify: `src/product/mod.rs`
   - 导出 `work_item_split_engine`。
 - Modify: `src/web/types.rs`
   - 扩展 `GenerateWorkItemsRequest`，新增拆分选项。
-  - 扩展 `GenerateWorkItemsResponse`：**保留旧字段 `workspace_session`（单数，兼容）**，新增 `workspace_sessions`（复数）、`work_item_plan` 与 `validator_findings`。
+  - 扩展 `GenerateWorkItemsResponse`：**保留旧字段 `workspace_session`（单数，兼容）**，新增 `workspace_sessions`（复数）、`work_item_plan`、`repository_profile`、`verification_plans` 与 `validator_findings`。
   - 扩展 `LifecycleWorkItemDto`，透出 P1/P2 新增字段。
 - Modify: `src/web/state.rs`
   - 在 `WebAppState` 中新增 `provider_adapter: Arc<dyn ProviderAdapter>` 字段。
@@ -59,7 +60,8 @@
 - Modify: `src/web/handlers.rs`
   - `generate_work_items` 调用 `WorkItemSplitEngine`。
   - 调用 `WorkItemSplitValidator` 校验 provider 输出。
-  - 校验通过后持久化多个 Work Item。
+  - 校验通过后持久化 draft `IssueWorkItemPlan`、draft Work Items、`RepositoryProfile` 和 `VerificationPlan`。
+  - 新增 IssueWorkItemPlan confirm/change-request API；confirm 后批量确认关联 Work Item。
   - 返回每个 Work Item 对应的 workspace session（复数），同时把主 session 写入旧的单数字段。
 - Modify: `src/product/lifecycle_store.rs`
   - 扩展 `CreateWorkItemInput` 支持 P1 新字段。
@@ -115,6 +117,7 @@ exclusive_write_scopes: Vec::new(),
 forbidden_write_scopes: Vec::new(),
 context_budget: WorkItemContextBudget::default(),
 required_handoff_from: Vec::new(),
+verification_plan_ref: None,
 require_execution_plan_confirm: false,
 ```
 
@@ -180,7 +183,12 @@ async fn generate_work_items_accepts_split_options_and_returns_plan_metadata() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(response["work_item_plan"]["status"], "draft");
     assert_eq!(response["work_item_plan"]["options"]["include_integration_tests"], true);
+    assert_eq!(response["repository_profile"]["confidence"], "high");
+    assert_eq!(response["verification_plans"].as_array().unwrap().len(), 3);
     assert_eq!(response["work_items"].as_array().unwrap().len(), 3);
+    assert!(response["work_items"].as_array().unwrap().iter().all(|item| {
+        item["plan_status"] == "draft" && item["verification_plan_ref"].is_string()
+    }));
     assert_eq!(response["workspace_sessions"].as_array().unwrap().len(), 3);
     // 兼容断言：旧的单数字段保留，指向主 session（首个 work item）。
     assert_eq!(response["workspace_session"]["entity_id"], "work_item_0001");
@@ -273,6 +281,8 @@ pub struct GenerateWorkItemsResponse {
     /// 新增：每个 Work Item 对应一个 session。
     pub workspace_sessions: Vec<WorkspaceSessionDto>,
     pub work_item_plan: IssueWorkItemPlan,
+    pub repository_profile: RepositoryProfile,
+    pub verification_plans: Vec<VerificationPlan>,
     pub validator_findings: Vec<WorkItemSplitFinding>,
 }
 ```
@@ -320,6 +330,7 @@ fn create_work_item_persists_split_fields() {
             forbidden_write_scopes: vec!["web/**".to_string()],
             context_budget: WorkItemContextBudget::default(),
             required_handoff_from: Vec::new(),
+            verification_plan_ref: Some("verification_plan_work_item_0001".to_string()),
             require_execution_plan_confirm: false,
         })
         .expect("work item");
@@ -442,8 +453,19 @@ cargo test --locked --test it_web generate_work_items_creates_backend_frontend_a
 2. **构造 `AdapterInput`**：
    - `provider_type`：使用当前项目配置的 author provider（复用 Coding Workspace 的 provider 选择逻辑）。
    - `role`：`AdapterRole::WorkItemSplitter`（若不存在则新增）或复用 `AdapterRole::Analyst`。
-   - `prompt`：包含上述上下文的 prompt template，明确指示 provider 输出 `IssueWorkItemPlan` JSON。
-   - `output_schema`：定义 `IssueWorkItemPlan` 的 JSON schema，包括 `work_items`、`dependency_graph`、`options`、`review_summary`。
+   - `prompt`：包含上述上下文的 prompt template，明确指示 provider 输出 `WorkItemSplitProviderOutput` JSON。
+   - `output_schema`：定义顶层 `WorkItemSplitProviderOutput` JSON schema：
+
+```json
+{
+  "repository_profile": { "...": "RepositoryProfile" },
+  "plan": { "...": "IssueWorkItemPlan" },
+  "work_items": [{ "...": "LifecycleWorkItemRecord candidate" }],
+  "verification_plans": [{ "...": "VerificationPlan" }]
+}
+```
+
+   - `plan.work_item_ids` 必须与顶层 `work_items[].id` 一致；`plan.verification_plan_ids` 必须与顶层 `verification_plans[].id` 一致；每个 Work Item 的 `verification_plan_ref` 必须指向同 `work_item_id` 的 `VerificationPlan`。`IssueWorkItemPlan` 自身不包含 `work_items` 字段。
    - `worktree_path`：当前 repository path（仅作 provider 工作目录，不写入目标仓库）。
 
 3. **调用 provider run**：
@@ -452,8 +474,9 @@ cargo test --locked --test it_web generate_work_items_creates_backend_frontend_a
    - **Provider adapter 来源：** 在 `WebAppState` 中新增 `provider_adapter: Arc<dyn ProviderAdapter>` 字段。P3 和 P6 共用同一个同步 provider adapter 注入点，避免重复构造。
 
 4. **解析输出**：
-   - 从 `AdapterOutput.structured_output` 解析 `IssueWorkItemPlan`。
-   - 从 plan 的 `work_items` 解析为 `LifecycleWorkItemRecord` 候选列表。
+   - 从 `AdapterOutput.structured_output` 解析 `WorkItemSplitProviderOutput`。
+   - 从顶层 `output.work_items` 解析为 `LifecycleWorkItemRecord` 候选列表。
+   - 从顶层 `output.repository_profile` 和 `output.verification_plans` 解析验证契约。
    - 若解析失败，返回 `work_item_split_provider_output_invalid`。
 
 5. **注入 engine 到 handler**：
@@ -464,10 +487,10 @@ cargo test --locked --test it_web generate_work_items_creates_backend_frontend_a
 在 `src/web/handlers.rs` 的 `generate_work_items` 中：
 
 1. 调用 `split_engine.generate(&request, &lifecycle, ...).await`。
-2. 得到 `(IssueWorkItemPlan, Vec<LifecycleWorkItemRecord>)` 候选。
-3. 调用 `WorkItemSplitValidator::validate(&plan, &candidates)`。
+2. 得到 `WorkItemSplitProviderOutput { repository_profile, plan, work_items, verification_plans }` 候选。
+3. 调用 `WorkItemSplitValidator::validate(&plan, &candidates, Some(&repository_profile), &verification_plans)`。
 4. 若校验失败，返回 `ApiError::validation_with_details("work_item_split_invalid", ...)`，不持久化任何 Work Item。
-5. 若校验通过，为每个 candidate 顺序调用 `lifecycle.create_work_item(...)`，并创建对应 workspace session。
+5. 若校验通过，先持久化 draft plan、repository profile、verification plans，再为每个 candidate 顺序调用 `lifecycle.create_work_item(...)` 创建 `plan_status=draft` 的 Work Item，并创建对应 workspace session。
 6. 构造 `GenerateWorkItemsResponse`。
 
 - [ ] **步骤 5：Include split context in workspace messages**
@@ -479,6 +502,7 @@ Update `ensure_workspace_context_message()` or the Work Item context builder in 
 - Forbidden write scopes.
 - Dependencies.
 - Required handoff sources.
+- VerificationPlan summary and required gates.
 - Superpowers/TDD/verification requirements.
 
 - [ ] **步骤 6：运行 generation tests 并确认通过**
@@ -622,12 +646,136 @@ cargo test --locked --test it_web generate_work_items_rejects_invalid_confirmed_
 
 预期：invalid candidate 返回 `work_item_split_invalid`; invalid HTTP refs return `400`, and lifecycle still has zero Work Items.
 
+## 任务 5：IssueWorkItemPlan Confirm / Change Request Gate
+
+**文件：**
+
+- Modify: `src/product/lifecycle_store.rs`
+- Modify: `src/web/handlers.rs`
+- Modify: `src/web/types.rs`
+- Modify: `tests/it_web/web_work_item_generation.rs`
+- Modify: `tests/it_product/product_lifecycle_store.rs`
+
+> **阻塞修复：** `generate_work_items` 返回 `work_item_plan.status=draft` 时，关联 Work Item 必须保持 `plan_status=draft`，不可启动 Coding。需要新增 IssueWorkItemPlan 级 confirm/change-request API；不得复用单个 Work Item workspace confirm route 表达整组拆分计划确认。
+
+- [ ] **步骤 1：编写失败态 confirm route test**
+
+追加:
+
+```rust
+#[tokio::test]
+async fn confirm_issue_work_item_plan_marks_work_items_confirmed() {
+    let (app, _repo) = app_with_confirmed_story_and_design().await;
+    let (_status, generated) = generate_split_work_items(app.clone()).await;
+    let plan_id = generated["work_item_plan"]["id"].as_str().unwrap();
+
+    let (status, confirmed) = request_json(
+        app.clone(),
+        Method::POST,
+        &format!("/api/projects/project_0001/issues/issue_0001/work-item-plans/{plan_id}/confirm"),
+        json!({}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(confirmed["work_item_plan"]["status"], "confirmed");
+    assert!(confirmed["work_items"].as_array().unwrap().iter().all(|item| {
+        item["plan_status"] == "confirmed"
+    }));
+}
+```
+
+- [ ] **步骤 2：编写失败态 change-request test**
+
+追加:
+
+```rust
+#[tokio::test]
+async fn request_change_keeps_split_work_items_not_codeable() {
+    let (app, _repo) = app_with_confirmed_story_and_design().await;
+    let (_status, generated) = generate_split_work_items(app.clone()).await;
+    let plan_id = generated["work_item_plan"]["id"].as_str().unwrap();
+
+    let (status, changed) = request_json(
+        app,
+        Method::POST,
+        &format!("/api/projects/project_0001/issues/issue_0001/work-item-plans/{plan_id}/change-request"),
+        json!({ "note": "拆分太粗，需要重新生成 verification plan" }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(changed["work_item_plan"]["status"], "change_requested");
+    assert!(changed["work_items"].as_array().unwrap().iter().all(|item| {
+        item["plan_status"] != "confirmed"
+    }));
+}
+```
+
+- [ ] **步骤 3：运行 confirm/change tests 并确认失败**
+
+运行:
+
+```bash
+cargo test --locked --test it_web confirm_issue_work_item_plan_marks_work_items_confirmed
+cargo test --locked --test it_web request_change_keeps_split_work_items_not_codeable
+```
+
+预期：路由/store API 尚不存在导致失败。
+
+- [ ] **步骤 4：实现 store API**
+
+在 `LifecycleStore` 增加：
+
+```rust
+pub fn confirm_issue_work_item_plan(
+    &self,
+    project_id: &str,
+    issue_id: &str,
+    plan_id: &str,
+) -> Result<(IssueWorkItemPlan, Vec<LifecycleWorkItemRecord>), ProductStoreError>
+
+pub fn request_issue_work_item_plan_change(
+    &self,
+    project_id: &str,
+    issue_id: &str,
+    plan_id: &str,
+    note: Option<String>,
+) -> Result<(IssueWorkItemPlan, Vec<LifecycleWorkItemRecord>), ProductStoreError>
+```
+
+确认规则：
+
+- 只能从 `draft` confirm 到 `confirmed`。
+- confirm 时必须在同一 store 更新边界内把 `IssueWorkItemPlan.status=confirmed`，并把 `plan.work_item_ids` 关联的 Work Item `plan_status=confirmed`。
+- change request 时 `IssueWorkItemPlan.status=change_requested`，Work Item 保持 `draft` 或改回 `draft`，不得可编码。
+- 任一 Work Item 缺失、plan/work item issue 不一致、verification plan 缺失时，整个操作失败且不得部分更新。
+
+- [ ] **步骤 5：实现 HTTP routes**
+
+新增：
+
+```text
+POST /api/projects/{project_id}/issues/{issue_id}/work-item-plans/{plan_id}/confirm
+POST /api/projects/{project_id}/issues/{issue_id}/work-item-plans/{plan_id}/change-request
+```
+
+response shape 与 `GenerateWorkItemsResponse` 对齐，返回 `work_item_plan`、`work_items`、`repository_profile`、`verification_plans` 和 `validator_findings`。
+
+- [ ] **步骤 6：运行 confirm/change tests 并确认通过**
+
+运行步骤 3 的两条命令。
+
+预期：通过；P5 的 `create_coding_attempt` 仍只需要检查 Work Item `plan_status=confirmed`，不需要理解 workspace confirm。
+
 ## 最终验证
 
 运行:
 
 ```bash
 cargo test --locked --test it_web generate_work_items
+cargo test --locked --test it_web confirm_issue_work_item_plan_marks_work_items_confirmed
+cargo test --locked --test it_web request_change_keeps_split_work_items_not_codeable
 cargo test --locked --test it_product lifecycle_store
 cargo fmt --check
 cargo clippy --all-targets --all-features --locked -- -D warnings

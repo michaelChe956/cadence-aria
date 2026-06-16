@@ -23,7 +23,10 @@
 - 将 30k-50k 上下文预算从不可测的 token 估算，改为可执行的代理指标：摘要字符数、refs 数、文件路径数、代码片段字符数与 handoff 数量。
 - 明确跨端 Issue 判定标准，避免纯后端或纯前端 Issue 被误拆。
 - 明确共享同一源码文件的后端计划必须严格串行：P3、P4、P5 都修改 `src/product/lifecycle_store.rs`，必须按 P3 → P4 → P5 顺序执行，不得并行；具体落地编排以拆分总览为准。
-- 明确每个实现计划的验证链必须包含项目强制 clippy 检查（`cargo clippy --all-targets --all-features --locked -- -D warnings`），不允许只跑 `fmt + check`。
+- 明确本方案作为多项目平台能力，不能硬编码当前 Cadence Aria 仓库的 Rust/pnpm 验证命令；项目画像与验证计划必须由 provider 输出，平台只做结构、安全和状态门禁校验。
+- 明确拆分计划确认是 `IssueWorkItemPlan` 级 confirm。生成期创建 draft plan/draft Work Items，用户确认拆分计划后才批量把关联 Work Item 的 `plan_status` 置为 `confirmed`，不复用单个 Work Item workspace confirm 表达整组拆分确认。
+- 明确共享 worktree 的终态释放锁必须经过 clean gate。Work Item 结束时不得遗留未提交/半提交改动；dirty 时进入强制人工 gate 并保持 active lock，不允许后续 Work Item 复用污染状态。
+- 本文档中的验证命令示例均为计划自身验证命令；运行中的目标项目验证命令不得作为平台内置兜底，只能来自 `VerificationPlan` provider 输出并经过平台安全校验。
 
 ## 背景
 
@@ -124,20 +127,59 @@ Work Item 状态事实源保存在 Aria 产品数据中，例如 lifecycle store
 - 用户启用时，系统必须生成 Integration/E2E Work Item，并让它依赖相关前后端 Work Item。
 - 用户跳过时，系统必须在 Aria 内部记录风险和后续手工验证建议，但不阻塞 Work Item Set 确认。
 
-### 6. WorkItemExecutionPlan 确认门禁可配置
+### 6. 拆分计划确认是 IssueWorkItemPlan 级确认
+
+拆分计划确认必须发生在 Issue Work Item Set 层级，而不是复用单个 Work Item 的 workspace confirm。
+
+规则：
+
+- `generate_work_items` 成功后保存 `IssueWorkItemPlan.status=draft`，并保存一组 `LifecycleWorkItemRecord.plan_status=draft` 的候选 Work Item。
+- draft Work Item 可以用于前端展示 DAG、范围、验证计划和风险，但不得启动 Coding。
+- 新增 `IssueWorkItemPlan` 级 confirm/change-request API。
+- 用户确认 draft plan 后，后端在同一事务边界内把 `IssueWorkItemPlan.status` 置为 `confirmed`，并批量把该 plan 关联的 Work Item `plan_status` 置为 `confirmed`。
+- 用户 request change 时，`IssueWorkItemPlan.status=change_requested`，关联 Work Item 保持不可编码。
+- 单个 Work Item workspace confirm 仍只表示该 Work Item 文档自身确认，不承担 Issue 级拆分计划确认语义。
+
+这样可以避免 P3 生成 `draft` plan 后，P5 Coding 入口要求 `confirmed` Work Item 但没有组级确认路径的链路断裂。
+
+### 7. RepositoryProfile 与 VerificationPlan 必须 provider-based
+
+Cadence Aria 是服务多个目标项目的平台，不能把当前仓库的 Rust、pnpm、Vitest 或 Playwright 命令作为默认验证策略硬编码到产品逻辑中。
+
+拆分 provider 的结构化输出必须收敛为：
+
+- `repository_profile`：目标项目画像，描述技术栈、包管理器、测试入口、构建入口、单元/集成/E2E 能力、受限环境要求和置信度。
+- `plan`：`IssueWorkItemPlan`。
+- `work_items`：候选 `LifecycleWorkItemRecord` 列表。
+- `verification_plans`：按 Work Item 关联的 `VerificationPlan` 列表。
+
+平台可以内置并强制执行的只有不变量：
+
+- 状态机与确认门禁。
+- Issue shared worktree active lock。
+- Git branch/worktree 安全前缀。
+- 路径逃逸、防运行时危险路径和 diff scope 校验。
+- dirty shared worktree clean gate。
+- 危险命令拦截、cwd 不得越出 repo、命令结构必须可审计。
+- required verification 未执行或未进入人工 gate 时不得标记 completed。
+
+平台不得根据 `WorkItemKind` 自行推导 `cargo test`、`pnpm test`、Playwright 等目标项目命令。若 provider 无法给出可信 `VerificationPlan`，该 Work Item 必须进入 verification-plan repair/manual gate，而不是落到 Aria 当前仓库命令兜底。
+
+### 8. WorkItemExecutionPlan 确认门禁可配置
 
 现有 `create_coding_attempt` 已有 `plan_status=confirmed` 门禁。本方案在其上引入 `WorkItemExecutionPlan`，但不默认增加第二道强制确认。
 
 规则：
 
 - `WorkItemExecutionPlan` 始终生成并展示，作为 Coder prompt 的结构化来源。
+- `WorkItemExecutionPlan` 的验证部分只引用 P3 保存的 `VerificationPlan`，不得按 Work Item kind 或当前仓库技术栈生成命令。
 - 默认情况下，拆分计划 confirmed 后即可启动 Coding，`WorkItemExecutionPlan` 不阻塞。
 - 当 `require_execution_plan_confirm=true` 时，对应 Work Item 的 `execution_plan_status` 必须为 `confirmed` 才能进入 Coder。
 - 用户可在 Issue Work Item Set 级别开启该开关，也可只对高风险 Work Item 开启。
 
 这样保留高风险场景的人审能力，同时避免所有 Work Item 都需要双重确认带来的操作负担。
 
-### 7. Handoff 由额外 provider run 生成
+### 9. Handoff 由额外 provider run 生成
 
 `WorkItemHandoff` 不由简单模板拼接产生，而是在 Work Item 代码、测试、review 阶段完成后，额外运行一次 provider 总结。
 
@@ -155,7 +197,7 @@ handoff run 输出写入 Aria 内部 `WorkItemHandoff`。它是 Work Item 完成
 
 handoff run 消耗 token 和时间，但它独立于下一个 Work Item 的 30k-50k 执行包预算。后续 Work Item 只消费 handoff 摘要，不消费 handoff 生成过程。
 
-### 8. 上下文预算按代理指标控制
+### 10. 上下文预算按代理指标控制
 
 上下文预算不是精确 token 计数，而是执行输入包规模约束。每个 Work Item 的 Coding 输入包目标为 30k-50k tokens 等价规模。由于当前系统没有稳定 token 计数器，第一版使用代理指标：
 
@@ -172,17 +214,17 @@ handoff run 消耗 token 和时间，但它独立于下一个 Work Item 的 30k-
 
 1. 用户在 confirmed Design Spec 上点击生成 Work Item。
 2. 前端展示生成选项：是否生成贯通测试/E2E Work Item、是否要求逐项执行计划确认、是否显式强制前后端拆分。
-3. 后端启动 Work Item Split Workspace。Provider 基于 confirmed Story Spec、confirmed Design Spec、OpenSpec 约束、仓库结构摘要和用户选项生成 `IssueWorkItemPlan`。
-4. `WorkItemSplitValidator` 校验 DAG、写入范围、前后端拆分、上下文预算代理指标、贯通测试选项、traceability 和验证策略。
-5. 校验失败时，拆分计划进入返修，不创建可执行 Work Item。
-6. 校验通过后，用户在 Aria UI 中确认拆分计划。
-7. 确认后，多个 Work Item 卡片进入 Work Item 列。无依赖项可先执行；有依赖项等待前置项完成。
+3. 后端启动 Work Item Split Workspace。Provider 基于 confirmed Story Spec、confirmed Design Spec、OpenSpec 约束、仓库结构摘要和用户选项生成 `WorkItemSplitProviderOutput`，包含 `repository_profile`、draft `IssueWorkItemPlan`、draft `work_items` 和 `verification_plans`。
+4. `WorkItemSplitValidator` 校验 DAG、写入范围、前后端拆分、上下文预算代理指标、贯通测试选项、traceability、`RepositoryProfile` 与 `VerificationPlan` 的结构和安全边界。Validator 不校验具体技术栈命令是否适合当前 Aria 仓库。
+5. 校验失败时，拆分计划进入返修，不创建可编码 Work Item。
+6. 校验通过后，保存 draft plan、draft Work Items、repository profile 和 verification plans，前端展示给用户确认。
+7. 用户在 Aria UI 中确认 `IssueWorkItemPlan` 后，后端批量确认关联 Work Item。确认后，多个 Work Item 卡片进入可执行状态；无依赖项可先执行，有依赖项等待前置项完成。
 8. 第一个进入 Coding 的 Work Item 创建 Issue 级共享 branch/worktree；后续 Work Item 复用该 worktree。
 9. 每个 Work Item Coding 前，Aria 内部生成 `WorkItemExecutionPlan` 并展示。若当前 Work Item 开启确认门禁，则必须确认后才进入 Coder；否则直接作为 prompt 输入进入 Coder。
-10. Coder prompt 包含当前 Work Item 的执行计划、允许/禁止写入范围、依赖项 handoff summary、验证目标和 OpenSpec/Superpowers/TDD 要求。
+10. Coder prompt 包含当前 Work Item 的执行计划、允许/禁止写入范围、依赖项 handoff summary、`VerificationPlan`、验证结果记录要求和 OpenSpec/Superpowers/TDD 要求。
 11. Work Item 代码与测试完成后，系统执行 diff scope 校验。校验逻辑复用 `cross_cutting/worktree.rs` 的 `validate_write_path` 与 `is_forbidden_runtime_path`，不要另写一套路径安全规则。
 12. diff scope 校验通过后，系统运行额外 provider handoff run，生成 `WorkItemHandoff`。
-13. Work Item 完成后在共享 worktree 上 commit 留痕。
+13. Work Item 完成后必须在共享 worktree 上 commit 留痕，并确认 `git status` clean；dirty 时进入强制人工 gate，保持 active lock，不允许下一个 Work Item 接管。
 14. 依赖它的后续 Work Item 启动时，只注入 handoff summary、commit/head、测试摘要和必要 refs。
 15. 所有必选 Work Item 完成后，Issue Work Item Set 完成；如果启用了 Integration/E2E Work Item，它必须通过后才能完成整个 Issue。
 
@@ -205,6 +247,8 @@ Issue 级拆分总览，只存 Aria 内部数据。
 - `require_execution_plan_confirm`
 - `status`: `draft | confirmed | change_requested`
 - `work_item_ids`
+- `repository_profile_ref`
+- `verification_plan_ids`
 - `dependency_graph`
 - `created_from_provider_run`
 - `validator_findings`
@@ -224,6 +268,7 @@ Issue 级拆分总览，只存 Aria 内部数据。
 - `forbidden_write_scopes`
 - `context_budget`
 - `required_handoff_from`
+- `verification_plan_ref`
 - `require_execution_plan_confirm`
 - `execution_plan_status`: `not_started | draft | confirmed | change_requested`
 - `handoff_summary_ref`
@@ -244,6 +289,64 @@ Issue 级拆分总览，只存 Aria 内部数据。
 - `max_traceability_refs`
 - `max_dependency_handoffs`
 
+### RepositoryProfile
+
+目标项目画像，只描述 provider 对目标仓库的识别结果，不写入目标项目仓库。
+
+字段建议：
+
+- `id`
+- `project_id`
+- `issue_id`
+- `repository_id`
+- `provider_run_ref`
+- `languages`
+- `frameworks`
+- `package_managers`
+- `test_frameworks`
+- `build_systems`
+- `verification_capabilities`
+- `confidence`: `low | medium | high`
+- `uncertainties`
+- `created_at`
+- `updated_at`
+
+### VerificationPlan
+
+每个 Work Item 关联一份或多份验证计划。计划内容来自 provider 输出，平台只校验结构、安全边界和执行结果状态。
+
+字段建议：
+
+- `id`
+- `project_id`
+- `issue_id`
+- `work_item_id`
+- `repository_profile_ref`
+- `provider_run_ref`
+- `scope`: `unit | integration | e2e | build | lint | manual | custom`
+- `commands`
+- `manual_checks`
+- `required_gates`
+- `risk_notes`
+- `confidence`: `low | medium | high`
+- `fallback_policy`: `manual_gate | repair_provider_output`
+- `created_at`
+- `updated_at`
+
+`commands` 中每个命令至少包含：
+
+- `id`
+- `label`
+- `command`
+- `cwd`
+- `purpose`
+- `required`
+- `timeout_seconds`
+- `source`: `provider`
+- `safety`: `approved | needs_manual_review`
+
+平台不得给 `commands` 添加按技术栈推导出的默认命令。若 provider 输出为空、低置信度或安全校验失败，进入 `verification_plan_invalid` repair/manual gate。
+
 ### WorkItemExecutionPlan
 
 每个 Work Item Coding 前生成，默认展示但不阻塞；当 `require_execution_plan_confirm=true` 时，用户确认后才能进入 Coder。
@@ -263,7 +366,8 @@ Issue 级拆分总览，只存 Aria 内部数据。
 - `openspec_refs`
 - `superpowers_contract`
 - `tdd_contract`
-- `verification_commands`
+- `verification_plan_ref`
+- `verification_summary`
 - `context_budget`
 - `risk_notes`
 - `created_at`
@@ -327,7 +431,8 @@ Issue 级共享 worktree 记录。
 - 用户跳过贯通测试或 E2E 时，必须记录风险说明。
 - `WorkItemContextBudget` 的代理指标必须处于可控范围；超过阈值时必须拆分或摘要化。
 - Work Item 必须包含 Story/Design/OpenSpec traceability refs。
-- Work Item 必须包含验收目标与验证命令策略。
+- Work Item 必须关联 `VerificationPlan`；`VerificationPlan` 必须来自 provider 输出，且每条命令必须声明 cwd、purpose、required、timeout 与 source。
+- `VerificationPlan` 的 cwd 不得越出目标 repo；命令不得包含平台危险命令黑名单；低置信度或 `needs_manual_review` 的命令不得自动执行，必须进入人工 gate。
 - Work Item 必须声明 Superpowers/TDD/Verification 使用要求。
 - 每个 Work Item 必须能关联到自己的 workspace session 与 artifact versions，避免拆分后 Work Item 正文与实体断联。
 
@@ -341,14 +446,16 @@ Issue 级共享 worktree 记录。
 - 当前 Work Item 如果开启执行计划确认门禁，则 `WorkItemExecutionPlan.status` 必须为 `confirmed`。
 - Coder prompt 包含允许与禁止写入范围。
 - 依赖项的 handoff summary 可读取。
+- `VerificationPlan` 可读取，且其命令结构已通过平台安全校验；无有效计划时不得进入 Coder 自动执行阶段。
 
 Work Item 完成时必须检查：
 
 - diff 没有越过允许写入范围。
 - 禁止写入范围未被修改。
-- 必需验证命令已执行或明确进入人工 gate。
+- `VerificationPlan.required_gates` 已有执行结果，或明确进入人工 gate 并记录人工验收结论。
 - handoff summary 已生成。
 - completion commit/head 已记录。
+- shared worktree `git status` clean；dirty 时不得完成、不得释放 active lock、不得启动后续 Work Item。
 
 ## 错误处理
 
@@ -356,9 +463,11 @@ Work Item 完成时必须检查：
 - DAG 有环时，要求 provider 重新生成依赖关系。
 - 写入范围冲突时，要求 provider 拆细 Work Item 或建立依赖。
 - 上下文预算代理指标超限时，要求 provider 缩小 Work Item 范围或改用摘要引用。
+- Provider 无法识别 `RepositoryProfile` 或无法输出可信 `VerificationPlan` 时，进入 provider repair/manual gate；平台不得用当前 Aria 仓库验证命令兜底。
 - 用户关闭贯通测试/E2E 时不报错，但记录风险。
 - 依赖 Work Item 未完成时，后序 Work Item 的 Coding 入口 disabled，并展示等待原因。
 - 共享 worktree dirty 且当前 Work Item 非 active 时，进入人工 gate，不自动继续。
+- 当前 active Work Item 结束路径发现 shared worktree dirty 时，进入强制人工 gate，保持 active lock，不自动 stash/rollback，也不允许后续 Work Item 开始；人工处理后必须 clean 并显式继续。
 - Coder 越界改动时，进入人工 gate 或自动返修，不解锁后续 Work Item。
 - Work Item 缺 handoff summary 时，不能标记为完成，也不能解锁依赖它的 Work Item。
 - 新增 `aria/issues/*` branch/worktree 前缀后，清理逻辑必须通过参数化安全校验；若安全校验不认识该前缀，禁止绕过校验删除。
@@ -367,7 +476,7 @@ Work Item 完成时必须检查：
 
 ### WorkItemSplitEngine
 
-负责组装拆分上下文并调用 provider 生成 `IssueWorkItemPlan`。
+负责组装拆分上下文并调用 provider 生成 `WorkItemSplitProviderOutput`。
 
 输入：
 
@@ -380,8 +489,10 @@ Work Item 完成时必须检查：
 
 输出：
 
+- `RepositoryProfile`。
 - draft `IssueWorkItemPlan`。
 - draft `LifecycleWorkItemRecord` 列表。
+- `VerificationPlan` 列表。
 - provider raw output 与校验 findings。
 
 ### WorkItemSplitValidator
@@ -389,6 +500,8 @@ Work Item 完成时必须检查：
 负责所有生成期结构与语义校验。第一版应作为纯函数模块实现，便于单元测试覆盖。
 
 该模块应复用 `worktree_scheduler.rs` 中已有依赖与 scope 判断思路，并将其入参迁移到 `LifecycleWorkItemRecord`。
+
+Validator 可以校验 `RepositoryProfile` / `VerificationPlan` 的结构、安全边界和关联完整性，但不得判定某个技术栈应该使用哪条命令。技术栈识别和命令选择属于 provider 决策。
 
 ### IssueWorktreeService
 
@@ -404,6 +517,8 @@ Work Item 完成时必须检查：
 
 负责 Coding 前生成 `WorkItemExecutionPlan`。默认展示但不阻塞；当 Issue 或 Work Item 启用 `require_execution_plan_confirm` 时，等待用户确认后 Coding Workspace 才能进入 Coder 阶段。
 
+Execution planner 只消费 P3 保存的 `VerificationPlan` 并生成提示摘要，不按 `WorkItemKind`、文件路径或当前仓库内容硬编码验证命令。
+
 ### WorkItemHandoffRunner
 
 负责在 Work Item 代码、测试和 review 完成后运行额外 provider handoff run。
@@ -413,7 +528,7 @@ Work Item 完成时必须检查：
 - Work Item 目标和范围。
 - diff summary。
 - files changed。
-- testing summary。
+- `VerificationPlan` 执行结果和人工 gate 结论。
 - review summary。
 - commit/head。
 
@@ -434,9 +549,13 @@ Coding Workspace 需要从 Work Item 读取：
 
 Coder 结束后需要新增 diff scope 校验与 handoff 生成门禁。diff scope 校验复用 `cross_cutting/worktree.rs` 的路径安全函数。
 
+所有 attempt 终态释放 Issue shared worktree active lock 前，必须调用 shared worktree clean gate。Completed 必须满足 diff scope pass、handoff saved、required verification gates pass/manual accepted、completion commit/head recorded、`git status` clean。Failed/Blocked/Aborted 只有在 shared worktree clean 时才能释放锁；dirty 时进入强制人工 gate 并保持锁。
+
 ### Lifecycle artifact 关联
 
 拆分为多个 Work Item 后，每个 `LifecycleWorkItemRecord` 仍必须拥有自己的 workspace session 与 artifact versions。P2 实现 `generate_work_items` 多 Work Item 生成时，必须保证：
+
+> 编号说明：以当前 P1-P9 细分计划为准，`generate_work_items` 多 Work Item 生成由 P3 实现；本段中的 P2 表达的是方案级早期粗分，不作为执行编号依据。
 
 - 每个 Work Item 的 `entity_id` 与对应 workspace session 一一对应。
 - Work Item 正文 artifact version 不被 IssueWorkItemPlan 或其他 Work Item 覆盖。
@@ -470,6 +589,8 @@ Work Item 列需要展示 DAG 状态：
 
 - Work Item kind。
 - 写入范围。
+- RepositoryProfile 摘要与置信度。
+- VerificationPlan 摘要、required gates 和人工 gate 状态。
 - 上下文预算代理指标摘要。
 - 依赖项。
 - handoff 状态。
@@ -483,6 +604,7 @@ Work Item 进入 Coding Workspace 后，Prepare 阶段优先展示 `WorkItemExec
 - 未开启确认门禁时，展示为即将使用的执行计划，可直接开始。
 - 开启确认门禁时，用户确认后进入 Coder。
 - 用户要求修改时，返回 execution plan 返修。
+- 验证区域展示来自 `VerificationPlan` 的命令/人工检查、来源、置信度和 required gate，不展示前端自行推导的当前仓库命令。
 
 ## 测试策略
 
@@ -498,21 +620,26 @@ Work Item 进入 Coding Workspace 后，Prepare 阶段优先展示 `WorkItemExec
 - 贯通测试/E2E 选项校验。
 - 上下文预算代理指标超限校验。
 - traceability refs 缺失校验。
+- RepositoryProfile/VerificationPlan 结构、关联和安全边界校验。
 - 旧 `worktree_scheduler` 算法迁移后能基于 `LifecycleWorkItemRecord` 判断 ready/waiting 状态。
 - execution plan 未确认只在 `require_execution_plan_confirm=true` 时阻塞 Coding。
 - handoff summary 缺失不能完成 Work Item。
 - diff 越界进入 gate。
+- shared worktree dirty 时不能 complete/release lock。
 
 ### Rust 集成测试
 
 覆盖：
 
 - `generate_work_items` 一次生成 IssueWorkItemPlan 和多个 Work Item。
+- provider 输出 RepositoryProfile 与 VerificationPlan 后被保存并关联到 Work Item。
+- draft IssueWorkItemPlan confirm 后，关联 Work Item 批量变为 confirmed；change requested 时保持不可编码。
 - 用户关闭贯通测试时记录风险但不生成 Integration/E2E Work Item。
 - 用户启用贯通测试时生成 Integration/E2E Work Item 并依赖前后端项。
 - 同一 Issue 下多个 Work Item 复用同一个 shared branch/worktree。
 - 新 `aria/issues/*` branch/worktree 前缀通过安全校验，存量 `aria/work-items/*` 仍兼容。
 - 同一 Issue 同一时刻只能有一个 active Work Item 修改共享 worktree。
+- dirty shared worktree 进入强制人工 gate 并保持 active lock，clean 后才可继续或释放。
 - 后序 Work Item 启动时注入前序 handoff summary。
 - 多 Work Item 拆分后，每个 Work Item 的 workspace session 与 artifact version 仍可被 Coding Workspace 读取。
 
@@ -524,6 +651,7 @@ Work Item 进入 Coding Workspace 后，Prepare 阶段优先展示 `WorkItemExec
 - Work Item DAG 展示。
 - 等待依赖或等待写入范围时禁用 Coding 入口。
 - Coding Prepare 阶段显示 execution plan confirmation 或非阻塞展示态。
+- Coding Prepare 阶段显示 VerificationPlan，且命令来源为 provider 输出。
 - Work Item 卡片展示写入范围、预算和 handoff 状态。
 
 ### 贯通测试
@@ -596,8 +724,10 @@ Work Item 进入 Coding Workspace 后，Prepare 阶段优先展示 `WorkItemExec
 - 新 `aria/issues/*` branch/worktree 前缀可安全创建、使用和清理；存量 `aria/work-items/*` 不被破坏。
 - 后序 Work Item 能读取前序 Work Item 的 handoff summary。
 - WorkItemExecutionPlan 默认展示但不阻塞；开启确认门禁时才阻塞。
+- VerificationPlan 来自 provider 输出，不硬编码当前仓库命令；无有效计划时进入 repair/manual gate。
 - WorkItemHandoff 由额外 provider run 生成，缺失时不能完成 Work Item。
 - Work Item 状态和计划不写入目标项目代码库。
 - Coding 阶段越界改动不会自动解锁后续 Work Item。
+- 共享 worktree dirty 时不会释放 active lock 或启动后续 Work Item。
 - 多 Work Item 拆分后，Work Item workspace session 与 artifact versions 关联稳定。
 - 相关后端、前端和贯通测试覆盖通过。

@@ -9,6 +9,7 @@
 **Goal:** Coding 启动前检查依赖完成、Issue 共享 worktree 准备、active Work Item 串行锁、写入范围和 handoff 可读性，并让同一 Issue 下的 Coding attempt 复用 Issue 共享 branch/worktree。
 
 **Architecture:** `create_coding_attempt` 负责启动前门禁和 branch 选择；`CodingWorkspaceEngine::execute_worktree_prepare` 负责按 attempt 中的 Issue branch/worktree 创建或复用 worktree；`LifecycleStore` 提供 active lock。第一版仍保持同一 Issue 同一时刻只有一个 active Work Item，避免共享 worktree 下 `git add -A` 污染其他 Work Item。
+所有释放 active lock 的路径必须先执行 shared worktree clean gate。每个 Work Item 完成、失败、阻塞或中止后不得遗留未提交/半提交改动；若 shared worktree dirty，进入强制人工 gate，保持当前 Work Item 的 active lock，不允许后续 Work Item 接管。
 
 **Tech Stack:** Rust 1.95.0、Axum、LifecycleStore、CodingAttemptStore、GitWorkspaceService、Cargo integration tests、TDD。
 
@@ -19,6 +20,7 @@
 执行本计划前确认：
 
 - P3 已让 `generate_work_items` 创建多个 Work Item，并写入 `depends_on`、`exclusive_write_scopes`、`forbidden_write_scopes`、`required_handoff_from`。
+- P3 已保存 provider 输出的 `VerificationPlan`，并在 IssueWorkItemPlan 级 confirm 后才把 Work Item `plan_status` 置为 confirmed。
 - P4 已提供 `IssueSharedWorktree` store API，并允许 `aria/issues/*` branch 与 `.worktrees/aria-issues/*` worktree。
 - P4 未改变 existing attempt worktree 行为；本计划负责切换 Coding attempt 到 Issue 级共享 worktree。
 
@@ -81,6 +83,7 @@
 - `coding_store_with_attempt(root, work_item_id, branch_name)`：构造 `CodingAttemptStore` 并写入一个指定 branch 的 attempt，返回 `(store, attempt)`。
 - `final_confirm_attempt(paths, work_item_id)`：构造一个处于 final confirm 前置状态的 attempt，返回 `(store, attempt)`。
 - `failed_attempt(paths, work_item_id)`：构造一个 `status` 为 `CodingAttemptStatus::Failed` 的 attempt，返回 `(store, attempt)`，用于验证异常终态释放锁。
+- `dirty_failed_attempt(paths, work_item_id)`：构造一个 `status=Failed` 且 shared worktree 存在未提交改动的 attempt，用于验证 dirty clean gate 保持锁。
 
 - [ ] **步骤 3：编译确认**
 
@@ -286,13 +289,13 @@ cargo test --locked --test it_product product_coding_workspace_engine
 
 预期：新增和既有 engine tests pass.
 
-## 任务 3：Release Active Lock On Completion, Abort And Failed/Blocked States
+## 任务 3：Release Active Lock Only After Shared Worktree Clean Gate
 
-> **🔴 v1.1 阻塞修复：** 原计划只在 `handle_final_confirm`（完成）和 `handle_abort`（中止）两个路径释放 active lock。若 attempt 走到**其他终态**（Coding/Review 失败、卡 gate 后被同 Issue 新 attempt 取代、provider run 异常退出等），锁不会释放，会导致同 Issue 后续 Work Item 永久卡在 `issue_worktree_active` 死锁。本任务新增步骤 5 覆盖异常终态/attempt 被取代时的释放逻辑。
+> **🔴 v1.2 阻塞修复：** active lock 释放不能只看 attempt 终态。共享 worktree 是同一 Issue 的连续交付状态，任何终态只要 worktree dirty，都可能包含未提交/半提交改动。此时必须进入强制人工 gate 并保持 active lock，不允许下一个 Work Item 复用污染状态。只有 worktree clean 时，Completed/Aborted/Failed/Blocked/Superseded 才能释放或转移锁。
 
 > **提交分段：** 本任务拆为两段提交，降低单 commit 风险。
-> - 段一（步骤 1-4）：`handle_final_confirm`、`handle_abort` 释放锁，新增 `handle_attempt_failed`，改造 `fail_provider_stream` 等核心失败路径为 `Failed`。
-> - 段二（步骤 5）：其余 `Blocked` 路径锁释放、新 attempt 取代旧 attempt 时的锁处理、`complete_attempt_after_final_rework` 锁释放。
+> - 段一（步骤 1-4）：`handle_final_confirm`、`handle_abort` 在 clean gate 通过后释放锁，新增 `handle_attempt_failed` 并在 clean 时释放。
+> - 段二（步骤 5-6）：dirty 强制人工 gate、Blocked/Superseded/新 attempt 取代旧 attempt 的 clean-gate 处理、`complete_attempt_after_final_rework` clean-gate 释放。
 
 **文件：**
 
@@ -352,7 +355,7 @@ cargo test --locked --test it_product final_confirm_releases_issue_shared_worktr
 
 - [ ] **步骤 3：释放 lock in completion and abort paths**
 
-在 `handle_final_confirm()`, after updating the Work Item to completed, call:
+在 `handle_final_confirm()`, after updating the Work Item to completed, first assert shared worktree clean, then call:
 
 ```rust
 LifecycleStore::new(self.store.paths())
@@ -362,6 +365,7 @@ LifecycleStore::new(self.store.paths())
 在 `handle_abort()`, call:
 
 ```rust
+ensure_issue_shared_worktree_clean(project_id, issue_id, &updated.work_item_id)?;
 let _ = LifecycleStore::new(self.store.paths())
     .release_issue_worktree_lock(project_id, issue_id, &updated.work_item_id);
 ```
@@ -417,20 +421,22 @@ async fn failed_attempt_releases_issue_shared_worktree_lock() {
 }
 ```
 
-随后在实现中，确保**所有 attempt 终态收敛点**都释放锁（而非仅完成/中止）：
+随后在实现中，确保**所有 attempt 终态收敛点**都先走 clean gate，再决定是否释放锁：
 
 1. 新增 `pub async fn handle_attempt_failed(&self, project_id: &str, issue_id: &str, attempt_id: &str) -> Result<(), CodingWorkspaceError>`：
    - 加载 attempt 及对应 Work Item。
    - 将 attempt 状态置为 `CodingAttemptStatus::Failed`（若尚未置为 Failed）。
-   - 调用 `release_issue_worktree_lock(project_id, issue_id, &work_item_id)`，仅当当前持锁 Work Item 与本 attempt 的 Work Item 一致时才释放，避免误释放后续 attempt 的锁。
+   - 调用 `ensure_issue_shared_worktree_clean(project_id, issue_id, &work_item_id)`。
+   - clean 时调用 `release_issue_worktree_lock(project_id, issue_id, &work_item_id)`，仅当当前持锁 Work Item 与本 attempt 的 Work Item 一致时才释放，避免误释放后续 attempt 的锁。
+   - dirty 时创建 `shared_worktree_dirty_manual_gate`，保持 active lock，并返回可恢复错误。
    - 缺少 shared worktree 记录时按 backward-compatible no-op 处理。
 2. 在已有 `handle_final_confirm`（Completed）和 `handle_abort`（Aborted）路径中保留并复核锁释放逻辑。
-3. 其他收敛到 Failed/Superseded/Blocked 等终态的代码路径（如 provider run 异常退出、attempt 被新 attempt 取代）应统一调用 `handle_attempt_failed` 或在本地执行同样的「仅当持锁者匹配才释放」逻辑。
-4. 新 attempt 抢占（取代旧 attempt）时，应在创建新 attempt 的锁获取逻辑中处理旧持锁项的释放/接管，避免旧项残留锁。
+3. 其他收敛到 Failed/Superseded/Blocked 等终态的代码路径（如 provider run 异常退出、attempt 被新 attempt 取代）应统一调用 clean-gate 释放 helper。
+4. 新 attempt 抢占（取代旧 attempt）时，应先检查旧持锁项 worktree clean；dirty 时拒绝新 attempt 并返回 `shared_worktree_dirty_manual_gate`，clean 时才释放/接管。
 
-> **选 B 的落地要求：** 引入真正的 `CodingAttemptStatus::Failed` 终态，并将不可恢复的失败路径从 `Blocked` 改为 `Failed`。可恢复的人工 gate（testing 失败但可 retry、review 需要人工决策）保持 `Blocked`，但同样需要在进入 `Blocked` 时释放 active lock，因为当前 Issue 下该 Work Item 已不能继续独占共享 worktree。
+> **选 B 的落地要求：** 引入真正的 `CodingAttemptStatus::Failed` 终态，并将不可恢复的失败路径从 `Blocked` 改为 `Failed`。可恢复的人工 gate（testing 失败但可 retry、review 需要人工决策）保持 `Blocked`，但只有 shared worktree clean 时才释放 active lock；dirty 时必须继续由当前 Work Item 独占直到人工处理干净。
 
-预期：`failed_attempt_releases_issue_shared_worktree_lock` 通过，同 Issue 后续 Work Item 不再死锁。
+预期：`failed_attempt_releases_issue_shared_worktree_lock` 通过，同 Issue 后续 Work Item 不再死锁；dirty 场景由步骤 6 覆盖，不能释放锁。
 
 ### 具体路径改造清单
 
@@ -451,13 +457,69 @@ async fn failed_attempt_releases_issue_shared_worktree_lock() {
 4. **新 attempt 取代旧 attempt**
    - 在 `create_coding_attempt`（`src/web/handlers.rs`）中，若已存在 active attempt，需要先调用 `engine.handle_attempt_failed(project_id, issue_id, &old_attempt.id).await`（或等价释放锁逻辑），再为新 attempt 获取 active lock。
 
-5. **Blocked 路径也需要释放锁**
-   - 对于保持 `Blocked` 的可恢复路径（如 testing 失败但可 retry），在进入 `Blocked` 后调用 `release_issue_worktree_lock`（仅当持锁者匹配时）。
-   - 这样后续 Work Item 不会因为一个卡在 gate 的 attempt 而永久阻塞。
+5. **Blocked 路径也需要 clean-gate 释放**
+   - 对于保持 `Blocked` 的可恢复路径（如 testing 失败但可 retry），在进入 `Blocked` 后调用统一 clean-gate helper。
+   - clean 时释放 active lock；dirty 时保持锁并创建 `shared_worktree_dirty_manual_gate`。
+   - 这样既避免干净失败路径死锁，也避免脏 worktree 污染后续 Work Item。
 
 6. **`complete_attempt_after_final_rework()`（`coding_workspace_engine.rs:4762`）**
    - 该函数内部直接置 `Completed` 并调用 `mark_work_item_completed_if_present`，**不经过 `handle_final_confirm`**。
-   - 必须在该函数内补充 `mark_issue_worktree_completed_item` 调用，确保锁释放。
+   - 必须在该函数内先执行 diff/verification/handoff 前置门禁（P6 接管更完整门禁）和 shared worktree clean gate；clean 后才补充 `mark_issue_worktree_completed_item` 调用，确保锁释放。
+   - dirty 时返回 `shared_worktree_dirty_manual_gate`，不得置 Completed，不得释放锁。
+
+- [ ] **步骤 6：dirty shared worktree blocks lock release**
+
+追加失败态测试：
+
+```rust
+#[tokio::test]
+async fn dirty_shared_worktree_blocks_lock_release_and_next_work_item() {
+    let root = tempdir().expect("root");
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let lifecycle = LifecycleStore::new(paths.clone());
+    let shared_path = root.path().join("repo/.worktrees/aria-issues/issue_0001");
+    std::fs::create_dir_all(&shared_path).expect("shared path");
+    std::fs::write(shared_path.join("dirty.txt"), "uncommitted").expect("dirty file");
+    lifecycle
+        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: shared_path,
+            base_branch: "main".to_string(),
+        })
+        .expect("shared worktree");
+    lifecycle
+        .try_acquire_issue_worktree_lock("project_0001", "issue_0001", "work_item_0001")
+        .expect("lock");
+    let (store, attempt) = dirty_failed_attempt(paths.clone(), "work_item_0001");
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
+
+    let error = engine
+        .handle_attempt_failed("project_0001", "issue_0001", &attempt.id)
+        .await
+        .expect_err("dirty worktree keeps lock");
+
+    assert!(format!("{error}").contains("shared_worktree_dirty_manual_gate"));
+    let shared = lifecycle
+        .get_issue_shared_worktree("project_0001", "issue_0001")
+        .expect("load shared")
+        .expect("shared exists");
+    assert_eq!(
+        shared.current_active_work_item_id.as_deref(),
+        Some("work_item_0001")
+    );
+}
+```
+
+实现要求：
+
+- 新增 `ensure_issue_shared_worktree_clean(project_id, issue_id, work_item_id)` helper。
+- helper 使用 git status porcelain 或既有 Git service 状态能力判断 shared worktree 是否 clean。
+- dirty 时创建/记录人工 gate，错误 code 为 `shared_worktree_dirty_manual_gate`。
+- dirty 时不 stash、不 rollback、不 release lock；人工处理 clean 后再显式继续或释放。
 
 ## 任务 4：Block Missing Handoff For Required Dependencies
 
@@ -540,6 +602,7 @@ cargo test --locked --test it_web rejects_coding_attempt_when_required_dependenc
 cargo test --locked --test it_product worktree_prepare_uses_issue_shared_worktree_path_for_issue_branch
 cargo test --locked --test it_product final_confirm_releases_issue_shared_worktree_lock
 cargo test --locked --test it_product failed_attempt_releases_issue_shared_worktree_lock
+cargo test --locked --test it_product dirty_shared_worktree_blocks_lock_release_and_next_work_item
 cargo test --locked --test it_product product_coding_workspace_engine
 cargo fmt --check
 cargo clippy --all-targets --all-features --locked -- -D warnings
@@ -554,16 +617,16 @@ cargo check --locked
 
 ## 提交
 
-段一（任务 1-3 步骤 1-4，核心锁释放 + Failed 终态）：
+段一（任务 1-3 步骤 1-4，clean-gate 锁释放 + Failed 终态）：
 
 ```bash
 git add src/web/handlers.rs src/product/coding_workspace_engine.rs src/product/lifecycle_store.rs tests/it_web/web_coding_attempt_api.rs tests/it_product/product_coding_workspace_engine.rs
-git commit -m "feat: gate coding attempts and release shared worktree lock on terminal states"
+git commit -m "feat: gate coding attempts and release clean shared worktree locks"
 ```
 
-段二（任务 3 步骤 5，Blocked/Superseded 路径锁释放）：
+段二（任务 3 步骤 5-6，Blocked/Superseded/dirty 路径 clean gate）：
 
 ```bash
 git add src/product/coding_workspace_engine.rs src/product/lifecycle_store.rs tests/it_product/product_coding_workspace_engine.rs
-git commit -m "feat: release shared worktree lock on blocked and superseded attempts"
+git commit -m "feat: enforce clean gate before shared worktree lock release"
 ```

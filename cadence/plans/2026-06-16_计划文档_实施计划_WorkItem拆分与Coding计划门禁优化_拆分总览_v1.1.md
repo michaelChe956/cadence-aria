@@ -32,6 +32,9 @@
   - 同一 Issue 的多个 Work Item 使用同一个共享 worktree branch。
   - Work Item 之间只对真实依赖排序；并行项必须写入范围互斥。
   - Coding 执行前必须具备单 session 可控的输入包；超限时继续拆分或摘要化。
+  - 运行时验证策略必须由 provider 输出的 `RepositoryProfile` / `VerificationPlan` 决定；平台不得硬编码当前 Cadence Aria 仓库的 Rust/pnpm/Playwright 命令作为目标项目兜底。
+  - `IssueWorkItemPlan` 使用组级确认流：生成后为 draft，用户确认 plan 后才批量确认关联 Work Item；不得复用单个 Work Item workspace confirm 表达拆分计划确认。
+  - 共享 worktree 终态必须经过 clean gate；dirty 时进入强制人工 gate 并保持 active lock，不允许后续 Work Item 接管污染状态。
 
 ## 拆分原则
 
@@ -41,6 +44,7 @@
 - 每个计划必须只修改自己声明的写入范围；若实现时发现需要越界修改，先更新拆分总览或新增计划，不在当前计划内临时扩大范围。
 - 依赖计划的开头必须提供前置交付摘要，避免后序 session 重新吞入前序完整上下文。
 - 每个计划的验证链必须包含项目强制检查命令，至少包含 `cargo fmt --check`、`cargo clippy --all-targets --all-features --locked -- -D warnings` 和 `cargo check --locked`，外加该计划的定向测试；不允许只跑 `fmt + check` 而省略 clippy（详见 `cadence/project-rules/build-test-commands.md`）。
+- 上一条中的验证链是实现 Cadence Aria 本身的计划验收命令；目标项目运行时的验证命令必须来自 provider 输出的 `VerificationPlan`，不得在 P3/P5/P6 中按 Work Item kind 或当前仓库技术栈硬编码。
 
 ### 写入范围共享与串行约束
 
@@ -93,11 +97,11 @@
 
 ## P2：后端 IssueWorkItemPlan 与 SplitValidator
 
-**目标：** 新增 Aria 内部 Issue 级拆分计划模型和纯函数校验器，校验 DAG、写入范围、跨端拆分、贯通测试选项、上下文预算代理指标和 traceability。
+**目标：** 新增 Aria 内部 Issue 级拆分计划模型、`RepositoryProfile`、`VerificationPlan` 和纯函数校验器，校验 DAG、写入范围、跨端拆分、贯通测试选项、上下文预算代理指标、traceability、验证计划结构与安全边界。
 
 **依赖：** P1。
 
-**前置交付摘要要求：** 读取 P1 提交摘要，确认 `LifecycleWorkItemRecord` 已具备 `depends_on`、`exclusive_write_scopes`、`forbidden_write_scopes`、`context_budget`、`kind` 和 execution plan/handoff 引用字段。
+**前置交付摘要要求：** 读取 P1 提交摘要，确认 `LifecycleWorkItemRecord` 已具备 `depends_on`、`exclusive_write_scopes`、`forbidden_write_scopes`、`context_budget`、`kind`、`verification_plan_ref` 和 execution plan/handoff 引用字段。
 
 **写入范围：**
 
@@ -111,6 +115,7 @@
 
 - 不调用 provider 生成拆分计划。
 - 不创建真实 Work Item。
+- 不根据 Rust/pnpm/Playwright 等技术栈选择验证命令；命令选择属于 provider 输出，P2 只校验结构、关联、cwd/path 和危险命令边界。
 - 不改前端。
 
 **验证：**
@@ -126,11 +131,11 @@
 
 ## P3：后端 generate_work_items 多 Work Item 与 artifact 关联
 
-**目标：** 将现有 `generate_work_items` 从单 Work Item 生成升级为 Issue Work Item Set 生成，保证每个 Work Item 都有自己的 workspace session 与 artifact versions。
+**目标：** 将现有 `generate_work_items` 从单 Work Item 生成升级为 provider-based Issue Work Item Set 生成，保存 `RepositoryProfile`、`VerificationPlan`、draft `IssueWorkItemPlan` 和 draft Work Items，并提供 IssueWorkItemPlan 级 confirm/change-request 流；保证每个 Work Item 都有自己的 workspace session 与 artifact versions。
 
 **依赖：** P1、P2。
 
-**前置交付摘要要求：** 总结 P2 的 `IssueWorkItemPlan` 字段、validator findings 结构和校验失败返回方式。
+**前置交付摘要要求：** 总结 P2 的 `IssueWorkItemPlan`、`RepositoryProfile`、`VerificationPlan` 字段，validator findings 结构和校验失败返回方式。
 
 **写入范围：**
 
@@ -147,11 +152,14 @@
 
 - 不实现 Issue 共享 worktree。
 - 不实现 Coding 启动门禁。
+- 不生成或硬编码目标项目验证命令；P3 只解析并保存 provider 输出的 `VerificationPlan`。
 - 不改前端 UI。
 
 **验证：**
 
 - `cargo test --locked --test it_web generate_work_items`
+- `cargo test --locked --test it_web confirm_issue_work_item_plan_marks_work_items_confirmed`
+- `cargo test --locked --test it_web request_change_keeps_split_work_items_not_codeable`
 - `cargo test --locked --test it_product lifecycle_store`
 - `cargo fmt --check`
 - `cargo clippy --all-targets --all-features --locked -- -D warnings`
@@ -197,11 +205,11 @@
 
 ## P5：后端 Coding 启动门禁与共享 worktree 复用
 
-**目标：** Coding 启动前检查依赖完成、共享 worktree 准备、active Work Item 串行锁、写入范围和 handoff 可读性，并让同一 Issue 下 attempt 复用 Issue 共享 worktree。
+**目标：** Coding 启动前检查依赖完成、共享 worktree 准备、active Work Item 串行锁、写入范围、handoff 和 `VerificationPlan` 可读性，并让同一 Issue 下 attempt 复用 Issue 共享 worktree；所有终态释放锁前执行 shared worktree clean gate。
 
 **依赖：** P1、P3、P4。
 
-**前置交付摘要要求：** 总结 P3 的 Work Item Set 创建行为和 P4 的 `IssueSharedWorktree` 安全前缀规则。
+**前置交付摘要要求：** 总结 P3 的 Work Item Set 创建行为、IssueWorkItemPlan confirm 行为、VerificationPlan 关联方式，以及 P4 的 `IssueSharedWorktree` 安全前缀规则。
 
 **写入范围：**
 
@@ -215,6 +223,7 @@
 
 - 不实现 `WorkItemExecutionPlan` provider run。
 - 不实现 handoff provider run。
+- 不决定目标项目验证命令。
 - 不改前端。
 
 **验证：**
@@ -225,6 +234,7 @@
 - `cargo test --locked --test it_product worktree_prepare_uses_issue_shared_worktree_path_for_issue_branch`
 - `cargo test --locked --test it_product final_confirm_releases_issue_shared_worktree_lock`
 - `cargo test --locked --test it_product failed_attempt_releases_issue_shared_worktree_lock`
+- `cargo test --locked --test it_product dirty_shared_worktree_blocks_lock_release_and_next_work_item`
 - `cargo fmt --check`
 - `cargo clippy --all-targets --all-features --locked -- -D warnings`
 - `cargo check --locked`
@@ -235,11 +245,11 @@
 
 ## P6：后端 WorkItemExecutionPlan 与 Handoff Provider Run
 
-**目标：** Coding 前生成内部 `WorkItemExecutionPlan`，默认展示但不阻塞；Work Item 完成前执行 diff scope 校验并运行额外 provider handoff run，越界 diff 或缺 handoff 都不允许完成或解锁依赖项。
+**目标：** Coding 前生成内部 `WorkItemExecutionPlan`，默认展示但不阻塞；ExecutionPlan 只消费 P3 保存的 `VerificationPlan`，不得按 WorkItemKind 硬编码命令；Work Item 完成前执行 diff scope、required verification、clean gate 校验并运行额外 provider handoff run，越界 diff、缺 handoff、缺 required verification 或 dirty worktree 都不允许完成或解锁依赖项。
 
 **依赖：** P1、P5。
 
-**前置交付摘要要求：** 总结 P5 的 Coding 门禁输入包结构、active lock 释放时机和 completion commit 记录方式。
+**前置交付摘要要求：** 总结 P5 的 Coding 门禁输入包结构、VerificationPlan 读取方式、active lock clean-gate 释放时机和 completion commit 记录方式。
 
 **写入范围：**
 
@@ -257,6 +267,7 @@
 
 - 不改前端 Prepare 展示。
 - 不实现前端 DAG。
+- 不按 backend/frontend/integration/e2e kind 生成 `cargo`、`pnpm`、Playwright 等目标项目命令。
 - 不做真实浏览器 E2E。
 
 **验证：**
@@ -265,6 +276,8 @@
 - `cargo test --locked --test it_product saves_and_loads_work_item_handoff`
 - `cargo test --locked --test it_product final_confirm_requires_work_item_handoff`
 - `cargo test --locked --test it_product final_confirm_rejects_diff_outside_work_item_write_scope`
+- `cargo test --locked --test it_product execution_plan_uses_provider_verification_plan_without_kind_defaults`
+- `cargo test --locked --test it_product final_confirm_requires_required_verification_gate_result`
 - `cargo test --locked --test it_product generates_handoff_from_review_and_test_summaries_before_final_confirm`
 - `cargo test --locked --test it_web coding_attempt_snapshot_includes_generated_work_item_execution_plan`
 - `cargo test --locked --test it_web coding_ws_blocks_coder_stage_when_execution_plan_requires_confirmation`
@@ -278,11 +291,11 @@
 
 ## P7：前端 Work Item 生成选项与 DAG 展示
 
-**目标：** 前端提供生成选项，并在 Work Item 列展示 kind、依赖、写入范围、预算、等待原因、handoff 状态和贯通/E2E 标识。
+**目标：** 前端提供生成选项，并在 Work Item 列展示 kind、依赖、写入范围、RepositoryProfile/VerificationPlan 摘要、预算、等待原因、handoff 状态和贯通/E2E 标识。
 
 **依赖：** P2、P3。
 
-**前置交付摘要要求：** 总结 P3 暴露给前端的 Work Item Set、validator findings、用户选项和等待原因字段。
+**前置交付摘要要求：** 总结 P3 暴露给前端的 Work Item Set、IssueWorkItemPlan confirm 状态、RepositoryProfile、VerificationPlan、validator findings、用户选项和等待原因字段。
 
 **写入范围：**
 
@@ -319,11 +332,11 @@
 
 ## P8：前端 Coding Prepare 执行计划展示
 
-**目标：** Coding Workspace Prepare 阶段展示 `WorkItemExecutionPlan`；默认非阻塞，开启确认门禁时要求用户确认或请求修改。
+**目标：** Coding Workspace Prepare 阶段展示 `WorkItemExecutionPlan` 和其引用的 provider-based `VerificationPlan`；默认非阻塞，开启确认门禁时要求用户确认或请求修改。
 
 **依赖：** P6。
 
-**前置交付摘要要求：** 总结 P6 的 execution plan API/WS 字段、确认状态和 change requested 行为。
+**前置交付摘要要求：** 总结 P6 的 execution plan API/WS 字段、VerificationPlan 字段、确认状态和 change requested 行为。
 
 **写入范围：**
 
@@ -357,11 +370,11 @@
 
 ## P9：贯通测试与可选 E2E Work Item 验收
 
-**目标：** 验证后端 Work Item、前端 Work Item、可选 Integration/E2E Work Item 的端到端关系：后端 handoff 被前端消费，Integration/E2E 等待前后端完成，用户跳过时记录风险但不阻塞。
+**目标：** 验证后端 Work Item、前端 Work Item、可选 Integration/E2E Work Item 的端到端关系：provider 输出 RepositoryProfile/VerificationPlan，IssueWorkItemPlan 组级确认后 Work Item 才可编码，后端 handoff 被前端消费，Integration/E2E 等待前后端完成，dirty shared worktree 被 clean gate 阻断，用户跳过时记录风险但不阻塞。
 
 **依赖：** P1-P8。
 
-**前置交付摘要要求：** 总结 P3/P5/P6/P7/P8 的 API、UI 和状态机行为，只引用摘要与关键测试名，不重新吞入所有实现细节。
+**前置交付摘要要求：** 总结 P3/P5/P6/P7/P8 的 API、UI、VerificationPlan 和状态机行为，只引用摘要与关键测试名，不重新吞入所有实现细节。
 
 **写入范围：**
 
@@ -411,8 +424,11 @@
 - Work Item 之间有 DAG；只有真实依赖才排序。
 - 无依赖并行项的写入范围必须互斥，无法证明互斥时必须建立依赖或继续拆分。
 - 每个 Work Item 的执行上下文受 30k-50k 等价预算代理指标约束。
+- RepositoryProfile/VerificationPlan 来自 provider 输出；平台不按当前仓库或 WorkItemKind 硬编码目标项目验证命令。
+- draft IssueWorkItemPlan 必须经组级 confirm 后，关联 Work Item 才能变成 confirmed 并启动 Coding。
 - 同一 Issue 下多个 Work Item 使用同一个共享 branch/worktree。
 - 同一 Issue 同一时刻只有一个 active Work Item 修改共享 worktree。
+- dirty shared worktree 会进入强制人工 gate 并保持 active lock，clean 前不得释放锁或启动后续 Work Item。
 - 后序 Work Item 可以消费前序 handoff summary，不需要完整历史上下文。
 - `WorkItemExecutionPlan` 默认展示但不阻塞；开启确认门禁时才阻塞。
 - Work Item 状态、拆分计划、执行计划和 handoff 都只存 Aria 内部数据，不写入目标项目代码库。

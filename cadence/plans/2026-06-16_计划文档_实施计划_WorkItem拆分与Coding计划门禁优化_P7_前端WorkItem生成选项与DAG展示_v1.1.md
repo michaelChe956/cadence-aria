@@ -20,7 +20,8 @@
 
 - 🔴 **硬前置（执行前必须确认）**：当前 `web/src/api/types.ts` 的 `LifecycleWorkItem`（约行 108-119）只有基础字段（无 `kind`/`depends_on`/`exclusive_write_scopes` 等），`GenerateWorkItemsRequest`（约行 749-753）只有 `title`/`story_spec_ids`/`design_spec_ids`（无 4 个开关）。这些拆分字段必须由**后端 P3 先落地并反映到前端类型**。开工前必须确认 P3 已交付对应 DTO 字段；若尚未交付，停止本计划并回到 P3，不在前端伪造字段。
 - P3 后端 `GenerateWorkItemsRequest` 已支持 `include_integration_tests`、`include_e2e_tests`、`force_frontend_backend_split`、`require_execution_plan_confirm`。
-- `LifecycleWorkItemDto` 已透出 `kind`、`depends_on`、`exclusive_write_scopes`、`forbidden_write_scopes`、`context_budget`、`required_handoff_from`、`handoff_summary_ref`、`completion_commit`、`completion_diff_summary_ref`。
+- P3 后端 `GenerateWorkItemsResponse` 已返回 `work_item_plan`、`repository_profile`、`verification_plans`、`work_items` 和 `validator_findings`。
+- `LifecycleWorkItemDto` 已透出 `kind`、`depends_on`、`exclusive_write_scopes`、`forbidden_write_scopes`、`context_budget`、`required_handoff_from`、`verification_plan_ref`、`handoff_summary_ref`、`completion_commit`、`completion_diff_summary_ref`。
 - P5/P6 后端会通过 `latest_attempt`、status 和 handoff 字段表达等待/完成状态。
 - **P7→P8 串行约束**：P7 与 P8 共享并修改 `web/src/api/types.ts`（P7 扩 `LifecycleWorkItem`/`GenerateWorkItemsRequest`，P8 新增 `WorkItemExecutionPlan`/`WorkItemHandoff` 并扩 `CodingAttemptSnapshotResponse`）。必须先完成 P7、再执行 P8，不得并行，避免 `types.ts` 合并冲突。
 
@@ -104,6 +105,7 @@ it("describes split work item lifecycle metadata", () => {
       max_dependency_handoffs: 3,
     },
     required_handoff_from: [],
+    verification_plan_ref: "verification_plan_work_item_0001",
     require_execution_plan_confirm: false,
     execution_plan_status: "not_started",
     handoff_summary_ref: null,
@@ -145,6 +147,7 @@ pnpm -C web test -- --run types
 ```ts
 export type WorkItemKind = "backend" | "frontend" | "integration" | "e2e" | "docs" | "infra" | "other";
 export type WorkItemExecutionPlanStatus = "not_started" | "draft" | "confirmed" | "change_requested";
+export type RepositoryProfileConfidence = "low" | "medium" | "high";
 
 export type WorkItemContextBudget = {
   target_context_k: string;
@@ -154,6 +157,42 @@ export type WorkItemContextBudget = {
   max_context_file_refs: number;
   max_traceability_refs: number;
   max_dependency_handoffs: number;
+};
+
+export type RepositoryProfile = {
+  id: string;
+  repository_id: string;
+  languages: string[];
+  frameworks: string[];
+  package_managers: string[];
+  test_frameworks: string[];
+  build_systems: string[];
+  verification_capabilities: string[];
+  confidence: RepositoryProfileConfidence;
+  uncertainties: string[];
+};
+
+export type VerificationPlan = {
+  id: string;
+  work_item_id: string;
+  repository_profile_ref: string | null;
+  scope: "unit" | "integration" | "e2e" | "build" | "lint" | "manual" | "custom";
+  commands: Array<{
+    id: string;
+    label: string;
+    command: string;
+    cwd: string;
+    purpose: string;
+    required: boolean;
+    timeout_seconds: number;
+    source: "provider";
+    safety: "approved" | "needs_manual_review";
+  }>;
+  manual_checks: Array<{ id: string; label: string; instructions: string; required: boolean }>;
+  required_gates: string[];
+  risk_notes: string[];
+  confidence: RepositoryProfileConfidence;
+  fallback_policy: "manual_gate" | "repair_provider_output";
 };
 ```
 
@@ -409,6 +448,7 @@ Drawer:
 
 - Show dependencies by ID/title.
 - Show allowed and forbidden scopes.
+- Show repository profile confidence and verification plan source/gates when available.
 - Show budget proxy compact summary.
 - Show `交接摘要已生成` or `等待交接摘要`.
 - Show `需要确认执行计划` if `require_execution_plan_confirm=true`.

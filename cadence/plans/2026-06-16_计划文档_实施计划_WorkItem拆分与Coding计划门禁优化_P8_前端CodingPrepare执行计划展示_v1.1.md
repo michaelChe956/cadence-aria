@@ -6,7 +6,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Coding Workspace Prepare 阶段展示 `WorkItemExecutionPlan`；默认非阻塞，开启确认门禁时要求用户确认或请求修改。
+**Goal:** Coding Workspace Prepare 阶段展示 `WorkItemExecutionPlan` 及其引用的 provider-based `VerificationPlan`；默认非阻塞，开启确认门禁时要求用户确认或请求修改。
 
 **Architecture:** 后端 P6 已在 coding attempt snapshot 和 WS state 中提供 execution plan。本计划只改 Coding Workspace 前端：API types、store、WS hydration 和 `CodingWorkspacePage` 展示/操作，不改 Product Workbench。
 
@@ -19,6 +19,7 @@
 执行本计划前确认：
 
 - P6 `CodingAttemptSnapshotResponse` 已包含 `work_item_execution_plan` 和 `work_item_handoff`。
+- P6 `WorkItemExecutionPlan` 通过 `verification_plan_ref` 引用 P3 保存的 `VerificationPlan`；前端不得用 Work Item kind 或当前仓库技术栈推导验证命令。
 - P6 已增加 confirm/change-request HTTP API，前端需要在 `web/src/api/client.ts` 增加调用。
 - 后端表达门禁的规则是：`require_execution_plan_confirm=false` 时 draft 不阻塞；为 true 时必须确认后才能进入 Coder。门禁标志的唯一来源是 work item / snapshot 上的 `require_execution_plan_confirm`（由 P6 后端字段透出），前端不在 plan 对象上自造 `require_confirmation`。
 - **P7→P8 串行约束**：P7 与 P8 共享并修改 `web/src/api/types.ts`（P7 扩 `LifecycleWorkItem`/`GenerateWorkItemsRequest`，P8 新增 `WorkItemExecutionPlan`/`WorkItemHandoff` 并扩 `CodingAttemptSnapshotResponse`）。必须先完成 P7、再执行 P8，不得并行，避免 `types.ts` 合并冲突。
@@ -37,7 +38,7 @@
 ## 文件结构
 
 - Modify: `web/src/api/types.ts`
-  - 新增 `WorkItemExecutionPlan`、`WorkItemHandoff` 类型。
+  - 新增 `WorkItemExecutionPlan`、`WorkItemHandoff` 类型，并复用 P7 的 `VerificationPlan` 类型。
   - 扩展 `CodingAttemptSnapshotResponse` 和 WS state type。
 - Modify: `web/src/api/types.test.ts`
 - Modify: `web/src/api/client.ts`
@@ -83,7 +84,8 @@ it("describes work item execution plan and handoff in coding snapshots", () => {
     openspec_refs: ["REQ-001"],
     superpowers_contract: "use superpowers:test-driven-development",
     tdd_contract: "先写失败测试，再写实现",
-    verification_commands: ["cargo test --locked --test it_product backend_api"],
+    verification_plan_ref: "verification_plan_work_item_0001",
+    verification_summary: "provider supplied required gate verify_backend_unit",
     risk_notes: [],
     created_at: "2026-06-16T00:00:00Z",
     updated_at: "2026-06-16T00:00:00Z",
@@ -272,7 +274,7 @@ export function requestWorkItemExecutionPlanChange(attemptId: string, payload: {
 - Goal.
 - Allowed/forbidden write scopes.
 - Dependency handoffs.
-- Verification commands.
+- Verification plan source, required gates, confidence and manual gate state.
 - Risk notes.
 - Confirm/change request buttons only when `requireExecutionPlanConfirm`（来自 snapshot 的 `require_execution_plan_confirm`）为 true 且 status 不是 `confirmed`。
 

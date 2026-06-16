@@ -20,13 +20,15 @@
 
 - `create_coding_attempt` 已检查依赖、handoff 可读性和 active lock。
 - Coding attempt 已使用 `aria/issues/{issue_id}` branch 与 `.worktrees/aria-issues/{issue_id}` worktree。
-- `handle_final_confirm()` 会释放 active lock 并记录 completed Work Item。
+- `handle_final_confirm()` 只有在 shared worktree clean gate 通过后才释放 active lock 并记录 completed Work Item；dirty 时保持锁并进入人工 gate。
+- P3 已保存 provider 输出的 `VerificationPlan`，Work Item 通过 `verification_plan_ref` 关联它。
 
 > **字段来源说明（v1.1 新增）：** 本计划写入的 `LifecycleWorkItemRecord` 字段及其上游来源如下，实现前必须确认这些字段已由上游落地并逐字对齐：
 >
 > - `execution_plan_status`：字段由 **P3/P4** 引入到 `LifecycleWorkItemRecord`；本计划任务 3 在 execution plan confirm/change-request 时更新它。
 > - `handoff_summary_ref`：字段由 **P3/P4** 引入；P5 在 Coding 启动门禁中读取，本计划任务 4 在完成时写入。
 > - `completion_commit`：字段由 **P3/P4** 引入。`CodingExecutionAttempt` 已有 `head_commit` 字段，本计划**约定 `completion_commit` 取自 attempt 的 `head_commit`**（即 final confirm 时 attempt 的 HEAD commit），而非新引入提交来源。`WorkItemHandoff.commit_sha` 亦应与该 `head_commit` 一致。
+> - `verification_plan_ref`：字段由 **P3** 引入，指向 provider 输出的 `VerificationPlan`。本计划只读取并展示该计划，不按 kind 或当前仓库技术栈生成命令。
 
 ## 计划大小边界
 
@@ -36,6 +38,7 @@
 - 不修改 Coding Prepare 前端展示。
 - 不写 Playwright E2E。
 - 不改变 P5 已建立的 shared worktree branch/path 规则。
+- 不按 `WorkItemKind`、文件路径或当前仓库内容硬编码 `cargo`、`pnpm`、Vitest、Playwright 等目标项目验证命令。
 
 如果需要前端展示字段，后端只扩展 DTO/WS payload；UI 渲染留给 P8。
 
@@ -113,7 +116,8 @@ fn saves_and_loads_work_item_execution_plan() {
         openspec_refs: vec!["REQ-001".to_string()],
         superpowers_contract: "use superpowers:test-driven-development".to_string(),
         tdd_contract: "先写失败测试，再写实现".to_string(),
-        verification_commands: vec!["cargo test --locked --test it_product backend_api".to_string()],
+        verification_plan_ref: Some("verification_plan_work_item_0001".to_string()),
+        verification_summary: Some("provider supplied required gate verify_backend_unit".to_string()),
         risk_notes: Vec::new(),
         created_at: "2026-06-16T00:00:00Z".to_string(),
         updated_at: "2026-06-16T00:00:00Z".to_string(),
@@ -212,12 +216,13 @@ async fn coding_attempt_snapshot_includes_generated_work_item_execution_plan() {
         "work_item_0001"
     );
     assert_eq!(snapshot["work_item_execution_plan"]["status"], "draft");
-    assert!(
-        snapshot["work_item_execution_plan"]["verification_commands"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|command| command.as_str().unwrap().contains("cargo"))
+    assert_eq!(
+        snapshot["work_item_execution_plan"]["verification_plan_ref"],
+        "verification_plan_work_item_0001"
+    );
+    assert_eq!(
+        snapshot["work_item_execution_plan"]["verification_summary"],
+        "provider supplied required gate verify_backend_unit"
     );
 }
 ```
@@ -240,9 +245,11 @@ cargo test --locked --test it_web coding_attempt_snapshot_includes_generated_wor
 - Work Item `exclusive_write_scopes` and `forbidden_write_scopes`.
 - `required_handoff_from` as dependency refs.
 - Story/Design IDs as refs.
-- Verification commands from Work Item kind:
-  - backend/integration: include cargo commands.
-  - frontend/e2e: include pnpm/vitest or Playwright commands.
+- Verification plan from Work Item `verification_plan_ref`:
+  - load the provider-supplied `VerificationPlan` saved by P3.
+  - copy only `verification_plan_ref` and a concise `verification_summary` into `WorkItemExecutionPlan`.
+  - do not synthesize `cargo`, `pnpm`, Vitest, Playwright, or any other command from Work Item kind.
+  - if no valid `VerificationPlan` exists, block with `verification_plan_missing` or enter provider repair/manual gate.
 
 不要 block attempt creation when `require_execution_plan_confirm=false`.
 
@@ -264,6 +271,58 @@ Update `get_coding_attempt()` to load both optional records.
 重新运行步骤 2 的命令。
 
 预期：通过。
+
+- [ ] **步骤 6：编写 provider verification plan 防硬编码回归测试**
+
+追加:
+
+```rust
+#[tokio::test]
+async fn execution_plan_uses_provider_verification_plan_without_kind_defaults() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    bootstrap_confirmed_backend_work_item_with_verification_plan(
+        app.clone(),
+        repo.path(),
+        verification_plan_with_command("custom-verify --target backend-api"),
+    )
+    .await;
+
+    let (_status, attempt) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001/coding-attempts",
+        json!({}),
+    )
+    .await;
+    let (status, snapshot) = request_json(
+        app,
+        Method::GET,
+        "/api/coding-attempts/coding_attempt_0001",
+        json!({}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let plan = &snapshot["work_item_execution_plan"];
+    assert_eq!(plan["verification_plan_ref"], "verification_plan_work_item_0001");
+    assert!(!plan.to_string().contains("cargo test"));
+    assert!(!plan.to_string().contains("pnpm"));
+    assert!(plan.to_string().contains("custom-verify"));
+}
+```
+
+运行:
+
+```bash
+cargo test --locked --test it_web execution_plan_uses_provider_verification_plan_without_kind_defaults
+```
+
+预期：通过后才能认为 P6 没有按 kind 注入默认命令。
 
 ## 任务 3：Execution Plan Confirmation Gate Is Configurable
 
@@ -376,7 +435,7 @@ fn saves_and_loads_work_item_handoff() {
         files_changed: vec!["src/web/handlers.rs".to_string()],
         commit_sha: Some("abc123".to_string()),
         diff_summary: "新增 session API".to_string(),
-        tests_run: vec!["cargo test --locked --test it_web session_api".to_string()],
+        tests_run: vec!["provider gate verify_session_api passed".to_string()],
         test_result_summary: "全部通过".to_string(),
         review_summary: Some("无阻塞问题".to_string()),
         api_or_contract_changes: vec!["GET /api/session".to_string()],
@@ -438,9 +497,47 @@ async fn final_confirm_requires_work_item_handoff() {
 
 - [ ] **步骤 5：实现 completion gate**
 
-Before setting attempt/work item completed in `handle_final_confirm()`, require a saved `WorkItemHandoff`. After success, update `LifecycleWorkItemRecord.handoff_summary_ref` and `completion_commit` from the handoff/review request（`completion_commit` 取 attempt 的 `head_commit`，见前置交付摘要）。
+Before setting attempt/work item completed in `handle_final_confirm()`, require:
 
-> **🔴 执行顺序约束（v1.1 新增）：** P5 已让 `handle_final_confirm()` 承担「置 Completed + 释放 active lock + 记录 last_completed」。本步骤插入的 handoff 校验**必须位于 P5 的状态更新与锁释放之前**：即进入函数后先校验 handoff 是否存在，缺失则提前 `return Err("work_item_handoff_missing")` 阻断，之后才执行 P5 的 Completed 落库与锁释放。否则会出现「Work Item 已置 Completed、锁已释放，但 handoff 缺失」的不一致状态，且锁释放后同 Issue 下一个 Work Item 可能已抢占，无法回滚。实现时确保校验、状态更新、锁释放三者在同一临界路径内按此顺序串行。
+- saved `WorkItemHandoff`
+- required verification gate results for the Work Item's `VerificationPlan`
+- shared worktree clean gate from P5 remains true at release time
+
+After success, update `LifecycleWorkItemRecord.handoff_summary_ref` and `completion_commit` from the handoff/review request（`completion_commit` 取 attempt 的 `head_commit`，见前置交付摘要）。
+
+> **🔴 执行顺序约束（v1.2 修订）：** P5 已让 `handle_final_confirm()` 承担「置 Completed + clean-gate 释放 active lock + 记录 last_completed」。本步骤插入的 handoff、verification gate 校验**必须位于 P5 的状态更新与锁释放之前**：即进入函数后先校验 diff scope、verification gates、handoff 和 shared worktree clean，缺失则提前返回阻断，之后才执行 P5 的 Completed 落库与锁释放。否则会出现「Work Item 已置 Completed、锁已释放，但 handoff 或 required verification 缺失」的不一致状态，且锁释放后同 Issue 下一个 Work Item 可能已抢占，无法回滚。
+
+- [ ] **步骤 5A：编写 required verification gate 失败测试**
+
+追加:
+
+```rust
+#[tokio::test]
+async fn final_confirm_requires_required_verification_gate_result() {
+    let root = tempdir().expect("root");
+    let (store, attempt) =
+        final_confirm_attempt_with_verification_plan(root.path(), "work_item_0001");
+    store
+        .save_work_item_handoff(&handoff_for_attempt(&attempt))
+        .expect("save handoff");
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
+
+    let error = engine
+        .handle_final_confirm("project_0001", "issue_0001", &attempt.id)
+        .await
+        .expect_err("missing required verification blocks completion");
+
+    assert!(format!("{error}").contains("verification_gate_result_missing"));
+}
+```
+
+实现要求：
+
+- 从 Work Item `verification_plan_ref` 读取 `VerificationPlan.required_gates`。
+- 从 attempt testing report / manual gate record / verification result store 读取执行结果。
+- required gate 缺失、失败且未人工接受时，返回 `verification_gate_result_missing` 或 `verification_gate_failed`。
+- manual accepted 必须记录操作者、时间、说明和关联 gate ID，供 handoff provider 输入消费。
 
 - [ ] **步骤 6：编写失败态 diff scope gate test（v1.1 阻塞修复）**
 
@@ -486,8 +583,9 @@ async fn final_confirm_rejects_diff_outside_work_item_write_scope() {
 2. 读取 attempt 的 changed files / diff files 清单；若当前代码只持久化 diff summary，需要在本步骤补一个内部 helper，从 review request、testing report 或 Git status 结果中得到相对路径列表，测试 helper 可直接提供该列表。
 3. 对每个相对路径调用 `crate::cross_cutting::worktree::validate_write_path(worktree_root, &work_item.exclusive_write_scopes, path, true)`。
 4. 若路径匹配任一 `work_item.forbidden_write_scopes`，返回 `work_item_diff_scope_violation`。
-5. 任一路径不在允许范围或命中禁止范围时，必须在 handoff 校验、Completed 落库、active lock 释放之前提前返回错误。
-6. 只有 diff scope 校验通过后，才继续执行步骤 5 的 handoff 校验和 P5 的完成/解锁逻辑。
+5. 任一路径不在允许范围或命中禁止范围时，必须在 verification/handoff 校验、Completed 落库、active lock 释放之前提前返回错误。
+6. diff scope 校验通过后，校验 `VerificationPlan.required_gates` 的执行结果或 manual accepted gate。
+7. required verification 校验通过后，继续执行 handoff 校验和 P5 的 clean-gate 完成/解锁逻辑。
 
 若需要在 `cross_cutting/worktree.rs` 中复用禁止运行时路径判断，可将私有 `is_forbidden_runtime_path` 提升为 `pub(crate)`；不要另写一套路径安全规则。
 
@@ -506,6 +604,7 @@ cargo test --locked --test it_product final_confirm_rejects_diff_outside_work_it
 ```bash
 cargo test --locked --test it_product saves_and_loads_work_item_handoff
 cargo test --locked --test it_product final_confirm_requires_work_item_handoff
+cargo test --locked --test it_product final_confirm_requires_required_verification_gate_result
 cargo test --locked --test it_product final_confirm_rejects_diff_outside_work_item_write_scope
 ```
 
@@ -549,7 +648,7 @@ async fn generates_handoff_from_extra_provider_run_before_final_confirm() {
             "summary": "后端 API 已完成，前端可调用 /api/session",
             "files_changed": ["src/web/handlers.rs"],
             "diff_summary": "新增 session API",
-            "tests_run": ["cargo test --locked --test it_web session_api"],
+            "tests_run": ["provider gate verify_session_api passed"],
             "test_result_summary": "全部通过",
             "api_or_contract_changes": ["GET /api/session"],
             "next_work_item_notes": ["前端处理 401"]
@@ -586,7 +685,7 @@ cargo test --locked --test it_product generates_handoff_from_extra_provider_run_
 1. `HandoffProviderInput`：聚合以下上下文
    - Work Item 目标与范围（`exclusive_write_scopes`、`forbidden_write_scopes`）
    - diff summary 与 changed files 清单
-   - testing report summary
+   - `VerificationPlan` execution result summary and manual gate decisions
    - review report / review request summary
    - commit/head（attempt.head_commit）
    - API 或契约变化摘要
@@ -627,8 +726,10 @@ cargo test --locked --test it_product generates_handoff_from_extra_provider_run_
 cargo test --locked --test it_product saves_and_loads_work_item_execution_plan
 cargo test --locked --test it_product saves_and_loads_work_item_handoff
 cargo test --locked --test it_product final_confirm_requires_work_item_handoff
+cargo test --locked --test it_product final_confirm_requires_required_verification_gate_result
 cargo test --locked --test it_product final_confirm_rejects_diff_outside_work_item_write_scope
 cargo test --locked --test it_product generates_handoff_from_extra_provider_run_before_final_confirm
+cargo test --locked --test it_web execution_plan_uses_provider_verification_plan_without_kind_defaults
 cargo test --locked --test it_web coding_attempt_snapshot_includes_generated_work_item_execution_plan
 cargo test --locked --test it_web coding_ws_blocks_coder_stage_when_execution_plan_requires_confirmation
 cargo fmt --check
