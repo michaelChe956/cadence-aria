@@ -10,7 +10,19 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import type { ArtifactVersion, CodingAttempt, ProductIssueArtifact } from "../../api/types";
+import type {
+  ArtifactVersion,
+  CodingAttempt,
+  ProductIssueArtifact,
+  WorkItemContextBudget,
+  WorkItemExecutionPlanStatus,
+  WorkItemKind,
+  LifecycleWorkItem,
+} from "../../api/types";
+import {
+  workItemKindLabel,
+  workItemWaitingReason,
+} from "../../state/lifecycle-workbench-store";
 import { MonacoDiffViewer } from "../shared/MonacoDiffViewer";
 import { MonacoViewer } from "../shared/MonacoViewer";
 
@@ -28,6 +40,20 @@ export interface DrawerEntity {
   phase?: string;
   createdAt?: string;
   latestAttempt?: CodingAttempt | null;
+  // Work item split metadata
+  workItemKind?: WorkItemKind;
+  dependsOn?: string[];
+  exclusiveWriteScopes?: string[];
+  forbiddenWriteScopes?: string[];
+  contextBudget?: WorkItemContextBudget;
+  requiredHandoffFrom?: string[];
+  verificationPlanRef?: string | null;
+  requireExecutionPlanConfirm?: boolean;
+  executionPlanStatus?: WorkItemExecutionPlanStatus;
+  handoffSummaryRef?: string | null;
+  completionCommit?: string | null;
+  completionDiffSummaryRef?: string | null;
+  allWorkItems?: LifecycleWorkItem[];
 }
 
 interface LifecycleCardDrawerProps {
@@ -208,6 +234,8 @@ export function LifecycleCardDrawer({
             </div>
           </section>
         ) : null}
+
+        {entity.kind === "work_item" ? <WorkItemDetail entity={entity} /> : null}
       </div>
 
       {artifactPreviewOpen && selectedArtifact ? (
@@ -408,6 +436,171 @@ function IssueDetail({
         </section>
       ) : null}
     </>
+  );
+}
+
+function WorkItemDetail({ entity }: { entity: DrawerEntity }) {
+  const titleMap = useMemo(() => {
+    const map: Record<string, string> = {};
+    (entity.allWorkItems ?? []).forEach((item) => {
+      map[item.work_item_id] = item.title;
+    });
+    return map;
+  }, [entity.allWorkItems]);
+
+  const waitingReason = useMemo(() => {
+    if (!entity.allWorkItems || entity.workItemKind === undefined) {
+      return null;
+    }
+    const synthetic: LifecycleWorkItem = {
+      work_item_id: entity.id,
+      issue_id: "",
+      repository_id: "",
+      story_spec_ids: [],
+      design_spec_ids: [],
+      title: entity.title,
+      plan_status: "confirmed",
+      execution_status: (entity.status as LifecycleWorkItem["execution_status"]) ?? "pending",
+      latest_attempt: entity.latestAttempt ?? null,
+      artifact_versions: [],
+      work_item_set_id: null,
+      kind: entity.workItemKind ?? "other",
+      sequence_hint: null,
+      depends_on: entity.dependsOn ?? [],
+      exclusive_write_scopes: entity.exclusiveWriteScopes ?? [],
+      forbidden_write_scopes: entity.forbiddenWriteScopes ?? [],
+      context_budget: entity.contextBudget ?? {
+        target_context_k: "30-50",
+        max_summary_chars: 20000,
+        max_handoff_chars: 12000,
+        max_code_context_chars: 30000,
+        max_context_file_refs: 80,
+        max_traceability_refs: 40,
+        max_dependency_handoffs: 3,
+      },
+      required_handoff_from: entity.requiredHandoffFrom ?? [],
+      verification_plan_ref: entity.verificationPlanRef ?? null,
+      require_execution_plan_confirm: entity.requireExecutionPlanConfirm ?? false,
+      execution_plan_status: entity.executionPlanStatus ?? "not_started",
+      handoff_summary_ref: entity.handoffSummaryRef ?? null,
+      completion_commit: entity.completionCommit ?? null,
+      completion_diff_summary_ref: entity.completionDiffSummaryRef ?? null,
+    };
+    return workItemWaitingReason(synthetic, entity.allWorkItems);
+  }, [entity]);
+
+  const hasHandoff = entity.handoffSummaryRef && entity.handoffSummaryRef.length > 0;
+
+  return (
+    <section className="space-y-3 border-t border-[var(--aria-line)] px-4 py-3">
+      <h3 className="text-sm font-semibold text-[var(--aria-ink)]">Work Item 拆分信息</h3>
+
+      {entity.workItemKind ? (
+        <div className="text-xs text-[var(--aria-ink-muted)]">
+          类型: <span className="font-medium text-[var(--aria-ink)]">{workItemKindLabel(entity.workItemKind)}</span>
+        </div>
+      ) : null}
+
+      {waitingReason ? (
+        <div className="rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-xs text-amber-800">
+          {waitingReason}
+        </div>
+      ) : null}
+
+      {entity.requireExecutionPlanConfirm ? (
+        <div className="rounded border border-[var(--aria-primary)] px-2 py-1.5 text-xs text-[var(--aria-primary)]">
+          需要确认执行计划
+        </div>
+      ) : null}
+
+      {entity.dependsOn && entity.dependsOn.length > 0 ? (
+        <div>
+          <div className="mb-1 text-xs font-medium text-[var(--aria-ink-muted)]">依赖</div>
+          <ul className="space-y-1">
+            {entity.dependsOn.map((id) => (
+              <li key={id} className="font-mono text-xs text-[var(--aria-ink)]">
+                {titleMap[id] ? `${titleMap[id]} (${id})` : id}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      {entity.requiredHandoffFrom && entity.requiredHandoffFrom.length > 0 ? (
+        <div>
+          <div className="mb-1 text-xs font-medium text-[var(--aria-ink-muted)]">需要交接摘要</div>
+          <ul className="space-y-1">
+            {entity.requiredHandoffFrom.map((id) => (
+              <li key={id} className="font-mono text-xs text-[var(--aria-ink)]">
+                {titleMap[id] ? `${titleMap[id]} (${id})` : id}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      {(entity.exclusiveWriteScopes && entity.exclusiveWriteScopes.length > 0) ||
+      (entity.forbiddenWriteScopes && entity.forbiddenWriteScopes.length > 0) ? (
+        <div className="space-y-1">
+          <div className="text-xs font-medium text-[var(--aria-ink-muted)]">写入范围</div>
+          {entity.exclusiveWriteScopes && entity.exclusiveWriteScopes.length > 0 ? (
+            <div className="space-y-1">
+              <div className="text-[10px] text-[var(--aria-ink-muted)]">允许</div>
+              {entity.exclusiveWriteScopes.map((scope) => (
+                <span
+                  key={scope}
+                  className="mr-1 inline-block rounded border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 font-mono text-[10px] text-emerald-800"
+                >
+                  {scope}
+                </span>
+              ))}
+            </div>
+          ) : null}
+          {entity.forbiddenWriteScopes && entity.forbiddenWriteScopes.length > 0 ? (
+            <div className="space-y-1">
+              <div className="text-[10px] text-[var(--aria-ink-muted)]">禁止</div>
+              {entity.forbiddenWriteScopes.map((scope) => (
+                <span
+                  key={scope}
+                  className="mr-1 inline-block rounded border border-red-200 bg-red-50 px-1.5 py-0.5 font-mono text-[10px] text-red-800"
+                >
+                  {scope}
+                </span>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {entity.contextBudget ? (
+        <div className="text-xs text-[var(--aria-ink-muted)]">
+          预算: <span className="font-medium text-[var(--aria-ink)]">{entity.contextBudget.target_context_k}K</span>
+          {" · "}
+          文件引用上限 {entity.contextBudget.max_context_file_refs}
+          {" · "}
+          依赖交接上限 {entity.contextBudget.max_dependency_handoffs}
+        </div>
+      ) : null}
+
+      <div className="text-xs text-[var(--aria-ink-muted)]">
+        交接状态:
+        {" "}
+        <span
+          className={[
+            "font-medium",
+            hasHandoff ? "text-emerald-700" : "text-amber-700",
+          ].join(" ")}
+        >
+          {hasHandoff ? "交接摘要已生成" : "等待交接摘要"}
+        </span>
+      </div>
+
+      {entity.verificationPlanRef ? (
+        <div className="text-xs text-[var(--aria-ink-muted)]">
+          验证计划: <span className="font-mono text-[var(--aria-ink)]">{entity.verificationPlanRef}</span>
+        </div>
+      ) : null}
+    </section>
   );
 }
 

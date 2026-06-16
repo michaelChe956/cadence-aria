@@ -1,7 +1,7 @@
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { CodingAttempt, WorkspaceSession } from "../../api/types";
+import type { CodingAttempt, LifecycleWorkItem, WorkspaceSession } from "../../api/types";
 import {
   useLifecycleWorkbenchStore,
   type LifecycleCard as LifecycleCardData,
@@ -647,6 +647,7 @@ describe("IssueLifecycleWorkbench", () => {
       await screen.findByRole("button", { name: "前端提示设计" }),
     );
     await user.click(screen.getByRole("button", { name: "生成 Work Item" }));
+    await user.click(screen.getByRole("button", { name: "确认生成" }));
 
     expect(
       await screen.findByRole("button", {
@@ -658,11 +659,9 @@ describe("IssueLifecycleWorkbench", () => {
       "/api/projects/project_0001/issues/issue_0001/work-items:generate",
       expect.objectContaining({
         method: "POST",
-        body: JSON.stringify({
-          title: "前端提示设计 Work Item",
-          story_spec_ids: ["story_spec_0001"],
-          design_spec_ids: ["design_spec_0001"],
-        }),
+        body: expect.stringContaining(
+          '"title":"前端提示设计 Work Item"',
+        ),
       }),
     );
     expect(fetchMock).not.toHaveBeenCalledWith(
@@ -701,6 +700,37 @@ describe("IssueLifecycleWorkbench", () => {
         "design_spec_0002",
       ),
     );
+  });
+
+  it("sends work item split options when generating from a confirmed design", async () => {
+    const user = userEvent.setup();
+    const fetchMock = lifecycleFetch();
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IssueLifecycleWorkbench />);
+
+    await user.click(await screen.findByText("前端提示设计"));
+    await user.click(screen.getByRole("button", { name: "生成 Work Item" }));
+    // include_integration_tests defaults to true; enable e2e too.
+    await user.click(screen.getByLabelText("生成 E2E Work Item"));
+    await user.click(screen.getByRole("button", { name: "确认生成" }));
+
+    await screen.findByRole("button", { name: "前端提示设计 Work Item" });
+
+    const generateCall = fetchMock.mock.calls.find(([url]) =>
+      String(url).includes("/work-items:generate"),
+    );
+    expect(generateCall).toBeDefined();
+    const body = JSON.parse(generateCall?.[1]?.body as string) as Record<
+      string,
+      unknown
+    >;
+    expect(body).toMatchObject({
+      include_integration_tests: true,
+      include_e2e_tests: true,
+      force_frontend_backend_split: true,
+      require_execution_plan_confirm: false,
+    });
   });
 
   it("starts coding from a confirmed work item drawer and opens the coding workspace", async () => {
@@ -1248,20 +1278,21 @@ function lifecycleFetch(options?: {
         review_rounds: number;
         superpowers_enabled: boolean;
         openspec_enabled: boolean;
+        include_integration_tests?: boolean;
+        include_e2e_tests?: boolean;
+        force_frontend_backend_split?: boolean;
+        require_execution_plan_confirm?: boolean;
       };
       const lifecycle = lifecycleData(issueId);
-      const workItem = {
-        work_item_id: "work_item_0001",
+      const workItem = workItemRecord({
         issue_id: issueId,
-        repository_id: "repository_0001",
         story_spec_ids: payload.story_spec_ids,
         design_spec_ids: payload.design_spec_ids,
         title: payload.title,
         plan_status: "not_started",
         execution_status: "pending",
-        latest_attempt: null,
         artifact_versions: [],
-      };
+      });
       const session = workspaceSessionRecord(
         "work_item",
         "work_item_0001",
@@ -1280,6 +1311,31 @@ function lifecycleFetch(options?: {
       return jsonResponse({
         work_items: [workItem],
         workspace_session: session,
+        workspace_sessions: [session],
+        work_item_plan: {
+          plan_id: "plan_0001",
+          issue_id: issueId,
+          status: "draft",
+          options: {
+            include_integration_tests: payload.include_integration_tests ?? true,
+            include_e2e_tests: payload.include_e2e_tests ?? false,
+            force_frontend_backend_split:
+              payload.force_frontend_backend_split ?? true,
+            require_execution_plan_confirm:
+              payload.require_execution_plan_confirm ?? false,
+          },
+          created_at: "2026-05-20T00:00:00Z",
+          updated_at: "2026-05-20T00:00:00Z",
+        },
+        repository_profile: {
+          profile_id: "profile_0001",
+          repository_id: "repository_0001",
+          confidence: "medium",
+          detected_layers: ["backend", "frontend"],
+          split_recommendation: "frontend_backend_split",
+        },
+        verification_plans: [],
+        validator_findings: [],
       });
     }
     const codingAttemptCreateMatch = url.match(
@@ -1565,16 +1621,9 @@ function initialLifecycleData(
       },
     ],
     work_items: [
-      {
-        work_item_id: "work_item_0001",
+      workItemRecord({
         issue_id: issueId,
-        repository_id: "repository_0001",
-        story_spec_ids: ["story_spec_0001"],
-        design_spec_ids: ["design_spec_0001"],
-        title: "实现提示组件",
         plan_status: confirmedWorkItem ? "confirmed" : "draft",
-        execution_status: "planning",
-        latest_attempt: null,
         artifact_versions: [
           {
             version: 1,
@@ -1587,7 +1636,7 @@ function initialLifecycleData(
             source_node_id: "timeline_node_work_item_001",
           },
         ],
-      },
+      }),
     ],
     workspace_sessions: [
       workspaceSessionRecord("story", storyId, "workspace_session_story_0001"),
@@ -1622,6 +1671,57 @@ function codingAttemptRecord(workItemId: string): CodingAttempt {
     review_request_url: null,
     created_at: "2026-05-23T00:00:00Z",
     updated_at: "2026-05-23T00:00:00Z",
+  };
+}
+
+function workItemRecord(
+  overrides: Partial<LifecycleWorkItem> = {},
+): LifecycleWorkItem {
+  return {
+    work_item_id: "work_item_0001",
+    issue_id: "issue_0001",
+    repository_id: "repository_0001",
+    story_spec_ids: ["story_spec_0001"],
+    design_spec_ids: ["design_spec_0001"],
+    title: "实现提示组件",
+    plan_status: "draft",
+    execution_status: "planning",
+    latest_attempt: null,
+    artifact_versions: [
+      {
+        version: 1,
+        markdown: "## 实施计划\n\n[TASK-001] 实现会话过期提示组件。",
+        generated_by: "claude_code",
+        reviewed_by: "codex",
+        review_verdict: "pass",
+        confirmed_by: null,
+        created_at: "2026-05-20T00:02:00Z",
+        source_node_id: "timeline_node_work_item_001",
+      },
+    ],
+    work_item_set_id: null,
+    kind: "backend",
+    sequence_hint: null,
+    depends_on: [],
+    exclusive_write_scopes: [],
+    forbidden_write_scopes: [],
+    context_budget: {
+      target_context_k: "30-50",
+      max_summary_chars: 20000,
+      max_handoff_chars: 12000,
+      max_code_context_chars: 30000,
+      max_context_file_refs: 80,
+      max_traceability_refs: 40,
+      max_dependency_handoffs: 3,
+    },
+    required_handoff_from: [],
+    verification_plan_ref: null,
+    require_execution_plan_confirm: false,
+    execution_plan_status: "not_started",
+    handoff_summary_ref: null,
+    completion_commit: null,
+    completion_diff_summary_ref: null,
+    ...overrides,
   };
 }
 

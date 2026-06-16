@@ -6,7 +6,12 @@ import {
   ScrollText,
   Trash2,
 } from "lucide-react";
+import type { LifecycleWorkItem } from "../../api/types";
 import type { LifecycleCard as LifecycleCardData } from "../../state/lifecycle-workbench-store";
+import {
+  workItemKindLabel,
+  workItemWaitingReason,
+} from "../../state/lifecycle-workbench-store";
 
 export function LifecycleCard({
   card,
@@ -15,6 +20,7 @@ export function LifecycleCard({
   onSelect,
   onGenerateStorySpec,
   onDelete,
+  allWorkItems,
 }: {
   card: LifecycleCardData;
   selected: boolean;
@@ -22,8 +28,9 @@ export function LifecycleCard({
   onSelect: () => void;
   onGenerateStorySpec?: () => void;
   onDelete?: () => void;
+  allWorkItems?: LifecycleWorkItem[];
 }) {
-  const codingStatusLabel = workItemCodingStatusLabel(card);
+  const workItemStatusLabel = workItemStatusBadge(card, allWorkItems);
   const visual = lifecycleCardVisual(card.kind);
   const Icon =
     card.kind === "issue"
@@ -91,9 +98,21 @@ export function LifecycleCard({
                   v{card.version}
                 </span>
               ) : null}
-              {codingStatusLabel ? (
-                <span className="rounded border border-[var(--aria-primary)] px-1.5 py-0.5 text-[var(--aria-primary)]">
-                  {codingStatusLabel}
+              {card.kind === "work_item" ? (
+                <span className="rounded border border-[var(--aria-line)] bg-white/70 px-1.5 py-0.5">
+                  {workItemKindLabel(card.raw.kind)}
+                </span>
+              ) : null}
+              {workItemStatusLabel ? (
+                <span
+                  className={[
+                    "rounded border px-1.5 py-0.5",
+                    workItemStatusLabel.waiting
+                      ? "border-amber-300 bg-amber-50 text-amber-800"
+                      : "border-[var(--aria-primary)] text-[var(--aria-primary)]",
+                  ].join(" ")}
+                >
+                  {workItemStatusLabel.text}
                 </span>
               ) : null}
             </span>
@@ -196,13 +215,25 @@ function lifecycleCardVisual(kind: LifecycleCardData["kind"]) {
   return visuals[kind];
 }
 
-function workItemCodingStatusLabel(card: LifecycleCardData) {
+function workItemStatusBadge(
+  card: LifecycleCardData,
+  allWorkItems?: LifecycleWorkItem[],
+): { text: string; waiting: boolean } | null {
   if (card.kind !== "work_item") {
     return null;
   }
+  const waitingReason = allWorkItems
+    ? workItemWaitingReason(card.raw, allWorkItems)
+    : null;
+  if (waitingReason) {
+    return { text: waitingReason, waiting: true };
+  }
   const latestAttempt = card.raw.latest_attempt;
   if (latestAttempt) {
-    return `${latestAttempt.status} · ${latestAttempt.stage}`;
+    return { text: `${latestAttempt.status} · ${latestAttempt.stage}`, waiting: false };
   }
-  return card.raw.plan_status === "confirmed" ? "可编码" : null;
+  if (card.raw.plan_status === "confirmed") {
+    return { text: "可编码", waiting: false };
+  }
+  return null;
 }

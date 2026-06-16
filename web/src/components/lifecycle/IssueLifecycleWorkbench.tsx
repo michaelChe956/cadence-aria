@@ -21,6 +21,7 @@ import {
 } from "../../api/client";
 import type {
   IssueLifecycleResponse,
+  LifecycleWorkItem,
   ProductIssue,
   Project,
   Repository,
@@ -74,6 +75,17 @@ export function IssueLifecycleWorkbench({
   const [repositoryDialogOpen, setRepositoryDialogOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [pendingWorkItemGenerate, setPendingWorkItemGenerate] = useState<{
+    card: LifecycleCardData;
+    source: "drawer" | "workspace";
+    storySpecIds: string[];
+  } | null>(null);
+  const [workItemOptions, setWorkItemOptions] = useState({
+    include_integration_tests: true,
+    include_e2e_tests: false,
+    force_frontend_backend_split: true,
+    require_execution_plan_confirm: false,
+  });
   const refreshRequestId = useRef(0);
   const drawerFocusedEntityId = useLifecycleWorkbenchStore(
     (state) => state.focusedEntityId,
@@ -266,6 +278,50 @@ export function IssueLifecycleWorkbench({
     onOpenCodingWorkspace(attempt.attempt_id);
   }
 
+  async function confirmGenerateWorkItems() {
+    if (!selectedProjectId || !pendingWorkItemGenerate) {
+      return;
+    }
+
+    const { card, source, storySpecIds } = pendingWorkItemGenerate;
+    setBusy(true);
+    setError(null);
+    try {
+      const response = await generateWorkItems(
+        selectedProjectId,
+        card.issueId,
+        {
+          title: defaultLaunchTitle({ target: "work_item", card }),
+          story_spec_ids: storySpecIds,
+          design_spec_ids: [card.id],
+          ...workItemOptions,
+        },
+      );
+      setPendingWorkItemGenerate(null);
+      const nextId = response.work_items[0]?.work_item_id;
+      await refresh(selectedProjectId);
+      if (nextId) {
+        setSelectedCardKey(`work_item:${nextId}`);
+        openDrawer(nextId);
+      }
+      if (source === "workspace" && response.workspace_session) {
+        onOpenWorkspace(response.workspace_session.workspace_session_id);
+      }
+    } catch (reason) {
+      setError(
+        reason instanceof Error
+          ? reason.message
+          : "生成 Work Item 失败",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function cancelGenerateWorkItems() {
+    setPendingWorkItemGenerate(null);
+  }
+
   async function handleGenerateNext(card: LifecycleCardData) {
     if (!selectedProjectId) {
       setError("缺少 Project 或生命周期实体");
@@ -292,21 +348,17 @@ export function IssueLifecycleWorkbench({
     }
 
     if (card.kind === "design_spec") {
-      const response = await generateWorkItems(
-        selectedProjectId,
-        card.issueId,
-        {
-          title: defaultLaunchTitle({ target: "work_item", card }),
-          story_spec_ids: card.raw.story_spec_ids,
-          design_spec_ids: [card.id],
-        },
-      );
-      const nextId = response.work_items[0]?.work_item_id;
-      await refresh(selectedProjectId);
-      if (nextId) {
-        setSelectedCardKey(`work_item:${nextId}`);
-        openDrawer(nextId);
-      }
+      setWorkItemOptions({
+        include_integration_tests: true,
+        include_e2e_tests: false,
+        force_frontend_backend_split: true,
+        require_execution_plan_confirm: false,
+      });
+      setPendingWorkItemGenerate({
+        card,
+        source: "drawer",
+        storySpecIds: card.raw.story_spec_ids,
+      });
       return;
     }
 
@@ -497,22 +549,17 @@ export function IssueLifecycleWorkbench({
     }
 
     if (target === "work_item" && card.kind === "design_spec") {
-      const response = await generateWorkItems(
-        selectedProjectId,
-        card.issueId,
-        {
-          title: defaultLaunchTitle({ target, card }),
-          story_spec_ids: card.raw.story_spec_ids,
-          design_spec_ids: [card.id],
-        },
-      );
-      setSelectedCardKey(
-        `work_item:${response.work_items[0]?.work_item_id ?? ""}`,
-      );
-      await refresh(selectedProjectId);
-      if (response.workspace_session) {
-        onOpenWorkspace(response.workspace_session.workspace_session_id);
-      }
+      setWorkItemOptions({
+        include_integration_tests: true,
+        include_e2e_tests: false,
+        force_frontend_backend_split: true,
+        require_execution_plan_confirm: false,
+      });
+      setPendingWorkItemGenerate({
+        card,
+        source: "workspace",
+        storySpecIds: card.raw.story_spec_ids,
+      });
       return;
     }
 
@@ -616,7 +663,13 @@ export function IssueLifecycleWorkbench({
       {isDrawerOpen && focusedEntity ? (
         <div className="fixed right-0 top-0 z-50 h-full w-[min(480px,100vw)] shadow-xl">
           <LifecycleCardDrawer
-            entity={toDrawerEntity(focusedEntity)}
+            entity={toDrawerEntity(
+              focusedEntity,
+              lifecycles.find(
+                (lifecycle) =>
+                  lifecycle.issue.issue_id === focusedEntity.issueId,
+              )?.work_items ?? [],
+            )}
             onClose={closeDrawer}
             onOpenWorkspace={() =>
               void handleOpenWorkspaceFromDrawer(focusedEntity)
@@ -640,6 +693,90 @@ export function IssueLifecycleWorkbench({
                 : undefined
             }
           />
+        </div>
+      ) : null}
+      {pendingWorkItemGenerate ? (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/30 p-4">
+          <div className="w-full max-w-sm rounded-lg border border-[var(--aria-line)] bg-[var(--aria-panel)] p-4 shadow-xl">
+            <h3 className="mb-3 text-sm font-semibold text-[var(--aria-ink)]">
+              生成 Work Item 选项
+            </h3>
+            <div className="space-y-2">
+              <label className="flex items-center gap-2 text-xs text-[var(--aria-ink)]">
+                <input
+                  type="checkbox"
+                  checked={workItemOptions.force_frontend_backend_split}
+                  onChange={(event) =>
+                    setWorkItemOptions((options) => ({
+                      ...options,
+                      force_frontend_backend_split: event.target.checked,
+                    }))
+                  }
+                  className="h-4 w-4 rounded border-[var(--aria-line)]"
+                />
+                强制前后端拆分
+              </label>
+              <label className="flex items-center gap-2 text-xs text-[var(--aria-ink)]">
+                <input
+                  type="checkbox"
+                  checked={workItemOptions.include_integration_tests}
+                  onChange={(event) =>
+                    setWorkItemOptions((options) => ({
+                      ...options,
+                      include_integration_tests: event.target.checked,
+                    }))
+                  }
+                  className="h-4 w-4 rounded border-[var(--aria-line)]"
+                />
+                生成贯通测试 Work Item
+              </label>
+              <label className="flex items-center gap-2 text-xs text-[var(--aria-ink)]">
+                <input
+                  type="checkbox"
+                  checked={workItemOptions.include_e2e_tests}
+                  onChange={(event) =>
+                    setWorkItemOptions((options) => ({
+                      ...options,
+                      include_e2e_tests: event.target.checked,
+                    }))
+                  }
+                  className="h-4 w-4 rounded border-[var(--aria-line)]"
+                />
+                生成 E2E Work Item
+              </label>
+              <label className="flex items-center gap-2 text-xs text-[var(--aria-ink)]">
+                <input
+                  type="checkbox"
+                  checked={workItemOptions.require_execution_plan_confirm}
+                  onChange={(event) =>
+                    setWorkItemOptions((options) => ({
+                      ...options,
+                      require_execution_plan_confirm: event.target.checked,
+                    }))
+                  }
+                  className="h-4 w-4 rounded border-[var(--aria-line)]"
+                />
+                要求确认执行计划
+              </label>
+            </div>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={cancelGenerateWorkItems}
+                className="inline-flex h-8 items-center rounded-md border border-[var(--aria-line)] bg-white px-3 text-xs font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)]"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={() => void confirmGenerateWorkItems()}
+                disabled={busy}
+                className="inline-flex h-8 items-center rounded-md bg-[var(--aria-primary)] px-3 text-xs font-semibold text-white hover:opacity-90 disabled:opacity-50"
+              >
+                确认生成
+              </button>
+            </div>
+          </div>
         </div>
       ) : null}
       {projectDialogOpen ? (
@@ -744,6 +881,7 @@ function IssueLifecycleDetail({
   onOpenFullIssue: (card: LifecycleCardData) => void;
   onDelete: (card: LifecycleCardData) => void;
 }) {
+  const allWorkItems = workItems.map((card) => card.raw as LifecycleWorkItem);
   if (!issue) {
     return (
       <section
@@ -846,6 +984,7 @@ function IssueLifecycleDetail({
           deletingKey={deletingKey}
           onSelect={onSelect}
           onDelete={onDelete}
+          allWorkItems={allWorkItems}
         />
       </div>
     </section>
@@ -864,6 +1003,7 @@ function LifecycleContentSection({
   deletingKey,
   onSelect,
   onDelete,
+  allWorkItems,
 }: {
   title: string;
   ariaLabel: string;
@@ -872,6 +1012,7 @@ function LifecycleContentSection({
   deletingKey: string | null;
   onSelect: (card: LifecycleCardData) => void;
   onDelete: (card: LifecycleCardData) => void;
+  allWorkItems?: LifecycleWorkItem[];
 }) {
   return (
     <section
@@ -901,6 +1042,7 @@ function LifecycleContentSection({
                 deleting={deletingKey === lifecycleCardKey(card)}
                 onSelect={() => onSelect(card)}
                 onDelete={() => onDelete(card)}
+                allWorkItems={allWorkItems}
               />
             </li>
           ))}
@@ -998,7 +1140,10 @@ function findCardInColumns(
   );
 }
 
-function toDrawerEntity(card: LifecycleCardData): DrawerEntity {
+function toDrawerEntity(
+  card: LifecycleCardData,
+  allWorkItems?: LifecycleWorkItem[],
+): DrawerEntity {
   const base = {
     id: card.id,
     kind: card.kind,
@@ -1028,6 +1173,19 @@ function toDrawerEntity(card: LifecycleCardData): DrawerEntity {
     ...base,
     artifactVersions: card.artifactVersions,
     latestAttempt: card.raw.latest_attempt,
+    workItemKind: card.raw.kind,
+    dependsOn: card.raw.depends_on,
+    exclusiveWriteScopes: card.raw.exclusive_write_scopes,
+    forbiddenWriteScopes: card.raw.forbidden_write_scopes,
+    contextBudget: card.raw.context_budget,
+    requiredHandoffFrom: card.raw.required_handoff_from,
+    verificationPlanRef: card.raw.verification_plan_ref,
+    requireExecutionPlanConfirm: card.raw.require_execution_plan_confirm,
+    executionPlanStatus: card.raw.execution_plan_status,
+    handoffSummaryRef: card.raw.handoff_summary_ref,
+    completionCommit: card.raw.completion_commit,
+    completionDiffSummaryRef: card.raw.completion_diff_summary_ref,
+    allWorkItems,
   };
 }
 
