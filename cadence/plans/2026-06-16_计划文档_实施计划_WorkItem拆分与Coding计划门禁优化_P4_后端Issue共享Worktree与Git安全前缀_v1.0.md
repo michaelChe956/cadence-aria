@@ -1,5 +1,9 @@
 # WorkItem 拆分 P4 后端 Issue 共享 Worktree 与 Git 安全前缀 Implementation Plan
 
+> **文档版本：** v1.1
+>
+> **v1.1 修订摘要：** 依据设计评审对照真实源码修订：(1) 真实 `create_branch()`（`git_workspace_service.rs:74-84`）根本不调用任何 `ensure_safe_*` 校验（仅 `delete_local_branch` 校验），故 reject 测试无法通过——任务 2 显式新增步骤：把分支名安全校验注入 `create_branch` 与 `create_worktree` 的 branch 参数路径；(2) 测试断言的 `issue_worktree_active` 在 `ProductStoreError`（`json_store.rs:8-17`，仅 Io/Json/NotFound/PathEscape）无对应变体，明确统一改用 `Io(format!("issue_worktree_active..."))`；(3) 最终验证过滤名 `issue_shared_worktree` 匹配不到 `rejects_lock_when_another_work_item_is_active` 等用例，改用更宽的过滤名以覆盖本计划全部新增用例。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 增加 Issue 级共享 worktree 记录与 Git 安全前缀参数化，让 `aria/issues/*` branch 和 `.worktrees/aria-issues/*` worktree 可创建、使用和清理，同时兼容存量 `aria/work-items/*`。
@@ -205,6 +209,8 @@ Persist record at:
 projects/{project_id}/issues/{issue_id}/issue-shared-worktree.json
 ```
 
+> **🔴 错误变体说明：** 步骤 1 的 `rejects_lock_when_another_work_item_is_active` 断言错误信息含 `issue_worktree_active`，但 `ProductStoreError`（`src/product/json_store.rs:8-17`）当前只有 `Io / Json / NotFound / PathEscape` 四个变体，无对应专用变体。本计划统一采用**复用 `Io` 变体**的写法：`try_acquire_issue_worktree_lock` 在已被其它 Work Item 占用时返回 `ProductStoreError::Io(format!("issue_worktree_active: issue {issue_id} locked by {active_id}"))`，使 `format!("{error}")` 包含 `issue_worktree_active`。（如后续需要可读性更强的领域错误，可在专门的重构计划里新增 `Conflict` 变体，本计划不引入。）
+
 - [ ] **步骤 4：运行 store tests 并确认通过**
 
 Run the two commands from Step 2 again.
@@ -297,6 +303,37 @@ const SAFE_BRANCH_PREFIXES: &[&str] = &["aria/work-items/", "aria/issues/"];
 
 Keep old callers working by updating internal references only.
 
+> **🔴 阻塞：必须把分支名安全校验注入 `create_branch`（以及 `create_worktree` 的 branch 参数路径）。** 经核对真实源码，`create_branch()`（`src/product/git_workspace_service.rs:74-84`）当前**不调用任何 `ensure_safe_*` 校验**——只有 `delete_local_branch()`（:134）调用了 `ensure_safe_attempt_branch_name()`，`create_worktree()`（:93）只调用 `ensure_safe_worktree_path()` 而不校验 branch 名。因此步骤 1 的 `git_workspace_service_still_rejects_unsafe_issue_branch_names`（断言 `create_branch(&repo, "aria/issues/../main", ...)` 报错含 `outside allowed aria branch prefixes`）在当前实现下**永远无法通过**。本步骤必须显式完成以下注入，这超出"仅重命名 helper + 改 allow-list"的范围：
+
+```rust
+pub async fn create_branch(
+    &self,
+    repo_path: &Path,
+    branch_name: &str,
+    base_branch: &str,
+) -> Result<(), GitWorkspaceError> {
+    ensure_git_repo(repo_path).await?;
+    ensure_safe_aria_branch_name(branch_name)?; // 新增注入
+    self.run_git(repo_path, &["branch", branch_name, base_branch])
+        .await
+        .map(|_| ())
+}
+
+pub async fn create_worktree(
+    &self,
+    repo_path: &Path,
+    branch_name: &str,
+    worktree_path: &Path,
+) -> Result<(), GitWorkspaceError> {
+    ensure_git_repo(repo_path).await?;
+    ensure_safe_aria_branch_name(branch_name)?; // 新增注入：worktree 的 branch 参数路径
+    ensure_safe_worktree_path(repo_path, worktree_path)?;
+    // ...既有逻辑...
+}
+```
+
+并确认 `ensure_safe_aria_branch_name()` 在 prefix 不匹配时返回的错误信息包含 `outside allowed aria branch prefixes`，使 reject 测试断言成立。
+
 - [ ] **步骤 4：Run Git safety tests and old Git tests**
 
 运行:
@@ -381,12 +418,19 @@ The method updates `last_completed_work_item_id`, clears `current_active_work_it
 运行:
 
 ```bash
-cargo test --locked --test it_product issue_shared_worktree
+# 注意：过滤名 issue_shared_worktree 匹配不到 rejects_lock_when_another_work_item_is_active
+# （该用例名不含此子串）。改用更宽的 issue 过滤名以覆盖本计划全部新增 store 用例：
+#   persists_issue_shared_worktree_and_active_lock
+#   rejects_lock_when_another_work_item_is_active
+#   marks_issue_shared_worktree_last_completed_work_item
+cargo test --locked --test it_product issue
 cargo test --locked --test it_product git_workspace_service
 cargo fmt --check
 cargo clippy --all-targets --all-features --locked -- -D warnings
 cargo check --locked
 ```
+
+> **过滤名说明：** 若担心 `issue` 过滤名命中过宽（其它含 `issue` 的用例），可改为显式追加用例名分别运行：`cargo test --locked --test it_product rejects_lock_when_another_work_item_is_active` 等三条，确保本计划新增的三个 store 用例与两个 Git safety 用例全部覆盖。
 
 预期:
 

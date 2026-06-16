@@ -1,5 +1,9 @@
 # WorkItem 拆分 P7 前端 Work Item 生成选项与 DAG 展示 Implementation Plan
 
+> **版本：v1.1**（修订自 v1.0）
+>
+> **v1.1 修订摘要：**（1）强化硬前置：当前 `web/src/api/types.ts` 的 `LifecycleWorkItem`（约行 108-119）仅含基础字段、`GenerateWorkItemsRequest`（约行 749-753）仅含 title/story_spec_ids/design_spec_ids，拆分相关字段必须由后端 P3 先落地并反映到前端类型，执行前必须确认 P3 已交付对应 DTO 字段；（2）测试伪代码对齐真实 props：`LifecycleCardDrawer` 实际 props 为 `{entity,onClose,onOpenWorkspace,onOpenCodingWorkspace?,onGenerateNext?,onDelete?}`（无 `open`），`DrawerEntityKind` 现为 `issue|story_spec|design_spec|work_item`（不含 `backend`），`LifecycleCard` 用 `onGenerateStorySpec` 而非 `onOpenFullIssue`，并明确需扩展 `DrawerEntity` 透传 work item 的 kind/scope；（3）预设拆分点：任务1-2（类型+store）与任务3-4（UI 组件）分两次提交或允许中途 checkpoint；（4）前置交付摘要补充 P7→P8 串行约束（共享 `types.ts`，禁止并行）。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 前端在生命周期工作台提供 Work Item 生成选项，并在 Work Item 列/Drawer 展示 kind、依赖、写入范围、预算、等待原因、handoff 状态和 Integration/E2E 标识。
@@ -14,9 +18,11 @@
 
 执行本计划前确认：
 
+- 🔴 **硬前置（执行前必须确认）**：当前 `web/src/api/types.ts` 的 `LifecycleWorkItem`（约行 108-119）只有基础字段（无 `kind`/`depends_on`/`exclusive_write_scopes` 等），`GenerateWorkItemsRequest`（约行 749-753）只有 `title`/`story_spec_ids`/`design_spec_ids`（无 4 个开关）。这些拆分字段必须由**后端 P3 先落地并反映到前端类型**。开工前必须确认 P3 已交付对应 DTO 字段；若尚未交付，停止本计划并回到 P3，不在前端伪造字段。
 - P3 后端 `GenerateWorkItemsRequest` 已支持 `include_integration_tests`、`include_e2e_tests`、`force_frontend_backend_split`、`require_execution_plan_confirm`。
 - `LifecycleWorkItemDto` 已透出 `kind`、`depends_on`、`exclusive_write_scopes`、`forbidden_write_scopes`、`context_budget`、`required_handoff_from`、`handoff_summary_ref`、`completion_commit`、`completion_diff_summary_ref`。
 - P5/P6 后端会通过 `latest_attempt`、status 和 handoff 字段表达等待/完成状态。
+- **P7→P8 串行约束**：P7 与 P8 共享并修改 `web/src/api/types.ts`（P7 扩 `LifecycleWorkItem`/`GenerateWorkItemsRequest`，P8 新增 `WorkItemExecutionPlan`/`WorkItemHandoff` 并扩 `CodingAttemptSnapshotResponse`）。必须先完成 P7、再执行 P8，不得并行，避免 `types.ts` 合并冲突。
 
 ## 计划大小边界
 
@@ -27,7 +33,15 @@
 - 不写 Playwright E2E。
 - 不改路由结构。
 
-如果发现 API 字段缺失，先停下并回到后端计划补字段，不在前端伪造状态。
+如果发现 API 字段缺失，先停下并回到后端计划补字段，不在前端伪造状态。执行前必须先确认 P3 已交付对应 DTO 字段（见前置交付摘要硬前置项）。
+
+## 提交拆分点
+
+本计划偏大（12 文件 / 4 任务），预设拆分点以便小步交付：
+
+- **第一段：任务 1-2（类型 + store）** — 完成后可独立提交一次。
+- **第二段：任务 3-4（UI 组件）** — 完成后再提交一次。
+- 若不分两次提交，至少在任务 2 完成后做一次 checkpoint（确保类型与 store helper 测试全绿）再进入 UI 任务。
 
 ## 文件结构
 
@@ -334,7 +348,7 @@ it("renders work item kind and waiting reason on work item cards", () => {
       selected={false}
       deleting={false}
       onSelect={vi.fn()}
-      onOpenFullIssue={vi.fn()}
+      onGenerateStorySpec={vi.fn()}
     />,
   );
 
@@ -343,6 +357,8 @@ it("renders work item kind and waiting reason on work item cards", () => {
 });
 ```
 
+> 说明：`LifecycleCard` 实际 props 为 `{card,selected,deleting?,onSelect,onGenerateStorySpec?,onDelete?}`，无 `onOpenFullIssue`。`card.kind` 取值为 `issue|story_spec|design_spec|work_item`；work item 的拆分 kind（backend/frontend/...）需通过扩展 `LifecycleCardData` 携带的 work item 字段表达。
+
 For drawer:
 
 ```tsx
@@ -350,13 +366,15 @@ it("renders work item scopes budget and handoff state in drawer", () => {
   render(
     <LifecycleCardDrawer
       entity={workItemDrawerEntity({
-        kind: "backend",
+        // entity.kind 为 DrawerEntityKind（work_item）；
+        // work item 拆分 kind/scope 通过扩展 DrawerEntity 的新字段透传。
+        workItemKind: "backend",
         exclusive_write_scopes: ["src/product/**"],
         forbidden_write_scopes: ["web/**"],
         handoff_summary_ref: "handoffs/work_item_0001.json",
       })}
-      open
       onClose={vi.fn()}
+      onOpenWorkspace={vi.fn()}
     />,
   );
 
@@ -365,6 +383,8 @@ it("renders work item scopes budget and handoff state in drawer", () => {
   expect(screen.getByText("交接摘要已生成")).toBeInTheDocument();
 });
 ```
+
+> 说明：`LifecycleCardDrawer` 实际 props 为 `{entity,onClose,onOpenWorkspace,onOpenCodingWorkspace?,onGenerateNext?,onDelete?}`，**无 `open` prop**。`DrawerEntityKind` 当前为 `issue|story_spec|design_spec|work_item`，不含 `backend`；因此本任务需扩展 `DrawerEntity`，新增透传 work item 的拆分 kind（`workItemKind`）、写入范围（`exclusive_write_scopes`/`forbidden_write_scopes`）与 handoff 字段，再在 Drawer 中渲染。
 
 - [ ] **步骤 2：运行 render tests 并确认失败**
 

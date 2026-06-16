@@ -8,6 +8,10 @@
 
 **Tech Stack:** Rust 1.95.0、Serde JSON、Cargo integration tests、TDD、OpenSpec、Superpowers。
 
+**版本：** v1.1
+
+> **v1.1 修订摘要：** 1) 将 `src/product/lifecycle_store.rs` 补进 File Structure 写入范围与 Task 4 的 `git add` 提交清单（给 `LifecycleWorkItemRecord` 加字段必须同步改 `lifecycle_store.rs:254` 的字面量构造点，否则编译失败却漏提交）；2) 在前置上下文与 Task 4 记录两项已评估风险：迁移后 `product::models::ExecutionMode` 成为无使用者的孤儿 `pub enum`（不触发 `dead_code`），以及新 scheduler 保留的 `ReadyDecision::NotAgentExecutable` variant 无构造分支，二者均确认 `-D warnings` 仍可通过。
+
 ---
 
 ## Plan Size Guard
@@ -39,12 +43,20 @@
 - 活跃链路使用 `LifecycleWorkItemRecord`。
 - `worktree_scheduler.rs` 已有 `ReadyDecision::{Ready, WaitingForDependency, WaitingForScope, NotAgentExecutable, NotPending}` 和 scope overlap 判定，应迁移保留。
 
+## 已评估风险
+
+- **`product::models::ExecutionMode` 迁移后成为孤儿 `pub enum`**：本计划删除 `WorkItemRecord` 后，`ExecutionMode` 的唯一字段使用者（`WorkItemRecord::execution_mode`，`models.rs:187`）随之消失。由于它是 `pub` 项，Rust 的 `dead_code` lint 不会对其报警，因此 `-D warnings` 仍可通过。本计划按 Task 3 Step 1 的说明保留 `ExecutionMode`，把清理评估留给后续计划（注意它与 `protocol::projections::ExecutionMode` 是不同类型）。
+- **`ReadyDecision::NotAgentExecutable` variant 在新 scheduler 中无构造分支**：迁移后的 `ready_work_items()` 不再产出该 variant（旧 `ExecutionMode` 判定已移除）。该 variant 作为 `pub enum` 成员同样不触发 `dead_code`，`-D warnings` 仍可通过；保留它是为了与旧 scheduler 的 API 兼容，留待 P3 接入 agent 可执行性判定时复用。
+
 ## File Structure
 
 - Modify: `src/product/models.rs`
   - 删除旧 `WorkItemRecord`。
   - 增加 `WorkItemKind`、`WorkItemContextBudget`、`WorkItemExecutionPlanStatus`。
   - 扩展 `LifecycleWorkItemRecord`，新增拆分/调度字段，并使用 serde default 保持旧 JSON 可读。
+- Modify: `src/product/lifecycle_store.rs`
+  - `create_work_item` 中 `LifecycleWorkItemRecord` 字面量构造点（`lifecycle_store.rs:254`）必须补齐新增字段的显式默认值，否则结构体新增字段后该构造点会编译失败。
+  - 补充导入 `WorkItemContextBudget`、`WorkItemExecutionPlanStatus`、`WorkItemKind`。
 - Modify: `src/product/worktree_scheduler.rs`
   - `ready_work_items()` 入参改为 `&[LifecycleWorkItemRecord]`。
   - 依赖读取 `depends_on`。
@@ -612,7 +624,7 @@ Expected: pass，无任何 warning。若出现 `unused import`（如 `ExecutionM
 Run:
 
 ```bash
-git diff -- src/product/models.rs src/product/worktree_scheduler.rs src/product/mod.rs tests/it_core/work_item_scheduler.rs tests/it_product.rs tests/it_product/product_work_item_models.rs
+git diff -- src/product/models.rs src/product/lifecycle_store.rs src/product/worktree_scheduler.rs src/product/mod.rs tests/it_core/work_item_scheduler.rs tests/it_product.rs tests/it_product/product_work_item_models.rs
 git status --short
 ```
 
@@ -626,7 +638,7 @@ Expected:
 Run:
 
 ```bash
-git add src/product/models.rs src/product/worktree_scheduler.rs src/product/mod.rs src/product/work_item_store.rs tests/it_core/work_item_scheduler.rs tests/it_product.rs tests/it_product/product_work_item_models.rs
+git add src/product/models.rs src/product/lifecycle_store.rs src/product/worktree_scheduler.rs src/product/mod.rs src/product/work_item_store.rs tests/it_core/work_item_scheduler.rs tests/it_product.rs tests/it_product/product_work_item_models.rs
 git commit -m "feat: migrate work item scheduler model"
 ```
 

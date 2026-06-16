@@ -1,5 +1,9 @@
 # WorkItem 拆分 P8 前端 Coding Prepare 执行计划展示 Implementation Plan
 
+> **版本：v1.1**（修订自 v1.0）
+>
+> **v1.1 修订摘要：**（1）任务1 store 测试由不存在的 `applySnapshot` 改为真实方法 `setSessionState`，入参类型修正为 `coding_session_state` 消息（`Extract<CodingWsOutMessage, { type: "coding_session_state" }>`），并说明 hydration 经由 `useCodingWorkspaceWs.ts` 的 `case "coding_session_state"` 分支落库；（2）门禁开关统一为来自 work item/snapshot 的 `require_execution_plan_confirm`，不再使用 plan 上的 `require_confirmation`，测试样例与类型定义对齐；（3）前置交付摘要补充 P7→P8 串行约束（共享 `types.ts`，禁止并行）。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Coding Workspace Prepare 阶段展示 `WorkItemExecutionPlan`；默认非阻塞，开启确认门禁时要求用户确认或请求修改。
@@ -16,7 +20,8 @@
 
 - P6 `CodingAttemptSnapshotResponse` 已包含 `work_item_execution_plan` 和 `work_item_handoff`。
 - P6 已增加 confirm/change-request HTTP API，前端需要在 `web/src/api/client.ts` 增加调用。
-- 后端表达门禁的规则是：`require_execution_plan_confirm=false` 时 draft 不阻塞；为 true 时必须确认后才能进入 Coder。
+- 后端表达门禁的规则是：`require_execution_plan_confirm=false` 时 draft 不阻塞；为 true 时必须确认后才能进入 Coder。门禁标志的唯一来源是 work item / snapshot 上的 `require_execution_plan_confirm`（由 P6 后端字段透出），前端不在 plan 对象上自造 `require_confirmation`。
+- **P7→P8 串行约束**：P7 与 P8 共享并修改 `web/src/api/types.ts`（P7 扩 `LifecycleWorkItem`/`GenerateWorkItemsRequest`，P8 新增 `WorkItemExecutionPlan`/`WorkItemHandoff` 并扩 `CodingAttemptSnapshotResponse`）。必须先完成 P7、再执行 P8，不得并行，避免 `types.ts` 合并冲突。
 
 ## 计划大小边界
 
@@ -91,12 +96,15 @@ it("describes work item execution plan and handoff in coding snapshots", () => {
 Append to `web/src/state/coding-workspace-store.test.ts`:
 
 ```ts
-it("stores work item execution plan from snapshot", () => {
+it("stores work item execution plan from coding session state", () => {
   const store = useCodingWorkspaceStore.getState();
   store.reset();
 
-  store.applySnapshot({
-    ...codingSnapshot(),
+  // setSessionState 入参为 coding_session_state 消息：
+  // Extract<CodingWsOutMessage, { type: "coding_session_state" }>
+  store.setSessionState({
+    type: "coding_session_state",
+    ...codingSessionState(),
     work_item_execution_plan: executionPlan(),
     work_item_handoff: null,
   });
@@ -104,6 +112,8 @@ it("stores work item execution plan from snapshot", () => {
   expect(useCodingWorkspaceStore.getState().workItemExecutionPlan?.goal).toBe("实现后端 API");
 });
 ```
+
+> 说明：`coding-workspace-store.ts` 中没有 `applySnapshot`，落库入口是 `setSessionState(...)`（约行 87/161），其入参为 `coding_session_state` WS 消息类型。HTTP 初始 snapshot 与 WS 推送都经由 `useCodingWorkspaceWs.ts` 的 `case "coding_session_state"` 分支（约行 370）调用 `setSessionState` 落库。
 
 - [ ] **步骤 2：运行 tests 并确认失败**
 
@@ -125,9 +135,11 @@ pnpm -C web test -- --run coding-workspace-store
 ```ts
 workItemExecutionPlan: WorkItemExecutionPlan | null;
 workItemHandoff: WorkItemHandoff | null;
+// 门禁开关唯一来源：work item / snapshot 上的 require_execution_plan_confirm
+requireExecutionPlanConfirm: boolean;
 ```
 
-Update reset and snapshot application paths.
+Update `reset` 和 `setSessionState` 落库路径，从 `coding_session_state` 消息中读取 `work_item_execution_plan` / `work_item_handoff` 写入上述字段。
 
 - [ ] **步骤 4：运行 tests 并确认通过**
 
@@ -175,7 +187,7 @@ pnpm -C web test -- --run useCodingWorkspaceWs
 
 - [ ] **步骤 3：更新 WS mapping**
 
-When receiving initial snapshot or `coding_session_state`, set store execution plan and handoff fields.
+When receiving initial snapshot or `coding_session_state`, set store execution plan、handoff 和 `requireExecutionPlanConfirm` 字段。落库统一经由 `setSessionState`（`useCodingWorkspaceWs.ts` 约行 370 的 `case "coding_session_state"` 已调用）。
 
 P6 已将字段加入 HTTP snapshot 和 `coding_session_state`，本测试必须覆盖 WS state hydration。
 
@@ -217,9 +229,11 @@ it("shows confirm and change request actions when execution plan confirmation is
   useCodingWorkspaceStore.setState({
     ...readyCodingState(),
     stage: "prepare_context",
+    // 门禁开关来自 work item / snapshot 的 require_execution_plan_confirm，
+    // 而非 plan 对象自身字段。
+    requireExecutionPlanConfirm: true,
     workItemExecutionPlan: executionPlan({
       status: "draft",
-      require_confirmation: true,
     }),
   });
 
@@ -260,7 +274,7 @@ export function requestWorkItemExecutionPlanChange(attemptId: string, payload: {
 - Dependency handoffs.
 - Verification commands.
 - Risk notes.
-- Confirm/change request buttons only when confirmation is required and status is not `confirmed`.
+- Confirm/change request buttons only when `requireExecutionPlanConfirm`（来自 snapshot 的 `require_execution_plan_confirm`）为 true 且 status 不是 `confirmed`。
 
 不要 render large explanatory text.
 
@@ -290,7 +304,8 @@ it("confirms execution plan and updates store", async () => {
   );
   useCodingWorkspaceStore.setState({
     ...readyCodingState(),
-    workItemExecutionPlan: executionPlan({ status: "draft", require_confirmation: true }),
+    requireExecutionPlanConfirm: true,
+    workItemExecutionPlan: executionPlan({ status: "draft" }),
   });
 
   render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);

@@ -1,5 +1,9 @@
 # WorkItem 拆分 P9 贯通测试与可选 E2E WorkItem 验收 Implementation Plan
 
+> **版本：v1.1**（修订自 v1.0）
+>
+> **v1.1 修订摘要：** 任务4 浏览器 E2E 首屏强断言改为"先确定性 seed/setup 再断言"：现有 e2e 无 work item 种子数据（`start-api.mjs` 仅设 `ARIA_PROVIDER_MODE=fake`，无 seed），原先 `page.goto("/workbench")` 后无条件 `expect(getByText("Work Item")).toBeVisible()` 可能必失败；改为先经 `web/e2e/helpers/coding.ts` / `workspace.ts` 完成确定性 setup/seed，再做断言。计划边界（不改生产代码除非暴露真实缺陷、修复超 1-2 文件须另开计划、不创建真实远端 PR）保留不变。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 验证后端 Work Item、前端 Work Item、可选 Integration/E2E Work Item 的端到端关系：后端 handoff 被前端消费，Integration/E2E 等待前后端完成，用户跳过时记录风险但不阻塞。
@@ -331,8 +335,13 @@ pnpm -C web test -- --run CodingWorkspacePage
 
 ```ts
 import { expect, test } from "@playwright/test";
+import { seedSplitWorkItems } from "./helpers/workspace";
 
 test("work item split flow shows DAG and coding execution plan", async ({ page }) => {
+  // 现有 e2e 仅设 ARIA_PROVIDER_MODE=fake（start-api.mjs），无 work item 种子数据。
+  // 首屏不得做无条件强断言，必须先经 helpers 做确定性 seed/setup 再断言。
+  await seedSplitWorkItems(page);
+
   await page.goto("/workbench");
 
   await expect(page.getByText("Work Item")).toBeVisible();
@@ -346,7 +355,7 @@ test("work item split flow shows DAG and coding execution plan", async ({ page }
 });
 ```
 
-使用 existing fake/test-control setup patterns if the workbench requires seeded data; do not hit external services.
+通过现有 `web/e2e/helpers/coding.ts` / `web/e2e/helpers/workspace.ts`（均已存在）或测试控制 API 完成确定性 seed/setup；不依赖人工预置数据，也不命中外部服务。若现有 helpers 缺少 work item seed 能力，按"仅在需要复用 setup helper 时修改"的边界补充一个确定性 seed helper。
 
 - [ ] **步骤 2：Run E2E test**
 

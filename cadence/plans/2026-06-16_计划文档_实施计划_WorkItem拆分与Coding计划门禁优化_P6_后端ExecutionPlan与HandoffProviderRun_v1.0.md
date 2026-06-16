@@ -1,5 +1,9 @@
 # WorkItem 拆分 P6 后端 WorkItemExecutionPlan 与 Handoff Provider Run Implementation Plan
 
+> **文档版本：** v1.1
+>
+> **v1.1 修订摘要：** 预设拆分点（execution plan 任务 1-3 / handoff 任务 4-5 分两段提交）；修正最终验证过滤名为实际测试函数子串；纠正 `CodingWsOutMessage::CodingSessionState` 实际定义在 `src/web/coding_ws_handler.rs`（非 `workspace_ws_types.rs`）；补全 `completion_commit`/`handoff_summary_ref`/`execution_plan_status` 字段来源（P3/P4）并明确 `completion_commit` 取 `head_commit`；明确 handoff 校验必须在 P5 的状态更新/锁释放之前执行；补充 diff scope 校验应复用 `validate_write_path` 的说明（否则显式标注为后续遗漏项）。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Coding 前生成内部 `WorkItemExecutionPlan`，默认展示但不阻塞；Work Item 完成前运行额外 provider handoff run，缺 handoff 不允许完成或解锁依赖项。
@@ -18,6 +22,12 @@
 - Coding attempt 已使用 `aria/issues/{issue_id}` branch 与 `.worktrees/aria-issues/{issue_id}` worktree。
 - `handle_final_confirm()` 会释放 active lock 并记录 completed Work Item。
 
+> **字段来源说明（v1.1 新增）：** 本计划写入的 `LifecycleWorkItemRecord` 字段及其上游来源如下，实现前必须确认这些字段已由上游落地并逐字对齐：
+>
+> - `execution_plan_status`：字段由 **P3/P4** 引入到 `LifecycleWorkItemRecord`；本计划任务 3 在 execution plan confirm/change-request 时更新它。
+> - `handoff_summary_ref`：字段由 **P3/P4** 引入；P5 在 Coding 启动门禁中读取，本计划任务 4 在完成时写入。
+> - `completion_commit`：字段由 **P3/P4** 引入。`CodingExecutionAttempt` 已有 `head_commit` 字段，本计划**约定 `completion_commit` 取自 attempt 的 `head_commit`**（即 final confirm 时 attempt 的 HEAD commit），而非新引入提交来源。`WorkItemHandoff.commit_sha` 亦应与该 `head_commit` 一致。
+
 ## 计划大小边界
 
 本计划只做后端 execution plan 与 handoff：
@@ -28,6 +38,13 @@
 - 不改变 P5 已建立的 shared worktree branch/path 规则。
 
 如果需要前端展示字段，后端只扩展 DTO/WS payload；UI 渲染留给 P8。
+
+> **拆分点预设（v1.1 新增）：** 本计划偏大（5 任务 / 8 文件 / 两个新模型 + 两条新路由 + 改动约 89KB 的 `coding_ws_handler.rs`）。为降低单次提交风险，**至少拆为两段提交**：
+>
+> - **段一「execution plan」（任务 1-3）**：`WorkItemExecutionPlan` 模型与 store、attempt 启动时生成、snapshot/WS 暴露、可配置 confirm 门禁。完成后独立提交并通过该段的最终验证。
+> - **段二「handoff」（任务 4-5）**：`WorkItemHandoff` 模型与 store、完成门禁、handoff 生成 helper。在段一合并基础上提交。
+>
+> 两段各自保持可编译、可测试、可独立 review。下方「提交」章节给出对应的两条提交命令。
 
 ## 文件结构
 
@@ -42,8 +59,10 @@
 - Modify: `src/web/types.rs`
   - `CodingAttemptSnapshotResponse` 包含 `work_item_execution_plan` 和 `work_item_handoff`。
 - Modify: `src/web/workspace_ws_types.rs`
-  - `CodingWsOutMessage::CodingSessionState` 包含 `work_item_execution_plan` 和 `work_item_handoff`。
+  - 若 WS payload 的 plan/handoff 子结构（如 DTO 字段类型）需新增，在此补充类型定义。
+  - **（v1.1 勘误）`CodingWsOutMessage::CodingSessionState` 枚举与变体实际定义在 `src/web/coding_ws_handler.rs`（约 `:1976`），不在 `workspace_ws_types.rs`。为该变体新增 `work_item_execution_plan` / `work_item_handoff` 字段的改动请在 `coding_ws_handler.rs` 完成（见下一条）。**
 - Modify: `src/web/coding_ws_handler.rs`
+  - `CodingWsOutMessage::CodingSessionState`（约 `:1976`）新增 `work_item_execution_plan` 和 `work_item_handoff` 字段。
   - Coding WS 初始 state 和进入 Coder 前门禁读取 execution plan。
 - Modify: `src/web/handlers.rs`
   - snapshot 返回新增字段。
@@ -410,7 +429,9 @@ async fn final_confirm_requires_work_item_handoff() {
 
 - [ ] **步骤 5：实现 completion gate**
 
-Before setting attempt/work item completed in `handle_final_confirm()`, require a saved `WorkItemHandoff`. After success, update `LifecycleWorkItemRecord.handoff_summary_ref` and `completion_commit` from the handoff/review request.
+Before setting attempt/work item completed in `handle_final_confirm()`, require a saved `WorkItemHandoff`. After success, update `LifecycleWorkItemRecord.handoff_summary_ref` and `completion_commit` from the handoff/review request（`completion_commit` 取 attempt 的 `head_commit`，见前置交付摘要）。
+
+> **🔴 执行顺序约束（v1.1 新增）：** P5 已让 `handle_final_confirm()` 承担「置 Completed + 释放 active lock + 记录 last_completed」。本步骤插入的 handoff 校验**必须位于 P5 的状态更新与锁释放之前**：即进入函数后先校验 handoff 是否存在，缺失则提前 `return Err("work_item_handoff_missing")` 阻断，之后才执行 P5 的 Completed 落库与锁释放。否则会出现「Work Item 已置 Completed、锁已释放，但 handoff 缺失」的不一致状态，且锁释放后同 Issue 下一个 Work Item 可能已抢占，无法回滚。实现时确保校验、状态更新、锁释放三者在同一临界路径内按此顺序串行。
 
 - [ ] **步骤 6：运行 handoff tests 并确认通过**
 
@@ -477,12 +498,17 @@ cargo test --locked --test it_product generates_handoff_from_review_and_test_sum
 
 ## 最终验证
 
+> **v1.1 修正：** 原过滤名 `work_item_execution_plan` / `work_item_handoff` / `execution_plan` 作为 `cargo test` 子串与实际测试函数名不一致或匹配过宽。下面已改为能命中本计划全部新增用例、且子串语义明确的过滤器。
+
 运行:
 
 ```bash
-cargo test --locked --test it_product work_item_execution_plan
-cargo test --locked --test it_product work_item_handoff
-cargo test --locked --test it_web execution_plan
+cargo test --locked --test it_product saves_and_loads_work_item_execution_plan
+cargo test --locked --test it_product saves_and_loads_work_item_handoff
+cargo test --locked --test it_product final_confirm_requires_work_item_handoff
+cargo test --locked --test it_product generates_handoff_from_review_and_test_summaries_before_final_confirm
+cargo test --locked --test it_web coding_attempt_snapshot_includes_generated_work_item_execution_plan
+cargo test --locked --test it_web coding_ws_blocks_coder_stage_when_execution_plan_requires_confirmation
 cargo fmt --check
 cargo clippy --all-targets --all-features --locked -- -D warnings
 cargo check --locked
@@ -494,9 +520,34 @@ cargo check --locked
 - Handoff tests pass.
 - Formatting, clippy and check pass.
 
+## Diff Scope 校验说明（v1.1 新增）
+
+> 设计要求 Coder 结束后对改动文件做 diff scope 校验，复用 `src/cross_cutting/worktree.rs` 的工具函数：
+>
+> - `validate_write_path`（`:270`，`pub`，可直接调用）。
+> - `is_forbidden_runtime_path`（`:417`，私有 `fn`；若需在本模块外单独使用，需先改为 `pub`）。
+>
+> 当前 P5/P6 正文均未给出 diff scope 校验的可执行步骤。处理方式二选一：
+>
+> - **若设计要求在本阶段落地**：在 handoff 生成（任务 5）或完成门禁（任务 4）前新增一步——收集 attempt 的改动文件清单，逐个调用 `validate_write_path`（结合 Work Item 的 `exclusive_write_scopes` / `forbidden_write_scopes`），命中禁止路径则阻断完成。
+> - **若暂不在本阶段落地**：在此**显式标注为已知遗漏项**，并指明由后续计划承接，避免被默认实现已覆盖。
+>
+> 本 v1.1 暂将其标注为**已知遗漏 / 待后续计划承接**，除非 reviewer 决定在本阶段补步骤。
+
 ## 提交
 
+> v1.1 拆分为两段提交（见「计划大小边界」）。
+
+段一「execution plan」（任务 1-3 完成后）:
+
 ```bash
-git add src/product/coding_models.rs src/product/coding_attempt_store.rs src/product/coding_workspace_engine.rs src/web/types.rs src/web/handlers.rs tests/it_product/product_coding_attempt_store.rs tests/it_product/product_coding_workspace_engine.rs tests/it_web/web_coding_attempt_api.rs
-git commit -m "feat: add work item execution plan and handoff"
+git add src/product/coding_models.rs src/product/coding_attempt_store.rs src/product/coding_workspace_engine.rs src/web/types.rs src/web/handlers.rs src/web/coding_ws_handler.rs tests/it_product/product_coding_attempt_store.rs tests/it_web/web_coding_attempt_api.rs
+git commit -m "feat: add work item execution plan and configurable confirm gate"
+```
+
+段二「handoff」（任务 4-5 完成后）:
+
+```bash
+git add src/product/coding_models.rs src/product/coding_attempt_store.rs src/product/coding_workspace_engine.rs tests/it_product/product_coding_attempt_store.rs tests/it_product/product_coding_workspace_engine.rs
+git commit -m "feat: require work item handoff before completion"
 ```

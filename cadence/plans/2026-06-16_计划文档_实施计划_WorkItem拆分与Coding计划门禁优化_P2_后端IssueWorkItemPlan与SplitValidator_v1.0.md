@@ -8,13 +8,17 @@
 
 **Tech Stack:** Rust 1.95.0、Serde JSON、Cargo integration tests、TDD、OpenSpec、Superpowers。
 
+**版本：** v1.1
+
+> **v1.1 修订摘要：** 1) 在「前置交付摘要」补回 P1 实际新增并测试的 `sequence_hint` 字段；2) 新增「任务 0：测试脚手架」，给出全文 Task2/3/4 都依赖却从未定义的 `work_item(...)` 与 `split_plan(...)` 两个 test helper 的可编译骨架；3) Task 4 为 `write_scope_required` 规则补一个失败测试，并说明 `forbidden_write_scopes` 暂不纳入本计划校验范围；4) 在 validator 实现描述中明确依赖来源以 `work_item.depends_on` 为准、`plan.dependency_graph` 仅做一致性校验。
+
 ---
 
 ## 前置交付摘要
 
 执行本计划前，先阅读 P1 的提交摘要并确认以下事实已经成立：
 
-- `LifecycleWorkItemRecord` 已包含 `work_item_set_id`、`kind`、`depends_on`、`exclusive_write_scopes`、`forbidden_write_scopes`、`context_budget`、`required_handoff_from`、`require_execution_plan_confirm`、`execution_plan_status`、`handoff_summary_ref`、`completion_commit`、`completion_diff_summary_ref`。
+- `LifecycleWorkItemRecord` 已包含 `work_item_set_id`、`kind`、`sequence_hint`、`depends_on`、`exclusive_write_scopes`、`forbidden_write_scopes`、`context_budget`、`required_handoff_from`、`require_execution_plan_confirm`、`execution_plan_status`、`handoff_summary_ref`、`completion_commit`、`completion_diff_summary_ref`。
 - 旧 `WorkItemRecord` 和 `WorkItemStore` 已删除，`worktree_scheduler::ready_work_items()` 已迁移到 `LifecycleWorkItemRecord`。
 - `src/product/mod.rs` 已导出仍在使用的 product 模块。
 
@@ -43,6 +47,103 @@
   - 引入 `product_work_item_split_validator`。
 - Create: `tests/it_product/product_work_item_split_validator.rs`
   - 覆盖所有生成期结构校验。
+
+## 任务 0：测试脚手架（test helpers）
+
+**文件：**
+
+- Modify: `tests/it_product/product_work_item_split_validator.rs`
+
+> **说明：** 任务 2/3/4 的全部测试都依赖 `work_item(...)` 与 `split_plan(...)` 两个 helper，但它们在测试文件中没有内建定义。必须在编写任务 2 的失败测试之前，把这两个 helper 的完整定义加入测试文件，否则任务 2 起的测试无法编译。本任务不新增产品代码，仅补测试脚手架，因此无独立的「失败 → 通过」循环。
+
+- [ ] **步骤 1：在测试文件中加入两个 test helper**
+
+在 `tests/it_product/product_work_item_split_validator.rs`（任务 1 步骤 1 创建）中，把任务 1 步骤 1 顶部的 `use cadence_aria::product::models::{...}` import 块**合并扩展**为下面这份完整 import（新增 `LifecycleWorkItemRecord`、`WorkItemContextBudget`、`WorkItemExecutionPlanStatus`、`WorkItemKind`、`WorkItemPlanStatus`、`WorkItemStatus`），再在其后加入两个 helper。`work_item(...)` 返回的 `LifecycleWorkItemRecord` 必须给 P1 新增的全部字段填默认值，并默认填充 `story_spec_ids` / `design_spec_ids`（任务 4 的 traceability 失败测试通过显式 `clear()` 来构造空值）：
+
+```rust
+use cadence_aria::product::models::{
+    IssueWorkItemDependencyEdge, IssueWorkItemPlan, IssueWorkItemPlanOptions,
+    IssueWorkItemPlanStatus, LifecycleWorkItemRecord, WorkItemContextBudget,
+    WorkItemExecutionPlanStatus, WorkItemKind, WorkItemPlanStatus, WorkItemStatus,
+};
+
+fn work_item(
+    id: &str,
+    kind: WorkItemKind,
+    depends_on: Vec<&str>,
+    scope: Vec<&str>,
+) -> LifecycleWorkItemRecord {
+    LifecycleWorkItemRecord {
+        id: id.to_string(),
+        project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        repository_id: "repo_0001".to_string(),
+        story_spec_ids: vec!["story_spec_0001".to_string()],
+        design_spec_ids: vec!["design_spec_0001".to_string()],
+        title: id.to_string(),
+        plan_status: WorkItemPlanStatus::Confirmed,
+        execution_status: WorkItemStatus::Pending,
+        worktree_path: None,
+        work_item_set_id: Some("work_item_set_0001".to_string()),
+        kind,
+        sequence_hint: None,
+        depends_on: depends_on.into_iter().map(str::to_string).collect(),
+        exclusive_write_scopes: scope.into_iter().map(str::to_string).collect(),
+        forbidden_write_scopes: Vec::new(),
+        context_budget: WorkItemContextBudget::default(),
+        required_handoff_from: Vec::new(),
+        require_execution_plan_confirm: false,
+        execution_plan_status: WorkItemExecutionPlanStatus::NotStarted,
+        handoff_summary_ref: None,
+        completion_commit: None,
+        completion_diff_summary_ref: None,
+        created_at: "2026-06-16T00:00:00Z".to_string(),
+        updated_at: "2026-06-16T00:00:00Z".to_string(),
+    }
+}
+
+fn split_plan(ids: Vec<&str>, edges: Vec<(&str, &str)>) -> IssueWorkItemPlan {
+    IssueWorkItemPlan {
+        id: "work_item_set_0001".to_string(),
+        project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        source_story_spec_ids: vec!["story_spec_0001".to_string()],
+        source_design_spec_ids: vec!["design_spec_0001".to_string()],
+        options: IssueWorkItemPlanOptions {
+            include_integration_tests: false,
+            include_e2e_tests: false,
+            force_frontend_backend_split: false,
+            require_execution_plan_confirm: false,
+        },
+        status: IssueWorkItemPlanStatus::Draft,
+        work_item_ids: ids.into_iter().map(str::to_string).collect(),
+        dependency_graph: edges
+            .into_iter()
+            .map(|(from, to)| IssueWorkItemDependencyEdge {
+                from_work_item_id: from.to_string(),
+                to_work_item_id: to.to_string(),
+            })
+            .collect(),
+        created_from_provider_run: None,
+        validator_findings: Vec::new(),
+        review_summary: None,
+        created_at: "2026-06-16T00:00:00Z".to_string(),
+        updated_at: "2026-06-16T00:00:00Z".to_string(),
+    }
+}
+```
+
+> **注意：** 任务 2 步骤 1 原本重复列出的 `use cadence_aria::product::models::{...}` 与 `use ...work_item_split_validator::WorkItemSplitValidator;` 中，凡已被本任务 import 覆盖的条目无需重复声明，只补 `WorkItemSplitValidator` 等尚未引入的项即可，避免 `duplicate import` 告警。
+
+- [ ] **步骤 2：确认脚手架编译**
+
+helper 引用的模型类型在任务 1（plan 模型）完成后才齐备。建议本任务的 helper 与任务 1 的 model 测试一起编译验证：
+
+```bash
+cargo test --locked --test it_product issue_work_item_plan_serializes_options_and_dependency_graph_as_snake_case
+```
+
+预期：测试文件可编译（helper 暂未被任何测试调用时允许出现 `dead_code`，将在任务 2 起被消费）。
 
 ## 任务 1：Add IssueWorkItemPlan Model
 
@@ -218,13 +319,9 @@ cargo test --locked --test it_product split_finding_severity_serializes_as_snake
 
 - [ ] **步骤 1：编写失败态 DAG tests**
 
-Append these tests:
+Append these tests（任务 0 已 import 所需模型类型，此处只补 validator 入口；若你的实现把 helper 与测试分文件组织，请按需补回模型 import）：
 
 ```rust
-use cadence_aria::product::models::{
-    LifecycleWorkItemRecord, WorkItemContextBudget, WorkItemExecutionPlanStatus, WorkItemKind,
-    WorkItemPlanStatus, WorkItemStatus,
-};
 use cadence_aria::product::work_item_split_validator::WorkItemSplitValidator;
 
 #[test]
@@ -325,7 +422,14 @@ fn error(code: &str, message: impl Into<String>, work_item_ids: Vec<String>) -> 
 }
 ```
 
-Implement membership and cycle detection with `HashSet`/DFS. Use the `plan.work_item_ids` list as the allowed node set and verify every `depends_on` and every `dependency_graph` endpoint belongs to it.
+Implement membership and cycle detection with `HashSet`/DFS.
+
+**依赖来源约定（唯一事实源）：** 以每个 `LifecycleWorkItemRecord::depends_on` 作为构建依赖图、检测环、判定 scope 排序的**唯一依赖来源**。`plan.dependency_graph` 不作为依赖判定输入，仅用于**一致性校验**：
+
+- 节点集合：以 `plan.work_item_ids` 为允许的节点全集。校验每个 `depends_on` 端点都属于该集合，否则报 `dependency_not_in_plan`。
+- `plan.dependency_graph` 的每条边 `(from, to)` 的两个端点也必须属于 `plan.work_item_ids`，否则同样报 `dependency_not_in_plan`。
+- 一致性：`depends_on` 推导出的边集（对每个 item 的每个 `dep`，记一条 `dep -> item` 的边）必须与 `plan.dependency_graph` 声明的边集相等。不一致时报 `dependency_graph_mismatch`（severity `error`）。这样可避免「图里画了顺序但 `depends_on` 没写」或反之导致的隐性不一致。
+- 环检测：在 `depends_on` 推导出的有向图上做 DFS，发现回边即报 `dependency_cycle`。
 
 在 `src/product/mod.rs`, add:
 
@@ -486,6 +590,17 @@ fn validator_requires_traceability_refs_on_every_work_item() {
     assert!(report.has_errors());
     assert!(report.findings.iter().any(|finding| finding.code == "traceability_refs_required"));
 }
+
+#[test]
+fn validator_requires_non_empty_exclusive_write_scopes() {
+    let plan = split_plan(vec!["work_item_0001"], vec![]);
+    let item = work_item("work_item_0001", WorkItemKind::Backend, vec![], vec![]);
+
+    let report = WorkItemSplitValidator::validate(&plan, &[item]);
+
+    assert!(report.has_errors());
+    assert!(report.findings.iter().any(|finding| finding.code == "write_scope_required"));
+}
 ```
 
 - [ ] **步骤 2：运行 semantic tests 并确认失败**
@@ -496,6 +611,7 @@ fn validator_requires_traceability_refs_on_every_work_item() {
 cargo test --locked --test it_product validator_requires_backend_and_frontend_when_force_split_is_enabled
 cargo test --locked --test it_product validator_requires_integration_item_when_option_enabled
 cargo test --locked --test it_product validator_requires_traceability_refs_on_every_work_item
+cargo test --locked --test it_product validator_requires_non_empty_exclusive_write_scopes
 ```
 
 预期: tests fail because semantic checks are not implemented.
@@ -508,11 +624,12 @@ Rules:
 - `include_integration_tests=true` requires at least one `WorkItemKind::Integration`.
 - `include_e2e_tests=true` requires at least one `WorkItemKind::E2e`.
 - Every Work Item requires at least one `story_spec_id` and at least one `design_spec_id`.
-- Empty `exclusive_write_scopes` is an error with code `write_scope_required`.
+- Empty `exclusive_write_scopes` is an error with code `write_scope_required`（对应步骤 1 的 `validator_requires_non_empty_exclusive_write_scopes` 失败测试）。
+- **`forbidden_write_scopes` 不纳入本计划校验范围**：本计划只做「写入范围必须非空」与「并行写入范围不得重叠」两类校验，`forbidden_write_scopes`（禁写范围）与 `exclusive_write_scopes` 的交叉一致性校验留待 P3 接入生成流时设计，本版 validator 不读取该字段。
 
 - [ ] **步骤 4：运行 semantic tests 并确认通过**
 
-Run the three commands from Step 2 again.
+Run the four commands from Step 2 again.
 
 预期：全部通过。
 

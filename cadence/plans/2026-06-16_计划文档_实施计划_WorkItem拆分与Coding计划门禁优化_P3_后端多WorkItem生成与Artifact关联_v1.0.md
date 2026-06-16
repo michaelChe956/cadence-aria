@@ -1,5 +1,9 @@
 # WorkItem 拆分 P3 后端多 WorkItem 生成与 Artifact 关联 Implementation Plan
 
+> **文档版本：** v1.1
+>
+> **v1.1 修订摘要：** 依据设计评审对照真实源码修订：(1) 新增"任务 0：修正全部 legacy `create_work_item` 调用点"，列出全仓 12+ 处调用文件并建议 `CreateWorkItemInput` 实现 `Default` 以缩小改动面；(2) `GenerateWorkItemsResponse` 改为兼容方案——保留旧字段 `workspace_session`（单数，取主 session）并新增 `workspace_sessions`（复数），维持"不改前端"边界且不破坏 `web_lifecycle_api.rs:350` 的既有断言；(3) 新增显式步骤：从 `web_lifecycle_api.rs` 移植 `request_json` 并定义 `app_with_confirmed_story_and_design` 两个 helper 到新测试文件；(4) 新增计划拆分点说明与 P1/P2 强依赖提示。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 将 `generate_work_items` 从单 Work Item 创建升级为 Issue Work Item Set 创建，确保每个 Work Item 都拥有独立 workspace session 与 artifact versions，并把 P2 validator 接入生成期校验。
@@ -18,6 +22,15 @@
 - `WorkItemSplitValidator::validate()` 会返回 `WorkItemSplitValidationReport`，并覆盖 DAG、scope、预算、跨端、Integration/E2E 与 traceability 校验。
 - P2 不创建真实 Work Item，因此本计划负责持久化和 HTTP response 契约。
 
+> **🔴 强依赖提示：** 本计划强依赖 P1/P2 产物——`LifecycleWorkItemRecord` 的新增字段（P1）、`IssueWorkItemPlan` 与 `WorkItemSplitValidator`（P2）。执行前必须确认 P1、P2 已合并到当前分支，否则任务 1/3/4 引用的类型与校验器不存在，无法编译。
+
+## 计划拆分点说明
+
+本计划范围偏大（types + store + handler 多 item 生成 + validator 接入 + workspace context）。若单个 session 放不下，按以下拆分点分两段提交：
+
+- **第一段（types + store 字段）**：任务 0（修正 legacy 调用点）、任务 1（HTTP types）、任务 2（`CreateWorkItemInput` 新字段持久化）。提交后保证全仓编译与既有测试通过。
+- **第二段（handler 多 item 生成 + validator 接入）**：任务 3（deterministic split builder + workspace context）、任务 4（validator 前置校验与无半成品回归）。
+
 ## 计划大小边界
 
 本计划只做 `generate_work_items` 生成链路：
@@ -34,23 +47,80 @@
 
 - Modify: `src/web/types.rs`
   - 扩展 `GenerateWorkItemsRequest`，新增拆分选项。
-  - 扩展 `GenerateWorkItemsResponse`，新增 `work_item_plan` 与 `validator_findings`。
+  - 扩展 `GenerateWorkItemsResponse`：**保留旧字段 `workspace_session`（单数，兼容）**，新增 `workspace_sessions`（复数）、`work_item_plan` 与 `validator_findings`。
   - 扩展 `LifecycleWorkItemDto`，透出 P1/P2 新增字段。
 - Modify: `src/web/handlers.rs`
   - `generate_work_items` 创建多个 Work Item。
   - 构造 `IssueWorkItemPlan` 并调用 `WorkItemSplitValidator`。
-  - 返回每个 Work Item 对应的 workspace session。
+  - 返回每个 Work Item 对应的 workspace session（复数），同时把主 session 写入旧的单数字段。
 - Modify: `src/product/lifecycle_store.rs`
   - 扩展 `CreateWorkItemInput` 支持 P1 新字段。
   - 增加批量创建辅助函数或保持 handler 顺序创建但保证失败前不产生半成品。
 - Modify: `src/web/workspace_context.rs`
   - Work Item workspace system context 纳入 kind、依赖、写入范围、预算和验证命令摘要。
+  - **同时修正本文件中的 legacy `create_work_item` 调用点（见任务 0）。**
 - Modify: `tests/it_web.rs`
   - 引入 `web_work_item_generation`。
 - Create: `tests/it_web/web_work_item_generation.rs`
   - 覆盖多 Work Item 生成、validator 拦截和 session/artifact 关联。
 - Modify: `tests/it_product/product_lifecycle_store.rs`
   - 覆盖 `CreateWorkItemInput` 新字段持久化。
+- Modify（任务 0，legacy 调用点）：`src/web/handlers.rs`、`src/web/workspace_context.rs`、`src/web/test_controls.rs`、`src/product/coding_evaluation_context.rs`、`src/product/lifecycle_store.rs`（self-test）、`tests/it_web/web_coding_ws_handler.rs`、`tests/it_web/web_coding_attempt_api.rs`、`tests/it_product/product_coding_workspace_engine.rs`、`tests/it_product/product_lifecycle_store.rs`
+  - 为所有 legacy `create_work_item(CreateWorkItemInput{...})` 调用点补默认字段值（详见任务 0）。
+
+## 任务 0：修正全部 legacy `create_work_item` 调用点
+
+> **🔴 阻塞前置：** 给 `CreateWorkItemInput` 增加必填字段后，全仓约 12+ 处既有 `create_work_item(CreateWorkItemInput{...})` 调用点会编译失败。本任务负责把它们全部补齐，必须先于（或紧随）任务 2 的字段扩展完成，否则全仓无法编译。
+
+**降风险建议（强烈推荐）：** 为 `CreateWorkItemInput` 新增字段实现 `Default`（或对整个结构体 `#[derive(Default)]`，注意 `WorkItemKind` 需有 `Default`），legacy 调用点即可用 `..Default::default()` 收尾，把改动面从"每处补 9 个字段"缩小为"每处补一行"。
+
+**已确认需要同步修改的调用点文件清单（源码 + 测试）：**
+
+- `src/web/handlers.rs:524`
+- `src/web/workspace_context.rs:779`
+- `src/web/test_controls.rs:484`
+- `src/product/coding_evaluation_context.rs:641 / 758 / 811`（3 处）
+- `src/product/lifecycle_store.rs:1329`（store 内 self-test）
+- `tests/it_web/web_coding_ws_handler.rs:2369 / 2416 / 2508 / 2573 / 2644 / 2703 / 2804 / 3981`（8 处）
+- `tests/it_web/web_coding_attempt_api.rs:702`
+- `tests/it_product/product_coding_workspace_engine.rs:4813 / 5001`（2 处）
+- `tests/it_product/product_lifecycle_store.rs:64 / 83`（2 处，旧用例）
+
+- [ ] **步骤 1：先确认调用点全集**
+
+运行（确认无遗漏后再动手）：
+
+```bash
+grep -rn "create_work_item(CreateWorkItemInput\|create_work_item(crate::product::lifecycle_store::CreateWorkItemInput" src/ tests/
+```
+
+- [ ] **步骤 2：实现 `Default` 并逐点补默认值**
+
+为 `CreateWorkItemInput` 新字段实现 `Default`，对上述每个 legacy 调用点追加：
+
+```rust
+work_item_set_id: None,
+kind: WorkItemKind::Other,
+sequence_hint: None,
+depends_on: Vec::new(),
+exclusive_write_scopes: Vec::new(),
+forbidden_write_scopes: Vec::new(),
+context_budget: WorkItemContextBudget::default(),
+required_handoff_from: Vec::new(),
+require_execution_plan_confirm: false,
+```
+
+或在实现 `Default` 后用 `..Default::default()` 收尾。
+
+- [ ] **步骤 3：全仓编译确认**
+
+```bash
+cargo check --locked --all-targets
+```
+
+预期：所有 legacy 调用点编译通过。
+
+
 
 ## 任务 1：Extend HTTP Types For Split Options And Work Item DTO
 
@@ -61,6 +131,11 @@
 - Create: `tests/it_web/web_work_item_generation.rs`
 
 - [ ] **步骤 1：编写失败态 response contract test**
+
+> **🔴 测试 helper 前置：** 本任务的测试用到 `request_json(...)` 与 `app_with_confirmed_story_and_design().await` 两个 helper，但全 `tests/` 中**不存在** `app_with_confirmed_story_and_design`，`request_json` 也分散在各测试文件中各自定义。必须在新测试文件里显式定义这两个 helper：
+>
+> - 从 `tests/it_web/web_lifecycle_api.rs:1159` 移植 `request_json`，签名返回 `(StatusCode, Value)`。
+> - 参考 `web_lifecycle_api.rs` 中"创建 project/issue + 生成并 confirm story/design spec"的既有流程，封装出 `app_with_confirmed_story_and_design()`，返回 `(axum::Router, TempRepo)`，内部完成：建仓、建 project、建 issue、生成并 confirm `story_spec_0001` 与 `design_spec_0001`。
 
 创建 `tests/it_web/web_work_item_generation.rs`:
 
@@ -99,7 +174,45 @@ async fn generate_work_items_accepts_split_options_and_returns_plan_metadata() {
     assert_eq!(response["work_item_plan"]["options"]["include_integration_tests"], true);
     assert_eq!(response["work_items"].as_array().unwrap().len(), 3);
     assert_eq!(response["workspace_sessions"].as_array().unwrap().len(), 3);
+    // 兼容断言：旧的单数字段保留，指向主 session（首个 work item）。
+    assert_eq!(response["workspace_session"]["entity_id"], "work_item_0001");
     assert!(response["validator_findings"].as_array().unwrap().is_empty());
+}
+
+// 移植自 tests/it_web/web_lifecycle_api.rs:1159，返回 (StatusCode, Value)。
+async fn request_json(
+    app: axum::Router,
+    method: Method,
+    uri: &str,
+    body: Value,
+) -> (StatusCode, Value) {
+    let request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .expect("request");
+    let response = app.oneshot(request).await.expect("response");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let value = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).expect("json")
+    };
+    (status, value)
+}
+
+// 新增 helper：建仓 + project + issue，并生成并 confirm story/design spec。
+// 参考 web_lifecycle_api.rs 中既有的生成/confirm 流程拼装。
+async fn app_with_confirmed_story_and_design() -> (axum::Router, tempfile::TempDir) {
+    // 1. tempdir + WebRuntime + build_web_router
+    // 2. POST 创建 project_0001 / issue_0001
+    // 3. 生成并 confirm story_spec_0001、design_spec_0001
+    // 返回 (app, repo_tempdir)
+    todo!("移植 web_lifecycle_api.rs 的 confirmed story/design 流程")
 }
 ```
 
@@ -141,16 +254,22 @@ pub struct GenerateWorkItemsRequest {
 }
 ```
 
-替换 `GenerateWorkItemsResponse` with:
+替换 `GenerateWorkItemsResponse` with（**兼容方案：保留旧的单数 `workspace_session` 字段，新增复数 `workspace_sessions`**）:
 
 ```rust
 pub struct GenerateWorkItemsResponse {
     pub work_items: Vec<LifecycleWorkItemDto>,
+    /// 兼容字段：保留旧的单数 session，取首个/主 session。
+    /// 维持"不改前端"边界，且不破坏 web_lifecycle_api.rs:350 的既有断言。
+    pub workspace_session: WorkspaceSessionDto,
+    /// 新增：每个 Work Item 对应一个 session。
     pub workspace_sessions: Vec<WorkspaceSessionDto>,
     pub work_item_plan: IssueWorkItemPlan,
     pub validator_findings: Vec<WorkItemSplitFinding>,
 }
 ```
+
+> **🔴 兼容性约束：** 旧字段 `workspace_session` 不得删除或改名。handler 构造响应时，将首个（主）Work Item 的 session 同时写入 `workspace_session`（单数）与 `workspace_sessions[0]`。本计划维持"不改前端"边界，既有后端测试 `tests/it_web/web_lifecycle_api.rs:350` 的 `workspace_session` 断言必须继续通过。
 
 添加 the necessary imports from `crate::product::models`.
 
@@ -509,5 +628,7 @@ cargo check --locked
 
 ```bash
 git add src/web/types.rs src/web/handlers.rs src/product/lifecycle_store.rs src/web/workspace_context.rs tests/it_web.rs tests/it_web/web_work_item_generation.rs tests/it_product/product_lifecycle_store.rs
+# 任务 0 修正的 legacy create_work_item 调用点
+git add src/web/test_controls.rs src/product/coding_evaluation_context.rs tests/it_web/web_coding_ws_handler.rs tests/it_web/web_coding_attempt_api.rs tests/it_product/product_coding_workspace_engine.rs
 git commit -m "feat: generate split work items"
 ```
