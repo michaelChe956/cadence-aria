@@ -120,6 +120,45 @@ export type WorkItemExecutionPlanStatus =
   | "confirmed"
   | "change_requested";
 
+export type WorkItemDependencyHandoffRef = {
+  work_item_id: string;
+  handoff_summary_ref: string;
+};
+
+export type WorkItemHandoff = {
+  handoff_id: string;
+  work_item_id: string;
+  summary: string;
+  handoff_summary_ref: string | null;
+  dependency_handoffs: WorkItemDependencyHandoffRef[];
+  verification_summary: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type WorkItemExecutionPlan = {
+  id: string;
+  project_id: string;
+  issue_id: string;
+  work_item_id: string;
+  attempt_id: string;
+  status: WorkItemExecutionPlanStatus;
+  goal: string;
+  allowed_write_scopes: string[];
+  forbidden_write_scopes: string[];
+  dependency_handoffs: WorkItemDependencyHandoffRef[];
+  story_refs: string[];
+  design_refs: string[];
+  openspec_refs: string[];
+  superpowers_contract: string;
+  tdd_contract: string;
+  verification_plan_ref: string;
+  verification_summary: string;
+  risk_notes: string[];
+  created_at: string;
+  updated_at: string;
+};
+
 export type WorkItemContextBudget = {
   target_context_k: string;
   max_summary_chars: number;
@@ -668,6 +707,9 @@ export type CodingWsOutMessage =
       pushed_remote: string | null;
       role_provider_config_snapshot: CodingRoleProviderConfigSnapshot;
       chat_entries: CodingChatEntry[];
+      work_item_execution_plan: WorkItemExecutionPlan | null;
+      work_item_handoff: WorkItemHandoff | null;
+      require_execution_plan_confirm: boolean;
     } & Omit<CodingAttemptSnapshotResponse, "attempt">)
   | { type: "coding_stage_change"; stage: CodingExecutionStage }
   | { type: "coding_timeline_node_created"; node: CodingTimelineNode }

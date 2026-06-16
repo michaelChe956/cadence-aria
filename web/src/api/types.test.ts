@@ -14,6 +14,7 @@ import type {
   NodeDetail,
   TestingReport,
   TimelineNodeType,
+  WorkItemExecutionPlan,
   WsInMessage,
   WsOutMessage,
 } from "./types";
@@ -230,6 +231,9 @@ describe("workspace websocket protocol types", () => {
       },
       provider_config_snapshot: { author: "fake", reviewer: "fake", review_rounds: 1 },
       chat_entries: [],
+      work_item_execution_plan: null,
+      work_item_handoff: null,
+      require_execution_plan_confirm: false,
       timeline_nodes: snapshot.timeline_nodes,
       role_runs: [
         {
@@ -431,6 +435,33 @@ describe("workspace websocket protocol types", () => {
 
     expect(report.run_no).toBe(1);
     expect(internal.role_run_id).toBe("coding_role_run_0002");
+  });
+
+  it("describes work item execution plan and handoff in coding snapshots", () => {
+    const plan: WorkItemExecutionPlan = {
+      id: "work_item_execution_plan_0001",
+      project_id: "project_0001",
+      issue_id: "issue_0001",
+      work_item_id: "work_item_0001",
+      attempt_id: "coding_attempt_0001",
+      status: "draft",
+      goal: "实现后端 API",
+      allowed_write_scopes: ["src/product/**"],
+      forbidden_write_scopes: ["web/**"],
+      dependency_handoffs: [],
+      story_refs: ["story_spec_0001"],
+      design_refs: ["design_spec_0001"],
+      openspec_refs: ["REQ-001"],
+      superpowers_contract: "use superpowers:test-driven-development",
+      tdd_contract: "先写失败测试，再写实现",
+      verification_plan_ref: "verification_plan_work_item_0001",
+      verification_summary: "provider supplied required gate verify_backend_unit",
+      risk_notes: [],
+      created_at: "2026-06-16T00:00:00Z",
+      updated_at: "2026-06-16T00:00:00Z",
+    };
+
+    expect(plan.allowed_write_scopes).toEqual(["src/product/**"]);
   });
 });
 

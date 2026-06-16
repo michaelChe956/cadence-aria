@@ -7,6 +7,7 @@ import type {
   CodingTimelineNode,
   CodingWsOutMessage,
   TestingReport,
+  WorkItemExecutionPlan,
 } from "../api/types";
 import { useCodingWorkspaceStore } from "./coding-workspace-store";
 
@@ -205,7 +206,41 @@ function sessionState(
     pending_choices: [],
     latest_analyst_decision: null,
     chat_entries: [],
+    work_item_execution_plan: null,
+    work_item_handoff: null,
+    require_execution_plan_confirm: false,
     ...overrides,
+  };
+}
+
+function codingSessionState(
+  overrides: Partial<Extract<CodingWsOutMessage, { type: "coding_session_state" }>> = {},
+): Extract<CodingWsOutMessage, { type: "coding_session_state" }> {
+  return sessionState(overrides);
+}
+
+function executionPlan(): WorkItemExecutionPlan {
+  return {
+    id: "work_item_execution_plan_0001",
+    project_id: "project_0001",
+    issue_id: "issue_0001",
+    work_item_id: "work_item_0001",
+    attempt_id: "coding_attempt_0001",
+    status: "draft",
+    goal: "实现后端 API",
+    allowed_write_scopes: ["src/product/**"],
+    forbidden_write_scopes: ["web/**"],
+    dependency_handoffs: [],
+    story_refs: ["story_spec_0001"],
+    design_refs: ["design_spec_0001"],
+    openspec_refs: ["REQ-001"],
+    superpowers_contract: "use superpowers:test-driven-development",
+    tdd_contract: "先写失败测试，再写实现",
+    verification_plan_ref: "verification_plan_work_item_0001",
+    verification_summary: "provider supplied required gate verify_backend_unit",
+    risk_notes: [],
+    created_at: "2026-06-16T00:00:00Z",
+    updated_at: "2026-06-16T00:00:00Z",
   };
 }
 
@@ -641,5 +676,20 @@ describe("coding workspace store", () => {
     );
 
     expect(useCodingWorkspaceStore.getState().activeTab).toBe("logs");
+  });
+
+  it("stores work item execution plan from coding session state", () => {
+    const store = useCodingWorkspaceStore.getState();
+    store.reset();
+
+    // setSessionState 入参为 coding_session_state 消息：
+    // Extract<CodingWsOutMessage, { type: "coding_session_state" }>
+    store.setSessionState({
+      ...codingSessionState(),
+      work_item_execution_plan: executionPlan(),
+      work_item_handoff: null,
+    });
+
+    expect(useCodingWorkspaceStore.getState().workItemExecutionPlan?.goal).toBe("实现后端 API");
   });
 });

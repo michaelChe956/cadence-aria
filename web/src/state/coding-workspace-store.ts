@@ -17,6 +17,8 @@ import type {
   ProviderConfigSnapshot,
   ReviewRequest,
   TestingReport,
+  WorkItemExecutionPlan,
+  WorkItemHandoff,
   WorkspaceProviderName,
 } from "../api/types";
 import type { ChatEntry, ChatEntryRole } from "./chat-entries";
@@ -81,6 +83,10 @@ export interface CodingWorkspaceState {
   pendingGates: CodingPendingGate[];
   protocolError: CodingProtocolError | null;
   tabLockedByUser: boolean;
+  workItemExecutionPlan: WorkItemExecutionPlan | null;
+  workItemHandoff: WorkItemHandoff | null;
+  // 门禁开关唯一来源：work item / snapshot 上的 require_execution_plan_confirm
+  requireExecutionPlanConfirm: boolean;
 }
 
 export interface CodingWorkspaceActions {
@@ -151,6 +157,9 @@ const initialState: CodingWorkspaceState = {
   pendingGates: [],
   protocolError: null,
   tabLockedByUser: false,
+  workItemExecutionPlan: null,
+  workItemHandoff: null,
+  requireExecutionPlanConfirm: false,
 };
 
 export const useCodingWorkspaceStore = create<
@@ -194,6 +203,9 @@ export const useCodingWorkspaceStore = create<
         latestAnalystDecision: snapshot.latest_analyst_decision ?? null,
         roleRuns: snapshot.role_runs ?? [],
         pendingGates: mergeSnapshotPendingGates(snapshot.pending_gates, prev.pendingGates),
+        workItemExecutionPlan: snapshot.work_item_execution_plan ?? null,
+        workItemHandoff: snapshot.work_item_handoff ?? null,
+        requireExecutionPlanConfirm: snapshot.require_execution_plan_confirm ?? false,
         protocolError: null,
         streamingContent: null,
         activeStreamNodeId: null,
