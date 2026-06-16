@@ -108,7 +108,9 @@ function blockedGate(overrides: Partial<CodingGateRequired> = {}): CodingGateReq
   };
 }
 
-function executionPlan(): WorkItemExecutionPlan {
+function executionPlan(
+  overrides: Partial<WorkItemExecutionPlan> = {},
+): WorkItemExecutionPlan {
   return {
     id: "work_item_execution_plan_0001",
     project_id: "project_0001",
@@ -130,6 +132,7 @@ function executionPlan(): WorkItemExecutionPlan {
     risk_notes: [],
     created_at: "2026-06-16T00:00:00Z",
     updated_at: "2026-06-16T00:00:00Z",
+    ...overrides,
   };
 }
 
@@ -1013,13 +1016,19 @@ describe("useCodingWorkspaceWs", () => {
 
     act(() => {
       harness.ws.receive({
-        type: "coding_session_state",
         ...codingSessionState(),
         work_item_execution_plan: executionPlan(),
         work_item_handoff: null,
+        require_execution_plan_confirm: false,
       });
     });
 
-    expect(useCodingWorkspaceStore.getState().workItemExecutionPlan?.status).toBe("draft");
+    expect(useCodingWorkspaceStore.getState().workItemExecutionPlan).toMatchObject({
+      status: "draft",
+      goal: "实现后端 API",
+      allowed_write_scopes: ["src/product/**"],
+    });
+    expect(useCodingWorkspaceStore.getState().workItemHandoff).toBeNull();
+    expect(useCodingWorkspaceStore.getState().requireExecutionPlanConfirm).toBe(false);
   });
 });
