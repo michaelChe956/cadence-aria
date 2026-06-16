@@ -186,6 +186,9 @@ describe("workspace websocket protocol types", () => {
       internal_pr_review: null,
       pending_gates: [],
       pending_choices: [],
+      work_item_execution_plan: null,
+      work_item_handoff: null,
+      require_execution_plan_confirm: false,
       latest_analyst_decision: {
         id: "analyst_decision_0001",
         attempt_id: "coding_attempt_0001",

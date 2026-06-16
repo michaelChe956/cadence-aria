@@ -644,6 +644,9 @@ export type CodingAttemptSnapshotResponse = {
   pending_choices: CodingChoiceGate[];
   latest_analyst_decision: AnalystDecisionRecord | null;
   role_runs?: CodingRoleRun[];
+  work_item_execution_plan: WorkItemExecutionPlan | null;
+  work_item_handoff: WorkItemHandoff | null;
+  require_execution_plan_confirm: boolean;
 };
 
 export type CodingAttemptDiffResponse = {

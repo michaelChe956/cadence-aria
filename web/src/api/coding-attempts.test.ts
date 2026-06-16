@@ -164,6 +164,9 @@ function codingAttemptSnapshotResponse() {
       },
     ],
     pending_choices: [],
+    work_item_execution_plan: null,
+    work_item_handoff: null,
+    require_execution_plan_confirm: false,
   };
 }
 
