@@ -12,8 +12,8 @@ use tempfile::tempdir;
 use tower::ServiceExt;
 
 #[derive(Debug, Clone)]
-struct MockSplitProviderAdapter {
-    output: Value,
+pub(crate) struct MockSplitProviderAdapter {
+    pub(crate) output: Value,
 }
 
 impl ProviderAdapter for MockSplitProviderAdapter {
@@ -30,7 +30,7 @@ impl ProviderAdapter for MockSplitProviderAdapter {
     }
 }
 
-fn valid_split_output() -> Value {
+pub(crate) fn valid_split_output() -> Value {
     json!({
         "repository_profile": {
             "confidence": "high",
@@ -388,7 +388,7 @@ async fn request_change_keeps_split_work_items_not_codeable() {
     );
 }
 
-async fn request_json(
+pub(crate) async fn request_json(
     app: axum::Router,
     method: Method,
     uri: &str,
@@ -413,7 +413,9 @@ async fn request_json(
     (status, value)
 }
 
-async fn app_with_confirmed_story_and_design(output: Value) -> (axum::Router, tempfile::TempDir) {
+pub(crate) async fn app_with_confirmed_story_and_design(
+    output: Value,
+) -> (axum::Router, tempfile::TempDir) {
     let root = tempdir().expect("root");
     let repo = root.path().join("repo");
     std::fs::create_dir_all(&repo).expect("create repo dir");

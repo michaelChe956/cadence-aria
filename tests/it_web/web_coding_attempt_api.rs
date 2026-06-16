@@ -945,7 +945,7 @@ async fn bootstrap_confirmed_split_work_items(
         .expect("create item2 with dependency");
 }
 
-async fn bootstrap_two_ready_confirmed_work_items(
+pub(crate) async fn bootstrap_two_ready_confirmed_work_items(
     app: axum::Router,
     root_path: &std::path::Path,
     repo_path: &std::path::Path,
@@ -1072,7 +1072,7 @@ async fn bootstrap_completed_dependency_without_handoff(
         .expect("create item2 with handoff dependency");
 }
 
-async fn bootstrap_story_and_design(app: axum::Router, repo_path: &std::path::Path) {
+pub(crate) async fn bootstrap_story_and_design(app: axum::Router, repo_path: &std::path::Path) {
     request_json(
         app.clone(),
         Method::POST,
@@ -1130,7 +1130,7 @@ async fn bootstrap_story_and_design(app: axum::Router, repo_path: &std::path::Pa
     .await;
 }
 
-async fn request_json(
+pub(crate) async fn request_json(
     app: axum::Router,
     method: Method,
     uri: &str,
@@ -1151,7 +1151,7 @@ async fn request_json(
     (status, value)
 }
 
-fn git_repo() -> tempfile::TempDir {
+pub(crate) fn git_repo() -> tempfile::TempDir {
     let dir = tempdir().expect("repo");
     run_git(dir.path(), &["init"]);
     run_git(dir.path(), &["config", "user.email", "aria@example.com"]);
@@ -1162,7 +1162,7 @@ fn git_repo() -> tempfile::TempDir {
     dir
 }
 
-fn run_git(cwd: &std::path::Path, args: &[&str]) {
+pub(crate) fn run_git(cwd: &std::path::Path, args: &[&str]) {
     let status = Command::new("git")
         .args(args)
         .current_dir(cwd)
@@ -1171,7 +1171,7 @@ fn run_git(cwd: &std::path::Path, args: &[&str]) {
     assert!(status.success());
 }
 
-fn prepare_attempt_with_worktree(
+pub(crate) fn prepare_attempt_with_worktree(
     store: &CodingAttemptStore,
     repo_path: &std::path::Path,
     project_id: &str,

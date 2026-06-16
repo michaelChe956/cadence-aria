@@ -13,16 +13,15 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::cross_cutting::provider_adapter::{
-    ProviderAdapter, DEFAULT_PROVIDER_TIMEOUT_SECS, ProviderAdapterError,
+    DEFAULT_PROVIDER_TIMEOUT_SECS, ProviderAdapter, ProviderAdapterError,
 };
-use crate::protocol::contracts::{AdapterInput, AdapterRole};
-use crate::cross_cutting::worktree::{scope_allows_path, validate_write_path};
 use crate::cross_cutting::streaming_provider::{
     ChoiceRequestData, PermissionRequestData, ProviderCommand, ProviderEvent,
     ProviderExecutionEvent, ProviderExecutionEventKind, ProviderExecutionEventStatus,
     ProviderPermissionMode, ProviderStatus, ProviderToolCall, ProviderToolResult, RiskLevel,
     StreamChunk, StreamingProviderAdapter, StreamingProviderInput,
 };
+use crate::cross_cutting::worktree::{scope_allows_path, validate_write_path};
 use crate::product::coding_attempt_store::{
     CodingAttemptStore, CreateBlockedGateInput, CreateChoiceGateInput,
     CreateQualityBypassAuditInput,
@@ -59,6 +58,7 @@ use crate::product::tester_agent_loop::{
     parse_test_plan_payload,
 };
 use crate::protocol::contracts::ProviderType;
+use crate::protocol::contracts::{AdapterInput, AdapterRole};
 use crate::web::coding_ws_handler::CodingWsOutMessage;
 use crate::web::workspace_ws_types::{
     ChoiceOption, WsExecutionEvent, WsExecutionEventKind, WsExecutionEventStatus,
@@ -3928,9 +3928,9 @@ impl CodingWorkspaceEngine {
         &self,
         attempt: &CodingExecutionAttempt,
     ) -> Result<WorkItemHandoff, CodingWorkspaceEngineError> {
-        let testing_reports = self
-            .store
-            .list_testing_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+        let testing_reports =
+            self.store
+                .list_testing_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
         let tests_run: Vec<String> = testing_reports
             .iter()
             .flat_map(|report| report.commands.iter().map(|cmd| cmd.command.join(" ")))
@@ -3940,10 +3940,12 @@ impl CodingWorkspaceEngine {
             .map(|report| format!("{:?}", report.overall_status))
             .unwrap_or_else(|| "no testing report".to_string());
 
-        let review_requests = self
-            .store
-            .list_review_requests(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
-        let review_summary = review_requests.last().map(|r| format!("{:?}", r.push_status));
+        let review_requests =
+            self.store
+                .list_review_requests(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+        let review_summary = review_requests
+            .last()
+            .map(|r| format!("{:?}", r.push_status));
 
         Ok(WorkItemHandoff {
             id: format!(
@@ -4093,9 +4095,7 @@ impl CodingWorkspaceEngine {
             .find(|item| item.id == attempt.work_item_id)
             .ok_or_else(|| CodingWorkspaceEngineError::FinalConfirmNotReady(attempt.id.clone()))?;
 
-        let changed_files = self
-            .changed_files_for_attempt(attempt, &work_item)
-            .await?;
+        let changed_files = self.changed_files_for_attempt(attempt, &work_item).await?;
         let worktree_path = self.attempt_worktree_path(attempt).await.ok();
         for relative_path in &changed_files {
             let candidate = std::path::Path::new(relative_path);
@@ -4111,15 +4111,13 @@ impl CodingWorkspaceEngine {
             if !work_item.exclusive_write_scopes.is_empty()
                 && let Some(ref base) = worktree_path
             {
-                let _ = validate_write_path(
-                    base,
-                    &work_item.exclusive_write_scopes,
-                    candidate,
-                    true,
-                )
-                .map_err(|_| {
-                    CodingWorkspaceEngineError::WorkItemDiffScopeViolation(relative_path.clone())
-                })?;
+                let _ =
+                    validate_write_path(base, &work_item.exclusive_write_scopes, candidate, true)
+                        .map_err(|_| {
+                        CodingWorkspaceEngineError::WorkItemDiffScopeViolation(
+                            relative_path.clone(),
+                        )
+                    })?;
             }
         }
 
@@ -4130,9 +4128,11 @@ impl CodingWorkspaceEngine {
                 plan_ref,
             )?;
             if !verification_plan.required_gates.is_empty() {
-                let reports = self
-                    .store
-                    .list_testing_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+                let reports = self.store.list_testing_reports(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &attempt.id,
+                )?;
                 let passed = reports.iter().any(|report| {
                     report.overall_status == TestingOverallStatus::Passed
                         || report.overall_status == TestingOverallStatus::PassedWithWarnings
@@ -4196,7 +4196,9 @@ impl CodingWorkspaceEngine {
         let shared = lifecycle.get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)?;
         match shared {
             Some(shared) if shared.worktree_path.exists() => Ok(shared.worktree_path),
-            _ => Err(CodingWorkspaceEngineError::MissingWorktree(attempt.id.clone())),
+            _ => Err(CodingWorkspaceEngineError::MissingWorktree(
+                attempt.id.clone(),
+            )),
         }
     }
 
