@@ -1335,6 +1335,13 @@ impl CodingWorkspaceEngine {
                 &attempt.id,
                 CodingAttemptStatus::Blocked,
             )?;
+            self.release_active_lock_if_shared_worktree_clean(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &attempt.work_item_id,
+            )
+            .await?;
         }
         let completed_at = Utc::now().to_rfc3339();
         self.store.update_timeline_node_status(
@@ -1385,6 +1392,13 @@ impl CodingWorkspaceEngine {
                 &current.id,
                 CodingAttemptStatus::Blocked,
             )?;
+            self.release_active_lock_if_shared_worktree_clean(
+                &current.project_id,
+                &current.issue_id,
+                &current.id,
+                &current.work_item_id,
+            )
+            .await?;
         }
 
         let node_id = self
@@ -1455,6 +1469,13 @@ impl CodingWorkspaceEngine {
                 &attempt.id,
                 CodingAttemptStatus::Blocked,
             )?;
+            self.release_active_lock_if_shared_worktree_clean(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &attempt.work_item_id,
+            )
+            .await?;
             let gate = self.store.create_blocked_gate(CreateBlockedGateInput {
                 attempt_id: attempt.id.clone(),
                 stage: CodingExecutionStage::Testing,
@@ -2772,6 +2793,13 @@ impl CodingWorkspaceEngine {
                 &attempt.id,
                 CodingAttemptStatus::Blocked,
             )?;
+            self.release_active_lock_if_shared_worktree_clean(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &attempt.work_item_id,
+            )
+            .await?;
         }
         if report.overall_status == TestingOverallStatus::Blocked
             && !testing_report_should_enter_analyst(&report)
@@ -3481,6 +3509,13 @@ impl CodingWorkspaceEngine {
                 &attempt.id,
                 CodingAttemptStatus::Blocked,
             )?;
+            self.release_active_lock_if_shared_worktree_clean(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &attempt.work_item_id,
+            )
+            .await?;
             self.complete_timeline_node(
                 &attempt.project_id,
                 &attempt.issue_id,
@@ -3551,6 +3586,13 @@ impl CodingWorkspaceEngine {
                 &attempt.id,
                 CodingAttemptStatus::Blocked,
             )?;
+            self.release_active_lock_if_shared_worktree_clean(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &attempt.work_item_id,
+            )
+            .await?;
             (
                 CodingTimelineNodeStatus::Failed,
                 Some("review request 推送失败".to_string()),
@@ -3613,11 +3655,11 @@ impl CodingWorkspaceEngine {
             &updated.work_item_id,
             WorkItemStatus::Completed,
         )?;
-        let _ = LifecycleStore::new(self.store.paths()).mark_issue_worktree_completed_item(
+        self.mark_issue_shared_worktree_completed_if_present(
             project_id,
             issue_id,
             &updated.work_item_id,
-        );
+        )?;
         if let Some(node_id) =
             self.active_final_confirm_node_id(project_id, issue_id, attempt_id)?
         {
@@ -3665,11 +3707,11 @@ impl CodingWorkspaceEngine {
             attempt_id,
             CodingAttemptStatus::Aborted,
         )?;
-        let _ = self.release_issue_shared_worktree_lock_if_holder(
+        self.release_issue_shared_worktree_lock_if_holder(
             project_id,
             issue_id,
             &updated.work_item_id,
-        );
+        )?;
         if let Some(node_id) = self.active_timeline_node_id(project_id, issue_id, attempt_id)? {
             let completed_at = Utc::now().to_rfc3339();
             self.store.update_timeline_node_status(
@@ -3813,6 +3855,43 @@ impl CodingWorkspaceEngine {
             lifecycle.release_issue_worktree_lock(project_id, issue_id, work_item_id)?;
         }
         Ok(())
+    }
+
+    fn mark_issue_shared_worktree_completed_if_present(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        work_item_id: &str,
+    ) -> Result<(), CodingWorkspaceEngineError> {
+        let lifecycle = LifecycleStore::new(self.store.paths());
+        if lifecycle
+            .get_issue_shared_worktree(project_id, issue_id)?
+            .is_some()
+        {
+            lifecycle.mark_issue_worktree_completed_item(project_id, issue_id, work_item_id)?;
+        }
+        Ok(())
+    }
+
+    async fn release_active_lock_if_shared_worktree_clean(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        work_item_id: &str,
+    ) -> Result<(), CodingWorkspaceEngineError> {
+        match self
+            .ensure_issue_shared_worktree_clean(project_id, issue_id, attempt_id, work_item_id)
+            .await
+        {
+            Ok(()) => self.release_issue_shared_worktree_lock_if_holder(
+                project_id,
+                issue_id,
+                work_item_id,
+            ),
+            Err(CodingWorkspaceEngineError::SharedWorktreeDirtyManualGate(_)) => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 
     pub async fn handle_blocked_gate_response(
@@ -4935,11 +5014,11 @@ impl CodingWorkspaceEngine {
             CodingAttemptStatus::Completed,
         )?;
         self.mark_work_item_completed_if_present(&completed)?;
-        let _ = LifecycleStore::new(self.store.paths()).mark_issue_worktree_completed_item(
+        self.mark_issue_shared_worktree_completed_if_present(
             &attempt.project_id,
             &attempt.issue_id,
             &attempt.work_item_id,
-        );
+        )?;
         let node = self.create_completed_final_confirm_timeline_node(&completed)?;
         let _ = self
             .event_tx
@@ -5086,7 +5165,13 @@ impl CodingWorkspaceEngine {
                             let _ = error;
                         }
                         Err(error) => return Err(error),
-                        Ok(()) => {}
+                        Ok(()) => {
+                            self.release_issue_shared_worktree_lock_if_holder(
+                                &attempt.project_id,
+                                &attempt.issue_id,
+                                &attempt.work_item_id,
+                            )?;
+                        }
                     }
                     Ok((
                         updated,
