@@ -6,7 +6,9 @@ use std::str::FromStr;
 use serde_json::json;
 
 use crate::cross_cutting::cli_adapter::{CliOutputChunk, ProviderOutputSink};
-use crate::cross_cutting::provider_adapter::{ProviderAdapter, ProviderAdapterError};
+use crate::cross_cutting::provider_adapter::{
+    FakeProviderAdapter, ProviderAdapter, ProviderAdapterError,
+};
 use crate::interactive::checkpoint::{
     CheckpointService, RollbackPreviewRequest as CoreRollbackPreviewRequest,
     RollbackRequest as CoreRollbackRequest,
@@ -43,7 +45,7 @@ use std::sync::Arc;
 pub struct WebRuntime {
     workspace_root: PathBuf,
     next_projection_version: u64,
-    real_provider: Option<Box<dyn ProviderAdapter + Send + Sync>>,
+    real_provider: Option<Arc<dyn ProviderAdapter + Send + Sync>>,
     provider_availability: Arc<dyn Fn(&ProviderType) -> bool + Send + Sync>,
     enforce_real_provider_availability: bool,
 }
@@ -95,7 +97,7 @@ impl WebRuntime {
         Ok(Self {
             workspace_root,
             next_projection_version: 1,
-            real_provider: Some(Box::new(real_routing_provider()?)),
+            real_provider: Some(Arc::new(real_routing_provider()?)),
             provider_availability: Arc::new(provider_type_available),
             enforce_real_provider_availability: true,
         })
@@ -122,7 +124,7 @@ impl WebRuntime {
         Ok(Self {
             workspace_root,
             next_projection_version: 1,
-            real_provider: Some(Box::new(real_routing_provider_with_output_sink(Some(
+            real_provider: Some(Arc::new(real_routing_provider_with_output_sink(Some(
                 output_sink,
             ))?)),
             provider_availability: Arc::new(provider_type_available),
@@ -137,7 +139,7 @@ impl WebRuntime {
         Self {
             workspace_root,
             next_projection_version: 1,
-            real_provider: Some(real_provider),
+            real_provider: Some(Arc::from(real_provider)),
             provider_availability: Arc::new(|_| true),
             enforce_real_provider_availability: false,
         }
@@ -145,6 +147,16 @@ impl WebRuntime {
 
     pub fn enforces_real_provider_availability(&self) -> bool {
         self.enforce_real_provider_availability
+    }
+
+    pub fn provider_adapter(&self) -> Arc<dyn ProviderAdapter + Send + Sync> {
+        if self.enforce_real_provider_availability {
+            self.real_provider
+                .clone()
+                .unwrap_or_else(|| Arc::new(real_routing_provider().expect("real provider")))
+        } else {
+            Arc::new(FakeProviderAdapter)
+        }
     }
 
     pub fn create_task(

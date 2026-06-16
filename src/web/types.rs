@@ -652,6 +652,16 @@ pub struct WorkspaceSessionConfirmRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub struct ConfirmIssueWorkItemPlanRequest {}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ChangeRequestIssueWorkItemPlanRequest {
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct WorkspaceMessageDto {
     pub role: String,
     pub content: String,

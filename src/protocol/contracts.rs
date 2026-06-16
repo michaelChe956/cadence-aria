@@ -36,6 +36,7 @@ pub enum AdapterRole {
     Orchestrator,
     Executor,
     Reviewer,
+    WorkItemSplitter,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -90,6 +90,13 @@ fn build_workspace_context_message(
         entity.linked_context.join("\n")
     };
 
+    let work_item_context = work_item_context_summary(lifecycle, session)?;
+    let work_item_context_block = if work_item_context.is_empty() {
+        String::new()
+    } else {
+        format!("\n\n[work_item_context]\n{work_item_context}")
+    };
+
     Ok(format!(
         "Workspace 生成任务已准备\n\n\
          [system]\n\
@@ -106,7 +113,7 @@ fn build_workspace_context_message(
          Issue 描述: {}\n\
          Repository: {} ({})\n\
          Repository 路径: {}\n\
-         关联上下文:\n{}\n\n\
+         关联上下文:\n{}{}\n\n\
          [constraint_summary]\n\
          {}\n\n\
          [workflow_discipline]\n\
@@ -128,10 +135,52 @@ fn build_workspace_context_message(
         repository.id,
         repository.path.display(),
         linked_context,
+        work_item_context_block,
         constraint_summary_for(session),
         workflow_discipline_for(session),
         output_schema_for(&session.workspace_type),
         completion_or_failure_for(session),
+    ))
+}
+
+fn work_item_context_summary(
+    lifecycle: &LifecycleStore,
+    session: &WorkspaceSessionRecord,
+) -> Result<String, ProductStoreError> {
+    if session.workspace_type != WorkspaceType::WorkItem {
+        return Ok(String::new());
+    }
+    let work_item = find_work_item(lifecycle, session, &session.entity_id)?;
+    let verification_plan_summary = if let Some(ref plan_ref) = work_item.verification_plan_ref {
+        match lifecycle.get_verification_plan(&session.project_id, &session.issue_id, plan_ref) {
+            Ok(plan) => {
+                let checks: Vec<String> = plan
+                    .commands
+                    .iter()
+                    .map(|command| format!("- {}: {}", command.label, command.command))
+                    .collect();
+                if checks.is_empty() {
+                    "(no commands)".to_string()
+                } else {
+                    checks.join("\n")
+                }
+            }
+            Err(_) => "(verification plan not found)".to_string(),
+        }
+    } else {
+        "(no verification plan)".to_string()
+    };
+
+    Ok(format!(
+        "kind: {:?}\ndepends_on: [{}]\nexclusive_write_scopes: [{}]\nforbidden_write_scopes: [{}]\ncontext_budget: target_context_k={}, max_summary_chars={}, max_code_context_chars={}\nverification_commands:\n{}",
+        work_item.kind,
+        work_item.depends_on.join(", "),
+        work_item.exclusive_write_scopes.join(", "),
+        work_item.forbidden_write_scopes.join(", "),
+        work_item.context_budget.target_context_k,
+        work_item.context_budget.max_summary_chars,
+        work_item.context_budget.max_code_context_chars,
+        verification_plan_summary
     ))
 }
 

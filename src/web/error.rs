@@ -31,6 +31,18 @@ impl ApiError {
             details,
         }
     }
+
+    pub fn validation_with_details(
+        code: impl Into<String>,
+        message: impl Into<String>,
+        details: Value,
+    ) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            details,
+        }
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -73,7 +85,8 @@ impl IntoResponse for ApiError {
             | "workspace_path_not_directory"
             | "workspace_path_not_git_repo"
             | "work_item_plan_not_confirmed"
-            | "repository_path_not_git_repo" => StatusCode::BAD_REQUEST,
+            | "repository_path_not_git_repo"
+            | "work_item_split_invalid" => StatusCode::BAD_REQUEST,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, Json(self)).into_response()

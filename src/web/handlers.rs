@@ -25,16 +25,21 @@ use crate::product::git_workspace_service::{GitWorkspaceError, GitWorkspaceServi
 use crate::product::issue_store::{CreateProductIssueWithRepositoryInput, IssueStore};
 use crate::product::json_store::{ProductStoreError, validate_relative_id};
 use crate::product::lifecycle_store::{
-    AppendSpecVersionInput, CreateDesignSpecInput, CreateStorySpecInput, CreateWorkItemInput,
-    CreateWorkspaceSessionInput, LifecycleStore,
+    AppendSpecVersionInput, CreateDesignSpecInput, CreateIssueWorkItemPlanInput,
+    CreateRepositoryProfileInput, CreateStorySpecInput, CreateVerificationPlanInput,
+    CreateWorkItemInput, CreateWorkspaceSessionInput, LifecycleStore,
 };
 use crate::product::models::{
     DesignKind, DesignSpecRecord, GateStatus, IssuePhase as ProductIssuePhase,
     IssueRecord as ProductIssueRecord, IssueRuntimeBindingRecord,
     IssueStatus as ProductIssueStatus, LifecycleConfirmationStatus, LifecycleWorkItemRecord,
     NodeDetail, ProjectRecord, ProviderName, RepositoryRecord, StorySpecRecord,
-    WorkItemExecutionPlanStatus, WorkItemKind, WorkItemPlanStatus, WorkItemStatus,
-    WorkspaceMessageRecord, WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType,
+    WorkItemExecutionPlanStatus, WorkItemKind, WorkItemStatus, WorkspaceMessageRecord,
+    WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType,
+};
+use crate::product::models::{
+    IssueWorkItemPlan as IssueWorkItemPlanRecord, IssueWorkItemPlanStatus, RepositoryProfile,
+    VerificationPlan, WorkItemPlanStatus,
 };
 use crate::product::project_store::{CreateProjectInput, ProjectStore};
 use crate::product::provider_workspace_runner::{
@@ -42,6 +47,8 @@ use crate::product::provider_workspace_runner::{
 };
 use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
 use crate::product::runtime_binding_store::RuntimeBindingStore;
+use crate::product::work_item_split_engine::{WorkItemSplitEngine, WorkItemSplitProviderOutput};
+use crate::product::work_item_split_validator::WorkItemSplitValidator;
 use crate::web::error::{ApiError, ApiResult};
 use crate::web::events::WebEventType;
 use crate::web::issue_registry::{CreateIssueInput, IssueRecord, IssueRegistry, IssueStatus};
@@ -517,83 +524,396 @@ pub async fn generate_work_items(
         .repo_id
         .clone()
         .ok_or_else(|| ApiError::validation("repository_required", "repository_id is required"))?;
-    find_repository(&app_paths, &project_id, &repository_id)?;
+    let repository = find_repository(&app_paths, &project_id, &repository_id)?;
     let lifecycle = LifecycleStore::new(app_paths.clone());
     validate_confirmed_story_specs(&lifecycle, &project_id, &issue_id, &request.story_spec_ids)?;
     validate_confirmed_design_specs(&lifecycle, &project_id, &issue_id, &request.design_spec_ids)?;
-    let work_item = lifecycle
-        .create_work_item(CreateWorkItemInput {
-            project_id: project_id.clone(),
-            issue_id: issue_id.clone(),
-            repository_id,
-            story_spec_ids: request.story_spec_ids,
-            design_spec_ids: request.design_spec_ids,
-            title: request.title,
-            ..Default::default()
-        })
-        .map_err(product_store_api_error)?;
-    let session = lifecycle
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id,
-            issue_id,
+
+    let engine = WorkItemSplitEngine::new(state.provider_adapter.clone());
+    let provider_output = engine
+        .generate(
+            &request,
+            &lifecycle,
+            &issue,
+            &repository,
+            workspace_config.author_provider.clone(),
+        )
+        .await?;
+
+    validate_work_item_generation_candidates(
+        &provider_output.plan,
+        &provider_output.work_items,
+        Some(&provider_output.repository_profile),
+        &provider_output.verification_plans,
+    )?;
+
+    let persisted =
+        persist_work_item_split_provider_output(&lifecycle, &workspace_config, provider_output)
+            .map_err(product_store_api_error)?;
+
+    build_generate_work_items_response(&lifecycle, &app_paths, persisted).map(Json)
+}
+
+fn validate_work_item_generation_candidates(
+    plan: &IssueWorkItemPlanRecord,
+    candidates: &[crate::product::models::LifecycleWorkItemRecord],
+    repository_profile: Option<&RepositoryProfile>,
+    verification_plans: &[VerificationPlan],
+) -> Result<(), ApiError> {
+    let report =
+        WorkItemSplitValidator::validate(plan, candidates, repository_profile, verification_plans);
+    if report.has_errors() {
+        return Err(ApiError::validation_with_details(
+            "work_item_split_invalid",
+            "work item split plan did not pass validation",
+            json!({ "validator_findings": report.findings }),
+        ));
+    }
+    Ok(())
+}
+
+struct PersistedWorkItemSplit {
+    plan: IssueWorkItemPlanRecord,
+    repository_profile: RepositoryProfile,
+    verification_plans: Vec<VerificationPlan>,
+    work_items: Vec<crate::product::models::LifecycleWorkItemRecord>,
+    workspace_sessions: Vec<WorkspaceSessionRecord>,
+}
+
+fn persist_work_item_split_provider_output(
+    lifecycle: &LifecycleStore,
+    workspace_config: &ProviderWorkspaceConfig,
+    provider_output: WorkItemSplitProviderOutput,
+) -> Result<PersistedWorkItemSplit, ProductStoreError> {
+    let repository_profile = lifecycle.create_repository_profile(CreateRepositoryProfileInput {
+        id: Some(provider_output.repository_profile.id.clone()),
+        project_id: provider_output.repository_profile.project_id.clone(),
+        issue_id: provider_output.repository_profile.issue_id.clone(),
+        repository_id: provider_output.repository_profile.repository_id.clone(),
+        provider_run_ref: provider_output.repository_profile.provider_run_ref.clone(),
+        languages: provider_output.repository_profile.languages.clone(),
+        frameworks: provider_output.repository_profile.frameworks.clone(),
+        package_managers: provider_output.repository_profile.package_managers.clone(),
+        test_frameworks: provider_output.repository_profile.test_frameworks.clone(),
+        build_systems: provider_output.repository_profile.build_systems.clone(),
+        verification_capabilities: provider_output
+            .repository_profile
+            .verification_capabilities
+            .clone(),
+        detected_layers: provider_output.repository_profile.detected_layers.clone(),
+        split_recommendation: provider_output
+            .repository_profile
+            .split_recommendation
+            .clone(),
+        confidence: provider_output.repository_profile.confidence.clone(),
+        uncertainties: provider_output.repository_profile.uncertainties.clone(),
+    })?;
+
+    let mut verification_plans = Vec::with_capacity(provider_output.verification_plans.len());
+    for plan in &provider_output.verification_plans {
+        verification_plans.push(lifecycle.create_verification_plan(
+            CreateVerificationPlanInput {
+                id: Some(plan.id.clone()),
+                project_id: plan.project_id.clone(),
+                issue_id: plan.issue_id.clone(),
+                work_item_id: plan.work_item_id.clone(),
+                repository_profile_ref: plan.repository_profile_ref.clone(),
+                provider_run_ref: plan.provider_run_ref.clone(),
+                scope: plan.scope.clone(),
+                commands: plan.commands.clone(),
+                manual_checks: plan.manual_checks.clone(),
+                required_gates: plan.required_gates.clone(),
+                risk_notes: plan.risk_notes.clone(),
+                confidence: plan.confidence.clone(),
+                fallback_policy: plan.fallback_policy.clone(),
+            },
+        )?);
+    }
+
+    let plan = lifecycle.create_issue_work_item_plan(CreateIssueWorkItemPlanInput {
+        id: Some(provider_output.plan.id.clone()),
+        project_id: provider_output.plan.project_id.clone(),
+        issue_id: provider_output.plan.issue_id.clone(),
+        source_story_spec_ids: provider_output.plan.source_story_spec_ids.clone(),
+        source_design_spec_ids: provider_output.plan.source_design_spec_ids.clone(),
+        options: provider_output.plan.options.clone(),
+        status: provider_output.plan.status.clone(),
+        work_item_ids: provider_output.plan.work_item_ids.clone(),
+        repository_profile_ref: provider_output.plan.repository_profile_ref.clone(),
+        verification_plan_ids: provider_output.plan.verification_plan_ids.clone(),
+        dependency_graph: provider_output.plan.dependency_graph.clone(),
+        created_from_provider_run: provider_output.plan.created_from_provider_run.clone(),
+        validator_findings: provider_output.plan.validator_findings.clone(),
+    })?;
+
+    let mut work_items = Vec::with_capacity(provider_output.work_items.len());
+    let mut workspace_sessions = Vec::with_capacity(provider_output.work_items.len());
+    for candidate in provider_output.work_items {
+        let work_item = lifecycle.create_work_item(CreateWorkItemInput {
+            id: Some(candidate.id.clone()),
+            project_id: candidate.project_id.clone(),
+            issue_id: candidate.issue_id.clone(),
+            repository_id: candidate.repository_id.clone(),
+            story_spec_ids: candidate.story_spec_ids.clone(),
+            design_spec_ids: candidate.design_spec_ids.clone(),
+            title: candidate.title.clone(),
+            work_item_set_id: candidate.work_item_set_id.clone(),
+            kind: candidate.kind.clone(),
+            sequence_hint: candidate.sequence_hint,
+            depends_on: candidate.depends_on.clone(),
+            exclusive_write_scopes: candidate.exclusive_write_scopes.clone(),
+            forbidden_write_scopes: candidate.forbidden_write_scopes.clone(),
+            context_budget: candidate.context_budget.clone(),
+            required_handoff_from: candidate.required_handoff_from.clone(),
+            verification_plan_ref: candidate.verification_plan_ref.clone(),
+            require_execution_plan_confirm: candidate.require_execution_plan_confirm,
+            plan_status: WorkItemPlanStatus::Draft,
+        })?;
+        work_items.push(work_item);
+    }
+
+    for work_item in &work_items {
+        let session = lifecycle.create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: work_item.project_id.clone(),
+            issue_id: work_item.issue_id.clone(),
             entity_id: work_item.id.clone(),
             workspace_type: WorkspaceType::WorkItem,
-            author_provider: workspace_config.author_provider,
-            reviewer_provider: workspace_config.reviewer_provider,
+            author_provider: workspace_config.author_provider.clone(),
+            reviewer_provider: workspace_config.reviewer_provider.clone(),
             review_rounds: workspace_config.review_rounds,
             superpowers_enabled: workspace_config.superpowers_enabled,
             openspec_enabled: workspace_config.openspec_enabled,
+        })?;
+        workspace_sessions.push(session);
+    }
+
+    Ok(PersistedWorkItemSplit {
+        plan,
+        repository_profile,
+        verification_plans,
+        work_items,
+        workspace_sessions,
+    })
+}
+
+fn build_generate_work_items_response(
+    lifecycle: &LifecycleStore,
+    app_paths: &ProductAppPaths,
+    persisted: PersistedWorkItemSplit,
+) -> ApiResult<GenerateWorkItemsResponse> {
+    let mut contextualized_sessions = Vec::with_capacity(persisted.workspace_sessions.len());
+    for session in persisted.workspace_sessions {
+        let session = ensure_workspace_context_message(app_paths, lifecycle, session)
+            .map_err(product_store_api_error)?;
+        contextualized_sessions.push(session);
+    }
+
+    let work_item_dtos: Vec<LifecycleWorkItemDto> = persisted
+        .work_items
+        .iter()
+        .map(|work_item| {
+            let session = workspace_session_for_entity(
+                &contextualized_sessions,
+                &work_item.id,
+                &WorkspaceType::WorkItem,
+            );
+            lifecycle_work_item_dto(lifecycle, work_item.clone(), None, session)
         })
-        .map_err(product_store_api_error)?;
-    let session = ensure_workspace_context_message(&app_paths, &lifecycle, session)
-        .map_err(product_store_api_error)?;
+        .collect::<ApiResult<Vec<_>>>()?;
 
-    let work_item_dto = lifecycle_work_item_dto(&lifecycle, work_item, None, Some(&session))?;
+    let workspace_session_dtos: Vec<WorkspaceSessionDto> = contextualized_sessions
+        .iter()
+        .map(|session| workspace_session_dto(session.clone()))
+        .collect();
 
-    Ok(Json(GenerateWorkItemsResponse {
-        work_items: vec![work_item_dto.clone()],
-        workspace_session: workspace_session_dto(session.clone()),
-        workspace_sessions: vec![workspace_session_dto(session)],
-        work_item_plan: crate::web::types::IssueWorkItemPlan {
-            plan_id: "work_item_plan_0001".to_string(),
-            issue_id: work_item_dto.issue_id.clone(),
-            status: "draft".to_string(),
-            options: crate::web::types::WorkItemSplitOptions {
-                include_integration_tests: request.include_integration_tests.unwrap_or(false),
-                include_e2e_tests: request.include_e2e_tests.unwrap_or(false),
-                force_frontend_backend_split: request.force_frontend_backend_split.unwrap_or(false),
-                require_execution_plan_confirm: request
-                    .require_execution_plan_confirm
-                    .unwrap_or(false),
-            },
-            created_at: work_item_dto
-                .artifact_versions
-                .first()
-                .map(|v| v.created_at.clone())
-                .unwrap_or_default(),
-            updated_at: work_item_dto
-                .artifact_versions
-                .first()
-                .map(|v| v.created_at.clone())
-                .unwrap_or_default(),
+    let primary_session = workspace_session_dtos.first().cloned().unwrap_or_else(|| {
+        workspace_session_dto(WorkspaceSessionRecord {
+            id: String::new(),
+            project_id: persisted.plan.project_id.clone(),
+            issue_id: persisted.plan.issue_id.clone(),
+            entity_id: String::new(),
+            workspace_type: WorkspaceType::WorkItem,
+            status: crate::product::models::WorkspaceSessionStatus::Open,
+            author_provider: ProviderName::Fake,
+            reviewer_provider: ProviderName::Fake,
+            review_rounds: 1,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+            provider_conversations: Vec::new(),
+            messages: Vec::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+    });
+
+    Ok(GenerateWorkItemsResponse {
+        work_items: work_item_dtos,
+        workspace_session: primary_session.clone(),
+        workspace_sessions: workspace_session_dtos,
+        work_item_plan: issue_work_item_plan_dto(&persisted.plan),
+        repository_profile: repository_profile_dto(&persisted.repository_profile),
+        verification_plans: persisted
+            .verification_plans
+            .iter()
+            .map(verification_plan_dto)
+            .collect(),
+        validator_findings: persisted
+            .plan
+            .validator_findings
+            .iter()
+            .map(work_item_split_finding_dto)
+            .collect(),
+    })
+}
+
+fn issue_work_item_plan_dto(
+    plan: &IssueWorkItemPlanRecord,
+) -> crate::web::types::IssueWorkItemPlan {
+    crate::web::types::IssueWorkItemPlan {
+        plan_id: plan.id.clone(),
+        issue_id: plan.issue_id.clone(),
+        status: issue_work_item_plan_status_text(&plan.status).to_string(),
+        options: crate::web::types::WorkItemSplitOptions {
+            include_integration_tests: plan.options.include_integration_tests,
+            include_e2e_tests: plan.options.include_e2e_tests,
+            force_frontend_backend_split: plan.options.force_frontend_backend_split,
+            require_execution_plan_confirm: plan.options.require_execution_plan_confirm,
         },
-        repository_profile: crate::web::types::RepositoryProfile {
-            profile_id: "repository_profile_0001".to_string(),
-            repository_id: work_item_dto.repository_id.clone(),
-            confidence: "high".to_string(),
-            detected_layers: vec!["backend".to_string(), "frontend".to_string()],
-            split_recommendation: "frontend_backend".to_string(),
+        created_at: plan.created_at.clone(),
+        updated_at: plan.updated_at.clone(),
+    }
+}
+
+fn repository_profile_dto(profile: &RepositoryProfile) -> crate::web::types::RepositoryProfile {
+    crate::web::types::RepositoryProfile {
+        profile_id: profile.id.clone(),
+        repository_id: profile.repository_id.clone(),
+        confidence: match profile.confidence {
+            crate::product::models::RepositoryProfileConfidence::High => "high",
+            crate::product::models::RepositoryProfileConfidence::Medium => "medium",
+            crate::product::models::RepositoryProfileConfidence::Low => "low",
+        }
+        .to_string(),
+        detected_layers: profile.detected_layers.clone(),
+        split_recommendation: profile.split_recommendation.clone(),
+    }
+}
+
+fn work_item_split_finding_dto(
+    finding: &crate::product::models::WorkItemSplitFinding,
+) -> crate::web::types::WorkItemSplitFinding {
+    crate::web::types::WorkItemSplitFinding {
+        finding_id: finding.code.clone(),
+        level: match finding.severity {
+            crate::product::models::WorkItemSplitFindingSeverity::Error => "error".to_string(),
+            crate::product::models::WorkItemSplitFindingSeverity::Warning => "warning".to_string(),
         },
-        verification_plans: vec![crate::web::types::VerificationPlan {
-            plan_ref: "verification_plan_work_item_0001".to_string(),
-            work_item_id: work_item_dto.work_item_id.clone(),
-            title: work_item_dto.title.clone(),
-            kind: work_item_dto.kind.clone(),
-            scope_summary: "placeholder".to_string(),
-            required_checks: vec!["compile".to_string()],
-        }],
-        validator_findings: Vec::new(),
-    }))
+        message: finding.message.clone(),
+        affected_scopes: finding.work_item_ids.clone(),
+    }
+}
+
+fn verification_plan_dto(plan: &VerificationPlan) -> crate::web::types::VerificationPlan {
+    crate::web::types::VerificationPlan {
+        plan_ref: plan.id.clone(),
+        work_item_id: plan.work_item_id.clone(),
+        title: plan.work_item_id.clone(),
+        kind: "work_item".to_string(),
+        scope_summary: format!("{:?}", plan.scope).to_lowercase(),
+        required_checks: plan
+            .commands
+            .iter()
+            .map(|command| command.label.clone())
+            .collect(),
+    }
+}
+
+fn issue_work_item_plan_status_text(status: &IssueWorkItemPlanStatus) -> &'static str {
+    match status {
+        IssueWorkItemPlanStatus::Draft => "draft",
+        IssueWorkItemPlanStatus::Confirmed => "confirmed",
+        IssueWorkItemPlanStatus::ChangeRequested => "change_requested",
+    }
+}
+
+pub async fn confirm_issue_work_item_plan(
+    State(state): State<WebAppState>,
+    Path((project_id, issue_id, plan_id)): Path<(String, String, String)>,
+    Json(_request): Json<crate::web::types::ConfirmIssueWorkItemPlanRequest>,
+) -> ApiResult<Json<GenerateWorkItemsResponse>> {
+    let app_paths = product_app_paths(&state);
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    let (plan, work_items) = lifecycle
+        .confirm_issue_work_item_plan(&project_id, &issue_id, &plan_id)
+        .map_err(product_store_api_error)?;
+    let persisted = load_work_item_plan_response_data(&lifecycle, plan, work_items)
+        .map_err(product_store_api_error)?;
+    build_generate_work_items_response(&lifecycle, &app_paths, persisted).map(Json)
+}
+
+pub async fn request_issue_work_item_plan_change(
+    State(state): State<WebAppState>,
+    Path((project_id, issue_id, plan_id)): Path<(String, String, String)>,
+    Json(request): Json<crate::web::types::ChangeRequestIssueWorkItemPlanRequest>,
+) -> ApiResult<Json<GenerateWorkItemsResponse>> {
+    let app_paths = product_app_paths(&state);
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    let (plan, work_items) = lifecycle
+        .request_issue_work_item_plan_change(&project_id, &issue_id, &plan_id, request.note)
+        .map_err(product_store_api_error)?;
+    let persisted = load_work_item_plan_response_data(&lifecycle, plan, work_items)
+        .map_err(product_store_api_error)?;
+    build_generate_work_items_response(&lifecycle, &app_paths, persisted).map(Json)
+}
+
+fn load_work_item_plan_response_data(
+    lifecycle: &LifecycleStore,
+    plan: IssueWorkItemPlanRecord,
+    work_items: Vec<crate::product::models::LifecycleWorkItemRecord>,
+) -> Result<PersistedWorkItemSplit, ProductStoreError> {
+    let repository_profile = match &plan.repository_profile_ref {
+        Some(profile_id) => {
+            lifecycle.get_repository_profile(&plan.project_id, &plan.issue_id, profile_id)?
+        }
+        None => RepositoryProfile {
+            id: String::new(),
+            project_id: plan.project_id.clone(),
+            issue_id: plan.issue_id.clone(),
+            repository_id: String::new(),
+            provider_run_ref: None,
+            languages: Vec::new(),
+            frameworks: Vec::new(),
+            package_managers: Vec::new(),
+            test_frameworks: Vec::new(),
+            build_systems: Vec::new(),
+            verification_capabilities: Vec::new(),
+            detected_layers: Vec::new(),
+            split_recommendation: String::new(),
+            confidence: crate::product::models::RepositoryProfileConfidence::Medium,
+            uncertainties: Vec::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        },
+    };
+
+    let mut verification_plans = Vec::with_capacity(plan.verification_plan_ids.len());
+    for plan_id in &plan.verification_plan_ids {
+        verification_plans.push(lifecycle.get_verification_plan(
+            &plan.project_id,
+            &plan.issue_id,
+            plan_id,
+        )?);
+    }
+
+    let workspace_sessions = lifecycle.list_workspace_sessions(&plan.project_id, &plan.issue_id)?;
+
+    Ok(PersistedWorkItemSplit {
+        plan,
+        repository_profile,
+        verification_plans,
+        work_items,
+        workspace_sessions,
+    })
 }
 
 pub async fn create_coding_attempt(
@@ -2753,5 +3073,146 @@ fn node_detail_store_api_error(error: ProductStoreError) -> ApiError {
             ..
         } => ApiError::runtime("node_detail_not_found", "node detail not found", json!({})),
         other => product_store_api_error(other),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_work_item_generation_candidates;
+    use crate::product::models::{
+        IssueWorkItemPlan, IssueWorkItemPlanOptions, IssueWorkItemPlanStatus,
+        LifecycleWorkItemRecord, RepositoryProfile, RepositoryProfileConfidence,
+        VerificationCommand, VerificationCommandSafety, VerificationCommandSource,
+        VerificationFallbackPolicy, VerificationPlan, VerificationScope, WorkItemContextBudget,
+        WorkItemKind, WorkItemPlanStatus, WorkItemStatus,
+    };
+
+    fn base_plan(work_item_ids: Vec<String>) -> IssueWorkItemPlan {
+        IssueWorkItemPlan {
+            id: "issue_work_item_plan_0001".to_string(),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            source_story_spec_ids: vec!["story_spec_0001".to_string()],
+            source_design_spec_ids: vec!["design_spec_0001".to_string()],
+            options: IssueWorkItemPlanOptions {
+                include_integration_tests: true,
+                include_e2e_tests: true,
+                force_frontend_backend_split: false,
+                require_execution_plan_confirm: false,
+            },
+            status: IssueWorkItemPlanStatus::Draft,
+            work_item_ids,
+            repository_profile_ref: Some("repository_profile_0001".to_string()),
+            verification_plan_ids: vec!["verification_plan_0001".to_string()],
+            dependency_graph: Vec::new(),
+            created_from_provider_run: None,
+            validator_findings: Vec::new(),
+            review_summary: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    fn base_item(id: &str, kind: WorkItemKind) -> LifecycleWorkItemRecord {
+        LifecycleWorkItemRecord {
+            id: id.to_string(),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            story_spec_ids: vec!["story_spec_0001".to_string()],
+            design_spec_ids: vec!["design_spec_0001".to_string()],
+            title: id.to_string(),
+            plan_status: WorkItemPlanStatus::Draft,
+            execution_status: WorkItemStatus::Pending,
+            worktree_path: None,
+            work_item_set_id: None,
+            kind,
+            sequence_hint: None,
+            depends_on: Vec::new(),
+            exclusive_write_scopes: vec!["src/**".to_string()],
+            forbidden_write_scopes: Vec::new(),
+            context_budget: WorkItemContextBudget::default(),
+            required_handoff_from: Vec::new(),
+            verification_plan_ref: Some("verification_plan_0001".to_string()),
+            require_execution_plan_confirm: false,
+            execution_plan_status: crate::product::models::WorkItemExecutionPlanStatus::NotStarted,
+            handoff_summary_ref: None,
+            completion_commit: None,
+            completion_diff_summary_ref: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    fn base_profile() -> RepositoryProfile {
+        RepositoryProfile {
+            id: "repository_profile_0001".to_string(),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            provider_run_ref: None,
+            languages: Vec::new(),
+            frameworks: Vec::new(),
+            package_managers: Vec::new(),
+            test_frameworks: Vec::new(),
+            build_systems: Vec::new(),
+            verification_capabilities: Vec::new(),
+            detected_layers: vec!["backend".to_string()],
+            split_recommendation: "backend".to_string(),
+            confidence: RepositoryProfileConfidence::High,
+            uncertainties: Vec::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    fn base_verification_plan(work_item_id: &str) -> VerificationPlan {
+        VerificationPlan {
+            id: "verification_plan_0001".to_string(),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            work_item_id: work_item_id.to_string(),
+            repository_profile_ref: Some("repository_profile_0001".to_string()),
+            provider_run_ref: None,
+            scope: VerificationScope::Unit,
+            commands: vec![VerificationCommand {
+                id: "cmd_001".to_string(),
+                label: "cargo test".to_string(),
+                command: "cargo test --lib".to_string(),
+                cwd: String::new(),
+                purpose: "unit tests".to_string(),
+                required: true,
+                timeout_seconds: 120,
+                source: VerificationCommandSource::Provider,
+                safety: VerificationCommandSafety::Approved,
+            }],
+            manual_checks: Vec::new(),
+            required_gates: Vec::new(),
+            risk_notes: Vec::new(),
+            confidence: RepositoryProfileConfidence::High,
+            fallback_policy: VerificationFallbackPolicy::ManualGate,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn validate_work_item_generation_candidates_rejects_required_e2e_when_e2e_item_is_missing() {
+        let work_item_ids = vec!["work_item_0001".to_string()];
+        let plan = base_plan(work_item_ids.clone());
+        let items = vec![base_item("work_item_0001", WorkItemKind::Backend)];
+        let profile = base_profile();
+        let verification_plans = vec![base_verification_plan("work_item_0001")];
+
+        let result = validate_work_item_generation_candidates(
+            &plan,
+            &items,
+            Some(&profile),
+            &verification_plans,
+        );
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code, "work_item_split_invalid");
     }
 }

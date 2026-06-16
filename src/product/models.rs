@@ -476,6 +476,8 @@ pub struct RepositoryProfile {
     pub test_frameworks: Vec<String>,
     pub build_systems: Vec<String>,
     pub verification_capabilities: Vec<String>,
+    pub detected_layers: Vec<String>,
+    pub split_recommendation: String,
     pub confidence: RepositoryProfileConfidence,
     pub uncertainties: Vec<String>,
     pub created_at: String,

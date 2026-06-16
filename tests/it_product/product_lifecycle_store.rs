@@ -3,14 +3,19 @@ use std::path::PathBuf;
 use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::json_store::ProductStoreError;
 use cadence_aria::product::lifecycle_store::{
-    AppendSpecVersionInput, CreateDesignSpecInput, CreateProjectProviderDefaultsInput,
-    CreateStorySpecInput, CreateWorkItemInput, CreateWorkspaceSessionInput, LifecycleStore,
+    AppendSpecVersionInput, CreateDesignSpecInput, CreateIssueWorkItemPlanInput,
+    CreateProjectProviderDefaultsInput, CreateRepositoryProfileInput, CreateStorySpecInput,
+    CreateVerificationPlanInput, CreateWorkItemInput, CreateWorkspaceSessionInput, LifecycleStore,
     UpsertIssueSharedWorktreeInput,
 };
 use cadence_aria::product::models::{
-    AgentRole, DesignKind, IssueSharedWorktreeStatus, LifecycleConfirmationStatus, NodeDetail,
+    AgentRole, DesignKind, IssueSharedWorktreeStatus, IssueWorkItemDependencyEdge,
+    IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, LifecycleConfirmationStatus, NodeDetail,
     ProviderConversationRef, ProviderConversationRole, ProviderName, ProviderSnapshot,
-    WorkItemContextBudget, WorkItemKind, WorkItemStatus, WorkspaceSessionStatus, WorkspaceType,
+    RepositoryProfileConfidence, VerificationCommand, VerificationCommandSafety,
+    VerificationCommandSource, VerificationFallbackPolicy, VerificationScope,
+    WorkItemContextBudget, WorkItemKind, WorkItemPlanStatus, WorkItemStatus,
+    WorkspaceSessionStatus, WorkspaceType,
 };
 use cadence_aria::web::workspace_ws_types::{
     ArtifactVersion, ProviderConfigSnapshot, TimelineNode, TimelineNodeStatus, TimelineNodeType,
@@ -742,6 +747,8 @@ fn create_work_item_persists_split_fields() {
             required_handoff_from: Vec::new(),
             verification_plan_ref: Some("verification_plan_work_item_0001".to_string()),
             require_execution_plan_confirm: false,
+            id: None,
+            plan_status: WorkItemPlanStatus::NotStarted,
         })
         .expect("work item");
 
@@ -751,4 +758,260 @@ fn create_work_item_persists_split_fields() {
     );
     assert_eq!(work_item.kind, WorkItemKind::Backend);
     assert_eq!(work_item.exclusive_write_scopes, vec!["src/product/**"]);
+}
+
+#[test]
+fn confirm_issue_work_item_plan_marks_work_items_confirmed() {
+    let root = tempdir().expect("tempdir");
+    let store = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")));
+
+    let work_item_a = store
+        .create_work_item(CreateWorkItemInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            story_spec_ids: vec!["story_spec_0001".to_string()],
+            design_spec_ids: vec!["design_spec_0001".to_string()],
+            title: "后端 API".to_string(),
+            kind: WorkItemKind::Backend,
+            plan_status: WorkItemPlanStatus::Draft,
+            ..Default::default()
+        })
+        .expect("work item a");
+    let work_item_b = store
+        .create_work_item(CreateWorkItemInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            story_spec_ids: vec!["story_spec_0001".to_string()],
+            design_spec_ids: vec!["design_spec_0001".to_string()],
+            title: "前端组件".to_string(),
+            kind: WorkItemKind::Frontend,
+            plan_status: WorkItemPlanStatus::Draft,
+            ..Default::default()
+        })
+        .expect("work item b");
+
+    let profile = store
+        .create_repository_profile(CreateRepositoryProfileInput {
+            id: Some("repository_profile_0001".to_string()),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            provider_run_ref: None,
+            languages: vec!["rust".to_string()],
+            frameworks: Vec::new(),
+            package_managers: vec!["cargo".to_string()],
+            test_frameworks: Vec::new(),
+            build_systems: vec!["cargo".to_string()],
+            verification_capabilities: vec!["cargo test".to_string()],
+            detected_layers: vec!["backend".to_string(), "frontend".to_string()],
+            split_recommendation: "frontend_backend".to_string(),
+            confidence: RepositoryProfileConfidence::High,
+            uncertainties: Vec::new(),
+        })
+        .expect("profile");
+
+    let verification_plan_a = store
+        .create_verification_plan(CreateVerificationPlanInput {
+            id: Some("verification_plan_0001".to_string()),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            work_item_id: work_item_a.id.clone(),
+            repository_profile_ref: Some(profile.id.clone()),
+            provider_run_ref: None,
+            scope: VerificationScope::Unit,
+            commands: vec![VerificationCommand {
+                id: "cmd_001".to_string(),
+                label: "cargo test".to_string(),
+                command: "cargo test --lib".to_string(),
+                cwd: String::new(),
+                purpose: "unit tests".to_string(),
+                required: true,
+                timeout_seconds: 120,
+                source: VerificationCommandSource::Provider,
+                safety: VerificationCommandSafety::Approved,
+            }],
+            manual_checks: Vec::new(),
+            required_gates: Vec::new(),
+            risk_notes: Vec::new(),
+            confidence: RepositoryProfileConfidence::High,
+            fallback_policy: VerificationFallbackPolicy::ManualGate,
+        })
+        .expect("verification plan a");
+    let verification_plan_b = store
+        .create_verification_plan(CreateVerificationPlanInput {
+            id: Some("verification_plan_0002".to_string()),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            work_item_id: work_item_b.id.clone(),
+            repository_profile_ref: Some(profile.id.clone()),
+            provider_run_ref: None,
+            scope: VerificationScope::Unit,
+            commands: vec![VerificationCommand {
+                id: "cmd_001".to_string(),
+                label: "cargo test".to_string(),
+                command: "cargo test --lib".to_string(),
+                cwd: String::new(),
+                purpose: "unit tests".to_string(),
+                required: true,
+                timeout_seconds: 120,
+                source: VerificationCommandSource::Provider,
+                safety: VerificationCommandSafety::Approved,
+            }],
+            manual_checks: Vec::new(),
+            required_gates: Vec::new(),
+            risk_notes: Vec::new(),
+            confidence: RepositoryProfileConfidence::High,
+            fallback_policy: VerificationFallbackPolicy::ManualGate,
+        })
+        .expect("verification plan b");
+
+    let plan = store
+        .create_issue_work_item_plan(CreateIssueWorkItemPlanInput {
+            id: Some("issue_work_item_plan_0001".to_string()),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            source_story_spec_ids: vec!["story_spec_0001".to_string()],
+            source_design_spec_ids: vec!["design_spec_0001".to_string()],
+            options: IssueWorkItemPlanOptions {
+                include_integration_tests: false,
+                include_e2e_tests: false,
+                force_frontend_backend_split: false,
+                require_execution_plan_confirm: false,
+            },
+            status: IssueWorkItemPlanStatus::Draft,
+            work_item_ids: vec![work_item_a.id.clone(), work_item_b.id.clone()],
+            repository_profile_ref: Some(profile.id.clone()),
+            verification_plan_ids: vec![
+                verification_plan_a.id.clone(),
+                verification_plan_b.id.clone(),
+            ],
+            dependency_graph: vec![IssueWorkItemDependencyEdge {
+                from_work_item_id: work_item_a.id.clone(),
+                to_work_item_id: work_item_b.id.clone(),
+            }],
+            created_from_provider_run: None,
+            validator_findings: Vec::new(),
+        })
+        .expect("plan");
+
+    let (confirmed_plan, confirmed_items) = store
+        .confirm_issue_work_item_plan("project_0001", "issue_0001", &plan.id)
+        .expect("confirm");
+
+    assert_eq!(confirmed_plan.status, IssueWorkItemPlanStatus::Confirmed);
+    assert_eq!(confirmed_items.len(), 2);
+    assert!(
+        confirmed_items
+            .iter()
+            .all(|item| item.plan_status == WorkItemPlanStatus::Confirmed)
+    );
+}
+
+#[test]
+fn request_change_keeps_split_work_items_not_codeable() {
+    let root = tempdir().expect("tempdir");
+    let store = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")));
+
+    let work_item = store
+        .create_work_item(CreateWorkItemInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            story_spec_ids: vec!["story_spec_0001".to_string()],
+            design_spec_ids: vec!["design_spec_0001".to_string()],
+            title: "后端 API".to_string(),
+            kind: WorkItemKind::Backend,
+            plan_status: WorkItemPlanStatus::Draft,
+            ..Default::default()
+        })
+        .expect("work item");
+
+    let profile = store
+        .create_repository_profile(CreateRepositoryProfileInput {
+            id: Some("repository_profile_0001".to_string()),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            provider_run_ref: None,
+            languages: vec!["rust".to_string()],
+            frameworks: Vec::new(),
+            package_managers: vec!["cargo".to_string()],
+            test_frameworks: Vec::new(),
+            build_systems: vec!["cargo".to_string()],
+            verification_capabilities: vec!["cargo test".to_string()],
+            detected_layers: vec!["backend".to_string()],
+            split_recommendation: "backend".to_string(),
+            confidence: RepositoryProfileConfidence::High,
+            uncertainties: Vec::new(),
+        })
+        .expect("profile");
+
+    let verification_plan = store
+        .create_verification_plan(CreateVerificationPlanInput {
+            id: Some("verification_plan_0001".to_string()),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            work_item_id: work_item.id.clone(),
+            repository_profile_ref: Some(profile.id.clone()),
+            provider_run_ref: None,
+            scope: VerificationScope::Unit,
+            commands: vec![VerificationCommand {
+                id: "cmd_001".to_string(),
+                label: "cargo test".to_string(),
+                command: "cargo test --lib".to_string(),
+                cwd: String::new(),
+                purpose: "unit tests".to_string(),
+                required: true,
+                timeout_seconds: 120,
+                source: VerificationCommandSource::Provider,
+                safety: VerificationCommandSafety::Approved,
+            }],
+            manual_checks: Vec::new(),
+            required_gates: Vec::new(),
+            risk_notes: Vec::new(),
+            confidence: RepositoryProfileConfidence::High,
+            fallback_policy: VerificationFallbackPolicy::ManualGate,
+        })
+        .expect("verification plan");
+
+    let plan = store
+        .create_issue_work_item_plan(CreateIssueWorkItemPlanInput {
+            id: Some("issue_work_item_plan_0001".to_string()),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            source_story_spec_ids: vec!["story_spec_0001".to_string()],
+            source_design_spec_ids: vec!["design_spec_0001".to_string()],
+            options: IssueWorkItemPlanOptions {
+                include_integration_tests: false,
+                include_e2e_tests: false,
+                force_frontend_backend_split: false,
+                require_execution_plan_confirm: false,
+            },
+            status: IssueWorkItemPlanStatus::Draft,
+            work_item_ids: vec![work_item.id.clone()],
+            repository_profile_ref: Some(profile.id.clone()),
+            verification_plan_ids: vec![verification_plan.id.clone()],
+            dependency_graph: Vec::new(),
+            created_from_provider_run: None,
+            validator_findings: Vec::new(),
+        })
+        .expect("plan");
+
+    let (changed_plan, changed_items) = store
+        .request_issue_work_item_plan_change(
+            "project_0001",
+            "issue_0001",
+            &plan.id,
+            Some("需要补充细节".to_string()),
+        )
+        .expect("change request");
+
+    assert_eq!(
+        changed_plan.status,
+        IssueWorkItemPlanStatus::ChangeRequested
+    );
+    assert_eq!(changed_items.len(), 1);
+    assert_eq!(changed_items[0].plan_status, WorkItemPlanStatus::Draft);
 }

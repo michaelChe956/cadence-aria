@@ -10,11 +10,14 @@ use crate::product::id::next_sequential_id;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::models::{
     DesignKind, DesignSpecRecord, IssueSharedWorktree, IssueSharedWorktreeStatus,
-    LifecycleConfirmationStatus, LifecycleWorkItemRecord, NodeDetail,
+    IssueWorkItemDependencyEdge, IssueWorkItemPlan, IssueWorkItemPlanOptions,
+    IssueWorkItemPlanStatus, LifecycleConfirmationStatus, LifecycleWorkItemRecord, NodeDetail,
     ProjectProviderDefaultsRecord, ProviderConversationRef, ProviderName,
-    ProviderReviewRoundRecord, SpecVersionRecord, StorySpecRecord, WorkItemContextBudget,
-    WorkItemExecutionPlanStatus, WorkItemKind, WorkItemPlanStatus, WorkItemStatus,
-    WorkspaceMessageRecord, WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType,
+    ProviderReviewRoundRecord, RepositoryProfile, RepositoryProfileConfidence, SpecVersionRecord,
+    StorySpecRecord, VerificationCommand, VerificationFallbackPolicy, VerificationManualCheck,
+    VerificationPlan, VerificationScope, WorkItemContextBudget, WorkItemExecutionPlanStatus,
+    WorkItemKind, WorkItemPlanStatus, WorkItemStatus, WorkspaceMessageRecord,
+    WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType,
 };
 use crate::web::workspace_ws_types::{ArtifactVersion, TimelineNode};
 
@@ -35,8 +38,9 @@ pub struct CreateDesignSpecInput {
     pub title: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateWorkItemInput {
+    pub id: Option<String>,
     pub project_id: String,
     pub issue_id: String,
     pub repository_id: String,
@@ -53,6 +57,85 @@ pub struct CreateWorkItemInput {
     pub required_handoff_from: Vec<String>,
     pub verification_plan_ref: Option<String>,
     pub require_execution_plan_confirm: bool,
+    pub plan_status: WorkItemPlanStatus,
+}
+
+impl Default for CreateWorkItemInput {
+    fn default() -> Self {
+        Self {
+            id: None,
+            project_id: String::new(),
+            issue_id: String::new(),
+            repository_id: String::new(),
+            story_spec_ids: Vec::new(),
+            design_spec_ids: Vec::new(),
+            title: String::new(),
+            work_item_set_id: None,
+            kind: WorkItemKind::default(),
+            sequence_hint: None,
+            depends_on: Vec::new(),
+            exclusive_write_scopes: Vec::new(),
+            forbidden_write_scopes: Vec::new(),
+            context_budget: WorkItemContextBudget::default(),
+            required_handoff_from: Vec::new(),
+            verification_plan_ref: None,
+            require_execution_plan_confirm: false,
+            plan_status: WorkItemPlanStatus::NotStarted,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateIssueWorkItemPlanInput {
+    pub id: Option<String>,
+    pub project_id: String,
+    pub issue_id: String,
+    pub source_story_spec_ids: Vec<String>,
+    pub source_design_spec_ids: Vec<String>,
+    pub options: IssueWorkItemPlanOptions,
+    pub status: IssueWorkItemPlanStatus,
+    pub work_item_ids: Vec<String>,
+    pub repository_profile_ref: Option<String>,
+    pub verification_plan_ids: Vec<String>,
+    pub dependency_graph: Vec<IssueWorkItemDependencyEdge>,
+    pub created_from_provider_run: Option<String>,
+    pub validator_findings: Vec<crate::product::models::WorkItemSplitFinding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateRepositoryProfileInput {
+    pub id: Option<String>,
+    pub project_id: String,
+    pub issue_id: String,
+    pub repository_id: String,
+    pub provider_run_ref: Option<String>,
+    pub languages: Vec<String>,
+    pub frameworks: Vec<String>,
+    pub package_managers: Vec<String>,
+    pub test_frameworks: Vec<String>,
+    pub build_systems: Vec<String>,
+    pub verification_capabilities: Vec<String>,
+    pub detected_layers: Vec<String>,
+    pub split_recommendation: String,
+    pub confidence: RepositoryProfileConfidence,
+    pub uncertainties: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateVerificationPlanInput {
+    pub id: Option<String>,
+    pub project_id: String,
+    pub issue_id: String,
+    pub work_item_id: String,
+    pub repository_profile_ref: Option<String>,
+    pub provider_run_ref: Option<String>,
+    pub scope: VerificationScope,
+    pub commands: Vec<VerificationCommand>,
+    pub manual_checks: Vec<VerificationManualCheck>,
+    pub required_gates: Vec<String>,
+    pub risk_notes: Vec<String>,
+    pub confidence: RepositoryProfileConfidence,
+    pub fallback_policy: VerificationFallbackPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -270,7 +353,13 @@ impl LifecycleStore {
         validate_relative_ids(&input.design_spec_ids)?;
 
         let root = self.work_items_root(&input.project_id, &input.issue_id);
-        let id = next_sequential_id("work_item", count_json_files(&root)?);
+        let id = match input.id {
+            Some(ref id) => {
+                validate_relative_id(id)?;
+                id.clone()
+            }
+            None => next_sequential_id("work_item", count_json_files(&root)?),
+        };
         let now = Utc::now().to_rfc3339();
         let work_item = LifecycleWorkItemRecord {
             id: id.clone(),
@@ -280,7 +369,7 @@ impl LifecycleStore {
             story_spec_ids: input.story_spec_ids,
             design_spec_ids: input.design_spec_ids,
             title: input.title,
-            plan_status: WorkItemPlanStatus::NotStarted,
+            plan_status: input.plan_status,
             execution_status: WorkItemStatus::Pending,
             worktree_path: None,
             work_item_set_id: input.work_item_set_id,
@@ -303,6 +392,362 @@ impl LifecycleStore {
 
         write_json(&root.join(format!("{id}.json")), &work_item)?;
         Ok(work_item)
+    }
+
+    pub fn count_work_items(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+    ) -> Result<usize, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        count_json_files(&self.work_items_root(project_id, issue_id))
+    }
+
+    pub fn create_issue_work_item_plan(
+        &self,
+        input: CreateIssueWorkItemPlanInput,
+    ) -> Result<IssueWorkItemPlan, ProductStoreError> {
+        validate_relative_id(&input.project_id)?;
+        validate_relative_id(&input.issue_id)?;
+        validate_relative_ids(&input.work_item_ids)?;
+        validate_relative_ids(&input.verification_plan_ids)?;
+
+        let root = self.issue_work_item_plans_root(&input.project_id, &input.issue_id);
+        let id = match input.id {
+            Some(ref id) => {
+                validate_relative_id(id)?;
+                id.clone()
+            }
+            None => next_sequential_id("issue_work_item_plan", count_json_files(&root)?),
+        };
+        let now = Utc::now().to_rfc3339();
+        let plan = IssueWorkItemPlan {
+            id: id.clone(),
+            project_id: input.project_id,
+            issue_id: input.issue_id,
+            source_story_spec_ids: input.source_story_spec_ids,
+            source_design_spec_ids: input.source_design_spec_ids,
+            options: input.options,
+            status: input.status,
+            work_item_ids: input.work_item_ids,
+            repository_profile_ref: input.repository_profile_ref,
+            verification_plan_ids: input.verification_plan_ids,
+            dependency_graph: input.dependency_graph,
+            created_from_provider_run: input.created_from_provider_run,
+            validator_findings: input.validator_findings,
+            review_summary: None,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        write_json(&root.join(format!("{id}.json")), &plan)?;
+        Ok(plan)
+    }
+
+    pub fn get_issue_work_item_plan(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+    ) -> Result<IssueWorkItemPlan, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(plan_id)?;
+        read_json(
+            &self
+                .issue_work_item_plans_root(project_id, issue_id)
+                .join(format!("{plan_id}.json")),
+        )
+    }
+
+    pub fn list_issue_work_item_plans(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+    ) -> Result<Vec<IssueWorkItemPlan>, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        list_json_records(&self.issue_work_item_plans_root(project_id, issue_id))
+    }
+
+    pub fn confirm_issue_work_item_plan(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+    ) -> Result<(IssueWorkItemPlan, Vec<LifecycleWorkItemRecord>), ProductStoreError> {
+        let mut plan = self.get_issue_work_item_plan(project_id, issue_id, plan_id)?;
+        if plan.status != IssueWorkItemPlanStatus::Draft {
+            return Err(ProductStoreError::Io(
+                "issue_work_item_plan_not_draft".to_string(),
+            ));
+        }
+
+        let work_items = self.list_work_items(project_id, issue_id)?;
+        let mut linked = Vec::with_capacity(plan.work_item_ids.len());
+        for work_item_id in &plan.work_item_ids {
+            let item = work_items
+                .iter()
+                .find(|item| &item.id == work_item_id)
+                .ok_or_else(|| ProductStoreError::NotFound {
+                    kind: "work_item",
+                    id: work_item_id.clone(),
+                })?;
+            if item.project_id != project_id || item.issue_id != issue_id {
+                return Err(ProductStoreError::Io(
+                    "issue_work_item_plan_project_issue_mismatch".to_string(),
+                ));
+            }
+            linked.push(item.clone());
+        }
+
+        for verification_plan_id in &plan.verification_plan_ids {
+            self.get_verification_plan(project_id, issue_id, verification_plan_id)?;
+        }
+
+        let now = Utc::now().to_rfc3339();
+        plan.status = IssueWorkItemPlanStatus::Confirmed;
+        plan.updated_at = now.clone();
+        write_json(
+            &self
+                .issue_work_item_plans_root(project_id, issue_id)
+                .join(format!("{plan_id}.json")),
+            &plan,
+        )?;
+
+        let mut confirmed = Vec::with_capacity(linked.len());
+        for item in linked {
+            let updated = self.update_work_item_plan_status(
+                project_id,
+                issue_id,
+                &item.id,
+                WorkItemPlanStatus::Confirmed,
+            )?;
+            confirmed.push(updated);
+        }
+        Ok((plan, confirmed))
+    }
+
+    pub fn request_issue_work_item_plan_change(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+        _note: Option<String>,
+    ) -> Result<(IssueWorkItemPlan, Vec<LifecycleWorkItemRecord>), ProductStoreError> {
+        let mut plan = self.get_issue_work_item_plan(project_id, issue_id, plan_id)?;
+        if plan.status != IssueWorkItemPlanStatus::Draft
+            && plan.status != IssueWorkItemPlanStatus::Confirmed
+        {
+            return Err(ProductStoreError::Io(
+                "issue_work_item_plan_not_actionable".to_string(),
+            ));
+        }
+
+        let work_items = self.list_work_items(project_id, issue_id)?;
+        let mut linked = Vec::with_capacity(plan.work_item_ids.len());
+        for work_item_id in &plan.work_item_ids {
+            let item = work_items
+                .iter()
+                .find(|item| &item.id == work_item_id)
+                .ok_or_else(|| ProductStoreError::NotFound {
+                    kind: "work_item",
+                    id: work_item_id.clone(),
+                })?;
+            if item.project_id != project_id || item.issue_id != issue_id {
+                return Err(ProductStoreError::Io(
+                    "issue_work_item_plan_project_issue_mismatch".to_string(),
+                ));
+            }
+            linked.push(item.clone());
+        }
+
+        for verification_plan_id in &plan.verification_plan_ids {
+            self.get_verification_plan(project_id, issue_id, verification_plan_id)?;
+        }
+
+        let now = Utc::now().to_rfc3339();
+        plan.status = IssueWorkItemPlanStatus::ChangeRequested;
+        plan.updated_at = now.clone();
+        write_json(
+            &self
+                .issue_work_item_plans_root(project_id, issue_id)
+                .join(format!("{plan_id}.json")),
+            &plan,
+        )?;
+
+        let mut updated_items = Vec::with_capacity(linked.len());
+        for item in linked {
+            let updated = self.update_work_item_plan_status(
+                project_id,
+                issue_id,
+                &item.id,
+                WorkItemPlanStatus::Draft,
+            )?;
+            updated_items.push(updated);
+        }
+        Ok((plan, updated_items))
+    }
+
+    pub fn create_repository_profile(
+        &self,
+        input: CreateRepositoryProfileInput,
+    ) -> Result<RepositoryProfile, ProductStoreError> {
+        validate_relative_id(&input.project_id)?;
+        validate_relative_id(&input.issue_id)?;
+        validate_relative_id(&input.repository_id)?;
+
+        let root = self.repository_profiles_root(&input.project_id, &input.issue_id);
+        let id = match input.id {
+            Some(ref id) => {
+                validate_relative_id(id)?;
+                id.clone()
+            }
+            None => next_sequential_id("repository_profile", count_json_files(&root)?),
+        };
+        let now = Utc::now().to_rfc3339();
+        let profile = RepositoryProfile {
+            id: id.clone(),
+            project_id: input.project_id,
+            issue_id: input.issue_id,
+            repository_id: input.repository_id,
+            provider_run_ref: input.provider_run_ref,
+            languages: input.languages,
+            frameworks: input.frameworks,
+            package_managers: input.package_managers,
+            test_frameworks: input.test_frameworks,
+            build_systems: input.build_systems,
+            verification_capabilities: input.verification_capabilities,
+            detected_layers: input.detected_layers,
+            split_recommendation: input.split_recommendation,
+            confidence: input.confidence,
+            uncertainties: input.uncertainties,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        write_json(&root.join(format!("{id}.json")), &profile)?;
+        Ok(profile)
+    }
+
+    pub fn get_repository_profile(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        profile_id: &str,
+    ) -> Result<RepositoryProfile, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(profile_id)?;
+        read_json(
+            &self
+                .repository_profiles_root(project_id, issue_id)
+                .join(format!("{profile_id}.json")),
+        )
+    }
+
+    pub fn list_repository_profiles(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+    ) -> Result<Vec<RepositoryProfile>, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        list_json_records(&self.repository_profiles_root(project_id, issue_id))
+    }
+
+    pub fn save_work_item_split_provider_run(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        provider_type: &ProviderName,
+        prompt: &str,
+        structured_output: &serde_json::Value,
+    ) -> Result<String, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+
+        let root = self.provider_runs_root(project_id, issue_id);
+        let existing = child_directories(&root)?.len();
+        let id = next_sequential_id("provider_run_split", existing);
+        let dir = root.join(&id);
+        let now = Utc::now().to_rfc3339();
+        write_json(
+            &dir.join("run.json"),
+            &serde_json::json!({
+                "provider_run_id": id,
+                "provider_type": provider_type,
+                "status": "completed",
+                "prompt_chars": prompt.chars().count(),
+                "structured_output_ref": format!("{id}_structured_output"),
+                "created_at": now
+            }),
+        )?;
+        write_json(&dir.join("structured_output.json"), structured_output)?;
+        Ok(id)
+    }
+
+    pub fn create_verification_plan(
+        &self,
+        input: CreateVerificationPlanInput,
+    ) -> Result<VerificationPlan, ProductStoreError> {
+        validate_relative_id(&input.project_id)?;
+        validate_relative_id(&input.issue_id)?;
+        validate_relative_id(&input.work_item_id)?;
+
+        let root = self.verification_plans_root(&input.project_id, &input.issue_id);
+        let id = match input.id {
+            Some(ref id) => {
+                validate_relative_id(id)?;
+                id.clone()
+            }
+            None => next_sequential_id("verification_plan", count_json_files(&root)?),
+        };
+        let now = Utc::now().to_rfc3339();
+        let plan = VerificationPlan {
+            id: id.clone(),
+            project_id: input.project_id,
+            issue_id: input.issue_id,
+            work_item_id: input.work_item_id,
+            repository_profile_ref: input.repository_profile_ref,
+            provider_run_ref: input.provider_run_ref,
+            scope: input.scope,
+            commands: input.commands,
+            manual_checks: input.manual_checks,
+            required_gates: input.required_gates,
+            risk_notes: input.risk_notes,
+            confidence: input.confidence,
+            fallback_policy: input.fallback_policy,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        write_json(&root.join(format!("{id}.json")), &plan)?;
+        Ok(plan)
+    }
+
+    pub fn get_verification_plan(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+    ) -> Result<VerificationPlan, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(plan_id)?;
+        read_json(
+            &self
+                .verification_plans_root(project_id, issue_id)
+                .join(format!("{plan_id}.json")),
+        )
+    }
+
+    pub fn list_verification_plans(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+    ) -> Result<Vec<VerificationPlan>, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        list_json_records(&self.verification_plans_root(project_id, issue_id))
     }
 
     pub fn list_work_items(
@@ -1120,6 +1565,30 @@ impl LifecycleStore {
         self.paths
             .issue_lifecycle_root(project_id, issue_id)
             .join("issue-shared-worktree.json")
+    }
+
+    fn issue_work_item_plans_root(&self, project_id: &str, issue_id: &str) -> PathBuf {
+        self.paths
+            .issue_lifecycle_root(project_id, issue_id)
+            .join("issue-work-item-plans")
+    }
+
+    fn repository_profiles_root(&self, project_id: &str, issue_id: &str) -> PathBuf {
+        self.paths
+            .issue_lifecycle_root(project_id, issue_id)
+            .join("repository-profiles")
+    }
+
+    fn verification_plans_root(&self, project_id: &str, issue_id: &str) -> PathBuf {
+        self.paths
+            .issue_lifecycle_root(project_id, issue_id)
+            .join("verification-plans")
+    }
+
+    fn provider_runs_root(&self, project_id: &str, issue_id: &str) -> PathBuf {
+        self.paths
+            .issue_lifecycle_root(project_id, issue_id)
+            .join("provider-runs")
     }
 
     fn delete_workspace_sessions_for_entity(

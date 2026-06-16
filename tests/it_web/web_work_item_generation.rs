@@ -1,16 +1,196 @@
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
+use cadence_aria::cross_cutting::provider_adapter::{ProviderAdapter, ProviderAdapterError};
+use cadence_aria::protocol::contracts::{AdapterInput, AdapterOutput, TimeoutStatus};
 use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::runtime::WebRuntime;
 use cadence_aria::web::state::WebAppState;
 use serde_json::{Value, json};
 use std::process::Command;
+use std::sync::Arc;
 use tempfile::tempdir;
 use tower::ServiceExt;
 
+#[derive(Debug, Clone)]
+struct MockSplitProviderAdapter {
+    output: Value,
+}
+
+impl ProviderAdapter for MockSplitProviderAdapter {
+    fn run(&self, _input: &AdapterInput) -> Result<AdapterOutput, ProviderAdapterError> {
+        Ok(AdapterOutput {
+            exit_code: Some(0),
+            stdout: String::new(),
+            stderr: String::new(),
+            structured_output: Some(self.output.clone()),
+            files_modified: Vec::new(),
+            duration_ms: 0,
+            timeout_status: TimeoutStatus::NotTimedOut,
+        })
+    }
+}
+
+fn valid_split_output() -> Value {
+    json!({
+        "repository_profile": {
+            "confidence": "high",
+            "detected_layers": ["backend", "frontend"],
+            "split_recommendation": "frontend_backend",
+            "languages": ["rust"],
+            "frameworks": [],
+            "package_managers": ["cargo"],
+            "test_frameworks": [],
+            "build_systems": ["cargo"],
+            "verification_capabilities": ["cargo test"],
+            "uncertainties": []
+        },
+        "work_items": [
+            {
+                "title": "实现后端登录会话 API",
+                "kind": "backend",
+                "sequence_hint": 10,
+                "depends_on": [],
+                "exclusive_write_scopes": ["src/product/session.rs"],
+                "forbidden_write_scopes": ["web/**"],
+                "required_handoff_from": [],
+                "require_execution_plan_confirm": false
+            },
+            {
+                "title": "实现前端会话过期提示",
+                "kind": "frontend",
+                "sequence_hint": 20,
+                "depends_on": [0],
+                "exclusive_write_scopes": ["web/src/session/**"],
+                "forbidden_write_scopes": ["src/product/**"],
+                "required_handoff_from": [],
+                "require_execution_plan_confirm": false
+            },
+            {
+                "title": "集成测试：会话过期端到端",
+                "kind": "integration",
+                "sequence_hint": 30,
+                "depends_on": [1],
+                "exclusive_write_scopes": ["tests/session/**"],
+                "forbidden_write_scopes": [],
+                "required_handoff_from": [],
+                "require_execution_plan_confirm": false
+            }
+        ],
+        "verification_plans": [
+            {
+                "scope": "unit",
+                "commands": [
+                    {
+                        "label": "cargo test backend",
+                        "command": "cargo test --lib session",
+                        "cwd": "",
+                        "purpose": "backend unit tests",
+                        "required": true,
+                        "timeout_seconds": 120,
+                        "safety": "approved"
+                    }
+                ],
+                "manual_checks": [],
+                "required_gates": [],
+                "risk_notes": [],
+                "confidence": "high",
+                "fallback_policy": "manual_gate"
+            },
+            {
+                "scope": "unit",
+                "commands": [
+                    {
+                        "label": "cargo test frontend",
+                        "command": "cargo test --lib frontend_session",
+                        "cwd": "",
+                        "purpose": "frontend unit tests",
+                        "required": true,
+                        "timeout_seconds": 120,
+                        "safety": "approved"
+                    }
+                ],
+                "manual_checks": [],
+                "required_gates": [],
+                "risk_notes": [],
+                "confidence": "high",
+                "fallback_policy": "manual_gate"
+            },
+            {
+                "scope": "integration",
+                "commands": [
+                    {
+                        "label": "cargo test integration",
+                        "command": "cargo test --test session_integration",
+                        "cwd": "",
+                        "purpose": "integration tests",
+                        "required": true,
+                        "timeout_seconds": 180,
+                        "safety": "approved"
+                    }
+                ],
+                "manual_checks": [],
+                "required_gates": [],
+                "risk_notes": [],
+                "confidence": "high",
+                "fallback_policy": "manual_gate"
+            }
+        ]
+    })
+}
+
+fn invalid_split_output_missing_e2e() -> Value {
+    json!({
+        "repository_profile": {
+            "confidence": "high",
+            "detected_layers": ["backend"],
+            "split_recommendation": "backend_only",
+            "languages": ["rust"],
+            "frameworks": [],
+            "package_managers": ["cargo"],
+            "test_frameworks": [],
+            "build_systems": ["cargo"],
+            "verification_capabilities": ["cargo test"],
+            "uncertainties": []
+        },
+        "work_items": [
+            {
+                "title": "实现后端登录会话 API",
+                "kind": "backend",
+                "sequence_hint": 10,
+                "depends_on": [],
+                "exclusive_write_scopes": ["src/product/session.rs"],
+                "forbidden_write_scopes": ["web/**"],
+                "required_handoff_from": [],
+                "require_execution_plan_confirm": false
+            }
+        ],
+        "verification_plans": [
+            {
+                "scope": "unit",
+                "commands": [
+                    {
+                        "label": "cargo test backend",
+                        "command": "cargo test --lib session",
+                        "cwd": "",
+                        "purpose": "backend unit tests",
+                        "required": true,
+                        "timeout_seconds": 120,
+                        "safety": "approved"
+                    }
+                ],
+                "manual_checks": [],
+                "required_gates": [],
+                "risk_notes": [],
+                "confidence": "high",
+                "fallback_policy": "manual_gate"
+            }
+        ]
+    })
+}
+
 #[tokio::test]
 async fn generate_work_items_accepts_split_options_and_returns_plan_metadata() {
-    let (app, _repo) = app_with_confirmed_story_and_design().await;
+    let (app, _repo) = app_with_confirmed_story_and_design(valid_split_output()).await;
 
     let (status, response) = request_json(
         app,
@@ -47,7 +227,6 @@ async fn generate_work_items_accepts_split_options_and_returns_plan_metadata() {
             })
     );
     assert_eq!(response["workspace_sessions"].as_array().unwrap().len(), 3);
-    // 兼容断言：旧的单数字段保留，指向主 session（首个 work item）。
     assert_eq!(response["workspace_session"]["entity_id"], "work_item_0001");
     assert!(
         response["validator_findings"]
@@ -57,7 +236,158 @@ async fn generate_work_items_accepts_split_options_and_returns_plan_metadata() {
     );
 }
 
-// 移植自 tests/it_web/web_lifecycle_api.rs:1159，返回 (StatusCode, Value)。
+#[tokio::test]
+async fn generate_work_items_creates_backend_frontend_and_integration_items_with_sessions() {
+    let (app, _repo) = app_with_confirmed_story_and_design(valid_split_output()).await;
+
+    let (status, response) = request_json(
+        app,
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items:generate",
+        json!({
+            "title": "登录会话拆分实现",
+            "story_spec_ids": ["story_spec_0001"],
+            "design_spec_ids": ["design_spec_0001"],
+            "include_integration_tests": true,
+            "include_e2e_tests": false,
+            "force_frontend_backend_split": true,
+            "require_execution_plan_confirm": false
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let items = response["work_items"].as_array().unwrap();
+    assert!(items.iter().any(|item| item["kind"] == "backend"));
+    assert!(items.iter().any(|item| item["kind"] == "frontend"));
+    assert!(items.iter().any(|item| item["kind"] == "integration"));
+    assert_eq!(response["workspace_sessions"].as_array().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn generate_work_items_rejects_invalid_confirmed_refs_without_half_created_records() {
+    let (app, _repo) =
+        app_with_confirmed_story_and_design(invalid_split_output_missing_e2e()).await;
+
+    let (status, response) = request_json(
+        app,
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items:generate",
+        json!({
+            "title": "登录会话拆分实现",
+            "story_spec_ids": ["story_spec_0001"],
+            "design_spec_ids": ["design_spec_0001"],
+            "include_integration_tests": true,
+            "include_e2e_tests": false,
+            "force_frontend_backend_split": true,
+            "require_execution_plan_confirm": false
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(response["code"], "work_item_split_invalid");
+    let lifecycle = cadence_aria::product::lifecycle_store::LifecycleStore::new(
+        cadence_aria::product::app_paths::ProductAppPaths::new(_repo.path().join(".aria")),
+    );
+    assert!(
+        lifecycle
+            .list_work_items("project_0001", "issue_0001")
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        lifecycle
+            .list_issue_work_item_plans("project_0001", "issue_0001")
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn confirm_issue_work_item_plan_marks_work_items_confirmed() {
+    let (app, _repo) = app_with_confirmed_story_and_design(valid_split_output()).await;
+
+    let (status, response) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items:generate",
+        json!({
+            "title": "登录会话拆分实现",
+            "story_spec_ids": ["story_spec_0001"],
+            "design_spec_ids": ["design_spec_0001"],
+            "include_integration_tests": true,
+            "include_e2e_tests": false,
+            "force_frontend_backend_split": true,
+            "require_execution_plan_confirm": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let plan_id = response["work_item_plan"]["plan_id"].as_str().unwrap();
+
+    let (status, response) = request_json(
+        app,
+        Method::POST,
+        &format!("/api/projects/project_0001/issues/issue_0001/work-item-plans/{plan_id}/confirm"),
+        json!({}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response["work_item_plan"]["status"], "confirmed");
+    assert!(
+        response["work_items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["plan_status"] == "confirmed")
+    );
+}
+
+#[tokio::test]
+async fn request_change_keeps_split_work_items_not_codeable() {
+    let (app, _repo) = app_with_confirmed_story_and_design(valid_split_output()).await;
+
+    let (status, response) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items:generate",
+        json!({
+            "title": "登录会话拆分实现",
+            "story_spec_ids": ["story_spec_0001"],
+            "design_spec_ids": ["design_spec_0001"],
+            "include_integration_tests": true,
+            "include_e2e_tests": false,
+            "force_frontend_backend_split": true,
+            "require_execution_plan_confirm": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let plan_id = response["work_item_plan"]["plan_id"].as_str().unwrap();
+
+    let (status, response) = request_json(
+        app,
+        Method::POST,
+        &format!(
+            "/api/projects/project_0001/issues/issue_0001/work-item-plans/{plan_id}/change-request"
+        ),
+        json!({"note": "需要补充 e2e"}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response["work_item_plan"]["status"], "change_requested");
+    assert!(
+        response["work_items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["plan_status"] == "draft")
+    );
+}
+
 async fn request_json(
     app: axum::Router,
     method: Method,
@@ -83,8 +413,7 @@ async fn request_json(
     (status, value)
 }
 
-// 新增 helper：建仓 + project + issue，并生成并 confirm story/design spec。
-async fn app_with_confirmed_story_and_design() -> (axum::Router, tempfile::TempDir) {
+async fn app_with_confirmed_story_and_design(output: Value) -> (axum::Router, tempfile::TempDir) {
     let root = tempdir().expect("root");
     let repo = root.path().join("repo");
     std::fs::create_dir_all(&repo).expect("create repo dir");
@@ -95,10 +424,10 @@ async fn app_with_confirmed_story_and_design() -> (axum::Router, tempfile::TempD
         .expect("git init");
     assert!(status.success());
 
-    let app = build_web_router(WebAppState::new(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-    ));
+    let runtime = WebRuntime::new_fake(root.path().to_path_buf());
+    let state = WebAppState::new(root.path().to_path_buf(), runtime)
+        .with_provider_adapter(Arc::new(MockSplitProviderAdapter { output }));
+    let app = build_web_router(state);
 
     request_json(
         app.clone(),
