@@ -55,7 +55,13 @@
 - Modify: `src/product/coding_workspace_engine.rs`
   - Prepare/Coding prompt 注入 execution plan。
   - final confirm 前检查 diff scope 和 handoff。
-  - 增加 handoff generation step/helper。
+  - 增加 handoff provider run 调用，解析输出并保存 `WorkItemHandoff`。
+- Modify: `src/product/coding_workspace_engine.rs` 构造函数
+  - 注入 `Arc<dyn ProviderAdapter>`，用于 handoff provider run。
+  - **Provider adapter 来源：** 复用 P3 在 `WebAppState` 中新增的 `provider_adapter` 字段，通过 `CodingWorkspaceEngine::new(..., provider_adapter, ...)` 传入。
+- Create: `src/product/handoff_provider.rs`（或内联于 coding_workspace_engine.rs）
+  - 定义 handoff provider 的 prompt template 与输出 schema。
+  - 将 `AdapterOutput` 解析为 `WorkItemHandoff`。
 - Modify: `src/cross_cutting/worktree.rs`
   - 必要时将禁止运行时路径判断提升为 `pub(crate)` 以复用既有安全规则，不另写路径安全逻辑。
 - Modify: `src/web/types.rs`
@@ -505,24 +511,51 @@ cargo test --locked --test it_product final_confirm_rejects_diff_outside_work_it
 
 预期：三条测试都通过。
 
-## 任务 5：Generate Handoff From Provider Or Fake Summary
+## 任务 5：Generate Handoff From Extra Provider Run
 
 **文件：**
 
 - Modify: `src/product/coding_workspace_engine.rs`
+- Create: `src/product/handoff_provider.rs`（若文件拆分；否则内联实现）
 - Modify: `tests/it_product/product_coding_workspace_engine.rs`
 
-- [ ] **步骤 1：编写失败态 handoff generation test**
+- [ ] **步骤 1：构造支持 handoff provider run 的 engine**
+
+修改 `CodingWorkspaceEngine::new` 签名（或新增 `with_provider` 构造器），注入 provider adapter：
+
+```rust
+pub fn new(
+    store: CodingAttemptStore,
+    git_service: GitWorkspaceService,
+    provider: Arc<dyn ProviderAdapter>,
+    event_tx: mpsc::Sender<CodingWsOutMessage>,
+) -> Self
+```
+
+所有现有调用点（tests 与生产代码）需要同步更新；测试使用 `Arc::new(FakeProviderAdapter::handoff(summary))` 这类 mock。
+
+- [ ] **步骤 2：编写失败态 handoff provider run test**
 
 追加:
 
 ```rust
 #[tokio::test]
-async fn generates_handoff_from_review_and_test_summaries_before_final_confirm() {
+async fn generates_handoff_from_extra_provider_run_before_final_confirm() {
     let root = tempdir().expect("root");
     let (store, attempt) = attempt_with_review_request_and_testing_report(root.path());
     let (tx, _rx) = tokio::sync::mpsc::channel(8);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let provider = Arc::new(FakeProviderAdapter::with_structured_output(
+        serde_json::json!({
+            "summary": "后端 API 已完成，前端可调用 /api/session",
+            "files_changed": ["src/web/handlers.rs"],
+            "diff_summary": "新增 session API",
+            "tests_run": ["cargo test --locked --test it_web session_api"],
+            "test_result_summary": "全部通过",
+            "api_or_contract_changes": ["GET /api/session"],
+            "next_work_item_notes": ["前端处理 401"]
+        }),
+    ));
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), provider, tx);
 
     let handoff = engine
         .generate_work_item_handoff(&attempt)
@@ -530,30 +563,57 @@ async fn generates_handoff_from_review_and_test_summaries_before_final_confirm()
         .expect("generate handoff");
 
     assert_eq!(handoff.work_item_id, "work_item_0001");
-    assert!(handoff.summary.contains("work_item_0001"));
+    assert!(handoff.summary.contains("/api/session"));
     assert!(!handoff.tests_run.is_empty());
+    assert!(handoff.provider_run_ref.is_some());
 }
 ```
 
-- [ ] **步骤 2：运行 generation test 并确认失败**
+- [ ] **步骤 3：运行 handoff generation test 并确认失败**
 
 运行:
 
 ```bash
-cargo test --locked --test it_product generates_handoff_from_review_and_test_summaries_before_final_confirm
+cargo test --locked --test it_product generates_handoff_from_extra_provider_run_before_final_confirm
 ```
 
-预期：方法缺失导致失败。
+预期：构造器签名、provider run 调用、`generate_work_item_handoff` 方法均缺失，编译失败。
 
-- [ ] **步骤 3：实现 handoff generation helper**
+- [ ] **步骤 4：实现 handoff provider run**
 
-第一版 uses a deterministic summary from persisted testing report, code review report, internal review and review request, and stores `provider_run_ref=None`. A later provider-backed handoff run can replace this helper without changing the persisted `WorkItemHandoff` contract.
+在 `src/product/handoff_provider.rs`（或 `coding_workspace_engine.rs` 内）实现：
+
+1. `HandoffProviderInput`：聚合以下上下文
+   - Work Item 目标与范围（`exclusive_write_scopes`、`forbidden_write_scopes`）
+   - diff summary 与 changed files 清单
+   - testing report summary
+   - review report / review request summary
+   - commit/head（attempt.head_commit）
+   - API 或契约变化摘要
+2. 构造 `AdapterInput`：
+   - `provider_type`：沿用当前 Coding Workspace 的 author provider（或专用 handoff provider，第一版复用 author provider）
+   - `role`：`AdapterRole::Handoff`（若不存在则新增）或复用 `AdapterRole::Analyst`
+   - `prompt`：包含上述输入的 prompt template
+   - `output_schema`：定义 `WorkItemHandoff` 核心字段的 JSON schema
+   - `worktree_path`：attempt worktree path
+3. 调用 `provider.run(&input)`，得到 `AdapterOutput`。
+4. 解析 `structured_output` 为 `WorkItemHandoff`；若解析失败，返回 `work_item_handoff_provider_output_invalid`。
+5. 保存 provider run record（复用 `provider_run_record_from_output`）到 `.aria` 目录，并将 ref 写入 `WorkItemHandoff.provider_run_ref`。
 
 不要 consume next Work Item context budget while generating handoff.
 
-- [ ] **步骤 4：运行 generation test 并确认通过**
+- [ ] **步骤 5：在 final confirm 路径调用 handoff provider run**
 
-重新运行步骤 2 的命令。
+在 `handle_final_confirm()` 中，diff scope 校验通过后、状态置 Completed 前：
+
+1. 调用 `engine.generate_work_item_handoff(&attempt).await`。
+2. 将生成的 `WorkItemHandoff` 通过 `CodingAttemptStore::save_work_item_handoff` 持久化。
+3. 更新 `LifecycleWorkItemRecord.handoff_summary_ref` 和 `completion_commit`。
+4. 再继续 P5 的 Completed 落库与 active lock 释放。
+
+- [ ] **步骤 6：运行 handoff generation test 并确认通过**
+
+重新运行步骤 3 的命令。
 
 预期：通过。
 
@@ -568,7 +628,7 @@ cargo test --locked --test it_product saves_and_loads_work_item_execution_plan
 cargo test --locked --test it_product saves_and_loads_work_item_handoff
 cargo test --locked --test it_product final_confirm_requires_work_item_handoff
 cargo test --locked --test it_product final_confirm_rejects_diff_outside_work_item_write_scope
-cargo test --locked --test it_product generates_handoff_from_review_and_test_summaries_before_final_confirm
+cargo test --locked --test it_product generates_handoff_from_extra_provider_run_before_final_confirm
 cargo test --locked --test it_web coding_attempt_snapshot_includes_generated_work_item_execution_plan
 cargo test --locked --test it_web coding_ws_blocks_coder_stage_when_execution_plan_requires_confirmation
 cargo fmt --check
@@ -601,6 +661,6 @@ git commit -m "feat: add work item execution plan and configurable confirm gate"
 段二「handoff」（任务 4-5 完成后）:
 
 ```bash
-git add src/product/coding_models.rs src/product/coding_attempt_store.rs src/product/coding_workspace_engine.rs tests/it_product/product_coding_attempt_store.rs tests/it_product/product_coding_workspace_engine.rs
+git add src/product/coding_models.rs src/product/coding_attempt_store.rs src/product/coding_workspace_engine.rs src/product/handoff_provider.rs tests/it_product/product_coding_attempt_store.rs tests/it_product/product_coding_workspace_engine.rs
 git commit -m "feat: require work item handoff before completion"
 ```

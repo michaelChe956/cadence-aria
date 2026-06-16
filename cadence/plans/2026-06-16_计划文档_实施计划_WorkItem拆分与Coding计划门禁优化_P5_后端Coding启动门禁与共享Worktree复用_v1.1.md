@@ -286,9 +286,13 @@ cargo test --locked --test it_product product_coding_workspace_engine
 
 预期：新增和既有 engine tests pass.
 
-## 任务 3：Release Active Lock On Completion And Abort
+## 任务 3：Release Active Lock On Completion, Abort And Failed/Blocked States
 
 > **🔴 v1.1 阻塞修复：** 原计划只在 `handle_final_confirm`（完成）和 `handle_abort`（中止）两个路径释放 active lock。若 attempt 走到**其他终态**（Coding/Review 失败、卡 gate 后被同 Issue 新 attempt 取代、provider run 异常退出等），锁不会释放，会导致同 Issue 后续 Work Item 永久卡在 `issue_worktree_active` 死锁。本任务新增步骤 5 覆盖异常终态/attempt 被取代时的释放逻辑。
+
+> **提交分段：** 本任务拆为两段提交，降低单 commit 风险。
+> - 段一（步骤 1-4）：`handle_final_confirm`、`handle_abort` 释放锁，新增 `handle_attempt_failed`，改造 `fail_provider_stream` 等核心失败路径为 `Failed`。
+> - 段二（步骤 5）：其余 `Blocked` 路径锁释放、新 attempt 取代旧 attempt 时的锁处理、`complete_attempt_after_final_rework` 锁释放。
 
 **文件：**
 
@@ -424,9 +428,36 @@ async fn failed_attempt_releases_issue_shared_worktree_lock() {
 3. 其他收敛到 Failed/Superseded/Blocked 等终态的代码路径（如 provider run 异常退出、attempt 被新 attempt 取代）应统一调用 `handle_attempt_failed` 或在本地执行同样的「仅当持锁者匹配才释放」逻辑。
 4. 新 attempt 抢占（取代旧 attempt）时，应在创建新 attempt 的锁获取逻辑中处理旧持锁项的释放/接管，避免旧项残留锁。
 
-> 若团队决定将「异常终态释放锁」收口到统一状态机改造而不在本计划内完成，则必须显式将其列为已知后续项并在 P6 或后续计划承接；本 v1.1 推荐直接在本步骤补齐实现。
+> **选 B 的落地要求：** 引入真正的 `CodingAttemptStatus::Failed` 终态，并将不可恢复的失败路径从 `Blocked` 改为 `Failed`。可恢复的人工 gate（testing 失败但可 retry、review 需要人工决策）保持 `Blocked`，但同样需要在进入 `Blocked` 时释放 active lock，因为当前 Issue 下该 Work Item 已不能继续独占共享 worktree。
 
 预期：`failed_attempt_releases_issue_shared_worktree_lock` 通过，同 Issue 后续 Work Item 不再死锁。
+
+### 具体路径改造清单
+
+1. **`fail_provider_stream()`（`coding_workspace_engine.rs:1136`）**
+   - 当前将 attempt 置为 `Blocked`。
+   - 改为置为 `CodingAttemptStatus::Failed`。
+   - 调用 `self.handle_attempt_failed(project_id, issue_id, attempt_id).await?` 后返回错误。
+
+2. **`max_auto_rework_exceeded` 路径（约 line 4880）**
+   - 当前将 attempt 置为 `Blocked` 并创建 blocked gate。
+   - 改为置为 `CodingAttemptStatus::Failed`。
+   - 调用 `handle_attempt_failed`。
+
+3. **其他 provider stream 失败且无法 retry 的路径**
+   - 搜索所有 `update_attempt_status(..., CodingAttemptStatus::Blocked)` 的调用点。
+   - 若该路径不是人工 gate（无 retry/continue 选项），改为 `Failed` 并调用 `handle_attempt_failed`。
+
+4. **新 attempt 取代旧 attempt**
+   - 在 `create_coding_attempt`（`src/web/handlers.rs`）中，若已存在 active attempt，需要先调用 `engine.handle_attempt_failed(project_id, issue_id, &old_attempt.id).await`（或等价释放锁逻辑），再为新 attempt 获取 active lock。
+
+5. **Blocked 路径也需要释放锁**
+   - 对于保持 `Blocked` 的可恢复路径（如 testing 失败但可 retry），在进入 `Blocked` 后调用 `release_issue_worktree_lock`（仅当持锁者匹配时）。
+   - 这样后续 Work Item 不会因为一个卡在 gate 的 attempt 而永久阻塞。
+
+6. **`complete_attempt_after_final_rework()`（`coding_workspace_engine.rs:4762`）**
+   - 该函数内部直接置 `Completed` 并调用 `mark_work_item_completed_if_present`，**不经过 `handle_final_confirm`**。
+   - 必须在该函数内补充 `mark_issue_worktree_completed_item` 调用，确保锁释放。
 
 ## 任务 4：Block Missing Handoff For Required Dependencies
 
@@ -523,7 +554,16 @@ cargo check --locked
 
 ## 提交
 
+段一（任务 1-3 步骤 1-4，核心锁释放 + Failed 终态）：
+
 ```bash
 git add src/web/handlers.rs src/product/coding_workspace_engine.rs src/product/lifecycle_store.rs tests/it_web/web_coding_attempt_api.rs tests/it_product/product_coding_workspace_engine.rs
-git commit -m "feat: gate coding attempts on split work items"
+git commit -m "feat: gate coding attempts and release shared worktree lock on terminal states"
+```
+
+段二（任务 3 步骤 5，Blocked/Superseded 路径锁释放）：
+
+```bash
+git add src/product/coding_workspace_engine.rs src/product/lifecycle_store.rs tests/it_product/product_coding_workspace_engine.rs
+git commit -m "feat: release shared worktree lock on blocked and superseded attempts"
 ```

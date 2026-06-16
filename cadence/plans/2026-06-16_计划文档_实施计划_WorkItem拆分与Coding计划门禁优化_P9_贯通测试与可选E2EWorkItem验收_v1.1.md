@@ -1,4 +1,4 @@
-# WorkItem 拆分 P9 贯通测试与可选 E2E WorkItem 验收 Implementation Plan
+# WorkItem 拆分 P9 贯通测试与 WorkItem 验收 Implementation Plan
 
 > **版本：v1.1**（修订自 v1.0）
 >
@@ -42,10 +42,8 @@
   - 前端 lifecycle 贯通状态测试。
 - Modify: `web/src/pages/CodingWorkspacePage.test.tsx`
   - execution plan/handoff 展示联动测试。
-- Create: `web/e2e/work-item-split-flow.spec.ts`
-  - 浏览器 E2E。仓库现有 Playwright 测试目录是 `web/e2e`。
-- Modify: `web/e2e/helpers/coding.ts` or `web/e2e/helpers/workspace.ts`
-  - 仅在需要复用 setup helper 时修改。
+
+> 说明：本计划不做浏览器 E2E 测试。
 
 ## 任务 1：Backend Flow Test For Split Generation And Dependency Gates
 
@@ -322,51 +320,6 @@ pnpm -C web test -- --run CodingWorkspacePage
 
 预期：通过。
 
-## 任务 4：Browser E2E Smoke Test
-
-**文件：**
-
-- Create: `web/e2e/work-item-split-flow.spec.ts`
-- Modify: `web/e2e/helpers/workspace.ts` if needed
-
-- [ ] **步骤 1：Write E2E smoke test**
-
-创建 `web/e2e/work-item-split-flow.spec.ts`:
-
-```ts
-import { expect, test } from "@playwright/test";
-import { seedSplitWorkItems } from "./helpers/workspace";
-
-test("work item split flow shows DAG and coding execution plan", async ({ page }) => {
-  // 现有 e2e 仅设 ARIA_PROVIDER_MODE=fake（start-api.mjs），无 work item 种子数据。
-  // 首屏不得做无条件强断言，必须先经 helpers 做确定性 seed/setup 再断言。
-  await seedSplitWorkItems(page);
-
-  await page.goto("/workbench");
-
-  await expect(page.getByText("Work Item")).toBeVisible();
-  await expect(page.getByText(/后端|Backend|前端|Frontend/)).toBeVisible();
-
-  const splitCard = page.getByText(/后端 API|Backend API/).first();
-  if (await splitCard.isVisible()) {
-    await splitCard.click();
-    await expect(page.getByText(/写入范围|Allowed scope/)).toBeVisible();
-  }
-});
-```
-
-通过现有 `web/e2e/helpers/coding.ts` / `web/e2e/helpers/workspace.ts`（均已存在）或测试控制 API 完成确定性 seed/setup；不依赖人工预置数据，也不命中外部服务。若现有 helpers 缺少 work item seed 能力，按"仅在需要复用 setup helper 时修改"的边界补充一个确定性 seed helper。
-
-- [ ] **步骤 2：Run E2E test**
-
-运行:
-
-```bash
-pnpm -C web test:e2e -- work-item-split-flow.spec.ts
-```
-
-预期：在现有 Playwright 配置下通过。若因缺少 fake seed 数据失败，通过现有 `web/e2e/helpers/*` 或测试控制 API 增加确定性 setup；不得依赖人工预置数据。
-
 ## 最终验证
 
 运行:
@@ -375,7 +328,6 @@ pnpm -C web test:e2e -- work-item-split-flow.spec.ts
 cargo test --locked --test it_web work_item_split_flow
 pnpm -C web test -- --run IssueLifecycleWorkbench
 pnpm -C web test -- --run CodingWorkspacePage
-pnpm -C web test:e2e -- work-item-split-flow.spec.ts
 cargo fmt --check
 cargo clippy --all-targets --all-features --locked -- -D warnings
 cargo check --locked
@@ -385,12 +337,11 @@ cargo check --locked
 
 - Backend flow tests pass.
 - Frontend Vitest tests pass.
-- Playwright smoke test passes.
 - Rust formatting, clippy and check pass.
 
 ## 提交
 
 ```bash
-git add tests/it_web.rs tests/it_web/web_work_item_split_flow.rs web/src/components/lifecycle/IssueLifecycleWorkbench.test.tsx web/src/pages/CodingWorkspacePage.test.tsx web/e2e/work-item-split-flow.spec.ts web/e2e/helpers/coding.ts web/e2e/helpers/workspace.ts
+git add tests/it_web.rs tests/it_web/web_work_item_split_flow.rs web/src/components/lifecycle/IssueLifecycleWorkbench.test.tsx web/src/pages/CodingWorkspacePage.test.tsx
 git commit -m "test: verify split work item flow"
 ```

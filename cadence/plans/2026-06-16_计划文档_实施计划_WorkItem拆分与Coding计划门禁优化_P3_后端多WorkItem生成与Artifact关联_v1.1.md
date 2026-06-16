@@ -8,7 +8,7 @@
 
 **Goal:** 将 `generate_work_items` 从单 Work Item 创建升级为 Issue Work Item Set 创建，确保每个 Work Item 都拥有独立 workspace session 与 artifact versions，并把 P2 validator 接入生成期校验。
 
-**Architecture:** 后端 handler 接收用户拆分选项，构造内部 `IssueWorkItemPlan` 和多个 `LifecycleWorkItemRecord` 草稿，通过 `WorkItemSplitValidator` 后再持久化。第一版保持 fake/provider 输出可控：不在本计划实现真实 provider 拆分 run，只建立可验证的后端生成契约和 artifact/session 关联。
+**Architecture:** 后端 handler 接收用户拆分选项，调用 `WorkItemSplitEngine` 运行 provider-based split generation，得到 `IssueWorkItemPlan` 和多个 `LifecycleWorkItemRecord` 草稿，通过 `WorkItemSplitValidator` 后再持久化。本计划必须实现真实 provider split run，不使用硬编码 deterministic builder。
 
 **Tech Stack:** Rust 1.95.0、Axum、Serde JSON、LifecycleStore、Cargo integration tests、TDD。
 
@@ -45,13 +45,21 @@
 
 ## 文件结构
 
+- Create: `src/product/work_item_split_engine.rs`
+  - 负责构造 split provider 上下文并运行 provider，解析输出为 `IssueWorkItemPlan` 和 `LifecycleWorkItemRecord` 候选列表。
+- Modify: `src/product/mod.rs`
+  - 导出 `work_item_split_engine`。
 - Modify: `src/web/types.rs`
   - 扩展 `GenerateWorkItemsRequest`，新增拆分选项。
   - 扩展 `GenerateWorkItemsResponse`：**保留旧字段 `workspace_session`（单数，兼容）**，新增 `workspace_sessions`（复数）、`work_item_plan` 与 `validator_findings`。
   - 扩展 `LifecycleWorkItemDto`，透出 P1/P2 新增字段。
+- Modify: `src/web/state.rs`
+  - 在 `WebAppState` 中新增 `provider_adapter: Arc<dyn ProviderAdapter>` 字段。
+  - 更新 `WebAppState::new` 及测试构造 helper，注入默认或 fake provider adapter。
 - Modify: `src/web/handlers.rs`
-  - `generate_work_items` 创建多个 Work Item。
-  - 构造 `IssueWorkItemPlan` 并调用 `WorkItemSplitValidator`。
+  - `generate_work_items` 调用 `WorkItemSplitEngine`。
+  - 调用 `WorkItemSplitValidator` 校验 provider 输出。
+  - 校验通过后持久化多个 Work Item。
   - 返回每个 Work Item 对应的 workspace session（复数），同时把主 session 写入旧的单数字段。
 - Modify: `src/product/lifecycle_store.rs`
   - 扩展 `CreateWorkItemInput` 支持 P1 新字段。
@@ -363,17 +371,19 @@ completion_diff_summary_ref: None,
 
 预期：测试通过。
 
-## 任务 3：Implement Deterministic First-Version Split Generation
+## 任务 3：Implement Provider-Based Split Generation
 
 **文件：**
 
+- Create: `src/product/work_item_split_engine.rs`
+- Modify: `src/product/mod.rs`
 - Modify: `src/web/handlers.rs`
 - Modify: `src/web/workspace_context.rs`
 - Modify: `tests/it_web/web_work_item_generation.rs`
 
-- [ ] **步骤 1：编写失败态 multi Work Item generation test**
+- [ ] **步骤 1：编写失败态 split engine test**
 
-Extend the web test to assert deterministic titles and dependencies:
+在 `tests/it_web/web_work_item_generation.rs` 中新增测试，mock provider adapter 返回结构化 split plan：
 
 ```rust
 #[tokio::test]
@@ -398,18 +408,17 @@ async fn generate_work_items_creates_backend_frontend_and_integration_items_with
 
     assert_eq!(status, StatusCode::OK);
     let items = response["work_items"].as_array().unwrap();
-    assert_eq!(items[0]["kind"], "backend");
-    assert_eq!(items[1]["kind"], "frontend");
-    assert_eq!(items[2]["kind"], "integration");
-    assert_eq!(items[1]["depends_on"], json!(["work_item_0001"]));
-    assert_eq!(items[2]["depends_on"], json!(["work_item_0001", "work_item_0002"]));
-    assert_eq!(response["workspace_sessions"][0]["entity_id"], "work_item_0001");
-    assert_eq!(response["workspace_sessions"][1]["entity_id"], "work_item_0002");
-    assert_eq!(response["workspace_sessions"][2]["entity_id"], "work_item_0003");
+    assert!(items.iter().any(|item| item["kind"] == "backend"));
+    assert!(items.iter().any(|item| item["kind"] == "frontend"));
+    assert!(items.iter().any(|item| item["kind"] == "integration"));
+    let frontend = items.iter().find(|item| item["kind"] == "frontend").unwrap();
+    assert_eq!(frontend["depends_on"], json!(["work_item_0001"]));
+    let sessions = response["workspace_sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 3);
 }
 ```
 
-- [ ] **步骤 2：运行 test 并确认失败**
+- [ ] **步骤 2：运行 split engine test 并确认失败**
 
 运行:
 
@@ -417,46 +426,51 @@ async fn generate_work_items_creates_backend_frontend_and_integration_items_with
 cargo test --locked --test it_web generate_work_items_creates_backend_frontend_and_integration_items_with_sessions
 ```
 
-预期：当前 handler returns one work item and one session.
+预期：`WorkItemSplitEngine` 不存在，测试编译失败。
 
-- [ ] **步骤 3：实现 deterministic split builder**
+- [ ] **步骤 3：实现 `WorkItemSplitEngine`**
 
-Inside `src/web/handlers.rs`, add a helper near `generate_work_items`:
+创建 `src/product/work_item_split_engine.rs`：
 
-```rust
-fn build_initial_work_item_specs(
-    request: &GenerateWorkItemsRequest,
-) -> Vec<InitialWorkItemSpec> {
-    let mut specs = vec![
-        InitialWorkItemSpec::backend(&request.title),
-        InitialWorkItemSpec::frontend(&request.title, vec!["work_item_0001".to_string()]),
-    ];
-    if request.include_integration_tests.unwrap_or(false) {
-        specs.push(InitialWorkItemSpec::integration(
-            &request.title,
-            vec!["work_item_0001".to_string(), "work_item_0002".to_string()],
-        ));
-    }
-    if request.include_e2e_tests.unwrap_or(false) {
-        specs.push(InitialWorkItemSpec::e2e(
-            &request.title,
-            vec!["work_item_0001".to_string(), "work_item_0002".to_string()],
-        ));
-    }
-    specs
-}
-```
+1. **上下文组装**：
+   - 读取 confirmed Story Spec 正文与 artifact refs。
+   - 读取 confirmed Design Spec 正文与 artifact refs。
+   - 读取 OpenSpec 约束摘要（通过 `ProviderContextBuilder` 或现有 helper）。
+   - 生成仓库结构摘要（顶层目录、关键文件列表）。
+   - 用户选项：`include_integration_tests`、`include_e2e_tests`、`force_frontend_backend_split`、`require_execution_plan_confirm`。
 
-使用 exact write scopes:
+2. **构造 `AdapterInput`**：
+   - `provider_type`：使用当前项目配置的 author provider（复用 Coding Workspace 的 provider 选择逻辑）。
+   - `role`：`AdapterRole::WorkItemSplitter`（若不存在则新增）或复用 `AdapterRole::Analyst`。
+   - `prompt`：包含上述上下文的 prompt template，明确指示 provider 输出 `IssueWorkItemPlan` JSON。
+   - `output_schema`：定义 `IssueWorkItemPlan` 的 JSON schema，包括 `work_items`、`dependency_graph`、`options`、`review_summary`。
+   - `worktree_path`：当前 repository path（仅作 provider 工作目录，不写入目标仓库）。
 
-- Backend: `src/**`, forbidden `web/**`
-- Frontend: `web/src/**`, forbidden `src/**`
-- Integration: `src/**`, `web/src/**`
-- E2E: `web/e2e/**`
+3. **调用 provider run**：
+   - 通过注入的 `Arc<dyn ProviderAdapter>` 调用 `provider.run(&input)`。
+   - 保存 provider run record 到 `.aria` 目录，ref 写入 `IssueWorkItemPlan.created_from_provider_run`。
+   - **Provider adapter 来源：** 在 `WebAppState` 中新增 `provider_adapter: Arc<dyn ProviderAdapter>` 字段。P3 和 P6 共用同一个同步 provider adapter 注入点，避免重复构造。
 
-在 creating records, construct `IssueWorkItemPlan`, run `WorkItemSplitValidator::validate()`, and return validation errors with code `work_item_split_invalid` before returning success.
+4. **解析输出**：
+   - 从 `AdapterOutput.structured_output` 解析 `IssueWorkItemPlan`。
+   - 从 plan 的 `work_items` 解析为 `LifecycleWorkItemRecord` 候选列表。
+   - 若解析失败，返回 `work_item_split_provider_output_invalid`。
 
-- [ ] **步骤 4：Include split context in workspace messages**
+5. **注入 engine 到 handler**：
+   - 修改 `WebAppState` 或 `generate_work_items` 参数，使 `WorkItemSplitEngine` 可访问 `ProviderAdapter` 和 `LifecycleStore`。
+
+- [ ] **步骤 4：在 handler 中调用 split engine 并持久化**
+
+在 `src/web/handlers.rs` 的 `generate_work_items` 中：
+
+1. 调用 `split_engine.generate(&request, &lifecycle, ...).await`。
+2. 得到 `(IssueWorkItemPlan, Vec<LifecycleWorkItemRecord>)` 候选。
+3. 调用 `WorkItemSplitValidator::validate(&plan, &candidates)`。
+4. 若校验失败，返回 `ApiError::validation_with_details("work_item_split_invalid", ...)`，不持久化任何 Work Item。
+5. 若校验通过，为每个 candidate 顺序调用 `lifecycle.create_work_item(...)`，并创建对应 workspace session。
+6. 构造 `GenerateWorkItemsResponse`。
+
+- [ ] **步骤 5：Include split context in workspace messages**
 
 Update `ensure_workspace_context_message()` or the Work Item context builder in `src/web/workspace_context.rs` so each Work Item session mentions:
 
@@ -467,7 +481,7 @@ Update `ensure_workspace_context_message()` or the Work Item context builder in 
 - Required handoff sources.
 - Superpowers/TDD/verification requirements.
 
-- [ ] **步骤 5：运行 generation tests 并确认通过**
+- [ ] **步骤 6：运行 generation tests 并确认通过**
 
 运行:
 
@@ -477,6 +491,8 @@ cargo test --locked --test it_web generate_work_items_creates_backend_frontend_a
 ```
 
 预期：两条测试都通过。
+
+> **范围说明：** 本任务不实现 provider 内部逻辑（prompt engineering、schema 调优），只建立可运行的 provider-based split generation 链路。provider 输出质量由后续迭代优化。
 
 ## 任务 4：Validator Blocks Invalid Generation Without Half-Created Work Items
 
@@ -627,8 +643,8 @@ cargo check --locked
 ## 提交
 
 ```bash
-git add src/web/types.rs src/web/handlers.rs src/product/lifecycle_store.rs src/web/workspace_context.rs tests/it_web.rs tests/it_web/web_work_item_generation.rs tests/it_product/product_lifecycle_store.rs
+git add src/product/work_item_split_engine.rs src/product/mod.rs src/web/state.rs src/web/types.rs src/web/handlers.rs src/product/lifecycle_store.rs src/web/workspace_context.rs tests/it_web.rs tests/it_web/web_work_item_generation.rs tests/it_product/product_lifecycle_store.rs
 # 任务 0 修正的 legacy create_work_item 调用点
 git add src/web/test_controls.rs src/product/coding_evaluation_context.rs tests/it_web/web_coding_ws_handler.rs tests/it_web/web_coding_attempt_api.rs tests/it_product/product_coding_workspace_engine.rs
-git commit -m "feat: generate split work items"
+git commit -m "feat: generate split work items via provider"
 ```
