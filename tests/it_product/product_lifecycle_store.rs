@@ -10,7 +10,7 @@ use cadence_aria::product::lifecycle_store::{
 use cadence_aria::product::models::{
     AgentRole, DesignKind, IssueSharedWorktreeStatus, LifecycleConfirmationStatus, NodeDetail,
     ProviderConversationRef, ProviderConversationRole, ProviderName, ProviderSnapshot,
-    WorkItemStatus, WorkspaceSessionStatus, WorkspaceType,
+    WorkItemContextBudget, WorkItemKind, WorkItemStatus, WorkspaceSessionStatus, WorkspaceType,
 };
 use cadence_aria::web::workspace_ws_types::{
     ArtifactVersion, ProviderConfigSnapshot, TimelineNode, TimelineNodeStatus, TimelineNodeType,
@@ -717,4 +717,38 @@ fn marks_issue_shared_worktree_last_completed_work_item() {
         updated.last_completed_work_item_id.as_deref(),
         Some("work_item_0001")
     );
+}
+
+#[test]
+fn create_work_item_persists_split_fields() {
+    let root = tempdir().expect("tempdir");
+    let store = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")));
+
+    let work_item = store
+        .create_work_item(CreateWorkItemInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            story_spec_ids: vec!["story_spec_0001".to_string()],
+            design_spec_ids: vec!["design_spec_0001".to_string()],
+            title: "后端 API".to_string(),
+            work_item_set_id: Some("work_item_set_0001".to_string()),
+            kind: WorkItemKind::Backend,
+            sequence_hint: Some(10),
+            depends_on: Vec::new(),
+            exclusive_write_scopes: vec!["src/product/**".to_string()],
+            forbidden_write_scopes: vec!["web/**".to_string()],
+            context_budget: WorkItemContextBudget::default(),
+            required_handoff_from: Vec::new(),
+            verification_plan_ref: Some("verification_plan_work_item_0001".to_string()),
+            require_execution_plan_confirm: false,
+        })
+        .expect("work item");
+
+    assert_eq!(
+        work_item.work_item_set_id.as_deref(),
+        Some("work_item_set_0001")
+    );
+    assert_eq!(work_item.kind, WorkItemKind::Backend);
+    assert_eq!(work_item.exclusive_write_scopes, vec!["src/product/**"]);
 }

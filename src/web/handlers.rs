@@ -32,9 +32,9 @@ use crate::product::models::{
     DesignKind, DesignSpecRecord, GateStatus, IssuePhase as ProductIssuePhase,
     IssueRecord as ProductIssueRecord, IssueRuntimeBindingRecord,
     IssueStatus as ProductIssueStatus, LifecycleConfirmationStatus, LifecycleWorkItemRecord,
-    NodeDetail, ProjectRecord, ProviderName, RepositoryRecord, StorySpecRecord, WorkItemPlanStatus,
-    WorkItemStatus, WorkspaceMessageRecord, WorkspaceSessionRecord, WorkspaceSessionStatus,
-    WorkspaceType,
+    NodeDetail, ProjectRecord, ProviderName, RepositoryRecord, StorySpecRecord,
+    WorkItemExecutionPlanStatus, WorkItemKind, WorkItemPlanStatus, WorkItemStatus,
+    WorkspaceMessageRecord, WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType,
 };
 use crate::product::project_store::{CreateProjectInput, ProjectStore};
 use crate::product::provider_workspace_runner::{
@@ -64,8 +64,9 @@ use crate::web::types::{
     ProjectListResponse, ProviderInputContentResponse, RepositoryDto, RepositoryListResponse,
     ResolveGateRequest, ResolveGateResponse, RollbackPreviewRequest, RollbackPreviewResponse,
     RollbackRequest, RollbackResponse, StopTaskResponse, StorySpecDto, TaskListResponse, WebEvent,
-    WorkspaceDto, WorkspaceListResponse, WorkspaceMessageDto, WorkspaceSessionConfirmRequest,
-    WorkspaceSessionDto, WorkspaceSessionMessageRequest, WorkspaceSessionRunNextRequest,
+    WorkItemContextBudgetDto, WorkspaceDto, WorkspaceListResponse, WorkspaceMessageDto,
+    WorkspaceSessionConfirmRequest, WorkspaceSessionDto, WorkspaceSessionMessageRequest,
+    WorkspaceSessionRunNextRequest,
 };
 use crate::web::workspace_context::ensure_workspace_context_message;
 use crate::web::workspace_registry::{CreateWorkspaceInput, WorkspaceRecord, WorkspaceRegistry};
@@ -550,8 +551,48 @@ pub async fn generate_work_items(
     let work_item_dto = lifecycle_work_item_dto(&lifecycle, work_item, None, Some(&session))?;
 
     Ok(Json(GenerateWorkItemsResponse {
-        work_items: vec![work_item_dto],
-        workspace_session: workspace_session_dto(session),
+        work_items: vec![work_item_dto.clone()],
+        workspace_session: workspace_session_dto(session.clone()),
+        workspace_sessions: vec![workspace_session_dto(session)],
+        work_item_plan: crate::web::types::IssueWorkItemPlan {
+            plan_id: "work_item_plan_0001".to_string(),
+            issue_id: work_item_dto.issue_id.clone(),
+            status: "draft".to_string(),
+            options: crate::web::types::WorkItemSplitOptions {
+                include_integration_tests: request.include_integration_tests.unwrap_or(false),
+                include_e2e_tests: request.include_e2e_tests.unwrap_or(false),
+                force_frontend_backend_split: request.force_frontend_backend_split.unwrap_or(false),
+                require_execution_plan_confirm: request
+                    .require_execution_plan_confirm
+                    .unwrap_or(false),
+            },
+            created_at: work_item_dto
+                .artifact_versions
+                .first()
+                .map(|v| v.created_at.clone())
+                .unwrap_or_default(),
+            updated_at: work_item_dto
+                .artifact_versions
+                .first()
+                .map(|v| v.created_at.clone())
+                .unwrap_or_default(),
+        },
+        repository_profile: crate::web::types::RepositoryProfile {
+            profile_id: "repository_profile_0001".to_string(),
+            repository_id: work_item_dto.repository_id.clone(),
+            confidence: "high".to_string(),
+            detected_layers: vec!["backend".to_string(), "frontend".to_string()],
+            split_recommendation: "frontend_backend".to_string(),
+        },
+        verification_plans: vec![crate::web::types::VerificationPlan {
+            plan_ref: "verification_plan_work_item_0001".to_string(),
+            work_item_id: work_item_dto.work_item_id.clone(),
+            title: work_item_dto.title.clone(),
+            kind: work_item_dto.kind.clone(),
+            scope_summary: "placeholder".to_string(),
+            required_checks: vec!["compile".to_string()],
+        }],
+        validator_findings: Vec::new(),
     }))
 }
 
@@ -2016,6 +2057,29 @@ fn lifecycle_work_item_dto(
         execution_status: work_item_status_text(&record.execution_status).to_string(),
         latest_attempt,
         artifact_versions: artifact_version_dtos(lifecycle, session)?,
+        work_item_set_id: record.work_item_set_id,
+        kind: work_item_kind_text(&record.kind).to_string(),
+        sequence_hint: record.sequence_hint,
+        depends_on: record.depends_on,
+        exclusive_write_scopes: record.exclusive_write_scopes,
+        forbidden_write_scopes: record.forbidden_write_scopes,
+        context_budget: WorkItemContextBudgetDto {
+            target_context_k: record.context_budget.target_context_k,
+            max_summary_chars: record.context_budget.max_summary_chars,
+            max_handoff_chars: record.context_budget.max_handoff_chars,
+            max_code_context_chars: record.context_budget.max_code_context_chars,
+            max_context_file_refs: record.context_budget.max_context_file_refs,
+            max_traceability_refs: record.context_budget.max_traceability_refs,
+            max_dependency_handoffs: record.context_budget.max_dependency_handoffs,
+        },
+        required_handoff_from: record.required_handoff_from,
+        verification_plan_ref: record.verification_plan_ref,
+        require_execution_plan_confirm: record.require_execution_plan_confirm,
+        execution_plan_status: work_item_execution_plan_status_text(&record.execution_plan_status)
+            .to_string(),
+        handoff_summary_ref: record.handoff_summary_ref,
+        completion_commit: record.completion_commit,
+        completion_diff_summary_ref: record.completion_diff_summary_ref,
     })
 }
 
@@ -2333,6 +2397,27 @@ fn work_item_status_text(status: &WorkItemStatus) -> &'static str {
         WorkItemStatus::Coding => "coding",
         WorkItemStatus::Completed => "completed",
         WorkItemStatus::Blocked => "blocked",
+    }
+}
+
+fn work_item_kind_text(kind: &WorkItemKind) -> &'static str {
+    match kind {
+        WorkItemKind::Backend => "backend",
+        WorkItemKind::Frontend => "frontend",
+        WorkItemKind::Integration => "integration",
+        WorkItemKind::E2e => "e2e",
+        WorkItemKind::Docs => "docs",
+        WorkItemKind::Infra => "infra",
+        WorkItemKind::Other => "other",
+    }
+}
+
+fn work_item_execution_plan_status_text(status: &WorkItemExecutionPlanStatus) -> &'static str {
+    match status {
+        WorkItemExecutionPlanStatus::NotStarted => "not_started",
+        WorkItemExecutionPlanStatus::Draft => "draft",
+        WorkItemExecutionPlanStatus::Confirmed => "confirmed",
+        WorkItemExecutionPlanStatus::ChangeRequested => "change_requested",
     }
 }
 

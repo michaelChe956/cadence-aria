@@ -434,6 +434,46 @@ pub struct LifecycleWorkItemDto {
     pub execution_status: String,
     pub latest_attempt: Option<CodingAttemptDto>,
     pub artifact_versions: Vec<ArtifactVersionDto>,
+    pub work_item_set_id: Option<String>,
+    pub kind: String,
+    pub sequence_hint: Option<u32>,
+    pub depends_on: Vec<String>,
+    pub exclusive_write_scopes: Vec<String>,
+    pub forbidden_write_scopes: Vec<String>,
+    pub context_budget: WorkItemContextBudgetDto,
+    pub required_handoff_from: Vec<String>,
+    pub verification_plan_ref: Option<String>,
+    pub require_execution_plan_confirm: bool,
+    pub execution_plan_status: String,
+    pub handoff_summary_ref: Option<String>,
+    pub completion_commit: Option<String>,
+    pub completion_diff_summary_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkItemContextBudgetDto {
+    pub target_context_k: String,
+    pub max_summary_chars: usize,
+    pub max_handoff_chars: usize,
+    pub max_code_context_chars: usize,
+    pub max_context_file_refs: usize,
+    pub max_traceability_refs: usize,
+    pub max_dependency_handoffs: usize,
+}
+
+impl Default for WorkItemContextBudgetDto {
+    fn default() -> Self {
+        Self {
+            target_context_k: "30-50".to_string(),
+            max_summary_chars: 20_000,
+            max_handoff_chars: 12_000,
+            max_code_context_chars: 30_000,
+            max_context_file_refs: 80,
+            max_traceability_refs: 40,
+            max_dependency_handoffs: 3,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -515,6 +555,10 @@ pub struct GenerateWorkItemsRequest {
     pub title: String,
     pub story_spec_ids: Vec<String>,
     pub design_spec_ids: Vec<String>,
+    pub include_integration_tests: Option<bool>,
+    pub include_e2e_tests: Option<bool>,
+    pub force_frontend_backend_split: Option<bool>,
+    pub require_execution_plan_confirm: Option<bool>,
     pub author_provider: Option<String>,
     pub reviewer_provider: Option<String>,
     pub review_rounds: Option<u32>,
@@ -526,7 +570,65 @@ pub struct GenerateWorkItemsRequest {
 #[serde(rename_all = "snake_case")]
 pub struct GenerateWorkItemsResponse {
     pub work_items: Vec<LifecycleWorkItemDto>,
+    /// 兼容字段：保留旧的单数 session，取首个/主 session。
+    /// 维持"不改前端"边界，且不破坏 web_lifecycle_api.rs:350 的既有断言。
     pub workspace_session: WorkspaceSessionDto,
+    /// 新增：每个 Work Item 对应一个 session。
+    pub workspace_sessions: Vec<WorkspaceSessionDto>,
+    pub work_item_plan: IssueWorkItemPlan,
+    pub repository_profile: RepositoryProfile,
+    pub verification_plans: Vec<VerificationPlan>,
+    pub validator_findings: Vec<WorkItemSplitFinding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct IssueWorkItemPlan {
+    pub plan_id: String,
+    pub issue_id: String,
+    pub status: String,
+    pub options: WorkItemSplitOptions,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkItemSplitOptions {
+    pub include_integration_tests: bool,
+    pub include_e2e_tests: bool,
+    pub force_frontend_backend_split: bool,
+    pub require_execution_plan_confirm: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RepositoryProfile {
+    pub profile_id: String,
+    pub repository_id: String,
+    pub confidence: String,
+    pub detected_layers: Vec<String>,
+    pub split_recommendation: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct VerificationPlan {
+    pub plan_ref: String,
+    pub work_item_id: String,
+    pub title: String,
+    pub kind: String,
+    pub scope_summary: String,
+    pub required_checks: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkItemSplitFinding {
+    pub finding_id: String,
+    pub level: String,
+    pub message: String,
+    pub affected_scopes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

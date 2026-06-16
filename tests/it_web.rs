@@ -47,3 +47,5 @@ mod web_static_assets;
 mod web_test_controls;
 #[path = "it_web/web_types.rs"]
 mod web_types;
+#[path = "it_web/web_work_item_generation.rs"]
+mod web_work_item_generation;
