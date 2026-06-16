@@ -120,6 +120,10 @@
 - `cargo clippy --all-targets --all-features --locked -- -D warnings`
 - `cargo check --locked`
 
+**详细计划文档：**
+
+- `cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_P2_后端IssueWorkItemPlan与SplitValidator_v1.0.md`
+
 ## P3：后端 generate_work_items 多 Work Item 与 artifact 关联
 
 **目标：** 将现有 `generate_work_items` 从单 Work Item 生成升级为 Issue Work Item Set 生成，保证每个 Work Item 都有自己的 workspace session 与 artifact versions。
@@ -130,10 +134,12 @@
 
 **写入范围：**
 
+- `src/web/types.rs`
 - `src/web/handlers.rs`
 - `src/product/lifecycle_store.rs`
 - `src/product/workspace_engine.rs`
 - `src/web/workspace_context.rs`
+- `tests/it_web.rs`
 - `tests/it_web/web_work_item_generation.rs` 或现有同类测试文件
 - `tests/it_product/product_lifecycle_store.rs`
 
@@ -150,6 +156,10 @@
 - `cargo fmt --check`
 - `cargo clippy --all-targets --all-features --locked -- -D warnings`
 - `cargo check --locked`
+
+**详细计划文档：**
+
+- `cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_P3_后端多WorkItem生成与Artifact关联_v1.0.md`
 
 ## P4：后端 Issue 共享 worktree 数据与 Git 安全前缀
 
@@ -181,6 +191,10 @@
 - `cargo clippy --all-targets --all-features --locked -- -D warnings`
 - `cargo check --locked`
 
+**详细计划文档：**
+
+- `cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_P4_后端Issue共享Worktree与Git安全前缀_v1.0.md`
+
 ## P5：后端 Coding 启动门禁与共享 worktree 复用
 
 **目标：** Coding 启动前检查依赖完成、共享 worktree 准备、active Work Item 串行锁、写入范围和 handoff 可读性，并让同一 Issue 下 attempt 复用 Issue 共享 worktree。
@@ -211,6 +225,10 @@
 - `cargo clippy --all-targets --all-features --locked -- -D warnings`
 - `cargo check --locked`
 
+**详细计划文档：**
+
+- `cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_P5_后端Coding启动门禁与共享Worktree复用_v1.0.md`
+
 ## P6：后端 WorkItemExecutionPlan 与 Handoff Provider Run
 
 **目标：** Coding 前生成内部 `WorkItemExecutionPlan`，默认展示但不阻塞；Work Item 完成后运行额外 provider handoff run，缺 handoff 不允许完成或解锁依赖项。
@@ -224,8 +242,11 @@
 - `src/product/coding_models.rs`
 - `src/product/coding_attempt_store.rs`
 - `src/product/coding_workspace_engine.rs`
+- `src/web/types.rs`
+- `src/web/handlers.rs`
 - `tests/it_product/product_coding_attempt_store.rs`
 - `tests/it_product/product_coding_workspace_engine.rs`
+- `tests/it_web/web_coding_attempt_api.rs`
 
 **不做：**
 
@@ -241,6 +262,10 @@
 - `cargo clippy --all-targets --all-features --locked -- -D warnings`
 - `cargo check --locked`
 
+**详细计划文档：**
+
+- `cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_P6_后端ExecutionPlan与HandoffProviderRun_v1.0.md`
+
 ## P7：前端 Work Item 生成选项与 DAG 展示
 
 **目标：** 前端提供生成选项，并在 Work Item 列展示 kind、依赖、写入范围、预算、等待原因、handoff 状态和贯通/E2E 标识。
@@ -253,10 +278,15 @@
 
 - `web/src/api/types.ts`
 - `web/src/api/types.test.ts`
-- `web/src/state/product-workbench-store.ts`
-- `web/src/state/product-workbench-store.test.ts`
-- `web/src/pages/ProductWorkbenchPage.tsx` 或现有 Work Item 列组件
-- `web/src/pages/ProductWorkbenchPage.test.tsx`
+- `web/src/api/client.ts`
+- `web/src/state/lifecycle-workbench-store.ts`
+- `web/src/state/lifecycle-workbench-store.test.ts`
+- `web/src/components/lifecycle/IssueLifecycleWorkbench.tsx`
+- `web/src/components/lifecycle/IssueLifecycleWorkbench.test.tsx`
+- `web/src/components/lifecycle/LifecycleCard.tsx`
+- `web/src/components/lifecycle/LifecycleCard.test.tsx`
+- `web/src/components/lifecycle/LifecycleCardDrawer.tsx`
+- `web/src/components/lifecycle/LifecycleCardDrawer.test.tsx`
 
 **不做：**
 
@@ -266,8 +296,16 @@
 
 **验证：**
 
-- `pnpm test -- --run ProductWorkbenchPage`
-- `pnpm test -- --run product-workbench-store`
+- `pnpm -C web test -- --run types`
+- `pnpm -C web test -- --run lifecycle-workbench-store`
+- `pnpm -C web test -- --run IssueLifecycleWorkbench`
+- `pnpm -C web test -- --run LifecycleCard`
+- `pnpm -C web test -- --run LifecycleCardDrawer`
+- `pnpm -C web build`
+
+**详细计划文档：**
+
+- `cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_P7_前端WorkItem生成选项与DAG展示_v1.0.md`
 
 ## P8：前端 Coding Prepare 执行计划展示
 
@@ -280,8 +318,12 @@
 **写入范围：**
 
 - `web/src/api/types.ts`
+- `web/src/api/types.test.ts`
+- `web/src/api/client.ts`
 - `web/src/state/coding-workspace-store.ts`
+- `web/src/state/coding-workspace-store.test.ts`
 - `web/src/hooks/useCodingWorkspaceWs.ts`
+- `web/src/hooks/useCodingWorkspaceWs.test.tsx`
 - `web/src/pages/CodingWorkspacePage.tsx`
 - `web/src/pages/CodingWorkspacePage.test.tsx`
 
@@ -293,8 +335,15 @@
 
 **验证：**
 
-- `pnpm test -- --run CodingWorkspacePage`
-- `pnpm test -- --run coding-workspace-store`
+- `pnpm -C web test -- --run types`
+- `pnpm -C web test -- --run CodingWorkspacePage`
+- `pnpm -C web test -- --run coding-workspace-store`
+- `pnpm -C web test -- --run useCodingWorkspaceWs`
+- `pnpm -C web build`
+
+**详细计划文档：**
+
+- `cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_P8_前端CodingPrepare执行计划展示_v1.0.md`
 
 ## P9：贯通测试与可选 E2E Work Item 验收
 
@@ -306,9 +355,12 @@
 
 **写入范围：**
 
-- `tests/it_web/*` 中专门的贯通测试文件
-- `web/tests/e2e/*` 或现有 Playwright 测试目录
-- 必要测试夹具文件
+- `tests/it_web.rs`
+- `tests/it_web/web_work_item_split_flow.rs`
+- `web/src/components/lifecycle/IssueLifecycleWorkbench.test.tsx`
+- `web/src/pages/CodingWorkspacePage.test.tsx`
+- `web/e2e/work-item-split-flow.spec.ts`
+- `web/e2e/helpers/coding.ts` 或 `web/e2e/helpers/workspace.ts`
 
 **不做：**
 
@@ -318,8 +370,16 @@
 **验证：**
 
 - `cargo test --locked --test it_web work_item_split_flow`
-- `pnpm test -- --run work-item`
-- 真实浏览器 E2E 命令按仓库当时已有 Playwright 规范执行。
+- `pnpm -C web test -- --run IssueLifecycleWorkbench`
+- `pnpm -C web test -- --run CodingWorkspacePage`
+- `pnpm -C web test:e2e -- work-item-split-flow.spec.ts`
+- `cargo fmt --check`
+- `cargo clippy --all-targets --all-features --locked -- -D warnings`
+- `cargo check --locked`
+
+**详细计划文档：**
+
+- `cadence/plans/2026-06-16_计划文档_实施计划_WorkItem拆分与Coding计划门禁优化_P9_贯通测试与可选E2EWorkItem验收_v1.0.md`
 
 ## 推荐执行顺序
 
