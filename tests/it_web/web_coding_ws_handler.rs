@@ -2917,6 +2917,14 @@ fn app_with_final_confirm_attempt(root_path: &std::path::Path) -> axum::Router {
         )
         .expect("waiting for human");
     store
+        .update_attempt_head_commit(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            Some("deadbeef".to_string()),
+        )
+        .expect("set head commit");
+    store
         .save_timeline_node(CodingTimelineNode {
             id: "coding_node_0001".to_string(),
             attempt_id: attempt.id,

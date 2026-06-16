@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -11,7 +12,11 @@ use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::cross_cutting::provider_adapter::{DEFAULT_PROVIDER_TIMEOUT_SECS, ProviderAdapterError};
+use crate::cross_cutting::provider_adapter::{
+    ProviderAdapter, DEFAULT_PROVIDER_TIMEOUT_SECS, ProviderAdapterError,
+};
+use crate::protocol::contracts::{AdapterInput, AdapterRole};
+use crate::cross_cutting::worktree::{scope_allows_path, validate_write_path};
 use crate::cross_cutting::streaming_provider::{
     ChoiceRequestData, PermissionRequestData, ProviderCommand, ProviderEvent,
     ProviderExecutionEvent, ProviderExecutionEventKind, ProviderExecutionEventStatus,
@@ -35,7 +40,7 @@ use crate::product::coding_models::{
     CodingRoleRunTrigger, CodingTimelineNode, CodingTimelineNodeStatus, InternalPrReview,
     PushStatus, ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict, TestCommand,
     TestCommandStatus, TestPlan, TestPlanRiskLevel, TestingOverallStatus, TestingReport,
-    TestingStepResult, TestingUnplannedEvidence,
+    TestingStepResult, TestingUnplannedEvidence, WorkItemHandoff,
 };
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::git_workspace_service::{GitWorkspaceError, GitWorkspaceService};
@@ -43,7 +48,8 @@ use crate::product::id::next_sequential_id;
 use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::models::{
-    ProviderConversationRef, ProviderConversationRole, ProviderName, WorkItemStatus, WorkspaceType,
+    LifecycleWorkItemRecord, ProviderConversationRef, ProviderConversationRole, ProviderName,
+    WorkItemStatus, WorkspaceType,
 };
 use crate::product::test_executor::{TestCommandSpec, TestExecutorError, run_all_tests};
 use crate::product::tester_agent_loop::{
@@ -52,7 +58,7 @@ use crate::product::tester_agent_loop::{
     execute_tester_tool_call, format_test_plan_chat_summary, format_testing_report_chat_summary,
     parse_test_plan_payload,
 };
-use crate::protocol::contracts::{AdapterInput, AdapterRole, ProviderType};
+use crate::protocol::contracts::ProviderType;
 use crate::web::coding_ws_handler::CodingWsOutMessage;
 use crate::web::workspace_ws_types::{
     ChoiceOption, WsExecutionEvent, WsExecutionEventKind, WsExecutionEventStatus,
@@ -93,7 +99,20 @@ pub enum CodingWorkspaceEngineError {
     SharedWorktreeDirtyManualGate(String),
     #[error("work_item_execution_plan_not_confirmed: {0}")]
     ExecutionPlanNotConfirmed(String),
+    #[error("completion_commit_missing: {0}")]
+    CompletionCommitMissing(String),
+    #[error("work_item_handoff_missing: {0}")]
+    WorkItemHandoffMissing(String),
+    #[error("verification_gate_result_missing: {0}")]
+    VerificationGateResultMissing(String),
+    #[error("verification_gate_failed: {0}")]
+    VerificationGateFailed(String),
+    #[error("work_item_diff_scope_violation: {0}")]
+    WorkItemDiffScopeViolation(String),
 }
+
+#[derive(Debug, Clone)]
+pub struct CompletionGateReport;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CodingExecutionContext {
@@ -183,11 +202,21 @@ impl CodingPromptMode {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CodingWorkspaceEngine {
     store: CodingAttemptStore,
     _git_service: GitWorkspaceService,
+    provider: Option<Arc<dyn ProviderAdapter + Send + Sync>>,
     event_tx: mpsc::Sender<CodingWsOutMessage>,
+}
+
+impl std::fmt::Debug for CodingWorkspaceEngine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CodingWorkspaceEngine")
+            .field("store", &self.store)
+            .field("event_tx", &self.event_tx)
+            .finish_non_exhaustive()
+    }
 }
 
 impl CodingWorkspaceEngine {
@@ -199,6 +228,21 @@ impl CodingWorkspaceEngine {
         Self {
             store,
             _git_service: git_service,
+            provider: None,
+            event_tx,
+        }
+    }
+
+    pub fn with_provider(
+        store: CodingAttemptStore,
+        git_service: GitWorkspaceService,
+        provider: Arc<dyn ProviderAdapter + Send + Sync>,
+        event_tx: mpsc::Sender<CodingWsOutMessage>,
+    ) -> Self {
+        Self {
+            store,
+            _git_service: git_service,
+            provider: Some(provider),
             event_tx,
         }
     }
@@ -3637,13 +3681,9 @@ impl CodingWorkspaceEngine {
             ));
         }
 
-        self.ensure_issue_shared_worktree_clean(
-            project_id,
-            issue_id,
-            attempt_id,
-            &current.work_item_id,
-        )
-        .await?;
+        self.generate_and_save_work_item_handoff_if_missing(&current)
+            .await?;
+        self.run_completion_gates(&current).await?;
 
         let updated = self.store.update_attempt_status(
             project_id,
@@ -3840,6 +3880,324 @@ impl CodingWorkspaceEngine {
             ));
         }
         Ok(())
+    }
+
+    async fn generate_and_save_work_item_handoff_if_missing(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<(), CodingWorkspaceEngineError> {
+        if self
+            .store
+            .get_work_item_handoff(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+            .is_some()
+        {
+            return Ok(());
+        }
+
+        let handoff = if let Some(provider) = self.provider.as_ref() {
+            self.generate_work_item_handoff_from_provider(provider, attempt)
+                .await?
+        } else {
+            self.generate_placeholder_work_item_handoff(attempt).await?
+        };
+
+        self.store.save_work_item_handoff(&handoff)?;
+
+        let lifecycle = LifecycleStore::new(self.store.paths());
+        if lifecycle
+            .list_work_items(&attempt.project_id, &attempt.issue_id)?
+            .iter()
+            .any(|item| item.id == attempt.work_item_id)
+        {
+            lifecycle.update_work_item_handoff_summary(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.work_item_id,
+                Some(format!(
+                    "projects/{}/issues/{}/coding-attempts/{}/work-item-handoff.json",
+                    attempt.project_id, attempt.issue_id, attempt.id
+                )),
+                attempt.head_commit.clone(),
+            )?;
+        }
+
+        Ok(())
+    }
+
+    async fn generate_placeholder_work_item_handoff(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<WorkItemHandoff, CodingWorkspaceEngineError> {
+        let testing_reports = self
+            .store
+            .list_testing_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+        let tests_run: Vec<String> = testing_reports
+            .iter()
+            .flat_map(|report| report.commands.iter().map(|cmd| cmd.command.join(" ")))
+            .collect();
+        let test_result_summary = testing_reports
+            .last()
+            .map(|report| format!("{:?}", report.overall_status))
+            .unwrap_or_else(|| "no testing report".to_string());
+
+        let review_requests = self
+            .store
+            .list_review_requests(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+        let review_summary = review_requests.last().map(|r| format!("{:?}", r.push_status));
+
+        Ok(WorkItemHandoff {
+            id: format!(
+                "work_item_handoff_{}_{}_{}",
+                attempt.project_id, attempt.issue_id, attempt.id
+            ),
+            project_id: attempt.project_id.clone(),
+            issue_id: attempt.issue_id.clone(),
+            work_item_id: attempt.work_item_id.clone(),
+            attempt_id: attempt.id.clone(),
+            provider_run_ref: None,
+            summary: "Handoff generated from attempt artifacts".to_string(),
+            files_changed: Vec::new(),
+            commit_sha: attempt.head_commit.clone(),
+            diff_summary: String::new(),
+            tests_run,
+            test_result_summary,
+            review_summary,
+            api_or_contract_changes: Vec::new(),
+            open_risks: Vec::new(),
+            next_work_item_notes: Vec::new(),
+            created_at: Utc::now().to_rfc3339(),
+        })
+    }
+
+    async fn generate_work_item_handoff_from_provider(
+        &self,
+        provider: &Arc<dyn ProviderAdapter + Send + Sync>,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<WorkItemHandoff, CodingWorkspaceEngineError> {
+        let worktree_path = self.attempt_worktree_path(attempt).await?;
+        let provider_type = provider_type_for_name(&attempt.provider_config_snapshot.author);
+        let output_schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "summary": {"type": "string"},
+                "files_changed": {"type": "array", "items": {"type": "string"}},
+                "diff_summary": {"type": "string"},
+                "tests_run": {"type": "array", "items": {"type": "string"}},
+                "test_result_summary": {"type": "string"},
+                "api_or_contract_changes": {"type": "array", "items": {"type": "string"}},
+                "next_work_item_notes": {"type": "array", "items": {"type": "string"}}
+            },
+            "required": ["summary"]
+        });
+        let input = AdapterInput {
+            provider_type,
+            role: AdapterRole::Handoff,
+            prompt: "Generate a concise handoff summary for the completed work item.".to_string(),
+            worktree_path: Some(worktree_path.to_string_lossy().to_string()),
+            context_files: Vec::new(),
+            output_schema: output_schema.to_string(),
+            timeout: DEFAULT_PROVIDER_TIMEOUT_SECS,
+            max_retries: 0,
+        };
+
+        let output = tokio::task::spawn_blocking({
+            let provider = Arc::clone(provider);
+            move || provider.run(&input)
+        })
+        .await
+        .map_err(|error| CodingWorkspaceEngineError::ProviderStream(error.to_string()))??;
+
+        let structured = output.structured_output.unwrap_or_default();
+        Ok(WorkItemHandoff {
+            id: format!(
+                "work_item_handoff_{}_{}_{}",
+                attempt.project_id, attempt.issue_id, attempt.id
+            ),
+            project_id: attempt.project_id.clone(),
+            issue_id: attempt.issue_id.clone(),
+            work_item_id: attempt.work_item_id.clone(),
+            attempt_id: attempt.id.clone(),
+            provider_run_ref: None,
+            summary: structured
+                .get("summary")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Completed work item")
+                .to_string(),
+            files_changed: structured
+                .get("files_changed")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            commit_sha: attempt.head_commit.clone(),
+            diff_summary: structured
+                .get("diff_summary")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            tests_run: structured
+                .get("tests_run")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            test_result_summary: structured
+                .get("test_result_summary")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            review_summary: None,
+            api_or_contract_changes: structured
+                .get("api_or_contract_changes")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            open_risks: Vec::new(),
+            next_work_item_notes: structured
+                .get("next_work_item_notes")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            created_at: Utc::now().to_rfc3339(),
+        })
+    }
+
+    async fn run_completion_gates(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<CompletionGateReport, CodingWorkspaceEngineError> {
+        if attempt.head_commit.is_none() {
+            return Err(CodingWorkspaceEngineError::CompletionCommitMissing(
+                attempt.id.clone(),
+            ));
+        }
+
+        let lifecycle = LifecycleStore::new(self.store.paths());
+        let work_item = lifecycle
+            .list_work_items(&attempt.project_id, &attempt.issue_id)?
+            .into_iter()
+            .find(|item| item.id == attempt.work_item_id)
+            .ok_or_else(|| CodingWorkspaceEngineError::FinalConfirmNotReady(attempt.id.clone()))?;
+
+        let changed_files = self
+            .changed_files_for_attempt(attempt, &work_item)
+            .await?;
+        let worktree_path = self.attempt_worktree_path(attempt).await.ok();
+        for relative_path in &changed_files {
+            let candidate = std::path::Path::new(relative_path);
+            if work_item
+                .forbidden_write_scopes
+                .iter()
+                .any(|scope| scope_allows_path(scope, relative_path, true))
+            {
+                return Err(CodingWorkspaceEngineError::WorkItemDiffScopeViolation(
+                    relative_path.clone(),
+                ));
+            }
+            if !work_item.exclusive_write_scopes.is_empty()
+                && let Some(ref base) = worktree_path
+            {
+                let _ = validate_write_path(
+                    base,
+                    &work_item.exclusive_write_scopes,
+                    candidate,
+                    true,
+                )
+                .map_err(|_| {
+                    CodingWorkspaceEngineError::WorkItemDiffScopeViolation(relative_path.clone())
+                })?;
+            }
+        }
+
+        if let Some(plan_ref) = &work_item.verification_plan_ref {
+            let verification_plan = lifecycle.get_verification_plan(
+                &attempt.project_id,
+                &attempt.issue_id,
+                plan_ref,
+            )?;
+            if !verification_plan.required_gates.is_empty() {
+                let reports = self
+                    .store
+                    .list_testing_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+                let passed = reports.iter().any(|report| {
+                    report.overall_status == TestingOverallStatus::Passed
+                        || report.overall_status == TestingOverallStatus::PassedWithWarnings
+                });
+                if !passed {
+                    return Err(CodingWorkspaceEngineError::VerificationGateResultMissing(
+                        attempt.id.clone(),
+                    ));
+                }
+            }
+        }
+
+        if self
+            .store
+            .get_work_item_handoff(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+            .is_none()
+        {
+            return Err(CodingWorkspaceEngineError::WorkItemHandoffMissing(
+                attempt.id.clone(),
+            ));
+        }
+
+        self.ensure_issue_shared_worktree_clean(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &attempt.work_item_id,
+        )
+        .await?;
+
+        Ok(CompletionGateReport)
+    }
+
+    async fn changed_files_for_attempt(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        _work_item: &LifecycleWorkItemRecord,
+    ) -> Result<Vec<String>, CodingWorkspaceEngineError> {
+        let worktree_path = match self.attempt_worktree_path(attempt).await {
+            Ok(path) => path,
+            Err(CodingWorkspaceEngineError::MissingWorktree(_)) => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        if !worktree_path.exists() {
+            return Ok(Vec::new());
+        }
+        match self._git_service.git_status(&worktree_path).await {
+            Ok(status) => Ok(status.into_iter().map(|file| file.path).collect()),
+            Err(_) => Ok(Vec::new()),
+        }
+    }
+
+    async fn attempt_worktree_path(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<PathBuf, CodingWorkspaceEngineError> {
+        if let Some(path) = attempt.worktree_path.as_ref() {
+            return Ok(path.clone());
+        }
+        let lifecycle = LifecycleStore::new(self.store.paths());
+        let shared = lifecycle.get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)?;
+        match shared {
+            Some(shared) if shared.worktree_path.exists() => Ok(shared.worktree_path),
+            _ => Err(CodingWorkspaceEngineError::MissingWorktree(attempt.id.clone())),
+        }
     }
 
     fn release_issue_shared_worktree_lock_if_holder(
@@ -4996,13 +5354,9 @@ impl CodingWorkspaceEngine {
         &self,
         attempt: &CodingExecutionAttempt,
     ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
-        self.ensure_issue_shared_worktree_clean(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            &attempt.work_item_id,
-        )
-        .await?;
+        self.generate_and_save_work_item_handoff_if_missing(attempt)
+            .await?;
+        self.run_completion_gates(attempt).await?;
         let staged = self.store.update_attempt_stage(
             &attempt.project_id,
             &attempt.issue_id,

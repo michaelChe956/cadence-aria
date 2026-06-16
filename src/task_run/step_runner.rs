@@ -104,6 +104,7 @@ fn adapter_role_text(role: &AdapterRole) -> &'static str {
         AdapterRole::Reviewer => "reviewer",
         AdapterRole::Executor => "executor",
         AdapterRole::WorkItemSplitter => "work_item_splitter",
+        AdapterRole::Handoff => "handoff",
     }
 }
 

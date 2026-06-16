@@ -589,9 +589,10 @@ fn spawn_coding_runner(
 ) -> mpsc::Sender<CodingRunnerCommand> {
     let (command_tx, command_rx) = mpsc::channel(32);
     tokio::spawn(async move {
-        let engine = CodingWorkspaceEngine::new(
+        let engine = CodingWorkspaceEngine::with_provider(
             coding_store.clone(),
             GitWorkspaceService::new(),
+            state.provider_adapter.clone(),
             event_tx.clone(),
         );
         if let Err(error) = execute_start_coding_flow(

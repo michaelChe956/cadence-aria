@@ -4228,6 +4228,14 @@ async fn execute_rework_no_issue_after_internal_review_completes_attempt() {
             CodingExecutionStage::InternalPrReview,
         )
         .expect("internal review stage");
+    store
+        .update_attempt_head_commit(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            Some("deadbeef".to_string()),
+        )
+        .expect("set head commit");
     let (tx, _rx) = mpsc::channel(16);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
     let provider = AnalystStreamingProvider {
@@ -4996,6 +5004,14 @@ async fn handle_final_confirm_completes_waiting_attempt_and_timeline_node() {
         )
         .expect("waiting for human");
     store
+        .update_attempt_head_commit(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            Some("deadbeef".to_string()),
+        )
+        .expect("set head commit");
+    store
         .save_timeline_node(CodingTimelineNode {
             id: "coding_node_0001".to_string(),
             attempt_id: attempt.id.clone(),
@@ -5284,6 +5300,14 @@ fn final_confirm_attempt(
             CodingAttemptStatus::WaitingForHuman,
         )
         .expect("set waiting for human");
+    let attempt = store
+        .update_attempt_head_commit(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            Some("deadbeef".to_string()),
+        )
+        .expect("set head commit");
     (store, attempt)
 }
 

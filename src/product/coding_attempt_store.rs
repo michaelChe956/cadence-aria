@@ -427,6 +427,21 @@ impl CodingAttemptStore {
         Ok(attempt)
     }
 
+    pub fn update_attempt_head_commit(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        head_commit: Option<String>,
+    ) -> Result<CodingExecutionAttempt, ProductStoreError> {
+        let path = self.attempt_path(project_id, issue_id, attempt_id);
+        let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
+        attempt.head_commit = head_commit;
+        attempt.updated_at = Utc::now().to_rfc3339();
+        write_json(&path, &attempt)?;
+        Ok(attempt)
+    }
+
     pub fn update_attempt_review_request_state(
         &self,
         project_id: &str,

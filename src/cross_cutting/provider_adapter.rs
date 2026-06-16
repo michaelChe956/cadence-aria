@@ -260,8 +260,20 @@ fn extract_json_candidate(text: &str) -> Option<&str> {
 }
 
 fn default_structured_output_for_role(role: &AdapterRole) -> Option<Value> {
-    if role != &AdapterRole::WorkItemSplitter {
-        return None;
+    match role {
+        AdapterRole::Handoff => {
+            return Some(json!({
+                "summary": "Completed work item handoff",
+                "files_changed": [],
+                "diff_summary": "",
+                "tests_run": [],
+                "test_result_summary": "passed",
+                "api_or_contract_changes": [],
+                "next_work_item_notes": []
+            }));
+        }
+        AdapterRole::WorkItemSplitter => {}
+        _ => return None,
     }
     Some(json!({
         "repository_profile": {
