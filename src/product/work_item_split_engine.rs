@@ -176,7 +176,7 @@ impl WorkItemSplitEngine {
                 })?;
                 let markdown = latest_markdown(lifecycle, project_id, issue_id, id)?;
                 Ok(format!(
-                    "Story Spec: {} ({}\n{}",
+                    "Story Spec: {} ({})\n{}",
                     spec.title, spec.id, markdown
                 ))
             })
