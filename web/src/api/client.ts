@@ -18,6 +18,7 @@ import type {
   Project,
   Repository,
   RepositoryListResponse,
+  WorkItemExecutionPlan,
 } from "./types";
 
 export class ApiRequestError extends Error implements ApiError {
@@ -295,5 +296,30 @@ export function getCodingAttemptArtifact(
 ): Promise<ArtifactContentResponse> {
   return requestJson<ArtifactContentResponse>(
     `/api/coding-attempts/${encodeURIComponent(attemptId)}/artifacts/${encodeURIComponent(artifactId)}`,
+  );
+}
+
+export function confirmWorkItemExecutionPlan(
+  attemptId: string,
+): Promise<WorkItemExecutionPlan> {
+  return requestJson<WorkItemExecutionPlan>(
+    `/api/coding-attempts/${encodeURIComponent(attemptId)}/execution-plan/confirm`,
+    {
+      method: "POST",
+      body: JSON.stringify({}),
+    },
+  );
+}
+
+export function requestWorkItemExecutionPlanChange(
+  attemptId: string,
+  payload: { note: string },
+): Promise<WorkItemExecutionPlan> {
+  return requestJson<WorkItemExecutionPlan>(
+    `/api/coding-attempts/${encodeURIComponent(attemptId)}/execution-plan/change-request`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
   );
 }

@@ -10,7 +10,12 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { deleteCodingAttempt, getCodingAttemptDiff } from "../api/client";
+import {
+  confirmWorkItemExecutionPlan,
+  deleteCodingAttempt,
+  getCodingAttemptDiff,
+  requestWorkItemExecutionPlanChange,
+} from "../api/client";
 import type {
   AnalystDecisionRecord,
   CodeReviewReport,
@@ -20,6 +25,7 @@ import type {
   InternalPrReview,
   ReviewFinding,
   TestingStepResult,
+  WorkItemExecutionPlan,
 } from "../api/types";
 import { CodingTimeline } from "../components/coding-workspace/CodingTimeline";
 import { CodingProviderConfigPanel } from "../components/coding-workspace/CodingProviderConfigPanel";
@@ -188,7 +194,21 @@ export function CodingWorkspacePage({
           {activePanel === "results" ? (
             <CodingArtifactTabs activeTab={activeTab} className="min-h-0" />
           ) : (
-            <div className="grid min-h-0 min-w-0 grid-rows-[auto_auto_minmax(0,1fr)_auto_auto] overflow-hidden">
+            <div
+              className={[
+                "grid min-h-0 min-w-0 overflow-hidden",
+                store.stage === "prepare_context" && store.workItemExecutionPlan
+                  ? "grid-rows-[auto_auto_auto_minmax(0,1fr)_auto_auto]"
+                  : "grid-rows-[auto_auto_minmax(0,1fr)_auto_auto]",
+              ].join(" ")}
+            >
+              {store.stage === "prepare_context" && store.workItemExecutionPlan ? (
+                <PrepareExecutionPlanPanel
+                  attemptId={attemptId}
+                  plan={store.workItemExecutionPlan}
+                  requireConfirm={store.requireExecutionPlanConfirm}
+                />
+              ) : null}
               <CodingProviderConfigPanel
                 snapshot={store.roleProviderConfigSnapshot}
                 lockedRole={lockedProviderRole(store.stage, store.status, store.pendingGates)}
@@ -1298,6 +1318,117 @@ function LogsPanel() {
           {log.timestamp} · {log.message}
         </div>
       ))}
+    </div>
+  );
+}
+
+function PrepareExecutionPlanPanel({
+  attemptId,
+  plan,
+  requireConfirm,
+}: {
+  attemptId: string;
+  plan: WorkItemExecutionPlan;
+  requireConfirm: boolean;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [changeNote, setChangeNote] = useState("");
+  const showActions = requireConfirm && plan.status !== "confirmed";
+
+  async function handleConfirm() {
+    setBusy(true);
+    setError(null);
+    try {
+      const updated = await confirmWorkItemExecutionPlan(attemptId);
+      useCodingWorkspaceStore.setState({ workItemExecutionPlan: updated });
+    } catch (reason) {
+      setError(errorMessage(reason, "确认执行计划失败"));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleRequestChange() {
+    const note = changeNote.trim();
+    if (!note) {
+      setError("请填写修改说明");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const updated = await requestWorkItemExecutionPlanChange(attemptId, { note });
+      useCodingWorkspaceStore.setState({ workItemExecutionPlan: updated });
+      setChangeNote("");
+    } catch (reason) {
+      setError(errorMessage(reason, "请求修改执行计划失败"));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="border-b border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-3 py-2">
+      <div className="flex items-center justify-between">
+        <h3 className="text-xs font-semibold uppercase text-[var(--aria-ink)]">执行计划</h3>
+        <span className="text-xs text-[var(--aria-ink-muted)]">{plan.status}</span>
+      </div>
+      <div className="mt-1 text-sm font-semibold text-[var(--aria-ink)]">{plan.goal}</div>
+      <dl className="mt-2 grid gap-1 text-xs">
+        <InfoRow label="允许写入" value={plan.allowed_write_scopes.join(", ")} />
+        {plan.forbidden_write_scopes.length > 0 ? (
+          <InfoRow label="禁止写入" value={plan.forbidden_write_scopes.join(", ")} />
+        ) : null}
+        {plan.dependency_handoffs.length > 0 ? (
+          <InfoRow
+            label="依赖交接"
+            value={plan.dependency_handoffs.map((handoff) => handoff.work_item_id).join(", ")}
+          />
+        ) : null}
+        <InfoRow label="验证计划" value={plan.verification_plan_ref} />
+        <InfoRow label="验证摘要" value={plan.verification_summary} />
+        {plan.risk_notes.length > 0 ? (
+          <InfoRow label="风险说明" value={plan.risk_notes.join("; ")} />
+        ) : null}
+      </dl>
+      {showActions ? (
+        <div className="mt-3 grid gap-2">
+          <textarea
+            aria-label="修改说明"
+            value={changeNote}
+            onChange={(event) => {
+              setChangeNote(event.target.value);
+              setError(null);
+            }}
+            rows={2}
+            placeholder="请求修改的原因或补充说明"
+            className="min-h-14 w-full resize-y rounded-md border border-[var(--aria-line)] bg-white px-2 py-1.5 text-xs text-[var(--aria-ink)] placeholder:text-[var(--aria-ink-muted)]"
+          />
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void handleConfirm()}
+              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[var(--aria-line)] bg-white px-3 text-xs font-semibold hover:bg-[var(--aria-panel-muted)] disabled:opacity-50"
+            >
+              <Check className="h-3.5 w-3.5" />
+              确认执行计划
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void handleRequestChange()}
+              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[var(--aria-line)] bg-white px-3 text-xs font-semibold hover:bg-[var(--aria-panel-muted)] disabled:opacity-50"
+            >
+              请求修改
+            </button>
+          </div>
+          {error ? (
+            <div className="text-xs font-semibold text-[var(--aria-danger)]">{error}</div>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }

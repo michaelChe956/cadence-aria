@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { deleteCodingAttempt, getCodingAttemptDiff } from "../api/client";
 import { useCodingWorkspaceWs } from "../hooks/useCodingWorkspaceWs";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
+import type { WorkItemExecutionPlan } from "../api/types";
 import { CodingWorkspacePage } from "./CodingWorkspacePage";
 
 vi.mock("../api/client", () => ({
@@ -84,6 +85,45 @@ function mockCodingWs(overrides: Partial<CodingWsApi> = {}) {
   };
   vi.mocked(useCodingWorkspaceWs).mockReturnValue(api);
   return api;
+}
+
+function readyCodingState() {
+  return {
+    attemptId: "coding_attempt_0001",
+    status: "created" as const,
+    stage: "prepare_context" as const,
+    branchName: "aria/work-items/work_item_0001/attempt-1",
+    baseBranch: "main",
+    worktreePath: "/tmp/worktree",
+    timelineNodes: [],
+    chatEntries: [],
+  };
+}
+
+function executionPlan(overrides: Partial<WorkItemExecutionPlan> = {}): WorkItemExecutionPlan {
+  return {
+    id: "work_item_execution_plan_0001",
+    project_id: "project_0001",
+    issue_id: "issue_0001",
+    work_item_id: "work_item_0001",
+    attempt_id: "coding_attempt_0001",
+    status: "draft",
+    goal: "实现后端 API",
+    allowed_write_scopes: ["src/product/**"],
+    forbidden_write_scopes: ["web/**"],
+    dependency_handoffs: [],
+    story_refs: ["story_spec_0001"],
+    design_refs: ["design_spec_0001"],
+    openspec_refs: ["REQ-001"],
+    superpowers_contract: "use superpowers:test-driven-development",
+    tdd_contract: "先写失败测试，再写实现",
+    verification_plan_ref: "verification_plan_work_item_0001",
+    verification_summary: "provider supplied required gate verify_backend_unit",
+    risk_notes: [],
+    created_at: "2026-06-16T00:00:00Z",
+    updated_at: "2026-06-16T00:00:00Z",
+    ...overrides,
+  };
 }
 
 describe("CodingWorkspacePage", () => {
@@ -1262,5 +1302,40 @@ describe("CodingWorkspacePage", () => {
       "overflow-hidden",
     );
     expect(screen.getByRole("button", { name: "继续返修" })).toBeInTheDocument();
+  });
+
+  it("shows work item execution plan during prepare stage as non blocking by default", () => {
+    mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      ...readyCodingState(),
+      stage: "prepare_context",
+      workItemExecutionPlan: executionPlan({ status: "draft" }),
+    });
+
+    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+
+    expect(screen.getByText("执行计划")).toBeInTheDocument();
+    expect(screen.getByText("实现后端 API")).toBeInTheDocument();
+    expect(screen.getByText("src/product/**")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "确认执行计划" })).not.toBeInTheDocument();
+  });
+
+  it("shows confirm and change request actions when execution plan confirmation is required", () => {
+    mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      ...readyCodingState(),
+      stage: "prepare_context",
+      // 门禁开关来自 work item / snapshot 的 require_execution_plan_confirm，
+      // 而非 plan 对象自身字段。
+      requireExecutionPlanConfirm: true,
+      workItemExecutionPlan: executionPlan({
+        status: "draft",
+      }),
+    });
+
+    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+
+    expect(screen.getByRole("button", { name: "确认执行计划" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "请求修改" })).toBeInTheDocument();
   });
 });
