@@ -2717,6 +2717,13 @@ fn coding_workspace_engine_with_dummy_events(store: CodingAttemptStore) -> Codin
 
 fn coding_workspace_api_error(error: CodingWorkspaceEngineError) -> ApiError {
     let error_message = error.to_string();
+    if error_message.contains("shared_worktree_dirty_manual_gate") {
+        return ApiError::runtime(
+            "shared_worktree_dirty_manual_gate",
+            "shared worktree has uncommitted changes; manual cleanup required",
+            json!({"details": error_message}),
+        );
+    }
     ApiError::runtime(
         "coding_workspace_engine_failed",
         "coding workspace engine operation failed",

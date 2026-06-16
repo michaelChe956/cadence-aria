@@ -89,6 +89,8 @@ pub enum CodingWorkspaceEngineError {
     FinalConfirmNotReady(String),
     #[error("{0}")]
     NoReviewableChanges(String),
+    #[error("shared_worktree_dirty_manual_gate: {0}")]
+    SharedWorktreeDirtyManualGate(String),
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -3591,6 +3593,14 @@ impl CodingWorkspaceEngine {
             ));
         }
 
+        self.ensure_issue_shared_worktree_clean(
+            project_id,
+            issue_id,
+            attempt_id,
+            &current.work_item_id,
+        )
+        .await?;
+
         let updated = self.store.update_attempt_status(
             project_id,
             issue_id,
@@ -3640,7 +3650,15 @@ impl CodingWorkspaceEngine {
         issue_id: &str,
         attempt_id: &str,
     ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
-        let _current = self.store.get_attempt(project_id, issue_id, attempt_id)?;
+        let current = self.store.get_attempt(project_id, issue_id, attempt_id)?;
+        self.ensure_issue_shared_worktree_clean(
+            project_id,
+            issue_id,
+            attempt_id,
+            &current.work_item_id,
+        )
+        .await?;
+
         let updated = self.store.update_attempt_status(
             project_id,
             issue_id,
@@ -3694,6 +3712,13 @@ impl CodingWorkspaceEngine {
             current
         };
 
+        self.ensure_issue_shared_worktree_clean(
+            project_id,
+            issue_id,
+            attempt_id,
+            &updated.work_item_id,
+        )
+        .await?;
         self.release_issue_shared_worktree_lock_if_holder(
             project_id,
             issue_id,
@@ -3708,7 +3733,14 @@ impl CodingWorkspaceEngine {
         issue_id: &str,
         attempt_id: &str,
     ) -> Result<(), CodingWorkspaceEngineError> {
-        let _current = self.store.get_attempt(project_id, issue_id, attempt_id)?;
+        let current = self.store.get_attempt(project_id, issue_id, attempt_id)?;
+        self.ensure_issue_shared_worktree_clean(
+            project_id,
+            issue_id,
+            attempt_id,
+            &current.work_item_id,
+        )
+        .await?;
         let updated = self.store.update_attempt_status(
             project_id,
             issue_id,
@@ -3720,6 +3752,49 @@ impl CodingWorkspaceEngine {
             issue_id,
             &updated.work_item_id,
         )?;
+        Ok(())
+    }
+
+    async fn ensure_issue_shared_worktree_clean(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        work_item_id: &str,
+    ) -> Result<(), CodingWorkspaceEngineError> {
+        let lifecycle = LifecycleStore::new(self.store.paths());
+        let shared = match lifecycle.get_issue_shared_worktree(project_id, issue_id)? {
+            Some(shared) => shared,
+            None => return Ok(()),
+        };
+        if shared.current_active_work_item_id.as_deref() != Some(work_item_id) {
+            return Ok(());
+        }
+        let worktree_path = shared.worktree_path;
+        if !worktree_path.exists() {
+            return Ok(());
+        }
+        let status = self._git_service.git_status(&worktree_path).await?;
+        if !status.is_empty() {
+            self.store.create_blocked_gate(CreateBlockedGateInput {
+                attempt_id: attempt_id.to_string(),
+                stage: CodingExecutionStage::FinalConfirm,
+                node_id: None,
+                role: None,
+                title: "Shared worktree has uncommitted changes".to_string(),
+                description: "Issue shared worktree has uncommitted changes and must be cleaned up manually before the active lock can be released".to_string(),
+                reason_code: Some("shared_worktree_dirty_manual_gate".to_string()),
+                evidence_refs: Vec::new(),
+                raw_provider_output_ref: None,
+                available_actions: vec![
+                    coding_gate_action_for_id("manual_continue").expect("manual continue action"),
+                    coding_gate_action_for_id("abort").expect("abort action"),
+                ],
+            })?;
+            return Err(CodingWorkspaceEngineError::SharedWorktreeDirtyManualGate(
+                worktree_path.to_string_lossy().to_string(),
+            ));
+        }
         Ok(())
     }
 
@@ -4840,6 +4915,13 @@ impl CodingWorkspaceEngine {
         &self,
         attempt: &CodingExecutionAttempt,
     ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
+        self.ensure_issue_shared_worktree_clean(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &attempt.work_item_id,
+        )
+        .await?;
         let staged = self.store.update_attempt_stage(
             &attempt.project_id,
             &attempt.issue_id,
@@ -4989,6 +5071,23 @@ impl CodingWorkspaceEngine {
                         .event_tx
                         .send(CodingWsOutMessage::CodingGateRequired { gate })
                         .await;
+                    match self
+                        .ensure_issue_shared_worktree_clean(
+                            &attempt.project_id,
+                            &attempt.issue_id,
+                            &attempt.id,
+                            &attempt.work_item_id,
+                        )
+                        .await
+                    {
+                        Err(
+                            error @ CodingWorkspaceEngineError::SharedWorktreeDirtyManualGate(_),
+                        ) => {
+                            let _ = error;
+                        }
+                        Err(error) => return Err(error),
+                        Ok(()) => {}
+                    }
                     Ok((
                         updated,
                         CodingTimelineNodeStatus::Blocked,

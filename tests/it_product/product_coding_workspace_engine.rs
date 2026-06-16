@@ -335,6 +335,47 @@ async fn failed_attempt_releases_issue_shared_worktree_lock() {
 }
 
 #[tokio::test]
+async fn dirty_shared_worktree_blocks_lock_release_and_next_work_item() {
+    let root = tempdir().expect("root");
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let lifecycle = LifecycleStore::new(paths.clone());
+    let shared_path = root.path().join("repo/.worktrees/aria-issues/issue_0001");
+    git_repo_in(&shared_path);
+    std::fs::write(shared_path.join("dirty.txt"), "uncommitted").expect("dirty file");
+    lifecycle
+        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: shared_path,
+            base_branch: "main".to_string(),
+        })
+        .expect("shared worktree");
+    lifecycle
+        .try_acquire_issue_worktree_lock("project_0001", "issue_0001", "work_item_0001")
+        .expect("lock");
+    let (store, attempt) = dirty_failed_attempt(paths.clone(), "work_item_0001");
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
+
+    let error = engine
+        .handle_attempt_failed("project_0001", "issue_0001", &attempt.id)
+        .await
+        .expect_err("dirty worktree keeps lock");
+
+    assert!(format!("{error}").contains("shared_worktree_dirty_manual_gate"));
+    let shared = lifecycle
+        .get_issue_shared_worktree("project_0001", "issue_0001")
+        .expect("load shared")
+        .expect("shared exists");
+    assert_eq!(
+        shared.current_active_work_item_id.as_deref(),
+        Some("work_item_0001")
+    );
+}
+
+#[tokio::test]
 async fn execute_coding_runs_provider_in_worktree_and_streams_timeline_events() {
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
@@ -5284,6 +5325,13 @@ fn failed_attempt(
         )
         .expect("set failed");
     (store, attempt)
+}
+
+fn dirty_failed_attempt(
+    paths: ProductAppPaths,
+    work_item_id: &str,
+) -> (CodingAttemptStore, CodingExecutionAttempt) {
+    failed_attempt(paths, work_item_id)
 }
 
 fn run_git(cwd: &Path, args: &[&str]) {
