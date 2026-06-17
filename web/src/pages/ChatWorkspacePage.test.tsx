@@ -828,6 +828,83 @@ describe("ChatWorkspacePage", () => {
     expect(api.sendAuthorDecision).toHaveBeenCalledWith("accept");
   });
 
+  it("work_item_plan candidate panel supports revert, request revision and accept", async () => {
+    const api = mockWorkspaceWs();
+    useWorkspaceStore.setState({
+      sessionId: "workspace_session_0001",
+      workspaceType: "work_item_plan",
+      stage: "author_confirm",
+      providers: { author: "claude_code", reviewer: "codex" },
+      workItemPlanCandidate: workItemPlanCandidate({
+        work_items: [
+          {
+            candidate_id: "wi_001",
+            title: "Frontend Auth",
+            kind: "frontend",
+            exclusive_write_scopes: ["src/auth"],
+            depends_on: [],
+            verification_plan_ref: null,
+            meta: { summary: "前端登录" },
+          },
+          {
+            candidate_id: "wi_002",
+            title: "Backend API",
+            kind: "backend",
+            exclusive_write_scopes: ["src/api"],
+            depends_on: ["wi_001"],
+            verification_plan_ref: null,
+            meta: { summary: "后端接口" },
+          },
+        ],
+      }),
+    });
+
+    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
+
+    await userEvent.click(screen.getByTestId("start-revert-wi_001"));
+    await userEvent.type(screen.getByTestId("revert-feedback-input-wi_001"), "拆得太粗");
+    await userEvent.click(screen.getByTestId("submit-revert-wi_001"));
+    expect(api.sendRevertWorkItem).toHaveBeenCalledWith("wi_001", "拆得太粗", false);
+
+    useWorkspaceStore.getState().setWorkItemPlanCandidate(
+      workItemPlanCandidate({
+        work_items: [
+          {
+            candidate_id: "wi_001",
+            title: "Frontend Auth",
+            kind: "frontend",
+            exclusive_write_scopes: ["src/auth"],
+            depends_on: [],
+            verification_plan_ref: null,
+            meta: { summary: "前端登录" },
+            reverted: true,
+            revert_feedback: "拆得太粗",
+          },
+          {
+            candidate_id: "wi_002",
+            title: "Backend API",
+            kind: "backend",
+            exclusive_write_scopes: ["src/api"],
+            depends_on: ["wi_001"],
+            verification_plan_ref: null,
+            meta: { summary: "后端接口" },
+          },
+        ],
+      }),
+    );
+
+    await waitFor(() => expect(screen.getByText(/已标记撤销/)).toBeInTheDocument());
+    const requestRevisionButton = screen.getByTestId("request-revision-button");
+    await waitFor(() => expect(requestRevisionButton).not.toBeDisabled());
+    expect(requestRevisionButton).toHaveTextContent("重新生成被标记的 1 项");
+    await userEvent.click(requestRevisionButton);
+    expect(api.sendRequestRevision).toHaveBeenCalled();
+
+    await userEvent.click(screen.getByTestId("accept-plan-button"));
+    expect(api.sendAuthorDecision).toHaveBeenCalledWith("accept");
+  });
+
   it("shows empty state when work_item_plan candidate is missing", async () => {
     mockWorkspaceWs();
     useWorkspaceStore.setState({
@@ -928,7 +1005,9 @@ function makeNodeDetail(overrides: Partial<NodeDetail> = {}): NodeDetail {
   };
 }
 
-function workItemPlanCandidate(): import("../api/types").WorkItemPlanCandidateDto {
+function workItemPlanCandidate(
+  overrides: Partial<import("../api/types").WorkItemPlanCandidateDto> = {},
+): import("../api/types").WorkItemPlanCandidateDto {
   return {
     plan: {
       plan_id: "plan_001",
@@ -968,5 +1047,6 @@ function workItemPlanCandidate(): import("../api/types").WorkItemPlanCandidateDt
     verification_plans: [],
     repository_profile: null,
     validator_findings: [],
+    ...overrides,
   };
 }
