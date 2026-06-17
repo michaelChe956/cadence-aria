@@ -12,6 +12,8 @@ import type {
   InternalPrReview,
   LifecycleWorkItem,
   NodeDetail,
+  PrepareWorkItemPlanRequest,
+  PrepareWorkItemPlanResponse,
   TestingReport,
   TimelineNodeType,
   WorkItemExecutionPlan,
@@ -400,6 +402,65 @@ describe("workspace websocket protocol types", () => {
 
     expect(decision.role_run_id).toBe("coding_role_run_0001");
     expect(decision.run_no).toBe(1);
+  });
+
+  it("accepts prepare work item plan request and response shapes", () => {
+    const request: PrepareWorkItemPlanRequest = {
+      title: "爬楼梯 Work Item Plan",
+      story_spec_ids: ["story_spec_0001"],
+      design_spec_ids: ["design_spec_0001"],
+      include_integration_tests: false,
+      include_e2e_tests: false,
+      force_frontend_backend_split: false,
+      require_execution_plan_confirm: true,
+      author_provider: "claude_code",
+      reviewer_provider: "codex",
+      review_rounds: 1,
+      superpowers_enabled: true,
+      openspec_enabled: true,
+    };
+    const response: PrepareWorkItemPlanResponse = {
+      work_item_plan: {
+        plan_id: "work_item_plan_0001",
+        project_id: "project_0001",
+        issue_id: "issue_0001",
+        title: request.title,
+        source_story_spec_ids: request.story_spec_ids ?? [],
+        source_design_spec_ids: request.design_spec_ids ?? [],
+        options: {
+          include_integration_tests: false,
+          include_e2e_tests: false,
+          force_frontend_backend_split: false,
+          require_execution_plan_confirm: true,
+        },
+        status: "prepared",
+        work_item_ids: ["work_item_0001"],
+        repository_profile_ref: null,
+        verification_plan_ids: [],
+        dependency_graph: [],
+        created_from_provider_run: null,
+        validator_findings: [],
+        review_summary: null,
+        created_at: "2026-06-17T00:00:00Z",
+        updated_at: "2026-06-17T00:00:00Z",
+      },
+      workspace_session: {
+        workspace_session_id: "workspace_session_work_item_plan_0001",
+        issue_id: "issue_0001",
+        entity_id: "work_item_plan_0001",
+        workspace_type: "work_item_plan",
+        status: "open",
+        author_provider: "claude_code",
+        reviewer_provider: "codex",
+        review_rounds: 1,
+        superpowers_enabled: true,
+        openspec_enabled: true,
+        messages: [],
+      },
+    };
+
+    expect(response.work_item_plan.plan_id).toBe("work_item_plan_0001");
+    expect(response.workspace_session.workspace_type).toBe("work_item_plan");
   });
 
   it("accepts role run metadata on review reports", () => {

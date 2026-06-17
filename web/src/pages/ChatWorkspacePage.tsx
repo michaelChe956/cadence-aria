@@ -587,6 +587,7 @@ function entityTypeLabel(workspaceType: string | null) {
   if (workspaceType === "story") return "Story Spec";
   if (workspaceType === "design") return "Design Spec";
   if (workspaceType === "work_item") return "Work Item";
+  if (workspaceType === "work_item_plan") return "Work Item Plan";
   return "Workspace";
 }
 

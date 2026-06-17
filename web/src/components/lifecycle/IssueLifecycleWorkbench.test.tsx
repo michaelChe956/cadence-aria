@@ -635,7 +635,7 @@ describe("IssueLifecycleWorkbench", () => {
     ).toBeInTheDocument();
   });
 
-  it("generates next lifecycle entities from the drawer without opening workspace or running providers", async () => {
+  it("prepares work item plan from design spec drawer and opens workspace", async () => {
     const fetchMock = lifecycleFetch();
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
@@ -647,21 +647,25 @@ describe("IssueLifecycleWorkbench", () => {
       await screen.findByRole("button", { name: "前端提示设计" }),
     );
     await user.click(screen.getByRole("button", { name: "生成 Work Item" }));
-    await user.click(screen.getByRole("button", { name: "确认生成" }));
 
-    expect(
-      await screen.findByRole("button", {
-        name: "前端提示设计 Work Item",
-      }),
-    ).toBeInTheDocument();
-    expect(onOpenWorkspace).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(onOpenWorkspace).toHaveBeenCalledWith(
+        "workspace_session_work_item_plan_0001",
+      ),
+    );
     expect(fetchMock).toHaveBeenCalledWith(
-      "/api/projects/project_0001/issues/issue_0001/work-items:generate",
+      "/api/projects/project_0001/issues/issue_0001/work-item-plans:prepare",
       expect.objectContaining({
         method: "POST",
-        body: expect.stringContaining(
-          '"title":"前端提示设计 Work Item"',
-        ),
+        body: JSON.stringify({
+          title: "前端提示设计 Work Item",
+          story_spec_ids: ["story_spec_0001"],
+          design_spec_ids: ["design_spec_0001"],
+          include_integration_tests: true,
+          include_e2e_tests: false,
+          force_frontend_backend_split: true,
+          require_execution_plan_confirm: false,
+        }),
       }),
     );
     expect(fetchMock).not.toHaveBeenCalledWith(
@@ -670,8 +674,19 @@ describe("IssueLifecycleWorkbench", () => {
       ),
       expect.anything(),
     );
+  });
 
-    await user.click(screen.getByRole("button", { name: "会话过期提示" }));
+  it("generates next design spec from story spec drawer without opening workspace or running providers", async () => {
+    const fetchMock = lifecycleFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    const onOpenWorkspace = vi.fn();
+
+    render(<IssueLifecycleWorkbench onOpenWorkspace={onOpenWorkspace} />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "会话过期提示" }),
+    );
     await user.click(screen.getByRole("button", { name: "生成 Design Spec" }));
 
     expect(
@@ -702,32 +717,39 @@ describe("IssueLifecycleWorkbench", () => {
     );
   });
 
-  it("sends work item split options when generating from a confirmed design", async () => {
+  it("sends default work item split options when preparing plan from a confirmed design", async () => {
     const user = userEvent.setup();
     const fetchMock = lifecycleFetch();
     vi.stubGlobal("fetch", fetchMock);
+    const onOpenWorkspace = vi.fn();
 
-    render(<IssueLifecycleWorkbench />);
+    render(<IssueLifecycleWorkbench onOpenWorkspace={onOpenWorkspace} />);
 
     await user.click(await screen.findByText("前端提示设计"));
     await user.click(screen.getByRole("button", { name: "生成 Work Item" }));
-    // include_integration_tests defaults to true; enable e2e too.
-    await user.click(screen.getByLabelText("生成 E2E Work Item"));
-    await user.click(screen.getByRole("button", { name: "确认生成" }));
 
-    await screen.findByRole("button", { name: "前端提示设计 Work Item" });
-
-    const generateCall = fetchMock.mock.calls.find(([url]) =>
-      String(url).includes("/work-items:generate"),
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/projects/project_0001/issues/issue_0001/work-item-plans:prepare",
+        expect.objectContaining({
+          method: "POST",
+          body: expect.stringContaining(
+            '"force_frontend_backend_split":true',
+          ),
+        }),
+      ),
     );
-    expect(generateCall).toBeDefined();
-    const body = JSON.parse(generateCall?.[1]?.body as string) as Record<
+    const prepareCall = fetchMock.mock.calls.find(([url]) =>
+      String(url).includes("/work-item-plans:prepare"),
+    );
+    expect(prepareCall).toBeDefined();
+    const body = JSON.parse(prepareCall?.[1]?.body as string) as Record<
       string,
       unknown
     >;
     expect(body).toMatchObject({
       include_integration_tests: true,
-      include_e2e_tests: true,
+      include_e2e_tests: false,
       force_frontend_backend_split: true,
       require_execution_plan_confirm: false,
     });
@@ -1282,11 +1304,12 @@ function lifecycleFetch(options?: {
         workspace_session: session,
       });
     }
-    const workItemsGenerateMatch = url.match(
-      /^\/api\/projects\/([^/]+)\/issues\/([^/]+)\/work-items:generate$/,
+    const prepareWorkItemPlanMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/issues\/([^/]+)\/work-item-plans:prepare$/,
     );
-    if (workItemsGenerateMatch) {
-      const issueId = workItemsGenerateMatch[2];
+    if (prepareWorkItemPlanMatch) {
+      const issueId = prepareWorkItemPlanMatch[2];
+      const projectId = prepareWorkItemPlanMatch[1];
       const payload = JSON.parse(String(init?.body ?? "{}")) as {
         title: string;
         story_spec_ids: string[];
@@ -1302,19 +1325,36 @@ function lifecycleFetch(options?: {
         require_execution_plan_confirm?: boolean;
       };
       const lifecycle = lifecycleData(issueId);
-      const workItem = workItemRecord({
+      const workItemPlan = {
+        plan_id: "work_item_plan_0001",
+        project_id: projectId,
         issue_id: issueId,
-        story_spec_ids: payload.story_spec_ids,
-        design_spec_ids: payload.design_spec_ids,
         title: payload.title,
-        plan_status: "not_started",
-        execution_status: "pending",
-        artifact_versions: [],
-      });
+        source_story_spec_ids: payload.story_spec_ids,
+        source_design_spec_ids: payload.design_spec_ids,
+        options: {
+          include_integration_tests: payload.include_integration_tests ?? true,
+          include_e2e_tests: payload.include_e2e_tests ?? false,
+          force_frontend_backend_split:
+            payload.force_frontend_backend_split ?? true,
+          require_execution_plan_confirm:
+            payload.require_execution_plan_confirm ?? false,
+        },
+        status: "prepared",
+        work_item_ids: ["work_item_0001"],
+        repository_profile_ref: null,
+        verification_plan_ids: [],
+        dependency_graph: [],
+        created_from_provider_run: null,
+        validator_findings: [],
+        review_summary: null,
+        created_at: "2026-05-20T00:00:00Z",
+        updated_at: "2026-05-20T00:00:00Z",
+      };
       const session = workspaceSessionRecord(
-        "work_item",
-        "work_item_0001",
-        "workspace_session_work_item_0001",
+        "work_item_plan",
+        "work_item_plan_0001",
+        "workspace_session_work_item_plan_0001",
         {
           author_provider: payload.author_provider,
           reviewer_provider: payload.reviewer_provider,
@@ -1324,36 +1364,10 @@ function lifecycleFetch(options?: {
           status: "open",
         },
       );
-      lifecycle.work_items = [workItem];
       lifecycle.workspace_sessions.push(session);
       return jsonResponse({
-        work_items: [workItem],
+        work_item_plan: workItemPlan,
         workspace_session: session,
-        workspace_sessions: [session],
-        work_item_plan: {
-          plan_id: "plan_0001",
-          issue_id: issueId,
-          status: "draft",
-          options: {
-            include_integration_tests: payload.include_integration_tests ?? true,
-            include_e2e_tests: payload.include_e2e_tests ?? false,
-            force_frontend_backend_split:
-              payload.force_frontend_backend_split ?? true,
-            require_execution_plan_confirm:
-              payload.require_execution_plan_confirm ?? false,
-          },
-          created_at: "2026-05-20T00:00:00Z",
-          updated_at: "2026-05-20T00:00:00Z",
-        },
-        repository_profile: {
-          profile_id: "profile_0001",
-          repository_id: "repository_0001",
-          confidence: "medium",
-          detected_layers: ["backend", "frontend"],
-          split_recommendation: "frontend_backend_split",
-        },
-        verification_plans: [],
-        validator_findings: [],
       });
     }
     const codingAttemptCreateMatch = url.match(
@@ -1564,7 +1578,7 @@ function repositoryRecordShape() {
 }
 
 function workspaceSessionRecord(
-  workspaceType: "story" | "design" | "work_item",
+  workspaceType: "story" | "design" | "work_item" | "work_item_plan",
   entityId: string,
   sessionId: string,
   overrides?: Partial<WorkspaceSession>,
@@ -1576,7 +1590,7 @@ function workspaceSessionRecord(
 }
 
 function workspaceSessionRecordShape(
-  workspaceType: "story" | "design" | "work_item",
+  workspaceType: "story" | "design" | "work_item" | "work_item_plan",
   entityId: string,
   sessionId: string,
 ): WorkspaceSession {

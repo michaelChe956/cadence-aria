@@ -12,8 +12,8 @@ import {
   deleteCodingAttempt,
   generateDesignSpecs,
   generateStorySpecs,
-  generateWorkItems,
   getIssueLifecycle,
+  prepareWorkItemPlan,
   listProductIssues,
   listProjects,
   listRepositories,
@@ -147,7 +147,7 @@ describe("api client", () => {
       story_spec_ids: ["story_0001"],
       design_kind: "frontend",
     });
-    await generateWorkItems("project/with space", "issue/with space", {
+    await prepareWorkItemPlan("project/with space", "issue/with space", {
       title: "Work",
       story_spec_ids: ["story_0001"],
       design_spec_ids: ["design_0001"],
@@ -157,7 +157,7 @@ describe("api client", () => {
       "/api/issues/issue%2Fwith%20space/lifecycle?project_id=project%2Fwith%20space",
       "/api/projects/project%2Fwith%20space/issues/issue%2Fwith%20space/story-specs:generate",
       "/api/projects/project%2Fwith%20space/issues/issue%2Fwith%20space/design-specs:generate",
-      "/api/projects/project%2Fwith%20space/issues/issue%2Fwith%20space/work-items:generate",
+      "/api/projects/project%2Fwith%20space/issues/issue%2Fwith%20space/work-item-plans:prepare",
     ]);
     expect(calls.slice(1).every((call) => call.init?.method === "POST")).toBe(
       true,

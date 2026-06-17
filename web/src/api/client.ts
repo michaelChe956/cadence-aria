@@ -10,9 +10,10 @@ import type {
   GenerateDesignSpecsResponse,
   GenerateStorySpecsRequest,
   GenerateStorySpecsResponse,
-  GenerateWorkItemsRequest,
   GenerateWorkItemsResponse,
   IssueLifecycleResponse,
+  PrepareWorkItemPlanRequest,
+  PrepareWorkItemPlanResponse,
   ProductIssue,
   ProductIssueListResponse,
   Project,
@@ -225,13 +226,13 @@ export function generateDesignSpecs(
   );
 }
 
-export function generateWorkItems(
+export function prepareWorkItemPlan(
   projectId: string,
   issueId: string,
-  payload: GenerateWorkItemsRequest,
-): Promise<GenerateWorkItemsResponse> {
-  return requestJson<GenerateWorkItemsResponse>(
-    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/work-items:generate`,
+  payload: PrepareWorkItemPlanRequest,
+): Promise<PrepareWorkItemPlanResponse> {
+  return requestJson<PrepareWorkItemPlanResponse>(
+    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/work-item-plans:prepare`,
     {
       method: "POST",
       body: JSON.stringify(payload),

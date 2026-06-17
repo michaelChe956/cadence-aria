@@ -796,7 +796,7 @@ export type WorkspaceSession = {
   workspace_session_id: string;
   issue_id: string;
   entity_id: string;
-  workspace_type: "story" | "design" | "work_item";
+  workspace_type: "story" | "design" | "work_item" | "work_item_plan";
   status:
     | "open"
     | "running"
@@ -894,6 +894,74 @@ export type GenerateWorkItemsResponse = {
   repository_profile: RepositoryProfile;
   verification_plans: VerificationPlan[];
   validator_findings: WorkItemSplitFinding[];
+};
+
+export type WorkItemSplitOptionsDto = WorkItemSplitOptions;
+
+export type WorkItemDependencyEdgeDto = {
+  from_work_item_id: string;
+  to_work_item_id: string;
+  dependency_type: "blocks" | "depends_on" | "related_to";
+};
+
+export type WorkItemCandidateMetaDto = {
+  summary: string;
+  scope_notes?: string[];
+  acceptance_criteria?: string[];
+};
+
+export type WorkItemCandidateDto = {
+  candidate_id: string;
+  title: string;
+  meta: WorkItemCandidateMetaDto;
+  suggested_order?: number | null;
+};
+
+export type ValidatorFindingDto = WorkItemSplitFinding;
+
+export type WorkItemPlanDto = {
+  plan_id: string;
+  project_id: string;
+  issue_id: string;
+  title: string;
+  source_story_spec_ids: string[];
+  source_design_spec_ids: string[];
+  options: WorkItemSplitOptionsDto;
+  status: string;
+  work_item_ids: string[];
+  repository_profile_ref: string | null;
+  verification_plan_ids: string[];
+  dependency_graph: WorkItemDependencyEdgeDto[];
+  created_from_provider_run: string | null;
+  validator_findings: ValidatorFindingDto[];
+  review_summary: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type WorkItemPlanCandidateDto = {
+  plan: WorkItemPlanDto;
+  work_items: LifecycleWorkItem[];
+  verification_plans: VerificationPlan[];
+  repository_profile: RepositoryProfile | null;
+  validator_findings: ValidatorFindingDto[];
+};
+
+export type IssueWorkItemPlanDetailDto = WorkItemPlanDto;
+
+export type PrepareWorkItemPlanRequest = ProviderWorkspaceConfigInput & {
+  title: string;
+  story_spec_ids?: string[] | null;
+  design_spec_ids?: string[] | null;
+  include_integration_tests?: boolean | null;
+  include_e2e_tests?: boolean | null;
+  force_frontend_backend_split?: boolean | null;
+  require_execution_plan_confirm?: boolean | null;
+};
+
+export type PrepareWorkItemPlanResponse = {
+  work_item_plan: IssueWorkItemPlanDetailDto;
+  workspace_session: WorkspaceSession;
 };
 
 export type ProviderConfigSnapshot = {
