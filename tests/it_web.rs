@@ -49,5 +49,7 @@ mod web_test_controls;
 mod web_types;
 #[path = "it_web/web_work_item_generation.rs"]
 mod web_work_item_generation;
+#[path = "it_web/web_work_item_plan_author.rs"]
+mod web_work_item_plan_author;
 #[path = "it_web/web_work_item_split_flow.rs"]
 mod web_work_item_split_flow;

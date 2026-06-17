@@ -11,6 +11,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 
+use crate::cross_cutting::provider_adapter::ProviderAdapter;
 use crate::cross_cutting::provider_registry::ProviderRegistry;
 use crate::cross_cutting::streaming_provider::{
     ChoiceOptionData, ChoiceRequestSource, ProviderCommand, ProviderExecutionEvent,
@@ -18,15 +19,18 @@ use crate::cross_cutting::streaming_provider::{
 };
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::checkpoint_store::CheckpointStore;
+use crate::product::issue_store::IssueStore;
 use crate::product::lifecycle_store::LifecycleStore;
-use crate::product::models::ProviderName;
+use crate::product::models::{ProviderName, WorkspaceSessionRecord, WorkspaceType};
+use crate::product::work_item_split_engine::WorkItemSplitEngine;
 use crate::product::workspace_engine::{
     AuthorDecisionOutcome, EngineEvent, PendingAuthorChoiceError, ReviewDecisionOutcome,
-    WorkspaceEngine, WorkspaceSession, WorkspaceStage,
+    WorkItemPlanAuthorOutcome, WorkspaceEngine, WorkspaceSession, WorkspaceStage,
 };
 use crate::product::workspace_repository::workspace_repository_for_session;
 use crate::web::state::{WebAppState, WorkspaceActiveRun, WorkspaceRunRegistry};
 use crate::web::test_controls::WorkspaceSocketControl;
+use crate::web::types::GenerateWorkItemsRequest;
 use crate::web::workspace_context::ensure_workspace_context_message;
 use crate::web::workspace_ws_types::{
     ChoiceOption, HumanConfirmDecision, RevisionPath, WsExecutionEvent, WsExecutionEventKind,
@@ -141,7 +145,7 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
 
     let (engine_tx, mut engine_rx) = mpsc::channel::<EngineEvent>(64);
 
-    let mut session = WorkspaceSession::from_record(session_record);
+    let mut session = WorkspaceSession::from_record(session_record.clone());
     session.repository_path = Some(repository.path);
     if let Ok(checkpoints) = checkpoint_store.list_checkpoints(&session.session_id) {
         session.restore_checkpoint_ids(&checkpoints);
@@ -398,6 +402,9 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
         workspace_runs: state.workspace_runs.clone(),
         session_id: session_id.clone(),
         next_run_id: next_run_id.clone(),
+        provider_adapter: state.provider_adapter.clone(),
+        app_paths: app_paths.clone(),
+        session_record: session_record.clone(),
     };
     let last_client_message_at = Arc::new(Mutex::new(tokio::time::Instant::now()));
     let current_run_for_idle = current_run.clone();
@@ -465,6 +472,7 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                 if let Err(message) = spawn_provider_run_from_handler(
                     run_context.clone(),
                     ProviderRunKind::Author { content },
+                    outbound_tx.clone(),
                 )
                 .await
                 {
@@ -593,6 +601,7 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                         if let Err(message) = spawn_provider_run_from_handler(
                             run_context.clone(),
                             ProviderRunKind::AuthorChoiceFollowup { content },
+                            outbound_tx.clone(),
                         )
                         .await
                         {
@@ -685,11 +694,20 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                 match result {
                     Ok((_node, locked)) => {
                         let _ = send_json_outbound(&outbound_tx, &locked).await;
+                        let run_kind = {
+                            let engine = engine.lock().await;
+                            if engine.session().workspace_type == WorkspaceType::WorkItemPlan {
+                                ProviderRunKind::WorkItemPlanAuthor
+                            } else {
+                                ProviderRunKind::Author {
+                                    content: String::new(),
+                                }
+                            }
+                        };
                         if let Err(message) = spawn_provider_run_from_handler(
                             run_context.clone(),
-                            ProviderRunKind::Author {
-                                content: String::new(),
-                            },
+                            run_kind,
+                            outbound_tx.clone(),
                         )
                         .await
                         {
@@ -785,6 +803,9 @@ struct ProviderRunContext {
     workspace_runs: WorkspaceRunRegistry,
     session_id: String,
     next_run_id: Arc<Mutex<u64>>,
+    provider_adapter: Arc<dyn ProviderAdapter + Send + Sync>,
+    app_paths: ProductAppPaths,
+    session_record: WorkspaceSessionRecord,
 }
 
 async fn handle_review_decision_from_handler(
@@ -801,8 +822,12 @@ async fn handle_review_decision_from_handler(
     match outcome {
         Ok(ReviewDecisionOutcome::HumanConfirm) => {}
         Ok(ReviewDecisionOutcome::StartRevision) => {
-            if let Err(message) =
-                spawn_provider_run_from_handler(run_context, ProviderRunKind::Revision).await
+            if let Err(message) = spawn_provider_run_from_handler(
+                run_context,
+                ProviderRunKind::Revision,
+                outbound_tx.clone(),
+            )
+            .await
             {
                 let err = WsOutMessage::Error { message };
                 let _ = send_json_outbound(&outbound_tx, &err).await;
@@ -827,8 +852,12 @@ async fn handle_author_decision_from_handler(
 
     match outcome {
         Ok(AuthorDecisionOutcome::StartReview) => {
-            if let Err(message) =
-                spawn_provider_run_from_handler(run_context, ProviderRunKind::ReviewOnly).await
+            if let Err(message) = spawn_provider_run_from_handler(
+                run_context,
+                ProviderRunKind::ReviewOnly,
+                outbound_tx.clone(),
+            )
+            .await
             {
                 let err = WsOutMessage::Error { message };
                 let _ = send_json_outbound(&outbound_tx, &err).await;
@@ -867,8 +896,12 @@ async fn handle_human_confirm_from_handler(
     match outcome {
         Ok(ReviewDecisionOutcome::HumanConfirm) => {}
         Ok(ReviewDecisionOutcome::StartRevision) => {
-            if let Err(message) =
-                spawn_provider_run_from_handler(run_context, ProviderRunKind::Revision).await
+            if let Err(message) = spawn_provider_run_from_handler(
+                run_context,
+                ProviderRunKind::Revision,
+                outbound_tx.clone(),
+            )
+            .await
             {
                 let err = WsOutMessage::Error { message };
                 let _ = send_json_outbound(&outbound_tx, &err).await;
@@ -1303,6 +1336,7 @@ enum ProviderRunKind {
     AuthorChoiceFollowup { content: String },
     Revision,
     ReviewOnly,
+    WorkItemPlanAuthor,
 }
 
 async fn active_run_command_tx(
@@ -1355,7 +1389,9 @@ async fn abort_active_run(
 async fn spawn_provider_run_from_handler(
     run_context: ProviderRunContext,
     run_kind: ProviderRunKind,
+    outbound_tx: mpsc::Sender<OutboundControl>,
 ) -> Result<(), String> {
+    let run_context_clone = run_context.clone();
     let ProviderRunContext {
         provider_registry,
         engine,
@@ -1363,6 +1399,9 @@ async fn spawn_provider_run_from_handler(
         workspace_runs,
         session_id,
         next_run_id,
+        provider_adapter: _,
+        app_paths: _,
+        session_record: _,
     } = run_context;
 
     abort_active_run(&current_run, &workspace_runs, &session_id).await;
@@ -1378,10 +1417,16 @@ async fn spawn_provider_run_from_handler(
                 .reviewer_provider
                 .clone()
                 .unwrap_or(ProviderName::Codex),
+            ProviderRunKind::WorkItemPlanAuthor => engine.session().author_provider.clone(),
         }
     };
-    let Some(provider_for_run) = provider_registry.get(&provider_name) else {
-        return Err(format!("provider unavailable: {provider_name:?}"));
+    let provider_for_run = if matches!(run_kind, ProviderRunKind::WorkItemPlanAuthor) {
+        None
+    } else {
+        let Some(p) = provider_registry.get(&provider_name) else {
+            return Err(format!("provider unavailable: {provider_name:?}"));
+        };
+        Some(p)
     };
 
     let run_id = {
@@ -1413,29 +1458,194 @@ async fn spawn_provider_run_from_handler(
     let workspace_runs_for_task = workspace_runs.clone();
     let session_id_for_task = session_id.clone();
     let provider_registry_for_run = provider_registry.clone();
+    let outbound_tx_for_task = outbound_tx.clone();
     tokio::spawn(async move {
         let mut engine = engine_for_run.lock().await;
         engine.use_run_token(run_cancel.clone());
         match run_kind {
             ProviderRunKind::Author { content } => {
                 engine
-                    .handle_user_message(content, provider_for_run, command_rx)
+                    .handle_user_message(
+                        content,
+                        provider_for_run.expect("provider for author"),
+                        command_rx,
+                    )
                     .await;
             }
             ProviderRunKind::AuthorChoiceFollowup { content } => {
                 engine
-                    .handle_author_choice_followup_message(content, provider_for_run, command_rx)
+                    .handle_author_choice_followup_message(
+                        content,
+                        provider_for_run.expect("provider for author choice followup"),
+                        command_rx,
+                    )
                     .await;
             }
             ProviderRunKind::Revision => {
                 engine
-                    .drive_revision_session(provider_for_run, command_rx)
+                    .drive_revision_session(
+                        provider_for_run.expect("provider for revision"),
+                        command_rx,
+                    )
                     .await;
             }
             ProviderRunKind::ReviewOnly => {
                 engine
-                    .drive_review_session(provider_for_run, command_rx)
+                    .drive_review_session(
+                        provider_for_run.expect("provider for review"),
+                        command_rx,
+                    )
                     .await;
+            }
+            ProviderRunKind::WorkItemPlanAuthor => {
+                let lifecycle_for_run = LifecycleStore::new(run_context_clone.app_paths.clone());
+                let app_paths_for_run = run_context_clone.app_paths.clone();
+                let session_record_for_run = run_context_clone.session_record.clone();
+                let provider_adapter_for_run = run_context_clone.provider_adapter.clone();
+
+                let request =
+                    match build_work_item_plan_generate_request(&engine, &lifecycle_for_run)
+                        .map_err(|e| format!("build request failed: {e}"))
+                    {
+                        Ok(r) => r,
+                        Err(message) => {
+                            engine.mark_active_run_finished(&run_label);
+                            drop(engine);
+                            let err = WsOutMessage::Error { message };
+                            let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                            return;
+                        }
+                    };
+
+                let repository = match workspace_repository_for_session(
+                    &app_paths_for_run,
+                    &lifecycle_for_run,
+                    &session_record_for_run,
+                ) {
+                    Ok(r) => r,
+                    Err(error) => {
+                        engine.mark_active_run_finished(&run_label);
+                        drop(engine);
+                        let err = WsOutMessage::Error {
+                            message: format!("load repository failed: {error}"),
+                        };
+                        let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                        return;
+                    }
+                };
+
+                let issue = match IssueStore::new(app_paths_for_run.clone()).get(
+                    &session_record_for_run.project_id,
+                    &session_record_for_run.issue_id,
+                ) {
+                    Ok(i) => i,
+                    Err(error) => {
+                        engine.mark_active_run_finished(&run_label);
+                        drop(engine);
+                        let err = WsOutMessage::Error {
+                            message: format!("load issue failed: {error}"),
+                        };
+                        let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                        return;
+                    }
+                };
+
+                let split_engine = WorkItemSplitEngine::new(provider_adapter_for_run);
+                let author_provider = engine.session().author_provider.clone();
+                drop(engine);
+
+                let output = match split_engine
+                    .generate(
+                        &request,
+                        &lifecycle_for_run,
+                        &issue,
+                        &repository,
+                        author_provider,
+                    )
+                    .await
+                {
+                    Ok(o) => o,
+                    Err(error) => {
+                        let mut engine = engine_for_run.lock().await;
+                        engine.mark_active_run_finished(&run_label);
+                        drop(engine);
+                        let err = WsOutMessage::Error {
+                            message: format!("split generate failed: {}", error.message),
+                        };
+                        let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                        return;
+                    }
+                };
+
+                engine = engine_for_run.lock().await;
+                let mut outcome = match engine.complete_work_item_plan_author(output).await {
+                    Ok(o) => o,
+                    Err(message) => {
+                        engine.mark_active_run_finished(&run_label);
+                        drop(engine);
+                        let err = WsOutMessage::Error { message };
+                        let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                        return;
+                    }
+                };
+
+                loop {
+                    match outcome {
+                        WorkItemPlanAuthorOutcome::AuthorConfirm => {
+                            engine.mark_active_run_finished(&run_label);
+                            return;
+                        }
+                        WorkItemPlanAuthorOutcome::HumanConfirm { reason: _ } => {
+                            engine.mark_active_run_finished(&run_label);
+                            return;
+                        }
+                        WorkItemPlanAuthorOutcome::AutoRevision { findings: _ } => {
+                            drop(engine);
+                            let author_provider = {
+                                let engine = engine_for_run.lock().await;
+                                let provider = engine.session().author_provider.clone();
+                                drop(engine);
+                                provider
+                            };
+                            let output = match split_engine
+                                .generate(
+                                    &request,
+                                    &lifecycle_for_run,
+                                    &issue,
+                                    &repository,
+                                    author_provider,
+                                )
+                                .await
+                            {
+                                Ok(o) => o,
+                                Err(error) => {
+                                    let mut engine = engine_for_run.lock().await;
+                                    engine.mark_active_run_finished(&run_label);
+                                    drop(engine);
+                                    let err = WsOutMessage::Error {
+                                        message: format!(
+                                            "split generate failed: {}",
+                                            error.message
+                                        ),
+                                    };
+                                    let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                                    return;
+                                }
+                            };
+                            engine = engine_for_run.lock().await;
+                            outcome = match engine.complete_work_item_plan_author(output).await {
+                                Ok(o) => o,
+                                Err(message) => {
+                                    engine.mark_active_run_finished(&run_label);
+                                    drop(engine);
+                                    let err = WsOutMessage::Error { message };
+                                    let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                                    return;
+                                }
+                            };
+                        }
+                    }
+                }
             }
         }
         while engine.session().stage == WorkspaceStage::CrossReview {
@@ -1558,4 +1768,34 @@ fn ws_execution_event_status(status: ProviderExecutionEventStatus) -> WsExecutio
         ProviderExecutionEventStatus::Failed => WsExecutionEventStatus::Failed,
         ProviderExecutionEventStatus::Aborted => WsExecutionEventStatus::Aborted,
     }
+}
+
+fn build_work_item_plan_generate_request(
+    engine: &WorkspaceEngine,
+    lifecycle: &LifecycleStore,
+) -> Result<GenerateWorkItemsRequest, String> {
+    let session = engine.session();
+    let plan = lifecycle
+        .get_issue_work_item_plan(&session.project_id, &session.issue_id, &session.entity_id)
+        .map_err(|e| format!("load plan failed: {e}"))?;
+    let provider_name_string = |name: &ProviderName| -> String {
+        serde_json::to_value(name)
+            .ok()
+            .and_then(|v| v.as_str().map(ToString::to_string))
+            .unwrap_or_else(|| "fake".to_string())
+    };
+    Ok(GenerateWorkItemsRequest {
+        title: plan.id.clone(),
+        story_spec_ids: plan.source_story_spec_ids.clone(),
+        design_spec_ids: plan.source_design_spec_ids.clone(),
+        include_integration_tests: Some(plan.options.include_integration_tests),
+        include_e2e_tests: Some(plan.options.include_e2e_tests),
+        force_frontend_backend_split: Some(plan.options.force_frontend_backend_split),
+        require_execution_plan_confirm: Some(plan.options.require_execution_plan_confirm),
+        author_provider: Some(provider_name_string(&session.author_provider)),
+        reviewer_provider: session.reviewer_provider.as_ref().map(provider_name_string),
+        review_rounds: Some(session.review_rounds),
+        superpowers_enabled: Some(session.superpowers_enabled),
+        openspec_enabled: Some(session.openspec_enabled),
+    })
 }
