@@ -753,14 +753,22 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                 )
                 .await;
             }
-            WsInMessage::RevertWorkItem { .. } => {
-                let _ = send_json_outbound(
-                    &outbound_tx,
-                    &WsOutMessage::Error {
-                        message: "RevertWorkItem is not yet implemented".to_string(),
-                    },
-                )
-                .await;
+            WsInMessage::RevertWorkItem {
+                work_item_id,
+                feedback,
+                clear,
+            } => {
+                let result = {
+                    let mut engine = engine.lock().await;
+                    engine
+                        .apply_revert_mark(&work_item_id, feedback, clear)
+                        .await
+                };
+                if let Err(message) = result {
+                    let err = WsOutMessage::Error { message };
+                    let _ = send_json_outbound(&outbound_tx, &err).await;
+                }
+                // 成功时 apply_revert_mark 已发 EngineEvent::ArtifactUpdate，event forwarder 会推前端
             }
         }
     }
@@ -961,7 +969,12 @@ fn is_message_valid_for_stage(msg: &WsInMessage, stage: &WorkspaceStage) -> bool
             )
         }
         WorkspaceStage::AuthorConfirm => {
-            matches!(msg, WsInMessage::AuthorDecision { .. } | WsInMessage::Abort)
+            matches!(
+                msg,
+                WsInMessage::AuthorDecision { .. }
+                    | WsInMessage::RevertWorkItem { .. }
+                    | WsInMessage::Abort
+            )
         }
         WorkspaceStage::CrossReview => {
             matches!(msg, WsInMessage::Abort | WsInMessage::ChoiceResponse { .. })
