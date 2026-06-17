@@ -16,9 +16,10 @@ use crate::product::models::{
     ProviderReviewRoundRecord, RepositoryProfile, RepositoryProfileConfidence, SpecVersionRecord,
     StorySpecRecord, VerificationCommand, VerificationFallbackPolicy, VerificationManualCheck,
     VerificationPlan, VerificationScope, WorkItemContextBudget, WorkItemExecutionPlanStatus,
-    WorkItemKind, WorkItemPlanStatus, WorkItemStatus, WorkspaceMessageRecord,
+    WorkItemKind, WorkItemPlanStatus, WorkItemSplitFinding, WorkItemStatus, WorkspaceMessageRecord,
     WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType,
 };
+use crate::product::work_item_split_engine::WorkItemSplitProviderOutput;
 // `ArtifactVersion` and `TimelineNode` are WebSocket protocol DTOs currently defined
 // in the web layer; product layer reuses them for persistence. Future iterations
 // should move these shared types to `product::models` to eliminate the upward
@@ -104,6 +105,24 @@ pub struct CreateIssueWorkItemPlanInput {
     pub dependency_graph: Vec<IssueWorkItemDependencyEdge>,
     pub created_from_provider_run: Option<String>,
     pub validator_findings: Vec<crate::product::models::WorkItemSplitFinding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssueWorkItemPlanUpdate {
+    pub work_item_ids: Vec<String>,
+    pub verification_plan_ids: Vec<String>,
+    pub repository_profile_ref: Option<String>,
+    pub dependency_graph: Vec<IssueWorkItemDependencyEdge>,
+    pub created_from_provider_run: Option<String>,
+    pub validator_findings: Vec<WorkItemSplitFinding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkItemPlanCandidateSnapshot {
+    pub plan_id: String,
+    pub work_item_ids: Vec<String>,
+    pub verification_plan_ids: Vec<String>,
+    pub repository_profile_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -593,6 +612,147 @@ impl LifecycleStore {
         Ok((plan, updated_items))
     }
 
+    pub fn update_issue_work_item_plan(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+        update: IssueWorkItemPlanUpdate,
+    ) -> Result<IssueWorkItemPlan, ProductStoreError> {
+        let mut plan = self.get_issue_work_item_plan(project_id, issue_id, plan_id)?;
+        plan.work_item_ids = update.work_item_ids;
+        plan.verification_plan_ids = update.verification_plan_ids;
+        plan.repository_profile_ref = update.repository_profile_ref;
+        plan.dependency_graph = update.dependency_graph;
+        plan.created_from_provider_run = update.created_from_provider_run;
+        plan.validator_findings = update.validator_findings;
+        plan.updated_at = Utc::now().to_rfc3339();
+        let path = self
+            .issue_work_item_plans_root(project_id, issue_id)
+            .join(format!("{plan_id}.json"));
+        write_json(&path, &plan)?;
+        Ok(plan)
+    }
+
+    pub fn replace_issue_work_item_plan_candidate(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+        output: &WorkItemSplitProviderOutput,
+        validator_findings: Vec<WorkItemSplitFinding>,
+    ) -> Result<WorkItemPlanCandidateSnapshot, ProductStoreError> {
+        let existing = self.get_issue_work_item_plan(project_id, issue_id, plan_id)?;
+        if existing.status != IssueWorkItemPlanStatus::Draft {
+            return Err(ProductStoreError::Io(format!(
+                "issue_work_item_plan_not_draft: {plan_id} status={:?}",
+                existing.status
+            )));
+        }
+
+        for old_wi_id in &existing.work_item_ids {
+            let path = self
+                .work_items_root(project_id, issue_id)
+                .join(format!("{old_wi_id}.json"));
+            let _ = remove_file_if_exists(&path);
+        }
+        for old_vp_id in &existing.verification_plan_ids {
+            let _ = self.delete_verification_plan(project_id, issue_id, old_vp_id);
+        }
+        if let Some(old_profile_id) = &existing.repository_profile_ref {
+            let _ = self.delete_repository_profile(project_id, issue_id, old_profile_id);
+        }
+
+        self.create_repository_profile(CreateRepositoryProfileInput {
+            id: Some(output.repository_profile.id.clone()),
+            project_id: project_id.to_string(),
+            issue_id: issue_id.to_string(),
+            repository_id: output.repository_profile.repository_id.clone(),
+            provider_run_ref: output.repository_profile.provider_run_ref.clone(),
+            languages: output.repository_profile.languages.clone(),
+            frameworks: output.repository_profile.frameworks.clone(),
+            package_managers: output.repository_profile.package_managers.clone(),
+            test_frameworks: output.repository_profile.test_frameworks.clone(),
+            build_systems: output.repository_profile.build_systems.clone(),
+            verification_capabilities: output.repository_profile.verification_capabilities.clone(),
+            detected_layers: output.repository_profile.detected_layers.clone(),
+            split_recommendation: output.repository_profile.split_recommendation.clone(),
+            confidence: output.repository_profile.confidence.clone(),
+            uncertainties: output.repository_profile.uncertainties.clone(),
+        })?;
+
+        for vp in &output.verification_plans {
+            self.create_verification_plan(CreateVerificationPlanInput {
+                id: Some(vp.id.clone()),
+                project_id: project_id.to_string(),
+                issue_id: issue_id.to_string(),
+                work_item_id: vp.work_item_id.clone(),
+                repository_profile_ref: vp.repository_profile_ref.clone(),
+                provider_run_ref: vp.provider_run_ref.clone(),
+                scope: vp.scope.clone(),
+                commands: vp.commands.clone(),
+                manual_checks: vp.manual_checks.clone(),
+                required_gates: vp.required_gates.clone(),
+                risk_notes: vp.risk_notes.clone(),
+                confidence: vp.confidence.clone(),
+                fallback_policy: vp.fallback_policy.clone(),
+            })?;
+        }
+
+        for wi in &output.work_items {
+            self.create_work_item(CreateWorkItemInput {
+                id: Some(wi.id.clone()),
+                project_id: project_id.to_string(),
+                issue_id: issue_id.to_string(),
+                repository_id: wi.repository_id.clone(),
+                story_spec_ids: wi.story_spec_ids.clone(),
+                design_spec_ids: wi.design_spec_ids.clone(),
+                title: wi.title.clone(),
+                work_item_set_id: wi.work_item_set_id.clone(),
+                kind: wi.kind.clone(),
+                sequence_hint: wi.sequence_hint,
+                depends_on: wi.depends_on.clone(),
+                exclusive_write_scopes: wi.exclusive_write_scopes.clone(),
+                forbidden_write_scopes: wi.forbidden_write_scopes.clone(),
+                context_budget: wi.context_budget.clone(),
+                required_handoff_from: wi.required_handoff_from.clone(),
+                verification_plan_ref: wi.verification_plan_ref.clone(),
+                require_execution_plan_confirm: wi.require_execution_plan_confirm,
+                plan_status: WorkItemPlanStatus::Draft,
+            })?;
+        }
+
+        let new_wi_ids: Vec<String> = output.work_items.iter().map(|wi| wi.id.clone()).collect();
+        let new_vp_ids: Vec<String> = output
+            .verification_plans
+            .iter()
+            .map(|vp| vp.id.clone())
+            .collect();
+        let new_profile_id = output.repository_profile.id.clone();
+        let new_graph = output.plan.dependency_graph.clone();
+        let provider_run_ref = output.plan.created_from_provider_run.clone();
+        self.update_issue_work_item_plan(
+            project_id,
+            issue_id,
+            plan_id,
+            IssueWorkItemPlanUpdate {
+                work_item_ids: new_wi_ids.clone(),
+                verification_plan_ids: new_vp_ids.clone(),
+                repository_profile_ref: Some(new_profile_id.clone()),
+                dependency_graph: new_graph,
+                created_from_provider_run: provider_run_ref,
+                validator_findings,
+            },
+        )?;
+
+        Ok(WorkItemPlanCandidateSnapshot {
+            plan_id: plan_id.to_string(),
+            work_item_ids: new_wi_ids,
+            verification_plan_ids: new_vp_ids,
+            repository_profile_id: new_profile_id,
+        })
+    }
+
     pub fn create_repository_profile(
         &self,
         input: CreateRepositoryProfileInput,
@@ -657,6 +817,22 @@ impl LifecycleStore {
         validate_relative_id(project_id)?;
         validate_relative_id(issue_id)?;
         list_json_records(&self.repository_profiles_root(project_id, issue_id))
+    }
+
+    pub fn delete_repository_profile(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        repository_profile_id: &str,
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(repository_profile_id)?;
+
+        let path = self
+            .repository_profiles_root(project_id, issue_id)
+            .join(format!("{repository_profile_id}.json"));
+        delete_required_file(&path, "repository_profile", repository_profile_id)
     }
 
     pub fn save_work_item_split_provider_run(
@@ -752,6 +928,22 @@ impl LifecycleStore {
         validate_relative_id(project_id)?;
         validate_relative_id(issue_id)?;
         list_json_records(&self.verification_plans_root(project_id, issue_id))
+    }
+
+    pub fn delete_verification_plan(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        verification_plan_id: &str,
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(verification_plan_id)?;
+
+        let path = self
+            .verification_plans_root(project_id, issue_id)
+            .join(format!("{verification_plan_id}.json"));
+        delete_required_file(&path, "verification_plan", verification_plan_id)
     }
 
     pub fn list_work_items(
