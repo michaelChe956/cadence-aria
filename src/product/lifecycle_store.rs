@@ -551,6 +551,48 @@ impl LifecycleStore {
         Ok((plan, confirmed))
     }
 
+    /// 为 plan 关联的每个 WorkItem 幂等创建 WorkspaceType::WorkItem 子 session。
+    ///
+    /// 在 HumanConfirm::Confirm 时调用。若 WorkItem 已有子 session（重试场景），跳过。
+    /// 返回新建的 session 列表（已存在的跳过不计入）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn ensure_work_item_sessions_for_plan(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+        author_provider: ProviderName,
+        reviewer_provider: Option<ProviderName>,
+        review_rounds: u32,
+        superpowers_enabled: bool,
+        openspec_enabled: bool,
+    ) -> Result<Vec<WorkspaceSessionRecord>, ProductStoreError> {
+        let plan = self.get_issue_work_item_plan(project_id, issue_id, plan_id)?;
+        let existing_sessions = self.list_workspace_sessions(project_id, issue_id)?;
+        let mut created = Vec::new();
+        for wi_id in &plan.work_item_ids {
+            let already_exists = existing_sessions
+                .iter()
+                .any(|s| s.workspace_type == WorkspaceType::WorkItem && s.entity_id == *wi_id);
+            if already_exists {
+                continue;
+            }
+            let session = self.create_workspace_session(CreateWorkspaceSessionInput {
+                project_id: project_id.to_string(),
+                issue_id: issue_id.to_string(),
+                entity_id: wi_id.clone(),
+                workspace_type: WorkspaceType::WorkItem,
+                author_provider: author_provider.clone(),
+                reviewer_provider: reviewer_provider.clone().unwrap_or(ProviderName::Codex),
+                review_rounds,
+                superpowers_enabled,
+                openspec_enabled,
+            })?;
+            created.push(session);
+        }
+        Ok(created)
+    }
+
     pub fn request_issue_work_item_plan_change(
         &self,
         project_id: &str,

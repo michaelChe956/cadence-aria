@@ -872,6 +872,9 @@ async fn handle_review_decision_from_handler(
 
     match outcome {
         Ok(ReviewDecisionOutcome::HumanConfirm) => {}
+        Ok(ReviewDecisionOutcome::ConfirmedWithChildSessions { .. }) => {
+            // Review decision path never produces child sessions; defensive no-op.
+        }
         Ok(ReviewDecisionOutcome::StartRevision) => {
             let run_kind = {
                 let engine = run_context.engine.lock().await;
@@ -952,6 +955,20 @@ async fn handle_human_confirm_from_handler(
 
     match outcome {
         Ok(ReviewDecisionOutcome::HumanConfirm) => {}
+        Ok(ReviewDecisionOutcome::ConfirmedWithChildSessions { child_sessions }) => {
+            let lifecycle = LifecycleStore::new(run_context.app_paths.clone());
+            for session in child_sessions {
+                if let Err(error) =
+                    ensure_workspace_context_message(&run_context.app_paths, &lifecycle, session)
+                {
+                    let err = WsOutMessage::Error {
+                        message: format!("ensure child workspace context failed: {error}"),
+                    };
+                    let _ = send_json_outbound(&outbound_tx, &err).await;
+                    return;
+                }
+            }
+        }
         Ok(ReviewDecisionOutcome::StartRevision) => {
             if let Err(message) = spawn_provider_run_from_handler(
                 run_context,

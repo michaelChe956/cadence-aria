@@ -477,6 +477,17 @@ pub enum EngineEvent {
 pub enum ReviewDecisionOutcome {
     StartRevision,
     HumanConfirm,
+    ConfirmedWithChildSessions {
+        child_sessions: Vec<WorkspaceSessionRecord>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkspaceConfirmOutcome {
+    WorkItemPlan {
+        child_sessions: Vec<WorkspaceSessionRecord>,
+    },
+    None,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2378,10 +2389,12 @@ impl WorkspaceEngine {
         }
 
         match decision {
-            HumanConfirmDecision::Confirm => {
-                self.handle_confirm().await;
-                Ok(ReviewDecisionOutcome::HumanConfirm)
-            }
+            HumanConfirmDecision::Confirm => match self.handle_confirm().await? {
+                WorkspaceConfirmOutcome::None => Ok(ReviewDecisionOutcome::HumanConfirm),
+                WorkspaceConfirmOutcome::WorkItemPlan { child_sessions } => {
+                    Ok(ReviewDecisionOutcome::ConfirmedWithChildSessions { child_sessions })
+                }
+            },
             HumanConfirmDecision::RequestChange => {
                 let context = human_confirm_payload_description(payload);
                 if self.latest_review_verdict.is_none() {
@@ -3023,58 +3036,113 @@ impl WorkspaceEngine {
         Ok(())
     }
 
-    pub async fn handle_confirm(&mut self) {
+    pub async fn handle_confirm(&mut self) -> Result<WorkspaceConfirmOutcome, String> {
         match self.session.stage {
             WorkspaceStage::HumanConfirm => {
                 self.complete_active_node(Some("已确认通过".to_string()))
                     .await;
                 self.mark_latest_artifact_confirmed(Some("human".to_string()));
-                if let Some(store) = &self.lifecycle_store {
-                    let _ = store.update_workspace_session_status(
-                        &self.session.session_id,
-                        WorkspaceSessionStatus::Confirmed,
-                    );
-                    let _ = match self.session.workspace_type {
-                        WorkspaceType::Story | WorkspaceType::Design => store
-                            .update_spec_confirmation_status(
-                                &self.session.project_id,
-                                &self.session.issue_id,
-                                &self.session.entity_id,
-                                LifecycleConfirmationStatus::Confirmed,
+                match self.session.workspace_type {
+                    WorkspaceType::WorkItemPlan => {
+                        let lifecycle = self
+                            .lifecycle_store
+                            .clone()
+                            .ok_or("lifecycle_store unavailable")?;
+                        let project_id = self.session.project_id.clone();
+                        let issue_id = self.session.issue_id.clone();
+                        let plan_id = self.session.entity_id.clone();
+
+                        let (plan, _confirmed) = lifecycle
+                            .confirm_issue_work_item_plan(&project_id, &issue_id, &plan_id)
+                            .map_err(|e| format!("confirm plan failed: {e}"))?;
+
+                        let new_sessions = lifecycle
+                            .ensure_work_item_sessions_for_plan(
+                                &project_id,
+                                &issue_id,
+                                &plan_id,
+                                self.session.author_provider.clone(),
+                                self.session.reviewer_provider.clone(),
+                                self.session.review_rounds,
+                                self.session.superpowers_enabled,
+                                self.session.openspec_enabled,
                             )
-                            .map(|_| ()),
-                        WorkspaceType::WorkItem => store
-                            .update_work_item_plan_status(
-                                &self.session.project_id,
-                                &self.session.issue_id,
-                                &self.session.entity_id,
-                                WorkItemPlanStatus::Confirmed,
-                            )
-                            .map(|_| ()),
-                        WorkspaceType::WorkItemPlan => {
-                            // TODO(WP5): 实现 WorkItemPlan 的 confirm 逻辑
-                            Ok(())
+                            .map_err(|e| format!("ensure child sessions failed: {e}"))?;
+
+                        if let Some(store) = &self.lifecycle_store {
+                            let _ = store.update_workspace_session_status(
+                                &self.session.session_id,
+                                WorkspaceSessionStatus::Confirmed,
+                            );
                         }
-                    };
+                        self.transition_stage(WorkspaceStage::Completed).await;
+                        let _ = self
+                            .create_timeline_node(TimelineNodeDraft {
+                                node_type: TimelineNodeType::Completed,
+                                agent: None,
+                                stage: WorkspaceStage::Completed,
+                                round: None,
+                                title: "WorkItemPlan 已确认".to_string(),
+                                summary: Some(format!(
+                                    "plan {} confirmed，已建立 {} 个子 WorkItem session",
+                                    plan.id,
+                                    new_sessions.len()
+                                )),
+                                status: TimelineNodeStatus::Completed,
+                            })
+                            .await;
+
+                        return Ok(WorkspaceConfirmOutcome::WorkItemPlan {
+                            child_sessions: new_sessions,
+                        });
+                    }
+                    _ => {
+                        if let Some(store) = &self.lifecycle_store {
+                            let _ = store.update_workspace_session_status(
+                                &self.session.session_id,
+                                WorkspaceSessionStatus::Confirmed,
+                            );
+                            let _ = match self.session.workspace_type {
+                                WorkspaceType::Story | WorkspaceType::Design => store
+                                    .update_spec_confirmation_status(
+                                        &self.session.project_id,
+                                        &self.session.issue_id,
+                                        &self.session.entity_id,
+                                        LifecycleConfirmationStatus::Confirmed,
+                                    )
+                                    .map(|_| ()),
+                                WorkspaceType::WorkItem => store
+                                    .update_work_item_plan_status(
+                                        &self.session.project_id,
+                                        &self.session.issue_id,
+                                        &self.session.entity_id,
+                                        WorkItemPlanStatus::Confirmed,
+                                    )
+                                    .map(|_| ()),
+                                WorkspaceType::WorkItemPlan => Ok(()),
+                            };
+                        }
+                        self.transition_stage(WorkspaceStage::Completed).await;
+                        let _ = self
+                            .create_timeline_node(TimelineNodeDraft {
+                                node_type: TimelineNodeType::Completed,
+                                agent: None,
+                                stage: WorkspaceStage::Completed,
+                                round: None,
+                                title: "流程完成".to_string(),
+                                summary: Some("已确认通过".to_string()),
+                                status: TimelineNodeStatus::Completed,
+                            })
+                            .await;
+                    }
                 }
-                self.transition_stage(WorkspaceStage::Completed).await;
-                let _ = self
-                    .create_timeline_node(TimelineNodeDraft {
-                        node_type: TimelineNodeType::Completed,
-                        agent: None,
-                        stage: WorkspaceStage::Completed,
-                        round: None,
-                        title: "流程完成".to_string(),
-                        summary: Some("已确认通过".to_string()),
-                        status: TimelineNodeStatus::Completed,
-                    })
-                    .await;
             }
             WorkspaceStage::Running => {
                 self.transition_stage(WorkspaceStage::CrossReview).await;
             }
             _ => {}
         }
+        Ok(WorkspaceConfirmOutcome::None)
     }
 
     pub fn handle_abort(&mut self) {
@@ -7519,7 +7587,7 @@ mod tests {
         session.stage = WorkspaceStage::HumanConfirm;
         let mut engine = WorkspaceEngine::new(store, tx, session);
 
-        engine.handle_confirm().await;
+        engine.handle_confirm().await.unwrap();
         assert_eq!(engine.session().stage, WorkspaceStage::Completed);
     }
 
@@ -7544,7 +7612,7 @@ mod tests {
             .unwrap();
         assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
 
-        engine.handle_confirm().await;
+        engine.handle_confirm().await.unwrap();
 
         match engine.build_session_state() {
             WsOutMessage::SessionState {
