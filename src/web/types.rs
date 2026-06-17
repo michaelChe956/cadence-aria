@@ -576,6 +576,9 @@ pub struct GenerateWorkItemsRequest {
     pub review_rounds: Option<u32>,
     pub superpowers_enabled: Option<bool>,
     pub openspec_enabled: Option<bool>,
+    /// 重生时注入上一次 validate findings，让 provider 针对问题返修。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision_feedback: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

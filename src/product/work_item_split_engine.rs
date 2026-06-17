@@ -326,6 +326,17 @@ fn build_split_prompt(
     design_context: &[String],
     repository_structure: &str,
 ) -> String {
+    let revision_feedback_section = request
+        .revision_feedback
+        .as_deref()
+        .map(|feedback| {
+            format!(
+                "[revision_feedback]\n\
+                 Previous validation found the following issues; please fix them in the regenerated plan:\n{feedback}\n\n"
+            )
+        })
+        .unwrap_or_default();
+
     format!(
         "你是 Aria 的 Work Item Splitter。请基于以下输入生成 IssueWorkItemPlan 候选拆分。\n\n\
          [issue]\n\
@@ -337,6 +348,7 @@ fn build_split_prompt(
          [confirmed_story_specs]\n{story_context}\n\n\
          [confirmed_design_specs]\n{design_context}\n\n\
          [repository_structure_summary]\n{repository_structure}\n\n\
+         {revision_feedback_section}\n\
          [openspec_constraint_summary]\n\
          story_spec_ids: {story_ids}\n\
          design_spec_ids: {design_ids}\n\n\
@@ -355,6 +367,7 @@ fn build_split_prompt(
         story_context = story_context.join("\n\n"),
         design_context = design_context.join("\n\n"),
         repository_structure = repository_structure,
+        revision_feedback_section = revision_feedback_section,
         story_ids = request.story_spec_ids.join(", "),
         design_ids = request.design_spec_ids.join(", "),
         include_integration_tests = request.include_integration_tests.unwrap_or(false),
@@ -743,5 +756,67 @@ fn parse_fallback_policy(value: &str) -> VerificationFallbackPolicy {
     match value {
         "repair_provider_output" => VerificationFallbackPolicy::RepairProviderOutput,
         _ => VerificationFallbackPolicy::ManualGate,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::product::models::{IssuePhase, IssueStatus};
+    use std::path::PathBuf;
+
+    #[test]
+    fn build_split_prompt_includes_revision_feedback() {
+        let request = GenerateWorkItemsRequest {
+            title: "test plan".to_string(),
+            story_spec_ids: vec![],
+            design_spec_ids: vec![],
+            include_integration_tests: None,
+            include_e2e_tests: None,
+            force_frontend_backend_split: None,
+            require_execution_plan_confirm: None,
+            author_provider: None,
+            reviewer_provider: None,
+            review_rounds: None,
+            superpowers_enabled: None,
+            openspec_enabled: None,
+            revision_feedback: Some("- [error] missing write scope\n".to_string()),
+        };
+        let issue = IssueRecord {
+            id: "issue_0001".to_string(),
+            project_id: "project_0001".to_string(),
+            repo_id: None,
+            title: "Test Issue".to_string(),
+            description: None,
+            change_id: "change_0001".to_string(),
+            phase: IssuePhase::Clarification,
+            status: IssueStatus::Draft,
+            active_binding_id: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        let repository = RepositoryRecord {
+            id: "repo_0001".to_string(),
+            project_id: "project_0001".to_string(),
+            name: "test-repo".to_string(),
+            path: PathBuf::from("/tmp/repo"),
+            repo_hash: "abc".to_string(),
+            runtime_root: PathBuf::from("/tmp/repo"),
+            default_policy_preset: "default".to_string(),
+            default_provider_mode: "default".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+
+        let prompt = build_split_prompt(&request, &issue, &repository, &[], &[], "(empty)");
+
+        assert!(
+            prompt.contains("[revision_feedback]"),
+            "prompt should contain revision feedback section: {prompt}"
+        );
+        assert!(
+            prompt.contains("missing write scope"),
+            "prompt should contain feedback content: {prompt}"
+        );
     }
 }

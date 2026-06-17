@@ -1329,6 +1329,99 @@ mod tests {
             ("human_intervene".to_string(), None)
         );
     }
+
+    #[test]
+    fn build_work_item_plan_generate_request_includes_validator_findings_as_revision_feedback() {
+        use crate::product::app_paths::ProductAppPaths;
+        use crate::product::checkpoint_store::CheckpointStore;
+        use crate::product::lifecycle_store::{
+            CreateDesignSpecInput, CreateIssueWorkItemPlanInput, CreateStorySpecInput,
+            CreateWorkspaceSessionInput,
+        };
+        use crate::product::models::{
+            IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, ProviderName, WorkItemSplitFinding,
+            WorkItemSplitFindingSeverity, WorkspaceType,
+        };
+        use std::sync::Arc;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let lifecycle = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
+
+        let story = lifecycle
+            .create_story_spec(CreateStorySpecInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                repository_id: "repo_0001".to_string(),
+                title: "Story".to_string(),
+            })
+            .unwrap();
+        let design = lifecycle
+            .create_design_spec(CreateDesignSpecInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                story_spec_ids: vec![story.id.clone()],
+                design_kind: crate::product::models::DesignKind::Backend,
+                title: "Design".to_string(),
+            })
+            .unwrap();
+
+        let finding = WorkItemSplitFinding {
+            severity: WorkItemSplitFindingSeverity::Error,
+            code: "write_scope_required".to_string(),
+            message: "work item must have at least one exclusive_write_scope".to_string(),
+            work_item_ids: vec!["wi_001".to_string()],
+        };
+        let plan = lifecycle
+            .create_issue_work_item_plan(CreateIssueWorkItemPlanInput {
+                id: Some("issue_work_item_plan_0001".to_string()),
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                source_story_spec_ids: vec![story.id],
+                source_design_spec_ids: vec![design.id],
+                options: IssueWorkItemPlanOptions {
+                    include_integration_tests: false,
+                    include_e2e_tests: false,
+                    force_frontend_backend_split: false,
+                    require_execution_plan_confirm: false,
+                },
+                status: IssueWorkItemPlanStatus::Draft,
+                work_item_ids: vec![],
+                repository_profile_ref: None,
+                verification_plan_ids: vec![],
+                dependency_graph: vec![],
+                created_from_provider_run: None,
+                validator_findings: vec![finding],
+            })
+            .unwrap();
+
+        let session_record = lifecycle
+            .create_workspace_session(CreateWorkspaceSessionInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                entity_id: plan.id,
+                workspace_type: WorkspaceType::WorkItemPlan,
+                author_provider: ProviderName::Codex,
+                reviewer_provider: ProviderName::ClaudeCode,
+                review_rounds: 0,
+                superpowers_enabled: false,
+                openspec_enabled: false,
+            })
+            .unwrap();
+
+        let session = WorkspaceSession::from_record(session_record);
+        let checkpoint_store = Arc::new(CheckpointStore::new(tmp.path().to_path_buf()));
+        let (tx, _rx) = mpsc::channel(1);
+        let engine =
+            WorkspaceEngine::new_persistent(checkpoint_store, lifecycle.clone(), tx, session);
+
+        let request = build_work_item_plan_generate_request(&engine, &lifecycle).unwrap();
+
+        let feedback = request
+            .revision_feedback
+            .expect("revision_feedback should be set when plan has findings");
+        assert!(feedback.contains("write_scope_required"));
+        assert!(feedback.contains("work item must have at least one exclusive_write_scope"));
+    }
 }
 
 enum ProviderRunKind {
@@ -1503,7 +1596,7 @@ async fn spawn_provider_run_from_handler(
                 let session_record_for_run = run_context_clone.session_record.clone();
                 let provider_adapter_for_run = run_context_clone.provider_adapter.clone();
 
-                let request =
+                let mut request =
                     match build_work_item_plan_generate_request(&engine, &lifecycle_for_run)
                         .map_err(|e| format!("build request failed: {e}"))
                     {
@@ -1589,6 +1682,11 @@ async fn spawn_provider_run_from_handler(
                     }
                 };
 
+                // 使用本地循环处理 AutoRevision，而不是递归 spawn_provider_run_from_handler。
+                // 原因是递归 await 会把非 `Send` 的 future 跨越 spawn 边界传递，导致编译失败。
+                // 循环上限由 `complete_work_item_plan_author` 内部的 `work_item_plan_author_retry_count`
+                // 控制（达到 3 次后返回 HumanConfirm）；下方的 `revision_iterations` 作为硬兜底。
+                let mut revision_iterations = 0;
                 loop {
                     match outcome {
                         WorkItemPlanAuthorOutcome::AuthorConfirm => {
@@ -1600,6 +1698,35 @@ async fn spawn_provider_run_from_handler(
                             return;
                         }
                         WorkItemPlanAuthorOutcome::AutoRevision { findings: _ } => {
+                            revision_iterations += 1;
+                            if revision_iterations > 5 {
+                                engine.mark_active_run_finished(&run_label);
+                                drop(engine);
+                                let err = WsOutMessage::Error {
+                                    message: "work item plan author revision exceeded hard limit"
+                                        .to_string(),
+                                };
+                                let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                                return;
+                            }
+
+                            // 每次重生前重新构建请求，以便把最新 persisted 的 validator_findings
+                            // 作为 revision_feedback 注入 prompt。
+                            request = match build_work_item_plan_generate_request(
+                                &engine,
+                                &lifecycle_for_run,
+                            )
+                            .map_err(|e| format!("build request failed: {e}"))
+                            {
+                                Ok(r) => r,
+                                Err(message) => {
+                                    engine.mark_active_run_finished(&run_label);
+                                    drop(engine);
+                                    let err = WsOutMessage::Error { message };
+                                    let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                                    return;
+                                }
+                            };
                             drop(engine);
                             let author_provider = {
                                 let engine = engine_for_run.lock().await;
@@ -1778,11 +1905,32 @@ fn build_work_item_plan_generate_request(
     let plan = lifecycle
         .get_issue_work_item_plan(&session.project_id, &session.issue_id, &session.entity_id)
         .map_err(|e| format!("load plan failed: {e}"))?;
-    let provider_name_string = |name: &ProviderName| -> String {
+    let provider_name_string = |name: &ProviderName| -> Result<String, String> {
         serde_json::to_value(name)
-            .ok()
-            .and_then(|v| v.as_str().map(ToString::to_string))
-            .unwrap_or_else(|| "fake".to_string())
+            .map_err(|e| format!("serialize provider name failed: {e}"))
+            .and_then(|v| {
+                v.as_str()
+                    .map(ToString::to_string)
+                    .ok_or_else(|| format!("provider name is not a string: {v}"))
+            })
+    };
+    let revision_feedback = if plan.validator_findings.is_empty() {
+        None
+    } else {
+        let feedback = plan
+            .validator_findings
+            .iter()
+            .map(|finding| {
+                format!(
+                    "- [{}] {} (work items: {})",
+                    finding.severity.as_str(),
+                    finding.message,
+                    finding.work_item_ids.join(", ")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        Some(feedback)
     };
     Ok(GenerateWorkItemsRequest {
         title: plan.id.clone(),
@@ -1792,10 +1940,15 @@ fn build_work_item_plan_generate_request(
         include_e2e_tests: Some(plan.options.include_e2e_tests),
         force_frontend_backend_split: Some(plan.options.force_frontend_backend_split),
         require_execution_plan_confirm: Some(plan.options.require_execution_plan_confirm),
-        author_provider: Some(provider_name_string(&session.author_provider)),
-        reviewer_provider: session.reviewer_provider.as_ref().map(provider_name_string),
+        author_provider: Some(provider_name_string(&session.author_provider)?),
+        reviewer_provider: session
+            .reviewer_provider
+            .as_ref()
+            .map(provider_name_string)
+            .transpose()?,
         review_rounds: Some(session.review_rounds),
         superpowers_enabled: Some(session.superpowers_enabled),
         openspec_enabled: Some(session.openspec_enabled),
+        revision_feedback,
     })
 }

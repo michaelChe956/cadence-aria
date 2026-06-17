@@ -288,6 +288,20 @@ pub enum WorkItemKind {
     Other,
 }
 
+impl WorkItemKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Backend => "backend",
+            Self::Frontend => "frontend",
+            Self::Integration => "integration",
+            Self::E2e => "e2e",
+            Self::Docs => "docs",
+            Self::Infra => "infra",
+            Self::Other => "other",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkItemExecutionPlanStatus {
@@ -406,6 +420,16 @@ pub enum IssueWorkItemPlanStatus {
     ChangeRequested,
 }
 
+impl IssueWorkItemPlanStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Draft => "draft",
+            Self::Confirmed => "confirmed",
+            Self::ChangeRequested => "change_requested",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct IssueSharedWorktree {
@@ -446,6 +470,15 @@ pub enum WorkItemSplitFindingSeverity {
     Warning,
 }
 
+impl WorkItemSplitFindingSeverity {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Error => "error",
+            Self::Warning => "warning",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct WorkItemSplitFinding {
@@ -461,6 +494,16 @@ pub enum RepositoryProfileConfidence {
     Low,
     Medium,
     High,
+}
+
+impl RepositoryProfileConfidence {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -497,6 +540,20 @@ pub enum VerificationScope {
     Custom,
 }
 
+impl VerificationScope {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unit => "unit",
+            Self::Integration => "integration",
+            Self::E2e => "e2e",
+            Self::Build => "build",
+            Self::Lint => "lint",
+            Self::Manual => "manual",
+            Self::Custom => "custom",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VerificationCommandSource {
@@ -510,11 +567,29 @@ pub enum VerificationCommandSafety {
     NeedsManualReview,
 }
 
+impl VerificationCommandSafety {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Approved => "approved",
+            Self::NeedsManualReview => "needs_manual_review",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VerificationFallbackPolicy {
     ManualGate,
     RepairProviderOutput,
+}
+
+impl VerificationFallbackPolicy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ManualGate => "manual_gate",
+            Self::RepairProviderOutput => "repair_provider_output",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

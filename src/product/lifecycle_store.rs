@@ -654,13 +654,13 @@ impl LifecycleStore {
             let path = self
                 .work_items_root(project_id, issue_id)
                 .join(format!("{old_wi_id}.json"));
-            let _ = remove_file_if_exists(&path);
+            remove_file_if_exists(&path)?;
         }
         for old_vp_id in &existing.verification_plan_ids {
-            let _ = self.delete_verification_plan(project_id, issue_id, old_vp_id);
+            self.delete_verification_plan(project_id, issue_id, old_vp_id)?;
         }
         if let Some(old_profile_id) = &existing.repository_profile_ref {
-            let _ = self.delete_repository_profile(project_id, issue_id, old_profile_id);
+            self.delete_repository_profile(project_id, issue_id, old_profile_id)?;
         }
 
         self.create_repository_profile(CreateRepositoryProfileInput {
