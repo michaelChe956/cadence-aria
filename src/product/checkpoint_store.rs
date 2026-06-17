@@ -5,13 +5,14 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::product::json_store::{ProductStoreError, read_json, write_json};
+use crate::web::workspace_ws_types::ArtifactPayload;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Checkpoint {
     pub id: String,
     pub session_id: String,
     pub message_index: u32,
-    pub artifact_snapshot: String,
+    pub artifact_snapshot: Option<ArtifactPayload>,
     pub stage: String,
     pub created_at: String,
 }
@@ -36,7 +37,7 @@ impl CheckpointStore {
         &self,
         session_id: &str,
         message_index: u32,
-        artifact_snapshot: &str,
+        artifact_snapshot: Option<&ArtifactPayload>,
         stage: &str,
     ) -> Result<Checkpoint, ProductStoreError> {
         let dir = self.checkpoints_dir(session_id);
@@ -48,7 +49,7 @@ impl CheckpointStore {
             id: id.clone(),
             session_id: session_id.to_string(),
             message_index,
-            artifact_snapshot: artifact_snapshot.to_string(),
+            artifact_snapshot: artifact_snapshot.cloned(),
             stage: stage.to_string(),
             created_at: Utc::now().to_rfc3339(),
         };
@@ -142,18 +143,25 @@ mod tests {
         (tmp, store)
     }
 
+    fn snapshot(markdown: &str) -> Option<ArtifactPayload> {
+        Some(ArtifactPayload::Markdown {
+            markdown: markdown.to_string(),
+            diff: None,
+        })
+    }
+
     #[test]
     fn create_and_list_checkpoints() {
         let (_tmp, store) = setup();
 
         let cp1 = store
-            .create_checkpoint("session_001", 0, "", "prepare_context")
+            .create_checkpoint("session_001", 0, None, "prepare_context")
             .unwrap();
         assert_eq!(cp1.id, "cp_001");
         assert_eq!(cp1.message_index, 0);
 
         let cp2 = store
-            .create_checkpoint("session_001", 1, "# Draft v1", "running")
+            .create_checkpoint("session_001", 1, snapshot("# Draft v1").as_ref(), "running")
             .unwrap();
         assert_eq!(cp2.id, "cp_002");
 
@@ -168,11 +176,11 @@ mod tests {
         let (_tmp, store) = setup();
 
         store
-            .create_checkpoint("session_001", 0, "snapshot", "running")
+            .create_checkpoint("session_001", 0, snapshot("snapshot").as_ref(), "running")
             .unwrap();
 
         let cp = store.get_checkpoint("session_001", "cp_001").unwrap();
-        assert_eq!(cp.artifact_snapshot, "snapshot");
+        assert_eq!(cp.artifact_snapshot, snapshot("snapshot"));
         assert_eq!(cp.stage, "running");
     }
 
@@ -189,21 +197,21 @@ mod tests {
         let (_tmp, store) = setup();
 
         store
-            .create_checkpoint("session_001", 0, "", "prepare_context")
+            .create_checkpoint("session_001", 0, None, "prepare_context")
             .unwrap();
         store
-            .create_checkpoint("session_001", 1, "v1", "running")
+            .create_checkpoint("session_001", 1, snapshot("v1").as_ref(), "running")
             .unwrap();
         store
-            .create_checkpoint("session_001", 2, "v2", "cross_review")
+            .create_checkpoint("session_001", 2, snapshot("v2").as_ref(), "cross_review")
             .unwrap();
         store
-            .create_checkpoint("session_001", 3, "v3", "human_confirm")
+            .create_checkpoint("session_001", 3, snapshot("v3").as_ref(), "human_confirm")
             .unwrap();
 
         let target = store.rollback_to("session_001", "cp_002").unwrap();
         assert_eq!(target.id, "cp_002");
-        assert_eq!(target.artifact_snapshot, "v1");
+        assert_eq!(target.artifact_snapshot, snapshot("v1"));
 
         let remaining = store.list_checkpoints("session_001").unwrap();
         assert_eq!(remaining.len(), 2);
@@ -216,10 +224,10 @@ mod tests {
         let (_tmp, store) = setup();
 
         store
-            .create_checkpoint("session_001", 0, "", "prepare_context")
+            .create_checkpoint("session_001", 0, None, "prepare_context")
             .unwrap();
         store
-            .create_checkpoint("session_001", 1, "v1", "running")
+            .create_checkpoint("session_001", 1, snapshot("v1").as_ref(), "running")
             .unwrap();
 
         store.rollback_to("session_001", "cp_002").unwrap();

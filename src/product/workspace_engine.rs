@@ -2413,11 +2413,11 @@ impl WorkspaceEngine {
         .await;
 
         let message_index = self.session.messages.len() as u32;
-        let artifact_snapshot = self.session.artifact.clone().unwrap();
+        let artifact_snapshot = self.session.artifact.as_ref();
         let checkpoint = self.checkpoint_store.create_checkpoint(
             &self.session.session_id,
             message_index,
-            artifact_snapshot.markdown_or_empty(),
+            artifact_snapshot,
             WorkspaceStage::AuthorConfirm.as_str(),
         );
 
@@ -2691,14 +2691,7 @@ impl WorkspaceEngine {
             self.transition_stage(stage).await;
         }
 
-        if !target.artifact_snapshot.is_empty() {
-            self.session.artifact = Some(ArtifactPayload::Markdown {
-                markdown: target.artifact_snapshot,
-                diff: None,
-            });
-        } else {
-            self.session.artifact = None;
-        }
+        self.session.artifact = target.artifact_snapshot.clone();
         if let Some(store) = &self.lifecycle_store {
             let _ = store.truncate_workspace_session_messages(
                 &self.session.session_id,
