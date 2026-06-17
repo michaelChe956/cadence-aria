@@ -456,6 +456,62 @@ pub(crate) async fn app_with_confirmed_story_and_design_and_test_providers(
     (app, root)
 }
 
+/// 与 `app_with_confirmed_story_and_design_and_test_providers` 相同，但额外提供 revision 输出，
+/// 用于验证包含 review / revision 的完整 WorkItemPlan 流程。
+pub(crate) async fn app_with_confirmed_story_and_design_revision_and_test_providers(
+    output: Value,
+    revision_output: Value,
+) -> (axum::Router, tempfile::TempDir) {
+    unsafe {
+        std::env::set_var("ARIA_E2E_TEST_CONTROLS", "1");
+    }
+    let root = tempdir().expect("root");
+    let repo = root.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo dir");
+    let status = Command::new("git")
+        .args(["init"])
+        .current_dir(&repo)
+        .status()
+        .expect("git init");
+    assert!(status.success());
+
+    let runtime = WebRuntime::new_fake(root.path().to_path_buf());
+    let mut state = WebAppState::new(root.path().to_path_buf(), runtime).with_provider_adapter(
+        Arc::new(MockSplitProviderAdapter {
+            output,
+            revision_output: Some(revision_output),
+        }),
+    );
+
+    let mut registry = ProviderRegistry::new();
+    let test_controls = cadence_aria::web::test_controls::TestControls::default();
+    registry.register(
+        ProviderName::Fake,
+        Arc::new(TestControlledFakeStreamingProvider::new(
+            test_controls.clone(),
+        )),
+    );
+    registry.register(
+        ProviderName::Codex,
+        Arc::new(TestControlledFakeStreamingProvider::new(
+            test_controls.clone(),
+        )),
+    );
+    registry.register(
+        ProviderName::ClaudeCode,
+        Arc::new(TestControlledFakeStreamingProvider::new(
+            test_controls.clone(),
+        )),
+    );
+    state.test_controls = test_controls;
+    state.provider_registry = Arc::new(registry);
+
+    let app = build_web_router(state);
+    let app = bootstrap_project_repo_issue_and_specs(app, &repo).await;
+
+    (app, root)
+}
+
 #[tokio::test]
 async fn prepare_work_item_plan_creates_draft_plan_and_session_without_generating() {
     let (app, _repo) = app_with_confirmed_story_and_design(valid_split_output()).await;

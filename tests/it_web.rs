@@ -57,3 +57,7 @@ mod web_work_item_plan_confirm;
 mod web_work_item_plan_revert;
 #[path = "it_web/web_work_item_plan_review.rs"]
 mod web_work_item_plan_review;
+#[path = "it_web/web_work_item_split_flow.rs"]
+mod web_work_item_split_flow;
+#[path = "it_web/web_workspace_recovery_consistency.rs"]
+mod web_workspace_recovery_consistency;
