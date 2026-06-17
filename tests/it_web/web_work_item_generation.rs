@@ -518,13 +518,18 @@ async fn prepare_work_item_plan_creates_draft_plan_and_session_without_generatin
             "reviewer_provider": "codex",
             "review_rounds": 1,
             "superpowers_enabled": true,
-            "openspec_enabled": true
+            "openspec_enabled": true,
+            "include_integration_tests": true
         }),
     )
     .await;
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(response["plan"]["status"], "draft");
+    assert_eq!(
+        response["plan"]["options"]["include_integration_tests"],
+        true
+    );
     assert!(
         response["plan"]["work_item_ids"]
             .as_array()

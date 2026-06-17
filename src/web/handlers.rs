@@ -596,10 +596,12 @@ pub async fn prepare_work_item_plan(
             source_story_spec_ids: request.story_spec_ids,
             source_design_spec_ids: request.design_spec_ids,
             options: crate::product::models::IssueWorkItemPlanOptions {
-                include_integration_tests: false,
-                include_e2e_tests: false,
-                force_frontend_backend_split: false,
-                require_execution_plan_confirm: false,
+                include_integration_tests: request.include_integration_tests.unwrap_or(true),
+                include_e2e_tests: request.include_e2e_tests.unwrap_or(false),
+                force_frontend_backend_split: request.force_frontend_backend_split.unwrap_or(false),
+                require_execution_plan_confirm: request
+                    .require_execution_plan_confirm
+                    .unwrap_or(false),
             },
             status: IssueWorkItemPlanStatus::Draft,
             work_item_ids: Vec::new(),

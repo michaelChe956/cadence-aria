@@ -654,6 +654,10 @@ pub struct PrepareWorkItemPlanRequest {
     pub review_rounds: Option<u32>,
     pub superpowers_enabled: Option<bool>,
     pub openspec_enabled: Option<bool>,
+    pub include_integration_tests: Option<bool>,
+    pub include_e2e_tests: Option<bool>,
+    pub force_frontend_backend_split: Option<bool>,
+    pub require_execution_plan_confirm: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
