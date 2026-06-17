@@ -314,11 +314,13 @@ pub struct WsProviderConfig {
     pub reviewer: Option<ProviderName>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ArtifactPayload {
     Markdown {
         markdown: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        diff: Option<String>,
     },
     WorkItemPlanCandidate {
         candidate: Box<WorkItemPlanCandidateDto>,
@@ -329,18 +331,19 @@ pub enum ArtifactPayload {
 #[serde(rename_all = "snake_case")]
 pub struct WorkItemPlanCandidateDto {
     pub plan: WorkItemPlanDto,
+    pub work_items: Vec<WorkItemCandidateDto>,
+    pub verification_plans: Vec<VerificationPlanDto>,
+    pub repository_profile: Option<RepositoryProfileDto>,
+    pub validator_findings: Vec<ValidatorFindingDto>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct WorkItemPlanDto {
-    pub title: String,
-    pub work_items: Vec<WorkItemCandidateDto>,
-    pub dependency_graph: Vec<WorkItemDependencyEdgeDto>,
-    pub verification_plans: Vec<VerificationPlanDto>,
-    pub repository_profile: Option<RepositoryProfileDto>,
+    pub id: String,
+    pub status: String,
     pub options: WorkItemSplitOptionsDto,
-    pub validator_findings: Vec<ValidatorFindingDto>,
+    pub dependency_graph: Vec<WorkItemDependencyEdgeDto>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -363,23 +366,21 @@ pub struct WorkItemDependencyEdgeDto {
 #[serde(rename_all = "snake_case")]
 pub struct WorkItemCandidateDto {
     pub id: String,
-    pub title: String,
     pub kind: String,
-    pub sequence_hint: u32,
+    pub title: String,
     pub depends_on: Vec<String>,
     pub exclusive_write_scopes: Vec<String>,
-    pub forbidden_write_scopes: Vec<String>,
-    pub required_handoff_from: Vec<String>,
-    pub require_execution_plan_confirm: bool,
+    pub verification_plan_ref: Option<String>,
     pub meta: WorkItemCandidateMetaDto,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct WorkItemCandidateMetaDto {
-    pub source_story_spec_ids: Vec<String>,
-    pub source_design_spec_ids: Vec<String>,
-    pub verification_plan_refs: Vec<String>,
+    #[serde(default)]
+    pub reverted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revert_feedback: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -972,79 +973,91 @@ mod tests {
     fn work_item_plan_candidate_dto_roundtrips_through_serde() {
         let dto = WorkItemPlanCandidateDto {
             plan: WorkItemPlanDto {
-                title: "爬楼梯问题 Work Item Plan".to_string(),
-                work_items: vec![WorkItemCandidateDto {
-                    id: "wi_001".to_string(),
-                    title: "实现爬楼梯问题".to_string(),
-                    kind: "backend".to_string(),
-                    sequence_hint: 10,
-                    depends_on: vec![],
-                    exclusive_write_scopes: vec!["src/product/stairs.rs".to_string()],
-                    forbidden_write_scopes: vec![],
-                    required_handoff_from: vec![],
+                id: "issue_work_item_plan_0001".to_string(),
+                status: "draft".to_string(),
+                options: WorkItemSplitOptionsDto {
+                    include_integration_tests: true,
+                    include_e2e_tests: false,
+                    force_frontend_backend_split: true,
                     require_execution_plan_confirm: false,
-                    meta: WorkItemCandidateMetaDto {
-                        source_story_spec_ids: vec!["story_001".to_string()],
-                        source_design_spec_ids: vec!["design_001".to_string()],
-                        verification_plan_refs: vec!["vp_001".to_string()],
-                    },
-                }],
+                },
                 dependency_graph: vec![WorkItemDependencyEdgeDto {
                     from_work_item_id: "wi_001".to_string(),
                     to_work_item_id: "wi_002".to_string(),
                 }],
-                verification_plans: vec![VerificationPlanDto {
-                    plan_ref: "vp_001".to_string(),
-                    scope: "unit".to_string(),
-                    commands: vec![VerificationCommandDto {
-                        label: "cargo test".to_string(),
-                        command: "cargo test".to_string(),
-                        cwd: "".to_string(),
-                        purpose: "unit tests".to_string(),
-                        required: true,
-                        timeout_seconds: 120,
-                        safety: "approved".to_string(),
-                    }],
-                    manual_checks: vec![VerificationManualCheckDto {
-                        label: "人工检查".to_string(),
-                        instructions: "检查输出".to_string(),
-                        required: false,
-                    }],
-                    required_gates: vec![],
-                    risk_notes: vec![],
-                    confidence: "high".to_string(),
-                    fallback_policy: "manual_gate".to_string(),
-                }],
-                repository_profile: Some(RepositoryProfileDto {
-                    profile_id: "rp_001".to_string(),
-                    repository_id: "repo_001".to_string(),
-                    languages: vec!["rust".to_string()],
-                    frameworks: vec![],
-                    package_managers: vec!["cargo".to_string()],
-                    test_frameworks: vec![],
-                    build_systems: vec!["cargo".to_string()],
-                    detected_layers: vec!["backend".to_string()],
-                    split_recommendation: "backend_only".to_string(),
-                    confidence: "high".to_string(),
-                }),
-                options: WorkItemSplitOptionsDto {
-                    include_integration_tests: true,
-                    include_e2e_tests: false,
-                    force_frontend_backend_split: false,
-                    require_execution_plan_confirm: false,
-                },
-                validator_findings: vec![ValidatorFindingDto {
-                    severity: "warning".to_string(),
-                    code: "W001".to_string(),
-                    message: "注意边界条件".to_string(),
-                    work_item_ids: vec!["wi_001".to_string()],
-                }],
             },
+            work_items: vec![WorkItemCandidateDto {
+                id: "wi_001".to_string(),
+                kind: "backend".to_string(),
+                title: "实现爬楼梯问题".to_string(),
+                depends_on: vec!["wi_000".to_string()],
+                exclusive_write_scopes: vec!["src/product/stairs.rs".to_string()],
+                verification_plan_ref: Some("vp_001".to_string()),
+                meta: WorkItemCandidateMetaDto {
+                    reverted: true,
+                    revert_feedback: Some("需要细化边界条件".to_string()),
+                },
+            }],
+            verification_plans: vec![VerificationPlanDto {
+                plan_ref: "vp_001".to_string(),
+                scope: "unit".to_string(),
+                commands: vec![VerificationCommandDto {
+                    label: "cargo test".to_string(),
+                    command: "cargo test".to_string(),
+                    cwd: "".to_string(),
+                    purpose: "unit tests".to_string(),
+                    required: true,
+                    timeout_seconds: 120,
+                    safety: "approved".to_string(),
+                }],
+                manual_checks: vec![VerificationManualCheckDto {
+                    label: "人工检查".to_string(),
+                    instructions: "检查输出".to_string(),
+                    required: false,
+                }],
+                required_gates: vec![],
+                risk_notes: vec![],
+                confidence: "high".to_string(),
+                fallback_policy: "manual_gate".to_string(),
+            }],
+            repository_profile: Some(RepositoryProfileDto {
+                profile_id: "rp_001".to_string(),
+                repository_id: "repo_001".to_string(),
+                languages: vec!["rust".to_string()],
+                frameworks: vec![],
+                package_managers: vec!["cargo".to_string()],
+                test_frameworks: vec![],
+                build_systems: vec!["cargo".to_string()],
+                detected_layers: vec!["backend".to_string()],
+                split_recommendation: "backend_only".to_string(),
+                confidence: "high".to_string(),
+            }),
+            validator_findings: vec![ValidatorFindingDto {
+                severity: "warning".to_string(),
+                code: "W001".to_string(),
+                message: "注意边界条件".to_string(),
+                work_item_ids: vec!["wi_001".to_string()],
+            }],
         };
 
         let json = serde_json::to_value(&dto).unwrap();
-        let back: WorkItemPlanCandidateDto = serde_json::from_value(json).unwrap();
+        let back: WorkItemPlanCandidateDto = serde_json::from_value(json.clone()).unwrap();
         assert_eq!(back, dto);
+
+        // 显式断言 plan 文档约定的字段路径
+        assert_eq!(json["plan"]["id"], "issue_work_item_plan_0001");
+        assert_eq!(json["plan"]["status"], "draft");
+        assert_eq!(json["work_items"][0]["id"], "wi_001");
+        assert_eq!(json["work_items"][0]["kind"], "backend");
+        assert_eq!(json["work_items"][0]["verification_plan_ref"], "vp_001");
+        assert_eq!(json["work_items"][0]["meta"]["reverted"], true);
+        assert_eq!(
+            json["work_items"][0]["meta"]["revert_feedback"],
+            "需要细化边界条件"
+        );
+        assert!(json["verification_plans"][0]["plan_ref"] == "vp_001");
+        assert!(json["repository_profile"]["profile_id"] == "rp_001");
+        assert!(json["validator_findings"][0]["code"] == "W001");
     }
 
     #[test]
@@ -1071,9 +1084,21 @@ mod tests {
     fn artifact_payload_markdown_variant_serializes_to_flat_json() {
         let payload = ArtifactPayload::Markdown {
             markdown: "# Plan\n".to_string(),
+            diff: Some("@@ -1 +1 @@\n-old\n+new".to_string()),
         };
         let json = serde_json::to_value(&payload).unwrap();
-        assert_eq!(json, serde_json::json!({"markdown": "# Plan\n"}));
+        assert_eq!(json["markdown"], "# Plan\n");
+        assert_eq!(json["diff"], "@@ -1 +1 @@\n-old\n+new");
+
+        let payload_without_diff = ArtifactPayload::Markdown {
+            markdown: "# Plan\n".to_string(),
+            diff: None,
+        };
+        let json_without_diff = serde_json::to_value(&payload_without_diff).unwrap();
+        assert_eq!(
+            json_without_diff,
+            serde_json::json!({"markdown": "# Plan\n"})
+        );
     }
 
     #[test]
@@ -1081,23 +1106,86 @@ mod tests {
         let payload = ArtifactPayload::WorkItemPlanCandidate {
             candidate: Box::new(WorkItemPlanCandidateDto {
                 plan: WorkItemPlanDto {
-                    title: "plan".to_string(),
-                    work_items: vec![],
-                    dependency_graph: vec![],
-                    verification_plans: vec![],
-                    repository_profile: None,
+                    id: "issue_work_item_plan_0001".to_string(),
+                    status: "draft".to_string(),
                     options: WorkItemSplitOptionsDto {
                         include_integration_tests: false,
                         include_e2e_tests: false,
                         force_frontend_backend_split: false,
                         require_execution_plan_confirm: false,
                     },
-                    validator_findings: vec![],
+                    dependency_graph: vec![],
                 },
+                work_items: vec![WorkItemCandidateDto {
+                    id: "wi_001".to_string(),
+                    kind: "backend".to_string(),
+                    title: "实现爬楼梯问题".to_string(),
+                    depends_on: vec![],
+                    exclusive_write_scopes: vec!["src/product/stairs.rs".to_string()],
+                    verification_plan_ref: None,
+                    meta: WorkItemCandidateMetaDto {
+                        reverted: false,
+                        revert_feedback: None,
+                    },
+                }],
+                verification_plans: vec![],
+                repository_profile: None,
+                validator_findings: vec![],
             }),
         };
         let json = serde_json::to_value(&payload).unwrap();
         assert!(json.get("candidate").is_some());
-        assert_eq!(json["candidate"]["plan"]["title"], "plan");
+        assert_eq!(json["candidate"]["plan"]["id"], "issue_work_item_plan_0001");
+        assert_eq!(json["candidate"]["plan"]["status"], "draft");
+        assert_eq!(json["candidate"]["work_items"][0]["id"], "wi_001");
+        assert_eq!(
+            json["candidate"]["work_items"][0]["meta"]["reverted"],
+            false
+        );
+        assert!(!json.as_object().unwrap().contains_key("markdown"));
+    }
+
+    #[test]
+    fn artifact_update_carries_candidate_payload_as_expected_json() {
+        let candidate = WorkItemPlanCandidateDto {
+            plan: WorkItemPlanDto {
+                id: "issue_work_item_plan_0001".to_string(),
+                status: "draft".to_string(),
+                options: WorkItemSplitOptionsDto {
+                    include_integration_tests: false,
+                    include_e2e_tests: false,
+                    force_frontend_backend_split: false,
+                    require_execution_plan_confirm: false,
+                },
+                dependency_graph: vec![],
+            },
+            work_items: vec![WorkItemCandidateDto {
+                id: "wi_001".to_string(),
+                kind: "backend".to_string(),
+                title: "实现爬楼梯问题".to_string(),
+                depends_on: vec![],
+                exclusive_write_scopes: vec!["src/product/stairs.rs".to_string()],
+                verification_plan_ref: None,
+                meta: WorkItemCandidateMetaDto {
+                    reverted: false,
+                    revert_feedback: None,
+                },
+            }],
+            verification_plans: vec![],
+            repository_profile: None,
+            validator_findings: vec![],
+        };
+        let out = WsOutMessage::ArtifactUpdate {
+            version: 7,
+            markdown: serde_json::to_string(&candidate).unwrap(),
+            diff: None,
+        };
+        let json = serde_json::to_value(out).unwrap();
+        assert_eq!(json["type"], "artifact_update");
+        assert_eq!(json["version"], 7);
+        let parsed_candidate: WorkItemPlanCandidateDto =
+            serde_json::from_str(json["markdown"].as_str().unwrap()).unwrap();
+        assert_eq!(parsed_candidate.plan.id, "issue_work_item_plan_0001");
+        assert_eq!(parsed_candidate.work_items[0].id, "wi_001");
     }
 }
