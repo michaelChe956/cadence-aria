@@ -1932,12 +1932,110 @@ async fn spawn_provider_run_from_handler(
                 };
 
                 engine = engine_for_run.lock().await;
-                if let Err(message) = engine.complete_work_item_plan_revision(output).await {
-                    engine.mark_active_run_finished(&run_label);
-                    drop(engine);
-                    let err = WsOutMessage::Error { message };
-                    let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
-                    return;
+                let mut outcome = match engine.complete_work_item_plan_revision(output).await {
+                    Ok(o) => o,
+                    Err(message) => {
+                        engine.mark_active_run_finished(&run_label);
+                        drop(engine);
+                        let err = WsOutMessage::Error { message };
+                        let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                        return;
+                    }
+                };
+
+                // revision 也可能 validate 失败，使用与 author 相同的本地 AutoRevision 循环。
+                // 由于 revision 的 retained/redo 是面向用户反馈的局部集合，AutoRevision 时
+                // 退化为整组生成（retained/redo 均为空），让模型基于 validator findings 全局调整。
+                let mut revision_iterations = 0;
+                loop {
+                    match outcome {
+                        WorkItemPlanAuthorOutcome::AuthorConfirm => {
+                            engine.mark_active_run_finished(&run_label);
+                            return;
+                        }
+                        WorkItemPlanAuthorOutcome::HumanConfirm { reason: _ } => {
+                            engine.mark_active_run_finished(&run_label);
+                            return;
+                        }
+                        WorkItemPlanAuthorOutcome::AutoRevision { findings: _ } => {
+                            revision_iterations += 1;
+                            if revision_iterations > 5 {
+                                engine.mark_active_run_finished(&run_label);
+                                drop(engine);
+                                let err = WsOutMessage::Error {
+                                    message: "work item plan revision exceeded hard limit"
+                                        .to_string(),
+                                };
+                                let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                                return;
+                            }
+
+                            // 每次重生前重新构建请求，把最新 persisted 的 validator_findings
+                            // 作为 revision_feedback 注入 prompt。
+                            let request = match build_work_item_plan_generate_request(
+                                &engine,
+                                &lifecycle_for_run,
+                            )
+                            .map_err(|e| format!("build request failed: {e}"))
+                            {
+                                Ok(r) => r,
+                                Err(message) => {
+                                    engine.mark_active_run_finished(&run_label);
+                                    drop(engine);
+                                    let err = WsOutMessage::Error { message };
+                                    let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                                    return;
+                                }
+                            };
+                            drop(engine);
+
+                            // 整组 AutoRevision 时丢弃局部 retained/redo，使用完整 generate_revision。
+                            let output = match split_engine
+                                .generate_revision(
+                                    &request,
+                                    &lifecycle_for_run,
+                                    &issue,
+                                    &repository,
+                                    {
+                                        let engine = engine_for_run.lock().await;
+                                        let provider = engine.session().author_provider.clone();
+                                        drop(engine);
+                                        provider
+                                    },
+                                    &[],
+                                    &[],
+                                )
+                                .await
+                            {
+                                Ok(o) => o,
+                                Err(error) => {
+                                    let mut engine = engine_for_run.lock().await;
+                                    engine.mark_active_run_finished(&run_label);
+                                    drop(engine);
+                                    let err = WsOutMessage::Error {
+                                        message: format!(
+                                            "split generate_revision failed: {}",
+                                            error.message
+                                        ),
+                                    };
+                                    let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                                    return;
+                                }
+                            };
+
+                            engine = engine_for_run.lock().await;
+                            outcome = match engine.complete_work_item_plan_revision(output).await {
+                                Ok(o) => o,
+                                Err(message) => {
+                                    engine.mark_active_run_finished(&run_label);
+                                    drop(engine);
+                                    let err = WsOutMessage::Error { message };
+                                    let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                                    return;
+                                }
+                            };
+                        }
+                    }
                 }
             }
         }

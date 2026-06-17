@@ -3236,12 +3236,15 @@ impl WorkspaceEngine {
         Ok(WorkItemPlanAuthorOutcome::AuthorConfirm)
     }
 
-    /// WorkItemPlan Revision 完成：replace Draft candidate → 组装 DTO →
+    /// WorkItemPlan Revision 完成：validate → replace Draft candidate → 组装 DTO →
     /// `update_artifact(WorkItemPlanCandidate)`（新 version）→ 回 AuthorConfirm。
+    ///
+    /// 校验逻辑与 `complete_work_item_plan_author` 保持一致：出现 errors 时进入
+    /// AutoRevision/HumanConfirm，避免非法候选直接暴露给用户。
     pub async fn complete_work_item_plan_revision(
         &mut self,
         output: WorkItemSplitProviderOutput,
-    ) -> Result<(), String> {
+    ) -> Result<WorkItemPlanAuthorOutcome, String> {
         let lifecycle = self
             .lifecycle_store
             .clone()
@@ -3250,13 +3253,52 @@ impl WorkspaceEngine {
         let issue_id = self.session.issue_id.clone();
         let plan_id = self.session.entity_id.clone();
 
+        let report = WorkItemSplitValidator::validate(
+            &output.plan,
+            &output.work_items,
+            Some(&output.repository_profile),
+            &output.verification_plans,
+        );
+        let findings = report.findings.clone();
+
+        if report.has_errors() {
+            self.work_item_plan_author_retry_count += 1;
+            if self.work_item_plan_author_retry_count >= 3 {
+                if let Err(error) = lifecycle.replace_issue_work_item_plan_candidate(
+                    &project_id,
+                    &issue_id,
+                    &plan_id,
+                    &output,
+                    findings.clone(),
+                ) {
+                    tracing::warn!(%error, "persist final validate findings before HumanConfirm failed");
+                }
+                self.enter_human_confirm_for_work_item_plan_author_failure(&findings)
+                    .await;
+                return Ok(WorkItemPlanAuthorOutcome::HumanConfirm {
+                    reason: "revision validate 连续 3 次失败".to_string(),
+                });
+            }
+
+            lifecycle
+                .replace_issue_work_item_plan_candidate(
+                    &project_id,
+                    &issue_id,
+                    &plan_id,
+                    &output,
+                    findings.clone(),
+                )
+                .map_err(|e| format!("replace candidate failed: {e}"))?;
+            return Ok(WorkItemPlanAuthorOutcome::AutoRevision { findings });
+        }
+
         lifecycle
             .replace_issue_work_item_plan_candidate(
                 &project_id,
                 &issue_id,
                 &plan_id,
                 &output,
-                Vec::new(),
+                findings.clone(),
             )
             .map_err(|e| format!("replace candidate failed: {e}"))?;
 
@@ -3271,7 +3313,7 @@ impl WorkspaceEngine {
         self.enter_author_confirm(Some("WorkItemPlan 候选已重做，等待确认".to_string()))
             .await;
         self.work_item_plan_author_retry_count = 0;
-        Ok(())
+        Ok(WorkItemPlanAuthorOutcome::AuthorConfirm)
     }
 
     /// AuthorConfirm 阶段用户主动请求 revision：进入 Revision 阶段并记录反馈。

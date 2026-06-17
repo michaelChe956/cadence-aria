@@ -1163,11 +1163,13 @@ fn build_revision_provider_output(
     let mut verification_plans = Vec::with_capacity(work_items.len());
     let mut verification_plan_ids = Vec::with_capacity(work_items.len());
 
+    // retained 的 verification_plan id 必须跳过 redo_verification_plans 已占用的
+    // redo_count 个 id，避免与 redo 项冲突。
     for (index, wi) in work_items.iter_mut().enumerate() {
         let plan_id = if index < retained_count {
             crate::product::id::next_sequential_id(
                 "verification_plan",
-                existing_verification_plans.len() + index,
+                existing_verification_plans.len() + redo_count + index,
             )
         } else {
             redo_verification_plans[index - retained_count].id.clone()
