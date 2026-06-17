@@ -12,10 +12,21 @@ use crate::web_work_item_generation::{
 
 static WS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-fn enable_test_controls() {
+struct TestControlsGuard;
+
+impl Drop for TestControlsGuard {
+    fn drop(&mut self) {
+        unsafe {
+            std::env::remove_var("ARIA_E2E_TEST_CONTROLS");
+        }
+    }
+}
+
+fn enable_test_controls() -> TestControlsGuard {
     unsafe {
         std::env::set_var("ARIA_E2E_TEST_CONTROLS", "1");
     }
+    TestControlsGuard
 }
 
 async fn connect_ws(
@@ -47,14 +58,20 @@ where
     while tokio::time::Instant::now() < deadline {
         let remaining = deadline - tokio::time::Instant::now();
         match timeout(remaining, ws.next()).await {
-            Ok(Some(Ok(Message::Text(text)))) => {
-                messages.push(serde_json::from_str(&text).expect("ws json"));
-                if predicate(&messages) {
-                    break;
+            Ok(Some(Ok(Message::Text(text)))) => match serde_json::from_str(&text) {
+                Ok(value) => {
+                    messages.push(value);
+                    if predicate(&messages) {
+                        break;
+                    }
                 }
-            }
+                Err(error) => panic!("ws json parse error: {error}\n{text}"),
+            },
             Ok(Some(Ok(Message::Close(_)))) => break,
-            Ok(Some(Ok(other))) => panic!("expected text ws message, got {other:?}"),
+            Ok(Some(Ok(other))) => {
+                eprintln!("ignoring non-text ws message: {other:?}");
+                continue;
+            }
             Ok(Some(Err(error))) => panic!("ws error: {error}"),
             Ok(None) => break,
             Err(_) => break,
@@ -150,7 +167,7 @@ async fn enable_revise_review_fixture(app: &axum::Router, session_id: &str) {
 #[tokio::test]
 async fn review_returns_verdict_for_whole_candidate() {
     let _guard = WS_TEST_LOCK.lock().await;
-    enable_test_controls();
+    let _test_guard = enable_test_controls();
 
     let (app, _repo) =
         app_with_confirmed_story_and_design_and_test_providers(valid_split_output()).await;
@@ -213,7 +230,7 @@ async fn review_returns_verdict_for_whole_candidate() {
 #[tokio::test]
 async fn work_item_plan_review_returns_decision_response() {
     let _guard = WS_TEST_LOCK.lock().await;
-    enable_test_controls();
+    let _test_guard = enable_test_controls();
 
     // human_intervene 路径：进入人工确认
     {

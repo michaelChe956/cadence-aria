@@ -2716,12 +2716,13 @@ impl WorkspaceEngine {
             .lifecycle_store
             .as_ref()
             .ok_or_else(|| "lifecycle_store unavailable for work_item_plan review".to_string())?;
-        let project_id = self.session.project_id.clone();
-        let issue_id = self.session.issue_id.clone();
-        let plan_id = self.session.entity_id.clone();
-        let candidate =
-            build_work_item_plan_candidate_dto(lifecycle, &project_id, &issue_id, &plan_id)
-                .map_err(|error| format!("build work_item_plan candidate dto failed: {error}"))?;
+        let candidate = build_work_item_plan_candidate_dto(
+            lifecycle,
+            &self.session.project_id,
+            &self.session.issue_id,
+            &self.session.entity_id,
+        )
+        .map_err(|error| format!("build work_item_plan candidate dto failed: {error}"))?;
 
         let working_dir = match &self.session.repository_path {
             Some(path) => path.clone(),
@@ -9481,6 +9482,22 @@ mod tests {
         assert!(
             !input.prompt.contains("当前已提取 Artifact Markdown"),
             "WorkItemPlan 分支不应走 Story/Design 的 artifact markdown 提示"
+        );
+    }
+
+    #[test]
+    fn build_work_item_plan_review_input_returns_error_when_lifecycle_store_missing() {
+        let (_tmp, _checkpoint_store, _lifecycle, _plan_id, mut engine) =
+            make_work_item_plan_engine_with_draft_candidate("sess_wip_review_no_lifecycle");
+        engine.lifecycle_store = None;
+
+        let result = engine.build_work_item_plan_review_input();
+
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert!(
+            error.contains("lifecycle_store unavailable"),
+            "错误信息应提示 lifecycle_store 不可用，实际为: {error}"
         );
     }
 
