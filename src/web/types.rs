@@ -663,14 +663,14 @@ pub struct PrepareWorkItemPlanRequest {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct PrepareWorkItemPlanResponse {
-    pub plan: IssueWorkItemPlanDetailDto,
+    pub work_item_plan: IssueWorkItemPlanDetailDto,
     pub workspace_session: WorkspaceSessionDto,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct IssueWorkItemPlanDetailDto {
-    pub plan_id: String,
+    pub id: String,
     pub issue_id: String,
     pub project_id: String,
     pub status: String,

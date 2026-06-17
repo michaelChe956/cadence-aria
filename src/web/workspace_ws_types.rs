@@ -187,7 +187,7 @@ pub enum WsInMessage {
     },
     RevertWorkItem {
         work_item_id: String,
-        feedback: String,
+        feedback: Option<String>,
         clear: bool,
     },
     Abort,
@@ -321,7 +321,7 @@ pub enum ArtifactPayload {
         markdown: String,
     },
     WorkItemPlanCandidate {
-        work_item_plan_candidate: Box<WorkItemPlanCandidateDto>,
+        candidate: Box<WorkItemPlanCandidateDto>,
     },
 }
 
@@ -1063,7 +1063,7 @@ mod tests {
                 work_item_id,
                 feedback,
                 clear,
-            } if work_item_id == "wi_001" && feedback == "需要回退" && !clear
+            } if work_item_id == "wi_001" && feedback.as_deref() == Some("需要回退") && !clear
         ));
     }
 
@@ -1079,7 +1079,7 @@ mod tests {
     #[test]
     fn artifact_payload_candidate_variant_serializes_to_flat_json() {
         let payload = ArtifactPayload::WorkItemPlanCandidate {
-            work_item_plan_candidate: Box::new(WorkItemPlanCandidateDto {
+            candidate: Box::new(WorkItemPlanCandidateDto {
                 plan: WorkItemPlanDto {
                     title: "plan".to_string(),
                     work_items: vec![],
@@ -1097,7 +1097,7 @@ mod tests {
             }),
         };
         let json = serde_json::to_value(&payload).unwrap();
-        assert!(json.get("work_item_plan_candidate").is_some());
-        assert_eq!(json["work_item_plan_candidate"]["plan"]["title"], "plan");
+        assert!(json.get("candidate").is_some());
+        assert_eq!(json["candidate"]["plan"]["title"], "plan");
     }
 }

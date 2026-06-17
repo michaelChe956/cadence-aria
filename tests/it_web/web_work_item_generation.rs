@@ -528,34 +528,37 @@ async fn prepare_work_item_plan_creates_draft_plan_and_session_without_generatin
     .await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(response["plan"]["status"], "draft");
+    assert_eq!(response["work_item_plan"]["status"], "draft");
     assert_eq!(
-        response["plan"]["options"]["include_integration_tests"],
-        true
-    );
-    assert_eq!(response["plan"]["options"]["include_e2e_tests"], false);
-    assert_eq!(
-        response["plan"]["options"]["force_frontend_backend_split"],
+        response["work_item_plan"]["options"]["include_integration_tests"],
         true
     );
     assert_eq!(
-        response["plan"]["options"]["require_execution_plan_confirm"],
+        response["work_item_plan"]["options"]["include_e2e_tests"],
+        false
+    );
+    assert_eq!(
+        response["work_item_plan"]["options"]["force_frontend_backend_split"],
+        true
+    );
+    assert_eq!(
+        response["work_item_plan"]["options"]["require_execution_plan_confirm"],
         false
     );
     assert!(
-        response["plan"]["work_item_ids"]
+        response["work_item_plan"]["work_item_ids"]
             .as_array()
             .unwrap()
             .is_empty()
     );
     assert!(
-        response["plan"]["verification_plan_ids"]
+        response["work_item_plan"]["verification_plan_ids"]
             .as_array()
             .unwrap()
             .is_empty()
     );
     assert!(
-        response["plan"]["dependency_graph"]
+        response["work_item_plan"]["dependency_graph"]
             .as_array()
             .unwrap()
             .is_empty()
@@ -566,7 +569,7 @@ async fn prepare_work_item_plan_creates_draft_plan_and_session_without_generatin
     );
     assert_eq!(
         response["workspace_session"]["entity_id"],
-        response["plan"]["plan_id"]
+        response["work_item_plan"]["id"]
     );
 
     let lifecycle = cadence_aria::product::lifecycle_store::LifecycleStore::new(

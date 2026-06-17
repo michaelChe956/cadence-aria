@@ -630,7 +630,7 @@ pub async fn prepare_work_item_plan(
         .map_err(product_store_api_error)?;
 
     Ok(Json(PrepareWorkItemPlanResponse {
-        plan: issue_work_item_plan_detail_dto(&plan),
+        work_item_plan: issue_work_item_plan_detail_dto(&plan),
         workspace_session: workspace_session_dto(session),
     }))
 }
@@ -867,7 +867,7 @@ fn issue_work_item_plan_dto(
 
 fn issue_work_item_plan_detail_dto(plan: &IssueWorkItemPlanRecord) -> IssueWorkItemPlanDetailDto {
     IssueWorkItemPlanDetailDto {
-        plan_id: plan.id.clone(),
+        id: plan.id.clone(),
         issue_id: plan.issue_id.clone(),
         project_id: plan.project_id.clone(),
         status: issue_work_item_plan_status_text(&plan.status).to_string(),
