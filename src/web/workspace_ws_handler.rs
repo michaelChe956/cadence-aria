@@ -267,11 +267,9 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                     node_id,
                 },
                 EngineEvent::StageChange { stage } => WsOutMessage::StageChange { stage },
-                EngineEvent::ArtifactUpdate { version, markdown } => WsOutMessage::ArtifactUpdate {
-                    version,
-                    markdown,
-                    diff: None,
-                },
+                EngineEvent::ArtifactUpdate { version, payload } => {
+                    WsOutMessage::ArtifactUpdate { version, payload }
+                }
                 EngineEvent::PermissionRequest {
                     id,
                     tool_name,

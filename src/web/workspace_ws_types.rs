@@ -57,8 +57,8 @@ pub enum WsOutMessage {
     },
     ArtifactUpdate {
         version: u32,
-        markdown: String,
-        diff: Option<String>,
+        #[serde(flatten)]
+        payload: ArtifactPayload,
     },
     ProviderSelectRequest {
         stage: String,
@@ -115,7 +115,7 @@ pub enum WsOutMessage {
         openspec_enabled: bool,
         messages: Vec<WsMessageDto>,
         checkpoints: Vec<WsCheckpointDto>,
-        artifact: Option<String>,
+        artifact: Option<ArtifactPayload>,
         providers: WsProviderConfig,
         timeline_nodes: Vec<TimelineNode>,
         active_node_id: Option<String>,
@@ -338,6 +338,26 @@ pub enum ArtifactPayload {
     WorkItemPlanCandidate {
         candidate: Box<WorkItemPlanCandidateDto>,
     },
+}
+
+impl ArtifactPayload {
+    pub fn markdown(&self) -> Option<&str> {
+        match self {
+            Self::Markdown { markdown, .. } => Some(markdown.as_str()),
+            Self::WorkItemPlanCandidate { .. } => None,
+        }
+    }
+
+    pub fn markdown_or_empty(&self) -> &str {
+        self.markdown().unwrap_or("")
+    }
+
+    pub fn into_markdown(self) -> Option<String> {
+        match self {
+            Self::Markdown { markdown, .. } => Some(markdown),
+            Self::WorkItemPlanCandidate { .. } => None,
+        }
+    }
 }
 
 /// Complete candidate produced by the work item plan author flow.
@@ -851,7 +871,10 @@ mod tests {
             openspec_enabled: true,
             messages: Vec::new(),
             checkpoints: Vec::new(),
-            artifact: Some("# Story".to_string()),
+            artifact: Some(ArtifactPayload::Markdown {
+                markdown: "# Story".to_string(),
+                diff: None,
+            }),
             providers: super::WsProviderConfig {
                 author: ProviderName::ClaudeCode,
                 reviewer: Some(ProviderName::Codex),
@@ -1225,15 +1248,66 @@ mod tests {
         };
         let out = WsOutMessage::ArtifactUpdate {
             version: 7,
-            markdown: serde_json::to_string(&candidate).unwrap(),
-            diff: None,
+            payload: ArtifactPayload::WorkItemPlanCandidate {
+                candidate: Box::new(candidate.clone()),
+            },
         };
         let json = serde_json::to_value(out).unwrap();
         assert_eq!(json["type"], "artifact_update");
         assert_eq!(json["version"], 7);
+        assert_eq!(json["candidate"]["plan"]["id"], "issue_work_item_plan_0001");
+        assert_eq!(json["candidate"]["work_items"][0]["id"], "wi_001");
         let parsed_candidate: WorkItemPlanCandidateDto =
-            serde_json::from_str(json["markdown"].as_str().unwrap()).unwrap();
+            serde_json::from_value(json["candidate"].clone()).unwrap();
         assert_eq!(parsed_candidate.plan.id, "issue_work_item_plan_0001");
         assert_eq!(parsed_candidate.work_items[0].id, "wi_001");
+    }
+
+    #[test]
+    fn artifact_update_with_markdown_payload_serializes_flat() {
+        let out = WsOutMessage::ArtifactUpdate {
+            version: 3,
+            payload: ArtifactPayload::Markdown {
+                markdown: "# Markdown payload\n".to_string(),
+                diff: Some("@@ -1 +1 @@\n-old\n+new".to_string()),
+            },
+        };
+        let json = serde_json::to_value(out).unwrap();
+        assert_eq!(json["type"], "artifact_update");
+        assert_eq!(json["version"], 3);
+        assert_eq!(json["markdown"], "# Markdown payload\n");
+        assert_eq!(json["diff"], "@@ -1 +1 @@\n-old\n+new");
+        assert!(!json.as_object().unwrap().contains_key("candidate"));
+    }
+
+    #[test]
+    fn session_state_artifact_accepts_markdown_payload() {
+        let state = WsOutMessage::SessionState {
+            session_id: "workspace_session_0001".to_string(),
+            workspace_type: WorkspaceType::Story,
+            stage: "author_confirm".to_string(),
+            superpowers_enabled: true,
+            openspec_enabled: true,
+            messages: Vec::new(),
+            checkpoints: Vec::new(),
+            artifact: Some(ArtifactPayload::Markdown {
+                markdown: "# Story".to_string(),
+                diff: None,
+            }),
+            providers: super::WsProviderConfig {
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::Codex),
+            },
+            timeline_nodes: Vec::new(),
+            active_node_id: None,
+            artifact_versions: Vec::new(),
+            artifact_version_summaries: Vec::new(),
+            timeline_node_details: std::collections::HashMap::new(),
+            timeline_node_summaries: std::collections::HashMap::new(),
+            active_run_id: None,
+        };
+        let json = serde_json::to_value(state).unwrap();
+        assert_eq!(json["artifact"]["markdown"], "# Story");
+        assert!(json["artifact"]["diff"].is_null());
     }
 }

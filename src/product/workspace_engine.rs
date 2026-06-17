@@ -25,11 +25,11 @@ use crate::product::models::{
 };
 use crate::protocol::contracts::{AdapterRole, ProviderType};
 use crate::web::workspace_ws_types::{
-    ArtifactVersion, ArtifactVersionSummary, AuthorDecision, ChoiceOption, HumanConfirmDecision,
-    NodeDetailSummary, ProviderConfigSnapshot, ReviewFinding, ReviewFindingSeverity, ReviewGate,
-    ReviewVerdict, ReviewVerdictType, TimelineNode, TimelineNodeStatus, TimelineNodeType,
-    WorkspaceStage as WsWorkspaceStage, WsCheckpointDto, WsMessageDto, WsOutMessage,
-    WsProviderConfig,
+    ArtifactPayload, ArtifactVersion, ArtifactVersionSummary, AuthorDecision, ChoiceOption,
+    HumanConfirmDecision, NodeDetailSummary, ProviderConfigSnapshot, ReviewFinding,
+    ReviewFindingSeverity, ReviewGate, ReviewVerdict, ReviewVerdictType, TimelineNode,
+    TimelineNodeStatus, TimelineNodeType, WorkspaceStage as WsWorkspaceStage, WsCheckpointDto,
+    WsMessageDto, WsOutMessage, WsProviderConfig,
 };
 
 const SUMMARY_PREVIEW_CHARS: usize = 2048;
@@ -168,7 +168,7 @@ pub struct WorkspaceSession {
     pub workspace_type: WorkspaceType,
     pub stage: WorkspaceStage,
     pub messages: Vec<SessionMessage>,
-    pub artifact: Option<String>,
+    pub artifact: Option<ArtifactPayload>,
     pub author_provider: ProviderName,
     pub reviewer_provider: Option<ProviderName>,
     pub review_rounds: u32,
@@ -256,7 +256,7 @@ pub enum EngineEvent {
     },
     ArtifactUpdate {
         version: u32,
-        markdown: String,
+        payload: ArtifactPayload,
     },
     PermissionRequest {
         id: String,
@@ -484,7 +484,10 @@ impl WorkspaceEngine {
                 .iter()
                 .rev()
                 .find(|version| version.is_current)
-                .map(|version| version.markdown.clone());
+                .map(|version| ArtifactPayload::Markdown {
+                    markdown: version.markdown.clone(),
+                    diff: None,
+                });
         }
         let (timeline_nodes, active_node_id) = if persisted_timeline_nodes.is_empty() {
             initial_timeline(&session)
@@ -2393,14 +2396,18 @@ impl WorkspaceEngine {
                 confirmed_by: None,
             });
         }
-        self.update_artifact(artifact_markdown).await;
+        self.update_artifact(ArtifactPayload::Markdown {
+            markdown: artifact_markdown.clone(),
+            diff: None,
+        })
+        .await;
 
         let message_index = self.session.messages.len() as u32;
-        let artifact_snapshot = self.session.artifact.clone().unwrap_or_default();
+        let artifact_snapshot = self.session.artifact.clone().unwrap();
         let checkpoint = self.checkpoint_store.create_checkpoint(
             &self.session.session_id,
             message_index,
-            &artifact_snapshot,
+            artifact_snapshot.markdown_or_empty(),
             WorkspaceStage::AuthorConfirm.as_str(),
         );
 
@@ -2474,7 +2481,12 @@ impl WorkspaceEngine {
                 .map_err(|error| format!("working directory error: {error}"))?,
         };
 
-        let artifact = self.session.artifact.clone().unwrap_or_default();
+        let artifact = self
+            .session
+            .artifact
+            .clone()
+            .map(|payload| payload.into_markdown().unwrap_or_default())
+            .unwrap_or_default();
         let provider = self
             .session
             .reviewer_provider
@@ -2547,7 +2559,12 @@ impl WorkspaceEngine {
                 .map_err(|error| format!("working directory error: {error}"))?,
         };
 
-        let artifact = self.session.artifact.clone().unwrap_or_default();
+        let artifact = self
+            .session
+            .artifact
+            .clone()
+            .map(|payload| payload.into_markdown().unwrap_or_default())
+            .unwrap_or_default();
         let provider = self.session.author_provider.clone();
         let resume_provider_session_id = if allow_resume {
             self.provider_resume_session_id(ProviderConversationRole::Author, &provider)
@@ -2665,7 +2682,10 @@ impl WorkspaceEngine {
         }
 
         if !target.artifact_snapshot.is_empty() {
-            self.session.artifact = Some(target.artifact_snapshot);
+            self.session.artifact = Some(ArtifactPayload::Markdown {
+                markdown: target.artifact_snapshot,
+                diff: None,
+            });
         } else {
             self.session.artifact = None;
         }
@@ -2773,8 +2793,8 @@ impl WorkspaceEngine {
         Ok(())
     }
 
-    pub async fn update_artifact(&mut self, markdown: String) {
-        self.session.artifact = Some(markdown.clone());
+    pub async fn update_artifact(&mut self, payload: ArtifactPayload) {
+        self.session.artifact = Some(payload.clone());
         for version in &mut self.artifact_versions {
             version.is_current = false;
         }
@@ -2783,6 +2803,7 @@ impl WorkspaceEngine {
             .active_node_id
             .clone()
             .unwrap_or_else(|| "timeline_node_unknown".to_string());
+        let markdown = payload.markdown_or_empty().to_string();
         self.artifact_versions.push(ArtifactVersion {
             version,
             markdown,
@@ -2813,7 +2834,7 @@ impl WorkspaceEngine {
             .event_tx
             .send(EngineEvent::ArtifactUpdate {
                 version,
-                markdown: self.session.artifact.clone().unwrap_or_default(),
+                payload: self.session.artifact.clone().unwrap(),
             })
             .await;
     }
@@ -4340,12 +4361,15 @@ fn workspace_status_for_stage(stage: &WorkspaceStage) -> WorkspaceSessionStatus 
     }
 }
 
-fn latest_artifact_from_messages(messages: &[WorkspaceMessageRecord]) -> Option<String> {
+fn latest_artifact_from_messages(messages: &[WorkspaceMessageRecord]) -> Option<ArtifactPayload> {
     messages
         .iter()
         .rev()
         .find(|message| matches!(message.role.as_str(), "assistant" | "provider"))
-        .map(|message| extract_artifact_content(&message.content))
+        .map(|message| ArtifactPayload::Markdown {
+            markdown: extract_artifact_content(&message.content),
+            diff: None,
+        })
 }
 
 #[cfg(test)]
@@ -4364,7 +4388,7 @@ mod tests {
     };
     use crate::protocol::contracts::{AdapterInput, ProviderType};
     use crate::web::workspace_ws_types::{
-        AuthorDecision, ProviderConfigSnapshot, ReviewFindingSeverity, ReviewGate,
+        ArtifactPayload, AuthorDecision, ProviderConfigSnapshot, ReviewFindingSeverity, ReviewGate,
         ReviewVerdictType, TimelineNode, TimelineNodeStatus, TimelineNodeType,
         WorkspaceStage as WsWorkspaceStage,
     };
@@ -4375,6 +4399,13 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let store = Arc::new(CheckpointStore::new(tmp.path().to_path_buf()));
         (tmp, store)
+    }
+
+    fn artifact_payload(markdown: &str) -> ArtifactPayload {
+        ArtifactPayload::Markdown {
+            markdown: markdown.to_string(),
+            diff: None,
+        }
     }
 
     fn make_session(session_id: &str) -> WorkspaceSession {
@@ -4787,7 +4818,9 @@ mod tests {
         let (event_tx, _event_rx) = mpsc::channel(8);
         let mut session = make_session("sess_review_no_resume");
         session.reviewer_provider = Some(ProviderName::Codex);
-        session.artifact = Some("# Story Spec\n\n## 功能需求\n- [REQ-001] Draft.\n".to_string());
+        session.artifact = Some(artifact_payload(
+            "# Story Spec\n\n## 功能需求\n- [REQ-001] Draft.\n",
+        ));
         session.provider_conversations = vec![ProviderConversationRef {
             role: ProviderConversationRole::Reviewer,
             provider: ProviderName::Codex,
@@ -4812,7 +4845,9 @@ mod tests {
     fn workspace_provider_inputs_use_three_hour_timeout() {
         let (event_tx, _event_rx) = mpsc::channel(8);
         let mut session = make_session("sess_workspace_timeout");
-        session.artifact = Some("# Story Spec\n\n## 功能需求\n- [REQ-001] Draft.\n".to_string());
+        session.artifact = Some(artifact_payload(
+            "# Story Spec\n\n## 功能需求\n- [REQ-001] Draft.\n",
+        ));
         let checkpoint_tmp = TempDir::new().unwrap();
         let mut engine = WorkspaceEngine::new(
             Arc::new(CheckpointStore::new(checkpoint_tmp.path().to_path_buf())),
@@ -4877,10 +4912,9 @@ mod tests {
                 created_at: "2026-06-01T00:00:02Z".to_string(),
             },
         ];
-        session.artifact = Some(
-            "# Current Story Spec\n\n## 功能需求\n- [REQ-001] 当前稿。\n\n## 成功标准\n- [AC-001] 当前稿覆盖 n=10 -> 89。\n"
-                .to_string(),
-        );
+        session.artifact = Some(artifact_payload(
+            "# Current Story Spec\n\n## 功能需求\n- [REQ-001] 当前稿。\n\n## 成功标准\n- [AC-001] 当前稿覆盖 n=10 -> 89。\n",
+        ));
         let checkpoint_tmp = TempDir::new().unwrap();
         let engine = WorkspaceEngine::new(
             Arc::new(CheckpointStore::new(checkpoint_tmp.path().to_path_buf())),
@@ -4910,7 +4944,7 @@ mod tests {
         let (event_tx, _event_rx) = mpsc::channel(8);
         let mut session = make_session("sess_design_review_prompt_extracted_artifact");
         session.workspace_type = WorkspaceType::Design;
-        session.artifact = Some(
+        session.artifact = Some(artifact_payload(
             "# 底层依赖安装任务 Design Spec\n\n\
              ## 设计范围\n\n\
              - [DEC-001] 覆盖依赖安装任务。\n\n\
@@ -4919,9 +4953,8 @@ mod tests {
              {\"task_id\":\"install_001\"}\n\
              ```\n\n\
              ## 风险\n\n\
-             - 无。\n"
-                .to_string(),
-        );
+             - 无。\n",
+        ));
         let checkpoint_tmp = TempDir::new().unwrap();
         let engine = WorkspaceEngine::new(
             Arc::new(CheckpointStore::new(checkpoint_tmp.path().to_path_buf())),
@@ -5468,7 +5501,7 @@ mod tests {
             let mut session = make_session(&format!("sess_optional_review_{workspace_type:?}"));
             session.workspace_type = workspace_type.clone();
             session.review_rounds = 2;
-            session.artifact = Some("# Artifact\n\n可用版本".to_string());
+            session.artifact = Some(artifact_payload("# Artifact\n\n可用版本"));
             let mut engine = WorkspaceEngine::new(store, tx, session);
             engine.start_review_or_skip().await;
 
@@ -5529,7 +5562,7 @@ mod tests {
             let mut session = make_session(&format!("sess_strong_review_{workspace_type:?}"));
             session.workspace_type = workspace_type.clone();
             session.review_rounds = 2;
-            session.artifact = Some("# Artifact\n\n缺少验收标准".to_string());
+            session.artifact = Some(artifact_payload("# Artifact\n\n缺少验收标准"));
             let mut engine = WorkspaceEngine::new(store, tx, session);
             engine.start_review_or_skip().await;
 
@@ -5583,7 +5616,7 @@ mod tests {
             let mut session = make_session(&format!("sess_triage_review_{workspace_type:?}"));
             session.workspace_type = workspace_type.clone();
             session.review_rounds = 2;
-            session.artifact = Some("# Artifact\n\n需要人工裁决的版本".to_string());
+            session.artifact = Some(artifact_payload("# Artifact\n\n需要人工裁决的版本"));
             let mut engine = WorkspaceEngine::new(store, tx, session);
             engine.start_review_or_skip().await;
 
@@ -5643,7 +5676,7 @@ mod tests {
             let mut session = make_session(&format!("sess_malformed_review_{workspace_type:?}"));
             session.workspace_type = workspace_type.clone();
             session.review_rounds = 2;
-            session.artifact = Some("# Artifact\n\n需要人工裁决的版本".to_string());
+            session.artifact = Some(artifact_payload("# Artifact\n\n需要人工裁决的版本"));
             let mut engine = WorkspaceEngine::new(store, tx, session);
             engine.start_review_or_skip().await;
 
@@ -5683,7 +5716,7 @@ mod tests {
         let (_tmp, store) = setup();
         let (tx, _) = mpsc::channel(8);
         let mut session = make_session("sess_review_prompt_gate");
-        session.artifact = Some("# Story Spec\n\n可用版本".to_string());
+        session.artifact = Some(artifact_payload("# Story Spec\n\n可用版本"));
         let engine = WorkspaceEngine::new(store, tx, session);
 
         let input = engine.build_review_input().expect("review input");
@@ -6015,8 +6048,8 @@ mod tests {
             engine
                 .session()
                 .artifact
-                .as_deref()
-                .is_some_and(|artifact| artifact.contains("# Story Spec"))
+                .as_ref()
+                .is_some_and(|artifact| artifact.markdown_or_empty().contains("# Story Spec"))
         );
         engine
             .handle_author_decision(AuthorDecision::Accept)
@@ -6095,7 +6128,11 @@ mod tests {
         assert!(prompt.contains("如二者冲突，以用户补充信息为准"));
         assert!(prompt.contains("请根据以上审核意见修改产物"));
         assert_eq!(
-            engine.session().artifact.as_deref(),
+            engine
+                .session()
+                .artifact
+                .as_ref()
+                .map(|payload| payload.markdown_or_empty()),
             Some(revised_artifact.trim())
         );
         engine
@@ -6201,10 +6238,9 @@ mod tests {
 
         let mut session = WorkspaceSession::from_record(session_record);
         session.stage = WorkspaceStage::Revision;
-        session.artifact = Some(
-            "# Story Spec\n\n## 功能需求\n- [REQ-001] 初版。\n\n## 成功标准\n- [AC-001] 初版可验收。\n"
-                .to_string(),
-        );
+        session.artifact = Some(artifact_payload(
+            "# Story Spec\n\n## 功能需求\n- [REQ-001] 初版。\n\n## 成功标准\n- [AC-001] 初版可验收。\n",
+        ));
         session.messages.push(SessionMessage {
             id: "msg_001".to_string(),
             role: "system".to_string(),
@@ -6242,10 +6278,9 @@ mod tests {
         let (tx, _) = mpsc::channel(64);
         let mut session = make_session("sess_revision_delta_prompt");
         session.stage = WorkspaceStage::Revision;
-        session.artifact = Some(
-            "# Story Spec\n\n## 功能需求\n- [REQ-001] 初版。\n\n## 成功标准\n- [AC-001] 初版可验收。\n"
-                .to_string(),
-        );
+        session.artifact = Some(artifact_payload(
+            "# Story Spec\n\n## 功能需求\n- [REQ-001] 初版。\n\n## 成功标准\n- [AC-001] 初版可验收。\n",
+        ));
         session.messages.push(SessionMessage {
             id: "msg_001".to_string(),
             role: "system".to_string(),
@@ -6256,7 +6291,12 @@ mod tests {
         session.messages.push(SessionMessage {
             id: "msg_002".to_string(),
             role: "assistant".to_string(),
-            content: session.artifact.clone().expect("artifact"),
+            content: session
+                .artifact
+                .clone()
+                .unwrap()
+                .into_markdown()
+                .expect("artifact"),
             checkpoint_id: None,
             created_at: chrono::Utc::now().to_rfc3339(),
         });
@@ -6339,7 +6379,7 @@ mod tests {
                 make_session(&format!("sess_revision_resume_stall_{workspace_type:?}"));
             session.workspace_type = workspace_type.clone();
             session.stage = WorkspaceStage::ReviewDecision;
-            session.artifact = Some(artifact.to_string());
+            session.artifact = Some(artifact_payload(artifact));
             session.author_provider = ProviderName::Codex;
             session.messages.push(SessionMessage {
                 id: "msg_001".to_string(),
@@ -6404,7 +6444,14 @@ mod tests {
                 inputs[1].prompt.contains(artifact.trim()),
                 "{workspace_type:?} fresh retry should include prior artifact"
             );
-            assert_eq!(engine.session().artifact.as_deref(), Some(output.trim()));
+            assert_eq!(
+                engine
+                    .session()
+                    .artifact
+                    .as_ref()
+                    .map(|payload| payload.markdown_or_empty()),
+                Some(output.trim())
+            );
             assert_eq!(
                 engine
                     .provider_resume_session_id(
@@ -6423,16 +6470,15 @@ mod tests {
         let mut session = make_session("sess_design_revision_prompt_fence_contract");
         session.workspace_type = WorkspaceType::Design;
         session.stage = WorkspaceStage::Revision;
-        session.artifact = Some(
+        session.artifact = Some(artifact_payload(
             "# 底层依赖安装任务 Design Spec\n\n\
              ## 设计范围\n\n\
              - 覆盖依赖安装任务。\n\n\
              ## API 契约\n\n\
              ```json\n\
              {\"task_id\":\"install_001\"}\n\
-             ```\n"
-                .to_string(),
-        );
+             ```\n",
+        ));
         let checkpoint_tmp = TempDir::new().unwrap();
         let mut engine = WorkspaceEngine::new(
             Arc::new(CheckpointStore::new(checkpoint_tmp.path().to_path_buf())),
@@ -6478,10 +6524,9 @@ mod tests {
         let (tx, _) = mpsc::channel(64);
         let mut session = make_session("sess_revision_delta_legacy_context_note");
         session.stage = WorkspaceStage::Revision;
-        session.artifact = Some(
-            "# Story Spec\n\n## 功能需求\n- [REQ-001] 初版。\n\n## 成功标准\n- [AC-001] 初版可验收。\n"
-                .to_string(),
-        );
+        session.artifact = Some(artifact_payload(
+            "# Story Spec\n\n## 功能需求\n- [REQ-001] 初版。\n\n## 成功标准\n- [AC-001] 初版可验收。\n",
+        ));
         session
             .provider_conversations
             .push(ProviderConversationRef {
@@ -7543,22 +7588,18 @@ mod tests {
 
         assert_eq!(*provider_type.lock().unwrap(), Some(ProviderType::Codex));
         assert_eq!(engine.session().stage, WorkspaceStage::AuthorConfirm);
-        assert!(
-            engine
-                .session()
-                .artifact
-                .as_deref()
-                .is_some_and(
-                    |artifact| artifact.contains("## 功能需求") && artifact.contains("## 成功标准")
-                )
-        );
+        assert!(engine.session().artifact.as_ref().is_some_and(|artifact| {
+            let artifact = artifact.markdown_or_empty();
+            artifact.contains("## 功能需求") && artifact.contains("## 成功标准")
+        }));
 
         let mut saw_artifact = false;
         let mut saw_author_confirm = false;
         while let Ok(event) = rx.try_recv() {
             match event {
-                EngineEvent::ArtifactUpdate { markdown, .. }
-                    if markdown.contains("## 功能需求") && markdown.contains("## 成功标准") =>
+                EngineEvent::ArtifactUpdate { payload, .. }
+                    if payload.markdown_or_empty().contains("## 功能需求")
+                        && payload.markdown_or_empty().contains("## 成功标准") =>
                 {
                     saw_artifact = true;
                 }
@@ -7599,18 +7640,16 @@ mod tests {
             .unwrap();
 
         assert_eq!(engine.session().stage, WorkspaceStage::CrossReview);
-        assert!(
-            engine
-                .session()
-                .artifact
-                .as_deref()
-                .is_some_and(|artifact| artifact.contains("# Streamed Story Spec"))
-        );
+        assert!(engine.session().artifact.as_ref().is_some_and(|artifact| {
+            artifact
+                .markdown_or_empty()
+                .contains("# Streamed Story Spec")
+        }));
         assert!(
             drain_engine_events(&mut rx).iter().any(|event| matches!(
                 event,
-                EngineEvent::ArtifactUpdate { markdown, .. }
-                    if markdown.contains("# Streamed Story Spec")
+                EngineEvent::ArtifactUpdate { payload, .. }
+                    if payload.markdown_or_empty().contains("# Streamed Story Spec")
             )),
             "streamed artifact should be published even when Completed.full_output is only a summary"
         );
@@ -7655,20 +7694,15 @@ mod tests {
         drop(inputs);
 
         assert_eq!(engine.session().stage, WorkspaceStage::AuthorConfirm);
-        assert!(
-            engine
-                .session()
-                .artifact
-                .as_deref()
-                .is_some_and(
-                    |artifact| artifact.contains("## 设计决策") && artifact.contains("## 公共组件")
-                )
-        );
+        assert!(engine.session().artifact.as_ref().is_some_and(|artifact| {
+            let artifact = artifact.markdown_or_empty();
+            artifact.contains("## 设计决策") && artifact.contains("## 公共组件")
+        }));
         assert!(
             drain_engine_events(&mut rx).iter().any(|event| matches!(
                 event,
-                EngineEvent::ArtifactUpdate { markdown, .. }
-                    if markdown.contains("# Retried Design Spec")
+                EngineEvent::ArtifactUpdate { payload, .. }
+                    if payload.markdown_or_empty().contains("# Retried Design Spec")
             )),
             "retry artifact should be published"
         );

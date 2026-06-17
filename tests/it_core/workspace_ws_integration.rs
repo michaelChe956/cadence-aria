@@ -567,8 +567,8 @@ async fn workspace_ws_streams_persistent_session_and_confirms_lifecycle_entity()
     for _ in 0..220 {
         match recv_json(&mut ws).await {
             WsOutMessage::StreamChunk { content, .. } => stream_chunks.push_str(&content),
-            WsOutMessage::ArtifactUpdate { markdown, .. } => {
-                saw_artifact = markdown.contains("Story Spec");
+            WsOutMessage::ArtifactUpdate { payload, .. } => {
+                saw_artifact = payload.markdown_or_empty().contains("Story Spec");
             }
             WsOutMessage::MessageComplete {
                 checkpoint_id: next_checkpoint,
