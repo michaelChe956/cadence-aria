@@ -639,7 +639,7 @@ impl ArtifactVersion {
         self.payload.markdown_or_empty()
     }
 
-    pub fn markdown_string(&self) -> String {
+    pub fn to_markdown_string(&self) -> String {
         self.payload.markdown_or_empty().to_string()
     }
 }

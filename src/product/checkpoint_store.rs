@@ -5,6 +5,9 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::product::json_store::{ProductStoreError, read_json, write_json};
+// `ArtifactPayload` is a WebSocket protocol DTO currently defined in the web layer.
+// product layer reuses it for checkpoint snapshots. Future iterations should move
+// these shared types to `product::models` to eliminate the upward dependency.
 use crate::web::workspace_ws_types::ArtifactPayload;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

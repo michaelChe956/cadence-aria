@@ -2643,7 +2643,7 @@ fn artifact_version_dtos(
 fn artifact_version_dto(version: ArtifactVersion) -> ArtifactVersionDto {
     ArtifactVersionDto {
         version: version.version,
-        markdown: version.markdown_string(),
+        markdown: version.to_markdown_string(),
         generated_by: provider_name_text(&version.generated_by).to_string(),
         reviewed_by: version
             .reviewed_by

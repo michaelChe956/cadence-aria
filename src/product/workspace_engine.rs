@@ -99,7 +99,11 @@ fn build_artifact_version_summary(version: &ArtifactVersion) -> ArtifactVersionS
     let (markdown_size, markdown_preview) = match &version.payload {
         ArtifactPayload::Markdown { markdown, .. } => (markdown.len(), preview(markdown)),
         ArtifactPayload::WorkItemPlanCandidate { candidate } => {
-            let size = serde_json::to_string(candidate).unwrap_or_default().len();
+            // For the candidate variant, `markdown_size`/`markdown_preview` reuse the
+            // summary schema fields for compatibility: the size is the JSON length of
+            // the candidate and the preview is the title of the first work item (or the
+            // plan id as a fallback). In a future iteration we may rename these fields.
+            let size = serde_json::to_string(candidate).map_or(0, |s| s.len());
             let preview_text = candidate
                 .work_items
                 .first()
@@ -2836,7 +2840,7 @@ impl WorkspaceEngine {
             .event_tx
             .send(EngineEvent::ArtifactUpdate {
                 version,
-                payload: self.session.artifact.clone().unwrap(),
+                payload: payload.clone(),
             })
             .await;
     }

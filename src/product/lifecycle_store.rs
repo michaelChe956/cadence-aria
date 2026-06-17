@@ -19,6 +19,10 @@ use crate::product::models::{
     WorkItemKind, WorkItemPlanStatus, WorkItemStatus, WorkspaceMessageRecord,
     WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType,
 };
+// `ArtifactVersion` and `TimelineNode` are WebSocket protocol DTOs currently defined
+// in the web layer; product layer reuses them for persistence. Future iterations
+// should move these shared types to `product::models` to eliminate the upward
+// dependency.
 use crate::web::workspace_ws_types::{ArtifactVersion, TimelineNode};
 
 #[derive(Debug, Clone, PartialEq, Eq)]

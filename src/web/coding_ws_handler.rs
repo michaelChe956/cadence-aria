@@ -1521,7 +1521,7 @@ fn coding_execution_context(
             .list_artifact_versions(&session.id)?
             .into_iter()
             .last()
-            .map(|version| version.markdown_string())
+            .map(|version| version.to_markdown_string())
             .and_then(|markdown| select_work_item_markdown(Some(markdown), session))
             .or_else(|| select_work_item_markdown(None, session)),
         None => None,
