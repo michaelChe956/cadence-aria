@@ -18,18 +18,23 @@ use crate::product::checkpoint_store::CheckpointStore;
 use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::{AppendSpecVersionInput, LifecycleStore};
 use crate::product::models::{
-    AgentRole, ArtifactRef, LifecycleConfirmationStatus, NodeDetail, PermissionEvent,
-    ProviderConversationRef, ProviderConversationRole, ProviderName, ProviderSnapshot,
-    WorkItemPlanStatus, WorkspaceMessageRecord, WorkspaceSessionRecord, WorkspaceSessionStatus,
-    WorkspaceType,
+    AgentRole, ArtifactRef, LifecycleConfirmationStatus, LifecycleWorkItemRecord, NodeDetail,
+    PermissionEvent, ProviderConversationRef, ProviderConversationRole, ProviderName,
+    ProviderSnapshot, WorkItemPlanStatus, WorkItemSplitFinding, WorkspaceMessageRecord,
+    WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType,
 };
+use crate::product::work_item_split_engine::WorkItemSplitProviderOutput;
+use crate::product::work_item_split_validator::WorkItemSplitValidator;
 use crate::protocol::contracts::{AdapterRole, ProviderType};
 use crate::web::workspace_ws_types::{
     ArtifactPayload, ArtifactVersion, ArtifactVersionSummary, AuthorDecision, ChoiceOption,
-    HumanConfirmDecision, NodeDetailSummary, ProviderConfigSnapshot, ReviewFinding,
-    ReviewFindingSeverity, ReviewGate, ReviewVerdict, ReviewVerdictType, TimelineNode,
-    TimelineNodeStatus, TimelineNodeType, WorkspaceStage as WsWorkspaceStage, WsCheckpointDto,
-    WsMessageDto, WsOutMessage, WsProviderConfig,
+    HumanConfirmDecision, NodeDetailSummary, ProviderConfigSnapshot, RepositoryProfileDto,
+    ReviewFinding, ReviewFindingSeverity, ReviewGate, ReviewVerdict, ReviewVerdictType,
+    TimelineNode, TimelineNodeStatus, TimelineNodeType, ValidatorFindingDto,
+    VerificationCommandDto, VerificationManualCheckDto, VerificationPlanDto, WorkItemCandidateDto,
+    WorkItemCandidateMetaDto, WorkItemDependencyEdgeDto, WorkItemPlanCandidateDto, WorkItemPlanDto,
+    WorkItemSplitOptionsDto, WorkspaceStage as WsWorkspaceStage, WsCheckpointDto, WsMessageDto,
+    WsOutMessage, WsProviderConfig,
 };
 
 const SUMMARY_PREVIEW_CHARS: usize = 2048;
@@ -48,6 +53,135 @@ fn serialized_string<T: serde::Serialize>(value: &T) -> String {
         .ok()
         .and_then(|value| value.as_str().map(str::to_string))
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn snake_case_enum_str<T: std::fmt::Debug>(value: &T) -> String {
+    format!("{:?}", value).to_lowercase()
+}
+
+fn build_work_item_plan_candidate_dto(
+    lifecycle: &LifecycleStore,
+    project_id: &str,
+    issue_id: &str,
+    plan_id: &str,
+) -> Result<WorkItemPlanCandidateDto, ProductStoreError> {
+    let plan = lifecycle.get_issue_work_item_plan(project_id, issue_id, plan_id)?;
+    let work_items = lifecycle.list_work_items(project_id, issue_id)?;
+    let plan_work_items: Vec<&LifecycleWorkItemRecord> = work_items
+        .iter()
+        .filter(|wi| plan.work_item_ids.contains(&wi.id))
+        .collect();
+
+    let verification_plans: Vec<VerificationPlanDto> = plan
+        .verification_plan_ids
+        .iter()
+        .filter_map(|vp_id| {
+            lifecycle
+                .get_verification_plan(project_id, issue_id, vp_id)
+                .ok()
+        })
+        .map(|vp| VerificationPlanDto {
+            plan_ref: vp.id,
+            scope: snake_case_enum_str(&vp.scope),
+            commands: vp
+                .commands
+                .iter()
+                .map(|cmd| VerificationCommandDto {
+                    label: cmd.label.clone(),
+                    command: cmd.command.clone(),
+                    cwd: cmd.cwd.clone(),
+                    purpose: cmd.purpose.clone(),
+                    required: cmd.required,
+                    timeout_seconds: cmd.timeout_seconds,
+                    safety: snake_case_enum_str(&cmd.safety),
+                })
+                .collect(),
+            manual_checks: vp
+                .manual_checks
+                .iter()
+                .map(|check| VerificationManualCheckDto {
+                    label: check.label.clone(),
+                    instructions: check.instructions.clone(),
+                    required: check.required,
+                })
+                .collect(),
+            required_gates: vp.required_gates,
+            risk_notes: vp.risk_notes,
+            confidence: snake_case_enum_str(&vp.confidence),
+            fallback_policy: snake_case_enum_str(&vp.fallback_policy),
+        })
+        .collect();
+
+    let repository_profile = plan
+        .repository_profile_ref
+        .as_ref()
+        .and_then(|rid| {
+            lifecycle
+                .get_repository_profile(project_id, issue_id, rid)
+                .ok()
+        })
+        .map(|rp| RepositoryProfileDto {
+            profile_id: rp.id,
+            repository_id: rp.repository_id,
+            languages: rp.languages,
+            frameworks: rp.frameworks,
+            package_managers: rp.package_managers,
+            test_frameworks: rp.test_frameworks,
+            build_systems: rp.build_systems,
+            detected_layers: rp.detected_layers,
+            split_recommendation: rp.split_recommendation,
+            confidence: snake_case_enum_str(&rp.confidence),
+        });
+
+    let work_item_dtos: Vec<WorkItemCandidateDto> = plan_work_items
+        .iter()
+        .map(|wi| WorkItemCandidateDto {
+            id: wi.id.clone(),
+            kind: snake_case_enum_str(&wi.kind),
+            title: wi.title.clone(),
+            depends_on: wi.depends_on.clone(),
+            exclusive_write_scopes: wi.exclusive_write_scopes.clone(),
+            verification_plan_ref: wi.verification_plan_ref.clone(),
+            meta: WorkItemCandidateMetaDto {
+                reverted: false,
+                revert_feedback: None,
+            },
+        })
+        .collect();
+
+    Ok(WorkItemPlanCandidateDto {
+        plan: WorkItemPlanDto {
+            id: plan.id,
+            status: snake_case_enum_str(&plan.status),
+            options: WorkItemSplitOptionsDto {
+                include_integration_tests: plan.options.include_integration_tests,
+                include_e2e_tests: plan.options.include_e2e_tests,
+                force_frontend_backend_split: plan.options.force_frontend_backend_split,
+                require_execution_plan_confirm: plan.options.require_execution_plan_confirm,
+            },
+            dependency_graph: plan
+                .dependency_graph
+                .iter()
+                .map(|e| WorkItemDependencyEdgeDto {
+                    from_work_item_id: e.from_work_item_id.clone(),
+                    to_work_item_id: e.to_work_item_id.clone(),
+                })
+                .collect(),
+        },
+        work_items: work_item_dtos,
+        verification_plans,
+        repository_profile,
+        validator_findings: plan
+            .validator_findings
+            .iter()
+            .map(|f| ValidatorFindingDto {
+                severity: snake_case_enum_str(&f.severity),
+                code: f.code.clone(),
+                message: f.message.clone(),
+                work_item_ids: f.work_item_ids.clone(),
+            })
+            .collect(),
+    })
 }
 
 fn build_node_detail_summary(detail: &NodeDetail) -> NodeDetailSummary {
@@ -347,6 +481,17 @@ pub enum AuthorDecisionOutcome {
     PrepareContext,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkItemPlanAuthorOutcome {
+    /// validate 通过（warnings 随 candidate 推送），进 AuthorConfirm。
+    AuthorConfirm,
+    /// validate 有 errors，需 handler 层重新调 WorkItemSplitEngine::generate 重生。
+    /// findings 作为 revision feedback 注入重生 prompt。
+    AutoRevision { findings: Vec<WorkItemSplitFinding> },
+    /// 连续重生超阈值（3 次）仍 has_errors，交用户决策。
+    HumanConfirm { reason: String },
+}
+
 pub struct WorkspaceEngine {
     checkpoint_store: Arc<CheckpointStore>,
     lifecycle_store: Option<LifecycleStore>,
@@ -361,6 +506,7 @@ pub struct WorkspaceEngine {
     pending_author_choice: Option<PendingAuthorChoice>,
     active_run_id: Option<String>,
     stream_buffers: HashMap<String, PendingStreamBuffer>,
+    work_item_plan_author_retry_count: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -481,6 +627,7 @@ impl WorkspaceEngine {
             pending_author_choice: None,
             active_run_id: None,
             stream_buffers: HashMap::new(),
+            work_item_plan_author_retry_count: 0,
         }
     }
 
@@ -537,6 +684,7 @@ impl WorkspaceEngine {
             pending_author_choice,
             active_run_id: None,
             stream_buffers: HashMap::new(),
+            work_item_plan_author_retry_count: 0,
         }
     }
 
@@ -2845,6 +2993,95 @@ impl WorkspaceEngine {
             .await;
     }
 
+    pub async fn complete_work_item_plan_author(
+        &mut self,
+        output: WorkItemSplitProviderOutput,
+    ) -> Result<WorkItemPlanAuthorOutcome, String> {
+        let lifecycle = self
+            .lifecycle_store
+            .clone()
+            .ok_or("lifecycle_store unavailable")?;
+        let project_id = self.session.project_id.clone();
+        let issue_id = self.session.issue_id.clone();
+        let plan_id = self.session.entity_id.clone();
+
+        let report = WorkItemSplitValidator::validate(
+            &output.plan,
+            &output.work_items,
+            Some(&output.repository_profile),
+            &output.verification_plans,
+        );
+        let findings = report.findings.clone();
+
+        if report.has_errors() {
+            self.work_item_plan_author_retry_count += 1;
+            if self.work_item_plan_author_retry_count >= 3 {
+                self.enter_human_confirm_for_work_item_plan_author_failure(&findings)
+                    .await;
+                return Ok(WorkItemPlanAuthorOutcome::HumanConfirm {
+                    reason: "validate 连续 3 次失败".to_string(),
+                });
+            }
+
+            let _ = lifecycle.replace_issue_work_item_plan_candidate(
+                &project_id,
+                &issue_id,
+                &plan_id,
+                &output,
+                findings.clone(),
+            );
+            return Ok(WorkItemPlanAuthorOutcome::AutoRevision { findings });
+        }
+
+        lifecycle
+            .replace_issue_work_item_plan_candidate(
+                &project_id,
+                &issue_id,
+                &plan_id,
+                &output,
+                findings.clone(),
+            )
+            .map_err(|e| format!("replace candidate failed: {e}"))?;
+
+        let candidate =
+            build_work_item_plan_candidate_dto(&lifecycle, &project_id, &issue_id, &plan_id)
+                .map_err(|e| format!("build candidate dto failed: {e}"))?;
+        self.update_artifact(ArtifactPayload::WorkItemPlanCandidate {
+            candidate: Box::new(candidate),
+        })
+        .await;
+
+        self.enter_author_confirm(Some("WorkItemPlan 候选已生成，等待确认".to_string()))
+            .await;
+
+        self.work_item_plan_author_retry_count = 0;
+        Ok(WorkItemPlanAuthorOutcome::AuthorConfirm)
+    }
+
+    async fn enter_human_confirm_for_work_item_plan_author_failure(
+        &mut self,
+        _findings: &[WorkItemSplitFinding],
+    ) {
+        self.transition_stage(WorkspaceStage::HumanConfirm).await;
+        if let Some(store) = &self.lifecycle_store {
+            let _ = store.update_workspace_session_status(
+                &self.session.session_id,
+                WorkspaceSessionStatus::WaitingForHuman,
+            );
+        }
+        let _ = self
+            .create_timeline_node(TimelineNodeDraft {
+                node_type: TimelineNodeType::HumanConfirm,
+                agent: None,
+                stage: WorkspaceStage::HumanConfirm,
+                round: None,
+                title: "WorkItemPlan validate 连续失败".to_string(),
+                summary: Some("author 多次重生仍 validate 失败，需人工介入".to_string()),
+                status: TimelineNodeStatus::Active,
+            })
+            .await;
+    }
+
     async fn transition_stage(&mut self, new_stage: WorkspaceStage) {
         self.session.stage = new_stage;
         let _ = self
@@ -4389,7 +4626,7 @@ mod tests {
     use crate::product::app_paths::ProductAppPaths;
     use crate::product::lifecycle_store::CreateWorkspaceSessionInput;
     use crate::product::models::{
-        AgentRole, ArtifactRef, NodeDetail, PermissionEvent, ProviderSnapshot,
+        AgentRole, ArtifactRef, IssueWorkItemPlan, NodeDetail, PermissionEvent, ProviderSnapshot,
         WorkspaceMessageRecord,
     };
     use crate::protocol::contracts::{AdapterInput, ProviderType};
@@ -8481,5 +8718,287 @@ mod tests {
         assert!(saw_prepare);
         assert_eq!(engine.session().stage, WorkspaceStage::PrepareContext);
         assert_eq!(engine.session().messages.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn complete_work_item_plan_author_pushes_candidate_and_enters_author_confirm() {
+        use crate::product::lifecycle_store::{
+            CreateDesignSpecInput, CreateIssueWorkItemPlanInput, CreateStorySpecInput,
+        };
+        use crate::product::models::{
+            IssueWorkItemDependencyEdge, IssueWorkItemPlanOptions, IssueWorkItemPlanStatus,
+            LifecycleWorkItemRecord, RepositoryProfile, RepositoryProfileConfidence,
+            VerificationCommand, VerificationCommandSafety, VerificationCommandSource,
+            VerificationFallbackPolicy, VerificationManualCheck, VerificationPlan,
+            VerificationScope, WorkItemContextBudget, WorkItemExecutionPlanStatus, WorkItemKind,
+            WorkItemPlanStatus, WorkItemStatus,
+        };
+        use crate::product::work_item_split_engine::WorkItemSplitProviderOutput;
+
+        let (_tmp, checkpoint_store) = setup();
+        let app_root = tempfile::tempdir().expect("app root");
+        let lifecycle_store =
+            LifecycleStore::new(ProductAppPaths::new(app_root.path().join(".aria")));
+        let project_id = "project_0001";
+        let issue_id = "issue_0001";
+        let repository_id = "repo_0001";
+
+        let story = lifecycle_store
+            .create_story_spec(CreateStorySpecInput {
+                project_id: project_id.to_string(),
+                issue_id: issue_id.to_string(),
+                repository_id: repository_id.to_string(),
+                title: "Story".to_string(),
+            })
+            .unwrap();
+        let design = lifecycle_store
+            .create_design_spec(CreateDesignSpecInput {
+                project_id: project_id.to_string(),
+                issue_id: issue_id.to_string(),
+                story_spec_ids: vec![story.id.clone()],
+                design_kind: crate::product::models::DesignKind::Backend,
+                title: "Design".to_string(),
+            })
+            .unwrap();
+
+        let plan = lifecycle_store
+            .create_issue_work_item_plan(CreateIssueWorkItemPlanInput {
+                id: Some("issue_work_item_plan_0001".to_string()),
+                project_id: project_id.to_string(),
+                issue_id: issue_id.to_string(),
+                source_story_spec_ids: vec![story.id.clone()],
+                source_design_spec_ids: vec![design.id.clone()],
+                options: IssueWorkItemPlanOptions {
+                    include_integration_tests: false,
+                    include_e2e_tests: false,
+                    force_frontend_backend_split: false,
+                    require_execution_plan_confirm: false,
+                },
+                status: IssueWorkItemPlanStatus::Draft,
+                work_item_ids: vec![],
+                repository_profile_ref: None,
+                verification_plan_ids: vec![],
+                dependency_graph: vec![],
+                created_from_provider_run: None,
+                validator_findings: vec![],
+            })
+            .unwrap();
+
+        let session_record = lifecycle_store
+            .create_workspace_session(CreateWorkspaceSessionInput {
+                project_id: project_id.to_string(),
+                issue_id: issue_id.to_string(),
+                entity_id: plan.id.clone(),
+                workspace_type: WorkspaceType::WorkItemPlan,
+                author_provider: ProviderName::Codex,
+                reviewer_provider: ProviderName::ClaudeCode,
+                review_rounds: 0,
+                superpowers_enabled: false,
+                openspec_enabled: false,
+            })
+            .unwrap();
+
+        let session = WorkspaceSession::from_record(session_record);
+        let (tx, _rx) = mpsc::channel(64);
+        let mut engine =
+            WorkspaceEngine::new_persistent(checkpoint_store, lifecycle_store.clone(), tx, session);
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let repository_profile = RepositoryProfile {
+            id: "repo_profile_0001".to_string(),
+            project_id: project_id.to_string(),
+            issue_id: issue_id.to_string(),
+            repository_id: repository_id.to_string(),
+            provider_run_ref: None,
+            languages: vec!["rust".to_string()],
+            frameworks: vec![],
+            package_managers: vec!["cargo".to_string()],
+            test_frameworks: vec![],
+            build_systems: vec!["cargo".to_string()],
+            verification_capabilities: vec![],
+            detected_layers: vec!["backend".to_string()],
+            split_recommendation: "backend_only".to_string(),
+            confidence: RepositoryProfileConfidence::High,
+            uncertainties: vec![],
+            created_at: now.clone(),
+            updated_at: now.clone(),
+        };
+
+        let work_items = vec![
+            LifecycleWorkItemRecord {
+                id: "wi_001".to_string(),
+                project_id: project_id.to_string(),
+                issue_id: issue_id.to_string(),
+                repository_id: repository_id.to_string(),
+                story_spec_ids: vec![story.id.clone()],
+                design_spec_ids: vec![design.id.clone()],
+                title: "Backend work item".to_string(),
+                plan_status: WorkItemPlanStatus::Draft,
+                execution_status: WorkItemStatus::Pending,
+                worktree_path: None,
+                work_item_set_id: None,
+                kind: WorkItemKind::Backend,
+                sequence_hint: None,
+                depends_on: vec![],
+                exclusive_write_scopes: vec!["src/backend.rs".to_string()],
+                forbidden_write_scopes: vec![],
+                context_budget: WorkItemContextBudget::default(),
+                required_handoff_from: vec![],
+                verification_plan_ref: Some("vp_001".to_string()),
+                require_execution_plan_confirm: false,
+                execution_plan_status: WorkItemExecutionPlanStatus::NotStarted,
+                handoff_summary_ref: None,
+                completion_commit: None,
+                completion_diff_summary_ref: None,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            },
+            LifecycleWorkItemRecord {
+                id: "wi_002".to_string(),
+                project_id: project_id.to_string(),
+                issue_id: issue_id.to_string(),
+                repository_id: repository_id.to_string(),
+                story_spec_ids: vec![story.id.clone()],
+                design_spec_ids: vec![design.id.clone()],
+                title: "Frontend work item".to_string(),
+                plan_status: WorkItemPlanStatus::Draft,
+                execution_status: WorkItemStatus::Pending,
+                worktree_path: None,
+                work_item_set_id: None,
+                kind: WorkItemKind::Frontend,
+                sequence_hint: None,
+                depends_on: vec!["wi_001".to_string()],
+                exclusive_write_scopes: vec!["src/frontend.rs".to_string()],
+                forbidden_write_scopes: vec![],
+                context_budget: WorkItemContextBudget::default(),
+                required_handoff_from: vec![],
+                verification_plan_ref: Some("vp_002".to_string()),
+                require_execution_plan_confirm: false,
+                execution_plan_status: WorkItemExecutionPlanStatus::NotStarted,
+                handoff_summary_ref: None,
+                completion_commit: None,
+                completion_diff_summary_ref: None,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            },
+        ];
+
+        let verification_plans = vec![
+            VerificationPlan {
+                id: "vp_001".to_string(),
+                project_id: project_id.to_string(),
+                issue_id: issue_id.to_string(),
+                work_item_id: "wi_001".to_string(),
+                repository_profile_ref: Some("repo_profile_0001".to_string()),
+                provider_run_ref: None,
+                scope: VerificationScope::Unit,
+                commands: vec![VerificationCommand {
+                    id: "cmd_001".to_string(),
+                    label: "cargo test".to_string(),
+                    command: "cargo test".to_string(),
+                    cwd: "".to_string(),
+                    purpose: "unit tests".to_string(),
+                    required: true,
+                    timeout_seconds: 120,
+                    source: VerificationCommandSource::Provider,
+                    safety: VerificationCommandSafety::Approved,
+                }],
+                manual_checks: vec![VerificationManualCheck {
+                    id: "check_001".to_string(),
+                    label: "manual".to_string(),
+                    instructions: "check".to_string(),
+                    required: false,
+                }],
+                required_gates: vec!["cmd_001".to_string()],
+                risk_notes: vec![],
+                confidence: RepositoryProfileConfidence::High,
+                fallback_policy: VerificationFallbackPolicy::ManualGate,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            },
+            VerificationPlan {
+                id: "vp_002".to_string(),
+                project_id: project_id.to_string(),
+                issue_id: issue_id.to_string(),
+                work_item_id: "wi_002".to_string(),
+                repository_profile_ref: Some("repo_profile_0001".to_string()),
+                provider_run_ref: None,
+                scope: VerificationScope::Unit,
+                commands: vec![VerificationCommand {
+                    id: "cmd_002".to_string(),
+                    label: "cargo test".to_string(),
+                    command: "cargo test".to_string(),
+                    cwd: "".to_string(),
+                    purpose: "unit tests".to_string(),
+                    required: true,
+                    timeout_seconds: 120,
+                    source: VerificationCommandSource::Provider,
+                    safety: VerificationCommandSafety::Approved,
+                }],
+                manual_checks: vec![],
+                required_gates: vec![],
+                risk_notes: vec![],
+                confidence: RepositoryProfileConfidence::High,
+                fallback_policy: VerificationFallbackPolicy::ManualGate,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            },
+        ];
+
+        let plan_record = IssueWorkItemPlan {
+            id: plan.id.clone(),
+            project_id: project_id.to_string(),
+            issue_id: issue_id.to_string(),
+            source_story_spec_ids: vec![story.id.clone()],
+            source_design_spec_ids: vec![design.id.clone()],
+            options: IssueWorkItemPlanOptions {
+                include_integration_tests: false,
+                include_e2e_tests: false,
+                force_frontend_backend_split: false,
+                require_execution_plan_confirm: false,
+            },
+            status: IssueWorkItemPlanStatus::Draft,
+            work_item_ids: vec!["wi_001".to_string(), "wi_002".to_string()],
+            repository_profile_ref: Some("repo_profile_0001".to_string()),
+            verification_plan_ids: vec!["vp_001".to_string(), "vp_002".to_string()],
+            dependency_graph: vec![IssueWorkItemDependencyEdge {
+                from_work_item_id: "wi_001".to_string(),
+                to_work_item_id: "wi_002".to_string(),
+            }],
+            created_from_provider_run: None,
+            validator_findings: vec![],
+            review_summary: None,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+        };
+
+        let output = WorkItemSplitProviderOutput {
+            repository_profile,
+            plan: plan_record,
+            work_items,
+            verification_plans,
+        };
+
+        let outcome = engine
+            .complete_work_item_plan_author(output)
+            .await
+            .expect("author completion should succeed");
+        assert!(matches!(outcome, WorkItemPlanAuthorOutcome::AuthorConfirm));
+
+        let artifact = engine
+            .session()
+            .artifact
+            .as_ref()
+            .expect("artifact should be set");
+        assert!(matches!(
+            artifact,
+            ArtifactPayload::WorkItemPlanCandidate { .. }
+        ));
+        assert_eq!(engine.session().stage, WorkspaceStage::AuthorConfirm);
+
+        if let ArtifactPayload::WorkItemPlanCandidate { candidate } = artifact {
+            assert_eq!(candidate.work_items.len(), 2);
+            assert_eq!(candidate.plan.id, plan.id);
+        }
     }
 }
