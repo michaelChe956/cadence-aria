@@ -18,10 +18,11 @@ use crate::product::checkpoint_store::CheckpointStore;
 use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::{AppendSpecVersionInput, LifecycleStore};
 use crate::product::models::{
-    AgentRole, ArtifactRef, LifecycleConfirmationStatus, LifecycleWorkItemRecord, NodeDetail,
-    PermissionEvent, ProviderConversationRef, ProviderConversationRole, ProviderName,
-    ProviderSnapshot, WorkItemPlanStatus, WorkItemSplitFinding, WorkspaceMessageRecord,
-    WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType,
+    AgentRole, ArtifactRef, IssueWorkItemPlan, LifecycleConfirmationStatus,
+    LifecycleWorkItemRecord, NodeDetail, PermissionEvent, ProviderConversationRef,
+    ProviderConversationRole, ProviderName, ProviderSnapshot, WorkItemPlanStatus,
+    WorkItemSplitFinding, WorkspaceMessageRecord, WorkspaceSessionRecord, WorkspaceSessionStatus,
+    WorkspaceType,
 };
 use crate::product::work_item_split_engine::{RedoSpec, WorkItemSplitProviderOutput};
 use crate::product::work_item_split_validator::WorkItemSplitValidator;
@@ -3044,37 +3045,7 @@ impl WorkspaceEngine {
                 self.mark_latest_artifact_confirmed(Some("human".to_string()));
                 match self.session.workspace_type {
                     WorkspaceType::WorkItemPlan => {
-                        let lifecycle = self
-                            .lifecycle_store
-                            .clone()
-                            .ok_or("lifecycle_store unavailable")?;
-                        let project_id = self.session.project_id.clone();
-                        let issue_id = self.session.issue_id.clone();
-                        let plan_id = self.session.entity_id.clone();
-
-                        let (plan, _confirmed) = lifecycle
-                            .confirm_issue_work_item_plan(&project_id, &issue_id, &plan_id)
-                            .map_err(|e| format!("confirm plan failed: {e}"))?;
-
-                        let new_sessions = lifecycle
-                            .ensure_work_item_sessions_for_plan(
-                                &project_id,
-                                &issue_id,
-                                &plan_id,
-                                self.session.author_provider.clone(),
-                                self.session.reviewer_provider.clone(),
-                                self.session.review_rounds,
-                                self.session.superpowers_enabled,
-                                self.session.openspec_enabled,
-                            )
-                            .map_err(|e| format!("ensure child sessions failed: {e}"))?;
-
-                        if let Some(store) = &self.lifecycle_store {
-                            let _ = store.update_workspace_session_status(
-                                &self.session.session_id,
-                                WorkspaceSessionStatus::Confirmed,
-                            );
-                        }
+                        let (plan, new_sessions) = self.confirm_work_item_plan().await?;
                         self.transition_stage(WorkspaceStage::Completed).await;
                         let _ = self
                             .create_timeline_node(TimelineNodeDraft {
@@ -3143,6 +3114,45 @@ impl WorkspaceEngine {
             _ => {}
         }
         Ok(WorkspaceConfirmOutcome::None)
+    }
+
+    /// WorkItemPlan 确认：plan/work_items Draft -> Confirmed，并幂等创建子 WorkItem session。
+    async fn confirm_work_item_plan(
+        &mut self,
+    ) -> Result<(IssueWorkItemPlan, Vec<WorkspaceSessionRecord>), String> {
+        let lifecycle = self
+            .lifecycle_store
+            .clone()
+            .ok_or("lifecycle_store unavailable")?;
+        let project_id = self.session.project_id.clone();
+        let issue_id = self.session.issue_id.clone();
+        let plan_id = self.session.entity_id.clone();
+
+        let (plan, _confirmed) = lifecycle
+            .confirm_issue_work_item_plan(&project_id, &issue_id, &plan_id)
+            .map_err(|e| format!("confirm plan failed: {e}"))?;
+
+        let new_sessions = lifecycle
+            .ensure_work_item_sessions_for_plan(
+                &project_id,
+                &issue_id,
+                &plan_id,
+                self.session.author_provider.clone(),
+                self.session.reviewer_provider.clone(),
+                self.session.review_rounds,
+                self.session.superpowers_enabled,
+                self.session.openspec_enabled,
+            )
+            .map_err(|e| format!("ensure child sessions failed: {e}"))?;
+
+        if let Some(store) = &self.lifecycle_store {
+            let _ = store.update_workspace_session_status(
+                &self.session.session_id,
+                WorkspaceSessionStatus::Confirmed,
+            );
+        }
+
+        Ok((plan, new_sessions))
     }
 
     pub fn handle_abort(&mut self) {
