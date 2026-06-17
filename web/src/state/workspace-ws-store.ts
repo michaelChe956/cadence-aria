@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { NodeDetail, WorkspaceProviderName } from "../api/types";
+import type { NodeDetail, WorkspaceProviderName, WorkItemPlanCandidateDto } from "../api/types";
 import type { WorkspaceContentRef } from "./chat-entries";
 import type {
   ChatEntry,
@@ -13,6 +13,12 @@ import {
   setWorkspaceContentCacheEntry,
   type WorkspaceContentCache,
 } from "./workspace-content-cache";
+
+type WorkspaceArtifact =
+  | string
+  | null
+  | { markdown: string; diff?: string | null }
+  | { candidate: WorkItemPlanCandidateDto };
 
 export type WsConnectionStatus = "disconnected" | "connecting" | "connected" | "error";
 export type ProviderStatus =
@@ -195,6 +201,7 @@ export interface WorkspaceWsState {
   checkpoints: WsCheckpoint[];
   chatEntries: ChatEntry[];
   artifact: string | null;
+  workItemPlanCandidate: WorkItemPlanCandidateDto | null;
   providers: WsProviderConfig | null;
   connectionStatus: WsConnectionStatus;
   streamingContent: string;
@@ -234,7 +241,7 @@ export interface WorkspaceWsActions {
     openspec_enabled?: boolean;
     messages: WsMessage[];
     checkpoints: WsCheckpoint[];
-    artifact: string | null;
+    artifact: WorkspaceArtifact;
     providers: WsProviderConfig;
     timeline_nodes?: TimelineNode[];
     active_node_id?: string | null;
@@ -258,6 +265,7 @@ export interface WorkspaceWsActions {
   rebuildChatEntries: () => void;
   setStage: (stage: string) => void;
   setArtifact: (markdown: string, version?: number) => void;
+  setWorkItemPlanCandidate: (candidate: WorkItemPlanCandidateDto | null) => void;
   addTimelineNode: (node: TimelineNode) => void;
   updateTimelineNode: (
     nodeId: string,
@@ -308,6 +316,7 @@ const initialState: WorkspaceWsState = {
   checkpoints: [],
   chatEntries: [],
   artifact: null,
+  workItemPlanCandidate: null,
   providers: null,
   connectionStatus: "disconnected",
   streamingContent: "",
@@ -351,6 +360,10 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
       const defaultSelectedNodeId =
         state.active_node_id ?? timelineNodes[timelineNodes.length - 1]?.node_id ?? null;
 
+      const { artifactMarkdown, workItemPlanCandidate } = normalizeWorkspaceArtifact(
+        state.artifact,
+      );
+
       const nextState: WorkspaceWsState = {
         ...prev,
         sessionId: state.session_id,
@@ -362,7 +375,8 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
         messages: state.messages,
         checkpoints: state.checkpoints,
         chatEntries: [],
-        artifact: state.artifact,
+        artifact: artifactMarkdown,
+        workItemPlanCandidate,
         providers: state.providers,
         streamingContent: "",
         streamBuffers: {},
@@ -630,6 +644,8 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
         ].sort((left, right) => left.version - right.version),
       };
     }),
+
+  setWorkItemPlanCandidate: (candidate) => set({ workItemPlanCandidate: candidate }),
 
   addTimelineNode: (node) =>
     set((prev) => ({
@@ -1014,6 +1030,24 @@ function emptyNodeDetail(
     started_at: node?.started_at ?? "",
     ended_at: node?.completed_at ?? null,
   };
+}
+
+function normalizeWorkspaceArtifact(
+  artifact: WorkspaceArtifact,
+): {
+  artifactMarkdown: string | null;
+  workItemPlanCandidate: WorkItemPlanCandidateDto | null;
+} {
+  if (artifact === null) {
+    return { artifactMarkdown: null, workItemPlanCandidate: null };
+  }
+  if (typeof artifact === "object" && "candidate" in artifact) {
+    return { artifactMarkdown: null, workItemPlanCandidate: artifact.candidate };
+  }
+  if (typeof artifact === "object" && "markdown" in artifact) {
+    return { artifactMarkdown: artifact.markdown, workItemPlanCandidate: null };
+  }
+  return { artifactMarkdown: artifact, workItemPlanCandidate: null };
 }
 
 function ensureNodeDetail(details: Record<string, TimelineNodeDetail>, nodeId: string) {

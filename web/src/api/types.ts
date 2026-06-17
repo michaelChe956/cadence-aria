@@ -913,8 +913,14 @@ export type WorkItemCandidateMetaDto = {
 export type WorkItemCandidateDto = {
   candidate_id: string;
   title: string;
+  kind: string;
+  exclusive_write_scopes: string[];
+  depends_on: string[];
+  verification_plan_ref: string | null;
   meta: WorkItemCandidateMetaDto;
   suggested_order?: number | null;
+  reverted?: boolean;
+  revert_feedback?: string | null;
 };
 
 export type ValidatorFindingDto = WorkItemSplitFinding;
@@ -941,7 +947,7 @@ export type WorkItemPlanDto = {
 
 export type WorkItemPlanCandidateDto = {
   plan: WorkItemPlanDto;
-  work_items: LifecycleWorkItem[];
+  work_items: WorkItemCandidateDto[];
   verification_plans: VerificationPlan[];
   repository_profile: RepositoryProfile | null;
   validator_findings: ValidatorFindingDto[];
@@ -980,6 +986,17 @@ export type RevisionPath = "revise" | "revise-with-context" | "skip-to-human";
 export type HumanConfirmDecision = "confirm" | "request-change" | "terminate";
 export type AuthorDecision = "accept" | "reject";
 
+export type ArtifactUpdateMessage =
+  | { type: "artifact_update"; version: number; markdown: string; diff?: string | null }
+  | { type: "artifact_update"; version: number; candidate: WorkItemPlanCandidateDto };
+
+export type RevertWorkItemMessage = {
+  type: "revert_work_item";
+  work_item_id: string;
+  feedback?: string | null;
+  clear: boolean;
+};
+
 export type WsInMessage =
   | { type: "user_message"; content: string }
   | { type: "context_note"; content: string }
@@ -1002,6 +1019,7 @@ export type WsInMessage =
   | { type: "author_decision"; decision: AuthorDecision }
   | { type: "select_revision_path"; path: RevisionPath; extra_context?: string | null }
   | { type: "request_revision"; feedback: StructuredFeedback }
+  | RevertWorkItemMessage
   | { type: "human_confirm"; decision: HumanConfirmDecision; payload?: unknown }
   | { type: "abort" }
   | { type: "hello"; session_id: string; last_seen_node_id?: string | null }
@@ -1212,7 +1230,7 @@ export type WsOutMessage =
       node_id?: string | null;
     }
   | { type: "stage_change"; stage: string }
-  | { type: "artifact_update"; version: number; markdown: string; diff?: string | null }
+  | ArtifactUpdateMessage
   | { type: "provider_select_request"; stage: string; defaults: ProviderDefaults }
   | {
       type: "permission_request";
@@ -1260,7 +1278,11 @@ export type WsOutMessage =
       openspec_enabled: boolean;
       messages: WsMessage[];
       checkpoints: WsCheckpoint[];
-      artifact: string | null;
+      artifact:
+        | string
+        | null
+        | { markdown: string; diff?: string | null }
+        | { candidate: WorkItemPlanCandidateDto };
       providers: WsProviderConfig;
       timeline_nodes: TimelineNode[];
       active_node_id: string | null;

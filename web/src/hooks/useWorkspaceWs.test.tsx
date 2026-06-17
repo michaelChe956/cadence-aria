@@ -1,8 +1,45 @@
 import { act, render } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { WorkItemPlanCandidateDto } from "../api/types";
 import type { ChatEntry } from "../state/chat-entries";
 import { useWorkspaceStore } from "../state/workspace-ws-store";
 import { useWorkspaceWs } from "./useWorkspaceWs";
+
+function makeWorkItemPlanCandidate(
+  overrides: Partial<WorkItemPlanCandidateDto> = {},
+): WorkItemPlanCandidateDto {
+  return {
+    plan: {
+      plan_id: "plan_001",
+      project_id: "project_001",
+      issue_id: "issue_001",
+      title: "Plan 001",
+      source_story_spec_ids: [],
+      source_design_spec_ids: [],
+      options: {
+        include_integration_tests: false,
+        include_e2e_tests: false,
+        force_frontend_backend_split: false,
+        require_execution_plan_confirm: false,
+      },
+      status: "draft",
+      work_item_ids: [],
+      repository_profile_ref: null,
+      verification_plan_ids: [],
+      dependency_graph: [],
+      created_from_provider_run: null,
+      validator_findings: [],
+      review_summary: null,
+      created_at: "2026-06-17T00:00:00Z",
+      updated_at: "2026-06-17T00:00:00Z",
+    },
+    work_items: [],
+    verification_plans: [],
+    repository_profile: null,
+    validator_findings: [],
+    ...overrides,
+  };
+}
 
 class MockWebSocket {
   static readonly CONNECTING = 0;
@@ -1393,5 +1430,148 @@ describe("useWorkspaceWs", () => {
 
     expect(harness.ws.sent).toHaveLength(0);
     expect(useWorkspaceStore.getState().pendingPermissions).toHaveLength(1);
+  });
+
+  it("stores work item plan candidate from artifact_update messages", () => {
+    const harness = renderWorkspaceHook();
+    const candidate = makeWorkItemPlanCandidate();
+
+    act(() => {
+      harness.ws.receive({
+        type: "artifact_update",
+        version: 1,
+        candidate,
+      });
+    });
+
+    expect(useWorkspaceStore.getState().workItemPlanCandidate).toEqual(candidate);
+    expect(useWorkspaceStore.getState().artifact).toBeNull();
+    expect(useWorkspaceStore.getState().chatEntries.at(-1)).toMatchObject({
+      type: "artifact_update",
+      content: "Work Item Plan 候选已更新 -> v1",
+      metadata: { version: 1, candidate: true },
+    });
+  });
+
+  it("stores markdown artifact from artifact_update messages and clears candidate", () => {
+    const harness = renderWorkspaceHook();
+
+    act(() => {
+      harness.ws.receive({
+        type: "artifact_update",
+        version: 1,
+        candidate: makeWorkItemPlanCandidate(),
+      });
+      harness.ws.receive({
+        type: "artifact_update",
+        version: 2,
+        markdown: "# Story",
+        diff: null,
+      });
+    });
+
+    expect(useWorkspaceStore.getState().artifact).toBe("# Story");
+    expect(useWorkspaceStore.getState().workItemPlanCandidate).toBeNull();
+  });
+
+  it("updates work item plan candidate on same version revert meta update", () => {
+    const harness = renderWorkspaceHook();
+    const initialCandidate = makeWorkItemPlanCandidate({
+      work_items: [
+        {
+          candidate_id: "wi_001",
+          title: "Item 1",
+          kind: "frontend",
+          exclusive_write_scopes: [],
+          depends_on: [],
+          verification_plan_ref: null,
+          meta: { summary: "summary" },
+        },
+      ],
+    });
+    const revertedCandidate = makeWorkItemPlanCandidate({
+      work_items: [
+        {
+          candidate_id: "wi_001",
+          title: "Item 1",
+          kind: "frontend",
+          exclusive_write_scopes: [],
+          depends_on: [],
+          verification_plan_ref: null,
+          meta: { summary: "summary" },
+          reverted: true,
+          revert_feedback: "范围过大",
+        },
+      ],
+    });
+
+    act(() => {
+      harness.ws.receive({
+        type: "artifact_update",
+        version: 1,
+        candidate: initialCandidate,
+      });
+      harness.ws.receive({
+        type: "artifact_update",
+        version: 1,
+        candidate: revertedCandidate,
+      });
+    });
+
+    expect(useWorkspaceStore.getState().workItemPlanCandidate).toEqual(revertedCandidate);
+  });
+
+  it("sends revert_work_item messages", () => {
+    const harness = renderWorkspaceHook();
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.sent.length = 0;
+      harness.api.sendRevertWorkItem("wi_001", " 范围过大 ", false);
+      harness.api.sendRevertWorkItem("wi_001", undefined, true);
+    });
+
+    expect(harness.ws.sent).toEqual([
+      JSON.stringify({
+        type: "revert_work_item",
+        work_item_id: "wi_001",
+        feedback: "范围过大",
+        clear: false,
+      }),
+      JSON.stringify({
+        type: "revert_work_item",
+        work_item_id: "wi_001",
+        feedback: null,
+        clear: true,
+      }),
+    ]);
+  });
+
+  it("sends request_revision messages", () => {
+    const harness = renderWorkspaceHook();
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.sent.length = 0;
+      harness.api.sendRequestRevision(" 请重新生成前端项 ");
+      harness.api.sendRequestRevision();
+    });
+
+    expect(harness.ws.sent).toEqual([
+      JSON.stringify({
+        type: "request_revision",
+        feedback: {
+          feedback_types: ["revision"],
+          description: "请重新生成前端项",
+        },
+      }),
+      JSON.stringify({
+        type: "request_revision",
+        feedback: {
+          feedback_types: ["revision"],
+          description: "",
+        },
+      }),
+    ]);
   });
 });

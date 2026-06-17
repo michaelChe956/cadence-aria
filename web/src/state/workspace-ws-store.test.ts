@@ -1,11 +1,47 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import type { NodeDetail } from "../api/types";
+import type { NodeDetail, WorkItemPlanCandidateDto } from "../api/types";
 import type { ChatEntry } from "./chat-entries";
 import {
   emptyWorkspaceContentCache,
   workspaceContentCacheValues,
 } from "./workspace-content-cache";
 import { selectPrepareContextNotes, useWorkspaceStore } from "./workspace-ws-store";
+
+function makeWorkItemPlanCandidate(
+  overrides: Partial<WorkItemPlanCandidateDto> = {},
+): WorkItemPlanCandidateDto {
+  return {
+    plan: {
+      plan_id: "plan_001",
+      project_id: "project_001",
+      issue_id: "issue_001",
+      title: "Plan 001",
+      source_story_spec_ids: [],
+      source_design_spec_ids: [],
+      options: {
+        include_integration_tests: false,
+        include_e2e_tests: false,
+        force_frontend_backend_split: false,
+        require_execution_plan_confirm: false,
+      },
+      status: "draft",
+      work_item_ids: [],
+      repository_profile_ref: null,
+      verification_plan_ids: [],
+      dependency_graph: [],
+      created_from_provider_run: null,
+      validator_findings: [],
+      review_summary: null,
+      created_at: "2026-06-17T00:00:00Z",
+      updated_at: "2026-06-17T00:00:00Z",
+    },
+    work_items: [],
+    verification_plans: [],
+    repository_profile: null,
+    validator_findings: [],
+    ...overrides,
+  };
+}
 
 function makeNodeDetail(overrides: Partial<NodeDetail> = {}): NodeDetail {
   return {
@@ -1801,5 +1837,66 @@ describe("workspace ws store", () => {
         resolution: "request-change",
       }),
     ]);
+  });
+
+  it("sets workItemPlanCandidate from a session state with candidate artifact", () => {
+    const store = useWorkspaceStore.getState();
+    const candidate = makeWorkItemPlanCandidate();
+
+    store.setSessionState({
+      session_id: "session_candidate",
+      workspace_type: "work_item_plan",
+      stage: "author_confirm",
+      messages: [],
+      checkpoints: [],
+      artifact: { candidate },
+      providers: { author: "claude_code", reviewer: null },
+    });
+
+    expect(useWorkspaceStore.getState().workItemPlanCandidate).toEqual(candidate);
+    expect(useWorkspaceStore.getState().artifact).toBeNull();
+  });
+
+  it("sets markdown artifact from a session state with markdown artifact", () => {
+    const store = useWorkspaceStore.getState();
+
+    store.setSessionState({
+      session_id: "session_markdown",
+      workspace_type: "story",
+      stage: "author_confirm",
+      messages: [],
+      checkpoints: [],
+      artifact: { markdown: "# Story", diff: null },
+      providers: { author: "claude_code", reviewer: null },
+    });
+
+    expect(useWorkspaceStore.getState().artifact).toBe("# Story");
+    expect(useWorkspaceStore.getState().workItemPlanCandidate).toBeNull();
+  });
+
+  it("supports legacy string artifact in session state", () => {
+    const store = useWorkspaceStore.getState();
+
+    store.setSessionState({
+      session_id: "session_legacy",
+      workspace_type: "story",
+      stage: "author_confirm",
+      messages: [],
+      checkpoints: [],
+      artifact: "# Legacy Story",
+      providers: { author: "claude_code", reviewer: null },
+    });
+
+    expect(useWorkspaceStore.getState().artifact).toBe("# Legacy Story");
+    expect(useWorkspaceStore.getState().workItemPlanCandidate).toBeNull();
+  });
+
+  it("updates workItemPlanCandidate via setWorkItemPlanCandidate", () => {
+    const store = useWorkspaceStore.getState();
+    const candidate = makeWorkItemPlanCandidate();
+
+    store.setWorkItemPlanCandidate(candidate);
+
+    expect(useWorkspaceStore.getState().workItemPlanCandidate).toEqual(candidate);
   });
 });

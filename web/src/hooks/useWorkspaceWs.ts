@@ -5,6 +5,7 @@ import type {
   ProviderConfigSnapshot,
   RevisionPath,
   WorkspaceProviderName,
+  WorkItemPlanCandidateDto,
   WsInMessage,
 } from "../api/types";
 import type { ChatEntry, ChatEntryRole } from "../state/chat-entries";
@@ -257,30 +258,46 @@ export function useWorkspaceWs(sessionId: string | null) {
         break;
       case "artifact_update":
         {
-          const markdown = msg.markdown as string;
-          const version = msg.version as number | undefined;
-          store.setArtifact(markdown, version);
-          store.appendChatEntry({
-            id: chatEntryId("artifact_update", String(version)),
-            type: "artifact_update",
-            role: "system",
-            content: `产物已更新 -> v${version}`,
-            timestamp: new Date().toISOString(),
-            metadata: {
-              version,
-              diff: (msg as { diff?: string | null }).diff ?? null,
-            },
-            content_ref:
-              version === undefined
-                ? undefined
-                : {
-                    kind: "artifact_version",
-                    version,
-                    sourceNodeId: store.activeNodeId ?? undefined,
-                  },
-            content_size: markdown.length,
-            has_full_content: true,
-          });
+          const version = msg.version as number;
+          if (msg.candidate) {
+            store.setWorkItemPlanCandidate(msg.candidate as WorkItemPlanCandidateDto);
+            store.appendChatEntry({
+              id: chatEntryId("artifact_update", `candidate:${String(version)}`),
+              type: "artifact_update",
+              role: "system",
+              content: `Work Item Plan 候选已更新 -> v${version}`,
+              timestamp: new Date().toISOString(),
+              metadata: {
+                version,
+                candidate: true,
+              },
+            });
+          } else {
+            const markdown = msg.markdown as string;
+            store.setArtifact(markdown, version);
+            store.setWorkItemPlanCandidate(null);
+            store.appendChatEntry({
+              id: chatEntryId("artifact_update", String(version)),
+              type: "artifact_update",
+              role: "system",
+              content: `产物已更新 -> v${version}`,
+              timestamp: new Date().toISOString(),
+              metadata: {
+                version,
+                diff: (msg as { diff?: string | null }).diff ?? null,
+              },
+              content_ref:
+                version === undefined
+                  ? undefined
+                  : {
+                      kind: "artifact_version",
+                      version,
+                      sourceNodeId: store.activeNodeId ?? undefined,
+                    },
+              content_size: markdown.length,
+              has_full_content: true,
+            });
+          }
         }
         break;
       case "permission_request":
@@ -580,6 +597,32 @@ export function useWorkspaceWs(sessionId: string | null) {
     [sendJson],
   );
 
+  const sendRequestRevision = useCallback(
+    (feedback?: string) => {
+      const trimmedFeedback = feedback?.trim();
+      sendJson({
+        type: "request_revision",
+        feedback: {
+          feedback_types: ["revision"],
+          description: trimmedFeedback ?? "",
+        },
+      });
+    },
+    [sendJson],
+  );
+
+  const sendRevertWorkItem = useCallback(
+    (workItemId: string, feedback?: string, clear = false) => {
+      sendJson({
+        type: "revert_work_item",
+        work_item_id: workItemId,
+        feedback: feedback?.trim() ?? null,
+        clear,
+      });
+    },
+    [sendJson],
+  );
+
   const sendMessage = useCallback(
     (content: string) => {
       console.warn("sendMessage is deprecated, use sendContextNote or sendStartGeneration");
@@ -691,6 +734,8 @@ export function useWorkspaceWs(sessionId: string | null) {
     sendStartGeneration,
     sendSelectRevisionPath,
     sendAuthorDecision,
+    sendRequestRevision,
+    sendRevertWorkItem,
     sendHumanConfirm,
     sendHello,
     sendPing,
