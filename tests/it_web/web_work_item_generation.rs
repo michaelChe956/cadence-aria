@@ -501,3 +501,72 @@ pub(crate) async fn app_with_confirmed_story_and_design(
 
     (app, root)
 }
+
+#[tokio::test]
+async fn prepare_work_item_plan_creates_draft_plan_and_session_without_generating() {
+    let (app, _repo) = app_with_confirmed_story_and_design(valid_split_output()).await;
+
+    let (status, response) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-item-plans:prepare",
+        json!({
+            "title": "爬楼梯问题 Work Item Plan",
+            "story_spec_ids": ["story_spec_0001"],
+            "design_spec_ids": ["design_spec_0001"],
+            "author_provider": "fake",
+            "reviewer_provider": "codex",
+            "review_rounds": 1,
+            "superpowers_enabled": true,
+            "openspec_enabled": true
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response["plan"]["status"], "draft");
+    assert!(
+        response["plan"]["work_item_ids"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        response["plan"]["verification_plan_ids"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        response["plan"]["dependency_graph"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        response["workspace_session"]["workspace_type"],
+        "work_item_plan"
+    );
+    assert_eq!(
+        response["workspace_session"]["entity_id"],
+        response["plan"]["plan_id"]
+    );
+
+    let lifecycle = cadence_aria::product::lifecycle_store::LifecycleStore::new(
+        cadence_aria::product::app_paths::ProductAppPaths::new(_repo.path().join(".aria")),
+    );
+    assert!(
+        lifecycle
+            .list_work_items("project_0001", "issue_0001")
+            .unwrap()
+            .is_empty()
+    );
+
+    let first_message = &response["workspace_session"]["messages"][0]["content"];
+    assert!(
+        first_message
+            .as_str()
+            .unwrap()
+            .contains("候选 work item plan 生成器")
+    );
+}

@@ -72,14 +72,16 @@ use crate::web::types::{
     FileContentResponse, FileDiffResponse, GenerateDesignSpecsRequest, GenerateDesignSpecsResponse,
     GenerateStorySpecsRequest, GenerateStorySpecsResponse, GenerateWorkItemsRequest,
     GenerateWorkItemsResponse, IssueDto, IssueLifecycleResponse, IssueListResponse,
-    IssueRollbackPreviewRequest, IssueRollbackRequest, LifecycleWorkItemDto,
-    ProductIssueArtifactDto, ProductIssueDto, ProductIssueListResponse, ProjectDto,
-    ProjectListResponse, ProviderInputContentResponse, RepositoryDto, RepositoryListResponse,
-    RequestExecutionPlanChangeRequest, ResolveGateRequest, ResolveGateResponse,
-    RollbackPreviewRequest, RollbackPreviewResponse, RollbackRequest, RollbackResponse,
-    StopTaskResponse, StorySpecDto, TaskListResponse, WebEvent, WorkItemContextBudgetDto,
-    WorkspaceDto, WorkspaceListResponse, WorkspaceMessageDto, WorkspaceSessionConfirmRequest,
-    WorkspaceSessionDto, WorkspaceSessionMessageRequest, WorkspaceSessionRunNextRequest,
+    IssueRollbackPreviewRequest, IssueRollbackRequest, IssueWorkItemPlanDependencyEdgeDto,
+    IssueWorkItemPlanDetailDto, LifecycleWorkItemDto, PrepareWorkItemPlanRequest,
+    PrepareWorkItemPlanResponse, ProductIssueArtifactDto, ProductIssueDto,
+    ProductIssueListResponse, ProjectDto, ProjectListResponse, ProviderInputContentResponse,
+    RepositoryDto, RepositoryListResponse, RequestExecutionPlanChangeRequest, ResolveGateRequest,
+    ResolveGateResponse, RollbackPreviewRequest, RollbackPreviewResponse, RollbackRequest,
+    RollbackResponse, StopTaskResponse, StorySpecDto, TaskListResponse, WebEvent,
+    WorkItemContextBudgetDto, WorkspaceDto, WorkspaceListResponse, WorkspaceMessageDto,
+    WorkspaceSessionConfirmRequest, WorkspaceSessionDto, WorkspaceSessionMessageRequest,
+    WorkspaceSessionRunNextRequest,
 };
 use crate::web::workspace_context::ensure_workspace_context_message;
 use crate::web::workspace_registry::{CreateWorkspaceInput, WorkspaceRecord, WorkspaceRegistry};
@@ -560,6 +562,77 @@ pub async fn generate_work_items(
     build_generate_work_items_response(&lifecycle, &app_paths, persisted).map(Json)
 }
 
+pub async fn prepare_work_item_plan(
+    State(state): State<WebAppState>,
+    Path((project_id, issue_id)): Path<(String, String)>,
+    Json(request): Json<PrepareWorkItemPlanRequest>,
+) -> ApiResult<Json<PrepareWorkItemPlanResponse>> {
+    let workspace_config = provider_workspace_config(
+        request.author_provider.as_deref(),
+        request.reviewer_provider.as_deref(),
+        request.review_rounds,
+        request.superpowers_enabled,
+        request.openspec_enabled,
+        &*state.provider_availability,
+    )?;
+    let app_paths = product_app_paths(&state);
+    let issue = IssueStore::new(app_paths.clone())
+        .get(&project_id, &issue_id)
+        .map_err(product_store_api_error)?;
+    let repository_id = issue
+        .repo_id
+        .clone()
+        .ok_or_else(|| ApiError::validation("repository_required", "repository_id is required"))?;
+    find_repository(&app_paths, &project_id, &repository_id)?;
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    validate_confirmed_story_specs(&lifecycle, &project_id, &issue_id, &request.story_spec_ids)?;
+    validate_confirmed_design_specs(&lifecycle, &project_id, &issue_id, &request.design_spec_ids)?;
+
+    let plan = lifecycle
+        .create_issue_work_item_plan(CreateIssueWorkItemPlanInput {
+            id: None,
+            project_id: project_id.clone(),
+            issue_id: issue_id.clone(),
+            source_story_spec_ids: request.story_spec_ids,
+            source_design_spec_ids: request.design_spec_ids,
+            options: crate::product::models::IssueWorkItemPlanOptions {
+                include_integration_tests: false,
+                include_e2e_tests: false,
+                force_frontend_backend_split: false,
+                require_execution_plan_confirm: false,
+            },
+            status: IssueWorkItemPlanStatus::Draft,
+            work_item_ids: Vec::new(),
+            repository_profile_ref: None,
+            verification_plan_ids: Vec::new(),
+            dependency_graph: Vec::new(),
+            created_from_provider_run: None,
+            validator_findings: Vec::new(),
+        })
+        .map_err(product_store_api_error)?;
+
+    let session = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id,
+            issue_id,
+            entity_id: plan.id.clone(),
+            workspace_type: WorkspaceType::WorkItemPlan,
+            author_provider: workspace_config.author_provider,
+            reviewer_provider: workspace_config.reviewer_provider,
+            review_rounds: workspace_config.review_rounds,
+            superpowers_enabled: workspace_config.superpowers_enabled,
+            openspec_enabled: workspace_config.openspec_enabled,
+        })
+        .map_err(product_store_api_error)?;
+    let session = ensure_workspace_context_message(&app_paths, &lifecycle, session)
+        .map_err(product_store_api_error)?;
+
+    Ok(Json(PrepareWorkItemPlanResponse {
+        plan: issue_work_item_plan_detail_dto(&plan),
+        workspace_session: workspace_session_dto(session),
+    }))
+}
+
 fn validate_work_item_generation_candidates(
     plan: &IssueWorkItemPlanRecord,
     candidates: &[crate::product::models::LifecycleWorkItemRecord],
@@ -785,6 +858,41 @@ fn issue_work_item_plan_dto(
             force_frontend_backend_split: plan.options.force_frontend_backend_split,
             require_execution_plan_confirm: plan.options.require_execution_plan_confirm,
         },
+        created_at: plan.created_at.clone(),
+        updated_at: plan.updated_at.clone(),
+    }
+}
+
+fn issue_work_item_plan_detail_dto(plan: &IssueWorkItemPlanRecord) -> IssueWorkItemPlanDetailDto {
+    IssueWorkItemPlanDetailDto {
+        plan_id: plan.id.clone(),
+        issue_id: plan.issue_id.clone(),
+        project_id: plan.project_id.clone(),
+        status: issue_work_item_plan_status_text(&plan.status).to_string(),
+        source_story_spec_ids: plan.source_story_spec_ids.clone(),
+        source_design_spec_ids: plan.source_design_spec_ids.clone(),
+        work_item_ids: plan.work_item_ids.clone(),
+        verification_plan_ids: plan.verification_plan_ids.clone(),
+        dependency_graph: plan
+            .dependency_graph
+            .iter()
+            .map(|edge| IssueWorkItemPlanDependencyEdgeDto {
+                from_work_item_id: edge.from_work_item_id.clone(),
+                to_work_item_id: edge.to_work_item_id.clone(),
+            })
+            .collect(),
+        repository_profile_ref: plan.repository_profile_ref.clone(),
+        options: crate::web::types::WorkItemSplitOptions {
+            include_integration_tests: plan.options.include_integration_tests,
+            include_e2e_tests: plan.options.include_e2e_tests,
+            force_frontend_backend_split: plan.options.force_frontend_backend_split,
+            require_execution_plan_confirm: plan.options.require_execution_plan_confirm,
+        },
+        validator_findings: plan
+            .validator_findings
+            .iter()
+            .map(work_item_split_finding_dto)
+            .collect(),
         created_at: plan.created_at.clone(),
         updated_at: plan.updated_at.clone(),
     }

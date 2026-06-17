@@ -645,6 +645,52 @@ pub struct WorkItemSplitFinding {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub struct PrepareWorkItemPlanRequest {
+    pub title: String,
+    pub story_spec_ids: Vec<String>,
+    pub design_spec_ids: Vec<String>,
+    pub author_provider: Option<String>,
+    pub reviewer_provider: Option<String>,
+    pub review_rounds: Option<u32>,
+    pub superpowers_enabled: Option<bool>,
+    pub openspec_enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PrepareWorkItemPlanResponse {
+    pub plan: IssueWorkItemPlanDetailDto,
+    pub workspace_session: WorkspaceSessionDto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct IssueWorkItemPlanDetailDto {
+    pub plan_id: String,
+    pub issue_id: String,
+    pub project_id: String,
+    pub status: String,
+    pub source_story_spec_ids: Vec<String>,
+    pub source_design_spec_ids: Vec<String>,
+    pub work_item_ids: Vec<String>,
+    pub verification_plan_ids: Vec<String>,
+    pub dependency_graph: Vec<IssueWorkItemPlanDependencyEdgeDto>,
+    pub repository_profile_ref: Option<String>,
+    pub options: WorkItemSplitOptions,
+    pub validator_findings: Vec<WorkItemSplitFinding>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct IssueWorkItemPlanDependencyEdgeDto {
+    pub from_work_item_id: String,
+    pub to_work_item_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct WorkspaceSessionMessageRequest {
     pub role: String,
     pub content: String,

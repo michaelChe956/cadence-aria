@@ -81,6 +81,10 @@ pub fn build_web_router(state: WebAppState) -> Router {
             post(handlers::generate_work_items),
         )
         .route(
+            "/api/projects/{project_id}/issues/{issue_id}/work-item-plans:prepare",
+            post(handlers::prepare_work_item_plan),
+        )
+        .route(
             "/api/projects/{project_id}/issues/{issue_id}/work-item-plans/{plan_id}/confirm",
             post(handlers::confirm_issue_work_item_plan),
         )
