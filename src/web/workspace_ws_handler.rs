@@ -1922,8 +1922,9 @@ fn build_work_item_plan_generate_request(
             .iter()
             .map(|finding| {
                 format!(
-                    "- [{}] {} (work items: {})",
+                    "- [{}][{}] {} (work items: {})",
                     finding.severity.as_str(),
+                    finding.code,
                     finding.message,
                     finding.work_item_ids.join(", ")
                 )
