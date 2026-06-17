@@ -657,10 +657,16 @@ impl LifecycleStore {
             remove_file_if_exists(&path)?;
         }
         for old_vp_id in &existing.verification_plan_ids {
-            self.delete_verification_plan(project_id, issue_id, old_vp_id)?;
+            let path = self
+                .verification_plans_root(project_id, issue_id)
+                .join(format!("{old_vp_id}.json"));
+            let _ = remove_file_if_exists(&path);
         }
         if let Some(old_profile_id) = &existing.repository_profile_ref {
-            self.delete_repository_profile(project_id, issue_id, old_profile_id)?;
+            let path = self
+                .repository_profiles_root(project_id, issue_id)
+                .join(format!("{old_profile_id}.json"));
+            let _ = remove_file_if_exists(&path);
         }
 
         self.create_repository_profile(CreateRepositoryProfileInput {

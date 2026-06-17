@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -63,10 +63,22 @@ fn build_work_item_plan_candidate_dto(
 ) -> Result<WorkItemPlanCandidateDto, ProductStoreError> {
     let plan = lifecycle.get_issue_work_item_plan(project_id, issue_id, plan_id)?;
     let work_items = lifecycle.list_work_items(project_id, issue_id)?;
+    let plan_work_item_ids: HashSet<String> = plan.work_item_ids.iter().cloned().collect();
     let plan_work_items: Vec<&LifecycleWorkItemRecord> = work_items
         .iter()
-        .filter(|wi| plan.work_item_ids.contains(&wi.id))
+        .filter(|wi| plan_work_item_ids.contains(&wi.id))
         .collect();
+
+    let found_ids: HashSet<&String> = plan_work_items.iter().map(|wi| &wi.id).collect();
+    if let Some(missing_id) = plan_work_item_ids
+        .iter()
+        .find(|id| !found_ids.contains(*id))
+    {
+        return Err(ProductStoreError::NotFound {
+            kind: "work_item",
+            id: missing_id.clone(),
+        });
+    }
 
     let verification_plans: Vec<VerificationPlanDto> = plan
         .verification_plan_ids
@@ -3008,6 +3020,15 @@ impl WorkspaceEngine {
         if report.has_errors() {
             self.work_item_plan_author_retry_count += 1;
             if self.work_item_plan_author_retry_count >= 3 {
+                if let Err(error) = lifecycle.replace_issue_work_item_plan_candidate(
+                    &project_id,
+                    &issue_id,
+                    &plan_id,
+                    &output,
+                    findings.clone(),
+                ) {
+                    tracing::warn!(%error, "persist final validate findings before HumanConfirm failed");
+                }
                 self.enter_human_confirm_for_work_item_plan_author_failure(&findings)
                     .await;
                 return Ok(WorkItemPlanAuthorOutcome::HumanConfirm {
