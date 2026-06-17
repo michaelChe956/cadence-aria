@@ -2708,7 +2708,10 @@ impl WorkspaceEngine {
                                 WorkItemPlanStatus::Confirmed,
                             )
                             .map(|_| ()),
-                        WorkspaceType::WorkItemPlan => Ok(()),
+                        WorkspaceType::WorkItemPlan => {
+                            // TODO(WP5): 实现 WorkItemPlan 的 confirm 逻辑
+                            Ok(())
+                        }
                     };
                 }
                 self.transition_stage(WorkspaceStage::Completed).await;

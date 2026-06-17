@@ -1,3 +1,11 @@
+//! WebSocket DTOs for the workspace protocol.
+//!
+//! Note on HTTP vs WS DTO boundaries: types in this module are optimized for the
+//! WebSocket wire protocol (`WsOutMessage`/`WsInMessage`) and may evolve
+//! independently from the HTTP REST DTOs in `src/web/types.rs`. When a field or
+//! shape differs from its HTTP counterpart, it is intentional to keep the WS
+//! contract stable while the REST API changes.
+
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
@@ -314,6 +322,11 @@ pub struct WsProviderConfig {
     pub reviewer: Option<ProviderName>,
 }
 
+/// Artifact payload union for `WsOutMessage::ArtifactUpdate`.
+///
+/// Defined in WP1; WP2a will mount this payload into `ArtifactUpdate` and
+/// `SessionState`, while WP2b/WP7 will produce the `WorkItemPlanCandidate`
+/// variant from the author/reviewer generation flow.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ArtifactPayload {
@@ -327,6 +340,11 @@ pub enum ArtifactPayload {
     },
 }
 
+/// Complete candidate produced by the work item plan author flow.
+///
+/// Carries the draft plan, proposed work items, verification plans, repository
+/// profile and validator findings. WP2b generates this DTO; WP2a embeds it into
+/// `ArtifactPayload::WorkItemPlanCandidate` and the workspace session artifact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct WorkItemPlanCandidateDto {
@@ -337,6 +355,10 @@ pub struct WorkItemPlanCandidateDto {
     pub validator_findings: Vec<ValidatorFindingDto>,
 }
 
+/// Core work item plan metadata sent over the websocket.
+///
+/// Mirrors the HTTP `IssueWorkItemPlan`/`IssueWorkItemPlanDetailDto` shape but
+/// omits issue/project IDs that are already present in the session context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct WorkItemPlanDto {
@@ -346,6 +368,11 @@ pub struct WorkItemPlanDto {
     pub dependency_graph: Vec<WorkItemDependencyEdgeDto>,
 }
 
+/// Split options controlling how work items are generated from a plan.
+///
+/// Consumed by WP2b to decide whether to include integration/e2e tests, force
+/// a frontend/backend split, or require explicit confirmation of the execution
+/// plan before coding begins.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct WorkItemSplitOptionsDto {
@@ -355,6 +382,7 @@ pub struct WorkItemSplitOptionsDto {
     pub require_execution_plan_confirm: bool,
 }
 
+/// Directed edge in the work item dependency graph.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct WorkItemDependencyEdgeDto {
@@ -362,6 +390,10 @@ pub struct WorkItemDependencyEdgeDto {
     pub to_work_item_id: String,
 }
 
+/// A single proposed work item inside a `WorkItemPlanCandidateDto`.
+///
+/// WP2b produces these candidates; WP3 review and WP4 revision/revert may
+/// update `meta.reverted`/`meta.revert_feedback` before WP5 confirms the plan.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct WorkItemCandidateDto {
@@ -374,6 +406,9 @@ pub struct WorkItemCandidateDto {
     pub meta: WorkItemCandidateMetaDto,
 }
 
+/// Mutable metadata attached to a `WorkItemCandidateDto`.
+///
+/// Tracks revert state and feedback generated during WP3/WP4 review cycles.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct WorkItemCandidateMetaDto {
@@ -383,6 +418,8 @@ pub struct WorkItemCandidateMetaDto {
     pub revert_feedback: Option<String>,
 }
 
+/// Validation finding produced when the candidate plan is checked for
+/// consistency, scope conflicts, or missing verification coverage.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ValidatorFindingDto {
@@ -392,6 +429,10 @@ pub struct ValidatorFindingDto {
     pub work_item_ids: Vec<String>,
 }
 
+/// Verification plan for one or more work items in the candidate.
+///
+/// WP2b generates these plans; WP5/execution uses them to gate completion of
+/// the associated work items.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct VerificationPlanDto {
@@ -405,6 +446,7 @@ pub struct VerificationPlanDto {
     pub fallback_policy: String,
 }
 
+/// Automated command that must pass to satisfy a `VerificationPlanDto`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct VerificationCommandDto {
@@ -417,6 +459,7 @@ pub struct VerificationCommandDto {
     pub safety: String,
 }
 
+/// Manual check that must be performed to satisfy a `VerificationPlanDto`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct VerificationManualCheckDto {
@@ -425,6 +468,11 @@ pub struct VerificationManualCheckDto {
     pub required: bool,
 }
 
+/// Repository profile used by the work item plan generator.
+///
+/// Contains detected languages, frameworks, layers and split recommendations.
+/// The WS shape carries more detail than the HTTP `RepositoryProfile` so the
+/// frontend can render the profile card without an extra REST round-trip.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct RepositoryProfileDto {
