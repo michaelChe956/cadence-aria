@@ -155,8 +155,10 @@ fn replace_issue_work_item_plan_candidate_swaps_draft_work_items_and_updates_pla
     }).expect("plan");
     // ... 建旧 work_item_0001/0002、verification_plan_0001、repository_profile_0001（省略，照现有夹具） ...
 
-    // 构造新 provider output（2 个新 work_item，新 verification_plan，新 profile）
-    let new_output = /* 构造 WorkItemSplitProviderOutput，work_items 含 2 项新 id，plan.id = plan.id */;
+    // 构造新 provider output（2 个新 work_item，新 verification_plan，新 profile）。
+    // output.plan.id 可与 prepare 创建的 plan.id 不同；replace 必须忽略 output.plan.id，
+    // 以传入的 plan.id / session.entity_id 为事实来源。
+    let new_output = /* 构造 WorkItemSplitProviderOutput，work_items 含 2 项新 id，output.plan.id = "issue_work_item_plan_9999" */;
 
     let snapshot = store.replace_issue_work_item_plan_candidate(
         "project_0001", "issue_0001", &plan.id, &new_output, vec![]
@@ -174,6 +176,10 @@ fn replace_issue_work_item_plan_candidate_swaps_draft_work_items_and_updates_pla
     assert_eq!(plan_after.repository_profile_ref.as_deref(), Some(&snapshot.repository_profile_id));
     // plan 仍 Draft，created_at 保留
     assert_eq!(plan_after.status, IssueWorkItemPlanStatus::Draft);
+    assert_eq!(plan_after.id, plan.id);
+    assert!(store.list_issue_work_item_plans("project_0001", "issue_0001").unwrap()
+        .iter()
+        .all(|p| p.id != "issue_work_item_plan_9999"));
     assert_eq!(plan_after.created_at, plan.created_at);
 }
 
@@ -330,6 +336,7 @@ pub fn replace_issue_work_item_plan_candidate(
     }
 
     // 3. 更新 plan 引用（保留 created_at/review_summary/status=Draft）
+    //    注意：忽略 output.plan.id；prepare 阶段创建的 plan_id / session.entity_id 是唯一事实来源。
     let new_wi_ids: Vec<String> = output.work_items.iter().map(|wi| wi.id.clone()).collect();
     let new_vp_ids: Vec<String> = output.verification_plans.iter().map(|vp| vp.id.clone()).collect();
     let new_profile_id = output.repository_profile.id.clone();
@@ -663,10 +670,10 @@ async fn work_item_plan_start_generation_returns_candidate_artifact() {
         json!({ "title":"登录拆分", "story_spec_ids":["story_spec_0001"], "design_spec_ids":["design_spec_0001"],
                 "include_integration_tests":true, "include_e2e_tests":false,
                 "force_frontend_backend_split":true, "require_execution_plan_confirm":false, "review_rounds":1 })).await;
-    let session_id = prepare_resp["workspace_session"]["id"].as_str().unwrap().to_string();
+    let session_id = prepare_resp["workspace_session"]["workspace_session_id"].as_str().unwrap().to_string();
 
     // 2. 连 WS，发 StartGeneration，收 ArtifactUpdate（candidate payload）
-    let ws = connect_ws(&app, &session_id).await;  // 现有 WS 连接 helper
+    let ws = connect_ws(&app, &session_id).await;  // 本 WP 新增共享 WS 连接 helper
     ws.send(json!({ "type":"start_generation", "provider_config":{/* minimal */}, "reviewer_enabled":false }).to_string()).await;
 
     // 收 SessionState（workspace_type=work_item_plan）→ 收 ArtifactUpdate（candidate）
@@ -695,10 +702,10 @@ async fn work_item_plan_author_persists_draft_candidate_records_without_child_se
 ```
 
 > 实现者注意：
-> 1. WS 连接 helper（`connect_ws`/`recv_ws_messages`）参考现有 WS 集成测试——先 `grep -rn "WebSocket\|ws_connect\|connect_ws\|recv_ws" tests/it_web/` 看现有模式。若没有现成 helper，参考 `web_lifecycle_api.rs` 或 `web_workspace_ws` 相关测试的 WS 握手方式。
+> 1. 本 WP 必须新增可被 WP3/WP4/WP8 复用的 WS 测试 helper（建议放在 `tests/it_web/web_work_item_plan_author.rs` 或抽到 `tests/it_web/workspace_ws_test_support.rs`）：`connect_ws(app, session_id)`、`recv_ws_messages_with_timeout(ws, timeout)`、`recv_until_stage(ws, stage)`。参考现有 `tests/it_web/web_coding_ws_handler.rs` 的 `tokio_tungstenite::connect_async` / `recv_json_value` 模式；不要假设仓库已有通用 helper。
 > 2. `provider_config` 最小值参考现有 StartGeneration 测试夹具。
 > 3. `valid_split_output()` 让 `MockSplitProviderAdapter` 返回有效 split JSON，`WorkItemSplitEngine::generate` 会成功 parse。
-> 4. 若 WS 集成测试在本仓库太难写（需异步 WS 握手 + 超时收消息），fallback：写一个更聚焦的 store+engine 层集成测试（不经过 WS，直接调 `WorkspaceEngine::complete_work_item_plan_author` 验证 candidate 落盘）——但这会与 Task 2 测试重叠。优先尝试 WS 测试。
+> 4. 不再允许把 WP2b 的 WS 路由覆盖整体 fallback 到 store+engine 层：Task 2 已覆盖 engine/store，Task 3 的价值是证明 `StartGeneration` WS 路由没有走普通 streaming author。若 helper 编写超出当前 Task，先补 helper，再写本测试。
 
 - [ ] **Step 3.2：运行测试，确认失败**
 
@@ -907,7 +914,7 @@ cargo check --locked
 ```
 Expected: 新 WS 集成测试 PASS；现有 `web_work_item_generation`（P3 REST 流程）仍全绿（本 WP 不删路由）；`cargo check` 全绿。
 
-> 若 WS 集成测试因异步握手复杂难写，fallback 到 store+engine 层测试（直接调 `complete_work_item_plan_author`），并在 plan 里标注「WS 层端到端验证延后到 WP8 贯通测试」。但优先尝试 WS 测试——`tests/it_web/` 应有现成 WS 握手 helper。
+> 本 Task 必须保留 WS 集成测试：若 helper 不完整，先按 Step 3.1 补共享 helper，再运行本测试。store/engine 层测试已由 Task 2 覆盖，不能替代这里的 WS 路由验证。
 
 - [ ] **Step 3.9：提交**
 
@@ -983,7 +990,7 @@ commit 后，把以下内容写入 WP3 plan 的「前置交付摘要」章节：
 **2. Placeholder 扫描**：
 - `build_work_item_plan_generate_request`（Task 3 Step 3.6）：给出职责描述但未给完整函数体——因 `GenerateWorkItemsRequest` 字段映射需实现时确认。给出 `grep` 定位指引，属可接受（不是「TBD」，是「字段映射以实际为准」）。**实现时应补完整字段映射**。
 - `VerificationPlanDto`/`RepositoryProfileDto` 的 `From` impl（Task 2 Step 2.3）：给出 `map(|vp| VerificationPlanDto::from(&vp))` 但未定义 impl——标注「以 WP1 实际定义为准，若无 From 则手写字段映射」。可接受。
-- WS 连接 helper（Task 3 Step 3.1）：给出 `grep` 定位现有 helper 的指引，fallback 到 store+engine 层测试。可接受。
+- WS 连接 helper（Task 3 Step 3.1）：已明确本 WP 新增共享 helper，后续 WP3/WP4/WP8 复用。属可接受。
 - `WorkItemSplitProviderOutput` 构造（Task 1 Step 1.1）：参考 `valid_split_output()`，未完整展开——因测试夹具构造繁长，参考现有夹具是合理指引。
 
 **3. 类型一致性**：
@@ -997,7 +1004,7 @@ commit 后，把以下内容写入 WP3 plan 的「前置交付摘要」章节：
 - **依赖获取**（Task 3 Step 3.6）：spawn 闭包需 `lifecycle`/`app_paths`/`session_record`，方案 A（给 `ProviderRunContext` 加字段）会扩大 `ProviderRunContext` 体积，但最干净。已标注选 A。
 - **engine 锁跨 await**（Task 3 Step 3.6）：多次 `engine.lock()` 分段，不跨 await 持锁。已标注。
 - **AutoRevision 循环收敛**（Task 3 Step 3.6）：靠 `work_item_plan_author_retry_count` 计数保证 3 次后进 HumanConfirm。计数在 engine 内存，abort 后丢失——接受此风险（方案 :265 也接受"已发起的 spawn_blocking 跑完、结果丢弃"）。
-- **WS 集成测试难度**（Task 3 Step 3.1）：若 WS 握手 helper 难写，fallback 到 store+engine 层测试，WS 端到端延后 WP8。已标注 fallback。
+- **WS 集成测试难度**（Task 3 Step 3.1）：本 WP 必须补共享 helper 并覆盖 `StartGeneration` WS 路由；不能整体延后 WP8，否则 WP3/WP4 的路由分支会缺共同测试基础。
 - **`build_work_item_plan_generate_request` 字段映射**（Task 3 Step 3.6）：`GenerateWorkItemsRequest` 的 `title` 字段——plan 无 title，用固定字符串或 plan.id。实现时定。
 
 ---

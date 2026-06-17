@@ -594,7 +594,7 @@ async fn work_item_plan_review_returns_decision_response() {
 ```
 
 > 实现者注意：
-> 1. **WS 连接 helper**（`connect_ws`/`recv_ws_messages`）：先 `grep -rn "WebSocket\|ws_connect\|connect_ws\|recv_ws\|tokio_tungstenite\|tungstenite" tests/it_web/` 看现有 WS 握手模式。若没有现成 helper，参考 `web_lifecycle_api.rs` 或 `web_coding_ws_handler.rs` 的 WS 测试模式。若 WS 集成测试在本仓库太难写，**fallback**：写一个 engine 层集成测试（不经 WS，直接调 `engine.handle_author_decision(Accept)` → `engine.drive_review_session(mock_reviewer_provider, commands)` → 断言 `ReviewComplete` 事件 + `engine.handle_review_decision("human_intervene", None)` → 断言 `ReviewDecisionOutcome::HumanConfirm`）——参考 `drive_review_session_pass_enters_human_confirm`（`:5809`）的 engine 层测试模式。**优先尝试 WS 测试**，fallback 到 engine 层。
+> 1. **WS 连接 helper**（`connect_ws`/`recv_ws_messages`）：复用 WP2b Task 3 新增的共享 helper；若 helper 还不完整，先在测试基础设施中补齐，再写本测试。Task 1 已覆盖 engine 层 prompt 构造，本 Task 2 的增量必须覆盖 WS 层 AuthorDecision → ReviewOnly run → ReviewComplete/ReviewDecisionResponse。
 > 2. **`prepare_work_item_plan_and_author_to_confirm` helper**：本 Task 最繁的夹具。需先 POST `/api/projects/.../work-item-plans:prepare`（WP1 路由）→ 连 WS → `sendStartGeneration`（WP2b `ProviderRunKind::WorkItemPlanAuthor`）→ 收 `ArtifactUpdate(candidate)` → 收 `StageChange(author_confirm)`。若 WP2b 测试已有类似 helper，直接复用（`grep -rn "prepare_work_item_plan\|work_item_plan_start_generation" tests/it_web/`）。
 > 3. **reviewer provider mock**：WS 层 reviewer 走 `provider_registry.get(reviewer_provider)`（`workspace_ws_handler.rs:1368-1372`）——需要 app 注入了 reviewer provider（如 FakeStreamingProvider 或能返回固定 verdict 的 mock）。参考 `app_with_confirmed_story_and_design` 的 `with_provider_adapter`（`web_work_item_generation.rs:431`）——但那是非流式 split adapter；reviewer 需要流式。**先 `grep -rn "with_streaming_provider\|with_reviewer\|provider_registry\|FakeStreaming" tests/it_web/`** 看 WS 测试如何注入流式 reviewer。若无现成，可能需在 `WebAppState::new` 时注入 `provider_registry` 含 FakeStreamingProvider（`ProviderName::Codex` 或 `Fake`）。
 > 4. **测试边界**：`work_item_plan_review_returns_decision_response` 的 `continue` 路径只断言 `stage_change → revision`，不断言 revision 执行成功——WP4 未实现时 `drive_revision_session` 对 WorkItemPlan 会失败（`build_revision_input` 读 `session.artifact` 的 `WorkItemPlanCandidate` 变体返回空字符串，prompt 为空），但 stage 转换在 `handle_review_decision` 内已完成（`:2167-2181`）——测试只收 `StageChange` 消息即可。若 WS handler 在 revision spawn 失败后发 `Error` 消息，测试应容忍（不 fail on Error，只断言 stage_change 先到）。
@@ -603,9 +603,9 @@ async fn work_item_plan_review_returns_decision_response() {
 - [ ] **Step 2.2：运行测试，确认失败**
 
 Run: `cargo test --locked --test it_web review_returns_verdict_for_whole_candidate work_item_plan_review_returns_decision_response`
-Expected: 失败——若用 WS 集成测试，可能因 WS helper 或 reviewer provider mock 未就位失败；若用 engine 层 fallback，因 `build_review_input` 对 WorkItemPlan 已在 Task 1 改为调 `build_work_item_plan_review_input`，engine 层测试应在 Task 1 后基本可过——本 Task 2 主要是 WS 层验证。
+Expected: 失败——WS helper 或 reviewer provider mock 未就位，或 WorkItemPlan 的 AuthorDecision::Accept 仍没有路由到 reviewer 流式 run。本 Task 2 主要是 WS 层验证。
 
-> 若 Task 1 的 engine 层测试已覆盖 review prompt 构造，Task 2 的核心增量是 **WS 层端到端**：AuthorDecision::Accept → ReviewOnly run kind → drive_review_session → ReviewComplete → ReviewDecisionRequired → ReviewDecisionResponse → stage 转换。若 WS 测试太难写，fallback 到 engine 层 `handle_author_decision(Accept)` + `drive_review_session` + `handle_review_decision` 的组合测试（不经 WS），并标注「WS 层端到端验证延后到 WP8 贯通测试」。
+> Task 1 的 engine 层测试已覆盖 review prompt 构造，Task 2 的核心增量是 **WS 层端到端**：AuthorDecision::Accept → ReviewOnly run kind → drive_review_session → ReviewComplete → ReviewDecisionRequired → ReviewDecisionResponse → stage 转换。不要用 engine 层组合测试替代本 Task；若失败，补 WS helper 或 reviewer provider mock。
 
 - [ ] **Step 2.3：补 helper（若用 WS 集成测试）**
 
@@ -623,11 +623,11 @@ cargo test --locked --test it_web web_work_item_generation
 cargo check --locked
 ```
 Expected:
-- 两个新测试 PASS（或 fallback 的 engine 层等价测试 PASS）。
+- 两个新 WS 层测试 PASS。
 - 现有 `web_work_item_generation`（P3 REST 流程 + WP2b author 链路）仍全绿。
 - `cargo check` 全绿。
 
-> 若 WS 集成测试因异步握手复杂难写，fallback 到 engine 层测试（直接调 `handle_author_decision` + `drive_review_session` + `handle_review_decision`），并在 plan 里标注「WS 层端到端验证延后到 WP8」。但优先尝试 WS 测试——`tests/it_web/` 应有现成 WS 握手 helper（`grep -rn "WebSocket\|tungstenite" tests/it_web/`）。
+> 若 WS helper 缺能力，先补 WP2b 共享 helper；不要把本 Task 的 WS 路由验证延后到 WP8。
 
 - [ ] **Step 2.5：提交**
 
@@ -701,7 +701,7 @@ commit 后，把以下内容写入 WP4 plan 的「前置交付摘要」章节：
 
 **2. Placeholder 扫描**：
 - `make_work_item_plan_engine_with_draft_candidate`（Task 1 Step 1.1）：给出职责描述 + 字段清单，未完整展开 lifecycle 记录构造——因 `IssueWorkItemPlan`/`LifecycleWorkItemRecord`/`VerificationPlan`/`RepositoryProfile` 构造涉及 10+ 字段，参考 WP2b 的 `complete_work_item_plan_author` 测试夹具（WP2b plan Task 2 Step 2.1）是合理指引。**实现时应补完整构造**——若 WP2b 已抽 helper，直接复用。
-- `prepare_work_item_plan_and_author_to_confirm`（Task 2 Step 2.1）：给出职责描述，未完整展开 WS 握手——给出 `grep` 定位现有 WS helper 的指引，fallback 到 engine 层测试。可接受。
+- `prepare_work_item_plan_and_author_to_confirm`（Task 2 Step 2.1）：给出职责描述，依赖 WP2b 共享 WS helper。可接受。
 - `RepositoryProfileDto`/`VerificationPlanDto`/`WorkItemCandidateDto` 字段名（Task 1 Step 1.3）：给出 `grep` 定位指引，标注「以 WP1 实际定义为准」。可接受。
 - `MockReviewerStreamingProvider`（Task 2 Step 2.3）：参考 engine 测试的 `ReviewVerdictStreamingProvider`（`:5757`），未完整展开——给出 `grep` 定位指引。可接受。
 - reviewer 契约尾部 JSON（Task 1 Step 1.3）：完整复制 `build_review_input`（`:2504-2517`）的文本，非占位符。
@@ -714,7 +714,7 @@ commit 后，把以下内容写入 WP4 plan 的「前置交付摘要」章节：
 
 **4. 边界风险**：
 - **WP4 Revision 分发未实现**（Task 2 Step 2.1 测试边界）：`handle_review_decision("continue")` 返回 `StartRevision` → WS handler `spawn_provider_run_from_handler(ProviderRunKind::Revision)` → `drive_revision_session` → `build_revision_input` 对 WorkItemPlan 返回空 artifact（WP2a 临时处理）→ revision prompt 为空 → provider 调用失败。**WP3 测试只断言 stage 进入 revision，不断言 revision 成功**。已标注。WP4 需改 Revision 分发为 `WorkItemPlanRevision`。
-- **reviewer provider 注入**（Task 2 Step 2.3）：WS 层 reviewer 走 `provider_registry.get(reviewer_provider)`——需 app 注入流式 reviewer mock。若 `app_with_confirmed_story_and_design` 只注入非流式 split adapter，需补流式 reviewer 注入。给出 `grep` 定位指引，fallback 到 engine 层测试。已标注。
+- **reviewer provider 注入**（Task 2 Step 2.3）：WS 层 reviewer 走 `provider_registry.get(reviewer_provider)`——需 app 注入流式 reviewer mock。若 `app_with_confirmed_story_and_design` 只注入非流式 split adapter，需补流式 reviewer 注入；不能用 engine 层测试替代 WS 路由验证。已标注。
 - **WP2a 空字符串分支保留**（Task 1 Step 1.4）：`build_review_input` 内对 `session.artifact` 的 `WorkItemPlanCandidate` 变体返回空字符串的 WP2a 分支，WP3 不清理（避免越界改 WP2a 已测试代码）。WorkItemPlan 分支在函数开头提前 return，不会走到那个 match——无功能影响。已标注。
 - **裁剪策略与设计方案 :289 一致性**：设计方案要求「repository_profile 只传 confidence + detected_layers；WorkItem 只传 reviewer 关心字段（id/kind/title/depends_on/exclusive_write_scopes/verification_plan_ref，不传 meta）」。Task 1 Step 1.3 的裁剪实现与此一致——`Repository Profile (trimmed)` 只输出 confidence + detected_layers；WorkItems 列表只输出 id/kind/title/depends_on/exclusive_write_scopes/verification_plan_ref，不输出 meta。`dependency_graph` 全传、`validator_findings` 全传——与设计方案一致。
 - **review prompt token 上限**（设计方案 :489 风险项）：裁剪后 prompt 仍可能超 token 上限（candidate 含大量 work_items 时）。本 WP 裁剪策略是设计方案 :289 明确要求的，不额外加 token 截断——若实际超限，后续 WP 或维护者加 work_items 分页或摘要。已标注。
@@ -736,5 +736,5 @@ commit 后，把以下内容写入 WP4 plan 的「前置交付摘要」章节：
 
 **⚠️ 实现前注意**：
 1. Task 1 的 `make_work_item_plan_engine_with_draft_candidate` 夹具是本 WP 最繁的构造——建议先 `grep -rn "build_work_item_plan_candidate_dto\|complete_work_item_plan_author" tests/ src/` 看 WP2b 是否已抽类似 helper 可复用。
-2. Task 2 的 WS 集成测试难度取决于现有 WS 握手 helper——先 `grep -rn "WebSocket\|tungstenite\|connect_ws" tests/it_web/` 评估。若难写，fallback 到 engine 层测试（参考 `drive_review_session_pass_enters_human_confirm`，`:5809`），WS 端到端延后 WP8。
+2. Task 2 的 WS 集成测试依赖 WP2b 共享 helper；若 helper 不完整，先补 helper，再做本 Task。WS 端到端不延后到 WP8。
 3. **WP4 边界依赖**：WP3 的 review 触发 revision 只到 `ReviewDecisionResponse` 响应，revision 执行由 WP4 实现。WP4 必须改 `Revision` 分发为 `WorkItemPlanRevision`（当前走 `drive_revision_session` 对 WorkItemPlan 会失败）——本 plan Task 3 Step 3.3 已明确交付此信息。

@@ -48,7 +48,7 @@
 
 ## 关键既有事实（避免重新探查）
 
-- `tests/it_web/web_work_item_generation.rs`：`app_with_confirmed_story_and_design(valid_split_output)` + `MockSplitProviderAdapter` + `request_json` + WS helper（WP2b/WP4 已建，`grep -rn "connect_ws\|recv_ws\|recv_until_stage" tests/it_web/` 确认）。
+- `tests/it_web/web_work_item_generation.rs`：`app_with_confirmed_story_and_design(valid_split_output)` + `MockSplitProviderAdapter` + `request_json` + WP2b 共享 WS helper（`connect_ws` / `recv_ws_messages_with_timeout` / `recv_until_stage`）。
 - `tests/it_web.rs`：`#[path] mod xxx;` 聚合子模块。
 - WP2b/WP3/WP4/WP5 已建的定向测试：`prepare_work_item_plan_creates_draft_plan_and_session_without_generating`、`work_item_plan_start_generation_returns_candidate_artifact`、`review_returns_verdict_for_whole_candidate`、`revert_work_item_triggers_local_redo_in_revision`、`confirm_creates_child_work_item_sessions`、`delete_legacy_rest_routes_returns_404`。
 - 前端测试：`IssueLifecycleWorkbench.test.tsx`、`ChatWorkspacePage.test.tsx`（WP6/WP7 已建 work_item_plan 分支测试）。
@@ -83,7 +83,7 @@
 - Modify: `tests/it_web.rs`（注册 mod）
 
 **Interfaces:**
-- Consumes: WP1-WP5 的后端链路 + 现有 WS helper + `MockSplitProviderAdapter`。
+- Consumes: WP1-WP5 的后端链路 + WP2b 共享 WS helper + `MockSplitProviderAdapter`。
 - Produces: `work_item_plan_full_flow` 贯通测试。
 
 - [ ] **Step 1.1：写贯通测试**
@@ -108,7 +108,7 @@ async fn work_item_plan_full_flow() {
         json!({ "title":"登录拆分", "story_spec_ids":["story_spec_0001"], "design_spec_ids":["design_spec_0001"],
                 "include_integration_tests":true, "include_e2e_tests":false,
                 "force_frontend_backend_split":true, "require_execution_plan_confirm":false, "review_rounds":1 })).await;
-    let session_id = prepare_resp["workspace_session"]["id"].as_str().unwrap().to_string();
+    let session_id = prepare_resp["workspace_session"]["workspace_session_id"].as_str().unwrap().to_string();
     let plan_id = prepare_resp["work_item_plan"]["id"].as_str().unwrap().to_string();
 
     // 2. WS connect + start_generation
@@ -167,11 +167,11 @@ async fn work_item_plan_full_flow() {
 ```
 
 > 实现者注意：
-> 1. WS helper（`connect_ws`/`recv_ws_messages_with_timeout`/`recv_until_stage`/`timeout`）：WP2b/WP4 已建或需补。`grep -rn "connect_ws\|recv_ws\|recv_until\|timeout" tests/it_web/` 确认。若 helper 不完整，本 Task 先补全 helper（作为测试基础设施，属本 WP 范围）。
+> 1. WS helper（`connect_ws`/`recv_ws_messages_with_timeout`/`recv_until_stage`/`timeout`）：复用 WP2b 共享 helper。若 helper 不完整，本 Task 先补全 helper（作为测试基础设施，属本 WP 范围），但不要降级为非 WS 测试。
 > 2. `provider_config`/`reviewer_enabled` 最小值参考现有 StartGeneration 测试夹具。
 > 3. review 消息时序（`ReviewDecisionRequired`/`StreamChunk`/`ReviewComplete`）：以 WP3 实现为准。若 review 在 `review_rounds=1` 时自动跑完不要求用户响应，调整测试时序。`recv_until_stage("human_confirm")` 兜底。
 > 4. `MockSplitProviderAdapter` 需支持 revision 调用返回不同 JSON（保留项 + 重做项）——`grep -n "MockSplitProviderAdapter" tests/it_web/web_work_item_generation.rs` 看是否支持调用序列，不支持则扩展。
-> 5. 若 WS 端到端测试太难写（异步握手 + 多轮消息），fallback：拆成多个 engine/store 层测试覆盖各阶段衔接（WP2b-WP5 已有定向测试，本 Task 补它们之间的衔接断言）。但优先尝试 WS 贯通——这是 WP8 的核心价值。
+> 5. WS 端到端测试是本 WP 核心价值；如果多轮消息不稳定，收紧 helper 的超时/过滤逻辑或拆分为多个 WS 场景测试，不用 engine/store 层测试替代。
 
 - [ ] **Step 1.2：运行贯通测试，修复测试基础设施**
 
@@ -232,10 +232,19 @@ async fn session_state_serde_roundtrip_preserves_work_item_plan_candidate() {
     // 构造一个 workspace_type=work_item_plan 的 SessionState，artifact={candidate: {...}}
     // serde 序列化 → 反序列化，断言 candidate 完整保留（work_items/meta/dependency_graph 等）
 }
+
+#[tokio::test]
+async fn reconnect_preserves_revert_marks_from_current_artifact_version() {
+    // prepare → start_generation → RevertWorkItem(work_item_0001, feedback)
+    // 断开后重新连接同一 session。
+    // 断言 SessionState.artifact.candidate.work_items[work_item_0001].meta.reverted == true，
+    // 且 revert_feedback 保留。该测试锁定 WP4 的策略：revert meta 写回当前 ArtifactVersion.payload，
+    // 不新增 version，但必须跨重连恢复。
+}
 ```
 
 > 实现者注意：
-> 1. `new_persistent`（`workspace_engine.rs:470-524`）恢复逻辑：WP2a 已适配 union（从 `ArtifactVersion.payload` 恢复 `session.artifact`）。本测试验证 WorkItemPlan 的 candidate payload 恢复正确。
+> 1. `new_persistent`（`workspace_engine.rs:470-524`）恢复逻辑：WP2a 已适配 union（从 `ArtifactVersion.payload` 恢复 `session.artifact`）。本测试验证 WorkItemPlan 的 candidate payload 恢复正确，并额外验证 WP4 的 revert meta 已写回当前 `ArtifactVersion.payload`，重连不丢。
 > 2. WorkItem Coding Workspace 是否受影响：`grep -rn "ArtifactUpdate\|session.artifact\|WorkspaceType::WorkItem" src/product/workspace_engine.rs src/web/workspace_ws_handler.rs` 确认 WorkItem 是否走 artifact 链路。若 WorkItem 的 Coding Workspace 走独立协议（`CodingAttempt`/`CodingSession`），不受 union 影响——在测试注释/文档说明原因。
 > 3. `SessionState` serde 往返：构造 `WsOutMessage::SessionState { workspace_type: WorkItemPlan, artifact: Some(ArtifactPayload::WorkItemPlanCandidate { candidate }), ... }`，`serde_json::to_string` → `from_str`，断言 `artifact` 的 candidate 完整。
 
@@ -246,6 +255,7 @@ Run:
 cargo test --locked --test it_web story_design_work_item_plan_recovery_consistency
 cargo test --locked --test it_web work_item_workspace_recovery_unaffected_or_covered
 cargo test --locked --test it_web session_state_serde_roundtrip_preserves_work_item_plan_candidate
+cargo test --locked --test it_web reconnect_preserves_revert_marks_from_current_artifact_version
 ```
 Expected: 通过。若失败，分析是测试问题还是生产缺陷（union 恢复遗漏 WorkItemPlan 分支等），停下新增修复计划。
 
@@ -334,14 +344,14 @@ commit 后，对照设计方案第 493-502 行验收标准逐项确认：
 - ✅ 不做项：不改生产代码（除非暴露缺陷）、不新增 Playwright E2E——均在「不做」清单。
 
 **2. Placeholder 扫描**：
-- WS helper（Task 1 Step 1.1）：给出 grep 确认 + fallback 到 engine 层测试指引。属可接受。
+- WS helper（Task 1 Step 1.1）：复用/补全 WP2b 共享 helper，不降级为 engine 层测试。属可接受。
 - `MockSplitProviderAdapter` 调用序列（Task 1 Step 1.1）：给出 grep 确认 + 扩展指引。属可接受。
 - review 消息时序（Task 1 Step 1.1）：以 WP3 实现为准，`recv_until_stage` 兜底。属可接受。
 - WorkItem 排除说明（Task 2 Step 2.1）：给出 grep 确认 WorkItem 是否走 artifact 链路的指引。属可接受。
 
 **3. 边界风险**：
 - **贯通测试暴露生产缺陷**（Task 1 Step 1.2）：本 WP 不改生产代码，缺陷需新增修复计划。已标注（全局约束 + Task 1 Step 1.2）。
-- **WS 端到端测试难度**（Task 1 Step 1.1）：若 WS 握手 + 多轮消息太难写，fallback 到 engine/store 层衔接测试。已标注。
+- **WS 端到端测试难度**（Task 1 Step 1.1）：若 WS 握手 + 多轮消息不稳定，补强 helper 或拆成多个 WS 场景测试；不降级为 engine/store 层衔接测试。已标注。
 - **WorkItem 恢复链路**（Task 2 Step 2.1）：WorkItem Coding Workspace 是否受 artifact union 影响需确认。若不受影响，排除说明；若受影响，补测试。已标注 grep 确认。
 - **review_rounds 时序**（Task 1 Step 1.1）：review_rounds=1 时 review 自动跑还是要求用户响应，以 WP3 实现为准。测试时序需适配。已标注。
 

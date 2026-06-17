@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 实现 `WsInMessage::RevertWorkItem` 标记处理（candidate meta 更新 + 推 `ArtifactUpdate`，同 version 仅 meta 变化）、批量触发 dedicated 非流式 WorkItemPlan Revision（`ProviderRunKind::WorkItemPlanRevision`）、`WorkItemSplitEngine::generate_revision`（retained + redo_specs）与 `repatch_dependencies` DAG 重连；revision 输出通过 `replace_issue_work_item_plan_candidate` 替换 Draft candidate 再写 artifact payload；review 触发的整组 revision 也走本 WP。最后迁移 WP2b 的 `AutoRevision` 路径到 `generate_revision`，对齐 design 第 269 行语义。
+**Goal:** 实现 `WsInMessage::RevertWorkItem` 标记处理（candidate meta 更新 + 写回当前 `ArtifactVersion.payload` + 推同 version `ArtifactUpdate`）、批量触发 dedicated 非流式 WorkItemPlan Revision（`ProviderRunKind::WorkItemPlanRevision`）、`WorkItemSplitEngine::generate_revision`（retained + redo_specs，局部重做时 provider 只输出 redo 项）与 `repatch_dependencies` DAG 重连；revision 输出通过 `replace_issue_work_item_plan_candidate` 替换 Draft candidate 再写 artifact payload；review 触发的整组 revision 也走本 WP。最后迁移 WP2b 的 `AutoRevision` 路径到 `generate_revision`，对齐 design 第 269 行语义。
 
-**Architecture:** revert 标记是"在当前 artifact_version 上改 `work_items[i].meta` + 推同 version 的 `ArtifactUpdate`"，不产生新 version、不调 provider。触发 Revision 走 dedicated 非流式 run：WS handler 在 `RequestRevision`（WorkItemPlan 下）启动 `ProviderRunKind::WorkItemPlanRevision`，用 `state.provider_adapter` 构造 `WorkItemSplitEngine`，调新 `generate_revision(retained, redo_specs)` 拿 `WorkItemSplitProviderOutput`，再调 `WorkspaceEngine::complete_work_item_plan_revision` 完成 replace candidate → 组装 DTO → `update_artifact(WorkItemPlanCandidate)` → 回 AuthorConfirm。`generate_revision` 是 `WorkItemSplitEngine` 的新方法，不改 `generate` 主体；`repatch_dependencies` 是纯函数，负责把被重做 WorkItem 的旧 id 在 `dependency_graph` 与其他 WorkItem 的 `depends_on` 中改指向新 id。review 触发的 revision（`handle_review_decision` continue→StartRevision）在 WorkItemPlan 下也路由到 `WorkItemPlanRevision`。
+**Architecture:** revert 标记是"在当前 artifact_version 上改 `work_items[i].meta` + 持久化该 version payload + 推同 version 的 `ArtifactUpdate`"，不产生新 version、不调 provider。触发 Revision 走 dedicated 非流式 run：WS handler 在 `RequestRevision`（WorkItemPlan 下）启动 `ProviderRunKind::WorkItemPlanRevision`，用 `state.provider_adapter` 构造 `WorkItemSplitEngine`，调新 `generate_revision(retained, redo_specs)`。局部重做时 retained 由后端沿用，provider 只返回 redo 项，后端分配新 id、合并 retained+redo、执行 `repatch_dependencies`；整组 review/AutoRevision（retained/redo 均空）退化为现有完整 split 输出解析。随后调 `WorkspaceEngine::complete_work_item_plan_revision` 完成 replace candidate → 组装 DTO → `update_artifact(WorkItemPlanCandidate)` → 回 AuthorConfirm。`generate_revision` 是 `WorkItemSplitEngine` 的新方法，不改 `generate` 主体；`repatch_dependencies` 是纯函数，负责把被重做 WorkItem 的旧 id 在 `dependency_graph` 与其他 WorkItem 的 `depends_on` 中改指向新 id。
 
 **Tech Stack:** Rust 1.95.0、Cargo、Axum、tokio（`spawn_blocking` 在 `WorkItemSplitEngine` 内）、serde。本 WP 不涉及前端。
 
@@ -108,7 +108,7 @@
 
 | 文件 | 操作 | 职责 / 本 WP 改动 |
 |---|---|---|
-| `src/product/work_item_split_engine.rs` | M | 新增 `generate_revision(&self, request, lifecycle, issue, repository, author_provider, retained: &[LifecycleWorkItemRecord], redo_specs: &[RedoSpec]) -> ApiResult<WorkItemSplitProviderOutput>`；新增 `repatch_dependencies(graph, id_mapping) -> Vec<IssueWorkItemDependencyEdge>` 纯函数；定义 `RedoSpec { old_id, feedback }`。**不改 `generate` 主体** |
+| `src/product/work_item_split_engine.rs` | M | 新增 `generate_revision(&self, request, lifecycle, issue, repository, author_provider, retained: &[LifecycleWorkItemRecord], redo_specs: &[RedoSpec]) -> ApiResult<WorkItemSplitProviderOutput>`；新增 redo-only provider parser/merge helper；新增 `repatch_dependencies(graph, id_mapping) -> Vec<IssueWorkItemDependencyEdge>` 纯函数；定义 `RedoSpec { old_id, feedback }`。**不改 `generate` 主体** |
 | `src/product/workspace_engine.rs` | M | 新增 `complete_work_item_plan_revision(&mut self, output: WorkItemSplitProviderOutput) -> Result<(), String>`（replace candidate → 组装 DTO → `update_artifact(WorkItemPlanCandidate)` → 回 AuthorConfirm）；新增 `apply_revert_mark(&mut self, work_item_id, feedback, clear) -> Result<(), String>`（改 candidate meta + 推同 version ArtifactUpdate）；Task 4 修改 `complete_work_item_plan_author` 的 `AutoRevision` 分支 |
 | `src/web/workspace_ws_handler.rs` | M | `ProviderRunKind` 加 `WorkItemPlanRevision`；`WsInMessage::RevertWorkItem` 分发 + AuthorConfirm 白名单 + `message_type`；`RequestRevision` 按 workspace_type 路由 `WorkItemPlanRevision`；`handle_review_decision` 的 StartRevision 在 WorkItemPlan 下路由 `WorkItemPlanRevision`；`spawn_provider_run_from_handler` 两处 match 加 `WorkItemPlanRevision` 分支 |
 | `src/product/lifecycle_store.rs` | （复用） | 复用 `replace_issue_work_item_plan_candidate`，**不改**（除非需读单个 work_item 的 helper） |
@@ -126,14 +126,14 @@
 
 ## Task 1：`WorkItemSplitEngine::generate_revision` + `repatch_dependencies`
 
-**目标**：`generate_revision` 在 `WorkItemSplitEngine` 上新增方法，prompt 注入"保留项清单 + 重做项及反馈"，provider 输出新整组，后端合并校验（保留项 id/内容未篡改）+ `repatch_dependencies` 重连 DAG。`repatch_dependencies` 是纯函数。**不改 `generate` 主体**。
+**目标**：`generate_revision` 在 `WorkItemSplitEngine` 上新增方法。局部重做时 prompt 注入"保留项清单 + 重做项及反馈"，provider **只输出 redo 项**，后端把 retained 原记录与 redo 输出合并，再 `repatch_dependencies` 重连 DAG；整组 review/AutoRevision（`retained`/`redo_specs` 均空）复用现有完整 split 输出解析。`repatch_dependencies` 是纯函数。**不改 `generate` 主体**。
 
 **Files:**
 - Modify: `src/product/work_item_split_engine.rs`
 - Test: `tests/it_product/product_work_item_split_engine.rs`
 
 **Interfaces:**
-- Consumes: `WorkItemSplitEngine::generate` 的内部 helper（`build_split_prompt`/`parse_provider_output`/`spawn_blocking` 调 provider 的模式）；`LifecycleWorkItemRecord`/`IssueWorkItemDependencyEdge`。
+- Consumes: `WorkItemSplitEngine::generate` 的内部 helper（`build_split_prompt`/`parse_provider_output`/`spawn_blocking` 调 provider 的模式）；`LifecycleWorkItemRecord`/`IssueWorkItemDependencyEdge`。局部重做新增 revision-only 输出结构，不能要求现有 `ProviderWorkItem` 携带 id。
 - Produces:
   - `RedoSpec { old_id: String, feedback: String }`
   - `WorkItemSplitEngine::generate_revision(...) -> ApiResult<WorkItemSplitProviderOutput>`
@@ -181,7 +181,7 @@
         let request = /* GenerateWorkItemsRequest，与 generate 同构 */;
 
         let output = engine.generate_revision(&request, &lifecycle, &issue, &repository, ProviderName::ClaudeCode, &retained, &redo_specs).await.expect("revision");
-        // 保留项 id 仍在
+        // 后端合并后，保留项 id 仍在
         assert!(output.work_items.iter().any(|wi| wi.id == "work_item_0001"));
         // 旧 redo id 不在（被重做）
         assert!(output.work_items.iter().all(|wi| wi.id != "work_item_0002"));
@@ -190,7 +190,7 @@
     }
 ```
 
-> 实现者注意：`split_engine_fixture` 参考 `tests/it_product/product_work_item_split_engine.rs` 现有 `generate` 测试夹具（`grep -n "fn.*generate\|async fn" tests/it_product/product_work_item_split_engine.rs`）。`MockSplitProviderAdapter` 让 provider 返回含 `work_item_0001`（保留）+ 新 id（重做）的 JSON。`LifecycleWorkItemRecord` 构造参考 `tests/it_web/web_work_item_generation.rs` 的 `valid_split_output()`。
+> 实现者注意：`split_engine_fixture` 参考 `tests/it_product/product_work_item_split_engine.rs` 现有 `generate` 测试夹具（`grep -n "fn.*generate\|async fn" tests/it_product/product_work_item_split_engine.rs`）。`MockSplitProviderAdapter` 让 provider 返回 **redo-only** JSON（只包含被重做项，不包含 `work_item_0001` retained）；断言 `generate_revision` 后端把 retained 原样合并回 output。`LifecycleWorkItemRecord` 构造参考 `tests/it_web/web_work_item_generation.rs` 的 `valid_split_output()`。
 
 - [ ] **Step 1.3：运行测试，确认失败**
 
@@ -236,18 +236,20 @@ pub fn repatch_dependencies(
 
 - [ ] **Step 1.5：实现 `generate_revision`**
 
-`src/product/work_item_split_engine.rs`，在 `generate`（:151-265）之后新增。复用 `generate` 的 `spawn_blocking` + `parse_provider_output` 模式，但 prompt 不同。
+`src/product/work_item_split_engine.rs`，在 `generate`（:151-265）之后新增。复用 `generate` 的 provider 调用模式，但解析分两路：`retained.is_empty() && redo_specs.is_empty()` 时复用完整 `parse_provider_output`；局部重做时解析 revision-only redo 输出，再由后端合并 retained。
 
 ```rust
 impl WorkItemSplitEngine {
-    /// Revision：保留项 + 重做项 + DAG repatch。
+    /// Revision：保留项 + redo-only 重做项 + DAG repatch。
     ///
-    /// prompt 注入"保留项清单（id+内容固定不变）+ 重做项及反馈"，要求 provider
-    /// 输出**完整新整组**（保留项原样 + 重做项新 id），后端合并校验：
-    /// 1. 保留项 id 与内容未被 provider 篡改；
-    /// 2. 重做项旧 id 不再出现，新 id 由 provider 分配（next_sequential_id 风格）；
-    /// 3. `repatch_dependencies` 把 dependency_graph 与各 WorkItem 的 depends_on
-    ///    中对旧 redo id 的引用改指向新 id（provider 输出的 graph 若已用新 id 则无需改）。
+    /// 局部重做时，prompt 注入"保留项清单（只作上下文，不允许重写）+ 重做项及反馈"，
+    /// provider 只输出 redo 项。后端负责：
+    /// 1. retained 原记录直接合并；
+    /// 2. 为 redo 输出分配新 id / verification_plan id；
+    /// 3. 用 redo_specs 顺序建立 old_id -> new_id 映射；
+    /// 4. `repatch_dependencies` 把 dependency_graph 与 retained/redo 的 depends_on 中旧 id 改成新 id。
+    ///
+    /// retained/redo_specs 均空时表示整组 review/AutoRevision，退化为完整 split 输出解析。
     pub async fn generate_revision(
         &self,
         request: &GenerateWorkItemsRequest,
@@ -259,58 +261,46 @@ impl WorkItemSplitEngine {
         redo_specs: &[RedoSpec],
     ) -> ApiResult<WorkItemSplitProviderOutput> {
         let prompt = build_revision_prompt(request, retained, redo_specs);
-        let raw = self.invoke_provider(&prompt, author_provider).await?; // 复用 generate 内的 spawn_blocking 调用
-        let mut output = parse_provider_output(&raw, &issue.id)?;
+        let provider_output = self.invoke_provider(&prompt, author_provider).await?;
+        let structured = provider_output.structured_output.ok_or_else(|| {
+            ApiError::runtime("work_item_split_provider_output_invalid", "missing structured output", json!({}))
+        })?;
 
-        // 1. 合并校验：保留项 id 仍在且内容未篡改
-        for retained_wi in retained {
-            let found = output
-                .work_items
-                .iter()
-                .find(|wi| wi.id == retained_wi.id)
-                .ok_or_else(|| ApiError::validation(
-                    "revision_retained_missing",
-                    &format!("retained work_item {} missing in revision output", retained_wi.id),
-                ))?;
-            // 内容未篡改：title/kind/depends_on/exclusive_write_scopes 一致
-            // （provider 可能微调，但 id+核心字段必须稳定——按 design "保留项 id+内容固定不变"）
-            // 实现时按 LifecycleWorkItemRecord 与 output.work_items 的字段逐一比对，不一致则 reject。
-            verify_retained_unchanged(retained_wi, found)?;
+        if retained.is_empty() && redo_specs.is_empty() {
+            return parse_provider_output(
+                lifecycle,
+                request,
+                issue,
+                repository,
+                provider_output.run_ref,
+                &structured,
+            );
         }
 
-        // 2. 旧 redo id 不再出现
-        let new_ids: Vec<&str> = output.work_items.iter().map(|wi| wi.id.as_str()).collect();
-        for spec in redo_specs {
-            if new_ids.contains(&spec.old_id.as_str()) {
-                return Err(ApiError::validation(
-                    "revision_redo_id_reused",
-                    &format!("redo old_id {} still present in revision output", spec.old_id),
-                ));
-            }
-        }
-
-        // 3. repatch_dependencies：构建 old→new 映射（redo_specs 的 old_id → output 中对应新项 id）
-        //    provider 输出的新整组里，重做项是新 id；映射由"redo_specs 顺序 ↔ output 中非 retained 项"对齐。
-        //    约定：output.work_items 中非 retained 的项即为重做项，按顺序与 redo_specs 对齐。
-        let mut id_mapping = std::collections::HashMap::new();
-        let redo_outputs: Vec<&LifecycleWorkItemRecord> = output
-            .work_items
-            .iter()
-            .filter(|wi| !retained.iter().any(|r| r.id == wi.id))
-            .collect();
-        if redo_outputs.len() != redo_specs.len() {
+        let redo = parse_revision_redo_output(&structured)?;
+        if redo.work_items.len() != redo_specs.len() || redo.verification_plans.len() != redo_specs.len() {
             return Err(ApiError::validation(
                 "revision_redo_count_mismatch",
-                &format!("redo_specs={} but output has {} redo items", redo_specs.len(), redo_outputs.len()),
+                &format!("redo_specs={} but provider returned work_items={} verification_plans={}", redo_specs.len(), redo.work_items.len(), redo.verification_plans.len()),
             ));
         }
-        for (spec, new_wi) in redo_specs.iter().zip(redo_outputs.iter()) {
-            id_mapping.insert(spec.old_id.clone(), new_wi.id.clone());
-        }
-        // repatch plan.dependency_graph
-        output.plan.dependency_graph = repatch_dependencies(&output.plan.dependency_graph, &id_mapping);
-        // repatch 各 work_item 的 depends_on
-        for wi in &mut output.work_items {
+
+        let mut id_mapping = std::collections::HashMap::new();
+        let mut merged_work_items = retained.to_vec();
+        let mut redo_work_items = materialize_redo_work_items(
+            lifecycle,
+            request,
+            issue,
+            repository,
+            &provider_output.run_ref,
+            redo.work_items,
+            redo.verification_plans,
+            redo_specs,
+            &mut id_mapping,
+        )?;
+        merged_work_items.append(&mut redo_work_items);
+
+        for wi in &mut merged_work_items {
             wi.depends_on = wi
                 .depends_on
                 .iter()
@@ -318,19 +308,27 @@ impl WorkItemSplitEngine {
                 .collect();
         }
 
-        // 4. 存 provider run（与 generate 一致）
-        // save_work_item_split_provider_run(...) — 复用 generate 内的持久化调用
-        Ok(output)
+        let old_graph = build_graph_from_work_items(&merged_work_items);
+        let dependency_graph = repatch_dependencies(&old_graph, &id_mapping);
+        build_revision_provider_output(
+            request,
+            issue,
+            repository,
+            provider_output.run_ref,
+            merged_work_items,
+            redo.repository_profile,
+            dependency_graph,
+        )
     }
 }
 ```
 
 > 实现者注意：
-> 1. `invoke_provider` 是 `generate` 内部 `spawn_blocking` 调 provider 的逻辑——若现有 `generate` 没抽成独立方法，**抽一个 private `async fn invoke_provider(&self, prompt, author_provider) -> ApiResult<String>`** 供 `generate` 与 `generate_revision` 复用（这是允许的 refactor，不破坏 `generate` 主体行为）。先 `grep -n "spawn_blocking\|fn generate" src/product/work_item_split_engine.rs` 看 :227 附近的调用模式。
-> 2. `build_revision_prompt(request, retained, redo_specs) -> String` 是新 helper，参考 `build_split_prompt` 风格，注入保留项清单（id/title/kind/depends_on/exclusive_write_scopes）+ 重做项（old_id + feedback）+ 要求输出完整新整组 JSON（同 `WORK_ITEM_SPLIT_OUTPUT_SCHEMA`）。
-> 3. `verify_retained_unchanged` 是 private helper，比对 retained 与 output 中对应项的核心字段。
-> 4. `save_work_item_split_provider_run` 的调用参考 `generate` 内部（:265 附近）。
-> 5. `LifecycleStore`/`IssueRecord`/`RepositoryRecord`/`ProviderName`/`ApiError`/`GenerateWorkItemsRequest` 顶部 `use` 已导入（`generate` 用过）。
+> 1. `invoke_provider` 应抽出 `generate` 内部 `spawn_blocking` 调 provider 的逻辑，并返回包含 `structured_output` 与 `run_ref` 的结果；不要把它简化成 raw string，否则无法复用现有 `parse_provider_output` 签名与 provider run 引用。
+> 2. `build_revision_prompt(request, retained, redo_specs) -> String` 是新 helper，参考 `build_split_prompt` 风格。局部重做时明确要求 provider 输出 redo-only JSON（work_items/verification_plans 数量必须等于 `redo_specs.len()`，不包含 retained，不包含旧 id）；整组修正时要求完整 split JSON。
+> 3. `parse_revision_redo_output` 是 revision-only parser，结构可复用 `ProviderWorkItem` / `ProviderVerificationPlan` / `ProviderRepositoryProfile`，但只解析 redo 项，不尝试读取 id。
+> 4. `materialize_redo_work_items` 负责为 redo 项按现有 count 分配 `work_item_*` / `verification_plan_*` id，并填充 `LifecycleWorkItemRecord` / `VerificationPlan`；实现时可抽取 `parse_provider_output` 中的 id 分配与 record 构造逻辑，避免复制大块代码。
+> 5. retained 不经过 provider 输出校验，因为 provider 不输出 retained；后端直接沿用 lifecycle 中的 `LifecycleWorkItemRecord`。这就是本计划选定策略，避免与现有 provider schema 冲突。
 
 - [ ] **Step 1.6：运行 Task 1 测试 + 收口**
 
@@ -354,7 +352,7 @@ git commit -m "feat(WP4): WorkItemSplitEngine generate_revision + repatch_depend
 
 ## Task 2：`RevertWorkItem` 标记处理（engine + WS handler）
 
-**目标**：用户在 AuthorConfirm 阶段对单个 WorkItem 点 `[revert]` → WS handler 收 `RevertWorkItem { work_item_id, feedback, clear }` → 调 `engine.apply_revert_mark` → 改当前 artifact_version 的 candidate `work_items[i].meta.reverted` + 存 feedback → 推**同 version** 的 `ArtifactUpdate`（不产新 version）。`clear: true` 取消标记。可连续标记多个。`RevertWorkItem` 加入 AuthorConfirm 阶段白名单。
+**目标**：用户在 AuthorConfirm 阶段对单个 WorkItem 点 `[revert]` → WS handler 收 `RevertWorkItem { work_item_id, feedback, clear }` → 调 `engine.apply_revert_mark` → 改当前 artifact_version 的 candidate `work_items[i].meta.reverted` + 存 feedback → 写回当前 `ArtifactVersion.payload`（不新增 version）→ 推**同 version** 的 `ArtifactUpdate`。`clear: true` 取消标记。可连续标记多个。`RevertWorkItem` 加入 AuthorConfirm 阶段白名单。
 
 **Files:**
 - Modify: `src/product/workspace_engine.rs`（新 `apply_revert_mark`）
@@ -395,7 +393,7 @@ async fn revert_work_item_clear_removes_mark() {
 }
 ```
 
-> 实现者注意：`prepare_and_start_generation`/`connect_ws`/`recv_ws_messages` helper 参考现有 WS 测试（WP2b Task 3 已建类似 helper，`grep -rn "connect_ws\|recv_ws\|WebSocket" tests/it_web/`）。若 WP2b fallback 到 engine 层测试无 WS helper，本 Task 也可 fallback：直接调 `engine.apply_revert_mark` + 断言 `session.artifact` 的 candidate meta，WS 端到端留 WP8。
+> 实现者注意：`prepare_and_start_generation`/`connect_ws`/`recv_ws_messages` helper 复用 WP2b Task 3 新增的共享 WS helper。若 helper 缺少 `recv_until_stage` / timeout 收集能力，先补 helper；本 Task 不 fallback 到 engine 层，因为需要覆盖 `RevertWorkItem` 的 WS 白名单与分发。
 
 - [ ] **Step 2.2：运行测试，确认失败**
 
@@ -410,9 +408,8 @@ Expected: 失败——`RevertWorkItem` 无分发（WS handler 不认识该消息
 impl WorkspaceEngine {
     /// AuthorConfirm 阶段标记/取消标记单个 WorkItem 的 revert。
     ///
-    /// **不产生新 artifact_version**：直接改 `session.artifact` 的 candidate meta，
-    /// 推同 version 的 `EngineEvent::ArtifactUpdate`（version 取当前 `artifact_versions`
-    /// 的 is_current version 号）。
+    /// **不产生新 artifact_version**：改 `session.artifact` 与当前 is_current
+    /// `ArtifactVersion.payload` 的 candidate meta，再推同 version 的 `EngineEvent::ArtifactUpdate`。
     pub async fn apply_revert_mark(
         &mut self,
         work_item_id: &str,
@@ -441,7 +438,7 @@ impl WorkspaceEngine {
             wi.meta.revert_feedback = feedback;
         }
 
-        // 更新 session.artifact（不 push artifact_versions，version 不变）
+        // 更新 session.artifact + 当前 ArtifactVersion.payload（不 push artifact_versions，version 不变）
         let current_version = self
             .artifact_versions
             .iter()
@@ -449,14 +446,19 @@ impl WorkspaceEngine {
             .find(|v| v.is_current)
             .map(|v| v.version)
             .unwrap_or(1);
-        self.session.artifact = Some(ArtifactPayload::WorkItemPlanCandidate { candidate: candidate.clone() });
+        let payload = ArtifactPayload::WorkItemPlanCandidate { candidate: candidate.clone() };
+        self.session.artifact = Some(payload.clone());
+        if let Some(version) = self.artifact_versions.iter_mut().rev().find(|v| v.is_current) {
+            version.payload = payload.clone();
+            self.persist_artifact_versions();
+        }
 
         // 推同 version 的 ArtifactUpdate（前端据此刷新 candidate 展示）
         let _ = self
             .event_tx
             .send(EngineEvent::ArtifactUpdate {
                 version: current_version,
-                payload: ArtifactPayload::WorkItemPlanCandidate { candidate },
+                payload,
             })
             .await;
         Ok(())
@@ -465,9 +467,9 @@ impl WorkspaceEngine {
 ```
 
 > 实现者注意：
-> 1. **不调 `update_artifact`**——`update_artifact` 会 push 新 `ArtifactVersion` 并递增 version。revert 标记必须保持 version 不变，只改 `session.artifact` 的 candidate meta 并手动发同 version 的 `EngineEvent::ArtifactUpdate`。
+> 1. **不调 `update_artifact`**——`update_artifact` 会 push 新 `ArtifactVersion` 并递增 version。revert 标记必须保持 version 不变：同步改 `session.artifact` 和当前 `artifact_versions[is_current].payload`，调用 `persist_artifact_versions()` 写回，再手动发同 version 的 `EngineEvent::ArtifactUpdate`。
 > 2. `WorkItemCandidateDto.meta` 字段是 `WorkItemCandidateMetaDto`（WP1 定义），需 `use` 导入。
-> 3. candidate meta 变化**不持久化到 `ArtifactVersion`**（ArtifactVersion 仍是 author/revision 时的 candidate 快照）；meta 是 AuthorConfirm 阶段的临时标记态，session 刷新时从 `session.artifact` 恢复。**若需持久化 meta 跨重连**（设计 :188 "meta 标记态"），可考虑把 meta 写回 lifecycle 的 work_item record 或 plan——但 design :188 说"标记不产生新 version，只在当前 version 上改 meta"，暗示 meta 是 artifact 层面的临时态。本 WP 采用"meta 只在 `session.artifact` 内存，不持久化到 ArtifactVersion"——重连时 meta 丢失。**若 WP8 贯通测试要求 meta 跨重连保留，再补持久化（可能需给 work_item record 加 revert_mark 字段）。本 WP 先按内存态实现，在 Self-Review 标注此风险。**
+> 3. candidate meta 变化必须跨重连保留；恢复路径走 `new_persistent` 从当前 `ArtifactVersion.payload` 还原 `session.artifact`。不把 revert meta 写入 lifecycle work_item record，避免污染 Draft candidate 的事实记录；artifact payload 是展示/恢复镜像。
 
 - [ ] **Step 2.4：WS handler `RevertWorkItem` 分发 + 白名单 + `message_type`**
 
@@ -556,7 +558,7 @@ async fn revision_replaces_draft_candidate_without_touching_confirmed_records() 
 }
 ```
 
-> 实现者注意：`MockSplitProviderAdapter` 需配置 revision 调用返回的 JSON（保留项 + 重做新项）。`recv_ws_messages_with_timeout` 收到多次 ArtifactUpdate（revert + revision），取最后一次。
+> 实现者注意：`MockSplitProviderAdapter` 需配置 revision 调用返回的 redo-only JSON（只返回被重做的新项；保留项由后端合并）。`recv_ws_messages_with_timeout` 收到多次 ArtifactUpdate（revert + revision），取最后一次。
 
 - [ ] **Step 3.2：运行测试，确认失败**
 
@@ -655,7 +657,7 @@ enum ProviderRunKind {
                 spawn_provider_run_from_handler(run_context.clone(), run_kind).await
 ```
 
-> review 触发的 revision 是整组可调（design :300），`redo_specs` 为空（无 revert 标记），`feedback` = review findings + summary + 用户 extra_context。Task 3.7 的 `WorkItemPlanRevision` 分支需处理"无 revert 标记的整组 revision"——`retained` 为空或全量，`redo_specs` 为空，prompt 让 provider 整组微调。**这与 AuthorConfirm revert 批量的局部重做不同**：分支内据 `session.artifact` 的 candidate meta 判断有无 reverted 项——有则局部重做（retained=未标记，redo=已标记），无则整组微调（retained=空，redo=空，feedback=review findings）。实现时在分支内组装 `retained`/`redo_specs`。
+> review 触发的 revision 是整组可调（design :300），`redo_specs` 为空（无 revert 标记），`feedback` = review findings + summary + 用户 extra_context。Task 3.7 的 `WorkItemPlanRevision` 分支需处理"无 revert 标记的整组 revision"——`retained` 空、`redo_specs` 空，prompt 让 provider 输出完整 split JSON 并走现有 `parse_provider_output`。**这与 AuthorConfirm revert 批量的局部重做不同**：分支内据 `session.artifact` 的 candidate meta 判断有无 reverted 项——有则局部重做（retained=未标记，redo=已标记，provider 只输出 redo 项），无则整组微调（retained=空，redo=空，feedback=review findings）。实现时在分支内组装 `retained`/`redo_specs`。
 
 - [ ] **Step 3.7：`spawn_provider_run_from_handler` 两处 match 加 `WorkItemPlanRevision` 分支**
 
@@ -873,9 +875,9 @@ Expected: PASS。
 
 commit 后，把以下内容写入 WP5 plan 的「前置交付摘要」章节：
 
-- `RevertWorkItem` 标记处理：AuthorConfirm 阶段，`engine.apply_revert_mark` 改 candidate meta + 推同 version `ArtifactUpdate`（不产新 version）；`clear:true` 取消。
+- `RevertWorkItem` 标记处理：AuthorConfirm 阶段，`engine.apply_revert_mark` 改 candidate meta + 写回当前 `ArtifactVersion.payload` + 推同 version `ArtifactUpdate`（不产新 version）；`clear:true` 取消；断线重连不丢标记。
 - `WorkItemPlanRevision` run：`RequestRevision`（WorkItemPlan 下）或 review `StartRevision` 触发，`generate_revision(retained, redo_specs)` + `repatch_dependencies`，`complete_work_item_plan_revision`（replace candidate → 新 version artifact → 回 AuthorConfirm）。
-- `generate_revision`：保留项 id/内容校验 + 重做项旧 id 替换 + DAG repatch。支持 `retained`/`redo_specs` 均空（整组微调，用于 review/AutoRevision）。
+- `generate_revision`：局部重做时 provider 只输出 redo 项，后端保留 retained、为 redo 分配新 id、建立 old→new 映射并 DAG repatch；支持 `retained`/`redo_specs` 均空（整组微调，用于 review/AutoRevision）。
 - `AutoRevision` 已迁移：validate 失败 → `WorkItemPlanRevision`（findings 作 feedback）→ 修正；连续 3 次进 HumanConfirm。
 - Draft candidate 仍无子 WorkItem session（confirm 时才建，WP5）。
 - **WP5 待办**：`handle_confirm` WorkItemPlan 分支调 `confirm_issue_work_item_plan` + 幂等建子 session；删 3 条废弃 REST 路由。
@@ -885,14 +887,14 @@ commit 后，把以下内容写入 WP5 plan 的「前置交付摘要」章节：
 ## Self-Review（写完后的自查）
 
 **1. Spec 覆盖**（对照总览 v1.1 WP4 目标/写入范围/验证 + 设计方案 :274-305、:326-335）：
-- ✅ `RevertWorkItem` 标记处理（candidate meta + 推 ArtifactUpdate 同 version）→ Task 2
+- ✅ `RevertWorkItem` 标记处理（candidate meta + 写回当前 ArtifactVersion payload + 推 ArtifactUpdate 同 version）→ Task 2
 - ✅ 批量触发 dedicated 非流式 WorkItemPlan Revision → Task 3
 - ✅ `WorkItemSplitEngine::generate_revision`（retained + redo_specs）→ Task 1
 - ✅ `repatch_dependencies` DAG 重连 → Task 1
 - ✅ revision 通过 `replace_issue_work_item_plan_candidate` 替换 Draft candidate → Task 3 `complete_work_item_plan_revision`
 - ✅ review 触发的整组 revision 走本 WP → Task 3 Step 3.6
 - ✅ revision 回 AuthorConfirm（不直接进 review）→ Task 3 Step 3.3
-- ✅ 重做语义（保留未标记 + 重做被 revert + DAG 重连 + 整组数量不变）→ Task 1/3
+- ✅ 重做语义（后端保留未标记 + provider redo-only 重做被 revert + DAG 重连 + 整组数量不变）→ Task 1/3
 - ✅ `RequestRevision` 复用现有消息 → Task 3 Step 3.5
 - ✅ AutoRevision 迁移到 generate_revision（对齐 design :269）→ Task 4
 - ✅ 验证命令链 → Task 5
@@ -902,8 +904,8 @@ commit 后，把以下内容写入 WP5 plan 的「前置交付摘要」章节：
 - `build_revision_prompt`（Task 1 Step 1.5）：给出职责但未给完整 prompt 文本——因 prompt 需与 `build_split_prompt` 风格对齐，实现时参考 `build_split_prompt`（:21-131）。给出 `grep` 定位，属可接受。
 - `build_work_item_plan_revision_input`（Task 3 Step 3.7）：给出签名与职责，实现时从 `session.artifact` 组装。属可接受指引。
 - `format_findings_as_feedback`（Task 4 Step 4.4）：给出职责，实现简单。属可接受。
-- `verify_retained_unchanged`（Task 1 Step 1.5）：给出职责（比对核心字段），实现时按 `LifecycleWorkItemRecord` 字段定。属可接受。
-- WS 测试 helper（Task 2/3）：给出 grep 定位 + fallback 到 engine 层测试。属可接受。
+- `parse_revision_redo_output` / `materialize_redo_work_items` / `build_revision_provider_output`（Task 1 Step 1.5）：给出职责和数据边界，具体字段映射需从现有 `parse_provider_output` 抽取。属可接受。
+- WS 测试 helper（Task 2/3）：复用 WP2b 共享 helper；若能力不足先补 helper。属可接受。
 
 **3. 类型一致性**：
 - `RedoSpec { old_id, feedback }` 在 Task 1 定义，Task 3 `build_work_item_plan_revision_input` 产出。
@@ -913,7 +915,7 @@ commit 后，把以下内容写入 WP5 plan 的「前置交付摘要」章节：
 - `complete_work_item_plan_revision(output: WorkItemSplitProviderOutput) -> Result<(), String>`（Task 3 定义），handler 调用一致。
 
 **4. 边界风险**：
-- **revert meta 持久化**（Task 2 Step 2.3）：meta 只在 `session.artifact` 内存，不持久化到 `ArtifactVersion`/lifecycle。重连时 meta 丢失。**风险**：用户标记 revert 后断连重连，标记态消失。design :188 说"标记不产生新 version，只在当前 version 上改 meta"——暗示 meta 是 artifact 临时态。本 WP 按内存态实现，WP8 贯通测试若要求跨重连保留，再补持久化（给 work_item record 加 revert_mark 字段或把 meta 写回 plan）。**已标注，实现时与维护者确认是否需持久化。**
+- **revert meta 持久化**（Task 2 Step 2.3）：已定为写回当前 `ArtifactVersion.payload`，不写 lifecycle work_item record。风险点变为"更新同 version 时漏调 `persist_artifact_versions` 导致重连丢失"；WP8 增加 `reconnect_preserves_revert_marks_from_current_artifact_version` 覆盖。
 - **`generate_revision` 支持 retained/redo 均空**（Task 1/3/4）：review 触发与 AutoRevision 触发的 revision 无 reverted 标记，`retained`/`redo_specs` 均空，prompt 退化为整组微调。`generate_revision` 需兼容此情况——Task 1 Step 1.5 的 prompt 构建需处理空 retained/redo。**已标注，Task 1 实现时确保支持。**
 - **`run_context` move + 重新 spawn**（Task 3 Step 3.7）：`ProviderRunContext` 已 `#[derive(Clone)]`（WP2b），`run_context.clone()`。`WorkItemPlanRevision` 加 `feedback` 字段后 `Clone` 仍成立。已标注。
 - **engine 锁跨 await**（Task 3 Step 3.7）：分段 lock，不跨 await 持锁。已标注。
@@ -936,6 +938,6 @@ commit 后，把以下内容写入 WP5 plan 的「前置交付摘要」章节：
 
 **⚠️ 实现前注意**：
 1. Task 1 的 `generate_revision` 需支持 `retained`/`redo_specs` 均空（整组微调），供 Task 3 的 review 触发与 Task 4 的 AutoRevision 触发使用。
-2. Task 2 的 revert meta 持久化策略需与维护者确认（内存态 vs 持久化到 lifecycle）。
+2. Task 2 的 revert meta 持久化策略已定：写回当前 `ArtifactVersion.payload`，不新增 version，不写 lifecycle work_item record。
 3. Task 3 Step 3.7 的 `WorkItemPlanRevision` 分支是本 WP 最复杂接入点（依赖获取 + run_context move + retained/redo 组装），建议执行者先完整读 WP2b Task 3 Step 3.6 的 `WorkItemPlanAuthor` 分支实现，再按本 plan 改造。
 4. Task 4 修改 WP2b 已写代码（`complete_work_item_plan_author` + handler outcome 处理），需同步更新 WP2b 的相关测试。

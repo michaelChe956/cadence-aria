@@ -4,11 +4,11 @@
 
 **Goal:** 将 `cadence/designs/2026-06-17_技术方案_WorkItem对话式Workspace生成_v1.0.md` 拆成多个单 session 可完成、前后端分离、可独立验证且最终能合成同一对话式 WorkItem 生成流程的实施计划。
 
-**Architecture:** 先落 `WorkspaceType::WorkItemPlan` 枚举、空 Draft `IssueWorkItemPlan` prepare 入口、artifact payload union 与 WS 契约骨架，再实现非流式 WorkItemPlan author/review/revert+revision/confirm 各阶段，最后前端入口与候选面板，贯通测试收尾。LifecycleStore Draft candidate 是事实来源，artifact payload 只做展示/恢复镜像；每个 WP 只改自己声明的写入范围，共享 `src/product/workspace_engine.rs` / `src/web/workspace_ws_handler.rs` 的 WP 必须严格串行。
+**Architecture:** 先落 `WorkspaceType::WorkItemPlan` 枚举、空 Draft `IssueWorkItemPlan` prepare 入口、artifact payload union 与 WS 契约骨架，再实现非流式 WorkItemPlan author/review/revert+revision/confirm 各阶段，最后前端入口与候选面板，贯通测试收尾。LifecycleStore Draft candidate 是事实来源；artifact payload 是展示/恢复镜像，AuthorConfirm 的 revert meta 写回当前 `ArtifactVersion.payload`（不新增 version）以保证重连不丢；每个 WP 只改自己声明的写入范围，共享 `src/product/workspace_engine.rs` / `src/web/workspace_ws_handler.rs` 的 WP 必须严格串行。
 
 **Tech Stack:** Rust 1.95.0、Cargo、Axum、tokio、React、TypeScript、Zustand、Vitest、OpenSpec、Superpowers。本计划不做 Playwright 浏览器 E2E。
 
-**版本：** v1.2（v1.0 → v1.1 修订：将 WP2 拆分为 WP2a「artifact payload union 挂载」+ WP2b「WorkItemPlan author run + Draft candidate 持久化」，同步更新串行约束表与推荐执行顺序；文件名保留 v1.0 以维持既有引用路径稳定。v1.1 → v1.2 修订：① WP3 验证条目 `work_item_plan_review_revision_loop` 改为 `work_item_plan_review_returns_decision_response`（WP3 边界只到 ReviewDecision 响应，revision 重做在 WP4）；② WP4 新增 Task 4「迁移 WP2b AutoRevision 到 generate_revision」以对齐 design 第 269 行 validate 失败语义；③ WP3-WP8 详细计划文档已生成，更新引用标注）
+**版本：** v1.3（v1.0 → v1.1 修订：将 WP2 拆分为 WP2a「artifact payload union 挂载」+ WP2b「WorkItemPlan author run + Draft candidate 持久化」，同步更新串行约束表与推荐执行顺序；文件名保留 v1.0 以维持既有引用路径稳定。v1.1 → v1.2 修订：① WP3 验证条目 `work_item_plan_review_revision_loop` 改为 `work_item_plan_review_returns_decision_response`（WP3 边界只到 ReviewDecision 响应，revision 重做在 WP4）；② WP4 新增 Task 4「迁移 WP2b AutoRevision 到 generate_revision」以对齐 design 第 269 行 validate 失败语义；③ WP3-WP8 详细计划文档已生成，更新引用标注。v1.2 → v1.3 修订：① prepare 响应统一为 `IssueWorkItemPlanDetailDto` + `WorkspaceSession.workspace_session_id`；② revert meta 写回当前 artifact version，重连恢复；③ revision 改为 provider 只生成 redo 项、后端合并 retained）
 
 ---
 
@@ -25,7 +25,7 @@
   - prepare 阶段先创建空 Draft `IssueWorkItemPlan`，`session.entity_id = plan_id`；author/revision 从该 plan 读取 source ids/options。
   - author/revision 用 `WorkItemSplitter`（`spawn_blocking` 非流式），review 用 `Reviewer`（流式）；WorkItemPlan 的 author/revision 不走普通 `drive_provider_session` 流式路径。
   - LifecycleStore Draft candidate 是唯一事实来源；`ArtifactUpdate` / `SessionState.artifact` 扩展为 markdown 或 candidate 的 union。
-  - AuthorConfirm 阶段逐个 revert，批量触发 Revision；revert = 重做（删一个重生补上，DAG 自动重连）。
+  - AuthorConfirm 阶段逐个 revert，批量触发 Revision；revert = 重做（删一个重生补上，DAG 自动重连）；revert meta 持久化到当前 artifact version，断线重连后仍可继续批量 Revision。
   - `confirm` 后才建子 Coding session（draft 阶段只存 candidate）。
   - 运行时验证命令不硬编码（本计划不涉及目标项目验证命令，仅复用 P3 的 provider-based VerificationPlan）。
 
@@ -210,7 +210,7 @@
 
 ## WP4：后端 revert + revision 局部重做
 
-**目标：** 实现 `WsInMessage::RevertWorkItem` 标记处理（candidate meta 更新 + 推 ArtifactUpdate）、批量触发 dedicated 非流式 WorkItemPlan Revision、`WorkItemSplitEngine::generate_revision`（retained + redo_specs）、`repatch_dependencies` DAG 重连；revision 输出必须通过 `replace_issue_work_item_plan_candidate` 替换 Draft candidate，再写 artifact payload。review 触发的整组 revision 也走本 WP 的 revision 路径。
+**目标：** 实现 `WsInMessage::RevertWorkItem` 标记处理（candidate meta 更新 + 写回当前 ArtifactVersion payload + 推同 version ArtifactUpdate）、批量触发 dedicated 非流式 WorkItemPlan Revision、`WorkItemSplitEngine::generate_revision`（retained + redo_specs）、`repatch_dependencies` DAG 重连；局部 revision 中 provider 只生成 redo 项，后端合并 retained 与 redo 后通过 `replace_issue_work_item_plan_candidate` 替换 Draft candidate，再写新 artifact payload。review 触发的整组 revision 也走本 WP 的 revision 路径。
 
 **依赖：** WP1、WP2。
 
@@ -286,7 +286,7 @@
 
 **依赖：** WP1（prepare API 契约）。
 
-**前置交付摘要要求：** 总结 WP1 的 `POST /work-item-plans:prepare` 请求/响应契约、返回的 `workspace_session_id` / `plan_id`、`WorkspaceType::WorkItemPlan` 的前端序列化值 `"work_item_plan"`。
+**前置交付摘要要求：** 总结 WP1 的 `POST /work-item-plans:prepare` 请求/响应契约、返回的 `work_item_plan.id` / `workspace_session.workspace_session_id`、`WorkspaceType::WorkItemPlan` 的前端序列化值 `"work_item_plan"`，并明确前端新增 `IssueWorkItemPlanDetailDto`，不复用旧 REST 的轻量 `IssueWorkItemPlan`。
 
 **写入范围：**
 

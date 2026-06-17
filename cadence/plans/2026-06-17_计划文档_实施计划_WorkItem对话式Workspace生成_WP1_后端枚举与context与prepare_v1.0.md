@@ -731,7 +731,7 @@ git commit -m "feat(WP1): WS 契约类型 ArtifactPayload/WorkItemPlanCandidateD
 - Test: `tests/it_web/web_work_item_generation.rs`（追加测试）或新增 `tests/it_web/web_work_item_plan_prepare.rs` + 在 `tests/it_web.rs` 加 `#[path] mod`
 
 **Interfaces:**
-- Consumes: Task 1 的 `WorkspaceType::WorkItemPlan`；`provider_workspace_config`（:3113）；`validate_confirmed_design_specs`（现有 private helper，见 `generate_work_items` :512-561）；`IssueStore::get`；`LifecycleStore::create_issue_work_item_plan` + `create_workspace_session` + `ensure_workspace_context_message`；DTO 投影 helper（`workspace_session_dto`，:2710 附近；若 `IssueWorkItemPlan` 已有 DTO 投影则复用，否则直接返回 models 的 `IssueWorkItemPlan`——后者已 derive `Serialize`）。
+- Consumes: Task 1 的 `WorkspaceType::WorkItemPlan`；`provider_workspace_config`（:3113）；`validate_confirmed_design_specs`（现有 private helper，见 `generate_work_items` :512-561）；`IssueStore::get`；`LifecycleStore::create_issue_work_item_plan` + `create_workspace_session` + `ensure_workspace_context_message`；DTO 投影 helper（`workspace_session_dto`，:2710 附近）；新增 `issue_work_item_plan_detail_dto`，显式把 product model 投影为 prepare 专用完整 DTO，避免与现有 web 轻量 `IssueWorkItemPlan { plan_id, ... }` 混淆。
 - Produces: `POST /api/projects/{project_id}/issues/{issue_id}/work-item-plans:prepare` → `PrepareWorkItemPlanResponse { work_item_plan, workspace_session }`；被 WP6 前端 `prepareWorkItemPlan` API client 依赖。
 
 - [ ] **Step 3.1：写失败测试 —— prepare 创建 Draft plan + session，不生成 WorkItem**
@@ -808,7 +808,7 @@ Expected: `status` 断言失败（404，因路由未注册）或编译失败（h
 
 - [ ] **Step 3.3：定义 DTO**
 
-`src/web/types.rs`，参考 `GenerateWorkItemsRequest`（:564-579）/ `GenerateStorySpecsResponse`（:537-542）的 derive 与字段风格。先 `grep -n "struct GenerateWorkItemsRequest\|struct GenerateStorySpecsResponse" src/web/types.rs` 定位插入点。
+`src/web/types.rs`，参考 `GenerateWorkItemsRequest`（:564-579）/ `GenerateStorySpecsResponse`（:537-542）的 derive 与字段风格。先 `grep -n "struct GenerateWorkItemsRequest\|struct GenerateStorySpecsResponse\|struct IssueWorkItemPlan" src/web/types.rs` 定位插入点。
 
 ```rust
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -833,12 +833,33 @@ pub struct PrepareWorkItemPlanRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct PrepareWorkItemPlanResponse {
-    pub work_item_plan: IssueWorkItemPlan,
+    pub work_item_plan: IssueWorkItemPlanDetailDto,
     pub workspace_session: WorkspaceSessionDto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct IssueWorkItemPlanDetailDto {
+    pub id: String,
+    pub project_id: String,
+    pub issue_id: String,
+    pub source_story_spec_ids: Vec<String>,
+    pub source_design_spec_ids: Vec<String>,
+    pub options: IssueWorkItemPlanOptions,
+    pub status: IssueWorkItemPlanStatus,
+    pub work_item_ids: Vec<String>,
+    pub repository_profile_ref: Option<String>,
+    pub verification_plan_ids: Vec<String>,
+    pub dependency_graph: Vec<IssueWorkItemDependencyEdge>,
+    pub created_from_provider_run: Option<String>,
+    pub validator_findings: Vec<WorkItemSplitFinding>,
+    pub review_summary: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
 }
 ```
 
-> `IssueWorkItemPlan` 已在 models.rs derive `Serialize`，可直接作为响应字段（与 `GenerateWorkItemsResponse.work_item_plan: IssueWorkItemPlan` 一致，见 types.rs:581-594）。`WorkspaceSessionDto` 已存在（types.rs:685 附近）。`use` 导入以现有 types.rs 顶部 import 风格为准。
+> 不复用现有 web DTO `IssueWorkItemPlan`：`src/web/types.rs` 已有轻量 DTO，字段是 `plan_id/status/options/created_at/updated_at`，不含 `id/work_item_ids/verification_plan_ids/dependency_graph`。prepare 必须返回完整 detail DTO，前端 WP6 也用同名 detail 类型对齐。`WorkspaceSessionDto` 已存在（types.rs:685 附近），其 id 字段名是 `workspace_session_id`，测试和前端 mock 不得写成 `id`。`use` 导入以现有 types.rs 顶部 import 风格为准。
 
 - [ ] **Step 3.4：实现 `prepare_work_item_plan` handler**
 
@@ -917,17 +938,18 @@ pub async fn prepare_work_item_plan(
         .map_err(product_store_api_error)?;
 
     Ok(Json(PrepareWorkItemPlanResponse {
-        work_item_plan: plan,
+        work_item_plan: issue_work_item_plan_detail_dto(plan),
         workspace_session: workspace_session_dto(session),
     }))
 }
 ```
 
 > 实现者注意：
-> 1. `handlers.rs` 顶部 `use` 补：`use crate::web::types::{PrepareWorkItemPlanRequest, PrepareWorkItemPlanResponse};` 以及确认 `CreateIssueWorkItemPlanInput`、`IssueWorkItemPlanOptions`、`IssueWorkItemPlanStatus` 已从 `crate::product::{lifecycle_store, models}` 导入（参考 `persist_work_item_split_provider_output` :589-703 的 import 方式——它已经用过这些类型，说明 import 路径已通）。
+> 1. `handlers.rs` 顶部 `use` 补：`use crate::web::types::{IssueWorkItemPlanDetailDto, PrepareWorkItemPlanRequest, PrepareWorkItemPlanResponse};` 以及确认 `CreateIssueWorkItemPlanInput`、`IssueWorkItemPlanOptions`、`IssueWorkItemPlanStatus` 已从 `crate::product::{lifecycle_store, models}` 导入（参考 `persist_work_item_split_provider_output` :589-703 的 import 方式——它已经用过这些类型，说明 import 路径已通）。
 > 2. **`options` 默认值**：上述 `unwrap_or(...)` 是合理默认。若想与现有 `generate_work_items` 完全一致，先 `grep -n "include_integration_tests\|include_e2e_tests\|force_frontend_backend_split\|require_execution_plan_confirm" src/web/handlers.rs src/product/work_item_split_engine.rs` 看现有代码怎么从 `Option<bool>` 构造 `IssueWorkItemPlanOptions`（很可能在 `persist_work_item_split_provider_output` 或 engine 内），**照抄其 unwrap 默认值**。
 > 3. **不调 Provider、不建 WorkItem、不建子 session**：handler 里不出现 `WorkItemSplitEngine`、`create_work_item`、`create_workspace_session(WorkspaceType::WorkItem, ...)`。这是「prepare 不生成」的硬约束。
 > 4. `validate_confirmed_design_specs` 的签名以实际为准（`generate_work_items` :512-561 调用了它；若签名是 `fn validate_confirmed_design_specs(&LifecycleStore, &str, &str, &[String]) -> Result<(), ApiError>`，照抄）。
+> 5. 新增 `issue_work_item_plan_detail_dto(plan: IssueWorkItemPlan) -> IssueWorkItemPlanDetailDto` helper，逐字段拷贝 product model 字段；不要把 `src/web/types.rs` 现有轻量 `IssueWorkItemPlan` 当作 prepare 响应类型。
 
 - [ ] **Step 3.5：注册路由**
 
@@ -1002,7 +1024,7 @@ Expected: PASS（本 WP 不删路由，旧 `generate_work_items` / `confirm` / `
 
 - `WorkspaceType::WorkItemPlan` 变体已就位，serde 序列化为 `"work_item_plan"`。
 - `workspace_context.rs` 全部 10 处分支已支持 WorkItemPlan；`ensure_workspace_context_message` 对 WorkItemPlan session 注入含「候选 work item plan 生成器」的上下文消息；entity context 的 title 形如 `Work Item Plan ({plan_id})`，`linked_context` 拼接 source story + design。
-- `POST /work-item-plans:prepare` 已可用，返回 `PrepareWorkItemPlanResponse { work_item_plan: IssueWorkItemPlan(status=Draft, 空集合), workspace_session(entity_id=plan_id, workspace_type=work_item_plan) }`。
+- `POST /work-item-plans:prepare` 已可用，返回 `PrepareWorkItemPlanResponse { work_item_plan: IssueWorkItemPlanDetailDto(id=plan_id, status=Draft, 空集合), workspace_session(workspace_session_id, entity_id=plan_id, workspace_type=work_item_plan) }`。注意 `workspace_session` 的 id 字段名是 `workspace_session_id`，不是 `id`。
 - WS 契约：`WsOutMessage::ArtifactUpdate` 新增 `candidate: Option<WorkItemPlanCandidateDto>`（Story/Design 调用方填 None）；`WsInMessage::RevertWorkItem { work_item_id, feedback, clear }` 已定义（WP4 处理）；`ArtifactPayload` enum 已定义（WP2 切换）。
 - **WP2 待办**：把 `WsOutMessage::ArtifactUpdate` 与 `SessionState.artifact` 切换到 `ArtifactPayload`（即 `ArtifactUpdate` 携带 `payload: ArtifactPayload`、`SessionState.artifact: Option<ArtifactPayload>`），同步改 `workspace_ws_handler.rs:270` 与 `workspace_engine.rs` 的所有构造/消费点。WP1 已定义 `ArtifactPayload`（`untagged` 扁平 JSON）与 `WorkItemPlanCandidateDto`，WP2 直接挂载、无需重新定义。
 

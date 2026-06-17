@@ -427,7 +427,7 @@ git commit -m "refactor(WP2a): artifact 链路消息层+内存层切 ArtifactPay
         };
         let json = serde_json::to_string(&v).expect("serialize");
         assert!(json.contains("\"markdown\":\"# Story\""));
-        assert!(!json.contains("\"markdown\":\"# Story\"") && json.contains("\"payload\"") == false);
+        assert!(!json.contains("\"payload\""));
         let back: ArtifactVersion = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(v, back);
     }
@@ -456,7 +456,7 @@ git commit -m "refactor(WP2a): artifact 链路消息层+内存层切 ArtifactPay
         assert_eq!(summary.markdown_size, "# 标题".len());
         assert!(summary.markdown_preview.contains("标题"));
 
-        let candidate_json = serde_json::to_string(&WorkItemPlanCandidateDto {
+        let candidate = WorkItemPlanCandidateDto {
             plan: WorkItemPlanDto {
                 id: "plan_1".to_string(),
                 status: "draft".to_string(),
@@ -472,11 +472,12 @@ git commit -m "refactor(WP2a): artifact 链路消息层+内存层切 ArtifactPay
             verification_plans: Vec::new(),
             repository_profile: None,
             validator_findings: Vec::new(),
-        }).unwrap();
+        };
+        let candidate_json = serde_json::to_string(&candidate).unwrap();
         let candidate_version = ArtifactVersion {
             version: 2,
             payload: ArtifactPayload::WorkItemPlanCandidate {
-                candidate: serde_json::from_value(serde_json::to_value(&candidate_json).unwrap()).unwrap(),
+                candidate,
             },
             generated_by: ProviderName::ClaudeCode,
             reviewed_by: None,

@@ -32,9 +32,9 @@
 
 - 后端 `POST /api/projects/{project_id}/issues/{issue_id}/work-item-plans:prepare` 已可用（WP1 Task 3）。
 - 请求体 `PrepareWorkItemPlanRequest`：`title / story_spec_ids / design_spec_ids / include_integration_tests? / include_e2e_tests? / force_frontend_backend_split? / require_execution_plan_confirm? / author_provider? / reviewer_provider? / review_rounds? / superpowers_enabled? / openspec_enabled?`（4 个 split 选项 + provider 配置，复用现有 `provider_workspace_config` 解析）。
-- 响应 `PrepareWorkItemPlanResponse`：`{ work_item_plan: IssueWorkItemPlan, workspace_session: WorkspaceSessionDto }`。
+- 响应 `PrepareWorkItemPlanResponse`：`{ work_item_plan: IssueWorkItemPlanDetailDto, workspace_session: WorkspaceSession }`。
   - `work_item_plan.status = "draft"`，`work_item_ids`/`verification_plan_ids`/`dependency_graph` 为空。
-  - `workspace_session.workspace_type = "work_item_plan"`，`entity_id = plan_id`。
+  - `workspace_session.workspace_session_id` 是 session id；`workspace_session.workspace_type = "work_item_plan"`，`entity_id = plan_id`。
 - `WorkspaceType::WorkItemPlan` 的前端序列化值：`"work_item_plan"`。
 - `WorkItemPlanCandidateDto` 后端结构（WP1 定义，WP7 前端用）：`{ plan: { id, status, options, dependency_graph }, work_items: [{ id, kind, title, depends_on, exclusive_write_scopes, verification_plan_ref, meta: { reverted, revert_feedback } }], verification_plans, repository_profile, validator_findings }`。
 
@@ -51,7 +51,7 @@
 ### `web/src/api/types.ts`
 - `WorkspaceSession` 类型（含 `workspace_type` 字段，联合类型 `WorkspaceType`）。`grep -n "workspace_type\|WorkspaceType\b\|WorkspaceSession" web/src/api/types.ts`。
 - `GenerateWorkItemsRequest`/`Response`（若前端有，参考字段；WP5 删后端 Response 但前端可能仍有定义——本 WP 不删前端 `GenerateWorkItems*` 类型，仅新增 prepare 类型）。
-- `IssueWorkItemPlan`/`WorkspaceSessionDto` 前端类型（若有，复用；若无，新增）。
+- 现有 `IssueWorkItemPlan` 是旧 REST 轻量类型（`plan_id/status/options/...`），不要复用于 prepare。新增 `IssueWorkItemPlanDetailDto`，与 WP1 后端 prepare detail DTO 字段对齐。现有 `WorkspaceSession` 已有 `workspace_session_id`，不要新增 `id` 别名。
 - `StorySpec`/`DesignSpec` 相关类型（参考 `source_story_spec_ids`/`source_design_spec_ids`）。
 
 ### `web/src/components/lifecycle/IssueLifecycleWorkbench.tsx`
@@ -103,8 +103,25 @@
 ```typescript
   it("prepareWorkItemPlan posts to work-item-plans:prepare and returns response", async () => {
     const mockResponse = {
-      work_item_plan: { id: "issue_work_item_plan_0001", status: "draft", work_item_ids: [], verification_plan_ids: [], dependency_graph: [] },
-      workspace_session: { id: "session_0001", workspace_type: "work_item_plan", entity_id: "issue_work_item_plan_0001" },
+      work_item_plan: {
+        id: "issue_work_item_plan_0001",
+        project_id: "project_0001",
+        issue_id: "issue_0001",
+        source_story_spec_ids: ["story_spec_0001"],
+        source_design_spec_ids: ["design_spec_0001"],
+        options: { include_integration_tests: true, include_e2e_tests: false, force_frontend_backend_split: true, require_execution_plan_confirm: false },
+        status: "draft",
+        work_item_ids: [],
+        repository_profile_ref: null,
+        verification_plan_ids: [],
+        dependency_graph: [],
+        created_from_provider_run: null,
+        validator_findings: [],
+        review_summary: null,
+        created_at: "2026-06-17T00:00:00Z",
+        updated_at: "2026-06-17T00:00:00Z",
+      },
+      workspace_session: { workspace_session_id: "session_0001", issue_id: "issue_0001", workspace_type: "work_item_plan", entity_id: "issue_work_item_plan_0001", status: "open", author_provider: "fake", reviewer_provider: "fake", review_rounds: 1, superpowers_enabled: false, openspec_enabled: false, messages: [] },
     };
     fetchMock.mockOnce(JSON.stringify(mockResponse), { status: 200 });
 
@@ -159,8 +176,27 @@ export interface PrepareWorkItemPlanRequest {
 }
 
 export interface PrepareWorkItemPlanResponse {
-  work_item_plan: IssueWorkItemPlan;
-  workspace_session: WorkspaceSessionDto;
+  work_item_plan: IssueWorkItemPlanDetailDto;
+  workspace_session: WorkspaceSession;
+}
+
+export interface IssueWorkItemPlanDetailDto {
+  id: string;
+  project_id: string;
+  issue_id: string;
+  source_story_spec_ids: string[];
+  source_design_spec_ids: string[];
+  options: WorkItemSplitOptionsDto;
+  status: "draft" | "confirmed" | "change_requested" | string;
+  work_item_ids: string[];
+  repository_profile_ref: string | null;
+  verification_plan_ids: string[];
+  dependency_graph: WorkItemDependencyEdgeDto[];
+  created_from_provider_run: string | null;
+  validator_findings: ValidatorFindingDto[];
+  review_summary: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 // WorkItemPlanCandidateDto（WP7 用，本 WP 先定义）
@@ -216,7 +252,7 @@ export interface ValidatorFindingDto {
 
 > 实现者注意：
 > 1. `WorkspaceType` 当前可能是字符串字面量联合或 enum——`grep -n "WorkspaceType\|workspace_type" web/src/api/types.ts` 确认现有定义，加 `"work_item_plan"`。
-> 2. `IssueWorkItemPlan`/`WorkspaceSessionDto`/`VerificationPlanDto`/`RepositoryProfileDto`：先 `grep -n "IssueWorkItemPlan\|WorkspaceSessionDto\|VerificationPlanDto\|RepositoryProfileDto" web/src/api/types.ts` 确认是否已有。若有复用，若无新增（字段对齐后端 `src/product/models.rs` + `src/web/types.rs`）。
+> 2. `IssueWorkItemPlanDetailDto` 是新增 prepare 专用完整 DTO；不要复用现有 `IssueWorkItemPlan`（旧 REST response 的轻量类型，字段是 `plan_id`）。`WorkspaceSession` 复用现有类型并把 `workspace_type` 联合加 `"work_item_plan"`，mock 和页面跳转都使用 `workspace_session.workspace_session_id`。
 > 3. `WorkItemPlanCandidateDto` 及子 DTO 本 WP 定义，WP7 `workspace-ws-store`/`WorkItemPlanCandidatePanel` 使用。
 
 - [ ] **Step 1.4：实现 `prepareWorkItemPlan` client**
@@ -281,8 +317,25 @@ git commit -m "feat(WP6): prepareWorkItemPlan API client + WorkItemPlanCandidate
 ```typescript
   it("handleGenerateNext from design spec opens ChatWorkspacePage via prepareWorkItemPlan", async () => {
     const mockPrepare = vi.fn().mockResolvedValue({
-      work_item_plan: { id: "issue_work_item_plan_0001", status: "draft", work_item_ids: [], verification_plan_ids: [], dependency_graph: [] },
-      workspace_session: { id: "session_0001", workspace_type: "work_item_plan", entity_id: "issue_work_item_plan_0001" },
+      work_item_plan: {
+        id: "issue_work_item_plan_0001",
+        project_id: "project_0001",
+        issue_id: "issue_0001",
+        source_story_spec_ids: ["story_spec_0001"],
+        source_design_spec_ids: ["design_spec_0001"],
+        options: { include_integration_tests: true, include_e2e_tests: false, force_frontend_backend_split: true, require_execution_plan_confirm: false },
+        status: "draft",
+        work_item_ids: [],
+        repository_profile_ref: null,
+        verification_plan_ids: [],
+        dependency_graph: [],
+        created_from_provider_run: null,
+        validator_findings: [],
+        review_summary: null,
+        created_at: "2026-06-17T00:00:00Z",
+        updated_at: "2026-06-17T00:00:00Z",
+      },
+      workspace_session: { workspace_session_id: "session_0001", issue_id: "issue_0001", workspace_type: "work_item_plan", entity_id: "issue_work_item_plan_0001", status: "open", author_provider: "fake", reviewer_provider: "fake", review_rounds: 1, superpowers_enabled: false, openspec_enabled: false, messages: [] },
     });
     vi.mocked(prepareWorkItemPlan).mockImplementation(mockPrepare);
 
@@ -424,7 +477,7 @@ commit 后，把以下内容写入 WP7 plan 的「前置交付摘要」章节：
 - ✅ `WorkItemPlanCandidateDto` 类型本 WP 先定义（WP7 用）→ Task 1 Step 1.3
 
 **2. Placeholder 扫描**：
-- `IssueWorkItemPlan`/`WorkspaceSessionDto`/`VerificationPlanDto`/`RepositoryProfileDto`（Task 1 Step 1.3）：给出 grep 确认是否已有、若无新增的指引。属可接受。
+- `IssueWorkItemPlanDetailDto` / `WorkspaceSession` / `VerificationPlanDto` / `RepositoryProfileDto`（Task 1 Step 1.3）：已明确 prepare 新增 detail DTO、复用现有 `WorkspaceSession.workspace_session_id`，避免复用旧 REST 轻量 `IssueWorkItemPlan`。属可接受。
 - `handleGenerateNext` 的参数派生（Task 2 Step 2.3）：给出"参考旧实现的默认值组装"指引。属可接受。
 - 路由路径（Task 2 Step 2.3）：给出 grep 确认指引。属可接受。
 - UI 选择器（Task 2 Step 2.1）：给出"以实际为准，参考现有 story/design 入口测试"指引。属可接受。
