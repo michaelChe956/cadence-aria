@@ -1,4 +1,4 @@
-use axum::http::Method;
+use axum::http::{Method, StatusCode};
 use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::lifecycle_store::LifecycleStore;
 use cadence_aria::product::models::{
@@ -321,4 +321,40 @@ async fn confirm_is_idempotent_on_retry() {
     assert_eq!(plan.status, IssueWorkItemPlanStatus::Confirmed);
 
     ws.close(None).await.ok();
+}
+
+#[tokio::test]
+async fn delete_legacy_rest_routes_returns_404() {
+    let (app, _repo) = app_with_confirmed_story_and_design(valid_split_output()).await;
+
+    let (status, _) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items:generate",
+        json!({
+            "title": "x",
+            "story_spec_ids": ["story_spec_0001"],
+            "design_spec_ids": ["design_spec_0001"]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, _) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-item-plans/some_plan/confirm",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, _) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-item-plans/some_plan/change-request",
+        json!({"feedback": "x"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }

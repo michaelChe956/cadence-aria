@@ -77,20 +77,8 @@ pub fn build_web_router(state: WebAppState) -> Router {
             delete(handlers::delete_design_spec),
         )
         .route(
-            "/api/projects/{project_id}/issues/{issue_id}/work-items:generate",
-            post(handlers::generate_work_items),
-        )
-        .route(
             "/api/projects/{project_id}/issues/{issue_id}/work-item-plans:prepare",
             post(handlers::prepare_work_item_plan),
-        )
-        .route(
-            "/api/projects/{project_id}/issues/{issue_id}/work-item-plans/{plan_id}/confirm",
-            post(handlers::confirm_issue_work_item_plan),
-        )
-        .route(
-            "/api/projects/{project_id}/issues/{issue_id}/work-item-plans/{plan_id}/change-request",
-            post(handlers::request_issue_work_item_plan_change),
         )
         .route(
             "/api/projects/{project_id}/issues/{issue_id}/work-items/{work_item_id}",

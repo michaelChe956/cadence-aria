@@ -1,8 +1,12 @@
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use cadence_aria::product::app_paths::ProductAppPaths;
-use cadence_aria::product::lifecycle_store::LifecycleStore;
-use cadence_aria::product::models::ProviderName;
+use cadence_aria::product::lifecycle_store::{
+    CreateWorkItemInput, CreateWorkspaceSessionInput, LifecycleStore,
+};
+use cadence_aria::product::models::{
+    ProviderName, WorkItemPlanStatus, WorkspaceSessionStatus, WorkspaceType,
+};
 use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::runtime::WebRuntime;
 use cadence_aria::web::state::WebAppState;
@@ -326,35 +330,8 @@ async fn confirmed_story_and_design_can_generate_design_and_work_item_workspaces
     )
     .await;
 
-    let (status, work_item_response) = request_json(
-        app.clone(),
-        Method::POST,
-        "/api/projects/project_0001/issues/issue_0001/work-items:generate",
-        json!({
-            "title":"实现会话过期提示",
-            "story_spec_ids":["story_spec_0001"],
-            "design_spec_ids":["design_spec_0001"],
-            "author_provider":"codex",
-            "reviewer_provider":"fake",
-            "review_rounds":1,
-            "superpowers_enabled":true,
-            "openspec_enabled":false
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        work_item_response["work_items"][0]["work_item_id"],
-        "work_item_0001"
-    );
-    assert_eq!(
-        work_item_response["workspace_session"]["workspace_type"],
-        "work_item"
-    );
-    assert_eq!(
-        work_item_response["workspace_session"]["reviewer_provider"],
-        "fake"
-    );
+    bootstrap_confirmed_work_item_session(root.path(), ProviderName::Codex, ProviderName::Fake)
+        .await;
 
     let (status, lifecycle) = request_json(
         app,
@@ -438,17 +415,8 @@ async fn delete_lifecycle_entities_removes_cards_and_workspace_sessions() {
         json!({"confirmed_by":"human"}),
     )
     .await;
-    request_json(
-        app.clone(),
-        Method::POST,
-        "/api/projects/project_0001/issues/issue_0001/work-items:generate",
-        json!({
-            "title":"实现会话过期提示",
-            "story_spec_ids":["story_spec_0001"],
-            "design_spec_ids":["design_spec_0001"]
-        }),
-    )
-    .await;
+    bootstrap_confirmed_work_item_session(root.path(), ProviderName::Fake, ProviderName::Fake)
+        .await;
 
     let (status, response) = request_json(
         app.clone(),
@@ -863,17 +831,8 @@ async fn lifecycle_returns_artifact_versions() {
         json!({"confirmed_by":"human"}),
     )
     .await;
-    request_json(
-        app.clone(),
-        Method::POST,
-        "/api/projects/project_0001/issues/issue_0001/work-items:generate",
-        json!({
-            "title":"爬楼梯问题 Work Item",
-            "story_spec_ids":["story_spec_0001"],
-            "design_spec_ids":["design_spec_0001"]
-        }),
-    )
-    .await;
+    bootstrap_confirmed_work_item_session(root.path(), ProviderName::Fake, ProviderName::Fake)
+        .await;
 
     let lifecycle = LifecycleStore::new(app_paths);
     lifecycle
@@ -1163,6 +1122,44 @@ async fn workspace_session_message_rejects_invalid_role_and_empty_content() {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(error["code"], "invalid_workspace_message");
     }
+}
+
+async fn bootstrap_confirmed_work_item_session(
+    root_path: &std::path::Path,
+    author_provider: ProviderName,
+    reviewer_provider: ProviderName,
+) {
+    let app_paths = ProductAppPaths::new(root_path.join(".aria"));
+    let lifecycle = LifecycleStore::new(app_paths);
+    lifecycle
+        .create_work_item(CreateWorkItemInput {
+            id: Some("work_item_0001".to_string()),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            story_spec_ids: vec!["story_spec_0001".to_string()],
+            design_spec_ids: vec!["design_spec_0001".to_string()],
+            title: "实现会话过期提示".to_string(),
+            plan_status: WorkItemPlanStatus::Confirmed,
+            ..Default::default()
+        })
+        .expect("create work item");
+    let session = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "work_item_0001".to_string(),
+            workspace_type: WorkspaceType::WorkItem,
+            author_provider,
+            reviewer_provider,
+            review_rounds: 1,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+        })
+        .expect("create work item session");
+    lifecycle
+        .update_workspace_session_status(&session.id, WorkspaceSessionStatus::Confirmed)
+        .expect("confirm work item session");
 }
 
 async fn request_json(

@@ -581,32 +581,6 @@ pub struct GenerateWorkItemsRequest {
     pub revision_feedback: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct GenerateWorkItemsResponse {
-    pub work_items: Vec<LifecycleWorkItemDto>,
-    /// 兼容字段：保留旧的单数 session，取首个/主 session。
-    /// 维持"不改前端"边界，且不破坏 web_lifecycle_api.rs:350 的既有断言。
-    pub workspace_session: WorkspaceSessionDto,
-    /// 新增：每个 Work Item 对应一个 session。
-    pub workspace_sessions: Vec<WorkspaceSessionDto>,
-    pub work_item_plan: IssueWorkItemPlan,
-    pub repository_profile: RepositoryProfile,
-    pub verification_plans: Vec<VerificationPlan>,
-    pub validator_findings: Vec<WorkItemSplitFinding>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct IssueWorkItemPlan {
-    pub plan_id: String,
-    pub issue_id: String,
-    pub status: String,
-    pub options: WorkItemSplitOptions,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct WorkItemSplitOptions {
@@ -614,27 +588,6 @@ pub struct WorkItemSplitOptions {
     pub include_e2e_tests: bool,
     pub force_frontend_backend_split: bool,
     pub require_execution_plan_confirm: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct RepositoryProfile {
-    pub profile_id: String,
-    pub repository_id: String,
-    pub confidence: String,
-    pub detected_layers: Vec<String>,
-    pub split_recommendation: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct VerificationPlan {
-    pub plan_ref: String,
-    pub work_item_id: String,
-    pub title: String,
-    pub kind: String,
-    pub scope_summary: String,
-    pub required_checks: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -713,16 +666,6 @@ pub struct WorkspaceSessionRunNextRequest {
 #[serde(rename_all = "snake_case")]
 pub struct WorkspaceSessionConfirmRequest {
     pub confirmed_by: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct ConfirmIssueWorkItemPlanRequest {}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct ChangeRequestIssueWorkItemPlanRequest {
-    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

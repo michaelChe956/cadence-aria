@@ -13,9 +13,13 @@ use cadence_aria::product::coding_models::{
     ReviewRequestKind, ReviewVerdict, TestCommand, TestCommandStatus, TestingOverallStatus,
     TestingReport,
 };
-use cadence_aria::product::lifecycle_store::{CreateWorkItemInput, LifecycleStore};
+use cadence_aria::product::lifecycle_store::{
+    CreateVerificationPlanInput, CreateWorkItemInput, CreateWorkspaceSessionInput, LifecycleStore,
+};
 use cadence_aria::product::models::{
-    ProviderName, WorkItemKind, WorkItemPlanStatus, WorkItemStatus,
+    ProviderName, RepositoryProfileConfidence, VerificationCommand, VerificationCommandSafety,
+    VerificationCommandSource, VerificationFallbackPolicy, VerificationScope, WorkItemKind,
+    WorkItemPlanStatus, WorkItemStatus, WorkspaceSessionStatus, WorkspaceType,
 };
 use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::runtime::WebRuntime;
@@ -773,6 +777,24 @@ async fn reads_coding_attempt_diff_from_worktree_against_base_branch() {
     assert!(content.contains("+def climb_stairs(n):"));
 }
 
+async fn workspace_root_from_app(app: axum::Router) -> std::path::PathBuf {
+    let (status, info) = request_json(app, Method::GET, "/api/runtime-info", json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    info["workspace_root"]
+        .as_str()
+        .expect("workspace_root")
+        .into()
+}
+
+fn provider_name_from_str(name: &str) -> ProviderName {
+    match name {
+        "fake" => ProviderName::Fake,
+        "codex" => ProviderName::Codex,
+        "claude_code" => ProviderName::ClaudeCode,
+        _ => ProviderName::Fake,
+    }
+}
+
 async fn bootstrap_confirmed_work_item(app: axum::Router, repo_path: &std::path::Path) {
     bootstrap_confirmed_work_item_with_providers(app, repo_path, "fake", "fake").await;
 }
@@ -784,46 +806,88 @@ async fn bootstrap_confirmed_work_item_with_providers(
     work_item_reviewer_provider: &str,
 ) {
     bootstrap_story_and_design(app.clone(), repo_path).await;
-    let (status, _) = request_json(
-        app.clone(),
-        Method::POST,
-        "/api/projects/project_0001/issues/issue_0001/work-items:generate",
-        json!({
-            "title":"实现爬楼梯",
-            "story_spec_ids":["story_spec_0001"],
-            "design_spec_ids":["design_spec_0001"],
-            "author_provider": work_item_author_provider,
-            "reviewer_provider": work_item_reviewer_provider
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let (status, _) = request_json(
-        app,
-        Method::POST,
-        "/api/workspace-sessions/workspace_session_0003/confirm",
-        json!({"confirmed_by":"human"}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
+    let app_paths = ProductAppPaths::new(workspace_root_from_app(app.clone()).await.join(".aria"));
+    let lifecycle = LifecycleStore::new(app_paths);
+    lifecycle
+        .create_verification_plan(CreateVerificationPlanInput {
+            id: Some("verification_plan_0001".to_string()),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            work_item_id: "work_item_0001".to_string(),
+            repository_profile_ref: None,
+            provider_run_ref: None,
+            scope: VerificationScope::Unit,
+            commands: vec![VerificationCommand {
+                id: "cmd_001".to_string(),
+                label: "cargo test".to_string(),
+                command: "cargo test --lib".to_string(),
+                cwd: String::new(),
+                purpose: "unit tests".to_string(),
+                required: true,
+                timeout_seconds: 120,
+                source: VerificationCommandSource::Provider,
+                safety: VerificationCommandSafety::Approved,
+            }],
+            manual_checks: Vec::new(),
+            required_gates: vec!["unit_tests".to_string()],
+            risk_notes: Vec::new(),
+            confidence: RepositoryProfileConfidence::High,
+            fallback_policy: VerificationFallbackPolicy::ManualGate,
+        })
+        .expect("create verification plan");
+
+    lifecycle
+        .create_work_item(CreateWorkItemInput {
+            id: Some("work_item_0001".to_string()),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            story_spec_ids: vec!["story_spec_0001".to_string()],
+            design_spec_ids: vec!["design_spec_0001".to_string()],
+            title: "实现爬楼梯".to_string(),
+            verification_plan_ref: Some("verification_plan_0001".to_string()),
+            plan_status: WorkItemPlanStatus::Confirmed,
+            ..Default::default()
+        })
+        .expect("create work item");
+
+    let author_provider = provider_name_from_str(work_item_author_provider);
+    let reviewer_provider = provider_name_from_str(work_item_reviewer_provider);
+    let session = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "work_item_0001".to_string(),
+            workspace_type: WorkspaceType::WorkItem,
+            author_provider,
+            reviewer_provider,
+            review_rounds: 1,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+        })
+        .expect("create work item session");
+    lifecycle
+        .update_workspace_session_status(&session.id, WorkspaceSessionStatus::Confirmed)
+        .expect("confirm work item session");
 }
 
 async fn bootstrap_unconfirmed_work_item(app: axum::Router, repo_path: &std::path::Path) {
     bootstrap_story_and_design(app.clone(), repo_path).await;
-    let (status, _) = request_json(
-        app,
-        Method::POST,
-        "/api/projects/project_0001/issues/issue_0001/work-items:generate",
-        json!({
-            "title":"实现爬楼梯",
-            "story_spec_ids":["story_spec_0001"],
-            "design_spec_ids":["design_spec_0001"],
-            "author_provider":"fake",
-            "reviewer_provider":"fake"
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
+    let app_paths = ProductAppPaths::new(workspace_root_from_app(app.clone()).await.join(".aria"));
+    let lifecycle = LifecycleStore::new(app_paths);
+    lifecycle
+        .create_work_item(CreateWorkItemInput {
+            id: Some("work_item_0001".to_string()),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            story_spec_ids: vec!["story_spec_0001".to_string()],
+            design_spec_ids: vec!["design_spec_0001".to_string()],
+            title: "实现爬楼梯".to_string(),
+            plan_status: WorkItemPlanStatus::Draft,
+            ..Default::default()
+        })
+        .expect("create work item");
 }
 
 async fn bootstrap_confirmed_work_item_without_workspace_session(
@@ -887,40 +951,21 @@ async fn bootstrap_confirmed_split_work_items(
     repo_path: &std::path::Path,
 ) {
     bootstrap_story_and_design(app.clone(), repo_path).await;
-    let (status, _) = request_json(
-        app.clone(),
-        Method::POST,
-        "/api/projects/project_0001/issues/issue_0001/work-items:generate",
-        json!({
-            "title":"实现爬楼梯",
-            "story_spec_ids":["story_spec_0001"],
-            "design_spec_ids":["design_spec_0001"],
-            "author_provider":"fake",
-            "reviewer_provider":"fake"
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let (status, _) = request_json(
-        app.clone(),
-        Method::POST,
-        "/api/workspace-sessions/workspace_session_0003/confirm",
-        json!({"confirmed_by":"human"}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-
     let app_paths = ProductAppPaths::new(root_path.join(".aria"));
     let lifecycle = LifecycleStore::new(app_paths);
     lifecycle
-        .update_work_item_plan_status(
-            "project_0001",
-            "issue_0001",
-            "work_item_0001",
-            WorkItemPlanStatus::Confirmed,
-        )
-        .expect("confirm item1");
-
+        .create_work_item(CreateWorkItemInput {
+            id: Some("work_item_0001".to_string()),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            story_spec_ids: vec!["story_spec_0001".to_string()],
+            design_spec_ids: vec!["design_spec_0001".to_string()],
+            title: "实现爬楼梯".to_string(),
+            plan_status: WorkItemPlanStatus::Confirmed,
+            ..Default::default()
+        })
+        .expect("create item1");
     lifecycle
         .create_work_item(CreateWorkItemInput {
             id: Some("work_item_0002".to_string()),
@@ -930,17 +975,12 @@ async fn bootstrap_confirmed_split_work_items(
             story_spec_ids: vec!["story_spec_0001".to_string()],
             design_spec_ids: vec!["design_spec_0001".to_string()],
             title: "实现爬楼梯 part 2".to_string(),
-            work_item_set_id: None,
             kind: WorkItemKind::Backend,
             sequence_hint: Some(20),
             depends_on: vec!["work_item_0001".to_string()],
             exclusive_write_scopes: vec!["src/".to_string()],
-            forbidden_write_scopes: Vec::new(),
-            context_budget: Default::default(),
-            required_handoff_from: Vec::new(),
-            verification_plan_ref: None,
-            require_execution_plan_confirm: false,
             plan_status: WorkItemPlanStatus::Confirmed,
+            ..Default::default()
         })
         .expect("create item2 with dependency");
 }
@@ -951,31 +991,21 @@ pub(crate) async fn bootstrap_two_ready_confirmed_work_items(
     repo_path: &std::path::Path,
 ) {
     bootstrap_story_and_design(app.clone(), repo_path).await;
-    let (status, _) = request_json(
-        app.clone(),
-        Method::POST,
-        "/api/projects/project_0001/issues/issue_0001/work-items:generate",
-        json!({
-            "title":"实现爬楼梯",
-            "story_spec_ids":["story_spec_0001"],
-            "design_spec_ids":["design_spec_0001"],
-            "author_provider":"fake",
-            "reviewer_provider":"fake"
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let (status, _) = request_json(
-        app.clone(),
-        Method::POST,
-        "/api/workspace-sessions/workspace_session_0003/confirm",
-        json!({"confirmed_by":"human"}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-
     let app_paths = ProductAppPaths::new(root_path.join(".aria"));
     let lifecycle = LifecycleStore::new(app_paths);
+    lifecycle
+        .create_work_item(CreateWorkItemInput {
+            id: Some("work_item_0001".to_string()),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            story_spec_ids: vec!["story_spec_0001".to_string()],
+            design_spec_ids: vec!["design_spec_0001".to_string()],
+            title: "实现爬楼梯".to_string(),
+            plan_status: WorkItemPlanStatus::Confirmed,
+            ..Default::default()
+        })
+        .expect("create item1");
     lifecycle
         .create_work_item(CreateWorkItemInput {
             id: Some("work_item_0002".to_string()),
@@ -985,17 +1015,11 @@ pub(crate) async fn bootstrap_two_ready_confirmed_work_items(
             story_spec_ids: vec!["story_spec_0001".to_string()],
             design_spec_ids: vec!["design_spec_0001".to_string()],
             title: "实现爬楼梯 part 2".to_string(),
-            work_item_set_id: None,
             kind: WorkItemKind::Backend,
             sequence_hint: Some(20),
-            depends_on: Vec::new(),
             exclusive_write_scopes: vec!["src/".to_string()],
-            forbidden_write_scopes: Vec::new(),
-            context_budget: Default::default(),
-            required_handoff_from: Vec::new(),
-            verification_plan_ref: None,
-            require_execution_plan_confirm: false,
             plan_status: WorkItemPlanStatus::Confirmed,
+            ..Default::default()
         })
         .expect("create item2");
 }
@@ -1006,39 +1030,21 @@ async fn bootstrap_completed_dependency_without_handoff(
     repo_path: &std::path::Path,
 ) {
     bootstrap_story_and_design(app.clone(), repo_path).await;
-    let (status, _) = request_json(
-        app.clone(),
-        Method::POST,
-        "/api/projects/project_0001/issues/issue_0001/work-items:generate",
-        json!({
-            "title":"实现爬楼梯",
-            "story_spec_ids":["story_spec_0001"],
-            "design_spec_ids":["design_spec_0001"],
-            "author_provider":"fake",
-            "reviewer_provider":"fake"
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let (status, _) = request_json(
-        app.clone(),
-        Method::POST,
-        "/api/workspace-sessions/workspace_session_0003/confirm",
-        json!({"confirmed_by":"human"}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-
     let app_paths = ProductAppPaths::new(root_path.join(".aria"));
     let lifecycle = LifecycleStore::new(app_paths);
     lifecycle
-        .update_work_item_plan_status(
-            "project_0001",
-            "issue_0001",
-            "work_item_0001",
-            WorkItemPlanStatus::Confirmed,
-        )
-        .expect("confirm item1");
+        .create_work_item(CreateWorkItemInput {
+            id: Some("work_item_0001".to_string()),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            story_spec_ids: vec!["story_spec_0001".to_string()],
+            design_spec_ids: vec!["design_spec_0001".to_string()],
+            title: "实现爬楼梯".to_string(),
+            plan_status: WorkItemPlanStatus::Confirmed,
+            ..Default::default()
+        })
+        .expect("create item1");
     lifecycle
         .update_work_item_execution_status(
             "project_0001",
@@ -1057,17 +1063,13 @@ async fn bootstrap_completed_dependency_without_handoff(
             story_spec_ids: vec!["story_spec_0001".to_string()],
             design_spec_ids: vec!["design_spec_0001".to_string()],
             title: "实现爬楼梯 part 2".to_string(),
-            work_item_set_id: None,
             kind: WorkItemKind::Backend,
             sequence_hint: Some(20),
             depends_on: vec!["work_item_0001".to_string()],
             exclusive_write_scopes: vec!["src/".to_string()],
-            forbidden_write_scopes: Vec::new(),
-            context_budget: Default::default(),
             required_handoff_from: vec!["work_item_0001".to_string()],
-            verification_plan_ref: None,
-            require_execution_plan_confirm: false,
             plan_status: WorkItemPlanStatus::Confirmed,
+            ..Default::default()
         })
         .expect("create item2 with handoff dependency");
 }
