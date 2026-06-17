@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust 1.95.0、Cargo、Axum、tokio、React、TypeScript、Zustand、Vitest、OpenSpec、Superpowers。本计划不做 Playwright 浏览器 E2E。
 
-**版本：** v1.0
+**版本：** v1.2（v1.0 → v1.1 修订：将 WP2 拆分为 WP2a「artifact payload union 挂载」+ WP2b「WorkItemPlan author run + Draft candidate 持久化」，同步更新串行约束表与推荐执行顺序；文件名保留 v1.0 以维持既有引用路径稳定。v1.1 → v1.2 修订：① WP3 验证条目 `work_item_plan_review_revision_loop` 改为 `work_item_plan_review_returns_decision_response`（WP3 边界只到 ReviewDecision 响应，revision 重做在 WP4）；② WP4 新增 Task 4「迁移 WP2b AutoRevision 到 generate_revision」以对齐 design 第 269 行 validate 失败语义；③ WP3-WP8 详细计划文档已生成，更新引用标注）
 
 ---
 
@@ -53,18 +53,18 @@
 
 | 共享文件 | 涉及 WP |
 |---|---|
-| `src/product/workspace_engine.rs` | WP2、WP3、WP4、WP5 |
-| `src/web/workspace_ws_handler.rs` | WP2、WP4、WP5 |
+| `src/product/workspace_engine.rs` | WP2a、WP2b、WP3、WP4、WP5 |
+| `src/web/workspace_ws_handler.rs` | WP2a、WP2b、WP4、WP5 |
 | `src/web/workspace_context.rs` | WP1 |
-| `src/web/workspace_ws_types.rs` | WP1、WP4 |
+| `src/web/workspace_ws_types.rs` | WP1、WP2a、WP4 |
 | `src/web/handlers.rs` | WP1、WP5 |
 | `src/web/app.rs` | WP1、WP5 |
 | `src/product/work_item_split_engine.rs` | WP4 |
-| `src/product/lifecycle_store.rs` | WP2、WP4、WP5 |
+| `src/product/lifecycle_store.rs` | WP2b、WP4、WP5 |
 | `src/product/models.rs` | WP1 |
 | `web/src/api/types.ts` / `client.ts` | WP6、WP7 |
 
-因此 **WP2 → WP3 → WP4 → WP5 必须严格串行**（共享 `workspace_engine.rs` / `workspace_ws_handler.rs` / `lifecycle_store.rs`），不得并行。WP6 → WP7 串行（都改前端 API types/client）。
+因此 **WP2a → WP2b → WP3 → WP4 → WP5 必须严格串行**（共享 `workspace_engine.rs` / `workspace_ws_handler.rs` / `lifecycle_store.rs`），不得并行。WP2a 是 WP2b 的前置（union 挂载是 author run 推送 candidate 的基础）。WP6 → WP7 串行（都改前端 API types/client）。
 
 ---
 
@@ -103,21 +103,55 @@
 - `cargo clippy --all-targets --all-features --locked -- -D warnings`
 - `cargo check --locked`
 
-**详细计划文档：** `cadence/plans/2026-06-17_计划文档_实施计划_WorkItem对话式Workspace生成_WP1_后端枚举与context与prepare_v1.0.md`（待审核后生成）
+**详细计划文档：** `cadence/plans/2026-06-17_计划文档_实施计划_WorkItem对话式Workspace生成_WP1_后端枚举与context与prepare_v1.0.md`（已生成）
 
-## WP2：后端 author 生成 + Draft candidate 持久化
+## WP2a：后端 artifact payload union 挂载
 
-**目标：** WorkItemPlan 在 `StartGeneration` 后走 dedicated 非流式 author run：从 `session.entity_id` 读取 Draft plan → 组装 `GenerateWorkItemsRequest` 兼容输入 → `WorkItemSplitEngine::generate` → `Validator::validate` → `LifecycleStore::replace_issue_work_item_plan_candidate` 持久化 Draft candidate → 写 artifact payload → 推 `ArtifactUpdate` → 进 AuthorConfirm。
+**目标：** 把 WP1 定义的 `ArtifactPayload` union 真正挂载到 artifact 链路：`WsOutMessage::ArtifactUpdate`、`SessionState.artifact`、`EngineEvent::ArtifactUpdate`、`WorkspaceSession.artifact`、`ArtifactVersion`、`ArtifactVersionSummary` 从 markdown `String` 切换到 `ArtifactPayload`（serde `untagged` + `flatten`，JSON 表现为设计方案 :339-348 要求的扁平 `markdown?/diff?/candidate?` 形态）。Story/Design/WorkItem 行为等价（`Markdown` 变体），`WorkItemPlanCandidate` 变体类型就位（WP2b 才产生 candidate 数据）。本 WP 是全 workspace type 基础设施改造，不涉及 WorkItemPlan 业务逻辑。
 
-**依赖：** WP1。
+**依赖：** WP1（`ArtifactPayload` enum、`WorkItemPlanCandidateDto` 及子 DTO 已在 `workspace_ws_types.rs` 纯新增定义）。
 
-**前置交付摘要要求：** 总结 WP1 的 `WorkspaceType::WorkItemPlan` 枚举、`workspace_context` 各分支签名、`prepare_work_item_plan` 创建的 Draft plan 字段（source ids/options/provider 配置）、`session.entity_id = plan_id` 约定、artifact payload union 与 `WorkItemPlanCandidateDto` 结构。
+**前置交付摘要要求：** 总结 WP1 的 `ArtifactPayload` enum 定义（`untagged`，`Markdown { markdown, diff }` / `WorkItemPlanCandidate { candidate }` 两变体）、`WorkItemPlanCandidateDto` 结构、`WsInMessage::RevertWorkItem` 变体；确认 WP1 未修改 `WsOutMessage::ArtifactUpdate` / `SessionState.artifact` / `ArtifactVersion`（保持 `String`，待本 WP 切换）。
 
 **写入范围：**
 
-- `src/web/workspace_ws_handler.rs`（`StartGeneration` 在 WorkItemPlan 下启动 dedicated non-streaming run，不启动 `ProviderRunKind::Author { content: "" }`；event forwarder 支持 artifact payload）
+- `src/web/workspace_ws_types.rs`（`WsOutMessage::ArtifactUpdate` 切 `{ version, #[serde(flatten)] payload: ArtifactPayload }`；`SessionState.artifact: Option<ArtifactPayload>`；`ArtifactVersion.markdown: String` → `payload: ArtifactPayload`；`ArtifactVersionSummary` 的 `markdown_size`/`markdown_preview` 保留字段名但按 payload 变体派生值，向后兼容前端旧契约）
+- `src/product/workspace_engine.rs`（`WorkspaceSession.artifact: Option<ArtifactPayload>`；`EngineEvent::ArtifactUpdate { version, payload }`；`update_artifact` 签名改 `ArtifactPayload`；`build_artifact_version_summary` 按变体派生 size/preview；`build_session_state`；`new_persistent` 恢复；`complete_assistant_message` 把 markdown 包成 `ArtifactPayload::Markdown`；`handle_rollback`；`build_review_input` / `build_revision_input` 读 payload 的 markdown；所有 `session.artifact = Some("...")` 测试夹具迁移为 `Some(ArtifactPayload::Markdown { ... })`）
+- `src/web/workspace_ws_handler.rs`（event forwarder `EngineEvent::ArtifactUpdate { version, payload }` → `WsOutMessage::ArtifactUpdate { version, payload }`）
+- `tests/it_web.rs` 及受影响集成测试夹具
+
+**不做：**
+
+- 不实现 WorkItemPlan author run（WP2b）。
+- 不实现 `replace_issue_work_item_plan_candidate`（WP2b）。
+- 不产生 `ArtifactPayload::WorkItemPlanCandidate` 数据（WP2b 才产生）；本 WP 只保证 union 类型挂载 + `Markdown` 变体等价。
+- 不改 `workspace_context.rs` / `handlers.rs` / `app.rs`（WP1 已完成）。
+- 不改前端（WP6/WP7）。
+
+**验证：**
+
+- `cargo test --locked --lib workspace_engine`（现有 Story/Design/WorkItem 流程测试全绿）
+- `cargo test --locked --lib workspace_ws_types`
+- `cargo test --locked --test it_web`（现有 web 集成测试全绿）
+- `cargo fmt --check`
+- `cargo clippy --all-targets --all-features --locked -- -D warnings`
+- `cargo check --locked`
+
+**详细计划文档：** `cadence/plans/2026-06-17_计划文档_实施计划_WorkItem对话式Workspace生成_WP2a_后端artifact_union挂载_v1.0.md`（已生成）
+
+## WP2b：后端 author 生成 + Draft candidate 持久化
+
+**目标：** WorkItemPlan 在 `StartGeneration` 后走 dedicated 非流式 author run：从 `session.entity_id` 读取 Draft plan → 组装 `GenerateWorkItemsRequest` 兼容输入 → `WorkItemSplitEngine::generate` → `Validator::validate` → `LifecycleStore::replace_issue_work_item_plan_candidate` 持久化 Draft candidate → 写 `ArtifactPayload::WorkItemPlanCandidate` → 推 `ArtifactUpdate` → 进 AuthorConfirm。
+
+**依赖：** WP1、WP2a。
+
+**前置交付摘要要求：** 总结 WP1 的 `WorkspaceType::WorkItemPlan` 枚举、`workspace_context` 各分支签名、`prepare_work_item_plan` 创建的 Draft plan 字段（source ids/options/provider 配置）、`session.entity_id = plan_id` 约定、`WorkItemPlanCandidateDto` 结构；总结 WP2a 的 `ArtifactPayload` 挂载点（`session.artifact: Option<ArtifactPayload>`、`EngineEvent::ArtifactUpdate { version, payload }`、`update_artifact(payload: ArtifactPayload)`、`ArtifactVersion.payload`），WP2b 直接用 `ArtifactPayload::WorkItemPlanCandidate { candidate }` 推送。
+
+**写入范围：**
+
+- `src/web/workspace_ws_handler.rs`（`StartGeneration` 在 WorkItemPlan 下启动 dedicated non-streaming run，不启动 `ProviderRunKind::Author { content: "" }`；新增 `ProviderRunKind::WorkItemPlanAuthor`；`ProviderRunContext` 加 `provider_adapter` 字段）
 - `src/product/workspace_engine.rs`（WorkItemPlan author run 的阶段推进、candidate payload 写入、`workspace_requires_artifact_gate`、`enter_author_confirm` 推进、`workspace_type_title`；不把 WorkItemPlan 走普通 markdown 完成判定）
-- `src/product/lifecycle_store.rs`（新增 `replace_issue_work_item_plan_candidate`，替换 Draft plan 关联的 work_items / verification_plans / repository_profile 并更新 plan 引用）
+- `src/product/lifecycle_store.rs`（新增 `replace_issue_work_item_plan_candidate`，替换 Draft plan 关联的 work_items / verification_plans / repository_profile 并更新 plan 引用；新增 `delete_verification_plan` / `delete_repository_profile` helper）
 - `tests/it_web.rs`
 - `tests/it_web/web_work_item_generation.rs` 或新增 `web_work_item_plan_author.rs`
 - `tests/it_product.rs`
@@ -142,7 +176,7 @@
 - `cargo clippy --all-targets --all-features --locked -- -D warnings`
 - `cargo check --locked`
 
-**详细计划文档：** `cadence/plans/2026-06-17_计划文档_实施计划_WorkItem对话式Workspace生成_WP2_后端author生成_v1.0.md`（待审核后生成）
+**详细计划文档：** `cadence/plans/2026-06-17_计划文档_实施计划_WorkItem对话式Workspace生成_WP2b_后端author生成_v1.0.md`（已生成）
 
 ## WP3：后端 review 整组
 
@@ -167,12 +201,12 @@
 **验证：**
 
 - `cargo test --locked --test it_web review_returns_verdict_for_whole_candidate`
-- `cargo test --locked --test it_web work_item_plan_review_revision_loop`
+- `cargo test --locked --test it_web work_item_plan_review_returns_decision_response`（v1.2 修订：原 `work_item_plan_review_revision_loop` 改名——WP3 边界只到 `ReviewDecisionResponse` 响应，完整 revision 重做循环由 WP4 实现、WP8 贯通）
 - `cargo fmt --check`
 - `cargo clippy --all-targets --all-features --locked -- -D warnings`
 - `cargo check --locked`
 
-**详细计划文档：** `cadence/plans/2026-06-17_计划文档_实施计划_WorkItem对话式Workspace生成_WP3_后端review整组_v1.0.md`（待审核后生成）
+**详细计划文档：** `cadence/plans/2026-06-17_计划文档_实施计划_WorkItem对话式Workspace生成_WP3_后端review整组_v1.0.md`（已生成）
 
 ## WP4：后端 revert + revision 局部重做
 
@@ -209,7 +243,7 @@
 - `cargo clippy --all-targets --all-features --locked -- -D warnings`
 - `cargo check --locked`
 
-**详细计划文档：** `cadence/plans/2026-06-17_计划文档_实施计划_WorkItem对话式Workspace生成_WP4_后端revert与revision_v1.0.md`（待审核后生成）
+**详细计划文档：** `cadence/plans/2026-06-17_计划文档_实施计划_WorkItem对话式Workspace生成_WP4_后端revert与revision_v1.0.md`（已生成）
 
 ## WP5：后端 confirm 落盘 + 子 session + 删废弃路由
 
@@ -244,7 +278,7 @@
 - `cargo clippy --all-targets --all-features --locked -- -D warnings`
 - `cargo check --locked`
 
-**详细计划文档：** `cadence/plans/2026-06-17_计划文档_实施计划_WorkItem对话式Workspace生成_WP5_后端confirm与删路由_v1.0.md`（待审核后生成）
+**详细计划文档：** `cadence/plans/2026-06-17_计划文档_实施计划_WorkItem对话式Workspace生成_WP5_后端confirm与删路由_v1.0.md`（已生成）
 
 ## WP6：前端 入口 + API
 
@@ -274,7 +308,7 @@
 - `pnpm -C web test -- --run IssueLifecycleWorkbench`
 - `pnpm -C web build`
 
-**详细计划文档：** `cadence/plans/2026-06-17_计划文档_实施计划_WorkItem对话式Workspace生成_WP6_前端入口与API_v1.0.md`（待审核后生成）
+**详细计划文档：** `cadence/plans/2026-06-17_计划文档_实施计划_WorkItem对话式Workspace生成_WP6_前端入口与API_v1.0.md`（已生成）
 
 ## WP7：前端 candidate 面板 + WS
 
@@ -309,7 +343,7 @@
 - `pnpm -C web test -- --run useWorkspaceWs`
 - `pnpm -C web build`
 
-**详细计划文档：** `cadence/plans/2026-06-17_计划文档_实施计划_WorkItem对话式Workspace生成_WP7_前端candidate面板_v1.0.md`（待审核后生成）
+**详细计划文档：** `cadence/plans/2026-06-17_计划文档_实施计划_WorkItem对话式Workspace生成_WP7_前端candidate面板_v1.0.md`（已生成）
 
 ## WP8：贯通测试
 
@@ -343,20 +377,21 @@
 - `cargo clippy --all-targets --all-features --locked -- -D warnings`
 - `cargo check --locked`
 
-**详细计划文档：** `cadence/plans/2026-06-17_计划文档_实施计划_WorkItem对话式Workspace生成_WP8_贯通测试_v1.0.md`（待审核后生成）
+**详细计划文档：** `cadence/plans/2026-06-17_计划文档_实施计划_WorkItem对话式Workspace生成_WP8_贯通测试_v1.0.md`（已生成）
 
 ## 推荐执行顺序
 
-1. 执行 WP1，落地枚举、context、prepare、WS 契约骨架。
-2. 执行 WP2，接入非流式 author 生成、Draft candidate 持久化与 artifact payload。
-3. 执行 WP3，接入 review 整组。
-4. 执行 WP4，接入 revert 与 revision 局部重做。
-5. 执行 WP5，接入 confirm 落盘、建子 session，删除废弃路由。
-   - WP2–WP5 共享 `src/product/workspace_engine.rs`、`src/web/workspace_ws_handler.rs`、`src/product/lifecycle_store.rs`，必须严格串行，不得并行。
-6. 执行 WP6，前端入口与 API（依赖 WP1 契约，可与 WP2–WP5 并行准备，但落地建议在 WP5 后以便端到端联调）。
-7. 执行 WP7，前端 candidate 面板与 WS 收发。
+1. 执行 WP1，落地枚举、context、prepare、WS 契约类型（`ArtifactPayload` / `WorkItemPlanCandidateDto` / `RevertWorkItem`，纯新增不挂载）。
+2. 执行 WP2a，把 artifact payload union 挂载到 `WsOutMessage::ArtifactUpdate` / `SessionState.artifact` / `EngineEvent::ArtifactUpdate` / `WorkspaceSession.artifact` / `ArtifactVersion`，Story/Design/WorkItem 行为等价。
+3. 执行 WP2b，接入非流式 author 生成、Draft candidate 持久化（依赖 WP2a 的 union 挂载）。
+4. 执行 WP3，接入 review 整组。
+5. 执行 WP4，接入 revert 与 revision 局部重做。
+6. 执行 WP5，接入 confirm 落盘、建子 session，删除废弃路由。
+   - WP2a–WP5 共享 `src/product/workspace_engine.rs`、`src/web/workspace_ws_handler.rs`、`src/product/lifecycle_store.rs`，必须严格串行，不得并行。
+7. 执行 WP6，前端入口与 API（依赖 WP1 契约，可与 WP2b–WP5 并行准备，但落地建议在 WP5 后以便端到端联调）。
+8. 执行 WP7，前端 candidate 面板与 WS 收发。
    - WP6 → WP7 串行（都改 `web/src/api/types.ts` / `client.ts`）。
-8. 最后执行 WP8，贯通测试验收。
+9. 最后执行 WP8，贯通测试验收。
 
 ## 验收标准
 
