@@ -51,5 +51,7 @@ mod web_types;
 mod web_work_item_generation;
 #[path = "it_web/web_work_item_plan_author.rs"]
 mod web_work_item_plan_author;
+#[path = "it_web/web_work_item_plan_review.rs"]
+mod web_work_item_plan_review;
 #[path = "it_web/web_work_item_split_flow.rs"]
 mod web_work_item_split_flow;

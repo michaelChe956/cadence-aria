@@ -1,10 +1,13 @@
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use cadence_aria::cross_cutting::provider_adapter::{ProviderAdapter, ProviderAdapterError};
+use cadence_aria::cross_cutting::provider_registry::ProviderRegistry;
+use cadence_aria::product::models::ProviderName;
 use cadence_aria::protocol::contracts::{AdapterInput, AdapterOutput, TimeoutStatus};
 use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::runtime::WebRuntime;
 use cadence_aria::web::state::WebAppState;
+use cadence_aria::web::test_controls::TestControlledFakeStreamingProvider;
 use serde_json::{Value, json};
 use std::process::Command;
 use std::sync::Arc;
@@ -413,24 +416,10 @@ pub(crate) async fn request_json(
     (status, value)
 }
 
-pub(crate) async fn app_with_confirmed_story_and_design(
-    output: Value,
-) -> (axum::Router, tempfile::TempDir) {
-    let root = tempdir().expect("root");
-    let repo = root.path().join("repo");
-    std::fs::create_dir_all(&repo).expect("create repo dir");
-    let status = Command::new("git")
-        .args(["init"])
-        .current_dir(&repo)
-        .status()
-        .expect("git init");
-    assert!(status.success());
-
-    let runtime = WebRuntime::new_fake(root.path().to_path_buf());
-    let state = WebAppState::new(root.path().to_path_buf(), runtime)
-        .with_provider_adapter(Arc::new(MockSplitProviderAdapter { output }));
-    let app = build_web_router(state);
-
+async fn bootstrap_project_repo_issue_and_specs(
+    app: axum::Router,
+    repo: &std::path::Path,
+) -> axum::Router {
     request_json(
         app.clone(),
         Method::POST,
@@ -498,6 +487,70 @@ pub(crate) async fn app_with_confirmed_story_and_design(
         json!({"confirmed_by":"human"}),
     )
     .await;
+
+    app
+}
+
+pub(crate) async fn app_with_confirmed_story_and_design(
+    output: Value,
+) -> (axum::Router, tempfile::TempDir) {
+    let root = tempdir().expect("root");
+    let repo = root.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo dir");
+    let status = Command::new("git")
+        .args(["init"])
+        .current_dir(&repo)
+        .status()
+        .expect("git init");
+    assert!(status.success());
+
+    let runtime = WebRuntime::new_fake(root.path().to_path_buf());
+    let state = WebAppState::new(root.path().to_path_buf(), runtime)
+        .with_provider_adapter(Arc::new(MockSplitProviderAdapter { output }));
+    let app = build_web_router(state);
+    let app = bootstrap_project_repo_issue_and_specs(app, &repo).await;
+
+    (app, root)
+}
+
+/// 与 `app_with_confirmed_story_and_design` 相同，但额外把 codex/claude_code 也注册为
+/// TestControlledFakeStreamingProvider，以便在 review 阶段通过 review fixture 注入固定 verdict。
+pub(crate) async fn app_with_confirmed_story_and_design_and_test_providers(
+    output: Value,
+) -> (axum::Router, tempfile::TempDir) {
+    let root = tempdir().expect("root");
+    let repo = root.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo dir");
+    let status = Command::new("git")
+        .args(["init"])
+        .current_dir(&repo)
+        .status()
+        .expect("git init");
+    assert!(status.success());
+
+    let runtime = WebRuntime::new_fake(root.path().to_path_buf());
+    let mut state = WebAppState::new(root.path().to_path_buf(), runtime)
+        .with_provider_adapter(Arc::new(MockSplitProviderAdapter { output }));
+
+    let mut registry = ProviderRegistry::new();
+    let test_controls = cadence_aria::web::test_controls::TestControls::default();
+    registry.register(
+        ProviderName::Fake,
+        Arc::new(TestControlledFakeStreamingProvider::new(test_controls.clone())),
+    );
+    registry.register(
+        ProviderName::Codex,
+        Arc::new(TestControlledFakeStreamingProvider::new(test_controls.clone())),
+    );
+    registry.register(
+        ProviderName::ClaudeCode,
+        Arc::new(TestControlledFakeStreamingProvider::new(test_controls.clone())),
+    );
+    state.test_controls = test_controls;
+    state.provider_registry = Arc::new(registry);
+
+    let app = build_web_router(state);
+    let app = bootstrap_project_repo_issue_and_specs(app, &repo).await;
 
     (app, root)
 }
