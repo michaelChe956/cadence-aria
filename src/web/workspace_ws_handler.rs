@@ -26,6 +26,7 @@ use crate::product::work_item_split_engine::WorkItemSplitEngine;
 use crate::product::workspace_engine::{
     AuthorDecisionOutcome, EngineEvent, PendingAuthorChoiceError, ReviewDecisionOutcome,
     WorkItemPlanAuthorOutcome, WorkspaceEngine, WorkspaceSession, WorkspaceStage,
+    build_work_item_plan_revision_input,
 };
 use crate::product::workspace_repository::workspace_repository_for_session;
 use crate::web::state::{WebAppState, WorkspaceActiveRun, WorkspaceRunRegistry};
@@ -440,16 +441,22 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
         };
         *last_client_message_at.lock().await = tokio::time::Instant::now();
 
-        let stage = if requires_stage_validation(&in_msg) {
+        let stage_and_type = if requires_stage_validation(&in_msg) {
             Some({
                 let engine = engine.lock().await;
-                engine.current_stage()
+                (
+                    engine.current_stage(),
+                    engine.session().workspace_type.clone(),
+                )
             })
         } else {
             None
         };
-        if let Some(stage) = stage.as_ref()
+        if let Some((stage, workspace_type)) = stage_and_type.as_ref()
             && !is_message_valid_for_stage(&in_msg, stage)
+            && !(matches!(in_msg, WsInMessage::RequestRevision { .. })
+                && *stage == WorkspaceStage::AuthorConfirm
+                && *workspace_type == WorkspaceType::WorkItemPlan)
         {
             let err = WsOutMessage::ProtocolError {
                 code: "INVALID_MESSAGE_FOR_STAGE".to_string(),
@@ -735,14 +742,50 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                 .await;
             }
             WsInMessage::RequestRevision { feedback } => {
-                let payload = serde_json::to_value(feedback).ok();
-                handle_human_confirm_from_handler(
-                    run_context.clone(),
-                    outbound_tx.clone(),
-                    HumanConfirmDecision::RequestChange,
-                    payload,
-                )
-                .await;
+                let is_work_item_plan = {
+                    let engine = engine.lock().await;
+                    engine.session().workspace_type == WorkspaceType::WorkItemPlan
+                };
+                let feedback_text = {
+                    let description = feedback.description.trim().to_string();
+                    if description.is_empty() {
+                        None
+                    } else {
+                        Some(description)
+                    }
+                };
+                if is_work_item_plan {
+                    let result = {
+                        let mut engine = engine.lock().await;
+                        engine
+                            .request_work_item_plan_revision(feedback_text.clone())
+                            .await
+                    };
+                    if let Err(message) = result {
+                        let err = WsOutMessage::Error { message };
+                        let _ = send_json_outbound(&outbound_tx, &err).await;
+                    } else if let Err(message) = spawn_provider_run_from_handler(
+                        run_context.clone(),
+                        ProviderRunKind::WorkItemPlanRevision {
+                            feedback: feedback_text,
+                        },
+                        outbound_tx.clone(),
+                    )
+                    .await
+                    {
+                        let err = WsOutMessage::Error { message };
+                        let _ = send_json_outbound(&outbound_tx, &err).await;
+                    }
+                } else {
+                    let payload = serde_json::to_value(feedback).ok();
+                    handle_human_confirm_from_handler(
+                        run_context.clone(),
+                        outbound_tx.clone(),
+                        HumanConfirmDecision::RequestChange,
+                        payload,
+                    )
+                    .await;
+                }
             }
             WsInMessage::HumanConfirm { decision, payload } => {
                 handle_human_confirm_from_handler(
@@ -830,12 +873,18 @@ async fn handle_review_decision_from_handler(
     match outcome {
         Ok(ReviewDecisionOutcome::HumanConfirm) => {}
         Ok(ReviewDecisionOutcome::StartRevision) => {
-            if let Err(message) = spawn_provider_run_from_handler(
-                run_context,
-                ProviderRunKind::Revision,
-                outbound_tx.clone(),
-            )
-            .await
+            let run_kind = {
+                let engine = run_context.engine.lock().await;
+                if engine.session().workspace_type == WorkspaceType::WorkItemPlan {
+                    ProviderRunKind::WorkItemPlanRevision {
+                        feedback: engine.work_item_plan_revision_feedback(),
+                    }
+                } else {
+                    ProviderRunKind::Revision
+                }
+            };
+            if let Err(message) =
+                spawn_provider_run_from_handler(run_context, run_kind, outbound_tx.clone()).await
             {
                 let err = WsOutMessage::Error { message };
                 let _ = send_json_outbound(&outbound_tx, &err).await;
@@ -1443,6 +1492,7 @@ enum ProviderRunKind {
     Revision,
     ReviewOnly,
     WorkItemPlanAuthor,
+    WorkItemPlanRevision { feedback: Option<String> },
 }
 
 async fn active_run_command_tx(
@@ -1523,10 +1573,15 @@ async fn spawn_provider_run_from_handler(
                 .reviewer_provider
                 .clone()
                 .unwrap_or(ProviderName::Codex),
-            ProviderRunKind::WorkItemPlanAuthor => engine.session().author_provider.clone(),
+            ProviderRunKind::WorkItemPlanAuthor | ProviderRunKind::WorkItemPlanRevision { .. } => {
+                engine.session().author_provider.clone()
+            }
         }
     };
-    let provider_for_run = if matches!(run_kind, ProviderRunKind::WorkItemPlanAuthor) {
+    let provider_for_run = if matches!(
+        run_kind,
+        ProviderRunKind::WorkItemPlanAuthor | ProviderRunKind::WorkItemPlanRevision { .. }
+    ) {
         None
     } else {
         let Some(p) = provider_registry.get(&provider_name) else {
@@ -1695,10 +1750,12 @@ async fn spawn_provider_run_from_handler(
                     }
                 };
 
-                // 使用本地循环处理 AutoRevision，而不是递归 spawn_provider_run_from_handler。
-                // 原因是递归 await 会把非 `Send` 的 future 跨越 spawn 边界传递，导致编译失败。
-                // 循环上限由 `complete_work_item_plan_author` 内部的 `work_item_plan_author_retry_count`
-                // 控制（达到 3 次后返回 HumanConfirm）；下方的 `revision_iterations` 作为硬兜底。
+                // 使用本地循环处理 AutoRevision，直接复用 Task 1 的 `generate_revision`
+                //（retained/redo 均为空，feedback 来自 validator findings），避免跨 spawn
+                // 边界传递非 `Send` future 导致编译失败。
+                // 循环上限由 `complete_work_item_plan_author` 内部的
+                // `work_item_plan_author_retry_count` 控制（达到 3 次后返回 HumanConfirm）；
+                // 下方的 `revision_iterations` 作为硬兜底。
                 let mut revision_iterations = 0;
                 loop {
                     match outcome {
@@ -1748,12 +1805,14 @@ async fn spawn_provider_run_from_handler(
                                 provider
                             };
                             let output = match split_engine
-                                .generate(
+                                .generate_revision(
                                     &request,
                                     &lifecycle_for_run,
                                     &issue,
                                     &repository,
                                     author_provider,
+                                    &[],
+                                    &[],
                                 )
                                 .await
                             {
@@ -1764,7 +1823,7 @@ async fn spawn_provider_run_from_handler(
                                     drop(engine);
                                     let err = WsOutMessage::Error {
                                         message: format!(
-                                            "split generate failed: {}",
+                                            "split generate_revision failed: {}",
                                             error.message
                                         ),
                                     };
@@ -1785,6 +1844,100 @@ async fn spawn_provider_run_from_handler(
                             };
                         }
                     }
+                }
+            }
+            ProviderRunKind::WorkItemPlanRevision { feedback } => {
+                let lifecycle_for_run = LifecycleStore::new(run_context_clone.app_paths.clone());
+                let app_paths_for_run = run_context_clone.app_paths.clone();
+                let session_record_for_run = run_context_clone.session_record.clone();
+                let provider_adapter_for_run = run_context_clone.provider_adapter.clone();
+
+                let (retained, redo_specs, request) = match build_work_item_plan_revision_input(
+                    &engine,
+                    &lifecycle_for_run,
+                    feedback.as_deref(),
+                )
+                .map_err(|e| format!("build revision input failed: {e}"))
+                {
+                    Ok(r) => r,
+                    Err(message) => {
+                        engine.mark_active_run_finished(&run_label);
+                        drop(engine);
+                        let err = WsOutMessage::Error { message };
+                        let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                        return;
+                    }
+                };
+
+                let repository = match workspace_repository_for_session(
+                    &app_paths_for_run,
+                    &lifecycle_for_run,
+                    &session_record_for_run,
+                ) {
+                    Ok(r) => r,
+                    Err(error) => {
+                        engine.mark_active_run_finished(&run_label);
+                        drop(engine);
+                        let err = WsOutMessage::Error {
+                            message: format!("load repository failed: {error}"),
+                        };
+                        let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                        return;
+                    }
+                };
+
+                let issue = match IssueStore::new(app_paths_for_run.clone()).get(
+                    &session_record_for_run.project_id,
+                    &session_record_for_run.issue_id,
+                ) {
+                    Ok(i) => i,
+                    Err(error) => {
+                        engine.mark_active_run_finished(&run_label);
+                        drop(engine);
+                        let err = WsOutMessage::Error {
+                            message: format!("load issue failed: {error}"),
+                        };
+                        let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                        return;
+                    }
+                };
+
+                let split_engine = WorkItemSplitEngine::new(provider_adapter_for_run);
+                let author_provider = engine.session().author_provider.clone();
+                drop(engine);
+
+                let output = match split_engine
+                    .generate_revision(
+                        &request,
+                        &lifecycle_for_run,
+                        &issue,
+                        &repository,
+                        author_provider,
+                        &retained,
+                        &redo_specs,
+                    )
+                    .await
+                {
+                    Ok(o) => o,
+                    Err(error) => {
+                        let mut engine = engine_for_run.lock().await;
+                        engine.mark_active_run_finished(&run_label);
+                        drop(engine);
+                        let err = WsOutMessage::Error {
+                            message: format!("split generate_revision failed: {}", error.message),
+                        };
+                        let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                        return;
+                    }
+                };
+
+                engine = engine_for_run.lock().await;
+                if let Err(message) = engine.complete_work_item_plan_revision(output).await {
+                    engine.mark_active_run_finished(&run_label);
+                    drop(engine);
+                    let err = WsOutMessage::Error { message };
+                    let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                    return;
                 }
             }
         }

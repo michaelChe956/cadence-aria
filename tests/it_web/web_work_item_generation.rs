@@ -3,7 +3,7 @@ use axum::http::{Method, Request, StatusCode};
 use cadence_aria::cross_cutting::provider_adapter::{ProviderAdapter, ProviderAdapterError};
 use cadence_aria::cross_cutting::provider_registry::ProviderRegistry;
 use cadence_aria::product::models::ProviderName;
-use cadence_aria::protocol::contracts::{AdapterInput, AdapterOutput, TimeoutStatus};
+use cadence_aria::protocol::contracts::{AdapterInput, AdapterOutput, AdapterRole, TimeoutStatus};
 use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::runtime::WebRuntime;
 use cadence_aria::web::state::WebAppState;
@@ -17,15 +17,25 @@ use tower::ServiceExt;
 #[derive(Debug, Clone)]
 pub(crate) struct MockSplitProviderAdapter {
     pub(crate) output: Value,
+    pub(crate) revision_output: Option<Value>,
 }
 
 impl ProviderAdapter for MockSplitProviderAdapter {
-    fn run(&self, _input: &AdapterInput) -> Result<AdapterOutput, ProviderAdapterError> {
+    fn run(&self, input: &AdapterInput) -> Result<AdapterOutput, ProviderAdapterError> {
+        let structured_output = if input.role == AdapterRole::WorkItemSplitter
+            && self.revision_output.is_some()
+            && (input.prompt.contains("局部重做（revision）")
+                || input.prompt.contains("[revision_feedback]"))
+        {
+            self.revision_output.clone().unwrap()
+        } else {
+            self.output.clone()
+        };
         Ok(AdapterOutput {
             exit_code: Some(0),
             stdout: String::new(),
             stderr: String::new(),
-            structured_output: Some(self.output.clone()),
+            structured_output: Some(structured_output),
             files_modified: Vec::new(),
             duration_ms: 0,
             timeout_status: TimeoutStatus::NotTimedOut,
@@ -141,7 +151,57 @@ pub(crate) fn valid_split_output() -> Value {
     })
 }
 
-fn invalid_split_output_missing_e2e() -> Value {
+pub(crate) fn valid_revision_redo_output() -> Value {
+    json!({
+        "repository_profile": {
+            "confidence": "high",
+            "detected_layers": ["backend", "frontend"],
+            "split_recommendation": "frontend_backend",
+            "languages": ["rust"],
+            "frameworks": [],
+            "package_managers": ["cargo"],
+            "test_frameworks": [],
+            "build_systems": ["cargo"],
+            "verification_capabilities": ["cargo test"],
+            "uncertainties": []
+        },
+        "work_items": [
+            {
+                "title": "实现后端登录会话 API（重做）",
+                "kind": "backend",
+                "sequence_hint": 10,
+                "depends_on": [],
+                "exclusive_write_scopes": ["src/product/session.rs"],
+                "forbidden_write_scopes": ["web/**"],
+                "required_handoff_from": [],
+                "require_execution_plan_confirm": false
+            }
+        ],
+        "verification_plans": [
+            {
+                "scope": "unit",
+                "commands": [
+                    {
+                        "label": "cargo test backend",
+                        "command": "cargo test --lib session",
+                        "cwd": "",
+                        "purpose": "backend unit tests",
+                        "required": true,
+                        "timeout_seconds": 120,
+                        "safety": "approved"
+                    }
+                ],
+                "manual_checks": [],
+                "required_gates": [],
+                "risk_notes": [],
+                "confidence": "high",
+                "fallback_policy": "manual_gate"
+            }
+        ]
+    })
+}
+
+pub(crate) fn invalid_split_output_missing_e2e() -> Value {
     json!({
         "repository_profile": {
             "confidence": "high",
@@ -505,8 +565,39 @@ pub(crate) async fn app_with_confirmed_story_and_design(
     assert!(status.success());
 
     let runtime = WebRuntime::new_fake(root.path().to_path_buf());
-    let state = WebAppState::new(root.path().to_path_buf(), runtime)
-        .with_provider_adapter(Arc::new(MockSplitProviderAdapter { output }));
+    let state = WebAppState::new(root.path().to_path_buf(), runtime).with_provider_adapter(
+        Arc::new(MockSplitProviderAdapter {
+            output,
+            revision_output: None,
+        }),
+    );
+    let app = build_web_router(state);
+    let app = bootstrap_project_repo_issue_and_specs(app, &repo).await;
+
+    (app, root)
+}
+
+pub(crate) async fn app_with_confirmed_story_and_design_and_revision_output(
+    output: Value,
+    revision_output: Value,
+) -> (axum::Router, tempfile::TempDir) {
+    let root = tempdir().expect("root");
+    let repo = root.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo dir");
+    let status = Command::new("git")
+        .args(["init"])
+        .current_dir(&repo)
+        .status()
+        .expect("git init");
+    assert!(status.success());
+
+    let runtime = WebRuntime::new_fake(root.path().to_path_buf());
+    let state = WebAppState::new(root.path().to_path_buf(), runtime).with_provider_adapter(
+        Arc::new(MockSplitProviderAdapter {
+            output,
+            revision_output: Some(revision_output),
+        }),
+    );
     let app = build_web_router(state);
     let app = bootstrap_project_repo_issue_and_specs(app, &repo).await;
 
@@ -529,8 +620,12 @@ pub(crate) async fn app_with_confirmed_story_and_design_and_test_providers(
     assert!(status.success());
 
     let runtime = WebRuntime::new_fake(root.path().to_path_buf());
-    let mut state = WebAppState::new(root.path().to_path_buf(), runtime)
-        .with_provider_adapter(Arc::new(MockSplitProviderAdapter { output }));
+    let mut state = WebAppState::new(root.path().to_path_buf(), runtime).with_provider_adapter(
+        Arc::new(MockSplitProviderAdapter {
+            output,
+            revision_output: None,
+        }),
+    );
 
     let mut registry = ProviderRegistry::new();
     let test_controls = cadence_aria::web::test_controls::TestControls::default();

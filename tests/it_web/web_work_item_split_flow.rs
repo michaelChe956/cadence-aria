@@ -192,6 +192,7 @@ async fn dirty_shared_worktree_blocks_next_work_item_until_manual_gate_resolved(
         )
         .with_provider_adapter(Arc::new(MockSplitProviderAdapter {
             output: two_ready_split_output(),
+            revision_output: None,
         })),
     );
     bootstrap_confirmed_split_plan_with_two_ready_work_items(app.clone(), root.path(), repo.path())
