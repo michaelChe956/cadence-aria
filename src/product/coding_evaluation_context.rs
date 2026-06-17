@@ -330,8 +330,8 @@ fn work_item_context(
     warnings: &mut Vec<String>,
 ) -> EvaluationWorkItemContext {
     let (raw_markdown_or_sections, truncated) = sanitize_context_text(
-        &version
-            .map(|version| version.markdown.clone())
+        version
+            .map(|version| version.markdown())
             .unwrap_or_default(),
     );
     if truncated {
@@ -558,7 +558,9 @@ mod tests {
         CreateWorkspaceSessionInput, LifecycleStore,
     };
     use crate::product::models::{DesignKind, ProviderName, WorkspaceType};
-    use crate::web::workspace_ws_types::{ArtifactVersion, ProviderConfigSnapshot};
+    use crate::web::workspace_ws_types::{
+        ArtifactPayload, ArtifactVersion, ProviderConfigSnapshot,
+    };
 
     const PROJECT_ID: &str = "project_0001";
     const ISSUE_ID: &str = "issue_0001";
@@ -666,7 +668,10 @@ mod tests {
                 &work_item_session.id,
                 ArtifactVersion {
                     version: 1,
-                    markdown: "# Work Item\n\n## 验证命令\n- cargo test --locked".to_string(),
+                    payload: ArtifactPayload::Markdown {
+                        markdown: "# Work Item\n\n## 验证命令\n- cargo test --locked".to_string(),
+                        diff: None,
+                    },
                     generated_by: ProviderName::Codex,
                     reviewed_by: Some(ProviderName::ClaudeCode),
                     review_verdict: None,
@@ -838,17 +843,20 @@ mod tests {
                 &work_item_session.id,
                 ArtifactVersion {
                     version: 1,
-                    markdown: format!(
-                        "## Acceptance Criteria\n\
-                         normal requirement\n\
-                         api_key = \"should-not-leak\"\n\
-                         Authorization: Bearer should-not-leak\n\
-                         -----BEGIN PRIVATE KEY-----\n\
-                         should-not-leak\n\
-                         -----END PRIVATE KEY-----\n\
-                         {}",
-                        "x".repeat(30_200)
-                    ),
+                    payload: ArtifactPayload::Markdown {
+                        markdown: format!(
+                            "## Acceptance Criteria\n\
+                             normal requirement\n\
+                             api_key = \"should-not-leak\"\n\
+                             Authorization: Bearer should-not-leak\n\
+                             -----BEGIN PRIVATE KEY-----\n\
+                             should-not-leak\n\
+                             -----END PRIVATE KEY-----\n\
+                             {}",
+                            "x".repeat(30_200)
+                        ),
+                        diff: None,
+                    },
                     generated_by: ProviderName::Codex,
                     reviewed_by: Some(ProviderName::ClaudeCode),
                     review_verdict: None,

@@ -42,7 +42,8 @@ use cadence_aria::product::tester_agent_loop::TesterAgentOptions;
 use cadence_aria::protocol::contracts::{AdapterInput, AdapterRole, ProviderType};
 use cadence_aria::web::coding_ws_handler::CodingWsOutMessage;
 use cadence_aria::web::workspace_ws_types::{
-    ArtifactVersion, ProviderConfigSnapshot, WsExecutionEventKind, WsExecutionEventStatus,
+    ArtifactPayload, ArtifactVersion, ProviderConfigSnapshot, WsExecutionEventKind,
+    WsExecutionEventStatus,
 };
 use tempfile::tempdir;
 use tokio::sync::mpsc;
@@ -5182,7 +5183,10 @@ fn seed_work_item_markdown(app_paths: &ProductAppPaths, markdown: &str) {
             &session.id,
             ArtifactVersion {
                 version: 1,
-                markdown: markdown.to_string(),
+                payload: ArtifactPayload::Markdown {
+                    markdown: markdown.to_string(),
+                    diff: None,
+                },
                 generated_by: ProviderName::Fake,
                 reviewed_by: Some(ProviderName::Fake),
                 review_verdict: None,

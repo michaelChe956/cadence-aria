@@ -96,6 +96,19 @@ fn build_node_detail_summary(detail: &NodeDetail) -> NodeDetailSummary {
 }
 
 fn build_artifact_version_summary(version: &ArtifactVersion) -> ArtifactVersionSummary {
+    let (markdown_size, markdown_preview) = match &version.payload {
+        ArtifactPayload::Markdown { markdown, .. } => (markdown.len(), preview(markdown)),
+        ArtifactPayload::WorkItemPlanCandidate { candidate } => {
+            let size = serde_json::to_string(candidate).unwrap_or_default().len();
+            let preview_text = candidate
+                .work_items
+                .first()
+                .map(|item| item.title.as_str())
+                .unwrap_or(candidate.plan.id.as_str())
+                .to_string();
+            (size, preview(&preview_text))
+        }
+    };
     ArtifactVersionSummary {
         version: version.version,
         generated_by: version.generated_by.clone(),
@@ -105,8 +118,8 @@ fn build_artifact_version_summary(version: &ArtifactVersion) -> ArtifactVersionS
         is_current: version.is_current,
         created_at: version.created_at.clone(),
         source_node_id: version.source_node_id.clone(),
-        markdown_size: version.markdown.len(),
-        markdown_preview: preview(&version.markdown),
+        markdown_size,
+        markdown_preview,
     }
 }
 
@@ -484,10 +497,7 @@ impl WorkspaceEngine {
                 .iter()
                 .rev()
                 .find(|version| version.is_current)
-                .map(|version| ArtifactPayload::Markdown {
-                    markdown: version.markdown.clone(),
-                    diff: None,
-                });
+                .map(|version| version.payload.clone());
         }
         let (timeline_nodes, active_node_id) = if persisted_timeline_nodes.is_empty() {
             initial_timeline(&session)
@@ -2803,10 +2813,9 @@ impl WorkspaceEngine {
             .active_node_id
             .clone()
             .unwrap_or_else(|| "timeline_node_unknown".to_string());
-        let markdown = payload.markdown_or_empty().to_string();
         self.artifact_versions.push(ArtifactVersion {
             version,
-            markdown,
+            payload: payload.clone(),
             generated_by: self.session.author_provider.clone(),
             reviewed_by: None,
             review_verdict: None,
@@ -4390,7 +4399,8 @@ mod tests {
     use crate::web::workspace_ws_types::{
         ArtifactPayload, AuthorDecision, ProviderConfigSnapshot, ReviewFindingSeverity, ReviewGate,
         ReviewVerdictType, TimelineNode, TimelineNodeStatus, TimelineNodeType,
-        WorkspaceStage as WsWorkspaceStage,
+        WorkItemCandidateDto, WorkItemCandidateMetaDto, WorkItemPlanCandidateDto, WorkItemPlanDto,
+        WorkItemSplitOptionsDto, WorkspaceStage as WsWorkspaceStage,
     };
     use std::sync::Mutex;
     use tempfile::TempDir;
@@ -4406,6 +4416,80 @@ mod tests {
             markdown: markdown.to_string(),
             diff: None,
         }
+    }
+
+    #[test]
+    fn build_artifact_version_summary_derives_size_for_markdown_and_candidate() {
+        let markdown_version = ArtifactVersion {
+            version: 1,
+            payload: ArtifactPayload::Markdown {
+                markdown: "hello".to_string(),
+                diff: None,
+            },
+            generated_by: ProviderName::ClaudeCode,
+            reviewed_by: None,
+            review_verdict: None,
+            confirmed_by: None,
+            is_current: true,
+            created_at: "2026-06-01T00:00:00Z".to_string(),
+            source_node_id: "node_001".to_string(),
+        };
+        let summary = build_artifact_version_summary(&markdown_version);
+        assert_eq!(summary.markdown_size, 5);
+        assert_eq!(summary.markdown_preview, "hello");
+
+        let candidate = WorkItemPlanCandidateDto {
+            plan: WorkItemPlanDto {
+                id: "plan_001".to_string(),
+                status: "draft".to_string(),
+                options: WorkItemSplitOptionsDto {
+                    include_integration_tests: false,
+                    include_e2e_tests: false,
+                    force_frontend_backend_split: false,
+                    require_execution_plan_confirm: false,
+                },
+                dependency_graph: vec![],
+            },
+            work_items: vec![WorkItemCandidateDto {
+                id: "wi_001".to_string(),
+                kind: "backend".to_string(),
+                title: "first work item".to_string(),
+                depends_on: vec![],
+                exclusive_write_scopes: vec![],
+                verification_plan_ref: None,
+                meta: WorkItemCandidateMetaDto {
+                    reverted: false,
+                    revert_feedback: None,
+                },
+            }],
+            verification_plans: vec![],
+            repository_profile: None,
+            validator_findings: vec![],
+        };
+        let candidate_version = ArtifactVersion {
+            version: 2,
+            payload: ArtifactPayload::WorkItemPlanCandidate {
+                candidate: Box::new(candidate.clone()),
+            },
+            generated_by: ProviderName::Codex,
+            reviewed_by: None,
+            review_verdict: None,
+            confirmed_by: None,
+            is_current: false,
+            created_at: "2026-06-01T00:00:01Z".to_string(),
+            source_node_id: "node_002".to_string(),
+        };
+        let summary = build_artifact_version_summary(&candidate_version);
+        assert_eq!(
+            summary.markdown_size,
+            serde_json::to_string(&candidate).unwrap().len()
+        );
+        assert!(
+            summary.markdown_preview.contains("first work item")
+                || summary.markdown_preview.contains("plan_001"),
+            "candidate preview should contain title or plan id: {}",
+            summary.markdown_preview
+        );
     }
 
     fn make_session(session_id: &str) -> WorkspaceSession {
@@ -6954,7 +7038,10 @@ mod tests {
         let artifact_markdown = format!("# Artifact\n\n{}", "M".repeat(3000));
         engine.artifact_versions.push(ArtifactVersion {
             version: 2,
-            markdown: artifact_markdown.clone(),
+            payload: ArtifactPayload::Markdown {
+                markdown: artifact_markdown.clone(),
+                diff: None,
+            },
             generated_by: ProviderName::ClaudeCode,
             reviewed_by: Some(ProviderName::Codex),
             review_verdict: Some(ReviewVerdictType::Pass),
@@ -7460,7 +7547,7 @@ mod tests {
         assert_eq!(engine.artifact_versions.len(), 1);
         assert!(
             engine.artifact_versions[0]
-                .markdown
+                .markdown()
                 .contains("不满意的候选")
         );
         assert!(

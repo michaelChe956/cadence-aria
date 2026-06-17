@@ -32,7 +32,9 @@ use cadence_aria::web::coding_ws_handler::{
 };
 use cadence_aria::web::runtime::WebRuntime;
 use cadence_aria::web::state::WebAppState;
-use cadence_aria::web::workspace_ws_types::{ArtifactVersion, ProviderConfigSnapshot};
+use cadence_aria::web::workspace_ws_types::{
+    ArtifactPayload, ArtifactVersion, ProviderConfigSnapshot,
+};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use std::collections::HashSet;
@@ -2492,7 +2494,10 @@ fn app_with_confirmed_work_item_context(root_path: &std::path::Path) -> axum::Ro
             &session.id,
             ArtifactVersion {
                 version: 1,
-                markdown: CLIMB_STAIRS_WORK_ITEM.to_string(),
+                payload: ArtifactPayload::Markdown {
+                    markdown: CLIMB_STAIRS_WORK_ITEM.to_string(),
+                    diff: None,
+                },
                 generated_by: ProviderName::Fake,
                 reviewed_by: Some(ProviderName::Fake),
                 review_verdict: None,

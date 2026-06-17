@@ -18,8 +18,8 @@ use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::runtime::WebRuntime;
 use cadence_aria::web::state::WebAppState;
 use cadence_aria::web::workspace_ws_types::{
-    ArtifactVersion, AuthorDecision, ProviderConfigSnapshot, ReviewVerdictType, TimelineNodeStatus,
-    TimelineNodeType, WsInMessage, WsOutMessage, WsProviderStatus,
+    ArtifactPayload, ArtifactVersion, AuthorDecision, ProviderConfigSnapshot, ReviewVerdictType,
+    TimelineNodeStatus, TimelineNodeType, WsInMessage, WsOutMessage, WsProviderStatus,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -736,7 +736,10 @@ async fn workspace_session_detail_http_api_returns_full_persisted_content() {
             "workspace_session_0001",
             ArtifactVersion {
                 version: 3,
-                markdown: "# Artifact v3\n\n完整 Markdown".to_string(),
+                payload: ArtifactPayload::Markdown {
+                    markdown: "# Artifact v3\n\n完整 Markdown".to_string(),
+                    diff: None,
+                },
                 generated_by: ProviderName::Fake,
                 reviewed_by: Some(ProviderName::Fake),
                 review_verdict: Some(ReviewVerdictType::Pass),

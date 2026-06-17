@@ -35,8 +35,9 @@ use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
 use crate::protocol::contracts::{AdapterInput, AdapterRole};
 use crate::web::state::WebAppState;
 use crate::web::workspace_ws_types::{
-    ArtifactVersion, ProviderConfigSnapshot, ReviewVerdictType, TimelineNode, TimelineNodeStatus,
-    TimelineNodeType, WorkspaceStage, WsExecutionEventKind, WsExecutionEventStatus,
+    ArtifactPayload, ArtifactVersion, ProviderConfigSnapshot, ReviewVerdictType, TimelineNode,
+    TimelineNodeStatus, TimelineNodeType, WorkspaceStage, WsExecutionEventKind,
+    WsExecutionEventStatus,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -381,11 +382,14 @@ fn create_large_workspace_fixture(
     let artifact_versions = (1..=5)
         .map(|version| ArtifactVersion {
             version,
-            markdown: format!(
-                "{}\n# Large Artifact v{version}\n\n{}",
-                "artifact line\n".repeat(220),
-                "artifact line\n".repeat(8780)
-            ),
+            payload: ArtifactPayload::Markdown {
+                markdown: format!(
+                    "{}\n# Large Artifact v{version}\n\n{}",
+                    "artifact line\n".repeat(220),
+                    "artifact line\n".repeat(8780)
+                ),
+                diff: None,
+            },
             generated_by: ProviderName::Codex,
             reviewed_by: Some(ProviderName::ClaudeCode),
             review_verdict: Some(ReviewVerdictType::Pass),
@@ -1428,7 +1432,7 @@ mod tests {
         assert!(detail.prompt.expect("large prompt").len() > 100_000);
         assert!(output.len() > 100_000);
         assert_eq!(artifacts.len(), 5);
-        assert!(artifacts[4].markdown.contains("# Large Artifact v5"));
+        assert!(artifacts[4].markdown().contains("# Large Artifact v5"));
     }
 
     #[tokio::test]

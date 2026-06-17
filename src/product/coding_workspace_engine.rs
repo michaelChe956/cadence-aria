@@ -5023,7 +5023,7 @@ impl CodingWorkspaceEngine {
             .list_artifact_versions(&session.id)?
             .into_iter()
             .last()
-            .map(|version| version.markdown))
+            .map(|version| version.markdown_string()))
     }
 
     fn build_code_review_report(

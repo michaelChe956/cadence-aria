@@ -6,7 +6,7 @@ use cadence_aria::product::models::ProviderName;
 use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::runtime::WebRuntime;
 use cadence_aria::web::state::WebAppState;
-use cadence_aria::web::workspace_ws_types::ArtifactVersion;
+use cadence_aria::web::workspace_ws_types::{ArtifactPayload, ArtifactVersion};
 use serde_json::{Value, json};
 use std::{fs, process::Command};
 use tempfile::tempdir;
@@ -881,7 +881,10 @@ async fn lifecycle_returns_artifact_versions() {
             "workspace_session_0001",
             ArtifactVersion {
                 version: 1,
-                markdown: "## 功能需求\n\n[REQ-001] 计算爬楼梯方案数。".to_string(),
+                payload: ArtifactPayload::Markdown {
+                    markdown: "## 功能需求\n\n[REQ-001] 计算爬楼梯方案数。".to_string(),
+                    diff: None,
+                },
                 generated_by: ProviderName::Fake,
                 reviewed_by: Some(ProviderName::Fake),
                 review_verdict: None,
@@ -897,7 +900,10 @@ async fn lifecycle_returns_artifact_versions() {
             "workspace_session_0002",
             ArtifactVersion {
                 version: 1,
-                markdown: "## 关键决策\n\n[DEC-001] 使用动态规划。".to_string(),
+                payload: ArtifactPayload::Markdown {
+                    markdown: "## 关键决策\n\n[DEC-001] 使用动态规划。".to_string(),
+                    diff: None,
+                },
                 generated_by: ProviderName::Fake,
                 reviewed_by: Some(ProviderName::Fake),
                 review_verdict: None,
@@ -913,7 +919,10 @@ async fn lifecycle_returns_artifact_versions() {
             "workspace_session_0003",
             ArtifactVersion {
                 version: 1,
-                markdown: "## 实施计划\n\n[TASK-001] 实现 climb_stairs。".to_string(),
+                payload: ArtifactPayload::Markdown {
+                    markdown: "## 实施计划\n\n[TASK-001] 实现 climb_stairs。".to_string(),
+                    diff: None,
+                },
                 generated_by: ProviderName::Fake,
                 reviewed_by: Some(ProviderName::Fake),
                 review_verdict: None,

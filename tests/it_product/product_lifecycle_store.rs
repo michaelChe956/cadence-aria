@@ -18,8 +18,8 @@ use cadence_aria::product::models::{
     WorkspaceSessionStatus, WorkspaceType,
 };
 use cadence_aria::web::workspace_ws_types::{
-    ArtifactVersion, ProviderConfigSnapshot, TimelineNode, TimelineNodeStatus, TimelineNodeType,
-    WorkspaceStage,
+    ArtifactPayload, ArtifactVersion, ProviderConfigSnapshot, TimelineNode, TimelineNodeStatus,
+    TimelineNodeType, WorkspaceStage,
 };
 use tempfile::tempdir;
 
@@ -286,7 +286,10 @@ fn persists_workspace_timeline_nodes_and_artifact_versions() {
     };
     let version = ArtifactVersion {
         version: 1,
-        markdown: "# Story Spec".to_string(),
+        payload: ArtifactPayload::Markdown {
+            markdown: "# Story Spec".to_string(),
+            diff: None,
+        },
         generated_by: ProviderName::ClaudeCode,
         reviewed_by: Some(ProviderName::Codex),
         review_verdict: None,

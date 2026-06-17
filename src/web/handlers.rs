@@ -1715,7 +1715,7 @@ pub async fn workspace_session_artifact_version(
             )
         })?;
     Ok(Json(
-        json!({"version": version.version, "markdown": version.markdown}),
+        json!({"version": version.version, "markdown": version.markdown()}),
     ))
 }
 
@@ -2643,7 +2643,7 @@ fn artifact_version_dtos(
 fn artifact_version_dto(version: ArtifactVersion) -> ArtifactVersionDto {
     ArtifactVersionDto {
         version: version.version,
-        markdown: version.markdown,
+        markdown: version.markdown_string(),
         generated_by: provider_name_text(&version.generated_by).to_string(),
         reviewed_by: version
             .reviewed_by
