@@ -63,6 +63,8 @@ function mockWorkspaceWs(overrides: Partial<WorkspaceWsApi> = {}) {
     sendStartGeneration: vi.fn(),
     sendSelectRevisionPath: vi.fn(),
     sendAuthorDecision: vi.fn(),
+    sendRequestRevision: vi.fn(),
+    sendRevertWorkItem: vi.fn(),
     sendHumanConfirm: vi.fn(),
     sendHello: vi.fn(),
     sendPing: vi.fn(),
@@ -805,6 +807,69 @@ describe("ChatWorkspacePage", () => {
     const payload = vi.mocked(api.sendHumanConfirm).mock.calls[0][1] as { description: string };
     expect(payload.description).toContain("补充说明段落");
   });
+
+  it("renders work item plan candidate panel for work_item_plan workspaces", async () => {
+    const api = mockWorkspaceWs();
+    useWorkspaceStore.setState({
+      sessionId: "workspace_session_0001",
+      workspaceType: "work_item_plan",
+      stage: "author_confirm",
+      providers: { author: "claude_code", reviewer: "codex" },
+      workItemPlanCandidate: workItemPlanCandidate(),
+    });
+
+    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
+
+    expect(screen.getByTestId("work-item-plan-candidate-panel")).toBeInTheDocument();
+    expect(screen.getByText("Work Item Plan 候选")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByTestId("accept-plan-button"));
+    expect(api.sendAuthorDecision).toHaveBeenCalledWith("accept");
+  });
+
+  it("shows empty state when work_item_plan candidate is missing", async () => {
+    mockWorkspaceWs();
+    useWorkspaceStore.setState({
+      sessionId: "workspace_session_0001",
+      workspaceType: "work_item_plan",
+      stage: "author_confirm",
+      providers: { author: "claude_code", reviewer: "codex" },
+      workItemPlanCandidate: null,
+    });
+
+    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
+
+    expect(screen.queryByTestId("work-item-plan-candidate-panel")).not.toBeInTheDocument();
+    expect(screen.getByText("尚未生成候选，请点击开始生成")).toBeInTheDocument();
+  });
+
+  it("keeps markdown artifact pane for story workspaces", async () => {
+    mockWorkspaceWs();
+    useWorkspaceStore.setState({
+      sessionId: "workspace_session_0001",
+      workspaceType: "story",
+      stage: "author_confirm",
+      providers: { author: "claude_code", reviewer: "codex" },
+      artifact: "# Story",
+      artifactVersions: [
+        {
+          version: 1,
+          markdown: "# Story",
+          generated_by: "claude_code",
+          created_at: "2026-06-17T00:00:00Z",
+          source_node_id: "node-1",
+        },
+      ],
+    });
+
+    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
+
+    expect(screen.queryByTestId("work-item-plan-candidate-panel")).not.toBeInTheDocument();
+    expect(screen.getByTestId("monaco-viewer")).toHaveTextContent("# Story");
+  });
 });
 
 function timelineNode(overrides: Partial<TimelineNode> = {}): TimelineNode {
@@ -860,5 +925,48 @@ function makeNodeDetail(overrides: Partial<NodeDetail> = {}): NodeDetail {
     started_at: "2026-05-20T14:30:00Z",
     ended_at: null,
     ...overrides,
+  };
+}
+
+function workItemPlanCandidate(): import("../api/types").WorkItemPlanCandidateDto {
+  return {
+    plan: {
+      plan_id: "plan_001",
+      project_id: "project_001",
+      issue_id: "issue_001",
+      title: "Plan 001",
+      source_story_spec_ids: [],
+      source_design_spec_ids: [],
+      options: {
+        include_integration_tests: false,
+        include_e2e_tests: false,
+        force_frontend_backend_split: false,
+        require_execution_plan_confirm: false,
+      },
+      status: "draft",
+      work_item_ids: [],
+      repository_profile_ref: null,
+      verification_plan_ids: [],
+      dependency_graph: [],
+      created_from_provider_run: null,
+      validator_findings: [],
+      review_summary: null,
+      created_at: "2026-06-17T00:00:00Z",
+      updated_at: "2026-06-17T00:00:00Z",
+    },
+    work_items: [
+      {
+        candidate_id: "wi_001",
+        title: "Frontend Auth",
+        kind: "frontend",
+        exclusive_write_scopes: ["src/auth"],
+        depends_on: [],
+        verification_plan_ref: null,
+        meta: { summary: "前端登录" },
+      },
+    ],
+    verification_plans: [],
+    repository_profile: null,
+    validator_findings: [],
   };
 }

@@ -24,6 +24,7 @@ import {
   loadAcknowledgedAbortedNodes,
 } from "../components/workspace/DisconnectBanner";
 import { ProviderConfigPanel } from "../components/workspace/ProviderConfigPanel";
+import { WorkItemPlanCandidatePanel } from "../components/workspace/WorkItemPlanCandidatePanel";
 import { WorkspaceHeader } from "../components/workspace/WorkspaceHeader";
 import { useStageUI } from "../hooks/useStageUI";
 import { useUnloadGuard } from "../hooks/useUnloadGuard";
@@ -51,6 +52,8 @@ export function ChatWorkspacePage({
     sendStartGeneration,
     sendSelectRevisionPath,
     sendAuthorDecision,
+    sendRequestRevision,
+    sendRevertWorkItem,
     sendHumanConfirm,
     abort,
     selectProvider,
@@ -78,6 +81,7 @@ export function ChatWorkspacePage({
   const artifactVersions = useWorkspaceStore((state) => state.artifactVersions);
   const artifactContentCache = useWorkspaceStore((state) => state.artifactContentCache);
   const artifact = useWorkspaceStore((state) => state.artifact);
+  const workItemPlanCandidate = useWorkspaceStore((state) => state.workItemPlanCandidate);
   const protocolError = useWorkspaceStore((state) => state.protocolError);
   const acknowledgedAbortedNodes = useWorkspaceStore((state) => state.acknowledgedAbortedNodes);
   const reviewerEnabled = useWorkspaceStore((state) => state.reviewerEnabled);
@@ -341,15 +345,32 @@ export function ChatWorkspacePage({
             artifactCount={artifactVersions.length}
           />
           {activePanel === "artifact" ? (
-            <ArtifactPane
-              artifactVersions={artifactVersions}
-              artifact={artifact}
-              sessionId={sessionReady ? sessionId : null}
-              artifactContentCache={artifactContentCacheValues}
-              loadArtifactVersion={handleLoadArtifactVersion}
-              onCacheArtifactContent={handleCacheArtifactContent}
-              className="min-h-0 border-l-0"
-            />
+            workspaceType === "work_item_plan" ? (
+              workItemPlanCandidate ? (
+                <WorkItemPlanCandidatePanel
+                  candidate={workItemPlanCandidate}
+                  stage={stage}
+                  onRevert={sendRevertWorkItem}
+                  onRequestRevision={sendRequestRevision}
+                  onAccept={() => sendAuthorDecision("accept")}
+                  className="min-h-0"
+                />
+              ) : (
+                <div className="flex min-h-0 flex-col items-center justify-center p-6 text-sm text-[var(--aria-ink-muted)]">
+                  <p>尚未生成候选，请点击开始生成</p>
+                </div>
+              )
+            ) : (
+              <ArtifactPane
+                artifactVersions={artifactVersions}
+                artifact={artifact}
+                sessionId={sessionReady ? sessionId : null}
+                artifactContentCache={artifactContentCacheValues}
+                loadArtifactVersion={handleLoadArtifactVersion}
+                onCacheArtifactContent={handleCacheArtifactContent}
+                className="min-h-0 border-l-0"
+              />
+            )
           ) : (
             <div className="grid min-h-0 grid-rows-[minmax(0,1fr)_auto_auto]">
               <ChatEntryList
