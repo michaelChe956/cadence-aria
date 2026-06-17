@@ -63,13 +63,10 @@ where
     messages
 }
 
-type WsStream = tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
->;
+type WsStream =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-async fn prepare_work_item_plan_and_author_to_confirm(
-    app: &axum::Router,
-) -> (String, WsStream) {
+async fn prepare_work_item_plan_and_author_to_confirm(app: &axum::Router) -> (String, WsStream) {
     let (_status, prepare_resp) = request_json(
         app.clone(),
         Method::POST,
@@ -107,16 +104,12 @@ async fn prepare_work_item_plan_and_author_to_confirm(
     .await
     .expect("send start_generation");
 
-    let messages = recv_ws_until(
-        &mut ws,
-        Duration::from_secs(15),
-        |msgs| {
-            msgs.iter().any(|m| m["type"] == "artifact_update")
-                && msgs.iter().any(|m| {
-                    m["type"] == "stage_change" && m["stage"] == "author_confirm"
-                })
-        },
-    )
+    let messages = recv_ws_until(&mut ws, Duration::from_secs(15), |msgs| {
+        msgs.iter().any(|m| m["type"] == "artifact_update")
+            && msgs
+                .iter()
+                .any(|m| m["type"] == "stage_change" && m["stage"] == "author_confirm")
+    })
     .await;
 
     let _artifact_update = messages
@@ -159,7 +152,8 @@ async fn review_returns_verdict_for_whole_candidate() {
     let _guard = WS_TEST_LOCK.lock().await;
     enable_test_controls();
 
-    let (app, _repo) = app_with_confirmed_story_and_design_and_test_providers(valid_split_output()).await;
+    let (app, _repo) =
+        app_with_confirmed_story_and_design_and_test_providers(valid_split_output()).await;
     let (session_id, mut ws) = prepare_work_item_plan_and_author_to_confirm(&app).await;
     enable_revise_review_fixture(&app, &session_id).await;
 
@@ -171,16 +165,12 @@ async fn review_returns_verdict_for_whole_candidate() {
     .await
     .expect("send author_decision");
 
-    let messages = recv_ws_until(
-        &mut ws,
-        Duration::from_secs(15),
-        |msgs| {
-            msgs.iter().any(|m| m["type"] == "review_decision_required")
-                || msgs.iter().any(|m| {
-                    m["type"] == "stage_change" && m["stage"] == "human_confirm"
-                })
-        },
-    )
+    let messages = recv_ws_until(&mut ws, Duration::from_secs(15), |msgs| {
+        msgs.iter().any(|m| m["type"] == "review_decision_required")
+            || msgs
+                .iter()
+                .any(|m| m["type"] == "stage_change" && m["stage"] == "human_confirm")
+    })
     .await;
 
     let _stage_cross = messages
@@ -227,7 +217,8 @@ async fn work_item_plan_review_returns_decision_response() {
 
     // human_intervene 路径：进入人工确认
     {
-        let (app, _repo) = app_with_confirmed_story_and_design_and_test_providers(valid_split_output()).await;
+        let (app, _repo) =
+            app_with_confirmed_story_and_design_and_test_providers(valid_split_output()).await;
         let (session_id, mut ws) = prepare_work_item_plan_and_author_to_confirm(&app).await;
         enable_revise_review_fixture(&app, &session_id).await;
 
@@ -239,11 +230,9 @@ async fn work_item_plan_review_returns_decision_response() {
         .await
         .expect("send author_decision");
 
-        let _messages = recv_ws_until(
-            &mut ws,
-            Duration::from_secs(15),
-            |msgs| msgs.iter().any(|m| m["type"] == "review_decision_required"),
-        )
+        let _messages = recv_ws_until(&mut ws, Duration::from_secs(15), |msgs| {
+            msgs.iter().any(|m| m["type"] == "review_decision_required")
+        })
         .await;
 
         ws.send(Message::Text(
@@ -258,14 +247,10 @@ async fn work_item_plan_review_returns_decision_response() {
         .await
         .expect("send review_decision_response human_intervene");
 
-        let messages = recv_ws_until(
-            &mut ws,
-            Duration::from_secs(10),
-            |msgs| {
-                msgs.iter()
-                    .any(|m| m["type"] == "stage_change" && m["stage"] == "human_confirm")
-            },
-        )
+        let messages = recv_ws_until(&mut ws, Duration::from_secs(10), |msgs| {
+            msgs.iter()
+                .any(|m| m["type"] == "stage_change" && m["stage"] == "human_confirm")
+        })
         .await;
         messages
             .iter()
@@ -277,7 +262,8 @@ async fn work_item_plan_review_returns_decision_response() {
 
     // continue 路径：只验证进入 revision 阶段（revision 执行在 WP4 实现）
     {
-        let (app, _repo) = app_with_confirmed_story_and_design_and_test_providers(valid_split_output()).await;
+        let (app, _repo) =
+            app_with_confirmed_story_and_design_and_test_providers(valid_split_output()).await;
         let (session_id, mut ws) = prepare_work_item_plan_and_author_to_confirm(&app).await;
         enable_revise_review_fixture(&app, &session_id).await;
 
@@ -289,11 +275,9 @@ async fn work_item_plan_review_returns_decision_response() {
         .await
         .expect("send author_decision");
 
-        let _messages = recv_ws_until(
-            &mut ws,
-            Duration::from_secs(15),
-            |msgs| msgs.iter().any(|m| m["type"] == "review_decision_required"),
-        )
+        let _messages = recv_ws_until(&mut ws, Duration::from_secs(15), |msgs| {
+            msgs.iter().any(|m| m["type"] == "review_decision_required")
+        })
         .await;
 
         ws.send(Message::Text(
@@ -308,14 +292,10 @@ async fn work_item_plan_review_returns_decision_response() {
         .await
         .expect("send review_decision_response continue");
 
-        let messages = recv_ws_until(
-            &mut ws,
-            Duration::from_secs(10),
-            |msgs| {
-                msgs.iter()
-                    .any(|m| m["type"] == "stage_change" && m["stage"] == "revision")
-            },
-        )
+        let messages = recv_ws_until(&mut ws, Duration::from_secs(10), |msgs| {
+            msgs.iter()
+                .any(|m| m["type"] == "stage_change" && m["stage"] == "revision")
+        })
         .await;
         messages
             .iter()

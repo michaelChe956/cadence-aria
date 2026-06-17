@@ -536,15 +536,21 @@ pub(crate) async fn app_with_confirmed_story_and_design_and_test_providers(
     let test_controls = cadence_aria::web::test_controls::TestControls::default();
     registry.register(
         ProviderName::Fake,
-        Arc::new(TestControlledFakeStreamingProvider::new(test_controls.clone())),
+        Arc::new(TestControlledFakeStreamingProvider::new(
+            test_controls.clone(),
+        )),
     );
     registry.register(
         ProviderName::Codex,
-        Arc::new(TestControlledFakeStreamingProvider::new(test_controls.clone())),
+        Arc::new(TestControlledFakeStreamingProvider::new(
+            test_controls.clone(),
+        )),
     );
     registry.register(
         ProviderName::ClaudeCode,
-        Arc::new(TestControlledFakeStreamingProvider::new(test_controls.clone())),
+        Arc::new(TestControlledFakeStreamingProvider::new(
+            test_controls.clone(),
+        )),
     );
     state.test_controls = test_controls;
     state.provider_registry = Arc::new(registry);
