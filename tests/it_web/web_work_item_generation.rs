@@ -519,7 +519,10 @@ async fn prepare_work_item_plan_creates_draft_plan_and_session_without_generatin
             "review_rounds": 1,
             "superpowers_enabled": true,
             "openspec_enabled": true,
-            "include_integration_tests": true
+            "include_integration_tests": true,
+            "include_e2e_tests": false,
+            "force_frontend_backend_split": true,
+            "require_execution_plan_confirm": false
         }),
     )
     .await;
@@ -529,6 +532,15 @@ async fn prepare_work_item_plan_creates_draft_plan_and_session_without_generatin
     assert_eq!(
         response["plan"]["options"]["include_integration_tests"],
         true
+    );
+    assert_eq!(response["plan"]["options"]["include_e2e_tests"], false);
+    assert_eq!(
+        response["plan"]["options"]["force_frontend_backend_split"],
+        true
+    );
+    assert_eq!(
+        response["plan"]["options"]["require_execution_plan_confirm"],
+        false
     );
     assert!(
         response["plan"]["work_item_ids"]
