@@ -737,6 +737,15 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                 )
                 .await;
             }
+            WsInMessage::RevertWorkItem { .. } => {
+                let _ = send_json_outbound(
+                    &outbound_tx,
+                    &WsOutMessage::Error {
+                        message: "RevertWorkItem is not yet implemented".to_string(),
+                    },
+                )
+                .await;
+            }
         }
     }
 
@@ -972,6 +981,7 @@ fn message_type(msg: &WsInMessage) -> &'static str {
         WsInMessage::SelectRevisionPath { .. } => "select_revision_path",
         WsInMessage::RequestRevision { .. } => "request_revision",
         WsInMessage::HumanConfirm { .. } => "human_confirm",
+        WsInMessage::RevertWorkItem { .. } => "revert_work_item",
         WsInMessage::Abort => "abort",
         WsInMessage::Ping => "ping",
     }

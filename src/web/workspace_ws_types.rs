@@ -185,6 +185,11 @@ pub enum WsInMessage {
         decision: HumanConfirmDecision,
         payload: Option<serde_json::Value>,
     },
+    RevertWorkItem {
+        work_item_id: String,
+        feedback: String,
+        clear: bool,
+    },
     Abort,
     Ping,
 }
@@ -307,6 +312,131 @@ pub struct WsCheckpointDto {
 pub struct WsProviderConfig {
     pub author: ProviderName,
     pub reviewer: Option<ProviderName>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ArtifactPayload {
+    Markdown {
+        markdown: String,
+    },
+    WorkItemPlanCandidate {
+        work_item_plan_candidate: Box<WorkItemPlanCandidateDto>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkItemPlanCandidateDto {
+    pub plan: WorkItemPlanDto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkItemPlanDto {
+    pub title: String,
+    pub work_items: Vec<WorkItemCandidateDto>,
+    pub dependency_graph: Vec<WorkItemDependencyEdgeDto>,
+    pub verification_plans: Vec<VerificationPlanDto>,
+    pub repository_profile: Option<RepositoryProfileDto>,
+    pub options: WorkItemSplitOptionsDto,
+    pub validator_findings: Vec<ValidatorFindingDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkItemSplitOptionsDto {
+    pub include_integration_tests: bool,
+    pub include_e2e_tests: bool,
+    pub force_frontend_backend_split: bool,
+    pub require_execution_plan_confirm: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkItemDependencyEdgeDto {
+    pub from_work_item_id: String,
+    pub to_work_item_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkItemCandidateDto {
+    pub id: String,
+    pub title: String,
+    pub kind: String,
+    pub sequence_hint: u32,
+    pub depends_on: Vec<String>,
+    pub exclusive_write_scopes: Vec<String>,
+    pub forbidden_write_scopes: Vec<String>,
+    pub required_handoff_from: Vec<String>,
+    pub require_execution_plan_confirm: bool,
+    pub meta: WorkItemCandidateMetaDto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkItemCandidateMetaDto {
+    pub source_story_spec_ids: Vec<String>,
+    pub source_design_spec_ids: Vec<String>,
+    pub verification_plan_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ValidatorFindingDto {
+    pub severity: String,
+    pub code: String,
+    pub message: String,
+    pub work_item_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct VerificationPlanDto {
+    pub plan_ref: String,
+    pub scope: String,
+    pub commands: Vec<VerificationCommandDto>,
+    pub manual_checks: Vec<VerificationManualCheckDto>,
+    pub required_gates: Vec<String>,
+    pub risk_notes: Vec<String>,
+    pub confidence: String,
+    pub fallback_policy: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct VerificationCommandDto {
+    pub label: String,
+    pub command: String,
+    pub cwd: String,
+    pub purpose: String,
+    pub required: bool,
+    pub timeout_seconds: u64,
+    pub safety: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct VerificationManualCheckDto {
+    pub label: String,
+    pub instructions: String,
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RepositoryProfileDto {
+    pub profile_id: String,
+    pub repository_id: String,
+    pub languages: Vec<String>,
+    pub frameworks: Vec<String>,
+    pub package_managers: Vec<String>,
+    pub test_frameworks: Vec<String>,
+    pub build_systems: Vec<String>,
+    pub detected_layers: Vec<String>,
+    pub split_recommendation: String,
+    pub confidence: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -473,10 +603,13 @@ fn default_true() -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChoiceOption, ProviderConfigSnapshot, ReviewGate, ReviewVerdict, ReviewVerdictType,
-        TimelineNode, TimelineNodeStatus, TimelineNodeType, WorkspaceStage, WsExecutionEvent,
-        WsExecutionEventKind, WsExecutionEventStatus, WsInMessage, WsOutMessage,
-        WsPermissionRiskLevel, WsProviderStatus,
+        ArtifactPayload, ChoiceOption, ProviderConfigSnapshot, RepositoryProfileDto, ReviewGate,
+        ReviewVerdict, ReviewVerdictType, TimelineNode, TimelineNodeStatus, TimelineNodeType,
+        ValidatorFindingDto, VerificationCommandDto, VerificationManualCheckDto,
+        VerificationPlanDto, WorkItemCandidateDto, WorkItemCandidateMetaDto,
+        WorkItemDependencyEdgeDto, WorkItemPlanCandidateDto, WorkItemPlanDto,
+        WorkItemSplitOptionsDto, WorkspaceStage, WsExecutionEvent, WsExecutionEventKind,
+        WsExecutionEventStatus, WsInMessage, WsOutMessage, WsPermissionRiskLevel, WsProviderStatus,
     };
     use crate::product::models::{ProviderName, WorkspaceType};
 
@@ -833,5 +966,138 @@ mod tests {
         let legacy: TimelineNodeType = serde_json::from_value(serde_json::json!("review"))
             .expect("legacy review value should deserialize");
         assert_eq!(legacy, TimelineNodeType::ReviewerRun);
+    }
+
+    #[test]
+    fn work_item_plan_candidate_dto_roundtrips_through_serde() {
+        let dto = WorkItemPlanCandidateDto {
+            plan: WorkItemPlanDto {
+                title: "爬楼梯问题 Work Item Plan".to_string(),
+                work_items: vec![WorkItemCandidateDto {
+                    id: "wi_001".to_string(),
+                    title: "实现爬楼梯问题".to_string(),
+                    kind: "backend".to_string(),
+                    sequence_hint: 10,
+                    depends_on: vec![],
+                    exclusive_write_scopes: vec!["src/product/stairs.rs".to_string()],
+                    forbidden_write_scopes: vec![],
+                    required_handoff_from: vec![],
+                    require_execution_plan_confirm: false,
+                    meta: WorkItemCandidateMetaDto {
+                        source_story_spec_ids: vec!["story_001".to_string()],
+                        source_design_spec_ids: vec!["design_001".to_string()],
+                        verification_plan_refs: vec!["vp_001".to_string()],
+                    },
+                }],
+                dependency_graph: vec![WorkItemDependencyEdgeDto {
+                    from_work_item_id: "wi_001".to_string(),
+                    to_work_item_id: "wi_002".to_string(),
+                }],
+                verification_plans: vec![VerificationPlanDto {
+                    plan_ref: "vp_001".to_string(),
+                    scope: "unit".to_string(),
+                    commands: vec![VerificationCommandDto {
+                        label: "cargo test".to_string(),
+                        command: "cargo test".to_string(),
+                        cwd: "".to_string(),
+                        purpose: "unit tests".to_string(),
+                        required: true,
+                        timeout_seconds: 120,
+                        safety: "approved".to_string(),
+                    }],
+                    manual_checks: vec![VerificationManualCheckDto {
+                        label: "人工检查".to_string(),
+                        instructions: "检查输出".to_string(),
+                        required: false,
+                    }],
+                    required_gates: vec![],
+                    risk_notes: vec![],
+                    confidence: "high".to_string(),
+                    fallback_policy: "manual_gate".to_string(),
+                }],
+                repository_profile: Some(RepositoryProfileDto {
+                    profile_id: "rp_001".to_string(),
+                    repository_id: "repo_001".to_string(),
+                    languages: vec!["rust".to_string()],
+                    frameworks: vec![],
+                    package_managers: vec!["cargo".to_string()],
+                    test_frameworks: vec![],
+                    build_systems: vec!["cargo".to_string()],
+                    detected_layers: vec!["backend".to_string()],
+                    split_recommendation: "backend_only".to_string(),
+                    confidence: "high".to_string(),
+                }),
+                options: WorkItemSplitOptionsDto {
+                    include_integration_tests: true,
+                    include_e2e_tests: false,
+                    force_frontend_backend_split: false,
+                    require_execution_plan_confirm: false,
+                },
+                validator_findings: vec![ValidatorFindingDto {
+                    severity: "warning".to_string(),
+                    code: "W001".to_string(),
+                    message: "注意边界条件".to_string(),
+                    work_item_ids: vec!["wi_001".to_string()],
+                }],
+            },
+        };
+
+        let json = serde_json::to_value(&dto).unwrap();
+        let back: WorkItemPlanCandidateDto = serde_json::from_value(json).unwrap();
+        assert_eq!(back, dto);
+    }
+
+    #[test]
+    fn revert_work_item_message_deserializes() {
+        let input: WsInMessage = serde_json::from_value(serde_json::json!({
+            "type": "revert_work_item",
+            "work_item_id": "wi_001",
+            "feedback": "需要回退",
+            "clear": false
+        }))
+        .unwrap();
+
+        assert!(matches!(
+            input,
+            WsInMessage::RevertWorkItem {
+                work_item_id,
+                feedback,
+                clear,
+            } if work_item_id == "wi_001" && feedback == "需要回退" && !clear
+        ));
+    }
+
+    #[test]
+    fn artifact_payload_markdown_variant_serializes_to_flat_json() {
+        let payload = ArtifactPayload::Markdown {
+            markdown: "# Plan\n".to_string(),
+        };
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json, serde_json::json!({"markdown": "# Plan\n"}));
+    }
+
+    #[test]
+    fn artifact_payload_candidate_variant_serializes_to_flat_json() {
+        let payload = ArtifactPayload::WorkItemPlanCandidate {
+            work_item_plan_candidate: Box::new(WorkItemPlanCandidateDto {
+                plan: WorkItemPlanDto {
+                    title: "plan".to_string(),
+                    work_items: vec![],
+                    dependency_graph: vec![],
+                    verification_plans: vec![],
+                    repository_profile: None,
+                    options: WorkItemSplitOptionsDto {
+                        include_integration_tests: false,
+                        include_e2e_tests: false,
+                        force_frontend_backend_split: false,
+                        require_execution_plan_confirm: false,
+                    },
+                    validator_findings: vec![],
+                },
+            }),
+        };
+        let json = serde_json::to_value(&payload).unwrap();
+        assert!(json.get("work_item_plan_candidate").is_some());
+        assert_eq!(json["work_item_plan_candidate"]["plan"]["title"], "plan");
     }
 }
