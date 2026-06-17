@@ -512,6 +512,7 @@ pub struct WorkspaceEngine {
     active_run_id: Option<String>,
     stream_buffers: HashMap<String, PendingStreamBuffer>,
     work_item_plan_author_retry_count: u32,
+    work_item_plan_revision_retry_count: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -633,6 +634,7 @@ impl WorkspaceEngine {
             active_run_id: None,
             stream_buffers: HashMap::new(),
             work_item_plan_author_retry_count: 0,
+            work_item_plan_revision_retry_count: 0,
         }
     }
 
@@ -690,6 +692,7 @@ impl WorkspaceEngine {
             active_run_id: None,
             stream_buffers: HashMap::new(),
             work_item_plan_author_retry_count: 0,
+            work_item_plan_revision_retry_count: 0,
         }
     }
 
@@ -3262,8 +3265,8 @@ impl WorkspaceEngine {
         let findings = report.findings.clone();
 
         if report.has_errors() {
-            self.work_item_plan_author_retry_count += 1;
-            if self.work_item_plan_author_retry_count >= 3 {
+            self.work_item_plan_revision_retry_count += 1;
+            if self.work_item_plan_revision_retry_count >= 3 {
                 if let Err(error) = lifecycle.replace_issue_work_item_plan_candidate(
                     &project_id,
                     &issue_id,
@@ -3312,7 +3315,7 @@ impl WorkspaceEngine {
 
         self.enter_author_confirm(Some("WorkItemPlan 候选已重做，等待确认".to_string()))
             .await;
-        self.work_item_plan_author_retry_count = 0;
+        self.work_item_plan_revision_retry_count = 0;
         Ok(WorkItemPlanAuthorOutcome::AuthorConfirm)
     }
 
@@ -3327,6 +3330,7 @@ impl WorkspaceEngine {
             );
         }
         self.pending_revision_context = feedback;
+        self.work_item_plan_revision_retry_count = 0;
         self.complete_active_node(Some("已请求修改".to_string()))
             .await;
         self.transition_stage(WorkspaceStage::Revision).await;
@@ -3510,7 +3514,7 @@ impl WorkspaceEngine {
             .rev()
             .find(|v| v.is_current)
             .map(|v| v.version)
-            .unwrap_or(1);
+            .ok_or_else(|| "no current artifact version to apply revert mark on".to_string())?;
         let payload = ArtifactPayload::WorkItemPlanCandidate {
             candidate: candidate.clone(),
         };

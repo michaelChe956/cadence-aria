@@ -1036,7 +1036,16 @@ fn materialize_redo_items(
         let depends_on: Vec<String> = item
             .depends_on
             .iter()
-            .filter_map(|dep_index| work_item_ids.get(*dep_index).cloned())
+            .filter_map(|dep_index| {
+                work_item_ids.get(*dep_index).cloned().or_else(|| {
+                    tracing::warn!(
+                        "revision redo work item {} depends_on index {} is out of range or references a retained item; ignoring",
+                        id,
+                        dep_index
+                    );
+                    None
+                })
+            })
             .collect();
         work_items.push(LifecycleWorkItemRecord {
             id: id.clone(),
