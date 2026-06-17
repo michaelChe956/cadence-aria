@@ -3065,6 +3065,7 @@ fn workspace_type_text(workspace_type: &WorkspaceType) -> &'static str {
         WorkspaceType::Story => "story",
         WorkspaceType::Design => "design",
         WorkspaceType::WorkItem => "work_item",
+        WorkspaceType::WorkItemPlan => "work_item_plan",
     }
 }
 
@@ -3246,6 +3247,11 @@ fn confirm_workspace_entity(
             )
             .map(|_| ())
             .map_err(product_store_api_error),
+        WorkspaceType::WorkItemPlan => Err(ApiError::runtime(
+            "work_item_plan_confirm_not_supported",
+            "confirm is not yet supported for work item plan sessions",
+            json!({}),
+        )),
     }
 }
 

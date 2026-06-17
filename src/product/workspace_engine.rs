@@ -2708,6 +2708,7 @@ impl WorkspaceEngine {
                                 WorkItemPlanStatus::Confirmed,
                             )
                             .map(|_| ()),
+                        WorkspaceType::WorkItemPlan => Ok(()),
                     };
                 }
                 self.transition_stage(WorkspaceStage::Completed).await;
@@ -3742,6 +3743,7 @@ fn workspace_type_title(workspace_type: &WorkspaceType) -> &'static str {
         WorkspaceType::Story => "Story Spec",
         WorkspaceType::Design => "Design Spec",
         WorkspaceType::WorkItem => "Work Item",
+        WorkspaceType::WorkItemPlan => "Work Item Plan",
     }
 }
 
@@ -3964,7 +3966,7 @@ fn content_has_complete_workspace_artifact(content: &str, workspace_type: &Works
     match workspace_type {
         WorkspaceType::Story => content.contains("## 功能需求") && content.contains("## 成功标准"),
         WorkspaceType::Design => design_artifact_has_required_headings(content),
-        WorkspaceType::WorkItem => false,
+        WorkspaceType::WorkItem | WorkspaceType::WorkItemPlan => false,
     }
 }
 

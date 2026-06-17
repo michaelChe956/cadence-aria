@@ -240,6 +240,7 @@ pub enum WorkspaceType {
     Story,
     Design,
     WorkItem,
+    WorkItemPlan,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
