@@ -35,7 +35,7 @@ use crate::product::lifecycle_store::{
     UpsertIssueSharedWorktreeInput,
 };
 use crate::product::models::{
-    DesignKind, DesignSpecRecord, GateStatus, IssuePhase as ProductIssuePhase,
+    DesignSpecRecord, GateStatus, IssuePhase as ProductIssuePhase,
     IssueRecord as ProductIssueRecord, IssueRuntimeBindingRecord,
     IssueStatus as ProductIssueStatus, LifecycleConfirmationStatus, LifecycleWorkItemRecord,
     NodeDetail, ProjectRecord, ProviderName, RepositoryRecord, StorySpecRecord,
@@ -474,13 +474,11 @@ pub async fn generate_design_specs(
         .map_err(product_store_api_error)?;
     let lifecycle = LifecycleStore::new(app_paths.clone());
     validate_confirmed_story_specs(&lifecycle, &project_id, &issue_id, &request.story_spec_ids)?;
-    let design_kind = parse_design_kind(&request.design_kind)?;
     let design = lifecycle
         .create_design_spec(CreateDesignSpecInput {
             project_id: project_id.clone(),
             issue_id: issue_id.clone(),
             story_spec_ids: request.story_spec_ids,
-            design_kind,
             title: request.title,
         })
         .map_err(product_store_api_error)?;
@@ -2211,7 +2209,6 @@ fn design_spec_dto(
         design_spec_id: record.id.clone(),
         issue_id: record.issue_id.clone(),
         story_spec_ids: record.story_spec_ids.clone(),
-        design_kind: design_kind_text(&record.design_kind).to_string(),
         title: record.title.clone(),
         current_version: record.current_version,
         current_markdown_preview: current_markdown_preview(lifecycle, record)?,
@@ -2694,13 +2691,6 @@ fn lifecycle_confirmation_status_text(status: &LifecycleConfirmationStatus) -> &
     }
 }
 
-fn design_kind_text(kind: &DesignKind) -> &'static str {
-    match kind {
-        DesignKind::Frontend => "frontend",
-        DesignKind::Backend => "backend",
-    }
-}
-
 fn work_item_plan_status_text(status: &WorkItemPlanStatus) -> &'static str {
     match status {
         WorkItemPlanStatus::NotStarted => "not_started",
@@ -2859,17 +2849,6 @@ fn provider_workspace_config(
         superpowers_enabled: superpowers_enabled.unwrap_or(true),
         openspec_enabled: openspec_enabled.unwrap_or(true),
     })
-}
-
-fn parse_design_kind(value: &str) -> ApiResult<DesignKind> {
-    match value {
-        "frontend" => Ok(DesignKind::Frontend),
-        "backend" => Ok(DesignKind::Backend),
-        _ => Err(ApiError::validation(
-            "invalid_design_kind",
-            "design_kind must be frontend or backend",
-        )),
-    }
 }
 
 fn validate_confirmed_story_specs(
