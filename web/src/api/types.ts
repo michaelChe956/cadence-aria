@@ -97,7 +97,6 @@ export type DesignSpec = {
   design_spec_id: string;
   issue_id: string;
   story_spec_ids: string[];
-  design_kind: "frontend" | "backend";
   title: string;
   current_version: number | null;
   current_markdown_preview: string | null;
@@ -825,7 +824,6 @@ export type GenerateStorySpecsResponse = {
 export type GenerateDesignSpecsRequest = ProviderWorkspaceConfigInput & {
   title: string;
   story_spec_ids: string[];
-  design_kind: "frontend" | "backend";
 };
 
 export type GenerateDesignSpecsResponse = {
