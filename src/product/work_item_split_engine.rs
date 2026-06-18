@@ -403,13 +403,6 @@ fn provider_name_to_type(name: &ProviderName) -> ProviderType {
     }
 }
 
-fn design_kind_text(kind: &crate::product::models::DesignKind) -> &'static str {
-    match kind {
-        crate::product::models::DesignKind::Frontend => "frontend",
-        crate::product::models::DesignKind::Backend => "backend",
-    }
-}
-
 fn collect_story_context(
     lifecycle: &LifecycleStore,
     request: &GenerateWorkItemsRequest,
@@ -457,10 +450,9 @@ fn collect_design_context(
             })?;
             let markdown = latest_markdown(lifecycle, project_id, issue_id, id)?;
             Ok(format!(
-                "Design Spec: {} ({}) kind={}\n{}",
+                "Design Spec: {} ({})\n{}",
                 spec.title,
                 spec.id,
-                design_kind_text(&spec.design_kind),
                 markdown
             ))
         })
