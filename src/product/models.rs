@@ -197,13 +197,6 @@ pub enum LifecycleConfirmationStatus {
     Blocked,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DesignKind {
-    Frontend,
-    Backend,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderName {
@@ -359,7 +352,6 @@ pub struct DesignSpecRecord {
     pub project_id: String,
     pub issue_id: String,
     pub story_spec_ids: Vec<String>,
-    pub design_kind: DesignKind,
     pub title: String,
     pub current_version: Option<u32>,
     pub confirmation_status: LifecycleConfirmationStatus,

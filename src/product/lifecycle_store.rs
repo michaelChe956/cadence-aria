@@ -9,7 +9,7 @@ use crate::product::app_paths::ProductAppPaths;
 use crate::product::id::next_sequential_id;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::models::{
-    DesignKind, DesignSpecRecord, IssueSharedWorktree, IssueSharedWorktreeStatus,
+    DesignSpecRecord, IssueSharedWorktree, IssueSharedWorktreeStatus,
     IssueWorkItemDependencyEdge, IssueWorkItemPlan, IssueWorkItemPlanOptions,
     IssueWorkItemPlanStatus, LifecycleConfirmationStatus, LifecycleWorkItemRecord, NodeDetail,
     ProjectProviderDefaultsRecord, ProviderConversationRef, ProviderName,
@@ -39,7 +39,6 @@ pub struct CreateDesignSpecInput {
     pub project_id: String,
     pub issue_id: String,
     pub story_spec_ids: Vec<String>,
-    pub design_kind: DesignKind,
     pub title: String,
 }
 
@@ -317,7 +316,6 @@ impl LifecycleStore {
             project_id: input.project_id,
             issue_id: input.issue_id,
             story_spec_ids: input.story_spec_ids,
-            design_kind: input.design_kind,
             title: input.title,
             current_version: None,
             confirmation_status: LifecycleConfirmationStatus::Draft,
@@ -2209,7 +2207,6 @@ mod tests {
                 project_id: PROJECT_ID.to_string(),
                 issue_id: ISSUE_ID.to_string(),
                 story_spec_ids: vec!["story_spec_0001".to_string()],
-                design_kind: DesignKind::Frontend,
                 title: "Frontend design".to_string(),
             })
             .unwrap();
