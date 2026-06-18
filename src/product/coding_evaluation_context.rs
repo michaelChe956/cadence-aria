@@ -557,7 +557,7 @@ mod tests {
         AppendSpecVersionInput, CreateDesignSpecInput, CreateStorySpecInput, CreateWorkItemInput,
         CreateWorkspaceSessionInput, LifecycleStore,
     };
-    use crate::product::models::{DesignKind, ProviderName, WorkspaceType};
+    use crate::product::models::{ProviderName, WorkspaceType};
     use crate::web::workspace_ws_types::{
         ArtifactPayload, ArtifactVersion, ProviderConfigSnapshot,
     };
@@ -610,7 +610,6 @@ mod tests {
                 project_id: PROJECT_ID.to_string(),
                 issue_id: ISSUE_ID.to_string(),
                 story_spec_ids: vec![story.id.clone()],
-                design_kind: DesignKind::Backend,
                 title: "Design".to_string(),
             })
             .unwrap();

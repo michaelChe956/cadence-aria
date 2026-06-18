@@ -1439,7 +1439,6 @@ mod tests {
                 project_id: "project_0001".to_string(),
                 issue_id: "issue_0001".to_string(),
                 story_spec_ids: vec![story.id.clone()],
-                design_kind: crate::product::models::DesignKind::Backend,
                 title: "Design".to_string(),
             })
             .unwrap();
