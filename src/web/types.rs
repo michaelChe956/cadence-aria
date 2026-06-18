@@ -414,7 +414,6 @@ pub struct DesignSpecDto {
     pub design_spec_id: String,
     pub issue_id: String,
     pub story_spec_ids: Vec<String>,
-    pub design_kind: String,
     pub title: String,
     pub current_version: Option<u32>,
     pub current_markdown_preview: Option<String>,
@@ -546,7 +545,6 @@ pub struct GenerateStorySpecsResponse {
 pub struct GenerateDesignSpecsRequest {
     pub title: String,
     pub story_spec_ids: Vec<String>,
-    pub design_kind: String,
     pub author_provider: Option<String>,
     pub reviewer_provider: Option<String>,
     pub review_rounds: Option<u32>,
