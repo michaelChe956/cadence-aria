@@ -234,11 +234,7 @@ fn workspace_entity_context(
             let design = find_design_spec(lifecycle, session, &session.entity_id)?;
             let stories = linked_story_context(lifecycle, session, &design.story_spec_ids)?;
             Ok(WorkspaceEntityContext {
-                title: format!(
-                    "{} ({})",
-                    design.title,
-                    design_kind_label(&design.design_kind)
-                ),
+                title: design.title,
                 repository_id: issue_repo_id(issue)?,
                 linked_context: stories,
             })
@@ -571,13 +567,6 @@ fn completion_or_failure_for(session: &WorkspaceSessionRecord) -> &'static str {
     }
 }
 
-fn design_kind_label(kind: &crate::product::models::DesignKind) -> &'static str {
-    match kind {
-        crate::product::models::DesignKind::Frontend => "frontend",
-        crate::product::models::DesignKind::Backend => "backend",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{ensure_workspace_context_message, output_schema_for};
@@ -588,7 +577,7 @@ mod tests {
         CreateStorySpecInput, CreateWorkItemInput, CreateWorkspaceSessionInput, LifecycleStore,
     };
     use crate::product::models::{
-        DesignKind, IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, LifecycleConfirmationStatus,
+        IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, LifecycleConfirmationStatus,
         ProviderName, WorkspaceMessageRecord, WorkspaceType,
     };
     use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
@@ -793,7 +782,6 @@ mod tests {
                 project_id: "project_0001".to_string(),
                 issue_id: "issue_0001".to_string(),
                 story_spec_ids: vec![story.id.clone()],
-                design_kind: DesignKind::Backend,
                 title: "爬楼梯问题 Design Spec".to_string(),
             })
             .expect("design");
@@ -860,7 +848,6 @@ mod tests {
                 project_id: "project_0001".to_string(),
                 issue_id: "issue_0001".to_string(),
                 story_spec_ids: vec![story.id.clone()],
-                design_kind: DesignKind::Backend,
                 title: "爬楼梯问题 Design Spec".to_string(),
             })
             .expect("design");
@@ -977,7 +964,6 @@ mod tests {
                 project_id: "project_0001".to_string(),
                 issue_id: "issue_0001".to_string(),
                 story_spec_ids: vec![story.id],
-                design_kind: DesignKind::Backend,
                 title: "爬楼梯问题 Design Spec".to_string(),
             })
             .expect("design");
@@ -1084,7 +1070,6 @@ mod tests {
                 project_id: "project_0001".to_string(),
                 issue_id: "issue_0001".to_string(),
                 story_spec_ids: vec![story.id.clone()],
-                design_kind: DesignKind::Backend,
                 title: "爬楼梯问题 Design Spec".to_string(),
             })
             .expect("design");
