@@ -155,7 +155,6 @@ async fn story_design_work_item_plan_recovery_consistency() {
         json!({
             "title": "第二个 Design",
             "story_spec_ids": ["story_spec_0001"],
-            "design_kind": "backend",
             "author_provider": "fake",
             "reviewer_provider": null,
             "review_rounds": 1,

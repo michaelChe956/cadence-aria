@@ -9,10 +9,10 @@ use cadence_aria::product::lifecycle_store::{
     UpsertIssueSharedWorktreeInput, WorkItemPlanCandidateSnapshot,
 };
 use cadence_aria::product::models::{
-    AgentRole, DesignKind, IssueSharedWorktreeStatus, IssueWorkItemDependencyEdge,
-    IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, LifecycleConfirmationStatus, NodeDetail,
-    ProviderConversationRef, ProviderConversationRole, ProviderName, ProviderSnapshot,
-    RepositoryProfile, RepositoryProfileConfidence, VerificationCommand, VerificationCommandSafety,
+    AgentRole, IssueSharedWorktreeStatus, IssueWorkItemDependencyEdge, IssueWorkItemPlanOptions,
+    IssueWorkItemPlanStatus, LifecycleConfirmationStatus, NodeDetail, ProviderConversationRef,
+    ProviderConversationRole, ProviderName, ProviderSnapshot, RepositoryProfile,
+    RepositoryProfileConfidence, VerificationCommand, VerificationCommandSafety,
     VerificationCommandSource, VerificationFallbackPolicy, VerificationManualCheck,
     VerificationPlan, VerificationScope, WorkItemContextBudget, WorkItemExecutionPlanStatus,
     WorkItemKind, WorkItemPlanStatus, WorkItemSplitFinding, WorkItemSplitFindingSeverity,
@@ -62,7 +62,6 @@ fn creates_story_design_work_item_and_versions_with_source_links() {
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
             story_spec_ids: vec![story.id.clone()],
-            design_kind: DesignKind::Frontend,
             title: "会话过期前端设计".to_string(),
         })
         .expect("design");

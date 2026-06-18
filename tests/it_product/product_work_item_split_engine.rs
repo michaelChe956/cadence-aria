@@ -8,7 +8,7 @@ use cadence_aria::product::lifecycle_store::{
     LifecycleStore,
 };
 use cadence_aria::product::models::{
-    DesignKind, IssueRecord, ProviderName, RepositoryRecord, WorkItemKind, WorkItemPlanStatus,
+    IssueRecord, ProviderName, RepositoryRecord, WorkItemKind, WorkItemPlanStatus,
 };
 use cadence_aria::product::project_store::{CreateProjectInput, ProjectStore};
 use cadence_aria::product::repository_store::{CreateRepositoryInput, RepositoryStore};
@@ -254,7 +254,6 @@ async fn split_engine_fixture() -> (TempDir, LifecycleStore, IssueRecord, Reposi
             project_id: story.project_id.clone(),
             issue_id: issue.id.clone(),
             story_spec_ids: vec!["story_spec_0001".to_string()],
-            design_kind: DesignKind::Backend,
             title: "会话过期后端设计".to_string(),
         })
         .expect("create design spec");

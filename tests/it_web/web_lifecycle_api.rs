@@ -298,7 +298,6 @@ async fn confirmed_story_and_design_can_generate_design_and_work_item_workspaces
         json!({
             "title":"会话过期后端设计",
             "story_spec_ids":["story_spec_0001"],
-            "design_kind":"backend",
             "author_provider":"codex",
             "reviewer_provider":"claude_code",
             "review_rounds":2,
@@ -316,7 +315,6 @@ async fn confirmed_story_and_design_can_generate_design_and_work_item_workspaces
         design_response["design_specs"][0]["story_spec_ids"],
         json!(["story_spec_0001"])
     );
-    assert_eq!(design_response["design_specs"][0]["design_kind"], "backend");
     assert_eq!(
         design_response["workspace_session"]["workspace_type"],
         "design"
@@ -403,8 +401,7 @@ async fn delete_lifecycle_entities_removes_cards_and_workspace_sessions() {
         "/api/projects/project_0001/issues/issue_0001/design-specs:generate",
         json!({
             "title":"会话过期前端设计",
-            "story_spec_ids":["story_spec_0001"],
-            "design_kind":"frontend"
+            "story_spec_ids":["story_spec_0001"]
         }),
     )
     .await;
@@ -819,8 +816,7 @@ async fn lifecycle_returns_artifact_versions() {
         "/api/projects/project_0001/issues/issue_0001/design-specs:generate",
         json!({
             "title":"爬楼梯问题 Design Spec",
-            "story_spec_ids":["story_spec_0001"],
-            "design_kind":"backend"
+            "story_spec_ids":["story_spec_0001"]
         }),
     )
     .await;

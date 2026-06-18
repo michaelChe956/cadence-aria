@@ -1117,7 +1117,6 @@ pub(crate) async fn bootstrap_story_and_design(app: axum::Router, repo_path: &st
         json!({
             "title":"爬楼梯 Design",
             "story_spec_ids":["story_spec_0001"],
-            "design_kind":"backend",
             "author_provider":"fake",
             "reviewer_provider":"fake"
         }),

@@ -331,7 +331,6 @@ async fn bootstrap_project_repo_issue_and_specs(
         json!({
             "title":"会话过期后端设计",
             "story_spec_ids":["story_spec_0001"],
-            "design_kind":"backend",
             "author_provider":"codex",
             "reviewer_provider":"claude_code",
             "review_rounds":2,
