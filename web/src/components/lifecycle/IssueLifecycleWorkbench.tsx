@@ -280,7 +280,6 @@ export function IssueLifecycleWorkbench({
         {
           title: defaultLaunchTitle({ target: "design", card }),
           story_spec_ids: [card.id],
-          design_kind: "frontend",
         },
       );
       const nextId = response.design_specs[0]?.design_spec_id;
@@ -484,7 +483,6 @@ export function IssueLifecycleWorkbench({
         {
           title: defaultLaunchTitle({ target, card }),
           story_spec_ids: [card.id],
-          design_kind: "frontend",
         },
       );
       setSelectedCardKey(
