@@ -451,9 +451,7 @@ fn collect_design_context(
             let markdown = latest_markdown(lifecycle, project_id, issue_id, id)?;
             Ok(format!(
                 "Design Spec: {} ({})\n{}",
-                spec.title,
-                spec.id,
-                markdown
+                spec.title, spec.id, markdown
             ))
         })
         .collect::<ApiResult<Vec<_>>>()

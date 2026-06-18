@@ -9,9 +9,9 @@ use crate::product::app_paths::ProductAppPaths;
 use crate::product::id::next_sequential_id;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::models::{
-    DesignSpecRecord, IssueSharedWorktree, IssueSharedWorktreeStatus,
-    IssueWorkItemDependencyEdge, IssueWorkItemPlan, IssueWorkItemPlanOptions,
-    IssueWorkItemPlanStatus, LifecycleConfirmationStatus, LifecycleWorkItemRecord, NodeDetail,
+    DesignSpecRecord, IssueSharedWorktree, IssueSharedWorktreeStatus, IssueWorkItemDependencyEdge,
+    IssueWorkItemPlan, IssueWorkItemPlanOptions, IssueWorkItemPlanStatus,
+    LifecycleConfirmationStatus, LifecycleWorkItemRecord, NodeDetail,
     ProjectProviderDefaultsRecord, ProviderConversationRef, ProviderName,
     ProviderReviewRoundRecord, RepositoryProfile, RepositoryProfileConfidence, SpecVersionRecord,
     StorySpecRecord, VerificationCommand, VerificationFallbackPolicy, VerificationManualCheck,
