@@ -145,7 +145,6 @@ describe("api client", () => {
     await generateDesignSpecs("project/with space", "issue/with space", {
       title: "Design",
       story_spec_ids: ["story_0001"],
-      design_kind: "frontend",
     });
     await prepareWorkItemPlan("project/with space", "issue/with space", {
       title: "Work",

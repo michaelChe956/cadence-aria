@@ -700,7 +700,6 @@ describe("IssueLifecycleWorkbench", () => {
         body: JSON.stringify({
           title: "会话过期提示 Design Spec",
           story_spec_ids: ["story_spec_0001"],
-          design_kind: "frontend",
         }),
       }),
     );
@@ -1258,7 +1257,6 @@ function lifecycleFetch(options?: {
       const payload = JSON.parse(String(init?.body ?? "{}")) as {
         title: string;
         story_spec_ids: string[];
-        design_kind: "frontend" | "backend";
         author_provider: "claude_code" | "codex" | "fake";
         reviewer_provider: "claude_code" | "codex" | "fake";
         review_rounds: number;
@@ -1275,7 +1273,6 @@ function lifecycleFetch(options?: {
         design_spec_id: designId,
         issue_id: issueId,
         story_spec_ids: payload.story_spec_ids,
-        design_kind: payload.design_kind,
         title: payload.title,
         current_version: null,
         current_markdown_preview: null,
@@ -1697,7 +1694,6 @@ function initialLifecycleData(
         design_spec_id: "design_spec_0001",
         issue_id: issueId,
         story_spec_ids: [storyId],
-        design_kind: "frontend",
         title: "前端提示设计",
         current_version: 1,
         current_markdown_preview: "## 关键决策\n\n[DEC-001] 使用全局提示条。",

@@ -193,7 +193,6 @@ function lifecycleCard(
         design_spec_id: "design_spec_0001",
         issue_id: "issue_0001",
         story_spec_ids: ["story_spec_0001"],
-        design_kind: "frontend",
         title,
         current_version: null,
         current_markdown_preview: "摘要",
