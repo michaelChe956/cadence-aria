@@ -197,11 +197,22 @@ export function useWorkspaceWs(sessionId: string | null) {
         store.rebuildChatEntries();
         break;
       case "stream_chunk":
-        if (!ACTIVE_PROVIDER_STAGES.has(store.stage) && !store.activeRunId) {
-          break;
-        }
         {
           const nodeId = msg.node_id as string | null | undefined;
+          const nodeStage = nodeId
+            ? store.timelineNodes.find((node) => node.node_id === nodeId)?.stage
+            : null;
+          const isActiveProviderNode =
+            Boolean(store.activeRunId) &&
+            typeof nodeId === "string" &&
+            nodeId === store.activeNodeId &&
+            typeof nodeStage === "string" &&
+            ACTIVE_PROVIDER_STAGES.has(nodeStage);
+          const acceptsActiveProviderChunk =
+            ACTIVE_PROVIDER_STAGES.has(store.stage) || isActiveProviderNode;
+          if (!acceptsActiveProviderChunk) {
+            break;
+          }
           if (nodeId) {
             const role = entryRoleForNode(
               store,

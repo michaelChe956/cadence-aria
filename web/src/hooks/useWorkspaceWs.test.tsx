@@ -921,6 +921,7 @@ describe("useWorkspaceWs", () => {
   });
 
   it("ignores late provider stream chunks after an abort returns to prepare_context", () => {
+    vi.useFakeTimers();
     const harness = renderWorkspaceHook();
 
     act(() => {
@@ -949,12 +950,16 @@ describe("useWorkspaceWs", () => {
         node_id: "timeline_node_aborted",
       });
     });
+    act(() => {
+      vi.advanceTimersByTime(80);
+    });
 
     expect(
       useWorkspaceStore
         .getState()
         .chatEntries.some((entry) => entry.type === "provider_stream"),
     ).toBe(false);
+    expect(useWorkspaceStore.getState().streamBuffers).toEqual({});
     expect(useWorkspaceStore.getState().streamingContent).toBe("");
   });
 

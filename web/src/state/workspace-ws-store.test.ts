@@ -1043,10 +1043,11 @@ describe("workspace ws store", () => {
   });
 
   it.each([
-    ["story", "Story Spec"],
-    ["design", "Design Spec"],
-    ["work_item", "Work Item"],
-  ])("rebuilds revision nodes as author chat entries for %s workspaces", (workspaceType, label) => {
+    ["story", "已按 reviewer 意见返修 Story Spec"],
+    ["design", "已按 reviewer 意见返修 Design Spec"],
+    ["work_item", "已按 reviewer 意见返修 Work Item"],
+    ["work_item_plan", "正在返修 Work Item Plan"],
+  ])("rebuilds revision nodes as author chat entries for %s workspaces", (workspaceType, streamContent) => {
     const store = useWorkspaceStore.getState();
     store.reset();
     store.setSessionState({
@@ -1086,7 +1087,7 @@ describe("workspace ws store", () => {
           node_type: "revision",
           agent_role: null,
           provider: { name: "claude_code", model: "claude-opus-4" },
-          streaming_content: `已按 reviewer 意见返修 ${label}`,
+          streaming_content: streamContent,
           is_revision: true,
         }),
       },
@@ -1098,7 +1099,7 @@ describe("workspace ws store", () => {
       expect.objectContaining({
         type: "provider_stream",
         role: "author",
-        content: `已按 reviewer 意见返修 ${label}`,
+        content: streamContent,
         metadata: expect.objectContaining({ provider: "claude_code" }),
       }),
     ]);
