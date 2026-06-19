@@ -956,6 +956,7 @@ function normalizeLifecycleResponse(
     !Array.isArray(lifecycle.story_specs) ||
     !Array.isArray(lifecycle.design_specs) ||
     !Array.isArray(lifecycle.work_item_plans) ||
+    !lifecycle.work_item_plans.every(isIssueWorkItemPlanDetail) ||
     !Array.isArray(lifecycle.work_items) ||
     !Array.isArray(lifecycle.workspace_sessions) ||
     !Array.isArray(lifecycle.coding_attempts)
@@ -968,6 +969,71 @@ function normalizeLifecycleResponse(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function isIssueWorkItemPlanDetail(value: unknown) {
+  if (!isRecord(value)) {
+    return false;
+  }
+
+  return (
+    typeof value.id === "string" &&
+    typeof value.issue_id === "string" &&
+    typeof value.project_id === "string" &&
+    typeof value.status === "string" &&
+    isStringArray(value.source_story_spec_ids) &&
+    isStringArray(value.source_design_spec_ids) &&
+    isStringArray(value.work_item_ids) &&
+    isStringArray(value.verification_plan_ids) &&
+    isDependencyGraph(value.dependency_graph) &&
+    (typeof value.repository_profile_ref === "string" ||
+      value.repository_profile_ref === null) &&
+    isWorkItemSplitOptions(value.options) &&
+    isWorkItemSplitFindings(value.validator_findings) &&
+    typeof value.created_at === "string" &&
+    typeof value.updated_at === "string"
+  );
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function isWorkItemSplitOptions(value: unknown) {
+  return (
+    isRecord(value) &&
+    typeof value.include_integration_tests === "boolean" &&
+    typeof value.include_e2e_tests === "boolean" &&
+    typeof value.force_frontend_backend_split === "boolean" &&
+    typeof value.require_execution_plan_confirm === "boolean"
+  );
+}
+
+function isDependencyGraph(value: unknown) {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (edge) =>
+        isRecord(edge) &&
+        typeof edge.from_work_item_id === "string" &&
+        typeof edge.to_work_item_id === "string",
+    )
+  );
+}
+
+function isWorkItemSplitFindings(value: unknown) {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (finding) =>
+        isRecord(finding) &&
+        typeof finding.finding_id === "string" &&
+        typeof finding.level === "string" &&
+        (finding.code === undefined || typeof finding.code === "string") &&
+        typeof finding.message === "string" &&
+        isStringArray(finding.affected_scopes),
+    )
+  );
 }
 
 function lifecycleCardKey(card: LifecycleCardData) {

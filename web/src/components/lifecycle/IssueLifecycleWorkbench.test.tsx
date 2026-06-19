@@ -28,7 +28,7 @@ vi.mock("../shared/MonacoViewer", () => ({
 type MockLifecycleData = {
   story_specs: Array<Record<string, unknown>>;
   design_specs: Array<Record<string, unknown>>;
-  work_item_plans: IssueWorkItemPlanDetailDto[];
+  work_item_plans: unknown[];
   work_items: Array<Record<string, unknown>>;
   workspace_sessions: WorkspaceSession[];
   coding_attempts: CodingAttempt[];
@@ -476,6 +476,31 @@ describe("IssueLifecycleWorkbench", () => {
     );
   });
 
+  it("shows an alert for invalid work item plan detail fields", async () => {
+    const { options: _options, ...missingOptions } = issueWorkItemPlanRecord();
+    vi.stubGlobal(
+      "fetch",
+      lifecycleFetch({
+        workItemPlans: [
+          missingOptions,
+          {
+            ...issueWorkItemPlanRecord({ id: "issue_plan_wrong_shape" }),
+            work_item_ids: "work_item_0001",
+          },
+        ],
+      }),
+    );
+
+    render(<IssueLifecycleWorkbench />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "invalid lifecycle response",
+    );
+    expect(
+      screen.queryByRole("button", { name: "Work Item Group" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("keeps the latest refresh result when an older request finishes later", async () => {
     const firstProjects = deferred<Response>();
     const secondProjects = deferred<Response>();
@@ -653,7 +678,7 @@ describe("IssueLifecycleWorkbench", () => {
 
     await waitFor(() =>
       expect(onOpenWorkspace).toHaveBeenCalledWith(
-        "workspace_session_work_item_plan_0001",
+        "workspace_session_plan_group_0001",
       ),
     );
     expect(fetchMock).toHaveBeenCalledWith(
@@ -774,7 +799,7 @@ describe("IssueLifecycleWorkbench", () => {
 
     await waitFor(() =>
       expect(onOpenWorkspace).toHaveBeenCalledWith(
-        "workspace_session_work_item_plan_0001",
+        "workspace_session_plan_group_0001",
       ),
     );
     expect(fetchMock).not.toHaveBeenCalledWith(
@@ -790,8 +815,8 @@ describe("IssueLifecycleWorkbench", () => {
         confirmedWorkItem: true,
         workItemPlans: [
           issueWorkItemPlanRecord({
-            id: "issue_work_item_plan_0001",
-            status: "prepared",
+            id: "issue_plan_0001",
+            status: "draft",
             work_item_ids: ["work_item_0001"],
           }),
         ],
@@ -826,7 +851,7 @@ describe("IssueLifecycleWorkbench", () => {
 
     render(
       <IssueLifecycleWorkbench
-        focusEntityId="issue_work_item_plan_0001"
+        focusEntityId="issue_plan_0001"
         onDrawerFocusChange={onDrawerFocusChange}
         onOpenWorkspace={onOpenWorkspace}
       />,
@@ -839,7 +864,7 @@ describe("IssueLifecycleWorkbench", () => {
 
     await waitFor(() =>
       expect(onOpenWorkspace).toHaveBeenCalledWith(
-        "workspace_session_work_item_plan_0001",
+        "workspace_session_plan_group_0001",
       ),
     );
     expect(onDrawerFocusChange).not.toHaveBeenCalledWith(null);
@@ -852,8 +877,8 @@ describe("IssueLifecycleWorkbench", () => {
         splitWorkItems: true,
         workItemPlans: [
           issueWorkItemPlanRecord({
-            id: "issue_work_item_plan_0001",
-            status: "prepared",
+            id: "issue_plan_0001",
+            status: "draft",
             work_item_ids: ["work_item_backend", "work_item_frontend"],
             validator_findings: [
               {
@@ -902,7 +927,7 @@ describe("IssueLifecycleWorkbench", () => {
       "design_spec_0001",
     );
     expect(screen.getByTestId("lifecycle-card-drawer")).toHaveTextContent(
-      "prepared",
+      "draft",
     );
     expect(screen.getByTestId("lifecycle-card-drawer")).toHaveTextContent(
       "需要补充贯通测试风险说明",
@@ -954,7 +979,7 @@ function lifecycleFetch(options?: {
   repositoriesByProject?: Record<string, ReturnType<typeof repositoryRecord>[]>;
   projectResponses?: Array<Promise<Response>>;
   splitWorkItems?: boolean;
-  workItemPlans?: IssueWorkItemPlanDetailDto[];
+  workItemPlans?: unknown[];
   skippedIntegrationRisk?: boolean;
 }) {
   const projects = [
@@ -1358,7 +1383,7 @@ function lifecycleFetch(options?: {
       };
       const lifecycle = lifecycleData(issueId);
       const workItemPlan = issueWorkItemPlanRecord({
-        id: "issue_work_item_plan_0001",
+        id: "issue_plan_0001",
         project_id: projectId,
         issue_id: issueId,
         source_story_spec_ids: payload.story_spec_ids,
@@ -1372,12 +1397,12 @@ function lifecycleFetch(options?: {
             payload.require_execution_plan_confirm ?? false,
         },
         work_item_ids: ["work_item_0001"],
-        status: "prepared",
+        status: "draft",
       });
       const session = workspaceSessionRecord(
         "work_item_plan",
         workItemPlan.id,
-        "workspace_session_work_item_plan_0001",
+        "workspace_session_plan_group_0001",
         {
           author_provider: payload.author_provider,
           reviewer_provider: payload.reviewer_provider,
@@ -1641,7 +1666,7 @@ function initialLifecycleData(
   empty: boolean | undefined,
   confirmedWorkItem: boolean | undefined,
   splitWorkItems: boolean | undefined,
-  workItemPlans: IssueWorkItemPlanDetailDto[] | undefined,
+  workItemPlans: unknown[] | undefined,
   skippedIntegrationRisk: boolean | undefined,
 ): MockLifecycleData {
   if (empty) {
@@ -1758,8 +1783,8 @@ function initialLifecycleData(
       ),
       workspaceSessionRecord(
         "work_item_plan",
-        "issue_work_item_plan_0001",
-        "workspace_session_work_item_plan_0001",
+        "issue_plan_0001",
+        "workspace_session_plan_group_0001",
       ),
     ],
     coding_attempts: [],
@@ -1789,7 +1814,7 @@ function issueWorkItemPlanRecord(
   overrides: Partial<IssueWorkItemPlanDetailDto> = {},
 ): IssueWorkItemPlanDetailDto {
   return {
-    id: "issue_work_item_plan_0001",
+    id: "issue_plan_0001",
     issue_id: "issue_0001",
     project_id: "project_0001",
     status: "draft",

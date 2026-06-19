@@ -151,7 +151,7 @@ describe("workspace websocket protocol types", () => {
 
   it("accepts lifecycle responses with issue work item plan detail fields", () => {
     const plan = {
-      id: "issue_work_item_plan_0001",
+      id: "issue_plan_0001",
       project_id: "project_0001",
       issue_id: "issue_0001",
       source_story_spec_ids: ["story_spec_0001"],
@@ -461,7 +461,7 @@ describe("workspace websocket protocol types", () => {
     };
     const response: PrepareWorkItemPlanResponse = {
       work_item_plan: {
-        id: "issue_work_item_plan_0001",
+        id: "issue_plan_0001",
         project_id: "project_0001",
         issue_id: "issue_0001",
         source_story_spec_ids: request.story_spec_ids ?? [],
@@ -472,7 +472,7 @@ describe("workspace websocket protocol types", () => {
           force_frontend_backend_split: false,
           require_execution_plan_confirm: true,
         },
-        status: "prepared",
+        status: "draft",
         work_item_ids: ["work_item_0001"],
         repository_profile_ref: null,
         verification_plan_ids: [],
@@ -482,9 +482,9 @@ describe("workspace websocket protocol types", () => {
         updated_at: "2026-06-17T00:00:00Z",
       },
       workspace_session: {
-        workspace_session_id: "workspace_session_work_item_plan_0001",
+        workspace_session_id: "workspace_session_plan_group_0001",
         issue_id: "issue_0001",
-        entity_id: "work_item_plan_0001",
+        entity_id: "issue_plan_0001",
         workspace_type: "work_item_plan",
         status: "open",
         author_provider: "claude_code",
@@ -496,7 +496,8 @@ describe("workspace websocket protocol types", () => {
       },
     };
 
-    expect(response.work_item_plan.id).toBe("issue_work_item_plan_0001");
+    expect(response.work_item_plan.id).toBe("issue_plan_0001");
+    expect(response.workspace_session.entity_id).toBe(response.work_item_plan.id);
     expect(response.workspace_session.workspace_type).toBe("work_item_plan");
   });
 
