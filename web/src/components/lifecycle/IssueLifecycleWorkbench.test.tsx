@@ -681,6 +681,9 @@ describe("IssueLifecycleWorkbench", () => {
         "workspace_session_plan_group_0001",
       ),
     );
+    expect(
+      screen.getByRole("region", { name: "Work Item 内容" }),
+    ).toHaveTextContent("0 个 Work Item");
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/projects/project_0001/issues/issue_0001/work-item-plans:prepare",
       expect.objectContaining({
@@ -701,6 +704,23 @@ describe("IssueLifecycleWorkbench", () => {
         /^\/api\/workspace-sessions\/.+\/(?:run-next|message|confirm)$/,
       ),
       expect.anything(),
+    );
+
+    await user.click(screen.getByRole("button", { name: "登录会话过期" }));
+    const workItemRegion = screen.getByRole("region", {
+      name: "Work Item 内容",
+    });
+    await user.click(
+      within(workItemRegion).getByRole("button", { name: "Work Item Group" }),
+    );
+    expect(await screen.findByTestId("work-item-group-children")).toHaveTextContent(
+      "暂无子 Work Item",
+    );
+
+    onOpenWorkspace.mockClear();
+    await user.click(screen.getByTestId("drawer-open-workspace"));
+    expect(onOpenWorkspace).toHaveBeenCalledWith(
+      "workspace_session_plan_group_0001",
     );
   });
 
@@ -792,8 +812,16 @@ describe("IssueLifecycleWorkbench", () => {
       <IssueLifecycleWorkbench onOpenWorkspace={onOpenWorkspace} />,
     );
 
+    const workItemRegion = await screen.findByRole("region", {
+      name: "Work Item 内容",
+    });
+    expect(workItemRegion).toHaveTextContent("confirmed");
+
     await user.click(
       await screen.findByRole("button", { name: "Work Item Group" }),
+    );
+    expect(screen.getByTestId("lifecycle-card-drawer")).toHaveTextContent(
+      "confirmed",
     );
     await user.click(screen.getByTestId("drawer-open-workspace"));
 
@@ -816,7 +844,7 @@ describe("IssueLifecycleWorkbench", () => {
         workItemPlans: [
           issueWorkItemPlanRecord({
             id: "issue_plan_0001",
-            status: "draft",
+            status: "confirmed",
             work_item_ids: ["work_item_0001"],
           }),
         ],
@@ -878,7 +906,7 @@ describe("IssueLifecycleWorkbench", () => {
         workItemPlans: [
           issueWorkItemPlanRecord({
             id: "issue_plan_0001",
-            status: "draft",
+            status: "confirmed",
             work_item_ids: ["work_item_backend", "work_item_frontend"],
             validator_findings: [
               {
@@ -927,7 +955,7 @@ describe("IssueLifecycleWorkbench", () => {
       "design_spec_0001",
     );
     expect(screen.getByTestId("lifecycle-card-drawer")).toHaveTextContent(
-      "draft",
+      "confirmed",
     );
     expect(screen.getByTestId("lifecycle-card-drawer")).toHaveTextContent(
       "需要补充贯通测试风险说明",
@@ -1396,7 +1424,7 @@ function lifecycleFetch(options?: {
           require_execution_plan_confirm:
             payload.require_execution_plan_confirm ?? false,
         },
-        work_item_ids: ["work_item_0001"],
+        work_item_ids: [],
         status: "draft",
       });
       const session = workspaceSessionRecord(
@@ -1738,6 +1766,7 @@ function initialLifecycleData(
           issueWorkItemPlanRecord({
             issue_id: issueId,
             work_item_ids: workItems.map((item) => item.work_item_id),
+            status: confirmedWorkItem ? "confirmed" : "draft",
           }),
         ]
       : [];

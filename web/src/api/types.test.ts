@@ -473,7 +473,7 @@ describe("workspace websocket protocol types", () => {
           require_execution_plan_confirm: true,
         },
         status: "draft",
-        work_item_ids: ["work_item_0001"],
+        work_item_ids: [],
         repository_profile_ref: null,
         verification_plan_ids: [],
         dependency_graph: [],
@@ -497,6 +497,7 @@ describe("workspace websocket protocol types", () => {
     };
 
     expect(response.work_item_plan.id).toBe("issue_plan_0001");
+    expect(response.work_item_plan.work_item_ids).toEqual([]);
     expect(response.workspace_session.entity_id).toBe(response.work_item_plan.id);
     expect(response.workspace_session.workspace_type).toBe("work_item_plan");
   });
