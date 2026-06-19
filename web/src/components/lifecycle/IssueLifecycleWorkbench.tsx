@@ -47,8 +47,22 @@ import {
 import { LifecycleCard } from "./LifecycleCard";
 import { LifecycleCardDrawer, type DrawerEntity } from "./LifecycleCardDrawer";
 import { ProjectSidebar } from "./ProjectSidebar";
+import {
+  WorkItemPlanOptionsDialog,
+  type WorkItemPlanOptionsFormValue,
+} from "./WorkItemPlanOptionsDialog";
 type ProviderWorkspaceLaunchTarget = "story" | "design" | "work_item";
+type PendingWorkItemPlanLaunch = {
+  card: LifecycleCardData;
+};
+
 const DELETE_EXIT_ANIMATION_MS = 220;
+const DEFAULT_WORK_ITEM_PLAN_OPTIONS = {
+  include_integration_tests: true,
+  include_e2e_tests: false,
+  force_frontend_backend_split: true,
+  require_execution_plan_confirm: false,
+} satisfies WorkItemPlanOptionsFormValue;
 
 export function IssueLifecycleWorkbench({
   focusEntityId,
@@ -73,6 +87,8 @@ export function IssueLifecycleWorkbench({
   const [dialogOpen, setDialogOpen] = useState(false);
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [repositoryDialogOpen, setRepositoryDialogOpen] = useState(false);
+  const [pendingWorkItemPlanLaunch, setPendingWorkItemPlanLaunch] =
+    useState<PendingWorkItemPlanLaunch | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const refreshRequestId = useRef(0);
@@ -292,21 +308,8 @@ export function IssueLifecycleWorkbench({
     }
 
     if (card.kind === "design_spec") {
-      const response = await prepareWorkItemPlan(
-        selectedProjectId,
-        card.issueId,
-        {
-          title: defaultLaunchTitle({ target: "work_item", card }),
-          story_spec_ids: card.raw.story_spec_ids,
-          design_spec_ids: [card.id],
-          include_integration_tests: true,
-          include_e2e_tests: false,
-          force_frontend_backend_split: true,
-          require_execution_plan_confirm: false,
-        },
-      );
-      await refresh(selectedProjectId);
-      onOpenWorkspace(response.workspace_session.workspace_session_id);
+      setError(null);
+      setPendingWorkItemPlanLaunch({ card });
       return;
     }
 
@@ -496,25 +499,38 @@ export function IssueLifecycleWorkbench({
     }
 
     if (target === "work_item" && card.kind === "design_spec") {
-      const response = await prepareWorkItemPlan(
-        selectedProjectId,
-        card.issueId,
-        {
-          title: defaultLaunchTitle({ target, card }),
-          story_spec_ids: card.raw.story_spec_ids,
-          design_spec_ids: [card.id],
-          include_integration_tests: true,
-          include_e2e_tests: false,
-          force_frontend_backend_split: true,
-          require_execution_plan_confirm: false,
-        },
-      );
-      await refresh(selectedProjectId);
-      onOpenWorkspace(response.workspace_session.workspace_session_id);
+      setError(null);
+      setPendingWorkItemPlanLaunch({ card });
       return;
     }
 
     setError("当前卡片不能启动该 Workspace");
+  }
+
+  async function handleConfirmWorkItemPlanOptions(
+    options: WorkItemPlanOptionsFormValue,
+  ) {
+    if (!selectedProjectId || !pendingWorkItemPlanLaunch) {
+      setError("缺少 Project 或 Design Spec");
+      return;
+    }
+
+    const { card } = pendingWorkItemPlanLaunch;
+    if (card.kind !== "design_spec") {
+      setError("当前实体不能生成 Work Item Plan");
+      return;
+    }
+
+    setError(null);
+    const response = await prepareWorkItemPlan(selectedProjectId, card.issueId, {
+      title: defaultLaunchTitle({ target: "work_item", card }),
+      story_spec_ids: card.raw.story_spec_ids,
+      design_spec_ids: [card.id],
+      ...options,
+    });
+    await refresh(selectedProjectId);
+    setPendingWorkItemPlanLaunch(null);
+    onOpenWorkspace(response.workspace_session.workspace_session_id);
   }
 
   return (
@@ -663,6 +679,13 @@ export function IssueLifecycleWorkbench({
           repositories={repositories}
           onCreate={handleCreateIssue}
           onClose={() => setDialogOpen(false)}
+        />
+      ) : null}
+      {pendingWorkItemPlanLaunch ? (
+        <WorkItemPlanOptionsDialog
+          defaultOptions={DEFAULT_WORK_ITEM_PLAN_OPTIONS}
+          onConfirm={handleConfirmWorkItemPlanOptions}
+          onClose={() => setPendingWorkItemPlanLaunch(null)}
         />
       ) : null}
     </>

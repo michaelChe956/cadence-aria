@@ -675,6 +675,12 @@ describe("IssueLifecycleWorkbench", () => {
       await screen.findByRole("button", { name: "前端提示设计" }),
     );
     await user.click(screen.getByRole("button", { name: "生成 Work Item" }));
+    const dialog = await screen.findByRole("dialog", {
+      name: "Work Item Plan 配置",
+    });
+    await user.click(
+      within(dialog).getByRole("button", { name: "创建并打开 Workspace" }),
+    );
 
     await waitFor(() =>
       expect(onOpenWorkspace).toHaveBeenCalledWith(
@@ -764,7 +770,27 @@ describe("IssueLifecycleWorkbench", () => {
     );
   });
 
-  it("sends default work item split options when preparing plan from a confirmed design", async () => {
+  it("opens work item plan options before preparing plan from a confirmed design", async () => {
+    const user = userEvent.setup();
+    const fetchMock = lifecycleFetch();
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IssueLifecycleWorkbench />);
+
+    await user.click(await screen.findByText("前端提示设计"));
+    await user.click(screen.getByRole("button", { name: "生成 Work Item" }));
+
+    expect(
+      await screen.findByRole("dialog", { name: "Work Item Plan 配置" }),
+    ).toBeInTheDocument();
+    expect(
+      fetchMock.mock.calls.some(([url]) =>
+        String(url).includes("/work-item-plans:prepare"),
+      ),
+    ).toBe(false);
+  });
+
+  it("sends default work item split options after confirming the dialog", async () => {
     const user = userEvent.setup();
     const fetchMock = lifecycleFetch();
     vi.stubGlobal("fetch", fetchMock);
@@ -774,15 +800,20 @@ describe("IssueLifecycleWorkbench", () => {
 
     await user.click(await screen.findByText("前端提示设计"));
     await user.click(screen.getByRole("button", { name: "生成 Work Item" }));
+    const dialog = await screen.findByRole("dialog", {
+      name: "Work Item Plan 配置",
+    });
+
+    await user.click(
+      within(dialog).getByRole("button", { name: "创建并打开 Workspace" }),
+    );
 
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
         "/api/projects/project_0001/issues/issue_0001/work-item-plans:prepare",
         expect.objectContaining({
           method: "POST",
-          body: expect.stringContaining(
-            '"force_frontend_backend_split":true',
-          ),
+          body: expect.stringContaining('"force_frontend_backend_split":true'),
         }),
       ),
     );
@@ -800,6 +831,74 @@ describe("IssueLifecycleWorkbench", () => {
       force_frontend_backend_split: true,
       require_execution_plan_confirm: false,
     });
+  });
+
+  it("sends selected work item split options after confirming the dialog", async () => {
+    const user = userEvent.setup();
+    const fetchMock = lifecycleFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    const onOpenWorkspace = vi.fn();
+
+    render(<IssueLifecycleWorkbench onOpenWorkspace={onOpenWorkspace} />);
+
+    await user.click(await screen.findByText("前端提示设计"));
+    await user.click(screen.getByRole("button", { name: "生成 Work Item" }));
+    const dialog = await screen.findByRole("dialog", {
+      name: "Work Item Plan 配置",
+    });
+
+    await user.click(within(dialog).getByLabelText("包含 E2E 测试 Work Item"));
+    await user.click(
+      within(dialog).getByLabelText("子 Work Item 执行前需要确认 Plan"),
+    );
+    await user.click(
+      within(dialog).getByRole("button", { name: "创建并打开 Workspace" }),
+    );
+
+    await waitFor(() =>
+      expect(onOpenWorkspace).toHaveBeenCalledWith(
+        "workspace_session_plan_group_0001",
+      ),
+    );
+    const prepareCall = fetchMock.mock.calls.find(([url]) =>
+      String(url).includes("/work-item-plans:prepare"),
+    );
+    expect(prepareCall).toBeDefined();
+    const body = JSON.parse(prepareCall?.[1]?.body as string) as Record<
+      string,
+      unknown
+    >;
+    expect(body).toMatchObject({
+      include_integration_tests: true,
+      include_e2e_tests: true,
+      force_frontend_backend_split: true,
+      require_execution_plan_confirm: true,
+    });
+  });
+
+  it("does not prepare a work item plan when options dialog is cancelled", async () => {
+    const user = userEvent.setup();
+    const fetchMock = lifecycleFetch();
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IssueLifecycleWorkbench />);
+
+    await user.click(await screen.findByText("前端提示设计"));
+    await user.click(screen.getByRole("button", { name: "生成 Work Item" }));
+    const dialog = await screen.findByRole("dialog", {
+      name: "Work Item Plan 配置",
+    });
+
+    await user.click(within(dialog).getByRole("button", { name: "取消" }));
+
+    expect(
+      screen.queryByRole("dialog", { name: "Work Item Plan 配置" }),
+    ).not.toBeInTheDocument();
+    expect(
+      fetchMock.mock.calls.some(([url]) =>
+        String(url).includes("/work-item-plans:prepare"),
+      ),
+    ).toBe(false);
   });
 
   it("opens the work item plan workspace from the group drawer", async () => {
