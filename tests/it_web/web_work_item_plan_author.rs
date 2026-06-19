@@ -138,7 +138,15 @@ async fn work_item_plan_start_generation_returns_candidate_artifact() {
     .await
     .expect("send start_generation");
 
-    let messages = recv_ws_messages_with_timeout(&mut ws, Duration::from_secs(10), 8).await;
+    let messages = recv_ws_until(&mut ws, Duration::from_secs(10), |messages| {
+        messages
+            .iter()
+            .any(|m| m["type"] == "artifact_update" && m.get("candidate").is_some())
+            && messages
+                .iter()
+                .any(|m| m["type"] == "stage_change" && m["stage"] == "author_confirm")
+    })
+    .await;
 
     let artifact_update = messages
         .iter()
