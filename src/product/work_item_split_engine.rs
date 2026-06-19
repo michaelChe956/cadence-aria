@@ -1503,6 +1503,24 @@ mod tests {
             prompt.contains("\"kind\""),
             "revision prompt must inline the schema's `kind` property: {prompt}"
         );
+        assert!(
+            prompt.contains("\"required\""),
+            "revision prompt must inline the schema's `required` clause: {prompt}"
+        );
+        for kind_value in [
+            "backend",
+            "frontend",
+            "integration",
+            "e2e",
+            "docs",
+            "infra",
+            "other",
+        ] {
+            assert!(
+                prompt.contains(kind_value),
+                "revision prompt must list kind value `{kind_value}`: {prompt}"
+            );
+        }
     }
 
     #[test]

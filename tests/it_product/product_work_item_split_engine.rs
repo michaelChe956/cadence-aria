@@ -99,7 +99,7 @@ fn valid_split_output() -> Value {
                 "commands": [
                     {
                         "label": "cargo test backend",
-                        "command": "cargo test --lib session",
+                        "command": "cargo test --locked --lib session",
                         "cwd": "",
                         "purpose": "backend unit tests",
                         "required": true,
@@ -118,7 +118,7 @@ fn valid_split_output() -> Value {
                 "commands": [
                     {
                         "label": "cargo test frontend",
-                        "command": "cargo test --lib frontend_session",
+                        "command": "cargo test --locked --lib frontend_session",
                         "cwd": "",
                         "purpose": "frontend unit tests",
                         "required": true,
@@ -181,7 +181,7 @@ fn valid_split_output_with_type_field() -> Value {
                 "commands": [
                     {
                         "label": "cargo test backend",
-                        "command": "cargo test --lib session",
+                        "command": "cargo test --locked --lib session",
                         "cwd": "",
                         "purpose": "backend unit tests",
                         "required": true,
@@ -200,7 +200,7 @@ fn valid_split_output_with_type_field() -> Value {
                 "commands": [
                     {
                         "label": "cargo test frontend",
-                        "command": "cargo test --lib frontend_session",
+                        "command": "cargo test --locked --lib frontend_session",
                         "cwd": "",
                         "purpose": "frontend unit tests",
                         "required": true,
@@ -250,7 +250,7 @@ fn redo_only_output() -> Value {
                 "commands": [
                     {
                         "label": "cargo test frontend redo",
-                        "command": "cargo test --lib frontend_session_redo",
+                        "command": "cargo test --locked --lib frontend_session_redo",
                         "cwd": "",
                         "purpose": "frontend unit tests after redo",
                         "required": true,
