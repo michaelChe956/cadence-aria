@@ -366,6 +366,12 @@ pub async fn issue_lifecycle(
             design_spec_dto(&lifecycle, &design, session)
         })
         .collect::<ApiResult<Vec<_>>>()?;
+    let work_item_plans = lifecycle
+        .list_issue_work_item_plans(&project_id, &issue_id)
+        .map_err(product_store_api_error)?
+        .into_iter()
+        .map(|plan| issue_work_item_plan_detail_dto(&plan))
+        .collect::<Vec<_>>();
     let coding_store = CodingAttemptStore::new(app_paths.clone());
     let mut coding_attempts = Vec::new();
     let work_items = lifecycle
@@ -395,6 +401,7 @@ pub async fn issue_lifecycle(
         issue: product_issue_dto_with_binding(&app_paths, issue)?,
         story_specs,
         design_specs,
+        work_item_plans,
         work_items,
         workspace_sessions,
         coding_attempts,

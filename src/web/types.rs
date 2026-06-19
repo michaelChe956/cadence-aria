@@ -377,6 +377,7 @@ pub struct IssueLifecycleResponse {
     pub issue: ProductIssueDto,
     pub story_specs: Vec<StorySpecDto>,
     pub design_specs: Vec<DesignSpecDto>,
+    pub work_item_plans: Vec<IssueWorkItemPlanDetailDto>,
     pub work_items: Vec<LifecycleWorkItemDto>,
     pub workspace_sessions: Vec<WorkspaceSessionDto>,
     pub coding_attempts: Vec<CodingAttemptDto>,
