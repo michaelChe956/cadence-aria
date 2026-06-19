@@ -1693,6 +1693,9 @@ async fn spawn_provider_run_from_handler(
                             return;
                         }
                     };
+                let _ = engine
+                    .append_active_run_stream("assistant", "正在生成 Work Item Plan：准备上下文\n")
+                    .await;
 
                 let repository = match workspace_repository_for_session(
                     &app_paths_for_run,
@@ -1729,6 +1732,12 @@ async fn spawn_provider_run_from_handler(
 
                 let split_engine = WorkItemSplitEngine::new(provider_adapter_for_run);
                 let author_provider = engine.session().author_provider.clone();
+                let _ = engine
+                    .append_active_run_stream(
+                        "assistant",
+                        "正在生成 Work Item Plan：调用 provider\n",
+                    )
+                    .await;
                 drop(engine);
 
                 let output = match split_engine
@@ -1755,6 +1764,12 @@ async fn spawn_provider_run_from_handler(
                 };
 
                 engine = engine_for_run.lock().await;
+                let _ = engine
+                    .append_active_run_stream(
+                        "assistant",
+                        "正在生成 Work Item Plan：解析并校验候选拆分\n",
+                    )
+                    .await;
                 let mut outcome = match engine.complete_work_item_plan_author(output).await {
                     Ok(o) => o,
                     Err(message) => {
@@ -1813,6 +1828,14 @@ async fn spawn_provider_run_from_handler(
                                     return;
                                 }
                             };
+                            let _ = engine
+                                .append_active_run_stream(
+                                    "assistant",
+                                    format!(
+                                        "正在生成 Work Item Plan：根据校验结果自动返修第 {revision_iterations} 轮\n"
+                                    ),
+                                )
+                                .await;
                             drop(engine);
                             let author_provider = {
                                 let engine = engine_for_run.lock().await;
@@ -1848,6 +1871,12 @@ async fn spawn_provider_run_from_handler(
                                 }
                             };
                             engine = engine_for_run.lock().await;
+                            let _ = engine
+                                .append_active_run_stream(
+                                    "assistant",
+                                    "正在生成 Work Item Plan：解析并校验候选拆分\n",
+                                )
+                                .await;
                             outcome = match engine.complete_work_item_plan_author(output).await {
                                 Ok(o) => o,
                                 Err(message) => {
@@ -1884,6 +1913,9 @@ async fn spawn_provider_run_from_handler(
                         return;
                     }
                 };
+                let _ = engine
+                    .append_active_run_stream("assistant", "正在返修 Work Item Plan：准备上下文\n")
+                    .await;
 
                 let repository = match workspace_repository_for_session(
                     &app_paths_for_run,
@@ -1920,6 +1952,12 @@ async fn spawn_provider_run_from_handler(
 
                 let split_engine = WorkItemSplitEngine::new(provider_adapter_for_run);
                 let author_provider = engine.session().author_provider.clone();
+                let _ = engine
+                    .append_active_run_stream(
+                        "assistant",
+                        "正在返修 Work Item Plan：调用 provider\n",
+                    )
+                    .await;
                 drop(engine);
 
                 let output = match split_engine
@@ -1948,6 +1986,12 @@ async fn spawn_provider_run_from_handler(
                 };
 
                 engine = engine_for_run.lock().await;
+                let _ = engine
+                    .append_active_run_stream(
+                        "assistant",
+                        "正在返修 Work Item Plan：解析并校验候选拆分\n",
+                    )
+                    .await;
                 let mut outcome = match engine.complete_work_item_plan_revision(output).await {
                     Ok(o) => o,
                     Err(message) => {
@@ -2003,6 +2047,14 @@ async fn spawn_provider_run_from_handler(
                                     return;
                                 }
                             };
+                            let _ = engine
+                                .append_active_run_stream(
+                                    "assistant",
+                                    format!(
+                                        "正在返修 Work Item Plan：根据校验结果自动返修第 {revision_iterations} 轮\n"
+                                    ),
+                                )
+                                .await;
                             drop(engine);
 
                             // 整组 AutoRevision 时丢弃局部 retained/redo，使用完整 generate_revision。
@@ -2040,6 +2092,12 @@ async fn spawn_provider_run_from_handler(
                             };
 
                             engine = engine_for_run.lock().await;
+                            let _ = engine
+                                .append_active_run_stream(
+                                    "assistant",
+                                    "正在返修 Work Item Plan：解析并校验候选拆分\n",
+                                )
+                                .await;
                             outcome = match engine.complete_work_item_plan_revision(output).await {
                                 Ok(o) => o,
                                 Err(message) => {

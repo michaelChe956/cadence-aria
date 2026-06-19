@@ -1074,6 +1074,28 @@ impl WorkspaceEngine {
         .await
     }
 
+    pub async fn append_active_run_stream(
+        &mut self,
+        role: &str,
+        content: impl Into<String>,
+    ) -> Result<(), String> {
+        let content = content.into();
+        let node_id = self.active_node_id.clone();
+        if let Some(node_id) = node_id.as_deref() {
+            self.buffer_stream_chunk(node_id, content.clone()).await?;
+            self.flush_stream_buffer(node_id).await?;
+        }
+        let _ = self
+            .event_tx
+            .send(EngineEvent::StreamChunk {
+                role: role.to_string(),
+                content,
+                node_id,
+            })
+            .await;
+        Ok(())
+    }
+
     pub async fn persist_permission_request(
         &mut self,
         node_id: &str,

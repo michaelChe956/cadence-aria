@@ -275,6 +275,7 @@ async fn story_design_work_item_plan_recovery_consistency() {
             stage,
             artifact,
             timeline_nodes,
+            timeline_node_summaries,
             ..
         } => {
             assert_eq!(workspace_type, WorkspaceType::WorkItemPlan);
@@ -289,6 +290,27 @@ async fn story_design_work_item_plan_recovery_consistency() {
                     .iter()
                     .any(|n| n.node_type == TimelineNodeType::AuthorConfirm),
                 "work_item_plan timeline should contain author_confirm node"
+            );
+            let progress_summary = timeline_node_summaries
+                .values()
+                .find(|summary| {
+                    summary
+                        .stream_preview
+                        .as_deref()
+                        .is_some_and(|stream| stream.contains("正在生成 Work Item Plan"))
+                })
+                .expect("work_item_plan timeline summary should include author progress");
+            let progress_node = timeline_nodes
+                .iter()
+                .find(|node| node.node_id == progress_summary.node_id)
+                .expect("progress node should be present in recovered timeline");
+            let lifecycle = LifecycleStore::new(ProductAppPaths::new(repo.path().join(".aria")));
+            let detail = lifecycle
+                .load_node_detail(&plan_session_id, &progress_node.node_id)
+                .expect("progress node detail should persist");
+            assert!(
+                detail.streaming_content.contains("正在生成 Work Item Plan"),
+                "work_item_plan node detail should persist author progress"
             );
         }
         other => panic!("expected SessionState, got {other:?}"),
