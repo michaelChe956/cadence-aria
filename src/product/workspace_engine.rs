@@ -235,6 +235,17 @@ fn build_node_detail_summary(detail: &NodeDetail) -> NodeDetailSummary {
     }
 }
 
+fn build_session_state_node_detail(mut detail: NodeDetail) -> NodeDetail {
+    detail.prompt = None;
+    detail.messages.clear();
+    if detail.streaming_content.chars().count() > SUMMARY_PREVIEW_CHARS {
+        detail.streaming_content = preview(&detail.streaming_content);
+    }
+    detail.execution_events.clear();
+    detail.permission_events.clear();
+    detail
+}
+
 fn build_artifact_version_summary(version: &ArtifactVersion) -> ArtifactVersionSummary {
     let (markdown_size, markdown_preview) = match &version.payload {
         ArtifactPayload::Markdown { markdown, .. } => (markdown.len(), preview(markdown)),
@@ -3870,23 +3881,26 @@ impl WorkspaceEngine {
             })
             .collect();
 
-        let timeline_node_summaries = self
-            .lifecycle_store
-            .as_ref()
-            .and_then(|store| {
-                let ids = store.list_node_detail_ids(&self.session.session_id).ok()?;
-                Some(
-                    ids.into_iter()
-                        .filter_map(|id| {
-                            store
-                                .load_node_detail(&self.session.session_id, &id)
-                                .ok()
-                                .map(|detail| (id, build_node_detail_summary(&detail)))
-                        })
-                        .collect::<HashMap<_, _>>(),
-                )
-            })
-            .unwrap_or_default();
+        let mut timeline_node_details = HashMap::new();
+        let mut timeline_node_summaries = HashMap::new();
+        if let Some(store) = self.lifecycle_store.as_ref()
+            && let Ok(ids) = store.list_node_detail_ids(&self.session.session_id)
+        {
+            let timeline_node_ids = self
+                .timeline_nodes
+                .iter()
+                .map(|node| node.node_id.as_str())
+                .collect::<HashSet<_>>();
+            for id in ids {
+                let Ok(detail) = store.load_node_detail(&self.session.session_id, &id) else {
+                    continue;
+                };
+                timeline_node_summaries.insert(id.clone(), build_node_detail_summary(&detail));
+                if timeline_node_ids.contains(id.as_str()) {
+                    timeline_node_details.insert(id, build_session_state_node_detail(detail));
+                }
+            }
+        }
         let artifact_version_summaries = self
             .artifact_versions
             .iter()
@@ -3910,7 +3924,7 @@ impl WorkspaceEngine {
             active_node_id: self.active_node_id.clone(),
             artifact_versions: Vec::new(),
             artifact_version_summaries,
-            timeline_node_details: HashMap::new(),
+            timeline_node_details,
             timeline_node_summaries,
             active_run_id: self.active_run_id.clone(),
         }
@@ -7921,8 +7935,19 @@ mod tests {
                 active_run_id,
                 ..
             } => {
-                assert!(timeline_node_details.is_empty());
                 assert!(artifact_versions.is_empty());
+
+                let inline_detail = timeline_node_details
+                    .get("node-1")
+                    .expect("inline node detail");
+                assert_eq!(inline_detail.node_id, "node-1");
+                assert_eq!(inline_detail.prompt, None);
+                assert!(inline_detail.messages.is_empty());
+                assert!(inline_detail.streaming_content.chars().count() <= SUMMARY_PREVIEW_CHARS);
+                assert_ne!(inline_detail.streaming_content, huge_stream);
+                assert!(inline_detail.execution_events.is_empty());
+                assert!(inline_detail.permission_events.is_empty());
+                assert_eq!(inline_detail.artifact_ref.as_ref().unwrap().version, 2);
 
                 let summary = timeline_node_summaries.get("node-1").expect("node summary");
                 assert_eq!(summary.node_id, "node-1");

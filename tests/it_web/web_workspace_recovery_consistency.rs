@@ -275,7 +275,7 @@ async fn story_design_work_item_plan_recovery_consistency() {
             stage,
             artifact,
             timeline_nodes,
-            timeline_node_summaries,
+            timeline_node_details,
             ..
         } => {
             assert_eq!(workspace_type, WorkspaceType::WorkItemPlan);
@@ -291,26 +291,21 @@ async fn story_design_work_item_plan_recovery_consistency() {
                     .any(|n| n.node_type == TimelineNodeType::AuthorConfirm),
                 "work_item_plan timeline should contain author_confirm node"
             );
-            let progress_summary = timeline_node_summaries
+            let progress_detail = timeline_node_details
                 .values()
-                .find(|summary| {
-                    summary
-                        .stream_preview
-                        .as_deref()
-                        .is_some_and(|stream| stream.contains("正在生成 Work Item Plan"))
-                })
-                .expect("work_item_plan timeline summary should include author progress");
-            let progress_node = timeline_nodes
-                .iter()
-                .find(|node| node.node_id == progress_summary.node_id)
-                .expect("progress node should be present in recovered timeline");
-            let lifecycle = LifecycleStore::new(ProductAppPaths::new(repo.path().join(".aria")));
-            let detail = lifecycle
-                .load_node_detail(&plan_session_id, &progress_node.node_id)
-                .expect("progress node detail should persist");
+                .find(|detail| detail.streaming_content.contains("正在生成 Work Item Plan"))
+                .expect("work_item_plan session_state details should include author progress");
             assert!(
-                detail.streaming_content.contains("正在生成 Work Item Plan"),
-                "work_item_plan node detail should persist author progress"
+                timeline_nodes
+                    .iter()
+                    .any(|node| node.node_id == progress_detail.node_id),
+                "progress detail should belong to a recovered timeline node"
+            );
+            assert!(
+                timeline_node_details
+                    .values()
+                    .any(|detail| detail.streaming_content.contains("正在生成 Work Item Plan")),
+                "session_state.timeline_node_details should restore WorkItemPlan progress"
             );
         }
         other => panic!("expected SessionState, got {other:?}"),
