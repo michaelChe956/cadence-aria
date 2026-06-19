@@ -78,6 +78,14 @@ fn parser_accepts_fenced_json_inside_structured_output_sentinel() {
 }
 
 #[test]
+fn parser_does_not_parse_truncated_json_with_only_end_sentinel() {
+    let stdout = "\"work_items\": []\n}</ARIA_STRUCTURED_OUTPUT>\n";
+    let parsed = parse_last_structured_output(stdout).expect("parse should not fail");
+
+    assert!(parsed.is_none(), "missing start sentinel must stay invalid");
+}
+
+#[test]
 fn provider_router_records_completed_run_with_external_raw_output_refs() {
     let input = adapter_input(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),

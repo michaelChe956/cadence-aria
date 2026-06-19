@@ -136,6 +136,88 @@ fn valid_split_output() -> Value {
     })
 }
 
+fn valid_split_output_with_type_field() -> Value {
+    // 真实 claude provider 习惯输出 `type` 而非 schema 要求的 `kind`。
+    // 回归 Bug: prompt 未内联 schema + ProviderWorkItem 缺少 alias 时,
+    // provider 返回 `type` 会导致 `missing field kind` 解析失败。
+    json!({
+        "repository_profile": {
+            "confidence": "high",
+            "detected_layers": ["backend", "frontend"],
+            "split_recommendation": "frontend_backend",
+            "languages": ["rust"],
+            "frameworks": [],
+            "package_managers": ["cargo"],
+            "test_frameworks": [],
+            "build_systems": ["cargo"],
+            "verification_capabilities": ["cargo test"],
+            "uncertainties": []
+        },
+        "work_items": [
+            {
+                "title": "实现后端登录会话 API",
+                "type": "backend",
+                "sequence_hint": 10,
+                "depends_on": [],
+                "exclusive_write_scopes": ["src/product/session.rs"],
+                "forbidden_write_scopes": ["web/**"],
+                "required_handoff_from": [],
+                "require_execution_plan_confirm": false
+            },
+            {
+                "title": "实现前端会话过期提示",
+                "type": "frontend",
+                "sequence_hint": 20,
+                "depends_on": [0],
+                "exclusive_write_scopes": ["web/src/session/**"],
+                "forbidden_write_scopes": ["src/product/**"],
+                "required_handoff_from": [],
+                "require_execution_plan_confirm": false
+            }
+        ],
+        "verification_plans": [
+            {
+                "scope": "unit",
+                "commands": [
+                    {
+                        "label": "cargo test backend",
+                        "command": "cargo test --lib session",
+                        "cwd": "",
+                        "purpose": "backend unit tests",
+                        "required": true,
+                        "timeout_seconds": 120,
+                        "safety": "approved"
+                    }
+                ],
+                "manual_checks": [],
+                "required_gates": [],
+                "risk_notes": [],
+                "confidence": "high",
+                "fallback_policy": "manual_gate"
+            },
+            {
+                "scope": "unit",
+                "commands": [
+                    {
+                        "label": "cargo test frontend",
+                        "command": "cargo test --lib frontend_session",
+                        "cwd": "",
+                        "purpose": "frontend unit tests",
+                        "required": true,
+                        "timeout_seconds": 120,
+                        "safety": "approved"
+                    }
+                ],
+                "manual_checks": [],
+                "required_gates": [],
+                "risk_notes": [],
+                "confidence": "high",
+                "fallback_policy": "manual_gate"
+            }
+        ]
+    })
+}
+
 fn redo_only_output() -> Value {
     json!({
         "repository_profile": {
@@ -325,6 +407,40 @@ fn repatch_dependencies_reconnects_dependents() {
                 && e.to_work_item_id == "work_item_0003")
     );
     assert_eq!(repatched.len(), 3);
+}
+
+#[tokio::test]
+async fn generate_accepts_type_field_as_kind_alias() {
+    // 回归 Bug: 真实 claude provider 输出 `work_items[].type` 而非 `kind`。
+    // ProviderWorkItem.kind 必须接受 `type` 别名,否则 serde 报
+    // `missing field kind`,WorkItemPlan 生成静默失败。
+    let (_dir, lifecycle, issue, repository) = split_engine_fixture().await;
+    let request = default_request();
+
+    let output = engine_with_output(valid_split_output_with_type_field())
+        .generate(
+            &request,
+            &lifecycle,
+            &issue,
+            &repository,
+            ProviderName::Fake,
+        )
+        .await
+        .expect("split with type alias should parse");
+
+    assert_eq!(output.work_items.len(), 2);
+    assert!(
+        output
+            .work_items
+            .iter()
+            .any(|wi| wi.kind == WorkItemKind::Backend)
+    );
+    assert!(
+        output
+            .work_items
+            .iter()
+            .any(|wi| wi.kind == WorkItemKind::Frontend)
+    );
 }
 
 #[tokio::test]

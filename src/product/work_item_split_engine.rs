@@ -536,8 +536,13 @@ fn build_split_prompt(
          force_frontend_backend_split: {force_frontend_backend_split}\n\
          require_execution_plan_confirm: {require_execution_plan_confirm}\n\n\
          [output_schema]\n\
-         严格按 src/product/work_item_split_output_schema.json 的 JSON schema 输出，顶层对象包裹在 <ARIA_STRUCTURED_OUTPUT>...</ARIA_STRUCTURED_OUTPUT> 标签内。\n\
-         work_items 数组顺序即执行顺序；depends_on 使用同数组中的 0-based 索引。verification_plans 数组与 work_items 一一对应。",
+         最终输出必须只包含一个 <ARIA_STRUCTURED_OUTPUT> JSON block。\n\
+         第一个非空字符必须是 <ARIA_STRUCTURED_OUTPUT>，最后一个非空字符必须是 </ARIA_STRUCTURED_OUTPUT>。\n\
+         标签内部必须是一个完整 JSON object，不要输出 Markdown、解释、代码块或标签外文本。\n\
+         严格按以下 JSON schema 输出。\n\
+         work_items 数组顺序即执行顺序；depends_on 使用同数组中的 0-based 索引。verification_plans 数组与 work_items 一一对应。\n\
+         每个 work_item 必须包含 `kind` 字段（不要写成 `type`），合法取值为以下之一：backend、frontend、integration、e2e、docs、infra、other。\n\n\
+         {schema}",
         title = issue.title,
         description = issue.description.as_deref().unwrap_or("无"),
         repo_id = repository.id,
@@ -552,6 +557,7 @@ fn build_split_prompt(
         include_e2e_tests = request.include_e2e_tests.unwrap_or(false),
         force_frontend_backend_split = request.force_frontend_backend_split.unwrap_or(false),
         require_execution_plan_confirm = request.require_execution_plan_confirm.unwrap_or(false),
+        schema = WORK_ITEM_SPLIT_OUTPUT_SCHEMA,
     )
 }
 
@@ -628,8 +634,13 @@ fn build_revision_prompt(
          [redo_work_items]\n\
          以下 WorkItem 需要按用户反馈重做，请只输出这些项：\n{redo_section}\n\n\
          [output_schema]\n\
-         严格按 src/product/work_item_split_output_schema.json 的 JSON schema 输出 redo-only 结果，顶层对象包裹在 <ARIA_STRUCTURED_OUTPUT>...</ARIA_STRUCTURED_OUTPUT> 标签内。\n\
-         work_items 数组必须且仅包含重做项，顺序对应 redo_work_items 列表；verification_plans 与 work_items 一一对应；depends_on 使用 0-based 索引。",
+         最终输出必须只包含一个 <ARIA_STRUCTURED_OUTPUT> JSON block。\n\
+         第一个非空字符必须是 <ARIA_STRUCTURED_OUTPUT>，最后一个非空字符必须是 </ARIA_STRUCTURED_OUTPUT>。\n\
+         标签内部必须是一个完整 JSON object，不要输出 Markdown、解释、代码块或标签外文本。\n\
+         严格按以下 JSON schema 输出 redo-only 结果。\n\
+         work_items 数组必须且仅包含重做项，顺序对应 redo_work_items 列表；verification_plans 与 work_items 一一对应；depends_on 使用 0-based 索引。\n\
+         每个 work_item 必须包含 `kind` 字段（不要写成 `type`），合法取值为以下之一：backend、frontend、integration、e2e、docs、infra、other。\n\n\
+         {schema}",
         title = issue.title,
         description = issue.description.as_deref().unwrap_or("无"),
         repo_id = repository.id,
@@ -639,6 +650,7 @@ fn build_revision_prompt(
         repository_structure = repository_structure,
         retained_section = retained_section,
         redo_section = redo_section,
+        schema = WORK_ITEM_SPLIT_OUTPUT_SCHEMA,
     )
 }
 
@@ -685,6 +697,9 @@ struct ProviderRepositoryProfile {
 #[serde(rename_all = "snake_case")]
 struct ProviderWorkItem {
     title: String,
+    /// Provider 习惯输出 `type` 而非 `kind`,接受别名以兼容真实 claude 输出。
+    /// 合法取值见 `parse_work_item_kind`: backend/frontend/integration/e2e/docs/infra/other。
+    #[serde(alias = "type")]
     kind: String,
     #[serde(default)]
     sequence_hint: Option<u32>,
@@ -1364,5 +1379,155 @@ mod tests {
             prompt.contains("missing write scope"),
             "prompt should contain feedback content: {prompt}"
         );
+    }
+
+    fn split_prompt_fixture() -> (GenerateWorkItemsRequest, IssueRecord, RepositoryRecord) {
+        let request = GenerateWorkItemsRequest {
+            title: "test plan".to_string(),
+            story_spec_ids: vec![],
+            design_spec_ids: vec![],
+            include_integration_tests: None,
+            include_e2e_tests: None,
+            force_frontend_backend_split: None,
+            require_execution_plan_confirm: None,
+            author_provider: None,
+            reviewer_provider: None,
+            review_rounds: None,
+            superpowers_enabled: None,
+            openspec_enabled: None,
+            revision_feedback: None,
+        };
+        let issue = IssueRecord {
+            id: "issue_0001".to_string(),
+            project_id: "project_0001".to_string(),
+            repo_id: None,
+            title: "Test Issue".to_string(),
+            description: None,
+            change_id: "change_0001".to_string(),
+            phase: IssuePhase::Clarification,
+            status: IssueStatus::Draft,
+            active_binding_id: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        let repository = RepositoryRecord {
+            id: "repo_0001".to_string(),
+            project_id: "project_0001".to_string(),
+            name: "test-repo".to_string(),
+            path: PathBuf::from("/tmp/repo"),
+            repo_hash: "abc".to_string(),
+            runtime_root: PathBuf::from("/tmp/repo"),
+            default_policy_preset: "default".to_string(),
+            default_provider_mode: "default".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        (request, issue, repository)
+    }
+
+    #[test]
+    fn build_split_prompt_inlines_schema_and_kind_guidance() {
+        // 回归 Bug: prompt 曾引用不存在的 `src/product/work_item_split_output_schema.json`,
+        // 而 WORK_ITEM_SPLIT_OUTPUT_SCHEMA 常量未注入 prompt,导致 provider 不知道
+        // `kind` 是必填字段,按习惯输出 `type` 触发 `missing field kind`。
+        // 修复后 prompt 必须内联 schema 正文并给出 kind 合法取值。
+        let (request, issue, repository) = split_prompt_fixture();
+        let prompt = build_split_prompt(&request, &issue, &repository, &[], &[], "(empty)");
+
+        assert!(
+            !prompt.contains("work_item_split_output_schema.json"),
+            "prompt must not reference a non-existent schema file path: {prompt}"
+        );
+        // schema 正文必须内联进 prompt(取 schema 常量里的标志性片段)。
+        assert!(
+            prompt.contains("\"kind\""),
+            "prompt must inline the schema's `kind` property: {prompt}"
+        );
+        assert!(
+            prompt.contains("\"required\""),
+            "prompt must inline the schema's `required` clause: {prompt}"
+        );
+        // kind 合法取值引导(provider 必须知道有哪些枚举值可选)。
+        for kind_value in [
+            "backend",
+            "frontend",
+            "integration",
+            "e2e",
+            "docs",
+            "infra",
+            "other",
+        ] {
+            assert!(
+                prompt.contains(kind_value),
+                "prompt must list kind value `{kind_value}`: {prompt}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_split_prompt_requires_only_sentinel_wrapped_json() {
+        let (request, issue, repository) = split_prompt_fixture();
+        let prompt = build_split_prompt(&request, &issue, &repository, &[], &[], "(empty)");
+
+        assert!(prompt.contains("<ARIA_STRUCTURED_OUTPUT>"));
+        assert!(prompt.contains("</ARIA_STRUCTURED_OUTPUT>"));
+        assert!(prompt.contains("最终输出必须只包含一个 <ARIA_STRUCTURED_OUTPUT> JSON block"));
+        assert!(prompt.contains("不要输出 Markdown、解释、代码块或标签外文本"));
+        assert!(prompt.contains("第一个非空字符必须是 <ARIA_STRUCTURED_OUTPUT>"));
+        assert!(prompt.contains("最后一个非空字符必须是 </ARIA_STRUCTURED_OUTPUT>"));
+    }
+
+    #[test]
+    fn build_revision_prompt_inlines_schema_and_kind_guidance() {
+        let (request, issue, repository) = split_prompt_fixture();
+        let redo_specs = vec![RedoSpec {
+            old_id: "work_item_0001".to_string(),
+            feedback: "拆得太粗".to_string(),
+        }];
+        let prompt = build_revision_prompt(
+            &request,
+            &issue,
+            &repository,
+            &[],
+            &redo_specs,
+            &[],
+            &[],
+            "(empty)",
+        );
+
+        assert!(
+            !prompt.contains("work_item_split_output_schema.json"),
+            "revision prompt must not reference a non-existent schema file path: {prompt}"
+        );
+        assert!(
+            prompt.contains("\"kind\""),
+            "revision prompt must inline the schema's `kind` property: {prompt}"
+        );
+    }
+
+    #[test]
+    fn build_revision_prompt_requires_only_sentinel_wrapped_json() {
+        let (request, issue, repository) = split_prompt_fixture();
+        let redo_specs = vec![RedoSpec {
+            old_id: "work_item_0001".to_string(),
+            feedback: "拆得太粗".to_string(),
+        }];
+        let prompt = build_revision_prompt(
+            &request,
+            &issue,
+            &repository,
+            &[],
+            &redo_specs,
+            &[],
+            &[],
+            "(empty)",
+        );
+
+        assert!(prompt.contains("<ARIA_STRUCTURED_OUTPUT>"));
+        assert!(prompt.contains("</ARIA_STRUCTURED_OUTPUT>"));
+        assert!(prompt.contains("最终输出必须只包含一个 <ARIA_STRUCTURED_OUTPUT> JSON block"));
+        assert!(prompt.contains("不要输出 Markdown、解释、代码块或标签外文本"));
+        assert!(prompt.contains("第一个非空字符必须是 <ARIA_STRUCTURED_OUTPUT>"));
+        assert!(prompt.contains("最后一个非空字符必须是 </ARIA_STRUCTURED_OUTPUT>"));
     }
 }
