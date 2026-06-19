@@ -476,6 +476,10 @@ describe("useWorkspaceWs", () => {
         },
       });
       harness.ws.receive({
+        type: "stage_change",
+        stage: "cross_review",
+      });
+      harness.ws.receive({
         type: "stream_chunk",
         role: "reviewer",
         content: "reviewing",
@@ -504,17 +508,81 @@ describe("useWorkspaceWs", () => {
       });
     });
 
+    expect(useWorkspaceStore.getState().chatEntries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "provider_stream",
+          role: "reviewer",
+          metadata: expect.objectContaining({ provider: "codex" }),
+        }),
+        expect.objectContaining({
+          type: "execution_event",
+          role: "reviewer",
+          content: "git diff --stat",
+          metadata: expect.objectContaining({ agent: "codex" }),
+        }),
+      ]),
+    );
+  });
+
+  it("keeps work item plan stream chunks when active run arrives before provider stage", () => {
+    vi.useFakeTimers();
+    const harness = renderWorkspaceHook();
+
+    act(() => {
+      harness.ws.receive({
+        type: "session_state",
+        session_id: "session_work_item_plan_progress",
+        workspace_type: "work_item_plan",
+        stage: "prepare_context",
+        messages: [],
+        checkpoints: [],
+        artifact: null,
+        providers: { author: "claude_code", reviewer: "codex" },
+        timeline_nodes: [
+          {
+            node_id: "timeline_node_work_item_plan_author",
+            node_type: "author_run",
+            agent: "claude_code",
+            stage: "running",
+            round: null,
+            status: "active",
+            title: "Work Item Plan 生成",
+            summary: null,
+            started_at: "2026-06-19T10:00:00Z",
+            completed_at: null,
+            duration_ms: null,
+            artifact_ref: null,
+            provider_config_snapshot: {
+              author: "claude_code",
+              reviewer: "codex",
+              review_rounds: 1,
+            },
+          },
+        ],
+        active_node_id: "timeline_node_work_item_plan_author",
+        artifact_versions: [],
+        timeline_node_details: {},
+        active_run_id: "run-work-item-plan-1",
+      });
+      harness.ws.receive({
+        type: "stream_chunk",
+        role: "author",
+        content: "正在生成 Work Item Plan",
+        node_id: "timeline_node_work_item_plan_author",
+      });
+    });
+    act(() => {
+      vi.advanceTimersByTime(80);
+    });
+
     expect(useWorkspaceStore.getState().chatEntries).toEqual([
       expect.objectContaining({
         type: "provider_stream",
-        role: "reviewer",
-        metadata: expect.objectContaining({ provider: "codex" }),
-      }),
-      expect.objectContaining({
-        type: "execution_event",
-        role: "reviewer",
-        content: "git diff --stat",
-        metadata: expect.objectContaining({ agent: "codex" }),
+        role: "author",
+        content: "正在生成 Work Item Plan",
+        node_id: "timeline_node_work_item_plan_author",
+        metadata: expect.objectContaining({ provider: "claude_code" }),
       }),
     ]);
   });
@@ -544,6 +612,10 @@ describe("useWorkspaceWs", () => {
             review_rounds: 2,
           },
         },
+      });
+      harness.ws.receive({
+        type: "stage_change",
+        stage: "cross_review",
       });
       harness.ws.receive({
         type: "stream_chunk",
@@ -1312,6 +1384,10 @@ describe("useWorkspaceWs", () => {
             review_rounds: 1,
           },
         },
+      });
+      harness.ws.receive({
+        type: "stage_change",
+        stage: "running",
       });
       harness.ws.receive({
         type: "stream_chunk",

@@ -197,7 +197,7 @@ export function useWorkspaceWs(sessionId: string | null) {
         store.rebuildChatEntries();
         break;
       case "stream_chunk":
-        if (!ACTIVE_PROVIDER_STAGES.has(store.stage) && store.activeRunId) {
+        if (!ACTIVE_PROVIDER_STAGES.has(store.stage) && !store.activeRunId) {
           break;
         }
         {

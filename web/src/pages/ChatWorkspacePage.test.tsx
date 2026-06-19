@@ -828,6 +828,43 @@ describe("ChatWorkspacePage", () => {
     expect(api.sendAuthorDecision).toHaveBeenCalledWith("accept");
   });
 
+  it("renders work item plan generation progress as a provider stream bubble", () => {
+    mockWorkspaceWs();
+    useWorkspaceStore.setState({
+      sessionId: "workspace_session_0001",
+      workspaceType: "work_item_plan",
+      stage: "running",
+      providers: { author: "claude_code", reviewer: "codex" },
+      timelineNodes: [
+        timelineNode({
+          node_id: "timeline_node_work_item_plan_author",
+          node_type: "author_run",
+          agent: "claude_code",
+          stage: "running",
+          status: "active",
+          title: "Work Item Plan 生成",
+        }),
+      ],
+      activeNodeId: "timeline_node_work_item_plan_author",
+      selectedNodeId: "timeline_node_work_item_plan_author",
+      chatEntries: [
+        chatEntry({
+          id: "timeline_node_work_item_plan_author:stream",
+          type: "provider_stream",
+          role: "author",
+          content: "正在生成 Work Item Plan",
+          node_id: "timeline_node_work_item_plan_author",
+          metadata: { provider: "claude_code" },
+        }),
+      ],
+    });
+
+    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+
+    expect(screen.getByTestId("chat-entry-list")).toHaveTextContent("正在生成 Work Item Plan");
+    expect(screen.getAllByText("Work Item Plan #workspace_session_0001").length).toBeGreaterThan(0);
+  });
+
   it("work_item_plan candidate panel supports revert, request revision and accept", async () => {
     const api = mockWorkspaceWs();
     useWorkspaceStore.setState({

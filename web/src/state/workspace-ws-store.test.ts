@@ -985,6 +985,63 @@ describe("workspace ws store", () => {
     ]);
   });
 
+  it("rebuilds work item plan author progress from timeline node streaming content", () => {
+    const store = useWorkspaceStore.getState();
+
+    store.setSessionState({
+      session_id: "session_work_item_plan_progress",
+      workspace_type: "work_item_plan",
+      stage: "running",
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "claude_code", reviewer: "codex" },
+      timeline_nodes: [
+        {
+          node_id: "timeline_node_work_item_plan_author",
+          node_type: "author_run",
+          agent: "claude_code",
+          stage: "running",
+          round: null,
+          status: "active",
+          title: "Work Item Plan 生成",
+          summary: null,
+          started_at: "2026-06-19T10:00:00Z",
+          completed_at: null,
+          duration_ms: null,
+          artifact_ref: null,
+          provider_config_snapshot: {
+            author: "claude_code",
+            reviewer: "codex",
+            review_rounds: 1,
+          },
+        },
+      ],
+      active_node_id: "timeline_node_work_item_plan_author",
+      artifact_versions: [],
+      timeline_node_details: {
+        timeline_node_work_item_plan_author: makeNodeDetail({
+          node_id: "timeline_node_work_item_plan_author",
+          node_type: "author_run",
+          agent_role: "author",
+          provider: { name: "claude_code", model: "claude-opus-4" },
+          streaming_content: "正在生成 Work Item Plan",
+        }),
+      },
+      active_run_id: null,
+    });
+
+    expect(useWorkspaceStore.getState().chatEntries).toEqual([
+      expect.objectContaining({
+        type: "provider_stream",
+        role: "author",
+        content: "正在生成 Work Item Plan",
+        node_id: "timeline_node_work_item_plan_author",
+        metadata: expect.objectContaining({ provider: "claude_code" }),
+      }),
+    ]);
+  });
+
   it.each([
     ["story", "Story Spec"],
     ["design", "Design Spec"],
