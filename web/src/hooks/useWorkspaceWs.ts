@@ -40,6 +40,7 @@ export function useWorkspaceWs(sessionId: string | null) {
   const wsRef = useRef<WebSocket | null>(null);
   const connectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const streamFlushTimeoutsRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const invalidatedPreStageNodeIdsRef = useRef<Set<string>>(new Set());
   const lastMessageAtRef = useRef(Date.now());
   const [closeCode, setCloseCode] = useState<number | undefined>();
   const connectionStatus = useWorkspaceStore((state) => state.connectionStatus);
@@ -193,6 +194,7 @@ export function useWorkspaceWs(sessionId: string | null) {
     const store = useWorkspaceStore.getState();
     switch (msg.type) {
       case "session_state":
+        invalidatedPreStageNodeIdsRef.current.clear();
         store.setSessionState(msg as never);
         store.rebuildChatEntries();
         break;
@@ -212,7 +214,11 @@ export function useWorkspaceWs(sessionId: string | null) {
             ACTIVE_PROVIDER_STAGES.has(stage),
           );
           const isPendingInitialProviderNode =
-            store.stage === "prepare_context" && !hasVisitedProviderStage && isActiveProviderNode;
+            store.stage === "prepare_context" &&
+            !hasVisitedProviderStage &&
+            isActiveProviderNode &&
+            typeof nodeId === "string" &&
+            !invalidatedPreStageNodeIdsRef.current.has(nodeId);
           const acceptsActiveProviderChunk =
             ACTIVE_PROVIDER_STAGES.has(store.stage) || isPendingInitialProviderNode;
           if (!acceptsActiveProviderChunk) {
@@ -257,7 +263,13 @@ export function useWorkspaceWs(sessionId: string | null) {
         store.finalizeStreamingEntry(resolveStreamEntryId(store, msg.node_id as string | null | undefined));
         break;
       case "stage_change":
-        store.setStage(msg.stage as string);
+        {
+          const nextStage = msg.stage as string;
+          if (!ACTIVE_PROVIDER_STAGES.has(nextStage) && store.activeNodeId) {
+            invalidatedPreStageNodeIdsRef.current.add(store.activeNodeId);
+          }
+          store.setStage(nextStage);
+        }
         store.appendChatEntry({
           id: chatEntryId("stage_change", `${msg.stage as string}:${store.chatEntries.length}`),
           type: "stage_change",

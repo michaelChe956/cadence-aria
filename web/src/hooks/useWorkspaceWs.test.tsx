@@ -587,6 +587,79 @@ describe("useWorkspaceWs", () => {
     ]);
   });
 
+  it("stops appending pre-stage stream chunks after prepare_context invalidates the active run", () => {
+    vi.useFakeTimers();
+    const harness = renderWorkspaceHook();
+
+    act(() => {
+      harness.ws.receive({
+        type: "session_state",
+        session_id: "session_work_item_plan_progress",
+        workspace_type: "work_item_plan",
+        stage: "prepare_context",
+        messages: [],
+        checkpoints: [],
+        artifact: null,
+        providers: { author: "claude_code", reviewer: "codex" },
+        timeline_nodes: [
+          {
+            node_id: "timeline_node_work_item_plan_author",
+            node_type: "author_run",
+            agent: "claude_code",
+            stage: "running",
+            round: null,
+            status: "active",
+            title: "Work Item Plan 生成",
+            summary: null,
+            started_at: "2026-06-19T10:00:00Z",
+            completed_at: null,
+            duration_ms: null,
+            artifact_ref: null,
+            provider_config_snapshot: {
+              author: "claude_code",
+              reviewer: "codex",
+              review_rounds: 1,
+            },
+          },
+        ],
+        active_node_id: "timeline_node_work_item_plan_author",
+        artifact_versions: [],
+        timeline_node_details: {},
+        active_run_id: "run-work-item-plan-1",
+      });
+      harness.ws.receive({
+        type: "stream_chunk",
+        role: "author",
+        content: "正在生成 Work Item Plan",
+        node_id: "timeline_node_work_item_plan_author",
+      });
+    });
+    act(() => {
+      vi.advanceTimersByTime(80);
+    });
+
+    act(() => {
+      harness.ws.receive({ type: "stage_change", stage: "prepare_context" });
+      harness.ws.receive({
+        type: "stream_chunk",
+        role: "author",
+        content: "late output",
+        node_id: "timeline_node_work_item_plan_author",
+      });
+    });
+    act(() => {
+      vi.advanceTimersByTime(80);
+    });
+
+    const streamEntry = useWorkspaceStore
+      .getState()
+      .chatEntries.find((entry) => entry.type === "provider_stream");
+    expect(streamEntry?.content).toBe("正在生成 Work Item Plan");
+    expect(
+      useWorkspaceStore.getState().streamBuffers.timeline_node_work_item_plan_author?.chunks,
+    ).toEqual([]);
+  });
+
   it("stores timeline websocket messages by node", () => {
     const harness = renderWorkspaceHook();
 
