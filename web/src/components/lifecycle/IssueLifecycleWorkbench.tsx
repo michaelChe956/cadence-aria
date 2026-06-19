@@ -748,7 +748,9 @@ function IssueLifecycleDetail({
   onOpenFullIssue: (card: LifecycleCardData) => void;
   onDelete: (card: LifecycleCardData) => void;
 }) {
-  const allWorkItems = workItems.map((card) => card.raw as LifecycleWorkItem);
+  const allWorkItems = workItems.flatMap((card) =>
+    card.kind === "work_item" ? [card.raw] : [],
+  );
   if (!issue) {
     return (
       <section
@@ -908,7 +910,11 @@ function LifecycleContentSection({
                 selected={selectedKey === lifecycleCardKey(card)}
                 deleting={deletingKey === lifecycleCardKey(card)}
                 onSelect={() => onSelect(card)}
-                onDelete={() => onDelete(card)}
+                onDelete={
+                  card.kind === "work_item_group"
+                    ? undefined
+                    : () => onDelete(card)
+                }
                 allWorkItems={allWorkItems}
               />
             </li>
@@ -949,6 +955,7 @@ function normalizeLifecycleResponse(
     lifecycle.issue.issue_id !== issue.issue_id ||
     !Array.isArray(lifecycle.story_specs) ||
     !Array.isArray(lifecycle.design_specs) ||
+    !Array.isArray(lifecycle.work_item_plans) ||
     !Array.isArray(lifecycle.work_items) ||
     !Array.isArray(lifecycle.workspace_sessions) ||
     !Array.isArray(lifecycle.coding_attempts)
@@ -1036,6 +1043,23 @@ function toDrawerEntity(
     };
   }
 
+  if (card.kind === "work_item_group") {
+    const itemsById = new Map(
+      (allWorkItems ?? []).map((item) => [item.work_item_id, item]),
+    );
+    return {
+      ...base,
+      artifactVersions: card.artifactVersions,
+      childWorkItems: card.childWorkItemIds
+        .map((id) => itemsById.get(id))
+        .filter((item): item is LifecycleWorkItem => item !== undefined),
+      workItemPlanSourceStorySpecIds: card.raw.source_story_spec_ids,
+      workItemPlanSourceDesignSpecIds: card.raw.source_design_spec_ids,
+      workItemPlanValidatorFindings: card.raw.validator_findings,
+      workItemPlanDependencyGraph: card.raw.dependency_graph,
+    };
+  }
+
   return {
     ...base,
     artifactVersions: card.artifactVersions,
@@ -1111,6 +1135,9 @@ function workspaceTypeForCard(
   }
   if (card.kind === "work_item") {
     return "work_item";
+  }
+  if (card.kind === "work_item_group") {
+    return "work_item_plan";
   }
   return null;
 }

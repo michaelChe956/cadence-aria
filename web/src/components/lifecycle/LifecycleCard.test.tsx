@@ -1,6 +1,9 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import type { LifecycleWorkItem } from "../../api/types";
+import type {
+  IssueWorkItemPlanDetailDto,
+  LifecycleWorkItem,
+} from "../../api/types";
 import type { LifecycleCard as LifecycleCardData } from "../../state/lifecycle-workbench-store";
 import { LifecycleCard } from "./LifecycleCard";
 
@@ -11,6 +14,7 @@ describe("LifecycleCard", () => {
       lifecycleCard("story_spec", "登录故事规格"),
       lifecycleCard("design_spec", "登录设计方案"),
       lifecycleCard("work_item", "登录实现任务"),
+      lifecycleCard("work_item_group", "登录 Work Item Group"),
     ];
 
     render(
@@ -42,11 +46,15 @@ describe("LifecycleCard", () => {
       "data-color-token",
       "amber",
     );
+    expect(
+      screen.getByTestId("lifecycle-card-work_item_group"),
+    ).toHaveAttribute("data-color-token", "amber");
 
     expect(screen.getByText("Issue")).toBeInTheDocument();
     expect(screen.getByText("Story")).toBeInTheDocument();
     expect(screen.getByText("Design")).toBeInTheDocument();
     expect(screen.getByText("Work Item")).toBeInTheDocument();
+    expect(screen.getByText("Work Item Group")).toBeInTheDocument();
   });
 
   it("allows long card titles to use two lines before truncating", () => {
@@ -202,6 +210,16 @@ function lifecycleCard(
     };
   }
 
+  if (kind === "work_item_group") {
+    return {
+      ...base,
+      kind,
+      artifactVersions: [],
+      childWorkItemIds: ["work_item_0001"],
+      raw: workItemPlanRaw(),
+    };
+  }
+
   return {
     ...base,
     kind,
@@ -219,6 +237,33 @@ function lifecycleCard(
       artifact_versions: [],
       ...rawOverride,
     }),
+  };
+}
+
+function workItemPlanRaw(
+  overrides: Partial<IssueWorkItemPlanDetailDto> = {},
+): IssueWorkItemPlanDetailDto {
+  return {
+    id: "issue_work_item_plan_0001",
+    issue_id: "issue_0001",
+    project_id: "project_0001",
+    status: "draft",
+    source_story_spec_ids: ["story_spec_0001"],
+    source_design_spec_ids: ["design_spec_0001"],
+    work_item_ids: ["work_item_0001"],
+    verification_plan_ids: [],
+    dependency_graph: [],
+    repository_profile_ref: null,
+    options: {
+      include_integration_tests: true,
+      include_e2e_tests: false,
+      force_frontend_backend_split: true,
+      require_execution_plan_confirm: false,
+    },
+    validator_findings: [],
+    created_at: "2026-05-25T00:00:00Z",
+    updated_at: "2026-05-25T00:00:00Z",
+    ...overrides,
   };
 }
 

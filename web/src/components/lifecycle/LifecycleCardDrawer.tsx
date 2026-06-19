@@ -13,11 +13,13 @@ import { useEffect, useMemo, useState } from "react";
 import type {
   ArtifactVersion,
   CodingAttempt,
+  IssueWorkItemPlanDependencyEdgeDto,
   ProductIssueArtifact,
   WorkItemContextBudget,
   WorkItemExecutionPlanStatus,
   WorkItemKind,
   LifecycleWorkItem,
+  WorkItemSplitFinding,
 } from "../../api/types";
 import {
   workItemKindLabel,
@@ -26,7 +28,12 @@ import {
 import { MonacoDiffViewer } from "../shared/MonacoDiffViewer";
 import { MonacoViewer } from "../shared/MonacoViewer";
 
-export type DrawerEntityKind = "issue" | "story_spec" | "design_spec" | "work_item";
+export type DrawerEntityKind =
+  | "issue"
+  | "story_spec"
+  | "design_spec"
+  | "work_item"
+  | "work_item_group";
 
 export interface DrawerEntity {
   id: string;
@@ -54,6 +61,11 @@ export interface DrawerEntity {
   completionCommit?: string | null;
   completionDiffSummaryRef?: string | null;
   allWorkItems?: LifecycleWorkItem[];
+  childWorkItems?: LifecycleWorkItem[];
+  workItemPlanSourceStorySpecIds?: string[];
+  workItemPlanSourceDesignSpecIds?: string[];
+  workItemPlanValidatorFindings?: WorkItemSplitFinding[];
+  workItemPlanDependencyGraph?: IssueWorkItemPlanDependencyEdgeDto[];
 }
 
 interface LifecycleCardDrawerProps {
@@ -70,6 +82,7 @@ const KIND_LABELS: Record<DrawerEntityKind, string> = {
   story_spec: "Story Spec",
   design_spec: "Design Spec",
   work_item: "Work Item",
+  work_item_group: "Work Item Group",
 };
 
 const STATUS_LABELS: Record<string, string> = {
@@ -235,6 +248,9 @@ export function LifecycleCardDrawer({
           </section>
         ) : null}
 
+        {entity.kind === "work_item_group" ? (
+          <WorkItemGroupDetail entity={entity} />
+        ) : null}
         {entity.kind === "work_item" ? <WorkItemDetail entity={entity} /> : null}
       </div>
 
@@ -436,6 +452,125 @@ function IssueDetail({
         </section>
       ) : null}
     </>
+  );
+}
+
+function WorkItemGroupDetail({ entity }: { entity: DrawerEntity }) {
+  const childWorkItems = entity.childWorkItems ?? [];
+  const sourceStoryIds = entity.workItemPlanSourceStorySpecIds ?? [];
+  const sourceDesignIds = entity.workItemPlanSourceDesignSpecIds ?? [];
+  const validatorFindings = entity.workItemPlanValidatorFindings ?? [];
+  const dependencyGraph = entity.workItemPlanDependencyGraph ?? [];
+
+  return (
+    <section className="space-y-3 border-t border-[var(--aria-line)] px-4 py-3">
+      <h3 className="text-sm font-semibold text-[var(--aria-ink)]">
+        Work Item Group 明细
+      </h3>
+
+      <div className="text-xs text-[var(--aria-ink-muted)]">
+        Plan status:{" "}
+        <span className="font-medium text-[var(--aria-ink)]">
+          {entity.status}
+        </span>
+      </div>
+
+      <div className="grid gap-2 text-xs text-[var(--aria-ink-muted)]">
+        <SourceIdList title="Source Story Spec" ids={sourceStoryIds} />
+        <SourceIdList title="Source Design Spec" ids={sourceDesignIds} />
+      </div>
+
+      <div>
+        <div className="mb-1 text-xs font-medium text-[var(--aria-ink-muted)]">
+          子 Work Item
+        </div>
+        <div
+          data-testid="work-item-group-children"
+          className="space-y-2"
+        >
+          {childWorkItems.length > 0 ? (
+            childWorkItems.map((item) => (
+              <div
+                key={item.work_item_id}
+                className="rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-2 text-xs"
+              >
+                <div className="font-semibold text-[var(--aria-ink)]">
+                  {item.title}
+                </div>
+                <div className="mt-1 flex flex-wrap gap-1.5 font-mono text-[11px] text-[var(--aria-ink-muted)]">
+                  <span>{item.work_item_id}</span>
+                  <span>kind: {item.kind}</span>
+                  <span>plan_status: {item.plan_status}</span>
+                  <span>execution_status: {item.execution_status}</span>
+                </div>
+              </div>
+            ))
+          ) : (
+            <div className="rounded-md border border-dashed border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-2 text-xs text-[var(--aria-ink-muted)]">
+              暂无子 Work Item
+            </div>
+          )}
+        </div>
+      </div>
+
+      {validatorFindings.length > 0 ? (
+        <div>
+          <div className="mb-1 text-xs font-medium text-[var(--aria-ink-muted)]">
+            Validator Findings
+          </div>
+          <ul className="space-y-1">
+            {validatorFindings.map((finding) => (
+              <li
+                key={finding.finding_id}
+                className="rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-xs text-amber-800"
+              >
+                {finding.message}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      {dependencyGraph.length > 0 ? (
+        <div>
+          <div className="mb-1 text-xs font-medium text-[var(--aria-ink-muted)]">
+            Dependency Graph
+          </div>
+          <ul className="space-y-1">
+            {dependencyGraph.map((edge) => (
+              <li
+                key={`${edge.from_work_item_id}->${edge.to_work_item_id}`}
+                className="font-mono text-xs text-[var(--aria-ink)]"
+              >
+                {edge.from_work_item_id} {"->"} {edge.to_work_item_id}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function SourceIdList({ title, ids }: { title: string; ids: string[] }) {
+  return (
+    <div>
+      <div className="mb-1 font-medium">{title}</div>
+      {ids.length > 0 ? (
+        <div className="flex flex-wrap gap-1">
+          {ids.map((id) => (
+            <span
+              key={id}
+              className="rounded border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-1.5 py-0.5 font-mono text-[11px] text-[var(--aria-ink)]"
+            >
+              {id}
+            </span>
+          ))}
+        </div>
+      ) : (
+        <div className="text-[var(--aria-ink-muted)]">无</div>
+      )}
+    </div>
   );
 }
 

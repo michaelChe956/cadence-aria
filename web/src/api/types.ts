@@ -780,6 +780,7 @@ export type IssueLifecycleResponse = {
   issue: ProductIssue;
   story_specs: StorySpec[];
   design_specs: DesignSpec[];
+  work_item_plans: IssueWorkItemPlanDetailDto[];
   work_items: LifecycleWorkItem[];
   workspace_sessions: WorkspaceSession[];
   coding_attempts: CodingAttempt[];
@@ -951,7 +952,27 @@ export type WorkItemPlanCandidateDto = {
   validator_findings: ValidatorFindingDto[];
 };
 
-export type IssueWorkItemPlanDetailDto = WorkItemPlanDto;
+export type IssueWorkItemPlanDependencyEdgeDto = {
+  from_work_item_id: string;
+  to_work_item_id: string;
+};
+
+export type IssueWorkItemPlanDetailDto = {
+  id: string;
+  issue_id: string;
+  project_id: string;
+  status: string;
+  source_story_spec_ids: string[];
+  source_design_spec_ids: string[];
+  work_item_ids: string[];
+  verification_plan_ids: string[];
+  dependency_graph: IssueWorkItemPlanDependencyEdgeDto[];
+  repository_profile_ref: string | null;
+  options: WorkItemSplitOptions;
+  validator_findings: WorkItemSplitFinding[];
+  created_at: string;
+  updated_at: string;
+};
 
 export type PrepareWorkItemPlanRequest = ProviderWorkspaceConfigInput & {
   title: string;

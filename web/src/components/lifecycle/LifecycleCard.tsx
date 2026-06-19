@@ -166,6 +166,9 @@ function lifecycleCardDeleteLabel(kind: LifecycleCardData["kind"]) {
   if (kind === "design_spec") {
     return "Design Spec";
   }
+  if (kind === "work_item_group") {
+    return "Work Item Group";
+  }
   return "Work Item";
 }
 
@@ -200,6 +203,15 @@ function lifecycleCardVisual(kind: LifecycleCardData["kind"]) {
     },
     work_item: {
       label: "Work Item",
+      token: "amber",
+      cardClassName: "border-amber-200 border-l-amber-500 bg-amber-50/70",
+      hoverClassName: "hover:border-amber-300 hover:bg-amber-50",
+      iconClassName: "text-amber-700",
+      labelClassName: "border-amber-200 bg-amber-100 text-amber-900",
+      metaClassName: "border-amber-200 bg-white/70 text-amber-900",
+    },
+    work_item_group: {
+      label: "Work Item Group",
       token: "amber",
       cardClassName: "border-amber-200 border-l-amber-500 bg-amber-50/70",
       hoverClassName: "hover:border-amber-300 hover:bg-amber-50",

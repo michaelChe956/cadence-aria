@@ -3,6 +3,7 @@ import type {
   ArtifactVersion,
   DesignSpec,
   IssueLifecycleResponse,
+  IssueWorkItemPlanDetailDto,
   LifecycleWorkItem,
   ProductIssue,
   StorySpec,
@@ -56,6 +57,19 @@ export type LifecycleCard =
       sourceIds: string[];
       artifactVersions: ArtifactVersion[];
       raw: LifecycleWorkItem;
+    }
+  | {
+      kind: "work_item_group";
+      id: string;
+      issueId: string;
+      title: string;
+      status: string;
+      version: number | null;
+      preview: string | null;
+      sourceIds: string[];
+      childWorkItemIds: string[];
+      artifactVersions: ArtifactVersion[];
+      raw: IssueWorkItemPlanDetailDto;
     };
 
 export type LifecycleColumns = {
@@ -112,19 +126,19 @@ export function groupLifecycleCards(lifecycles: IssueLifecycleResponse[]): Lifec
         });
       });
 
-      lifecycle.work_items.forEach((item) => {
-        const artifactVersions = item.artifact_versions ?? [];
+      (lifecycle.work_item_plans ?? []).forEach((plan) => {
         columns.work_item.push({
-          kind: "work_item",
-          id: item.work_item_id,
-          issueId: item.issue_id,
-          title: item.title,
-          status: item.execution_status,
-          version: latestArtifactVersion(artifactVersions),
-          preview: null,
-          sourceIds: [...item.story_spec_ids, ...item.design_spec_ids],
-          artifactVersions,
-          raw: item,
+          kind: "work_item_group",
+          id: plan.id,
+          issueId: plan.issue_id,
+          title: "Work Item Group",
+          status: plan.status,
+          version: null,
+          preview: `${plan.work_item_ids.length} 个 Work Item`,
+          sourceIds: [...plan.source_story_spec_ids, ...plan.source_design_spec_ids],
+          childWorkItemIds: [...plan.work_item_ids],
+          artifactVersions: [],
+          raw: plan,
         });
       });
 
@@ -236,13 +250,6 @@ export function workItemWaitingReason(
   }
 
   return null;
-}
-
-function latestArtifactVersion(versions: ArtifactVersion[]): number | null {
-  if (versions.length === 0) {
-    return null;
-  }
-  return Math.max(...versions.map((version) => version.version));
 }
 
 export interface LifecycleWorkbenchState {

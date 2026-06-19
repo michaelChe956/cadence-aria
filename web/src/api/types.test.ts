@@ -9,6 +9,7 @@ import type {
   CodingWsOutMessage,
   GenerateWorkItemsRequest,
   IssueLifecycleResponse,
+  IssueWorkItemPlanDetailDto,
   InternalPrReview,
   LifecycleWorkItem,
   NodeDetail,
@@ -103,6 +104,7 @@ describe("workspace websocket protocol types", () => {
       issue: {} as IssueLifecycleResponse["issue"],
       story_specs: [],
       design_specs: [],
+      work_item_plans: [],
       work_items: [
         {
           work_item_id: "work_item_0001",
@@ -145,6 +147,44 @@ describe("workspace websocket protocol types", () => {
 
     expect(lifecycle.work_items[0].latest_attempt?.attempt_id).toBe("coding_attempt_0001");
     expect(lifecycle.coding_attempts[0].stage).toBe("prepare_context");
+  });
+
+  it("accepts lifecycle responses with issue work item plan detail fields", () => {
+    const plan = {
+      id: "issue_work_item_plan_0001",
+      project_id: "project_0001",
+      issue_id: "issue_0001",
+      source_story_spec_ids: ["story_spec_0001"],
+      source_design_spec_ids: ["design_spec_0001"],
+      options: {
+        include_integration_tests: true,
+        include_e2e_tests: false,
+        force_frontend_backend_split: true,
+        require_execution_plan_confirm: false,
+      },
+      status: "draft",
+      work_item_ids: ["work_item_frontend", "work_item_backend"],
+      repository_profile_ref: null,
+      verification_plan_ids: [],
+      dependency_graph: [],
+      validator_findings: [],
+      created_at: "2026-06-19T00:00:00Z",
+      updated_at: "2026-06-19T00:00:00Z",
+    } satisfies IssueWorkItemPlanDetailDto;
+    const response = {
+      issue: {} as IssueLifecycleResponse["issue"],
+      story_specs: [],
+      design_specs: [],
+      work_item_plans: [plan],
+      work_items: [],
+      workspace_sessions: [],
+      coding_attempts: [],
+    } satisfies IssueLifecycleResponse;
+
+    expect(response.work_item_plans[0].work_item_ids).toEqual([
+      "work_item_frontend",
+      "work_item_backend",
+    ]);
   });
 
   it("describes coding attempt snapshots and websocket messages", () => {
@@ -421,10 +461,9 @@ describe("workspace websocket protocol types", () => {
     };
     const response: PrepareWorkItemPlanResponse = {
       work_item_plan: {
-        plan_id: "work_item_plan_0001",
+        id: "issue_work_item_plan_0001",
         project_id: "project_0001",
         issue_id: "issue_0001",
-        title: request.title,
         source_story_spec_ids: request.story_spec_ids ?? [],
         source_design_spec_ids: request.design_spec_ids ?? [],
         options: {
@@ -438,9 +477,7 @@ describe("workspace websocket protocol types", () => {
         repository_profile_ref: null,
         verification_plan_ids: [],
         dependency_graph: [],
-        created_from_provider_run: null,
         validator_findings: [],
-        review_summary: null,
         created_at: "2026-06-17T00:00:00Z",
         updated_at: "2026-06-17T00:00:00Z",
       },
@@ -459,7 +496,7 @@ describe("workspace websocket protocol types", () => {
       },
     };
 
-    expect(response.work_item_plan.plan_id).toBe("work_item_plan_0001");
+    expect(response.work_item_plan.id).toBe("issue_work_item_plan_0001");
     expect(response.workspace_session.workspace_type).toBe("work_item_plan");
   });
 

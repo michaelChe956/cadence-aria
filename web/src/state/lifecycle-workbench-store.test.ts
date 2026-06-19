@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import type { IssueLifecycleResponse, LifecycleWorkItem } from "../api/types";
+import type {
+  IssueLifecycleResponse,
+  IssueWorkItemPlanDetailDto,
+  LifecycleWorkItem,
+} from "../api/types";
 import {
   groupLifecycleCards,
   lifecycleBlockedReason,
@@ -45,6 +49,33 @@ function lifecycleWorkItem(
     handoff_summary_ref: null,
     completion_commit: null,
     completion_diff_summary_ref: null,
+    ...overrides,
+  };
+}
+
+function makeIssueWorkItemPlan(
+  overrides: Partial<IssueWorkItemPlanDetailDto> = {},
+): IssueWorkItemPlanDetailDto {
+  return {
+    id: "issue_work_item_plan_default",
+    issue_id: "issue_0001",
+    project_id: "project_0001",
+    status: "draft",
+    source_story_spec_ids: [],
+    source_design_spec_ids: [],
+    work_item_ids: [],
+    verification_plan_ids: [],
+    dependency_graph: [],
+    repository_profile_ref: null,
+    options: {
+      include_integration_tests: true,
+      include_e2e_tests: false,
+      force_frontend_backend_split: true,
+      require_execution_plan_confirm: false,
+    },
+    validator_findings: [],
+    created_at: "2026-06-19T00:00:00Z",
+    updated_at: "2026-06-19T00:00:00Z",
     ...overrides,
   };
 }
@@ -113,6 +144,7 @@ const lifecycle: IssueLifecycleResponse = {
       ],
     },
   ],
+  work_item_plans: [],
   work_items: [],
   workspace_sessions: [],
   coding_attempts: [],
@@ -148,6 +180,15 @@ const otherLifecycle: IssueLifecycleResponse = {
       confirmation_status: "confirmed",
       artifact_versions: [],
     },
+  ],
+  work_item_plans: [
+    makeIssueWorkItemPlan({
+      id: "issue_work_item_plan_0002",
+      issue_id: "issue_0002",
+      source_story_spec_ids: ["story_spec_0002"],
+      source_design_spec_ids: ["design_spec_0002"],
+      work_item_ids: ["work_item_0002"],
+    }),
   ],
   work_items: [
     lifecycleWorkItem({
@@ -191,24 +232,63 @@ describe("lifecycle workbench store", () => {
     expect(lifecycle.design_specs[0].story_spec_ids).toEqual(["story_spec_0001"]);
   });
 
-  it("passes story, design, and work item artifact versions through card data", () => {
+  it("groups work items under issue work item plan cards", () => {
+    const columns = groupLifecycleCards([
+      {
+        ...lifecycle,
+        work_item_plans: [
+          makeIssueWorkItemPlan({
+            id: "issue_work_item_plan_0001",
+            work_item_ids: ["work_item_frontend", "work_item_backend"],
+          }),
+        ],
+        work_items: [
+          lifecycleWorkItem({
+            work_item_id: "work_item_frontend",
+            title: "前端登录提示",
+          }),
+          lifecycleWorkItem({
+            work_item_id: "work_item_backend",
+            title: "后端会话状态",
+          }),
+        ],
+      },
+    ]);
+
+    expect(columns.work_item).toHaveLength(1);
+    const card = columns.work_item[0];
+    if (card.kind !== "work_item_group") {
+      throw new Error("unexpected card kind");
+    }
+    expect(card).toMatchObject({
+      kind: "work_item_group",
+      id: "issue_work_item_plan_0001",
+      title: "Work Item Group",
+      status: "draft",
+    });
+    expect(card.childWorkItemIds).toEqual([
+      "work_item_frontend",
+      "work_item_backend",
+    ]);
+  });
+
+  it("passes story and design artifact versions through card data", () => {
     const grouped = groupLifecycleCards([lifecycle, otherLifecycle]);
     const storyCard = grouped.story_spec[0];
     const designCard = grouped.design_spec[0];
-    const workItemCard = grouped.work_item[0];
+    const workItemGroupCard = grouped.work_item[0];
 
     if (
       storyCard.kind !== "story_spec" ||
       designCard.kind !== "design_spec" ||
-      workItemCard.kind !== "work_item"
+      workItemGroupCard.kind !== "work_item_group"
     ) {
       throw new Error("unexpected card kind");
     }
     expect(storyCard.artifactVersions).toEqual(lifecycle.story_specs[0].artifact_versions);
     expect(designCard.artifactVersions).toEqual(lifecycle.design_specs[0].artifact_versions);
-    expect(workItemCard.artifactVersions).toEqual(
-      otherLifecycle.work_items[0].artifact_versions,
-    );
+    expect(workItemGroupCard.artifactVersions).toEqual([]);
+    expect(workItemGroupCard.childWorkItemIds).toEqual(["work_item_0002"]);
   });
 
   it("filters cards by focused issue", () => {

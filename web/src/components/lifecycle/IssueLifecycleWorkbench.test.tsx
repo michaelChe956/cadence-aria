@@ -1,7 +1,12 @@
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { CodingAttempt, LifecycleWorkItem, WorkspaceSession } from "../../api/types";
+import type {
+  CodingAttempt,
+  IssueWorkItemPlanDetailDto,
+  LifecycleWorkItem,
+  WorkspaceSession,
+} from "../../api/types";
 import {
   useLifecycleWorkbenchStore,
   type LifecycleCard as LifecycleCardData,
@@ -23,6 +28,7 @@ vi.mock("../shared/MonacoViewer", () => ({
 type MockLifecycleData = {
   story_specs: Array<Record<string, unknown>>;
   design_specs: Array<Record<string, unknown>>;
+  work_item_plans: IssueWorkItemPlanDetailDto[];
   work_items: Array<Record<string, unknown>>;
   workspace_sessions: WorkspaceSession[];
   coding_attempts: CodingAttempt[];
@@ -65,7 +71,10 @@ describe("IssueLifecycleWorkbench", () => {
     ).toHaveTextContent("前端提示设计");
     expect(
       screen.getByRole("region", { name: "Work Item 内容" }),
-    ).toHaveTextContent("实现提示组件");
+    ).toHaveTextContent("Work Item Group");
+    expect(
+      screen.getByRole("region", { name: "Work Item 内容" }),
+    ).not.toHaveTextContent("实现提示组件");
   });
 
   it("keeps long selected issue descriptions compact and opens the full content in the drawer", async () => {
@@ -384,7 +393,7 @@ describe("IssueLifecycleWorkbench", () => {
     expect(await screen.findByText("还没有 Project")).toBeInTheDocument();
   });
 
-  it("deletes story specs, design specs, and work items from selected issue content", async () => {
+  it("deletes specs from selected issue content and does not expose group deletion", async () => {
     const fetchMock = lifecycleFetch();
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
@@ -426,20 +435,14 @@ describe("IssueLifecycleWorkbench", () => {
       ).not.toHaveTextContent("前端提示设计"),
     );
 
-    await user.click(
-      within(screen.getByRole("region", { name: "Work Item 内容" })).getByRole(
-        "button",
-        { name: "删除 Work Item 实现提示组件" },
-      ),
-    );
-    expect(fetchMock).toHaveBeenCalledWith(
-      "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001",
-      expect.objectContaining({ method: "DELETE" }),
-    );
-    await waitFor(() =>
-      expect(
+    expect(
+      within(
         screen.getByRole("region", { name: "Work Item 内容" }),
-      ).not.toHaveTextContent("实现提示组件"),
+      ).queryByLabelText(/删除/u),
+    ).not.toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      expect.stringMatching(/\/work-items\//u),
+      expect.objectContaining({ method: "DELETE" }),
     );
   });
 
@@ -754,129 +757,159 @@ describe("IssueLifecycleWorkbench", () => {
     });
   });
 
-  it("starts coding from a confirmed work item drawer and opens the coding workspace", async () => {
+  it("opens the work item plan workspace from the group drawer", async () => {
     const fetchMock = lifecycleFetch({ confirmedWorkItem: true });
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
-    const onOpenCodingWorkspace = vi.fn();
+    const onOpenWorkspace = vi.fn();
 
     render(
-      <IssueLifecycleWorkbench onOpenCodingWorkspace={onOpenCodingWorkspace} />,
+      <IssueLifecycleWorkbench onOpenWorkspace={onOpenWorkspace} />,
     );
 
     await user.click(
-      await screen.findByRole("button", { name: "实现提示组件" }),
+      await screen.findByRole("button", { name: "Work Item Group" }),
     );
-    await user.click(screen.getByRole("button", { name: "开始 Coding" }));
+    await user.click(screen.getByTestId("drawer-open-workspace"));
 
     await waitFor(() =>
-      expect(onOpenCodingWorkspace).toHaveBeenCalledWith("coding_attempt_0001"),
+      expect(onOpenWorkspace).toHaveBeenCalledWith(
+        "workspace_session_work_item_plan_0001",
+      ),
     );
-    expect(fetchMock).toHaveBeenCalledWith(
-      "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001/coding-attempts",
-      expect.objectContaining({ method: "POST" }),
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      expect.stringMatching(/\/coding-attempts$/u),
+      expect.anything(),
     );
   });
 
-  it("opens work item drawer artifact preview from lifecycle data", async () => {
-    vi.stubGlobal("fetch", lifecycleFetch({ confirmedWorkItem: true }));
+  it("reveals child work items from the work item group drawer", async () => {
+    vi.stubGlobal(
+      "fetch",
+      lifecycleFetch({
+        confirmedWorkItem: true,
+        workItemPlans: [
+          issueWorkItemPlanRecord({
+            id: "issue_work_item_plan_0001",
+            status: "prepared",
+            work_item_ids: ["work_item_0001"],
+          }),
+        ],
+      }),
+    );
     const user = userEvent.setup();
 
     render(<IssueLifecycleWorkbench />);
 
     await user.click(
-      await screen.findByRole("button", { name: "实现提示组件" }),
-    );
-    expect(await screen.findByTestId("lifecycle-card-drawer")).toHaveTextContent(
-      "实现提示组件",
+      await screen.findByRole("button", { name: "Work Item Group" }),
     );
 
-    await user.click(screen.getByRole("button", { name: "查看 Markdown 内容" }));
-
-    expect(screen.getByText("版本 v1 预览")).toBeInTheDocument();
-    expect(screen.getByTestId("monaco-viewer")).toHaveTextContent(
-      "实现会话过期提示组件",
-    );
+    const children = await screen.findByTestId("work-item-group-children");
+    expect(children).toHaveTextContent("实现提示组件");
+    expect(children).toHaveTextContent("work_item_0001");
+    expect(children).toHaveTextContent("backend");
+    expect(children).toHaveTextContent("confirmed");
+    expect(children).toHaveTextContent("planning");
+    expect(screen.queryByRole("button", { name: "开始 Coding" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("drawer-open-coding-workspace"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByTestId("drawer-delete-work-item")).not.toBeInTheDocument();
   });
 
-  it("deletes a work item from the drawer and removes its coding workspace content", async () => {
-    const fetchMock = lifecycleFetch({ confirmedWorkItem: true });
-    vi.stubGlobal("fetch", fetchMock);
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
-    const user = userEvent.setup();
-
-    render(<IssueLifecycleWorkbench />);
-
-    await user.click(
-      await screen.findByRole("button", { name: "实现提示组件" }),
-    );
-    expect(await screen.findByTestId("lifecycle-card-drawer")).toHaveTextContent(
-      "实现提示组件",
-    );
-
-    await user.click(screen.getByTestId("drawer-delete-work-item"));
-
-    expect(confirm).toHaveBeenCalledWith(
-      expect.stringContaining("Coding Workspace、日志和 worktree"),
-    );
-    expect(fetchMock).toHaveBeenCalledWith(
-      "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001",
-      expect.objectContaining({ method: "DELETE" }),
-    );
-    await waitFor(() =>
-      expect(screen.queryByTestId("lifecycle-card-drawer")).not.toBeInTheDocument(),
-    );
-    confirm.mockRestore();
-  });
-
-  it("does not clear drawer URL focus while handing off to the coding workspace route", async () => {
+  it("keeps drawer URL focus while opening the work item plan workspace", async () => {
     vi.stubGlobal("fetch", lifecycleFetch({ confirmedWorkItem: true }));
     const user = userEvent.setup();
     const onDrawerFocusChange = vi.fn();
-    const onOpenCodingWorkspace = vi.fn();
+    const onOpenWorkspace = vi.fn();
 
     render(
       <IssueLifecycleWorkbench
-        focusEntityId="work_item_0001"
+        focusEntityId="issue_work_item_plan_0001"
         onDrawerFocusChange={onDrawerFocusChange}
-        onOpenCodingWorkspace={onOpenCodingWorkspace}
+        onOpenWorkspace={onOpenWorkspace}
       />,
     );
 
-    await screen.findByRole("button", { name: "开始 Coding" });
+    await screen.findByTestId("drawer-open-workspace");
     onDrawerFocusChange.mockClear();
 
-    await user.click(screen.getByRole("button", { name: "开始 Coding" }));
+    await user.click(screen.getByTestId("drawer-open-workspace"));
 
     await waitFor(() =>
-      expect(onOpenCodingWorkspace).toHaveBeenCalledWith("coding_attempt_0001"),
+      expect(onOpenWorkspace).toHaveBeenCalledWith(
+        "workspace_session_work_item_plan_0001",
+      ),
     );
     expect(onDrawerFocusChange).not.toHaveBeenCalledWith(null);
   });
 
-  it("marks confirmed work item cards as ready for coding", async () => {
-    vi.stubGlobal("fetch", lifecycleFetch({ confirmedWorkItem: true }));
-
-    render(<IssueLifecycleWorkbench />);
-
-    const workItemColumn = await screen.findByRole("region", {
-      name: "Work Item 内容",
-    });
-    expect(workItemColumn).toHaveTextContent("可编码");
-  });
-
-  it("shows generated split work items and skipped integration risk", async () => {
+  it("shows one work item group and reveals child work items in the drawer", async () => {
     vi.stubGlobal(
       "fetch",
-      lifecycleFetch({ splitWorkItems: true, skippedIntegrationRisk: true }),
+      lifecycleFetch({
+        splitWorkItems: true,
+        workItemPlans: [
+          issueWorkItemPlanRecord({
+            id: "issue_work_item_plan_0001",
+            status: "prepared",
+            work_item_ids: ["work_item_backend", "work_item_frontend"],
+            validator_findings: [
+              {
+                finding_id: "finding_0001",
+                level: "warning",
+                code: "integration_or_e2e_skipped_risk",
+                message: "需要补充贯通测试风险说明",
+                affected_scopes: ["web/**"],
+              },
+            ],
+            dependency_graph: [
+              {
+                from_work_item_id: "work_item_backend",
+                to_work_item_id: "work_item_frontend",
+              },
+            ],
+          }),
+        ],
+      }),
     );
+    const user = userEvent.setup();
 
     render(<IssueLifecycleWorkbench />);
+    await user.click(await screen.findByRole("button", { name: "登录会话过期" }));
 
-    expect(await screen.findByText("后端 API")).toBeInTheDocument();
-    expect(screen.getByText("前端 UI")).toBeInTheDocument();
-    expect(screen.getByText(/等待依赖完成/)).toBeInTheDocument();
-    expect(screen.getByText(/跳过贯通测试/)).toBeInTheDocument();
+    const workItemRegion = screen.getByRole("region", { name: "Work Item 内容" });
+    expect(workItemRegion).toHaveTextContent("Work Item Group");
+    expect(workItemRegion).not.toHaveTextContent("后端 API");
+    expect(workItemRegion).not.toHaveTextContent("前端 UI");
+
+    await user.click(
+      within(workItemRegion).getByRole("button", { name: "Work Item Group" }),
+    );
+
+    const children = await screen.findByTestId("work-item-group-children");
+    expect(children).toHaveTextContent("后端 API");
+    expect(children).toHaveTextContent("work_item_backend");
+    expect(children).toHaveTextContent("frontend");
+    expect(children).toHaveTextContent("confirmed");
+    expect(children).toHaveTextContent("pending");
+    expect(children).toHaveTextContent("前端 UI");
+    expect(screen.getByTestId("lifecycle-card-drawer")).toHaveTextContent(
+      "story_spec_0001",
+    );
+    expect(screen.getByTestId("lifecycle-card-drawer")).toHaveTextContent(
+      "design_spec_0001",
+    );
+    expect(screen.getByTestId("lifecycle-card-drawer")).toHaveTextContent(
+      "prepared",
+    );
+    expect(screen.getByTestId("lifecycle-card-drawer")).toHaveTextContent(
+      "需要补充贯通测试风险说明",
+    );
+    expect(screen.getByTestId("lifecycle-card-drawer")).toHaveTextContent(
+      "work_item_backend -> work_item_frontend",
+    );
   });
 });
 
@@ -921,6 +954,7 @@ function lifecycleFetch(options?: {
   repositoriesByProject?: Record<string, ReturnType<typeof repositoryRecord>[]>;
   projectResponses?: Array<Promise<Response>>;
   splitWorkItems?: boolean;
+  workItemPlans?: IssueWorkItemPlanDetailDto[];
   skippedIntegrationRisk?: boolean;
 }) {
   const projects = [
@@ -951,6 +985,7 @@ function lifecycleFetch(options?: {
       options?.emptyLifecycle,
       options?.confirmedWorkItem,
       options?.splitWorkItems,
+      options?.workItemPlans,
       options?.skippedIntegrationRisk,
     );
     lifecycleByIssue.set(issueId, initial);
@@ -1322,11 +1357,10 @@ function lifecycleFetch(options?: {
         require_execution_plan_confirm?: boolean;
       };
       const lifecycle = lifecycleData(issueId);
-      const workItemPlan = {
-        plan_id: "work_item_plan_0001",
+      const workItemPlan = issueWorkItemPlanRecord({
+        id: "issue_work_item_plan_0001",
         project_id: projectId,
         issue_id: issueId,
-        title: payload.title,
         source_story_spec_ids: payload.story_spec_ids,
         source_design_spec_ids: payload.design_spec_ids,
         options: {
@@ -1337,20 +1371,12 @@ function lifecycleFetch(options?: {
           require_execution_plan_confirm:
             payload.require_execution_plan_confirm ?? false,
         },
-        status: "prepared",
         work_item_ids: ["work_item_0001"],
-        repository_profile_ref: null,
-        verification_plan_ids: [],
-        dependency_graph: [],
-        created_from_provider_run: null,
-        validator_findings: [],
-        review_summary: null,
-        created_at: "2026-05-20T00:00:00Z",
-        updated_at: "2026-05-20T00:00:00Z",
-      };
+        status: "prepared",
+      });
       const session = workspaceSessionRecord(
         "work_item_plan",
-        "work_item_plan_0001",
+        workItemPlan.id,
         "workspace_session_work_item_plan_0001",
         {
           author_provider: payload.author_provider,
@@ -1361,6 +1387,7 @@ function lifecycleFetch(options?: {
           status: "open",
         },
       );
+      lifecycle.work_item_plans = [workItemPlan];
       lifecycle.workspace_sessions.push(session);
       return jsonResponse({
         work_item_plan: workItemPlan,
@@ -1486,6 +1513,7 @@ function lifecycleFetch(options?: {
           },
           story_specs: [],
           design_specs: [],
+          work_item_plans: [],
           work_items: [],
           workspace_sessions: [],
           coding_attempts: [],
@@ -1512,6 +1540,7 @@ function lifecycleFetch(options?: {
         },
         story_specs: data.story_specs,
         design_specs: data.design_specs,
+        work_item_plans: data.work_item_plans,
         work_items: data.work_items,
         workspace_sessions: data.workspace_sessions,
         coding_attempts: data.coding_attempts,
@@ -1612,12 +1641,14 @@ function initialLifecycleData(
   empty: boolean | undefined,
   confirmedWorkItem: boolean | undefined,
   splitWorkItems: boolean | undefined,
+  workItemPlans: IssueWorkItemPlanDetailDto[] | undefined,
   skippedIntegrationRisk: boolean | undefined,
 ): MockLifecycleData {
   if (empty) {
     return {
       story_specs: [],
       design_specs: [],
+      work_item_plans: [],
       work_items: [],
       workspace_sessions: [],
       coding_attempts: [],
@@ -1676,6 +1707,16 @@ function initialLifecycleData(
         }),
       ];
 
+  const defaultWorkItemPlans =
+    workItems.length > 0
+      ? [
+          issueWorkItemPlanRecord({
+            issue_id: issueId,
+            work_item_ids: workItems.map((item) => item.work_item_id),
+          }),
+        ]
+      : [];
+
   return {
     story_specs: [
       {
@@ -1701,6 +1742,7 @@ function initialLifecycleData(
         artifact_versions: [],
       },
     ],
+    work_item_plans: workItemPlans ?? defaultWorkItemPlans,
     work_items: workItems,
     workspace_sessions: [
       workspaceSessionRecord("story", storyId, "workspace_session_story_0001"),
@@ -1713,6 +1755,11 @@ function initialLifecycleData(
         "work_item",
         "work_item_0001",
         "workspace_session_work_item_0001",
+      ),
+      workspaceSessionRecord(
+        "work_item_plan",
+        "issue_work_item_plan_0001",
+        "workspace_session_work_item_plan_0001",
       ),
     ],
     coding_attempts: [],
@@ -1735,6 +1782,33 @@ function codingAttemptRecord(workItemId: string): CodingAttempt {
     review_request_url: null,
     created_at: "2026-05-23T00:00:00Z",
     updated_at: "2026-05-23T00:00:00Z",
+  };
+}
+
+function issueWorkItemPlanRecord(
+  overrides: Partial<IssueWorkItemPlanDetailDto> = {},
+): IssueWorkItemPlanDetailDto {
+  return {
+    id: "issue_work_item_plan_0001",
+    issue_id: "issue_0001",
+    project_id: "project_0001",
+    status: "draft",
+    source_story_spec_ids: ["story_spec_0001"],
+    source_design_spec_ids: ["design_spec_0001"],
+    work_item_ids: ["work_item_0001"],
+    verification_plan_ids: [],
+    dependency_graph: [],
+    repository_profile_ref: null,
+    options: {
+      include_integration_tests: true,
+      include_e2e_tests: false,
+      force_frontend_backend_split: true,
+      require_execution_plan_confirm: false,
+    },
+    validator_findings: [],
+    created_at: "2026-05-20T00:00:00Z",
+    updated_at: "2026-05-20T00:00:00Z",
+    ...overrides,
   };
 }
 
