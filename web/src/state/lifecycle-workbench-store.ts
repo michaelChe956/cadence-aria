@@ -126,26 +126,44 @@ export function groupLifecycleCards(lifecycles: IssueLifecycleResponse[]): Lifec
         });
       });
 
-      (lifecycle.work_item_plans ?? []).forEach((plan) => {
+      const workItemPlan = latestIssueWorkItemPlan(lifecycle.work_item_plans ?? []);
+      if (workItemPlan) {
         columns.work_item.push({
           kind: "work_item_group",
-          id: plan.id,
-          issueId: plan.issue_id,
+          id: workItemPlan.id,
+          issueId: workItemPlan.issue_id,
           title: "Work Item Group",
-          status: plan.status,
+          status: workItemPlan.status,
           version: null,
-          preview: `${plan.work_item_ids.length} 个 Work Item`,
-          sourceIds: [...plan.source_story_spec_ids, ...plan.source_design_spec_ids],
-          childWorkItemIds: [...plan.work_item_ids],
+          preview: `${workItemPlan.work_item_ids.length} 个 Work Item`,
+          sourceIds: [
+            ...workItemPlan.source_story_spec_ids,
+            ...workItemPlan.source_design_spec_ids,
+          ],
+          childWorkItemIds: [...workItemPlan.work_item_ids],
           artifactVersions: [],
-          raw: plan,
+          raw: workItemPlan,
         });
-      });
+      }
 
       return columns;
     },
     { issue: [], story_spec: [], design_spec: [], work_item: [] },
   );
+}
+
+function latestIssueWorkItemPlan(plans: IssueWorkItemPlanDetailDto[]) {
+  return plans.reduce<IssueWorkItemPlanDetailDto | null>((latest, plan) => {
+    if (!latest) {
+      return plan;
+    }
+    return planTimestamp(plan) >= planTimestamp(latest) ? plan : latest;
+  }, null);
+}
+
+function planTimestamp(plan: IssueWorkItemPlanDetailDto) {
+  const parsed = Date.parse(plan.updated_at || plan.created_at);
+  return Number.isNaN(parsed) ? 0 : parsed;
 }
 
 export function visibleLifecycle(

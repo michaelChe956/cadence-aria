@@ -272,6 +272,42 @@ describe("lifecycle workbench store", () => {
     ]);
   });
 
+  it("shows only the latest work item group for an issue with multiple plans", () => {
+    const columns = groupLifecycleCards([
+      {
+        ...lifecycle,
+        work_item_plans: [
+          makeIssueWorkItemPlan({
+            id: "issue_work_item_plan_old",
+            work_item_ids: ["work_item_old"],
+            updated_at: "2026-06-18T00:00:00Z",
+          }),
+          makeIssueWorkItemPlan({
+            id: "issue_work_item_plan_latest",
+            work_item_ids: ["work_item_latest_frontend", "work_item_latest_backend"],
+            updated_at: "2026-06-19T00:00:00Z",
+          }),
+        ],
+        work_items: [
+          lifecycleWorkItem({ work_item_id: "work_item_old" }),
+          lifecycleWorkItem({ work_item_id: "work_item_latest_frontend" }),
+          lifecycleWorkItem({ work_item_id: "work_item_latest_backend" }),
+        ],
+      },
+    ]);
+
+    expect(columns.work_item).toHaveLength(1);
+    const card = columns.work_item[0];
+    if (card.kind !== "work_item_group") {
+      throw new Error("unexpected card kind");
+    }
+    expect(card.id).toBe("issue_work_item_plan_latest");
+    expect(card.childWorkItemIds).toEqual([
+      "work_item_latest_frontend",
+      "work_item_latest_backend",
+    ]);
+  });
+
   it("passes story and design artifact versions through card data", () => {
     const grouped = groupLifecycleCards([lifecycle, otherLifecycle]);
     const storyCard = grouped.story_spec[0];

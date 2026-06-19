@@ -999,7 +999,7 @@ describe("workspace ws store", () => {
       timeline_nodes: [
         {
           node_id: "timeline_node_work_item_plan_author",
-          node_type: "author_run",
+          node_type: "start_generation",
           agent: "claude_code",
           stage: "running",
           round: null,
@@ -1022,7 +1022,7 @@ describe("workspace ws store", () => {
       timeline_node_details: {
         timeline_node_work_item_plan_author: makeNodeDetail({
           node_id: "timeline_node_work_item_plan_author",
-          node_type: "author_run",
+          node_type: "start_generation",
           agent_role: "author",
           provider: { name: "claude_code", model: "claude-opus-4" },
           streaming_content: "正在生成 Work Item Plan",

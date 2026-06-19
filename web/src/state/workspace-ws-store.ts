@@ -1150,7 +1150,7 @@ function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
       continue;
     }
 
-    const role = chatRoleForNode(node);
+    const role = chatRoleForNode(node, state.workspaceType, detail);
     if (!role) {
       const marker = timelineAnchorEntry(node, detail);
       if (marker) {
@@ -1439,8 +1439,19 @@ function providerSummaryEntries(
   return entries;
 }
 
-function chatRoleForNode(node: TimelineNode): ChatEntryRole | null {
+function chatRoleForNode(
+  node: TimelineNode,
+  workspaceType: string | null,
+  detail: TimelineNodeDetail,
+): ChatEntryRole | null {
   if (node.node_type === "author_run" || node.node_type === "revision") {
+    return "author";
+  }
+  if (
+    workspaceType === "work_item_plan" &&
+    node.node_type === "start_generation" &&
+    (detail.streaming_content.trim().length > 0 || detail.messages.length > 0)
+  ) {
     return "author";
   }
   if (node.node_type === "reviewer_run") {

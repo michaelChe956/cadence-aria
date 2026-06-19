@@ -201,6 +201,12 @@ export function useWorkspaceWs(sessionId: string | null) {
       case "stream_chunk":
         {
           const nodeId = msg.node_id as string | null | undefined;
+          if (
+            typeof nodeId === "string" &&
+            invalidatedPreStageNodeIdsRef.current.has(nodeId)
+          ) {
+            break;
+          }
           const nodeStage = nodeId
             ? store.timelineNodes.find((node) => node.node_id === nodeId)?.stage
             : null;

@@ -660,6 +660,100 @@ describe("useWorkspaceWs", () => {
     ).toEqual([]);
   });
 
+  it("rejects stale chunks for an invalidated node after a new run enters running", () => {
+    vi.useFakeTimers();
+    const harness = renderWorkspaceHook();
+
+    act(() => {
+      harness.ws.receive({
+        type: "session_state",
+        session_id: "session_work_item_plan_progress",
+        workspace_type: "work_item_plan",
+        stage: "prepare_context",
+        messages: [],
+        checkpoints: [],
+        artifact: null,
+        providers: { author: "claude_code", reviewer: "codex" },
+        timeline_nodes: [
+          {
+            node_id: "timeline_node_old_author",
+            node_type: "author_run",
+            agent: "claude_code",
+            stage: "running",
+            round: null,
+            status: "active",
+            title: "旧 Work Item Plan 生成",
+            summary: null,
+            started_at: "2026-06-19T10:00:00Z",
+            completed_at: null,
+            duration_ms: null,
+            artifact_ref: null,
+            provider_config_snapshot: {
+              author: "claude_code",
+              reviewer: "codex",
+              review_rounds: 1,
+            },
+          },
+        ],
+        active_node_id: "timeline_node_old_author",
+        artifact_versions: [],
+        timeline_node_details: {},
+        active_run_id: "run-old",
+      });
+      harness.ws.receive({
+        type: "stream_chunk",
+        role: "author",
+        content: "旧 run 初始输出",
+        node_id: "timeline_node_old_author",
+      });
+    });
+    act(() => {
+      vi.advanceTimersByTime(80);
+    });
+
+    act(() => {
+      harness.ws.receive({ type: "stage_change", stage: "prepare_context" });
+      harness.ws.receive({
+        type: "timeline_node_created",
+        node: {
+          node_id: "timeline_node_new_author",
+          node_type: "author_run",
+          agent: "claude_code",
+          stage: "running",
+          round: null,
+          status: "active",
+          title: "新 Work Item Plan 生成",
+          summary: null,
+          started_at: "2026-06-19T10:01:00Z",
+          completed_at: null,
+          duration_ms: null,
+          artifact_ref: null,
+          provider_config_snapshot: {
+            author: "claude_code",
+            reviewer: "codex",
+            review_rounds: 1,
+          },
+        },
+      });
+      harness.ws.receive({ type: "stage_change", stage: "running" });
+      harness.ws.receive({
+        type: "stream_chunk",
+        role: "author",
+        content: "旧 run 迟到输出",
+        node_id: "timeline_node_old_author",
+      });
+    });
+    act(() => {
+      vi.advanceTimersByTime(80);
+    });
+
+    const oldStreamEntry = useWorkspaceStore
+      .getState()
+      .chatEntries.find((entry) => entry.node_id === "timeline_node_old_author");
+    expect(oldStreamEntry?.content).toBe("旧 run 初始输出");
+    expect(useWorkspaceStore.getState().streamBuffers.timeline_node_old_author?.chunks).toEqual([]);
+  });
+
   it("stores timeline websocket messages by node", () => {
     const harness = renderWorkspaceHook();
 
