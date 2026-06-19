@@ -208,8 +208,13 @@ export function useWorkspaceWs(sessionId: string | null) {
             nodeId === store.activeNodeId &&
             typeof nodeStage === "string" &&
             ACTIVE_PROVIDER_STAGES.has(nodeStage);
+          const hasVisitedProviderStage = store.visitedStages.some((stage) =>
+            ACTIVE_PROVIDER_STAGES.has(stage),
+          );
+          const isPendingInitialProviderNode =
+            store.stage === "prepare_context" && !hasVisitedProviderStage && isActiveProviderNode;
           const acceptsActiveProviderChunk =
-            ACTIVE_PROVIDER_STAGES.has(store.stage) || isActiveProviderNode;
+            ACTIVE_PROVIDER_STAGES.has(store.stage) || isPendingInitialProviderNode;
           if (!acceptsActiveProviderChunk) {
             break;
           }
