@@ -11,6 +11,7 @@ import {
   deleteRepository,
   deleteStorySpec,
   deleteWorkItem,
+  deleteWorkItemPlan,
   generateDesignSpecs,
   generateStorySpecs,
   getIssueLifecycle,
@@ -415,6 +416,12 @@ export function IssueLifecycleWorkbench({
       );
     } else if (card.kind === "work_item") {
       deleteRequest = deleteWorkItem(selectedProjectId, card.issueId, card.id);
+    } else if (card.kind === "work_item_group") {
+      deleteRequest = deleteWorkItemPlan(
+        selectedProjectId,
+        card.issueId,
+        card.id,
+      );
     } else {
       setError("Issue 请从 Issue 卡片列表删除");
       return;
@@ -439,13 +446,15 @@ export function IssueLifecycleWorkbench({
     }
   }
 
-  function handleDeleteWorkItemFromDrawer(card: LifecycleCardData) {
-    if (card.kind !== "work_item") {
+  function handleDeleteLifecycleCardFromDrawer(card: LifecycleCardData) {
+    if (card.kind !== "work_item" && card.kind !== "work_item_group") {
       return;
     }
-    const confirmed = window.confirm(
-      "删除 Work Item 会同时删除关联的 Coding Workspace、日志和 worktree，且无法撤销。",
-    );
+    const message =
+      card.kind === "work_item_group"
+        ? "删除 Work Item Group 会同时删除子 Work Item、关联 Coding Workspace、日志和 worktree，且无法撤销。"
+        : "删除 Work Item 会同时删除关联的 Coding Workspace、日志和 worktree，且无法撤销。";
+    const confirmed = window.confirm(message);
     if (!confirmed) {
       return;
     }
@@ -655,8 +664,9 @@ export function IssueLifecycleWorkbench({
                 : undefined
             }
             onDelete={
-              focusedEntity.kind === "work_item"
-                ? () => handleDeleteWorkItemFromDrawer(focusedEntity)
+              focusedEntity.kind === "work_item" ||
+              focusedEntity.kind === "work_item_group"
+                ? () => handleDeleteLifecycleCardFromDrawer(focusedEntity)
                 : undefined
             }
           />
@@ -934,9 +944,7 @@ function LifecycleContentSection({
                 deleting={deletingKey === lifecycleCardKey(card)}
                 onSelect={() => onSelect(card)}
                 onDelete={
-                  card.kind === "work_item_group"
-                    ? undefined
-                    : () => onDelete(card)
+                  () => onDelete(card)
                 }
                 allWorkItems={allWorkItems}
               />

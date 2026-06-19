@@ -1368,33 +1368,64 @@ pub async fn delete_work_item(
 ) -> ApiResult<Json<serde_json::Value>> {
     let app_paths = product_app_paths(&state);
     let store = LifecycleStore::new(app_paths.clone());
+    delete_work_item_with_cleanup(&app_paths, &store, &project_id, &issue_id, &work_item_id)
+        .await?;
+    Ok(Json(json!({"status":"deleted"})))
+}
+
+pub async fn delete_work_item_plan(
+    State(state): State<WebAppState>,
+    Path((project_id, issue_id, plan_id)): Path<(String, String, String)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let app_paths = product_app_paths(&state);
+    let store = LifecycleStore::new(app_paths.clone());
+    let plan = store
+        .get_issue_work_item_plan(&project_id, &issue_id, &plan_id)
+        .map_err(product_store_api_error)?;
+    for work_item_id in &plan.work_item_ids {
+        delete_work_item_with_cleanup(&app_paths, &store, &project_id, &issue_id, work_item_id)
+            .await?;
+    }
+    store
+        .delete_issue_work_item_plan(&project_id, &issue_id, &plan_id)
+        .map_err(product_store_api_error)?;
+    Ok(Json(json!({"status":"deleted"})))
+}
+
+async fn delete_work_item_with_cleanup(
+    app_paths: &ProductAppPaths,
+    store: &LifecycleStore,
+    project_id: &str,
+    issue_id: &str,
+    work_item_id: &str,
+) -> ApiResult<()> {
     let work_item = store
-        .list_work_items(&project_id, &issue_id)
+        .list_work_items(project_id, issue_id)
         .map_err(product_store_api_error)?
         .into_iter()
         .find(|work_item| work_item.id == work_item_id)
         .ok_or_else(|| {
             product_store_api_error(ProductStoreError::NotFound {
                 kind: "work_item",
-                id: work_item_id.clone(),
+                id: work_item_id.to_string(),
             })
         })?;
-    let repository = find_repository(&app_paths, &project_id, &work_item.repository_id)?;
-    let coding_store = CodingAttemptStore::new(app_paths);
+    let repository = find_repository(app_paths, project_id, &work_item.repository_id)?;
+    let coding_store = CodingAttemptStore::new(app_paths.clone());
     let attempts = coding_store
-        .list_attempts_for_work_item(&project_id, &issue_id, &work_item_id)
+        .list_attempts_for_work_item(project_id, issue_id, work_item_id)
         .map_err(product_store_api_error)?;
     for attempt in attempts {
         let attempt = abort_attempt_if_active(&coding_store, attempt)?;
         cleanup_coding_attempt_workspace(&repository, &attempt).await?;
     }
     coding_store
-        .delete_attempts_for_work_item(&project_id, &issue_id, &work_item_id)
+        .delete_attempts_for_work_item(project_id, issue_id, work_item_id)
         .map_err(product_store_api_error)?;
     store
-        .delete_work_item(&project_id, &issue_id, &work_item_id)
+        .delete_work_item(project_id, issue_id, work_item_id)
         .map_err(product_store_api_error)?;
-    Ok(Json(json!({"status":"deleted"})))
+    Ok(())
 }
 
 pub async fn list_issues(State(state): State<WebAppState>) -> ApiResult<Json<IssueListResponse>> {

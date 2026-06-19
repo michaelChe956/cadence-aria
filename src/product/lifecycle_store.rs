@@ -491,6 +491,37 @@ impl LifecycleStore {
         list_json_records(&self.issue_work_item_plans_root(project_id, issue_id))
     }
 
+    pub fn delete_issue_work_item_plan(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+    ) -> Result<IssueWorkItemPlan, ProductStoreError> {
+        let plan = self.get_issue_work_item_plan(project_id, issue_id, plan_id)?;
+
+        delete_required_file(
+            &self
+                .issue_work_item_plans_root(project_id, issue_id)
+                .join(format!("{plan_id}.json")),
+            "issue_work_item_plan",
+            plan_id,
+        )?;
+        self.delete_workspace_sessions_for_entity(
+            project_id,
+            issue_id,
+            plan_id,
+            WorkspaceType::WorkItemPlan,
+        )?;
+        for verification_plan_id in &plan.verification_plan_ids {
+            self.delete_verification_plan(project_id, issue_id, verification_plan_id)?;
+        }
+        if let Some(repository_profile_id) = &plan.repository_profile_ref {
+            self.delete_repository_profile(project_id, issue_id, repository_profile_id)?;
+        }
+
+        Ok(plan)
+    }
+
     pub fn confirm_issue_work_item_plan(
         &self,
         project_id: &str,

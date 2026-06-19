@@ -124,6 +124,14 @@ export function LifecycleCardDrawer({
   const canShowDiff = selectedVersionIndex > 0 && selectedArtifact !== null && latestVersion !== null;
   const nextActionLabel = entity.status === "confirmed" ? NEXT_ACTION_LABELS[entity.kind] : null;
   const codingActionLabel = entity.latestAttempt ? "进入 Coding Workspace" : "开始 Coding";
+  const deleteActionLabel =
+    entity.kind === "work_item_group"
+      ? "删除 Work Item Group"
+      : "删除 Work Item";
+  const deleteActionTestId =
+    entity.kind === "work_item_group"
+      ? "drawer-delete-work-item-group"
+      : "drawer-delete-work-item";
   const Icon = iconForKind(entity.kind);
 
   useEffect(() => {
@@ -371,15 +379,16 @@ export function LifecycleCardDrawer({
             {codingActionLabel}
           </button>
         ) : null}
-        {entity.kind === "work_item" && onDelete ? (
+        {(entity.kind === "work_item" || entity.kind === "work_item_group") &&
+        onDelete ? (
           <button
-            data-testid="drawer-delete-work-item"
+            data-testid={deleteActionTestId}
             type="button"
             onClick={onDelete}
             className="inline-flex h-9 w-full items-center justify-center gap-2 rounded-md border border-[var(--aria-danger)] bg-white px-3 text-sm font-semibold text-[var(--aria-danger)] hover:bg-red-50"
           >
             <Trash2 className="h-4 w-4" />
-            删除 Work Item
+            {deleteActionLabel}
           </button>
         ) : null}
       </footer>

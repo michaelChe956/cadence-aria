@@ -9,6 +9,7 @@ import {
   deleteRepository,
   deleteStorySpec,
   deleteWorkItem,
+  deleteWorkItemPlan,
   deleteCodingAttempt,
   generateDesignSpecs,
   generateStorySpecs,
@@ -193,6 +194,11 @@ describe("api client", () => {
       "issue/with space",
       "work/with space",
     );
+    await deleteWorkItemPlan(
+      "project/with space",
+      "issue/with space",
+      "plan/with space",
+    );
     await deleteCodingAttempt("attempt/with space");
 
     expect(calls.map((call) => call.input)).toEqual([
@@ -202,6 +208,7 @@ describe("api client", () => {
       "/api/projects/project%2Fwith%20space/issues/issue%2Fwith%20space/story-specs/story%2Fwith%20space",
       "/api/projects/project%2Fwith%20space/issues/issue%2Fwith%20space/design-specs/design%2Fwith%20space",
       "/api/projects/project%2Fwith%20space/issues/issue%2Fwith%20space/work-items/work%2Fwith%20space",
+      "/api/projects/project%2Fwith%20space/issues/issue%2Fwith%20space/work-item-plans/plan%2Fwith%20space",
       "/api/coding-attempts/attempt%2Fwith%20space",
     ]);
     expect(calls.every((call) => call.init?.method === "DELETE")).toBe(true);

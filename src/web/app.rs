@@ -81,6 +81,10 @@ pub fn build_web_router(state: WebAppState) -> Router {
             post(handlers::prepare_work_item_plan),
         )
         .route(
+            "/api/projects/{project_id}/issues/{issue_id}/work-item-plans/{plan_id}",
+            delete(handlers::delete_work_item_plan),
+        )
+        .route(
             "/api/projects/{project_id}/issues/{issue_id}/work-items/{work_item_id}",
             delete(handlers::delete_work_item),
         )

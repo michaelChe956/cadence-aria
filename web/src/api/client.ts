@@ -189,6 +189,19 @@ export function deleteWorkItem(
   );
 }
 
+export function deleteWorkItemPlan(
+  projectId: string,
+  issueId: string,
+  planId: string,
+): Promise<{ status: string }> {
+  return requestJson<{ status: string }>(
+    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/work-item-plans/${encodeURIComponent(planId)}`,
+    {
+      method: "DELETE",
+    },
+  );
+}
+
 export function getIssueLifecycle(
   issueId: string,
   projectId: string,

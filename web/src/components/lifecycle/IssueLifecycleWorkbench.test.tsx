@@ -393,7 +393,7 @@ describe("IssueLifecycleWorkbench", () => {
     expect(await screen.findByText("还没有 Project")).toBeInTheDocument();
   });
 
-  it("deletes specs from selected issue content and does not expose group deletion", async () => {
+  it("deletes specs and work item groups from selected issue content", async () => {
     const fetchMock = lifecycleFetch();
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
@@ -435,14 +435,20 @@ describe("IssueLifecycleWorkbench", () => {
       ).not.toHaveTextContent("前端提示设计"),
     );
 
-    expect(
-      within(
-        screen.getByRole("region", { name: "Work Item 内容" }),
-      ).queryByLabelText(/删除/u),
-    ).not.toBeInTheDocument();
-    expect(fetchMock).not.toHaveBeenCalledWith(
-      expect.stringMatching(/\/work-items\//u),
+    await user.click(
+      within(screen.getByRole("region", { name: "Work Item 内容" })).getByRole(
+        "button",
+        { name: /删除 Work Item Group/u },
+      ),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/project_0001/issues/issue_0001/work-item-plans/issue_plan_0001",
       expect.objectContaining({ method: "DELETE" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("region", { name: "Work Item 内容" }),
+      ).not.toHaveTextContent("Work Item Group"),
     );
   });
 
@@ -935,6 +941,36 @@ describe("IssueLifecycleWorkbench", () => {
     );
   });
 
+  it("deletes the work item group from the group drawer", async () => {
+    const fetchMock = lifecycleFetch({ confirmedWorkItem: true });
+    vi.stubGlobal("fetch", fetchMock);
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Work Item Group" }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "删除 Work Item Group" }),
+    );
+
+    expect(confirmSpy).toHaveBeenCalledWith(
+      expect.stringContaining("删除 Work Item Group"),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/project_0001/issues/issue_0001/work-item-plans/issue_plan_0001",
+      expect.objectContaining({ method: "DELETE" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("region", { name: "Work Item 内容" }),
+      ).not.toHaveTextContent("Work Item Group"),
+    );
+    confirmSpy.mockRestore();
+  });
+
   it("reveals child work items from the work item group drawer", async () => {
     vi.stubGlobal(
       "fetch",
@@ -1290,6 +1326,40 @@ function lifecycleFetch(options?: {
             session.workspace_type === "design" &&
             session.entity_id === designSpecId
           ),
+      );
+      return jsonResponse({ status: "deleted" });
+    }
+    const workItemPlanDeleteMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/issues\/([^/]+)\/work-item-plans\/([^/]+)$/,
+    );
+    if (workItemPlanDeleteMatch && init?.method === "DELETE") {
+      const issueId = workItemPlanDeleteMatch[2];
+      const planId = workItemPlanDeleteMatch[3];
+      const lifecycle = lifecycleData(issueId);
+      const plan = lifecycle.work_item_plans.find(
+        (candidate): candidate is IssueWorkItemPlanDetailDto =>
+          isMockIssueWorkItemPlan(candidate) && candidate.id === planId,
+      );
+      const childWorkItemIds = new Set(plan?.work_item_ids ?? []);
+      lifecycle.work_item_plans = lifecycle.work_item_plans.filter(
+        (candidate) =>
+          !isMockIssueWorkItemPlan(candidate) || candidate.id !== planId,
+      );
+      lifecycle.work_items = lifecycle.work_items.filter(
+        (workItem) =>
+          !childWorkItemIds.has(String(workItem.work_item_id ?? "")),
+      );
+      lifecycle.workspace_sessions = lifecycle.workspace_sessions.filter(
+        (session) =>
+          !(
+            (session.workspace_type === "work_item_plan" &&
+              session.entity_id === planId) ||
+            (session.workspace_type === "work_item" &&
+              childWorkItemIds.has(session.entity_id))
+          ),
+      );
+      lifecycle.coding_attempts = lifecycle.coding_attempts.filter(
+        (attempt) => !childWorkItemIds.has(attempt.work_item_id),
       );
       return jsonResponse({ status: "deleted" });
     }
@@ -1700,6 +1770,20 @@ function lifecycleFetch(options?: {
     }
     return jsonResponse({});
   });
+}
+
+function isMockIssueWorkItemPlan(
+  value: unknown,
+): value is IssueWorkItemPlanDetailDto {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const candidate = value as { id?: unknown; work_item_ids?: unknown };
+  return (
+    typeof candidate.id === "string" &&
+    Array.isArray(candidate.work_item_ids) &&
+    candidate.work_item_ids.every((item) => typeof item === "string")
+  );
 }
 
 function jsonResponse(body: unknown) {
