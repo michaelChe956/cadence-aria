@@ -1092,10 +1092,14 @@ impl WorkspaceEngine {
     ) -> Result<(), String> {
         let content = content.into();
         let node_id = self.active_node_id.clone();
-        if let Some(node_id) = node_id.as_deref() {
-            self.buffer_stream_chunk(node_id, content.clone()).await?;
-            self.flush_stream_buffer(node_id).await?;
-        }
+        let persist_result = if let Some(node_id) = node_id.as_deref() {
+            match self.buffer_stream_chunk(node_id, content.clone()).await {
+                Ok(()) => self.flush_stream_buffer(node_id).await,
+                Err(error) => Err(error),
+            }
+        } else {
+            Ok(())
+        };
         let _ = self
             .event_tx
             .send(EngineEvent::StreamChunk {
@@ -1104,7 +1108,7 @@ impl WorkspaceEngine {
                 node_id,
             })
             .await;
-        Ok(())
+        persist_result
     }
 
     pub async fn persist_permission_request(
@@ -3896,7 +3900,9 @@ impl WorkspaceEngine {
                     continue;
                 };
                 timeline_node_summaries.insert(id.clone(), build_node_detail_summary(&detail));
-                if timeline_node_ids.contains(id.as_str()) {
+                if self.session.workspace_type == WorkspaceType::WorkItemPlan
+                    && timeline_node_ids.contains(id.as_str())
+                {
                     timeline_node_details.insert(id, build_session_state_node_detail(detail));
                 }
             }
@@ -7839,8 +7845,8 @@ mod tests {
             .create_workspace_session(CreateWorkspaceSessionInput {
                 project_id: "project_0001".to_string(),
                 issue_id: "issue_0001".to_string(),
-                entity_id: "story_spec_0001".to_string(),
-                workspace_type: WorkspaceType::Story,
+                entity_id: "issue_work_item_plan_0001".to_string(),
+                workspace_type: WorkspaceType::WorkItemPlan,
                 author_provider: ProviderName::ClaudeCode,
                 reviewer_provider: ProviderName::Codex,
                 review_rounds: 2,
@@ -7981,6 +7987,137 @@ mod tests {
         assert!(!serialized.contains(&huge_prompt));
         assert!(!serialized.contains(&huge_stream));
         assert!(!serialized.contains(&artifact_markdown));
+    }
+
+    #[tokio::test]
+    async fn build_session_state_keeps_story_details_out_of_inline_payload() {
+        let (tmp, checkpoint_store) = setup();
+        let lifecycle_store = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
+        let (tx, _) = mpsc::channel(64);
+        let session_record = lifecycle_store
+            .create_workspace_session(CreateWorkspaceSessionInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                entity_id: "story_spec_0001".to_string(),
+                workspace_type: WorkspaceType::Story,
+                author_provider: ProviderName::ClaudeCode,
+                reviewer_provider: ProviderName::Codex,
+                review_rounds: 2,
+                superpowers_enabled: true,
+                openspec_enabled: true,
+            })
+            .unwrap();
+        let session = WorkspaceSession::from_record(session_record);
+        let session_id = session.session_id.clone();
+        let mut engine =
+            WorkspaceEngine::new_persistent(checkpoint_store, lifecycle_store.clone(), tx, session);
+        engine.timeline_nodes.push(TimelineNode {
+            node_id: "node-story".to_string(),
+            node_type: TimelineNodeType::AuthorRun,
+            agent: Some(ProviderName::ClaudeCode),
+            stage: WsWorkspaceStage::Completed,
+            round: None,
+            status: TimelineNodeStatus::Completed,
+            title: "Story 生成".to_string(),
+            summary: None,
+            started_at: "2026-05-20T14:30:00Z".to_string(),
+            completed_at: Some("2026-05-20T14:35:00Z".to_string()),
+            duration_ms: Some(300000),
+            artifact_ref: None,
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::ClaudeCode,
+                reviewer: None,
+                review_rounds: 0,
+            },
+        });
+        lifecycle_store
+            .save_node_detail(
+                &session_id,
+                "node-story",
+                &NodeDetail {
+                    node_id: "node-story".to_string(),
+                    session_id: session_id.clone(),
+                    node_type: TimelineNodeType::AuthorRun,
+                    status: TimelineNodeStatus::Completed,
+                    agent_role: Some(AgentRole::Author),
+                    provider: None,
+                    prompt: None,
+                    messages: vec![],
+                    streaming_content: "Story provider stream".to_string(),
+                    execution_events: vec![],
+                    permission_events: vec![],
+                    verdict: None,
+                    artifact_ref: None,
+                    is_revision: false,
+                    base_artifact_ref: None,
+                    started_at: "2026-05-20T14:30:00Z".to_string(),
+                    ended_at: Some("2026-05-20T14:35:00Z".to_string()),
+                },
+            )
+            .unwrap();
+
+        match engine.build_session_state() {
+            WsOutMessage::SessionState {
+                timeline_node_details,
+                timeline_node_summaries,
+                ..
+            } => {
+                assert!(timeline_node_details.is_empty());
+                assert!(
+                    timeline_node_summaries
+                        .get("node-story")
+                        .and_then(|summary| summary.stream_preview.as_deref())
+                        .is_some_and(|stream| stream.contains("Story provider stream"))
+                );
+            }
+            _ => panic!("expected SessionState"),
+        }
+    }
+
+    #[tokio::test]
+    async fn append_active_run_stream_sends_event_when_detail_persist_fails() {
+        let (tmp, checkpoint_store) = setup();
+        let lifecycle_store = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
+        let (tx, mut rx) = mpsc::channel(64);
+        let session_record = lifecycle_store
+            .create_workspace_session(CreateWorkspaceSessionInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                entity_id: "issue_work_item_plan_0001".to_string(),
+                workspace_type: WorkspaceType::WorkItemPlan,
+                author_provider: ProviderName::ClaudeCode,
+                reviewer_provider: ProviderName::Codex,
+                review_rounds: 2,
+                superpowers_enabled: true,
+                openspec_enabled: true,
+            })
+            .unwrap();
+        let session = WorkspaceSession::from_record(session_record);
+        let mut engine =
+            WorkspaceEngine::new_persistent(checkpoint_store, lifecycle_store, tx, session);
+        engine.active_node_id = Some("missing-node".to_string());
+
+        let result = engine
+            .append_active_run_stream("assistant", "正在生成 Work Item Plan：准备上下文\n")
+            .await;
+
+        assert!(result.is_err());
+        let event = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("stream chunk event timeout")
+            .expect("stream chunk event");
+        match event {
+            EngineEvent::StreamChunk {
+                role,
+                content,
+                node_id,
+            } => {
+                assert_eq!(role, "assistant");
+                assert!(content.contains("正在生成 Work Item Plan"));
+                assert_eq!(node_id.as_deref(), Some("missing-node"));
+            }
+            _ => panic!("expected StreamChunk"),
+        }
     }
 
     #[tokio::test]

@@ -219,6 +219,7 @@ async fn story_design_work_item_plan_recovery_consistency() {
             stage,
             artifact,
             timeline_nodes,
+            timeline_node_details,
             ..
         } => {
             assert_eq!(workspace_type, WorkspaceType::Story);
@@ -234,6 +235,10 @@ async fn story_design_work_item_plan_recovery_consistency() {
                     .any(|n| n.node_type == TimelineNodeType::AuthorConfirm),
                 "story timeline should contain author_confirm node"
             );
+            assert!(
+                timeline_node_details.is_empty(),
+                "story session_state should keep details lightweight and use summaries"
+            );
         }
         other => panic!("expected SessionState, got {other:?}"),
     }
@@ -247,6 +252,7 @@ async fn story_design_work_item_plan_recovery_consistency() {
             stage,
             artifact,
             timeline_nodes,
+            timeline_node_details,
             ..
         } => {
             assert_eq!(workspace_type, WorkspaceType::Design);
@@ -261,6 +267,10 @@ async fn story_design_work_item_plan_recovery_consistency() {
                     .iter()
                     .any(|n| n.node_type == TimelineNodeType::AuthorConfirm),
                 "design timeline should contain author_confirm node"
+            );
+            assert!(
+                timeline_node_details.is_empty(),
+                "design session_state should keep details lightweight and use summaries"
             );
         }
         other => panic!("expected SessionState, got {other:?}"),
