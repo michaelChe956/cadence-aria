@@ -568,7 +568,7 @@ describe("useWorkspaceWs", () => {
       harness.ws.receive({
         type: "stream_chunk",
         role: "author",
-        content: "正在生成 Work Item Plan",
+        content: "Fake Work Item Plan streaming draft",
         node_id: "timeline_node_work_item_plan_author",
       });
     });
@@ -580,11 +580,63 @@ describe("useWorkspaceWs", () => {
       expect.objectContaining({
         type: "provider_stream",
         role: "author",
-        content: "正在生成 Work Item Plan",
+        content: "Fake Work Item Plan streaming draft",
         node_id: "timeline_node_work_item_plan_author",
         metadata: expect.objectContaining({ provider: "claude_code" }),
       }),
     ]);
+  });
+
+  it("routes work item plan auto revision stream chunks to the revision node", () => {
+    vi.useFakeTimers();
+    const harness = renderWorkspaceHook();
+
+    act(() => {
+      harness.ws.receive({
+        type: "timeline_node_created",
+        node: {
+          node_id: "timeline_node_work_item_plan_auto_revision_1",
+          node_type: "revision",
+          agent: "claude_code",
+          stage: "revision",
+          round: 1,
+          status: "active",
+          title: "Work Item Plan 自动返修 Round 1",
+          summary: "根据 Work Item Plan 校验结果自动返修",
+          started_at: "2026-06-21T10:01:00Z",
+          completed_at: null,
+          duration_ms: null,
+          artifact_ref: null,
+          provider_config_snapshot: {
+            author: "claude_code",
+            reviewer: "codex",
+            review_rounds: 1,
+          },
+        },
+      });
+      harness.ws.receive({ type: "stage_change", stage: "revision" });
+      harness.ws.receive({
+        type: "stream_chunk",
+        role: "author",
+        content: "Fake Work Item Plan streaming draft",
+        node_id: "timeline_node_work_item_plan_auto_revision_1",
+      });
+    });
+    act(() => {
+      vi.advanceTimersByTime(80);
+    });
+
+    const streamEntry = useWorkspaceStore
+      .getState()
+      .chatEntries.find(
+        (entry) => entry.node_id === "timeline_node_work_item_plan_auto_revision_1",
+      );
+    expect(streamEntry).toMatchObject({
+      type: "provider_stream",
+      role: "author",
+      node_id: "timeline_node_work_item_plan_auto_revision_1",
+      content: "Fake Work Item Plan streaming draft",
+    });
   });
 
   it("stops appending pre-stage stream chunks after prepare_context invalidates the active run", () => {
@@ -630,7 +682,7 @@ describe("useWorkspaceWs", () => {
       harness.ws.receive({
         type: "stream_chunk",
         role: "author",
-        content: "正在生成 Work Item Plan",
+        content: "Fake Work Item Plan streaming draft",
         node_id: "timeline_node_work_item_plan_author",
       });
     });
@@ -654,7 +706,7 @@ describe("useWorkspaceWs", () => {
     const streamEntry = useWorkspaceStore
       .getState()
       .chatEntries.find((entry) => entry.type === "provider_stream");
-    expect(streamEntry?.content).toBe("正在生成 Work Item Plan");
+    expect(streamEntry?.content).toBe("Fake Work Item Plan streaming draft");
     expect(
       useWorkspaceStore.getState().streamBuffers.timeline_node_work_item_plan_author?.chunks,
     ).toEqual([]);

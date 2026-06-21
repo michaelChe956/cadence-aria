@@ -179,19 +179,26 @@ struct ProviderInvocationResult {
     run_ref: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct WorkItemSplitInvocation {
+    pub prompt: String,
+    pub provider_type: ProviderType,
+    pub worktree_path: String,
+    pub author_provider: ProviderName,
+}
+
 impl WorkItemSplitEngine {
     pub fn new(provider_adapter: Arc<dyn ProviderAdapter + Send + Sync>) -> Self {
         Self { provider_adapter }
     }
 
-    pub async fn generate(
-        &self,
+    pub fn build_generate_invocation(
         request: &GenerateWorkItemsRequest,
         lifecycle: &LifecycleStore,
         issue: &IssueRecord,
         repository: &RepositoryRecord,
         author_provider: ProviderName,
-    ) -> ApiResult<WorkItemSplitProviderOutput> {
+    ) -> ApiResult<WorkItemSplitInvocation> {
         let story_context = collect_story_context(lifecycle, request, issue)?;
         let design_context = collect_design_context(lifecycle, request, issue)?;
 
@@ -205,8 +212,145 @@ impl WorkItemSplitEngine {
             &repository_structure,
         );
 
+        Ok(WorkItemSplitInvocation {
+            prompt,
+            provider_type: provider_name_to_type(&author_provider),
+            worktree_path: repository.path.to_string_lossy().to_string(),
+            author_provider,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_revision_invocation(
+        request: &GenerateWorkItemsRequest,
+        lifecycle: &LifecycleStore,
+        issue: &IssueRecord,
+        repository: &RepositoryRecord,
+        author_provider: ProviderName,
+        retained: &[LifecycleWorkItemRecord],
+        redo_specs: &[RedoSpec],
+    ) -> ApiResult<WorkItemSplitInvocation> {
+        let story_context = collect_story_context(lifecycle, request, issue)?;
+        let design_context = collect_design_context(lifecycle, request, issue)?;
+
+        let repository_structure = summarize_repository_structure(&repository.path);
+        let prompt = build_revision_prompt(
+            request,
+            issue,
+            repository,
+            retained,
+            redo_specs,
+            &story_context,
+            &design_context,
+            &repository_structure,
+        );
+
+        Ok(WorkItemSplitInvocation {
+            prompt,
+            provider_type: provider_name_to_type(&author_provider),
+            worktree_path: repository.path.to_string_lossy().to_string(),
+            author_provider,
+        })
+    }
+
+    pub fn complete_generate_from_structured_output(
+        request: &GenerateWorkItemsRequest,
+        lifecycle: &LifecycleStore,
+        issue: &IssueRecord,
+        repository: &RepositoryRecord,
+        author_provider: &ProviderName,
+        prompt: &str,
+        structured_output: serde_json::Value,
+    ) -> ApiResult<WorkItemSplitProviderOutput> {
+        let run_ref = lifecycle
+            .save_work_item_split_provider_run(
+                &issue.project_id,
+                &issue.id,
+                author_provider,
+                prompt,
+                &structured_output,
+            )
+            .map_err(product_store_api_error)?;
+
+        parse_provider_output(
+            lifecycle,
+            request,
+            issue,
+            repository,
+            run_ref,
+            &structured_output,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn complete_revision_from_structured_output(
+        request: &GenerateWorkItemsRequest,
+        lifecycle: &LifecycleStore,
+        issue: &IssueRecord,
+        repository: &RepositoryRecord,
+        author_provider: &ProviderName,
+        prompt: &str,
+        structured_output: serde_json::Value,
+        retained: &[LifecycleWorkItemRecord],
+        redo_specs: &[RedoSpec],
+    ) -> ApiResult<WorkItemSplitProviderOutput> {
+        let run_ref = lifecycle
+            .save_work_item_split_provider_run(
+                &issue.project_id,
+                &issue.id,
+                author_provider,
+                prompt,
+                &structured_output,
+            )
+            .map_err(product_store_api_error)?;
+
+        if retained.is_empty() && redo_specs.is_empty() {
+            return parse_provider_output(
+                lifecycle,
+                request,
+                issue,
+                repository,
+                run_ref,
+                &structured_output,
+            );
+        }
+
+        materialize_revision_output(
+            lifecycle,
+            request,
+            issue,
+            repository,
+            run_ref,
+            &structured_output,
+            retained,
+            redo_specs,
+        )
+    }
+
+    pub async fn generate(
+        &self,
+        request: &GenerateWorkItemsRequest,
+        lifecycle: &LifecycleStore,
+        issue: &IssueRecord,
+        repository: &RepositoryRecord,
+        author_provider: ProviderName,
+    ) -> ApiResult<WorkItemSplitProviderOutput> {
+        let invocation = Self::build_generate_invocation(
+            request,
+            lifecycle,
+            issue,
+            repository,
+            author_provider,
+        )?;
+
         let provider_output = self
-            .invoke_provider(&prompt, repository, author_provider, lifecycle, issue)
+            .invoke_provider(
+                &invocation.prompt,
+                repository,
+                invocation.author_provider.clone(),
+                lifecycle,
+                issue,
+            )
             .await?;
 
         parse_provider_output(
@@ -297,23 +441,24 @@ impl WorkItemSplitEngine {
         retained: &[LifecycleWorkItemRecord],
         redo_specs: &[RedoSpec],
     ) -> ApiResult<WorkItemSplitProviderOutput> {
-        let story_context = collect_story_context(lifecycle, request, issue)?;
-        let design_context = collect_design_context(lifecycle, request, issue)?;
-
-        let repository_structure = summarize_repository_structure(&repository.path);
-        let prompt = build_revision_prompt(
+        let invocation = Self::build_revision_invocation(
             request,
+            lifecycle,
             issue,
             repository,
+            author_provider,
             retained,
             redo_specs,
-            &story_context,
-            &design_context,
-            &repository_structure,
-        );
+        )?;
 
         let provider_output = self
-            .invoke_provider(&prompt, repository, author_provider, lifecycle, issue)
+            .invoke_provider(
+                &invocation.prompt,
+                repository,
+                invocation.author_provider,
+                lifecycle,
+                issue,
+            )
             .await?;
         let structured = &provider_output.structured_output;
 
@@ -328,69 +473,15 @@ impl WorkItemSplitEngine {
             );
         }
 
-        let redo = parse_revision_redo_output(structured)?;
-        if redo.work_items.len() != redo_specs.len()
-            || redo.verification_plans.len() != redo_specs.len()
-        {
-            return Err(ApiError::validation(
-                "revision_redo_count_mismatch",
-                format!(
-                    "redo_specs={} but provider returned work_items={} verification_plans={}",
-                    redo_specs.len(),
-                    redo.work_items.len(),
-                    redo.verification_plans.len()
-                ),
-            ));
-        }
-
-        let mut id_mapping = HashMap::new();
-        let mut merged_work_items = retained.to_vec();
-
-        let profile_id = crate::product::id::next_sequential_id(
-            "repository_profile",
-            lifecycle
-                .list_repository_profiles(&issue.project_id, &issue.id)
-                .map_err(product_store_api_error)?
-                .len(),
-        );
-
-        let parsed_profile = redo.repository_profile;
-        let (mut redo_work_items, redo_verification_plans) = materialize_redo_items(
-            lifecycle,
-            request,
-            issue,
-            repository,
-            &provider_output.run_ref,
-            redo.work_items,
-            redo.verification_plans,
-            redo_specs,
-            &profile_id,
-            &mut id_mapping,
-        )?;
-        merged_work_items.append(&mut redo_work_items);
-
-        for wi in &mut merged_work_items {
-            wi.depends_on = wi
-                .depends_on
-                .iter()
-                .map(|dep| id_mapping.get(dep).cloned().unwrap_or_else(|| dep.clone()))
-                .collect();
-        }
-
-        let old_graph = build_graph_from_work_items(&merged_work_items);
-        let dependency_graph = repatch_dependencies(&old_graph, &id_mapping);
-
-        build_revision_provider_output(
+        materialize_revision_output(
             lifecycle,
             request,
             issue,
             repository,
             provider_output.run_ref,
-            profile_id,
-            merged_work_items,
-            parsed_profile,
-            redo_verification_plans,
-            dependency_graph,
+            structured,
+            retained,
+            redo_specs,
         )
     }
 }
@@ -536,9 +627,13 @@ fn build_split_prompt(
          force_frontend_backend_split: {force_frontend_backend_split}\n\
          require_execution_plan_confirm: {require_execution_plan_confirm}\n\n\
          [output_schema]\n\
-         最终输出必须只包含一个 <ARIA_STRUCTURED_OUTPUT> JSON block。\n\
-         第一个非空字符必须是 <ARIA_STRUCTURED_OUTPUT>，最后一个非空字符必须是 </ARIA_STRUCTURED_OUTPUT>。\n\
-         标签内部必须是一个完整 JSON object，不要输出 Markdown、解释、代码块或标签外文本。\n\
+         可以在最终结构化 JSON 前输出简短、可读的拆分过程，供 Workbench 流式展示。\n\
+         长时间分析、探索代码库或自动修正前，先输出一行简短可读状态，供 Workbench 流式展示；不要等待所有工具调用结束后才给第一段说明。\n\
+         如果需要执行多步代码库探索，每完成一组探索后输出一句当前发现摘要。\n\
+         这些可读状态必须位于最终 <ARIA_STRUCTURED_OUTPUT> 之前；最终结构化 JSON 仍只放在最后一个 sentinel block 中。\n\
+         最后必须输出一个 <ARIA_STRUCTURED_OUTPUT> JSON block。\n\
+         后端只解析最后一个 <ARIA_STRUCTURED_OUTPUT>...</ARIA_STRUCTURED_OUTPUT> block。\n\
+         标签内部必须是一个完整 JSON object，不要输出 Markdown code fence。\n\
          严格按以下 JSON schema 输出。\n\
          work_items 数组顺序即执行顺序；depends_on 使用同数组中的 0-based 索引。verification_plans 数组与 work_items 一一对应。\n\
          每个 work_item 必须包含 `kind` 字段（不要写成 `type`），合法取值为以下之一：backend、frontend、integration、e2e、docs、infra、other。\n\n\
@@ -634,9 +729,13 @@ fn build_revision_prompt(
          [redo_work_items]\n\
          以下 WorkItem 需要按用户反馈重做，请只输出这些项：\n{redo_section}\n\n\
          [output_schema]\n\
-         最终输出必须只包含一个 <ARIA_STRUCTURED_OUTPUT> JSON block。\n\
-         第一个非空字符必须是 <ARIA_STRUCTURED_OUTPUT>，最后一个非空字符必须是 </ARIA_STRUCTURED_OUTPUT>。\n\
-         标签内部必须是一个完整 JSON object，不要输出 Markdown、解释、代码块或标签外文本。\n\
+         可以在最终结构化 JSON 前输出简短、可读的拆分过程，供 Workbench 流式展示。\n\
+         长时间分析、探索代码库或自动修正前，先输出一行简短可读状态，供 Workbench 流式展示；不要等待所有工具调用结束后才给第一段说明。\n\
+         如果需要执行多步代码库探索，每完成一组探索后输出一句当前发现摘要。\n\
+         这些可读状态必须位于最终 <ARIA_STRUCTURED_OUTPUT> 之前；最终结构化 JSON 仍只放在最后一个 sentinel block 中。\n\
+         最后必须输出一个 <ARIA_STRUCTURED_OUTPUT> JSON block。\n\
+         后端只解析最后一个 <ARIA_STRUCTURED_OUTPUT>...</ARIA_STRUCTURED_OUTPUT> block。\n\
+         标签内部必须是一个完整 JSON object，不要输出 Markdown code fence。\n\
          严格按以下 JSON schema 输出 redo-only 结果。\n\
          work_items 数组必须且仅包含重做项，顺序对应 redo_work_items 列表；verification_plans 与 work_items 一一对应；depends_on 使用 0-based 索引。\n\
          每个 work_item 必须包含 `kind` 字段（不要写成 `type`），合法取值为以下之一：backend、frontend、integration、e2e、docs、infra、other。\n\n\
@@ -1001,6 +1100,83 @@ fn parse_revision_redo_output(structured: &serde_json::Value) -> ApiResult<Provi
             json!({}),
         )
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn materialize_revision_output(
+    lifecycle: &LifecycleStore,
+    request: &GenerateWorkItemsRequest,
+    issue: &IssueRecord,
+    repository: &RepositoryRecord,
+    provider_run_ref: String,
+    structured: &serde_json::Value,
+    retained: &[LifecycleWorkItemRecord],
+    redo_specs: &[RedoSpec],
+) -> ApiResult<WorkItemSplitProviderOutput> {
+    let redo = parse_revision_redo_output(structured)?;
+    if redo.work_items.len() != redo_specs.len()
+        || redo.verification_plans.len() != redo_specs.len()
+    {
+        return Err(ApiError::validation(
+            "revision_redo_count_mismatch",
+            format!(
+                "redo_specs={} but provider returned work_items={} verification_plans={}",
+                redo_specs.len(),
+                redo.work_items.len(),
+                redo.verification_plans.len()
+            ),
+        ));
+    }
+
+    let mut id_mapping = HashMap::new();
+    let mut merged_work_items = retained.to_vec();
+
+    let profile_id = crate::product::id::next_sequential_id(
+        "repository_profile",
+        lifecycle
+            .list_repository_profiles(&issue.project_id, &issue.id)
+            .map_err(product_store_api_error)?
+            .len(),
+    );
+
+    let parsed_profile = redo.repository_profile;
+    let (mut redo_work_items, redo_verification_plans) = materialize_redo_items(
+        lifecycle,
+        request,
+        issue,
+        repository,
+        &provider_run_ref,
+        redo.work_items,
+        redo.verification_plans,
+        redo_specs,
+        &profile_id,
+        &mut id_mapping,
+    )?;
+    merged_work_items.append(&mut redo_work_items);
+
+    for wi in &mut merged_work_items {
+        wi.depends_on = wi
+            .depends_on
+            .iter()
+            .map(|dep| id_mapping.get(dep).cloned().unwrap_or_else(|| dep.clone()))
+            .collect();
+    }
+
+    let old_graph = build_graph_from_work_items(&merged_work_items);
+    let dependency_graph = repatch_dependencies(&old_graph, &id_mapping);
+
+    build_revision_provider_output(
+        lifecycle,
+        request,
+        issue,
+        repository,
+        provider_run_ref,
+        profile_id,
+        merged_work_items,
+        parsed_profile,
+        redo_verification_plans,
+        dependency_graph,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1465,16 +1641,26 @@ mod tests {
     }
 
     #[test]
-    fn build_split_prompt_requires_only_sentinel_wrapped_json() {
+    fn build_split_prompt_allows_readable_stream_before_final_sentinel() {
         let (request, issue, repository) = split_prompt_fixture();
         let prompt = build_split_prompt(&request, &issue, &repository, &[], &[], "(empty)");
 
         assert!(prompt.contains("<ARIA_STRUCTURED_OUTPUT>"));
         assert!(prompt.contains("</ARIA_STRUCTURED_OUTPUT>"));
-        assert!(prompt.contains("最终输出必须只包含一个 <ARIA_STRUCTURED_OUTPUT> JSON block"));
-        assert!(prompt.contains("不要输出 Markdown、解释、代码块或标签外文本"));
-        assert!(prompt.contains("第一个非空字符必须是 <ARIA_STRUCTURED_OUTPUT>"));
-        assert!(prompt.contains("最后一个非空字符必须是 </ARIA_STRUCTURED_OUTPUT>"));
+        assert!(prompt.contains("可以在最终结构化 JSON 前输出简短、可读的拆分过程"));
+        assert!(prompt.contains("最后必须输出一个 <ARIA_STRUCTURED_OUTPUT> JSON block"));
+        assert!(prompt.contains("后端只解析最后一个 <ARIA_STRUCTURED_OUTPUT>"));
+        assert!(prompt.contains("不要输出 Markdown code fence"));
+    }
+
+    #[test]
+    fn split_prompt_requests_progress_before_long_operations() {
+        let (request, issue, repository) = split_prompt_fixture();
+        let prompt = build_split_prompt(&request, &issue, &repository, &[], &[], "(empty)");
+
+        assert!(prompt.contains("长时间分析、探索代码库或自动修正前"));
+        assert!(prompt.contains("先输出一行简短可读状态"));
+        assert!(prompt.contains("每完成一组探索后输出一句当前发现摘要"));
     }
 
     #[test]
@@ -1524,7 +1710,7 @@ mod tests {
     }
 
     #[test]
-    fn build_revision_prompt_requires_only_sentinel_wrapped_json() {
+    fn build_revision_prompt_allows_readable_stream_before_final_sentinel() {
         let (request, issue, repository) = split_prompt_fixture();
         let redo_specs = vec![RedoSpec {
             old_id: "work_item_0001".to_string(),
@@ -1543,9 +1729,32 @@ mod tests {
 
         assert!(prompt.contains("<ARIA_STRUCTURED_OUTPUT>"));
         assert!(prompt.contains("</ARIA_STRUCTURED_OUTPUT>"));
-        assert!(prompt.contains("最终输出必须只包含一个 <ARIA_STRUCTURED_OUTPUT> JSON block"));
-        assert!(prompt.contains("不要输出 Markdown、解释、代码块或标签外文本"));
-        assert!(prompt.contains("第一个非空字符必须是 <ARIA_STRUCTURED_OUTPUT>"));
-        assert!(prompt.contains("最后一个非空字符必须是 </ARIA_STRUCTURED_OUTPUT>"));
+        assert!(prompt.contains("可以在最终结构化 JSON 前输出简短、可读的拆分过程"));
+        assert!(prompt.contains("最后必须输出一个 <ARIA_STRUCTURED_OUTPUT> JSON block"));
+        assert!(prompt.contains("后端只解析最后一个 <ARIA_STRUCTURED_OUTPUT>"));
+        assert!(prompt.contains("不要输出 Markdown code fence"));
+    }
+
+    #[test]
+    fn revision_prompt_requests_progress_before_long_operations() {
+        let (request, issue, repository) = split_prompt_fixture();
+        let redo_specs = vec![RedoSpec {
+            old_id: "work_item_0001".to_string(),
+            feedback: "拆得太粗".to_string(),
+        }];
+        let prompt = build_revision_prompt(
+            &request,
+            &issue,
+            &repository,
+            &[],
+            &redo_specs,
+            &[],
+            &[],
+            "(empty)",
+        );
+
+        assert!(prompt.contains("长时间分析、探索代码库或自动修正前"));
+        assert!(prompt.contains("先输出一行简短可读状态"));
+        assert!(prompt.contains("每完成一组探索后输出一句当前发现摘要"));
     }
 }

@@ -303,19 +303,25 @@ async fn story_design_work_item_plan_recovery_consistency() {
             );
             let progress_detail = timeline_node_details
                 .values()
-                .find(|detail| detail.streaming_content.contains("正在生成 Work Item Plan"))
-                .expect("work_item_plan session_state details should include author progress");
+                .find(|detail| {
+                    detail.node_type == TimelineNodeType::AuthorRun
+                        && detail
+                            .streaming_content
+                            .contains("Fake Work Item Plan streaming draft")
+                })
+                .expect("work_item_plan session_state details should include provider stream");
             assert!(
                 timeline_nodes
                     .iter()
-                    .any(|node| node.node_id == progress_detail.node_id),
-                "progress detail should belong to a recovered timeline node"
+                    .any(|node| node.node_id == progress_detail.node_id
+                        && node.node_type == TimelineNodeType::AuthorRun),
+                "provider stream detail should belong to recovered author_run node"
             );
             assert!(
-                timeline_node_details
-                    .values()
-                    .any(|detail| detail.streaming_content.contains("正在生成 Work Item Plan")),
-                "session_state.timeline_node_details should restore WorkItemPlan progress"
+                timeline_node_details.values().all(|detail| detail.node_type
+                    != TimelineNodeType::StartGeneration
+                    || detail.streaming_content.is_empty()),
+                "start_generation should not restore WorkItemPlan provider stream"
             );
         }
         other => panic!("expected SessionState, got {other:?}"),

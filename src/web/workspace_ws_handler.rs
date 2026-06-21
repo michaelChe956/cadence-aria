@@ -11,7 +11,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 
-use crate::cross_cutting::provider_adapter::ProviderAdapter;
+use crate::cross_cutting::provider_adapter::parse_last_structured_output;
 use crate::cross_cutting::provider_registry::ProviderRegistry;
 use crate::cross_cutting::streaming_provider::{
     ChoiceOptionData, ChoiceRequestSource, ProviderCommand, ProviderExecutionEvent,
@@ -403,7 +403,6 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
         workspace_runs: state.workspace_runs.clone(),
         session_id: session_id.clone(),
         next_run_id: next_run_id.clone(),
-        provider_adapter: state.provider_adapter.clone(),
         app_paths: app_paths.clone(),
         session_record: session_record.clone(),
     };
@@ -854,7 +853,6 @@ struct ProviderRunContext {
     workspace_runs: WorkspaceRunRegistry,
     session_id: String,
     next_run_id: Arc<Mutex<u64>>,
-    provider_adapter: Arc<dyn ProviderAdapter + Send + Sync>,
     app_paths: ProductAppPaths,
     session_record: WorkspaceSessionRecord,
 }
@@ -1511,6 +1509,14 @@ enum ProviderRunKind {
     WorkItemPlanRevision { feedback: Option<String> },
 }
 
+fn parse_work_item_split_structured_output(full_output: &str) -> Result<serde_json::Value, String> {
+    parse_last_structured_output(full_output)
+        .map_err(|error| error.details)
+        .and_then(|structured| {
+            structured.ok_or_else(|| "missing structured output sentinel".to_string())
+        })
+}
+
 async fn active_run_command_tx(
     current_run: &Arc<Mutex<Option<WorkspaceActiveRun>>>,
     workspace_runs: &WorkspaceRunRegistry,
@@ -1571,7 +1577,6 @@ async fn spawn_provider_run_from_handler(
         workspace_runs,
         session_id,
         next_run_id,
-        provider_adapter: _,
         app_paths: _,
         session_record: _,
     } = run_context;
@@ -1594,16 +1599,11 @@ async fn spawn_provider_run_from_handler(
             }
         }
     };
-    let provider_for_run = if matches!(
-        run_kind,
-        ProviderRunKind::WorkItemPlanAuthor | ProviderRunKind::WorkItemPlanRevision { .. }
-    ) {
-        None
-    } else {
-        let Some(p) = provider_registry.get(&provider_name) else {
+    let provider_for_run = {
+        let Some(provider) = provider_registry.get(&provider_name) else {
             return Err(format!("provider unavailable: {provider_name:?}"));
         };
-        Some(p)
+        provider
     };
 
     let run_id = {
@@ -1642,43 +1642,33 @@ async fn spawn_provider_run_from_handler(
         match run_kind {
             ProviderRunKind::Author { content } => {
                 engine
-                    .handle_user_message(
-                        content,
-                        provider_for_run.expect("provider for author"),
-                        command_rx,
-                    )
+                    .handle_user_message(content, provider_for_run.clone(), command_rx)
                     .await;
             }
             ProviderRunKind::AuthorChoiceFollowup { content } => {
                 engine
                     .handle_author_choice_followup_message(
                         content,
-                        provider_for_run.expect("provider for author choice followup"),
+                        provider_for_run.clone(),
                         command_rx,
                     )
                     .await;
             }
             ProviderRunKind::Revision => {
                 engine
-                    .drive_revision_session(
-                        provider_for_run.expect("provider for revision"),
-                        command_rx,
-                    )
+                    .drive_revision_session(provider_for_run.clone(), command_rx)
                     .await;
             }
             ProviderRunKind::ReviewOnly => {
                 engine
-                    .drive_review_session(
-                        provider_for_run.expect("provider for review"),
-                        command_rx,
-                    )
+                    .drive_review_session(provider_for_run.clone(), command_rx)
                     .await;
             }
             ProviderRunKind::WorkItemPlanAuthor => {
                 let lifecycle_for_run = LifecycleStore::new(run_context_clone.app_paths.clone());
                 let app_paths_for_run = run_context_clone.app_paths.clone();
                 let session_record_for_run = run_context_clone.session_record.clone();
-                let provider_adapter_for_run = run_context_clone.provider_adapter.clone();
+                let mut command_rx = command_rx;
 
                 let mut request =
                     match build_work_item_plan_generate_request(&engine, &lifecycle_for_run)
@@ -1693,9 +1683,6 @@ async fn spawn_provider_run_from_handler(
                             return;
                         }
                     };
-                let _ = engine
-                    .append_active_run_stream("assistant", "正在生成 Work Item Plan：准备上下文\n")
-                    .await;
 
                 let repository = match workspace_repository_for_session(
                     &app_paths_for_run,
@@ -1730,29 +1717,72 @@ async fn spawn_provider_run_from_handler(
                     }
                 };
 
-                let split_engine = WorkItemSplitEngine::new(provider_adapter_for_run);
                 let author_provider = engine.session().author_provider.clone();
-                let _ = engine
-                    .append_active_run_stream(
-                        "assistant",
-                        "正在生成 Work Item Plan：调用 provider\n",
-                    )
+                let invocation = match WorkItemSplitEngine::build_generate_invocation(
+                    &request,
+                    &lifecycle_for_run,
+                    &issue,
+                    &repository,
+                    author_provider,
+                ) {
+                    Ok(invocation) => invocation,
+                    Err(error) => {
+                        engine.mark_active_run_finished(&run_label);
+                        let err = WsOutMessage::Error {
+                            message: format!("split generate failed: {}", error.message),
+                        };
+                        let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                        return;
+                    }
+                };
+                let node_id = engine.begin_work_item_plan_author_run().await;
+                let provider_input = engine.build_work_item_plan_streaming_input(
+                    invocation.provider_type.clone(),
+                    invocation.prompt.clone(),
+                    invocation.worktree_path.clone(),
+                );
+                let provider_session = provider_for_run
+                    .start(provider_input, run_cancel.clone())
                     .await;
-                drop(engine);
-
-                let output = match split_engine
-                    .generate(
-                        &request,
-                        &lifecycle_for_run,
-                        &issue,
-                        &repository,
-                        author_provider,
+                let full_output = match engine
+                    .drive_work_item_plan_provider_session_to_output(
+                        provider_session,
+                        &mut command_rx,
+                        node_id,
+                        invocation.author_provider.clone(),
                     )
                     .await
                 {
-                    Ok(o) => o,
+                    Ok(output) => output,
+                    Err(_) => {
+                        engine.mark_active_run_finished(&run_label);
+                        return;
+                    }
+                };
+                let structured_output = match parse_work_item_split_structured_output(&full_output)
+                {
+                    Ok(output) => output,
+                    Err(message) => {
+                        engine.mark_active_run_finished(&run_label);
+                        drop(engine);
+                        let err = WsOutMessage::Error {
+                            message: format!("split generate failed: {message}"),
+                        };
+                        let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                        return;
+                    }
+                };
+                let output = match WorkItemSplitEngine::complete_generate_from_structured_output(
+                    &request,
+                    &lifecycle_for_run,
+                    &issue,
+                    &repository,
+                    &invocation.author_provider,
+                    &invocation.prompt,
+                    structured_output,
+                ) {
+                    Ok(output) => output,
                     Err(error) => {
-                        let mut engine = engine_for_run.lock().await;
                         engine.mark_active_run_finished(&run_label);
                         drop(engine);
                         let err = WsOutMessage::Error {
@@ -1762,14 +1792,6 @@ async fn spawn_provider_run_from_handler(
                         return;
                     }
                 };
-
-                engine = engine_for_run.lock().await;
-                let _ = engine
-                    .append_active_run_stream(
-                        "assistant",
-                        "正在生成 Work Item Plan：解析并校验候选拆分\n",
-                    )
-                    .await;
                 let mut outcome = match engine.complete_work_item_plan_author(output).await {
                     Ok(o) => o,
                     Err(message) => {
@@ -1828,36 +1850,18 @@ async fn spawn_provider_run_from_handler(
                                     return;
                                 }
                             };
-                            let _ = engine
-                                .append_active_run_stream(
-                                    "assistant",
-                                    format!(
-                                        "正在生成 Work Item Plan：根据校验结果自动返修第 {revision_iterations} 轮\n"
-                                    ),
-                                )
-                                .await;
-                            drop(engine);
-                            let author_provider = {
-                                let engine = engine_for_run.lock().await;
-                                let provider = engine.session().author_provider.clone();
-                                drop(engine);
-                                provider
-                            };
-                            let output = match split_engine
-                                .generate_revision(
-                                    &request,
-                                    &lifecycle_for_run,
-                                    &issue,
-                                    &repository,
-                                    author_provider,
-                                    &[],
-                                    &[],
-                                )
-                                .await
-                            {
-                                Ok(o) => o,
+                            let author_provider = { engine.session().author_provider.clone() };
+                            let invocation = match WorkItemSplitEngine::build_revision_invocation(
+                                &request,
+                                &lifecycle_for_run,
+                                &issue,
+                                &repository,
+                                author_provider,
+                                &[],
+                                &[],
+                            ) {
+                                Ok(invocation) => invocation,
                                 Err(error) => {
-                                    let mut engine = engine_for_run.lock().await;
                                     engine.mark_active_run_finished(&run_label);
                                     drop(engine);
                                     let err = WsOutMessage::Error {
@@ -1870,13 +1874,75 @@ async fn spawn_provider_run_from_handler(
                                     return;
                                 }
                             };
-                            engine = engine_for_run.lock().await;
-                            let _ = engine
-                                .append_active_run_stream(
-                                    "assistant",
-                                    "正在生成 Work Item Plan：解析并校验候选拆分\n",
-                                )
+                            let node_id = engine
+                                .begin_work_item_plan_auto_revision_run(revision_iterations)
                                 .await;
+                            let provider_input = engine.build_work_item_plan_streaming_input(
+                                invocation.provider_type.clone(),
+                                invocation.prompt.clone(),
+                                invocation.worktree_path.clone(),
+                            );
+                            let provider_session = provider_for_run
+                                .start(provider_input, run_cancel.clone())
+                                .await;
+                            let full_output = match engine
+                                .drive_work_item_plan_provider_session_to_output(
+                                    provider_session,
+                                    &mut command_rx,
+                                    node_id,
+                                    invocation.author_provider.clone(),
+                                )
+                                .await
+                            {
+                                Ok(output) => output,
+                                Err(_) => {
+                                    engine.mark_active_run_finished(&run_label);
+                                    return;
+                                }
+                            };
+                            let structured_output =
+                                match parse_work_item_split_structured_output(&full_output) {
+                                    Ok(output) => output,
+                                    Err(message) => {
+                                        engine.mark_active_run_finished(&run_label);
+                                        drop(engine);
+                                        let err = WsOutMessage::Error {
+                                            message: format!(
+                                                "split generate_revision failed: {message}"
+                                            ),
+                                        };
+                                        let _ =
+                                            send_json_outbound(&outbound_tx_for_task, &err).await;
+                                        return;
+                                    }
+                                };
+                            let output =
+                                match WorkItemSplitEngine::complete_revision_from_structured_output(
+                                    &request,
+                                    &lifecycle_for_run,
+                                    &issue,
+                                    &repository,
+                                    &invocation.author_provider,
+                                    &invocation.prompt,
+                                    structured_output,
+                                    &[],
+                                    &[],
+                                ) {
+                                    Ok(o) => o,
+                                    Err(error) => {
+                                        engine.mark_active_run_finished(&run_label);
+                                        drop(engine);
+                                        let err = WsOutMessage::Error {
+                                            message: format!(
+                                                "split generate_revision failed: {}",
+                                                error.message
+                                            ),
+                                        };
+                                        let _ =
+                                            send_json_outbound(&outbound_tx_for_task, &err).await;
+                                        return;
+                                    }
+                                };
                             outcome = match engine.complete_work_item_plan_author(output).await {
                                 Ok(o) => o,
                                 Err(message) => {
@@ -1895,7 +1961,7 @@ async fn spawn_provider_run_from_handler(
                 let lifecycle_for_run = LifecycleStore::new(run_context_clone.app_paths.clone());
                 let app_paths_for_run = run_context_clone.app_paths.clone();
                 let session_record_for_run = run_context_clone.session_record.clone();
-                let provider_adapter_for_run = run_context_clone.provider_adapter.clone();
+                let mut command_rx = command_rx;
 
                 let (retained, redo_specs, request) = match build_work_item_plan_revision_input(
                     &engine,
@@ -1913,9 +1979,6 @@ async fn spawn_provider_run_from_handler(
                         return;
                     }
                 };
-                let _ = engine
-                    .append_active_run_stream("assistant", "正在返修 Work Item Plan：准备上下文\n")
-                    .await;
 
                 let repository = match workspace_repository_for_session(
                     &app_paths_for_run,
@@ -1950,31 +2013,85 @@ async fn spawn_provider_run_from_handler(
                     }
                 };
 
-                let split_engine = WorkItemSplitEngine::new(provider_adapter_for_run);
                 let author_provider = engine.session().author_provider.clone();
-                let _ = engine
-                    .append_active_run_stream(
-                        "assistant",
-                        "正在返修 Work Item Plan：调用 provider\n",
-                    )
+                let invocation = match WorkItemSplitEngine::build_revision_invocation(
+                    &request,
+                    &lifecycle_for_run,
+                    &issue,
+                    &repository,
+                    author_provider,
+                    &retained,
+                    &redo_specs,
+                ) {
+                    Ok(invocation) => invocation,
+                    Err(error) => {
+                        engine.mark_active_run_finished(&run_label);
+                        drop(engine);
+                        let err = WsOutMessage::Error {
+                            message: format!("split generate_revision failed: {}", error.message),
+                        };
+                        let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                        return;
+                    }
+                };
+                let Some(node_id) = engine.active_timeline_node_id() else {
+                    engine.mark_active_run_finished(&run_label);
+                    drop(engine);
+                    let err = WsOutMessage::Error {
+                        message: "work item plan revision node unavailable".to_string(),
+                    };
+                    let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                    return;
+                };
+                let provider_input = engine.build_work_item_plan_streaming_input(
+                    invocation.provider_type.clone(),
+                    invocation.prompt.clone(),
+                    invocation.worktree_path.clone(),
+                );
+                let provider_session = provider_for_run
+                    .start(provider_input, run_cancel.clone())
                     .await;
-                drop(engine);
-
-                let output = match split_engine
-                    .generate_revision(
-                        &request,
-                        &lifecycle_for_run,
-                        &issue,
-                        &repository,
-                        author_provider,
-                        &retained,
-                        &redo_specs,
+                let full_output = match engine
+                    .drive_work_item_plan_provider_session_to_output(
+                        provider_session,
+                        &mut command_rx,
+                        node_id,
+                        invocation.author_provider.clone(),
                     )
                     .await
                 {
+                    Ok(output) => output,
+                    Err(_) => {
+                        engine.mark_active_run_finished(&run_label);
+                        return;
+                    }
+                };
+                let structured_output = match parse_work_item_split_structured_output(&full_output)
+                {
+                    Ok(output) => output,
+                    Err(message) => {
+                        engine.mark_active_run_finished(&run_label);
+                        drop(engine);
+                        let err = WsOutMessage::Error {
+                            message: format!("split generate_revision failed: {message}"),
+                        };
+                        let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                        return;
+                    }
+                };
+                let output = match WorkItemSplitEngine::complete_revision_from_structured_output(
+                    &request,
+                    &lifecycle_for_run,
+                    &issue,
+                    &repository,
+                    &invocation.author_provider,
+                    &invocation.prompt,
+                    structured_output,
+                    &retained,
+                    &redo_specs,
+                ) {
                     Ok(o) => o,
                     Err(error) => {
-                        let mut engine = engine_for_run.lock().await;
                         engine.mark_active_run_finished(&run_label);
                         drop(engine);
                         let err = WsOutMessage::Error {
@@ -1985,13 +2102,6 @@ async fn spawn_provider_run_from_handler(
                     }
                 };
 
-                engine = engine_for_run.lock().await;
-                let _ = engine
-                    .append_active_run_stream(
-                        "assistant",
-                        "正在返修 Work Item Plan：解析并校验候选拆分\n",
-                    )
-                    .await;
                 let mut outcome = match engine.complete_work_item_plan_revision(output).await {
                     Ok(o) => o,
                     Err(message) => {
@@ -2047,37 +2157,20 @@ async fn spawn_provider_run_from_handler(
                                     return;
                                 }
                             };
-                            let _ = engine
-                                .append_active_run_stream(
-                                    "assistant",
-                                    format!(
-                                        "正在返修 Work Item Plan：根据校验结果自动返修第 {revision_iterations} 轮\n"
-                                    ),
-                                )
-                                .await;
-                            drop(engine);
 
                             // 整组 AutoRevision 时丢弃局部 retained/redo，使用完整 generate_revision。
-                            let output = match split_engine
-                                .generate_revision(
-                                    &request,
-                                    &lifecycle_for_run,
-                                    &issue,
-                                    &repository,
-                                    {
-                                        let engine = engine_for_run.lock().await;
-                                        let provider = engine.session().author_provider.clone();
-                                        drop(engine);
-                                        provider
-                                    },
-                                    &[],
-                                    &[],
-                                )
-                                .await
-                            {
-                                Ok(o) => o,
+                            let author_provider = engine.session().author_provider.clone();
+                            let invocation = match WorkItemSplitEngine::build_revision_invocation(
+                                &request,
+                                &lifecycle_for_run,
+                                &issue,
+                                &repository,
+                                author_provider,
+                                &[],
+                                &[],
+                            ) {
+                                Ok(invocation) => invocation,
                                 Err(error) => {
-                                    let mut engine = engine_for_run.lock().await;
                                     engine.mark_active_run_finished(&run_label);
                                     drop(engine);
                                     let err = WsOutMessage::Error {
@@ -2090,14 +2183,76 @@ async fn spawn_provider_run_from_handler(
                                     return;
                                 }
                             };
-
-                            engine = engine_for_run.lock().await;
-                            let _ = engine
-                                .append_active_run_stream(
-                                    "assistant",
-                                    "正在返修 Work Item Plan：解析并校验候选拆分\n",
-                                )
+                            let node_id = engine
+                                .begin_work_item_plan_auto_revision_run(revision_iterations)
                                 .await;
+                            let provider_input = engine.build_work_item_plan_streaming_input(
+                                invocation.provider_type.clone(),
+                                invocation.prompt.clone(),
+                                invocation.worktree_path.clone(),
+                            );
+                            let provider_session = provider_for_run
+                                .start(provider_input, run_cancel.clone())
+                                .await;
+                            let full_output = match engine
+                                .drive_work_item_plan_provider_session_to_output(
+                                    provider_session,
+                                    &mut command_rx,
+                                    node_id,
+                                    invocation.author_provider.clone(),
+                                )
+                                .await
+                            {
+                                Ok(output) => output,
+                                Err(_) => {
+                                    engine.mark_active_run_finished(&run_label);
+                                    return;
+                                }
+                            };
+                            let structured_output =
+                                match parse_work_item_split_structured_output(&full_output) {
+                                    Ok(output) => output,
+                                    Err(message) => {
+                                        engine.mark_active_run_finished(&run_label);
+                                        drop(engine);
+                                        let err = WsOutMessage::Error {
+                                            message: format!(
+                                                "split generate_revision failed: {message}"
+                                            ),
+                                        };
+                                        let _ =
+                                            send_json_outbound(&outbound_tx_for_task, &err).await;
+                                        return;
+                                    }
+                                };
+                            let output =
+                                match WorkItemSplitEngine::complete_revision_from_structured_output(
+                                    &request,
+                                    &lifecycle_for_run,
+                                    &issue,
+                                    &repository,
+                                    &invocation.author_provider,
+                                    &invocation.prompt,
+                                    structured_output,
+                                    &[],
+                                    &[],
+                                ) {
+                                    Ok(o) => o,
+                                    Err(error) => {
+                                        engine.mark_active_run_finished(&run_label);
+                                        drop(engine);
+                                        let err = WsOutMessage::Error {
+                                            message: format!(
+                                                "split generate_revision failed: {}",
+                                                error.message
+                                            ),
+                                        };
+                                        let _ =
+                                            send_json_outbound(&outbound_tx_for_task, &err).await;
+                                        return;
+                                    }
+                                };
+
                             outcome = match engine.complete_work_item_plan_revision(output).await {
                                 Ok(o) => o,
                                 Err(message) => {

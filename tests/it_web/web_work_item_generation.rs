@@ -2,6 +2,9 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use cadence_aria::cross_cutting::provider_adapter::{ProviderAdapter, ProviderAdapterError};
 use cadence_aria::cross_cutting::provider_registry::ProviderRegistry;
+use cadence_aria::cross_cutting::streaming_provider::{
+    ProviderEvent, ProviderSession, StreamingProviderAdapter, StreamingProviderInput,
+};
 use cadence_aria::product::models::ProviderName;
 use cadence_aria::protocol::contracts::{AdapterInput, AdapterOutput, AdapterRole, TimeoutStatus};
 use cadence_aria::web::app::build_web_router;
@@ -9,9 +12,12 @@ use cadence_aria::web::runtime::WebRuntime;
 use cadence_aria::web::state::WebAppState;
 use cadence_aria::web::test_controls::TestControlledFakeStreamingProvider;
 use serde_json::{Value, json};
+use std::collections::VecDeque;
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
 #[derive(Debug, Clone)]
@@ -251,6 +257,71 @@ pub(crate) fn invalid_split_output_missing_e2e() -> Value {
     })
 }
 
+#[derive(Clone)]
+struct QueuedSplitStreamingProvider {
+    outputs: Arc<Mutex<VecDeque<Value>>>,
+}
+
+impl QueuedSplitStreamingProvider {
+    fn new(outputs: Vec<Value>) -> Self {
+        Self {
+            outputs: Arc::new(Mutex::new(VecDeque::from(outputs))),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for QueuedSplitStreamingProvider {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let output = self
+            .outputs
+            .lock()
+            .expect("queued split outputs lock")
+            .pop_front()
+            .unwrap_or_else(valid_split_output);
+        let full_output = format!(
+            "Fake Work Item Plan streaming draft\n\n\
+             <ARIA_STRUCTURED_OUTPUT>{}</ARIA_STRUCTURED_OUTPUT>",
+            output
+        );
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let (command_tx, _command_rx) = mpsc::channel(8);
+
+        tokio::spawn(async move {
+            if cancel.is_cancelled() {
+                return;
+            }
+            if event_tx
+                .send(ProviderEvent::TextDelta {
+                    content: full_output.clone(),
+                })
+                .await
+                .is_err()
+            {
+                return;
+            }
+            if cancel.is_cancelled() {
+                return;
+            }
+            let _ = event_tx
+                .send(ProviderEvent::Completed {
+                    full_output,
+                    provider_session_id: None,
+                })
+                .await;
+        });
+
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+}
+
 pub(crate) async fn request_json(
     app: axum::Router,
     method: Method,
@@ -397,6 +468,58 @@ pub(crate) async fn app_with_confirmed_story_and_design_and_revision_output(
             revision_output: Some(revision_output),
         }),
     );
+    let app = build_web_router(state);
+    let app = bootstrap_project_repo_issue_and_specs(app, &repo).await;
+
+    (app, root)
+}
+
+pub(crate) async fn app_with_confirmed_story_and_design_and_streaming_revision_output(
+    output: Value,
+    revision_output: Value,
+) -> (axum::Router, tempfile::TempDir) {
+    let root = tempdir().expect("root");
+    let repo = root.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo dir");
+    let status = Command::new("git")
+        .args(["init"])
+        .current_dir(&repo)
+        .status()
+        .expect("git init");
+    assert!(status.success());
+
+    let runtime = WebRuntime::new_fake(root.path().to_path_buf());
+    let mut state = WebAppState::new(root.path().to_path_buf(), runtime).with_provider_adapter(
+        Arc::new(MockSplitProviderAdapter {
+            output: output.clone(),
+            revision_output: Some(revision_output.clone()),
+        }),
+    );
+
+    let test_controls = cadence_aria::web::test_controls::TestControls::default();
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Fake,
+        Arc::new(QueuedSplitStreamingProvider::new(vec![
+            output,
+            revision_output,
+        ])),
+    );
+    registry.register(
+        ProviderName::Codex,
+        Arc::new(TestControlledFakeStreamingProvider::new(
+            test_controls.clone(),
+        )),
+    );
+    registry.register(
+        ProviderName::ClaudeCode,
+        Arc::new(TestControlledFakeStreamingProvider::new(
+            test_controls.clone(),
+        )),
+    );
+    state.test_controls = test_controls;
+    state.provider_registry = Arc::new(registry);
+
     let app = build_web_router(state);
     let app = bootstrap_project_repo_issue_and_specs(app, &repo).await;
 

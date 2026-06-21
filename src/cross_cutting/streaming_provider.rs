@@ -499,6 +499,178 @@ fn fake_workspace_markdown(prompt: &str) -> String {
         })
         .to_string();
     }
+    if prompt.contains("Work Item Splitter") || prompt.contains("IssueWorkItemPlan") {
+        let structured_output = if prompt.contains("局部重做（revision）") {
+            serde_json::json!({
+                "repository_profile": {
+                    "confidence": "high",
+                    "detected_layers": ["backend", "frontend"],
+                    "split_recommendation": "frontend_backend",
+                    "languages": ["rust"],
+                    "frameworks": [],
+                    "package_managers": ["cargo"],
+                    "test_frameworks": ["cargo test"],
+                    "build_systems": ["cargo"],
+                    "verification_capabilities": ["unit_tests"],
+                    "uncertainties": []
+                },
+                "work_items": [{
+                    "title": "重做 Work Item Plan 后端流式 collector",
+                    "kind": "backend",
+                    "sequence_hint": 1,
+                    "depends_on": [],
+                    "exclusive_write_scopes": ["src/product/workspace_engine.rs"],
+                    "forbidden_write_scopes": [],
+                    "required_handoff_from": [],
+                    "require_execution_plan_confirm": false
+                }],
+                "verification_plans": [{
+                    "scope": "unit",
+                    "commands": [{
+                        "id": "cmd_001",
+                        "label": "workspace engine unit test",
+                        "command": "cargo test --locked --lib drive_work_item_plan_provider_session_returns_output_and_persists_stream",
+                        "cwd": ".",
+                        "purpose": "验证 Work Item Plan 后端流式 collector",
+                        "required": true,
+                        "timeout_seconds": 120,
+                        "safety": "approved"
+                    }],
+                    "manual_checks": [],
+                    "required_gates": [],
+                    "risk_notes": [],
+                    "confidence": "high",
+                    "fallback_policy": "manual_gate"
+                }]
+            })
+        } else {
+            serde_json::json!({
+                "repository_profile": {
+                    "confidence": "high",
+                    "detected_layers": ["backend", "frontend"],
+                    "split_recommendation": "frontend_backend",
+                    "languages": ["rust"],
+                    "frameworks": [],
+                    "package_managers": ["cargo"],
+                    "test_frameworks": ["cargo test"],
+                    "build_systems": ["cargo"],
+                    "verification_capabilities": ["unit_tests"],
+                    "uncertainties": []
+                },
+                "plan": {
+                    "work_item_ids": ["wi_01", "wi_02", "wi_03"],
+                    "dependency_graph": [
+                        { "from_work_item_id": "wi_01", "to_work_item_id": "wi_02" },
+                        { "from_work_item_id": "wi_02", "to_work_item_id": "wi_03" }
+                    ]
+                },
+                "work_items": [
+                    {
+                        "title": "实现 Work Item Plan 后端流式 collector",
+                        "kind": "backend",
+                        "sequence_hint": 1,
+                        "depends_on": [],
+                        "exclusive_write_scopes": ["src/product/workspace_engine.rs"],
+                        "forbidden_write_scopes": [],
+                        "context_budget": {
+                            "target_context_k": "30-50",
+                            "max_summary_chars": 20000,
+                            "max_handoff_chars": 12000,
+                            "max_code_context_chars": 30000,
+                            "max_context_file_refs": 80,
+                            "max_traceability_refs": 40,
+                            "max_dependency_handoffs": 3
+                        },
+                        "required_handoff_from": [],
+                        "require_execution_plan_confirm": false
+                    },
+                    {
+                        "title": "接入 Workbench Work Item Plan 前端流式展示",
+                        "kind": "frontend",
+                        "sequence_hint": 2,
+                        "depends_on": [0],
+                        "exclusive_write_scopes": ["web/src/state/workspace-ws-store.ts"],
+                        "forbidden_write_scopes": [],
+                        "required_handoff_from": [],
+                        "require_execution_plan_confirm": false
+                    },
+                    {
+                        "title": "补充 Work Item Plan 流式集成测试",
+                        "kind": "integration",
+                        "sequence_hint": 3,
+                        "depends_on": [1],
+                        "exclusive_write_scopes": ["tests/it_web/web_work_item_plan_author.rs"],
+                        "forbidden_write_scopes": [],
+                        "required_handoff_from": [],
+                        "require_execution_plan_confirm": false
+                    }
+                ],
+                "verification_plans": [
+                    {
+                        "scope": "unit",
+                        "commands": [{
+                            "id": "cmd_001",
+                            "label": "workspace engine unit test",
+                            "command": "cargo test --locked --lib drive_work_item_plan_provider_session_returns_output_and_persists_stream",
+                            "cwd": ".",
+                            "purpose": "验证 Work Item Plan 后端流式 collector",
+                            "required": true,
+                            "timeout_seconds": 120,
+                            "safety": "approved"
+                        }],
+                        "manual_checks": [],
+                        "required_gates": [],
+                        "risk_notes": [],
+                        "confidence": "high",
+                        "fallback_policy": "manual_gate"
+                    },
+                    {
+                        "scope": "unit",
+                        "commands": [{
+                            "id": "cmd_002",
+                            "label": "workspace ws store test",
+                            "command": "pnpm test --run src/state/workspace-ws-store.test.ts",
+                            "cwd": "web",
+                            "purpose": "验证前端状态可接收 Work Item Plan provider stream",
+                            "required": true,
+                            "timeout_seconds": 120,
+                            "safety": "approved"
+                        }],
+                        "manual_checks": [],
+                        "required_gates": [],
+                        "risk_notes": [],
+                        "confidence": "high",
+                        "fallback_policy": "manual_gate"
+                    },
+                    {
+                        "scope": "integration",
+                        "commands": [{
+                            "id": "cmd_003",
+                            "label": "work item plan integration test",
+                            "command": "cargo test --locked --test it_web work_item_plan_author_streams_provider_output_before_candidate_artifact",
+                            "cwd": ".",
+                            "purpose": "验证 provider stream 先于 candidate artifact 出现",
+                            "required": true,
+                            "timeout_seconds": 180,
+                            "safety": "approved"
+                        }],
+                        "manual_checks": [],
+                        "required_gates": [],
+                        "risk_notes": [],
+                        "confidence": "high",
+                        "fallback_policy": "manual_gate"
+                    }
+                ]
+            })
+        };
+        return format!(
+            "Fake Work Item Plan streaming draft\n\n\
+             - 分析 Story/Design 约束\n\
+             - 拆分可执行 Work Item\n\n\
+             <ARIA_STRUCTURED_OUTPUT>{}</ARIA_STRUCTURED_OUTPUT>",
+            structured_output
+        );
+    }
 
     let issue = extract_prompt_field(prompt, "Issue")
         .or_else(|| extract_prompt_field(prompt, "Issue 描述"))
@@ -810,6 +982,45 @@ mod tests {
         assert!(output.contains("[REQ-001]"));
         assert!(output.contains("[AC-001]"));
         assert!(!output.contains("[system]"));
+    }
+
+    #[tokio::test]
+    async fn fake_streaming_provider_outputs_work_item_split_sentinel() {
+        let provider = FakeStreamingProvider;
+        let input = StreamingProviderInput {
+            provider_type: crate::protocol::contracts::ProviderType::Fake,
+            role: crate::protocol::contracts::AdapterRole::WorkItemSplitter,
+            prompt: "你是 Aria 的 Work Item Splitter".to_string(),
+            working_dir: std::env::current_dir().unwrap(),
+            workspace_session_id: Some("workspace_session_0001".to_string()),
+            resume_provider_session_id: None,
+            permission_mode: ProviderPermissionMode::Supervised,
+            env_vars: std::collections::BTreeMap::new(),
+            timeout_secs: 60,
+        };
+
+        let mut session = provider
+            .start(input, CancellationToken::new())
+            .await
+            .unwrap();
+        let mut streamed = String::new();
+        let mut completed = None;
+        while let Some(event) = session.events.recv().await {
+            match event {
+                ProviderEvent::TextDelta { content } => streamed.push_str(&content),
+                ProviderEvent::Completed { full_output, .. } => {
+                    completed = Some(full_output);
+                    break;
+                }
+                other => panic!("unexpected provider event: {other:?}"),
+            }
+        }
+
+        let full_output = completed.expect("completed output");
+        assert!(streamed.contains("Fake Work Item Plan streaming draft"));
+        assert!(full_output.contains("<ARIA_STRUCTURED_OUTPUT>"));
+        assert!(full_output.contains("\"work_items\""));
+        assert!(full_output.contains("\"target_context_k\""));
     }
 
     #[tokio::test]

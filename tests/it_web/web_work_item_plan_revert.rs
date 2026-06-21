@@ -8,6 +8,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::web_work_item_generation::{
     app_with_confirmed_story_and_design, app_with_confirmed_story_and_design_and_revision_output,
+    app_with_confirmed_story_and_design_and_streaming_revision_output,
     invalid_split_output_missing_e2e, request_json, valid_revision_redo_output, valid_split_output,
 };
 
@@ -98,7 +99,7 @@ async fn revert_work_item_is_valid_in_author_confirm_only() {
     .await
     .expect("send start_generation");
 
-    let messages = recv_ws_messages_with_timeout(&mut ws, Duration::from_secs(10), 8).await;
+    let messages = recv_ws_messages_with_timeout(&mut ws, Duration::from_secs(10), 32).await;
     let initial_artifact = messages
         .iter()
         .find(|m| m["type"] == "artifact_update")
@@ -186,7 +187,7 @@ async fn revert_work_item_clear_removes_mark() {
     .await
     .expect("send start_generation");
 
-    let messages = recv_ws_messages_with_timeout(&mut ws, Duration::from_secs(10), 8).await;
+    let messages = recv_ws_messages_with_timeout(&mut ws, Duration::from_secs(10), 32).await;
     let initial_artifact = messages
         .iter()
         .find(|m| m["type"] == "artifact_update")
@@ -312,7 +313,7 @@ async fn revert_work_item_triggers_local_redo_in_revision() {
     .await
     .expect("send start_generation");
 
-    let messages = recv_ws_messages_with_timeout(&mut ws, Duration::from_secs(10), 10).await;
+    let messages = recv_ws_messages_with_timeout(&mut ws, Duration::from_secs(10), 32).await;
     let initial_artifact = messages
         .iter()
         .find(|m| m["type"] == "artifact_update")
@@ -357,7 +358,7 @@ async fn revert_work_item_triggers_local_redo_in_revision() {
     .await
     .expect("send request_revision");
 
-    let messages = recv_ws_messages_with_timeout(&mut ws, Duration::from_secs(10), 12).await;
+    let messages = recv_ws_messages_with_timeout(&mut ws, Duration::from_secs(10), 32).await;
     assert!(
         messages.iter().all(|m| m["type"] != "error"),
         "request_revision should not produce error messages: {:?}",
@@ -399,7 +400,7 @@ async fn revert_work_item_triggers_local_redo_in_revision() {
 async fn work_item_plan_validate_errors_auto_revision_uses_generate_revision() {
     let _guard = WS_TEST_LOCK.lock().await;
     // 首次 generate 返回 validate 失败的输出；带 revision_feedback 的 revision 返回合法输出。
-    let (app, _repo) = app_with_confirmed_story_and_design_and_revision_output(
+    let (app, _repo) = app_with_confirmed_story_and_design_and_streaming_revision_output(
         invalid_split_output_missing_e2e(),
         valid_split_output(),
     )
@@ -419,7 +420,7 @@ async fn work_item_plan_validate_errors_auto_revision_uses_generate_revision() {
     .await
     .expect("send start_generation");
 
-    let messages = recv_ws_messages_with_timeout(&mut ws, Duration::from_secs(15), 16).await;
+    let messages = recv_ws_messages_with_timeout(&mut ws, Duration::from_secs(15), 48).await;
     assert!(
         messages.iter().all(|m| m["type"] != "error"),
         "auto revision should not produce error messages: {:?}",
@@ -427,6 +428,31 @@ async fn work_item_plan_validate_errors_auto_revision_uses_generate_revision() {
             .iter()
             .filter(|m| m["type"] == "error")
             .collect::<Vec<_>>()
+    );
+    let auto_revision_node = messages
+        .iter()
+        .find(|message| {
+            message["type"] == "timeline_node_created"
+                && message["node"]["node_type"] == "revision"
+                && message["node"]["title"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("Work Item Plan 自动返修")
+        })
+        .expect("expected AutoRevision to create a dedicated revision node");
+    let auto_revision_node_id = auto_revision_node["node"]["node_id"]
+        .as_str()
+        .expect("auto revision node id");
+    assert!(
+        messages.iter().any(|message| {
+            message["type"] == "stream_chunk"
+                && message["node_id"] == auto_revision_node_id
+                && message["content"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("Fake Work Item Plan streaming draft")
+        }),
+        "expected AutoRevision provider stream on a revision node"
     );
 
     let stage = messages

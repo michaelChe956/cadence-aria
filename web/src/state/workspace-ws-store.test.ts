@@ -985,7 +985,7 @@ describe("workspace ws store", () => {
     ]);
   });
 
-  it("rebuilds work item plan author progress from timeline node streaming content", () => {
+  it("rebuilds work item plan author stream from author_run timeline node content", () => {
     const store = useWorkspaceStore.getState();
 
     store.setSessionState({
@@ -999,7 +999,7 @@ describe("workspace ws store", () => {
       timeline_nodes: [
         {
           node_id: "timeline_node_work_item_plan_author",
-          node_type: "start_generation",
+          node_type: "author_run",
           agent: "claude_code",
           stage: "running",
           round: null,
@@ -1022,10 +1022,10 @@ describe("workspace ws store", () => {
       timeline_node_details: {
         timeline_node_work_item_plan_author: makeNodeDetail({
           node_id: "timeline_node_work_item_plan_author",
-          node_type: "start_generation",
+          node_type: "author_run",
           agent_role: "author",
           provider: { name: "claude_code", model: "claude-opus-4" },
-          streaming_content: "正在生成 Work Item Plan",
+          streaming_content: "Fake Work Item Plan streaming draft",
         }),
       },
       active_run_id: null,
@@ -1035,11 +1035,157 @@ describe("workspace ws store", () => {
       expect.objectContaining({
         type: "provider_stream",
         role: "author",
-        content: "正在生成 Work Item Plan",
+        content: "Fake Work Item Plan streaming draft",
         node_id: "timeline_node_work_item_plan_author",
         metadata: expect.objectContaining({ provider: "claude_code" }),
       }),
     ]);
+  });
+
+  it("does not rebuild work item plan provider stream from start_generation nodes", () => {
+    const store = useWorkspaceStore.getState();
+
+    store.setSessionState({
+      session_id: "session_work_item_plan_start_generation",
+      workspace_type: "work_item_plan",
+      stage: "running",
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "claude_code", reviewer: "codex" },
+      timeline_nodes: [
+        {
+          node_id: "timeline_node_start_generation",
+          node_type: "start_generation",
+          agent: null,
+          stage: "prepare_context",
+          round: null,
+          status: "completed",
+          title: "开始生成",
+          summary: null,
+          started_at: "2026-06-19T10:00:00Z",
+          completed_at: "2026-06-19T10:00:00Z",
+          duration_ms: 0,
+          artifact_ref: null,
+          provider_config_snapshot: {
+            author: "claude_code",
+            reviewer: "codex",
+            review_rounds: 1,
+          },
+        },
+      ],
+      active_node_id: "timeline_node_start_generation",
+      artifact_versions: [],
+      timeline_node_details: {
+        timeline_node_start_generation: makeNodeDetail({
+          node_id: "timeline_node_start_generation",
+          node_type: "start_generation",
+          streaming_content: "Fake Work Item Plan streaming draft",
+        }),
+      },
+      active_run_id: null,
+    });
+
+    expect(
+      useWorkspaceStore
+        .getState()
+        .chatEntries.some((entry) => entry.type === "provider_stream"),
+    ).toBe(false);
+    expect(useWorkspaceStore.getState().chatEntries).toContainEqual(
+      expect.objectContaining({
+        type: "start_generation",
+        role: "system",
+        node_id: "timeline_node_start_generation",
+      }),
+    );
+  });
+
+  it("restores completed work item plan author stream while focusing active author confirm", () => {
+    const store = useWorkspaceStore.getState();
+
+    store.setSessionState({
+      session_id: "session_work_item_plan_author_confirm",
+      workspace_type: "work_item_plan",
+      stage: "author_confirm",
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "claude_code", reviewer: "codex" },
+      timeline_nodes: [
+        {
+          node_id: "timeline_node_work_item_plan_author",
+          node_type: "author_run",
+          agent: "claude_code",
+          stage: "running",
+          round: null,
+          status: "completed",
+          title: "Work Item Plan 生成",
+          summary: "WorkItemPlan provider 输出完成",
+          started_at: "2026-06-21T10:00:00Z",
+          completed_at: "2026-06-21T10:01:00Z",
+          duration_ms: 60_000,
+          artifact_ref: "artifact_version_001",
+          provider_config_snapshot: {
+            author: "claude_code",
+            reviewer: "codex",
+            review_rounds: 1,
+          },
+        },
+        {
+          node_id: "timeline_node_author_confirm",
+          node_type: "author_confirm",
+          agent: null,
+          stage: "author_confirm",
+          round: null,
+          status: "active",
+          title: "Author 结果确认",
+          summary: "WorkItemPlan 候选已生成，等待确认",
+          started_at: "2026-06-21T10:01:00Z",
+          completed_at: null,
+          duration_ms: null,
+          artifact_ref: null,
+          provider_config_snapshot: {
+            author: "claude_code",
+            reviewer: "codex",
+            review_rounds: 1,
+          },
+        },
+      ],
+      active_node_id: "timeline_node_author_confirm",
+      artifact_versions: [],
+      timeline_node_details: {
+        timeline_node_work_item_plan_author: makeNodeDetail({
+          node_id: "timeline_node_work_item_plan_author",
+          node_type: "author_run",
+          agent_role: "author",
+          provider: { name: "claude_code", model: "claude-opus-4" },
+          streaming_content: "Fake Work Item Plan streaming draft",
+        }),
+        timeline_node_author_confirm: makeNodeDetail({
+          node_id: "timeline_node_author_confirm",
+          node_type: "author_confirm",
+          streaming_content: "",
+        }),
+      },
+      active_run_id: null,
+    });
+
+    expect(useWorkspaceStore.getState().activeNodeId).toBe("timeline_node_author_confirm");
+    expect(useWorkspaceStore.getState().chatEntries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "provider_stream",
+          role: "author",
+          node_id: "timeline_node_work_item_plan_author",
+          content: "Fake Work Item Plan streaming draft",
+        }),
+        expect.objectContaining({
+          type: "stage_change",
+          role: "system",
+          node_id: "timeline_node_author_confirm",
+        }),
+      ]),
+    );
   });
 
   it.each([

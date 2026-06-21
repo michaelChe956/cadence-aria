@@ -6,7 +6,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::cross_cutting::provider_adapter::DEFAULT_PROVIDER_TIMEOUT_SECS;
+use crate::cross_cutting::provider_adapter::{
+    DEFAULT_PROVIDER_TIMEOUT_SECS, STRUCTURED_OUTPUT_END, STRUCTURED_OUTPUT_START,
+};
 use crate::cross_cutting::streaming_provider::{
     ChoiceOptionData, ChoiceRequestSource, ProviderCommand, ProviderEvent, ProviderExecutionEvent,
     ProviderExecutionEventKind, ProviderExecutionEventStatus, ProviderPermissionMode,
@@ -21,8 +23,8 @@ use crate::product::models::{
     AgentRole, ArtifactRef, IssueWorkItemPlan, LifecycleConfirmationStatus,
     LifecycleWorkItemRecord, NodeDetail, PermissionEvent, ProviderConversationRef,
     ProviderConversationRole, ProviderName, ProviderSnapshot, WorkItemPlanStatus,
-    WorkItemSplitFinding, WorkspaceMessageRecord, WorkspaceSessionRecord, WorkspaceSessionStatus,
-    WorkspaceType,
+    WorkItemSplitFinding, WorkItemSplitFindingSeverity, WorkspaceMessageRecord,
+    WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType,
 };
 use crate::product::work_item_split_engine::{RedoSpec, WorkItemSplitProviderOutput};
 use crate::product::work_item_split_validator::WorkItemSplitValidator;
@@ -55,6 +57,18 @@ fn serialized_string<T: serde::Serialize>(value: &T) -> String {
         .ok()
         .and_then(|value| value.as_str().map(str::to_string))
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn work_item_plan_findings_summary(prefix: &str, findings: &[WorkItemSplitFinding]) -> String {
+    let errors = findings
+        .iter()
+        .filter(|finding| finding.severity == WorkItemSplitFindingSeverity::Error)
+        .count();
+    let warnings = findings
+        .iter()
+        .filter(|finding| finding.severity == WorkItemSplitFindingSeverity::Warning)
+        .count();
+    format!("{prefix}（errors: {errors}, warnings: {warnings}）")
 }
 
 fn build_work_item_plan_candidate_dto(
@@ -625,6 +639,76 @@ impl Default for PendingStreamBuffer {
     }
 }
 
+struct StructuredOutputDisplayFilter {
+    pending: String,
+    inside_structured_output: bool,
+}
+
+impl StructuredOutputDisplayFilter {
+    fn new() -> Self {
+        Self {
+            pending: String::new(),
+            inside_structured_output: false,
+        }
+    }
+
+    fn push(&mut self, chunk: &str) -> String {
+        self.pending.push_str(chunk);
+        let mut visible = String::new();
+
+        loop {
+            if self.inside_structured_output {
+                if let Some(end_index) = self.pending.find(STRUCTURED_OUTPUT_END) {
+                    let drain_end = end_index + STRUCTURED_OUTPUT_END.len();
+                    self.pending.drain(..drain_end);
+                    self.inside_structured_output = false;
+                    continue;
+                }
+
+                let keep = longest_suffix_prefix_len(&self.pending, STRUCTURED_OUTPUT_END);
+                if self.pending.len() > keep {
+                    self.pending.drain(..self.pending.len() - keep);
+                }
+                break;
+            }
+
+            if let Some(start_index) = self.pending.find(STRUCTURED_OUTPUT_START) {
+                visible.push_str(&self.pending[..start_index]);
+                let drain_end = start_index + STRUCTURED_OUTPUT_START.len();
+                self.pending.drain(..drain_end);
+                self.inside_structured_output = true;
+                continue;
+            }
+
+            let keep = longest_suffix_prefix_len(&self.pending, STRUCTURED_OUTPUT_START);
+            if self.pending.len() > keep {
+                let emit: String = self.pending.drain(..self.pending.len() - keep).collect();
+                visible.push_str(&emit);
+            }
+            break;
+        }
+
+        visible
+    }
+
+    fn finish(&mut self) -> String {
+        if self.inside_structured_output {
+            self.pending.clear();
+            String::new()
+        } else {
+            std::mem::take(&mut self.pending)
+        }
+    }
+}
+
+fn longest_suffix_prefix_len(value: &str, pattern: &str) -> usize {
+    let max_len = value.len().min(pattern.len().saturating_sub(1));
+    (1..=max_len)
+        .rev()
+        .find(|len| value.ends_with(&pattern[..*len]))
+        .unwrap_or(0)
+}
+
 struct TimelineNodeDraft {
     node_type: TimelineNodeType,
     agent: Option<ProviderName>,
@@ -838,6 +922,10 @@ impl WorkspaceEngine {
         self.active_run_id.as_deref()
     }
 
+    pub fn active_timeline_node_id(&self) -> Option<String> {
+        self.active_node_id.clone()
+    }
+
     pub async fn take_pending_author_choice_prompt(
         &mut self,
         id: &str,
@@ -993,6 +1081,33 @@ impl WorkspaceEngine {
             locked_at: chrono::Utc::now().to_rfc3339(),
         };
         Ok((node, locked))
+    }
+
+    pub async fn begin_work_item_plan_author_run(&mut self) -> String {
+        self.create_timeline_node(TimelineNodeDraft {
+            node_type: TimelineNodeType::AuthorRun,
+            agent: Some(self.session.author_provider.clone()),
+            stage: WorkspaceStage::Running,
+            round: None,
+            title: "Work Item Plan 生成".to_string(),
+            summary: None,
+            status: TimelineNodeStatus::Active,
+        })
+        .await
+    }
+
+    pub async fn begin_work_item_plan_auto_revision_run(&mut self, round: u32) -> String {
+        self.transition_stage(WorkspaceStage::Revision).await;
+        self.create_timeline_node(TimelineNodeDraft {
+            node_type: TimelineNodeType::Revision,
+            agent: Some(self.session.author_provider.clone()),
+            stage: WorkspaceStage::Revision,
+            round: Some(round),
+            title: format!("Work Item Plan 自动返修 Round {round}"),
+            summary: Some("根据 Work Item Plan 校验结果自动返修".to_string()),
+            status: TimelineNodeStatus::Active,
+        })
+        .await
     }
 
     pub async fn append_aborted_by_disconnect(
@@ -1775,6 +1890,307 @@ impl WorkspaceEngine {
             self.complete_assistant_message(assistant_msg_id, full_content, false)
                 .await;
         }
+    }
+
+    pub async fn drive_work_item_plan_provider_session_to_output(
+        &mut self,
+        session: Result<
+            ProviderSession,
+            crate::cross_cutting::provider_adapter::ProviderAdapterError,
+        >,
+        command_rx: &mut mpsc::Receiver<ProviderCommand>,
+        node_id: String,
+        agent: ProviderName,
+    ) -> Result<String, String> {
+        let mut session = match session {
+            Ok(session) => session,
+            Err(error) => {
+                let message = error.details.clone();
+                let _ = self
+                    .event_tx
+                    .send(EngineEvent::Error {
+                        message: message.clone(),
+                    })
+                    .await;
+                self.update_timeline_node(
+                    &node_id,
+                    TimelineNodeStatus::Failed,
+                    Some("Provider 启动失败".to_string()),
+                )
+                .await;
+                self.finish_failed_run().await;
+                return Err(message);
+            }
+        };
+
+        let cancel = self.cancel.clone();
+        let mut full_content = String::new();
+        let mut events_open = true;
+        let mut commands_open = true;
+        let mut tool_call_titles = BTreeMap::new();
+        let mut tool_call_commands = BTreeMap::new();
+        let mut display_filter = StructuredOutputDisplayFilter::new();
+
+        while events_open {
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    let display_content = display_filter.finish();
+                    self.emit_work_item_plan_display_chunk(&node_id, display_content).await;
+                    let _ = self.flush_stream_buffer(&node_id).await;
+                    self.finish_aborted_run().await;
+                    return Err("provider run aborted".to_string());
+                }
+                command = command_rx.recv(), if commands_open => {
+                    match command {
+                        Some(ProviderCommand::Abort) => {
+                            let _ = session.commands.send(ProviderCommand::Abort).await;
+                            cancel.cancel();
+                            let display_content = display_filter.finish();
+                            self.emit_work_item_plan_display_chunk(&node_id, display_content).await;
+                            let _ = self.flush_stream_buffer(&node_id).await;
+                            self.finish_aborted_run().await;
+                            return Err("provider run aborted".to_string());
+                        }
+                        Some(ProviderCommand::PermissionResponse {
+                            id,
+                            approved,
+                            reason,
+                        }) => {
+                            let _ = self
+                                .persist_permission_response(
+                                    &node_id,
+                                    id.clone(),
+                                    serde_json::json!({
+                                        "approved": approved,
+                                        "reason": reason.clone(),
+                                    }),
+                                )
+                                .await;
+                            if session.commands.send(ProviderCommand::PermissionResponse {
+                                id,
+                                approved,
+                                reason,
+                            }).await.is_err() {
+                                commands_open = false;
+                            }
+                        }
+                        Some(ProviderCommand::ChoiceResponse {
+                            id,
+                            selected_option_ids,
+                            free_text,
+                        }) => {
+                            if session.commands.send(ProviderCommand::ChoiceResponse {
+                                id,
+                                selected_option_ids,
+                                free_text,
+                            }).await.is_err() {
+                                commands_open = false;
+                            }
+                        }
+                        Some(ProviderCommand::ToolResult(_)) => {}
+                        None => commands_open = false,
+                    }
+                }
+                event = session.events.recv() => {
+                    let Some(event) = event else {
+                        events_open = false;
+                        continue;
+                    };
+
+                    match event {
+                        ProviderEvent::TextDelta { content } => {
+                            full_content.push_str(&content);
+                            let display_content = display_filter.push(&content);
+                            self.emit_work_item_plan_display_chunk(&node_id, display_content).await;
+                        }
+                        ProviderEvent::PermissionRequest(request) => {
+                            let _ = self
+                                .persist_permission_request(
+                                    &node_id,
+                                    request.id.clone(),
+                                    serde_json::json!({
+                                        "tool_name": request.tool_name.clone(),
+                                        "description": request.description.clone(),
+                                        "risk_level": risk_level_text(&request.risk_level),
+                                    }),
+                                )
+                                .await;
+                            let _ = self
+                                .event_tx
+                                .send(EngineEvent::ExecutionEvent {
+                                    event: ProviderExecutionEvent {
+                                        event_id: format!("permission_{}", request.id),
+                                        kind: ProviderExecutionEventKind::Command,
+                                        status: ProviderExecutionEventStatus::WaitingApproval,
+                                        title: "Waiting for permission".to_string(),
+                                        detail: Some(request.description.clone()),
+                                        command: Some(request.tool_name.clone()),
+                                        cwd: self
+                                            .session
+                                            .repository_path
+                                            .as_ref()
+                                            .map(|path| path.display().to_string()),
+                                        output: None,
+                                        exit_code: None,
+                                    },
+                                    node_id: Some(node_id.clone()),
+                                    agent: Some(agent.clone()),
+                                })
+                                .await;
+                            let _ = self
+                                .event_tx
+                                .send(EngineEvent::PermissionRequest {
+                                    id: request.id,
+                                    tool_name: request.tool_name,
+                                    description: request.description,
+                                    risk_level: request.risk_level,
+                                })
+                                .await;
+                        }
+                        ProviderEvent::ChoiceRequest(request) => {
+                            let _ = self
+                                .event_tx
+                                .send(EngineEvent::ChoiceRequest {
+                                    id: request.id,
+                                    prompt: request.prompt,
+                                    options: request.options,
+                                    allow_multiple: request.allow_multiple,
+                                    allow_free_text: request.allow_free_text,
+                                    source: request.source,
+                                })
+                                .await;
+                        }
+                        ProviderEvent::StatusChanged(status) => {
+                            let _ = self
+                                .event_tx
+                                .send(EngineEvent::ProviderStatus { status })
+                                .await;
+                        }
+                        ProviderEvent::Execution(event) => {
+                            self
+                                .emit_execution_event(
+                                    event,
+                                    Some(node_id.clone()),
+                                    Some(agent.clone()),
+                                )
+                                .await;
+                        }
+                        ProviderEvent::ToolCall(call) => {
+                            tool_call_titles.insert(call.id.clone(), call.tool_name.clone());
+                            if let Some(command) = extract_tool_command(&call.input) {
+                                tool_call_commands.insert(call.id.clone(), command);
+                            }
+                            self
+                                .emit_execution_event(
+                                    execution_event_from_tool_call(call),
+                                    Some(node_id.clone()),
+                                    Some(agent.clone()),
+                                )
+                                .await;
+                        }
+                        ProviderEvent::ToolResult(result) => {
+                            let title = tool_call_titles
+                                .get(&result.tool_use_id)
+                                .cloned()
+                                .unwrap_or_else(|| "Tool result".to_string());
+                            let command = tool_call_commands.get(&result.tool_use_id).cloned();
+                            self
+                                .emit_execution_event(
+                                    execution_event_from_tool_result(result, title, command),
+                                    Some(node_id.clone()),
+                                    Some(agent.clone()),
+                                )
+                                .await;
+                        }
+                        ProviderEvent::Completed {
+                            full_output,
+                            provider_session_id,
+                        } => {
+                            let display_content = display_filter.finish();
+                            self.emit_work_item_plan_display_chunk(&node_id, display_content).await;
+                            let _ = self.flush_stream_buffer(&node_id).await;
+                            self
+                                .record_provider_session(
+                                    ProviderConversationRole::Author,
+                                    agent,
+                                    provider_session_id,
+                                    Some(node_id),
+                                )
+                                .await;
+                            return Ok(full_output);
+                        }
+                        ProviderEvent::Failed { message } => {
+                            let display_content = display_filter.finish();
+                            self.emit_work_item_plan_display_chunk(&node_id, display_content).await;
+                            let _ = self.flush_stream_buffer(&node_id).await;
+                            let _ = self
+                                .event_tx
+                                .send(EngineEvent::Error {
+                                    message: message.clone(),
+                                })
+                                .await;
+                            self.update_timeline_node(
+                                &node_id,
+                                TimelineNodeStatus::Failed,
+                                Some("Provider 运行失败".to_string()),
+                            )
+                            .await;
+                            self.finish_failed_run().await;
+                            return Err(message);
+                        }
+                        ProviderEvent::ProtocolError {
+                            code,
+                            message,
+                            context,
+                        } => {
+                            let _ = self
+                                .event_tx
+                                .send(EngineEvent::ProtocolError {
+                                    code,
+                                    message,
+                                    context,
+                                })
+                                .await;
+                        }
+                        ProviderEvent::PermissionTimeout { permission_id } => {
+                            self
+                                .handle_permission_timeout(
+                                    permission_id.clone(),
+                                    Some(node_id.clone()),
+                                )
+                                .await;
+                            return Err(format!("permission timeout: {permission_id}"));
+                        }
+                    }
+                }
+            }
+        }
+
+        let display_content = display_filter.finish();
+        self.emit_work_item_plan_display_chunk(&node_id, display_content)
+            .await;
+        let _ = self.flush_stream_buffer(&node_id).await;
+        if full_content.is_empty() {
+            self.finish_empty_assistant_output().await;
+            Err("provider completed without output".to_string())
+        } else {
+            Ok(full_content)
+        }
+    }
+
+    async fn emit_work_item_plan_display_chunk(&mut self, node_id: &str, content: String) {
+        if content.is_empty() {
+            return;
+        }
+        let _ = self.buffer_stream_chunk(node_id, content.clone()).await;
+        let _ = self
+            .event_tx
+            .send(EngineEvent::StreamChunk {
+                role: "assistant".to_string(),
+                content,
+                node_id: Some(node_id.to_string()),
+            })
+            .await;
     }
 
     async fn emit_execution_event(
@@ -2695,6 +3111,25 @@ impl WorkspaceEngine {
         })
     }
 
+    pub fn build_work_item_plan_streaming_input(
+        &self,
+        provider_type: ProviderType,
+        prompt: String,
+        worktree_path: String,
+    ) -> StreamingProviderInput {
+        StreamingProviderInput {
+            provider_type,
+            role: AdapterRole::WorkItemSplitter,
+            prompt,
+            working_dir: PathBuf::from(worktree_path),
+            workspace_session_id: Some(self.session.session_id.clone()),
+            resume_provider_session_id: None,
+            permission_mode: ProviderPermissionMode::Supervised,
+            env_vars: BTreeMap::new(),
+            timeout_secs: DEFAULT_PROVIDER_TIMEOUT_SECS,
+        }
+    }
+
     fn build_review_input(&self) -> Result<StreamingProviderInput, String> {
         if matches!(self.session.workspace_type, WorkspaceType::WorkItemPlan) {
             return self.build_work_item_plan_review_input();
@@ -3308,6 +3743,11 @@ impl WorkspaceEngine {
                 ) {
                     tracing::warn!(%error, "persist final validate findings before HumanConfirm failed");
                 }
+                self.complete_active_node(Some(work_item_plan_findings_summary(
+                    "WorkItemPlan 校验失败，转人工确认",
+                    &findings,
+                )))
+                .await;
                 self.enter_human_confirm_for_work_item_plan_author_failure(&findings)
                     .await;
                 return Ok(WorkItemPlanAuthorOutcome::HumanConfirm {
@@ -3324,6 +3764,11 @@ impl WorkspaceEngine {
                     findings.clone(),
                 )
                 .map_err(|e| format!("replace candidate failed: {e}"))?;
+            self.complete_active_node(Some(work_item_plan_findings_summary(
+                "WorkItemPlan 校验失败，准备自动返修",
+                &findings,
+            )))
+            .await;
             return Ok(WorkItemPlanAuthorOutcome::AutoRevision { findings });
         }
 
@@ -3347,6 +3792,8 @@ impl WorkspaceEngine {
         })
         .await;
 
+        self.complete_active_node(Some("WorkItemPlan provider 输出完成".to_string()))
+            .await;
         self.enter_author_confirm(Some("WorkItemPlan 候选已生成，等待确认".to_string()))
             .await;
 
@@ -3391,6 +3838,11 @@ impl WorkspaceEngine {
                 ) {
                     tracing::warn!(%error, "persist final validate findings before HumanConfirm failed");
                 }
+                self.complete_active_node(Some(work_item_plan_findings_summary(
+                    "WorkItemPlan 返修校验失败，转人工确认",
+                    &findings,
+                )))
+                .await;
                 self.enter_human_confirm_for_work_item_plan_author_failure(&findings)
                     .await;
                 return Ok(WorkItemPlanAuthorOutcome::HumanConfirm {
@@ -3407,6 +3859,11 @@ impl WorkspaceEngine {
                     findings.clone(),
                 )
                 .map_err(|e| format!("replace candidate failed: {e}"))?;
+            self.complete_active_node(Some(work_item_plan_findings_summary(
+                "WorkItemPlan 返修校验失败，准备自动返修",
+                &findings,
+            )))
+            .await;
             return Ok(WorkItemPlanAuthorOutcome::AutoRevision { findings });
         }
 
@@ -3428,6 +3885,8 @@ impl WorkspaceEngine {
         })
         .await;
 
+        self.complete_active_node(Some("WorkItemPlan 返修 provider 输出完成".to_string()))
+            .await;
         self.enter_author_confirm(Some("WorkItemPlan 候选已重做，等待确认".to_string()))
             .await;
         self.work_item_plan_revision_retry_count = 0;
@@ -10064,6 +10523,182 @@ mod tests {
             error.contains("lifecycle_store unavailable"),
             "错误信息应提示 lifecycle_store 不可用，实际为: {error}"
         );
+    }
+
+    #[tokio::test]
+    async fn begin_work_item_plan_author_run_creates_standard_author_node() {
+        let (_tmp, _checkpoint_store, _lifecycle, _plan_id, mut engine) =
+            make_work_item_plan_engine_with_draft_candidate("sess_wip_author_stream_node");
+
+        let node_id = engine.begin_work_item_plan_author_run().await;
+        let node = engine
+            .timeline_nodes
+            .iter()
+            .find(|node| node.node_id == node_id)
+            .expect("author node");
+
+        assert_eq!(node.node_type, TimelineNodeType::AuthorRun);
+        assert_eq!(node.stage, WsWorkspaceStage::Running);
+        assert_eq!(node.agent, Some(ProviderName::ClaudeCode));
+        assert_eq!(node.status, TimelineNodeStatus::Active);
+        assert_eq!(node.title, "Work Item Plan 生成");
+        assert_eq!(
+            engine.active_timeline_node_id().as_deref(),
+            Some(node_id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn drive_work_item_plan_provider_session_returns_output_and_persists_stream() {
+        let (_tmp, _checkpoint_store, lifecycle, _plan_id, mut engine) =
+            make_work_item_plan_engine_with_draft_candidate("sess_wip_stream_collector");
+        engine.session.session_id = lifecycle
+            .list_workspace_sessions("project_0001", "issue_0001")
+            .expect("workspace sessions")
+            .into_iter()
+            .find(|session| session.workspace_type == WorkspaceType::WorkItemPlan)
+            .expect("work item plan session")
+            .id;
+        let node_id = engine.begin_work_item_plan_author_run().await;
+        let (provider_event_tx, provider_event_rx) = mpsc::channel(8);
+        let (provider_command_tx, _provider_command_rx) = mpsc::channel(8);
+        provider_event_tx
+            .send(ProviderEvent::TextDelta {
+                content: "Fake Work Item Plan streaming draft\n".to_string(),
+            })
+            .await
+            .expect("send text delta");
+        provider_event_tx
+            .send(ProviderEvent::Completed {
+                full_output: "Final structured output".to_string(),
+                provider_session_id: Some("provider-work-item-plan-author-1".to_string()),
+            })
+            .await
+            .expect("send completed");
+        drop(provider_event_tx);
+        let mut command_rx = empty_provider_commands();
+
+        let output = engine
+            .drive_work_item_plan_provider_session_to_output(
+                Ok(ProviderSession {
+                    events: provider_event_rx,
+                    commands: provider_command_tx,
+                }),
+                &mut command_rx,
+                node_id.clone(),
+                ProviderName::ClaudeCode,
+            )
+            .await
+            .expect("collector output");
+
+        assert_eq!(output, "Final structured output");
+        let detail = lifecycle
+            .load_node_detail(engine.session().session_id.as_str(), &node_id)
+            .expect("node detail");
+        assert!(
+            detail
+                .streaming_content
+                .contains("Fake Work Item Plan streaming draft")
+        );
+        assert!(
+            engine
+                .session()
+                .provider_conversations
+                .iter()
+                .any(|conversation| {
+                    conversation.role == ProviderConversationRole::Author
+                        && conversation.provider == ProviderName::ClaudeCode
+                        && conversation.provider_session_id == "provider-work-item-plan-author-1"
+                        && conversation.last_node_id.as_deref() == Some(node_id.as_str())
+                })
+        );
+    }
+
+    #[tokio::test]
+    async fn drive_work_item_plan_provider_session_hides_structured_output_from_stream() {
+        let (_tmp, _checkpoint_store, lifecycle, _plan_id, mut engine) =
+            make_work_item_plan_engine_with_draft_candidate("sess_wip_stream_filter");
+        engine.session.session_id = lifecycle
+            .list_workspace_sessions("project_0001", "issue_0001")
+            .expect("workspace sessions")
+            .into_iter()
+            .find(|session| session.workspace_type == WorkspaceType::WorkItemPlan)
+            .expect("work item plan session")
+            .id;
+        let node_id = engine.begin_work_item_plan_author_run().await;
+        let (provider_event_tx, provider_event_rx) = mpsc::channel(8);
+        let (provider_command_tx, _provider_command_rx) = mpsc::channel(8);
+        let full_output = "Readable Work Item Plan draft\n<ARIA_STRUCTURED_OUTPUT>{\"work_items\":[]}</ARIA_STRUCTURED_OUTPUT>".to_string();
+        provider_event_tx
+            .send(ProviderEvent::TextDelta {
+                content: "Readable Work Item Plan draft\n<ARIA_STRUCTURED".to_string(),
+            })
+            .await
+            .expect("send text delta");
+        provider_event_tx
+            .send(ProviderEvent::TextDelta {
+                content: "_OUTPUT>{\"work_items\":[]}</ARIA_STRUCTURED_OUTPUT>".to_string(),
+            })
+            .await
+            .expect("send structured delta");
+        provider_event_tx
+            .send(ProviderEvent::Completed {
+                full_output: full_output.clone(),
+                provider_session_id: None,
+            })
+            .await
+            .expect("send completed");
+        drop(provider_event_tx);
+        let mut command_rx = empty_provider_commands();
+
+        let output = engine
+            .drive_work_item_plan_provider_session_to_output(
+                Ok(ProviderSession {
+                    events: provider_event_rx,
+                    commands: provider_command_tx,
+                }),
+                &mut command_rx,
+                node_id.clone(),
+                ProviderName::ClaudeCode,
+            )
+            .await
+            .expect("collector output");
+
+        assert_eq!(output, full_output);
+        let detail = lifecycle
+            .load_node_detail(engine.session().session_id.as_str(), &node_id)
+            .expect("node detail");
+        assert!(
+            detail
+                .streaming_content
+                .contains("Readable Work Item Plan draft")
+        );
+        assert!(!detail.streaming_content.contains("ARIA_STRUCTURED_OUTPUT"));
+        assert!(!detail.streaming_content.contains("\"work_items\""));
+    }
+
+    #[test]
+    fn build_work_item_plan_streaming_input_uses_splitter_role() {
+        let (_tmp, _checkpoint_store, _lifecycle, _plan_id, engine) =
+            make_work_item_plan_engine_with_draft_candidate("sess_wip_splitter_input");
+
+        let input = engine.build_work_item_plan_streaming_input(
+            ProviderType::Fake,
+            "split prompt".to_string(),
+            "/tmp/worktree".to_string(),
+        );
+
+        assert_eq!(input.provider_type, ProviderType::Fake);
+        assert_eq!(input.role, AdapterRole::WorkItemSplitter);
+        assert_eq!(input.prompt, "split prompt");
+        assert_eq!(input.working_dir, PathBuf::from("/tmp/worktree"));
+        assert_eq!(
+            input.workspace_session_id.as_deref(),
+            Some(engine.session().session_id.as_str())
+        );
+        assert_eq!(input.resume_provider_session_id, None);
+        assert_eq!(input.permission_mode, ProviderPermissionMode::Supervised);
+        assert_eq!(input.timeout_secs, DEFAULT_PROVIDER_TIMEOUT_SECS);
     }
 
     fn make_work_item_plan_engine_with_draft_candidate(
