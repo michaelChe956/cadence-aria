@@ -12,9 +12,28 @@
 ## 当前 Git 状态
 
 - `git status --short --branch`：`## feat-b-0616...origin/feat-b-0616`
-- 当前 HEAD：`0262979 feat(work-item-plan): add serial draft generation flow`
+- 本节原始记录时 HEAD：`0262979 feat(work-item-plan): add serial draft generation flow`
 - 本地分支与 `origin/feat-b-0616` 对齐。
 - 记录前工作区干净。
+
+## 续做暂停记录
+
+- 记录时间：2026-06-23 00:41 CST
+- 追加记录前 HEAD：`c4b129a docs(work-item-plan): record staged flow handoff`
+- `git status --short --branch`：`## feat-b-0616...origin/feat-b-0616`
+- 工作区干净，本地分支与 `origin/feat-b-0616` 对齐。
+- 当前恢复点：已确认 WP4 已完成并推送，正在复核 WP5 计划与现有 Batch/Draft 代码结构，尚未开始 WP5 代码修改。
+- 已确认现有代码具备部分 WP5 基础：
+  - `WorkItemDraftRecord.batch_id`
+  - `WorkItemGenerationMode::{Serial, Batch}`
+  - `WorkItemBatchRecord`
+  - `WorkItemBatchStatus::{Generating, Completed, ReviewPending, ReviewDone}`
+  - `TimelineNodeType::WorkItemBatchRun`
+- 明天继续入口：
+  - 先确认 `git status --short --branch`。
+  - 重新读取 worktree 内规则文件。
+  - 继续实施 WP5，优先按 TDD 新增 `tests/it_web/web_work_item_plan_batch.rs`。
+  - 先覆盖 Batch record、拓扑序队列、自动串行生成全部 draft，再继续 validation retry、batch decision 与整组 review。
 
 ## 已完成内容
 
