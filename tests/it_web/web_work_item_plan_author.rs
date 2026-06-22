@@ -16,7 +16,8 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::web_work_item_generation::{
     app_with_confirmed_story_and_design, app_with_confirmed_story_and_design_and_revision_output,
-    request_json, valid_revision_redo_output, valid_split_output,
+    app_with_confirmed_story_and_design_and_streaming_outputs, request_json, valid_outline_output,
+    valid_revision_redo_output, valid_split_output,
 };
 
 static WS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -74,9 +75,11 @@ where
 }
 
 #[tokio::test]
-async fn work_item_plan_start_generation_returns_candidate_artifact() {
+async fn work_item_plan_start_generation_returns_outline_artifact() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let (app, _repo) = app_with_confirmed_story_and_design(valid_split_output()).await;
+    let (app, _repo, _prompts) =
+        app_with_confirmed_story_and_design_and_streaming_outputs(vec![valid_outline_output()])
+            .await;
 
     let (_status, prepare_resp) = request_json(
         app.clone(),
@@ -116,7 +119,7 @@ async fn work_item_plan_start_generation_returns_candidate_artifact() {
     let messages = recv_ws_until(&mut ws, Duration::from_secs(10), |messages| {
         messages
             .iter()
-            .any(|m| m["type"] == "artifact_update" && m.get("candidate").is_some())
+            .any(|m| m["type"] == "artifact_update" && m.get("outline_candidate").is_some())
             && messages
                 .iter()
                 .any(|m| m["type"] == "stage_change" && m["stage"] == "author_confirm")
@@ -127,13 +130,14 @@ async fn work_item_plan_start_generation_returns_candidate_artifact() {
         .iter()
         .find(|m| m["type"] == "artifact_update")
         .expect("artifact_update");
-    assert!(artifact_update["candidate"]["work_items"].is_array());
+    assert!(artifact_update["outline_candidate"]["outline"]["work_item_outlines"].is_array());
     assert!(
-        !artifact_update["candidate"]["work_items"]
+        !artifact_update["outline_candidate"]["outline"]["work_item_outlines"]
             .as_array()
             .unwrap()
             .is_empty()
     );
+    assert!(artifact_update.get("candidate").is_none());
 
     let _author_confirm_stage = messages
         .iter()
@@ -145,9 +149,11 @@ async fn work_item_plan_start_generation_returns_candidate_artifact() {
 }
 
 #[tokio::test]
-async fn work_item_plan_author_streams_provider_output_before_candidate_artifact() {
+async fn work_item_plan_author_streams_provider_output_before_outline_artifact() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let (app, _repo) = app_with_confirmed_story_and_design(valid_split_output()).await;
+    let (app, _repo, _prompts) =
+        app_with_confirmed_story_and_design_and_streaming_outputs(vec![valid_outline_output()])
+            .await;
 
     let (_status, prepare_resp) = request_json(
         app.clone(),
@@ -203,8 +209,8 @@ async fn work_item_plan_author_streams_provider_output_before_candidate_artifact
 
         match value["type"].as_str() {
             Some("timeline_node_created")
-                if value["node"]["node_type"] == "author_run"
-                    && value["node"]["title"] == "Work Item Plan 生成" =>
+                if value["node"]["node_type"] == "work_item_plan_outline_run"
+                    && value["node"]["title"] == "WorkItemPlan Outline 生成" =>
             {
                 author_node_id = value["node"]["node_id"].as_str().map(str::to_string);
             }
@@ -219,7 +225,7 @@ async fn work_item_plan_author_streams_provider_output_before_candidate_artifact
             {
                 saw_provider_stream = true;
             }
-            Some("artifact_update") if value.get("candidate").is_some() => {
+            Some("artifact_update") if value.get("outline_candidate").is_some() => {
                 saw_candidate = true;
                 break;
             }
@@ -230,13 +236,13 @@ async fn work_item_plan_author_streams_provider_output_before_candidate_artifact
 
     assert!(
         author_node_id.is_some(),
-        "expected dedicated author_run node"
+        "expected dedicated work_item_plan_outline_run node"
     );
     assert!(
         saw_provider_stream,
         "expected provider text stream before candidate"
     );
-    assert!(saw_candidate, "expected candidate artifact_update");
+    assert!(saw_candidate, "expected outline artifact_update");
 
     ws.close(None).await.ok();
 }
@@ -244,7 +250,9 @@ async fn work_item_plan_author_streams_provider_output_before_candidate_artifact
 #[tokio::test]
 async fn work_item_plan_author_completes_provider_node_before_author_confirm() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let (app, _repo) = app_with_confirmed_story_and_design(valid_split_output()).await;
+    let (app, _repo, _prompts) =
+        app_with_confirmed_story_and_design_and_streaming_outputs(vec![valid_outline_output()])
+            .await;
 
     let (_status, prepare_resp) = request_json(
         app.clone(),
@@ -298,8 +306,8 @@ async fn work_item_plan_author_completes_provider_node_before_author_confirm() {
 
         match value["type"].as_str() {
             Some("timeline_node_created")
-                if value["node"]["node_type"] == "author_run"
-                    && value["node"]["title"] == "Work Item Plan 生成" =>
+                if value["node"]["node_type"] == "work_item_plan_outline_run"
+                    && value["node"]["title"] == "WorkItemPlan Outline 生成" =>
             {
                 author_node_id = value["node"]["node_id"].as_str().map(str::to_string);
             }
@@ -311,7 +319,9 @@ async fn work_item_plan_author_completes_provider_node_before_author_confirm() {
             {
                 saw_author_completed = true;
             }
-            Some("timeline_node_created") if value["node"]["node_type"] == "author_confirm" => {
+            Some("timeline_node_created")
+                if value["node"]["node_type"] == "work_item_plan_outline_confirm" =>
+            {
                 saw_author_confirm = true;
             }
             Some("error") => panic!("ws error message: {value}"),
@@ -325,18 +335,19 @@ async fn work_item_plan_author_completes_provider_node_before_author_confirm() {
 
     assert!(
         author_node_id.is_some(),
-        "expected WorkItemPlan author_run node"
+        "expected WorkItemPlan outline run node"
     );
     assert!(saw_author_completed, "expected author_run to be completed");
     assert!(
         saw_author_confirm,
-        "expected AuthorConfirm node after provider completion"
+        "expected WorkItemPlan outline confirm node after provider completion"
     );
 
     ws.close(None).await.ok();
 }
 
 #[tokio::test]
+#[ignore = "legacy full-candidate revision flow is superseded by WP2 outline generation; WP3+ will replace this coverage"]
 async fn work_item_plan_revision_streams_provider_output_before_candidate_artifact() {
     let _guard = WS_TEST_LOCK.lock().await;
     let (app, _repo) = app_with_confirmed_story_and_design_and_revision_output(
@@ -485,9 +496,11 @@ async fn work_item_plan_revision_streams_provider_output_before_candidate_artifa
 }
 
 #[tokio::test]
-async fn work_item_plan_author_persists_draft_candidate_records_without_child_sessions() {
+async fn work_item_plan_author_persists_outline_without_draft_work_items_or_child_sessions() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let (app, _repo) = app_with_confirmed_story_and_design(valid_split_output()).await;
+    let (app, _repo, _prompts) =
+        app_with_confirmed_story_and_design_and_streaming_outputs(vec![valid_outline_output()])
+            .await;
 
     let (_status, prepare_resp) = request_json(
         app.clone(),
@@ -536,7 +549,7 @@ async fn work_item_plan_author_persists_draft_candidate_records_without_child_se
         .find(|m| m["type"] == "artifact_update")
         .expect("artifact_update");
     assert!(
-        !artifact_update["candidate"]["work_items"]
+        !artifact_update["outline_candidate"]["outline"]["work_item_outlines"]
             .as_array()
             .unwrap()
             .is_empty()
@@ -555,11 +568,9 @@ async fn work_item_plan_author_persists_draft_candidate_records_without_child_se
     let work_items = lifecycle
         .list_work_items("project_0001", "issue_0001")
         .unwrap();
-    assert!(!work_items.is_empty());
     assert!(
-        work_items
-            .iter()
-            .all(|wi| wi.plan_status == WorkItemPlanStatus::Draft)
+        work_items.is_empty(),
+        "WP2 outline generation must not materialize draft work items"
     );
 
     ws.close(None).await.ok();

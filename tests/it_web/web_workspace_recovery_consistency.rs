@@ -22,7 +22,8 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::web_work_item_generation::{
-    app_with_confirmed_story_and_design, request_json, valid_split_output,
+    app_with_confirmed_story_and_design, app_with_confirmed_story_and_design_and_streaming_outputs,
+    request_json, valid_outline_output, valid_split_output,
 };
 
 static WS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -132,7 +133,9 @@ fn recover_engine(repo: &tempfile::TempDir, session_id: &str) -> WorkspaceEngine
 #[tokio::test]
 async fn story_design_work_item_plan_recovery_consistency() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let (app, repo) = app_with_confirmed_story_and_design(valid_split_output()).await;
+    let (app, repo, _prompts) =
+        app_with_confirmed_story_and_design_and_streaming_outputs(vec![valid_outline_output()])
+            .await;
 
     // 生成新的 Story / Design spec 并运行到 author_confirm（不确认）
     let story_session_id = generate_session_to_author_confirm(
@@ -290,32 +293,34 @@ async fn story_design_work_item_plan_recovery_consistency() {
         } => {
             assert_eq!(workspace_type, WorkspaceType::WorkItemPlan);
             assert_eq!(stage, "author_confirm");
-            let candidate = match artifact {
-                Some(ArtifactPayload::WorkItemPlanCandidate { candidate }) => candidate,
-                other => panic!("expected WorkItemPlanCandidate artifact, got {other:?}"),
+            let outline_candidate = match artifact {
+                Some(ArtifactPayload::WorkItemPlanOutlineCandidate { outline_candidate }) => {
+                    outline_candidate
+                }
+                other => panic!("expected WorkItemPlanOutlineCandidate artifact, got {other:?}"),
             };
-            assert!(!candidate.work_items.is_empty());
+            assert!(!outline_candidate.outline.work_item_outlines.is_empty());
             assert!(
                 timeline_nodes
                     .iter()
-                    .any(|n| n.node_type == TimelineNodeType::AuthorConfirm),
-                "work_item_plan timeline should contain author_confirm node"
+                    .any(|n| n.node_type == TimelineNodeType::WorkItemPlanOutlineConfirm),
+                "work_item_plan timeline should contain outline confirm node"
             );
             let progress_detail = timeline_node_details
                 .values()
                 .find(|detail| {
-                    detail.node_type == TimelineNodeType::AuthorRun
+                    detail.node_type == TimelineNodeType::WorkItemPlanOutlineRun
                         && detail
                             .streaming_content
                             .contains("Fake Work Item Plan streaming draft")
                 })
-                .expect("work_item_plan session_state details should include provider stream");
+                .expect("work_item_plan outline details should include provider stream");
             assert!(
                 timeline_nodes
                     .iter()
                     .any(|node| node.node_id == progress_detail.node_id
-                        && node.node_type == TimelineNodeType::AuthorRun),
-                "provider stream detail should belong to recovered author_run node"
+                        && node.node_type == TimelineNodeType::WorkItemPlanOutlineRun),
+                "provider stream detail should belong to recovered outline_run node"
             );
             assert!(
                 timeline_node_details.values().all(|detail| detail.node_type
@@ -329,6 +334,7 @@ async fn story_design_work_item_plan_recovery_consistency() {
 }
 
 #[tokio::test]
+#[ignore = "legacy full-candidate final confirm creates child WorkItem sessions; WP6 final compile will replace this coverage"]
 async fn work_item_workspace_recovery_unaffected_or_covered() {
     let _guard = WS_TEST_LOCK.lock().await;
     let (app, repo) = app_with_confirmed_story_and_design(valid_split_output()).await;
@@ -593,6 +599,7 @@ fn session_state_serde_roundtrip_preserves_work_item_plan_candidate() {
 }
 
 #[tokio::test]
+#[ignore = "legacy full-candidate revert recovery is superseded by WP2 outline generation; WP3+ will replace this coverage"]
 async fn reconnect_preserves_revert_marks_from_current_artifact_version() {
     let _guard = WS_TEST_LOCK.lock().await;
     let (app, _repo) = app_with_confirmed_story_and_design(valid_split_output()).await;

@@ -2,18 +2,19 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::cross_cutting::provider_adapter::{ProviderAdapter, ProviderAdapterError};
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::models::{
-    IssueRecord, IssueWorkItemDependencyEdge, IssueWorkItemPlan, IssueWorkItemPlanOptions,
-    IssueWorkItemPlanStatus, LifecycleWorkItemRecord, ProviderName, RepositoryProfile,
-    RepositoryProfileConfidence, RepositoryRecord, VerificationCommand, VerificationCommandSafety,
-    VerificationCommandSource, VerificationFallbackPolicy, VerificationManualCheck,
-    VerificationPlan, VerificationScope, WorkItemContextBudget, WorkItemExecutionPlanStatus,
-    WorkItemKind, WorkItemPlanStatus, WorkItemStatus,
+    DesignContextCapabilities, IssueRecord, IssueWorkItemDependencyEdge, IssueWorkItemPlan,
+    IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, LifecycleWorkItemRecord,
+    OutlineContextBlockerResolution, ProviderName, RepositoryProfile, RepositoryProfileConfidence,
+    RepositoryRecord, VerificationCommand, VerificationCommandSafety, VerificationCommandSource,
+    VerificationFallbackPolicy, VerificationManualCheck, VerificationPlan, VerificationScope,
+    WorkItemContextBudget, WorkItemExecutionPlanStatus, WorkItemKind, WorkItemPlanOutline,
+    WorkItemPlanStatus, WorkItemStatus,
 };
 use crate::protocol::contracts::{AdapterInput, AdapterRole, ProviderType};
 use crate::web::error::{ApiError, ApiResult};
@@ -131,12 +132,56 @@ const WORK_ITEM_SPLIT_OUTPUT_SCHEMA: &str = r#"{
   "required": ["repository_profile", "work_items", "verification_plans"]
 }"#;
 
+const WORK_ITEM_PLAN_OUTLINE_OUTPUT_SCHEMA: &str = r#"{
+  "type": "object",
+  "properties": {
+    "outline": {
+      "type": "object",
+      "required": [
+        "id",
+        "project_id",
+        "issue_id",
+        "source_story_spec_ids",
+        "source_design_spec_ids",
+        "strategy_summary",
+        "work_item_outlines",
+        "dependency_graph",
+        "risks",
+        "handoff_strategy",
+        "status"
+      ]
+    },
+    "context_blockers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["code", "message", "needed_context"]
+      }
+    }
+  },
+  "additionalProperties": false
+}"#;
+
 #[derive(Debug, Clone)]
 pub struct WorkItemSplitProviderOutput {
     pub repository_profile: RepositoryProfile,
     pub plan: IssueWorkItemPlan,
     pub work_items: Vec<LifecycleWorkItemRecord>,
     pub verification_plans: Vec<VerificationPlan>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkItemPlanContextBlocker {
+    pub code: String,
+    pub message: String,
+    pub needed_context: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutlineAuthorOutput {
+    pub outline: Option<WorkItemPlanOutline>,
+    pub context_blockers: Vec<WorkItemPlanContextBlocker>,
 }
 
 /// 被重做的 WorkItem 规格：旧 id + 用户反馈。
@@ -185,6 +230,7 @@ pub struct WorkItemSplitInvocation {
     pub provider_type: ProviderType,
     pub worktree_path: String,
     pub author_provider: ProviderName,
+    pub sentinel_nonce: String,
 }
 
 impl WorkItemSplitEngine {
@@ -213,10 +259,44 @@ impl WorkItemSplitEngine {
         );
 
         Ok(WorkItemSplitInvocation {
+            sentinel_nonce: prompt_nonce(&prompt),
             prompt,
             provider_type: provider_name_to_type(&author_provider),
             worktree_path: repository.path.to_string_lossy().to_string(),
             author_provider,
+        })
+    }
+
+    pub fn build_outline_invocation(
+        request: &GenerateWorkItemsRequest,
+        lifecycle: &LifecycleStore,
+        issue: &IssueRecord,
+        repository: &RepositoryRecord,
+        author_provider: ProviderName,
+        context_resolutions: &[OutlineContextBlockerResolution],
+    ) -> ApiResult<WorkItemSplitInvocation> {
+        let story_context = collect_story_context(lifecycle, request, issue)?;
+        let design_context = collect_design_context(lifecycle, request, issue)?;
+        let repository_structure = summarize_repository_structure(&repository.path);
+        let capabilities = merge_design_context_capabilities(&design_context);
+        let gaps = design_context_gaps(&capabilities);
+        let (prompt, sentinel_nonce) = build_outline_prompt_with_nonce(
+            request,
+            issue,
+            repository,
+            &story_context,
+            &design_context,
+            &repository_structure,
+            &gaps,
+            context_resolutions,
+        );
+
+        Ok(WorkItemSplitInvocation {
+            prompt,
+            provider_type: provider_name_to_type(&author_provider),
+            worktree_path: repository.path.to_string_lossy().to_string(),
+            author_provider,
+            sentinel_nonce,
         })
     }
 
@@ -246,6 +326,7 @@ impl WorkItemSplitEngine {
         );
 
         Ok(WorkItemSplitInvocation {
+            sentinel_nonce: prompt_nonce(&prompt),
             prompt,
             provider_type: provider_name_to_type(&author_provider),
             worktree_path: repository.path.to_string_lossy().to_string(),
@@ -548,6 +629,15 @@ fn collect_design_context(
         .collect::<ApiResult<Vec<_>>>()
 }
 
+pub fn design_context_capabilities_for_request(
+    lifecycle: &LifecycleStore,
+    request: &GenerateWorkItemsRequest,
+    issue: &IssueRecord,
+) -> ApiResult<DesignContextCapabilities> {
+    let design_context = collect_design_context(lifecycle, request, issue)?;
+    Ok(merge_design_context_capabilities(&design_context))
+}
+
 fn latest_markdown(
     lifecycle: &LifecycleStore,
     project_id: &str,
@@ -585,6 +675,213 @@ fn summarize_repository_structure(path: &Path) -> String {
     } else {
         entries.join("\n")
     }
+}
+
+pub fn extract_design_context_capabilities(markdown: &str) -> DesignContextCapabilities {
+    let normalized = markdown_headings(markdown).join("\n").to_lowercase();
+    DesignContextCapabilities {
+        has_architecture: contains_any(&normalized, &["架构概览", "系统架构", "architecture"]),
+        has_module_breakdown: contains_any(
+            &normalized,
+            &["模块划分", "模块拆分", "modules", "module breakdown"],
+        ),
+        has_tech_stack: contains_any(
+            &normalized,
+            &["技术选型", "技术栈", "tech stack", "technology"],
+        ),
+        has_test_strategy: contains_any(
+            &normalized,
+            &["测试框架", "测试策略", "test strategy", "testing strategy"],
+        ),
+        has_key_paths: contains_any(
+            &normalized,
+            &[
+                "关键目录结构",
+                "关键路径",
+                "key paths",
+                "directory structure",
+            ],
+        ),
+    }
+}
+
+pub fn design_context_gaps(capabilities: &DesignContextCapabilities) -> Vec<String> {
+    let mut gaps = Vec::new();
+    if !capabilities.has_architecture {
+        gaps.push("missing_architecture".to_string());
+    }
+    if !capabilities.has_module_breakdown {
+        gaps.push("missing_module_breakdown".to_string());
+    }
+    if !capabilities.has_tech_stack {
+        gaps.push("missing_tech_stack".to_string());
+    }
+    if !capabilities.has_test_strategy {
+        gaps.push("missing_test_strategy".to_string());
+    }
+    if !capabilities.has_key_paths {
+        gaps.push("missing_key_paths".to_string());
+    }
+    gaps
+}
+
+fn merge_design_context_capabilities(design_context: &[String]) -> DesignContextCapabilities {
+    design_context.iter().fold(
+        DesignContextCapabilities {
+            has_architecture: false,
+            has_module_breakdown: false,
+            has_tech_stack: false,
+            has_test_strategy: false,
+            has_key_paths: false,
+        },
+        |mut merged, markdown| {
+            let current = extract_design_context_capabilities(markdown);
+            merged.has_architecture |= current.has_architecture;
+            merged.has_module_breakdown |= current.has_module_breakdown;
+            merged.has_tech_stack |= current.has_tech_stack;
+            merged.has_test_strategy |= current.has_test_strategy;
+            merged.has_key_paths |= current.has_key_paths;
+            merged
+        },
+    )
+}
+
+fn contains_any(value: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| value.contains(needle))
+}
+
+fn markdown_headings(markdown: &str) -> Vec<String> {
+    markdown
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with('#') {
+                Some(trimmed.trim_matches('#').trim().to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cfg(test)]
+fn build_outline_prompt(
+    request: &GenerateWorkItemsRequest,
+    issue: &IssueRecord,
+    repository: &RepositoryRecord,
+    story_context: &[String],
+    design_context: &[String],
+    repository_structure: &str,
+    design_context_gaps: &[String],
+    context_resolutions: &[OutlineContextBlockerResolution],
+) -> String {
+    build_outline_prompt_with_nonce(
+        request,
+        issue,
+        repository,
+        story_context,
+        design_context,
+        repository_structure,
+        design_context_gaps,
+        context_resolutions,
+    )
+    .0
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_outline_prompt_with_nonce(
+    request: &GenerateWorkItemsRequest,
+    issue: &IssueRecord,
+    repository: &RepositoryRecord,
+    story_context: &[String],
+    design_context: &[String],
+    repository_structure: &str,
+    design_context_gaps: &[String],
+    context_resolutions: &[OutlineContextBlockerResolution],
+) -> (String, String) {
+    let nonce = structured_output_nonce();
+    let prompt = format!(
+        "你是 Aria 的 WorkItemPlan Outline Planner。请基于以下输入生成第一阶段 WorkItemPlan Outline。\n\n\
+         [issue]\n\
+         title: {title}\n\
+         description: {description}\n\n\
+         [repository]\n\
+         id: {repo_id}\n\
+         path: {repo_path}\n\n\
+         [confirmed_story_specs]\n{story_context}\n\n\
+         [confirmed_design_specs]\n{design_context}\n\n\
+         [repository_structure_summary]\n{repository_structure}\n\n\
+         [design_context_gaps]\n{design_context_gaps}\n\n\
+         [context_blocker_resolutions]\n{context_resolutions}\n\n\
+         [user_options]\n\
+         include_integration_tests: {include_integration_tests}\n\
+         include_e2e_tests: {include_e2e_tests}\n\
+         force_frontend_backend_split: {force_frontend_backend_split}\n\
+         require_execution_plan_confirm: {require_execution_plan_confirm}\n\n\
+         [strict_output_contract]\n\
+         只能输出 WorkItemPlan Outline，不得输出完整 Work Item。\n\
+         不得输出 VerificationPlan、verification_plan、verification_plans、work_item_id、work_item_ids。\n\
+         不得输出 repository_profile，不得输出 parallel_groups。\n\
+         不得修改仓库文件，不得创建计划文档。\n\
+         如果无法补齐模块边界、关键路径或测试策略，请不要猜测完整拆分；请在 context_blockers 数组中写明需要用户补充的上下文。\n\
+         可以在最终结构化 JSON 前输出简短、可读的规划过程，供 Workbench 流式展示。\n\
+         最后必须输出一个 nonce sentinel JSON block。\n\
+         后端只解析最后一个 nonce 匹配的 <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">...</ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\"> block。\n\
+         标签内部必须是一个完整 JSON object，不要输出 Markdown code fence。\n\
+         严格按以下 JSON schema 输出。\n\n\
+         {schema}",
+        title = issue.title,
+        description = issue.description.as_deref().unwrap_or("无"),
+        repo_id = repository.id,
+        repo_path = repository.path.display(),
+        story_context = story_context.join("\n\n"),
+        design_context = design_context.join("\n\n"),
+        repository_structure = repository_structure,
+        design_context_gaps = format_string_list(design_context_gaps),
+        context_resolutions = format_context_resolutions(context_resolutions),
+        include_integration_tests = request.include_integration_tests.unwrap_or(false),
+        include_e2e_tests = request.include_e2e_tests.unwrap_or(false),
+        force_frontend_backend_split = request.force_frontend_backend_split.unwrap_or(false),
+        require_execution_plan_confirm = request.require_execution_plan_confirm.unwrap_or(false),
+        nonce = nonce,
+        schema = WORK_ITEM_PLAN_OUTLINE_OUTPUT_SCHEMA,
+    );
+    (prompt, nonce)
+}
+
+fn format_string_list(values: &[String]) -> String {
+    if values.is_empty() {
+        "(none)".to_string()
+    } else {
+        values
+            .iter()
+            .map(|value| format!("- {value}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+fn format_context_resolutions(resolutions: &[OutlineContextBlockerResolution]) -> String {
+    if resolutions.is_empty() {
+        return "(none)".to_string();
+    }
+
+    resolutions
+        .iter()
+        .map(|resolution| {
+            let summary = resolution.summary.as_deref().unwrap_or("(none)");
+            format!(
+                "- blocker_node_id: {blocker}\n  resolution_node_id: {resolution_node}\n  artifact_ref: {artifact_ref}\n  estimated_tokens: {tokens}\n  summary: {summary}",
+                blocker = resolution.blocker_node_id,
+                resolution_node = resolution.resolution_node_id,
+                artifact_ref = resolution.resolution_artifact_ref,
+                tokens = resolution.estimated_tokens,
+                summary = summary
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn build_split_prompt(
@@ -665,6 +962,14 @@ fn structured_output_nonce() -> String {
         .chars()
         .take(8)
         .collect()
+}
+
+fn prompt_nonce(prompt: &str) -> String {
+    prompt
+        .split_once("<ARIA_STRUCTURED_OUTPUT nonce=\"")
+        .and_then(|(_, tail)| tail.split_once('"'))
+        .map(|(nonce, _)| nonce.to_string())
+        .unwrap_or_default()
 }
 
 fn work_item_kind_text(kind: &WorkItemKind) -> &'static str {
@@ -781,6 +1086,78 @@ fn map_provider_adapter_error(error: ProviderAdapterError) -> ApiError {
 
 fn product_store_api_error(error: crate::product::json_store::ProductStoreError) -> ApiError {
     ApiError::runtime("product_store_error", error.to_string(), json!({}))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct ProviderOutlineAuthorOutput {
+    #[serde(default)]
+    outline: Option<WorkItemPlanOutline>,
+    #[serde(default)]
+    context_blockers: Vec<WorkItemPlanContextBlocker>,
+}
+
+pub fn parse_work_item_plan_outline_output(
+    value: serde_json::Value,
+) -> ApiResult<OutlineAuthorOutput> {
+    if let Some(field) = forbidden_outline_field(&value) {
+        return Err(ApiError::validation_with_details(
+            "outline_forbidden_field",
+            format!("WorkItemPlan Outline output must not contain `{field}`"),
+            json!({ "field": field }),
+        ));
+    }
+
+    let output: ProviderOutlineAuthorOutput = serde_json::from_value(value).map_err(|error| {
+        ApiError::runtime(
+            "outline_parse_error",
+            format!("failed to parse WorkItemPlan Outline output: {error}"),
+            json!({}),
+        )
+    })?;
+
+    if output.outline.is_none() && output.context_blockers.is_empty() {
+        return Err(ApiError::validation(
+            "outline_empty_output",
+            "WorkItemPlan Outline output must include outline or context_blockers",
+        ));
+    }
+
+    Ok(OutlineAuthorOutput {
+        outline: output.outline,
+        context_blockers: output.context_blockers,
+    })
+}
+
+fn forbidden_outline_field(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, value) in map {
+                if is_forbidden_outline_key(key) {
+                    return Some(key.clone());
+                }
+                if let Some(field) = forbidden_outline_field(value) {
+                    return Some(field);
+                }
+            }
+            None
+        }
+        serde_json::Value::Array(values) => values.iter().find_map(forbidden_outline_field),
+        _ => None,
+    }
+}
+
+fn is_forbidden_outline_key(key: &str) -> bool {
+    matches!(
+        key,
+        "work_items"
+            | "work_item_id"
+            | "work_item_ids"
+            | "verification_plan"
+            | "verification_plans"
+            | "repository_profile"
+            | "parallel_groups"
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -1615,6 +1992,123 @@ mod tests {
     }
 
     #[test]
+    fn design_context_capabilities_detects_required_sections() {
+        let markdown = r#"
+# 技术方案
+
+## 架构概览
+系统分层说明。
+
+## Modules
+模块拆分说明。
+
+## Tech Stack
+Rust + React。
+
+## Test Strategy
+cargo test 与 vitest。
+
+## Key Paths
+- src/product
+- web/src
+
+## Dependencies / Verification
+外部依赖和验证约束。
+"#;
+
+        let capabilities = extract_design_context_capabilities(markdown);
+
+        assert!(capabilities.has_architecture);
+        assert!(capabilities.has_module_breakdown);
+        assert!(capabilities.has_tech_stack);
+        assert!(capabilities.has_test_strategy);
+        assert!(capabilities.has_key_paths);
+        assert!(design_context_gaps(&capabilities).is_empty());
+    }
+
+    #[test]
+    fn legacy_design_spec_gaps_are_injected_without_blocking() {
+        let markdown = r#"
+# 旧版设计
+
+## Architecture
+只有架构描述。
+
+## 模块划分
+有模块拆分，但没有测试策略和关键目录。
+"#;
+
+        let capabilities = extract_design_context_capabilities(markdown);
+        let gaps = design_context_gaps(&capabilities);
+
+        assert!(capabilities.has_architecture);
+        assert!(capabilities.has_module_breakdown);
+        assert_eq!(
+            gaps,
+            vec![
+                "missing_tech_stack".to_string(),
+                "missing_test_strategy".to_string(),
+                "missing_key_paths".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn outline_author_prompt_forbids_full_work_items_and_repository_profile() {
+        let (request, issue, repository) = split_prompt_fixture();
+        let prompt = build_outline_prompt(
+            &request,
+            &issue,
+            &repository,
+            &["story context".to_string()],
+            &["design context".to_string()],
+            "(empty)",
+            &["missing_test_strategy".to_string()],
+            &[],
+        );
+
+        assert!(prompt.contains("只能输出 WorkItemPlan Outline"));
+        assert!(prompt.contains("不得输出完整 Work Item"));
+        assert!(prompt.contains("不得输出 VerificationPlan"));
+        assert!(prompt.contains("不得输出 repository_profile"));
+        assert!(prompt.contains("不得输出 parallel_groups"));
+        assert!(prompt.contains("context_blockers"));
+        assert!(prompt.contains("missing_test_strategy"));
+        assert!(prompt.contains("<ARIA_STRUCTURED_OUTPUT nonce=\""));
+    }
+
+    #[test]
+    fn outline_parser_accepts_valid_sentinel_json() {
+        let parsed =
+            parse_work_item_plan_outline_output(valid_outline_author_output()).expect("outline");
+
+        assert!(parsed.context_blockers.is_empty());
+        let outline = parsed.outline.expect("outline payload");
+        assert_eq!(outline.work_item_outlines[0].outline_id, "outline_backend");
+        assert_eq!(
+            outline.dependency_graph[0].from_outline_id,
+            "outline_backend"
+        );
+    }
+
+    #[test]
+    fn outline_parser_rejects_verification_plan_or_work_item_id() {
+        let mut output = valid_outline_author_output();
+        output["outline"]["work_item_outlines"][0]["verification_plan"] =
+            serde_json::json!({"commands": []});
+
+        let error = parse_work_item_plan_outline_output(output).expect_err("forbidden field");
+        assert_eq!(error.code, "outline_forbidden_field");
+
+        let mut output = valid_outline_author_output();
+        output["outline"]["work_item_outlines"][0]["work_item_id"] =
+            serde_json::json!("work_item_0001");
+
+        let error = parse_work_item_plan_outline_output(output).expect_err("forbidden field");
+        assert_eq!(error.code, "outline_forbidden_field");
+    }
+
+    #[test]
     fn build_split_prompt_inlines_schema_and_kind_guidance() {
         // 回归 Bug: prompt 曾引用不存在的 `src/product/work_item_split_output_schema.json`,
         // 而 WORK_ITEM_SPLIT_OUTPUT_SCHEMA 常量未注入 prompt,导致 provider 不知道
@@ -1769,5 +2263,60 @@ mod tests {
         assert!(prompt.contains("长时间分析、探索代码库或自动修正前"));
         assert!(prompt.contains("先输出一行简短可读状态"));
         assert!(prompt.contains("每完成一组探索后输出一句当前发现摘要"));
+    }
+
+    fn valid_outline_author_output() -> serde_json::Value {
+        serde_json::json!({
+            "outline": {
+                "id": "outline_artifact_1",
+                "project_id": "project_0001",
+                "issue_id": "issue_0001",
+                "source_story_spec_ids": ["story_spec_0001"],
+                "source_design_spec_ids": ["design_spec_0001"],
+                "strategy_summary": "先后端后前端",
+                "work_item_outlines": [
+                    {
+                        "outline_id": "outline_backend",
+                        "title": "后端 API",
+                        "kind": "backend",
+                        "goal": "实现 API",
+                        "scope": ["src/product"],
+                        "non_goals": [],
+                        "source_story_spec_ids": ["story_spec_0001"],
+                        "source_design_spec_ids": ["design_spec_0001"],
+                        "exclusive_write_scopes": ["src/product/**"],
+                        "forbidden_write_scopes": ["web/**"],
+                        "depends_on": [],
+                        "verification_intent": ["cargo test --locked --lib api"],
+                        "handoff_notes": "提供 API contract"
+                    },
+                    {
+                        "outline_id": "outline_frontend",
+                        "title": "前端 UI",
+                        "kind": "frontend",
+                        "goal": "接入 API",
+                        "scope": ["web/src"],
+                        "non_goals": [],
+                        "source_story_spec_ids": ["story_spec_0001"],
+                        "source_design_spec_ids": ["design_spec_0001"],
+                        "exclusive_write_scopes": ["web/src/**"],
+                        "forbidden_write_scopes": ["src/product/**"],
+                        "depends_on": ["outline_backend"],
+                        "verification_intent": ["pnpm -C web test"],
+                        "handoff_notes": "消费 API contract"
+                    }
+                ],
+                "dependency_graph": [
+                    {
+                        "from_outline_id": "outline_backend",
+                        "to_outline_id": "outline_frontend"
+                    }
+                ],
+                "risks": [],
+                "handoff_strategy": "后端输出 contract 给前端",
+                "status": "draft"
+            },
+            "context_blockers": []
+        })
     }
 }

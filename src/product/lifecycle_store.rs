@@ -237,6 +237,10 @@ impl LifecycleStore {
         Self { paths }
     }
 
+    pub fn app_paths(&self) -> ProductAppPaths {
+        self.paths.clone()
+    }
+
     pub fn create_story_spec(
         &self,
         input: CreateStorySpecInput,

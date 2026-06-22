@@ -21,8 +21,15 @@ use crate::product::app_paths::ProductAppPaths;
 use crate::product::checkpoint_store::CheckpointStore;
 use crate::product::issue_store::IssueStore;
 use crate::product::lifecycle_store::LifecycleStore;
-use crate::product::models::{ProviderName, WorkspaceSessionRecord, WorkspaceType};
-use crate::product::work_item_split_engine::WorkItemSplitEngine;
+use crate::product::models::{
+    OutlineContextBlockerResolution, OutlineContextIndex, ProviderName, WorkspaceSessionRecord,
+    WorkspaceType,
+};
+use crate::product::work_item_plan_store::WorkItemPlanStore;
+use crate::product::work_item_split_engine::{
+    WorkItemSplitEngine, design_context_capabilities_for_request, design_context_gaps,
+    parse_work_item_plan_outline_output,
+};
 use crate::product::workspace_engine::{
     AuthorDecisionOutcome, EngineEvent, PendingAuthorChoiceError, ReviewDecisionOutcome,
     WorkItemPlanAuthorOutcome, WorkspaceEngine, WorkspaceSession, WorkspaceStage,
@@ -875,6 +882,9 @@ async fn handle_review_decision_from_handler(
         Ok(ReviewDecisionOutcome::ConfirmedWithChildSessions { .. }) => {
             // Review decision path never produces child sessions; defensive no-op.
         }
+        Ok(ReviewDecisionOutcome::StartWorkItemPlanOutline) => {
+            // Review decision path never restarts outline generation; defensive no-op.
+        }
         Ok(ReviewDecisionOutcome::StartRevision) => {
             let run_kind = {
                 let engine = run_context.engine.lock().await;
@@ -955,6 +965,18 @@ async fn handle_human_confirm_from_handler(
 
     match outcome {
         Ok(ReviewDecisionOutcome::HumanConfirm) => {}
+        Ok(ReviewDecisionOutcome::StartWorkItemPlanOutline) => {
+            if let Err(message) = spawn_provider_run_from_handler(
+                run_context,
+                ProviderRunKind::WorkItemPlanAuthor,
+                outbound_tx.clone(),
+            )
+            .await
+            {
+                let err = WsOutMessage::Error { message };
+                let _ = send_json_outbound(&outbound_tx, &err).await;
+            }
+        }
         Ok(ReviewDecisionOutcome::ConfirmedWithChildSessions { child_sessions }) => {
             let lifecycle = LifecycleStore::new(run_context.app_paths.clone());
             for session in child_sessions {
@@ -1519,6 +1541,24 @@ fn parse_work_item_split_structured_output(full_output: &str) -> Result<serde_js
         })
 }
 
+fn work_item_plan_findings_feedback(
+    findings: &[crate::product::models::WorkItemSplitFinding],
+) -> String {
+    findings
+        .iter()
+        .map(|finding| {
+            format!(
+                "- [{}] {}: {} ({})",
+                finding.severity.as_str(),
+                finding.code,
+                finding.message,
+                finding.work_item_ids.join(", ")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 async fn active_run_command_tx(
     current_run: &Arc<Mutex<Option<WorkspaceActiveRun>>>,
     workspace_runs: &WorkspaceRunRegistry,
@@ -1720,12 +1760,29 @@ async fn spawn_provider_run_from_handler(
                 };
 
                 let author_provider = engine.session().author_provider.clone();
-                let invocation = match WorkItemSplitEngine::build_generate_invocation(
+                let context_resolutions = match load_work_item_plan_outline_context_resolutions(
+                    &app_paths_for_run,
+                    &session_record_for_run,
+                    &request,
+                    &lifecycle_for_run,
+                    &issue,
+                ) {
+                    Ok(resolutions) => resolutions,
+                    Err(message) => {
+                        engine.mark_active_run_finished(&run_label);
+                        drop(engine);
+                        let err = WsOutMessage::Error { message };
+                        let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                        return;
+                    }
+                };
+                let invocation = match WorkItemSplitEngine::build_outline_invocation(
                     &request,
                     &lifecycle_for_run,
                     &issue,
                     &repository,
                     author_provider,
+                    &context_resolutions,
                 ) {
                     Ok(invocation) => invocation,
                     Err(error) => {
@@ -1737,7 +1794,7 @@ async fn spawn_provider_run_from_handler(
                         return;
                     }
                 };
-                let node_id = engine.begin_work_item_plan_author_run().await;
+                let node_id = engine.begin_work_item_plan_outline_run().await;
                 let provider_input = engine.build_work_item_plan_streaming_input(
                     invocation.provider_type.clone(),
                     invocation.prompt.clone(),
@@ -1774,27 +1831,20 @@ async fn spawn_provider_run_from_handler(
                         return;
                     }
                 };
-                let output = match WorkItemSplitEngine::complete_generate_from_structured_output(
-                    &request,
-                    &lifecycle_for_run,
-                    &issue,
-                    &repository,
-                    &invocation.author_provider,
-                    &invocation.prompt,
-                    structured_output,
-                ) {
+                let output = match parse_work_item_plan_outline_output(structured_output) {
                     Ok(output) => output,
                     Err(error) => {
                         engine.mark_active_run_finished(&run_label);
                         drop(engine);
                         let err = WsOutMessage::Error {
-                            message: format!("split generate failed: {}", error.message),
+                            message: format!("outline generate failed: {}", error.message),
                         };
                         let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
                         return;
                     }
                 };
-                let mut outcome = match engine.complete_work_item_plan_author(output).await {
+                let mut outcome = match engine.complete_work_item_plan_outline_author(output).await
+                {
                     Ok(o) => o,
                     Err(message) => {
                         engine.mark_active_run_finished(&run_label);
@@ -1822,7 +1872,7 @@ async fn spawn_provider_run_from_handler(
                             engine.mark_active_run_finished(&run_label);
                             return;
                         }
-                        WorkItemPlanAuthorOutcome::AutoRevision { findings: _ } => {
+                        WorkItemPlanAuthorOutcome::AutoRevision { findings } => {
                             revision_iterations += 1;
                             if revision_iterations > 5 {
                                 engine.mark_active_run_finished(&run_label);
@@ -1835,32 +1885,34 @@ async fn spawn_provider_run_from_handler(
                                 return;
                             }
 
-                            // 每次重生前重新构建请求，以便把最新 persisted 的 validator_findings
-                            // 作为 revision_feedback 注入 prompt。
-                            request = match build_work_item_plan_generate_request(
-                                &engine,
-                                &lifecycle_for_run,
-                            )
-                            .map_err(|e| format!("build request failed: {e}"))
-                            {
-                                Ok(r) => r,
-                                Err(message) => {
-                                    engine.mark_active_run_finished(&run_label);
-                                    drop(engine);
-                                    let err = WsOutMessage::Error { message };
-                                    let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
-                                    return;
-                                }
-                            };
+                            request.revision_feedback =
+                                Some(work_item_plan_findings_feedback(&findings));
                             let author_provider = { engine.session().author_provider.clone() };
-                            let invocation = match WorkItemSplitEngine::build_revision_invocation(
+                            let context_resolutions =
+                                match load_work_item_plan_outline_context_resolutions(
+                                    &app_paths_for_run,
+                                    &session_record_for_run,
+                                    &request,
+                                    &lifecycle_for_run,
+                                    &issue,
+                                ) {
+                                    Ok(resolutions) => resolutions,
+                                    Err(message) => {
+                                        engine.mark_active_run_finished(&run_label);
+                                        drop(engine);
+                                        let err = WsOutMessage::Error { message };
+                                        let _ =
+                                            send_json_outbound(&outbound_tx_for_task, &err).await;
+                                        return;
+                                    }
+                                };
+                            let invocation = match WorkItemSplitEngine::build_outline_invocation(
                                 &request,
                                 &lifecycle_for_run,
                                 &issue,
                                 &repository,
                                 author_provider,
-                                &[],
-                                &[],
+                                &context_resolutions,
                             ) {
                                 Ok(invocation) => invocation,
                                 Err(error) => {
@@ -1868,7 +1920,7 @@ async fn spawn_provider_run_from_handler(
                                     drop(engine);
                                     let err = WsOutMessage::Error {
                                         message: format!(
-                                            "split generate_revision failed: {}",
+                                            "outline generate_revision failed: {}",
                                             error.message
                                         ),
                                     };
@@ -1876,9 +1928,7 @@ async fn spawn_provider_run_from_handler(
                                     return;
                                 }
                             };
-                            let node_id = engine
-                                .begin_work_item_plan_auto_revision_run(revision_iterations)
-                                .await;
+                            let node_id = engine.begin_work_item_plan_outline_run().await;
                             let provider_input = engine.build_work_item_plan_streaming_input(
                                 invocation.provider_type.clone(),
                                 invocation.prompt.clone(),
@@ -1910,7 +1960,7 @@ async fn spawn_provider_run_from_handler(
                                         drop(engine);
                                         let err = WsOutMessage::Error {
                                             message: format!(
-                                                "split generate_revision failed: {message}"
+                                                "outline generate_revision failed: {message}"
                                             ),
                                         };
                                         let _ =
@@ -1919,24 +1969,14 @@ async fn spawn_provider_run_from_handler(
                                     }
                                 };
                             let output =
-                                match WorkItemSplitEngine::complete_revision_from_structured_output(
-                                    &request,
-                                    &lifecycle_for_run,
-                                    &issue,
-                                    &repository,
-                                    &invocation.author_provider,
-                                    &invocation.prompt,
-                                    structured_output,
-                                    &[],
-                                    &[],
-                                ) {
+                                match parse_work_item_plan_outline_output(structured_output) {
                                     Ok(o) => o,
                                     Err(error) => {
                                         engine.mark_active_run_finished(&run_label);
                                         drop(engine);
                                         let err = WsOutMessage::Error {
                                             message: format!(
-                                                "split generate_revision failed: {}",
+                                                "outline generate_revision failed: {}",
                                                 error.message
                                             ),
                                         };
@@ -1945,16 +1985,18 @@ async fn spawn_provider_run_from_handler(
                                         return;
                                     }
                                 };
-                            outcome = match engine.complete_work_item_plan_author(output).await {
-                                Ok(o) => o,
-                                Err(message) => {
-                                    engine.mark_active_run_finished(&run_label);
-                                    drop(engine);
-                                    let err = WsOutMessage::Error { message };
-                                    let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
-                                    return;
-                                }
-                            };
+                            outcome =
+                                match engine.complete_work_item_plan_outline_author(output).await {
+                                    Ok(o) => o,
+                                    Err(message) => {
+                                        engine.mark_active_run_finished(&run_label);
+                                        drop(engine);
+                                        let err = WsOutMessage::Error { message };
+                                        let _ =
+                                            send_json_outbound(&outbound_tx_for_task, &err).await;
+                                        return;
+                                    }
+                                };
                         }
                     }
                 }
@@ -2447,4 +2489,43 @@ fn build_work_item_plan_generate_request(
         openspec_enabled: Some(session.openspec_enabled),
         revision_feedback,
     })
+}
+
+fn load_work_item_plan_outline_context_resolutions(
+    app_paths: &ProductAppPaths,
+    session: &WorkspaceSessionRecord,
+    request: &GenerateWorkItemsRequest,
+    lifecycle: &LifecycleStore,
+    issue: &crate::product::models::IssueRecord,
+) -> Result<Vec<OutlineContextBlockerResolution>, String> {
+    let store = WorkItemPlanStore::new(app_paths.clone());
+    let capabilities =
+        design_context_capabilities_for_request(lifecycle, request, issue).map_err(|error| {
+            format!(
+                "extract design context capabilities failed: {}",
+                error.message
+            )
+        })?;
+    let gaps = design_context_gaps(&capabilities);
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut index = store
+        .load_outline_context_index(&session.project_id, &session.issue_id, &session.entity_id)
+        .map_err(|error| format!("load outline context index failed: {error}"))?
+        .unwrap_or_else(|| OutlineContextIndex {
+            project_id: session.project_id.clone(),
+            issue_id: session.issue_id.clone(),
+            plan_id: session.entity_id.clone(),
+            generation_round_id: "outline_stage".to_string(),
+            blocker_resolutions: Vec::new(),
+            design_context_gaps: Vec::new(),
+            design_context_capabilities: capabilities.clone(),
+            updated_at: now.clone(),
+        });
+    index.design_context_capabilities = capabilities;
+    index.design_context_gaps = gaps;
+    index.updated_at = now;
+    store
+        .save_outline_context_index(&index)
+        .map_err(|error| format!("save outline context index failed: {error}"))?;
+    Ok(index.blocker_resolutions)
 }

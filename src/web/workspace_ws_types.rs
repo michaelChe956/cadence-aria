@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::product::models::{NodeDetail, ProviderName, WorkspaceType};
+use crate::product::models::{NodeDetail, ProviderName, WorkItemPlanOutline, WorkspaceType};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -340,6 +340,12 @@ pub enum ArtifactPayload {
     WorkItemPlanCandidate {
         candidate: Box<WorkItemPlanCandidateDto>,
     },
+    WorkItemPlanOutlineCandidate {
+        outline_candidate: Box<WorkItemPlanOutlineCandidateDto>,
+    },
+    WorkItemPlanContextBlocker {
+        context_blocker: Box<WorkItemPlanContextBlockerPayload>,
+    },
 }
 
 impl ArtifactPayload {
@@ -347,6 +353,8 @@ impl ArtifactPayload {
         match self {
             Self::Markdown { markdown, .. } => Some(markdown.as_str()),
             Self::WorkItemPlanCandidate { .. } => None,
+            Self::WorkItemPlanOutlineCandidate { .. } => None,
+            Self::WorkItemPlanContextBlocker { .. } => None,
         }
     }
 
@@ -358,8 +366,36 @@ impl ArtifactPayload {
         match self {
             Self::Markdown { markdown, .. } => Some(markdown),
             Self::WorkItemPlanCandidate { .. } => None,
+            Self::WorkItemPlanOutlineCandidate { .. } => None,
+            Self::WorkItemPlanContextBlocker { .. } => None,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkItemPlanOutlineCandidateDto {
+    pub outline: WorkItemPlanOutline,
+    pub design_context_gaps: Vec<String>,
+    pub validator_findings: Vec<ValidatorFindingDto>,
+    pub context_blockers: Vec<WorkItemPlanContextBlockerDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkItemPlanContextBlockerPayload {
+    pub context_blockers: Vec<WorkItemPlanContextBlockerDto>,
+    pub design_context_gaps: Vec<String>,
+    pub exploration_summary: String,
+    pub allowed_actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkItemPlanContextBlockerDto {
+    pub code: String,
+    pub message: String,
+    pub needed_context: Vec<String>,
 }
 
 /// Complete candidate produced by the work item plan author flow.
@@ -524,6 +560,9 @@ pub enum TimelineNodeType {
     ReviewDecision,
     Revision,
     HumanConfirm,
+    WorkItemPlanOutlineRun,
+    WorkItemPlanOutlineConfirm,
+    WorkItemPlanContextBlocker,
     AbortedByDisconnect,
     ProtocolError,
     Completed,

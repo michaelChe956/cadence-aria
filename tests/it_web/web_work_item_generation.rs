@@ -3,7 +3,8 @@ use axum::http::{Method, Request, StatusCode};
 use cadence_aria::cross_cutting::provider_adapter::{ProviderAdapter, ProviderAdapterError};
 use cadence_aria::cross_cutting::provider_registry::ProviderRegistry;
 use cadence_aria::cross_cutting::streaming_provider::{
-    ProviderEvent, ProviderSession, StreamingProviderAdapter, StreamingProviderInput,
+    FakeStreamingProvider, ProviderEvent, ProviderSession, StreamingProviderAdapter,
+    StreamingProviderInput,
 };
 use cadence_aria::product::models::ProviderName;
 use cadence_aria::protocol::contracts::{AdapterInput, AdapterOutput, AdapterRole, TimeoutStatus};
@@ -157,6 +158,101 @@ pub(crate) fn valid_split_output() -> Value {
     })
 }
 
+pub(crate) fn valid_outline_output() -> Value {
+    json!({
+        "outline": {
+            "id": "outline_0001",
+            "project_id": "project_0001",
+            "issue_id": "issue_0001",
+            "source_story_spec_ids": ["story_spec_0001"],
+            "source_design_spec_ids": ["design_spec_0001"],
+            "strategy_summary": "先实现后端会话 API，再补前端过期提示，最后补集成测试。",
+            "work_item_outlines": [
+                {
+                    "outline_id": "outline_backend_session",
+                    "title": "实现后端登录会话 API",
+                    "kind": "backend",
+                    "goal": "提供登录会话过期检测与刷新相关 API。",
+                    "scope": ["src/product/session.rs", "src/web/session_handlers.rs"],
+                    "non_goals": ["不实现前端 UI"],
+                    "source_story_spec_ids": ["story_spec_0001"],
+                    "source_design_spec_ids": ["design_spec_0001"],
+                    "exclusive_write_scopes": ["src/product/session.rs", "src/web/session_handlers.rs"],
+                    "forbidden_write_scopes": ["web/**"],
+                    "depends_on": [],
+                    "verification_intent": ["cargo test --locked --lib session"],
+                    "handoff_notes": "输出会话状态 DTO 与错误语义。"
+                },
+                {
+                    "outline_id": "outline_frontend_expiry",
+                    "title": "实现前端会话过期提示",
+                    "kind": "frontend",
+                    "goal": "在前端展示会话过期提示并触发重新登录入口。",
+                    "scope": ["web/src/session/**"],
+                    "non_goals": ["不修改后端 API"],
+                    "source_story_spec_ids": ["story_spec_0001"],
+                    "source_design_spec_ids": ["design_spec_0001"],
+                    "exclusive_write_scopes": ["web/src/session/**"],
+                    "forbidden_write_scopes": ["src/product/**"],
+                    "depends_on": ["outline_backend_session"],
+                    "verification_intent": ["pnpm -C web test"],
+                    "handoff_notes": "消费后端会话状态 DTO。"
+                },
+                {
+                    "outline_id": "outline_integration_session",
+                    "title": "集成测试：会话过期端到端",
+                    "kind": "integration",
+                    "goal": "覆盖会话过期到前端提示的贯通路径。",
+                    "scope": ["tests/session/**"],
+                    "non_goals": ["不新增业务功能"],
+                    "source_story_spec_ids": ["story_spec_0001"],
+                    "source_design_spec_ids": ["design_spec_0001"],
+                    "exclusive_write_scopes": ["tests/session/**"],
+                    "forbidden_write_scopes": [],
+                    "depends_on": ["outline_frontend_expiry"],
+                    "verification_intent": ["cargo test --locked --test it_web session"],
+                    "handoff_notes": "验证前后端协议一致性。"
+                }
+            ],
+            "dependency_graph": [
+                {
+                    "from_outline_id": "outline_backend_session",
+                    "to_outline_id": "outline_frontend_expiry"
+                },
+                {
+                    "from_outline_id": "outline_frontend_expiry",
+                    "to_outline_id": "outline_integration_session"
+                }
+            ],
+            "risks": ["前后端错误码需要保持一致"],
+            "handoff_strategy": "后端先定义稳定 DTO，前端和集成测试逐步消费。",
+            "status": "draft"
+        },
+        "context_blockers": []
+    })
+}
+
+pub(crate) fn context_blocker_outline_output() -> Value {
+    json!({
+        "context_blockers": [
+            {
+                "code": "missing_module_boundary",
+                "message": "无法判断会话 API 应落在 product 还是 web 层。",
+                "needed_context": ["请补充模块边界", "请说明测试策略"]
+            }
+        ]
+    })
+}
+
+pub(crate) fn invalid_outline_output_duplicate_ids() -> Value {
+    let mut output = valid_outline_output();
+    let outlines = output["outline"]["work_item_outlines"]
+        .as_array_mut()
+        .expect("outline array");
+    outlines[1]["outline_id"] = json!("outline_backend_session");
+    output
+}
+
 pub(crate) fn valid_revision_redo_output() -> Value {
     json!({
         "repository_profile": {
@@ -258,14 +354,26 @@ pub(crate) fn invalid_split_output_missing_e2e() -> Value {
 }
 
 #[derive(Clone)]
-struct QueuedSplitStreamingProvider {
+pub(crate) struct QueuedSplitStreamingProvider {
     outputs: Arc<Mutex<VecDeque<Value>>>,
+    captured_prompts: Option<Arc<Mutex<Vec<String>>>>,
 }
 
 impl QueuedSplitStreamingProvider {
-    fn new(outputs: Vec<Value>) -> Self {
+    pub(crate) fn new(outputs: Vec<Value>) -> Self {
         Self {
             outputs: Arc::new(Mutex::new(VecDeque::from(outputs))),
+            captured_prompts: None,
+        }
+    }
+
+    pub(crate) fn new_recording(
+        outputs: Vec<Value>,
+        captured_prompts: Arc<Mutex<Vec<String>>>,
+    ) -> Self {
+        Self {
+            outputs: Arc::new(Mutex::new(VecDeque::from(outputs))),
+            captured_prompts: Some(captured_prompts),
         }
     }
 }
@@ -274,9 +382,18 @@ impl QueuedSplitStreamingProvider {
 impl StreamingProviderAdapter for QueuedSplitStreamingProvider {
     async fn start(
         &self,
-        _input: StreamingProviderInput,
+        input: StreamingProviderInput,
         cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
+        if input.role != AdapterRole::WorkItemSplitter {
+            return FakeStreamingProvider.start(input, cancel).await;
+        }
+        if let Some(captured_prompts) = &self.captured_prompts {
+            captured_prompts
+                .lock()
+                .expect("captured prompts lock")
+                .push(input.prompt.clone());
+        }
         let output = self
             .outputs
             .lock()
@@ -524,6 +641,58 @@ pub(crate) async fn app_with_confirmed_story_and_design_and_streaming_revision_o
     let app = bootstrap_project_repo_issue_and_specs(app, &repo).await;
 
     (app, root)
+}
+
+pub(crate) async fn app_with_confirmed_story_and_design_and_streaming_outputs(
+    outputs: Vec<Value>,
+) -> (axum::Router, tempfile::TempDir, Arc<Mutex<Vec<String>>>) {
+    let root = tempdir().expect("root");
+    let repo = root.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo dir");
+    let status = Command::new("git")
+        .args(["init"])
+        .current_dir(&repo)
+        .status()
+        .expect("git init");
+    assert!(status.success());
+
+    let runtime = WebRuntime::new_fake(root.path().to_path_buf());
+    let mut state = WebAppState::new(root.path().to_path_buf(), runtime).with_provider_adapter(
+        Arc::new(MockSplitProviderAdapter {
+            output: outputs.first().cloned().unwrap_or_else(valid_split_output),
+            revision_output: None,
+        }),
+    );
+
+    let captured_prompts = Arc::new(Mutex::new(Vec::new()));
+    let test_controls = cadence_aria::web::test_controls::TestControls::default();
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Fake,
+        Arc::new(QueuedSplitStreamingProvider::new_recording(
+            outputs,
+            captured_prompts.clone(),
+        )),
+    );
+    registry.register(
+        ProviderName::Codex,
+        Arc::new(TestControlledFakeStreamingProvider::new(
+            test_controls.clone(),
+        )),
+    );
+    registry.register(
+        ProviderName::ClaudeCode,
+        Arc::new(TestControlledFakeStreamingProvider::new(
+            test_controls.clone(),
+        )),
+    );
+    state.test_controls = test_controls;
+    state.provider_registry = Arc::new(registry);
+
+    let app = build_web_router(state);
+    let app = bootstrap_project_repo_issue_and_specs(app, &repo).await;
+
+    (app, root, captured_prompts)
 }
 
 /// 与 `app_with_confirmed_story_and_design` 相同，但额外把 codex/claude_code 也注册为

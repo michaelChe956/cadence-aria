@@ -20,14 +20,20 @@ use crate::product::checkpoint_store::CheckpointStore;
 use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::{AppendSpecVersionInput, LifecycleStore};
 use crate::product::models::{
-    AgentRole, ArtifactRef, IssueWorkItemPlan, LifecycleConfirmationStatus,
-    LifecycleWorkItemRecord, NodeDetail, PermissionEvent, ProviderConversationRef,
+    AgentRole, ArtifactRef, DesignContextCapabilities, IssueWorkItemPlan,
+    LifecycleConfirmationStatus, LifecycleWorkItemRecord, NodeDetail,
+    OutlineContextBlockerResolution, OutlineContextIndex, PermissionEvent, ProviderConversationRef,
     ProviderConversationRole, ProviderName, ProviderSnapshot, WorkItemPlanStatus,
     WorkItemSplitFinding, WorkItemSplitFindingSeverity, WorkspaceMessageRecord,
     WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType,
 };
-use crate::product::work_item_split_engine::{RedoSpec, WorkItemSplitProviderOutput};
-use crate::product::work_item_split_validator::WorkItemSplitValidator;
+use crate::product::work_item_plan_store::WorkItemPlanStore;
+use crate::product::work_item_split_engine::{
+    OutlineAuthorOutput, RedoSpec, WorkItemPlanContextBlocker, WorkItemSplitProviderOutput,
+};
+use crate::product::work_item_split_validator::{
+    WorkItemPlanOutlineValidator, WorkItemSplitValidator,
+};
 use crate::protocol::contracts::{AdapterRole, ProviderType};
 use crate::web::types::GenerateWorkItemsRequest;
 use crate::web::workspace_ws_types::{
@@ -36,11 +42,12 @@ use crate::web::workspace_ws_types::{
     ReviewFinding, ReviewFindingSeverity, ReviewGate, ReviewVerdict, ReviewVerdictType,
     TimelineNode, TimelineNodeStatus, TimelineNodeType, ValidatorFindingDto,
     VerificationCommandDto, VerificationManualCheckDto, VerificationPlanDto, WorkItemCandidateDto,
-    WorkItemCandidateMetaDto, WorkItemDependencyEdgeDto, WorkItemPlanCandidateDto, WorkItemPlanDto,
-    WorkItemPlanReviewAction, WorkItemPlanReviewAffectedItem, WorkItemPlanReviewComplete,
-    WorkItemPlanReviewGate, WorkItemPlanReviewScope, WorkItemPlanReviewVerdict,
-    WorkItemSplitOptionsDto, WorkspaceStage as WsWorkspaceStage, WsCheckpointDto, WsMessageDto,
-    WsOutMessage, WsProviderConfig,
+    WorkItemCandidateMetaDto, WorkItemDependencyEdgeDto, WorkItemPlanCandidateDto,
+    WorkItemPlanContextBlockerDto, WorkItemPlanContextBlockerPayload, WorkItemPlanDto,
+    WorkItemPlanOutlineCandidateDto, WorkItemPlanReviewAction, WorkItemPlanReviewAffectedItem,
+    WorkItemPlanReviewComplete, WorkItemPlanReviewGate, WorkItemPlanReviewScope,
+    WorkItemPlanReviewVerdict, WorkItemSplitOptionsDto, WorkspaceStage as WsWorkspaceStage,
+    WsCheckpointDto, WsMessageDto, WsOutMessage, WsProviderConfig,
 };
 
 const SUMMARY_PREVIEW_CHARS: usize = 2048;
@@ -71,6 +78,31 @@ fn work_item_plan_findings_summary(prefix: &str, findings: &[WorkItemSplitFindin
         .filter(|finding| finding.severity == WorkItemSplitFindingSeverity::Warning)
         .count();
     format!("{prefix}（errors: {errors}, warnings: {warnings}）")
+}
+
+fn work_item_split_findings_to_dto(findings: &[WorkItemSplitFinding]) -> Vec<ValidatorFindingDto> {
+    findings
+        .iter()
+        .map(|finding| ValidatorFindingDto {
+            severity: finding.severity.as_str().to_string(),
+            code: finding.code.clone(),
+            message: finding.message.clone(),
+            work_item_ids: finding.work_item_ids.clone(),
+        })
+        .collect()
+}
+
+fn work_item_plan_context_blockers_to_dto(
+    blockers: &[WorkItemPlanContextBlocker],
+) -> Vec<WorkItemPlanContextBlockerDto> {
+    blockers
+        .iter()
+        .map(|blocker| WorkItemPlanContextBlockerDto {
+            code: blocker.code.clone(),
+            message: blocker.message.clone(),
+            needed_context: blocker.needed_context.clone(),
+        })
+        .collect()
 }
 
 fn build_work_item_plan_candidate_dto(
@@ -193,16 +225,7 @@ fn build_work_item_plan_candidate_dto(
         work_items: work_item_dtos,
         verification_plans,
         repository_profile,
-        validator_findings: plan
-            .validator_findings
-            .iter()
-            .map(|f| ValidatorFindingDto {
-                severity: f.severity.as_str().to_string(),
-                code: f.code.clone(),
-                message: f.message.clone(),
-                work_item_ids: f.work_item_ids.clone(),
-            })
-            .collect(),
+        validator_findings: work_item_split_findings_to_dto(&plan.validator_findings),
     })
 }
 
@@ -277,6 +300,16 @@ fn build_artifact_version_summary(version: &ArtifactVersion) -> ArtifactVersionS
                 .map(|item| item.title.as_str())
                 .unwrap_or(candidate.plan.id.as_str())
                 .to_string();
+            (size, preview(&preview_text))
+        }
+        ArtifactPayload::WorkItemPlanOutlineCandidate { outline_candidate } => {
+            let size = serde_json::to_string(outline_candidate).map_or(0, |s| s.len());
+            let preview_text = outline_candidate.outline.strategy_summary.clone();
+            (size, preview(&preview_text))
+        }
+        ArtifactPayload::WorkItemPlanContextBlocker { context_blocker } => {
+            let size = serde_json::to_string(context_blocker).map_or(0, |s| s.len());
+            let preview_text = context_blocker.exploration_summary.clone();
             (size, preview(&preview_text))
         }
     };
@@ -505,6 +538,7 @@ pub enum EngineEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReviewDecisionOutcome {
     StartRevision,
+    StartWorkItemPlanOutline,
     HumanConfirm,
     ConfirmedWithChildSessions {
         child_sessions: Vec<WorkspaceSessionRecord>,
@@ -929,6 +963,14 @@ impl WorkspaceEngine {
         self.active_node_id.clone()
     }
 
+    fn active_node_type(&self) -> Option<TimelineNodeType> {
+        let active_node_id = self.active_node_id.as_deref()?;
+        self.timeline_nodes
+            .iter()
+            .find(|node| node.node_id == active_node_id)
+            .map(|node| node.node_type.clone())
+    }
+
     pub async fn take_pending_author_choice_prompt(
         &mut self,
         id: &str,
@@ -1093,6 +1135,19 @@ impl WorkspaceEngine {
             stage: WorkspaceStage::Running,
             round: None,
             title: "Work Item Plan 生成".to_string(),
+            summary: None,
+            status: TimelineNodeStatus::Active,
+        })
+        .await
+    }
+
+    pub async fn begin_work_item_plan_outline_run(&mut self) -> String {
+        self.create_timeline_node(TimelineNodeDraft {
+            node_type: TimelineNodeType::WorkItemPlanOutlineRun,
+            agent: Some(self.session.author_provider.clone()),
+            stage: WorkspaceStage::Running,
+            round: None,
+            title: "WorkItemPlan Outline 生成".to_string(),
             summary: None,
             status: TimelineNodeStatus::Active,
         })
@@ -2843,6 +2898,14 @@ impl WorkspaceEngine {
             return Err("human confirm is only available during human_confirm stage".to_string());
         }
 
+        if self.session.workspace_type == WorkspaceType::WorkItemPlan
+            && self.active_node_type() == Some(TimelineNodeType::WorkItemPlanContextBlocker)
+        {
+            return self
+                .handle_work_item_plan_context_blocker_decision(decision, payload)
+                .await;
+        }
+
         match decision {
             HumanConfirmDecision::Confirm => match self.handle_confirm().await? {
                 WorkspaceConfirmOutcome::None => Ok(ReviewDecisionOutcome::HumanConfirm),
@@ -2910,6 +2973,130 @@ impl WorkspaceEngine {
                 Ok(ReviewDecisionOutcome::HumanConfirm)
             }
         }
+    }
+
+    async fn handle_work_item_plan_context_blocker_decision(
+        &mut self,
+        decision: HumanConfirmDecision,
+        payload: Option<serde_json::Value>,
+    ) -> Result<ReviewDecisionOutcome, String> {
+        match decision {
+            HumanConfirmDecision::Confirm => Err(
+                "work item plan context blocker cannot be confirmed; provide context or terminate"
+                    .to_string(),
+            ),
+            HumanConfirmDecision::RequestChange => {
+                let resolution = human_confirm_payload_description(payload).ok_or_else(|| {
+                    "work item plan context blocker requires non-empty context".to_string()
+                })?;
+                self.append_work_item_plan_context_blocker_resolution(resolution)
+                    .await?;
+                if let Some(store) = &self.lifecycle_store {
+                    let _ = store.update_workspace_session_status(
+                        &self.session.session_id,
+                        WorkspaceSessionStatus::Open,
+                    );
+                }
+                self.transition_stage(WorkspaceStage::Running).await;
+                Ok(ReviewDecisionOutcome::StartWorkItemPlanOutline)
+            }
+            HumanConfirmDecision::Terminate => {
+                self.complete_active_node(Some("已终止 WorkItemPlan Outline 生成".to_string()))
+                    .await;
+                if let Some(store) = &self.lifecycle_store {
+                    let _ = store.update_workspace_session_status(
+                        &self.session.session_id,
+                        WorkspaceSessionStatus::Terminated,
+                    );
+                }
+                self.transition_stage(WorkspaceStage::Completed).await;
+                let _ = self
+                    .create_timeline_node(TimelineNodeDraft {
+                        node_type: TimelineNodeType::Completed,
+                        agent: None,
+                        stage: WorkspaceStage::Completed,
+                        round: None,
+                        title: "WorkItemPlan Outline 生成已终止".to_string(),
+                        summary: Some("用户终止上下文补充流程".to_string()),
+                        status: TimelineNodeStatus::Completed,
+                    })
+                    .await;
+                Ok(ReviewDecisionOutcome::HumanConfirm)
+            }
+        }
+    }
+
+    async fn append_work_item_plan_context_blocker_resolution(
+        &mut self,
+        resolution: String,
+    ) -> Result<(), String> {
+        let lifecycle = self
+            .lifecycle_store
+            .clone()
+            .ok_or_else(|| "lifecycle_store unavailable".to_string())?;
+        let blocker_node_id = self
+            .active_node_id
+            .clone()
+            .ok_or_else(|| "context blocker node unavailable".to_string())?;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        self.complete_active_node(Some("已记录上下文补充".to_string()))
+            .await;
+        let resolution_node = self
+            .append_completed_timeline_event(
+                TimelineNodeType::ContextNote,
+                WorkspaceStage::HumanConfirm,
+                "WorkItemPlan 上下文补充".to_string(),
+                Some(resolution.clone()),
+                TimelineNodeStatus::Completed,
+                true,
+            )
+            .await;
+        let resolution_node_id = resolution_node.node_id.clone();
+        let artifact_ref = self
+            .update_artifact(ArtifactPayload::Markdown {
+                markdown: format_context_blocker_resolution_markdown(&resolution),
+                diff: None,
+            })
+            .await;
+
+        let store = WorkItemPlanStore::new(lifecycle.app_paths());
+        let project_id = self.session.project_id.clone();
+        let issue_id = self.session.issue_id.clone();
+        let plan_id = self.session.entity_id.clone();
+        let mut index = store
+            .load_outline_context_index(&project_id, &issue_id, &plan_id)
+            .map_err(|error| format!("load outline context index failed: {error}"))?
+            .unwrap_or_else(|| OutlineContextIndex {
+                project_id: project_id.clone(),
+                issue_id: issue_id.clone(),
+                plan_id: plan_id.clone(),
+                generation_round_id: "outline_stage".to_string(),
+                blocker_resolutions: Vec::new(),
+                design_context_gaps: Vec::new(),
+                design_context_capabilities: empty_design_context_capabilities(),
+                updated_at: now.clone(),
+            });
+
+        index
+            .blocker_resolutions
+            .push(OutlineContextBlockerResolution {
+                blocker_node_id: blocker_node_id.clone(),
+                resolution_node_id: resolution_node_id.clone(),
+                resolution_artifact_ref: format!(
+                    "{}/v{}",
+                    artifact_ref.artifact_id, artifact_ref.version
+                ),
+                estimated_tokens: estimate_context_resolution_tokens(&resolution),
+                created_at: now.clone(),
+                summary: Some(resolution.clone()),
+                merged_count: None,
+            });
+        index.updated_at = now;
+        store
+            .save_outline_context_index(&index)
+            .map_err(|error| format!("save outline context index failed: {error}"))?;
+        Ok(())
     }
 
     fn should_retry_missing_workspace_artifact(&self, full_content: &str) -> bool {
@@ -3668,7 +3855,7 @@ impl WorkspaceEngine {
         Ok(())
     }
 
-    pub async fn update_artifact(&mut self, payload: ArtifactPayload) {
+    pub async fn update_artifact(&mut self, payload: ArtifactPayload) -> ArtifactRef {
         self.session.artifact = Some(payload.clone());
         for version in &mut self.artifact_versions {
             version.is_current = false;
@@ -3695,14 +3882,12 @@ impl WorkspaceEngine {
             .last()
             .map(|version| version.source_node_id.clone())
             .unwrap_or_else(|| "timeline_node_unknown".to_string());
+        let artifact_ref = ArtifactRef {
+            artifact_id: format!("artifact_version_{version:03}"),
+            version,
+        };
         let _ = self
-            .persist_artifact_ref(
-                &source_node_id,
-                ArtifactRef {
-                    artifact_id: format!("artifact_version_{version:03}"),
-                    version,
-                },
-            )
+            .persist_artifact_ref(&source_node_id, artifact_ref.clone())
             .await;
         let _ = self
             .event_tx
@@ -3711,6 +3896,7 @@ impl WorkspaceEngine {
                 payload: payload.clone(),
             })
             .await;
+        artifact_ref
     }
 
     pub async fn complete_work_item_plan_author(
@@ -3801,6 +3987,111 @@ impl WorkspaceEngine {
 
         self.work_item_plan_author_retry_count = 0;
         Ok(WorkItemPlanAuthorOutcome::AuthorConfirm)
+    }
+
+    pub async fn complete_work_item_plan_outline_author(
+        &mut self,
+        output: OutlineAuthorOutput,
+    ) -> Result<WorkItemPlanAuthorOutcome, String> {
+        let design_context_gaps = self.current_work_item_plan_design_context_gaps();
+        if !output.context_blockers.is_empty() {
+            let payload = ArtifactPayload::WorkItemPlanContextBlocker {
+                context_blocker: Box::new(WorkItemPlanContextBlockerPayload {
+                    context_blockers: work_item_plan_context_blockers_to_dto(
+                        &output.context_blockers,
+                    ),
+                    design_context_gaps: design_context_gaps.clone(),
+                    exploration_summary: "Outline author 需要补充上下文后才能继续".to_string(),
+                    allowed_actions: vec!["provide_context".to_string(), "abort".to_string()],
+                }),
+            };
+            self.update_artifact(payload).await;
+            self.complete_active_node(Some(
+                "WorkItemPlan Outline author 请求补充上下文".to_string(),
+            ))
+            .await;
+            self.enter_work_item_plan_context_blocker(Some(
+                "请补充 WorkItemPlan Outline 所需上下文".to_string(),
+            ))
+            .await;
+            return Ok(WorkItemPlanAuthorOutcome::HumanConfirm {
+                reason: "context_blockers".to_string(),
+            });
+        }
+
+        let outline = output
+            .outline
+            .ok_or_else(|| "WorkItemPlan Outline output missing outline".to_string())?;
+        let report = WorkItemPlanOutlineValidator::validate(&outline);
+        let findings = report.findings.clone();
+
+        if report.has_errors() {
+            self.work_item_plan_author_retry_count += 1;
+            self.complete_active_node(Some(work_item_plan_findings_summary(
+                "WorkItemPlan Outline 校验失败",
+                &findings,
+            )))
+            .await;
+
+            if self.work_item_plan_author_retry_count >= 2 {
+                let payload = ArtifactPayload::WorkItemPlanContextBlocker {
+                    context_blocker: Box::new(WorkItemPlanContextBlockerPayload {
+                        context_blockers: Vec::new(),
+                        design_context_gaps: design_context_gaps.clone(),
+                        exploration_summary: work_item_plan_findings_summary(
+                            "Outline 自动重跑后仍校验失败",
+                            &findings,
+                        ),
+                        allowed_actions: vec!["provide_context".to_string(), "abort".to_string()],
+                    }),
+                };
+                self.update_artifact(payload).await;
+                self.enter_work_item_plan_context_blocker(Some(
+                    "Outline 校验失败，请补充上下文或终止".to_string(),
+                ))
+                .await;
+                return Ok(WorkItemPlanAuthorOutcome::HumanConfirm {
+                    reason: "outline_validation_failed".to_string(),
+                });
+            }
+
+            return Ok(WorkItemPlanAuthorOutcome::AutoRevision { findings });
+        }
+
+        self.update_artifact(ArtifactPayload::WorkItemPlanOutlineCandidate {
+            outline_candidate: Box::new(WorkItemPlanOutlineCandidateDto {
+                outline,
+                design_context_gaps,
+                validator_findings: work_item_split_findings_to_dto(&findings),
+                context_blockers: Vec::new(),
+            }),
+        })
+        .await;
+        self.complete_active_node(Some("WorkItemPlan Outline provider 输出完成".to_string()))
+            .await;
+        self.enter_work_item_plan_outline_confirm(Some(
+            "WorkItemPlan Outline 已生成，等待确认".to_string(),
+        ))
+        .await;
+        self.work_item_plan_author_retry_count = 0;
+        Ok(WorkItemPlanAuthorOutcome::AuthorConfirm)
+    }
+
+    fn current_work_item_plan_design_context_gaps(&self) -> Vec<String> {
+        let Some(lifecycle) = &self.lifecycle_store else {
+            return Vec::new();
+        };
+        let store = WorkItemPlanStore::new(lifecycle.app_paths());
+        store
+            .load_outline_context_index(
+                &self.session.project_id,
+                &self.session.issue_id,
+                &self.session.entity_id,
+            )
+            .ok()
+            .flatten()
+            .map(|index| index.design_context_gaps)
+            .unwrap_or_default()
     }
 
     /// WorkItemPlan Revision 完成：validate → replace Draft candidate → 组装 DTO →
@@ -4140,6 +4431,27 @@ impl WorkspaceEngine {
             .await;
     }
 
+    async fn enter_work_item_plan_context_blocker(&mut self, summary: Option<String>) {
+        self.transition_stage(WorkspaceStage::HumanConfirm).await;
+        if let Some(store) = &self.lifecycle_store {
+            let _ = store.update_workspace_session_status(
+                &self.session.session_id,
+                WorkspaceSessionStatus::WaitingForHuman,
+            );
+        }
+        let _ = self
+            .create_timeline_node(TimelineNodeDraft {
+                node_type: TimelineNodeType::WorkItemPlanContextBlocker,
+                agent: None,
+                stage: WorkspaceStage::HumanConfirm,
+                round: None,
+                title: "WorkItemPlan 上下文补充".to_string(),
+                summary,
+                status: TimelineNodeStatus::Active,
+            })
+            .await;
+    }
+
     async fn transition_stage(&mut self, new_stage: WorkspaceStage) {
         self.session.stage = new_stage;
         let _ = self
@@ -4457,6 +4769,27 @@ impl WorkspaceEngine {
         }
     }
 
+    async fn enter_work_item_plan_outline_confirm(&mut self, summary: Option<String>) {
+        self.transition_stage(WorkspaceStage::AuthorConfirm).await;
+        let _ = self
+            .create_timeline_node(TimelineNodeDraft {
+                node_type: TimelineNodeType::WorkItemPlanOutlineConfirm,
+                agent: None,
+                stage: WorkspaceStage::AuthorConfirm,
+                round: None,
+                title: "WorkItemPlan Outline 确认".to_string(),
+                summary,
+                status: TimelineNodeStatus::Active,
+            })
+            .await;
+        if let Some(store) = &self.lifecycle_store {
+            let _ = store.update_workspace_session_status(
+                &self.session.session_id,
+                WorkspaceSessionStatus::WaitingForHuman,
+            );
+        }
+    }
+
     async fn enter_human_confirm(&mut self, summary: Option<String>) {
         self.transition_stage(WorkspaceStage::HumanConfirm).await;
         let _ = self
@@ -4558,7 +4891,9 @@ impl WorkspaceEngine {
             node_type: node.node_type.clone(),
             status: node.status.clone(),
             agent_role: match node.node_type {
-                TimelineNodeType::AuthorRun => Some(AgentRole::Author),
+                TimelineNodeType::AuthorRun | TimelineNodeType::WorkItemPlanOutlineRun => {
+                    Some(AgentRole::Author)
+                }
                 TimelineNodeType::ReviewerRun => Some(AgentRole::Reviewer),
                 _ => None,
             },
@@ -5354,6 +5689,27 @@ fn human_confirm_payload_description(payload: Option<serde_json::Value>) -> Opti
     } else {
         Some(trimmed)
     }
+}
+
+fn empty_design_context_capabilities() -> DesignContextCapabilities {
+    DesignContextCapabilities {
+        has_architecture: false,
+        has_module_breakdown: false,
+        has_tech_stack: false,
+        has_test_strategy: false,
+        has_key_paths: false,
+    }
+}
+
+fn estimate_context_resolution_tokens(value: &str) -> u32 {
+    ((value.chars().count() as u32).saturating_add(3) / 4).max(1)
+}
+
+fn format_context_blocker_resolution_markdown(resolution: &str) -> String {
+    format!(
+        "# WorkItemPlan 上下文补充\n\n## 用户补充\n\n{resolution}\n",
+        resolution = resolution.trim()
+    )
 }
 
 fn workspace_type_title(workspace_type: &WorkspaceType) -> &'static str {

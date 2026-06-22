@@ -53,6 +53,8 @@ mod web_work_item_generation;
 mod web_work_item_plan_author;
 #[path = "it_web/web_work_item_plan_confirm.rs"]
 mod web_work_item_plan_confirm;
+#[path = "it_web/web_work_item_plan_outline.rs"]
+mod web_work_item_plan_outline;
 #[path = "it_web/web_work_item_plan_revert.rs"]
 mod web_work_item_plan_revert;
 #[path = "it_web/web_work_item_plan_review.rs"]

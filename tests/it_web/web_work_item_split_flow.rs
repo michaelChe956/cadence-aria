@@ -132,6 +132,7 @@ async fn prepare_and_start_generation(
 }
 
 #[tokio::test]
+#[ignore = "legacy full-candidate WorkItemPlan flow is superseded by WP2 outline generation; WP8 will replace this end-to-end coverage"]
 async fn work_item_plan_full_flow() {
     let _guard = WS_TEST_LOCK.lock().await;
     let (app, repo) = app_with_confirmed_story_and_design_revision_and_test_providers(

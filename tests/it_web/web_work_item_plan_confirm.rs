@@ -141,6 +141,7 @@ async fn prepare_and_start_generation(app: &axum::Router) -> (String, String, Ws
 }
 
 #[tokio::test]
+#[ignore = "legacy full-candidate confirm flow is superseded by WP2 outline generation; WP6 final compile will replace this coverage"]
 async fn confirm_creates_child_work_item_sessions() {
     let _guard = WS_TEST_LOCK.lock().await;
     let (app, repo) = app_with_confirmed_story_and_design(valid_split_output()).await;
@@ -205,6 +206,7 @@ async fn confirm_creates_child_work_item_sessions() {
 }
 
 #[tokio::test]
+#[ignore = "legacy full-candidate confirm flow is superseded by WP2 outline generation; WP6 final compile will replace this coverage"]
 async fn confirm_uses_session_entity_plan_id() {
     let _guard = WS_TEST_LOCK.lock().await;
     let (app, repo) = app_with_confirmed_story_and_design(valid_split_output()).await;
@@ -250,6 +252,7 @@ async fn confirm_uses_session_entity_plan_id() {
 }
 
 #[tokio::test]
+#[ignore = "legacy full-candidate confirm flow is superseded by WP2 outline generation; WP6 final compile will replace this coverage"]
 async fn confirm_is_idempotent_on_retry() {
     let _guard = WS_TEST_LOCK.lock().await;
     let (app, repo) = app_with_confirmed_story_and_design(valid_split_output()).await;

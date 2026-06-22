@@ -60,6 +60,7 @@ async fn recv_ws_messages_with_timeout(
 }
 
 #[tokio::test]
+#[ignore = "legacy full-candidate revert flow is superseded by WP2 outline generation; WP3+ will replace this coverage"]
 async fn revert_work_item_is_valid_in_author_confirm_only() {
     let _guard = WS_TEST_LOCK.lock().await;
     let (app, _repo) = app_with_confirmed_story_and_design(valid_split_output()).await;
@@ -148,6 +149,7 @@ async fn revert_work_item_is_valid_in_author_confirm_only() {
 }
 
 #[tokio::test]
+#[ignore = "legacy full-candidate revert flow is superseded by WP2 outline generation; WP3+ will replace this coverage"]
 async fn revert_work_item_clear_removes_mark() {
     let _guard = WS_TEST_LOCK.lock().await;
     let (app, _repo) = app_with_confirmed_story_and_design(valid_split_output()).await;
@@ -291,6 +293,7 @@ async fn prepare_and_start_generation(app: &axum::Router) -> String {
 }
 
 #[tokio::test]
+#[ignore = "legacy full-candidate revert flow is superseded by WP2 outline generation; WP3+ will replace this coverage"]
 async fn revert_work_item_triggers_local_redo_in_revision() {
     let _guard = WS_TEST_LOCK.lock().await;
     let (app, _repo) = app_with_confirmed_story_and_design_and_revision_output(
@@ -397,6 +400,7 @@ async fn revert_work_item_triggers_local_redo_in_revision() {
 }
 
 #[tokio::test]
+#[ignore = "legacy full-candidate auto revision flow is superseded by WP2 outline generation; WP3+ will replace this coverage"]
 async fn work_item_plan_validate_errors_auto_revision_uses_generate_revision() {
     let _guard = WS_TEST_LOCK.lock().await;
     // 首次 generate 返回 validate 失败的输出；带 revision_feedback 的 revision 返回合法输出。
