@@ -19,14 +19,20 @@
 - R6 author 探索能力：prompt 允许读 CLAUDE.md + 仓库目录结构（只读，不作为 plan 字段）。
 - R7 work_item_id 阶段 4 编译时分配，Draft 阶段以 outline_id 为主键。
 - R8 strict validator 复用现有 5 函数，失败分 item 级 / plan 级。
-- R9 Draft 持久化复用 `LifecycleWorkItemRecord` + 新增 `outline_id` 字段，编译时创建 child session。
+- R9 Draft 持久化改为独立 `WorkItemDraftRecord`，不复用 `LifecycleWorkItemRecord` 占位；编译时创建真实 work item、verification plan 与 child session。
 - R10 编译失败处理：item 级 / plan 级分流。
 - R14 状态机倾向新增语义化 node type，非纯 metadata。
 - R18 reviewer prompt 统一改造为 sentinel structured block（现状用 markdown JSON fence，与 author 解析路径不同）。
 - R19 `required_gates` 规则说明现有 validator 已覆盖。
-- R20 `plan_reopen_required` 触发后的 drafts 处理规则。
+- R20 `plan_reopen_required` 触发后的 Draft records 处理规则。
 - R21 Outline 轻量校验失败状态归属。
 - 其他：R11 修正"已确认的后续项"笔误；R12 明确轻量校验与现有 validator 复用关系；R13 `generation_mode_select` 接入点；R15 补数据流转图；R16 命名统一；R17 review 状态字段来源；R22 补测试。
+- 本轮补充收敛高/中风险：
+  - Draft 阶段不再复用 `LifecycleWorkItemRecord` 作为可变占位记录，改为独立 `WorkItemDraftRecord`，以 `outline_id` 为 Draft 主键；阶段 4 才编译为真实 `LifecycleWorkItemRecord` / `VerificationPlan` / child workspace session，避免 `id` 迁移和 session/entity 引用重写。
+  - 补充 `stage` / timeline node / WS message / 前端操作 / 恢复 payload 矩阵，明确 `generation_mode_select`、逐项确认、整组确认的协议入口。
+  - 自动模式统一为"整组生成完成 → 用户接受整组 → reviewer 整组审核 → final compile"；reviewer 关闭时，用户接受整组后直接进入 final compile。
+  - `superseded` 只属于 `WorkItemDraftStatus`，不扩展现有 `WorkItemPlanStatus`。
+  - 补充 strict validator finding code 到 item 级 / plan 级 / warning 的归因映射。
 
 ## v1.2 变更摘要
 
@@ -65,6 +71,26 @@
 
 - **Design spec 模板补强**：要求 Design spec 包含架构/模块/技术选型章节（模块划分、技术栈、测试框架、关键目录结构）。author 生成 work item 时从此章节获取仓库结构知识，替代原有 `repository_profile` 探测。
 - **author 探索能力**：author prompt 允许读取 CLAUDE.md（项目技术栈章节）和目标仓库的目录结构（只读，不得修改文件，不得创建计划文档），作为 spec 信息的补充。探索所得不作为 plan 持久化字段，仅用于本次 prompt 上下文。
+
+### Design Spec 前置门禁与兼容策略
+
+Design spec 模板补强不只是文档要求，需落到 WorkItemPlan Outline 生成前的上下文门禁：
+
+- **新 Design spec**：Design author / reviewer prompt 必须要求产物包含以下二级章节或等价结构：
+  - 架构概览。
+  - 模块划分。
+  - 技术选型与测试框架。
+  - 关键目录结构与主要落点。
+  - 外部依赖、运行方式与验证约束。
+- **WorkItemPlan prepare 阶段**：构建 Outline prompt 前，后端对已确认 Design spec 做轻量 heading/section 提取，生成 `design_context_capabilities`：
+  - `has_architecture`
+  - `has_module_breakdown`
+  - `has_tech_stack`
+  - `has_test_strategy`
+  - `has_key_paths`
+- **兼容旧 Design spec**：若旧 spec 缺少上述章节，不直接阻断 WorkItemPlan 生成；后端把缺口写入 `design_context_gaps`，并强制 Outline author 通过 CLAUDE.md + 目录结构只读探索补齐假设。
+- **不可恢复缺口**：若 Design spec 缺口 + CLAUDE.md + 目录结构摘要仍不足以判断模块边界或测试策略，Outline author 必须在结构化输出中返回 `context_blockers[]`，后端停在 `outline_running` 的人工确认/返修入口，不进入 `outline_confirm`。
+- **Reviewer 责任**：Outline reviewer 必须检查 `design_context_gaps` 与 author 的补齐假设；如果补齐假设会影响拆分边界，应返回 `revise` 或 `needs_human`。
 
 ## 非目标
 
@@ -173,7 +199,7 @@ Reviewer 不通过时，只重写当前 work item；重写 prompt 必须携带 r
 - 整组重写。
 - 暂停整组。
 
-自动模式下，全部 work item 生成完成后进入整组 reviewer 审核（默认开启，可关闭）。Reviewer 审核对象是整组 Work Items，而不是单个 item 的暂停确认点。
+自动模式下，全部 work item 生成完成后先进入整组确认。用户接受全部后，若 reviewer 开启，再进入整组 reviewer 审核；若 reviewer 关闭，直接进入 final compile。Reviewer 审核对象是整组 Work Items，而不是单个 item 的暂停确认点。
 
 Reviewer 审核范围包括：
 
@@ -188,7 +214,7 @@ Reviewer 审核范围包括：
 
 ### 阶段 4：最终编译与严格校验
 
-所有 work item 确认后，后端再把结果编译为现有真实结构：
+所有 work item 确认后，后端再把 Draft 结果编译为现有真实结构：
 
 - `IssueWorkItemPlan`
 - `LifecycleWorkItemRecord[]`
@@ -198,11 +224,12 @@ Reviewer 审核范围包括：
 
 阶段 4 编译步骤：
 
-1. **分配 work_item_id**：为每个 `WorkItemDraftCandidate` 分配稳定的 `work_item_id`，构建 outline_id → work_item_id 映射表。
-2. **字段映射**：将 Draft 的 `implementation_context`、`exclusive_write_scopes`、`forbidden_write_scopes`、`verification_plan`、`handoff_summary` 等字段映射到 `LifecycleWorkItemRecord` 的对应字段。
-3. **构建 dependency_graph**：基于 Outline 的 `dependency_graph`（outline_id 边）和映射表，转换为 work_item_id 边，写入 `IssueWorkItemPlan.dependency_graph`。
-4. **创建 child workspace sessions**：为每个 work item 创建 child workspace session，将 Draft 的 `implementation_context` 迁移到 session 的 artifact。
-5. **运行 strict validator**：复用现有 `WorkItemSplitValidator` 的 5 个函数，入参为编译后的真实结构。
+1. **分配 work_item_id**：为每个 accepted `WorkItemDraftRecord` 分配稳定的 `work_item_id`，构建 outline_id → work_item_id 映射表。Draft 阶段不暴露真实 work_item_id。
+2. **创建真实 WorkItem**：将 Draft 的 `implementation_context`、`exclusive_write_scopes`、`forbidden_write_scopes`、`verification_plan`、`handoff_summary` 等字段映射到 `LifecycleWorkItemRecord` 的对应字段，并写入 work item store。
+3. **创建真实 VerificationPlan**：为每个 Draft 内嵌的 `verification_plan` 分配 `verification_plan_id`，写入 verification plan store，并回填 `LifecycleWorkItemRecord.verification_plan_ref`。
+4. **构建 dependency_graph**：基于 Outline 的 `dependency_graph`（outline_id 边）和映射表，转换为 work_item_id 边，写入 `IssueWorkItemPlan.dependency_graph`。
+5. **创建 child workspace sessions**：为每个 work item 创建 child workspace session，将 Draft 的 `implementation_context` 迁移到 session 的 artifact。
+6. **运行 strict validator**：复用现有 `WorkItemSplitValidator` 的 5 个函数，入参为编译后的真实结构。
 
 strict validator 失败处理按失败级别区分（详见错误处理章节）：
 
@@ -253,6 +280,61 @@ Timeline node 建议：
 
 **与现有实现的衔接**：现有 `WorkspaceStage`（8 个变体，4 种 WorkspaceType 共用）和 `TimelineNodeType`（12 个变体）对四种 WorkspaceType 完全通用，无 WorkItemPlan 专属状态。实现时需评估是否为 WorkItemPlan 引入专属 stage 枚举值，或在现有 stage 上通过 timeline node type 区分。建议优先扩展 timeline node type（影响面小），stage 枚举保持通用，通过 active node type 推导当前 UI 形态。
 
+### Stage / Timeline / WS 契约矩阵
+
+实现时不新增 `WorkspaceStage` 枚举值；WorkItemPlan 专属 UI 形态由 active timeline node type 与 artifact payload 推导。前端不得只依赖 `stage` 判断 WorkItemPlan 面板，应同时读取 `active_node.node_type`。
+
+| 业务阶段 | 复用 `WorkspaceStage` | active timeline node type | 前端主操作 | WS 输入消息 | 关键恢复 payload |
+| --- | --- | --- | --- | --- | --- |
+| Outline 生成 | `running` | `work_item_plan_outline_run` | 仅展示流式进度、允许 abort | `abort` | `WorkItemPlanOutlineCandidate`、node detail streaming |
+| Outline 确认 | `author_confirm` | `work_item_plan_outline_confirm` | 接受 Outline / 重写 Outline / 带反馈重写 | `author_decision` + `request_revision` | current outline artifact、validator findings |
+| Outline review | `cross_review` | `work_item_plan_outline_review` | 仅展示 reviewer 进度 | `abort` | review verdict metadata |
+| 生成模式选择 | `author_confirm` | `work_item_generation_mode` | 逐个生成 / 自动生成全部 / 回到 Outline 返修 | `select_work_item_generation_mode` / `request_revision` | confirmed outline、selected mode（可空） |
+| 单 item 生成 | `running` | `work_item_draft_run` | 展示当前 item 流式进度、允许 abort | `abort` | current outline_id、draft stream |
+| 单 item 确认 | `author_confirm` | `work_item_draft_confirm` | 接受当前 item / 重写当前 item / 暂停 | `work_item_draft_decision` | `WorkItemDraftRecord`、accepted draft summaries |
+| 单 item review | `cross_review` | `work_item_draft_review` | 仅展示 reviewer 进度 | `abort` | review verdict metadata、target_outline_id |
+| 自动整组生成 | `running` | `work_item_batch_run` | 展示队列、允许 abort | `abort` | batch queue state、已生成 drafts |
+| 自动整组确认 | `author_confirm` | `work_item_batch_confirm` | 接受全部 / 整组重写 / 暂停 | `work_item_batch_decision` | batch draft list、batch failure summary |
+| 自动整组 review | `cross_review` | `work_item_batch_review` | 仅展示 reviewer 进度 | `abort` | batch review verdict metadata |
+| 最终编译 | `running` | `work_item_plan_compile` | 展示编译和 strict validator 结果 | `abort` | compile report、outline_id → work_item_id 映射 |
+| 最终人工确认 | `human_confirm` | `human_confirm` | 确认完成 / 带反馈返修 / 终止 | `human_confirm` | compiled plan summary、child session ids |
+| 完成 | `completed` | `completed` | 查看结果 | 无 | confirmed `IssueWorkItemPlan` |
+
+新增 WS 输入消息：
+
+```json
+{
+  "type": "select_work_item_generation_mode",
+  "mode": "serial|batch"
+}
+```
+
+```json
+{
+  "type": "work_item_draft_decision",
+  "outline_id": "outline_001",
+  "decision": "accept|rewrite|pause",
+  "feedback": "optional"
+}
+```
+
+```json
+{
+  "type": "work_item_batch_decision",
+  "decision": "accept_all|rewrite_batch|pause",
+  "feedback": "optional"
+}
+```
+
+兼容规则：
+
+- `author_decision` 只保留给 Outline author 结果确认，不承载单 item 或 batch 的确认语义。
+- `request_revision` 在 WorkItemPlan 中只用于 Outline 级返修；单 item / batch 返修使用上表新增消息，避免误触发旧的整组 revision 路径。
+- `select_work_item_generation_mode` 只能在 active node type 为 `work_item_generation_mode` 时接受。
+- `work_item_draft_decision` 只能在 active node type 为 `work_item_draft_confirm` 时接受，且 `outline_id` 必须等于当前 active draft。
+- `work_item_batch_decision` 只能在 active node type 为 `work_item_batch_confirm` 时接受。
+- 刷新恢复时，后端 `SessionState` 必须带回 current outline、draft records、batch queue、active outline_id、accepted draft summaries、compile report；前端以这些 payload 重建独立气泡和操作区。
+
 ## 数据模型草案
 
 ### WorkItemPlanOutline
@@ -300,7 +382,6 @@ Timeline node 建议：
 核心字段：
 
 - `outline_id`（主键，Draft 阶段以此引用）
-- `work_item_id`（阶段 4 编译时分配，Draft 阶段为 None）
 - `title`
 - `kind`
 - `goal`
@@ -311,34 +392,77 @@ Timeline node 建议：
 - `required_handoff_from_outline_ids`（引用 outline_id）
 - `handoff_summary`（预期交付摘要，供后序 item prompt 使用）
 - `verification_plan`
-- `status`（draft / accepted / superseded）
-- `generated_from_node_id`
-- `accepted_at`
+
+`status`、`generated_from_node_id`、`accepted_at`、`superseded_at` 等状态字段属于 `WorkItemDraftRecord`，由后端设置；provider 结构化输出不得包含这些后端状态字段。
 
 > **命名统一**：Outline 与 Draft 都用 `exclusive_write_scopes` / `forbidden_write_scopes`，体现"Outline 预期 → Draft 继承细化"的语义递进。
 >
 > **review_verdict 存储**：Draft 的 review verdict 不作为 `WorkItemDraftCandidate` 字段，存在对应 `work_item_draft_review` timeline node 的 metadata 里，避免污染 Record。前端刷新恢复时从 timeline node 读取 review 状态。
 
+### WorkItemDraftRecord
+
+`WorkItemDraftRecord` 是 Draft 阶段的持久化记录，不等价于真实 `LifecycleWorkItemRecord`。它的存在是为了避免 Draft 阶段用占位 `id` 写入 work item store 后，阶段 4 再重命名 JSON 文件、重写 `depends_on`、重写 `VerificationPlan.work_item_id`、重建 artifact 与 session 引用。
+
+核心字段：
+
+- `project_id`
+- `issue_id`
+- `plan_id`
+- `outline_id`（文件名与主键）
+- `generation_mode`（serial / batch）
+- `candidate`（完整 `WorkItemDraftCandidate`）
+- `status`（draft / accepted / superseded）
+- `review_node_id`
+- `review_verdict_ref`
+- `generated_from_node_id`
+- `accepted_at`
+- `superseded_at`
+- `created_at`
+- `updated_at`
+
+`WorkItemDraftStatus` 仅用于 Draft store，不扩展现有 `WorkItemPlanStatus`。现有 `WorkItemPlanStatus` 继续只描述真实 work item 在 plan 中的状态。
+
 ### Draft 持久化方式
 
-`WorkItemDraftCandidate` 复用现有 `LifecycleWorkItemRecord` 持久化，新增 `outline_id: Option<String>` 字段：
+`WorkItemDraftCandidate` 使用新 Draft store 持久化：
 
-- 阶段 3（Draft）：创建 `LifecycleWorkItemRecord`，`plan_status = Draft`，`outline_id = Some(...)`，`work_item_id` 留空（或与 id 字段相同，作为占位）。review_verdict 存在 timeline node metadata。
-- 阶段 4（编译）：分配 `work_item_id`，`plan_status → Confirmed`，创建 child workspace session，Draft 的 `implementation_context` / `verification_plan` 迁移到 session 的 artifact。
+- 存储路径建议：`.aria/projects/<project>/issues/<issue>/work_item_plan_drafts/<plan_id>/<outline_id>.json`。
+- 阶段 3（Draft）：创建或更新 `WorkItemDraftRecord`，不写入 `work_items/`，不写入 `verification_plans/`，不创建 child workspace session。
+- 阶段 3 确认：只把对应 Draft record 的 `status` 改为 `accepted`，并记录确认 node 与时间。
+- 阶段 3 返修：重写当前 outline 的 Draft record；旧 draft 若已进入历史 timeline，则标记 `superseded`，新 draft 覆盖当前可用版本。
+- 阶段 4（编译）：读取所有 `accepted` Draft record，分配真实 `work_item_id` 和 `verification_plan_id`，写入现有 `work_items/`、`verification_plans/`、`issue_work_item_plans/`，创建 child workspace session。
 
-现有 `work_item_set_id` 字段用于关联同一 plan 下的所有 draft。不引入新表。
+现有 `LifecycleWorkItemRecord.work_item_set_id` 仍用于真实 WorkItem 编译结果的归组，不再承担 Draft 阶段关联职责。
 
 ### 数据流转图（Outline → Draft → 编译后真实结构）
 
 | 阶段 | 实体 | 关键字段 | → 编译后映射 |
 | --- | --- | --- | --- |
 | 阶段 1 Outline | `WorkItemPlanOutline` | `dependency_graph`（outline_id 边） | → `IssueWorkItemPlan.dependency_graph`（经 id 映射为 work_item_id 边） |
-| 阶段 1 Outline | `WorkItemOutline` | `outline_id`、`exclusive_write_scopes` | → `LifecycleWorkItemRecord.outline_id`（保留溯源）、`exclusive_write_scopes` |
-| 阶段 3 Draft | `WorkItemDraftCandidate`（存于 `LifecycleWorkItemRecord`） | `implementation_context`、`verification_plan`、`handoff_summary` | → child workspace session artifact + `VerificationPlan` |
+| 阶段 1 Outline | `WorkItemOutline` | `outline_id`、`exclusive_write_scopes` | → `WorkItemDraftRecord.outline_id`、最终 `LifecycleWorkItemRecord.exclusive_write_scopes` |
+| 阶段 3 Draft | `WorkItemDraftRecord` | `outline_id`、`status`、`candidate` | → 阶段 4 只读取 `accepted` Draft |
+| 阶段 3 Draft | `WorkItemDraftCandidate` | `implementation_context`、`verification_plan`、`handoff_summary` | → child workspace session artifact + `VerificationPlan` |
 | 阶段 3 Draft | `WorkItemDraftCandidate.depends_on_outline_ids` | outline_id 列表 | → `LifecycleWorkItemRecord.depends_on`（work_item_id 列表，经映射） |
 | 阶段 4 编译 | `IssueWorkItemPlan` | `work_item_ids`、`verification_plan_ids`、`dependency_graph` | 最终真实结构，供 strict validator 与下游 Coding 使用 |
 
 > `IssueWorkItemPlan.repository_profile_ref` 移除（R4），现有 `WorkItemSplitValidator` 中 `repository_profile_missing` / `repository_profile_low_confidence` 两条校验随之失效，需同步移除。
+
+### WS Artifact Payload 扩展
+
+WorkItemPlan 两阶段流程不再只依赖当前整组 `WorkItemPlanCandidateDto`。WebSocket `ArtifactPayload` 需要新增或拆分以下 payload，供刷新恢复和右侧 Artifact 面板渲染：
+
+| Payload | 用途 | 关键字段 |
+| --- | --- | --- |
+| `WorkItemPlanOutlineCandidate` | 展示阶段 1 Outline | `outline`、`design_context_gaps`、`validator_findings`、`context_blockers` |
+| `WorkItemDraftCandidate` | 展示串行模式当前/历史单 item draft | `record`、`candidate`、`review_status`、`target_outline_id` |
+| `WorkItemBatchState` | 展示自动模式队列与整组结果 | `mode=batch`、`queue[]`、`draft_records[]`、`batch_status`、`failure_summary` |
+| `WorkItemPlanCompileReport` | 展示阶段 4 编译结果 | `outline_to_work_item_id`、`created_work_item_ids`、`created_verification_plan_ids`、`child_session_ids`、`validator_findings` |
+
+兼容策略：
+
+- 旧 `WorkItemPlanCandidateDto` 可以作为阶段 4 编译后的展示 DTO 保留，但不再作为 Draft 阶段的唯一 artifact。
+- 前端 `workspace-ws-store` 应保留当前 WorkItemPlan artifact 的 discriminated union，而不是只保存 `workItemPlanCandidate` 单字段。
+- 刷新恢复时，后端必须从 timeline node detail + Draft store + compile report 重建当前 payload；不能只依赖最后一条 `artifact_update`。
 
 ## Prompt 设计要求
 
@@ -657,11 +781,11 @@ Reviewer verdict schema：
 - 自动模式整组返修：清空本轮全部 work item draft，按原 Outline 或返修后的 Outline 重新调度整组生成。
 - `plan_reopen_required`：停止当前 item/batch 生成，进入 Outline 返修或人工决策，不能在当前 item prompt 中自行修改 Outline。
 
-`plan_reopen_required` 触发后的 drafts 处理规则：
+`plan_reopen_required` 触发后的 Draft records 处理规则：
 
-- **已生成但未确认的 drafts**：清空。这些 draft 基于错误的 Outline 生成，不可信。
-- **已确认的 drafts**：标记为 `superseded`，保留在 timeline 历史中供回溯，但不参与下一轮生成。Outline 返修后，受影响 outline 对应的 draft 必须重新生成；未受影响的 outline 若 draft 仍可用，可在新轮次中复用（由用户或自动模式决定）。
-- **Outline 返修后的重新生成范围**：Outline 返修可能改变 outline 列表、依赖图或写入边界。返修通过后，所有 `superseded` draft 对应的 outline 都需要重新生成 draft；新增或修改的 outline 强制重新生成；未变化的 outline 若用户选择复用旧 draft，需通过 strict validator 重新校验兼容性。
+- **已生成但未确认的 Draft records**：从当前 Draft store 删除；timeline 历史仍保留对应 run/detail，供回溯。
+- **已确认的 Draft records**：状态标记为 `superseded`，保留在 Draft store 与 timeline 历史中供回溯，但不参与下一轮生成和阶段 4 编译。
+- **Outline 返修后的重新生成范围**：Outline 返修可能改变 outline 列表、依赖图或写入边界。返修通过后，所有 `superseded` draft 对应的 outline 默认重新生成；新增或修改的 outline 强制重新生成；未变化的 outline 若用户选择复用旧 draft，后端需把该 draft 复制为新轮次 `accepted` record，并在阶段 4 strict validator 中重新校验兼容性。
 
 ## 可复用代码
 
@@ -672,6 +796,7 @@ Reviewer verdict schema：
 - WebSocket session state 与 node detail 恢复机制。
 - 现有 WorkItemPlan candidate DTO 的部分展示字段。
 - `LifecycleStore` 中 work item、verification plan、issue work item plan 的最终落盘方法。
+- `LifecycleStore` 的 JSON store 辅助能力可复用于新增 `WorkItemDraftRecord` store，但 Draft records 必须与真实 `work_items/` 分目录存储。
 - dependency graph 和 validator 的部分纯函数（`validate_plan_membership` / `validate_dependencies` / `validate_scopes_and_budgets` 可复用于 Outline 轻量校验，需适配签名）。
 - 当前 full validator（`WorkItemSplitValidator` 5 函数）作为最终编译后的严格校验器。
 - 现有 WorkItemPlan reviewer prompt 的 5 维度审核框架（作为 Outline reviewer 基础）。
@@ -679,7 +804,7 @@ Reviewer verdict schema：
 需要废弃或重写：
 
 - 当前 `WorkItemSplitEngine` 一次性输出全量 work item 的 prompt/schema（保留 provider 调用与 sentinel 解析框架，废弃"一次性全量"语义）。
-- 当前 `complete_work_item_plan_author` 的"生成后立即 full validate + 自动返修 loop"流程（保留落盘 candidate 部分，去掉立即 full validate 与自动返修 loop）。
+- 当前 `complete_work_item_plan_author` 的"生成后立即 full validate + 自动返修 loop"流程（保留 provider 调用与 artifact update 思路，废弃一次性 candidate 落盘语义，改为 Outline/Draft/Compile 三段落盘）。
 - 当前 WorkItemPlan 自动返修 loop。
 - 当前 candidate panel 只展示整组结果的交互模型。
 - 当前校验失败直接进入自动返修的 timeline 行为。
@@ -747,7 +872,7 @@ WorkItemPlan Outline review 不通过（reviewer 开启时）：
 `plan_reopen_required` 触发：
 
 - 单 item / 整组 reviewer 返回此 verdict 时，停止当前 item/batch 生成。
-- 已生成未确认 drafts 清空；已确认 drafts 标记 `superseded` 保留历史。
+- 已生成未确认 Draft records 从当前 Draft store 删除；已确认 Draft records 标记 `superseded` 保留历史。
 - 进入 Outline 返修或人工决策，不能在当前 item prompt 中自行修改 Outline。
 - Outline 返修通过后，受影响 outline 对应 draft 重新生成（详见 Rewrite Prompt 规则章节）。
 
@@ -760,10 +885,42 @@ WorkItemPlan Outline review 不通过（reviewer 开启时）：
   - 两种模式都：回 Outline 返修或转人工。
 - 不再静默进入内部自动返修。
 
+### Strict Validator 归因映射
+
+阶段 4 strict validator 必须把现有 `WorkItemSplitValidator` finding code 映射到明确 remediation scope，供串行/自动模式选择正确返修入口。
+
+| finding code | 归因 | 处理 |
+| --- | --- | --- |
+| `work_item_not_in_plan` | plan 级 | 回 Outline 返修或人工处理 |
+| `dependency_not_in_plan` | plan 级 | 回 Outline 返修或人工处理 |
+| `dependency_graph_mismatch` | plan 级 | 回 Outline 返修或人工处理 |
+| `dependency_cycle` | plan 级 | 回 Outline 返修或人工处理 |
+| `frontend_backend_split_required` | plan 级 | 回 Outline 返修或人工处理 |
+| `integration_work_item_required` | plan 级 | 回 Outline 返修或人工处理 |
+| `e2e_work_item_required` | plan 级 | 回 Outline 返修或人工处理 |
+| `verification_plan_mismatch` 且无明确 work_item_id | plan 级 | 回 Outline 返修或人工处理 |
+| `parallel_scope_overlap` | item 级（涉及两个 item） | 串行模式定位最近生成且未被后续依赖锁定的 item；自动模式整组重写 |
+| `write_scope_required` | item 级 | 串行模式定位目标 item；自动模式整组重写 |
+| `context_budget_over_limit` | item 级 | 串行模式定位目标 item；自动模式整组重写 |
+| `traceability_refs_required` | item 级 | 串行模式定位目标 item；自动模式整组重写 |
+| `verification_plan_missing` | item 级 | 串行模式定位目标 item；自动模式整组重写 |
+| `verification_plan_mismatch` 且有明确 work_item_id | item 级 | 串行模式定位目标 item；自动模式整组重写 |
+| `verification_command_source_invalid` | item 级 | 串行模式定位目标 item；自动模式整组重写 |
+| `verification_command_cwd_outside_repository` | item 级 | 串行模式定位目标 item；自动模式整组重写 |
+| `verification_command_needs_manual_review` | item 级 | 串行模式定位目标 item；自动模式整组重写或人工确认 |
+| `verification_command_unsafe` | item 级 | 串行模式定位目标 item；自动模式整组重写或人工确认 |
+| `verification_gate_missing` | item 级 | 串行模式定位目标 item；自动模式整组重写 |
+| `integration_or_e2e_skipped_risk` | warning | 不阻断编译；展示给用户确认 |
+
+`repository_profile_missing` 与 `repository_profile_low_confidence` 随 `repository_profile` 移除而删除；若实现期间暂未删除旧 validator 分支，阶段 4 调用必须传 `None` 且确保这两类 finding 不再产生。
+
 ## 验证策略
 
 后端测试：
 
+- Design spec heading/section 提取生成 `design_context_capabilities` 与 `design_context_gaps`。
+- 旧 Design spec 缺章节时不直接阻断 Outline 生成，但 prompt 必须包含 `design_context_gaps`。
+- Design spec + CLAUDE.md + 目录结构均不足时，Outline author 返回 `context_blockers[]` 后停在 `outline_running` 人工确认/返修入口。
 - Outline parser 接受合法 plan outline。
 - Outline validator 拦截重复 id、缺失依赖、环形依赖、缺少追踪关系。
 - Outline author prompt 输出合法 sentinel JSON，且不包含完整 Work Item 或 VerificationPlan。
@@ -772,6 +929,8 @@ WorkItemPlan Outline review 不通过（reviewer 开启时）：
 - Outline reviewer prompt 输出走 sentinel structured block（与 author 解析路径统一）。
 - 单 item author prompt 只输出一个 WorkItemDraftCandidate。
 - 单 item author prompt 不输出 `work_item_id`（阶段 4 编译时分配）。
+- provider 输出不得包含 `WorkItemDraftRecord.status`、`generated_from_node_id`、`accepted_at` 等后端状态字段。
+- Draft 阶段只写 `WorkItemDraftRecord`，不写真实 `LifecycleWorkItemRecord` / `VerificationPlan` / child workspace session。
 - 单 item author prompt 生成的 `required_gates` 只能引用本 verification plan 内已定义 id。
 - 串行模式生成第二个 work item 时包含第一个已确认 item 上下文与 handoff_summary。
 - 串行模式支持单 item 重写。
@@ -779,22 +938,29 @@ WorkItemPlan Outline review 不通过（reviewer 开启时）：
 - 单 item reviewer 支持 `plan_reopen_required` 并能阻断后续 item 生成。
 - 自动模式按拓扑顺序串行调度。
 - 自动模式不允许单 item 重写。
-- 自动模式全部生成完成后进入整组 review。
+- 自动模式全部生成完成后先进入整组确认；用户接受全部后 reviewer 开启才进入整组 review。
 - 自动模式整组 reviewer 不允许返回单 item rewrite 操作。
-- `plan_reopen_required` 触发后，已生成未确认 drafts 清空、已确认 drafts 标记 `superseded`。
+- `plan_reopen_required` 触发后，已生成未确认 Draft records 从当前 Draft store 删除、已确认 Draft records 标记 `superseded`。
+- `WorkItemDraftStatus::Superseded` 不影响现有 `WorkItemPlanStatus` 反序列化。
 - 阶段 4 编译时分配 work_item_id 并构建 outline_id → work_item_id 映射。
+- 阶段 4 编译后才创建真实 WorkItem、VerificationPlan 与 child workspace session。
 - 最终编译后仍运行严格 validator（现有 5 函数）。
 - strict validator item 级失败定位到具体 work item。
 - strict validator plan 级失败（如 dependency_graph 不一致）回 Outline 返修。
-- reviewer 关闭时，Outline/单 item/整组均不进入 review 阶段，直接进对应确认节点。
+- strict validator finding code 按归因映射表分流。
+- reviewer 关闭时，Outline/单 item/整组均不进入 review 阶段；整组接受后直接进入 final compile。
 - provider 中途崩溃后，刷新可恢复 outline、已确认 work item、当前运行 item 或 batch 状态。
+- `select_work_item_generation_mode` / `work_item_draft_decision` / `work_item_batch_decision` 只能在矩阵指定 active node type 下生效，其他阶段拒绝。
+- `SessionState` 可从 Draft store + timeline node detail + compile report 恢复当前 WorkItemPlan artifact payload。
 
 前端测试：
 
 - Outline 确认后展示两个生成按钮。
+- WorkItemPlan artifact 使用 discriminated union，能区分 outline / draft / batch / compile report。
 - 串行模式每个 work item 独立消息气泡和确认操作。
 - 串行模式每个 work item 确认后展示 reviewer 审核状态（reviewer 开启时）。
 - 自动模式展示队列状态且只允许整组操作。
+- 自动模式整组生成完成后展示接受全部/整组重写/暂停；接受全部后才展示整组 review 状态（reviewer 开启时）。
 - 自动模式展示整组 review 结果，不显示单 item 重写入口（reviewer 开启时）。
 - 刷新后可恢复 outline、已确认 work item、当前运行 item 或 batch 状态。
 
@@ -812,8 +978,8 @@ WorkItemPlan Outline review 不通过（reviewer 开启时）：
 
 1. WorkItemPlan Outline review 默认开启。Outline 经人工确认 author 结果后，若 reviewer 开启，由 reviewer 审核通过才能进入生成模式选择；若 reviewer 关闭，直接进入生成模式选择。
 2. 串行模式 Work Item review 默认逐项执行。每个 work item 的 author 结果经用户确认后，若 reviewer 开启，reviewer 审核通过才能生成下一个 work item；若 reviewer 关闭，直接生成下一个。
-3. 自动模式 Work Item review 默认整组执行。全部 work item 生成完成后，若 reviewer 开启，由 reviewer 审核整组结果，失败时只允许整组重写或转人工处理，不支持单项重写；若 reviewer 关闭，直接进入整组确认。
+3. 自动模式 Work Item review 默认整组执行。全部 work item 生成完成后先进入整组确认；用户接受全部后，若 reviewer 开启，由 reviewer 审核整组结果，失败时只允许整组重写或转人工处理，不支持单项重写；若 reviewer 关闭，直接进入 final compile。
 
 三条规则的 reviewer 开关语义与 story/design/workitem 完全一致，WorkItemPlan 不做特例。reviewer 开启时走 sentinel structured block 输出与统一解析路径（见 Prompt 契约总则）。
 
-后续实现计划仍需细化 review retry 上限、人工介入入口，以及 review 与最终 strict validator 的错误归因边界。Reviewer prompt 与 finding schema 的基本契约已在 Prompt 设计章节中定义，实现计划必须以该契约为基础。
+后续实现计划仍需细化 review retry 上限与人工介入入口。review 与最终 strict validator 的错误归因边界以本方案的 Strict Validator 归因映射为准；Reviewer prompt 与 finding schema 的基本契约已在 Prompt 设计章节中定义，实现计划必须以该契约为基础。
