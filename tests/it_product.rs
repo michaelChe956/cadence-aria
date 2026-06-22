@@ -21,6 +21,8 @@ mod product_test_executor;
 mod product_tester_agent_loop;
 #[path = "it_product/product_work_item_models.rs"]
 mod product_work_item_models;
+#[path = "it_product/product_work_item_plan_store.rs"]
+mod product_work_item_plan_store;
 #[path = "it_product/product_work_item_split_engine.rs"]
 mod product_work_item_split_engine;
 #[path = "it_product/product_work_item_split_validator.rs"]
