@@ -661,6 +661,36 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                 )
                 .await;
             }
+            WsInMessage::SelectWorkItemGenerationMode { mode } => {
+                let result = {
+                    let mut engine = engine.lock().await;
+                    engine.select_work_item_generation_mode(mode).await
+                };
+                if let Err(message) = result {
+                    let err = WsOutMessage::ProtocolError {
+                        code: "WORK_ITEM_GENERATION_MODE_NODE_REQUIRED".to_string(),
+                        message,
+                        context: None,
+                    };
+                    let _ = send_json_outbound(&outbound_tx, &err).await;
+                }
+            }
+            WsInMessage::RequestOutlineRevision { feedback } => {
+                let result = {
+                    let mut engine = engine.lock().await;
+                    engine
+                        .request_work_item_plan_outline_revision(feedback)
+                        .await
+                };
+                if let Err(message) = result {
+                    let err = WsOutMessage::ProtocolError {
+                        code: "WORK_ITEM_GENERATION_MODE_NODE_REQUIRED".to_string(),
+                        message,
+                        context: None,
+                    };
+                    let _ = send_json_outbound(&outbound_tx, &err).await;
+                }
+            }
             WsInMessage::Abort => {
                 if abort_active_run(&current_run, &state.workspace_runs, &session_id).await {
                     let _ = send_json_outbound(
@@ -769,20 +799,39 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                             .request_work_item_plan_revision(feedback_text.clone())
                             .await
                     };
-                    if let Err(message) = result {
-                        let err = WsOutMessage::Error { message };
-                        let _ = send_json_outbound(&outbound_tx, &err).await;
-                    } else if let Err(message) = spawn_provider_run_from_handler(
-                        run_context.clone(),
-                        ProviderRunKind::WorkItemPlanRevision {
-                            feedback: feedback_text,
-                        },
-                        outbound_tx.clone(),
-                    )
-                    .await
-                    {
-                        let err = WsOutMessage::Error { message };
-                        let _ = send_json_outbound(&outbound_tx, &err).await;
+                    match result {
+                        Ok(ReviewDecisionOutcome::StartWorkItemPlanOutline) => {
+                            if let Err(message) = spawn_provider_run_from_handler(
+                                run_context.clone(),
+                                ProviderRunKind::WorkItemPlanAuthor,
+                                outbound_tx.clone(),
+                            )
+                            .await
+                            {
+                                let err = WsOutMessage::Error { message };
+                                let _ = send_json_outbound(&outbound_tx, &err).await;
+                            }
+                        }
+                        Ok(ReviewDecisionOutcome::StartRevision) => {
+                            if let Err(message) = spawn_provider_run_from_handler(
+                                run_context.clone(),
+                                ProviderRunKind::WorkItemPlanRevision {
+                                    feedback: feedback_text,
+                                },
+                                outbound_tx.clone(),
+                            )
+                            .await
+                            {
+                                let err = WsOutMessage::Error { message };
+                                let _ = send_json_outbound(&outbound_tx, &err).await;
+                            }
+                        }
+                        Ok(ReviewDecisionOutcome::HumanConfirm)
+                        | Ok(ReviewDecisionOutcome::ConfirmedWithChildSessions { .. }) => {}
+                        Err(message) => {
+                            let err = WsOutMessage::Error { message };
+                            let _ = send_json_outbound(&outbound_tx, &err).await;
+                        }
                     }
                 } else {
                     let payload = serde_json::to_value(feedback).ok();
@@ -1060,6 +1109,8 @@ fn is_message_valid_for_stage(msg: &WsInMessage, stage: &WorkspaceStage) -> bool
             matches!(
                 msg,
                 WsInMessage::AuthorDecision { .. }
+                    | WsInMessage::SelectWorkItemGenerationMode { .. }
+                    | WsInMessage::RequestOutlineRevision { .. }
                     | WsInMessage::RevertWorkItem { .. }
                     | WsInMessage::Abort
             )
@@ -1110,8 +1161,10 @@ fn message_type(msg: &WsInMessage) -> &'static str {
         WsInMessage::ChoiceResponse { .. } => "choice_response",
         WsInMessage::ReviewDecisionResponse { .. } => "review_decision_response",
         WsInMessage::AuthorDecision { .. } => "author_decision",
+        WsInMessage::SelectWorkItemGenerationMode { .. } => "select_work_item_generation_mode",
         WsInMessage::SelectRevisionPath { .. } => "select_revision_path",
         WsInMessage::RequestRevision { .. } => "request_revision",
+        WsInMessage::RequestOutlineRevision { .. } => "request_outline_revision",
         WsInMessage::HumanConfirm { .. } => "human_confirm",
         WsInMessage::RevertWorkItem { .. } => "revert_work_item",
         WsInMessage::Abort => "abort",
@@ -1606,6 +1659,22 @@ async fn abort_active_run(
     false
 }
 
+async fn clear_active_run_if_token(
+    current_run: &Arc<Mutex<Option<WorkspaceActiveRun>>>,
+    workspace_runs: &WorkspaceRunRegistry,
+    session_id: &str,
+    run_token: u64,
+) {
+    let _ = workspace_runs.remove_if_token(session_id, run_token).await;
+    let mut current = current_run.lock().await;
+    if current
+        .as_ref()
+        .is_some_and(|active| active.token == run_token)
+    {
+        *current = None;
+    }
+}
+
 async fn spawn_provider_run_from_handler(
     run_context: ProviderRunContext,
     run_kind: ProviderRunKind,
@@ -1866,10 +1935,26 @@ async fn spawn_provider_run_from_handler(
                     match outcome {
                         WorkItemPlanAuthorOutcome::AuthorConfirm => {
                             engine.mark_active_run_finished(&run_label);
+                            drop(engine);
+                            clear_active_run_if_token(
+                                &current_run_for_task,
+                                &workspace_runs_for_task,
+                                &session_id_for_task,
+                                run_token,
+                            )
+                            .await;
                             return;
                         }
                         WorkItemPlanAuthorOutcome::HumanConfirm { reason: _ } => {
                             engine.mark_active_run_finished(&run_label);
+                            drop(engine);
+                            clear_active_run_if_token(
+                                &current_run_for_task,
+                                &workspace_runs_for_task,
+                                &session_id_for_task,
+                                run_token,
+                            )
+                            .await;
                             return;
                         }
                         WorkItemPlanAuthorOutcome::AutoRevision { findings } => {
@@ -2165,10 +2250,26 @@ async fn spawn_provider_run_from_handler(
                     match outcome {
                         WorkItemPlanAuthorOutcome::AuthorConfirm => {
                             engine.mark_active_run_finished(&run_label);
+                            drop(engine);
+                            clear_active_run_if_token(
+                                &current_run_for_task,
+                                &workspace_runs_for_task,
+                                &session_id_for_task,
+                                run_token,
+                            )
+                            .await;
                             return;
                         }
                         WorkItemPlanAuthorOutcome::HumanConfirm { reason: _ } => {
                             engine.mark_active_run_finished(&run_label);
+                            drop(engine);
+                            clear_active_run_if_token(
+                                &current_run_for_task,
+                                &workspace_runs_for_task,
+                                &session_id_for_task,
+                                run_token,
+                            )
+                            .await;
                             return;
                         }
                         WorkItemPlanAuthorOutcome::AutoRevision { findings: _ } => {
@@ -2340,16 +2441,13 @@ async fn spawn_provider_run_from_handler(
         engine.mark_active_run_finished(&run_label);
         drop(engine);
 
-        let _ = workspace_runs_for_task
-            .remove_if_token(&session_id_for_task, run_token)
-            .await;
-        let mut current = current_run_for_task.lock().await;
-        if current
-            .as_ref()
-            .is_some_and(|active| active.token == run_token)
-        {
-            *current = None;
-        }
+        clear_active_run_if_token(
+            &current_run_for_task,
+            &workspace_runs_for_task,
+            &session_id_for_task,
+            run_token,
+        )
+        .await;
     });
 
     Ok(())

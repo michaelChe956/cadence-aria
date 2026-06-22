@@ -23,11 +23,11 @@ use crate::product::models::{
     AgentRole, ArtifactRef, DesignContextCapabilities, IssueWorkItemPlan,
     LifecycleConfirmationStatus, LifecycleWorkItemRecord, NodeDetail,
     OutlineContextBlockerResolution, OutlineContextIndex, PermissionEvent, ProviderConversationRef,
-    ProviderConversationRole, ProviderName, ProviderSnapshot, WorkItemPlanStatus,
-    WorkItemSplitFinding, WorkItemSplitFindingSeverity, WorkspaceMessageRecord,
+    ProviderConversationRole, ProviderName, ProviderSnapshot, WorkItemPlanDraftActiveIndex,
+    WorkItemPlanStatus, WorkItemSplitFinding, WorkItemSplitFindingSeverity, WorkspaceMessageRecord,
     WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType,
 };
-use crate::product::work_item_plan_store::WorkItemPlanStore;
+use crate::product::work_item_plan_store::{WorkItemPlanStore, next_generation_round_id};
 use crate::product::work_item_split_engine::{
     OutlineAuthorOutput, RedoSpec, WorkItemPlanContextBlocker, WorkItemSplitProviderOutput,
 };
@@ -42,12 +42,13 @@ use crate::web::workspace_ws_types::{
     ReviewFinding, ReviewFindingSeverity, ReviewGate, ReviewVerdict, ReviewVerdictType,
     TimelineNode, TimelineNodeStatus, TimelineNodeType, ValidatorFindingDto,
     VerificationCommandDto, VerificationManualCheckDto, VerificationPlanDto, WorkItemCandidateDto,
-    WorkItemCandidateMetaDto, WorkItemDependencyEdgeDto, WorkItemPlanCandidateDto,
-    WorkItemPlanContextBlockerDto, WorkItemPlanContextBlockerPayload, WorkItemPlanDto,
-    WorkItemPlanOutlineCandidateDto, WorkItemPlanReviewAction, WorkItemPlanReviewAffectedItem,
-    WorkItemPlanReviewComplete, WorkItemPlanReviewGate, WorkItemPlanReviewScope,
-    WorkItemPlanReviewVerdict, WorkItemSplitOptionsDto, WorkspaceStage as WsWorkspaceStage,
-    WsCheckpointDto, WsMessageDto, WsOutMessage, WsProviderConfig,
+    WorkItemCandidateMetaDto, WorkItemDependencyEdgeDto, WorkItemGenerationModeDto,
+    WorkItemPlanCandidateDto, WorkItemPlanContextBlockerDto, WorkItemPlanContextBlockerPayload,
+    WorkItemPlanDto, WorkItemPlanOutlineCandidateDto, WorkItemPlanReviewAction,
+    WorkItemPlanReviewAffectedItem, WorkItemPlanReviewComplete, WorkItemPlanReviewGate,
+    WorkItemPlanReviewScope, WorkItemPlanReviewVerdict, WorkItemSplitOptionsDto,
+    WorkspaceStage as WsWorkspaceStage, WsCheckpointDto, WsMessageDto, WsOutMessage,
+    WsProviderConfig,
 };
 
 const SUMMARY_PREVIEW_CHARS: usize = 2048;
@@ -971,6 +972,117 @@ impl WorkspaceEngine {
             .map(|node| node.node_type.clone())
     }
 
+    fn current_work_item_plan_outline_candidate(
+        &self,
+    ) -> Result<&WorkItemPlanOutlineCandidateDto, String> {
+        match self.session.artifact.as_ref() {
+            Some(ArtifactPayload::WorkItemPlanOutlineCandidate { outline_candidate }) => {
+                Ok(outline_candidate)
+            }
+            _ => Err("current WorkItemPlan Outline artifact is unavailable".to_string()),
+        }
+    }
+
+    fn current_work_item_plan_outline_ids(&self) -> Vec<String> {
+        self.current_work_item_plan_outline_candidate()
+            .map(|candidate| {
+                candidate
+                    .outline
+                    .work_item_outlines
+                    .iter()
+                    .map(|outline| outline.outline_id.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn work_item_plan_store(&self) -> Result<WorkItemPlanStore, String> {
+        let lifecycle = self
+            .lifecycle_store
+            .as_ref()
+            .ok_or_else(|| "lifecycle_store unavailable".to_string())?;
+        Ok(WorkItemPlanStore::new(lifecycle.app_paths()))
+    }
+
+    fn save_confirmed_work_item_plan_outline_index(&self) -> Result<String, String> {
+        self.current_work_item_plan_outline_candidate()?;
+        let store = self.work_item_plan_store()?;
+        let project_id = self.session.project_id.clone();
+        let issue_id = self.session.issue_id.clone();
+        let plan_id = self.session.entity_id.clone();
+        let current = store
+            .load_active_index(&project_id, &issue_id, &plan_id)
+            .map_err(|error| format!("load work item plan active index failed: {error}"))?;
+        let generation_round_id = current
+            .as_ref()
+            .map(next_generation_round_id)
+            .unwrap_or_else(|| "round_001".to_string());
+        let now = chrono::Utc::now().to_rfc3339();
+        let index = WorkItemPlanDraftActiveIndex {
+            project_id,
+            issue_id,
+            plan_id,
+            current_generation_round_id: generation_round_id.clone(),
+            outline_state: "confirmed".to_string(),
+            outline_to_current_draft_id: BTreeMap::new(),
+            draft_statuses: BTreeMap::new(),
+            batches: Vec::new(),
+            updated_at: now,
+        };
+        store
+            .save_active_index(&index)
+            .map_err(|error| format!("save work item plan active index failed: {error}"))?;
+        Ok(generation_round_id)
+    }
+
+    fn mark_work_item_plan_outline_revising(&self) -> Result<(), String> {
+        let store = self.work_item_plan_store()?;
+        let project_id = self.session.project_id.clone();
+        let issue_id = self.session.issue_id.clone();
+        let plan_id = self.session.entity_id.clone();
+        let mut index = store
+            .load_active_index(&project_id, &issue_id, &plan_id)
+            .map_err(|error| format!("load work item plan active index failed: {error}"))?
+            .unwrap_or_else(|| WorkItemPlanDraftActiveIndex {
+                project_id,
+                issue_id,
+                plan_id,
+                current_generation_round_id: "round_001".to_string(),
+                outline_state: "revising".to_string(),
+                outline_to_current_draft_id: BTreeMap::new(),
+                draft_statuses: BTreeMap::new(),
+                batches: Vec::new(),
+                updated_at: chrono::Utc::now().to_rfc3339(),
+            });
+        index.outline_state = "revising".to_string();
+        index.updated_at = chrono::Utc::now().to_rfc3339();
+        store
+            .save_active_index(&index)
+            .map_err(|error| format!("save work item plan active index failed: {error}"))
+    }
+
+    async fn update_work_item_plan_outline_generation_metadata(
+        &mut self,
+        generation_round_id: Option<String>,
+        selected_mode: Option<WorkItemGenerationModeDto>,
+    ) -> Result<(), String> {
+        let Some(ArtifactPayload::WorkItemPlanOutlineCandidate { outline_candidate }) =
+            self.session.artifact.clone()
+        else {
+            return Err("current WorkItemPlan Outline artifact is unavailable".to_string());
+        };
+        let mut outline_candidate = *outline_candidate;
+        if generation_round_id.is_some() {
+            outline_candidate.current_generation_round_id = generation_round_id;
+        }
+        outline_candidate.selected_generation_mode = selected_mode;
+        self.update_artifact(ArtifactPayload::WorkItemPlanOutlineCandidate {
+            outline_candidate: Box::new(outline_candidate),
+        })
+        .await;
+        Ok(())
+    }
+
     pub async fn take_pending_author_choice_prompt(
         &mut self,
         id: &str,
@@ -1152,6 +1264,90 @@ impl WorkspaceEngine {
             status: TimelineNodeStatus::Active,
         })
         .await
+    }
+
+    pub async fn begin_work_item_plan_outline_review_run(&mut self) -> String {
+        self.transition_stage(WorkspaceStage::CrossReview).await;
+        let round = self.next_review_round();
+        let reviewer = self
+            .session
+            .reviewer_provider
+            .clone()
+            .unwrap_or(ProviderName::Codex);
+        self.create_timeline_node(TimelineNodeDraft {
+            node_type: TimelineNodeType::WorkItemPlanOutlineReview,
+            agent: Some(reviewer),
+            stage: WorkspaceStage::CrossReview,
+            round: Some(round),
+            title: format!("WorkItemPlan Outline Review Round {round}"),
+            summary: None,
+            status: TimelineNodeStatus::Active,
+        })
+        .await
+    }
+
+    pub async fn select_work_item_generation_mode(
+        &mut self,
+        mode: WorkItemGenerationModeDto,
+    ) -> Result<(), String> {
+        if self.session.stage != WorkspaceStage::AuthorConfirm
+            || self.active_node_type() != Some(TimelineNodeType::WorkItemGenerationMode)
+        {
+            return Err(
+                "select_work_item_generation_mode requires active work_item_generation_mode node"
+                    .to_string(),
+            );
+        }
+
+        let (node_type, title, summary) = match mode {
+            WorkItemGenerationModeDto::Serial => (
+                TimelineNodeType::WorkItemDraftRun,
+                "Work Item Draft 生成".to_string(),
+                "已选择逐项生成 Work Item".to_string(),
+            ),
+            WorkItemGenerationModeDto::Batch => (
+                TimelineNodeType::WorkItemBatchRun,
+                "Work Item Batch 生成".to_string(),
+                "已选择自动生成全部 Work Item".to_string(),
+            ),
+        };
+        self.update_work_item_plan_outline_generation_metadata(None, Some(mode))
+            .await?;
+        self.complete_active_node(Some(summary)).await;
+        self.transition_stage(WorkspaceStage::Running).await;
+        let _ = self
+            .create_timeline_node(TimelineNodeDraft {
+                node_type,
+                agent: Some(self.session.author_provider.clone()),
+                stage: WorkspaceStage::Running,
+                round: None,
+                title,
+                summary: Some("WP3 占位节点，Draft/Batch 实际生成由后续 WP 接入".to_string()),
+                status: TimelineNodeStatus::Active,
+            })
+            .await;
+        Ok(())
+    }
+
+    pub async fn request_work_item_plan_outline_revision(
+        &mut self,
+        feedback: Option<String>,
+    ) -> Result<(), String> {
+        if self.session.stage != WorkspaceStage::AuthorConfirm
+            || self.active_node_type() != Some(TimelineNodeType::WorkItemGenerationMode)
+        {
+            return Err(
+                "request_outline_revision requires active work_item_generation_mode node"
+                    .to_string(),
+            );
+        }
+        self.pending_revision_context = feedback;
+        self.mark_work_item_plan_outline_revising()?;
+        self.complete_active_node(Some("已返回 WorkItemPlan Outline 返修".to_string()))
+            .await;
+        self.transition_stage(WorkspaceStage::Running).await;
+        self.begin_work_item_plan_outline_run().await;
+        Ok(())
     }
 
     pub async fn begin_work_item_plan_auto_revision_run(&mut self, round: u32) -> String {
@@ -2696,8 +2892,8 @@ impl WorkspaceEngine {
             .clone()
             .unwrap_or_else(|| "review_unknown".to_string());
         let round = self.active_review_round().unwrap_or(1);
-        let verdict =
-            Self::parse_review_verdict_for_workspace(&output, &self.session.workspace_type);
+        let active_node_type = self.active_node_type();
+        let verdict = self.parse_review_verdict_for_active_node(&output);
         self.record_review_message(output);
         self.latest_review_verdict = Some(verdict.clone());
         let reviewer = self
@@ -2742,6 +2938,11 @@ impl WorkspaceEngine {
         };
         self.mark_latest_artifact_reviewed(reviewer, Some(artifact_verdict));
 
+        if active_node_type == Some(TimelineNodeType::WorkItemPlanOutlineReview) {
+            self.route_work_item_plan_outline_review(verdict).await;
+            return;
+        }
+
         match &verdict.review_gate {
             ReviewGate::UserConfirmAllowed | ReviewGate::UserTriageRequired => {
                 self.enter_human_confirm(Some(verdict.summary)).await;
@@ -2775,6 +2976,39 @@ impl WorkspaceEngine {
         }
     }
 
+    async fn route_work_item_plan_outline_review(&mut self, verdict: ReviewVerdict) {
+        let outline_verdict = verdict
+            .work_item_plan_review
+            .as_ref()
+            .map(|review| review.verdict.clone());
+        match outline_verdict.unwrap_or(match verdict.verdict {
+            ReviewVerdictType::Pass => WorkItemPlanReviewVerdict::Pass,
+            ReviewVerdictType::Revise => WorkItemPlanReviewVerdict::Revise,
+            ReviewVerdictType::NeedsHuman => WorkItemPlanReviewVerdict::NeedsHuman,
+        }) {
+            WorkItemPlanReviewVerdict::Pass => {
+                self.enter_work_item_generation_mode(Some(
+                    "Outline review 通过，请选择 Work Item 生成模式".to_string(),
+                ))
+                .await;
+            }
+            WorkItemPlanReviewVerdict::Revise | WorkItemPlanReviewVerdict::PlanReopenRequired => {
+                if let Err(message) = self.mark_work_item_plan_outline_revising() {
+                    let _ = self.event_tx.send(EngineEvent::Error { message }).await;
+                    self.enter_human_confirm(Some("Outline 返修状态保存失败".to_string()))
+                        .await;
+                    return;
+                }
+                self.pending_revision_context = Some(verdict.comments);
+                self.transition_stage(WorkspaceStage::Running).await;
+                self.begin_work_item_plan_outline_run().await;
+            }
+            WorkItemPlanReviewVerdict::NeedsHuman | WorkItemPlanReviewVerdict::ReviseBatch => {
+                self.enter_human_confirm(Some(verdict.summary)).await;
+            }
+        }
+    }
+
     pub async fn handle_author_decision(
         &mut self,
         decision: AuthorDecision,
@@ -2783,6 +3017,21 @@ impl WorkspaceEngine {
             return Err(
                 "author decision is only available during author_confirm stage".to_string(),
             );
+        }
+
+        if self.session.workspace_type == WorkspaceType::WorkItemPlan {
+            match self.active_node_type() {
+                Some(TimelineNodeType::WorkItemPlanOutlineConfirm) => {
+                    return self.handle_work_item_plan_outline_decision(decision).await;
+                }
+                Some(TimelineNodeType::WorkItemGenerationMode) => {
+                    return Err(
+                        "author_decision is not valid on work_item_generation_mode node"
+                            .to_string(),
+                    );
+                }
+                _ => {}
+            }
         }
 
         match decision {
@@ -2822,6 +3071,48 @@ impl WorkspaceEngine {
                     })
                     .await;
                 Ok(AuthorDecisionOutcome::PrepareContext)
+            }
+        }
+    }
+
+    async fn handle_work_item_plan_outline_decision(
+        &mut self,
+        decision: AuthorDecision,
+    ) -> Result<AuthorDecisionOutcome, String> {
+        match decision {
+            AuthorDecision::Accept => {
+                let generation_round_id = self.save_confirmed_work_item_plan_outline_index()?;
+                self.update_work_item_plan_outline_generation_metadata(
+                    Some(generation_round_id.clone()),
+                    None,
+                )
+                .await?;
+                self.mark_latest_artifact_confirmed(Some("human".to_string()));
+                let review_enabled =
+                    self.session.review_rounds > 0 && self.session.reviewer_provider.is_some();
+                let summary = format!(
+                    "WorkItemPlan Outline 已确认，generation_round_id={generation_round_id}"
+                );
+                self.complete_active_node(Some(summary)).await;
+                if review_enabled {
+                    self.begin_work_item_plan_outline_review_run().await;
+                    Ok(AuthorDecisionOutcome::StartReview)
+                } else {
+                    self.enter_work_item_generation_mode(Some(
+                        "请选择 Work Item 生成模式".to_string(),
+                    ))
+                    .await;
+                    Ok(AuthorDecisionOutcome::HumanConfirm)
+                }
+            }
+            AuthorDecision::Reject => {
+                self.mark_latest_artifact_rejected();
+                self.complete_active_node(Some("用户要求重写 WorkItemPlan Outline".to_string()))
+                    .await;
+                self.mark_work_item_plan_outline_revising()?;
+                self.transition_stage(WorkspaceStage::Running).await;
+                self.begin_work_item_plan_outline_run().await;
+                Ok(AuthorDecisionOutcome::HumanConfirm)
             }
         }
     }
@@ -3391,6 +3682,12 @@ impl WorkspaceEngine {
     }
 
     fn build_work_item_plan_review_input(&self) -> Result<StreamingProviderInput, String> {
+        if let Some(ArtifactPayload::WorkItemPlanOutlineCandidate { outline_candidate }) =
+            self.session.artifact.as_ref()
+        {
+            return self.build_work_item_plan_outline_review_input(outline_candidate);
+        }
+
         let lifecycle = self
             .lifecycle_store
             .as_ref()
@@ -3531,6 +3828,144 @@ impl WorkspaceEngine {
              - `pass`：产物可进入最终人工确认。\n\
              - `revise`：仅当存在 blocking/must_fix/strong_recommend_fix finding。\n\
              - `needs_human`：没有明确可自动返修内容，需要用户做产品/范围判断。\n",
+        ));
+
+        Ok(StreamingProviderInput {
+            provider_type: provider_type_for_name(&provider),
+            role: AdapterRole::Reviewer,
+            prompt,
+            working_dir,
+            workspace_session_id: Some(self.session.session_id.clone()),
+            resume_provider_session_id: None,
+            permission_mode: ProviderPermissionMode::Supervised,
+            env_vars: BTreeMap::new(),
+            timeout_secs: DEFAULT_PROVIDER_TIMEOUT_SECS,
+        })
+    }
+
+    fn build_work_item_plan_outline_review_input(
+        &self,
+        outline_candidate: &WorkItemPlanOutlineCandidateDto,
+    ) -> Result<StreamingProviderInput, String> {
+        let working_dir = match &self.session.repository_path {
+            Some(path) => path.clone(),
+            None => std::env::current_dir()
+                .map_err(|error| format!("working directory error: {error}"))?,
+        };
+        let provider = self
+            .session
+            .reviewer_provider
+            .clone()
+            .unwrap_or(ProviderName::Codex);
+        let generation_round_id = self
+            .work_item_plan_store()
+            .ok()
+            .and_then(|store| {
+                store
+                    .load_active_index(
+                        &self.session.project_id,
+                        &self.session.issue_id,
+                        &self.session.entity_id,
+                    )
+                    .ok()
+                    .flatten()
+            })
+            .map(|index| index.current_generation_round_id)
+            .unwrap_or_else(|| "generation_round_unknown".to_string());
+
+        let outline = &outline_candidate.outline;
+        let mut prompt = String::new();
+        prompt.push_str("请作为 reviewer 审核当前 WorkItemPlan Outline。\n\n");
+        prompt.push_str("审核对象只是 Outline 阶段的拆分方案，不是完整 Work Item，不得要求完整 verification plan、required_gates 或 repository_profile。\n\n");
+        prompt.push_str(&format!(
+            "Workspace 类型: {}\n",
+            workspace_type_title(&self.session.workspace_type)
+        ));
+        prompt.push_str("会话上下文:\n");
+        for msg in &self.session.messages {
+            if matches!(msg.role.as_str(), "assistant" | "provider") {
+                continue;
+            }
+            prompt.push_str(&format!("[{}]: {}\n", msg.role, msg.content));
+        }
+        self.append_missing_context_notes_to_prompt(&mut prompt);
+
+        prompt.push_str("\n## Design context gaps\n");
+        if outline_candidate.design_context_gaps.is_empty() {
+            prompt.push_str("(none)\n");
+        } else {
+            for gap in &outline_candidate.design_context_gaps {
+                prompt.push_str(&format!("- {gap}\n"));
+            }
+        }
+
+        prompt.push_str("\n## Validator findings\n");
+        if outline_candidate.validator_findings.is_empty() {
+            prompt.push_str("(none)\n");
+        } else {
+            for finding in &outline_candidate.validator_findings {
+                prompt.push_str(&format!(
+                    "- [{}] {}: {}\n",
+                    finding.severity, finding.code, finding.message
+                ));
+            }
+        }
+
+        prompt.push_str("\n## Outline\n");
+        prompt.push_str(&format!(
+            "- id: {}\n- strategy_summary: {}\n- handoff_strategy: {}\n",
+            outline.id, outline.strategy_summary, outline.handoff_strategy
+        ));
+        prompt.push_str("\n### Work item outlines\n");
+        for item in &outline.work_item_outlines {
+            prompt.push_str(&format!(
+                "\n- outline_id: {}\n  title: {}\n  kind: {:?}\n  goal: {}\n  scope: [{}]\n  depends_on: [{}]\n  exclusive_write_scopes: [{}]\n  forbidden_write_scopes: [{}]\n  verification_intent: [{}]\n  handoff_notes: {}\n",
+                item.outline_id,
+                item.title,
+                item.kind,
+                item.goal,
+                item.scope.join(", "),
+                item.depends_on.join(", "),
+                item.exclusive_write_scopes.join(", "),
+                item.forbidden_write_scopes.join(", "),
+                item.verification_intent.join(", "),
+                item.handoff_notes,
+            ));
+        }
+        prompt.push_str("\n### Dependency graph\n");
+        if outline.dependency_graph.is_empty() {
+            prompt.push_str("(empty)\n");
+        } else {
+            for edge in &outline.dependency_graph {
+                prompt.push_str(&format!(
+                    "- {} -> {}\n",
+                    edge.from_outline_id, edge.to_outline_id
+                ));
+            }
+        }
+        prompt.push_str("\n### Risks\n");
+        for risk in &outline.risks {
+            prompt.push_str(&format!("- {risk}\n"));
+        }
+
+        prompt.push_str(
+            "\n\n审核边界说明：请只检查拆分策略、覆盖 Story/Design、outline 粒度、依赖图、写入边界、上下文缺口补齐假设与 handoff 策略。\
+             不要要求 author 在 Outline 阶段输出完整 Work Item 正文、完整 verification plan、required_gates 或 repository_profile。\
+             如果问题会影响拆分边界，返回 `revise`；如果需要用户做产品/范围判断，返回 `needs_human`。\n",
+        );
+        let nonce = structured_output_nonce();
+        let schema = format!(
+            r#"{{"verdict":"pass|revise|needs_human","review_scope":"outline","generation_round_id":"{}","summary":"一句话摘要","affects_items":[{{"target_outline_id":"outline id"}}],"findings":[{{"severity":"blocking|must_fix|strong_recommend_fix|suggestion|minor|optional","message":"问题描述","evidence":"Outline 中的具体证据","impact":"为什么影响或不影响 Draft 生成","required_action":"需要 Outline author 执行的最小动作"}}]}}"#,
+            generation_round_id
+        );
+        prompt.push_str(&reviewer_output_contract(
+            &nonce,
+            &schema,
+            "\n\n请输出审核意见；可以先输出简短可读说明，最终 JSON 必须放在 nonce sentinel block 中，不得使用 Markdown code fence：\n\
+             - `pass`：Outline 可进入生成模式选择。\n\
+             - `revise`：Outline 需要返修，且必须给出至少一个 blocking/must_fix/strong_recommend_fix finding。\n\
+             - `needs_human`：需要用户做产品/范围判断。\n\
+             - `affects_items.target_outline_id` 只能引用当前 Outline 中存在的 outline_id。\n",
         ));
 
         Ok(StreamingProviderInput {
@@ -4064,6 +4499,8 @@ impl WorkspaceEngine {
                 design_context_gaps,
                 validator_findings: work_item_split_findings_to_dto(&findings),
                 context_blockers: Vec::new(),
+                current_generation_round_id: None,
+                selected_generation_mode: None,
             }),
         })
         .await;
@@ -4190,11 +4627,27 @@ impl WorkspaceEngine {
     pub async fn request_work_item_plan_revision(
         &mut self,
         feedback: Option<String>,
-    ) -> Result<(), String> {
+    ) -> Result<ReviewDecisionOutcome, String> {
         if self.session.stage != WorkspaceStage::AuthorConfirm {
             return Err(
                 "request_revision is only available during author_confirm stage".to_string(),
             );
+        }
+        if self.active_node_type() == Some(TimelineNodeType::WorkItemPlanOutlineConfirm) {
+            self.pending_revision_context = feedback;
+            self.work_item_plan_revision_retry_count = 0;
+            self.mark_latest_artifact_rejected();
+            self.complete_active_node(Some("已请求重写 WorkItemPlan Outline".to_string()))
+                .await;
+            if let Some(store) = &self.lifecycle_store {
+                let _ = store.update_workspace_session_status(
+                    &self.session.session_id,
+                    WorkspaceSessionStatus::Open,
+                );
+            }
+            self.transition_stage(WorkspaceStage::Running).await;
+            self.work_item_plan_author_retry_count = 0;
+            return Ok(ReviewDecisionOutcome::StartWorkItemPlanOutline);
         }
         self.pending_revision_context = feedback;
         self.work_item_plan_revision_retry_count = 0;
@@ -4219,7 +4672,7 @@ impl WorkspaceEngine {
             })
             .await;
         self.work_item_plan_author_retry_count = 0;
-        Ok(())
+        Ok(ReviewDecisionOutcome::StartRevision)
     }
 
     /// 组装 review / AutoRevision 触发 WorkItemPlan revision 时使用的整体反馈文本。
@@ -4790,6 +5243,27 @@ impl WorkspaceEngine {
         }
     }
 
+    async fn enter_work_item_generation_mode(&mut self, summary: Option<String>) {
+        self.transition_stage(WorkspaceStage::AuthorConfirm).await;
+        let _ = self
+            .create_timeline_node(TimelineNodeDraft {
+                node_type: TimelineNodeType::WorkItemGenerationMode,
+                agent: None,
+                stage: WorkspaceStage::AuthorConfirm,
+                round: None,
+                title: "Work Item 生成模式选择".to_string(),
+                summary,
+                status: TimelineNodeStatus::Active,
+            })
+            .await;
+        if let Some(store) = &self.lifecycle_store {
+            let _ = store.update_workspace_session_status(
+                &self.session.session_id,
+                WorkspaceSessionStatus::WaitingForHuman,
+            );
+        }
+    }
+
     async fn enter_human_confirm(&mut self, summary: Option<String>) {
         self.transition_stage(WorkspaceStage::HumanConfirm).await;
         let _ = self
@@ -4891,10 +5365,13 @@ impl WorkspaceEngine {
             node_type: node.node_type.clone(),
             status: node.status.clone(),
             agent_role: match node.node_type {
-                TimelineNodeType::AuthorRun | TimelineNodeType::WorkItemPlanOutlineRun => {
-                    Some(AgentRole::Author)
+                TimelineNodeType::AuthorRun
+                | TimelineNodeType::WorkItemPlanOutlineRun
+                | TimelineNodeType::WorkItemDraftRun
+                | TimelineNodeType::WorkItemBatchRun => Some(AgentRole::Author),
+                TimelineNodeType::ReviewerRun | TimelineNodeType::WorkItemPlanOutlineReview => {
+                    Some(AgentRole::Reviewer)
                 }
-                TimelineNodeType::ReviewerRun => Some(AgentRole::Reviewer),
                 _ => None,
             },
             provider: node.agent.as_ref().map(|provider| ProviderSnapshot {
@@ -5035,7 +5512,12 @@ impl WorkspaceEngine {
     fn next_review_round(&self) -> u32 {
         self.timeline_nodes
             .iter()
-            .filter(|node| node.node_type == TimelineNodeType::ReviewerRun)
+            .filter(|node| {
+                matches!(
+                    node.node_type,
+                    TimelineNodeType::ReviewerRun | TimelineNodeType::WorkItemPlanOutlineReview
+                )
+            })
             .count() as u32
             + 1
     }
@@ -5115,6 +5597,34 @@ impl WorkspaceEngine {
 
     fn parse_review_verdict(output: &str) -> ReviewVerdict {
         Self::parse_review_verdict_for_workspace(output, &WorkspaceType::Story)
+    }
+
+    fn parse_review_verdict_for_active_node(&self, output: &str) -> ReviewVerdict {
+        if self.session.workspace_type == WorkspaceType::WorkItemPlan
+            && self.active_node_type() == Some(TimelineNodeType::WorkItemPlanOutlineReview)
+        {
+            let valid_outline_ids = self.current_work_item_plan_outline_ids();
+            let trimmed = output.trim();
+            let parsed = extract_structured_json(trimmed).and_then(|(comments, json)| {
+                parse_work_item_plan_review_json(
+                    &json,
+                    &comments,
+                    &valid_outline_ids,
+                    WorkItemPlanReviewScope::Outline,
+                )
+                .or_else(|| parse_review_json(&json, &comments))
+            });
+            return parsed.unwrap_or_else(|| ReviewVerdict {
+                verdict: ReviewVerdictType::NeedsHuman,
+                comments: output.to_string(),
+                summary: "需要人工确认".to_string(),
+                findings: Vec::new(),
+                review_gate: ReviewGate::UserTriageRequired,
+                work_item_plan_review: None,
+            });
+        }
+
+        Self::parse_review_verdict_for_workspace(output, &self.session.workspace_type)
     }
 
     fn parse_review_verdict_for_workspace(
@@ -5433,7 +5943,7 @@ fn parse_work_item_plan_review_json(
         .and_then(|value| value.as_str())
         .map(ToString::to_string);
     let (generic_verdict, review_gate, review_action, gates) =
-        work_item_plan_review_routing(&parsed_verdict);
+        work_item_plan_review_routing(&parsed_verdict, &scope);
     let extension = WorkItemPlanReviewComplete {
         verdict: parsed_verdict,
         review_scope: scope,
@@ -5470,6 +5980,7 @@ fn parse_work_item_plan_review_verdict(value: &str) -> WorkItemPlanReviewVerdict
 
 fn work_item_plan_review_routing(
     verdict: &WorkItemPlanReviewVerdict,
+    scope: &WorkItemPlanReviewScope,
 ) -> (
     ReviewVerdictType,
     ReviewGate,
@@ -5483,12 +5994,23 @@ fn work_item_plan_review_routing(
             WorkItemPlanReviewAction::Continue,
             Vec::new(),
         ),
-        WorkItemPlanReviewVerdict::Revise => (
-            ReviewVerdictType::Revise,
-            ReviewGate::RequiresRevision,
-            WorkItemPlanReviewAction::ReviseCurrentItem,
-            vec![WorkItemPlanReviewGate::RequiresCurrentItemRevision],
-        ),
+        WorkItemPlanReviewVerdict::Revise => {
+            if scope == &WorkItemPlanReviewScope::Outline {
+                (
+                    ReviewVerdictType::Revise,
+                    ReviewGate::RequiresRevision,
+                    WorkItemPlanReviewAction::ReviseOutline,
+                    vec![WorkItemPlanReviewGate::RequiresPlanReopen],
+                )
+            } else {
+                (
+                    ReviewVerdictType::Revise,
+                    ReviewGate::RequiresRevision,
+                    WorkItemPlanReviewAction::ReviseCurrentItem,
+                    vec![WorkItemPlanReviewGate::RequiresCurrentItemRevision],
+                )
+            }
+        }
         WorkItemPlanReviewVerdict::ReviseBatch => (
             ReviewVerdictType::NeedsHuman,
             ReviewGate::UserTriageRequired,

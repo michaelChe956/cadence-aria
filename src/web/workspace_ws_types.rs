@@ -184,12 +184,18 @@ pub enum WsInMessage {
     AuthorDecision {
         decision: AuthorDecision,
     },
+    SelectWorkItemGenerationMode {
+        mode: WorkItemGenerationModeDto,
+    },
     SelectRevisionPath {
         path: RevisionPath,
         extra_context: Option<String>,
     },
     RequestRevision {
         feedback: StructuredFeedback,
+    },
+    RequestOutlineRevision {
+        feedback: Option<String>,
     },
     HumanConfirm {
         decision: HumanConfirmDecision,
@@ -225,6 +231,13 @@ pub enum HumanConfirmDecision {
 pub enum AuthorDecision {
     Accept,
     Reject,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkItemGenerationModeDto {
+    Serial,
+    Batch,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -379,6 +392,10 @@ pub struct WorkItemPlanOutlineCandidateDto {
     pub design_context_gaps: Vec<String>,
     pub validator_findings: Vec<ValidatorFindingDto>,
     pub context_blockers: Vec<WorkItemPlanContextBlockerDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_generation_round_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_generation_mode: Option<WorkItemGenerationModeDto>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -562,7 +579,11 @@ pub enum TimelineNodeType {
     HumanConfirm,
     WorkItemPlanOutlineRun,
     WorkItemPlanOutlineConfirm,
+    WorkItemPlanOutlineReview,
     WorkItemPlanContextBlocker,
+    WorkItemGenerationMode,
+    WorkItemDraftRun,
+    WorkItemBatchRun,
     AbortedByDisconnect,
     ProtocolError,
     Completed,
@@ -790,11 +811,12 @@ mod tests {
         RepositoryProfileDto, ReviewGate, ReviewVerdict, ReviewVerdictType, TimelineNode,
         TimelineNodeStatus, TimelineNodeType, ValidatorFindingDto, VerificationCommandDto,
         VerificationManualCheckDto, VerificationPlanDto, WorkItemCandidateDto,
-        WorkItemCandidateMetaDto, WorkItemDependencyEdgeDto, WorkItemPlanCandidateDto,
-        WorkItemPlanDto, WorkItemPlanReviewAction, WorkItemPlanReviewComplete,
-        WorkItemPlanReviewGate, WorkItemPlanReviewScope, WorkItemPlanReviewVerdict,
-        WorkItemSplitOptionsDto, WorkspaceStage, WsExecutionEvent, WsExecutionEventKind,
-        WsExecutionEventStatus, WsInMessage, WsOutMessage, WsPermissionRiskLevel, WsProviderStatus,
+        WorkItemCandidateMetaDto, WorkItemDependencyEdgeDto, WorkItemGenerationModeDto,
+        WorkItemPlanCandidateDto, WorkItemPlanDto, WorkItemPlanReviewAction,
+        WorkItemPlanReviewComplete, WorkItemPlanReviewGate, WorkItemPlanReviewScope,
+        WorkItemPlanReviewVerdict, WorkItemSplitOptionsDto, WorkspaceStage, WsExecutionEvent,
+        WsExecutionEventKind, WsExecutionEventStatus, WsInMessage, WsOutMessage,
+        WsPermissionRiskLevel, WsProviderStatus,
     };
     use crate::product::models::{ProviderName, WorkspaceType};
 
@@ -1130,6 +1152,48 @@ mod tests {
         assert_eq!(json["reviewer_enabled"], true);
         let back: WsInMessage = serde_json::from_value(json).unwrap();
         assert_eq!(back, msg);
+    }
+
+    #[test]
+    fn work_item_plan_mode_messages_roundtrip() {
+        assert_eq!(
+            serde_json::to_value(TimelineNodeType::WorkItemPlanOutlineReview).unwrap(),
+            "work_item_plan_outline_review"
+        );
+        assert_eq!(
+            serde_json::to_value(TimelineNodeType::WorkItemGenerationMode).unwrap(),
+            "work_item_generation_mode"
+        );
+
+        let select = WsInMessage::SelectWorkItemGenerationMode {
+            mode: WorkItemGenerationModeDto::Serial,
+        };
+        let json = serde_json::to_value(&select).unwrap();
+        assert_eq!(json["type"], "select_work_item_generation_mode");
+        assert_eq!(json["mode"], "serial");
+        let back: WsInMessage = serde_json::from_value(json).unwrap();
+        assert_eq!(back, select);
+
+        let batch: WsInMessage = serde_json::from_value(serde_json::json!({
+            "type": "select_work_item_generation_mode",
+            "mode": "batch"
+        }))
+        .unwrap();
+        assert_eq!(
+            batch,
+            WsInMessage::SelectWorkItemGenerationMode {
+                mode: WorkItemGenerationModeDto::Batch
+            }
+        );
+
+        let revise = WsInMessage::RequestOutlineRevision {
+            feedback: Some("拆分粒度再细一点".to_string()),
+        };
+        let json = serde_json::to_value(&revise).unwrap();
+        assert_eq!(json["type"], "request_outline_revision");
+        assert_eq!(json["feedback"], "拆分粒度再细一点");
+        let back: WsInMessage = serde_json::from_value(json).unwrap();
+        assert_eq!(back, revise);
     }
 
     #[test]
