@@ -37,6 +37,8 @@ use crate::web::workspace_ws_types::{
     TimelineNode, TimelineNodeStatus, TimelineNodeType, ValidatorFindingDto,
     VerificationCommandDto, VerificationManualCheckDto, VerificationPlanDto, WorkItemCandidateDto,
     WorkItemCandidateMetaDto, WorkItemDependencyEdgeDto, WorkItemPlanCandidateDto, WorkItemPlanDto,
+    WorkItemPlanReviewAction, WorkItemPlanReviewAffectedItem, WorkItemPlanReviewComplete,
+    WorkItemPlanReviewGate, WorkItemPlanReviewScope, WorkItemPlanReviewVerdict,
     WorkItemSplitOptionsDto, WorkspaceStage as WsWorkspaceStage, WsCheckpointDto, WsMessageDto,
     WsOutMessage, WsProviderConfig,
 };
@@ -479,6 +481,7 @@ pub enum EngineEvent {
         summary: String,
         findings: Vec<ReviewFinding>,
         review_gate: ReviewGate,
+        work_item_plan_review: Option<WorkItemPlanReviewComplete>,
     },
     ReviewDecisionRequired {
         node_id: String,
@@ -2638,7 +2641,8 @@ impl WorkspaceEngine {
             .clone()
             .unwrap_or_else(|| "review_unknown".to_string());
         let round = self.active_review_round().unwrap_or(1);
-        let verdict = Self::parse_review_verdict(&output);
+        let verdict =
+            Self::parse_review_verdict_for_workspace(&output, &self.session.workspace_type);
         self.record_review_message(output);
         self.latest_review_verdict = Some(verdict.clone());
         let reviewer = self
@@ -2653,20 +2657,17 @@ impl WorkspaceEngine {
                     "summary": verdict.summary.clone(),
                     "findings": verdict.findings.clone(),
                     "review_gate": verdict.review_gate.clone(),
+                    "work_item_plan_review": verdict.work_item_plan_review.clone(),
                 }),
             )
             .await;
         let _ = self
             .event_tx
-            .send(EngineEvent::ReviewComplete {
-                node_id: node_id.clone(),
+            .send(review_complete_event_from_verdict(
+                node_id.clone(),
                 round,
-                verdict: verdict.verdict.clone(),
-                comments: verdict.comments.clone(),
-                summary: verdict.summary.clone(),
-                findings: verdict.findings.clone(),
-                review_gate: verdict.review_gate.clone(),
-            })
+                &verdict,
+            ))
             .await;
         self.update_timeline_node(
             &node_id,
@@ -2860,6 +2861,7 @@ impl WorkspaceEngine {
                         summary: "人工请求修改".to_string(),
                         findings: Vec::new(),
                         review_gate: ReviewGate::RequiresRevision,
+                        work_item_plan_review: None,
                     });
                 }
                 self.pending_revision_context = context;
@@ -3173,8 +3175,11 @@ impl WorkspaceEngine {
              不要因为当前 Artifact 未包含外层 artifact fence 判定返修；只审核 markdown 内部一级标题、必需 heading、稳定 ID、追踪关系、内容完整性和设计质量。\
              如果 markdown 正文内部的代码块未闭合或内容结构不合规，仍可按实际问题要求返修。\n",
         );
-        prompt.push_str(
-            "\n\n请输出审核意见，并在末尾附加 JSON 代码块：\n\
+        let nonce = structured_output_nonce();
+        prompt.push_str(&reviewer_output_contract(
+            &nonce,
+            r#"{"verdict":"pass|revise|needs_human","summary":"一句话摘要","findings":[{"severity":"blocking|must_fix|strong_recommend_fix|suggestion|minor|optional","message":"问题描述","evidence":"当前产物中的具体证据","impact":"为什么影响或不影响下一阶段","required_action":"需要作者执行的最小动作"}]}"#,
+            "\n\n请输出审核意见；可以先输出简短可读说明，最终 JSON 必须放在 nonce sentinel block 中，不得使用 Markdown code fence：\n\
              - 只有影响下一阶段可用性的 finding 才能标记为 `blocking`、`must_fix` 或 `strong_recommend_fix`。\n\
              - 风格、措辞、文档美化、未来扩展、非必要补充只能标记为 `suggestion`、`minor` 或 `optional`。\n\
              - 没有强返修 finding 时，必须允许用户确认当前版本，不要为了普通建议使用强返修。\n\
@@ -3182,11 +3187,8 @@ impl WorkspaceEngine {
              - 第二轮及后续 review 只复核上一轮强返修项是否关闭；除非 revision 新引入真正阻塞问题，不得重新发散普通建议。\n\
              - `pass`：产物可进入最终人工确认。\n\
              - `revise`：仅当存在 blocking/must_fix/strong_recommend_fix finding。\n\
-             - `needs_human`：没有明确可自动返修内容，需要用户做产品/范围判断。\n\
-             ```json\n\
-             {\"verdict\":\"pass|revise|needs_human\",\"summary\":\"一句话摘要\",\"findings\":[{\"severity\":\"blocking|must_fix|strong_recommend_fix|suggestion|minor|optional\",\"message\":\"问题描述\",\"evidence\":\"当前产物中的具体证据\",\"impact\":\"为什么影响或不影响下一阶段\",\"required_action\":\"需要作者执行的最小动作\"}]}\n\
-             ```\n",
-        );
+             - `needs_human`：没有明确可自动返修内容，需要用户做产品/范围判断。\n",
+        ));
 
         Ok(StreamingProviderInput {
             provider_type: provider_type_for_name(&provider),
@@ -3329,8 +3331,11 @@ impl WorkspaceEngine {
              5) 验证计划覆盖度（每个 work_item 的 verification_plan_ref 是否存在、scope 是否匹配）。\
              不要因为 verification_plans 摘要未展开 commands 判定返修；只审核上述五个维度。\n",
         );
-        prompt.push_str(
-            "\n\n请输出审核意见，并在末尾附加 JSON 代码块：\n\
+        let nonce = structured_output_nonce();
+        prompt.push_str(&reviewer_output_contract(
+            &nonce,
+            r#"{"verdict":"pass|revise|needs_human","summary":"一句话摘要","findings":[{"severity":"blocking|must_fix|strong_recommend_fix|suggestion|minor|optional","message":"问题描述","evidence":"当前产物中的具体证据","impact":"为什么影响或不影响下一阶段","required_action":"需要作者执行的最小动作"}]}"#,
+            "\n\n请输出审核意见；可以先输出简短可读说明，最终 JSON 必须放在 nonce sentinel block 中，不得使用 Markdown code fence：\n\
              - 只有影响下一阶段可用性的 finding 才能标记为 `blocking`、`must_fix` 或 `strong_recommend_fix`。\n\
              - 风格、措辞、文档美化、未来扩展、非必要补充只能标记为 `suggestion`、`minor` 或 `optional`。\n\
              - 没有强返修 finding 时，必须允许用户确认当前版本，不要为了普通建议使用强返修。\n\
@@ -3338,11 +3343,8 @@ impl WorkspaceEngine {
              - 第二轮及后续 review 只复核上一轮强返修项是否关闭；除非 revision 新引入真正阻塞问题，不得重新发散普通建议。\n\
              - `pass`：产物可进入最终人工确认。\n\
              - `revise`：仅当存在 blocking/must_fix/strong_recommend_fix finding。\n\
-             - `needs_human`：没有明确可自动返修内容，需要用户做产品/范围判断。\n\
-             ```json\n\
-             {\"verdict\":\"pass|revise|needs_human\",\"summary\":\"一句话摘要\",\"findings\":[{\"severity\":\"blocking|must_fix|strong_recommend_fix|suggestion|minor|optional\",\"message\":\"问题描述\",\"evidence\":\"当前产物中的具体证据\",\"impact\":\"为什么影响或不影响下一阶段\",\"required_action\":\"需要作者执行的最小动作\"}]}\n\
-             ```\n",
-        );
+             - `needs_human`：没有明确可自动返修内容，需要用户做产品/范围判断。\n",
+        ));
 
         Ok(StreamingProviderInput {
             provider_type: provider_type_for_name(&provider),
@@ -4777,9 +4779,27 @@ impl WorkspaceEngine {
     }
 
     fn parse_review_verdict(output: &str) -> ReviewVerdict {
+        Self::parse_review_verdict_for_workspace(output, &WorkspaceType::Story)
+    }
+
+    fn parse_review_verdict_for_workspace(
+        output: &str,
+        workspace_type: &WorkspaceType,
+    ) -> ReviewVerdict {
         let trimmed = output.trim();
-        let parsed = extract_tail_json(trimmed)
-            .and_then(|(comments, json)| parse_review_json(&json, &comments));
+        let parsed = extract_structured_json(trimmed).and_then(|(comments, json)| {
+            if *workspace_type == WorkspaceType::WorkItemPlan {
+                parse_work_item_plan_review_json(
+                    &json,
+                    &comments,
+                    &[],
+                    WorkItemPlanReviewScope::Batch,
+                )
+                .or_else(|| parse_review_json(&json, &comments))
+            } else {
+                parse_review_json(&json, &comments)
+            }
+        });
 
         parsed.unwrap_or_else(|| ReviewVerdict {
             verdict: ReviewVerdictType::NeedsHuman,
@@ -4787,6 +4807,7 @@ impl WorkspaceEngine {
             summary: "需要人工确认".to_string(),
             findings: Vec::new(),
             review_gate: ReviewGate::UserTriageRequired,
+            work_item_plan_review: None,
         })
     }
 }
@@ -4894,7 +4915,84 @@ fn latest_review_verdict_from_messages(messages: &[SessionMessage]) -> Option<Re
         .map(|message| WorkspaceEngine::parse_review_verdict(&message.content))
 }
 
-fn extract_tail_json(output: &str) -> Option<(String, String)> {
+fn review_complete_event_from_verdict(
+    node_id: String,
+    round: u32,
+    verdict: &ReviewVerdict,
+) -> EngineEvent {
+    EngineEvent::ReviewComplete {
+        node_id,
+        round,
+        verdict: verdict.verdict.clone(),
+        comments: verdict.comments.clone(),
+        summary: verdict.summary.clone(),
+        findings: verdict.findings.clone(),
+        review_gate: verdict.review_gate.clone(),
+        work_item_plan_review: verdict.work_item_plan_review.clone(),
+    }
+}
+
+const STRUCTURED_OUTPUT_START_PREFIX: &str = "<ARIA_STRUCTURED_OUTPUT";
+const STRUCTURED_OUTPUT_END_PREFIX: &str = "</ARIA_STRUCTURED_OUTPUT";
+
+fn extract_structured_json(output: &str) -> Option<(String, String)> {
+    extract_nonce_sentinel_json(output).or_else(|| extract_markdown_fence_json(output))
+}
+
+fn extract_nonce_sentinel_json(output: &str) -> Option<(String, String)> {
+    let mut search_end = output.len();
+    while let Some(start) = output[..search_end].rfind(STRUCTURED_OUTPUT_START_PREFIX) {
+        let after_start_prefix = &output[start + STRUCTURED_OUTPUT_START_PREFIX.len()..];
+        let Some((Some(start_nonce), start_tag_len)) =
+            parse_structured_output_tag(after_start_prefix)
+        else {
+            search_end = start;
+            continue;
+        };
+        let json_start = start + STRUCTURED_OUTPUT_START_PREFIX.len() + start_tag_len;
+        let after_start = &output[json_start..];
+        let Some(end) = after_start.find(STRUCTURED_OUTPUT_END_PREFIX) else {
+            search_end = start;
+            continue;
+        };
+        let after_end_prefix = &after_start[end + STRUCTURED_OUTPUT_END_PREFIX.len()..];
+        let Some((end_nonce, _end_tag_len)) = parse_structured_output_tag(after_end_prefix) else {
+            search_end = start;
+            continue;
+        };
+        if end_nonce.as_deref() != Some(start_nonce.as_str()) {
+            search_end = start;
+            continue;
+        }
+        return Some((
+            output[..start].to_string(),
+            after_start[..end].trim().to_string(),
+        ));
+    }
+    None
+}
+
+fn parse_structured_output_tag(after_prefix: &str) -> Option<(Option<String>, usize)> {
+    let end_offset = after_prefix.find('>')?;
+    let attrs = after_prefix[..end_offset].trim();
+    let nonce = parse_structured_output_nonce(attrs)?;
+    Some((nonce, end_offset + 1))
+}
+
+fn parse_structured_output_nonce(attrs: &str) -> Option<Option<String>> {
+    if attrs.is_empty() {
+        return Some(None);
+    }
+    let nonce = attrs
+        .strip_prefix("nonce=\"")
+        .and_then(|value| value.strip_suffix('"'))?;
+    if nonce.len() != 8 || !nonce.chars().all(|ch| ch.is_ascii_alphanumeric()) {
+        return None;
+    }
+    Some(Some(nonce.to_string()))
+}
+
+fn extract_markdown_fence_json(output: &str) -> Option<(String, String)> {
     if output.starts_with('{') && output.ends_with('}') {
         return Some((String::new(), output.to_string()));
     }
@@ -4945,7 +5043,199 @@ fn parse_review_json(json: &str, comments: &str) -> Option<ReviewVerdict> {
         summary,
         findings: parsed_findings.findings,
         review_gate,
+        work_item_plan_review: None,
     })
+}
+
+fn parse_work_item_plan_review_json(
+    json: &str,
+    comments: &str,
+    valid_outline_ids: &[String],
+    scope: WorkItemPlanReviewScope,
+) -> Option<ReviewVerdict> {
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    let parsed_verdict = parse_work_item_plan_review_verdict(value.get("verdict")?.as_str()?);
+    let summary = value
+        .get("summary")
+        .and_then(|value| value.as_str())
+        .unwrap_or(match parsed_verdict {
+            WorkItemPlanReviewVerdict::Pass => "审核通过",
+            WorkItemPlanReviewVerdict::Revise => "需要返修当前 Work Item",
+            WorkItemPlanReviewVerdict::ReviseBatch => "需要重写当前 Batch",
+            WorkItemPlanReviewVerdict::NeedsHuman => "需要人工确认",
+            WorkItemPlanReviewVerdict::PlanReopenRequired => "需要重开 Outline",
+        })
+        .to_string();
+    let target_outline_id = value
+        .get("target_outline_id")
+        .and_then(|value| value.as_str())
+        .map(ToString::to_string);
+    if target_outline_id
+        .as_ref()
+        .is_some_and(|id| !valid_outline_ids.iter().any(|valid| valid == id))
+    {
+        return Some(work_item_plan_review_invalid_reference(comments));
+    }
+
+    let (affects_items, warnings, total_affects, invalid_affects) =
+        parse_work_item_plan_review_affects_items(value.get("affects_items"), valid_outline_ids);
+    if total_affects > 0 && invalid_affects * 2 > total_affects {
+        return Some(work_item_plan_review_invalid_reference(comments));
+    }
+
+    let parsed_findings = parse_review_findings(value.get("findings"));
+    let generation_round_id = value
+        .get("generation_round_id")
+        .and_then(|value| value.as_str())
+        .unwrap_or("generation_round_unknown")
+        .to_string();
+    let draft_id = value
+        .get("draft_id")
+        .and_then(|value| value.as_str())
+        .map(ToString::to_string);
+    let batch_id = value
+        .get("batch_id")
+        .and_then(|value| value.as_str())
+        .map(ToString::to_string);
+    let (generic_verdict, review_gate, review_action, gates) =
+        work_item_plan_review_routing(&parsed_verdict);
+    let extension = WorkItemPlanReviewComplete {
+        verdict: parsed_verdict,
+        review_scope: scope,
+        target_outline_id,
+        generation_round_id,
+        draft_id,
+        batch_id,
+        review_action,
+        gates,
+        affects_items,
+        warnings,
+    };
+
+    Some(ReviewVerdict {
+        verdict: generic_verdict,
+        comments: comments.trim().to_string(),
+        summary,
+        findings: parsed_findings.findings,
+        review_gate,
+        work_item_plan_review: Some(extension),
+    })
+}
+
+fn parse_work_item_plan_review_verdict(value: &str) -> WorkItemPlanReviewVerdict {
+    match value {
+        "pass" => WorkItemPlanReviewVerdict::Pass,
+        "revise" => WorkItemPlanReviewVerdict::Revise,
+        "revise_batch" => WorkItemPlanReviewVerdict::ReviseBatch,
+        "needs_human" => WorkItemPlanReviewVerdict::NeedsHuman,
+        "plan_reopen_required" => WorkItemPlanReviewVerdict::PlanReopenRequired,
+        _ => WorkItemPlanReviewVerdict::NeedsHuman,
+    }
+}
+
+fn work_item_plan_review_routing(
+    verdict: &WorkItemPlanReviewVerdict,
+) -> (
+    ReviewVerdictType,
+    ReviewGate,
+    WorkItemPlanReviewAction,
+    Vec<WorkItemPlanReviewGate>,
+) {
+    match verdict {
+        WorkItemPlanReviewVerdict::Pass => (
+            ReviewVerdictType::Pass,
+            ReviewGate::UserConfirmAllowed,
+            WorkItemPlanReviewAction::Continue,
+            Vec::new(),
+        ),
+        WorkItemPlanReviewVerdict::Revise => (
+            ReviewVerdictType::Revise,
+            ReviewGate::RequiresRevision,
+            WorkItemPlanReviewAction::ReviseCurrentItem,
+            vec![WorkItemPlanReviewGate::RequiresCurrentItemRevision],
+        ),
+        WorkItemPlanReviewVerdict::ReviseBatch => (
+            ReviewVerdictType::NeedsHuman,
+            ReviewGate::UserTriageRequired,
+            WorkItemPlanReviewAction::ReviseBatch,
+            vec![WorkItemPlanReviewGate::RequiresBatchRevision],
+        ),
+        WorkItemPlanReviewVerdict::NeedsHuman => (
+            ReviewVerdictType::NeedsHuman,
+            ReviewGate::UserTriageRequired,
+            WorkItemPlanReviewAction::HumanTriage,
+            Vec::new(),
+        ),
+        WorkItemPlanReviewVerdict::PlanReopenRequired => (
+            ReviewVerdictType::NeedsHuman,
+            ReviewGate::UserTriageRequired,
+            WorkItemPlanReviewAction::ReviseOutline,
+            vec![WorkItemPlanReviewGate::RequiresPlanReopen],
+        ),
+    }
+}
+
+fn parse_work_item_plan_review_affects_items(
+    value: Option<&serde_json::Value>,
+    valid_outline_ids: &[String],
+) -> (
+    Vec<WorkItemPlanReviewAffectedItem>,
+    Vec<String>,
+    usize,
+    usize,
+) {
+    let Some(items) = value.and_then(|value| value.as_array()) else {
+        return (Vec::new(), Vec::new(), 0, 0);
+    };
+
+    let mut valid_items = Vec::new();
+    let mut warnings = Vec::new();
+    let mut invalid_count = 0;
+    for item in items {
+        let outline_index = item
+            .get("outline_index")
+            .and_then(|value| value.as_u64())
+            .and_then(|value| u32::try_from(value).ok());
+        let target_outline_id = item
+            .get("target_outline_id")
+            .and_then(|value| value.as_str())
+            .map(ToString::to_string);
+        let index_valid = outline_index.is_none_or(|index| {
+            usize::try_from(index)
+                .ok()
+                .is_some_and(|index| index < valid_outline_ids.len())
+        });
+        let target_valid = target_outline_id
+            .as_ref()
+            .is_some_and(|id| valid_outline_ids.iter().any(|valid| valid == id));
+        let valid = index_valid && (target_outline_id.is_none() || target_valid);
+
+        if valid && (outline_index.is_some() || target_outline_id.is_some()) {
+            valid_items.push(WorkItemPlanReviewAffectedItem {
+                outline_index,
+                target_outline_id,
+            });
+        } else {
+            invalid_count += 1;
+            warnings.push(format!(
+                "invalid_reference: target_outline_id={} not found",
+                target_outline_id.as_deref().unwrap_or("<missing>")
+            ));
+        }
+    }
+
+    (valid_items, warnings, items.len(), invalid_count)
+}
+
+fn work_item_plan_review_invalid_reference(comments: &str) -> ReviewVerdict {
+    ReviewVerdict {
+        verdict: ReviewVerdictType::NeedsHuman,
+        comments: comments.trim().to_string(),
+        summary: "WorkItemPlan reviewer 引用无效，需要人工确认".to_string(),
+        findings: Vec::new(),
+        review_gate: ReviewGate::UserTriageRequired,
+        work_item_plan_review: None,
+    }
 }
 
 struct ParsedReviewFindings {
@@ -5493,6 +5783,24 @@ fn provider_type_for_name(provider: &ProviderName) -> ProviderType {
     }
 }
 
+fn structured_output_nonce() -> String {
+    uuid::Uuid::new_v4()
+        .simple()
+        .to_string()
+        .chars()
+        .take(8)
+        .collect()
+}
+
+fn reviewer_output_contract(nonce: &str, schema: &str, intro: &str) -> String {
+    format!(
+        "{intro}\
+         <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">\n\
+         {schema}\n\
+         </ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">\n"
+    )
+}
+
 fn provider_name_text(provider: &ProviderName) -> &'static str {
     match provider {
         ProviderName::ClaudeCode => "claude_code",
@@ -5704,7 +6012,8 @@ mod tests {
         ArtifactPayload, AuthorDecision, ProviderConfigSnapshot, ReviewFindingSeverity, ReviewGate,
         ReviewVerdictType, TimelineNode, TimelineNodeStatus, TimelineNodeType,
         WorkItemCandidateDto, WorkItemCandidateMetaDto, WorkItemPlanCandidateDto, WorkItemPlanDto,
-        WorkItemSplitOptionsDto, WorkspaceStage as WsWorkspaceStage,
+        WorkItemPlanReviewAction, WorkItemPlanReviewGate, WorkItemPlanReviewScope,
+        WorkItemPlanReviewVerdict, WorkItemSplitOptionsDto, WorkspaceStage as WsWorkspaceStage,
     };
     use std::sync::Mutex;
     use tempfile::TempDir;
@@ -6248,6 +6557,7 @@ mod tests {
             summary: "需要返修".to_string(),
             findings: Vec::new(),
             review_gate: ReviewGate::RequiresRevision,
+            work_item_plan_review: None,
         });
 
         assert_eq!(
@@ -6751,6 +7061,68 @@ mod tests {
     }
 
     #[test]
+    fn reviewer_prompt_requires_nonce_sentinel() {
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let mut session = make_session("sess_reviewer_nonce_prompt");
+        session.artifact = Some(artifact_payload(
+            "# Story Spec\n\n## 功能需求\n- [REQ-001] Draft.",
+        ));
+        session.reviewer_provider = Some(ProviderName::Codex);
+        let checkpoint_tmp = TempDir::new().unwrap();
+        let engine = WorkspaceEngine::new(
+            Arc::new(CheckpointStore::new(checkpoint_tmp.path().to_path_buf())),
+            event_tx,
+            session,
+        );
+
+        let input = engine.build_review_input().expect("review input");
+
+        assert!(input.prompt.contains("<ARIA_STRUCTURED_OUTPUT nonce=\""));
+        assert!(input.prompt.contains("</ARIA_STRUCTURED_OUTPUT nonce=\""));
+        assert!(input.prompt.contains("不得使用 Markdown code fence"));
+        assert!(!input.prompt.contains("```json"));
+    }
+
+    #[test]
+    fn extract_structured_json_prefers_last_matching_nonce_block() {
+        let output = "第一次输出\n\
+            <ARIA_STRUCTURED_OUTPUT nonce=\"old00001\">{\"verdict\":\"needs_human\",\"summary\":\"old\"}</ARIA_STRUCTURED_OUTPUT nonce=\"old00001\">\n\
+            最终输出\n\
+            <ARIA_STRUCTURED_OUTPUT nonce=\"new00002\">{\"verdict\":\"pass\",\"summary\":\"new\"}</ARIA_STRUCTURED_OUTPUT nonce=\"new00002\">";
+
+        let (comments, json) = extract_structured_json(output).expect("structured json");
+
+        assert!(comments.contains("最终输出"));
+        assert!(json.contains("\"summary\":\"new\""));
+    }
+
+    #[test]
+    fn extract_structured_json_ignores_nonce_mismatch() {
+        let output = "review text\n\
+            <ARIA_STRUCTURED_OUTPUT nonce=\"a1b2c3d4\">{\"verdict\":\"pass\",\"summary\":\"ok\"}</ARIA_STRUCTURED_OUTPUT nonce=\"deadbeef\">";
+
+        assert!(extract_structured_json(output).is_none());
+    }
+
+    #[test]
+    fn extract_structured_json_falls_back_to_markdown_fence() {
+        let output = "review text\n\n```json\n{\"verdict\":\"pass\",\"summary\":\"ok\"}\n```";
+
+        let (comments, json) = extract_structured_json(output).expect("markdown fallback json");
+
+        assert_eq!(comments.trim(), "review text");
+        assert!(json.contains("\"summary\":\"ok\""));
+    }
+
+    #[test]
+    fn extract_structured_json_treats_non_nonce_sentinel_as_text() {
+        let output =
+            "review text\n<ARIA_STRUCTURED_OUTPUT>{\"verdict\":\"pass\"}</ARIA_STRUCTURED_OUTPUT>";
+
+        assert!(extract_structured_json(output).is_none());
+    }
+
+    #[test]
     fn parse_review_verdict_does_not_upgrade_actionable_comments_without_strong_findings() {
         let output = "**审核结论**\n\n\
             不建议通过。当前 Story Spec 覆盖主方向，但安装任务 API 设计存在实现级歧义。\n\n\
@@ -6875,6 +7247,157 @@ mod tests {
         assert_eq!(verdict.verdict, ReviewVerdictType::NeedsHuman);
         assert_eq!(verdict.review_gate, ReviewGate::UserTriageRequired);
         assert!(verdict.findings.is_empty());
+    }
+
+    #[test]
+    fn work_item_plan_review_revise_batch_maps_to_needs_human_generic_verdict_with_extension() {
+        let json = r#"{
+            "verdict": "revise_batch",
+            "summary": "整组需要重写",
+            "generation_round_id": "round_0001",
+            "batch_id": "batch_0001"
+        }"#;
+
+        let verdict = parse_work_item_plan_review_json(
+            json,
+            "batch review comments",
+            &["outline_api".to_string()],
+            WorkItemPlanReviewScope::Batch,
+        )
+        .expect("work item plan review");
+
+        assert_eq!(verdict.verdict, ReviewVerdictType::NeedsHuman);
+        assert_eq!(verdict.review_gate, ReviewGate::UserTriageRequired);
+        let review = verdict
+            .work_item_plan_review
+            .expect("work item plan extension");
+        assert_eq!(review.verdict, WorkItemPlanReviewVerdict::ReviseBatch);
+        assert_eq!(review.review_action, WorkItemPlanReviewAction::ReviseBatch);
+        assert_eq!(
+            review.gates,
+            vec![WorkItemPlanReviewGate::RequiresBatchRevision]
+        );
+    }
+
+    #[test]
+    fn work_item_plan_review_invalid_target_outline_id_downgrades_to_needs_human() {
+        let json = r#"{
+            "verdict": "plan_reopen_required",
+            "summary": "outline 不可局部修复",
+            "target_outline_id": "outline_missing",
+            "generation_round_id": "round_0001",
+            "draft_id": "draft_0001"
+        }"#;
+
+        let verdict = parse_work_item_plan_review_json(
+            json,
+            "raw comments",
+            &["outline_api".to_string()],
+            WorkItemPlanReviewScope::Item,
+        )
+        .expect("work item plan review");
+
+        assert_eq!(verdict.verdict, ReviewVerdictType::NeedsHuman);
+        assert_eq!(verdict.review_gate, ReviewGate::UserTriageRequired);
+        assert!(verdict.work_item_plan_review.is_none());
+        assert!(verdict.summary.contains("引用无效"));
+    }
+
+    #[test]
+    fn work_item_plan_review_drops_invalid_affects_items_below_threshold() {
+        let json = r#"{
+            "verdict": "needs_human",
+            "summary": "部分 item 需要人工判断",
+            "generation_round_id": "round_0001",
+            "affects_items": [
+                { "target_outline_id": "outline_api" },
+                { "target_outline_id": "outline_missing" }
+            ]
+        }"#;
+
+        let verdict = parse_work_item_plan_review_json(
+            json,
+            "",
+            &["outline_api".to_string(), "outline_ui".to_string()],
+            WorkItemPlanReviewScope::Batch,
+        )
+        .expect("work item plan review");
+
+        let review = verdict
+            .work_item_plan_review
+            .expect("work item plan extension");
+        assert_eq!(review.affects_items.len(), 1);
+        assert_eq!(
+            review.affects_items[0].target_outline_id.as_deref(),
+            Some("outline_api")
+        );
+        assert!(
+            review
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("outline_missing"))
+        );
+    }
+
+    #[test]
+    fn work_item_plan_review_invalid_affects_items_over_half_downgrades() {
+        let json = r#"{
+            "verdict": "needs_human",
+            "summary": "引用大量不存在 item",
+            "generation_round_id": "round_0001",
+            "affects_items": [
+                { "target_outline_id": "outline_api" },
+                { "target_outline_id": "outline_missing_1" },
+                { "target_outline_id": "outline_missing_2" }
+            ]
+        }"#;
+
+        let verdict = parse_work_item_plan_review_json(
+            json,
+            "raw comments",
+            &["outline_api".to_string(), "outline_ui".to_string()],
+            WorkItemPlanReviewScope::Batch,
+        )
+        .expect("work item plan review");
+
+        assert_eq!(verdict.verdict, ReviewVerdictType::NeedsHuman);
+        assert_eq!(verdict.review_gate, ReviewGate::UserTriageRequired);
+        assert!(verdict.work_item_plan_review.is_none());
+        assert!(verdict.summary.contains("引用无效"));
+    }
+
+    #[test]
+    fn review_complete_event_preserves_work_item_plan_extension() {
+        let extension = WorkItemPlanReviewComplete {
+            verdict: WorkItemPlanReviewVerdict::PlanReopenRequired,
+            review_scope: WorkItemPlanReviewScope::Item,
+            target_outline_id: Some("outline_api".to_string()),
+            generation_round_id: "round_0001".to_string(),
+            draft_id: Some("draft_0001".to_string()),
+            batch_id: None,
+            review_action: WorkItemPlanReviewAction::ReviseOutline,
+            gates: vec![WorkItemPlanReviewGate::RequiresPlanReopen],
+            affects_items: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let verdict = ReviewVerdict {
+            verdict: ReviewVerdictType::NeedsHuman,
+            comments: "需要重开 outline".to_string(),
+            summary: "需要重开 Outline".to_string(),
+            findings: Vec::new(),
+            review_gate: ReviewGate::UserTriageRequired,
+            work_item_plan_review: Some(extension.clone()),
+        };
+
+        let event = review_complete_event_from_verdict("node_review_001".to_string(), 2, &verdict);
+
+        match event {
+            EngineEvent::ReviewComplete {
+                work_item_plan_review: Some(actual),
+                ..
+            } => assert_eq!(actual, extension),
+            _ => panic!("expected review extension"),
+        }
     }
 
     #[tokio::test]
@@ -7569,6 +8092,7 @@ mod tests {
                 summary: "补充上下文".to_string(),
                 findings: Vec::new(),
                 review_gate: ReviewGate::RequiresRevision,
+                work_item_plan_review: None,
             });
 
             let result = engine
@@ -7644,6 +8168,7 @@ mod tests {
             summary: "补 API 字段".to_string(),
             findings: Vec::new(),
             review_gate: ReviewGate::RequiresRevision,
+            work_item_plan_review: None,
         });
 
         let input = engine.build_revision_input().expect("revision input");
@@ -7704,6 +8229,7 @@ mod tests {
             summary: "补充失败路径".to_string(),
             findings: Vec::new(),
             review_gate: ReviewGate::RequiresRevision,
+            work_item_plan_review: None,
         });
         engine.pending_revision_context = Some("补充登录错误码".to_string());
         let captured_input = Arc::new(Mutex::new(None));
@@ -7792,6 +8318,7 @@ mod tests {
                 summary: "补充失败路径".to_string(),
                 findings: Vec::new(),
                 review_gate: ReviewGate::RequiresRevision,
+                work_item_plan_review: None,
             });
             engine
                 .handle_review_decision(
@@ -7879,6 +8406,7 @@ mod tests {
             summary: "补齐追踪关系".to_string(),
             findings: Vec::new(),
             review_gate: ReviewGate::RequiresRevision,
+            work_item_plan_review: None,
         });
 
         let input = engine.build_revision_input().expect("revision input");
@@ -7931,6 +8459,7 @@ mod tests {
             summary: "补充验收值".to_string(),
             findings: Vec::new(),
             review_gate: ReviewGate::RequiresRevision,
+            work_item_plan_review: None,
         });
         engine
             .append_completed_timeline_event(
@@ -8784,6 +9313,7 @@ mod tests {
             summary: "等待人工确认".to_string(),
             findings: Vec::new(),
             review_gate: ReviewGate::UserConfirmAllowed,
+            work_item_plan_review: None,
         });
         engine
             .enter_human_confirm(Some("等待人工确认".to_string()))

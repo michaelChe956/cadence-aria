@@ -24,6 +24,7 @@
 | 区域 | 当前事实 | v1.5.0 需要变化 |
 |---|---|---|
 | `src/product/work_item_split_engine.rs` | prompt 一次性输出 `repository_profile`、完整 `work_items`、完整 `verification_plans`；author 已用无 nonce sentinel | 改为 Outline prompt、单 item prompt、batch 调度 prompt；新流程不要求 `repository_profile` |
+| `src/cross_cutting/provider_adapter.rs` | structured output parser 只识别无 nonce `<ARIA_STRUCTURED_OUTPUT>` | WP0 先兼容带 nonce sentinel，避免后续 author prompt 统一改造破坏 provider structured output 提取 |
 | `src/product/workspace_engine.rs` | `complete_work_item_plan_author` 生成后立即 full validator，失败自动返修，成功进入整组 AuthorConfirm | 改为 Outline 轻量校验、Draft 局部校验、最终 Compile 前 strict validator；废弃黑盒自动返修主流程 |
 | `src/product/lifecycle_store.rs` | `replace_issue_work_item_plan_candidate` 在 Draft 阶段直接写真实 `work_items/`、`verification_plans/`、`repository_profiles/` | Draft 阶段只写 immutable `WorkItemDraftRecord` 与 active index；真实实体只在 Final Compile transaction 中写入 |
 | `src/web/workspace_ws_types.rs` | `ArtifactPayload` 只有 Markdown / `WorkItemPlanCandidate`；`TimelineNodeType` 无 WorkItemPlan 专属 node；`ReviewComplete` 只有通用 verdict | 新增 Outline/Draft/Batch/Compile payload；新增 WorkItemPlan 专属 timeline node type；`ReviewComplete` 加可选 `work_item_plan_review` |
@@ -61,6 +62,7 @@
 | 文件 | 涉及 WP |
 |---|---|
 | `src/product/workspace_engine.rs` | WP0、WP2、WP3、WP4、WP5、WP6 |
+| `src/cross_cutting/provider_adapter.rs` | WP0 |
 | `src/web/workspace_ws_handler.rs` | WP3、WP4、WP5、WP6 |
 | `src/web/workspace_ws_types.rs` | WP0、WP2、WP3、WP4、WP5、WP6、WP7 |
 | `src/product/models.rs` | WP0、WP1 |

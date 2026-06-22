@@ -101,6 +101,8 @@ pub enum WsOutMessage {
         summary: String,
         findings: Vec<ReviewFinding>,
         review_gate: ReviewGate,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        work_item_plan_review: Option<WorkItemPlanReviewComplete>,
     },
     ReviewDecisionRequired {
         node_id: String,
@@ -598,6 +600,66 @@ pub enum ReviewGate {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkItemPlanReviewVerdict {
+    Pass,
+    Revise,
+    ReviseBatch,
+    NeedsHuman,
+    PlanReopenRequired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkItemPlanReviewScope {
+    Outline,
+    Item,
+    Batch,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkItemPlanReviewAction {
+    Continue,
+    ReviseOutline,
+    ReviseCurrentItem,
+    ReviseBatch,
+    HumanTriage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkItemPlanReviewGate {
+    RequiresCurrentItemRevision,
+    RequiresBatchRevision,
+    RequiresPlanReopen,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkItemPlanReviewAffectedItem {
+    pub outline_index: Option<u32>,
+    pub target_outline_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkItemPlanReviewComplete {
+    pub verdict: WorkItemPlanReviewVerdict,
+    pub review_scope: WorkItemPlanReviewScope,
+    pub target_outline_id: Option<String>,
+    pub generation_round_id: String,
+    pub draft_id: Option<String>,
+    pub batch_id: Option<String>,
+    pub review_action: WorkItemPlanReviewAction,
+    pub gates: Vec<WorkItemPlanReviewGate>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub affects_items: Vec<WorkItemPlanReviewAffectedItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewVerdict {
     pub verdict: ReviewVerdictType,
     pub comments: String,
@@ -606,6 +668,8 @@ pub struct ReviewVerdict {
     pub findings: Vec<ReviewFinding>,
     #[serde(default = "default_review_gate")]
     pub review_gate: ReviewGate,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_item_plan_review: Option<WorkItemPlanReviewComplete>,
 }
 
 fn default_review_gate() -> ReviewGate {
@@ -688,9 +752,10 @@ mod tests {
         TimelineNodeStatus, TimelineNodeType, ValidatorFindingDto, VerificationCommandDto,
         VerificationManualCheckDto, VerificationPlanDto, WorkItemCandidateDto,
         WorkItemCandidateMetaDto, WorkItemDependencyEdgeDto, WorkItemPlanCandidateDto,
-        WorkItemPlanDto, WorkItemSplitOptionsDto, WorkspaceStage, WsExecutionEvent,
-        WsExecutionEventKind, WsExecutionEventStatus, WsInMessage, WsOutMessage,
-        WsPermissionRiskLevel, WsProviderStatus,
+        WorkItemPlanDto, WorkItemPlanReviewAction, WorkItemPlanReviewComplete,
+        WorkItemPlanReviewGate, WorkItemPlanReviewScope, WorkItemPlanReviewVerdict,
+        WorkItemSplitOptionsDto, WorkspaceStage, WsExecutionEvent, WsExecutionEventKind,
+        WsExecutionEventStatus, WsInMessage, WsOutMessage, WsPermissionRiskLevel, WsProviderStatus,
     };
     use crate::product::models::{ProviderName, WorkspaceType};
 
@@ -844,6 +909,7 @@ mod tests {
                 required_action: "补充验收标准".to_string(),
             }],
             review_gate: ReviewGate::UserTriageRequired,
+            work_item_plan_review: None,
         };
 
         let review_complete = serde_json::to_value(WsOutMessage::ReviewComplete {
@@ -854,12 +920,14 @@ mod tests {
             summary: verdict.summary.clone(),
             findings: verdict.findings.clone(),
             review_gate: verdict.review_gate.clone(),
+            work_item_plan_review: None,
         })
         .unwrap();
         assert_eq!(review_complete["type"], "review_complete");
         assert_eq!(review_complete["verdict"], "revise");
         assert_eq!(review_complete["review_gate"], "user_triage_required");
         assert_eq!(review_complete["findings"][0]["severity"], "must_fix");
+        assert!(review_complete.get("work_item_plan_review").is_none());
 
         let input: WsInMessage = serde_json::from_value(serde_json::json!({
             "type": "review_decision_response",
@@ -906,6 +974,89 @@ mod tests {
         assert_eq!(state["openspec_enabled"], true);
         assert_eq!(state["timeline_nodes"].as_array().unwrap().len(), 0);
         assert_eq!(state["artifact_versions"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn work_item_plan_review_complete_roundtrips() {
+        let review = WorkItemPlanReviewComplete {
+            verdict: WorkItemPlanReviewVerdict::PlanReopenRequired,
+            review_scope: WorkItemPlanReviewScope::Item,
+            target_outline_id: Some("outline_backend_api".to_string()),
+            generation_round_id: "round_0001".to_string(),
+            draft_id: Some("draft_0002".to_string()),
+            batch_id: None,
+            review_action: WorkItemPlanReviewAction::ReviseOutline,
+            gates: vec![WorkItemPlanReviewGate::RequiresPlanReopen],
+            affects_items: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let value = serde_json::to_value(WsOutMessage::ReviewComplete {
+            node_id: "node_review_001".to_string(),
+            round: 1,
+            verdict: ReviewVerdictType::NeedsHuman,
+            comments: "当前 item 依赖 outline 缺口，需回到 outline".to_string(),
+            summary: "需要重开 Outline".to_string(),
+            findings: Vec::new(),
+            review_gate: ReviewGate::UserTriageRequired,
+            work_item_plan_review: Some(review),
+        })
+        .unwrap();
+
+        assert_eq!(value["type"], "review_complete");
+        assert_eq!(
+            value["work_item_plan_review"]["verdict"],
+            "plan_reopen_required"
+        );
+        assert_eq!(value["work_item_plan_review"]["review_scope"], "item");
+        assert_eq!(
+            value["work_item_plan_review"]["target_outline_id"],
+            "outline_backend_api"
+        );
+        assert_eq!(
+            value["work_item_plan_review"]["review_action"],
+            "revise_outline"
+        );
+        assert_eq!(
+            value["work_item_plan_review"]["gates"][0],
+            "requires_plan_reopen"
+        );
+
+        let parsed: WsOutMessage = serde_json::from_value(value).unwrap();
+        match parsed {
+            WsOutMessage::ReviewComplete {
+                work_item_plan_review: Some(parsed_review),
+                ..
+            } => {
+                assert_eq!(
+                    parsed_review.verdict,
+                    WorkItemPlanReviewVerdict::PlanReopenRequired
+                );
+                assert_eq!(
+                    parsed_review.gates,
+                    vec![WorkItemPlanReviewGate::RequiresPlanReopen]
+                );
+            }
+            other => panic!("expected WorkItemPlan review extension, got {other:?}"),
+        }
+
+        let legacy: WsOutMessage = serde_json::from_value(serde_json::json!({
+            "type": "review_complete",
+            "node_id": "node_review_001",
+            "round": 1,
+            "verdict": "pass",
+            "comments": "",
+            "summary": "审核通过",
+            "findings": [],
+            "review_gate": "user_confirm_allowed"
+        }))
+        .unwrap();
+        assert!(matches!(
+            legacy,
+            WsOutMessage::ReviewComplete {
+                work_item_plan_review: None,
+                ..
+            }
+        ));
     }
 
     #[test]

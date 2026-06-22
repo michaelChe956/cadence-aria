@@ -595,6 +595,7 @@ fn build_split_prompt(
     design_context: &[String],
     repository_structure: &str,
 ) -> String {
+    let nonce = structured_output_nonce();
     let revision_feedback_section = request
         .revision_feedback
         .as_deref()
@@ -630,9 +631,9 @@ fn build_split_prompt(
          可以在最终结构化 JSON 前输出简短、可读的拆分过程，供 Workbench 流式展示。\n\
          长时间分析、探索代码库或自动修正前，先输出一行简短可读状态，供 Workbench 流式展示；不要等待所有工具调用结束后才给第一段说明。\n\
          如果需要执行多步代码库探索，每完成一组探索后输出一句当前发现摘要。\n\
-         这些可读状态必须位于最终 <ARIA_STRUCTURED_OUTPUT> 之前；最终结构化 JSON 仍只放在最后一个 sentinel block 中。\n\
-         最后必须输出一个 <ARIA_STRUCTURED_OUTPUT> JSON block。\n\
-         后端只解析最后一个 <ARIA_STRUCTURED_OUTPUT>...</ARIA_STRUCTURED_OUTPUT> block。\n\
+         这些可读状态必须位于最终 <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\"> 之前；最终结构化 JSON 仍只放在最后一个 sentinel block 中。\n\
+         最后必须输出一个 nonce sentinel JSON block。\n\
+         后端只解析最后一个 nonce 匹配的 <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">...</ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\"> block。\n\
          标签内部必须是一个完整 JSON object，不要输出 Markdown code fence。\n\
          严格按以下 JSON schema 输出。\n\
          work_items 数组顺序即执行顺序；depends_on 使用同数组中的 0-based 索引。verification_plans 数组与 work_items 一一对应。\n\
@@ -652,8 +653,18 @@ fn build_split_prompt(
         include_e2e_tests = request.include_e2e_tests.unwrap_or(false),
         force_frontend_backend_split = request.force_frontend_backend_split.unwrap_or(false),
         require_execution_plan_confirm = request.require_execution_plan_confirm.unwrap_or(false),
+        nonce = nonce,
         schema = WORK_ITEM_SPLIT_OUTPUT_SCHEMA,
     )
+}
+
+fn structured_output_nonce() -> String {
+    uuid::Uuid::new_v4()
+        .simple()
+        .to_string()
+        .chars()
+        .take(8)
+        .collect()
 }
 
 fn work_item_kind_text(kind: &WorkItemKind) -> &'static str {
@@ -690,6 +701,7 @@ fn build_revision_prompt(
         );
     }
 
+    let nonce = structured_output_nonce();
     let retained_section = if retained.is_empty() {
         "(无)".to_string()
     } else {
@@ -732,9 +744,9 @@ fn build_revision_prompt(
          可以在最终结构化 JSON 前输出简短、可读的拆分过程，供 Workbench 流式展示。\n\
          长时间分析、探索代码库或自动修正前，先输出一行简短可读状态，供 Workbench 流式展示；不要等待所有工具调用结束后才给第一段说明。\n\
          如果需要执行多步代码库探索，每完成一组探索后输出一句当前发现摘要。\n\
-         这些可读状态必须位于最终 <ARIA_STRUCTURED_OUTPUT> 之前；最终结构化 JSON 仍只放在最后一个 sentinel block 中。\n\
-         最后必须输出一个 <ARIA_STRUCTURED_OUTPUT> JSON block。\n\
-         后端只解析最后一个 <ARIA_STRUCTURED_OUTPUT>...</ARIA_STRUCTURED_OUTPUT> block。\n\
+         这些可读状态必须位于最终 <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\"> 之前；最终结构化 JSON 仍只放在最后一个 sentinel block 中。\n\
+         最后必须输出一个 nonce sentinel JSON block。\n\
+         后端只解析最后一个 nonce 匹配的 <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">...</ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\"> block。\n\
          标签内部必须是一个完整 JSON object，不要输出 Markdown code fence。\n\
          严格按以下 JSON schema 输出 redo-only 结果。\n\
          work_items 数组必须且仅包含重做项，顺序对应 redo_work_items 列表；verification_plans 与 work_items 一一对应；depends_on 使用 0-based 索引。\n\
@@ -749,6 +761,7 @@ fn build_revision_prompt(
         repository_structure = repository_structure,
         retained_section = retained_section,
         redo_section = redo_section,
+        nonce = nonce,
         schema = WORK_ITEM_SPLIT_OUTPUT_SCHEMA,
     )
 }
@@ -1645,11 +1658,11 @@ mod tests {
         let (request, issue, repository) = split_prompt_fixture();
         let prompt = build_split_prompt(&request, &issue, &repository, &[], &[], "(empty)");
 
-        assert!(prompt.contains("<ARIA_STRUCTURED_OUTPUT>"));
-        assert!(prompt.contains("</ARIA_STRUCTURED_OUTPUT>"));
+        assert!(prompt.contains("<ARIA_STRUCTURED_OUTPUT nonce=\""));
+        assert!(prompt.contains("</ARIA_STRUCTURED_OUTPUT nonce=\""));
         assert!(prompt.contains("可以在最终结构化 JSON 前输出简短、可读的拆分过程"));
-        assert!(prompt.contains("最后必须输出一个 <ARIA_STRUCTURED_OUTPUT> JSON block"));
-        assert!(prompt.contains("后端只解析最后一个 <ARIA_STRUCTURED_OUTPUT>"));
+        assert!(prompt.contains("最后必须输出一个 nonce sentinel JSON block"));
+        assert!(prompt.contains("后端只解析最后一个 nonce 匹配的 <ARIA_STRUCTURED_OUTPUT"));
         assert!(prompt.contains("不要输出 Markdown code fence"));
     }
 
@@ -1727,11 +1740,11 @@ mod tests {
             "(empty)",
         );
 
-        assert!(prompt.contains("<ARIA_STRUCTURED_OUTPUT>"));
-        assert!(prompt.contains("</ARIA_STRUCTURED_OUTPUT>"));
+        assert!(prompt.contains("<ARIA_STRUCTURED_OUTPUT nonce=\""));
+        assert!(prompt.contains("</ARIA_STRUCTURED_OUTPUT nonce=\""));
         assert!(prompt.contains("可以在最终结构化 JSON 前输出简短、可读的拆分过程"));
-        assert!(prompt.contains("最后必须输出一个 <ARIA_STRUCTURED_OUTPUT> JSON block"));
-        assert!(prompt.contains("后端只解析最后一个 <ARIA_STRUCTURED_OUTPUT>"));
+        assert!(prompt.contains("最后必须输出一个 nonce sentinel JSON block"));
+        assert!(prompt.contains("后端只解析最后一个 nonce 匹配的 <ARIA_STRUCTURED_OUTPUT"));
         assert!(prompt.contains("不要输出 Markdown code fence"));
     }
 

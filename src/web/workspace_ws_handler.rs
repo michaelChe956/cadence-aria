@@ -348,6 +348,7 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                     summary,
                     findings,
                     review_gate,
+                    work_item_plan_review,
                 } => WsOutMessage::ReviewComplete {
                     node_id,
                     round,
@@ -356,6 +357,7 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                     summary,
                     findings,
                     review_gate,
+                    work_item_plan_review,
                 },
                 EngineEvent::ReviewDecisionRequired {
                     node_id,
