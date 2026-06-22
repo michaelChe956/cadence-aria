@@ -18,6 +18,7 @@
 - 明确 `context_blockers` 用户补充上下文的持久化边界：以 `context_blocker_resolution` artifact 写入 timeline / artifact store，作为下一次 Outline author run 的 prompt 输入；Draft active index 不保存该信息。
 - 明确 `WorkItemPlanCompileTransaction` 非崩溃类写入失败的处理：status 置为 `recovery_required` 进入人工处理；`IssueWorkItemPlan` 指针提交前可清理回退，提交后只能继续幂等补齐或人工整理。
 - 调整 review verdict 协议扩展的兼容策略：新增 `WorkItemPlanReviewComplete` 子结构承载 `revise_batch` / `plan_reopen_required`，不直接扩展共享 `ReviewVerdictType` enum，避免旧 Workspace 数据反序列化问题。
+- 补充 WorkItemPlan artifact 版本与结构化 Diff 展示：用户可查看 Outline、Draft attempts、Batch snapshots、Compile reports 的历史版本，并按结构化字段对比变化。
 - 清理文档中针对后续执行阶段的表述，聚焦 WorkItemPlan 生成流程；将“后续 Workspace/执行阶段”等用语统一为中性描述，避免与具体执行策略耦合。
 
 ## v1.3 变更摘要（基于 v1.0 设计评审 R1-R22）
@@ -581,7 +582,86 @@ WorkItemPlan 两阶段流程不再只依赖当前整组 `WorkItemPlanCandidateDt
 
 - 旧 `WorkItemPlanCandidateDto` 可以作为阶段 4 编译后的展示 DTO 保留，但不再作为 Draft 阶段的唯一 artifact。
 - 前端 `workspace-ws-store` 应保留当前 WorkItemPlan artifact 的 discriminated union，而不是只保存 `workItemPlanCandidate` 单字段。
-- 刷新恢复时，后端必须从 timeline node detail + Draft store + compile report 重建当前 payload；不能只依赖最后一条 `artifact_update`。
+- 刷新恢复时，后端必须从 timeline node detail + Draft store + compile report 重建当前 payload 与 artifact history index；不能只依赖最后一条 `artifact_update`。
+
+### Artifact 版本与结构化 Diff 展示
+
+WorkItemPlan Workspace 必须像 Story / Design Workspace 一样支持用户查看历史 artifact 版本和版本变动，但 WorkItemPlan 的 artifact 是结构化对象，不应只套用 Markdown diff。
+
+UI 壳层应尽量复用 Story / Design Workspace 已有的版本历史体验：左侧 timeline 负责定位过程节点，右侧 Artifact 面板负责展示该节点的版本内容、版本列表与对比。WorkItemPlan 的差异在于右侧 renderer 和 diff model 必须按 artifact kind 分派，而不是把所有内容降级为一份 Markdown。
+
+右侧 Artifact 面板的默认规则：
+
+- 默认展示当前 active timeline node 对应的 artifact。
+- 用户点击左侧 timeline 历史节点时，右侧切换到该节点当时的 artifact。
+- 历史 Draft 即使已 `superseded`，也必须能按 `draft_id` 回放完整内容。
+- 当前 active artifact、历史 artifact 与最终 compiled entity 必须在 UI 上明确区分，避免用户误以为 Draft 已经是正式 WorkItem。
+
+`SessionState` 或 WorkItemPlan WS DTO 应提供稳定的 `artifact_versions[]` 索引，或提供足够字段让前端确定性重建该索引。每个 version entry 至少包含：
+
+| 字段 | 说明 |
+| --- | --- |
+| `artifact_version_ref` | 稳定引用，建议包含 `kind`、`version_id`、`source_node_id` |
+| `artifact_kind` | outline / context_blocker_resolution / draft / batch_snapshot / compile_report / final_candidate |
+| `source_node_id` | 生成该版本的 timeline node，用于 timeline 点击后定位右侧 artifact |
+| `status` | active / accepted / superseded / copied / compiled / recovery_required |
+| `generation_round_id` | 所属生成轮次；legacy final candidate 可为空但必须有正式实体 id |
+| `entity_ref` | `outline_version_ref`、`draft_id`、`batch_id`、`compile_id` 或 `IssueWorkItemPlan.id` |
+| `payload_ref` | 指向 timeline node detail、Draft store record、compile report 等真实 payload 来源 |
+| `display_title` | 人类可读标题，仅用于展示，不得作为类型判断依据 |
+| `review_summary` | reviewer verdict 摘要，可为空 |
+| `validator_summary` | validator findings 摘要，可为空 |
+| `relations` | `superseded_by_draft_id`、`copied_from_draft_id`、`compiled_entity_refs` 等关系 |
+
+Artifact 历史版本入口建议采用三段式：
+
+- `当前内容`：展示 active node 或用户选中节点的 artifact。
+- `历史版本`：按 artifact kind 分组列出所有版本。
+- `对比`：支持与上一版对比，以及选择两个同类型版本对比。
+
+历史版本列表至少覆盖以下对象：
+
+| Artifact 类型 | 版本粒度 | 关键标识 |
+| --- | --- | --- |
+| Outline | 每次 Outline author / revision 产出一个版本 | `outline_version_ref`、`source_node_id`、`generation_round_id` |
+| Context blocker resolution | 每次用户补充上下文产出一个版本 | `blocker_node_id`、`resolution_node_id`、`created_at` |
+| Draft | 同一 outline 每次生成 / 重写 / 复用产出一个版本 | `draft_id`、`outline_id`、`attempt_index`、`copied_from_draft_id` |
+| Batch snapshot | 自动模式每轮 batch run / batch rewrite 产出一个快照 | `batch_id`、`generation_round_id`、`draft_ids[]` |
+| Compile report | 每次 final compile transaction 产出一个报告 | `compile_id`、`transaction_status`、`plan_commit_state` |
+| Final candidate（legacy） | 编译后兼容旧展示的整组候选 | `IssueWorkItemPlan.id`、`work_item_ids[]` |
+
+每条历史版本记录应展示：
+
+- artifact kind 与人类可读标题。
+- 版本号或 attempt 序号。
+- 生成来源 timeline node。
+- 当前状态：active / accepted / superseded / copied / compiled / recovery_required。
+- reviewer verdict、validator findings 摘要。
+- 替代关系：`superseded_by_draft_id`、`copied_from_draft_id`。
+
+结构化 Diff 规则：
+
+| Diff 类型 | 对比内容 |
+| --- | --- |
+| Outline diff | `work_item_outlines` 新增 / 删除 / 修改、dependency edge 变化、write scope 变化、traceability refs 变化、verification intent 变化 |
+| Context resolution diff | 用户补充内容变化、关联 blocker 变化、是否被后续 Outline run 消费 |
+| Draft diff | `goal`、`implementation_context`、write scopes、depends_on / required_handoff、`handoff_summary`、verification plan commands / manual checks / required gates 变化 |
+| Batch diff | draft 新增 / superseded / copied / retained、queue 状态变化、batch failure summary、batch review findings 变化 |
+| Compile report diff | outline_id → work_item_id 映射变化、created work item / verification plan / child session ids、transaction 状态、validator findings 变化 |
+
+Diff 请求与响应约束：
+
+- `ArtifactDiffRequest` 只接受两个 `artifact_version_ref`，后端或前端 diff 层按 ref 解析真实 payload，不接受标题字符串或当前 UI index 作为输入。
+- 默认只允许同 `artifact_kind` 版本互相比对；跨类型对比入口置灰并解释原因。若后续确需支持 Draft → Compile report 的追踪视图，应单独建 `traceability view`，不混入普通 diff。
+- `ArtifactDiffResult` 使用 typed union：`OutlineDiff`、`ContextResolutionDiff`、`DraftDiff`、`BatchDiff`、`CompileReportDiff`。前端 renderer 按 union tag 渲染字段级变化。
+- 任意一侧 payload 缺失时，展示可恢复错误：缺少的 `artifact_version_ref`、期望 payload 来源、允许用户刷新或进入人工处理；不得静默回退到最新 artifact。
+
+实现约束：
+
+- 结构化 Diff 是 WorkItemPlan 的主展示方式；Markdown diff 只能作为 fallback 或原始 JSON/Markdown 查看入口。
+- 前端不得只保留最后一个 WorkItemPlan artifact；`workspace-ws-store` 需要保存可查询的 artifact history index，或能从 `SessionState.artifact_versions`、timeline node detail、Draft store payload 重建该 index。
+- `superseded` 历史版本只读展示，不提供接受或重写操作；用户若要复用旧 draft，必须走方案中定义的“复制为当前 `generation_round_id` 下的新 `draft_id`”流程。
+- Compile report 是正式落盘报告，不参与 Draft 重写；如果 compile 失败进入 `recovery_required`，Artifact 面板展示 transaction report 和允许的人工操作。
 
 ## Prompt 设计要求
 
@@ -956,6 +1036,13 @@ Outline 阶段：
 - 每个完成项仍有独立气泡。
 - 操作区只提供接受全部、整组重写、暂停整组。
 
+Artifact 版本与对比：
+
+- 右侧 Artifact 面板提供 `当前内容`、`历史版本`、`对比` 三个视图。
+- 历史版本按 Outline、Context blocker resolution、Draft、Batch snapshot、Compile report 分组。
+- 用户从 timeline 选择历史节点时，右侧展示该节点对应的历史 artifact，且明确标记只读 / superseded / active / compiled 状态。
+- WorkItemPlan 使用结构化 Diff 展示变动；Outline、Draft、Batch、Compile report 分别按本方案的结构化 Diff 规则渲染。
+
 ## 错误处理
 
 Outline 轻量校验失败：
@@ -1058,6 +1145,8 @@ WorkItemPlan Outline review 不通过（reviewer 开启时）：
 - Draft 阶段只写 immutable `WorkItemDraftRecord` 与 active index，不写真实 `LifecycleWorkItemRecord` / `VerificationPlan` / child workspace session。
 - 同一 outline 多次重写会生成多个 `draft_id`，旧 draft 标记 `superseded` 且 timeline 历史仍可恢复旧内容。
 - Outline 返修后复用旧 draft 时，会复制为当前 `generation_round_id` 下的新 `draft_id`，而不是原地改写旧 record。
+- WorkItemPlan artifact history index 能列出 Outline、Context blocker resolution、Draft attempts、Batch snapshots、Compile reports，并能从 SessionState / timeline node detail / Draft store / compile report 恢复。
+- 结构化 Diff 后端或 DTO 层至少提供稳定输入：每个 artifact version 必须带 artifact kind、source_node_id、status、generation_round_id 或对应实体 id，前端不依赖标题字符串推断类型。
 - 单 item author prompt 生成的 `required_gates` 只能引用本 verification plan 内已定义 id。
 - 串行模式生成第二个 work item 时包含第一个已确认 item 上下文与 handoff_summary。
 - 串行模式 item accept 前运行 draft 局部严格校验；校验失败停在当前 item 返修。
@@ -1097,6 +1186,12 @@ WorkItemPlan Outline review 不通过（reviewer 开启时）：
 - 自动模式整组生成完成后展示接受全部/整组重写/暂停；接受全部后才展示整组 review 状态（reviewer 开启时）。
 - 自动模式展示整组 review 结果，不显示单 item 重写入口（reviewer 开启时）。
 - 刷新后可恢复 outline、已确认 work item、当前运行 item 或 batch 状态。
+- Artifact 面板展示 `当前内容`、`历史版本`、`对比` 三个视图。
+- 用户点击历史 timeline node 时，Artifact 面板能展示该节点的历史 artifact，并标记 active / superseded / copied / compiled / recovery_required。
+- Outline diff 展示 outline 增删改、dependency edge、write scope、traceability 与 verification intent 变化。
+- Draft diff 展示 goal、implementation_context、write scopes、depends_on / handoff、verification plan 变化。
+- Batch diff 展示 draft 新增 / superseded / copied / retained 与 batch review findings 变化。
+- Compile report diff 展示 id 映射、created ids、transaction 状态和 validator findings 变化。
 
 回归测试：
 
