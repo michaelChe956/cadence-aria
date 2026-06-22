@@ -774,6 +774,8 @@ pub struct WorkItemPlanDraftActiveIndex {
     pub plan_id: String,
     pub current_generation_round_id: String,
     pub outline_state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_outline_id: Option<String>,
     pub outline_to_current_draft_id: BTreeMap<String, String>,
     pub draft_statuses: BTreeMap<String, WorkItemDraftStatus>,
     pub batches: Vec<WorkItemBatchRecord>,

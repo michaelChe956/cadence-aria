@@ -1,3 +1,4 @@
+use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -9,7 +10,7 @@ use crate::product::json_store::{ProductStoreError, read_json, validate_relative
 use crate::product::models::{
     OutlineContextBlockerResolution, OutlineContextIndex, WorkItemBatchRecord, WorkItemDraftRecord,
     WorkItemDraftStatus, WorkItemDraftSupersedeReason, WorkItemGenerationMode,
-    WorkItemPlanCompileTransaction, WorkItemPlanDraftActiveIndex,
+    WorkItemPlanCompileTransaction, WorkItemPlanDraftActiveIndex, WorkItemPlanOutline,
 };
 
 const MAX_CONTEXT_RESOLUTIONS: usize = 20;
@@ -281,6 +282,76 @@ pub fn mark_downstream_superseded(
     }
 }
 
+pub fn outline_rewrite_invalidation_plan(
+    outline: &WorkItemPlanOutline,
+    target_outline_id: &str,
+) -> Result<Vec<(String, WorkItemDraftSupersedeReason)>, String> {
+    let known_outline_ids: HashSet<&str> = outline
+        .work_item_outlines
+        .iter()
+        .map(|item| item.outline_id.as_str())
+        .collect();
+    if !known_outline_ids.contains(target_outline_id) {
+        return Err(format!("target outline `{target_outline_id}` not found"));
+    }
+
+    for edge in &outline.dependency_graph {
+        if !known_outline_ids.contains(edge.from_outline_id.as_str()) {
+            return Err(format!(
+                "dependency edge references missing from_outline_id `{}`",
+                edge.from_outline_id
+            ));
+        }
+        if !known_outline_ids.contains(edge.to_outline_id.as_str()) {
+            return Err(format!(
+                "dependency edge references missing to_outline_id `{}`",
+                edge.to_outline_id
+            ));
+        }
+    }
+
+    let mut planned = Vec::new();
+    let mut visited = HashSet::new();
+    let mut queue = VecDeque::from([target_outline_id.to_string()]);
+    visited.insert(target_outline_id.to_string());
+    planned.push((
+        target_outline_id.to_string(),
+        WorkItemDraftSupersedeReason::DirectRewrite,
+    ));
+
+    while let Some(current) = queue.pop_front() {
+        for edge in outline
+            .dependency_graph
+            .iter()
+            .filter(|edge| edge.from_outline_id == current)
+        {
+            if visited.insert(edge.to_outline_id.clone()) {
+                planned.push((
+                    edge.to_outline_id.clone(),
+                    WorkItemDraftSupersedeReason::AncestorRewritten,
+                ));
+                queue.push_back(edge.to_outline_id.clone());
+            }
+        }
+    }
+
+    Ok(planned)
+}
+
+pub fn mark_draft_record_superseded(
+    record: &mut WorkItemDraftRecord,
+    superseded_by_draft_id: Option<String>,
+    reason: WorkItemDraftSupersedeReason,
+    now: &str,
+) {
+    record.status = WorkItemDraftStatus::Superseded;
+    record.active = false;
+    record.superseded_by_draft_id = superseded_by_draft_id;
+    record.supersede_reason = Some(reason);
+    record.superseded_at = Some(now.to_string());
+    record.updated_at = now.to_string();
+}
+
 pub fn copy_draft_for_current_round(
     index: &WorkItemPlanDraftActiveIndex,
     source: &WorkItemDraftRecord,
@@ -369,6 +440,7 @@ fn validate_active_index(index: &WorkItemPlanDraftActiveIndex) -> Result<(), Pro
     validate_work_item_plan_path_ids(&index.project_id, &index.issue_id, &index.plan_id)?;
     validate_relative_id(&index.current_generation_round_id)?;
     validate_outline_state(&index.outline_state)?;
+    validate_optional_id(index.active_outline_id.as_deref())?;
     for (outline_id, draft_id) in &index.outline_to_current_draft_id {
         validate_relative_id(outline_id)?;
         validate_relative_id(draft_id)?;

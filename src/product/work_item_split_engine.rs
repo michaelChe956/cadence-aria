@@ -13,7 +13,8 @@ use crate::product::models::{
     OutlineContextBlockerResolution, ProviderName, RepositoryProfile, RepositoryProfileConfidence,
     RepositoryRecord, VerificationCommand, VerificationCommandSafety, VerificationCommandSource,
     VerificationFallbackPolicy, VerificationManualCheck, VerificationPlan, VerificationScope,
-    WorkItemContextBudget, WorkItemExecutionPlanStatus, WorkItemKind, WorkItemPlanOutline,
+    WorkItemContextBudget, WorkItemDraftCandidate, WorkItemDraftRecord,
+    WorkItemExecutionPlanStatus, WorkItemGenerationMode, WorkItemKind, WorkItemPlanOutline,
     WorkItemPlanStatus, WorkItemStatus,
 };
 use crate::protocol::contracts::{AdapterInput, AdapterRole, ProviderType};
@@ -182,6 +183,12 @@ pub struct WorkItemPlanContextBlocker {
 pub struct OutlineAuthorOutput {
     pub outline: Option<WorkItemPlanOutline>,
     pub context_blockers: Vec<WorkItemPlanContextBlocker>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkItemDraftInvocation {
+    pub prompt: String,
+    pub sentinel_nonce: String,
 }
 
 /// 被重做的 WorkItem 规格：旧 id + 用户反馈。
@@ -1129,6 +1136,167 @@ pub fn parse_work_item_plan_outline_output(
     })
 }
 
+pub fn build_work_item_draft_invocation(
+    outline: &WorkItemPlanOutline,
+    current_outline_id: &str,
+    generation_mode: WorkItemGenerationMode,
+    accepted_drafts: &[WorkItemDraftRecord],
+    feedback: Option<&str>,
+) -> ApiResult<WorkItemDraftInvocation> {
+    let current_outline = outline
+        .work_item_outlines
+        .iter()
+        .find(|item| item.outline_id == current_outline_id)
+        .ok_or_else(|| {
+            ApiError::validation_with_details(
+                "work_item_draft_outline_missing",
+                format!("current outline `{current_outline_id}` not found"),
+                json!({ "outline_id": current_outline_id }),
+            )
+        })?;
+    let dependency_ids: std::collections::HashSet<&str> = current_outline
+        .depends_on
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let direct_dependencies: Vec<&WorkItemDraftRecord> = accepted_drafts
+        .iter()
+        .filter(|draft| dependency_ids.contains(draft.outline_id.as_str()))
+        .collect();
+    let other_previous: Vec<&WorkItemDraftRecord> = accepted_drafts
+        .iter()
+        .filter(|draft| !dependency_ids.contains(draft.outline_id.as_str()))
+        .collect();
+    let nonce = structured_output_nonce();
+    let prompt = build_work_item_draft_prompt(
+        outline,
+        current_outline,
+        generation_mode,
+        &direct_dependencies,
+        &other_previous,
+        feedback,
+        &nonce,
+    );
+
+    Ok(WorkItemDraftInvocation {
+        prompt,
+        sentinel_nonce: nonce,
+    })
+}
+
+pub fn parse_work_item_draft_output(value: serde_json::Value) -> ApiResult<WorkItemDraftCandidate> {
+    if value.get("drafts").is_some() || value.get("work_items").is_some() {
+        return Err(ApiError::validation(
+            "work_item_draft_multiple_items",
+            "single item draft output must contain exactly one draft",
+        ));
+    }
+    if let Some(field) = forbidden_work_item_draft_field(&value) {
+        return Err(ApiError::validation_with_details(
+            "work_item_draft_forbidden_field",
+            format!("WorkItemDraftCandidate output must not contain `{field}`"),
+            json!({ "field": field }),
+        ));
+    }
+
+    let draft_value = value.get("draft").cloned().unwrap_or(value);
+    serde_json::from_value(draft_value).map_err(|error| {
+        ApiError::runtime(
+            "work_item_draft_parse_error",
+            format!("failed to parse WorkItemDraftCandidate output: {error}"),
+            json!({}),
+        )
+    })
+}
+
+fn build_work_item_draft_prompt(
+    outline: &WorkItemPlanOutline,
+    current_outline: &crate::product::models::WorkItemOutline,
+    generation_mode: WorkItemGenerationMode,
+    direct_dependencies: &[&WorkItemDraftRecord],
+    other_previous: &[&WorkItemDraftRecord],
+    feedback: Option<&str>,
+    nonce: &str,
+) -> String {
+    let outline_json = serde_json::to_string_pretty(outline).unwrap_or_else(|_| "{}".to_string());
+    let current_outline_json =
+        serde_json::to_string_pretty(current_outline).unwrap_or_else(|_| "{}".to_string());
+    let direct_dependency_json =
+        serde_json::to_string_pretty(direct_dependencies).unwrap_or_else(|_| "[]".to_string());
+    let previous_summaries = other_previous
+        .iter()
+        .map(|draft| {
+            format!(
+                "- {} / {}: {}",
+                draft.outline_id, draft.draft_id, draft.candidate.handoff_summary
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let feedback_section = feedback
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| format!("\n[user_or_reviewer_feedback]\n{value}\n"))
+        .unwrap_or_default();
+    let mode = match generation_mode {
+        WorkItemGenerationMode::Serial => "serial",
+        WorkItemGenerationMode::Batch => "batch",
+    };
+
+    format!(
+        "你是 Aria 的 Work Item Draft author。请只为当前 WorkItemPlan Outline 中的一个 item 生成 WorkItemDraftCandidate。\n\n\
+         [generation_mode]\n{mode}\n\n\
+         [confirmed_outline]\n{outline_json}\n\n\
+         [current_work_item_outline]\n{current_outline_json}\n\n\
+         [直接依赖 draft 完整内容]\n{direct_dependency_json}\n\n\
+         [其他已 accepted draft 摘要]\n{previous_summaries}\n\
+         {feedback_section}\n\
+         [hard_rules]\n\
+         - 只能输出一个 WorkItemDraftCandidate，字段必须对应当前 outline_id `{outline_id}`。\n\
+         - 不得修改 Outline，不得新增、删除或重命名 outline。\n\
+         - 不得输出 work_item_id、draft_id、status、generated_from_node_id、accepted_at、batch_id 等后端状态字段。\n\
+         - verification_plan 可以是对象，但 required_gates 只能引用同一 verification_plan 内的 command/manual_check id。\n\
+         - 可以先输出简短可读状态；最终 JSON 必须放在最后一个 nonce sentinel block 中，不要输出 Markdown code fence。\n\n\
+         [output]\n\
+         <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">{{\"draft\":{{\"outline_id\":\"{outline_id}\",\"title\":\"...\",\"kind\":\"backend|frontend|integration|e2e|docs|infra|other\",\"goal\":\"...\",\"implementation_context\":\"...\",\"exclusive_write_scopes\":[],\"forbidden_write_scopes\":[],\"depends_on_outline_ids\":[],\"required_handoff_from_outline_ids\":[],\"handoff_summary\":\"...\",\"verification_plan\":{{}}}}}}</ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">",
+        outline_id = current_outline.outline_id,
+    )
+}
+
+fn forbidden_work_item_draft_field(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, value) in map {
+                if is_forbidden_work_item_draft_key(key) {
+                    return Some(key.clone());
+                }
+                if let Some(field) = forbidden_work_item_draft_field(value) {
+                    return Some(field);
+                }
+            }
+            None
+        }
+        serde_json::Value::Array(values) => values.iter().find_map(forbidden_work_item_draft_field),
+        _ => None,
+    }
+}
+
+fn is_forbidden_work_item_draft_key(key: &str) -> bool {
+    matches!(
+        key,
+        "work_item_id"
+            | "draft_id"
+            | "status"
+            | "generated_from_node_id"
+            | "accepted_at"
+            | "batch_id"
+            | "superseded_by_draft_id"
+            | "supersede_reason"
+            | "copied_from_draft_id"
+            | "review_node_id"
+            | "review_verdict_ref"
+    )
+}
+
 fn forbidden_outline_field(value: &serde_json::Value) -> Option<String> {
     match value {
         serde_json::Value::Object(map) => {
@@ -1889,7 +2057,10 @@ fn parse_fallback_policy(value: &str) -> VerificationFallbackPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::product::models::{IssuePhase, IssueStatus};
+    use crate::product::models::{
+        IssuePhase, IssueStatus, WorkItemDraftCandidate, WorkItemDraftRecord, WorkItemDraftStatus,
+        WorkItemGenerationMode,
+    };
     use std::path::PathBuf;
 
     #[test]
@@ -2109,6 +2280,95 @@ cargo test 与 vitest。
     }
 
     #[test]
+    fn single_item_prompt_contains_accepted_previous_context() {
+        let outline = parse_work_item_plan_outline_output(valid_outline_author_output())
+            .expect("outline output")
+            .outline
+            .expect("outline");
+        let accepted_backend = sample_draft_record(
+            "draft_backend",
+            "outline_backend",
+            WorkItemDraftCandidate {
+                outline_id: "outline_backend".to_string(),
+                title: "后端 API".to_string(),
+                kind: WorkItemKind::Backend,
+                goal: "实现 API".to_string(),
+                implementation_context: "定义 GET /api/session/status".to_string(),
+                exclusive_write_scopes: vec!["src/product/**".to_string()],
+                forbidden_write_scopes: vec!["web/**".to_string()],
+                depends_on_outline_ids: vec![],
+                required_handoff_from_outline_ids: vec![],
+                handoff_summary: "后端输出 SessionStatusDto".to_string(),
+                verification_plan: serde_json::json!({"commands": []}),
+            },
+        );
+
+        let invocation = build_work_item_draft_invocation(
+            &outline,
+            "outline_frontend",
+            WorkItemGenerationMode::Serial,
+            &[accepted_backend],
+            Some("补充错误态"),
+        )
+        .expect("draft invocation");
+
+        assert!(invocation.prompt.contains("outline_frontend"));
+        assert!(invocation.prompt.contains("serial"));
+        assert!(invocation.prompt.contains("SessionStatusDto"));
+        assert!(invocation.prompt.contains("直接依赖 draft 完整内容"));
+        assert!(invocation.prompt.contains("补充错误态"));
+    }
+
+    #[test]
+    fn single_item_prompt_forbids_work_item_id_and_outline_changes() {
+        let outline = parse_work_item_plan_outline_output(valid_outline_author_output())
+            .expect("outline output")
+            .outline
+            .expect("outline");
+
+        let invocation = build_work_item_draft_invocation(
+            &outline,
+            "outline_backend",
+            WorkItemGenerationMode::Serial,
+            &[],
+            None,
+        )
+        .expect("draft invocation");
+
+        assert!(invocation.prompt.contains("不得输出 work_item_id"));
+        assert!(invocation.prompt.contains("不得修改 Outline"));
+        assert!(
+            invocation
+                .prompt
+                .contains("只能输出一个 WorkItemDraftCandidate")
+        );
+    }
+
+    #[test]
+    fn single_item_parser_rejects_multiple_work_items() {
+        let error = parse_work_item_draft_output(serde_json::json!({
+            "drafts": [
+                valid_work_item_draft_candidate_json("outline_backend"),
+                valid_work_item_draft_candidate_json("outline_frontend")
+            ]
+        }))
+        .expect_err("multiple drafts must be rejected");
+
+        assert_eq!(error.code, "work_item_draft_multiple_items");
+    }
+
+    #[test]
+    fn single_item_parser_rejects_backend_status_fields() {
+        let mut output = serde_json::json!({
+            "draft": valid_work_item_draft_candidate_json("outline_backend")
+        });
+        output["draft"]["status"] = serde_json::json!("accepted");
+
+        let error = parse_work_item_draft_output(output).expect_err("status must be rejected");
+        assert_eq!(error.code, "work_item_draft_forbidden_field");
+    }
+
+    #[test]
     fn build_split_prompt_inlines_schema_and_kind_guidance() {
         // 回归 Bug: prompt 曾引用不存在的 `src/product/work_item_split_output_schema.json`,
         // 而 WORK_ITEM_SPLIT_OUTPUT_SCHEMA 常量未注入 prompt,导致 provider 不知道
@@ -2318,5 +2578,69 @@ cargo test 与 vitest。
             },
             "context_blockers": []
         })
+    }
+
+    fn valid_work_item_draft_candidate_json(outline_id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "outline_id": outline_id,
+            "title": "后端 API",
+            "kind": "backend",
+            "goal": "实现 API",
+            "implementation_context": "实现 API handler 与 product service。",
+            "exclusive_write_scopes": ["src/product/**"],
+            "forbidden_write_scopes": ["web/**"],
+            "depends_on_outline_ids": [],
+            "required_handoff_from_outline_ids": [],
+            "handoff_summary": "输出 SessionStatusDto",
+            "verification_plan": {
+                "commands": [
+                    {
+                        "id": "cmd_backend",
+                        "label": "cargo test",
+                        "command": "cargo test --locked --lib session",
+                        "cwd": "",
+                        "purpose": "验证后端 API",
+                        "required": true,
+                        "timeout_seconds": 120,
+                        "safety": "approved",
+                        "source": "local"
+                    }
+                ],
+                "manual_checks": [],
+                "required_gates": ["cmd_backend"]
+            }
+        })
+    }
+
+    fn sample_draft_record(
+        draft_id: &str,
+        outline_id: &str,
+        candidate: WorkItemDraftCandidate,
+    ) -> WorkItemDraftRecord {
+        WorkItemDraftRecord {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            plan_id: "plan_0001".to_string(),
+            draft_id: draft_id.to_string(),
+            outline_id: outline_id.to_string(),
+            generation_round_id: "round_001".to_string(),
+            batch_id: None,
+            attempt_index: 1,
+            outline_version_ref: "artifact://outline/1".to_string(),
+            generation_mode: WorkItemGenerationMode::Serial,
+            candidate,
+            status: WorkItemDraftStatus::Accepted,
+            active: true,
+            superseded_by_draft_id: None,
+            supersede_reason: None,
+            copied_from_draft_id: None,
+            review_node_id: None,
+            review_verdict_ref: None,
+            generated_from_node_id: "node_draft_run".to_string(),
+            accepted_at: Some("2026-06-22T10:00:00Z".to_string()),
+            superseded_at: None,
+            created_at: "2026-06-22T10:00:00Z".to_string(),
+            updated_at: "2026-06-22T10:00:00Z".to_string(),
+        }
     }
 }

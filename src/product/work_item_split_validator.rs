@@ -3,8 +3,9 @@ use std::collections::{HashMap, HashSet};
 use crate::cross_cutting::worktree::scopes_may_overlap;
 use crate::product::models::{
     IssueWorkItemPlan, LifecycleWorkItemRecord, RepositoryProfile, RepositoryProfileConfidence,
-    VerificationCommandSafety, VerificationCommandSource, VerificationPlan, WorkItemKind,
-    WorkItemPlanOutline, WorkItemSplitFinding, WorkItemSplitFindingSeverity,
+    VerificationCommandSafety, VerificationCommandSource, VerificationPlan, WorkItemDraftCandidate,
+    WorkItemKind, WorkItemOutline, WorkItemPlanOutline, WorkItemSplitFinding,
+    WorkItemSplitFindingSeverity,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,6 +57,141 @@ impl WorkItemPlanOutlineValidator {
         validate_outline_dependency_cycles(outline, &edges, &mut findings);
         validate_outline_scope_conflicts(outline, &edges, &mut findings);
         WorkItemSplitValidationReport { findings }
+    }
+}
+
+pub struct WorkItemDraftLocalValidator;
+
+impl WorkItemDraftLocalValidator {
+    pub fn validate(
+        current: &WorkItemDraftCandidate,
+        accepted_dependencies: &[WorkItemDraftCandidate],
+        current_outline: &WorkItemOutline,
+    ) -> WorkItemSplitValidationReport {
+        let mut findings = Vec::new();
+        validate_draft_matches_outline(current, current_outline, &mut findings);
+        validate_draft_scopes(current, &mut findings);
+        validate_draft_verification_plan(current, &mut findings);
+        validate_draft_direct_dependency_scopes(current, accepted_dependencies, &mut findings);
+        WorkItemSplitValidationReport { findings }
+    }
+}
+
+fn validate_draft_matches_outline(
+    current: &WorkItemDraftCandidate,
+    current_outline: &WorkItemOutline,
+    findings: &mut Vec<WorkItemSplitFinding>,
+) {
+    if current.outline_id != current_outline.outline_id {
+        findings.push(error(
+            "draft_outline_mismatch",
+            format!(
+                "draft outline_id {} does not match current outline {}",
+                current.outline_id, current_outline.outline_id
+            ),
+            vec![
+                current.outline_id.clone(),
+                current_outline.outline_id.clone(),
+            ],
+        ));
+    }
+}
+
+fn validate_draft_scopes(
+    current: &WorkItemDraftCandidate,
+    findings: &mut Vec<WorkItemSplitFinding>,
+) {
+    if current.exclusive_write_scopes.is_empty() {
+        findings.push(error(
+            "write_scope_required",
+            format!(
+                "draft {} must include at least one exclusive_write_scope",
+                current.outline_id
+            ),
+            vec![current.outline_id.clone()],
+        ));
+    }
+}
+
+fn validate_draft_verification_plan(
+    current: &WorkItemDraftCandidate,
+    findings: &mut Vec<WorkItemSplitFinding>,
+) {
+    let defined_gate_ids = draft_verification_defined_gate_ids(&current.verification_plan);
+    let required_gates = current
+        .verification_plan
+        .get("required_gates")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    for gate in required_gates {
+        let Some(gate_id) = gate.as_str() else {
+            findings.push(error(
+                "verification_required_gate_invalid",
+                format!(
+                    "draft {} has a non-string required gate",
+                    current.outline_id
+                ),
+                vec![current.outline_id.clone()],
+            ));
+            continue;
+        };
+        if !defined_gate_ids.contains(gate_id) {
+            findings.push(error(
+                "verification_required_gate_missing",
+                format!(
+                    "draft {} requires gate {} which is not defined in its verification_plan",
+                    current.outline_id, gate_id
+                ),
+                vec![current.outline_id.clone()],
+            ));
+        }
+    }
+}
+
+fn draft_verification_defined_gate_ids(plan: &serde_json::Value) -> HashSet<String> {
+    let mut ids = HashSet::new();
+    for field in ["commands", "manual_checks"] {
+        if let Some(items) = plan.get(field).and_then(|value| value.as_array()) {
+            for item in items {
+                if let Some(id) = item.get("id").and_then(|value| value.as_str()) {
+                    ids.insert(id.to_string());
+                }
+            }
+        }
+    }
+    ids
+}
+
+fn validate_draft_direct_dependency_scopes(
+    current: &WorkItemDraftCandidate,
+    accepted_dependencies: &[WorkItemDraftCandidate],
+    findings: &mut Vec<WorkItemSplitFinding>,
+) {
+    let direct_dependency_ids: HashSet<&str> = current
+        .depends_on_outline_ids
+        .iter()
+        .map(String::as_str)
+        .collect();
+    for dependency in accepted_dependencies {
+        if !direct_dependency_ids.contains(dependency.outline_id.as_str()) {
+            continue;
+        }
+        if scopes_may_overlap(
+            &current.exclusive_write_scopes,
+            &dependency.exclusive_write_scopes,
+            true,
+        ) {
+            findings.push(error(
+                "direct_dependency_scope_conflict",
+                format!(
+                    "draft {} overlaps exclusive write scopes with direct dependency {}",
+                    current.outline_id, dependency.outline_id
+                ),
+                vec![current.outline_id.clone(), dependency.outline_id.clone()],
+            ));
+        }
     }
 }
 
@@ -872,7 +1008,9 @@ fn is_command_unsafe(command: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::product::models::{WorkItemOutline, WorkItemOutlineDependencyEdge};
+    use crate::product::models::{
+        WorkItemDraftCandidate, WorkItemOutline, WorkItemOutlineDependencyEdge,
+    };
 
     #[test]
     fn outline_validator_rejects_duplicate_outline_ids() {
@@ -945,6 +1083,61 @@ mod tests {
         assert_has_code(&report, "write_scope_conflict");
     }
 
+    #[test]
+    fn local_validator_allows_valid_single_draft() {
+        let outline = valid_outline();
+        let current_outline = outline.work_item_outlines[1].clone();
+        let dependency = valid_draft_candidate("outline_backend", vec![]);
+        let current = valid_draft_candidate("outline_frontend", vec!["outline_backend"]);
+
+        let report =
+            WorkItemDraftLocalValidator::validate(&current, &[dependency], &current_outline);
+
+        assert!(
+            !report.has_errors(),
+            "expected valid local draft, got {:?}",
+            report.findings
+        );
+    }
+
+    #[test]
+    fn local_validator_blocks_missing_write_scope() {
+        let outline = valid_outline();
+        let current_outline = outline.work_item_outlines[0].clone();
+        let mut current = valid_draft_candidate("outline_backend", vec![]);
+        current.exclusive_write_scopes.clear();
+
+        let report = WorkItemDraftLocalValidator::validate(&current, &[], &current_outline);
+
+        assert_has_code(&report, "write_scope_required");
+    }
+
+    #[test]
+    fn local_validator_blocks_required_gate_missing() {
+        let outline = valid_outline();
+        let current_outline = outline.work_item_outlines[0].clone();
+        let mut current = valid_draft_candidate("outline_backend", vec![]);
+        current.verification_plan["required_gates"] = serde_json::json!(["cmd_missing"]);
+
+        let report = WorkItemDraftLocalValidator::validate(&current, &[], &current_outline);
+
+        assert_has_code(&report, "verification_required_gate_missing");
+    }
+
+    #[test]
+    fn local_validator_blocks_scope_conflict_with_direct_dependency() {
+        let outline = valid_outline();
+        let current_outline = outline.work_item_outlines[1].clone();
+        let dependency = valid_draft_candidate("outline_backend", vec![]);
+        let mut current = valid_draft_candidate("outline_frontend", vec!["outline_backend"]);
+        current.exclusive_write_scopes = vec!["src/product/api.rs".to_string()];
+
+        let report =
+            WorkItemDraftLocalValidator::validate(&current, &[dependency], &current_outline);
+
+        assert_has_code(&report, "direct_dependency_scope_conflict");
+    }
+
     fn assert_has_code(report: &WorkItemSplitValidationReport, code: &str) {
         assert!(
             report.findings.iter().any(|finding| finding.code == code),
@@ -1000,6 +1193,48 @@ mod tests {
             risks: vec![],
             handoff_strategy: "后端输出 contract 给前端".to_string(),
             status: "draft".to_string(),
+        }
+    }
+
+    fn valid_draft_candidate(
+        outline_id: &str,
+        depends_on_outline_ids: Vec<&str>,
+    ) -> WorkItemDraftCandidate {
+        WorkItemDraftCandidate {
+            outline_id: outline_id.to_string(),
+            title: format!("Draft {outline_id}"),
+            kind: WorkItemKind::Backend,
+            goal: "实现局部 work item".to_string(),
+            implementation_context: "实现必要代码并保持 handoff。".to_string(),
+            exclusive_write_scopes: if outline_id == "outline_backend" {
+                vec!["src/product/api.rs".to_string()]
+            } else {
+                vec!["web/src/session.ts".to_string()]
+            },
+            forbidden_write_scopes: vec![],
+            depends_on_outline_ids: depends_on_outline_ids
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            required_handoff_from_outline_ids: vec![],
+            handoff_summary: "handoff summary".to_string(),
+            verification_plan: serde_json::json!({
+                "commands": [
+                    {
+                        "id": "cmd_test",
+                        "label": "test",
+                        "command": "cargo test --locked --lib api",
+                        "cwd": "",
+                        "purpose": "验证局部 draft",
+                        "required": true,
+                        "timeout_seconds": 120,
+                        "safety": "approved",
+                        "source": "provider"
+                    }
+                ],
+                "manual_checks": [],
+                "required_gates": ["cmd_test"]
+            }),
         }
     }
 }

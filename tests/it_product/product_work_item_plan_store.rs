@@ -15,8 +15,8 @@ use cadence_aria::product::models::{
 };
 use cadence_aria::product::work_item_plan_store::{
     WorkItemPlanStore, compact_outline_context_index, copy_draft_for_current_round,
-    mark_downstream_superseded, mark_draft_active, next_batch_id, next_draft_id,
-    next_generation_round_id,
+    mark_downstream_superseded, mark_draft_active, mark_draft_record_superseded, next_batch_id,
+    next_draft_id, next_generation_round_id, outline_rewrite_invalidation_plan,
 };
 use tempfile::tempdir;
 
@@ -108,6 +108,7 @@ fn work_item_plan_models_roundtrip() {
         plan_id: "plan_1".to_string(),
         current_generation_round_id: "round_001".to_string(),
         outline_state: "confirmed".to_string(),
+        active_outline_id: Some("outline_001".to_string()),
         outline_to_current_draft_id: BTreeMap::from([(
             "outline_001".to_string(),
             "draft_001".to_string(),
@@ -127,7 +128,12 @@ fn work_item_plan_models_roundtrip() {
 
     let active_json = serde_json::to_value(&active_index).unwrap();
     assert_eq!(active_json["batches"][0]["status"], "completed");
+    assert_eq!(active_json["active_outline_id"], "outline_001");
     let active_back: WorkItemPlanDraftActiveIndex = serde_json::from_value(active_json).unwrap();
+    assert_eq!(
+        active_back.active_outline_id.as_deref(),
+        Some("outline_001")
+    );
     assert_eq!(active_back.batches[0].mode, WorkItemGenerationMode::Batch);
 
     let compile_tx = WorkItemPlanCompileTransaction {
@@ -255,6 +261,7 @@ fn active_index_tracks_current_round_and_batches() {
         .expect("load active index")
         .expect("active index should exist");
     assert_eq!(loaded.current_generation_round_id, "round_001");
+    assert_eq!(loaded.active_outline_id.as_deref(), Some("outline_001"));
     assert_eq!(loaded.batches[0].batch_id, "batch_20260622_001");
 }
 
@@ -378,6 +385,97 @@ fn copying_draft_creates_new_draft_id_and_records_source() {
     assert_eq!(copied.status, WorkItemDraftStatus::Draft);
     assert!(copied.active);
     assert_eq!(copied.batch_id, None);
+}
+
+#[test]
+fn direct_rewrite_supersedes_target_and_downstream() {
+    let invalidation =
+        outline_rewrite_invalidation_plan(&sample_dependency_outline(), "outline_001")
+            .expect("invalidation plan");
+
+    assert_eq!(
+        invalidation,
+        vec![
+            (
+                "outline_001".to_string(),
+                WorkItemDraftSupersedeReason::DirectRewrite
+            ),
+            (
+                "outline_002".to_string(),
+                WorkItemDraftSupersedeReason::AncestorRewritten
+            ),
+            (
+                "outline_003".to_string(),
+                WorkItemDraftSupersedeReason::AncestorRewritten
+            )
+        ]
+    );
+
+    let mut direct = sample_draft_record_for_outline("draft_001", "outline_001");
+    let mut downstream = sample_draft_record_for_outline("draft_002", "outline_002");
+    mark_draft_record_superseded(
+        &mut direct,
+        Some("draft_004".to_string()),
+        WorkItemDraftSupersedeReason::DirectRewrite,
+        "2026-06-22T12:00:00Z",
+    );
+    mark_draft_record_superseded(
+        &mut downstream,
+        None,
+        WorkItemDraftSupersedeReason::AncestorRewritten,
+        "2026-06-22T12:00:00Z",
+    );
+
+    assert_eq!(direct.status, WorkItemDraftStatus::Superseded);
+    assert!(!direct.active);
+    assert_eq!(direct.superseded_by_draft_id.as_deref(), Some("draft_004"));
+    assert_eq!(
+        direct.supersede_reason,
+        Some(WorkItemDraftSupersedeReason::DirectRewrite)
+    );
+    assert_eq!(
+        downstream.supersede_reason,
+        Some(WorkItemDraftSupersedeReason::AncestorRewritten)
+    );
+}
+
+#[test]
+fn ancestor_rewritten_draft_can_be_copied_and_revalidated() {
+    let mut index = sample_active_index();
+    index
+        .draft_statuses
+        .insert("draft_002".to_string(), WorkItemDraftStatus::Superseded);
+    let mut source = sample_draft_record_for_outline("draft_002", "outline_002");
+    mark_draft_record_superseded(
+        &mut source,
+        None,
+        WorkItemDraftSupersedeReason::AncestorRewritten,
+        "2026-06-22T12:00:00Z",
+    );
+
+    let copied =
+        copy_draft_for_current_round(&index, &source, "node_copy_2", "2026-06-22T12:10:00Z");
+
+    assert_ne!(copied.draft_id, source.draft_id);
+    assert_eq!(copied.copied_from_draft_id.as_deref(), Some("draft_002"));
+    assert_eq!(copied.status, WorkItemDraftStatus::Draft);
+    assert!(copied.active);
+    assert_eq!(copied.supersede_reason, None);
+    assert_eq!(copied.superseded_at, None);
+}
+
+#[test]
+fn direct_rewrite_cannot_opt_out() {
+    let invalidation =
+        outline_rewrite_invalidation_plan(&sample_dependency_outline(), "outline_002")
+            .expect("invalidation plan");
+
+    assert!(
+        invalidation.iter().any(|(outline_id, reason)| {
+            outline_id == "outline_002" && reason == &WorkItemDraftSupersedeReason::DirectRewrite
+        }),
+        "direct rewrite target must always be invalidated"
+    );
 }
 
 #[test]
@@ -545,6 +643,60 @@ fn sample_draft_record(draft_id: &str, generation_round_id: &str) -> WorkItemDra
     }
 }
 
+fn sample_draft_record_for_outline(draft_id: &str, outline_id: &str) -> WorkItemDraftRecord {
+    let mut record = sample_draft_record(draft_id, "round_001");
+    record.outline_id = outline_id.to_string();
+    record.candidate.outline_id = outline_id.to_string();
+    record
+}
+
+fn sample_dependency_outline() -> WorkItemPlanOutline {
+    WorkItemPlanOutline {
+        id: "outline_artifact_1".to_string(),
+        project_id: "project_1".to_string(),
+        issue_id: "issue_1".to_string(),
+        source_story_spec_ids: vec!["story_1".to_string()],
+        source_design_spec_ids: vec!["design_1".to_string()],
+        strategy_summary: "按依赖链拆分".to_string(),
+        work_item_outlines: vec![
+            sample_outline("outline_001", WorkItemKind::Backend),
+            sample_outline("outline_002", WorkItemKind::Frontend),
+            sample_outline("outline_003", WorkItemKind::Integration),
+        ],
+        dependency_graph: vec![
+            WorkItemOutlineDependencyEdge {
+                from_outline_id: "outline_001".to_string(),
+                to_outline_id: "outline_002".to_string(),
+            },
+            WorkItemOutlineDependencyEdge {
+                from_outline_id: "outline_002".to_string(),
+                to_outline_id: "outline_003".to_string(),
+            },
+        ],
+        risks: Vec::new(),
+        handoff_strategy: "逐项传递".to_string(),
+        status: "confirmed".to_string(),
+    }
+}
+
+fn sample_outline(outline_id: &str, kind: WorkItemKind) -> WorkItemOutline {
+    WorkItemOutline {
+        outline_id: outline_id.to_string(),
+        title: format!("item {outline_id}"),
+        kind,
+        goal: "goal".to_string(),
+        scope: vec![format!("scope/{outline_id}")],
+        non_goals: Vec::new(),
+        source_story_spec_ids: vec!["story_1".to_string()],
+        source_design_spec_ids: vec!["design_1".to_string()],
+        exclusive_write_scopes: vec![format!("scope/{outline_id}")],
+        forbidden_write_scopes: Vec::new(),
+        depends_on: Vec::new(),
+        verification_intent: vec!["cargo test --locked".to_string()],
+        handoff_notes: "handoff".to_string(),
+    }
+}
+
 fn sample_active_index() -> WorkItemPlanDraftActiveIndex {
     WorkItemPlanDraftActiveIndex {
         project_id: "project_1".to_string(),
@@ -552,6 +704,7 @@ fn sample_active_index() -> WorkItemPlanDraftActiveIndex {
         plan_id: "plan_1".to_string(),
         current_generation_round_id: "round_001".to_string(),
         outline_state: "confirmed".to_string(),
+        active_outline_id: Some("outline_001".to_string()),
         outline_to_current_draft_id: BTreeMap::from([(
             "outline_001".to_string(),
             "draft_001".to_string(),

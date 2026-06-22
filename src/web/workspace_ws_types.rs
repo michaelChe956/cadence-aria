@@ -10,7 +10,9 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::product::models::{NodeDetail, ProviderName, WorkItemPlanOutline, WorkspaceType};
+use crate::product::models::{
+    NodeDetail, ProviderName, WorkItemDraftRecord, WorkItemPlanOutline, WorkspaceType,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -197,6 +199,11 @@ pub enum WsInMessage {
     RequestOutlineRevision {
         feedback: Option<String>,
     },
+    WorkItemDraftDecision {
+        outline_id: String,
+        decision: WorkItemDraftDecisionDto,
+        feedback: Option<String>,
+    },
     HumanConfirm {
         decision: HumanConfirmDecision,
         payload: Option<serde_json::Value>,
@@ -238,6 +245,14 @@ pub enum AuthorDecision {
 pub enum WorkItemGenerationModeDto {
     Serial,
     Batch,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkItemDraftDecisionDto {
+    Accept,
+    Rewrite,
+    Pause,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -359,6 +374,9 @@ pub enum ArtifactPayload {
     WorkItemPlanContextBlocker {
         context_blocker: Box<WorkItemPlanContextBlockerPayload>,
     },
+    WorkItemDraftCandidate {
+        draft_candidate: Box<WorkItemDraftCandidatePayload>,
+    },
 }
 
 impl ArtifactPayload {
@@ -368,6 +386,7 @@ impl ArtifactPayload {
             Self::WorkItemPlanCandidate { .. } => None,
             Self::WorkItemPlanOutlineCandidate { .. } => None,
             Self::WorkItemPlanContextBlocker { .. } => None,
+            Self::WorkItemDraftCandidate { .. } => None,
         }
     }
 
@@ -381,6 +400,7 @@ impl ArtifactPayload {
             Self::WorkItemPlanCandidate { .. } => None,
             Self::WorkItemPlanOutlineCandidate { .. } => None,
             Self::WorkItemPlanContextBlocker { .. } => None,
+            Self::WorkItemDraftCandidate { .. } => None,
         }
     }
 }
@@ -405,6 +425,14 @@ pub struct WorkItemPlanContextBlockerPayload {
     pub design_context_gaps: Vec<String>,
     pub exploration_summary: String,
     pub allowed_actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkItemDraftCandidatePayload {
+    pub draft_record: WorkItemDraftRecord,
+    pub validator_findings: Vec<ValidatorFindingDto>,
+    pub can_accept: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -583,6 +611,8 @@ pub enum TimelineNodeType {
     WorkItemPlanContextBlocker,
     WorkItemGenerationMode,
     WorkItemDraftRun,
+    WorkItemDraftConfirm,
+    WorkItemDraftReview,
     WorkItemBatchRun,
     AbortedByDisconnect,
     ProtocolError,
