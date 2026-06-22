@@ -6,21 +6,35 @@
 - 版本：v1.2
 - 日期：2026-06-22
 - 分支：feat-b-0616
-- 被评审方案：`cadence/designs/2026-06-22_技术方案_WorkItemPlan两阶段生成与逐项WorkItem确认流程_v1.4.md`
+- 被评审方案：`cadence/designs/2026-06-22_技术方案_WorkItemPlan两阶段生成与逐项WorkItem确认流程_v1.4.1.md`（原评审对象为 v1.4，已按本评审建议优化为 v1.4.1）
 - 评审方式：只读调研 + 与当前 `WorkspaceEngine` / WS contract / 前端 store / `LifecycleStore` 对照
 
 ## 评审结论
 
 v1.4 已基本吸收 v1.1 评审中的核心修订：不可变 `draft_id`、downstream invalidation、`WorkItemPlanCompileTransaction`、`work_item_plan_context_blocker` 节点、`repository_profile` 兼容策略、自动模式上下文术语统一。
 
-但 v1.4 作为"待实现计划拆解"的文档，仍有 4 个 P0 和 5 个 P1 缺口会直接影响实现计划拆解与后续返工。建议在拆实现计划前先修订 v1.4 或在首个 WP 中明确这些缺口。
+但 v1.4 作为"待实现计划拆解"的文档，仍有 4 个 P0 和 5 个 P1 缺口会直接影响实现计划拆解与后续返工。本评审发出后，方案已按建议优化为 **v1.4.1**，P0/P1 缺口已基本补齐，可进入实现计划拆解阶段。
+
+## 修订后复核（v1.4.1）
+
+| 本评审问题 | 优先级 | v1.4.1 修复状态 | 说明 |
+| --- | --- | --- | --- |
+| P0-1 `generation_mode_select` 返修消息未明确 | P0 | ✅ 已修复 | 新增 `request_outline_revision` 消息；`select_work_item_generation_mode` 仅 mode 为 `serial`/`batch`；禁止该节点使用 `author_decision`。 |
+| P0-2 串行模式局部校验时序未明确 | P0 | ✅ 已修复 | author 输出后自动运行 `WorkItemDraftLocalValidator`；通过后展示"接受"；失败后只展示"重写/暂停"与 findings。 |
+| P0-3 自动模式降级串行后 batch draft 迁移未明确 | P0 | ✅ 已修复 | 受影响 outline 之前的 batch drafts 复制为新串行 draft 并重新跑局部校验/review；受影响 outline 及之后按串行重新生成。 |
+| P0-4 `recovery_required` 缺少 stage/node/WS 消息 | P0 | ✅ 已修复 | 新增 `work_item_plan_compile_recovery` 节点（复用 `human_confirm`），`work_item_plan_compile_recovery_action` 消息支持 `continue`/`abort_and_rollback`/`human_triage`。 |
+| P1-1 `WorkItemPlanReviewComplete` 代码层面未明确 | P1 | ✅ 已修复 | 给出 Rust struct/enum 草案，明确嵌入 `ReviewComplete` 的方式与兼容降级规则。 |
+| P1-2 复用旧 draft 状态机位置未对齐 | P1 | ✅ 已修复 | 入口从 `generation_mode_select`/`draft_confirm` 改为 Outline 返修通过后的"重新生成准备阶段"。 |
+| P1-3 reviewer sentinel block 迁移路径未明确 | P1 | ✅ 已修复 | 明确本次统一改造所有 WorkspaceType 的 reviewer 输出与解析，旧 markdown fence 可降级解析一个版本。 |
+| P1-4 `batch_review` 流转未明确 | P1 | ✅ 已修复 | 通过后自动进入 `final_compile`；不通过后自动回到 `batch_confirm` 并展示 findings。 |
+| P1-5 `outline_context_index.json` 未明确 | P1 | ✅ 已修复 | 明确为必须实现项，给出 schema 与更新规则。 |
 
 ## 项目进度摸底
 
 - worktree：`.worktrees/feat-b-0616`
 - 分支状态：`feat-b-0616` 已关联 `origin/feat-b-0616`，工作区干净，`git fetch origin main` 后 `main...HEAD` 显示该分支领先 main 约 30+ 个 commit，全部与 WorkItemPlan 相关。
 - 分支内容：相对 `origin/main` 已包含 WorkItem 拆分、WorkItemPlan 对话式 Workspace、配置弹窗、分组删除、WorkItemPlan 流式进度与恢复等实现，覆盖后端 engine/store/WS、前端 store/page/component、集成测试。
-- 当前方案状态：v1.4 刚完成设计修订，尚未进入实现计划拆解；代码实现仍停留在旧"一次性生成完整 work items + 自动返修 loop"流程。
+- 当前方案状态：v1.4 已按本评审建议优化为 v1.4.1，核心协议与状态机缺口已补齐，可进入实现计划拆解；代码实现仍停留在旧"一次性生成完整 work items + 自动返修 loop"流程。
 
 ## 对照 v1.1 评审的修复状态
 
@@ -361,8 +375,9 @@ v1.4 提出完整的 artifact history index、6 种 artifact kind、5 种 diff t
 
 ## 整体建议
 
-1. **先修订方案再拆实现计划**：P0 的四个问题（generation_mode_select 返修消息、item 局部校验时序、自动降级串行、compile recovery 节点）必须在实现计划拆解前明确，否则各 WP 之间会出现协议断层。
-2. **优先补齐协议层文档**：P1-1 的 `WorkItemPlanReviewComplete` 代码层草案、P1-3 的 reviewer sentinel block 迁移路径、P1-4 的 batch_review 流转，都是后端与前端的共享契约，应尽早确定。
-3. **Artifact 历史与 Diff 独立成 WP**：避免与核心两阶段流程耦合，降低首批实现风险。
+1. **v1.4.1 可进入实现计划拆解**：P0 与 P1 缺口已在 v1.4.1 中补齐，协议层（节点类型、WS 消息、`ReviewComplete` 子结构、compile recovery）已具备拆 WP 条件。
+2. **优先实现协议层/枚举层扩展**：首个 WP 应首先扩展 `TimelineNodeType`、`ArtifactPayload`、`ReviewComplete` 子结构、`WsInMessage` 新消息，并补充对应单元测试；这是后续 Outline / Draft / Compile 业务 WP 的前置依赖。
+3. **Artifact 历史与 Diff 独立成 WP**：避免与核心两阶段流程耦合，降低首批实现风险。主流程 WP 只需保留足够元数据（`source_node_id`、`draft_id`、`batch_id`、`compile_id`）。
 4. **回归测试策略**：新增 WorkItemPlan 专属 node type 和 payload 时，必须确保 Story / Design / 普通 WorkItem Workspace 不受影响。建议在实现计划中为每个 WP 明确"共享链路回归测试"作为 DoD。
-5. **代码现状提示**：当前代码仍停留在旧一次性生成 + 自动返修 loop，新两阶段模型尚未落地。首个实现 WP 应首先做协议层/枚举层扩展（`TimelineNodeType`、`ArtifactPayload`、`ReviewComplete` 子结构、`WsInMessage` 新消息），再逐步实现 Outline / Draft / Compile 业务逻辑。
+5. **代码现状提示**：当前代码仍停留在旧一次性生成 + 自动返修 loop，新两阶段模型尚未落地。首个 WP 建议从协议层扩展与最小 Outline → Draft → Compile 端到端路径开始，避免一次性改造全部旧逻辑。
+6. **P2 问题可后续细化**：`parallel_scope_overlap` 定位规则、warning 类 finding 处理、reviewer `revise` 降级语义、Design spec heading 提取策略可在实现计划中逐步明确，不阻塞拆 WP。
