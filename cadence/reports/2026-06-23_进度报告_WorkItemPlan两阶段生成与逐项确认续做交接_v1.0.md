@@ -35,6 +35,43 @@
   - 继续实施 WP5，优先按 TDD 新增 `tests/it_web/web_work_item_plan_batch.rs`。
   - 先覆盖 Batch record、拓扑序队列、自动串行生成全部 draft，再继续 validation retry、batch decision 与整组 review。
 
+## Goal 模式退出前暂停记录
+
+- 记录时间：2026-06-23 00:48 CST
+- 当前 HEAD：`d608e5c docs(work-item-plan): update handoff pause point`
+- `git status --short --branch`：`## feat-b-0616...origin/feat-b-0616`
+- 工作区干净，本地分支与 `origin/feat-b-0616` 对齐。
+- 按用户指令已停止继续实施 WP5；本轮没有新增测试、没有修改业务代码、没有更新 WP5 plan checklist。
+- 已完成的恢复动作：
+  - 重新读取 worktree 内 `AGENTS.md`、`CLAUDE.md`。
+  - 重新读取 `.claude/rules/` 相关规则。
+  - 重新读取 `cadence/project-rules/README.md` 及已启用规则：
+    - `cadence/project-rules/build-test-commands.md`
+    - `cadence/project-rules/workspace-artifact-bug-triage.md`
+  - 执行 `git fetch origin feat-b-0616`，未发现需要合并的新远端提交。
+  - 复核 WP5 plan 与当前 Batch/Draft 相关代码结构。
+- 本轮确认的 WP5 当前代码状态：
+  - `select_work_item_generation_mode(Batch)` 仍只创建 `work_item_batch_run` 占位节点。
+  - `workspace_ws_handler.rs` 目前只在 Serial 模式选择后启动 `ProviderRunKind::WorkItemPlanDraft`，Batch 模式尚未启动 provider flow。
+  - `WorkItemBatchRecord`、`WorkItemBatchStatus`、`WorkItemDraftRecord.batch_id`、`next_batch_id`、batch/serial draft 语义校验等基础模型与 store helper 已存在。
+  - WS 协议已有 `TimelineNodeType::WorkItemBatchRun`，但仍缺 `work_item_batch_confirm`、`work_item_batch_review`、Batch payload 与 Batch decision message。
+  - Review parser 已支持 `WorkItemPlanReviewScope::Batch` 的结构化解析基础，但 active node 路由尚未识别 Batch review。
+- 明天继续的推荐入口：
+  1. 先确认 `git status --short --branch` 为干净。
+  2. 重新读取 worktree 内规则。
+  3. 从 WP5 TDD RED 开始，新增 `tests/it_web/web_work_item_plan_batch.rs` 并注册到 `tests/it_web.rs`。
+  4. 第一批失败测试建议覆盖：
+     - `batch_mode_creates_batch_record_for_current_round`
+     - `batch_queue_uses_outline_topological_order`
+     - `batch_generation_invokes_one_provider_run_per_outline`
+     - `batch_generation_does_not_enter_item_confirm`
+  5. 实现顺序建议：
+     - 新增 Batch payload / confirm / review node type。
+     - 选择 Batch 时创建 `WorkItemBatchRecord(status=generating)` 与 batch queue。
+     - handler 中接入 Batch provider loop，按拓扑序逐个调用单 item draft prompt。
+     - 再补 validation retry、batch decision、整组 review。
+  6. Task 6 `downgrade_to_serial` 与 WP6 strict validator 失败入口耦合，实施时先落基础 helper/协议入口；真实触发若依赖 WP6，应在 WP5 plan 中说明保留到 WP6 串联。
+
 ## 已完成内容
 
 已完成并推送 WP4：
