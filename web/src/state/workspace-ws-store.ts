@@ -1349,8 +1349,10 @@ function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
       continue;
     }
 
+    const latestProviderPrompt = latestProviderPromptEvent(detail.execution_events);
+    let renderedProviderPromptEntry = false;
     const prompt = detail.prompt?.trim();
-    if (prompt && !detail.execution_events.some(isProviderPromptEvent)) {
+    if (prompt && !latestProviderPrompt) {
       const provider = providerNameForNode(node, detail);
       entries.push({
         id: chatEntryId(node.node_id, "provider-prompt"),
@@ -1376,6 +1378,10 @@ function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
         content_size: prompt.length,
         has_full_content: true,
       });
+      renderedProviderPromptEntry = true;
+    } else if (!latestProviderPrompt && summary && summary.prompt_size > 0) {
+      entries.push(providerPromptSummaryEntry(node, summary, role));
+      renderedProviderPromptEntry = true;
     }
 
     const streamContent = textFromSources([
@@ -1395,7 +1401,6 @@ function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
       });
     }
 
-    const latestProviderPrompt = latestProviderPromptEvent(detail.execution_events);
     for (const event of detail.execution_events) {
       const timestamp = detail.started_at || node.started_at;
       const provider = providerNameForNode(node, detail, event);
@@ -1415,6 +1420,10 @@ function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
           content_size: event.output.length,
           has_full_content: true,
         });
+        renderedProviderPromptEntry = true;
+        continue;
+      }
+      if (isProviderPromptTitle(event) && renderedProviderPromptEntry) {
         continue;
       }
       entries.push({
@@ -1558,30 +1567,7 @@ function providerSummaryEntries(
   }
 
   if (summary.prompt_size > 0) {
-    entries.push({
-      id: chatEntryId(node.node_id, "provider-prompt-summary"),
-      type: "execution_event",
-      role,
-      content: `${providerPromptContent(node.title)} · ${formatContentSize(summary.prompt_size)}`,
-      timestamp,
-      node_id: node.node_id,
-      metadata: {
-        event_id: `${node.node_id}_prompt`,
-        node_id: node.node_id,
-        agent: provider,
-        kind: "output",
-        status: summary.status,
-        title: "Provider Prompt",
-        detail: "发送给 Workspace provider 的完整提示词",
-        command: null,
-        cwd: null,
-        exit_code: null,
-        ...(provider ? { provider } : {}),
-      },
-      content_ref: { kind: "provider_prompt", nodeId: node.node_id },
-      content_size: summary.prompt_size,
-      has_full_content: true,
-    });
+    entries.push(providerPromptSummaryEntry(node, summary, role));
   }
 
   if (summary.has_large_outputs || summary.execution_event_count > 0) {
@@ -1615,6 +1601,39 @@ function providerSummaryEntries(
   }
 
   return entries;
+}
+
+function providerPromptSummaryEntry(
+  node: TimelineNode,
+  summary: NodeDetailSummary,
+  role: ChatEntryRole,
+): ChatEntry {
+  const provider = summary.provider_name ?? node.agent ?? null;
+  const timestamp = summary.started_at || node.started_at;
+  return {
+    id: chatEntryId(node.node_id, "provider-prompt"),
+    type: "execution_event",
+    role,
+    content: `${providerPromptContent(node.title)} · ${formatContentSize(summary.prompt_size)}`,
+    timestamp,
+    node_id: node.node_id,
+    metadata: {
+      event_id: `${node.node_id}_prompt`,
+      node_id: node.node_id,
+      agent: provider,
+      kind: "output",
+      status: summary.status,
+      title: "Provider Prompt",
+      detail: "发送给 Workspace provider 的完整提示词",
+      command: null,
+      cwd: null,
+      exit_code: null,
+      ...(provider ? { provider } : {}),
+    },
+    content_ref: { kind: "provider_prompt", nodeId: node.node_id },
+    content_size: summary.prompt_size,
+    has_full_content: true,
+  };
 }
 
 function chatRoleForNode(
@@ -1748,6 +1767,10 @@ function isProviderPromptEvent(
   event: Pick<ExecutionEvent, "title" | "output">,
 ): event is Pick<ExecutionEvent, "title" | "output"> & { output: string } {
   return event.title === "Provider Prompt" && typeof event.output === "string";
+}
+
+function isProviderPromptTitle(event: Pick<ExecutionEvent, "title">) {
+  return event.title === "Provider Prompt";
 }
 
 function latestProviderPromptEvent(events: ExecutionEvent[]) {

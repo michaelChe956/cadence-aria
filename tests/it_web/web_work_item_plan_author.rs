@@ -22,21 +22,8 @@ use crate::web_work_item_generation::{
 
 static WS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-struct TestControlsGuard;
-
-impl Drop for TestControlsGuard {
-    fn drop(&mut self) {
-        unsafe {
-            std::env::remove_var("ARIA_E2E_TEST_CONTROLS");
-        }
-    }
-}
-
-fn enable_test_controls() -> TestControlsGuard {
-    unsafe {
-        std::env::set_var("ARIA_E2E_TEST_CONTROLS", "1");
-    }
-    TestControlsGuard
+async fn enable_test_controls() -> crate::TestControlsEnvGuard {
+    crate::enable_test_controls().await
 }
 
 async fn connect_ws(
@@ -366,7 +353,7 @@ async fn work_item_plan_author_completes_provider_node_before_author_confirm() {
 #[tokio::test]
 async fn outline_review_revise_requires_decision_before_next_outline_provider_run() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_controls = enable_test_controls();
+    let _test_controls = enable_test_controls().await;
     let (app, _repo, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
         valid_outline_output(),
         valid_outline_output(),

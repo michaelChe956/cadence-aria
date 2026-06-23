@@ -10,17 +10,11 @@ use cadence_aria::web::runtime::WebRuntime;
 use cadence_aria::web::state::WebAppState;
 use serde_json::{Value, json};
 use tempfile::tempdir;
-use tokio::sync::Mutex;
 use tower::ServiceExt;
-
-static ENV_LOCK: Mutex<()> = Mutex::const_new(());
 
 #[tokio::test]
 async fn test_control_routes_are_disabled_without_e2e_env() {
-    let _guard = ENV_LOCK.lock().await;
-    unsafe {
-        std::env::remove_var("ARIA_E2E_TEST_CONTROLS");
-    }
+    let _guard = crate::disable_test_controls().await;
     let root = tempdir().expect("root");
     let state = WebAppState::new(
         root.path().to_path_buf(),
@@ -41,10 +35,7 @@ async fn test_control_routes_are_disabled_without_e2e_env() {
 
 #[tokio::test]
 async fn test_control_routes_update_shared_state_when_enabled() {
-    let _guard = ENV_LOCK.lock().await;
-    unsafe {
-        std::env::set_var("ARIA_E2E_TEST_CONTROLS", "1");
-    }
+    let _guard = crate::enable_test_controls().await;
     let root = tempdir().expect("root");
     let state = WebAppState::new(
         root.path().to_path_buf(),
@@ -86,10 +77,6 @@ async fn test_control_routes_update_shared_state_when_enabled() {
     .await;
     assert_eq!(ws_timeout["status"], "ok");
     assert_eq!(controls.server_idle_timeout(), Duration::from_millis(750));
-
-    unsafe {
-        std::env::remove_var("ARIA_E2E_TEST_CONTROLS");
-    }
 }
 
 async fn request_json(app: axum::Router, method: Method, uri: &str, body: Value) -> Value {
@@ -119,10 +106,7 @@ async fn request_status(app: axum::Router, method: Method, uri: &str, body: Valu
 
 #[tokio::test]
 async fn coding_role_run_fixture_seed_route_creates_attempt_with_runs() {
-    let _guard = ENV_LOCK.lock().await;
-    unsafe {
-        std::env::set_var("ARIA_E2E_TEST_CONTROLS", "1");
-    }
+    let _guard = crate::enable_test_controls().await;
     let root = tempdir().expect("root");
     let state = WebAppState::new(
         root.path().to_path_buf(),
@@ -155,8 +139,4 @@ async fn coding_role_run_fixture_seed_route_creates_attempt_with_runs() {
         runs.iter()
             .any(|run| run.role == CodingProviderRole::Analyst)
     );
-
-    unsafe {
-        std::env::remove_var("ARIA_E2E_TEST_CONTROLS");
-    }
 }

@@ -31,21 +31,8 @@ static WS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 type WsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-struct TestControlsGuard;
-
-impl Drop for TestControlsGuard {
-    fn drop(&mut self) {
-        unsafe {
-            std::env::remove_var("ARIA_E2E_TEST_CONTROLS");
-        }
-    }
-}
-
-fn enable_test_controls() -> TestControlsGuard {
-    unsafe {
-        std::env::set_var("ARIA_E2E_TEST_CONTROLS", "1");
-    }
-    TestControlsGuard
+async fn enable_test_controls() -> crate::TestControlsEnvGuard {
+    crate::enable_test_controls().await
 }
 
 async fn connect_ws(app: axum::Router, session_id: &str) -> WsStream {
@@ -373,7 +360,7 @@ async fn story_design_work_item_plan_recovery_consistency() {
 #[tokio::test]
 async fn story_workspace_review_sentinel_fallback_still_passes() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, _repo, _prompts) =
         app_with_confirmed_story_and_design_and_streaming_outputs(vec![valid_outline_output()])
             .await;

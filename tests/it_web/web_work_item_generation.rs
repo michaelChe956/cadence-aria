@@ -253,6 +253,15 @@ pub(crate) fn invalid_outline_output_duplicate_ids() -> Value {
     output
 }
 
+pub(crate) fn malformed_outline_structured_stdout() -> String {
+    r#"Fake Work Item Plan streaming draft
+
+<ARIA_STRUCTURED_OUTPUT nonce="badjson1">
+{"outline":{"id":"outline_artifact_wip_0001","project_id":"project_0001","issue_id":"issue_0001","source_story_spec_ids":[],"source_design_spec_ids":[],"strategy_summary":"bad json","work_item_outlines":[{"outline_id":"outline_backend_session","title":"后端：会话 API","kind":"backend","goal":"实现后端会话 API","scope":[],"non_goals":[],"source_story_spec_ids":[],"source_design_spec_ids":[],"exclusive_write_scopes":["src/product/session.rs"],"forbidden_write_scopes":[],"depends_on":[],"verification_intent":[],"handoff_notes":"后续前端依赖 DTO"},"handoff_strategy":"wrongly nested top-level field","risks":[],"status":"draft"},"context_blockers":[]}
+</ARIA_STRUCTURED_OUTPUT nonce="badjson1">"#
+        .to_string()
+}
+
 pub(crate) fn valid_revision_redo_output() -> Value {
     json!({
         "repository_profile": {
@@ -355,20 +364,46 @@ pub(crate) fn invalid_split_output_missing_e2e() -> Value {
 
 #[derive(Clone)]
 pub(crate) struct QueuedSplitStreamingProvider {
-    outputs: Arc<Mutex<VecDeque<Value>>>,
+    outputs: Arc<Mutex<VecDeque<QueuedSplitOutput>>>,
     captured_prompts: Option<Arc<Mutex<Vec<String>>>>,
+}
+
+#[derive(Clone)]
+pub(crate) enum QueuedSplitOutput {
+    Json(Value),
+    RawStdout(String),
 }
 
 impl QueuedSplitStreamingProvider {
     pub(crate) fn new(outputs: Vec<Value>) -> Self {
         Self {
-            outputs: Arc::new(Mutex::new(VecDeque::from(outputs))),
+            outputs: Arc::new(Mutex::new(VecDeque::from(
+                outputs
+                    .into_iter()
+                    .map(QueuedSplitOutput::Json)
+                    .collect::<Vec<_>>(),
+            ))),
             captured_prompts: None,
         }
     }
 
     pub(crate) fn new_recording(
         outputs: Vec<Value>,
+        captured_prompts: Arc<Mutex<Vec<String>>>,
+    ) -> Self {
+        Self {
+            outputs: Arc::new(Mutex::new(VecDeque::from(
+                outputs
+                    .into_iter()
+                    .map(QueuedSplitOutput::Json)
+                    .collect::<Vec<_>>(),
+            ))),
+            captured_prompts: Some(captured_prompts),
+        }
+    }
+
+    pub(crate) fn new_raw_recording(
+        outputs: Vec<QueuedSplitOutput>,
         captured_prompts: Arc<Mutex<Vec<String>>>,
     ) -> Self {
         Self {
@@ -399,12 +434,17 @@ impl StreamingProviderAdapter for QueuedSplitStreamingProvider {
             .lock()
             .expect("queued split outputs lock")
             .pop_front()
-            .unwrap_or_else(valid_split_output);
-        let full_output = format!(
-            "Fake Work Item Plan streaming draft\n\n\
-             <ARIA_STRUCTURED_OUTPUT>{}</ARIA_STRUCTURED_OUTPUT>",
-            output
-        );
+            .unwrap_or_else(|| QueuedSplitOutput::Json(valid_split_output()));
+        let full_output = match output {
+            QueuedSplitOutput::Json(output) => {
+                format!(
+                    "Fake Work Item Plan streaming draft\n\n\
+                     <ARIA_STRUCTURED_OUTPUT>{}</ARIA_STRUCTURED_OUTPUT>",
+                    output
+                )
+            }
+            QueuedSplitOutput::RawStdout(output) => output,
+        };
         let (event_tx, event_rx) = mpsc::channel(8);
         let (command_tx, _command_rx) = mpsc::channel(8);
 
@@ -695,6 +735,58 @@ pub(crate) async fn app_with_confirmed_story_and_design_and_streaming_outputs(
     (app, root, captured_prompts)
 }
 
+pub(crate) async fn app_with_confirmed_story_and_design_and_streaming_raw_outputs(
+    outputs: Vec<QueuedSplitOutput>,
+) -> (axum::Router, tempfile::TempDir, Arc<Mutex<Vec<String>>>) {
+    let root = tempdir().expect("root");
+    let repo = root.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo dir");
+    let status = Command::new("git")
+        .args(["init"])
+        .current_dir(&repo)
+        .status()
+        .expect("git init");
+    assert!(status.success());
+
+    let runtime = WebRuntime::new_fake(root.path().to_path_buf());
+    let mut state = WebAppState::new(root.path().to_path_buf(), runtime).with_provider_adapter(
+        Arc::new(MockSplitProviderAdapter {
+            output: valid_split_output(),
+            revision_output: None,
+        }),
+    );
+
+    let captured_prompts = Arc::new(Mutex::new(Vec::new()));
+    let test_controls = cadence_aria::web::test_controls::TestControls::default();
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Fake,
+        Arc::new(QueuedSplitStreamingProvider::new_raw_recording(
+            outputs,
+            captured_prompts.clone(),
+        )),
+    );
+    registry.register(
+        ProviderName::Codex,
+        Arc::new(TestControlledFakeStreamingProvider::new(
+            test_controls.clone(),
+        )),
+    );
+    registry.register(
+        ProviderName::ClaudeCode,
+        Arc::new(TestControlledFakeStreamingProvider::new(
+            test_controls.clone(),
+        )),
+    );
+    state.test_controls = test_controls;
+    state.provider_registry = Arc::new(registry);
+
+    let app = build_web_router(state);
+    let app = bootstrap_project_repo_issue_and_specs(app, &repo).await;
+
+    (app, root, captured_prompts)
+}
+
 /// 与 `app_with_confirmed_story_and_design` 相同，但额外把 codex/claude_code 也注册为
 /// TestControlledFakeStreamingProvider，以便在 review 阶段通过 review fixture 注入固定 verdict。
 pub(crate) async fn app_with_confirmed_story_and_design_and_test_providers(
@@ -753,9 +845,7 @@ pub(crate) async fn app_with_confirmed_story_and_design_revision_and_test_provid
     output: Value,
     revision_output: Value,
 ) -> (axum::Router, tempfile::TempDir) {
-    unsafe {
-        std::env::set_var("ARIA_E2E_TEST_CONTROLS", "1");
-    }
+    let _test_controls_env = crate::enable_test_controls().await;
     let root = tempdir().expect("root");
     let repo = root.path().join("repo");
     std::fs::create_dir_all(&repo).expect("create repo dir");

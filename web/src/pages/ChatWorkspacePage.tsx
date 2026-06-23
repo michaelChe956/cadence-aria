@@ -440,11 +440,17 @@ export function ChatWorkspacePage({
               ) : null}
               <ChatInputBar
                 stage={stage}
+                activeNodeType={activeNode?.node_type ?? null}
+                workItemPlanArtifact={workItemPlanArtifact}
                 disabled={inputDisabled}
                 onSendContextNote={sendContextNote}
                 onStartGeneration={handleStartGeneration}
                 onSendHumanDecision={(content) => sendHumanConfirm("request-change", content)}
                 onAuthorDecision={handleAuthorDecision}
+                onSelectWorkItemGenerationMode={sendSelectWorkItemGenerationMode}
+                onRequestOutlineRevision={() => sendRequestOutlineRevision()}
+                onWorkItemDraftDecision={sendWorkItemDraftDecision}
+                onWorkItemBatchDecision={sendWorkItemBatchDecision}
                 onAbort={abort}
               />
             </div>

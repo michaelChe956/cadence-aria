@@ -918,6 +918,16 @@ fn build_outline_prompt_with_nonce(
     context_resolutions: &[OutlineContextBlockerResolution],
 ) -> (String, String) {
     let nonce = structured_output_nonce();
+    let revision_feedback_section = request
+        .revision_feedback
+        .as_deref()
+        .map(|feedback| {
+            format!(
+                "[revision_feedback]\n\
+                 Previous outline attempt failed; fix these issues in the regenerated outline:\n{feedback}\n\n"
+            )
+        })
+        .unwrap_or_default();
     let prompt = format!(
         "你是 Aria 的 WorkItemPlan Outline Planner。请基于以下输入生成第一阶段 WorkItemPlan Outline。\n\n\
          [issue]\n\
@@ -931,6 +941,7 @@ fn build_outline_prompt_with_nonce(
          [repository_structure_summary]\n{repository_structure}\n\n\
          [design_context_gaps]\n{design_context_gaps}\n\n\
          [context_blocker_resolutions]\n{context_resolutions}\n\n\
+         {revision_feedback_section}\
          [user_options]\n\
          include_integration_tests: {include_integration_tests}\n\
          include_e2e_tests: {include_e2e_tests}\n\
@@ -962,6 +973,7 @@ fn build_outline_prompt_with_nonce(
         repository_structure = repository_structure,
         design_context_gaps = format_string_list(design_context_gaps),
         context_resolutions = format_context_resolutions(context_resolutions),
+        revision_feedback_section = revision_feedback_section,
         include_integration_tests = request.include_integration_tests.unwrap_or(false),
         include_e2e_tests = request.include_e2e_tests.unwrap_or(false),
         force_frontend_backend_split = request.force_frontend_backend_split.unwrap_or(false),

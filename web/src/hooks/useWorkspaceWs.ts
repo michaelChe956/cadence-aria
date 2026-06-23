@@ -431,7 +431,7 @@ export function useWorkspaceWs(sessionId: string | null) {
             break;
           }
           store.appendChatEntry({
-            id: chatEntryId("execution_event", event.event_id),
+            id: executionEventChatEntryId(event),
             type: "execution_event",
             role: entryRoleForNode(store, event.node_id ?? null, "system"),
             content: executionEventContent(event, nodeTitleForEvent(store, event)),
@@ -990,6 +990,12 @@ function isProviderPromptEvent(
 function providerPromptChatEntryId(event: ExecutionEvent) {
   return event.node_id
     ? chatEntryId(event.node_id, "provider-prompt")
+    : chatEntryId("execution_event", event.event_id);
+}
+
+function executionEventChatEntryId(event: ExecutionEvent) {
+  return event.node_id
+    ? chatEntryId(event.node_id, `execution-${event.event_id}`)
     : chatEntryId("execution_event", event.event_id);
 }
 

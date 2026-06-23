@@ -28,21 +28,8 @@ static WS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 type WsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-struct TestControlsGuard;
-
-impl Drop for TestControlsGuard {
-    fn drop(&mut self) {
-        unsafe {
-            std::env::remove_var("ARIA_E2E_TEST_CONTROLS");
-        }
-    }
-}
-
-fn enable_test_controls() -> TestControlsGuard {
-    unsafe {
-        std::env::set_var("ARIA_E2E_TEST_CONTROLS", "1");
-    }
-    TestControlsGuard
+async fn enable_test_controls() -> crate::TestControlsEnvGuard {
+    crate::enable_test_controls().await
 }
 
 async fn connect_ws(app: axum::Router, session_id: &str) -> WsStream {
@@ -171,7 +158,7 @@ async fn prepare_plan_accept_outline_and_select_batch(
 #[tokio::test]
 async fn batch_accept_all_runs_final_compile_and_materializes_entities() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, root, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
         valid_outline_output(),
         valid_draft_output("outline_backend_session"),
@@ -324,7 +311,7 @@ async fn batch_accept_all_runs_final_compile_and_materializes_entities() {
 #[tokio::test]
 async fn strict_validator_item_failure_in_batch_returns_batch_confirm_without_real_writes() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, root, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
         valid_outline_output(),
         unsafe_backend_draft_output(),
@@ -444,7 +431,7 @@ async fn strict_validator_item_failure_in_batch_returns_batch_confirm_without_re
 #[tokio::test]
 async fn downgrade_to_serial_copies_unaffected_batch_drafts_and_revalidates() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, root, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
         valid_outline_output(),
         valid_draft_output("outline_backend_session"),
@@ -596,7 +583,7 @@ async fn downgrade_to_serial_copies_unaffected_batch_drafts_and_revalidates() {
 #[tokio::test]
 async fn recovery_abort_and_rollback_is_rejected_after_plan_commit_marker() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, root, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
         valid_outline_output(),
         valid_draft_output("outline_backend_session"),
@@ -734,7 +721,7 @@ async fn recovery_abort_and_rollback_is_rejected_after_plan_commit_marker() {
 #[tokio::test]
 async fn recovery_human_triage_keeps_transaction_for_manual_resolution() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, root, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
         valid_outline_output(),
         valid_draft_output("outline_backend_session"),
@@ -862,7 +849,7 @@ async fn recovery_human_triage_keeps_transaction_for_manual_resolution() {
 #[tokio::test]
 async fn compile_recovery_resumes_after_committed_marker() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, root, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
         valid_outline_output(),
         valid_draft_output("outline_backend_session"),
@@ -1008,7 +995,7 @@ async fn compile_recovery_resumes_after_committed_marker() {
 #[tokio::test]
 async fn recovery_abort_and_rollback_before_plan_commit_restores_previous_snapshot() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, root, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
         valid_outline_output(),
         valid_draft_output("outline_backend_session"),

@@ -18,21 +18,8 @@ static WS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 type WsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-struct TestControlsGuard;
-
-impl Drop for TestControlsGuard {
-    fn drop(&mut self) {
-        unsafe {
-            std::env::remove_var("ARIA_E2E_TEST_CONTROLS");
-        }
-    }
-}
-
-fn enable_test_controls() -> TestControlsGuard {
-    unsafe {
-        std::env::set_var("ARIA_E2E_TEST_CONTROLS", "1");
-    }
-    TestControlsGuard
+async fn enable_test_controls() -> crate::TestControlsEnvGuard {
+    crate::enable_test_controls().await
 }
 
 async fn connect_ws(app: axum::Router, session_id: &str) -> WsStream {
@@ -246,7 +233,7 @@ fn batch_review_plan_reopen() -> Value {
 #[tokio::test]
 async fn batch_mode_creates_batch_record_for_current_round() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, root, _prompts) =
         app_with_confirmed_story_and_design_and_streaming_outputs(vec![valid_outline_output()])
             .await;
@@ -285,7 +272,7 @@ async fn batch_mode_creates_batch_record_for_current_round() {
 #[tokio::test]
 async fn batch_generation_invokes_one_provider_run_per_outline() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, root, prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
         valid_outline_output(),
         valid_draft_output("outline_backend_session"),
@@ -399,7 +386,7 @@ async fn batch_generation_invokes_one_provider_run_per_outline() {
 #[tokio::test]
 async fn batch_local_validation_failure_retries_once() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, root, prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
         valid_outline_output(),
         invalid_draft_output_missing_scope("outline_backend_session"),
@@ -457,7 +444,7 @@ async fn batch_local_validation_failure_retries_once() {
 #[tokio::test]
 async fn batch_local_validation_second_failure_marks_validation_failed_and_continues() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, root, prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
         valid_outline_output(),
         invalid_draft_output_missing_scope("outline_backend_session"),
@@ -538,7 +525,7 @@ async fn batch_local_validation_second_failure_marks_validation_failed_and_conti
 #[tokio::test]
 async fn batch_confirm_accept_all_marks_all_valid_drafts_accepted() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, root, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
         valid_outline_output(),
         valid_draft_output("outline_backend_session"),
@@ -606,7 +593,7 @@ async fn batch_confirm_accept_all_marks_all_valid_drafts_accepted() {
 #[tokio::test]
 async fn batch_accept_enters_batch_review_when_reviewer_enabled() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, _root, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
         valid_outline_output(),
         valid_draft_output("outline_backend_session"),
@@ -660,7 +647,7 @@ async fn batch_accept_enters_batch_review_when_reviewer_enabled() {
 #[tokio::test]
 async fn batch_accept_skips_review_when_reviewer_disabled() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, root, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
         valid_outline_output(),
         valid_draft_output("outline_backend_session"),
@@ -717,7 +704,7 @@ async fn batch_accept_skips_review_when_reviewer_disabled() {
 #[tokio::test]
 async fn batch_review_revise_batch_returns_batch_confirm() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, _root, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
         valid_outline_output(),
         valid_draft_output("outline_backend_session"),
@@ -771,7 +758,7 @@ async fn batch_review_revise_batch_returns_batch_confirm() {
 #[tokio::test]
 async fn batch_review_plan_reopen_supersedes_drafts_and_sets_outline_revising() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, root, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
         valid_outline_output(),
         valid_draft_output("outline_backend_session"),
@@ -844,7 +831,7 @@ async fn batch_review_plan_reopen_supersedes_drafts_and_sets_outline_revising() 
 #[tokio::test]
 async fn batch_confirm_rewrite_batch_supersedes_current_batch_drafts() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, root, prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
         valid_outline_output(),
         valid_draft_output("outline_backend_session"),

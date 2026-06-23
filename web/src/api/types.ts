@@ -854,9 +854,11 @@ export type VerificationPlan = {
 export type WorkItemSplitFinding = {
   finding_id: string;
   level: string;
+  severity?: string;
   code?: string;
   message: string;
   affected_scopes: string[];
+  work_item_ids?: string[];
 };
 
 export type WorkItemSplitOptions = {
@@ -867,7 +869,7 @@ export type WorkItemSplitOptions = {
 };
 
 export type IssueWorkItemPlan = {
-  plan_id: string;
+  plan_id?: string;
   issue_id: string;
   status: string;
   options: WorkItemSplitOptions;
@@ -958,26 +960,41 @@ export type WorkItemPlanOutlineItem = {
   outline_id: string;
   title: string;
   kind: WorkItemKind | string;
+  goal?: string;
+  scope?: string[];
+  non_goals?: string[];
+  source_story_spec_ids?: string[];
+  source_design_spec_ids?: string[];
+  depends_on?: string[];
+  verification_intent?: string[];
+  handoff_notes?: string;
   sequence_hint?: number | null;
-  depends_on_outline_ids: string[];
+  depends_on_outline_ids?: string[];
   exclusive_write_scopes: string[];
   forbidden_write_scopes: string[];
-  context_budget: WorkItemContextBudget;
-  required_handoff_from_outline_ids: string[];
-  verification_strategy: string;
-  risk_notes: string[];
+  context_budget?: WorkItemContextBudget;
+  required_handoff_from_outline_ids?: string[];
+  verification_strategy?: string;
+  risk_notes?: string[];
 };
 
 export type WorkItemPlanOutline = {
   id: string;
+  project_id?: string;
+  issue_id?: string;
   plan_id: string;
+  source_story_spec_ids?: string[];
+  source_design_spec_ids?: string[];
   strategy_summary: string;
-  work_items: WorkItemPlanOutlineItem[];
+  work_items?: WorkItemPlanOutlineItem[];
+  work_item_outlines?: WorkItemPlanOutlineItem[];
   dependency_graph: WorkItemDependencyEdgeDto[];
   risks: string[];
-  handoff_plan: string[];
-  created_at: string;
-  updated_at: string;
+  handoff_plan?: string[];
+  handoff_strategy?: string;
+  status?: string;
+  created_at?: string;
+  updated_at?: string;
 };
 
 export type WorkItemPlanContextBlocker = {
@@ -1003,13 +1020,16 @@ export type WorkItemPlanContextBlockerPayload = {
 };
 
 export type WorkItemDraftVerificationCommand = {
+  id?: string;
   label?: string;
   command?: string;
+  description?: string;
   cwd?: string;
   purpose?: string;
   required?: boolean;
   timeout_seconds?: number;
   safety?: string;
+  expected_exit_code?: number;
 };
 
 export type WorkItemDraftVerificationManualCheck = {
@@ -1021,7 +1041,15 @@ export type WorkItemDraftVerificationManualCheck = {
 export type WorkItemDraftVerificationPlan = {
   commands: WorkItemDraftVerificationCommand[];
   manual_checks: WorkItemDraftVerificationManualCheck[];
-  required_gates: string[];
+  required_gates: Array<
+    | string
+    | {
+        gate_id?: string;
+        name?: string;
+        description?: string;
+        depends_on?: string[];
+      }
+  >;
   risk_notes: string[];
 };
 
@@ -1029,6 +1057,7 @@ export type WorkItemDraftCandidate = {
   outline_id: string;
   title: string;
   kind: WorkItemKind | string;
+  goal?: string;
   implementation_context: string;
   exclusive_write_scopes: string[];
   forbidden_write_scopes: string[];
@@ -1046,15 +1075,20 @@ export type WorkItemDraftStatus =
   | "copied";
 
 export type WorkItemDraftRecord = {
+  project_id?: string;
+  issue_id?: string;
   draft_id: string;
   plan_id: string;
   generation_round_id: string;
   outline_id: string;
   batch_id?: string | null;
+  attempt_index?: number;
+  outline_version_ref?: string;
+  generation_mode?: WorkItemGenerationMode | string;
   candidate: WorkItemDraftCandidate;
   status: WorkItemDraftStatus | string;
   active: boolean;
-  superseded: boolean;
+  superseded?: boolean;
   superseded_by_draft_id?: string | null;
   supersede_reason?: string | null;
   copied_from_draft_id?: string | null;

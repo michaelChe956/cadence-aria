@@ -999,6 +999,45 @@ describe("ChatWorkspacePage", () => {
     );
   });
 
+  it("generation mode node shows mode actions in chat controls instead of review actions", async () => {
+    const api = mockWorkspaceWs();
+    useWorkspaceStore.setState({
+      sessionId: "workspace_session_0001",
+      workspaceType: "work_item_plan",
+      stage: "author_confirm",
+      providers: { author: "claude_code", reviewer: "codex" },
+      activeNodeId: "node_mode",
+      selectedNodeId: "node_mode",
+      timelineNodes: [
+        timelineNode({
+          node_id: "node_mode",
+          node_type: "work_item_generation_mode",
+          stage: "author_confirm",
+          title: "选择生成模式",
+        }),
+      ],
+      workItemPlanArtifact: { type: "outline_candidate", payload: workItemPlanOutlinePayload() },
+    });
+
+    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+
+    expect(screen.getByRole("textbox")).toHaveAttribute(
+      "placeholder",
+      "请选择 Work Item 生成模式",
+    );
+    expect(screen.queryByRole("button", { name: "进入 Review" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "重新编写" })).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "逐个生成" }));
+    await userEvent.click(screen.getByRole("button", { name: "自动生成" }));
+    await userEvent.click(screen.getByRole("button", { name: "返回 Outline 返修" }));
+
+    expect(api.sendSelectWorkItemGenerationMode).toHaveBeenNthCalledWith(1, "serial");
+    expect(api.sendSelectWorkItemGenerationMode).toHaveBeenNthCalledWith(2, "batch");
+    expect(api.sendRequestOutlineRevision).toHaveBeenCalledWith();
+    expect(api.sendAuthorDecision).not.toHaveBeenCalled();
+  });
+
   it("outline confirm node shows accept and rewrite actions", async () => {
     const api = mockWorkspaceWs();
     useWorkspaceStore.setState({
@@ -1134,6 +1173,100 @@ describe("ChatWorkspacePage", () => {
       "outline_backend",
       "pause",
     );
+  });
+
+  it("draft confirm chat controls send work item draft decisions instead of author review decisions", async () => {
+    const api = mockWorkspaceWs();
+    useWorkspaceStore.setState({
+      sessionId: "workspace_session_0001",
+      workspaceType: "work_item_plan",
+      stage: "author_confirm",
+      providers: { author: "claude_code", reviewer: "codex" },
+      activeNodeId: "node_draft",
+      selectedNodeId: "node_draft",
+      timelineNodes: [
+        timelineNode({
+          node_id: "node_draft",
+          node_type: "work_item_draft_confirm",
+          stage: "author_confirm",
+          title: "确认 Draft",
+        }),
+      ],
+      workItemPlanArtifact: { type: "draft_candidate", payload: workItemDraftPayload() },
+    });
+
+    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+
+    expect(screen.getByRole("textbox")).toHaveAttribute(
+      "placeholder",
+      "请确认当前 Work Item Draft",
+    );
+    expect(screen.queryByRole("button", { name: "进入 Review" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "重新编写" })).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "接受" }));
+    await userEvent.click(screen.getByRole("button", { name: "重写" }));
+    await userEvent.click(screen.getByRole("button", { name: "暂停" }));
+
+    expect(api.sendWorkItemDraftDecision).toHaveBeenNthCalledWith(
+      1,
+      "outline_backend",
+      "accept",
+    );
+    expect(api.sendWorkItemDraftDecision).toHaveBeenNthCalledWith(
+      2,
+      "outline_backend",
+      "rewrite",
+    );
+    expect(api.sendWorkItemDraftDecision).toHaveBeenNthCalledWith(
+      3,
+      "outline_backend",
+      "pause",
+    );
+    expect(api.sendAuthorDecision).not.toHaveBeenCalled();
+  });
+
+  it("invalid draft chat controls hide accept and do not expose review actions", async () => {
+    const api = mockWorkspaceWs();
+    useWorkspaceStore.setState({
+      sessionId: "workspace_session_0001",
+      workspaceType: "work_item_plan",
+      stage: "author_confirm",
+      providers: { author: "claude_code", reviewer: "codex" },
+      activeNodeId: "node_draft",
+      selectedNodeId: "node_draft",
+      timelineNodes: [
+        timelineNode({
+          node_id: "node_draft",
+          node_type: "work_item_draft_confirm",
+          stage: "author_confirm",
+          title: "确认 Draft",
+        }),
+      ],
+      workItemPlanArtifact: {
+        type: "draft_candidate",
+        payload: { ...workItemDraftPayload(), can_accept: false },
+      },
+    });
+
+    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+
+    expect(screen.queryByRole("button", { name: "接受" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "进入 Review" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "重写" }));
+    await userEvent.click(screen.getByRole("button", { name: "暂停" }));
+
+    expect(api.sendWorkItemDraftDecision).toHaveBeenNthCalledWith(
+      1,
+      "outline_backend",
+      "rewrite",
+    );
+    expect(api.sendWorkItemDraftDecision).toHaveBeenNthCalledWith(
+      2,
+      "outline_backend",
+      "pause",
+    );
+    expect(api.sendAuthorDecision).not.toHaveBeenCalled();
   });
 
   it("renders batch queue and review findings", async () => {

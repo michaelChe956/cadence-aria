@@ -441,17 +441,17 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                 == Some(crate::web::workspace_ws_types::TimelineNodeType::WorkItemPlanOutlineRun)
             && engine.active_run_id().is_none()
     };
-    if should_resume_outline_run && state.workspace_runs.run(&session_id).await.is_none() {
-        if let Err(message) = spawn_provider_run_from_handler(
+    if should_resume_outline_run
+        && state.workspace_runs.run(&session_id).await.is_none()
+        && let Err(message) = spawn_provider_run_from_handler(
             run_context.clone(),
             ProviderRunKind::WorkItemPlanAuthor,
             outbound_tx.clone(),
         )
         .await
-        {
-            let err = WsOutMessage::Error { message };
-            let _ = send_json_outbound(&outbound_tx, &err).await;
-        }
+    {
+        let err = WsOutMessage::Error { message };
+        let _ = send_json_outbound(&outbound_tx, &err).await;
     }
 
     while let Some(Ok(msg)) = ws_receiver.next().await {
@@ -1785,6 +1785,32 @@ fn parse_work_item_split_structured_output(full_output: &str) -> Result<serde_js
         })
 }
 
+async fn complete_work_item_plan_outline_author_from_output(
+    engine: &mut WorkspaceEngine,
+    full_output: &str,
+) -> Result<WorkItemPlanAuthorOutcome, String> {
+    let structured_output = match parse_work_item_split_structured_output(full_output) {
+        Ok(output) => output,
+        Err(message) => {
+            return engine
+                .complete_work_item_plan_outline_author_output_error(
+                    "outline_structured_output_parse_error",
+                    message,
+                )
+                .await;
+        }
+    };
+    let output = match parse_work_item_plan_outline_output(structured_output) {
+        Ok(output) => output,
+        Err(error) => {
+            return engine
+                .complete_work_item_plan_outline_author_output_error(error.code, error.message)
+                .await;
+        }
+    };
+    engine.complete_work_item_plan_outline_author(output).await
+}
+
 fn work_item_plan_findings_feedback(
     findings: &[crate::product::models::WorkItemSplitFinding],
 ) -> String {
@@ -2099,34 +2125,11 @@ async fn spawn_provider_run_from_handler(
                         return;
                     }
                 };
-                let structured_output = match parse_work_item_split_structured_output(&full_output)
-                {
-                    Ok(output) => output,
-                    Err(message) => {
-                        let message = format!("split generate failed: {message}");
-                        engine
-                            .finish_active_run_with_failed_node(message.clone())
-                            .await;
-                        drop(engine);
-                        let err = WsOutMessage::Error { message };
-                        let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
-                        return;
-                    }
-                };
-                let output = match parse_work_item_plan_outline_output(structured_output) {
-                    Ok(output) => output,
-                    Err(error) => {
-                        let message = format!("outline generate failed: {}", error.message);
-                        engine
-                            .finish_active_run_with_failed_node(message.clone())
-                            .await;
-                        drop(engine);
-                        let err = WsOutMessage::Error { message };
-                        let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
-                        return;
-                    }
-                };
-                let mut outcome = match engine.complete_work_item_plan_outline_author(output).await
+                let mut outcome = match complete_work_item_plan_outline_author_from_output(
+                    &mut engine,
+                    &full_output,
+                )
+                .await
                 {
                     Ok(o) => o,
                     Err(message) => {
@@ -2253,54 +2256,23 @@ async fn spawn_provider_run_from_handler(
                                     return;
                                 }
                             };
-                            let structured_output =
-                                match parse_work_item_split_structured_output(&full_output) {
-                                    Ok(output) => output,
-                                    Err(message) => {
-                                        let message =
-                                            format!("outline generate_revision failed: {message}");
-                                        engine
-                                            .finish_active_run_with_failed_node(message.clone())
-                                            .await;
-                                        drop(engine);
-                                        let err = WsOutMessage::Error { message };
-                                        let _ =
-                                            send_json_outbound(&outbound_tx_for_task, &err).await;
-                                        return;
-                                    }
-                                };
-                            let output =
-                                match parse_work_item_plan_outline_output(structured_output) {
-                                    Ok(o) => o,
-                                    Err(error) => {
-                                        let message = format!(
-                                            "outline generate_revision failed: {}",
-                                            error.message
-                                        );
-                                        engine
-                                            .finish_active_run_with_failed_node(message.clone())
-                                            .await;
-                                        drop(engine);
-                                        let err = WsOutMessage::Error { message };
-                                        let _ =
-                                            send_json_outbound(&outbound_tx_for_task, &err).await;
-                                        return;
-                                    }
-                                };
-                            outcome =
-                                match engine.complete_work_item_plan_outline_author(output).await {
-                                    Ok(o) => o,
-                                    Err(message) => {
-                                        engine
-                                            .finish_active_run_with_failed_node(message.clone())
-                                            .await;
-                                        drop(engine);
-                                        let err = WsOutMessage::Error { message };
-                                        let _ =
-                                            send_json_outbound(&outbound_tx_for_task, &err).await;
-                                        return;
-                                    }
-                                };
+                            outcome = match complete_work_item_plan_outline_author_from_output(
+                                &mut engine,
+                                &full_output,
+                            )
+                            .await
+                            {
+                                Ok(o) => o,
+                                Err(message) => {
+                                    engine
+                                        .finish_active_run_with_failed_node(message.clone())
+                                        .await;
+                                    drop(engine);
+                                    let err = WsOutMessage::Error { message };
+                                    let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                                    return;
+                                }
+                            };
                         }
                     }
                 }
@@ -3058,68 +3030,68 @@ async fn drive_current_work_item_plan_outline_run(
     session_record: &WorkspaceSessionRecord,
 ) -> Result<WorkItemPlanAuthorOutcome, String> {
     let lifecycle = LifecycleStore::new(app_paths.clone());
-    let request = build_work_item_plan_generate_request(engine, &lifecycle)
+    let mut request = build_work_item_plan_generate_request(engine, &lifecycle)
         .map_err(|error| format!("build request failed: {error}"))?;
     let repository = workspace_repository_for_session(app_paths, &lifecycle, session_record)
         .map_err(|error| format!("load repository failed: {error}"))?;
     let issue = IssueStore::new(app_paths.clone())
         .get(&session_record.project_id, &session_record.issue_id)
         .map_err(|error| format!("load issue failed: {error}"))?;
-    let author_provider = engine.session().author_provider.clone();
-    let context_resolutions = load_work_item_plan_outline_context_resolutions(
-        app_paths,
-        session_record,
-        &request,
-        &lifecycle,
-        &issue,
-    )?;
-    let invocation = WorkItemSplitEngine::build_outline_invocation(
-        &request,
-        &lifecycle,
-        &issue,
-        &repository,
-        author_provider,
-        &context_resolutions,
-    )
-    .map_err(|error| format!("split generate failed: {}", error.message))?;
-    let node_id = engine
-        .active_timeline_node_id()
-        .ok_or_else(|| "work item plan outline run node unavailable".to_string())?;
-    let provider_input = engine.build_work_item_plan_streaming_input(
-        invocation.provider_type.clone(),
-        invocation.prompt.clone(),
-        invocation.worktree_path.clone(),
-    );
-    let provider_session = provider.start(provider_input, run_cancel).await;
-    let full_output = engine
-        .drive_work_item_plan_provider_session_to_output(
-            provider_session,
-            command_rx,
-            node_id,
-            invocation.author_provider.clone(),
+
+    let mut revision_iterations = 0;
+    loop {
+        let author_provider = engine.session().author_provider.clone();
+        let context_resolutions = load_work_item_plan_outline_context_resolutions(
+            app_paths,
+            session_record,
+            &request,
+            &lifecycle,
+            &issue,
+        )?;
+        let invocation = WorkItemSplitEngine::build_outline_invocation(
+            &request,
+            &lifecycle,
+            &issue,
+            &repository,
+            author_provider,
+            &context_resolutions,
         )
-        .await?;
-    let structured_output = match parse_work_item_split_structured_output(&full_output) {
-        Ok(output) => output,
-        Err(message) => {
-            let message = format!("split generate failed: {message}");
-            engine
-                .finish_active_run_with_failed_node(message.clone())
-                .await;
-            return Err(message);
+        .map_err(|error| format!("split generate failed: {}", error.message))?;
+        let node_id = engine
+            .active_timeline_node_id()
+            .ok_or_else(|| "work item plan outline run node unavailable".to_string())?;
+        let provider_input = engine.build_work_item_plan_streaming_input(
+            invocation.provider_type.clone(),
+            invocation.prompt.clone(),
+            invocation.worktree_path.clone(),
+        );
+        let provider_session = provider.start(provider_input, run_cancel.clone()).await;
+        let full_output = engine
+            .drive_work_item_plan_provider_session_to_output(
+                provider_session,
+                command_rx,
+                node_id,
+                invocation.author_provider.clone(),
+            )
+            .await?;
+        let outcome =
+            complete_work_item_plan_outline_author_from_output(engine, &full_output).await?;
+
+        match outcome {
+            WorkItemPlanAuthorOutcome::AuthorConfirm
+            | WorkItemPlanAuthorOutcome::HumanConfirm { .. } => return Ok(outcome),
+            WorkItemPlanAuthorOutcome::AutoRevision { findings } => {
+                revision_iterations += 1;
+                if revision_iterations > 5 {
+                    return Err(
+                        "work item plan outline author revision exceeded hard limit".to_string()
+                    );
+                }
+                request.revision_feedback = Some(work_item_plan_findings_feedback(&findings));
+                engine.begin_work_item_plan_outline_run().await;
+            }
         }
-    };
-    let output = match parse_work_item_plan_outline_output(structured_output) {
-        Ok(output) => output,
-        Err(error) => {
-            let message = format!("outline generate failed: {}", error.message);
-            engine
-                .finish_active_run_with_failed_node(message.clone())
-                .await;
-            return Err(message);
-        }
-    };
-    engine.complete_work_item_plan_outline_author(output).await
+    }
 }
 
 fn map_revision_path(

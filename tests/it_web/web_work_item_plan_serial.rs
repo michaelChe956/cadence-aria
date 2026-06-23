@@ -21,21 +21,8 @@ static WS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 type WsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-struct TestControlsGuard;
-
-impl Drop for TestControlsGuard {
-    fn drop(&mut self) {
-        unsafe {
-            std::env::remove_var("ARIA_E2E_TEST_CONTROLS");
-        }
-    }
-}
-
-fn enable_test_controls() -> TestControlsGuard {
-    unsafe {
-        std::env::set_var("ARIA_E2E_TEST_CONTROLS", "1");
-    }
-    TestControlsGuard
+async fn enable_test_controls() -> crate::TestControlsEnvGuard {
+    crate::enable_test_controls().await
 }
 
 async fn connect_ws(app: axum::Router, session_id: &str) -> WsStream {
@@ -254,7 +241,7 @@ fn item_review_plan_reopen(outline_id: &str, draft_id: &str) -> Value {
 #[tokio::test]
 async fn serial_mode_starts_first_outline_by_topological_order() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, root, _prompts) =
         app_with_confirmed_story_and_design_and_streaming_outputs(vec![valid_outline_output()])
             .await;
@@ -291,7 +278,7 @@ async fn serial_mode_starts_first_outline_by_topological_order() {
 #[tokio::test]
 async fn serial_item_run_writes_draft_record_not_real_work_item() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, root, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
         valid_outline_output(),
         valid_draft_output("outline_backend_session"),
@@ -355,7 +342,7 @@ async fn serial_item_run_writes_draft_record_not_real_work_item() {
 #[tokio::test]
 async fn local_validation_success_enters_draft_confirm_with_accept() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, _root, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
         valid_outline_output(),
         valid_draft_output("outline_backend_session"),
@@ -390,7 +377,7 @@ async fn local_validation_success_enters_draft_confirm_with_accept() {
 #[tokio::test]
 async fn local_validation_failure_enters_draft_confirm_without_accept() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, root, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
         valid_outline_output(),
         invalid_draft_output_missing_scope("outline_backend_session"),
@@ -468,7 +455,7 @@ async fn local_validation_failure_enters_draft_confirm_without_accept() {
 #[tokio::test]
 async fn accepted_draft_enters_item_review_when_reviewer_enabled() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, root, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
         valid_outline_output(),
         valid_draft_output("outline_backend_session"),
@@ -540,9 +527,59 @@ async fn accepted_draft_enters_item_review_when_reviewer_enabled() {
 }
 
 #[tokio::test]
+async fn author_decision_is_rejected_on_draft_confirm_node() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let _test_guard = enable_test_controls().await;
+    let (app, _root, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
+        valid_outline_output(),
+        valid_draft_output("outline_backend_session"),
+    ])
+    .await;
+    let (_session_id, _plan_id, mut ws) =
+        prepare_plan_accept_outline_and_select_serial_with_reviewer(&app, true).await;
+
+    let _messages = recv_ws_until(&mut ws, Duration::from_secs(10), |messages| {
+        messages.iter().any(|message| {
+            message["type"] == "timeline_node_created"
+                && message["node"]["node_type"] == "work_item_draft_confirm"
+        })
+    })
+    .await;
+
+    ws.send(Message::Text(
+        json!({ "type": "author_decision", "decision": "accept" })
+            .to_string()
+            .into(),
+    ))
+    .await
+    .expect("send invalid author decision");
+
+    let messages = recv_ws_until(&mut ws, Duration::from_secs(5), |messages| {
+        messages
+            .iter()
+            .any(|message| message["type"] == "protocol_error")
+    })
+    .await;
+    let protocol_error = messages
+        .iter()
+        .find(|message| message["type"] == "protocol_error")
+        .expect("protocol error");
+    assert_eq!(protocol_error["code"], "INVALID_AUTHOR_DECISION");
+    assert!(
+        !messages.iter().any(|message| {
+            message["type"] == "timeline_node_created"
+                && message["node"]["node_type"] == "reviewer_run"
+        }),
+        "generic reviewer_run must not be created from draft confirm: {messages:?}"
+    );
+
+    ws.close(None).await.ok();
+}
+
+#[tokio::test]
 async fn item_review_pass_starts_next_outline() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, root, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
         valid_outline_output(),
         valid_draft_output("outline_backend_session"),
@@ -611,7 +648,7 @@ async fn item_review_pass_starts_next_outline() {
 #[tokio::test]
 async fn item_review_revise_rewrites_only_current_item() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, root, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
         valid_outline_output(),
         valid_draft_output("outline_backend_session"),
@@ -683,7 +720,7 @@ async fn item_review_revise_rewrites_only_current_item() {
 #[tokio::test]
 async fn item_review_plan_reopen_marks_outline_revising() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, root, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
         valid_outline_output(),
         valid_draft_output("outline_backend_session"),
@@ -754,7 +791,7 @@ async fn item_review_plan_reopen_marks_outline_revising() {
 #[tokio::test]
 async fn plan_reopen_required_supersedes_drafts_and_reopens_outline() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, root, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
         valid_outline_output(),
         valid_draft_output("outline_backend_session"),
@@ -926,7 +963,7 @@ async fn plan_reopen_required_supersedes_drafts_and_reopens_outline() {
 #[tokio::test]
 async fn item_review_revise_affecting_previous_item_downgrades_to_needs_human() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, root, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
         valid_outline_output(),
         valid_draft_output("outline_backend_session"),
@@ -1033,7 +1070,7 @@ async fn item_review_revise_affecting_previous_item_downgrades_to_needs_human() 
 #[tokio::test]
 async fn draft_accept_marks_record_accepted() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, root, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
         valid_outline_output(),
         valid_draft_output("outline_backend_session"),
@@ -1088,7 +1125,7 @@ async fn draft_accept_marks_record_accepted() {
 #[tokio::test]
 async fn draft_rewrite_supersedes_old_draft_and_regenerates_current_outline() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, root, prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
         valid_outline_output(),
         valid_draft_output("outline_backend_session"),
@@ -1185,7 +1222,7 @@ async fn draft_rewrite_supersedes_old_draft_and_regenerates_current_outline() {
 #[tokio::test]
 async fn draft_pause_enters_human_confirm_without_regenerating() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, root, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
         valid_outline_output(),
         valid_draft_output("outline_backend_session"),

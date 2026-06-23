@@ -12,21 +12,8 @@ use crate::web_work_item_generation::{
 
 static WS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-struct TestControlsGuard;
-
-impl Drop for TestControlsGuard {
-    fn drop(&mut self) {
-        unsafe {
-            std::env::remove_var("ARIA_E2E_TEST_CONTROLS");
-        }
-    }
-}
-
-fn enable_test_controls() -> TestControlsGuard {
-    unsafe {
-        std::env::set_var("ARIA_E2E_TEST_CONTROLS", "1");
-    }
-    TestControlsGuard
+async fn enable_test_controls() -> crate::TestControlsEnvGuard {
+    crate::enable_test_controls().await
 }
 
 async fn connect_ws(
@@ -168,7 +155,7 @@ async fn enable_revise_review_fixture(app: &axum::Router, session_id: &str) {
 #[ignore = "legacy full-candidate review flow is superseded by WP2 outline generation; WP3 outline review will replace this coverage"]
 async fn review_returns_verdict_for_whole_candidate() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
 
     let (app, _repo) =
         app_with_confirmed_story_and_design_and_test_providers(valid_split_output()).await;
@@ -232,7 +219,7 @@ async fn review_returns_verdict_for_whole_candidate() {
 #[ignore = "legacy full-candidate review flow is superseded by WP2 outline generation; WP3 outline review will replace this coverage"]
 async fn work_item_plan_review_returns_decision_response() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
 
     // human_intervene 路径：进入人工确认
     {

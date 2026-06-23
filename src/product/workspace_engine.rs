@@ -565,9 +565,23 @@ fn build_session_state_node_detail(mut detail: NodeDetail) -> NodeDetail {
     if detail.streaming_content.chars().count() > SUMMARY_PREVIEW_CHARS {
         detail.streaming_content = preview(&detail.streaming_content);
     }
-    detail.execution_events.clear();
+    detail.execution_events = session_state_execution_event_summaries(detail.execution_events);
     detail.permission_events.clear();
     detail
+}
+
+fn session_state_execution_event_summaries(
+    events: Vec<serde_json::Value>,
+) -> Vec<serde_json::Value> {
+    events
+        .into_iter()
+        .map(|mut event| {
+            if let Some(object) = event.as_object_mut() {
+                object.insert("output".to_string(), serde_json::Value::Null);
+            }
+            event
+        })
+        .collect()
 }
 
 fn build_artifact_version_summary(version: &ArtifactVersion) -> ArtifactVersionSummary {
@@ -5153,6 +5167,10 @@ impl WorkspaceEngine {
                                 node_id.clone(),
                             )
                             .await;
+                            if full_output.is_empty() {
+                                self.finish_empty_assistant_output().await;
+                                return;
+                            }
                             self.complete_review(full_output).await;
                             return;
                         }
@@ -5544,6 +5562,24 @@ impl WorkspaceEngine {
                 Some(TimelineNodeType::WorkItemGenerationMode) => {
                     return Err(
                         "author_decision is not valid on work_item_generation_mode node"
+                            .to_string(),
+                    );
+                }
+                Some(TimelineNodeType::WorkItemDraftConfirm) => {
+                    return Err(
+                        "author_decision is not valid on work_item_draft_confirm node; use work_item_draft_decision"
+                            .to_string(),
+                    );
+                }
+                Some(TimelineNodeType::WorkItemBatchConfirm) => {
+                    return Err(
+                        "author_decision is not valid on work_item_batch_confirm node; use work_item_batch_decision"
+                            .to_string(),
+                    );
+                }
+                Some(TimelineNodeType::WorkItemPlanCompileRecovery) => {
+                    return Err(
+                        "author_decision is not valid on work_item_plan_compile_recovery node; use work_item_plan_compile_recovery_action"
                             .to_string(),
                     );
                 }
@@ -7256,6 +7292,55 @@ impl WorkspaceEngine {
         .await;
         self.work_item_plan_author_retry_count = 0;
         Ok(WorkItemPlanAuthorOutcome::AuthorConfirm)
+    }
+
+    pub async fn complete_work_item_plan_outline_author_output_error(
+        &mut self,
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Result<WorkItemPlanAuthorOutcome, String> {
+        let code = code.into();
+        let message = message.into();
+        let findings = vec![WorkItemSplitFinding {
+            severity: WorkItemSplitFindingSeverity::Error,
+            code,
+            message: format!(
+                "Provider did not return a valid WorkItemPlan Outline structured output: {message}"
+            ),
+            work_item_ids: Vec::new(),
+        }];
+        let design_context_gaps = self.current_work_item_plan_design_context_gaps();
+
+        self.work_item_plan_author_retry_count += 1;
+        self.complete_active_node(Some(work_item_plan_findings_summary(
+            "WorkItemPlan Outline 结构化输出解析失败",
+            &findings,
+        )))
+        .await;
+
+        if self.work_item_plan_author_retry_count >= 2 {
+            let payload = ArtifactPayload::WorkItemPlanContextBlocker {
+                context_blocker: Box::new(WorkItemPlanContextBlockerPayload {
+                    context_blockers: Vec::new(),
+                    design_context_gaps,
+                    exploration_summary: work_item_plan_findings_summary(
+                        "Outline 自动重跑后仍无法解析 provider 输出",
+                        &findings,
+                    ),
+                    allowed_actions: vec!["provide_context".to_string(), "abort".to_string()],
+                }),
+            };
+            self.update_artifact(payload).await;
+            self.enter_work_item_plan_context_blocker(Some(
+                "Outline 结构化输出解析失败，请补充上下文或终止".to_string(),
+            ))
+            .await;
+            return Ok(WorkItemPlanAuthorOutcome::HumanConfirm {
+                reason: "outline_output_parse_failed".to_string(),
+            });
+        }
+
+        Ok(WorkItemPlanAuthorOutcome::AutoRevision { findings })
     }
 
     fn current_work_item_plan_design_context_gaps(&self) -> Vec<String> {
@@ -12725,7 +12810,17 @@ mod tests {
             prompt: Some(huge_prompt.clone()),
             messages: vec![],
             streaming_content: huge_stream.clone(),
-            execution_events: vec![serde_json::json!({"output": huge_output})],
+            execution_events: vec![serde_json::json!({
+                "event_id": "call_read",
+                "kind": "command",
+                "status": "completed",
+                "title": "Command completed",
+                "detail": "exit code 0",
+                "command": "sed -n '1,120p' src/lib.rs",
+                "cwd": "/repo",
+                "output": huge_output,
+                "exit_code": 0
+            })],
             permission_events: vec![PermissionEvent {
                 request_id: "perm-1".to_string(),
                 request: serde_json::json!({"tool": "shell"}),
@@ -12768,7 +12863,24 @@ mod tests {
                 assert!(inline_detail.messages.is_empty());
                 assert!(inline_detail.streaming_content.chars().count() <= SUMMARY_PREVIEW_CHARS);
                 assert_ne!(inline_detail.streaming_content, huge_stream);
-                assert!(inline_detail.execution_events.is_empty());
+                assert_eq!(inline_detail.execution_events.len(), 1);
+                assert_eq!(
+                    inline_detail.execution_events[0]
+                        .get("event_id")
+                        .and_then(serde_json::Value::as_str),
+                    Some("call_read")
+                );
+                assert_eq!(
+                    inline_detail.execution_events[0]
+                        .get("command")
+                        .and_then(serde_json::Value::as_str),
+                    Some("sed -n '1,120p' src/lib.rs")
+                );
+                assert!(
+                    inline_detail.execution_events[0]
+                        .get("output")
+                        .is_some_and(serde_json::Value::is_null)
+                );
                 assert!(inline_detail.permission_events.is_empty());
                 assert_eq!(inline_detail.artifact_ref.as_ref().unwrap().version, 2);
 
@@ -12803,6 +12915,7 @@ mod tests {
         }
         assert!(!serialized.contains(&huge_prompt));
         assert!(!serialized.contains(&huge_stream));
+        assert!(!serialized.contains(&huge_output));
         assert!(!serialized.contains(&artifact_markdown));
     }
 
@@ -14255,6 +14368,58 @@ mod tests {
             }
         }
         assert!(saw_error);
+    }
+
+    #[tokio::test]
+    async fn reviewer_empty_provider_output_marks_review_node_failed_without_human_confirm() {
+        let (_tmp, store) = setup();
+        let (tx, mut rx) = mpsc::channel(64);
+        let session = make_session("sess_empty_review_output");
+        let mut engine = WorkspaceEngine::new(store, tx, session);
+        let node_id = create_reviewer_run_node(&mut engine).await;
+
+        engine
+            .drive_reviewer_provider_session(
+                Ok(text_choice_provider_session("")),
+                empty_provider_commands(),
+                ProviderName::Codex,
+            )
+            .await;
+
+        let review_node = engine
+            .timeline_nodes
+            .iter()
+            .find(|node| node.node_id == node_id)
+            .expect("review node");
+        assert_eq!(review_node.status, TimelineNodeStatus::Failed);
+        assert_eq!(
+            review_node.summary.as_deref(),
+            Some("Provider 未返回助手内容")
+        );
+        assert_eq!(engine.session().stage, WorkspaceStage::PrepareContext);
+        assert!(
+            !engine
+                .timeline_nodes
+                .iter()
+                .any(|node| node.node_type == TimelineNodeType::HumanConfirm),
+            "empty reviewer output must not create a human confirm node"
+        );
+
+        let events = drain_engine_events(&mut rx);
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                EngineEvent::Error { message }
+                    if message == "Provider completed without assistant output"
+            )),
+            "empty reviewer output should emit an explicit provider error"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, EngineEvent::ReviewComplete { .. })),
+            "empty reviewer output must not be converted into a review verdict"
+        );
     }
 
     #[tokio::test]

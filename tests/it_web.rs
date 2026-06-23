@@ -1,4 +1,34 @@
 //! 集成测试入口：web 域。各子模块原为独立 tests/*.rs，合并以减少二进制数量。
+static TEST_CONTROLS_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+pub(crate) struct TestControlsEnvGuard {
+    _guard: tokio::sync::MutexGuard<'static, ()>,
+}
+
+impl Drop for TestControlsEnvGuard {
+    fn drop(&mut self) {
+        unsafe {
+            std::env::remove_var("ARIA_E2E_TEST_CONTROLS");
+        }
+    }
+}
+
+pub(crate) async fn enable_test_controls() -> TestControlsEnvGuard {
+    let guard = TEST_CONTROLS_ENV_LOCK.lock().await;
+    unsafe {
+        std::env::set_var("ARIA_E2E_TEST_CONTROLS", "1");
+    }
+    TestControlsEnvGuard { _guard: guard }
+}
+
+pub(crate) async fn disable_test_controls() -> tokio::sync::MutexGuard<'static, ()> {
+    let guard = TEST_CONTROLS_ENV_LOCK.lock().await;
+    unsafe {
+        std::env::remove_var("ARIA_E2E_TEST_CONTROLS");
+    }
+    guard
+}
+
 #[path = "it_web/web_api_handlers.rs"]
 mod web_api_handlers;
 #[path = "it_web/web_cli.rs"]

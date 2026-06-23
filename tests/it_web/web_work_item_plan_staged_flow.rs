@@ -19,21 +19,8 @@ static WS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 type WsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-struct TestControlsGuard;
-
-impl Drop for TestControlsGuard {
-    fn drop(&mut self) {
-        unsafe {
-            std::env::remove_var("ARIA_E2E_TEST_CONTROLS");
-        }
-    }
-}
-
-fn enable_test_controls() -> TestControlsGuard {
-    unsafe {
-        std::env::set_var("ARIA_E2E_TEST_CONTROLS", "1");
-    }
-    TestControlsGuard
+async fn enable_test_controls() -> crate::TestControlsEnvGuard {
+    crate::enable_test_controls().await
 }
 
 async fn connect_ws(app: axum::Router, session_id: &str) -> WsStream {
@@ -185,7 +172,7 @@ async fn accept_serial_draft(ws: &mut WsStream, outline_id: &str) {
 #[tokio::test]
 async fn work_item_plan_serial_flow_outline_to_compile() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, root, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
         valid_outline_output(),
         valid_draft_output("outline_backend_session"),
@@ -282,7 +269,7 @@ async fn work_item_plan_serial_flow_outline_to_compile() {
 #[tokio::test]
 async fn work_item_plan_batch_flow_with_validation_failed_then_rewrite() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, root, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
         valid_outline_output(),
         invalid_draft_output_missing_scope("outline_backend_session"),
@@ -400,7 +387,7 @@ async fn work_item_plan_batch_flow_with_validation_failed_then_rewrite() {
 #[tokio::test]
 async fn session_state_restores_work_item_plan_staged_artifacts() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, _root, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
         valid_outline_output(),
         valid_draft_output("outline_backend_session"),

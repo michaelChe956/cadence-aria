@@ -9,8 +9,10 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::web_work_item_generation::{
-    app_with_confirmed_story_and_design_and_streaming_outputs, context_blocker_outline_output,
-    invalid_outline_output_duplicate_ids, request_json, valid_outline_output,
+    QueuedSplitOutput, app_with_confirmed_story_and_design_and_streaming_outputs,
+    app_with_confirmed_story_and_design_and_streaming_raw_outputs, context_blocker_outline_output,
+    invalid_outline_output_duplicate_ids, malformed_outline_structured_stdout, request_json,
+    valid_outline_output,
 };
 
 static WS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -303,6 +305,66 @@ async fn outline_validation_failure_auto_retries_then_human_blocker() {
     assert!(messages.iter().any(|message| {
         message["type"] == "artifact_update" && message.get("context_blocker").is_some()
     }));
+
+    ws.close(None).await.ok();
+}
+
+#[tokio::test]
+async fn outline_structured_json_parse_failure_auto_retries_then_accepts_valid_outline() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let (app, _repo, prompts) =
+        app_with_confirmed_story_and_design_and_streaming_raw_outputs(vec![
+            QueuedSplitOutput::RawStdout(malformed_outline_structured_stdout()),
+            QueuedSplitOutput::Json(valid_outline_output()),
+        ])
+        .await;
+    let (_session_id, _plan_id, mut ws) = prepare_plan_and_start(&app).await;
+
+    let messages = recv_ws_until(&mut ws, Duration::from_secs(10), |messages| {
+        let outline_runs = messages
+            .iter()
+            .filter(|message| {
+                message["type"] == "timeline_node_created"
+                    && message["node"]["node_type"] == "work_item_plan_outline_run"
+            })
+            .count();
+        outline_runs >= 2
+            && messages.iter().any(|message| {
+                message["type"] == "artifact_update" && message.get("outline_candidate").is_some()
+            })
+            && messages.iter().any(|message| {
+                message["type"] == "timeline_node_created"
+                    && message["node"]["node_type"] == "work_item_plan_outline_confirm"
+            })
+    })
+    .await;
+
+    let outline_run_count = messages
+        .iter()
+        .filter(|message| {
+            message["type"] == "timeline_node_created"
+                && message["node"]["node_type"] == "work_item_plan_outline_run"
+        })
+        .count();
+    assert_eq!(outline_run_count, 2);
+    assert!(
+        messages.iter().all(|message| message["type"] != "error"),
+        "parse failure should be handled as auto retry, not terminal websocket error: {messages:?}"
+    );
+    {
+        let prompts = prompts.lock().expect("prompts lock");
+        assert_eq!(
+            prompts.len(),
+            2,
+            "invalid structured JSON should trigger one fresh outline provider attempt"
+        );
+        assert!(
+            prompts[1].contains("[revision_feedback]")
+                && prompts[1].contains("outline_structured_output_parse_error"),
+            "retry prompt should explain the structured JSON parse failure: {}",
+            prompts[1]
+        );
+    }
 
     ws.close(None).await.ok();
 }

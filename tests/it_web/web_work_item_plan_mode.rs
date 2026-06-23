@@ -9,7 +9,9 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::web_work_item_generation::{
-    app_with_confirmed_story_and_design_and_streaming_outputs, request_json, valid_outline_output,
+    QueuedSplitOutput, app_with_confirmed_story_and_design_and_streaming_outputs,
+    app_with_confirmed_story_and_design_and_streaming_raw_outputs,
+    malformed_outline_structured_stdout, request_json, valid_outline_output,
 };
 
 static WS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -17,21 +19,8 @@ static WS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 type WsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-struct TestControlsGuard;
-
-impl Drop for TestControlsGuard {
-    fn drop(&mut self) {
-        unsafe {
-            std::env::remove_var("ARIA_E2E_TEST_CONTROLS");
-        }
-    }
-}
-
-fn enable_test_controls() -> TestControlsGuard {
-    unsafe {
-        std::env::set_var("ARIA_E2E_TEST_CONTROLS", "1");
-    }
-    TestControlsGuard
+async fn enable_test_controls() -> crate::TestControlsEnvGuard {
+    crate::enable_test_controls().await
 }
 
 async fn connect_ws(app: axum::Router, session_id: &str) -> WsStream {
@@ -193,7 +182,7 @@ fn active_index(
 #[tokio::test]
 async fn accept_outline_creates_generation_round_and_active_index() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, root, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
         valid_outline_output(),
         valid_outline_output(),
@@ -228,7 +217,7 @@ async fn accept_outline_creates_generation_round_and_active_index() {
 #[tokio::test]
 async fn author_decision_is_rejected_on_generation_mode_node() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, _root, _prompts) =
         app_with_confirmed_story_and_design_and_streaming_outputs(vec![valid_outline_output()])
             .await;
@@ -274,7 +263,7 @@ async fn author_decision_is_rejected_on_generation_mode_node() {
 #[tokio::test]
 async fn request_revision_on_outline_confirm_returns_to_outline_run_without_round() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, root, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
         valid_outline_output(),
         valid_outline_output(),
@@ -328,7 +317,7 @@ async fn request_revision_on_outline_confirm_returns_to_outline_run_without_roun
 #[tokio::test]
 async fn outline_accept_enters_outline_review_when_reviewer_enabled() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, _root, _prompts) =
         app_with_confirmed_story_and_design_and_streaming_outputs(vec![valid_outline_output()])
             .await;
@@ -365,7 +354,7 @@ async fn outline_accept_enters_outline_review_when_reviewer_enabled() {
 #[tokio::test]
 async fn outline_accept_skips_review_when_reviewer_disabled() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, _root, _prompts) =
         app_with_confirmed_story_and_design_and_streaming_outputs(vec![valid_outline_output()])
             .await;
@@ -397,7 +386,7 @@ async fn outline_accept_skips_review_when_reviewer_disabled() {
 #[tokio::test]
 async fn outline_review_pass_enters_generation_mode() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, _root, _prompts) =
         app_with_confirmed_story_and_design_and_streaming_outputs(vec![valid_outline_output()])
             .await;
@@ -437,7 +426,7 @@ async fn outline_review_pass_enters_generation_mode() {
 #[tokio::test]
 async fn outline_review_revise_returns_to_outline_revision() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, root, _prompts) =
         app_with_confirmed_story_and_design_and_streaming_outputs(vec![valid_outline_output()])
             .await;
@@ -453,12 +442,26 @@ async fn outline_review_revise_returns_to_outline_revision() {
     .expect("send accept");
 
     let _messages = recv_ws_until(&mut ws, Duration::from_secs(15), |messages| {
+        messages
+            .iter()
+            .any(|message| message["type"] == "review_decision_required")
+    })
+    .await;
+
+    ws.send(Message::Text(
+        json!({ "type": "review_decision_response", "decision": "continue" })
+            .to_string()
+            .into(),
+    ))
+    .await
+    .expect("send review decision");
+
+    let _messages = recv_ws_until(&mut ws, Duration::from_secs(15), |messages| {
         messages.iter().any(|message| {
             message["type"] == "timeline_node_created"
                 && message["node"]["node_type"] == "work_item_plan_outline_run"
-        }) && messages
-            .iter()
-            .any(|message| message["type"] == "stage_change" && message["stage"] == "running")
+                && message["node"]["stage"] == "running"
+        })
     })
     .await;
 
@@ -469,9 +472,88 @@ async fn outline_review_revise_returns_to_outline_revision() {
 }
 
 #[tokio::test]
+async fn outline_review_revision_parse_failure_auto_retries_then_returns_to_outline_confirm() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let _test_guard = enable_test_controls().await;
+    let (app, _root, prompts) =
+        app_with_confirmed_story_and_design_and_streaming_raw_outputs(vec![
+            QueuedSplitOutput::Json(valid_outline_output()),
+            QueuedSplitOutput::RawStdout(malformed_outline_structured_stdout()),
+            QueuedSplitOutput::Json(valid_outline_output()),
+        ])
+        .await;
+    let (session_id, _plan_id, mut ws) = prepare_plan_and_start(&app, true).await;
+    enable_work_item_plan_review_fixture(&app, &session_id, "revise").await;
+
+    ws.send(Message::Text(
+        json!({ "type": "author_decision", "decision": "accept" })
+            .to_string()
+            .into(),
+    ))
+    .await
+    .expect("send accept");
+
+    let _messages = recv_ws_until(&mut ws, Duration::from_secs(15), |messages| {
+        messages
+            .iter()
+            .any(|message| message["type"] == "review_decision_required")
+    })
+    .await;
+
+    ws.send(Message::Text(
+        json!({ "type": "review_decision_response", "decision": "continue" })
+            .to_string()
+            .into(),
+    ))
+    .await
+    .expect("send review decision");
+
+    let messages = recv_ws_until(&mut ws, Duration::from_secs(15), |messages| {
+        let outline_runs = messages
+            .iter()
+            .filter(|message| {
+                message["type"] == "timeline_node_created"
+                    && message["node"]["node_type"] == "work_item_plan_outline_run"
+            })
+            .count();
+        outline_runs >= 2
+            && messages.iter().any(|message| {
+                message["type"] == "timeline_node_created"
+                    && message["node"]["node_type"] == "work_item_plan_outline_confirm"
+            })
+    })
+    .await;
+
+    let outline_run_count = messages
+        .iter()
+        .filter(|message| {
+            message["type"] == "timeline_node_created"
+                && message["node"]["node_type"] == "work_item_plan_outline_run"
+        })
+        .count();
+    assert_eq!(outline_run_count, 2);
+    assert!(
+        messages.iter().all(|message| message["type"] != "error"),
+        "follow-up parse failure should retry instead of emitting terminal error: {messages:?}"
+    );
+    {
+        let prompts = prompts.lock().expect("prompts lock");
+        assert_eq!(prompts.len(), 3);
+        assert!(
+            prompts[2].contains("[revision_feedback]")
+                && prompts[2].contains("outline_structured_output_parse_error"),
+            "follow-up retry prompt should include parse feedback: {}",
+            prompts[2]
+        );
+    }
+
+    ws.close(None).await.ok();
+}
+
+#[tokio::test]
 async fn select_serial_mode_enters_first_item_run() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, _root, _prompts) =
         app_with_confirmed_story_and_design_and_streaming_outputs(vec![valid_outline_output()])
             .await;
@@ -521,7 +603,7 @@ async fn select_serial_mode_enters_first_item_run() {
 #[tokio::test]
 async fn select_batch_mode_enters_batch_run() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, _root, _prompts) =
         app_with_confirmed_story_and_design_and_streaming_outputs(vec![valid_outline_output()])
             .await;
@@ -571,7 +653,7 @@ async fn select_batch_mode_enters_batch_run() {
 #[tokio::test]
 async fn request_outline_revision_on_mode_node_sets_outline_revising() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, root, _prompts) =
         app_with_confirmed_story_and_design_and_streaming_outputs(vec![valid_outline_output()])
             .await;
@@ -619,7 +701,7 @@ async fn request_outline_revision_on_mode_node_sets_outline_revising() {
 #[tokio::test]
 async fn select_mode_rejected_outside_generation_mode_node() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, _root, _prompts) =
         app_with_confirmed_story_and_design_and_streaming_outputs(vec![valid_outline_output()])
             .await;
@@ -653,7 +735,7 @@ async fn select_mode_rejected_outside_generation_mode_node() {
 #[tokio::test]
 async fn session_state_restores_generation_mode_node_with_outline_payload() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls();
+    let _test_guard = enable_test_controls().await;
     let (app, _root, _prompts) =
         app_with_confirmed_story_and_design_and_streaming_outputs(vec![valid_outline_output()])
             .await;
