@@ -7651,6 +7651,15 @@ impl WorkspaceEngine {
         self.transition_stage(WorkspaceStage::PrepareContext).await;
     }
 
+    pub async fn finish_active_run_with_failed_node(&mut self, message: impl Into<String>) {
+        let message = message.into();
+        if let Some(node_id) = self.active_node_id.clone() {
+            self.update_timeline_node(&node_id, TimelineNodeStatus::Failed, Some(message))
+                .await;
+        }
+        self.finish_failed_run().await;
+    }
+
     async fn finish_empty_assistant_output(&mut self) {
         let _ = self
             .event_tx
@@ -14227,6 +14236,35 @@ mod tests {
             }
         }
         assert!(saw_error);
+    }
+
+    #[tokio::test]
+    async fn finish_active_run_with_failed_node_marks_outline_node_failed() {
+        let (_tmp, lifecycle_store, mut engine) = persistent_test_engine();
+        let node_id = engine.begin_work_item_plan_outline_run().await;
+        engine.mark_active_run_started("outline-run");
+
+        engine
+            .finish_active_run_with_failed_node("Outline structured output parse failed")
+            .await;
+
+        let node = engine
+            .timeline_nodes
+            .iter()
+            .find(|node| node.node_id == node_id)
+            .expect("outline node");
+        assert_eq!(node.status, TimelineNodeStatus::Failed);
+        assert_eq!(
+            node.summary.as_deref(),
+            Some("Outline structured output parse failed")
+        );
+        assert_eq!(engine.active_run_id(), None);
+        assert_eq!(engine.current_stage(), WorkspaceStage::PrepareContext);
+
+        let detail = lifecycle_store
+            .load_node_detail(&engine.session().session_id, &node_id)
+            .expect("node detail");
+        assert_eq!(detail.status, TimelineNodeStatus::Failed);
     }
 
     #[tokio::test]

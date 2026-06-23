@@ -2054,11 +2054,12 @@ async fn spawn_provider_run_from_handler(
                 {
                     Ok(output) => output,
                     Err(message) => {
-                        engine.mark_active_run_finished(&run_label);
+                        let message = format!("split generate failed: {message}");
+                        engine
+                            .finish_active_run_with_failed_node(message.clone())
+                            .await;
                         drop(engine);
-                        let err = WsOutMessage::Error {
-                            message: format!("split generate failed: {message}"),
-                        };
+                        let err = WsOutMessage::Error { message };
                         let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
                         return;
                     }
@@ -2066,11 +2067,12 @@ async fn spawn_provider_run_from_handler(
                 let output = match parse_work_item_plan_outline_output(structured_output) {
                     Ok(output) => output,
                     Err(error) => {
-                        engine.mark_active_run_finished(&run_label);
+                        let message = format!("outline generate failed: {}", error.message);
+                        engine
+                            .finish_active_run_with_failed_node(message.clone())
+                            .await;
                         drop(engine);
-                        let err = WsOutMessage::Error {
-                            message: format!("outline generate failed: {}", error.message),
-                        };
+                        let err = WsOutMessage::Error { message };
                         let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
                         return;
                     }
@@ -2079,7 +2081,9 @@ async fn spawn_provider_run_from_handler(
                 {
                     Ok(o) => o,
                     Err(message) => {
-                        engine.mark_active_run_finished(&run_label);
+                        engine
+                            .finish_active_run_with_failed_node(message.clone())
+                            .await;
                         drop(engine);
                         let err = WsOutMessage::Error { message };
                         let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
@@ -2204,13 +2208,13 @@ async fn spawn_provider_run_from_handler(
                                 match parse_work_item_split_structured_output(&full_output) {
                                     Ok(output) => output,
                                     Err(message) => {
-                                        engine.mark_active_run_finished(&run_label);
+                                        let message =
+                                            format!("outline generate_revision failed: {message}");
+                                        engine
+                                            .finish_active_run_with_failed_node(message.clone())
+                                            .await;
                                         drop(engine);
-                                        let err = WsOutMessage::Error {
-                                            message: format!(
-                                                "outline generate_revision failed: {message}"
-                                            ),
-                                        };
+                                        let err = WsOutMessage::Error { message };
                                         let _ =
                                             send_json_outbound(&outbound_tx_for_task, &err).await;
                                         return;
@@ -2220,14 +2224,15 @@ async fn spawn_provider_run_from_handler(
                                 match parse_work_item_plan_outline_output(structured_output) {
                                     Ok(o) => o,
                                     Err(error) => {
-                                        engine.mark_active_run_finished(&run_label);
+                                        let message = format!(
+                                            "outline generate_revision failed: {}",
+                                            error.message
+                                        );
+                                        engine
+                                            .finish_active_run_with_failed_node(message.clone())
+                                            .await;
                                         drop(engine);
-                                        let err = WsOutMessage::Error {
-                                            message: format!(
-                                                "outline generate_revision failed: {}",
-                                                error.message
-                                            ),
-                                        };
+                                        let err = WsOutMessage::Error { message };
                                         let _ =
                                             send_json_outbound(&outbound_tx_for_task, &err).await;
                                         return;
@@ -2237,7 +2242,9 @@ async fn spawn_provider_run_from_handler(
                                 match engine.complete_work_item_plan_outline_author(output).await {
                                     Ok(o) => o,
                                     Err(message) => {
-                                        engine.mark_active_run_finished(&run_label);
+                                        engine
+                                            .finish_active_run_with_failed_node(message.clone())
+                                            .await;
                                         drop(engine);
                                         let err = WsOutMessage::Error { message };
                                         let _ =
