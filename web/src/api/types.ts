@@ -952,6 +952,161 @@ export type WorkItemPlanCandidateDto = {
   validator_findings: ValidatorFindingDto[];
 };
 
+export type WorkItemGenerationMode = "serial" | "batch";
+
+export type WorkItemPlanOutlineItem = {
+  outline_id: string;
+  title: string;
+  kind: WorkItemKind | string;
+  sequence_hint?: number | null;
+  depends_on_outline_ids: string[];
+  exclusive_write_scopes: string[];
+  forbidden_write_scopes: string[];
+  context_budget: WorkItemContextBudget;
+  required_handoff_from_outline_ids: string[];
+  verification_strategy: string;
+  risk_notes: string[];
+};
+
+export type WorkItemPlanOutline = {
+  id: string;
+  plan_id: string;
+  strategy_summary: string;
+  work_items: WorkItemPlanOutlineItem[];
+  dependency_graph: WorkItemDependencyEdgeDto[];
+  risks: string[];
+  handoff_plan: string[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type WorkItemPlanContextBlocker = {
+  code: string;
+  message: string;
+  needed_context: string[];
+};
+
+export type WorkItemPlanOutlineCandidatePayload = {
+  outline: WorkItemPlanOutline;
+  design_context_gaps: string[];
+  validator_findings: ValidatorFindingDto[];
+  context_blockers: WorkItemPlanContextBlocker[];
+  current_generation_round_id?: string | null;
+  selected_generation_mode?: WorkItemGenerationMode | null;
+};
+
+export type WorkItemPlanContextBlockerPayload = {
+  context_blockers: WorkItemPlanContextBlocker[];
+  design_context_gaps: string[];
+  exploration_summary: string;
+  allowed_actions: string[];
+};
+
+export type WorkItemDraftVerificationCommand = {
+  label?: string;
+  command?: string;
+  cwd?: string;
+  purpose?: string;
+  required?: boolean;
+  timeout_seconds?: number;
+  safety?: string;
+};
+
+export type WorkItemDraftVerificationManualCheck = {
+  label?: string;
+  instructions?: string;
+  required?: boolean;
+};
+
+export type WorkItemDraftVerificationPlan = {
+  commands: WorkItemDraftVerificationCommand[];
+  manual_checks: WorkItemDraftVerificationManualCheck[];
+  required_gates: string[];
+  risk_notes: string[];
+};
+
+export type WorkItemDraftCandidate = {
+  outline_id: string;
+  title: string;
+  kind: WorkItemKind | string;
+  implementation_context: string;
+  exclusive_write_scopes: string[];
+  forbidden_write_scopes: string[];
+  depends_on_outline_ids: string[];
+  required_handoff_from_outline_ids: string[];
+  verification_plan: WorkItemDraftVerificationPlan;
+  handoff_summary: string;
+};
+
+export type WorkItemDraftStatus =
+  | "draft"
+  | "accepted"
+  | "superseded"
+  | "validation_failed"
+  | "copied";
+
+export type WorkItemDraftRecord = {
+  draft_id: string;
+  plan_id: string;
+  generation_round_id: string;
+  outline_id: string;
+  batch_id?: string | null;
+  candidate: WorkItemDraftCandidate;
+  status: WorkItemDraftStatus | string;
+  active: boolean;
+  superseded: boolean;
+  superseded_by_draft_id?: string | null;
+  supersede_reason?: string | null;
+  copied_from_draft_id?: string | null;
+  generated_from_node_id: string;
+  accepted_by_node_id?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type WorkItemDraftCandidatePayload = {
+  draft_record: WorkItemDraftRecord;
+  validator_findings: ValidatorFindingDto[];
+  can_accept: boolean;
+};
+
+export type WorkItemBatchFailureSummary = {
+  draft_id: string;
+  outline_id: string;
+  status: string;
+};
+
+export type WorkItemBatchStatePayload = {
+  batch_id: string;
+  generation_round_id: string;
+  queue: string[];
+  draft_records: WorkItemDraftRecord[];
+  batch_status: "generating" | "completed" | "review_pending" | "review_done" | string;
+  failure_summary: WorkItemBatchFailureSummary[];
+};
+
+export type WorkItemPlanCompileReportPayload = {
+  compile_id: string;
+  generation_round_id: string;
+  status: "preparing" | "committing" | "committed" | "failed" | "recovery_required" | string;
+  plan_commit_state: "not_started" | "committed" | "rolled_back" | string;
+  work_item_ids: string[];
+  verification_plan_ids: string[];
+  child_session_ids: string[];
+  validator_findings: ValidatorFindingDto[];
+};
+
+export type WorkItemPlanArtifactPayload =
+  | { type: "outline_candidate"; payload: WorkItemPlanOutlineCandidatePayload }
+  | { type: "context_blocker"; payload: WorkItemPlanContextBlockerPayload }
+  | { type: "draft_candidate"; payload: WorkItemDraftCandidatePayload }
+  | { type: "batch_state"; payload: WorkItemBatchStatePayload }
+  | { type: "compile_report"; payload: WorkItemPlanCompileReportPayload };
+
+export type WorkItemPlanArtifactVersion = ArtifactVersionSummary & {
+  artifact?: WorkItemPlanArtifactPayload | null;
+};
+
 export type IssueWorkItemPlanDependencyEdgeDto = {
   from_work_item_id: string;
   to_work_item_id: string;
@@ -1007,7 +1162,16 @@ export type AuthorDecision = "accept" | "reject";
 
 export type ArtifactUpdateMessage =
   | { type: "artifact_update"; version: number; markdown: string; diff?: string | null }
-  | { type: "artifact_update"; version: number; candidate: WorkItemPlanCandidateDto };
+  | { type: "artifact_update"; version: number; candidate: WorkItemPlanCandidateDto }
+  | {
+      type: "artifact_update";
+      version: number;
+      outline_candidate: WorkItemPlanOutlineCandidatePayload;
+    }
+  | { type: "artifact_update"; version: number; context_blocker: WorkItemPlanContextBlockerPayload }
+  | { type: "artifact_update"; version: number; draft_candidate: WorkItemDraftCandidatePayload }
+  | { type: "artifact_update"; version: number; batch_state: WorkItemBatchStatePayload }
+  | { type: "artifact_update"; version: number; compile_report: WorkItemPlanCompileReportPayload };
 
 export type RevertWorkItemMessage = {
   type: "revert_work_item";
@@ -1015,6 +1179,17 @@ export type RevertWorkItemMessage = {
   feedback?: string | null;
   clear: boolean;
 };
+
+export type WorkItemDraftDecision = "accept" | "rewrite" | "pause";
+export type WorkItemBatchDecision =
+  | "accept_all"
+  | "rewrite_batch"
+  | "pause"
+  | "downgrade_to_serial";
+export type WorkItemPlanCompileRecoveryAction =
+  | "continue"
+  | "abort_and_rollback"
+  | "human_triage";
 
 export type WsInMessage =
   | { type: "user_message"; content: string }
@@ -1039,6 +1214,25 @@ export type WsInMessage =
   | { type: "select_revision_path"; path: RevisionPath; extra_context?: string | null }
   | { type: "request_revision"; feedback: StructuredFeedback }
   | RevertWorkItemMessage
+  | { type: "select_work_item_generation_mode"; mode: WorkItemGenerationMode }
+  | { type: "request_outline_revision"; feedback?: string | null }
+  | {
+      type: "work_item_draft_decision";
+      outline_id: string;
+      decision: WorkItemDraftDecision;
+      feedback?: string | null;
+    }
+  | {
+      type: "work_item_batch_decision";
+      decision: WorkItemBatchDecision;
+      feedback?: string | null;
+      first_affected_outline_id?: string | null;
+    }
+  | {
+      type: "work_item_plan_compile_recovery_action";
+      action: WorkItemPlanCompileRecoveryAction;
+      reason?: string | null;
+    }
   | { type: "human_confirm"; decision: HumanConfirmDecision; payload?: unknown }
   | { type: "abort" }
   | { type: "hello"; session_id: string; last_seen_node_id?: string | null }
@@ -1054,9 +1248,23 @@ export type TimelineNodeType =
   | "review_decision"
   | "revision"
   | "human_confirm"
+  | "work_item_plan_outline_run"
+  | "work_item_plan_outline_confirm"
+  | "work_item_plan_outline_review"
+  | "work_item_plan_context_blocker"
+  | "work_item_generation_mode"
+  | "work_item_draft_run"
+  | "work_item_draft_confirm"
+  | "work_item_draft_review"
+  | "work_item_batch_run"
+  | "work_item_batch_confirm"
+  | "work_item_batch_review"
+  | "work_item_plan_compile"
+  | "work_item_plan_compile_recovery"
   | "aborted_by_disconnect"
   | "protocol_error"
-  | "completed";
+  | "completed"
+  | (string & {});
 
 export type TimelineNodeStatus = "active" | "paused" | "completed" | "failed" | "skipped";
 export type ProviderStatus =

@@ -24,7 +24,9 @@ import {
   loadAcknowledgedAbortedNodes,
 } from "../components/workspace/DisconnectBanner";
 import { ProviderConfigPanel } from "../components/workspace/ProviderConfigPanel";
+import { WorkItemPlanArtifactPanel } from "../components/workspace/WorkItemPlanArtifactPanel";
 import { WorkItemPlanCandidatePanel } from "../components/workspace/WorkItemPlanCandidatePanel";
+import { WorkItemPlanStagedPanel } from "../components/workspace/WorkItemPlanStagedPanel";
 import { WorkspaceHeader } from "../components/workspace/WorkspaceHeader";
 import { useStageUI } from "../hooks/useStageUI";
 import { useUnloadGuard } from "../hooks/useUnloadGuard";
@@ -54,6 +56,11 @@ export function ChatWorkspacePage({
     sendAuthorDecision,
     sendRequestRevision,
     sendRevertWorkItem,
+    sendSelectWorkItemGenerationMode,
+    sendRequestOutlineRevision,
+    sendWorkItemDraftDecision,
+    sendWorkItemBatchDecision,
+    sendWorkItemPlanCompileRecoveryAction,
     sendHumanConfirm,
     abort,
     selectProvider,
@@ -82,6 +89,10 @@ export function ChatWorkspacePage({
   const artifactContentCache = useWorkspaceStore((state) => state.artifactContentCache);
   const artifact = useWorkspaceStore((state) => state.artifact);
   const workItemPlanCandidate = useWorkspaceStore((state) => state.workItemPlanCandidate);
+  const workItemPlanArtifact = useWorkspaceStore((state) => state.workItemPlanArtifact);
+  const workItemPlanArtifactVersions = useWorkspaceStore(
+    (state) => state.workItemPlanArtifactVersions,
+  );
   const protocolError = useWorkspaceStore((state) => state.protocolError);
   const acknowledgedAbortedNodes = useWorkspaceStore((state) => state.acknowledgedAbortedNodes);
   const reviewerEnabled = useWorkspaceStore((state) => state.reviewerEnabled);
@@ -105,6 +116,22 @@ export function ChatWorkspacePage({
   const artifactContentCacheValues = useMemo(
     () => numericContentCacheValues(artifactContentCache),
     [artifactContentCache],
+  );
+  const activeNode = useMemo(
+    () => timelineNodes.find((node) => node.node_id === activeNodeId) ?? null,
+    [activeNodeId, timelineNodes],
+  );
+  const selectedWorkItemPlanArtifactVersion = useMemo(
+    () =>
+      selectedNodeId
+        ? workItemPlanArtifactVersions.find((version) => version.source_node_id === selectedNodeId)
+        : undefined,
+    [selectedNodeId, workItemPlanArtifactVersions],
+  );
+  const displayedWorkItemPlanArtifact =
+    selectedWorkItemPlanArtifactVersion?.artifact ?? workItemPlanArtifact;
+  const showingHistoricalWorkItemPlanArtifact = Boolean(
+    selectedWorkItemPlanArtifactVersion?.artifact && selectedNodeId !== activeNodeId,
   );
   const abortedByDisconnectNode = latestUnacknowledgedAbortedNode(
     timelineNodes,
@@ -346,19 +373,43 @@ export function ChatWorkspacePage({
           />
           {activePanel === "artifact" ? (
             workspaceType === "work_item_plan" ? (
-              workItemPlanCandidate ? (
-                <WorkItemPlanCandidatePanel
-                  candidate={workItemPlanCandidate}
-                  stage={stage}
-                  onRevert={sendRevertWorkItem}
-                  onRequestRevision={sendRequestRevision}
-                  onAccept={() => sendAuthorDecision("accept")}
-                  className="min-h-0"
-                />
-              ) : (
-                <div className="flex min-h-0 flex-col items-center justify-center p-6 text-sm text-[var(--aria-ink-muted)]">
-                  <p>尚未生成候选，请点击开始生成</p>
+              displayedWorkItemPlanArtifact ? (
+                <div className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)]">
+                  {showingHistoricalWorkItemPlanArtifact ? null : (
+                    <WorkItemPlanStagedPanel
+                      activeNodeType={activeNode?.node_type ?? null}
+                      artifact={displayedWorkItemPlanArtifact}
+                      onAcceptOutline={() => sendAuthorDecision("accept")}
+                      onSelectMode={sendSelectWorkItemGenerationMode}
+                      onRequestOutlineRevision={() => sendRequestOutlineRevision()}
+                      onDraftDecision={sendWorkItemDraftDecision}
+                      onBatchDecision={sendWorkItemBatchDecision}
+                      onCompileRecoveryAction={sendWorkItemPlanCompileRecoveryAction}
+                    />
+                  )}
+                  <WorkItemPlanArtifactPanel
+                    artifact={displayedWorkItemPlanArtifact}
+                    readonly={showingHistoricalWorkItemPlanArtifact}
+                    className="min-h-0"
+                  />
                 </div>
+              ) : (
+                <>
+                  {workItemPlanCandidate ? (
+                    <WorkItemPlanCandidatePanel
+                      candidate={workItemPlanCandidate}
+                      stage={stage}
+                      onRevert={sendRevertWorkItem}
+                      onRequestRevision={sendRequestRevision}
+                      onAccept={() => sendAuthorDecision("accept")}
+                      className="min-h-0"
+                    />
+                  ) : (
+                    <div className="flex min-h-0 flex-col items-center justify-center p-6 text-sm text-[var(--aria-ink-muted)]">
+                      <p>尚未生成候选，请点击开始生成</p>
+                    </div>
+                  )}
+                </>
               )
             ) : (
               <ArtifactPane

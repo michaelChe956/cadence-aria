@@ -41,6 +41,92 @@ function makeWorkItemPlanCandidate(
   };
 }
 
+function makeOutlineArtifactPayload() {
+  return {
+    outline: {
+      id: "outline_version_001",
+      plan_id: "plan_001",
+      strategy_summary: "Split frontend and backend work.",
+      work_items: [],
+      dependency_graph: [],
+      risks: [],
+      handoff_plan: [],
+      created_at: "2026-06-23T00:00:00Z",
+      updated_at: "2026-06-23T00:00:00Z",
+    },
+    design_context_gaps: [],
+    validator_findings: [],
+    context_blockers: [],
+    current_generation_round_id: "round_001",
+    selected_generation_mode: null,
+  };
+}
+
+function makeDraftArtifactPayload() {
+  return {
+    draft_record: {
+      draft_id: "draft_backend_001",
+      plan_id: "plan_001",
+      generation_round_id: "round_001",
+      outline_id: "outline_backend",
+      batch_id: null,
+      candidate: {
+        outline_id: "outline_backend",
+        title: "Backend flow",
+        kind: "backend",
+        implementation_context: "Implement backend flow.",
+        exclusive_write_scopes: ["src/product"],
+        forbidden_write_scopes: [],
+        depends_on_outline_ids: [],
+        required_handoff_from_outline_ids: [],
+        verification_plan: {
+          commands: [],
+          manual_checks: [],
+          required_gates: [],
+          risk_notes: [],
+        },
+        handoff_summary: "Backend handoff.",
+      },
+      status: "draft",
+      active: true,
+      superseded: false,
+      superseded_by_draft_id: null,
+      supersede_reason: null,
+      copied_from_draft_id: null,
+      generated_from_node_id: "node_draft",
+      accepted_by_node_id: null,
+      created_at: "2026-06-23T00:00:00Z",
+      updated_at: "2026-06-23T00:00:00Z",
+    },
+    validator_findings: [],
+    can_accept: true,
+  };
+}
+
+function makeBatchArtifactPayload() {
+  return {
+    batch_id: "batch_001",
+    generation_round_id: "round_001",
+    queue: ["outline_backend"],
+    draft_records: [makeDraftArtifactPayload().draft_record],
+    batch_status: "completed",
+    failure_summary: [],
+  };
+}
+
+function makeCompileArtifactPayload() {
+  return {
+    compile_id: "compile_001",
+    generation_round_id: "round_001",
+    status: "committed",
+    plan_commit_state: "committed",
+    work_item_ids: ["work_item_backend"],
+    verification_plan_ids: ["verification_backend"],
+    child_session_ids: ["session_child_backend"],
+    validator_findings: [],
+  };
+}
+
 class MockWebSocket {
   static readonly CONNECTING = 0;
   static readonly OPEN = 1;
@@ -1841,6 +1927,49 @@ describe("useWorkspaceWs", () => {
     expect(useWorkspaceStore.getState().workItemPlanCandidate).toEqual(revertedCandidate);
   });
 
+  it("stores staged work item plan artifact_update payloads", () => {
+    const harness = renderWorkspaceHook();
+    const outlineCandidate = makeOutlineArtifactPayload();
+    const draftCandidate = makeDraftArtifactPayload();
+    const batchState = makeBatchArtifactPayload();
+    const compileReport = makeCompileArtifactPayload();
+
+    act(() => {
+      harness.ws.receive({
+        type: "artifact_update",
+        version: 1,
+        outline_candidate: outlineCandidate,
+      });
+      harness.ws.receive({
+        type: "artifact_update",
+        version: 2,
+        draft_candidate: draftCandidate,
+      });
+      harness.ws.receive({
+        type: "artifact_update",
+        version: 3,
+        batch_state: batchState,
+      });
+      harness.ws.receive({
+        type: "artifact_update",
+        version: 4,
+        compile_report: compileReport,
+      });
+    });
+
+    expect(useWorkspaceStore.getState().workItemPlanArtifact).toEqual({
+      type: "compile_report",
+      payload: compileReport,
+    });
+    expect(useWorkspaceStore.getState().workItemPlanCandidate).toBeNull();
+    expect(useWorkspaceStore.getState().artifact).toBeNull();
+    expect(useWorkspaceStore.getState().chatEntries.at(-1)).toMatchObject({
+      type: "artifact_update",
+      content: "Work Item Plan staged artifact 已更新 -> v4",
+      metadata: { version: 4, artifact_type: "compile_report" },
+    });
+  });
+
   it("sends revert_work_item messages", () => {
     const harness = renderWorkspaceHook();
 
@@ -1891,6 +2020,63 @@ describe("useWorkspaceWs", () => {
           feedback_types: ["revision"],
           description: "",
         },
+      }),
+    ]);
+  });
+
+  it("sends staged work item plan workflow messages", () => {
+    const harness = renderWorkspaceHook();
+    const api = harness.api as unknown as {
+      sendSelectWorkItemGenerationMode: (mode: "serial" | "batch") => void;
+      sendRequestOutlineRevision: (feedback?: string) => void;
+      sendWorkItemDraftDecision: (
+        outlineId: string,
+        decision: "accept" | "rewrite" | "pause",
+        feedback?: string,
+      ) => void;
+      sendWorkItemBatchDecision: (
+        decision: "accept_all" | "rewrite_batch" | "pause" | "downgrade_to_serial",
+        feedback?: string,
+        firstAffectedOutlineId?: string,
+      ) => void;
+      sendWorkItemPlanCompileRecoveryAction: (
+        action: "continue" | "abort_and_rollback" | "human_triage",
+        reason?: string,
+      ) => void;
+    };
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.sent.length = 0;
+      api.sendSelectWorkItemGenerationMode("serial");
+      api.sendRequestOutlineRevision(" 需要调整拆分 ");
+      api.sendWorkItemDraftDecision("outline_backend", "rewrite", " 缩小范围 ");
+      api.sendWorkItemBatchDecision("downgrade_to_serial", " 严格校验失败 ", "outline_backend");
+      api.sendWorkItemPlanCompileRecoveryAction("human_triage", " 需要人工检查 ");
+    });
+
+    expect(harness.ws.sent).toEqual([
+      JSON.stringify({ type: "select_work_item_generation_mode", mode: "serial" }),
+      JSON.stringify({
+        type: "request_outline_revision",
+        feedback: "需要调整拆分",
+      }),
+      JSON.stringify({
+        type: "work_item_draft_decision",
+        outline_id: "outline_backend",
+        decision: "rewrite",
+        feedback: "缩小范围",
+      }),
+      JSON.stringify({
+        type: "work_item_batch_decision",
+        decision: "downgrade_to_serial",
+        feedback: "严格校验失败",
+        first_affected_outline_id: "outline_backend",
+      }),
+      JSON.stringify({
+        type: "work_item_plan_compile_recovery_action",
+        action: "human_triage",
+        reason: "需要人工检查",
       }),
     ]);
   });

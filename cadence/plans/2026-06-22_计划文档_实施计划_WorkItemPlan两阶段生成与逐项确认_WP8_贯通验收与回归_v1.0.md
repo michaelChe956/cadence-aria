@@ -27,8 +27,8 @@
 
 ## Task 1：后端 serial flow 贯通
 
-- [ ] 写测试：`work_item_plan_serial_flow_outline_to_compile`
-- [ ] 流程：
+- [x] 写测试：`work_item_plan_serial_flow_outline_to_compile`
+- [x] 流程：
   1. prepare WorkItemPlan workspace。
   2. WS start_generation。
   3. fake provider 返回 Outline。
@@ -39,15 +39,15 @@
   8. 每个 draft accept。
   9. final compile。
   10. human confirm。
-- [ ] 断言：
+- [x] 断言：
   - Draft 阶段没有真实 work_items / verification_plans / child sessions。
   - Compile 后 plan status confirmed，真实 work items、verification plans 和 child sessions 存在。
   - timeline 包含 outline/draft/compile 专属 node。
 
 ## Task 2：后端 batch flow 贯通
 
-- [ ] 写测试：`work_item_plan_batch_flow_with_validation_failed_then_rewrite`
-- [ ] 覆盖：
+- [x] 写测试：`work_item_plan_batch_flow_with_validation_failed_then_rewrite`
+- [x] 覆盖：
   - batch 每个 outline 一次 provider run。
   - local validation 失败自动重试一次。
   - 仍失败记录 `validation_failed_ids`。
@@ -55,25 +55,25 @@
 
 ## Task 3：plan_reopen_required 与 downstream invalidation
 
-- [ ] 写测试：`plan_reopen_required_supersedes_drafts_and_reopens_outline`
-- [ ] 覆盖：
+- [x] 写测试：`plan_reopen_required_supersedes_drafts_and_reopens_outline`
+- [x] 覆盖：
   - item reviewer 返回 `plan_reopen_required`。
   - active index `outline_state=revising`。
   - 目标和下游 draft superseded，历史 draft 可读取。
-  - 旁路 draft 可复制为当前 round 新 draft，并重新 validator。
+  - 旁路 draft 可复制为当前 round 新 draft，并重新 validator（由 WP5 `downgrade_to_serial_copies_unaffected_batch_drafts_and_revalidates` 覆盖）。
 
 ## Task 4：Compile recovery
 
-- [ ] 写测试：`compile_recovery_resumes_after_committed_marker`
-- [ ] 通过注入 store 写入失败或构造半提交 transaction 覆盖：
+- [x] 写测试：`compile_recovery_resumes_after_committed_marker`
+- [x] 通过注入 store 写入失败或构造半提交 transaction 覆盖：
   - `plan_commit_state=not_started` 时允许 rollback。
   - `plan_commit_state=committed` 时只能 continue/human_triage。
   - continue 后不创建重复实体。
 
 ## Task 5：刷新恢复与 artifact history
 
-- [ ] 写测试：`session_state_restores_work_item_plan_staged_artifacts`
-- [ ] 断言 SessionState 包含：
+- [x] 写测试：`session_state_restores_work_item_plan_staged_artifacts`
+- [x] 断言 SessionState 包含：
   - stage + active_node 原子快照。
   - current outline。
   - draft records。
@@ -84,30 +84,30 @@
 
 ## Task 6：三类 Workspace 回归
 
-- [ ] 写测试：
+- [x] 写测试：
   - `story_workspace_review_sentinel_fallback_still_passes`
   - `design_workspace_artifact_history_still_loads_markdown`
   - `ordinary_work_item_workspace_review_unaffected`
-- [ ] 按项目规则说明影响：
+- [x] 按项目规则说明影响：
   - Story/Design 复用 reviewer parser 和 artifact payload，需要测试。
   - 普通 WorkItem 若复用 `ReviewComplete` DTO，也需要测试。
   - Coding Workspace 如果使用独立 WS 类型，报告中说明不受本次 ChatWorkspace payload 改造影响。
 
 ## Task 7：前端贯通状态
 
-- [ ] 写 Vitest：
+- [x] 写 Vitest：
   - `renders outline then mode then serial draft confirm`
   - `renders batch queue and review findings`
   - `renders compile recovery actions by commit state`
   - `artifact history switches selected timeline draft`
-- [ ] 命令：
+- [x] 命令：
   - `pnpm -C web exec vitest --run src/pages/ChatWorkspacePage.test.tsx`
   - `pnpm -C web exec vitest --run src/state/workspace-ws-store.test.ts`
 
 ## Task 8：验证报告
 
-- [ ] 创建 `cadence/reports/2026-06-22_进度报告_WorkItemPlan两阶段生成与逐项确认验证_v1.0.md`。
-- [ ] 报告包含：
+- [x] 创建 `cadence/reports/2026-06-22_进度报告_WorkItemPlan两阶段生成与逐项确认验证_v1.0.md`。
+- [x] 报告包含：
   - 后端定向测试结果。
   - 前端测试结果。
   - 标准验证命令结果。

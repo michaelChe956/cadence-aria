@@ -31,6 +31,23 @@ static WS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 type WsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
+struct TestControlsGuard;
+
+impl Drop for TestControlsGuard {
+    fn drop(&mut self) {
+        unsafe {
+            std::env::remove_var("ARIA_E2E_TEST_CONTROLS");
+        }
+    }
+}
+
+fn enable_test_controls() -> TestControlsGuard {
+    unsafe {
+        std::env::set_var("ARIA_E2E_TEST_CONTROLS", "1");
+    }
+    TestControlsGuard
+}
+
 async fn connect_ws(app: axum::Router, session_id: &str) -> WsStream {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
@@ -113,6 +130,26 @@ async fn generate_session_to_author_confirm(
 
     ws.close(None).await.ok();
     session_id
+}
+
+async fn enable_review_fixture(app: &axum::Router, session_id: &str, verdict: &str) {
+    let (status, response) = request_json(
+        app.clone(),
+        Method::POST,
+        &format!("/api/test/workspace-sessions/{session_id}/review-fixture"),
+        json!({
+            "verdict": verdict,
+            "summary": "审核通过",
+            "comments": "覆盖核心路径",
+            "findings": []
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        axum::http::StatusCode::OK,
+        "enable review fixture failed: {response}"
+    );
 }
 
 fn recover_engine(repo: &tempfile::TempDir, session_id: &str) -> WorkspaceEngine {
@@ -334,12 +371,168 @@ async fn story_design_work_item_plan_recovery_consistency() {
 }
 
 #[tokio::test]
-#[ignore = "legacy full-candidate final confirm creates child WorkItem sessions; WP6 final compile will replace this coverage"]
-async fn work_item_workspace_recovery_unaffected_or_covered() {
+async fn story_workspace_review_sentinel_fallback_still_passes() {
     let _guard = WS_TEST_LOCK.lock().await;
-    let (app, repo) = app_with_confirmed_story_and_design(valid_split_output()).await;
+    let _test_guard = enable_test_controls();
+    let (app, _repo, _prompts) =
+        app_with_confirmed_story_and_design_and_streaming_outputs(vec![valid_outline_output()])
+            .await;
 
-    // 准备并确认 WorkItemPlan，产生子 WorkItem sessions
+    let (status, resp) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/story-specs:generate",
+        json!({
+            "title": "Reviewer fallback Story",
+            "author_provider": "fake",
+            "reviewer_provider": "codex",
+            "review_rounds": 1,
+            "superpowers_enabled": false,
+            "openspec_enabled": true
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        axum::http::StatusCode::OK,
+        "story generate failed: {resp}"
+    );
+    let session_id = resp["workspace_session"]["workspace_session_id"]
+        .as_str()
+        .expect("story session id")
+        .to_string();
+
+    let mut ws = connect_ws(app.clone(), &session_id).await;
+    ws.send(Message::Text(
+        json!({
+            "type": "start_generation",
+            "provider_config": { "author": "fake", "reviewer": "codex", "review_rounds": 1 },
+            "reviewer_enabled": true
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .expect("send start_generation");
+    let _messages = recv_ws_until(&mut ws, Duration::from_secs(15), |messages| {
+        messages.iter().any(|message| {
+            message["type"] == "stage_change" && message["stage"] == "author_confirm"
+        })
+    })
+    .await;
+
+    enable_review_fixture(&app, &session_id, "pass").await;
+    ws.send(Message::Text(
+        json!({ "type": "author_decision", "decision": "accept" })
+            .to_string()
+            .into(),
+    ))
+    .await
+    .expect("send author accept");
+
+    let messages = recv_ws_until(&mut ws, Duration::from_secs(15), |messages| {
+        messages
+            .iter()
+            .any(|message| message["type"] == "review_complete")
+            && messages.iter().any(|message| {
+                message["type"] == "stage_change" && message["stage"] == "human_confirm"
+            })
+    })
+    .await;
+    let review_complete = messages
+        .iter()
+        .find(|message| message["type"] == "review_complete")
+        .expect("story review complete");
+    assert_eq!(review_complete["verdict"], "pass");
+    assert!(
+        review_complete
+            .get("work_item_plan_review")
+            .is_none_or(Value::is_null),
+        "Story review_complete must not carry WorkItemPlan extension: {review_complete:?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message["type"] == "stage_change" && message["stage"] == "human_confirm"),
+        "Story review fallback should enter human_confirm, got {messages:?}"
+    );
+
+    ws.close(None).await.ok();
+}
+
+#[tokio::test]
+async fn design_workspace_artifact_history_still_loads_markdown() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let (app, repo, _prompts) =
+        app_with_confirmed_story_and_design_and_streaming_outputs(vec![valid_outline_output()])
+            .await;
+
+    let design_session_id = generate_session_to_author_confirm(
+        &app,
+        "/api/projects/project_0001/issues/issue_0001/design-specs:generate",
+        json!({
+            "title": "Design artifact history",
+            "story_spec_ids": ["story_spec_0001"],
+            "author_provider": "fake",
+            "reviewer_provider": null,
+            "review_rounds": 1,
+            "superpowers_enabled": false,
+            "openspec_enabled": true
+        }),
+    )
+    .await;
+
+    let app_paths = ProductAppPaths::new(repo.path().join(".aria"));
+    let lifecycle = LifecycleStore::new(app_paths);
+    let versions = lifecycle
+        .list_artifact_versions(&design_session_id)
+        .expect("list design artifact versions");
+    assert!(
+        versions
+            .iter()
+            .any(|version| version.is_current && version.markdown().contains("# Design Spec")),
+        "Design artifact history should keep readable markdown versions: {versions:?}"
+    );
+
+    let design_engine = recover_engine(&repo, &design_session_id);
+    match design_engine.build_session_state() {
+        WsOutMessage::SessionState {
+            workspace_type,
+            artifact,
+            artifact_versions,
+            artifact_version_summaries,
+            ..
+        } => {
+            assert_eq!(workspace_type, WorkspaceType::Design);
+            assert!(artifact_versions.is_empty());
+            assert!(
+                artifact_version_summaries
+                    .iter()
+                    .any(|summary| summary.is_current && summary.markdown_size > 0),
+                "SessionState should expose Design artifact history summaries"
+            );
+            let markdown = artifact
+                .as_ref()
+                .and_then(|payload| payload.markdown())
+                .expect("recovered design artifact markdown");
+            assert!(markdown.contains("# Design Spec"));
+        }
+        other => panic!("expected Design SessionState, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn ordinary_work_item_workspace_review_unaffected() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let (app, repo, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
+        valid_outline_output(),
+        valid_draft_output("outline_backend_session"),
+        valid_frontend_draft_output(),
+        valid_integration_draft_output(),
+    ])
+    .await;
+
+    // 准备并通过当前两阶段 batch compile 产生子 WorkItem sessions
     let (_status, prepare_resp) = request_json(
         app.clone(),
         Method::POST,
@@ -378,8 +571,10 @@ async fn work_item_workspace_recovery_unaffected_or_covered() {
     .await
     .expect("send start_generation");
     let _messages = recv_ws_until(&mut ws, Duration::from_secs(15), |msgs| {
-        msgs.iter()
-            .any(|m| m["type"] == "stage_change" && m["stage"] == "author_confirm")
+        msgs.iter().any(|m| {
+            m["type"] == "timeline_node_created"
+                && m["node"]["node_type"] == "work_item_plan_outline_confirm"
+        })
     })
     .await;
 
@@ -390,6 +585,41 @@ async fn work_item_workspace_recovery_unaffected_or_covered() {
     ))
     .await
     .expect("send author_decision accept");
+    let _messages = recv_ws_until(&mut ws, Duration::from_secs(10), |msgs| {
+        msgs.iter().any(|m| {
+            m["type"] == "timeline_node_created"
+                && m["node"]["node_type"] == "work_item_generation_mode"
+        })
+    })
+    .await;
+
+    ws.send(Message::Text(
+        json!({ "type": "select_work_item_generation_mode", "mode": "batch" })
+            .to_string()
+            .into(),
+    ))
+    .await
+    .expect("send batch mode");
+    let _messages = recv_ws_until(&mut ws, Duration::from_secs(10), |msgs| {
+        msgs.iter().any(|m| {
+            m["type"] == "timeline_node_created"
+                && m["node"]["node_type"] == "work_item_batch_confirm"
+        })
+    })
+    .await;
+
+    ws.send(Message::Text(
+        json!({
+            "type": "work_item_batch_decision",
+            "decision": "accept_all",
+            "feedback": null,
+            "first_affected_outline_id": null
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .expect("send batch accept_all");
     let _messages = recv_ws_until(&mut ws, Duration::from_secs(10), |msgs| {
         msgs.iter()
             .any(|m| m["type"] == "stage_change" && m["stage"] == "human_confirm")
@@ -596,6 +826,108 @@ fn session_state_serde_roundtrip_preserves_work_item_plan_candidate() {
         }
         other => panic!("expected SessionState with WorkItemPlanCandidate, got {other:?}"),
     }
+}
+
+fn valid_draft_output(outline_id: &str) -> Value {
+    json!({
+        "draft": {
+            "outline_id": outline_id,
+            "title": "实现后端登录会话 API",
+            "kind": "backend",
+            "goal": "提供登录会话过期检测与刷新相关 API。",
+            "implementation_context": "实现 product service 与 web handler，返回稳定 DTO。",
+            "exclusive_write_scopes": ["src/product/session.rs", "src/web/session_handlers.rs"],
+            "forbidden_write_scopes": ["web/**"],
+            "depends_on_outline_ids": [],
+            "required_handoff_from_outline_ids": [],
+            "handoff_summary": "输出 SessionStatusDto 与错误语义。",
+            "verification_plan": {
+                "commands": [
+                    {
+                        "id": "cmd_backend_session",
+                        "label": "cargo test session",
+                        "command": "cargo test --locked --lib session",
+                        "cwd": "",
+                        "purpose": "验证后端 session 逻辑",
+                        "required": true,
+                        "timeout_seconds": 120,
+                        "safety": "approved",
+                        "source": "provider"
+                    }
+                ],
+                "manual_checks": [],
+                "required_gates": ["cmd_backend_session"]
+            }
+        }
+    })
+}
+
+fn valid_frontend_draft_output() -> Value {
+    json!({
+        "draft": {
+            "outline_id": "outline_frontend_expiry",
+            "title": "实现前端会话过期提示",
+            "kind": "frontend",
+            "goal": "在前端展示会话过期提示并触发重新登录入口。",
+            "implementation_context": "消费后端会话状态 DTO，展示稳定 UI 状态。",
+            "exclusive_write_scopes": ["web/src/session/expiry.ts"],
+            "forbidden_write_scopes": ["src/product/**"],
+            "depends_on_outline_ids": ["outline_backend_session"],
+            "required_handoff_from_outline_ids": ["outline_backend_session"],
+            "handoff_summary": "输出前端会话过期提示组件。",
+            "verification_plan": {
+                "commands": [
+                    {
+                        "id": "cmd_frontend_session",
+                        "label": "pnpm web test",
+                        "command": "pnpm -C web test",
+                        "cwd": "",
+                        "purpose": "验证前端 session UI",
+                        "required": true,
+                        "timeout_seconds": 120,
+                        "safety": "approved",
+                        "source": "provider"
+                    }
+                ],
+                "manual_checks": [],
+                "required_gates": ["cmd_frontend_session"]
+            }
+        }
+    })
+}
+
+fn valid_integration_draft_output() -> Value {
+    json!({
+        "draft": {
+            "outline_id": "outline_integration_session",
+            "title": "集成测试：会话过期端到端",
+            "kind": "integration",
+            "goal": "覆盖会话过期到前端提示的贯通路径。",
+            "implementation_context": "覆盖后端会话 DTO 到前端提示的集成路径。",
+            "exclusive_write_scopes": ["tests/session/expiry.rs"],
+            "forbidden_write_scopes": [],
+            "depends_on_outline_ids": ["outline_frontend_expiry"],
+            "required_handoff_from_outline_ids": ["outline_frontend_expiry"],
+            "handoff_summary": "输出端到端验证覆盖。",
+            "verification_plan": {
+                "commands": [
+                    {
+                        "id": "cmd_integration_session",
+                        "label": "cargo test session integration",
+                        "command": "cargo test --locked --test it_web session",
+                        "cwd": "",
+                        "purpose": "验证会话过期贯通路径",
+                        "required": true,
+                        "timeout_seconds": 120,
+                        "safety": "approved",
+                        "source": "provider"
+                    }
+                ],
+                "manual_checks": [],
+                "required_gates": ["cmd_integration_session"]
+            }
+        }
+    })
 }
 
 #[tokio::test]

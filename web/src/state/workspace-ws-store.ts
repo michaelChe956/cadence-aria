@@ -1,5 +1,16 @@
 import { create } from "zustand";
-import type { NodeDetail, WorkspaceProviderName, WorkItemPlanCandidateDto } from "../api/types";
+import type {
+  NodeDetail,
+  WorkItemBatchStatePayload,
+  WorkItemDraftCandidatePayload,
+  WorkItemPlanArtifactPayload,
+  WorkItemPlanArtifactVersion,
+  WorkItemPlanCandidateDto,
+  WorkItemPlanCompileReportPayload,
+  WorkItemPlanContextBlockerPayload,
+  WorkItemPlanOutlineCandidatePayload,
+  WorkspaceProviderName,
+} from "../api/types";
 import type { WorkspaceContentRef } from "./chat-entries";
 import type {
   ChatEntry,
@@ -18,7 +29,12 @@ type WorkspaceArtifact =
   | string
   | null
   | { markdown: string; diff?: string | null }
-  | { candidate: WorkItemPlanCandidateDto };
+  | { candidate: WorkItemPlanCandidateDto }
+  | { outline_candidate: WorkItemPlanOutlineCandidatePayload }
+  | { context_blocker: WorkItemPlanContextBlockerPayload }
+  | { draft_candidate: WorkItemDraftCandidatePayload }
+  | { batch_state: WorkItemBatchStatePayload }
+  | { compile_report: WorkItemPlanCompileReportPayload };
 
 export type WsConnectionStatus = "disconnected" | "connecting" | "connected" | "error";
 export type ProviderStatus =
@@ -46,9 +62,23 @@ export type TimelineNodeType =
   | "review_decision"
   | "revision"
   | "human_confirm"
+  | "work_item_plan_outline_run"
+  | "work_item_plan_outline_confirm"
+  | "work_item_plan_outline_review"
+  | "work_item_plan_context_blocker"
+  | "work_item_generation_mode"
+  | "work_item_draft_run"
+  | "work_item_draft_confirm"
+  | "work_item_draft_review"
+  | "work_item_batch_run"
+  | "work_item_batch_confirm"
+  | "work_item_batch_review"
+  | "work_item_plan_compile"
+  | "work_item_plan_compile_recovery"
   | "aborted_by_disconnect"
   | "protocol_error"
-  | "completed";
+  | "completed"
+  | (string & {});
 export type TimelineNodeStatus = "active" | "paused" | "completed" | "failed" | "skipped";
 export type ReviewVerdictType = "pass" | "revise" | "needs_human";
 
@@ -202,6 +232,8 @@ export interface WorkspaceWsState {
   chatEntries: ChatEntry[];
   artifact: string | null;
   workItemPlanCandidate: WorkItemPlanCandidateDto | null;
+  workItemPlanArtifact: WorkItemPlanArtifactPayload | null;
+  workItemPlanArtifactVersions: WorkItemPlanArtifactVersion[];
   providers: WsProviderConfig | null;
   connectionStatus: WsConnectionStatus;
   streamingContent: string;
@@ -266,6 +298,7 @@ export interface WorkspaceWsActions {
   setStage: (stage: string) => void;
   setArtifact: (markdown: string, version?: number) => void;
   setWorkItemPlanCandidate: (candidate: WorkItemPlanCandidateDto | null) => void;
+  setWorkItemPlanArtifact: (artifact: WorkItemPlanArtifactPayload | null, version?: number) => void;
   addTimelineNode: (node: TimelineNode) => void;
   updateTimelineNode: (
     nodeId: string,
@@ -317,6 +350,8 @@ const initialState: WorkspaceWsState = {
   chatEntries: [],
   artifact: null,
   workItemPlanCandidate: null,
+  workItemPlanArtifact: null,
+  workItemPlanArtifactVersions: [],
   providers: null,
   connectionStatus: "disconnected",
   streamingContent: "",
@@ -360,9 +395,8 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
       const defaultSelectedNodeId =
         state.active_node_id ?? timelineNodes[timelineNodes.length - 1]?.node_id ?? null;
 
-      const { artifactMarkdown, workItemPlanCandidate } = normalizeWorkspaceArtifact(
-        state.artifact,
-      );
+      const { artifactMarkdown, workItemPlanCandidate, workItemPlanArtifact } =
+        normalizeWorkspaceArtifact(state.artifact);
 
       const nextState: WorkspaceWsState = {
         ...prev,
@@ -377,6 +411,22 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
         chatEntries: [],
         artifact: artifactMarkdown,
         workItemPlanCandidate,
+        workItemPlanArtifact,
+        workItemPlanArtifactVersions: workItemPlanArtifact
+          ? [
+              {
+                version: Math.max(0, ...(state.artifact_version_summaries ?? []).map((item) => item.version)),
+                generated_by: state.providers.author,
+                reviewed_by: state.providers.reviewer ?? null,
+                review_verdict: null,
+                confirmed_by: null,
+                is_current: true,
+                created_at: new Date().toISOString(),
+                source_node_id: state.active_node_id ?? "",
+                artifact: workItemPlanArtifact,
+              },
+            ]
+          : [],
         providers: state.providers,
         streamingContent: "",
         streamBuffers: {},
@@ -645,7 +695,53 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
       };
     }),
 
-  setWorkItemPlanCandidate: (candidate) => set({ workItemPlanCandidate: candidate }),
+  setWorkItemPlanCandidate: (candidate) =>
+    set((prev) => ({
+      workItemPlanCandidate: candidate,
+      workItemPlanArtifact: candidate ? null : prev.workItemPlanArtifact,
+    })),
+
+  setWorkItemPlanArtifact: (artifact, version) =>
+    set((prev) => ({
+      workItemPlanArtifact: artifact,
+      workItemPlanCandidate: artifact ? null : prev.workItemPlanCandidate,
+      artifact: artifact ? null : prev.artifact,
+      artifactVersions:
+        artifact && version !== undefined
+          ? [
+              ...prev.artifactVersions.filter((artifactVersion) => artifactVersion.version !== version),
+              {
+                version,
+                generated_by: prev.providers?.author ?? "fake",
+                reviewed_by: null,
+                review_verdict: null,
+                confirmed_by: null,
+                is_current: true,
+                created_at: new Date().toISOString(),
+                source_node_id: prev.activeNodeId ?? "",
+              },
+            ].sort((left, right) => left.version - right.version)
+          : prev.artifactVersions,
+      workItemPlanArtifactVersions:
+        artifact && version !== undefined
+          ? [
+              ...prev.workItemPlanArtifactVersions.filter(
+                (artifactVersion) => artifactVersion.version !== version,
+              ),
+              {
+                version,
+                generated_by: prev.providers?.author ?? "fake",
+                reviewed_by: prev.providers?.reviewer ?? null,
+                review_verdict: null,
+                confirmed_by: null,
+                is_current: true,
+                created_at: new Date().toISOString(),
+                source_node_id: prev.activeNodeId ?? "",
+                artifact,
+              },
+            ].sort((left, right) => left.version - right.version)
+          : prev.workItemPlanArtifactVersions,
+    })),
 
   addTimelineNode: (node) =>
     set((prev) => ({
@@ -1037,17 +1133,84 @@ function normalizeWorkspaceArtifact(
 ): {
   artifactMarkdown: string | null;
   workItemPlanCandidate: WorkItemPlanCandidateDto | null;
+  workItemPlanArtifact: WorkItemPlanArtifactPayload | null;
 } {
   if (artifact === null) {
-    return { artifactMarkdown: null, workItemPlanCandidate: null };
+    return {
+      artifactMarkdown: null,
+      workItemPlanCandidate: null,
+      workItemPlanArtifact: null,
+    };
   }
   if (typeof artifact === "object" && "candidate" in artifact) {
-    return { artifactMarkdown: null, workItemPlanCandidate: artifact.candidate };
+    return {
+      artifactMarkdown: null,
+      workItemPlanCandidate: artifact.candidate,
+      workItemPlanArtifact: null,
+    };
+  }
+  if (typeof artifact === "object" && "outline_candidate" in artifact) {
+    return {
+      artifactMarkdown: null,
+      workItemPlanCandidate: null,
+      workItemPlanArtifact: {
+        type: "outline_candidate",
+        payload: artifact.outline_candidate,
+      },
+    };
+  }
+  if (typeof artifact === "object" && "context_blocker" in artifact) {
+    return {
+      artifactMarkdown: null,
+      workItemPlanCandidate: null,
+      workItemPlanArtifact: {
+        type: "context_blocker",
+        payload: artifact.context_blocker,
+      },
+    };
+  }
+  if (typeof artifact === "object" && "draft_candidate" in artifact) {
+    return {
+      artifactMarkdown: null,
+      workItemPlanCandidate: null,
+      workItemPlanArtifact: {
+        type: "draft_candidate",
+        payload: artifact.draft_candidate,
+      },
+    };
+  }
+  if (typeof artifact === "object" && "batch_state" in artifact) {
+    return {
+      artifactMarkdown: null,
+      workItemPlanCandidate: null,
+      workItemPlanArtifact: {
+        type: "batch_state",
+        payload: artifact.batch_state,
+      },
+    };
+  }
+  if (typeof artifact === "object" && "compile_report" in artifact) {
+    return {
+      artifactMarkdown: null,
+      workItemPlanCandidate: null,
+      workItemPlanArtifact: {
+        type: "compile_report",
+        payload: artifact.compile_report,
+      },
+    };
   }
   if (typeof artifact === "object" && "markdown" in artifact) {
-    return { artifactMarkdown: artifact.markdown, workItemPlanCandidate: null };
+    return {
+      artifactMarkdown: artifact.markdown,
+      workItemPlanCandidate: null,
+      workItemPlanArtifact: null,
+    };
   }
-  return { artifactMarkdown: artifact, workItemPlanCandidate: null };
+  return {
+    artifactMarkdown: artifact,
+    workItemPlanCandidate: null,
+    workItemPlanArtifact: null,
+  };
 }
 
 function ensureNodeDetail(details: Record<string, TimelineNodeDetail>, nodeId: string) {

@@ -5,7 +5,17 @@ import type {
   ProviderConfigSnapshot,
   RevisionPath,
   WorkspaceProviderName,
+  WorkItemBatchDecision,
+  WorkItemBatchStatePayload,
+  WorkItemDraftCandidatePayload,
+  WorkItemDraftDecision,
+  WorkItemGenerationMode,
+  WorkItemPlanArtifactPayload,
   WorkItemPlanCandidateDto,
+  WorkItemPlanCompileRecoveryAction,
+  WorkItemPlanCompileReportPayload,
+  WorkItemPlanContextBlockerPayload,
+  WorkItemPlanOutlineCandidatePayload,
   WsInMessage,
 } from "../api/types";
 import type { ChatEntry, ChatEntryRole } from "../state/chat-entries";
@@ -307,30 +317,47 @@ export function useWorkspaceWs(sessionId: string | null) {
               },
             });
           } else {
-            const markdown = msg.markdown as string;
-            store.setArtifact(markdown, version);
-            store.setWorkItemPlanCandidate(null);
-            store.appendChatEntry({
-              id: chatEntryId("artifact_update", String(version)),
-              type: "artifact_update",
-              role: "system",
-              content: `产物已更新 -> v${version}`,
-              timestamp: new Date().toISOString(),
-              metadata: {
-                version,
-                diff: (msg as { diff?: string | null }).diff ?? null,
-              },
-              content_ref:
-                version === undefined
-                  ? undefined
-                  : {
-                      kind: "artifact_version",
-                      version,
-                      sourceNodeId: store.activeNodeId ?? undefined,
-                    },
-              content_size: markdown.length,
-              has_full_content: true,
-            });
+            const workItemPlanArtifact = workItemPlanArtifactFromMessage(msg);
+            if (workItemPlanArtifact) {
+              store.setWorkItemPlanArtifact(workItemPlanArtifact, version);
+              store.appendChatEntry({
+                id: chatEntryId("artifact_update", `${workItemPlanArtifact.type}:${String(version)}`),
+                type: "artifact_update",
+                role: "system",
+                content: `Work Item Plan staged artifact 已更新 -> v${version}`,
+                timestamp: new Date().toISOString(),
+                metadata: {
+                  version,
+                  artifact_type: workItemPlanArtifact.type,
+                },
+              });
+            } else {
+              const markdown = msg.markdown as string;
+              store.setArtifact(markdown, version);
+              store.setWorkItemPlanCandidate(null);
+              store.setWorkItemPlanArtifact(null);
+              store.appendChatEntry({
+                id: chatEntryId("artifact_update", String(version)),
+                type: "artifact_update",
+                role: "system",
+                content: `产物已更新 -> v${version}`,
+                timestamp: new Date().toISOString(),
+                metadata: {
+                  version,
+                  diff: (msg as { diff?: string | null }).diff ?? null,
+                },
+                content_ref:
+                  version === undefined
+                    ? undefined
+                    : {
+                        kind: "artifact_version",
+                        version,
+                        sourceNodeId: store.activeNodeId ?? undefined,
+                      },
+                content_size: markdown.length,
+                has_full_content: true,
+              });
+            }
           }
         }
         break;
@@ -657,6 +684,67 @@ export function useWorkspaceWs(sessionId: string | null) {
     [sendJson],
   );
 
+  const sendSelectWorkItemGenerationMode = useCallback(
+    (mode: WorkItemGenerationMode) => {
+      sendJson({ type: "select_work_item_generation_mode", mode });
+    },
+    [sendJson],
+  );
+
+  const sendRequestOutlineRevision = useCallback(
+    (feedback?: string) => {
+      const trimmedFeedback = feedback?.trim();
+      sendJson({
+        type: "request_outline_revision",
+        feedback: trimmedFeedback ? trimmedFeedback : null,
+      });
+    },
+    [sendJson],
+  );
+
+  const sendWorkItemDraftDecision = useCallback(
+    (outlineId: string, decision: WorkItemDraftDecision, feedback?: string) => {
+      const trimmedFeedback = feedback?.trim();
+      sendJson({
+        type: "work_item_draft_decision",
+        outline_id: outlineId,
+        decision,
+        feedback: trimmedFeedback ? trimmedFeedback : null,
+      });
+    },
+    [sendJson],
+  );
+
+  const sendWorkItemBatchDecision = useCallback(
+    (
+      decision: WorkItemBatchDecision,
+      feedback?: string,
+      firstAffectedOutlineId?: string,
+    ) => {
+      const trimmedFeedback = feedback?.trim();
+      const trimmedOutlineId = firstAffectedOutlineId?.trim();
+      sendJson({
+        type: "work_item_batch_decision",
+        decision,
+        feedback: trimmedFeedback ? trimmedFeedback : null,
+        first_affected_outline_id: trimmedOutlineId ? trimmedOutlineId : null,
+      });
+    },
+    [sendJson],
+  );
+
+  const sendWorkItemPlanCompileRecoveryAction = useCallback(
+    (action: WorkItemPlanCompileRecoveryAction, reason?: string) => {
+      const trimmedReason = reason?.trim();
+      sendJson({
+        type: "work_item_plan_compile_recovery_action",
+        action,
+        reason: trimmedReason ? trimmedReason : null,
+      });
+    },
+    [sendJson],
+  );
+
   const sendMessage = useCallback(
     (content: string) => {
       console.warn("sendMessage is deprecated, use sendContextNote or sendStartGeneration");
@@ -770,6 +858,11 @@ export function useWorkspaceWs(sessionId: string | null) {
     sendAuthorDecision,
     sendRequestRevision,
     sendRevertWorkItem,
+    sendSelectWorkItemGenerationMode,
+    sendRequestOutlineRevision,
+    sendWorkItemDraftDecision,
+    sendWorkItemBatchDecision,
+    sendWorkItemPlanCompileRecoveryAction,
     sendHumanConfirm,
     sendHello,
     sendPing,
@@ -836,6 +929,40 @@ function streamEntryId(nodeId: string | null | undefined) {
 
 function chatEntryId(kind: string, suffix: string) {
   return `${kind}:${suffix}`;
+}
+
+function workItemPlanArtifactFromMessage(msg: WsServerMessage): WorkItemPlanArtifactPayload | null {
+  if (msg.outline_candidate) {
+    return {
+      type: "outline_candidate",
+      payload: msg.outline_candidate as WorkItemPlanOutlineCandidatePayload,
+    };
+  }
+  if (msg.context_blocker) {
+    return {
+      type: "context_blocker",
+      payload: msg.context_blocker as WorkItemPlanContextBlockerPayload,
+    };
+  }
+  if (msg.draft_candidate) {
+    return {
+      type: "draft_candidate",
+      payload: msg.draft_candidate as WorkItemDraftCandidatePayload,
+    };
+  }
+  if (msg.batch_state) {
+    return {
+      type: "batch_state",
+      payload: msg.batch_state as WorkItemBatchStatePayload,
+    };
+  }
+  if (msg.compile_report) {
+    return {
+      type: "compile_report",
+      payload: msg.compile_report as WorkItemPlanCompileReportPayload,
+    };
+  }
+  return null;
 }
 
 function permissionRequestContent(request: { tool_name: string; description: string }) {

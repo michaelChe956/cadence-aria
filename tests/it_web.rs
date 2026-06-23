@@ -51,6 +51,10 @@ mod web_types;
 mod web_work_item_generation;
 #[path = "it_web/web_work_item_plan_author.rs"]
 mod web_work_item_plan_author;
+#[path = "it_web/web_work_item_plan_batch.rs"]
+mod web_work_item_plan_batch;
+#[path = "it_web/web_work_item_plan_compile.rs"]
+mod web_work_item_plan_compile;
 #[path = "it_web/web_work_item_plan_confirm.rs"]
 mod web_work_item_plan_confirm;
 #[path = "it_web/web_work_item_plan_mode.rs"]
@@ -63,6 +67,8 @@ mod web_work_item_plan_revert;
 mod web_work_item_plan_review;
 #[path = "it_web/web_work_item_plan_serial.rs"]
 mod web_work_item_plan_serial;
+#[path = "it_web/web_work_item_plan_staged_flow.rs"]
+mod web_work_item_plan_staged_flow;
 #[path = "it_web/web_work_item_split_flow.rs"]
 mod web_work_item_split_flow;
 #[path = "it_web/web_workspace_recovery_consistency.rs"]

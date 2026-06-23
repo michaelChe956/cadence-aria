@@ -18,20 +18,27 @@ use crate::cross_cutting::streaming_provider::{
 use crate::product::artifact_extraction::extract_artifact_content;
 use crate::product::checkpoint_store::CheckpointStore;
 use crate::product::json_store::ProductStoreError;
-use crate::product::lifecycle_store::{AppendSpecVersionInput, LifecycleStore};
+use crate::product::lifecycle_store::{
+    AppendSpecVersionInput, CreateVerificationPlanInput, CreateWorkItemInput,
+    CreateWorkspaceSessionInput, IssueWorkItemPlanUpdate, LifecycleStore,
+};
 use crate::product::models::{
-    AgentRole, ArtifactRef, DesignContextCapabilities, IssueWorkItemPlan,
-    LifecycleConfirmationStatus, LifecycleWorkItemRecord, NodeDetail,
+    AgentRole, ArtifactRef, DesignContextCapabilities, IssueWorkItemDependencyEdge,
+    IssueWorkItemPlan, LifecycleConfirmationStatus, LifecycleWorkItemRecord, NodeDetail,
     OutlineContextBlockerResolution, OutlineContextIndex, PermissionEvent, ProviderConversationRef,
-    ProviderConversationRole, ProviderName, ProviderSnapshot, WorkItemDraftCandidate,
-    WorkItemDraftRecord, WorkItemDraftStatus, WorkItemDraftSupersedeReason, WorkItemGenerationMode,
+    ProviderConversationRole, ProviderName, ProviderSnapshot, RepositoryProfileConfidence,
+    VerificationCommand, VerificationCommandSafety, VerificationCommandSource,
+    VerificationFallbackPolicy, VerificationManualCheck, VerificationPlan, VerificationScope,
+    WorkItemBatchRecord, WorkItemBatchStatus, WorkItemDraftCandidate, WorkItemDraftRecord,
+    WorkItemDraftStatus, WorkItemDraftSupersedeReason, WorkItemGenerationMode,
+    WorkItemPlanCommitState, WorkItemPlanCompileStatus, WorkItemPlanCompileTransaction,
     WorkItemPlanDraftActiveIndex, WorkItemPlanOutline, WorkItemPlanStatus, WorkItemSplitFinding,
     WorkItemSplitFindingSeverity, WorkspaceMessageRecord, WorkspaceSessionRecord,
     WorkspaceSessionStatus, WorkspaceType,
 };
 use crate::product::work_item_plan_store::{
-    WorkItemPlanStore, mark_draft_active, mark_draft_record_superseded, next_draft_id,
-    next_generation_round_id,
+    WorkItemPlanStore, copy_draft_for_current_round, mark_draft_active,
+    mark_draft_record_superseded, next_batch_id, next_draft_id, next_generation_round_id,
 };
 use crate::product::work_item_split_engine::{
     OutlineAuthorOutput, RedoSpec, WorkItemPlanContextBlocker, WorkItemSplitProviderOutput,
@@ -47,14 +54,17 @@ use crate::web::workspace_ws_types::{
     HumanConfirmDecision, NodeDetailSummary, ProviderConfigSnapshot, RepositoryProfileDto,
     ReviewFinding, ReviewFindingSeverity, ReviewGate, ReviewVerdict, ReviewVerdictType,
     TimelineNode, TimelineNodeStatus, TimelineNodeType, ValidatorFindingDto,
-    VerificationCommandDto, VerificationManualCheckDto, VerificationPlanDto, WorkItemCandidateDto,
-    WorkItemCandidateMetaDto, WorkItemDependencyEdgeDto, WorkItemDraftCandidatePayload,
-    WorkItemDraftDecisionDto, WorkItemGenerationModeDto, WorkItemPlanCandidateDto,
-    WorkItemPlanContextBlockerDto, WorkItemPlanContextBlockerPayload, WorkItemPlanDto,
-    WorkItemPlanOutlineCandidateDto, WorkItemPlanReviewAction, WorkItemPlanReviewAffectedItem,
-    WorkItemPlanReviewComplete, WorkItemPlanReviewGate, WorkItemPlanReviewScope,
-    WorkItemPlanReviewVerdict, WorkItemSplitOptionsDto, WorkspaceStage as WsWorkspaceStage,
-    WsCheckpointDto, WsMessageDto, WsOutMessage, WsProviderConfig,
+    VerificationCommandDto, VerificationManualCheckDto, VerificationPlanDto,
+    WorkItemBatchDecisionDto, WorkItemBatchFailureSummaryDto, WorkItemBatchStatePayload,
+    WorkItemCandidateDto, WorkItemCandidateMetaDto, WorkItemDependencyEdgeDto,
+    WorkItemDraftCandidatePayload, WorkItemDraftDecisionDto, WorkItemGenerationModeDto,
+    WorkItemPlanCandidateDto, WorkItemPlanCompileRecoveryActionDto,
+    WorkItemPlanCompileReportPayload, WorkItemPlanContextBlockerDto,
+    WorkItemPlanContextBlockerPayload, WorkItemPlanDto, WorkItemPlanOutlineCandidateDto,
+    WorkItemPlanReviewAction, WorkItemPlanReviewAffectedItem, WorkItemPlanReviewComplete,
+    WorkItemPlanReviewGate, WorkItemPlanReviewScope, WorkItemPlanReviewVerdict,
+    WorkItemSplitOptionsDto, WorkspaceStage as WsWorkspaceStage, WsCheckpointDto, WsMessageDto,
+    WsOutMessage, WsProviderConfig,
 };
 
 const SUMMARY_PREVIEW_CHARS: usize = 2048;
@@ -139,6 +149,27 @@ fn work_item_plan_outline_topological_order(
     Ok(order)
 }
 
+fn current_work_item_batch(
+    index: &WorkItemPlanDraftActiveIndex,
+) -> Result<&WorkItemBatchRecord, String> {
+    index
+        .batches
+        .iter()
+        .rev()
+        .find(|batch| {
+            batch.generation_round_id == index.current_generation_round_id
+                && batch.mode == WorkItemGenerationMode::Batch
+                && batch.status == WorkItemBatchStatus::Generating
+        })
+        .or_else(|| {
+            index.batches.iter().rev().find(|batch| {
+                batch.generation_round_id == index.current_generation_round_id
+                    && batch.mode == WorkItemGenerationMode::Batch
+            })
+        })
+        .ok_or_else(|| "current work item batch record is missing".to_string())
+}
+
 fn work_item_plan_findings_summary(prefix: &str, findings: &[WorkItemSplitFinding]) -> String {
     let errors = findings
         .iter()
@@ -149,6 +180,189 @@ fn work_item_plan_findings_summary(prefix: &str, findings: &[WorkItemSplitFindin
         .filter(|finding| finding.severity == WorkItemSplitFindingSeverity::Warning)
         .count();
     format!("{prefix}（errors: {errors}, warnings: {warnings}）")
+}
+
+fn work_item_draft_status_label(status: &WorkItemDraftStatus) -> &'static str {
+    match status {
+        WorkItemDraftStatus::Draft => "draft",
+        WorkItemDraftStatus::Accepted => "accepted",
+        WorkItemDraftStatus::Superseded => "superseded",
+        WorkItemDraftStatus::ValidationFailed => "validation_failed",
+    }
+}
+
+fn next_compile_id() -> String {
+    format!("compile_{}", chrono::Utc::now().format("%Y%m%d%H%M%S%3f"))
+}
+
+fn compile_work_item_id(compile_id: &str, index: usize) -> String {
+    format!("work_item_{compile_id}_{:03}", index + 1)
+}
+
+fn compile_verification_plan_id(compile_id: &str, index: usize) -> String {
+    format!("verification_plan_{compile_id}_{:03}", index + 1)
+}
+
+fn parse_compile_verification_scope(value: Option<&str>) -> VerificationScope {
+    match value.unwrap_or_default() {
+        "unit" => VerificationScope::Unit,
+        "integration" => VerificationScope::Integration,
+        "e2e" => VerificationScope::E2e,
+        "build" => VerificationScope::Build,
+        "lint" => VerificationScope::Lint,
+        "manual" => VerificationScope::Manual,
+        _ => VerificationScope::Custom,
+    }
+}
+
+fn parse_compile_confidence(value: Option<&str>) -> RepositoryProfileConfidence {
+    match value.unwrap_or("high") {
+        "low" => RepositoryProfileConfidence::Low,
+        "medium" => RepositoryProfileConfidence::Medium,
+        _ => RepositoryProfileConfidence::High,
+    }
+}
+
+fn parse_compile_fallback_policy(value: Option<&str>) -> VerificationFallbackPolicy {
+    match value.unwrap_or("manual_gate") {
+        "repair_provider_output" => VerificationFallbackPolicy::RepairProviderOutput,
+        _ => VerificationFallbackPolicy::ManualGate,
+    }
+}
+
+fn parse_compile_safety(value: Option<&str>) -> VerificationCommandSafety {
+    match value.unwrap_or("approved") {
+        "needs_manual_review" => VerificationCommandSafety::NeedsManualReview,
+        _ => VerificationCommandSafety::Approved,
+    }
+}
+
+fn json_string_array(value: Option<&serde_json::Value>) -> Vec<String> {
+    value
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn parse_compile_verification_plan(
+    value: &serde_json::Value,
+    id: String,
+    project_id: String,
+    issue_id: String,
+    work_item_id: String,
+    now: String,
+) -> VerificationPlan {
+    let commands = value
+        .get("commands")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .enumerate()
+                .map(|(index, command)| VerificationCommand {
+                    id: command
+                        .get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("cmd_{:03}", index + 1)),
+                    label: command
+                        .get("label")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("验证命令")
+                        .to_string(),
+                    command: command
+                        .get("command")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    cwd: command
+                        .get("cwd")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    purpose: command
+                        .get("purpose")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    required: command
+                        .get("required")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false),
+                    timeout_seconds: command
+                        .get("timeout_seconds")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(120),
+                    source: VerificationCommandSource::Provider,
+                    safety: parse_compile_safety(
+                        command.get("safety").and_then(serde_json::Value::as_str),
+                    ),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let manual_checks = value
+        .get("manual_checks")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .enumerate()
+                .map(|(index, check)| VerificationManualCheck {
+                    id: check
+                        .get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("manual_{:03}", index + 1)),
+                    label: check
+                        .get("label")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("人工检查")
+                        .to_string(),
+                    instructions: check
+                        .get("instructions")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    required: check
+                        .get("required")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    VerificationPlan {
+        id,
+        project_id,
+        issue_id,
+        work_item_id,
+        repository_profile_ref: None,
+        provider_run_ref: None,
+        scope: parse_compile_verification_scope(
+            value.get("scope").and_then(serde_json::Value::as_str),
+        ),
+        commands,
+        manual_checks,
+        required_gates: json_string_array(value.get("required_gates")),
+        risk_notes: json_string_array(value.get("risk_notes")),
+        confidence: parse_compile_confidence(
+            value.get("confidence").and_then(serde_json::Value::as_str),
+        ),
+        fallback_policy: parse_compile_fallback_policy(
+            value
+                .get("fallback_policy")
+                .and_then(serde_json::Value::as_str),
+        ),
+        created_at: now.clone(),
+        updated_at: now,
+    }
 }
 
 fn work_item_split_findings_to_dto(findings: &[WorkItemSplitFinding]) -> Vec<ValidatorFindingDto> {
@@ -389,6 +603,26 @@ fn build_artifact_version_summary(version: &ArtifactVersion) -> ArtifactVersionS
                 "{}: {}",
                 draft_candidate.draft_record.outline_id,
                 draft_candidate.draft_record.candidate.title
+            );
+            (size, preview(&preview_text))
+        }
+        ArtifactPayload::WorkItemBatchState { batch_state } => {
+            let size = serde_json::to_string(batch_state).map_or(0, |s| s.len());
+            let preview_text = format!(
+                "{}: {:?} ({} drafts)",
+                batch_state.batch_id,
+                batch_state.batch_status,
+                batch_state.draft_records.len()
+            );
+            (size, preview(&preview_text))
+        }
+        ArtifactPayload::WorkItemPlanCompileReport { compile_report } => {
+            let size = serde_json::to_string(compile_report).map_or(0, |s| s.len());
+            let preview_text = format!(
+                "{}: {:?} ({} work items)",
+                compile_report.compile_id,
+                compile_report.status,
+                compile_report.work_item_ids.len()
             );
             (size, preview(&preview_text))
         }
@@ -658,6 +892,28 @@ pub enum WorkItemDraftDecisionOutcome {
     HumanConfirm,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkItemBatchDecisionOutcome {
+    StartBatchRun,
+    StartDraftRun,
+    StartReview,
+    HumanConfirm,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkItemPlanCompileRecoveryOutcome {
+    Continue,
+    HumanConfirm,
+}
+
+struct WorkItemPlanCompileProjectionContext<'a> {
+    outline_order: &'a [String],
+    outline_to_work_item_id: &'a BTreeMap<String, String>,
+    outline_to_verification_plan_id: &'a BTreeMap<String, String>,
+    repository_id: &'a str,
+    now: &'a str,
+}
+
 pub struct WorkspaceEngine {
     checkpoint_store: Arc<CheckpointStore>,
     lifecycle_store: Option<LifecycleStore>,
@@ -674,6 +930,7 @@ pub struct WorkspaceEngine {
     stream_buffers: HashMap<String, PendingStreamBuffer>,
     work_item_plan_author_retry_count: u32,
     work_item_plan_revision_retry_count: u32,
+    work_item_batch_retry_counts: HashMap<String, u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -866,6 +1123,7 @@ impl WorkspaceEngine {
             stream_buffers: HashMap::new(),
             work_item_plan_author_retry_count: 0,
             work_item_plan_revision_retry_count: 0,
+            work_item_batch_retry_counts: HashMap::new(),
         }
     }
 
@@ -924,6 +1182,7 @@ impl WorkspaceEngine {
             stream_buffers: HashMap::new(),
             work_item_plan_author_retry_count: 0,
             work_item_plan_revision_retry_count: 0,
+            work_item_batch_retry_counts: HashMap::new(),
         }
     }
 
@@ -1174,12 +1433,60 @@ impl WorkspaceEngine {
                 batches: Vec::new(),
                 updated_at: chrono::Utc::now().to_rfc3339(),
             });
+        let now = chrono::Utc::now().to_rfc3339();
+        self.supersede_current_generation_drafts_for_outline_revision(&store, &mut index, &now)?;
         index.outline_state = "revising".to_string();
         index.active_outline_id = None;
-        index.updated_at = chrono::Utc::now().to_rfc3339();
+        index.updated_at = now;
         store
             .save_active_index(&index)
             .map_err(|error| format!("save work item plan active index failed: {error}"))
+    }
+
+    fn supersede_current_generation_drafts_for_outline_revision(
+        &self,
+        store: &WorkItemPlanStore,
+        index: &mut WorkItemPlanDraftActiveIndex,
+        now: &str,
+    ) -> Result<(), String> {
+        let draft_ids: Vec<String> = index
+            .draft_statuses
+            .iter()
+            .filter_map(|(draft_id, status)| {
+                if status == &WorkItemDraftStatus::Superseded {
+                    None
+                } else {
+                    Some(draft_id.clone())
+                }
+            })
+            .collect();
+
+        for draft_id in draft_ids {
+            let mut record = store
+                .get_draft_record(
+                    &index.project_id,
+                    &index.issue_id,
+                    &index.plan_id,
+                    &index.current_generation_round_id,
+                    &draft_id,
+                )
+                .map_err(|error| format!("load draft for outline revision failed: {error}"))?;
+            mark_draft_record_superseded(
+                &mut record,
+                None,
+                WorkItemDraftSupersedeReason::OutlineRevised,
+                now,
+            );
+            store.put_draft_record(&record).map_err(|error| {
+                format!("save superseded outline revision draft failed: {error}")
+            })?;
+            index
+                .draft_statuses
+                .insert(draft_id, WorkItemDraftStatus::Superseded);
+        }
+
+        index.outline_to_current_draft_id.clear();
+        Ok(())
     }
 
     fn set_active_work_item_plan_outline(&self, outline_id: &str) -> Result<(), String> {
@@ -1443,6 +1750,26 @@ impl WorkspaceEngine {
         .await
     }
 
+    async fn begin_work_item_batch_review_run(&mut self) -> String {
+        self.transition_stage(WorkspaceStage::CrossReview).await;
+        let round = self.next_review_round();
+        let reviewer = self
+            .session
+            .reviewer_provider
+            .clone()
+            .unwrap_or(ProviderName::Codex);
+        self.create_timeline_node(TimelineNodeDraft {
+            node_type: TimelineNodeType::WorkItemBatchReview,
+            agent: Some(reviewer),
+            stage: WorkspaceStage::CrossReview,
+            round: Some(round),
+            title: format!("Work Item Batch Review Round {round}"),
+            summary: Some("审核整组 Work Item Draft".to_string()),
+            status: TimelineNodeStatus::Active,
+        })
+        .await
+    }
+
     pub async fn select_work_item_generation_mode(
         &mut self,
         mode: WorkItemGenerationModeDto,
@@ -1466,6 +1793,7 @@ impl WorkspaceEngine {
                 self.start_serial_work_item_draft_run().await;
             }
             WorkItemGenerationModeDto::Batch => {
+                self.create_current_work_item_batch_record()?;
                 self.complete_active_node(Some("已选择自动生成全部 Work Item".to_string()))
                     .await;
                 self.transition_stage(WorkspaceStage::Running).await;
@@ -1483,6 +1811,40 @@ impl WorkspaceEngine {
             }
         }
         Ok(())
+    }
+
+    fn create_current_work_item_batch_record(&self) -> Result<WorkItemBatchRecord, String> {
+        let store = self.work_item_plan_store()?;
+        let project_id = self.session.project_id.clone();
+        let issue_id = self.session.issue_id.clone();
+        let plan_id = self.session.entity_id.clone();
+        let mut index = store
+            .load_active_index(&project_id, &issue_id, &plan_id)
+            .map_err(|error| format!("load work item plan active index failed: {error}"))?
+            .ok_or_else(|| "work item plan active index is missing".to_string())?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let batch = WorkItemBatchRecord {
+            batch_id: next_batch_id(&index, &now),
+            generation_round_id: index.current_generation_round_id.clone(),
+            mode: WorkItemGenerationMode::Batch,
+            item_draft_ids: Vec::new(),
+            status: WorkItemBatchStatus::Generating,
+            validation_failed_ids: Vec::new(),
+            created_at: now.clone(),
+        };
+        let outline_candidate = self.current_work_item_plan_outline_candidate()?;
+        let first_outline_id =
+            work_item_plan_outline_topological_order(&outline_candidate.outline)?
+                .into_iter()
+                .next()
+                .ok_or_else(|| "WorkItemPlan Outline has no work item outlines".to_string())?;
+        index.active_outline_id = Some(first_outline_id);
+        index.batches.push(batch.clone());
+        index.updated_at = now;
+        store
+            .save_active_index(&index)
+            .map_err(|error| format!("save work item plan active index failed: {error}"))?;
+        Ok(batch)
     }
 
     async fn start_serial_work_item_draft_run(&mut self) {
@@ -1602,6 +1964,50 @@ impl WorkspaceEngine {
         ))
     }
 
+    pub fn build_current_work_item_batch_draft_streaming_input(
+        &self,
+    ) -> Result<StreamingProviderInput, String> {
+        if self.active_node_type() != Some(TimelineNodeType::WorkItemBatchRun) {
+            return Err("batch draft input requires active work_item_batch_run node".to_string());
+        }
+        let store = self.work_item_plan_store()?;
+        let index = store
+            .load_active_index(
+                &self.session.project_id,
+                &self.session.issue_id,
+                &self.session.entity_id,
+            )
+            .map_err(|error| format!("load work item plan active index failed: {error}"))?
+            .ok_or_else(|| "work item plan active index missing".to_string())?;
+        let active_outline_id = index
+            .active_outline_id
+            .clone()
+            .ok_or_else(|| "active batch work item outline missing".to_string())?;
+        let batch = current_work_item_batch(&index)?;
+        let outline_candidate = self.latest_work_item_plan_outline_candidate()?;
+        let batch_drafts =
+            self.batch_work_item_plan_draft_records(&store, &index, &batch.batch_id)?;
+        let invocation = build_work_item_draft_invocation(
+            &outline_candidate.outline,
+            &active_outline_id,
+            WorkItemGenerationMode::Batch,
+            &batch_drafts,
+            None,
+        )
+        .map_err(|error| error.message)?;
+        let working_dir = self
+            .session
+            .repository_path
+            .clone()
+            .or_else(|| std::env::current_dir().ok())
+            .ok_or_else(|| "working directory unavailable".to_string())?;
+        Ok(self.build_work_item_plan_streaming_input(
+            provider_type_for_name(&self.session.author_provider),
+            invocation.prompt,
+            working_dir.to_string_lossy().to_string(),
+        ))
+    }
+
     fn accepted_work_item_plan_draft_records(
         &self,
         store: &WorkItemPlanStore,
@@ -1624,6 +2030,861 @@ impl WorkspaceEngine {
             records.push(record);
         }
         Ok(records)
+    }
+
+    fn batch_work_item_plan_draft_records(
+        &self,
+        store: &WorkItemPlanStore,
+        index: &WorkItemPlanDraftActiveIndex,
+        batch_id: &str,
+    ) -> Result<Vec<WorkItemDraftRecord>, String> {
+        let batch = index
+            .batches
+            .iter()
+            .find(|batch| batch.batch_id == batch_id)
+            .ok_or_else(|| format!("batch `{batch_id}` not found"))?;
+        let mut records = Vec::new();
+        for draft_id in &batch.item_draft_ids {
+            let record = store
+                .get_draft_record(
+                    &index.project_id,
+                    &index.issue_id,
+                    &index.plan_id,
+                    &index.current_generation_round_id,
+                    draft_id,
+                )
+                .map_err(|error| format!("load batch draft record failed: {error}"))?;
+            records.push(record);
+        }
+        Ok(records)
+    }
+
+    fn current_work_item_batch_state_payload(
+        &self,
+        store: &WorkItemPlanStore,
+        index: &WorkItemPlanDraftActiveIndex,
+        batch_id: &str,
+    ) -> Result<WorkItemBatchStatePayload, String> {
+        let batch = index
+            .batches
+            .iter()
+            .find(|batch| batch.batch_id == batch_id)
+            .ok_or_else(|| format!("batch `{batch_id}` not found"))?;
+        let outline_candidate = self.latest_work_item_plan_outline_candidate()?;
+        let queue = work_item_plan_outline_topological_order(&outline_candidate.outline)?;
+        let mut draft_records = Vec::new();
+        for draft_id in batch
+            .item_draft_ids
+            .iter()
+            .chain(batch.validation_failed_ids.iter())
+        {
+            draft_records.push(
+                store
+                    .get_draft_record(
+                        &index.project_id,
+                        &index.issue_id,
+                        &index.plan_id,
+                        &index.current_generation_round_id,
+                        draft_id,
+                    )
+                    .map_err(|error| format!("load batch state draft failed: {error}"))?,
+            );
+        }
+        let failure_summary = draft_records
+            .iter()
+            .filter(|record| record.status == WorkItemDraftStatus::ValidationFailed)
+            .map(|record| WorkItemBatchFailureSummaryDto {
+                draft_id: record.draft_id.clone(),
+                outline_id: record.outline_id.clone(),
+                status: work_item_draft_status_label(&record.status).to_string(),
+            })
+            .collect();
+
+        Ok(WorkItemBatchStatePayload {
+            batch_id: batch.batch_id.clone(),
+            generation_round_id: batch.generation_round_id.clone(),
+            queue,
+            draft_records,
+            batch_status: batch.status.clone(),
+            failure_summary,
+        })
+    }
+
+    async fn enter_work_item_plan_compile(&mut self) {
+        self.transition_stage(WorkspaceStage::Running).await;
+        self.create_timeline_node(TimelineNodeDraft {
+            node_type: TimelineNodeType::WorkItemPlanCompile,
+            agent: None,
+            stage: WorkspaceStage::Running,
+            round: None,
+            title: "WorkItemPlan Final Compile".to_string(),
+            summary: Some("编译已确认 Draft 并写入真实 Work Item".to_string()),
+            status: TimelineNodeStatus::Active,
+        })
+        .await;
+
+        match self.run_work_item_plan_compile().await {
+            Ok(report) => {
+                let work_item_count = report.work_item_ids.len();
+                self.update_artifact(ArtifactPayload::WorkItemPlanCompileReport {
+                    compile_report: Box::new(report),
+                })
+                .await;
+                self.complete_active_node(Some(format!(
+                    "Final Compile 完成，已创建 {work_item_count} 个 Work Item"
+                )))
+                .await;
+                self.enter_human_confirm(Some(format!(
+                    "Final Compile 完成，已创建 {work_item_count} 个 Work Item，等待最终确认"
+                )))
+                .await;
+            }
+            Err(message) => {
+                self.complete_active_node(Some(format!("Final Compile 失败：{message}")))
+                    .await;
+                if self.mark_latest_compile_transaction_recovery_required(&message) {
+                    self.enter_work_item_plan_compile_recovery(Some(format!(
+                        "Final Compile 需要恢复：{message}"
+                    )))
+                    .await;
+                } else if self.is_current_work_item_plan_batch_mode() {
+                    self.enter_work_item_batch_confirm(Some(format!(
+                        "Final Compile strict validator 失败：{message}"
+                    )))
+                    .await;
+                } else {
+                    self.enter_human_confirm(Some(format!("Final Compile 失败：{message}")))
+                        .await;
+                }
+            }
+        }
+    }
+
+    async fn enter_work_item_plan_compile_recovery(&mut self, summary: Option<String>) {
+        self.transition_stage(WorkspaceStage::HumanConfirm).await;
+        let _ = self
+            .create_timeline_node(TimelineNodeDraft {
+                node_type: TimelineNodeType::WorkItemPlanCompileRecovery,
+                agent: None,
+                stage: WorkspaceStage::HumanConfirm,
+                round: None,
+                title: "WorkItemPlan Compile Recovery".to_string(),
+                summary,
+                status: TimelineNodeStatus::Active,
+            })
+            .await;
+        if let Some(store) = &self.lifecycle_store {
+            let _ = store.update_workspace_session_status(
+                &self.session.session_id,
+                WorkspaceSessionStatus::WaitingForHuman,
+            );
+        }
+    }
+
+    fn mark_latest_compile_transaction_recovery_required(&self, message: &str) -> bool {
+        let Ok(store) = self.work_item_plan_store() else {
+            return false;
+        };
+        let Ok(Some(mut tx)) = store
+            .list_compile_transactions(
+                &self.session.project_id,
+                &self.session.issue_id,
+                &self.session.entity_id,
+            )
+            .map(|transactions| {
+                transactions
+                    .into_iter()
+                    .filter(|tx| {
+                        matches!(
+                            tx.status,
+                            WorkItemPlanCompileStatus::Preparing
+                                | WorkItemPlanCompileStatus::Validating
+                                | WorkItemPlanCompileStatus::Committing
+                                | WorkItemPlanCompileStatus::RecoveryRequired
+                        )
+                    })
+                    .max_by(|left, right| left.created_at.cmp(&right.created_at))
+            })
+        else {
+            return false;
+        };
+        tx.status = WorkItemPlanCompileStatus::RecoveryRequired;
+        tx.failure_reason = Some(message.to_string());
+        tx.updated_at = chrono::Utc::now().to_rfc3339();
+        store.put_compile_transaction(&tx).is_ok()
+    }
+
+    async fn run_work_item_plan_compile(
+        &mut self,
+    ) -> Result<WorkItemPlanCompileReportPayload, String> {
+        let lifecycle = self
+            .lifecycle_store
+            .clone()
+            .ok_or_else(|| "lifecycle_store unavailable".to_string())?;
+        let store = self.work_item_plan_store()?;
+        let project_id = self.session.project_id.clone();
+        let issue_id = self.session.issue_id.clone();
+        let plan_id = self.session.entity_id.clone();
+        let previous_plan = lifecycle
+            .get_issue_work_item_plan(&project_id, &issue_id, &plan_id)
+            .map_err(|error| format!("load issue work item plan failed: {error}"))?;
+        let index = store
+            .load_active_index(&project_id, &issue_id, &plan_id)
+            .map_err(|error| format!("load work item plan active index failed: {error}"))?
+            .ok_or_else(|| "work item plan active index missing".to_string())?;
+        let outline_candidate = self.latest_work_item_plan_outline_candidate()?;
+        let outline_order = work_item_plan_outline_topological_order(&outline_candidate.outline)?;
+        let draft_records =
+            self.accepted_active_draft_records_for_compile(&store, &index, &outline_order)?;
+        let active_draft_ids: Vec<String> = draft_records
+            .iter()
+            .map(|record| record.draft_id.clone())
+            .collect();
+        let compile_id = next_compile_id();
+        let now = chrono::Utc::now().to_rfc3339();
+        let outline_to_work_item_id: BTreeMap<String, String> = outline_order
+            .iter()
+            .enumerate()
+            .map(|(index, outline_id)| {
+                (outline_id.clone(), compile_work_item_id(&compile_id, index))
+            })
+            .collect();
+        let outline_to_verification_plan_id: BTreeMap<String, String> = outline_order
+            .iter()
+            .enumerate()
+            .map(|(index, outline_id)| {
+                (
+                    outline_id.clone(),
+                    compile_verification_plan_id(&compile_id, index),
+                )
+            })
+            .collect();
+        let mut tx = WorkItemPlanCompileTransaction {
+            compile_id: compile_id.clone(),
+            project_id: project_id.clone(),
+            issue_id: issue_id.clone(),
+            plan_id: plan_id.clone(),
+            generation_round_id: index.current_generation_round_id.clone(),
+            outline_version_ref: outline_candidate.outline.id.clone(),
+            active_draft_ids,
+            status: WorkItemPlanCompileStatus::Preparing,
+            plan_commit_state: WorkItemPlanCommitState::NotStarted,
+            step_cursor: "preparing".to_string(),
+            outline_to_work_item_id: BTreeMap::new(),
+            outline_to_verification_plan_id: BTreeMap::new(),
+            created_work_item_ids: Vec::new(),
+            created_verification_plan_ids: Vec::new(),
+            child_session_ids: Vec::new(),
+            validator_findings: Vec::new(),
+            abort_requested_at: None,
+            failure_reason: None,
+            previous_plan_snapshot: previous_plan.clone(),
+            created_at: now.clone(),
+            updated_at: now.clone(),
+            committed_at: None,
+        };
+        store
+            .put_compile_transaction(&tx)
+            .map_err(|error| format!("save compile transaction failed: {error}"))?;
+
+        let repository_id = self.work_item_plan_repository_id(&lifecycle, &previous_plan)?;
+        let (mut compiled_plan, work_items, verification_plans) = self
+            .project_work_item_plan_drafts_for_compile(
+                &previous_plan,
+                &draft_records,
+                WorkItemPlanCompileProjectionContext {
+                    outline_order: &outline_order,
+                    outline_to_work_item_id: &outline_to_work_item_id,
+                    outline_to_verification_plan_id: &outline_to_verification_plan_id,
+                    repository_id: &repository_id,
+                    now: &now,
+                },
+            )?;
+        tx.status = WorkItemPlanCompileStatus::Validating;
+        tx.step_cursor = "validating".to_string();
+        tx.outline_to_work_item_id = outline_to_work_item_id;
+        tx.outline_to_verification_plan_id = outline_to_verification_plan_id;
+        tx.updated_at = chrono::Utc::now().to_rfc3339();
+        store
+            .put_compile_transaction(&tx)
+            .map_err(|error| format!("save validating compile transaction failed: {error}"))?;
+
+        let report = WorkItemSplitValidator::validate(
+            &compiled_plan,
+            &work_items,
+            None,
+            &verification_plans,
+        );
+        tx.validator_findings = report.findings.clone();
+        if report.has_errors() {
+            tx.status = WorkItemPlanCompileStatus::Failed;
+            tx.failure_reason = Some(work_item_plan_findings_summary(
+                "Final Compile strict validator failed",
+                &report.findings,
+            ));
+            tx.updated_at = chrono::Utc::now().to_rfc3339();
+            store
+                .put_compile_transaction(&tx)
+                .map_err(|error| format!("save failed compile transaction failed: {error}"))?;
+            return Err(work_item_plan_findings_summary(
+                "Final Compile strict validator failed",
+                &report.findings,
+            ));
+        }
+        compiled_plan.validator_findings = report.findings.clone();
+
+        tx.status = WorkItemPlanCompileStatus::Committing;
+        tx.step_cursor = "committing".to_string();
+        tx.updated_at = chrono::Utc::now().to_rfc3339();
+        store
+            .put_compile_transaction(&tx)
+            .map_err(|error| format!("save committing compile transaction failed: {error}"))?;
+
+        for (work_item, verification_plan) in work_items.iter().zip(verification_plans.iter()) {
+            if !tx.created_work_item_ids.contains(&work_item.id) {
+                lifecycle
+                    .create_work_item(CreateWorkItemInput {
+                        id: Some(work_item.id.clone()),
+                        project_id: work_item.project_id.clone(),
+                        issue_id: work_item.issue_id.clone(),
+                        repository_id: work_item.repository_id.clone(),
+                        story_spec_ids: work_item.story_spec_ids.clone(),
+                        design_spec_ids: work_item.design_spec_ids.clone(),
+                        title: work_item.title.clone(),
+                        work_item_set_id: work_item.work_item_set_id.clone(),
+                        kind: work_item.kind.clone(),
+                        sequence_hint: work_item.sequence_hint,
+                        depends_on: work_item.depends_on.clone(),
+                        exclusive_write_scopes: work_item.exclusive_write_scopes.clone(),
+                        forbidden_write_scopes: work_item.forbidden_write_scopes.clone(),
+                        context_budget: work_item.context_budget.clone(),
+                        required_handoff_from: work_item.required_handoff_from.clone(),
+                        verification_plan_ref: work_item.verification_plan_ref.clone(),
+                        require_execution_plan_confirm: work_item.require_execution_plan_confirm,
+                        plan_status: WorkItemPlanStatus::Confirmed,
+                    })
+                    .map_err(|error| format!("create work item failed: {error}"))?;
+                tx.created_work_item_ids.push(work_item.id.clone());
+            }
+            if !tx
+                .created_verification_plan_ids
+                .contains(&verification_plan.id)
+            {
+                lifecycle
+                    .create_verification_plan(CreateVerificationPlanInput {
+                        id: Some(verification_plan.id.clone()),
+                        project_id: verification_plan.project_id.clone(),
+                        issue_id: verification_plan.issue_id.clone(),
+                        work_item_id: verification_plan.work_item_id.clone(),
+                        repository_profile_ref: verification_plan.repository_profile_ref.clone(),
+                        provider_run_ref: verification_plan.provider_run_ref.clone(),
+                        scope: verification_plan.scope.clone(),
+                        commands: verification_plan.commands.clone(),
+                        manual_checks: verification_plan.manual_checks.clone(),
+                        required_gates: verification_plan.required_gates.clone(),
+                        risk_notes: verification_plan.risk_notes.clone(),
+                        confidence: verification_plan.confidence.clone(),
+                        fallback_policy: verification_plan.fallback_policy.clone(),
+                    })
+                    .map_err(|error| format!("create verification plan failed: {error}"))?;
+                tx.created_verification_plan_ids
+                    .push(verification_plan.id.clone());
+            }
+            let child_session = lifecycle
+                .create_workspace_session(CreateWorkspaceSessionInput {
+                    project_id: project_id.clone(),
+                    issue_id: issue_id.clone(),
+                    entity_id: work_item.id.clone(),
+                    workspace_type: WorkspaceType::WorkItem,
+                    author_provider: self.session.author_provider.clone(),
+                    reviewer_provider: self
+                        .session
+                        .reviewer_provider
+                        .clone()
+                        .unwrap_or(ProviderName::Codex),
+                    review_rounds: self.session.review_rounds,
+                    superpowers_enabled: self.session.superpowers_enabled,
+                    openspec_enabled: self.session.openspec_enabled,
+                })
+                .map_err(|error| format!("create child work item workspace failed: {error}"))?;
+            tx.child_session_ids.push(child_session.id);
+            tx.updated_at = chrono::Utc::now().to_rfc3339();
+            store
+                .put_compile_transaction(&tx)
+                .map_err(|error| format!("save compile step cursor failed: {error}"))?;
+        }
+
+        tx.plan_commit_state = WorkItemPlanCommitState::Committed;
+        tx.committed_at = Some(chrono::Utc::now().to_rfc3339());
+        tx.step_cursor = "plan_commit_marker_written".to_string();
+        tx.updated_at = chrono::Utc::now().to_rfc3339();
+        store
+            .put_compile_transaction(&tx)
+            .map_err(|error| format!("save compile committed marker failed: {error}"))?;
+
+        lifecycle
+            .commit_issue_work_item_plan(
+                &project_id,
+                &issue_id,
+                &plan_id,
+                IssueWorkItemPlanUpdate {
+                    work_item_ids: compiled_plan.work_item_ids.clone(),
+                    verification_plan_ids: compiled_plan.verification_plan_ids.clone(),
+                    repository_profile_ref: None,
+                    dependency_graph: compiled_plan.dependency_graph.clone(),
+                    created_from_provider_run: compiled_plan.created_from_provider_run.clone(),
+                    validator_findings: compiled_plan.validator_findings.clone(),
+                },
+            )
+            .map_err(|error| format!("commit issue work item plan failed: {error}"))?;
+
+        tx.status = WorkItemPlanCompileStatus::Committed;
+        tx.step_cursor = "committed".to_string();
+        tx.updated_at = chrono::Utc::now().to_rfc3339();
+        store
+            .put_compile_transaction(&tx)
+            .map_err(|error| format!("save committed compile transaction failed: {error}"))?;
+
+        Ok(WorkItemPlanCompileReportPayload {
+            compile_id,
+            generation_round_id: index.current_generation_round_id,
+            status: WorkItemPlanCompileStatus::Committed,
+            plan_commit_state: WorkItemPlanCommitState::Committed,
+            work_item_ids: compiled_plan.work_item_ids,
+            verification_plan_ids: compiled_plan.verification_plan_ids,
+            child_session_ids: tx.child_session_ids,
+            validator_findings: work_item_split_findings_to_dto(&tx.validator_findings),
+        })
+    }
+
+    pub async fn handle_work_item_plan_compile_recovery_action(
+        &mut self,
+        action: WorkItemPlanCompileRecoveryActionDto,
+        reason: Option<String>,
+    ) -> Result<WorkItemPlanCompileRecoveryOutcome, String> {
+        if self.session.workspace_type != WorkspaceType::WorkItemPlan
+            || self.active_node_type() != Some(TimelineNodeType::WorkItemPlanCompileRecovery)
+        {
+            return Err(
+                "work_item_plan_compile_recovery_action requires active work_item_plan_compile_recovery node"
+                    .to_string(),
+            );
+        }
+
+        let lifecycle = self
+            .lifecycle_store
+            .clone()
+            .ok_or_else(|| "lifecycle_store unavailable".to_string())?;
+        let store = self.work_item_plan_store()?;
+        let mut tx = self.latest_work_item_plan_recovery_transaction(&store)?;
+
+        match action {
+            WorkItemPlanCompileRecoveryActionDto::AbortAndRollback => {
+                if tx.plan_commit_state == WorkItemPlanCommitState::Committed {
+                    return Err(
+                        "abort_and_rollback is not allowed when plan_commit_state=committed"
+                            .to_string(),
+                    );
+                }
+
+                for verification_plan_id in tx.created_verification_plan_ids.clone() {
+                    lifecycle
+                        .delete_verification_plan(
+                            &tx.project_id,
+                            &tx.issue_id,
+                            &verification_plan_id,
+                        )
+                        .map_err(|error| {
+                            format!("delete verification plan during rollback failed: {error}")
+                        })?;
+                }
+                for work_item_id in tx.created_work_item_ids.clone() {
+                    lifecycle
+                        .delete_work_item(&tx.project_id, &tx.issue_id, &work_item_id)
+                        .map_err(|error| {
+                            format!("delete work item during rollback failed: {error}")
+                        })?;
+                }
+                lifecycle
+                    .restore_issue_work_item_plan_snapshot(
+                        &tx.project_id,
+                        &tx.issue_id,
+                        &tx.plan_id,
+                        &tx.previous_plan_snapshot,
+                    )
+                    .map_err(|error| format!("restore previous WorkItemPlan failed: {error}"))?;
+
+                tx.status = WorkItemPlanCompileStatus::Failed;
+                tx.created_work_item_ids.clear();
+                tx.created_verification_plan_ids.clear();
+                tx.child_session_ids.clear();
+                tx.failure_reason = Some(
+                    reason
+                        .unwrap_or_else(|| "compile recovery aborted and rolled back".to_string()),
+                );
+                tx.step_cursor = "rolled_back".to_string();
+                tx.updated_at = chrono::Utc::now().to_rfc3339();
+                store.put_compile_transaction(&tx).map_err(|error| {
+                    format!("save rolled back compile transaction failed: {error}")
+                })?;
+
+                self.complete_active_node(Some(
+                    "已放弃本次 Final Compile 并恢复旧 Plan".to_string(),
+                ))
+                .await;
+                self.enter_human_confirm(Some(
+                    "Final Compile 已回滚，等待人工确认下一步".to_string(),
+                ))
+                .await;
+                Ok(WorkItemPlanCompileRecoveryOutcome::HumanConfirm)
+            }
+            WorkItemPlanCompileRecoveryActionDto::Continue => {
+                if tx.plan_commit_state == WorkItemPlanCommitState::Committed {
+                    self.commit_recovered_work_item_plan_after_marker(&lifecycle, &tx)?;
+                    tx.status = WorkItemPlanCompileStatus::Committed;
+                    tx.failure_reason = reason.or(tx.failure_reason);
+                    tx.step_cursor = "committed".to_string();
+                    tx.updated_at = chrono::Utc::now().to_rfc3339();
+                    store.put_compile_transaction(&tx).map_err(|error| {
+                        format!("save continued compile transaction failed: {error}")
+                    })?;
+                    self.complete_active_node(Some(
+                        "Final Compile 已从 committed marker 恢复".to_string(),
+                    ))
+                    .await;
+                    self.enter_human_confirm(Some(
+                        "Final Compile 已提交，等待最终确认".to_string(),
+                    ))
+                    .await;
+                    return Ok(WorkItemPlanCompileRecoveryOutcome::HumanConfirm);
+                }
+
+                self.complete_active_node(Some("继续 Final Compile".to_string()))
+                    .await;
+                self.enter_work_item_plan_compile().await;
+                Ok(WorkItemPlanCompileRecoveryOutcome::Continue)
+            }
+            WorkItemPlanCompileRecoveryActionDto::HumanTriage => {
+                tx.failure_reason = reason.or(tx.failure_reason);
+                tx.updated_at = chrono::Utc::now().to_rfc3339();
+                store.put_compile_transaction(&tx).map_err(|error| {
+                    format!("save human triage compile transaction failed: {error}")
+                })?;
+                self.complete_active_node(Some("Final Compile 转人工处理".to_string()))
+                    .await;
+                self.enter_human_confirm(Some("Final Compile 需要人工整理".to_string()))
+                    .await;
+                Ok(WorkItemPlanCompileRecoveryOutcome::HumanConfirm)
+            }
+        }
+    }
+
+    fn latest_work_item_plan_recovery_transaction(
+        &self,
+        store: &WorkItemPlanStore,
+    ) -> Result<WorkItemPlanCompileTransaction, String> {
+        store
+            .list_compile_transactions(
+                &self.session.project_id,
+                &self.session.issue_id,
+                &self.session.entity_id,
+            )
+            .map_err(|error| format!("list compile transactions failed: {error}"))?
+            .into_iter()
+            .filter(|tx| tx.status == WorkItemPlanCompileStatus::RecoveryRequired)
+            .max_by(|left, right| left.created_at.cmp(&right.created_at))
+            .ok_or_else(|| "work item plan compile recovery transaction is missing".to_string())
+    }
+
+    fn commit_recovered_work_item_plan_after_marker(
+        &self,
+        lifecycle: &LifecycleStore,
+        tx: &WorkItemPlanCompileTransaction,
+    ) -> Result<(), String> {
+        let work_items = lifecycle
+            .list_work_items(&tx.project_id, &tx.issue_id)
+            .map_err(|error| format!("list work items during compile recovery failed: {error}"))?;
+        let created_work_item_ids: HashSet<&str> = tx
+            .created_work_item_ids
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let work_items_by_id: HashMap<&str, &LifecycleWorkItemRecord> = work_items
+            .iter()
+            .filter(|item| created_work_item_ids.contains(item.id.as_str()))
+            .map(|item| (item.id.as_str(), item))
+            .collect();
+        for work_item_id in &tx.created_work_item_ids {
+            if !work_items_by_id.contains_key(work_item_id.as_str()) {
+                return Err(format!(
+                    "created work item `{work_item_id}` missing during compile recovery"
+                ));
+            }
+        }
+
+        let dependency_graph = tx
+            .created_work_item_ids
+            .iter()
+            .filter_map(|work_item_id| work_items_by_id.get(work_item_id.as_str()).copied())
+            .flat_map(|work_item| {
+                work_item
+                    .depends_on
+                    .iter()
+                    .cloned()
+                    .map(|from_work_item_id| IssueWorkItemDependencyEdge {
+                        from_work_item_id,
+                        to_work_item_id: work_item.id.clone(),
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        lifecycle
+            .commit_issue_work_item_plan(
+                &tx.project_id,
+                &tx.issue_id,
+                &tx.plan_id,
+                IssueWorkItemPlanUpdate {
+                    work_item_ids: tx.created_work_item_ids.clone(),
+                    verification_plan_ids: tx.created_verification_plan_ids.clone(),
+                    repository_profile_ref: None,
+                    dependency_graph,
+                    created_from_provider_run: tx
+                        .previous_plan_snapshot
+                        .created_from_provider_run
+                        .clone(),
+                    validator_findings: tx.validator_findings.clone(),
+                },
+            )
+            .map_err(|error| format!("commit recovered WorkItemPlan failed: {error}"))?;
+        Ok(())
+    }
+
+    fn accepted_active_draft_records_for_compile(
+        &self,
+        store: &WorkItemPlanStore,
+        index: &WorkItemPlanDraftActiveIndex,
+        outline_order: &[String],
+    ) -> Result<Vec<WorkItemDraftRecord>, String> {
+        let mut records = Vec::with_capacity(outline_order.len());
+        for outline_id in outline_order {
+            let draft_id = index
+                .outline_to_current_draft_id
+                .get(outline_id)
+                .ok_or_else(|| format!("outline `{outline_id}` has no active draft"))?;
+            if index.draft_statuses.get(draft_id) != Some(&WorkItemDraftStatus::Accepted) {
+                return Err(format!("draft `{draft_id}` is not accepted"));
+            }
+            let record = store
+                .get_draft_record(
+                    &index.project_id,
+                    &index.issue_id,
+                    &index.plan_id,
+                    &index.current_generation_round_id,
+                    draft_id,
+                )
+                .map_err(|error| format!("load active draft `{draft_id}` failed: {error}"))?;
+            if !record.active || record.status != WorkItemDraftStatus::Accepted {
+                return Err(format!(
+                    "draft `{draft_id}` is not an accepted active draft"
+                ));
+            }
+            if record.superseded_by_draft_id.is_some()
+                || record.supersede_reason.is_some()
+                || record.superseded_at.is_some()
+            {
+                return Err(format!("draft `{draft_id}` has been superseded"));
+            }
+            records.push(record);
+        }
+        Ok(records)
+    }
+
+    fn is_current_work_item_plan_batch_mode(&self) -> bool {
+        let Ok(store) = self.work_item_plan_store() else {
+            return false;
+        };
+        store
+            .load_active_index(
+                &self.session.project_id,
+                &self.session.issue_id,
+                &self.session.entity_id,
+            )
+            .ok()
+            .flatten()
+            .map(|index| {
+                index.batches.iter().any(|batch| {
+                    batch.generation_round_id == index.current_generation_round_id
+                        && batch.mode == WorkItemGenerationMode::Batch
+                })
+            })
+            .unwrap_or(false)
+    }
+
+    fn work_item_plan_repository_id(
+        &self,
+        lifecycle: &LifecycleStore,
+        plan: &IssueWorkItemPlan,
+    ) -> Result<String, String> {
+        let story_specs = lifecycle
+            .list_story_specs(&plan.project_id, &plan.issue_id)
+            .map_err(|error| format!("list story specs failed: {error}"))?;
+        for story_id in &plan.source_story_spec_ids {
+            if let Some(story) = story_specs.iter().find(|story| &story.id == story_id) {
+                return Ok(story.repository_id.clone());
+            }
+        }
+        Err("cannot resolve repository_id for WorkItemPlan compile".to_string())
+    }
+
+    fn project_work_item_plan_drafts_for_compile(
+        &self,
+        previous_plan: &IssueWorkItemPlan,
+        draft_records: &[WorkItemDraftRecord],
+        context: WorkItemPlanCompileProjectionContext<'_>,
+    ) -> Result<
+        (
+            IssueWorkItemPlan,
+            Vec<LifecycleWorkItemRecord>,
+            Vec<VerificationPlan>,
+        ),
+        String,
+    > {
+        let outline_order = context.outline_order;
+        let outline_to_work_item_id = context.outline_to_work_item_id;
+        let outline_to_verification_plan_id = context.outline_to_verification_plan_id;
+        let repository_id = context.repository_id;
+        let now = context.now;
+        let draft_by_outline: HashMap<&str, &WorkItemDraftRecord> = draft_records
+            .iter()
+            .map(|record| (record.outline_id.as_str(), record))
+            .collect();
+        let mut work_items = Vec::with_capacity(outline_order.len());
+        let mut verification_plans = Vec::with_capacity(outline_order.len());
+        for (index, outline_id) in outline_order.iter().enumerate() {
+            let record = draft_by_outline
+                .get(outline_id.as_str())
+                .ok_or_else(|| format!("accepted draft for outline `{outline_id}` missing"))?;
+            let candidate = &record.candidate;
+            let work_item_id = outline_to_work_item_id
+                .get(outline_id)
+                .cloned()
+                .ok_or_else(|| format!("work item id for outline `{outline_id}` missing"))?;
+            let verification_plan_id = outline_to_verification_plan_id
+                .get(outline_id)
+                .cloned()
+                .ok_or_else(|| {
+                    format!("verification plan id for outline `{outline_id}` missing")
+                })?;
+            let depends_on = candidate
+                .depends_on_outline_ids
+                .iter()
+                .map(|dependency_outline_id| {
+                    outline_to_work_item_id
+                        .get(dependency_outline_id)
+                        .cloned()
+                        .ok_or_else(|| {
+                            format!(
+                                "dependency outline `{dependency_outline_id}` for `{outline_id}` missing"
+                            )
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let required_handoff_from = candidate
+                .required_handoff_from_outline_ids
+                .iter()
+                .map(|dependency_outline_id| {
+                    outline_to_work_item_id
+                        .get(dependency_outline_id)
+                        .cloned()
+                        .ok_or_else(|| {
+                            format!(
+                                "handoff outline `{dependency_outline_id}` for `{outline_id}` missing"
+                            )
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            work_items.push(LifecycleWorkItemRecord {
+                id: work_item_id.clone(),
+                project_id: previous_plan.project_id.clone(),
+                issue_id: previous_plan.issue_id.clone(),
+                repository_id: repository_id.to_string(),
+                story_spec_ids: previous_plan.source_story_spec_ids.clone(),
+                design_spec_ids: previous_plan.source_design_spec_ids.clone(),
+                title: candidate.title.clone(),
+                plan_status: WorkItemPlanStatus::Confirmed,
+                execution_status: crate::product::models::WorkItemStatus::Pending,
+                worktree_path: None,
+                work_item_set_id: Some(previous_plan.id.clone()),
+                kind: candidate.kind.clone(),
+                sequence_hint: Some((index + 1) as u32),
+                depends_on,
+                exclusive_write_scopes: candidate.exclusive_write_scopes.clone(),
+                forbidden_write_scopes: candidate.forbidden_write_scopes.clone(),
+                context_budget: crate::product::models::WorkItemContextBudget::default(),
+                required_handoff_from,
+                verification_plan_ref: Some(verification_plan_id.clone()),
+                require_execution_plan_confirm: previous_plan
+                    .options
+                    .require_execution_plan_confirm,
+                execution_plan_status:
+                    crate::product::models::WorkItemExecutionPlanStatus::NotStarted,
+                handoff_summary_ref: None,
+                completion_commit: None,
+                completion_diff_summary_ref: None,
+                created_at: now.to_string(),
+                updated_at: now.to_string(),
+            });
+            verification_plans.push(parse_compile_verification_plan(
+                &candidate.verification_plan,
+                verification_plan_id,
+                previous_plan.project_id.clone(),
+                previous_plan.issue_id.clone(),
+                work_item_id,
+                now.to_string(),
+            ));
+        }
+        let work_item_ids: Vec<String> = outline_order
+            .iter()
+            .filter_map(|outline_id| outline_to_work_item_id.get(outline_id).cloned())
+            .collect();
+        let verification_plan_ids: Vec<String> = outline_order
+            .iter()
+            .filter_map(|outline_id| outline_to_verification_plan_id.get(outline_id).cloned())
+            .collect();
+        let dependency_graph = self
+            .latest_work_item_plan_outline_candidate()?
+            .outline
+            .dependency_graph
+            .iter()
+            .map(|edge| {
+                let from_work_item_id = outline_to_work_item_id
+                    .get(&edge.from_outline_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        format!("dependency from outline `{}` missing", edge.from_outline_id)
+                    })?;
+                let to_work_item_id = outline_to_work_item_id
+                    .get(&edge.to_outline_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        format!("dependency to outline `{}` missing", edge.to_outline_id)
+                    })?;
+                Ok(IssueWorkItemDependencyEdge {
+                    from_work_item_id,
+                    to_work_item_id,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let mut compiled_plan = previous_plan.clone();
+        compiled_plan.status = crate::product::models::IssueWorkItemPlanStatus::Confirmed;
+        compiled_plan.work_item_ids = work_item_ids;
+        compiled_plan.verification_plan_ids = verification_plan_ids;
+        compiled_plan.repository_profile_ref = None;
+        compiled_plan.dependency_graph = dependency_graph;
+        compiled_plan.validator_findings = Vec::new();
+        compiled_plan.updated_at = now.to_string();
+        Ok((compiled_plan, work_items, verification_plans))
     }
 
     pub async fn complete_work_item_draft_author(
@@ -1774,6 +3035,263 @@ impl WorkspaceEngine {
         Ok(())
     }
 
+    pub async fn complete_work_item_batch_draft_author(
+        &mut self,
+        candidate: WorkItemDraftCandidate,
+    ) -> Result<(), String> {
+        if self.active_node_type() != Some(TimelineNodeType::WorkItemBatchRun) {
+            return Err("batch draft author completion requires active batch run".to_string());
+        }
+
+        let generated_from_node_id = self
+            .active_node_id
+            .clone()
+            .ok_or_else(|| "active batch run node missing".to_string())?;
+        let store = self.work_item_plan_store()?;
+        let mut index = store
+            .load_active_index(
+                &self.session.project_id,
+                &self.session.issue_id,
+                &self.session.entity_id,
+            )
+            .map_err(|error| format!("load work item plan active index failed: {error}"))?
+            .ok_or_else(|| "work item plan active index missing".to_string())?;
+        let active_outline_id = index
+            .active_outline_id
+            .clone()
+            .ok_or_else(|| "active batch work item outline missing".to_string())?;
+        if candidate.outline_id != active_outline_id {
+            return Err(format!(
+                "draft outline_id {} does not match active outline {}",
+                candidate.outline_id, active_outline_id
+            ));
+        }
+        let outline_candidate = self.latest_work_item_plan_outline_candidate()?;
+        let current_outline = outline_candidate
+            .outline
+            .work_item_outlines
+            .iter()
+            .find(|item| item.outline_id == active_outline_id)
+            .cloned()
+            .ok_or_else(|| format!("active outline {active_outline_id} not found"))?;
+        let batch_id = current_work_item_batch(&index)?.batch_id.clone();
+        let batch_drafts = self.batch_work_item_plan_draft_records(&store, &index, &batch_id)?;
+        let batch_candidates: Vec<WorkItemDraftCandidate> = batch_drafts
+            .iter()
+            .map(|record| record.candidate.clone())
+            .collect();
+        let report =
+            WorkItemDraftLocalValidator::validate(&candidate, &batch_candidates, &current_outline);
+        if report.has_errors() {
+            let retry_count = self
+                .work_item_batch_retry_counts
+                .entry(active_outline_id.clone())
+                .or_default();
+            if *retry_count == 0 {
+                *retry_count += 1;
+                return Ok(());
+            }
+        } else {
+            self.work_item_batch_retry_counts.remove(&active_outline_id);
+        }
+        let status = if report.has_errors() {
+            WorkItemDraftStatus::ValidationFailed
+        } else {
+            WorkItemDraftStatus::Draft
+        };
+        let draft_id = next_draft_id(&index);
+        let now = chrono::Utc::now().to_rfc3339();
+        let record = WorkItemDraftRecord {
+            project_id: self.session.project_id.clone(),
+            issue_id: self.session.issue_id.clone(),
+            plan_id: self.session.entity_id.clone(),
+            draft_id: draft_id.clone(),
+            outline_id: active_outline_id.clone(),
+            generation_round_id: index.current_generation_round_id.clone(),
+            batch_id: Some(batch_id.clone()),
+            attempt_index: 1,
+            outline_version_ref: outline_candidate.outline.id.clone(),
+            generation_mode: WorkItemGenerationMode::Batch,
+            candidate,
+            status: status.clone(),
+            active: true,
+            superseded_by_draft_id: None,
+            supersede_reason: None,
+            copied_from_draft_id: None,
+            review_node_id: None,
+            review_verdict_ref: None,
+            generated_from_node_id,
+            accepted_at: None,
+            superseded_at: None,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+        };
+
+        store
+            .put_draft_record(&record)
+            .map_err(|error| format!("save batch work item draft record failed: {error}"))?;
+        mark_draft_active(&mut index, &active_outline_id, &draft_id, status.clone());
+        let outline_order = work_item_plan_outline_topological_order(&outline_candidate.outline)?;
+        let current_pos = outline_order
+            .iter()
+            .position(|id| id == &active_outline_id)
+            .ok_or_else(|| format!("outline {active_outline_id} not found in order"))?;
+        let next_outline_id = outline_order.get(current_pos + 1).cloned();
+        {
+            let batch = index
+                .batches
+                .iter_mut()
+                .find(|batch| batch.batch_id == batch_id)
+                .ok_or_else(|| format!("batch `{batch_id}` not found"))?;
+            match status {
+                WorkItemDraftStatus::ValidationFailed => {
+                    batch.validation_failed_ids.push(draft_id.clone());
+                }
+                _ => {
+                    batch.item_draft_ids.push(draft_id.clone());
+                }
+            }
+            if next_outline_id.is_none() {
+                batch.status = WorkItemBatchStatus::Completed;
+            }
+        }
+        index.active_outline_id = next_outline_id;
+        index.updated_at = now;
+        store
+            .save_active_index(&index)
+            .map_err(|error| format!("save work item plan active index failed: {error}"))?;
+
+        let validator_findings = work_item_split_findings_to_dto(&report.findings);
+        self.update_artifact(ArtifactPayload::WorkItemDraftCandidate {
+            draft_candidate: Box::new(WorkItemDraftCandidatePayload {
+                draft_record: record,
+                validator_findings,
+                can_accept: !report.has_errors(),
+            }),
+        })
+        .await;
+        if index.active_outline_id.is_none() {
+            let batch_state =
+                self.current_work_item_batch_state_payload(&store, &index, &batch_id)?;
+            self.update_artifact(ArtifactPayload::WorkItemBatchState {
+                batch_state: Box::new(batch_state),
+            })
+            .await;
+            self.complete_active_node(Some("Work Item Batch 生成完成，等待整组确认".to_string()))
+                .await;
+            self.enter_work_item_batch_confirm(Some("请确认整组 Work Item Draft".to_string()))
+                .await;
+        }
+        Ok(())
+    }
+
+    pub async fn handle_work_item_batch_decision(
+        &mut self,
+        decision: WorkItemBatchDecisionDto,
+        feedback: Option<String>,
+        first_affected_outline_id: Option<String>,
+    ) -> Result<WorkItemBatchDecisionOutcome, String> {
+        if self.session.stage != WorkspaceStage::AuthorConfirm
+            || self.active_node_type() != Some(TimelineNodeType::WorkItemBatchConfirm)
+        {
+            return Err(
+                "work_item_batch_decision requires active work_item_batch_confirm node".to_string(),
+            );
+        }
+
+        match decision {
+            WorkItemBatchDecisionDto::AcceptAll => self.accept_current_work_item_batch().await,
+            WorkItemBatchDecisionDto::Pause => {
+                self.complete_active_node(Some("Work Item Batch 已暂停".to_string()))
+                    .await;
+                self.enter_human_confirm(Some("Work Item Batch 已暂停，等待人工处理".to_string()))
+                    .await;
+                Ok(WorkItemBatchDecisionOutcome::HumanConfirm)
+            }
+            WorkItemBatchDecisionDto::RewriteBatch => self.rewrite_current_work_item_batch().await,
+            WorkItemBatchDecisionDto::DowngradeToSerial => {
+                self.downgrade_current_work_item_batch_to_serial(
+                    first_affected_outline_id,
+                    feedback,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn accept_current_work_item_batch(
+        &mut self,
+    ) -> Result<WorkItemBatchDecisionOutcome, String> {
+        let store = self.work_item_plan_store()?;
+        let mut index = store
+            .load_active_index(
+                &self.session.project_id,
+                &self.session.issue_id,
+                &self.session.entity_id,
+            )
+            .map_err(|error| format!("load work item plan active index failed: {error}"))?
+            .ok_or_else(|| "work item plan active index missing".to_string())?;
+        let batch_id = current_work_item_batch(&index)?.batch_id.clone();
+        let batch_pos = index
+            .batches
+            .iter()
+            .position(|batch| batch.batch_id == batch_id)
+            .ok_or_else(|| format!("batch `{batch_id}` not found"))?;
+        if !index.batches[batch_pos].validation_failed_ids.is_empty() {
+            return Err("accept_all requires no validation_failed drafts".to_string());
+        }
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let draft_ids = index.batches[batch_pos].item_draft_ids.clone();
+        for draft_id in &draft_ids {
+            let mut record = store
+                .get_draft_record(
+                    &index.project_id,
+                    &index.issue_id,
+                    &index.plan_id,
+                    &index.current_generation_round_id,
+                    draft_id,
+                )
+                .map_err(|error| format!("load batch draft record failed: {error}"))?;
+            if record.status == WorkItemDraftStatus::ValidationFailed {
+                return Err(format!(
+                    "draft `{}` has validation errors and cannot be accepted",
+                    record.draft_id
+                ));
+            }
+            record.status = WorkItemDraftStatus::Accepted;
+            record.accepted_at = Some(now.clone());
+            record.updated_at = now.clone();
+            store
+                .put_draft_record(&record)
+                .map_err(|error| format!("save accepted batch draft failed: {error}"))?;
+            index
+                .draft_statuses
+                .insert(draft_id.clone(), WorkItemDraftStatus::Accepted);
+        }
+        let review_enabled =
+            self.session.review_rounds > 0 && self.session.reviewer_provider.is_some();
+        index.batches[batch_pos].status = if review_enabled {
+            WorkItemBatchStatus::ReviewPending
+        } else {
+            WorkItemBatchStatus::ReviewDone
+        };
+        index.updated_at = now;
+        store
+            .save_active_index(&index)
+            .map_err(|error| format!("save work item plan active index failed: {error}"))?;
+
+        self.complete_active_node(Some("Work Item Batch 已接受".to_string()))
+            .await;
+        if review_enabled {
+            self.begin_work_item_batch_review_run().await;
+            Ok(WorkItemBatchDecisionOutcome::StartReview)
+        } else {
+            self.enter_work_item_plan_compile().await;
+            Ok(WorkItemBatchDecisionOutcome::HumanConfirm)
+        }
+    }
+
     pub async fn handle_work_item_draft_decision(
         &mut self,
         outline_id: String,
@@ -1901,10 +3419,7 @@ impl WorkspaceEngine {
             store
                 .save_active_index(&index)
                 .map_err(|error| format!("save work item plan active index failed: {error}"))?;
-            self.enter_human_confirm(Some(
-                "所有 Work Item Draft 已确认，等待 Final Compile".to_string(),
-            ))
-            .await;
+            self.enter_work_item_plan_compile().await;
             Ok(WorkItemDraftDecisionOutcome::HumanConfirm)
         }
     }
@@ -1928,6 +3443,240 @@ impl WorkspaceEngine {
         self.transition_stage(WorkspaceStage::Running).await;
         self.begin_work_item_plan_outline_run().await;
         Ok(())
+    }
+
+    async fn rewrite_current_work_item_batch(
+        &mut self,
+    ) -> Result<WorkItemBatchDecisionOutcome, String> {
+        let store = self.work_item_plan_store()?;
+        let mut index = store
+            .load_active_index(
+                &self.session.project_id,
+                &self.session.issue_id,
+                &self.session.entity_id,
+            )
+            .map_err(|error| format!("load work item plan active index failed: {error}"))?
+            .ok_or_else(|| "work item plan active index missing".to_string())?;
+        let current_batch = current_work_item_batch(&index)?.clone();
+        let now = chrono::Utc::now().to_rfc3339();
+        let old_draft_ids: Vec<String> = current_batch
+            .item_draft_ids
+            .iter()
+            .chain(current_batch.validation_failed_ids.iter())
+            .cloned()
+            .collect();
+        for draft_id in &old_draft_ids {
+            let mut record = store
+                .get_draft_record(
+                    &index.project_id,
+                    &index.issue_id,
+                    &index.plan_id,
+                    &index.current_generation_round_id,
+                    draft_id,
+                )
+                .map_err(|error| format!("load batch draft record failed: {error}"))?;
+            mark_draft_record_superseded(
+                &mut record,
+                None,
+                WorkItemDraftSupersedeReason::DirectRewrite,
+                &now,
+            );
+            store
+                .put_draft_record(&record)
+                .map_err(|error| format!("save superseded batch draft failed: {error}"))?;
+            index
+                .draft_statuses
+                .insert(draft_id.clone(), WorkItemDraftStatus::Superseded);
+            if index
+                .outline_to_current_draft_id
+                .get(&record.outline_id)
+                .is_some_and(|current_draft_id| current_draft_id == draft_id)
+            {
+                index.outline_to_current_draft_id.remove(&record.outline_id);
+            }
+        }
+
+        let outline_candidate = self.latest_work_item_plan_outline_candidate()?;
+        let first_outline_id =
+            work_item_plan_outline_topological_order(&outline_candidate.outline)?
+                .into_iter()
+                .next()
+                .ok_or_else(|| "WorkItemPlan Outline has no work item outlines".to_string())?;
+        let new_batch = WorkItemBatchRecord {
+            batch_id: next_batch_id(&index, &now),
+            generation_round_id: index.current_generation_round_id.clone(),
+            mode: WorkItemGenerationMode::Batch,
+            item_draft_ids: Vec::new(),
+            status: WorkItemBatchStatus::Generating,
+            validation_failed_ids: Vec::new(),
+            created_at: now.clone(),
+        };
+        index.active_outline_id = Some(first_outline_id);
+        index.batches.push(new_batch);
+        index.updated_at = now;
+        store
+            .save_active_index(&index)
+            .map_err(|error| format!("save work item plan active index failed: {error}"))?;
+
+        self.complete_active_node(Some("Work Item Batch 已请求整组重写".to_string()))
+            .await;
+        self.transition_stage(WorkspaceStage::Running).await;
+        let _ = self
+            .create_timeline_node(TimelineNodeDraft {
+                node_type: TimelineNodeType::WorkItemBatchRun,
+                agent: Some(self.session.author_provider.clone()),
+                stage: WorkspaceStage::Running,
+                round: None,
+                title: "Work Item Batch 生成".to_string(),
+                summary: Some("正在整组重写 Work Item Draft".to_string()),
+                status: TimelineNodeStatus::Active,
+            })
+            .await;
+        Ok(WorkItemBatchDecisionOutcome::StartBatchRun)
+    }
+
+    async fn downgrade_current_work_item_batch_to_serial(
+        &mut self,
+        first_affected_outline_id: Option<String>,
+        feedback: Option<String>,
+    ) -> Result<WorkItemBatchDecisionOutcome, String> {
+        let store = self.work_item_plan_store()?;
+        let mut index = store
+            .load_active_index(
+                &self.session.project_id,
+                &self.session.issue_id,
+                &self.session.entity_id,
+            )
+            .map_err(|error| format!("load work item plan active index failed: {error}"))?
+            .ok_or_else(|| "work item plan active index missing".to_string())?;
+        if !self.current_round_has_failed_compile(&store, &index)? {
+            return Err(
+                "downgrade_to_serial is not available before strict validation".to_string(),
+            );
+        }
+        let outline_candidate = self.latest_work_item_plan_outline_candidate()?;
+        let outline_order = work_item_plan_outline_topological_order(&outline_candidate.outline)?;
+        let target_outline_id = first_affected_outline_id
+            .or_else(|| outline_order.first().cloned())
+            .ok_or_else(|| "WorkItemPlan Outline has no work item outlines".to_string())?;
+        if !outline_order
+            .iter()
+            .any(|outline_id| outline_id == &target_outline_id)
+        {
+            return Err(format!(
+                "first_affected_outline_id `{target_outline_id}` is not in current outline"
+            ));
+        }
+        let target_pos = outline_order
+            .iter()
+            .position(|outline_id| outline_id == &target_outline_id)
+            .ok_or_else(|| format!("outline {target_outline_id} not found in order"))?;
+        let generated_from_node_id = self
+            .active_node_id
+            .clone()
+            .unwrap_or_else(|| "work_item_batch_downgrade".to_string());
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut accepted_copied_candidates = Vec::new();
+
+        for outline_id in outline_order.iter().take(target_pos) {
+            let source_draft_id = index
+                .outline_to_current_draft_id
+                .get(outline_id)
+                .cloned()
+                .ok_or_else(|| {
+                    format!("cannot downgrade before `{target_outline_id}`: outline `{outline_id}` has no current draft")
+                })?;
+            let mut source = store
+                .get_draft_record(
+                    &index.project_id,
+                    &index.issue_id,
+                    &index.plan_id,
+                    &index.current_generation_round_id,
+                    &source_draft_id,
+                )
+                .map_err(|error| format!("load draft for downgrade failed: {error}"))?;
+            let current_outline = outline_candidate
+                .outline
+                .work_item_outlines
+                .iter()
+                .find(|item| item.outline_id == *outline_id)
+                .cloned()
+                .ok_or_else(|| format!("outline `{outline_id}` not found"))?;
+            let report = WorkItemDraftLocalValidator::validate(
+                &source.candidate,
+                &accepted_copied_candidates,
+                &current_outline,
+            );
+            let mut copied =
+                copy_draft_for_current_round(&index, &source, &generated_from_node_id, &now);
+            copied.status = if report.has_errors() {
+                WorkItemDraftStatus::ValidationFailed
+            } else {
+                WorkItemDraftStatus::Accepted
+            };
+            copied.accepted_at = if copied.status == WorkItemDraftStatus::Accepted {
+                Some(now.clone())
+            } else {
+                None
+            };
+
+            store
+                .put_draft_record(&copied)
+                .map_err(|error| format!("save copied serial draft failed: {error}"))?;
+            mark_draft_record_superseded(
+                &mut source,
+                Some(copied.draft_id.clone()),
+                WorkItemDraftSupersedeReason::DirectRewrite,
+                &now,
+            );
+            store
+                .put_draft_record(&source)
+                .map_err(|error| format!("save superseded batch draft failed: {error}"))?;
+            mark_draft_active(
+                &mut index,
+                outline_id,
+                &copied.draft_id,
+                copied.status.clone(),
+            );
+            if copied.status == WorkItemDraftStatus::Accepted {
+                accepted_copied_candidates.push(copied.candidate.clone());
+            } else {
+                return Err(format!(
+                    "copied draft for outline `{outline_id}` failed local validation during downgrade"
+                ));
+            }
+        }
+
+        index.active_outline_id = Some(target_outline_id.clone());
+        index.updated_at = now;
+        store
+            .save_active_index(&index)
+            .map_err(|error| format!("save work item plan active index failed: {error}"))?;
+
+        self.complete_active_node(Some(
+            feedback
+                .map(|feedback| format!("已降级为逐项生成：{feedback}"))
+                .unwrap_or_else(|| "已降级为逐项生成".to_string()),
+        ))
+        .await;
+        self.start_serial_work_item_draft_run_for(&target_outline_id)
+            .await?;
+        Ok(WorkItemBatchDecisionOutcome::StartDraftRun)
+    }
+
+    fn current_round_has_failed_compile(
+        &self,
+        store: &WorkItemPlanStore,
+        index: &WorkItemPlanDraftActiveIndex,
+    ) -> Result<bool, String> {
+        let transactions = store
+            .list_compile_transactions(&index.project_id, &index.issue_id, &index.plan_id)
+            .map_err(|error| format!("list compile transactions failed: {error}"))?;
+        Ok(transactions.iter().any(|tx| {
+            tx.generation_round_id == index.current_generation_round_id
+                && tx.status == WorkItemPlanCompileStatus::Failed
+                && tx.plan_commit_state == WorkItemPlanCommitState::NotStarted
+        }))
     }
 
     pub async fn begin_work_item_plan_auto_revision_run(&mut self, round: u32) -> String {
@@ -3528,6 +5277,11 @@ impl WorkspaceEngine {
             return;
         }
 
+        if active_node_type == Some(TimelineNodeType::WorkItemBatchReview) {
+            self.route_work_item_batch_review(verdict).await;
+            return;
+        }
+
         match &verdict.review_gate {
             ReviewGate::UserConfirmAllowed | ReviewGate::UserTriageRequired => {
                 self.enter_human_confirm(Some(verdict.summary)).await;
@@ -3668,6 +5422,73 @@ impl WorkspaceEngine {
         }
     }
 
+    async fn route_work_item_batch_review(&mut self, verdict: ReviewVerdict) {
+        let review = verdict.work_item_plan_review.clone();
+        let batch_verdict = review
+            .as_ref()
+            .map(|review| review.verdict.clone())
+            .unwrap_or(match verdict.verdict {
+                ReviewVerdictType::Pass => WorkItemPlanReviewVerdict::Pass,
+                ReviewVerdictType::Revise => WorkItemPlanReviewVerdict::ReviseBatch,
+                ReviewVerdictType::NeedsHuman => WorkItemPlanReviewVerdict::NeedsHuman,
+            });
+
+        match batch_verdict {
+            WorkItemPlanReviewVerdict::Pass => {
+                if let Err(message) = self.mark_current_work_item_batch_review_done() {
+                    let _ = self.event_tx.send(EngineEvent::Error { message }).await;
+                    self.enter_human_confirm(Some("Batch review 状态保存失败".to_string()))
+                        .await;
+                    return;
+                }
+                self.enter_work_item_plan_compile().await;
+            }
+            WorkItemPlanReviewVerdict::ReviseBatch => {
+                self.enter_work_item_batch_confirm(Some(verdict.summary))
+                    .await;
+            }
+            WorkItemPlanReviewVerdict::PlanReopenRequired => {
+                if let Err(message) = self.mark_work_item_plan_outline_revising() {
+                    let _ = self.event_tx.send(EngineEvent::Error { message }).await;
+                    self.enter_human_confirm(Some("Outline 返修状态保存失败".to_string()))
+                        .await;
+                    return;
+                }
+                self.enter_human_confirm(Some(
+                    "Reviewer 要求重开 Outline，已暂停自动生成流程".to_string(),
+                ))
+                .await;
+            }
+            WorkItemPlanReviewVerdict::NeedsHuman | WorkItemPlanReviewVerdict::Revise => {
+                self.enter_human_confirm(Some(verdict.summary)).await;
+            }
+        }
+    }
+
+    fn mark_current_work_item_batch_review_done(&self) -> Result<(), String> {
+        let store = self.work_item_plan_store()?;
+        let mut index = store
+            .load_active_index(
+                &self.session.project_id,
+                &self.session.issue_id,
+                &self.session.entity_id,
+            )
+            .map_err(|error| format!("load work item plan active index failed: {error}"))?
+            .ok_or_else(|| "work item plan active index missing".to_string())?;
+        let batch_id = current_work_item_batch(&index)?.batch_id.clone();
+        let batch = index
+            .batches
+            .iter_mut()
+            .find(|batch| batch.batch_id == batch_id)
+            .ok_or_else(|| format!("batch `{batch_id}` not found"))?;
+        batch.status = WorkItemBatchStatus::ReviewDone;
+        index.updated_at = chrono::Utc::now().to_rfc3339();
+        store
+            .save_active_index(&index)
+            .map_err(|error| format!("save work item plan active index failed: {error}"))?;
+        Ok(())
+    }
+
     async fn continue_after_work_item_draft_review_pass(
         &mut self,
         outline_id: &str,
@@ -3703,10 +5524,7 @@ impl WorkspaceEngine {
             store
                 .save_active_index(&index)
                 .map_err(|error| format!("save work item plan active index failed: {error}"))?;
-            self.enter_human_confirm(Some(
-                "所有 Work Item Draft 已通过 Review，等待 Final Compile".to_string(),
-            ))
-            .await;
+            self.enter_work_item_plan_compile().await;
         }
         Ok(())
     }
@@ -4384,6 +6202,10 @@ impl WorkspaceEngine {
     }
 
     fn build_work_item_plan_review_input(&self) -> Result<StreamingProviderInput, String> {
+        if self.active_node_type() == Some(TimelineNodeType::WorkItemBatchReview) {
+            return self.build_work_item_batch_review_input();
+        }
+
         if self.active_node_type() == Some(TimelineNodeType::WorkItemDraftReview) {
             let draft_candidate = self.current_work_item_draft_candidate_payload()?;
             return self.build_work_item_draft_review_input(&draft_candidate);
@@ -4675,6 +6497,66 @@ impl WorkspaceEngine {
              - `affects_items.target_outline_id` 只能引用当前 Outline 中存在的 outline_id。\n",
         ));
 
+        Ok(StreamingProviderInput {
+            provider_type: provider_type_for_name(&provider),
+            role: AdapterRole::Reviewer,
+            prompt,
+            working_dir,
+            workspace_session_id: Some(self.session.session_id.clone()),
+            resume_provider_session_id: None,
+            permission_mode: ProviderPermissionMode::Supervised,
+            env_vars: BTreeMap::new(),
+            timeout_secs: DEFAULT_PROVIDER_TIMEOUT_SECS,
+        })
+    }
+
+    fn build_work_item_batch_review_input(&self) -> Result<StreamingProviderInput, String> {
+        let store = self.work_item_plan_store()?;
+        let index = store
+            .load_active_index(
+                &self.session.project_id,
+                &self.session.issue_id,
+                &self.session.entity_id,
+            )
+            .map_err(|error| format!("load work item plan active index failed: {error}"))?
+            .ok_or_else(|| "work item plan active index missing".to_string())?;
+        let batch = current_work_item_batch(&index)?;
+        let draft_records =
+            self.batch_work_item_plan_draft_records(&store, &index, &batch.batch_id)?;
+        let draft_json =
+            serde_json::to_string_pretty(&draft_records).unwrap_or_else(|_| "[]".to_string());
+        let outline_ids = self.current_work_item_plan_outline_ids();
+        let provider = self
+            .session
+            .reviewer_provider
+            .clone()
+            .unwrap_or(ProviderName::Codex);
+        let nonce = structured_output_nonce();
+        let mut prompt = String::new();
+        prompt
+            .push_str("请作为 reviewer 审核 WorkItemPlan 自动模式生成的整组 Work Item Draft。\n\n");
+        prompt.push_str(&format!(
+            "generation_round_id: {}\nbatch_id: {}\n\n",
+            batch.generation_round_id, batch.batch_id
+        ));
+        prompt.push_str("[batch_draft_records]\n");
+        prompt.push_str(&draft_json);
+        prompt.push_str("\n\n");
+        prompt.push_str(&reviewer_output_contract(
+            &nonce,
+            r#"{"verdict":"pass|revise_batch|needs_human|plan_reopen_required","review_scope":"batch","generation_round_id":"round id","summary":"一句话摘要","affects_items":[{"target_outline_id":"outline id"}],"findings":[{"severity":"blocking|must_fix|strong_recommend_fix|suggestion|minor|optional","message":"问题描述","evidence":"整组 draft 或依赖上下文中的具体证据","impact":"为什么影响或不影响 final compile","required_action":"需要 batch author 执行的最小动作"}]}"#,
+            "\n\n审核规则：自动模式只能整组通过、整组返修或要求重开 Outline；不得要求单项重写。最终 JSON 必须放在 nonce sentinel block 中。\n",
+        ));
+        prompt.push_str(&format!(
+            "\n[valid_outline_ids]\n{}\n",
+            outline_ids.join("\n")
+        ));
+        let working_dir = self
+            .session
+            .repository_path
+            .clone()
+            .or_else(|| std::env::current_dir().ok())
+            .ok_or_else(|| "working directory unavailable".to_string())?;
         Ok(StreamingProviderInput {
             provider_type: provider_type_for_name(&provider),
             role: AdapterRole::Reviewer,
@@ -5045,11 +6927,23 @@ impl WorkspaceEngine {
         let issue_id = self.session.issue_id.clone();
         let plan_id = self.session.entity_id.clone();
 
-        let (plan, _confirmed) = lifecycle
-            .confirm_issue_work_item_plan(&project_id, &issue_id, &plan_id)
-            .map_err(|e| format!("confirm plan failed: {e}"))?;
+        let current_plan = lifecycle
+            .get_issue_work_item_plan(&project_id, &issue_id, &plan_id)
+            .map_err(|e| format!("load plan failed: {e}"))?;
+        let plan = match current_plan.status {
+            crate::product::models::IssueWorkItemPlanStatus::Draft => {
+                lifecycle
+                    .confirm_issue_work_item_plan(&project_id, &issue_id, &plan_id)
+                    .map_err(|e| format!("confirm plan failed: {e}"))?
+                    .0
+            }
+            crate::product::models::IssueWorkItemPlanStatus::Confirmed => current_plan,
+            crate::product::models::IssueWorkItemPlanStatus::ChangeRequested => {
+                return Err("cannot confirm a change_requested WorkItemPlan".to_string());
+            }
+        };
 
-        let new_sessions = lifecycle
+        let _created_sessions = lifecycle
             .ensure_work_item_sessions_for_plan(
                 &project_id,
                 &issue_id,
@@ -5061,6 +6955,16 @@ impl WorkspaceEngine {
                 self.session.openspec_enabled,
             )
             .map_err(|e| format!("ensure child sessions failed: {e}"))?;
+        let plan_work_item_ids: HashSet<String> = plan.work_item_ids.iter().cloned().collect();
+        let child_sessions = lifecycle
+            .list_workspace_sessions(&project_id, &issue_id)
+            .map_err(|e| format!("list child sessions failed: {e}"))?
+            .into_iter()
+            .filter(|session| {
+                session.workspace_type == WorkspaceType::WorkItem
+                    && plan_work_item_ids.contains(&session.entity_id)
+            })
+            .collect::<Vec<_>>();
 
         if let Some(store) = &self.lifecycle_store {
             let _ = store.update_workspace_session_status(
@@ -5069,7 +6973,7 @@ impl WorkspaceEngine {
             );
         }
 
-        Ok((plan, new_sessions))
+        Ok((plan, child_sessions))
     }
 
     pub fn handle_abort(&mut self) {
@@ -6106,6 +8010,27 @@ impl WorkspaceEngine {
         }
     }
 
+    async fn enter_work_item_batch_confirm(&mut self, summary: Option<String>) {
+        self.transition_stage(WorkspaceStage::AuthorConfirm).await;
+        let _ = self
+            .create_timeline_node(TimelineNodeDraft {
+                node_type: TimelineNodeType::WorkItemBatchConfirm,
+                agent: None,
+                stage: WorkspaceStage::AuthorConfirm,
+                round: None,
+                title: "Work Item Batch 确认".to_string(),
+                summary,
+                status: TimelineNodeStatus::Active,
+            })
+            .await;
+        if let Some(store) = &self.lifecycle_store {
+            let _ = store.update_workspace_session_status(
+                &self.session.session_id,
+                WorkspaceSessionStatus::WaitingForHuman,
+            );
+        }
+    }
+
     async fn enter_human_confirm(&mut self, summary: Option<String>) {
         self.transition_stage(WorkspaceStage::HumanConfirm).await;
         let _ = self
@@ -6213,7 +8138,8 @@ impl WorkspaceEngine {
                 | TimelineNodeType::WorkItemBatchRun => Some(AgentRole::Author),
                 TimelineNodeType::ReviewerRun
                 | TimelineNodeType::WorkItemPlanOutlineReview
-                | TimelineNodeType::WorkItemDraftReview => Some(AgentRole::Reviewer),
+                | TimelineNodeType::WorkItemDraftReview
+                | TimelineNodeType::WorkItemBatchReview => Some(AgentRole::Reviewer),
                 _ => None,
             },
             provider: node.agent.as_ref().map(|provider| ProviderSnapshot {
@@ -6477,6 +8403,30 @@ impl WorkspaceEngine {
                     &comments,
                     &valid_outline_ids,
                     WorkItemPlanReviewScope::Item,
+                )
+                .or_else(|| parse_review_json(&json, &comments))
+            });
+            return parsed.unwrap_or_else(|| ReviewVerdict {
+                verdict: ReviewVerdictType::NeedsHuman,
+                comments: output.to_string(),
+                summary: "需要人工确认".to_string(),
+                findings: Vec::new(),
+                review_gate: ReviewGate::UserTriageRequired,
+                work_item_plan_review: None,
+            });
+        }
+
+        if self.session.workspace_type == WorkspaceType::WorkItemPlan
+            && self.active_node_type() == Some(TimelineNodeType::WorkItemBatchReview)
+        {
+            let valid_outline_ids = self.current_work_item_plan_outline_ids();
+            let trimmed = output.trim();
+            let parsed = extract_structured_json(trimmed).and_then(|(comments, json)| {
+                parse_work_item_plan_review_json(
+                    &json,
+                    &comments,
+                    &valid_outline_ids,
+                    WorkItemPlanReviewScope::Batch,
                 )
                 .or_else(|| parse_review_json(&json, &comments))
             });

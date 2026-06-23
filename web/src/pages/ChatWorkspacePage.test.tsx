@@ -65,6 +65,11 @@ function mockWorkspaceWs(overrides: Partial<WorkspaceWsApi> = {}) {
     sendAuthorDecision: vi.fn(),
     sendRequestRevision: vi.fn(),
     sendRevertWorkItem: vi.fn(),
+    sendSelectWorkItemGenerationMode: vi.fn(),
+    sendRequestOutlineRevision: vi.fn(),
+    sendWorkItemDraftDecision: vi.fn(),
+    sendWorkItemBatchDecision: vi.fn(),
+    sendWorkItemPlanCompileRecoveryAction: vi.fn(),
     sendHumanConfirm: vi.fn(),
     sendHello: vi.fn(),
     sendPing: vi.fn(),
@@ -959,6 +964,388 @@ describe("ChatWorkspacePage", () => {
     expect(screen.getByText("尚未生成候选，请点击开始生成")).toBeInTheDocument();
   });
 
+  it("generation mode node shows serial batch revision buttons", async () => {
+    const api = mockWorkspaceWs();
+    useWorkspaceStore.setState({
+      sessionId: "workspace_session_0001",
+      workspaceType: "work_item_plan",
+      stage: "author_confirm",
+      providers: { author: "claude_code", reviewer: "codex" },
+      activeNodeId: "node_mode",
+      selectedNodeId: "node_mode",
+      timelineNodes: [
+        timelineNode({
+          node_id: "node_mode",
+          node_type: "work_item_generation_mode",
+          stage: "author_confirm",
+          title: "选择生成模式",
+        }),
+      ],
+      workItemPlanArtifact: { type: "outline_candidate", payload: workItemPlanOutlinePayload() },
+    });
+
+    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
+
+    await userEvent.click(screen.getByRole("button", { name: "逐个生成" }));
+    await userEvent.click(screen.getByRole("button", { name: "自动生成" }));
+    await userEvent.click(screen.getByRole("button", { name: "返回 Outline 返修" }));
+
+    expect(api.sendSelectWorkItemGenerationMode).toHaveBeenNthCalledWith(1, "serial");
+    expect(api.sendSelectWorkItemGenerationMode).toHaveBeenNthCalledWith(2, "batch");
+    expect(api.sendRequestOutlineRevision).toHaveBeenCalledWith();
+    expect(screen.getByTestId("work-item-plan-artifact-panel")).toHaveTextContent(
+      "Split frontend and backend work.",
+    );
+  });
+
+  it("outline confirm node shows accept and rewrite actions", async () => {
+    const api = mockWorkspaceWs();
+    useWorkspaceStore.setState({
+      sessionId: "workspace_session_0001",
+      workspaceType: "work_item_plan",
+      stage: "author_confirm",
+      providers: { author: "claude_code", reviewer: "codex" },
+      activeNodeId: "node_outline",
+      selectedNodeId: "node_outline",
+      timelineNodes: [
+        timelineNode({
+          node_id: "node_outline",
+          node_type: "work_item_plan_outline_confirm",
+          stage: "author_confirm",
+          title: "确认 Outline",
+        }),
+      ],
+      workItemPlanArtifact: { type: "outline_candidate", payload: workItemPlanOutlinePayload() },
+    });
+
+    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
+
+    await userEvent.click(screen.getByRole("button", { name: "接受 Outline" }));
+    await userEvent.click(screen.getByRole("button", { name: "重写 Outline" }));
+
+    expect(api.sendAuthorDecision).toHaveBeenCalledWith("accept");
+    expect(api.sendRequestOutlineRevision).toHaveBeenCalledWith();
+  });
+
+  it("renders outline then mode then serial draft confirm", async () => {
+    const api = mockWorkspaceWs();
+    useWorkspaceStore.setState({
+      sessionId: "workspace_session_0001",
+      workspaceType: "work_item_plan",
+      stage: "author_confirm",
+      providers: { author: "claude_code", reviewer: "codex" },
+      activeNodeId: "node_outline",
+      selectedNodeId: "node_outline",
+      timelineNodes: [
+        timelineNode({
+          node_id: "node_outline",
+          node_type: "work_item_plan_outline_confirm",
+          stage: "author_confirm",
+          title: "确认 Outline",
+        }),
+      ],
+      workItemPlanArtifact: { type: "outline_candidate", payload: workItemPlanOutlinePayload() },
+    });
+
+    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
+
+    expect(screen.getByTestId("work-item-plan-artifact-panel")).toHaveTextContent(
+      "Split frontend and backend work.",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "接受 Outline" }));
+    expect(api.sendAuthorDecision).toHaveBeenCalledWith("accept");
+
+    useWorkspaceStore.setState({
+      activeNodeId: "node_mode",
+      selectedNodeId: "node_mode",
+      timelineNodes: [
+        timelineNode({
+          node_id: "node_mode",
+          node_type: "work_item_generation_mode",
+          stage: "author_confirm",
+          title: "选择生成模式",
+        }),
+      ],
+      workItemPlanArtifact: { type: "outline_candidate", payload: workItemPlanOutlinePayload() },
+    });
+    await waitFor(() => expect(screen.getByRole("button", { name: "逐个生成" })).toBeInTheDocument());
+    await userEvent.click(screen.getByRole("button", { name: "逐个生成" }));
+    expect(api.sendSelectWorkItemGenerationMode).toHaveBeenCalledWith("serial");
+
+    useWorkspaceStore.setState({
+      activeNodeId: "node_draft",
+      selectedNodeId: "node_draft",
+      timelineNodes: [
+        timelineNode({
+          node_id: "node_draft",
+          node_type: "work_item_draft_confirm",
+          stage: "author_confirm",
+          title: "确认 Draft",
+        }),
+      ],
+      workItemPlanArtifact: { type: "draft_candidate", payload: workItemDraftPayload() },
+    });
+    await waitFor(() => expect(screen.getByRole("button", { name: "接受" })).toBeInTheDocument());
+    expect(screen.getByTestId("work-item-plan-artifact-panel")).toHaveTextContent("Backend flow");
+    await userEvent.click(screen.getByRole("button", { name: "接受" }));
+    expect(api.sendWorkItemDraftDecision).toHaveBeenCalledWith("outline_backend", "accept");
+  });
+
+  it("draft confirm hides accept when validation failed", async () => {
+    const api = mockWorkspaceWs();
+    useWorkspaceStore.setState({
+      sessionId: "workspace_session_0001",
+      workspaceType: "work_item_plan",
+      stage: "author_confirm",
+      providers: { author: "claude_code", reviewer: "codex" },
+      activeNodeId: "node_draft",
+      selectedNodeId: "node_draft",
+      timelineNodes: [
+        timelineNode({
+          node_id: "node_draft",
+          node_type: "work_item_draft_confirm",
+          stage: "author_confirm",
+          title: "确认 Draft",
+        }),
+      ],
+      workItemPlanArtifact: {
+        type: "draft_candidate",
+        payload: { ...workItemDraftPayload(), can_accept: false },
+      },
+    });
+
+    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
+
+    expect(screen.queryByRole("button", { name: "接受" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "重写" }));
+    await userEvent.click(screen.getByRole("button", { name: "暂停" }));
+
+    expect(api.sendWorkItemDraftDecision).toHaveBeenNthCalledWith(
+      1,
+      "outline_backend",
+      "rewrite",
+    );
+    expect(api.sendWorkItemDraftDecision).toHaveBeenNthCalledWith(
+      2,
+      "outline_backend",
+      "pause",
+    );
+  });
+
+  it("renders batch queue and review findings", async () => {
+    const api = mockWorkspaceWs();
+    useWorkspaceStore.setState({
+      sessionId: "workspace_session_0001",
+      workspaceType: "work_item_plan",
+      stage: "author_confirm",
+      providers: { author: "claude_code", reviewer: "codex" },
+      activeNodeId: "node_batch",
+      selectedNodeId: "node_batch",
+      timelineNodes: [
+        timelineNode({
+          node_id: "node_batch",
+          node_type: "work_item_batch_confirm",
+          stage: "author_confirm",
+          title: "确认 Batch",
+        }),
+      ],
+      workItemPlanArtifact: {
+        type: "batch_state",
+        payload: {
+          ...workItemBatchPayload(true),
+          queue: ["outline_backend", "outline_frontend"],
+        },
+      },
+    });
+
+    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
+
+    expect(screen.getByTestId("work-item-plan-artifact-panel")).toHaveTextContent(
+      "outline_backend -> outline_frontend",
+    );
+    expect(screen.getByTestId("work-item-plan-artifact-panel")).toHaveTextContent(
+      "validation_failed",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "降级串行" }));
+    expect(api.sendWorkItemBatchDecision).toHaveBeenCalledWith(
+      "downgrade_to_serial",
+      undefined,
+      "outline_backend",
+    );
+  });
+
+  it("batch confirm shows accept all rewrite pause and downgrade actions", async () => {
+    const api = mockWorkspaceWs();
+    useWorkspaceStore.setState({
+      sessionId: "workspace_session_0001",
+      workspaceType: "work_item_plan",
+      stage: "author_confirm",
+      providers: { author: "claude_code", reviewer: "codex" },
+      activeNodeId: "node_batch",
+      selectedNodeId: "node_batch",
+      timelineNodes: [
+        timelineNode({
+          node_id: "node_batch",
+          node_type: "work_item_batch_confirm",
+          stage: "author_confirm",
+          title: "确认 Batch",
+        }),
+      ],
+      workItemPlanArtifact: { type: "batch_state", payload: workItemBatchPayload(true) },
+    });
+
+    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
+
+    await userEvent.click(screen.getByRole("button", { name: "接受全部" }));
+    await userEvent.click(screen.getByRole("button", { name: "整组重写" }));
+    await userEvent.click(screen.getByRole("button", { name: "暂停" }));
+    await userEvent.click(screen.getByRole("button", { name: "降级串行" }));
+
+    expect(api.sendWorkItemBatchDecision).toHaveBeenNthCalledWith(1, "accept_all");
+    expect(api.sendWorkItemBatchDecision).toHaveBeenNthCalledWith(2, "rewrite_batch");
+    expect(api.sendWorkItemBatchDecision).toHaveBeenNthCalledWith(3, "pause");
+    expect(api.sendWorkItemBatchDecision).toHaveBeenNthCalledWith(
+      4,
+      "downgrade_to_serial",
+      undefined,
+      "outline_backend",
+    );
+  });
+
+  it("compile recovery hides abort rollback after committed marker", async () => {
+    const api = mockWorkspaceWs();
+    useWorkspaceStore.setState({
+      sessionId: "workspace_session_0001",
+      workspaceType: "work_item_plan",
+      stage: "human_confirm",
+      providers: { author: "claude_code", reviewer: "codex" },
+      activeNodeId: "node_recovery",
+      selectedNodeId: "node_recovery",
+      timelineNodes: [
+        timelineNode({
+          node_id: "node_recovery",
+          node_type: "work_item_plan_compile_recovery",
+          stage: "human_confirm",
+          title: "Compile Recovery",
+        }),
+      ],
+      workItemPlanArtifact: {
+        type: "compile_report",
+        payload: workItemCompileReportPayload("committed"),
+      },
+    });
+
+    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
+
+    expect(screen.queryByRole("button", { name: "放弃并回滚" })).not.toBeInTheDocument();
+    expect(screen.getByTestId("work-item-plan-artifact-panel")).toHaveTextContent("Before");
+    expect(screen.getByTestId("work-item-plan-artifact-panel")).toHaveTextContent("After");
+    await userEvent.click(screen.getByRole("button", { name: "继续" }));
+    await userEvent.click(screen.getByRole("button", { name: "转人工" }));
+
+    expect(api.sendWorkItemPlanCompileRecoveryAction).toHaveBeenNthCalledWith(1, "continue");
+    expect(api.sendWorkItemPlanCompileRecoveryAction).toHaveBeenNthCalledWith(2, "human_triage");
+  });
+
+  it("timeline selection shows historical draft artifact as readonly", async () => {
+    mockWorkspaceWs();
+    const oldDraft = workItemDraftPayload("Backend flow v1");
+    const currentDraft = workItemDraftPayload("Backend flow v2");
+    useWorkspaceStore.setState({
+      sessionId: "workspace_session_0001",
+      workspaceType: "work_item_plan",
+      stage: "author_confirm",
+      providers: { author: "claude_code", reviewer: "codex" },
+      activeNodeId: "node_current_draft",
+      selectedNodeId: "node_old_draft",
+      timelineNodes: [
+        timelineNode({
+          node_id: "node_old_draft",
+          node_type: "work_item_draft_confirm",
+          stage: "author_confirm",
+          title: "历史 Draft",
+          status: "completed",
+        }),
+        timelineNode({
+          node_id: "node_current_draft",
+          node_type: "work_item_draft_confirm",
+          stage: "author_confirm",
+          title: "当前 Draft",
+          status: "active",
+        }),
+      ],
+      workItemPlanArtifact: { type: "draft_candidate", payload: currentDraft },
+      workItemPlanArtifactVersions: [
+        {
+          version: 1,
+          generated_by: "claude_code",
+          reviewed_by: null,
+          review_verdict: null,
+          confirmed_by: null,
+          is_current: false,
+          created_at: "2026-06-23T00:00:00Z",
+          source_node_id: "node_old_draft",
+          artifact: { type: "draft_candidate", payload: oldDraft },
+        },
+        {
+          version: 2,
+          generated_by: "claude_code",
+          reviewed_by: null,
+          review_verdict: null,
+          confirmed_by: null,
+          is_current: true,
+          created_at: "2026-06-23T00:01:00Z",
+          source_node_id: "node_current_draft",
+          artifact: { type: "draft_candidate", payload: currentDraft },
+        },
+      ],
+    });
+
+    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
+
+    expect(screen.getByTestId("work-item-plan-artifact-panel")).toHaveTextContent(
+      "Backend flow v1",
+    );
+    expect(screen.getByTestId("work-item-plan-artifact-panel")).toHaveTextContent("只读历史");
+  });
+
+  it("unknown work item plan node type renders processing card", async () => {
+    mockWorkspaceWs();
+    useWorkspaceStore.setState({
+      sessionId: "workspace_session_0001",
+      workspaceType: "work_item_plan",
+      stage: "human_confirm",
+      providers: { author: "claude_code", reviewer: "codex" },
+      activeNodeId: "node_future",
+      selectedNodeId: "node_future",
+      timelineNodes: [
+        timelineNode({
+          node_id: "node_future",
+          node_type: "work_item_plan_future_phase",
+          stage: "human_confirm",
+          title: "Future phase",
+        }),
+      ],
+      workItemPlanArtifact: { type: "outline_candidate", payload: workItemPlanOutlinePayload() },
+    });
+
+    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
+
+    expect(screen.getByTestId("work-item-plan-staged-panel")).toHaveTextContent("系统处理中");
+    expect(screen.getByTestId("work-item-plan-staged-panel")).toHaveTextContent(
+      "work_item_plan_future_phase",
+    );
+  });
+
   it("keeps markdown artifact pane for story workspaces", async () => {
     mockWorkspaceWs();
     useWorkspaceStore.setState({
@@ -1085,5 +1472,121 @@ function workItemPlanCandidate(
     repository_profile: null,
     validator_findings: [],
     ...overrides,
+  };
+}
+
+function workItemPlanOutlinePayload() {
+  return {
+    outline: {
+      id: "outline_version_001",
+      plan_id: "plan_001",
+      strategy_summary: "Split frontend and backend work.",
+      work_items: [
+        {
+          outline_id: "outline_backend",
+          title: "Backend flow",
+          kind: "backend",
+          sequence_hint: 1,
+          depends_on_outline_ids: [],
+          exclusive_write_scopes: ["src/product"],
+          forbidden_write_scopes: [],
+          context_budget: {
+            target_context_k: "medium",
+            max_summary_chars: 4000,
+            max_handoff_chars: 2000,
+            max_code_context_chars: 12000,
+            max_context_file_refs: 12,
+            max_traceability_refs: 12,
+            max_dependency_handoffs: 4,
+          },
+          required_handoff_from_outline_ids: [],
+          verification_strategy: "cargo test --locked",
+          risk_notes: [],
+        },
+      ],
+      dependency_graph: [],
+      risks: [],
+      handoff_plan: [],
+      created_at: "2026-06-23T00:00:00Z",
+      updated_at: "2026-06-23T00:00:00Z",
+    },
+    design_context_gaps: [],
+    validator_findings: [],
+    context_blockers: [],
+    current_generation_round_id: "round_001",
+    selected_generation_mode: null,
+  };
+}
+
+function workItemDraftPayload(title = "Backend flow") {
+  return {
+    draft_record: {
+      draft_id: "draft_backend_001",
+      plan_id: "plan_001",
+      generation_round_id: "round_001",
+      outline_id: "outline_backend",
+      batch_id: null,
+      candidate: {
+        outline_id: "outline_backend",
+        title,
+        kind: "backend",
+        implementation_context: "Implement backend state transitions.",
+        exclusive_write_scopes: ["src/product"],
+        forbidden_write_scopes: [],
+        depends_on_outline_ids: [],
+        required_handoff_from_outline_ids: [],
+        verification_plan: {
+          commands: [],
+          manual_checks: [],
+          required_gates: [],
+          risk_notes: [],
+        },
+        handoff_summary: "Backend state is ready for frontend.",
+      },
+      status: "draft",
+      active: true,
+      superseded: false,
+      superseded_by_draft_id: null,
+      supersede_reason: null,
+      copied_from_draft_id: null,
+      generated_from_node_id: "node_draft",
+      accepted_by_node_id: null,
+      created_at: "2026-06-23T00:00:00Z",
+      updated_at: "2026-06-23T00:00:00Z",
+    },
+    validator_findings: [],
+    can_accept: true,
+  };
+}
+
+function workItemBatchPayload(withFailure = false) {
+  return {
+    batch_id: "batch_001",
+    generation_round_id: "round_001",
+    queue: ["outline_backend"],
+    draft_records: [workItemDraftPayload().draft_record],
+    batch_status: "completed",
+    failure_summary: withFailure
+      ? [
+          {
+            draft_id: "draft_backend_001",
+            outline_id: "outline_backend",
+            status: "validation_failed",
+          },
+        ]
+      : [],
+  };
+}
+
+function workItemCompileReportPayload(planCommitState: string) {
+  return {
+    compile_id: "compile_001",
+    generation_round_id: "round_001",
+    status: "recovery_required",
+    plan_commit_state: planCommitState,
+    work_item_ids: ["work_item_backend"],
+    verification_plan_ids: ["verification_backend"],
+    child_session_ids: ["session_child_backend"],
+    validator_findings: [],
   };
 }

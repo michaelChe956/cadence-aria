@@ -32,8 +32,9 @@ use crate::product::work_item_split_engine::{
 };
 use crate::product::workspace_engine::{
     AuthorDecisionOutcome, EngineEvent, PendingAuthorChoiceError, ReviewDecisionOutcome,
-    WorkItemDraftDecisionOutcome, WorkItemPlanAuthorOutcome, WorkspaceEngine, WorkspaceSession,
-    WorkspaceStage, build_work_item_plan_revision_input,
+    WorkItemBatchDecisionOutcome, WorkItemDraftDecisionOutcome, WorkItemPlanAuthorOutcome,
+    WorkItemPlanCompileRecoveryOutcome, WorkspaceEngine, WorkspaceSession, WorkspaceStage,
+    build_work_item_plan_revision_input,
 };
 use crate::product::workspace_repository::workspace_repository_for_session;
 use crate::web::state::{WebAppState, WorkspaceActiveRun, WorkspaceRunRegistry};
@@ -675,16 +676,23 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                         context: None,
                     };
                     let _ = send_json_outbound(&outbound_tx, &err).await;
-                } else if selected_mode == WorkItemGenerationModeDto::Serial
-                    && let Err(message) = spawn_provider_run_from_handler(
+                } else {
+                    let run_kind = match selected_mode {
+                        WorkItemGenerationModeDto::Serial => {
+                            ProviderRunKind::WorkItemPlanDraft { feedback: None }
+                        }
+                        WorkItemGenerationModeDto::Batch => ProviderRunKind::WorkItemPlanBatch,
+                    };
+                    if let Err(message) = spawn_provider_run_from_handler(
                         run_context.clone(),
-                        ProviderRunKind::WorkItemPlanDraft { feedback: None },
+                        run_kind,
                         outbound_tx.clone(),
                     )
                     .await
-                {
-                    let err = WsOutMessage::Error { message };
-                    let _ = send_json_outbound(&outbound_tx, &err).await;
+                    {
+                        let err = WsOutMessage::Error { message };
+                        let _ = send_json_outbound(&outbound_tx, &err).await;
+                    }
                 }
             }
             WsInMessage::RequestOutlineRevision { feedback } => {
@@ -743,6 +751,89 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                     Err(message) => {
                         let err = WsOutMessage::ProtocolError {
                             code: "WORK_ITEM_DRAFT_CONFIRM_REQUIRED".to_string(),
+                            message,
+                            context: None,
+                        };
+                        let _ = send_json_outbound(&outbound_tx, &err).await;
+                    }
+                }
+            }
+            WsInMessage::WorkItemBatchDecision {
+                decision,
+                feedback,
+                first_affected_outline_id,
+            } => {
+                let result = {
+                    let mut engine = engine.lock().await;
+                    engine
+                        .handle_work_item_batch_decision(
+                            decision,
+                            feedback,
+                            first_affected_outline_id,
+                        )
+                        .await
+                };
+                match result {
+                    Ok(WorkItemBatchDecisionOutcome::StartBatchRun) => {
+                        if let Err(message) = spawn_provider_run_from_handler(
+                            run_context.clone(),
+                            ProviderRunKind::WorkItemPlanBatch,
+                            outbound_tx.clone(),
+                        )
+                        .await
+                        {
+                            let err = WsOutMessage::Error { message };
+                            let _ = send_json_outbound(&outbound_tx, &err).await;
+                        }
+                    }
+                    Ok(WorkItemBatchDecisionOutcome::StartDraftRun) => {
+                        if let Err(message) = spawn_provider_run_from_handler(
+                            run_context.clone(),
+                            ProviderRunKind::WorkItemPlanDraft { feedback: None },
+                            outbound_tx.clone(),
+                        )
+                        .await
+                        {
+                            let err = WsOutMessage::Error { message };
+                            let _ = send_json_outbound(&outbound_tx, &err).await;
+                        }
+                    }
+                    Ok(WorkItemBatchDecisionOutcome::StartReview) => {
+                        if let Err(message) = spawn_provider_run_from_handler(
+                            run_context.clone(),
+                            ProviderRunKind::ReviewOnly,
+                            outbound_tx.clone(),
+                        )
+                        .await
+                        {
+                            let err = WsOutMessage::Error { message };
+                            let _ = send_json_outbound(&outbound_tx, &err).await;
+                        }
+                    }
+                    Ok(WorkItemBatchDecisionOutcome::HumanConfirm) => {}
+                    Err(message) => {
+                        let err = WsOutMessage::ProtocolError {
+                            code: "WORK_ITEM_BATCH_CONFIRM_REQUIRED".to_string(),
+                            message,
+                            context: None,
+                        };
+                        let _ = send_json_outbound(&outbound_tx, &err).await;
+                    }
+                }
+            }
+            WsInMessage::WorkItemPlanCompileRecoveryAction { action, reason } => {
+                let result = {
+                    let mut engine = engine.lock().await;
+                    engine
+                        .handle_work_item_plan_compile_recovery_action(action, reason)
+                        .await
+                };
+                match result {
+                    Ok(WorkItemPlanCompileRecoveryOutcome::Continue)
+                    | Ok(WorkItemPlanCompileRecoveryOutcome::HumanConfirm) => {}
+                    Err(message) => {
+                        let err = WsOutMessage::ProtocolError {
+                            code: "INVALID_COMPILE_RECOVERY_ACTION".to_string(),
                             message,
                             context: None,
                         };
@@ -1171,6 +1262,7 @@ fn is_message_valid_for_stage(msg: &WsInMessage, stage: &WorkspaceStage) -> bool
                     | WsInMessage::SelectWorkItemGenerationMode { .. }
                     | WsInMessage::RequestOutlineRevision { .. }
                     | WsInMessage::WorkItemDraftDecision { .. }
+                    | WsInMessage::WorkItemBatchDecision { .. }
                     | WsInMessage::RevertWorkItem { .. }
                     | WsInMessage::Abort
             )
@@ -1188,6 +1280,7 @@ fn is_message_valid_for_stage(msg: &WsInMessage, stage: &WorkspaceStage) -> bool
         WorkspaceStage::HumanConfirm => matches!(
             msg,
             WsInMessage::HumanConfirm { .. }
+                | WsInMessage::WorkItemPlanCompileRecoveryAction { .. }
                 | WsInMessage::RequestRevision { .. }
                 | WsInMessage::Confirm
         ),
@@ -1226,6 +1319,10 @@ fn message_type(msg: &WsInMessage) -> &'static str {
         WsInMessage::RequestRevision { .. } => "request_revision",
         WsInMessage::RequestOutlineRevision { .. } => "request_outline_revision",
         WsInMessage::WorkItemDraftDecision { .. } => "work_item_draft_decision",
+        WsInMessage::WorkItemBatchDecision { .. } => "work_item_batch_decision",
+        WsInMessage::WorkItemPlanCompileRecoveryAction { .. } => {
+            "work_item_plan_compile_recovery_action"
+        }
         WsInMessage::HumanConfirm { .. } => "human_confirm",
         WsInMessage::RevertWorkItem { .. } => "revert_work_item",
         WsInMessage::Abort => "abort",
@@ -1645,6 +1742,7 @@ enum ProviderRunKind {
     ReviewOnly,
     WorkItemPlanAuthor,
     WorkItemPlanDraft { feedback: Option<String> },
+    WorkItemPlanBatch,
     WorkItemPlanRevision { feedback: Option<String> },
 }
 
@@ -1769,6 +1867,7 @@ async fn spawn_provider_run_from_handler(
                 .unwrap_or(ProviderName::Codex),
             ProviderRunKind::WorkItemPlanAuthor
             | ProviderRunKind::WorkItemPlanDraft { .. }
+            | ProviderRunKind::WorkItemPlanBatch
             | ProviderRunKind::WorkItemPlanRevision { .. } => {
                 engine.session().author_provider.clone()
             }
@@ -2223,6 +2322,92 @@ async fn spawn_provider_run_from_handler(
                     let err = WsOutMessage::Error { message };
                     let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
                     return;
+                }
+            }
+            ProviderRunKind::WorkItemPlanBatch => {
+                let mut command_rx = command_rx;
+                while engine.active_node_type()
+                    == Some(crate::web::workspace_ws_types::TimelineNodeType::WorkItemBatchRun)
+                {
+                    let Some(node_id) = engine.active_timeline_node_id() else {
+                        engine.mark_active_run_finished(&run_label);
+                        drop(engine);
+                        let err = WsOutMessage::Error {
+                            message: "work item batch run node unavailable".to_string(),
+                        };
+                        let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                        return;
+                    };
+                    let provider_input =
+                        match engine.build_current_work_item_batch_draft_streaming_input() {
+                            Ok(input) => input,
+                            Err(message) => {
+                                engine.mark_active_run_finished(&run_label);
+                                drop(engine);
+                                let err = WsOutMessage::Error { message };
+                                let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                                return;
+                            }
+                        };
+                    let author_provider = engine.session().author_provider.clone();
+                    let provider_session = provider_for_run
+                        .start(provider_input, run_cancel.clone())
+                        .await;
+                    let full_output = match engine
+                        .drive_work_item_plan_provider_session_to_output(
+                            provider_session,
+                            &mut command_rx,
+                            node_id,
+                            author_provider,
+                        )
+                        .await
+                    {
+                        Ok(output) => output,
+                        Err(_) => {
+                            engine.mark_active_run_finished(&run_label);
+                            return;
+                        }
+                    };
+                    let structured_output =
+                        match parse_work_item_split_structured_output(&full_output) {
+                            Ok(output) => output,
+                            Err(message) => {
+                                engine.mark_active_run_finished(&run_label);
+                                drop(engine);
+                                let err = WsOutMessage::Error {
+                                    message: format!(
+                                        "work item batch draft generate failed: {message}"
+                                    ),
+                                };
+                                let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                                return;
+                            }
+                        };
+                    let candidate = match parse_work_item_draft_output(structured_output) {
+                        Ok(candidate) => candidate,
+                        Err(error) => {
+                            engine.mark_active_run_finished(&run_label);
+                            drop(engine);
+                            let err = WsOutMessage::Error {
+                                message: format!(
+                                    "work item batch draft parse failed: {}",
+                                    error.message
+                                ),
+                            };
+                            let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                            return;
+                        }
+                    };
+                    if let Err(message) = engine
+                        .complete_work_item_batch_draft_author(candidate)
+                        .await
+                    {
+                        engine.mark_active_run_finished(&run_label);
+                        drop(engine);
+                        let err = WsOutMessage::Error { message };
+                        let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                        return;
+                    }
                 }
             }
             ProviderRunKind::WorkItemPlanRevision { feedback } => {

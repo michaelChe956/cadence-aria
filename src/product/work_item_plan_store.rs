@@ -117,6 +117,24 @@ impl WorkItemPlanStore {
         )
     }
 
+    pub fn list_compile_transactions(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+    ) -> Result<Vec<WorkItemPlanCompileTransaction>, ProductStoreError> {
+        validate_work_item_plan_path_ids(project_id, issue_id, plan_id)?;
+        let root = self
+            .app_paths
+            .issue_root(project_id, issue_id)
+            .join("work_item_plan_compiles")
+            .join(plan_id);
+        json_file_paths(&root)?
+            .into_iter()
+            .map(|path| read_json(&path))
+            .collect()
+    }
+
     pub fn load_outline_context_index(
         &self,
         project_id: &str,

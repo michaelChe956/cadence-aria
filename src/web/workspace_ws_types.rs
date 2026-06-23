@@ -11,7 +11,8 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::product::models::{
-    NodeDetail, ProviderName, WorkItemDraftRecord, WorkItemPlanOutline, WorkspaceType,
+    NodeDetail, ProviderName, WorkItemBatchStatus, WorkItemDraftRecord, WorkItemPlanCommitState,
+    WorkItemPlanCompileStatus, WorkItemPlanOutline, WorkspaceType,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -204,6 +205,15 @@ pub enum WsInMessage {
         decision: WorkItemDraftDecisionDto,
         feedback: Option<String>,
     },
+    WorkItemBatchDecision {
+        decision: WorkItemBatchDecisionDto,
+        feedback: Option<String>,
+        first_affected_outline_id: Option<String>,
+    },
+    WorkItemPlanCompileRecoveryAction {
+        action: WorkItemPlanCompileRecoveryActionDto,
+        reason: Option<String>,
+    },
     HumanConfirm {
         decision: HumanConfirmDecision,
         payload: Option<serde_json::Value>,
@@ -253,6 +263,23 @@ pub enum WorkItemDraftDecisionDto {
     Accept,
     Rewrite,
     Pause,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkItemBatchDecisionDto {
+    AcceptAll,
+    RewriteBatch,
+    Pause,
+    DowngradeToSerial,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkItemPlanCompileRecoveryActionDto {
+    Continue,
+    AbortAndRollback,
+    HumanTriage,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -377,6 +404,12 @@ pub enum ArtifactPayload {
     WorkItemDraftCandidate {
         draft_candidate: Box<WorkItemDraftCandidatePayload>,
     },
+    WorkItemBatchState {
+        batch_state: Box<WorkItemBatchStatePayload>,
+    },
+    WorkItemPlanCompileReport {
+        compile_report: Box<WorkItemPlanCompileReportPayload>,
+    },
 }
 
 impl ArtifactPayload {
@@ -387,6 +420,8 @@ impl ArtifactPayload {
             Self::WorkItemPlanOutlineCandidate { .. } => None,
             Self::WorkItemPlanContextBlocker { .. } => None,
             Self::WorkItemDraftCandidate { .. } => None,
+            Self::WorkItemBatchState { .. } => None,
+            Self::WorkItemPlanCompileReport { .. } => None,
         }
     }
 
@@ -401,6 +436,8 @@ impl ArtifactPayload {
             Self::WorkItemPlanOutlineCandidate { .. } => None,
             Self::WorkItemPlanContextBlocker { .. } => None,
             Self::WorkItemDraftCandidate { .. } => None,
+            Self::WorkItemBatchState { .. } => None,
+            Self::WorkItemPlanCompileReport { .. } => None,
         }
     }
 }
@@ -433,6 +470,38 @@ pub struct WorkItemDraftCandidatePayload {
     pub draft_record: WorkItemDraftRecord,
     pub validator_findings: Vec<ValidatorFindingDto>,
     pub can_accept: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkItemBatchStatePayload {
+    pub batch_id: String,
+    pub generation_round_id: String,
+    pub queue: Vec<String>,
+    pub draft_records: Vec<WorkItemDraftRecord>,
+    pub batch_status: WorkItemBatchStatus,
+    pub failure_summary: Vec<WorkItemBatchFailureSummaryDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkItemBatchFailureSummaryDto {
+    pub draft_id: String,
+    pub outline_id: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkItemPlanCompileReportPayload {
+    pub compile_id: String,
+    pub generation_round_id: String,
+    pub status: WorkItemPlanCompileStatus,
+    pub plan_commit_state: WorkItemPlanCommitState,
+    pub work_item_ids: Vec<String>,
+    pub verification_plan_ids: Vec<String>,
+    pub child_session_ids: Vec<String>,
+    pub validator_findings: Vec<ValidatorFindingDto>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -614,6 +683,10 @@ pub enum TimelineNodeType {
     WorkItemDraftConfirm,
     WorkItemDraftReview,
     WorkItemBatchRun,
+    WorkItemBatchConfirm,
+    WorkItemBatchReview,
+    WorkItemPlanCompile,
+    WorkItemPlanCompileRecovery,
     AbortedByDisconnect,
     ProtocolError,
     Completed,

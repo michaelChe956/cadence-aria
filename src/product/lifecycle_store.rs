@@ -709,6 +709,50 @@ impl LifecycleStore {
         Ok(plan)
     }
 
+    pub fn commit_issue_work_item_plan(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+        update: IssueWorkItemPlanUpdate,
+    ) -> Result<IssueWorkItemPlan, ProductStoreError> {
+        let mut plan = self.update_issue_work_item_plan(project_id, issue_id, plan_id, update)?;
+        plan.status = IssueWorkItemPlanStatus::Confirmed;
+        plan.updated_at = Utc::now().to_rfc3339();
+        let path = self
+            .issue_work_item_plans_root(project_id, issue_id)
+            .join(format!("{plan_id}.json"));
+        write_json(&path, &plan)?;
+        Ok(plan)
+    }
+
+    pub fn restore_issue_work_item_plan_snapshot(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+        snapshot: &IssueWorkItemPlan,
+    ) -> Result<IssueWorkItemPlan, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(plan_id)?;
+        if snapshot.id != plan_id
+            || snapshot.project_id != project_id
+            || snapshot.issue_id != issue_id
+        {
+            return Err(ProductStoreError::Io(format!(
+                "issue_work_item_plan_snapshot_mismatch: {plan_id}"
+            )));
+        }
+        let mut plan = snapshot.clone();
+        plan.updated_at = Utc::now().to_rfc3339();
+        let path = self
+            .issue_work_item_plans_root(project_id, issue_id)
+            .join(format!("{plan_id}.json"));
+        write_json(&path, &plan)?;
+        Ok(plan)
+    }
+
     pub fn replace_issue_work_item_plan_candidate(
         &self,
         project_id: &str,

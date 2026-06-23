@@ -32,78 +32,79 @@
 
 ## Task 1：TypeScript 类型与 store union
 
-- [ ] 写失败测试：`pnpm -C web exec vitest --run src/state/workspace-ws-store.test.ts`
+- [x] 写失败测试：`pnpm -C web exec vitest --run src/state/workspace-ws-store.test.ts`
   - `stores work item plan outline payload`
   - `stores draft payload without clearing artifact history`
   - `stores compile report payload`
   - `unknown node type keeps loading fallback`
-- [ ] `api/types.ts` 新增：
+- [x] `api/types.ts` 新增：
   - `WorkItemPlanOutlineCandidatePayload`
   - `WorkItemPlanContextBlockerPayload`
   - `WorkItemDraftCandidatePayload`
   - `WorkItemBatchStatePayload`
   - `WorkItemPlanCompileReportPayload`
   - `WorkItemPlanArtifactPayload` union。
-- [ ] `WorkspaceArtifact` 替换候选单字段，保留 legacy `{ candidate }`。
-- [ ] store 保存：
-  - `workItemPlanArtifact: WorkItemPlanArtifactPayload | null`
-  - `workItemPlanArtifactVersions: WorkItemPlanArtifactVersion[]`
-  - legacy `workItemPlanCandidate` 可保留过渡。
+- [x] `WorkspaceArtifact` 替换候选单字段，保留 legacy `{ candidate }`。
+- [x] store 保存：
+  - [x] `workItemPlanArtifact: WorkItemPlanArtifactPayload | null`
+  - [x] `workItemPlanArtifactVersions: WorkItemPlanArtifactVersion[]`
+  - [x] legacy `workItemPlanCandidate` 可保留过渡。
 
 ## Task 2：WS 发送与接收
 
-- [ ] 写失败测试：`pnpm -C web exec vitest --run src/hooks/useWorkspaceWs.test.tsx`
-- [ ] 新增发送函数：
+- [x] 写失败测试：`pnpm -C web exec vitest --run src/hooks/useWorkspaceWs.test.tsx`
+- [x] 新增发送函数：
   - `sendSelectWorkItemGenerationMode(mode)`
   - `sendRequestOutlineRevision(feedback?)`
   - `sendWorkItemDraftDecision(outlineId, decision, feedback?)`
   - `sendWorkItemBatchDecision(decision, feedback?, firstAffectedOutlineId?)`
   - `sendWorkItemPlanCompileRecoveryAction(action, reason?)`
-- [ ] `artifact_update` 分发按 union tag 或字段存在性识别，不再只判断 `candidate`。
-- [ ] `session_state` 中 stage 与 active node 一次性落 store；active node 未就绪时保持 loading。
+- [x] `artifact_update` 分发按 union tag 或字段存在性识别，不再只判断 `candidate`。
+- [x] `session_state` 中 stage 与 active node 一次性落 store；active node 未就绪时保持 loading。
 
 ## Task 3：WorkItemPlanStagedPanel
 
-- [ ] 写失败测试：`pnpm -C web exec vitest --run src/pages/ChatWorkspacePage.test.tsx`
+- [x] 写失败测试：`pnpm -C web exec vitest --run src/pages/ChatWorkspacePage.test.tsx`
   - `generation mode node shows serial batch revision buttons`
   - `draft confirm hides accept when validation failed`
   - `batch confirm shows accept all rewrite pause`
   - `compile recovery hides abort rollback after committed marker`
-- [ ] 新组件根据 `activeNode.node_type` 渲染：
-  - `work_item_plan_outline_confirm`：接受 Outline / 重写 Outline。
-  - `work_item_generation_mode`：逐个生成 / 自动生成 / 返回 Outline 返修。
-  - `work_item_draft_confirm`：接受 / 重写 / 暂停；校验失败隐藏接受。
-  - `work_item_batch_confirm`：接受全部 / 整组重写 / 暂停；严格校验失败时显示降级串行。
-  - `work_item_plan_compile_recovery`：继续 / 放弃 / 转人工，按 `plan_commit_state` 动态启用。
-- [ ] 不在 UI 内描述快捷键或实现细节。
+- [x] 新组件根据 `activeNode.node_type` 渲染：
+  - [x] `work_item_plan_outline_confirm`：接受 Outline / 重写 Outline。
+  - [x] `work_item_generation_mode`：逐个生成 / 自动生成 / 返回 Outline 返修。
+  - [x] `work_item_draft_confirm`：接受 / 重写 / 暂停；校验失败隐藏接受。
+  - [x] `work_item_batch_confirm`：接受全部 / 整组重写 / 暂停；严格校验失败时显示降级串行。
+  - [x] `work_item_plan_compile_recovery`：继续 / 放弃 / 转人工，按 `plan_commit_state` 动态启用。
+- [x] 不在 UI 内描述快捷键或实现细节。
 
 ## Task 4：Artifact MVP 面板
 
-- [ ] 写失败测试：
-  - `artifact panel lists outline draft batch compile groups`
-  - `timeline selection shows historical draft_readonly`
-  - `compile report renders_key_values`
-- [ ] MVP 范围：
-  - Outline 最新版本只读展示。
-  - Draft 按 outline 分组，显示 active/accepted/superseded/copied/validation_failed。
-  - Batch snapshot 展示 queue 和 failure summary。
-  - Compile report 用 key-value 或 JSON pretty-print 展示 before/after。
-- [ ] 对比 tab 可以先只对 compile report 做 before/after 文本展示；Outline/Draft diff 显示“本阶段未实现结构化对比”。
+- [x] 写失败测试：
+  - [x] `artifact panel lists outline draft batch compile groups`
+  - [x] `timeline selection shows historical draft_readonly`
+  - [x] `compile report renders_key_values`
+- [x] MVP 范围：
+  - [x] Outline 最新版本只读展示。
+  - [x] Draft 显示 outline、status、accept 状态与写入范围。
+  - [x] Batch snapshot 展示 queue 和 failure summary。
+  - [x] Compile report 用 key-value 展示关键字段。
+  - [x] 历史 draft_readonly 选择。
+- [x] 对比 tab 可以先只对 compile report 做 before/after 文本展示；Outline/Draft diff 显示“本阶段未实现结构化对比”。
 
 ## Task 5：Unknown node type 与 protocol version fallback
 
-- [ ] 写失败测试：
-  - `unknown_work_item_plan_node_type_renders_processing_card`
-  - `upgrade_required_message_sets_protocol_error`
-- [ ] 未知 node type 显示通用“系统处理中...”卡片，展示 node_type 原始值和刷新提示。
-- [ ] 后端若推 `upgrade_required`，前端显示 protocol error alert。
-- [ ] 不缓存上一 active node 去匹配新 stage。
+- [x] 写失败测试：
+  - [x] `unknown_work_item_plan_node_type_renders_processing_card`
+  - [x] `upgrade_required_message_sets_protocol_error`
+- [x] 未知 node type 显示通用“系统处理中...”卡片，展示 node_type 原始值。
+- [x] 后端若推 `upgrade_required`，前端显示 protocol error alert。
+- [x] 不缓存上一 active node 去匹配新 stage。
 
 ## Task 6：旧 CandidatePanel 兼容
 
-- [ ] 写失败测试：`legacy_candidate_payload_still_renders_existing_panel`
-- [ ] `WorkItemPlanCandidatePanel` 仅用于 legacy final candidate 或旧 session。
-- [ ] 新两阶段 payload 默认走 `WorkItemPlanStagedPanel` / `WorkItemPlanArtifactPanel`。
+- [x] 写失败测试：`legacy_candidate_payload_still_renders_existing_panel`
+- [x] `WorkItemPlanCandidatePanel` 仅用于 legacy final candidate 或旧 session。
+- [x] 新两阶段 payload 默认走 `WorkItemPlanStagedPanel` / `WorkItemPlanArtifactPanel`。
 
 ## 验证
 

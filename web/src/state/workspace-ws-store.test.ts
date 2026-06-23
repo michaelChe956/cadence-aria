@@ -43,6 +43,103 @@ function makeWorkItemPlanCandidate(
   };
 }
 
+function makeOutlineArtifactPayload() {
+  return {
+    outline: {
+      id: "outline_version_001",
+      plan_id: "plan_001",
+      strategy_summary: "Split frontend and backend work.",
+      work_items: [
+        {
+          outline_id: "outline_backend",
+          title: "Backend flow",
+          kind: "backend",
+          sequence_hint: 1,
+          depends_on_outline_ids: [],
+          exclusive_write_scopes: ["src/product"],
+          forbidden_write_scopes: [],
+          context_budget: {
+            target_context_k: "medium",
+            max_summary_chars: 4000,
+            max_handoff_chars: 2000,
+            max_code_context_chars: 12000,
+            max_context_file_refs: 12,
+            max_traceability_refs: 12,
+            max_dependency_handoffs: 4,
+          },
+          required_handoff_from_outline_ids: [],
+          verification_strategy: "cargo test --locked",
+          risk_notes: [],
+        },
+      ],
+      dependency_graph: [],
+      risks: [],
+      handoff_plan: [],
+      created_at: "2026-06-23T00:00:00Z",
+      updated_at: "2026-06-23T00:00:00Z",
+    },
+    design_context_gaps: [],
+    validator_findings: [],
+    context_blockers: [],
+    current_generation_round_id: "round_001",
+    selected_generation_mode: null,
+  };
+}
+
+function makeDraftArtifactPayload() {
+  return {
+    draft_record: {
+      draft_id: "draft_backend_001",
+      plan_id: "plan_001",
+      generation_round_id: "round_001",
+      outline_id: "outline_backend",
+      batch_id: null,
+      candidate: {
+        outline_id: "outline_backend",
+        title: "Backend flow",
+        kind: "backend",
+        implementation_context: "Implement backend state transitions.",
+        exclusive_write_scopes: ["src/product"],
+        forbidden_write_scopes: [],
+        depends_on_outline_ids: [],
+        required_handoff_from_outline_ids: [],
+        verification_plan: {
+          commands: [],
+          manual_checks: [],
+          required_gates: [],
+          risk_notes: [],
+        },
+        handoff_summary: "Backend state is ready for frontend.",
+      },
+      status: "draft",
+      active: true,
+      superseded: false,
+      superseded_by_draft_id: null,
+      supersede_reason: null,
+      copied_from_draft_id: null,
+      generated_from_node_id: "node_draft",
+      accepted_by_node_id: null,
+      created_at: "2026-06-23T00:00:00Z",
+      updated_at: "2026-06-23T00:00:00Z",
+    },
+    validator_findings: [],
+    can_accept: true,
+  };
+}
+
+function makeCompileArtifactPayload() {
+  return {
+    compile_id: "compile_001",
+    generation_round_id: "round_001",
+    status: "committed",
+    plan_commit_state: "committed",
+    work_item_ids: ["work_item_backend"],
+    verification_plan_ids: ["verification_backend"],
+    child_session_ids: ["session_child_backend"],
+    validator_findings: [],
+  };
+}
+
 function makeNodeDetail(overrides: Partial<NodeDetail> = {}): NodeDetail {
   return {
     node_id: "timeline_node_001",
@@ -2102,5 +2199,151 @@ describe("workspace ws store", () => {
     store.setWorkItemPlanCandidate(candidate);
 
     expect(useWorkspaceStore.getState().workItemPlanCandidate).toEqual(candidate);
+  });
+
+  it("stores work item plan outline payload from session state", () => {
+    const store = useWorkspaceStore.getState();
+    const outlineCandidate = makeOutlineArtifactPayload();
+
+    store.setSessionState({
+      session_id: "session_outline_artifact",
+      workspace_type: "work_item_plan",
+      stage: "author_confirm",
+      messages: [],
+      checkpoints: [],
+      artifact: { outline_candidate: outlineCandidate } as never,
+      providers: { author: "claude_code", reviewer: null },
+    });
+
+    expect((useWorkspaceStore.getState() as never as { workItemPlanArtifact: unknown }).workItemPlanArtifact).toEqual({
+      type: "outline_candidate",
+      payload: outlineCandidate,
+    });
+    expect(useWorkspaceStore.getState().workItemPlanCandidate).toBeNull();
+    expect(useWorkspaceStore.getState().artifact).toBeNull();
+  });
+
+  it("stores draft payload without clearing artifact history", () => {
+    const store = useWorkspaceStore.getState();
+    const draftCandidate = makeDraftArtifactPayload();
+
+    store.setSessionState({
+      session_id: "session_draft_artifact",
+      workspace_type: "work_item_plan",
+      stage: "author_confirm",
+      messages: [],
+      checkpoints: [],
+      artifact: { draft_candidate: draftCandidate } as never,
+      providers: { author: "claude_code", reviewer: null },
+      artifact_version_summaries: [
+        {
+          version: 1,
+          generated_by: "claude_code",
+          reviewed_by: null,
+          review_verdict: null,
+          confirmed_by: null,
+          is_current: true,
+          created_at: "2026-06-23T00:00:00Z",
+          source_node_id: "node_draft",
+        },
+      ],
+    });
+
+    expect((useWorkspaceStore.getState() as never as { workItemPlanArtifact: unknown }).workItemPlanArtifact).toEqual({
+      type: "draft_candidate",
+      payload: draftCandidate,
+    });
+    expect(useWorkspaceStore.getState().artifactVersions).toHaveLength(1);
+  });
+
+  it("stores compile report payload from session state", () => {
+    const store = useWorkspaceStore.getState();
+    const compileReport = makeCompileArtifactPayload();
+
+    store.setSessionState({
+      session_id: "session_compile_artifact",
+      workspace_type: "work_item_plan",
+      stage: "human_confirm",
+      messages: [],
+      checkpoints: [],
+      artifact: { compile_report: compileReport } as never,
+      providers: { author: "claude_code", reviewer: null },
+    });
+
+    expect((useWorkspaceStore.getState() as never as { workItemPlanArtifact: unknown }).workItemPlanArtifact).toEqual({
+      type: "compile_report",
+      payload: compileReport,
+    });
+    expect(useWorkspaceStore.getState().artifact).toBeNull();
+  });
+
+  it("tracks typed work item plan artifact versions", () => {
+    const store = useWorkspaceStore.getState();
+    const outlineCandidate = makeOutlineArtifactPayload();
+
+    store.setWorkItemPlanArtifact(
+      {
+        type: "outline_candidate",
+        payload: outlineCandidate,
+      },
+      7,
+    );
+
+    expect(
+      (useWorkspaceStore.getState() as never as { workItemPlanArtifactVersions: unknown[] })
+        .workItemPlanArtifactVersions,
+    ).toEqual([
+      expect.objectContaining({
+        version: 7,
+        artifact: {
+          type: "outline_candidate",
+          payload: outlineCandidate,
+        },
+      }),
+    ]);
+  });
+
+  it("keeps unknown work item plan node types available for fallback rendering", () => {
+    const store = useWorkspaceStore.getState();
+
+    store.setSessionState({
+      session_id: "session_unknown_node",
+      workspace_type: "work_item_plan",
+      stage: "human_confirm",
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "claude_code", reviewer: null },
+      active_node_id: "node_future",
+      timeline_nodes: [
+        {
+          node_id: "node_future",
+          node_type: "work_item_plan_future_phase",
+          agent: null,
+          stage: "human_confirm",
+          round: null,
+          status: "active",
+          title: "Future phase",
+          summary: null,
+          started_at: "2026-06-23T00:00:00Z",
+          completed_at: null,
+          duration_ms: null,
+          artifact_ref: null,
+          provider_config_snapshot: {
+            author: "claude_code",
+            reviewer: null,
+            review_rounds: 0,
+          },
+        } as never,
+      ],
+    });
+
+    expect(useWorkspaceStore.getState().activeNodeId).toBe("node_future");
+    expect(useWorkspaceStore.getState().timelineNodes[0]?.node_type).toBe(
+      "work_item_plan_future_phase",
+    );
+    expect(useWorkspaceStore.getState().nodeDetails.node_future?.node_type).toBe(
+      "work_item_plan_future_phase",
+    );
   });
 });

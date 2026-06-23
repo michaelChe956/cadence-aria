@@ -752,6 +752,178 @@ async fn item_review_plan_reopen_marks_outline_revising() {
 }
 
 #[tokio::test]
+async fn plan_reopen_required_supersedes_drafts_and_reopens_outline() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let _test_guard = enable_test_controls();
+    let (app, root, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
+        valid_outline_output(),
+        valid_draft_output("outline_backend_session"),
+        valid_frontend_draft_output(),
+        valid_integration_draft_output(),
+    ])
+    .await;
+    let (session_id, plan_id, mut ws) =
+        prepare_plan_accept_outline_and_select_serial_with_reviewer(&app, true).await;
+
+    let store = WorkItemPlanStore::new(ProductAppPaths::new(root.path().join(".aria")));
+
+    let _messages = recv_ws_until(&mut ws, Duration::from_secs(10), |messages| {
+        messages.iter().any(|message| {
+            message["type"] == "timeline_node_created"
+                && message["node"]["node_type"] == "work_item_draft_confirm"
+        })
+    })
+    .await;
+    let index = store
+        .load_active_index("project_0001", "issue_0001", &plan_id)
+        .expect("load active index after backend draft")
+        .expect("active index after backend draft");
+    let backend_draft_id = index
+        .outline_to_current_draft_id
+        .get("outline_backend_session")
+        .expect("backend draft id")
+        .clone();
+    enable_work_item_plan_review_fixture(
+        &app,
+        &session_id,
+        item_review_pass("outline_backend_session", &backend_draft_id),
+    )
+    .await;
+    ws.send(Message::Text(
+        json!({
+            "type": "work_item_draft_decision",
+            "outline_id": "outline_backend_session",
+            "decision": "accept",
+            "feedback": null
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .expect("send backend draft accept");
+
+    let _messages = recv_ws_until(&mut ws, Duration::from_secs(10), |messages| {
+        messages.iter().any(|message| {
+            message["type"] == "artifact_update"
+                && message["draft_candidate"]["draft_record"]["outline_id"]
+                    == "outline_frontend_expiry"
+        })
+    })
+    .await;
+    let index = store
+        .load_active_index("project_0001", "issue_0001", &plan_id)
+        .expect("load active index after frontend draft")
+        .expect("active index after frontend draft");
+    let frontend_draft_id = index
+        .outline_to_current_draft_id
+        .get("outline_frontend_expiry")
+        .expect("frontend draft id")
+        .clone();
+    enable_work_item_plan_review_fixture(
+        &app,
+        &session_id,
+        item_review_pass("outline_frontend_expiry", &frontend_draft_id),
+    )
+    .await;
+    ws.send(Message::Text(
+        json!({
+            "type": "work_item_draft_decision",
+            "outline_id": "outline_frontend_expiry",
+            "decision": "accept",
+            "feedback": null
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .expect("send frontend draft accept");
+
+    let _messages = recv_ws_until(&mut ws, Duration::from_secs(10), |messages| {
+        messages.iter().any(|message| {
+            message["type"] == "artifact_update"
+                && message["draft_candidate"]["draft_record"]["outline_id"]
+                    == "outline_integration_session"
+        })
+    })
+    .await;
+    let index = store
+        .load_active_index("project_0001", "issue_0001", &plan_id)
+        .expect("load active index after integration draft")
+        .expect("active index after integration draft");
+    let integration_draft_id = index
+        .outline_to_current_draft_id
+        .get("outline_integration_session")
+        .expect("integration draft id")
+        .clone();
+    enable_work_item_plan_review_fixture(
+        &app,
+        &session_id,
+        item_review_plan_reopen("outline_frontend_expiry", &integration_draft_id),
+    )
+    .await;
+    ws.send(Message::Text(
+        json!({
+            "type": "work_item_draft_decision",
+            "outline_id": "outline_integration_session",
+            "decision": "accept",
+            "feedback": null
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .expect("send integration draft accept");
+
+    let messages = recv_ws_until(&mut ws, Duration::from_secs(10), |messages| {
+        messages
+            .iter()
+            .any(|message| message["type"] == "stage_change" && message["stage"] == "human_confirm")
+    })
+    .await;
+    assert!(
+        messages
+            .iter()
+            .any(|message| message["type"] == "stage_change" && message["stage"] == "human_confirm"),
+        "plan reopen should pause for human confirm, got {messages:?}"
+    );
+
+    let index = store
+        .load_active_index("project_0001", "issue_0001", &plan_id)
+        .expect("load active index after plan reopen")
+        .expect("active index after plan reopen");
+    assert_eq!(index.outline_state, "revising");
+    assert_eq!(index.active_outline_id, None);
+    assert!(index.outline_to_current_draft_id.is_empty());
+    for draft_id in [&backend_draft_id, &frontend_draft_id, &integration_draft_id] {
+        assert_eq!(
+            index.draft_statuses.get(draft_id),
+            Some(&WorkItemDraftStatus::Superseded),
+            "draft {draft_id} should be superseded after plan reopen"
+        );
+    }
+
+    let mut drafts = store
+        .list_draft_records("project_0001", "issue_0001", &plan_id)
+        .expect("list draft history after plan reopen");
+    drafts.sort_by(|left, right| left.draft_id.cmp(&right.draft_id));
+    assert_eq!(drafts.len(), 3);
+    for draft in drafts {
+        assert_eq!(draft.status, WorkItemDraftStatus::Superseded);
+        assert!(!draft.active);
+        assert_eq!(
+            draft.supersede_reason,
+            Some(WorkItemDraftSupersedeReason::OutlineRevised)
+        );
+        assert!(
+            !draft.candidate.title.is_empty(),
+            "superseded draft history should remain readable"
+        );
+    }
+
+    ws.close(None).await.ok();
+}
+
+#[tokio::test]
 async fn item_review_revise_affecting_previous_item_downgrades_to_needs_human() {
     let _guard = WS_TEST_LOCK.lock().await;
     let _test_guard = enable_test_controls();
@@ -1130,6 +1302,40 @@ fn valid_frontend_draft_output() -> Value {
                 ],
                 "manual_checks": [],
                 "required_gates": ["cmd_frontend_session"]
+            }
+        }
+    })
+}
+
+fn valid_integration_draft_output() -> Value {
+    json!({
+        "draft": {
+            "outline_id": "outline_integration_session",
+            "title": "集成测试：会话过期端到端",
+            "kind": "integration",
+            "goal": "覆盖会话过期到前端提示的贯通路径。",
+            "implementation_context": "覆盖后端会话 DTO 到前端提示的集成路径。",
+            "exclusive_write_scopes": ["tests/session/expiry.rs"],
+            "forbidden_write_scopes": [],
+            "depends_on_outline_ids": ["outline_frontend_expiry"],
+            "required_handoff_from_outline_ids": ["outline_frontend_expiry"],
+            "handoff_summary": "输出端到端验证覆盖。",
+            "verification_plan": {
+                "commands": [
+                    {
+                        "id": "cmd_integration_session",
+                        "label": "cargo test session integration",
+                        "command": "cargo test --locked --test it_web session",
+                        "cwd": "",
+                        "purpose": "验证会话过期贯通路径",
+                        "required": true,
+                        "timeout_seconds": 120,
+                        "safety": "approved",
+                        "source": "provider"
+                    }
+                ],
+                "manual_checks": [],
+                "required_gates": ["cmd_integration_session"]
             }
         }
     })
