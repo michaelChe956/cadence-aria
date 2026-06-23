@@ -1227,13 +1227,28 @@ function ensureNodeDetail(details: Record<string, TimelineNodeDetail>, nodeId: s
 }
 
 function agentRoleFor(node?: TimelineNode): "author" | "reviewer" | null {
-  if (node?.node_type === "author_run" || node?.node_type === "revision") {
+  if (
+    node?.node_type === "author_run" ||
+    node?.node_type === "revision" ||
+    node?.node_type === "work_item_plan_outline_run" ||
+    node?.node_type === "work_item_draft_run" ||
+    node?.node_type === "work_item_batch_run"
+  ) {
     return "author";
   }
-  if (node?.node_type === "reviewer_run") {
+  if (
+    node?.node_type === "reviewer_run" ||
+    node?.node_type === "work_item_plan_outline_review" ||
+    node?.node_type === "work_item_draft_review" ||
+    node?.node_type === "work_item_batch_review"
+  ) {
     return "reviewer";
   }
   return null;
+}
+
+export function chatRoleForTimelineNode(node?: TimelineNode): ChatEntryRole | null {
+  return agentRoleFor(node);
 }
 
 function upsertEvent(events: ExecutionEvent[], event: ExecutionEvent) {
@@ -1607,13 +1622,7 @@ function chatRoleForNode(
   _workspaceType: string | null,
   _detail: TimelineNodeDetail,
 ): ChatEntryRole | null {
-  if (node.node_type === "author_run" || node.node_type === "revision") {
-    return "author";
-  }
-  if (node.node_type === "reviewer_run") {
-    return "reviewer";
-  }
-  return null;
+  return chatRoleForTimelineNode(node);
 }
 
 function timelineAnchorEntry(node: TimelineNode, detail: TimelineNodeDetail): ChatEntry | null {

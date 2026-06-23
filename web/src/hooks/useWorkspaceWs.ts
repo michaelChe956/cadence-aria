@@ -21,6 +21,7 @@ import type {
 import type { ChatEntry, ChatEntryRole } from "../state/chat-entries";
 import { useWorkspaceWsReconnect } from "./useWorkspaceWsReconnect";
 import {
+  chatRoleForTimelineNode,
   useWorkspaceStore,
   type ExecutionEvent,
   type ProviderStatus,
@@ -1032,11 +1033,9 @@ function entryRoleForNode(
   const node = nodeId
     ? store.timelineNodes.find((candidate) => candidate.node_id === nodeId)
     : null;
-  if (node?.node_type === "reviewer_run") {
-    return "reviewer";
-  }
-  if (node?.node_type === "author_run") {
-    return "author";
+  const nodeRole = chatRoleForTimelineNode(node ?? undefined);
+  if (nodeRole) {
+    return nodeRole;
   }
   const detail = nodeId ? store.nodeDetails[nodeId] : null;
   if (detail?.agent_role === "reviewer") {

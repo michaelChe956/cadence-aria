@@ -1139,6 +1139,77 @@ describe("workspace ws store", () => {
     ]);
   });
 
+  it("rebuilds work item plan outline provider events as author messages", () => {
+    const store = useWorkspaceStore.getState();
+
+    store.setSessionState({
+      session_id: "session_work_item_plan_outline",
+      workspace_type: "work_item_plan",
+      stage: "running",
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "claude_code", reviewer: "codex" },
+      timeline_nodes: [
+        {
+          node_id: "timeline_node_outline",
+          node_type: "work_item_plan_outline_run",
+          agent: "claude_code",
+          stage: "running",
+          round: null,
+          status: "active",
+          title: "WorkItemPlan Outline 生成",
+          summary: null,
+          started_at: "2026-06-23T10:00:00Z",
+          completed_at: null,
+          duration_ms: null,
+          artifact_ref: null,
+          provider_config_snapshot: {
+            author: "claude_code",
+            reviewer: "codex",
+            review_rounds: 1,
+          },
+        },
+      ],
+      active_node_id: "timeline_node_outline",
+      artifact_versions: [],
+      timeline_node_details: {
+        timeline_node_outline: makeNodeDetail({
+          node_id: "timeline_node_outline",
+          node_type: "work_item_plan_outline_run",
+          agent_role: "author",
+          provider: { name: "claude_code", model: "claude-opus-4" },
+          execution_events: [
+            {
+              event_id: "provider",
+              node_id: "timeline_node_outline",
+              agent: "claude_code",
+              kind: "provider",
+              status: "started",
+              title: "Claude Code provider started",
+              detail: null,
+              command: null,
+              cwd: "/tmp/repo",
+              output: null,
+              exit_code: null,
+            },
+          ],
+        }),
+      },
+      active_run_id: null,
+    });
+
+    expect(useWorkspaceStore.getState().chatEntries).toEqual([
+      expect.objectContaining({
+        type: "execution_event",
+        role: "author",
+        content: "Claude Code provider started",
+        node_id: "timeline_node_outline",
+        metadata: expect.objectContaining({ provider: "claude_code" }),
+      }),
+    ]);
+  });
+
   it("does not rebuild work item plan provider stream from start_generation nodes", () => {
     const store = useWorkspaceStore.getState();
 

@@ -329,6 +329,57 @@ describe("useWorkspaceWs", () => {
     });
   });
 
+  it("labels work item plan author execution events as author messages", () => {
+    const harness = renderWorkspaceHook();
+
+    act(() => {
+      harness.ws.receive({
+        type: "timeline_node_created",
+        node: {
+          node_id: "timeline_node_outline",
+          node_type: "work_item_plan_outline_run",
+          agent: "claude_code",
+          stage: "running",
+          round: null,
+          status: "active",
+          title: "WorkItemPlan Outline 生成",
+          summary: null,
+          started_at: "2026-06-23T10:00:00Z",
+          completed_at: null,
+          duration_ms: null,
+          artifact_ref: null,
+          provider_config_snapshot: {
+            author: "claude_code",
+            reviewer: "codex",
+            review_rounds: 1,
+          },
+        },
+      });
+      harness.ws.receive({
+        type: "execution_event",
+        event: {
+          event_id: "provider",
+          node_id: "timeline_node_outline",
+          agent: "claude_code",
+          kind: "provider",
+          status: "started",
+          title: "Claude Code provider started",
+          detail: null,
+          command: null,
+          cwd: "/tmp/repo",
+          output: null,
+          exit_code: null,
+        },
+      });
+    });
+
+    expect(useWorkspaceStore.getState().chatEntries.at(-1)).toMatchObject({
+      type: "execution_event",
+      role: "author",
+      metadata: expect.objectContaining({ provider: "claude_code" }),
+    });
+  });
+
   it("does not duplicate realtime provider prompt execution event output in chat entry metadata", () => {
     const harness = renderWorkspaceHook();
     const hugePrompt = "[system]\n" + "prompt line\n".repeat(10_000);

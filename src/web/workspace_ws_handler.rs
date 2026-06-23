@@ -16,6 +16,7 @@ use crate::cross_cutting::provider_registry::ProviderRegistry;
 use crate::cross_cutting::streaming_provider::{
     ChoiceOptionData, ChoiceRequestSource, ProviderCommand, ProviderExecutionEvent,
     ProviderExecutionEventKind, ProviderExecutionEventStatus, ProviderStatus, RiskLevel,
+    StreamingProviderAdapter,
 };
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::checkpoint_store::CheckpointStore;
@@ -431,6 +432,27 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
         state.test_controls.server_idle_timeout(),
         std::time::Duration::from_secs(5),
     );
+
+    let should_resume_outline_run = {
+        let engine = engine.lock().await;
+        engine.session().workspace_type == WorkspaceType::WorkItemPlan
+            && engine.session().stage == WorkspaceStage::Running
+            && engine.active_node_type()
+                == Some(crate::web::workspace_ws_types::TimelineNodeType::WorkItemPlanOutlineRun)
+            && engine.active_run_id().is_none()
+    };
+    if should_resume_outline_run && state.workspace_runs.run(&session_id).await.is_none() {
+        if let Err(message) = spawn_provider_run_from_handler(
+            run_context.clone(),
+            ProviderRunKind::WorkItemPlanAuthor,
+            outbound_tx.clone(),
+        )
+        .await
+        {
+            let err = WsOutMessage::Error { message };
+            let _ = send_json_outbound(&outbound_tx, &err).await;
+        }
+    }
 
     while let Some(Ok(msg)) = ws_receiver.next().await {
         let text = match msg {
@@ -2026,7 +2048,25 @@ async fn spawn_provider_run_from_handler(
                         return;
                     }
                 };
-                let node_id = engine.begin_work_item_plan_outline_run().await;
+                let node_id = if engine.active_node_type()
+                    == Some(
+                        crate::web::workspace_ws_types::TimelineNodeType::WorkItemPlanOutlineRun,
+                    ) {
+                    match engine.active_timeline_node_id() {
+                        Some(node_id) => node_id,
+                        None => {
+                            engine.mark_active_run_finished(&run_label);
+                            drop(engine);
+                            let err = WsOutMessage::Error {
+                                message: "work item plan outline run node unavailable".to_string(),
+                            };
+                            let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                            return;
+                        }
+                    }
+                } else {
+                    engine.begin_work_item_plan_outline_run().await
+                };
                 let provider_input = engine.build_work_item_plan_streaming_input(
                     invocation.provider_type.clone(),
                     invocation.prompt.clone(),
@@ -2772,6 +2812,84 @@ async fn spawn_provider_run_from_handler(
         if engine.session().workspace_type == WorkspaceType::WorkItemPlan
             && engine.session().stage == WorkspaceStage::Running
             && engine.active_node_type()
+                == Some(crate::web::workspace_ws_types::TimelineNodeType::WorkItemPlanOutlineRun)
+        {
+            let author_name = engine.session().author_provider.clone();
+            let Some(provider_for_outline) = provider_registry_for_run.get(&author_name) else {
+                engine.mark_active_run_finished(&run_label);
+                drop(engine);
+                let err = WsOutMessage::Error {
+                    message: format!("provider unavailable: {author_name:?}"),
+                };
+                let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                clear_active_run_if_token(
+                    &current_run_for_task,
+                    &workspace_runs_for_task,
+                    &session_id_for_task,
+                    run_token,
+                )
+                .await;
+                return;
+            };
+            let (outline_command_tx, mut outline_command_rx) = mpsc::channel(8);
+            {
+                let mut current = current_run_for_task.lock().await;
+                if let Some(active) = current.as_mut()
+                    && active.token == run_token
+                {
+                    active.command_tx = outline_command_tx.clone();
+                }
+            }
+            workspace_runs_for_task
+                .replace_command_tx_if_token(&session_id_for_task, run_token, outline_command_tx)
+                .await;
+            match drive_current_work_item_plan_outline_run(
+                &mut engine,
+                provider_for_outline,
+                run_cancel.clone(),
+                &mut outline_command_rx,
+                &run_context_clone.app_paths,
+                &run_context_clone.session_record,
+            )
+            .await
+            {
+                Ok(WorkItemPlanAuthorOutcome::AuthorConfirm)
+                | Ok(WorkItemPlanAuthorOutcome::HumanConfirm { .. }) => {}
+                Ok(WorkItemPlanAuthorOutcome::AutoRevision { .. }) => {
+                    engine.mark_active_run_finished(&run_label);
+                    drop(engine);
+                    let err = WsOutMessage::Error {
+                        message: "work item plan outline auto revision after review is not supported in follow-up run".to_string(),
+                    };
+                    let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                    clear_active_run_if_token(
+                        &current_run_for_task,
+                        &workspace_runs_for_task,
+                        &session_id_for_task,
+                        run_token,
+                    )
+                    .await;
+                    return;
+                }
+                Err(message) => {
+                    engine.mark_active_run_finished(&run_label);
+                    drop(engine);
+                    let err = WsOutMessage::Error { message };
+                    let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                    clear_active_run_if_token(
+                        &current_run_for_task,
+                        &workspace_runs_for_task,
+                        &session_id_for_task,
+                        run_token,
+                    )
+                    .await;
+                    return;
+                }
+            }
+        }
+        if engine.session().workspace_type == WorkspaceType::WorkItemPlan
+            && engine.session().stage == WorkspaceStage::Running
+            && engine.active_node_type()
                 == Some(crate::web::workspace_ws_types::TimelineNodeType::WorkItemDraftRun)
         {
             let author_name = engine.session().author_provider.clone();
@@ -2920,6 +3038,79 @@ async fn spawn_provider_run_from_handler(
     });
 
     Ok(())
+}
+
+async fn drive_current_work_item_plan_outline_run(
+    engine: &mut WorkspaceEngine,
+    provider: Arc<dyn StreamingProviderAdapter>,
+    run_cancel: CancellationToken,
+    command_rx: &mut mpsc::Receiver<ProviderCommand>,
+    app_paths: &ProductAppPaths,
+    session_record: &WorkspaceSessionRecord,
+) -> Result<WorkItemPlanAuthorOutcome, String> {
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    let request = build_work_item_plan_generate_request(engine, &lifecycle)
+        .map_err(|error| format!("build request failed: {error}"))?;
+    let repository = workspace_repository_for_session(app_paths, &lifecycle, session_record)
+        .map_err(|error| format!("load repository failed: {error}"))?;
+    let issue = IssueStore::new(app_paths.clone())
+        .get(&session_record.project_id, &session_record.issue_id)
+        .map_err(|error| format!("load issue failed: {error}"))?;
+    let author_provider = engine.session().author_provider.clone();
+    let context_resolutions = load_work_item_plan_outline_context_resolutions(
+        app_paths,
+        session_record,
+        &request,
+        &lifecycle,
+        &issue,
+    )?;
+    let invocation = WorkItemSplitEngine::build_outline_invocation(
+        &request,
+        &lifecycle,
+        &issue,
+        &repository,
+        author_provider,
+        &context_resolutions,
+    )
+    .map_err(|error| format!("split generate failed: {}", error.message))?;
+    let node_id = engine
+        .active_timeline_node_id()
+        .ok_or_else(|| "work item plan outline run node unavailable".to_string())?;
+    let provider_input = engine.build_work_item_plan_streaming_input(
+        invocation.provider_type.clone(),
+        invocation.prompt.clone(),
+        invocation.worktree_path.clone(),
+    );
+    let provider_session = provider.start(provider_input, run_cancel).await;
+    let full_output = engine
+        .drive_work_item_plan_provider_session_to_output(
+            provider_session,
+            command_rx,
+            node_id,
+            invocation.author_provider.clone(),
+        )
+        .await?;
+    let structured_output = match parse_work_item_split_structured_output(&full_output) {
+        Ok(output) => output,
+        Err(message) => {
+            let message = format!("split generate failed: {message}");
+            engine
+                .finish_active_run_with_failed_node(message.clone())
+                .await;
+            return Err(message);
+        }
+    };
+    let output = match parse_work_item_plan_outline_output(structured_output) {
+        Ok(output) => output,
+        Err(error) => {
+            let message = format!("outline generate failed: {}", error.message);
+            engine
+                .finish_active_run_with_failed_node(message.clone())
+                .await;
+            return Err(message);
+        }
+    };
+    engine.complete_work_item_plan_outline_author(output).await
 }
 
 fn map_revision_path(

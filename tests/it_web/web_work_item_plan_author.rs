@@ -22,6 +22,23 @@ use crate::web_work_item_generation::{
 
 static WS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+struct TestControlsGuard;
+
+impl Drop for TestControlsGuard {
+    fn drop(&mut self) {
+        unsafe {
+            std::env::remove_var("ARIA_E2E_TEST_CONTROLS");
+        }
+    }
+}
+
+fn enable_test_controls() -> TestControlsGuard {
+    unsafe {
+        std::env::set_var("ARIA_E2E_TEST_CONTROLS", "1");
+    }
+    TestControlsGuard
+}
+
 async fn connect_ws(
     app: axum::Router,
     session_id: &str,
@@ -341,6 +358,109 @@ async fn work_item_plan_author_completes_provider_node_before_author_confirm() {
     assert!(
         saw_author_confirm,
         "expected WorkItemPlan outline confirm node after provider completion"
+    );
+
+    ws.close(None).await.ok();
+}
+
+#[tokio::test]
+async fn outline_review_revise_auto_starts_next_outline_provider_run() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let _test_controls = enable_test_controls();
+    let (app, _repo, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
+        valid_outline_output(),
+        valid_outline_output(),
+    ])
+    .await;
+
+    let (_status, prepare_resp) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-item-plans:prepare",
+        json!({
+            "title": "登录拆分",
+            "story_spec_ids": ["story_spec_0001"],
+            "design_spec_ids": ["design_spec_0001"],
+            "include_integration_tests": true,
+            "include_e2e_tests": false,
+            "force_frontend_backend_split": true,
+            "require_execution_plan_confirm": false,
+            "review_rounds": 1
+        }),
+    )
+    .await;
+
+    let session_id = prepare_resp["workspace_session"]["workspace_session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let mut ws = connect_ws(app.clone(), &session_id).await;
+
+    ws.send(Message::Text(
+        json!({
+            "type": "start_generation",
+            "provider_config": { "author": "fake", "reviewer": "codex", "review_rounds": 1 },
+            "reviewer_enabled": true
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .expect("send start_generation");
+
+    let _messages = recv_ws_until(&mut ws, Duration::from_secs(10), |messages| {
+        messages.iter().any(|message| {
+            message["type"] == "timeline_node_created"
+                && message["node"]["node_type"] == "work_item_plan_outline_confirm"
+        })
+    })
+    .await;
+
+    enable_work_item_plan_review_fixture(&app, &session_id, outline_review_revise()).await;
+
+    ws.send(Message::Text(
+        json!({ "type": "author_decision", "decision": "accept" })
+            .to_string()
+            .into(),
+    ))
+    .await
+    .expect("send outline accept");
+
+    let messages = recv_ws_until(&mut ws, Duration::from_secs(10), |messages| {
+        let outline_run_nodes = messages
+            .iter()
+            .filter(|message| {
+                message["type"] == "timeline_node_created"
+                    && message["node"]["node_type"] == "work_item_plan_outline_run"
+            })
+            .count();
+        let saw_second_outline_stream = messages.iter().any(|message| {
+            message["type"] == "stream_chunk"
+                && message["content"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("Fake Work Item Plan streaming draft")
+        });
+        outline_run_nodes >= 1 && saw_second_outline_stream
+    })
+    .await;
+
+    assert!(
+        messages.iter().any(|message| {
+            message["type"] == "timeline_node_created"
+                && message["node"]["node_type"] == "work_item_plan_outline_run"
+        }),
+        "expected outline review revise to create a new outline run node"
+    );
+    assert!(
+        messages.iter().any(|message| {
+            message["type"] == "stream_chunk"
+                && message["content"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("Fake Work Item Plan streaming draft")
+        }),
+        "expected the new outline run to start provider streaming"
     );
 
     ws.close(None).await.ok();
@@ -668,4 +788,40 @@ async fn issue_lifecycle_includes_work_item_plan_groups_without_hiding_child_wor
         .collect::<Vec<_>>();
     assert!(returned_work_item_ids.contains(&backend_item.id.as_str()));
     assert!(returned_work_item_ids.contains(&frontend_item.id.as_str()));
+}
+
+async fn enable_work_item_plan_review_fixture(app: &axum::Router, session_id: &str, review: Value) {
+    let (status, response) = request_json(
+        app.clone(),
+        Method::POST,
+        &format!("/api/test/workspace-sessions/{session_id}/review-fixture"),
+        json!({
+            "verdict": review["verdict"].as_str().unwrap_or("pass"),
+            "summary": review["summary"].as_str().unwrap_or("review fixture"),
+            "comments": "review fixture",
+            "raw_json": review
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "enable review fixture failed: {response}"
+    );
+}
+
+fn outline_review_revise() -> Value {
+    json!({
+        "verdict": "revise",
+        "summary": "Outline 需要重写",
+        "generation_round_id": "round_001",
+        "affects_items": [{ "target_outline_id": "outline_backend_session" }],
+        "findings": [{
+            "severity": "blocking",
+            "message": "写入范围存在重叠",
+            "evidence": "outline_frontend 与 outline_backend 都声明 web/",
+            "impact": "后续 work item 无法安全并行",
+            "required_action": "重新拆分 exclusive_write_scopes"
+        }]
+    })
 }
