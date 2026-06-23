@@ -1104,7 +1104,16 @@ async fn handle_review_decision_from_handler(
             // Review decision path never produces child sessions; defensive no-op.
         }
         Ok(ReviewDecisionOutcome::StartWorkItemPlanOutline) => {
-            // Review decision path never restarts outline generation; defensive no-op.
+            if let Err(message) = spawn_provider_run_from_handler(
+                run_context,
+                ProviderRunKind::WorkItemPlanAuthor,
+                outbound_tx.clone(),
+            )
+            .await
+            {
+                let err = WsOutMessage::Error { message };
+                let _ = send_json_outbound(&outbound_tx, &err).await;
+            }
         }
         Ok(ReviewDecisionOutcome::StartRevision) => {
             let run_kind = {

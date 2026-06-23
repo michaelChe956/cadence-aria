@@ -364,7 +364,7 @@ async fn work_item_plan_author_completes_provider_node_before_author_confirm() {
 }
 
 #[tokio::test]
-async fn outline_review_revise_auto_starts_next_outline_provider_run() {
+async fn outline_review_revise_requires_decision_before_next_outline_provider_run() {
     let _guard = WS_TEST_LOCK.lock().await;
     let _test_controls = enable_test_controls();
     let (app, _repo, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
@@ -441,7 +441,68 @@ async fn outline_review_revise_auto_starts_next_outline_provider_run() {
                     .unwrap_or("")
                     .contains("Fake Work Item Plan streaming draft")
         });
-        outline_run_nodes >= 1 && saw_second_outline_stream
+        messages
+            .iter()
+            .any(|message| message["type"] == "review_decision_required")
+            || (outline_run_nodes >= 1 && saw_second_outline_stream)
+    })
+    .await;
+
+    assert!(
+        messages
+            .iter()
+            .any(|message| { message["type"] == "review_decision_required" }),
+        "expected outline review revise to require a human review decision before changes"
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| { message["type"] == "stage_change" && message["stage"] == "running" }),
+        "outline review revise must not re-enter running before human decision"
+    );
+    assert!(
+        !messages.iter().any(|message| {
+            message["type"] == "timeline_node_created"
+                && message["node"]["node_type"] == "work_item_plan_outline_run"
+        }),
+        "outline review revise must not create a new outline run before human decision"
+    );
+    assert!(
+        !messages.iter().any(|message| {
+            message["type"] == "stream_chunk"
+                && message["content"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("Fake Work Item Plan streaming draft")
+        }),
+        "outline review revise must not start provider streaming before human decision"
+    );
+
+    ws.send(Message::Text(
+        json!({
+            "type": "review_decision_response",
+            "decision": "continue",
+            "extra_context": null
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .expect("send review_decision_response continue");
+
+    let messages = recv_ws_until(&mut ws, Duration::from_secs(10), |messages| {
+        let outline_run_nodes = messages.iter().any(|message| {
+            message["type"] == "timeline_node_created"
+                && message["node"]["node_type"] == "work_item_plan_outline_run"
+        });
+        let saw_outline_stream = messages.iter().any(|message| {
+            message["type"] == "stream_chunk"
+                && message["content"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("Fake Work Item Plan streaming draft")
+        });
+        outline_run_nodes && saw_outline_stream
     })
     .await;
 
@@ -450,7 +511,7 @@ async fn outline_review_revise_auto_starts_next_outline_provider_run() {
             message["type"] == "timeline_node_created"
                 && message["node"]["node_type"] == "work_item_plan_outline_run"
         }),
-        "expected outline review revise to create a new outline run node"
+        "expected human continue to create a new outline run node"
     );
     assert!(
         messages.iter().any(|message| {
@@ -460,7 +521,7 @@ async fn outline_review_revise_auto_starts_next_outline_provider_run() {
                     .unwrap_or("")
                     .contains("Fake Work Item Plan streaming draft")
         }),
-        "expected the new outline run to start provider streaming"
+        "expected human continue to start provider streaming"
     );
 
     ws.close(None).await.ok();

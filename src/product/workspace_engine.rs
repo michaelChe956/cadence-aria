@@ -5287,32 +5287,36 @@ impl WorkspaceEngine {
                 self.enter_human_confirm(Some(verdict.summary)).await;
             }
             ReviewGate::RequiresRevision => {
-                self.transition_stage(WorkspaceStage::ReviewDecision).await;
-                let decision_node_id = self
-                    .create_timeline_node(TimelineNodeDraft {
-                        node_type: TimelineNodeType::ReviewDecision,
-                        agent: None,
-                        stage: WorkspaceStage::ReviewDecision,
-                        round: Some(round),
-                        title: format!("Review Decision Round {round}"),
-                        summary: Some(verdict.summary),
-                        status: TimelineNodeStatus::Paused,
-                    })
-                    .await;
-                let _ = self
-                    .event_tx
-                    .send(EngineEvent::ReviewDecisionRequired {
-                        node_id: decision_node_id,
-                        round,
-                        options: vec![
-                            "continue".to_string(),
-                            "continue_with_context".to_string(),
-                            "human_intervene".to_string(),
-                        ],
-                    })
-                    .await;
+                self.enter_review_decision(round, verdict.summary).await;
             }
         }
+    }
+
+    async fn enter_review_decision(&mut self, round: u32, summary: String) {
+        self.transition_stage(WorkspaceStage::ReviewDecision).await;
+        let decision_node_id = self
+            .create_timeline_node(TimelineNodeDraft {
+                node_type: TimelineNodeType::ReviewDecision,
+                agent: None,
+                stage: WorkspaceStage::ReviewDecision,
+                round: Some(round),
+                title: format!("Review Decision Round {round}"),
+                summary: Some(summary),
+                status: TimelineNodeStatus::Paused,
+            })
+            .await;
+        let _ = self
+            .event_tx
+            .send(EngineEvent::ReviewDecisionRequired {
+                node_id: decision_node_id,
+                round,
+                options: vec![
+                    "continue".to_string(),
+                    "continue_with_context".to_string(),
+                    "human_intervene".to_string(),
+                ],
+            })
+            .await;
     }
 
     async fn route_work_item_plan_outline_review(&mut self, verdict: ReviewVerdict) {
@@ -5332,15 +5336,8 @@ impl WorkspaceEngine {
                 .await;
             }
             WorkItemPlanReviewVerdict::Revise | WorkItemPlanReviewVerdict::PlanReopenRequired => {
-                if let Err(message) = self.mark_work_item_plan_outline_revising() {
-                    let _ = self.event_tx.send(EngineEvent::Error { message }).await;
-                    self.enter_human_confirm(Some("Outline 返修状态保存失败".to_string()))
-                        .await;
-                    return;
-                }
-                self.pending_revision_context = Some(verdict.comments);
-                self.transition_stage(WorkspaceStage::Running).await;
-                self.begin_work_item_plan_outline_run().await;
+                let round = self.active_review_round().unwrap_or(1);
+                self.enter_review_decision(round, verdict.summary).await;
             }
             WorkItemPlanReviewVerdict::NeedsHuman | WorkItemPlanReviewVerdict::ReviseBatch => {
                 self.enter_human_confirm(Some(verdict.summary)).await;
@@ -5668,6 +5665,16 @@ impl WorkspaceEngine {
                         "continue_with_context requires non-empty extra_context".to_string()
                     );
                 }
+                if self.review_decision_restarts_work_item_plan_outline() {
+                    self.pending_revision_context = normalized_context;
+                    self.complete_active_node(Some("已选择返修 WorkItemPlan Outline".to_string()))
+                        .await;
+                    self.mark_work_item_plan_outline_revising()?;
+                    self.transition_stage(WorkspaceStage::Running).await;
+                    self.work_item_plan_author_retry_count = 0;
+                    self.work_item_plan_revision_retry_count = 0;
+                    return Ok(ReviewDecisionOutcome::StartWorkItemPlanOutline);
+                }
                 self.pending_revision_context = normalized_context;
                 self.complete_active_node(Some("已选择返修".to_string()))
                     .await;
@@ -5698,6 +5705,18 @@ impl WorkspaceEngine {
             }
             _ => Err(format!("unknown review decision: {decision}")),
         }
+    }
+
+    fn review_decision_restarts_work_item_plan_outline(&self) -> bool {
+        self.session.workspace_type == WorkspaceType::WorkItemPlan
+            && self
+                .latest_review_verdict
+                .as_ref()
+                .and_then(|verdict| verdict.work_item_plan_review.as_ref())
+                .is_some_and(|review| {
+                    review.review_scope == WorkItemPlanReviewScope::Outline
+                        && review.review_action == WorkItemPlanReviewAction::ReviseOutline
+                })
     }
 
     pub async fn handle_human_confirm(
