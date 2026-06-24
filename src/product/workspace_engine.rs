@@ -182,6 +182,28 @@ fn work_item_plan_findings_summary(prefix: &str, findings: &[WorkItemSplitFindin
     format!("{prefix}（errors: {errors}, warnings: {warnings}）")
 }
 
+fn work_item_plan_outline_terminal_failure_summary(findings: &[WorkItemSplitFinding]) -> String {
+    let mut lines = vec![format!(
+        "{}，已停止继续生成。",
+        work_item_plan_findings_summary("Outline 自动重跑后仍校验失败", findings)
+    )];
+    let error_findings = findings
+        .iter()
+        .filter(|finding| finding.severity == WorkItemSplitFindingSeverity::Error)
+        .collect::<Vec<_>>();
+    if !error_findings.is_empty() {
+        lines.push("主要问题：".to_string());
+        for finding in error_findings.iter().take(5) {
+            lines.push(format!("- {} - {}", finding.code, finding.message));
+        }
+        if error_findings.len() > 5 {
+            lines.push(format!("- 其余 {} 个错误已省略", error_findings.len() - 5));
+        }
+    }
+    lines.push("请终止当前流程并重新创建 Work Item Plan。".to_string());
+    lines.join("\n")
+}
+
 fn work_item_draft_status_label(status: &WorkItemDraftStatus) -> &'static str {
     match status {
         WorkItemDraftStatus::Draft => "draft",
@@ -7286,20 +7308,19 @@ impl WorkspaceEngine {
             .await;
 
             if self.work_item_plan_author_retry_count >= 2 {
+                let exploration_summary =
+                    work_item_plan_outline_terminal_failure_summary(&findings);
                 let payload = ArtifactPayload::WorkItemPlanContextBlocker {
                     context_blocker: Box::new(WorkItemPlanContextBlockerPayload {
                         context_blockers: Vec::new(),
                         design_context_gaps: design_context_gaps.clone(),
-                        exploration_summary: work_item_plan_findings_summary(
-                            "Outline 自动重跑后仍校验失败",
-                            &findings,
-                        ),
+                        exploration_summary,
                         allowed_actions: vec!["provide_context".to_string(), "abort".to_string()],
                     }),
                 };
                 self.update_artifact(payload).await;
                 self.enter_work_item_plan_context_blocker(Some(
-                    "Outline 校验失败，请补充上下文或终止".to_string(),
+                    "Outline 校验失败，请终止后重新创建 Work Item Plan".to_string(),
                 ))
                 .await;
                 return Ok(WorkItemPlanAuthorOutcome::HumanConfirm {

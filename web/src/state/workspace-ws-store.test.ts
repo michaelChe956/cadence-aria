@@ -140,6 +140,16 @@ function makeCompileArtifactPayload() {
   };
 }
 
+function makeContextBlockerArtifactPayload() {
+  return {
+    context_blockers: [],
+    design_context_gaps: [],
+    exploration_summary:
+      "Outline 自动重跑后仍校验失败，已停止继续生成。主要问题：duplicate_outline_id - outline id outline_backend_session is duplicated。请终止当前流程并重新创建 Work Item Plan。",
+    allowed_actions: ["provide_context", "abort"],
+  };
+}
+
 function makeNodeDetail(overrides: Partial<NodeDetail> = {}): NodeDetail {
   return {
     node_id: "timeline_node_001",
@@ -2346,6 +2356,49 @@ describe("workspace ws store", () => {
       payload: compileReport,
     });
     expect(useWorkspaceStore.getState().artifact).toBeNull();
+  });
+
+  it("uses work item plan context blocker summary for the human confirm gate prompt", () => {
+    const contextBlocker = makeContextBlockerArtifactPayload();
+
+    useWorkspaceStore.getState().setSessionState({
+      session_id: "session_outline_blocker",
+      workspace_type: "work_item_plan",
+      stage: "human_confirm",
+      messages: [],
+      checkpoints: [],
+      artifact: { context_blocker: contextBlocker } as never,
+      providers: { author: "claude_code", reviewer: null },
+      active_node_id: "node_context_blocker",
+      timeline_nodes: [
+        {
+          node_id: "node_context_blocker",
+          node_type: "work_item_plan_context_blocker",
+          agent: null,
+          stage: "human_confirm",
+          round: null,
+          status: "active",
+          title: "WorkItemPlan 上下文确认",
+          summary: "Outline 校验失败，请终止后重新创建 Work Item Plan",
+          started_at: "2026-06-23T00:00:00Z",
+          completed_at: null,
+          duration_ms: null,
+          artifact_ref: null,
+          provider_config_snapshot: {
+            author: "claude_code",
+            reviewer: null,
+            review_rounds: 0,
+          },
+        },
+      ],
+    });
+
+    const gatePrompt = useWorkspaceStore
+      .getState()
+      .chatEntries.find((entry) => entry.type === "gate_prompt");
+    expect(gatePrompt).toMatchObject({
+      content: contextBlocker.exploration_summary,
+    });
   });
 
   it("tracks typed work item plan artifact versions", () => {

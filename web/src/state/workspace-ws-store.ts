@@ -1741,15 +1741,27 @@ function buildGatePromptEntry(
     ...(findings.length > 0 ? { findings } : {}),
     ...(reviewGate ? { review_gate: reviewGate } : {}),
   };
+  const fallbackContent = verdict === "needs_human" ? "需要人工确认" : "等待人工确认";
   return {
     id: chatEntryId(gatePromptNode?.node_id ?? "human_confirm", "gate-prompt"),
     type: "gate_prompt",
     role: "system",
-    content: verdict === "needs_human" ? "需要人工确认" : "等待人工确认",
+    content: workItemPlanContextBlockerGatePromptContent(state) ?? fallbackContent,
     timestamp: gatePromptNode?.completed_at ?? gatePromptNode?.started_at ?? new Date().toISOString(),
     node_id: gatePromptNode?.node_id,
     metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
   };
+}
+
+function workItemPlanContextBlockerGatePromptContent(state: WorkspaceWsState): string | null {
+  if (
+    state.workspaceType !== "work_item_plan" ||
+    state.workItemPlanArtifact?.type !== "context_blocker"
+  ) {
+    return null;
+  }
+  const summary = state.workItemPlanArtifact.payload.exploration_summary.trim();
+  return summary || null;
 }
 
 function findLatestNodeOfType(nodes: TimelineNode[], type: TimelineNodeType) {

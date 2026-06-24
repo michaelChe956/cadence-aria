@@ -654,9 +654,11 @@ async fn select_batch_mode_enters_batch_run() {
 async fn request_outline_revision_on_mode_node_sets_outline_revising() {
     let _guard = WS_TEST_LOCK.lock().await;
     let _test_guard = enable_test_controls().await;
-    let (app, root, _prompts) =
-        app_with_confirmed_story_and_design_and_streaming_outputs(vec![valid_outline_output()])
-            .await;
+    let (app, root, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
+        valid_outline_output(),
+        valid_outline_output(),
+    ])
+    .await;
     let (_session_id, plan_id, mut ws) = prepare_plan_and_start(&app, false).await;
 
     ws.send(Message::Text(
@@ -684,16 +686,42 @@ async fn request_outline_revision_on_mode_node_sets_outline_revising() {
     ))
     .await
     .expect("send outline revision");
-    let _messages = recv_ws_until(&mut ws, Duration::from_secs(10), |messages| {
-        messages.iter().any(|message| {
+    let messages = recv_ws_until(&mut ws, Duration::from_secs(10), |messages| {
+        let outline_run_node_ids: Vec<&str> = messages
+            .iter()
+            .filter_map(|message| {
+                if message["type"] == "timeline_node_created"
+                    && message["node"]["node_type"] == "work_item_plan_outline_run"
+                {
+                    message["node"]["node_id"].as_str()
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let saw_provider_prompt = messages.iter().any(|message| {
+            message["type"] == "execution_event"
+                && message["event"]["title"] == "Provider Prompt"
+                && message["event"]["node_id"]
+                    .as_str()
+                    .is_some_and(|node_id| outline_run_node_ids.contains(&node_id))
+        });
+        let saw_outline_confirm = messages.iter().any(|message| {
             message["type"] == "timeline_node_created"
-                && message["node"]["node_type"] == "work_item_plan_outline_run"
-        })
+                && message["node"]["node_type"] == "work_item_plan_outline_confirm"
+        });
+        !outline_run_node_ids.is_empty() && saw_provider_prompt && saw_outline_confirm
     })
     .await;
 
     let index = active_index(&root, &plan_id);
     assert_eq!(index.outline_state, "revising");
+    assert!(
+        messages.iter().any(|message| {
+            message["type"] == "execution_event" && message["event"]["title"] == "Provider Prompt"
+        }),
+        "request_outline_revision should start a provider run for the new outline node"
+    );
 
     ws.close(None).await.ok();
 }

@@ -720,17 +720,34 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
             WsInMessage::RequestOutlineRevision { feedback } => {
                 let result = {
                     let mut engine = engine.lock().await;
+                    let revision_feedback =
+                        engine.work_item_plan_outline_revision_feedback(feedback.as_deref());
                     engine
                         .request_work_item_plan_outline_revision(feedback)
                         .await
+                        .map(|_| revision_feedback)
                 };
-                if let Err(message) = result {
-                    let err = WsOutMessage::ProtocolError {
-                        code: "WORK_ITEM_GENERATION_MODE_NODE_REQUIRED".to_string(),
-                        message,
-                        context: None,
-                    };
-                    let _ = send_json_outbound(&outbound_tx, &err).await;
+                match result {
+                    Ok(feedback) => {
+                        if let Err(message) = spawn_provider_run_from_handler(
+                            run_context.clone(),
+                            ProviderRunKind::WorkItemPlanOutlineRevision { feedback },
+                            outbound_tx.clone(),
+                        )
+                        .await
+                        {
+                            let err = WsOutMessage::Error { message };
+                            let _ = send_json_outbound(&outbound_tx, &err).await;
+                        }
+                    }
+                    Err(message) => {
+                        let err = WsOutMessage::ProtocolError {
+                            code: "WORK_ITEM_GENERATION_MODE_NODE_REQUIRED".to_string(),
+                            message,
+                            context: None,
+                        };
+                        let _ = send_json_outbound(&outbound_tx, &err).await;
+                    }
                 }
             }
             WsInMessage::WorkItemDraftDecision {

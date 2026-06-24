@@ -323,6 +323,33 @@ async fn outline_validation_failure_auto_retries_then_human_blocker() {
     assert!(messages.iter().any(|message| {
         message["type"] == "artifact_update" && message.get("context_blocker").is_some()
     }));
+    let context_blocker = messages
+        .iter()
+        .find_map(|message| message.get("context_blocker"))
+        .expect("context blocker artifact update");
+    let exploration_summary = context_blocker["exploration_summary"]
+        .as_str()
+        .expect("exploration summary");
+    assert!(
+        exploration_summary.contains("duplicate_outline_id"),
+        "summary should include the validator finding code: {exploration_summary}"
+    );
+    assert!(
+        exploration_summary.contains("outline id outline_backend_session is duplicated"),
+        "summary should include the validator finding message: {exploration_summary}"
+    );
+    assert!(
+        exploration_summary.contains("请终止当前流程并重新创建 Work Item Plan"),
+        "summary should guide the user to recreate the Work Item Plan: {exploration_summary}"
+    );
+    assert!(messages.iter().any(|message| {
+        message["type"] == "timeline_node_created"
+            && message["node"]["node_type"] == "work_item_plan_context_blocker"
+            && message["node"]["summary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("请终止后重新创建 Work Item Plan")
+    }));
 
     ws.close(None).await.ok();
 }
