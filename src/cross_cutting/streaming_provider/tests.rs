@@ -282,14 +282,11 @@ async fn fake_streaming_provider_cancel_closes_commands_when_completed_is_backpr
 
     tokio::time::timeout(TEST_TIMEOUT, session.commands.closed())
         .await
-        .expect(
-            "cancel should close the provider command receiver under completed backpressure",
-        );
+        .expect("cancel should close the provider command receiver under completed backpressure");
 }
 
 #[tokio::test]
-async fn fake_streaming_provider_run_streaming_cancel_closes_bridge_when_output_is_backpressured()
-{
+async fn fake_streaming_provider_run_streaming_cancel_closes_bridge_when_output_is_backpressured() {
     let provider = FakeStreamingProvider;
     let cancel = CancellationToken::new();
     let prompt = prompt_with_word_count(80);
