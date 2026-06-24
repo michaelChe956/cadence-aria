@@ -710,6 +710,20 @@ pub struct ProviderConfigSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelineNodeRetryError {
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelineNodeRetry {
+    pub retry_of_node_id: String,
+    pub retry_attempt: u32,
+    pub retry_reason: String,
+    pub retry_error: TimelineNodeRetryError,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimelineNode {
     pub node_id: String,
     pub node_type: TimelineNodeType,
@@ -724,6 +738,8 @@ pub struct TimelineNode {
     pub duration_ms: Option<u64>,
     pub artifact_ref: Option<String>,
     pub provider_config_snapshot: ProviderConfigSnapshot,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<TimelineNodeRetry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1031,6 +1047,7 @@ mod tests {
                 reviewer: Some(ProviderName::Codex),
                 review_rounds: 2,
             },
+            retry: None,
         };
 
         let created =

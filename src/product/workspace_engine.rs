@@ -53,8 +53,8 @@ use crate::web::workspace_ws_types::{
     ArtifactPayload, ArtifactVersion, ArtifactVersionSummary, AuthorDecision, ChoiceOption,
     HumanConfirmDecision, NodeDetailSummary, ProviderConfigSnapshot, RepositoryProfileDto,
     ReviewFinding, ReviewFindingSeverity, ReviewGate, ReviewVerdict, ReviewVerdictType,
-    TimelineNode, TimelineNodeStatus, TimelineNodeType, ValidatorFindingDto,
-    VerificationCommandDto, VerificationManualCheckDto, VerificationPlanDto,
+    TimelineNode, TimelineNodeRetry, TimelineNodeRetryError, TimelineNodeStatus, TimelineNodeType,
+    ValidatorFindingDto, VerificationCommandDto, VerificationManualCheckDto, VerificationPlanDto,
     WorkItemBatchDecisionDto, WorkItemBatchFailureSummaryDto, WorkItemBatchStatePayload,
     WorkItemCandidateDto, WorkItemCandidateMetaDto, WorkItemDependencyEdgeDto,
     WorkItemDraftCandidatePayload, WorkItemDraftDecisionDto, WorkItemGenerationModeDto,
@@ -8262,6 +8262,7 @@ impl WorkspaceEngine {
                 .as_ref()
                 .map(|_| "artifact_current".to_string()),
             provider_config_snapshot: self.provider_config_snapshot(),
+            retry: None,
         };
         self.timeline_nodes.push(node.clone());
         self.active_node_id = Some(node_id.clone());
@@ -8302,6 +8303,7 @@ impl WorkspaceEngine {
                 .as_ref()
                 .map(|_| "artifact_current".to_string()),
             provider_config_snapshot: self.provider_config_snapshot(),
+            retry: None,
         };
         self.timeline_nodes.push(node.clone());
         if make_active {
@@ -8313,6 +8315,69 @@ impl WorkspaceEngine {
             .send(EngineEvent::TimelineNodeCreated { node: node.clone() })
             .await;
         node
+    }
+
+    pub async fn begin_work_item_plan_outline_auto_retry_run(
+        &mut self,
+        retry_of_node_id: String,
+        retry_attempt: u32,
+        retry_reason: String,
+        retry_error: TimelineNodeRetryError,
+    ) -> String {
+        self.create_timeline_node_with_retry(
+            TimelineNodeDraft {
+                node_type: TimelineNodeType::WorkItemPlanOutlineRun,
+                agent: Some(self.session.author_provider.clone()),
+                stage: WorkspaceStage::Running,
+                round: None,
+                title: "WorkItemPlan Outline 生成".to_string(),
+                summary: Some(format!("自动重跑 #{retry_attempt}")),
+                status: TimelineNodeStatus::Active,
+            },
+            Some(TimelineNodeRetry {
+                retry_of_node_id,
+                retry_attempt,
+                retry_reason,
+                retry_error,
+            }),
+        )
+        .await
+    }
+
+    async fn create_timeline_node_with_retry(
+        &mut self,
+        draft: TimelineNodeDraft,
+        retry: Option<TimelineNodeRetry>,
+    ) -> String {
+        let node_id = format!("timeline_node_{:03}", self.timeline_nodes.len() + 1);
+        let node = TimelineNode {
+            node_id: node_id.clone(),
+            node_type: draft.node_type,
+            agent: draft.agent,
+            stage: ws_stage(&draft.stage),
+            round: draft.round,
+            status: draft.status,
+            title: draft.title,
+            summary: draft.summary,
+            started_at: chrono::Utc::now().to_rfc3339(),
+            completed_at: None,
+            duration_ms: None,
+            artifact_ref: self
+                .session
+                .artifact
+                .as_ref()
+                .map(|_| "artifact_current".to_string()),
+            provider_config_snapshot: self.provider_config_snapshot(),
+            retry,
+        };
+        self.timeline_nodes.push(node.clone());
+        self.active_node_id = Some(node_id.clone());
+        self.persist_timeline_nodes();
+        let _ = self
+            .event_tx
+            .send(EngineEvent::TimelineNodeCreated { node })
+            .await;
+        node_id
     }
 
     fn empty_node_detail_for(&self, node: &TimelineNode) -> NodeDetail {
@@ -8686,6 +8751,7 @@ fn initial_timeline(session: &WorkspaceSession) -> (Vec<TimelineNode>, Option<St
             reviewer: session.reviewer_provider.clone(),
             review_rounds: session.review_rounds,
         },
+        retry: None,
     };
     let active_node_id = Some(node.node_id.clone());
     (vec![node], active_node_id)
@@ -10387,6 +10453,7 @@ mod tests {
                     duration_ms: None,
                     artifact_ref: None,
                     provider_config_snapshot,
+                    retry: None,
                 }],
             )
             .expect("replace timeline nodes");
@@ -12160,6 +12227,7 @@ mod tests {
                 reviewer: Some(ProviderName::Codex),
                 review_rounds: 1,
             },
+            retry: None,
         });
         engine.active_node_id = Some(node_id);
         engine.latest_review_verdict = Some(ReviewVerdict {
@@ -12778,6 +12846,7 @@ mod tests {
             duration_ms: None,
             artifact_ref: Some("artifact_current".to_string()),
             provider_config_snapshot: provider_config_snapshot.clone(),
+            retry: None,
         };
         let completed = TimelineNode {
             node_id: "timeline_node_002".to_string(),
@@ -12793,6 +12862,7 @@ mod tests {
             duration_ms: None,
             artifact_ref: Some("artifact_current".to_string()),
             provider_config_snapshot,
+            retry: None,
         };
 
         assert_eq!(
@@ -12843,6 +12913,7 @@ mod tests {
                         duration_ms: Some(0),
                         artifact_ref: None,
                         provider_config_snapshot: provider_config_snapshot.clone(),
+                        retry: None,
                     },
                     TimelineNode {
                         node_id: "timeline_node_002".to_string(),
@@ -12858,6 +12929,7 @@ mod tests {
                         duration_ms: None,
                         artifact_ref: None,
                         provider_config_snapshot,
+                        retry: None,
                     },
                 ],
             )
@@ -12939,6 +13011,7 @@ mod tests {
                 reviewer: None,
                 review_rounds: 0,
             },
+            retry: None,
         });
         let huge_prompt = "P".repeat(3000);
         let huge_stream = "S".repeat(3000);
@@ -13120,6 +13193,7 @@ mod tests {
                 reviewer: None,
                 review_rounds: 0,
             },
+            retry: None,
         });
         lifecycle_store
             .save_node_detail(

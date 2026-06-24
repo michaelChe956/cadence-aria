@@ -787,6 +787,7 @@ fn session_state_serde_roundtrip_preserves_work_item_plan_candidate() {
                 reviewer: Some(cadence_aria::product::models::ProviderName::Codex),
                 review_rounds: 1,
             },
+            retry: None,
         }],
         active_node_id: Some("node_001".to_string()),
         artifact_versions: vec![],

@@ -658,6 +658,7 @@ async fn recovery_abort_and_rollback_is_rejected_after_plan_commit_marker() {
             reviewer: None,
             review_rounds: 1,
         },
+        retry: None,
     });
     lifecycle
         .save_timeline_nodes(&session_id, &timeline_nodes)
@@ -795,6 +796,7 @@ async fn recovery_human_triage_keeps_transaction_for_manual_resolution() {
             reviewer: None,
             review_rounds: 1,
         },
+        retry: None,
     });
     lifecycle
         .save_timeline_nodes(&session_id, &timeline_nodes)
@@ -937,6 +939,7 @@ async fn compile_recovery_resumes_after_committed_marker() {
             reviewer: None,
             review_rounds: 1,
         },
+        retry: None,
     });
     lifecycle
         .save_timeline_nodes(&session_id, &timeline_nodes)
@@ -1078,6 +1081,7 @@ async fn recovery_abort_and_rollback_before_plan_commit_restores_previous_snapsh
             reviewer: None,
             review_rounds: 1,
         },
+        retry: None,
     });
     lifecycle
         .save_timeline_nodes(&session_id, &timeline_nodes)

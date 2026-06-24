@@ -327,6 +327,7 @@ fn create_large_workspace_fixture(
                 None
             },
             provider_config_snapshot: provider_snapshot.clone(),
+            retry: None,
         });
         if is_provider_node {
             let prompt_index = provider_index as usize;

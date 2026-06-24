@@ -369,6 +369,33 @@ async fn outline_structured_json_parse_failure_auto_retries_then_accepts_valid_o
         messages.iter().all(|message| message["type"] != "error"),
         "parse failure should be handled as auto retry, not terminal websocket error: {messages:?}"
     );
+    let outline_runs = messages
+        .iter()
+        .filter(|message| {
+            message["type"] == "timeline_node_created"
+                && message["node"]["node_type"] == "work_item_plan_outline_run"
+        })
+        .collect::<Vec<_>>();
+    let first_run_id = outline_runs[0]["node"]["node_id"]
+        .as_str()
+        .expect("first outline run id");
+    let retry = &outline_runs[1]["node"]["retry"];
+    assert_eq!(
+        retry["retry_of_node_id"], first_run_id,
+        "retry node should point at the failed outline attempt"
+    );
+    assert_eq!(retry["retry_attempt"], 2);
+    assert_eq!(
+        retry["retry_reason"],
+        "outline_structured_output_parse_error"
+    );
+    assert!(
+        retry["retry_error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Provider did not return a valid WorkItemPlan Outline structured output"),
+        "retry node should carry the parse error for UI disclosure: {retry}"
+    );
     {
         let prompts = prompts.lock().expect("prompts lock");
         assert_eq!(
@@ -380,6 +407,11 @@ async fn outline_structured_json_parse_failure_auto_retries_then_accepts_valid_o
             prompts[1].contains("[revision_feedback]")
                 && prompts[1].contains("outline_structured_output_parse_error"),
             "retry prompt should explain the structured JSON parse failure: {}",
+            prompts[1]
+        );
+        assert!(
+            prompts[1].contains("JSON 字符串内不得直接包含未转义英文双引号"),
+            "retry prompt should warn about JSON string quote escaping: {}",
             prompts[1]
         );
     }

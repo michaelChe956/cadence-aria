@@ -23,8 +23,8 @@ use crate::product::checkpoint_store::CheckpointStore;
 use crate::product::issue_store::IssueStore;
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::models::{
-    OutlineContextBlockerResolution, OutlineContextIndex, ProviderName, WorkspaceSessionRecord,
-    WorkspaceType,
+    OutlineContextBlockerResolution, OutlineContextIndex, ProviderName, WorkItemSplitFinding,
+    WorkspaceSessionRecord, WorkspaceType,
 };
 use crate::product::work_item_plan_store::WorkItemPlanStore;
 use crate::product::work_item_split_engine::{
@@ -43,9 +43,9 @@ use crate::web::test_controls::WorkspaceSocketControl;
 use crate::web::types::GenerateWorkItemsRequest;
 use crate::web::workspace_context::ensure_workspace_context_message;
 use crate::web::workspace_ws_types::{
-    ChoiceOption, HumanConfirmDecision, RevisionPath, WorkItemGenerationModeDto, WsExecutionEvent,
-    WsExecutionEventKind, WsExecutionEventStatus, WsInMessage, WsOutMessage, WsPermissionRiskLevel,
-    WsProviderStatus,
+    ChoiceOption, HumanConfirmDecision, RevisionPath, TimelineNodeRetryError,
+    WorkItemGenerationModeDto, WsExecutionEvent, WsExecutionEventKind, WsExecutionEventStatus,
+    WsInMessage, WsOutMessage, WsPermissionRiskLevel, WsProviderStatus,
 };
 
 pub async fn workspace_ws(
@@ -1850,9 +1850,7 @@ async fn complete_work_item_plan_outline_author_from_output(
     engine.complete_work_item_plan_outline_author(output).await
 }
 
-fn work_item_plan_findings_feedback(
-    findings: &[crate::product::models::WorkItemSplitFinding],
-) -> String {
+fn work_item_plan_findings_feedback(findings: &[WorkItemSplitFinding]) -> String {
     findings
         .iter()
         .map(|finding| {
@@ -1866,6 +1864,37 @@ fn work_item_plan_findings_feedback(
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn combine_outline_auto_retry_feedback(
+    base_feedback: Option<&str>,
+    findings: &[WorkItemSplitFinding],
+) -> String {
+    let mut parts = Vec::new();
+    if let Some(base) = base_feedback
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        parts.push(base.to_string());
+    }
+    let findings_feedback = work_item_plan_findings_feedback(findings);
+    if !findings_feedback.trim().is_empty() {
+        parts.push(format!("[auto_retry_error]\n{findings_feedback}"));
+    }
+    parts.join("\n\n")
+}
+
+fn work_item_plan_retry_error(findings: &[WorkItemSplitFinding]) -> TimelineNodeRetryError {
+    findings
+        .first()
+        .map(|finding| TimelineNodeRetryError {
+            code: finding.code.clone(),
+            message: finding.message.clone(),
+        })
+        .unwrap_or_else(|| TimelineNodeRetryError {
+            code: "work_item_plan_outline_auto_retry".to_string(),
+            message: "WorkItemPlan Outline 自动重跑".to_string(),
+        })
 }
 
 async fn active_run_command_tx(
@@ -2272,7 +2301,14 @@ async fn spawn_provider_run_from_handler(
                                 return;
                             }
 
-                            let feedback = work_item_plan_findings_feedback(&findings);
+                            let feedback = combine_outline_auto_retry_feedback(
+                                outline_revision_feedback.as_deref(),
+                                &findings,
+                            );
+                            let retry_of_node_id = engine
+                                .active_timeline_node_id()
+                                .unwrap_or_else(|| "timeline_node_unknown".to_string());
+                            let retry_error = work_item_plan_retry_error(&findings);
                             let author_provider = engine.session().author_provider.clone();
                             invocation =
                                 match WorkItemSplitEngine::build_outline_revision_invocation(
@@ -2297,7 +2333,14 @@ async fn spawn_provider_run_from_handler(
                                         return;
                                     }
                                 };
-                            let node_id = engine.begin_work_item_plan_outline_run().await;
+                            let node_id = engine
+                                .begin_work_item_plan_outline_auto_retry_run(
+                                    retry_of_node_id,
+                                    revision_iterations + 1,
+                                    retry_error.code.clone(),
+                                    retry_error,
+                                )
+                                .await;
                             engine
                                 .emit_provider_prompt_event(
                                     &node_id,
@@ -3164,8 +3207,20 @@ async fn drive_current_work_item_plan_outline_run(
                         "work item plan outline author revision exceeded hard limit".to_string()
                     );
                 }
-                request.revision_feedback = Some(work_item_plan_findings_feedback(&findings));
-                engine.begin_work_item_plan_outline_run().await;
+                let retry_of_node_id = engine
+                    .active_timeline_node_id()
+                    .unwrap_or_else(|| "timeline_node_unknown".to_string());
+                let retry_error = work_item_plan_retry_error(&findings);
+                request.revision_feedback =
+                    Some(combine_outline_auto_retry_feedback(None, &findings));
+                engine
+                    .begin_work_item_plan_outline_auto_retry_run(
+                        retry_of_node_id,
+                        revision_iterations + 1,
+                        retry_error.code.clone(),
+                        retry_error,
+                    )
+                    .await;
             }
         }
     }

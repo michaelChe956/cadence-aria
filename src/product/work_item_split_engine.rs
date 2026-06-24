@@ -992,6 +992,7 @@ fn build_outline_prompt_with_nonce(
          如果能输出完整 outline，不得输出非空 context_blockers。\n\
          只有完全无法产出 outline 时才输出 context_blockers，且不要同时输出 outline。\n\
          路径不确定性写入 risks 或 handoff_notes，不要用 context_blockers 阻塞。\n\
+         JSON 字符串内不得直接包含未转义英文双引号；自然语言引用请改用中文引号「」或转义为 \\\"，输出前必须确认 sentinel block 内 JSON 可被标准 JSON.parse/serde_json 解析。\n\
          可以在最终结构化 JSON 前输出简短、可读的规划过程，供 Workbench 流式展示。\n\
          最后必须输出一个 nonce sentinel JSON block。\n\
          后端只解析最后一个 nonce 匹配的 <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">...</ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\"> block。\n\
@@ -1046,6 +1047,7 @@ fn build_outline_revision_prompt(
          如果能输出完整 outline，不得输出非空 context_blockers。\n\
          只有完全无法产出 outline 时才输出 context_blockers，且不要同时输出 outline。\n\
          路径不确定性写入 risks 或 handoff_notes，不要用 context_blockers 阻塞。\n\
+         JSON 字符串内不得直接包含未转义英文双引号；自然语言引用请改用中文引号「」或转义为 \\\"，输出前必须确认 sentinel block 内 JSON 可被标准 JSON.parse/serde_json 解析。\n\
          可以在最终结构化 JSON 前输出简短、可读的修改说明，供 Workbench 流式展示。\n\
          最后必须输出一个 nonce sentinel JSON block。\n\
          后端只解析最后一个 nonce 匹配的 <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">...</ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\"> block。\n\

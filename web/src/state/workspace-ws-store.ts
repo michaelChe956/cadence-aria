@@ -129,6 +129,18 @@ export interface ProviderConfigSnapshot {
   review_rounds: number;
 }
 
+export interface TimelineNodeRetryError {
+  code: string;
+  message: string;
+}
+
+export interface TimelineNodeRetry {
+  retry_of_node_id: string;
+  retry_attempt: number;
+  retry_reason: string;
+  retry_error: TimelineNodeRetryError;
+}
+
 export interface TimelineNode {
   node_id: string;
   node_type: TimelineNodeType;
@@ -143,6 +155,7 @@ export interface TimelineNode {
   duration_ms?: number | null;
   artifact_ref?: string | null;
   provider_config_snapshot: ProviderConfigSnapshot;
+  retry?: TimelineNodeRetry | null;
 }
 
 export interface ReviewVerdict {
@@ -497,10 +510,8 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
       const visibleText = buffer.visibleText + appended;
       const entryId = chatEntryId(nodeId, "stream-active");
       const index = prev.chatEntries.findIndex((entry) => entry.id === entryId);
-      const provider =
-        prev.timelineNodes.find((candidate) => candidate.node_id === nodeId)?.agent ??
-        prev.nodeDetails[nodeId]?.provider?.name ??
-        null;
+      const timelineNode = prev.timelineNodes.find((candidate) => candidate.node_id === nodeId);
+      const provider = timelineNode?.agent ?? prev.nodeDetails[nodeId]?.provider?.name ?? null;
       const entry: ChatEntry = {
         id: entryId,
         type: "provider_stream",
@@ -509,7 +520,7 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
         timestamp: new Date().toISOString(),
         node_id: nodeId,
         content_ref: { kind: "node_stream", nodeId },
-        metadata: provider ? { provider } : undefined,
+        metadata: providerEntryMetadata(timelineNode, provider),
       };
       const chatEntries = index === -1 ? [...prev.chatEntries, entry] : [...prev.chatEntries];
       if (index !== -1) {
@@ -744,17 +755,35 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
     })),
 
   addTimelineNode: (node) =>
-    set((prev) => ({
-      timelineNodes: [...prev.timelineNodes, node],
-      activeNodeId: node.node_id,
-      selectedNodeId: node.node_id,
-      nodeDetails: {
-        ...prev.nodeDetails,
-        [node.node_id]:
-          prev.nodeDetails[node.node_id] ??
-          emptyNodeDetail(node.node_id, { sessionId: prev.sessionId, node }),
-      },
-    })),
+    set((prev) => {
+      const retrySourceNodeId = node.retry?.retry_of_node_id ?? null;
+      const streamBuffers = { ...prev.streamBuffers };
+      if (retrySourceNodeId) {
+        delete streamBuffers[retrySourceNodeId];
+      }
+      const sourceActiveEntryId = retrySourceNodeId
+        ? chatEntryId(retrySourceNodeId, "stream-active")
+        : null;
+      return {
+        timelineNodes: [...prev.timelineNodes, node],
+        activeNodeId: node.node_id,
+        selectedNodeId: node.node_id,
+        nodeDetails: {
+          ...prev.nodeDetails,
+          [node.node_id]:
+            prev.nodeDetails[node.node_id] ??
+            emptyNodeDetail(node.node_id, { sessionId: prev.sessionId, node }),
+        },
+        chatEntries: retrySourceNodeId
+          ? prev.chatEntries.filter((entry) => entry.node_id !== retrySourceNodeId)
+          : prev.chatEntries,
+        streamBuffers,
+        activeStreamEntryId:
+          sourceActiveEntryId && prev.activeStreamEntryId === sourceActiveEntryId
+            ? null
+            : prev.activeStreamEntryId,
+      };
+    }),
 
   updateTimelineNode: (nodeId, status, summary, completedAt) =>
     set((prev) => ({
@@ -1287,6 +1316,7 @@ function deduplicateExecutionEvents(events: ExecutionEvent[]) {
 
 function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
   const entries: ChatEntry[] = [];
+  const retriedNodeIds = retriedTimelineNodeIds(state.timelineNodes);
 
   for (const message of state.messages) {
     if (!isPreparedWorkspaceContextMessage(message)) {
@@ -1304,6 +1334,10 @@ function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
   }
 
   for (const node of state.timelineNodes) {
+    if (retriedNodeIds.has(node.node_id)) {
+      continue;
+    }
+
     const detail = state.nodeDetails[node.node_id];
     if (!detail) {
       continue;
@@ -1372,7 +1406,7 @@ function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
           command: null,
           cwd: null,
           exit_code: null,
-          ...(provider ? { provider } : {}),
+          ...providerEntryMetadata(node, provider),
         },
         content_ref: { kind: "provider_prompt", nodeId: node.node_id },
         content_size: prompt.length,
@@ -1397,7 +1431,7 @@ function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
         content: streamContent,
         timestamp: detail.started_at || node.started_at,
         node_id: node.node_id,
-        metadata: provider ? { provider } : undefined,
+        metadata: providerEntryMetadata(node, provider),
       });
     }
 
@@ -1415,7 +1449,7 @@ function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
           content: `${executionEventContent(event, node.title)} · ${formatContentSize(event.output.length)}`,
           timestamp,
           node_id: node.node_id,
-          metadata: providerPromptEventMetadata(event, provider),
+          metadata: providerPromptEventMetadata(event, provider, node),
           content_ref: { kind: "provider_prompt", nodeId: node.node_id },
           content_size: event.output.length,
           has_full_content: true,
@@ -1562,7 +1596,7 @@ function providerSummaryEntries(
       content: streamPreview,
       timestamp,
       node_id: node.node_id,
-      metadata: provider ? { provider } : undefined,
+      metadata: providerEntryMetadata(node, provider),
     });
   }
 
@@ -1589,7 +1623,7 @@ function providerSummaryEntries(
         command: null,
         cwd: null,
         exit_code: null,
-        ...(provider ? { provider } : {}),
+        ...providerEntryMetadata(node, provider),
       },
       content_ref: {
         kind: "execution_output",
@@ -1628,7 +1662,7 @@ function providerPromptSummaryEntry(
       command: null,
       cwd: null,
       exit_code: null,
-      ...(provider ? { provider } : {}),
+      ...providerEntryMetadata(node, provider),
     },
     content_ref: { kind: "provider_prompt", nodeId: node.node_id },
     content_size: summary.prompt_size,
@@ -1783,7 +1817,11 @@ function latestProviderPromptEvent(events: ExecutionEvent[]) {
   return null;
 }
 
-function providerPromptEventMetadata(event: ExecutionEvent, provider?: string | null) {
+function providerPromptEventMetadata(
+  event: ExecutionEvent,
+  provider?: string | null,
+  node?: TimelineNode,
+) {
   return {
     event_id: event.event_id,
     node_id: event.node_id ?? null,
@@ -1795,8 +1833,30 @@ function providerPromptEventMetadata(event: ExecutionEvent, provider?: string | 
     command: event.command ?? null,
     cwd: event.cwd ?? null,
     exit_code: event.exit_code ?? null,
-    ...(provider ? { provider } : {}),
+    ...providerEntryMetadata(node, provider),
   };
+}
+
+function providerEntryMetadata(
+  node: TimelineNode | undefined,
+  provider?: string | null,
+): Record<string, unknown> | undefined {
+  const metadata: Record<string, unknown> = {};
+  if (provider) {
+    metadata.provider = provider;
+  }
+  if (node?.retry) {
+    metadata.retry = node.retry;
+  }
+  return Object.keys(metadata).length > 0 ? metadata : undefined;
+}
+
+function retriedTimelineNodeIds(nodes: TimelineNode[]) {
+  return new Set(
+    nodes
+      .map((node) => node.retry?.retry_of_node_id)
+      .filter((nodeId): nodeId is string => typeof nodeId === "string" && nodeId.length > 0),
+  );
 }
 
 function providerNameForNode(node: TimelineNode, detail: TimelineNodeDetail, event?: ExecutionEvent) {

@@ -1363,6 +1363,18 @@ export type ProviderDefaults = {
   review_rounds: number;
 };
 
+export type TimelineNodeRetryError = {
+  code: string;
+  message: string;
+};
+
+export type TimelineNodeRetry = {
+  retry_of_node_id: string;
+  retry_attempt: number;
+  retry_reason: string;
+  retry_error: TimelineNodeRetryError;
+};
+
 export type TimelineNode = {
   node_id: string;
   node_type: TimelineNodeType;
@@ -1377,6 +1389,7 @@ export type TimelineNode = {
   duration_ms?: number | null;
   artifact_ref?: string | null;
   provider_config_snapshot: ProviderConfigSnapshot;
+  retry?: TimelineNodeRetry | null;
 };
 
 export type ReviewVerdict = {

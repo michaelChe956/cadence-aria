@@ -294,4 +294,138 @@ describe("chat entries store", () => {
       node_id: "node-human-1",
     });
   });
+
+  it("collapses failed provider attempts when a timeline node is an automatic retry", () => {
+    const failedAttempt = makeTimelineNode({
+      node_id: "timeline_node_006",
+      node_type: "work_item_plan_outline_run",
+      agent: "codex",
+      status: "failed",
+      title: "WorkItemPlan Outline 生成",
+      started_at: "2026-06-24T10:00:00Z",
+    });
+    const retryAttempt = makeTimelineNode({
+      node_id: "timeline_node_007",
+      node_type: "work_item_plan_outline_run",
+      agent: "codex",
+      status: "completed",
+      title: "WorkItemPlan Outline 生成",
+      started_at: "2026-06-24T10:01:00Z",
+      retry: {
+        retry_of_node_id: "timeline_node_006",
+        retry_attempt: 2,
+        retry_reason: "outline_structured_output_parse_error",
+        retry_error: {
+          code: "outline_structured_output_parse_error",
+          message:
+            "Provider did not return a valid WorkItemPlan Outline structured output: invalid structured output json",
+        },
+      },
+    });
+
+    const store = useWorkspaceStore.getState();
+    store.setSessionState({
+      session_id: "session-work-item-plan",
+      workspace_type: "work_item",
+      stage: "running",
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "codex", reviewer: "codex" },
+      timeline_nodes: [failedAttempt, retryAttempt],
+      active_node_id: "timeline_node_007",
+      artifact_versions: [],
+      timeline_node_details: {
+        "timeline_node_006": makeNodeDetail({
+          node_id: "timeline_node_006",
+          node_type: "work_item_plan_outline_run",
+          provider: { name: "codex", model: "gpt-5" },
+          streaming_content: "错误的第一轮 author 输出",
+          status: "failed",
+        }),
+        "timeline_node_007": makeNodeDetail({
+          node_id: "timeline_node_007",
+          node_type: "work_item_plan_outline_run",
+          provider: { name: "codex", model: "gpt-5" },
+          streaming_content: "修正后的完整 outline",
+          status: "completed",
+        }),
+      },
+      active_run_id: null,
+    });
+
+    store.rebuildChatEntries();
+
+    const providerEntries = useWorkspaceStore
+      .getState()
+      .chatEntries.filter((entry) => entry.type === "provider_stream");
+    expect(providerEntries).toHaveLength(1);
+    expect(providerEntries[0]).toMatchObject({
+      node_id: "timeline_node_007",
+      content: "修正后的完整 outline",
+      metadata: {
+        provider: "codex",
+        retry: {
+          retry_of_node_id: "timeline_node_006",
+          retry_attempt: 2,
+          retry_reason: "outline_structured_output_parse_error",
+          retry_error: {
+            code: "outline_structured_output_parse_error",
+          },
+        },
+      },
+    });
+    expect(providerEntries[0].metadata?.retry).toMatchObject({
+      retry_error: {
+        message: expect.stringContaining("Provider did not return a valid WorkItemPlan Outline"),
+      },
+    });
+  });
+
+  it("removes the visible source attempt when an automatic retry node arrives live", () => {
+    const store = useWorkspaceStore.getState();
+    store.appendChatEntry({
+      id: "timeline_node_006:stream",
+      type: "provider_stream",
+      role: "author",
+      content: "错误的第一轮 author 输出",
+      timestamp: "2026-06-24T10:00:00Z",
+      node_id: "timeline_node_006",
+      metadata: { provider: "codex" },
+    });
+
+    store.addTimelineNode(
+      makeTimelineNode({
+        node_id: "timeline_node_007",
+        node_type: "work_item_plan_outline_run",
+        agent: "codex",
+        status: "active",
+        title: "WorkItemPlan Outline 生成",
+        retry: {
+          retry_of_node_id: "timeline_node_006",
+          retry_attempt: 2,
+          retry_reason: "outline_structured_output_parse_error",
+          retry_error: {
+            code: "outline_structured_output_parse_error",
+            message: "Provider did not return a valid WorkItemPlan Outline structured output",
+          },
+        },
+      }),
+    );
+    store.appendBufferedStreamChunk("修正后的完整 outline", "timeline_node_007", "author");
+    store.flushBufferedStream("timeline_node_007");
+
+    const entries = useWorkspaceStore.getState().chatEntries;
+    expect(entries.map((entry) => entry.node_id)).toEqual(["timeline_node_007"]);
+    expect(entries[0]).toMatchObject({
+      content: "修正后的完整 outline",
+      metadata: {
+        provider: "codex",
+        retry: {
+          retry_of_node_id: "timeline_node_006",
+          retry_attempt: 2,
+        },
+      },
+    });
+  });
 });

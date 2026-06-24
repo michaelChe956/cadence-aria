@@ -284,6 +284,7 @@ fn persists_workspace_timeline_nodes_and_artifact_versions() {
             reviewer: Some(ProviderName::Codex),
             review_rounds: 2,
         },
+        retry: None,
     };
     let version = ArtifactVersion {
         version: 1,

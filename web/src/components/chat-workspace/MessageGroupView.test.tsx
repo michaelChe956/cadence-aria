@@ -187,6 +187,46 @@ describe("MessageGroupView", () => {
 
     expect(screen.getByText(expectedTitle)).toBeInTheDocument();
   });
+
+  it("marks automatic retry groups and exposes the previous attempt error", () => {
+    render(
+      <MessageGroupView
+        group={{
+          id: "group-retry",
+          nodeId: "timeline_node_007",
+          role: "author",
+          primaryEntry: makeEntry(
+            "retry-stream",
+            "provider_stream",
+            "author",
+            "修正后的完整 outline",
+            {
+              provider: "codex",
+              retry: {
+                retry_of_node_id: "timeline_node_006",
+                retry_attempt: 2,
+                retry_reason: "outline_structured_output_parse_error",
+                retry_error: {
+                  code: "outline_structured_output_parse_error",
+                  message:
+                    "Provider did not return a valid WorkItemPlan Outline structured output: invalid structured output json",
+                },
+              },
+            },
+          ),
+          inlineEvents: [],
+          interruptEntries: [],
+        }}
+      />,
+    );
+
+    expect(screen.getByText("作者 · Codex · 自动重跑 #2")).toBeInTheDocument();
+    expect(screen.getByText("自动重跑 #2")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("上一轮错误"));
+    expect(
+      screen.getByText(/Provider did not return a valid WorkItemPlan Outline structured output/),
+    ).toBeInTheDocument();
+  });
 });
 
 function makeEntry(
