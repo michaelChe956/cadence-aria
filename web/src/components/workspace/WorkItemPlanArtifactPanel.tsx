@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type {
   ValidatorFindingDto,
   WorkItemBatchStatePayload,
@@ -9,6 +10,7 @@ import type {
   WorkItemPlanOutline,
   WorkItemPlanOutlineItem,
 } from "../../api/types";
+import { MonacoViewer } from "../shared/MonacoViewer";
 
 export interface WorkItemPlanArtifactPanelProps {
   artifact: WorkItemPlanArtifactPayload | null;
@@ -121,37 +123,74 @@ function OutlineArtifact({
 }: {
   artifact: Extract<WorkItemPlanArtifactPayload, { type: "outline_candidate" }>["payload"];
 }) {
+  const [view, setView] = useState<"cards" | "source">("cards");
   const outline = artifact.outline;
   const items = outlineItems(outline);
   return (
     <section className="space-y-4">
-      <Header title="Work Item Plan Outline" meta={artifact.current_generation_round_id ?? "--"} />
-      <Paragraph>{outline.strategy_summary}</Paragraph>
-      <div className="grid gap-2 sm:grid-cols-2">
-        <KeyValue label="items" value={String(items.length)} />
-        <KeyValue label="status" value={outline.status ?? "--"} />
+      <div className="flex items-center justify-between gap-3">
+        <Header title="Work Item Plan Outline" meta={artifact.current_generation_round_id ?? "--"} />
+        <div className="flex items-center rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-0.5 text-xs">
+          <button
+            type="button"
+            data-testid="outline-view-cards"
+            onClick={() => setView("cards")}
+            className={`rounded px-2 py-1 ${
+              view === "cards"
+                ? "bg-white font-medium text-[var(--aria-ink)] shadow-sm"
+                : "text-[var(--aria-ink-muted)] hover:text-[var(--aria-ink)]"
+            }`}
+          >
+            Cards
+          </button>
+          <button
+            type="button"
+            data-testid="outline-view-source"
+            onClick={() => setView("source")}
+            className={`rounded px-2 py-1 ${
+              view === "source"
+                ? "bg-white font-medium text-[var(--aria-ink)] shadow-sm"
+                : "text-[var(--aria-ink-muted)] hover:text-[var(--aria-ink)]"
+            }`}
+          >
+            Source
+          </button>
+        </div>
       </div>
-      {outline.handoff_strategy ? (
-        <ReadableBlock title="Handoff strategy" content={outline.handoff_strategy} />
-      ) : null}
-      {outline.risks.length > 0 ? <BulletList title="Risks" items={outline.risks} /> : null}
-      {outline.dependency_graph.length > 0 ? (
-        <BulletList
-          title="Dependencies"
-          items={outline.dependency_graph.map((edge) => {
-            if ("from_outline_id" in edge && "to_outline_id" in edge) {
-              return `${edge.from_outline_id} -> ${edge.to_outline_id}`;
-            }
-            return `${edge.from_work_item_id} -> ${edge.to_work_item_id}`;
-          })}
-        />
-      ) : null}
-      <div className="space-y-3">
-        {items.map((item, index) => (
-          <WorkItemOutlineCard key={item.outline_id} item={item} index={index} />
-        ))}
-      </div>
-      <ValidatorFindings findings={artifact.validator_findings} />
+      {view === "source" ? (
+        <div className="h-[400px] overflow-hidden rounded-md border border-[var(--aria-line)]">
+          <MonacoViewer value={JSON.stringify(outline, null, 2)} language="json" height="100%" />
+        </div>
+      ) : (
+        <>
+          <Paragraph>{outline.strategy_summary}</Paragraph>
+          <div className="grid gap-2 sm:grid-cols-2">
+            <KeyValue label="items" value={String(items.length)} />
+            <KeyValue label="status" value={outline.status ?? "--"} />
+          </div>
+          {outline.handoff_strategy ? (
+            <ReadableBlock title="Handoff strategy" content={outline.handoff_strategy} />
+          ) : null}
+          {outline.risks.length > 0 ? <BulletList title="Risks" items={outline.risks} /> : null}
+          {outline.dependency_graph.length > 0 ? (
+            <BulletList
+              title="Dependencies"
+              items={outline.dependency_graph.map((edge) => {
+                if ("from_outline_id" in edge && "to_outline_id" in edge) {
+                  return `${edge.from_outline_id} -> ${edge.to_outline_id}`;
+                }
+                return `${edge.from_work_item_id} -> ${edge.to_work_item_id}`;
+              })}
+            />
+          ) : null}
+          <div className="space-y-3">
+            {items.map((item, index) => (
+              <WorkItemOutlineCard key={item.outline_id} item={item} index={index} />
+            ))}
+          </div>
+          <ValidatorFindings findings={artifact.validator_findings} />
+        </>
+      )}
     </section>
   );
 }

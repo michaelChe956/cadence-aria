@@ -838,6 +838,99 @@ async fn issue_lifecycle_includes_work_item_plan_groups_without_hiding_child_wor
     assert!(returned_work_item_ids.contains(&frontend_item.id.as_str()));
 }
 
+#[tokio::test]
+async fn work_item_plan_author_emits_provider_prompt_event() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let (app, _repo, _prompts) =
+        app_with_confirmed_story_and_design_and_streaming_outputs(vec![valid_outline_output()])
+            .await;
+
+    let (_status, prepare_resp) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-item-plans:prepare",
+        json!({
+            "title": "登录拆分",
+            "story_spec_ids": ["story_spec_0001"],
+            "design_spec_ids": ["design_spec_0001"],
+            "include_integration_tests": true,
+            "include_e2e_tests": false,
+            "force_frontend_backend_split": true,
+            "require_execution_plan_confirm": false,
+            "review_rounds": 1
+        }),
+    )
+    .await;
+
+    let session_id = prepare_resp["workspace_session"]["workspace_session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let mut ws = connect_ws(app, &session_id).await;
+    ws.send(Message::Text(
+        json!({
+            "type": "start_generation",
+            "provider_config": { "author": "fake", "reviewer": null, "review_rounds": 1 },
+            "reviewer_enabled": false
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .expect("send start_generation");
+
+    let mut author_node_id: Option<String> = None;
+    let mut saw_provider_prompt = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline - tokio::time::Instant::now();
+        let value = match timeout(remaining, ws.next()).await {
+            Ok(Some(Ok(Message::Text(text)))) => {
+                serde_json::from_str::<Value>(&text).expect("ws json")
+            }
+            Ok(Some(Ok(Message::Close(_)))) => break,
+            Ok(Some(Ok(other))) => panic!("expected text ws message, got {other:?}"),
+            Ok(Some(Err(error))) => panic!("ws error: {error}"),
+            Ok(None) => break,
+            Err(_) => break,
+        };
+
+        match value["type"].as_str() {
+            Some("timeline_node_created")
+                if value["node"]["node_type"] == "work_item_plan_outline_run" =>
+            {
+                author_node_id = value["node"]["node_id"].as_str().map(str::to_string);
+            }
+            Some("execution_event")
+                if author_node_id
+                    .as_deref()
+                    .is_some_and(|node_id| value["event"]["node_id"].as_str() == Some(node_id))
+                    && value["event"]["title"] == "Provider Prompt" =>
+            {
+                saw_provider_prompt = true;
+                assert!(
+                    value["event"]["output"]
+                        .as_str()
+                        .unwrap_or("")
+                        .contains("WorkItemPlan Outline"),
+                    "provider prompt should contain the prompt text: {value}"
+                );
+            }
+            Some("artifact_update") if value.get("outline_candidate").is_some() => break,
+            Some("error") => panic!("ws error message: {value}"),
+            _ => {}
+        }
+    }
+
+    assert!(
+        saw_provider_prompt,
+        "expected Provider Prompt execution_event for work_item_plan_outline_run"
+    );
+
+    ws.close(None).await.ok();
+}
+
 async fn enable_work_item_plan_review_fixture(app: &axum::Router, session_id: &str, review: Value) {
     let (status, response) = request_json(
         app.clone(),

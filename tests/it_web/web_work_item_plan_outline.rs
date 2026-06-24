@@ -302,6 +302,24 @@ async fn outline_validation_failure_auto_retries_then_human_blocker() {
         })
         .count();
     assert_eq!(outline_run_count, 2);
+    let provider_prompt_count = messages
+        .iter()
+        .filter(|message| {
+            message["type"] == "execution_event"
+                && message["event"]["title"] == "Provider Prompt"
+                && message["event"]["node_id"].as_str().is_some_and(|node_id| {
+                    messages.iter().any(|m| {
+                        m["type"] == "timeline_node_created"
+                            && m["node"]["node_id"] == node_id
+                            && m["node"]["node_type"] == "work_item_plan_outline_run"
+                    })
+                })
+        })
+        .count();
+    assert_eq!(
+        provider_prompt_count, 2,
+        "each outline run (initial + retry) should emit a Provider Prompt event"
+    );
     assert!(messages.iter().any(|message| {
         message["type"] == "artifact_update" && message.get("context_blocker").is_some()
     }));

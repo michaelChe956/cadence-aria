@@ -867,6 +867,9 @@ pub enum EngineEvent {
 pub enum ReviewDecisionOutcome {
     StartRevision,
     StartWorkItemPlanOutline,
+    StartWorkItemPlanOutlineRevision {
+        feedback: Option<String>,
+    },
     HumanConfirm,
     ConfirmedWithChildSessions {
         child_sessions: Vec<WorkspaceSessionRecord>,
@@ -1975,6 +1978,7 @@ impl WorkspaceEngine {
             provider_type_for_name(&self.session.author_provider),
             invocation.prompt,
             working_dir.to_string_lossy().to_string(),
+            self.session.author_provider.clone(),
         ))
     }
 
@@ -2019,6 +2023,7 @@ impl WorkspaceEngine {
             provider_type_for_name(&self.session.author_provider),
             invocation.prompt,
             working_dir.to_string_lossy().to_string(),
+            self.session.author_provider.clone(),
         ))
     }
 
@@ -4814,6 +4819,22 @@ impl WorkspaceEngine {
             .await;
     }
 
+    pub async fn emit_provider_prompt_event(
+        &mut self,
+        node_id: &str,
+        prompt: String,
+        detail: &'static str,
+        agent: Option<ProviderName>,
+    ) {
+        let _ = self.persist_prompt_snapshot(node_id, prompt.clone()).await;
+        self.emit_execution_event(
+            provider_prompt_event(node_id, prompt, detail),
+            Some(node_id.to_string()),
+            agent,
+        )
+        .await;
+    }
+
     pub async fn drive_review_session(
         &mut self,
         provider: Arc<dyn StreamingProviderAdapter>,
@@ -5701,7 +5722,11 @@ impl WorkspaceEngine {
                         "continue_with_context requires non-empty extra_context".to_string()
                     );
                 }
-                if self.review_decision_restarts_work_item_plan_outline() {
+                if self.review_decision_restarts_work_item_plan_outline()
+                    || self.current_artifact_is_work_item_plan_outline_candidate()
+                {
+                    let outline_feedback = self
+                        .work_item_plan_outline_revision_feedback(normalized_context.as_deref());
                     self.pending_revision_context = normalized_context;
                     self.complete_active_node(Some("已选择返修 WorkItemPlan Outline".to_string()))
                         .await;
@@ -5709,7 +5734,9 @@ impl WorkspaceEngine {
                     self.transition_stage(WorkspaceStage::Running).await;
                     self.work_item_plan_author_retry_count = 0;
                     self.work_item_plan_revision_retry_count = 0;
-                    return Ok(ReviewDecisionOutcome::StartWorkItemPlanOutline);
+                    return Ok(ReviewDecisionOutcome::StartWorkItemPlanOutlineRevision {
+                        feedback: outline_feedback,
+                    });
                 }
                 self.pending_revision_context = normalized_context;
                 self.complete_active_node(Some("已选择返修".to_string()))
@@ -5753,6 +5780,13 @@ impl WorkspaceEngine {
                     review.review_scope == WorkItemPlanReviewScope::Outline
                         && review.review_action == WorkItemPlanReviewAction::ReviseOutline
                 })
+    }
+
+    pub(crate) fn current_artifact_is_work_item_plan_outline_candidate(&self) -> bool {
+        matches!(
+            self.session.artifact,
+            Some(ArtifactPayload::WorkItemPlanOutlineCandidate { .. })
+        )
     }
 
     pub async fn handle_human_confirm(
@@ -6171,14 +6205,17 @@ impl WorkspaceEngine {
         provider_type: ProviderType,
         prompt: String,
         worktree_path: String,
+        author_provider: ProviderName,
     ) -> StreamingProviderInput {
+        let resume_provider_session_id =
+            self.provider_resume_session_id(ProviderConversationRole::Author, &author_provider);
         StreamingProviderInput {
             provider_type,
             role: AdapterRole::WorkItemSplitter,
             prompt,
             working_dir: PathBuf::from(worktree_path),
             workspace_session_id: Some(self.session.session_id.clone()),
-            resume_provider_session_id: None,
+            resume_provider_session_id,
             permission_mode: ProviderPermissionMode::Supervised,
             env_vars: BTreeMap::new(),
             timeout_secs: DEFAULT_PROVIDER_TIMEOUT_SECS,
@@ -7462,7 +7499,11 @@ impl WorkspaceEngine {
                 "request_revision is only available during author_confirm stage".to_string(),
             );
         }
-        if self.active_node_type() == Some(TimelineNodeType::WorkItemPlanOutlineConfirm) {
+        if self.active_node_type() == Some(TimelineNodeType::WorkItemPlanOutlineConfirm)
+            || self.current_artifact_is_work_item_plan_outline_candidate()
+        {
+            let outline_feedback =
+                self.work_item_plan_outline_revision_feedback(feedback.as_deref());
             self.pending_revision_context = feedback;
             self.work_item_plan_revision_retry_count = 0;
             self.mark_latest_artifact_rejected();
@@ -7476,7 +7517,9 @@ impl WorkspaceEngine {
             }
             self.transition_stage(WorkspaceStage::Running).await;
             self.work_item_plan_author_retry_count = 0;
-            return Ok(ReviewDecisionOutcome::StartWorkItemPlanOutline);
+            return Ok(ReviewDecisionOutcome::StartWorkItemPlanOutlineRevision {
+                feedback: outline_feedback,
+            });
         }
         self.pending_revision_context = feedback;
         self.work_item_plan_revision_retry_count = 0;
@@ -7523,6 +7566,40 @@ impl WorkspaceEngine {
             }
         }
         if let Some(context) = &self.pending_revision_context {
+            parts.push(format!("用户补充信息:\n{}", context));
+        }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join("\n\n"))
+        }
+    }
+
+    /// 组装 outline 阶段增量返修使用的反馈文本。
+    ///
+    /// 与 `work_item_plan_revision_feedback` 区别：该反馈会注入到同一会话
+    /// 的增量 prompt 中，不再重复完整 issue/story/design 上下文。
+    pub fn work_item_plan_outline_revision_feedback(
+        &self,
+        context: Option<&str>,
+    ) -> Option<String> {
+        let mut parts = Vec::new();
+        if let Some(verdict) = &self.latest_review_verdict {
+            if !verdict.summary.is_empty() {
+                parts.push(format!("Reviewer 摘要: {}", verdict.summary));
+            }
+            if !verdict.comments.is_empty() {
+                parts.push(format!("Reviewer 审核意见:\n{}", verdict.comments));
+            }
+            for finding in &verdict.findings {
+                parts.push(format!(
+                    "[{}] {}",
+                    serialized_string(&finding.severity),
+                    finding.message
+                ));
+            }
+        }
+        if let Some(context) = context.map(str::trim).filter(|c| !c.is_empty()) {
             parts.push(format!("用户补充信息:\n{}", context));
         }
         if parts.is_empty() {
@@ -9803,7 +9880,7 @@ mod tests {
     use crate::product::lifecycle_store::{
         CreateDesignSpecInput, CreateIssueWorkItemPlanInput, CreateRepositoryProfileInput,
         CreateStorySpecInput, CreateVerificationPlanInput, CreateWorkItemInput,
-        CreateWorkspaceSessionInput, IssueWorkItemPlanUpdate,
+        CreateWorkspaceSessionInput, IssueWorkItemPlanUpdate, LifecycleStore,
     };
     use crate::product::models::{
         AgentRole, ArtifactRef, IssueWorkItemDependencyEdge, IssueWorkItemPlan,
@@ -9819,8 +9896,9 @@ mod tests {
         ArtifactPayload, AuthorDecision, ProviderConfigSnapshot, ReviewFindingSeverity, ReviewGate,
         ReviewVerdictType, TimelineNode, TimelineNodeStatus, TimelineNodeType,
         WorkItemCandidateDto, WorkItemCandidateMetaDto, WorkItemPlanCandidateDto, WorkItemPlanDto,
-        WorkItemPlanReviewAction, WorkItemPlanReviewGate, WorkItemPlanReviewScope,
-        WorkItemPlanReviewVerdict, WorkItemSplitOptionsDto, WorkspaceStage as WsWorkspaceStage,
+        WorkItemPlanOutlineCandidateDto, WorkItemPlanReviewAction, WorkItemPlanReviewComplete,
+        WorkItemPlanReviewGate, WorkItemPlanReviewScope, WorkItemPlanReviewVerdict,
+        WorkItemSplitOptionsDto, WorkspaceStage as WsWorkspaceStage,
     };
     use std::sync::Mutex;
     use tempfile::TempDir;
@@ -12029,6 +12107,89 @@ mod tests {
                 "{workspace_type:?} should not create revision node without extra context"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn review_decision_continue_with_work_item_plan_outline_candidate_restarts_outline() {
+        let (tmp, checkpoint_store) = setup();
+        let lifecycle_store = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
+        let (tx, _rx) = mpsc::channel(64);
+        let mut session = make_session("sess_wip_outline_review_fallback");
+        session.workspace_type = WorkspaceType::WorkItemPlan;
+        session.stage = WorkspaceStage::ReviewDecision;
+        session.artifact = Some(ArtifactPayload::WorkItemPlanOutlineCandidate {
+            outline_candidate: Box::new(WorkItemPlanOutlineCandidateDto {
+                outline: WorkItemPlanOutline {
+                    id: "outline_001".to_string(),
+                    project_id: "project_0001".to_string(),
+                    issue_id: "issue_0001".to_string(),
+                    source_story_spec_ids: vec![],
+                    source_design_spec_ids: vec![],
+                    strategy_summary: "test".to_string(),
+                    work_item_outlines: vec![],
+                    dependency_graph: vec![],
+                    risks: vec![],
+                    handoff_strategy: "".to_string(),
+                    status: "draft".to_string(),
+                },
+                design_context_gaps: vec![],
+                validator_findings: vec![],
+                context_blockers: vec![],
+                current_generation_round_id: None,
+                selected_generation_mode: None,
+            }),
+        });
+        let mut engine =
+            WorkspaceEngine::new_persistent(checkpoint_store, lifecycle_store, tx, session);
+        let node_id = "node_outline_confirm_001".to_string();
+        engine.timeline_nodes.push(TimelineNode {
+            node_id: node_id.clone(),
+            node_type: TimelineNodeType::WorkItemPlanOutlineConfirm,
+            agent: Some(ProviderName::ClaudeCode),
+            stage: WsWorkspaceStage::AuthorConfirm,
+            round: Some(1),
+            status: TimelineNodeStatus::Paused,
+            title: "WorkItemPlan Outline Confirm".to_string(),
+            summary: None,
+            started_at: chrono::Utc::now().to_rfc3339(),
+            completed_at: None,
+            duration_ms: None,
+            artifact_ref: None,
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::Codex),
+                review_rounds: 1,
+            },
+        });
+        engine.active_node_id = Some(node_id);
+        engine.latest_review_verdict = Some(ReviewVerdict {
+            verdict: ReviewVerdictType::Revise,
+            comments: "revise".to_string(),
+            summary: "revise".to_string(),
+            findings: Vec::new(),
+            review_gate: ReviewGate::UserConfirmAllowed,
+            work_item_plan_review: None,
+        });
+
+        let outcome = engine
+            .handle_review_decision("continue".to_string(), None)
+            .await
+            .expect("decision should be accepted");
+
+        assert_eq!(
+            outcome,
+            ReviewDecisionOutcome::StartWorkItemPlanOutlineRevision {
+                feedback: Some("Reviewer 摘要: revise\n\nReviewer 审核意见:\nrevise".to_string()),
+            }
+        );
+        assert_eq!(engine.session().stage, WorkspaceStage::Running);
+        assert!(
+            !engine
+                .timeline_nodes
+                .iter()
+                .any(|node| node.node_type == TimelineNodeType::Revision),
+            "should not create full revision node for outline candidate"
+        );
     }
 
     #[tokio::test]
@@ -15239,6 +15400,7 @@ mod tests {
             ProviderType::Fake,
             "split prompt".to_string(),
             "/tmp/worktree".to_string(),
+            ProviderName::Fake,
         );
 
         assert_eq!(input.provider_type, ProviderType::Fake);
@@ -15252,6 +15414,90 @@ mod tests {
         assert_eq!(input.resume_provider_session_id, None);
         assert_eq!(input.permission_mode, ProviderPermissionMode::Supervised);
         assert_eq!(input.timeout_secs, DEFAULT_PROVIDER_TIMEOUT_SECS);
+    }
+
+    #[test]
+    fn build_work_item_plan_streaming_input_reuses_author_provider_session() {
+        let (_tmp, _checkpoint_store, _lifecycle, _plan_id, mut engine) =
+            make_work_item_plan_engine_with_draft_candidate("sess_wip_resume_author");
+        engine.session.provider_conversations = vec![ProviderConversationRef {
+            role: ProviderConversationRole::Author,
+            provider: ProviderName::ClaudeCode,
+            provider_session_id: "author-session-1".to_string(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            last_node_id: Some("node-1".to_string()),
+        }];
+
+        let input = engine.build_work_item_plan_streaming_input(
+            ProviderType::ClaudeCode,
+            "split prompt".to_string(),
+            "/tmp/worktree".to_string(),
+            ProviderName::ClaudeCode,
+        );
+
+        assert_eq!(
+            input.resume_provider_session_id,
+            Some("author-session-1".to_string()),
+            "should reuse persisted author provider session id"
+        );
+    }
+
+    #[test]
+    fn work_item_plan_outline_revision_feedback_assembles_review_and_context() {
+        let (_tmp, _checkpoint_store, _lifecycle, _plan_id, mut engine) =
+            make_work_item_plan_engine_with_draft_candidate("sess_wip_outline_feedback");
+        engine.latest_review_verdict = Some(ReviewVerdict {
+            verdict: ReviewVerdictType::Revise,
+            comments: "拆分粒度太粗".to_string(),
+            summary: "需要细化 outline".to_string(),
+            findings: vec![ReviewFinding {
+                severity: ReviewFindingSeverity::MustFix,
+                message: "backend outline 缺少 exclusive_write_scope".to_string(),
+                evidence: "outline 中 backend 项 exclusive_write_scopes 为空".to_string(),
+                impact: "会导致 draft 阶段写入冲突".to_string(),
+                required_action: "为 backend outline 补充 exclusive_write_scope".to_string(),
+            }],
+            review_gate: ReviewGate::UserConfirmAllowed,
+            work_item_plan_review: None,
+        });
+
+        let feedback = engine
+            .work_item_plan_outline_revision_feedback(Some("用户补充：请把 frontend 再拆成两个"))
+            .expect("feedback should be assembled");
+
+        assert!(
+            feedback.contains("需要细化 outline"),
+            "missing summary: {feedback}"
+        );
+        assert!(
+            feedback.contains("拆分粒度太粗"),
+            "missing comments: {feedback}"
+        );
+        assert!(
+            feedback.contains("backend outline 缺少 exclusive_write_scope"),
+            "missing finding: {feedback}"
+        );
+        assert!(
+            feedback.contains("用户补充：请把 frontend 再拆成两个"),
+            "missing user context: {feedback}"
+        );
+    }
+
+    #[test]
+    fn work_item_plan_outline_revision_feedback_returns_none_when_empty() {
+        let (_tmp, _checkpoint_store, _lifecycle, _plan_id, engine) =
+            make_work_item_plan_engine_with_draft_candidate("sess_wip_outline_feedback_empty");
+
+        assert_eq!(
+            engine.work_item_plan_outline_revision_feedback(None),
+            None,
+            "should return None when no review verdict and no context"
+        );
+        assert_eq!(
+            engine.work_item_plan_outline_revision_feedback(Some("  ")),
+            None,
+            "should return None when context is whitespace only"
+        );
     }
 
     fn make_work_item_plan_engine_with_draft_candidate(

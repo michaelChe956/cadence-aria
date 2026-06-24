@@ -984,6 +984,20 @@ async fn handle_workspace_socket(socket: WebSocket, session_id: String, state: W
                                 let _ = send_json_outbound(&outbound_tx, &err).await;
                             }
                         }
+                        Ok(ReviewDecisionOutcome::StartWorkItemPlanOutlineRevision {
+                            feedback,
+                        }) => {
+                            if let Err(message) = spawn_provider_run_from_handler(
+                                run_context.clone(),
+                                ProviderRunKind::WorkItemPlanOutlineRevision { feedback },
+                                outbound_tx.clone(),
+                            )
+                            .await
+                            {
+                                let err = WsOutMessage::Error { message };
+                                let _ = send_json_outbound(&outbound_tx, &err).await;
+                            }
+                        }
                         Ok(ReviewDecisionOutcome::StartRevision) => {
                             if let Err(message) = spawn_provider_run_from_handler(
                                 run_context.clone(),
@@ -1115,6 +1129,18 @@ async fn handle_review_decision_from_handler(
                 let _ = send_json_outbound(&outbound_tx, &err).await;
             }
         }
+        Ok(ReviewDecisionOutcome::StartWorkItemPlanOutlineRevision { feedback }) => {
+            if let Err(message) = spawn_provider_run_from_handler(
+                run_context,
+                ProviderRunKind::WorkItemPlanOutlineRevision { feedback },
+                outbound_tx.clone(),
+            )
+            .await
+            {
+                let err = WsOutMessage::Error { message };
+                let _ = send_json_outbound(&outbound_tx, &err).await;
+            }
+        }
         Ok(ReviewDecisionOutcome::StartRevision) => {
             let run_kind = {
                 let engine = run_context.engine.lock().await;
@@ -1199,6 +1225,18 @@ async fn handle_human_confirm_from_handler(
             if let Err(message) = spawn_provider_run_from_handler(
                 run_context,
                 ProviderRunKind::WorkItemPlanAuthor,
+                outbound_tx.clone(),
+            )
+            .await
+            {
+                let err = WsOutMessage::Error { message };
+                let _ = send_json_outbound(&outbound_tx, &err).await;
+            }
+        }
+        Ok(ReviewDecisionOutcome::StartWorkItemPlanOutlineRevision { feedback }) => {
+            if let Err(message) = spawn_provider_run_from_handler(
+                run_context,
+                ProviderRunKind::WorkItemPlanOutlineRevision { feedback },
                 outbound_tx.clone(),
             )
             .await
@@ -1772,6 +1810,7 @@ enum ProviderRunKind {
     Revision,
     ReviewOnly,
     WorkItemPlanAuthor,
+    WorkItemPlanOutlineRevision { feedback: Option<String> },
     WorkItemPlanDraft { feedback: Option<String> },
     WorkItemPlanBatch,
     WorkItemPlanRevision { feedback: Option<String> },
@@ -1923,6 +1962,7 @@ async fn spawn_provider_run_from_handler(
                 .clone()
                 .unwrap_or(ProviderName::Codex),
             ProviderRunKind::WorkItemPlanAuthor
+            | ProviderRunKind::WorkItemPlanOutlineRevision { .. }
             | ProviderRunKind::WorkItemPlanDraft { .. }
             | ProviderRunKind::WorkItemPlanBatch
             | ProviderRunKind::WorkItemPlanRevision { .. } => {
@@ -1967,6 +2007,10 @@ async fn spawn_provider_run_from_handler(
     let session_id_for_task = session_id.clone();
     let provider_registry_for_run = provider_registry.clone();
     let outbound_tx_for_task = outbound_tx.clone();
+    let outline_revision_feedback = match &run_kind {
+        ProviderRunKind::WorkItemPlanOutlineRevision { feedback } => feedback.clone(),
+        _ => None,
+    };
     tokio::spawn(async move {
         let mut engine = engine_for_run.lock().await;
         engine.use_run_token(run_cancel.clone());
@@ -1995,13 +2039,14 @@ async fn spawn_provider_run_from_handler(
                     .drive_review_session(provider_for_run.clone(), command_rx)
                     .await;
             }
-            ProviderRunKind::WorkItemPlanAuthor => {
+            ProviderRunKind::WorkItemPlanAuthor
+            | ProviderRunKind::WorkItemPlanOutlineRevision { .. } => {
                 let lifecycle_for_run = LifecycleStore::new(run_context_clone.app_paths.clone());
                 let app_paths_for_run = run_context_clone.app_paths.clone();
                 let session_record_for_run = run_context_clone.session_record.clone();
                 let mut command_rx = command_rx;
 
-                let mut request =
+                let request =
                     match build_work_item_plan_generate_request(&engine, &lifecycle_for_run)
                         .map_err(|e| format!("build request failed: {e}"))
                     {
@@ -2049,40 +2094,67 @@ async fn spawn_provider_run_from_handler(
                 };
 
                 let author_provider = engine.session().author_provider.clone();
-                let context_resolutions = match load_work_item_plan_outline_context_resolutions(
-                    &app_paths_for_run,
-                    &session_record_for_run,
-                    &request,
-                    &lifecycle_for_run,
-                    &issue,
-                ) {
-                    Ok(resolutions) => resolutions,
-                    Err(message) => {
-                        engine.mark_active_run_finished(&run_label);
-                        drop(engine);
-                        let err = WsOutMessage::Error { message };
-                        let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
-                        return;
+
+                // 首次生成：使用完整 prompt + context_resolutions；
+                // review/AutoRevision：使用同一会话增量返修 prompt，不重复完整上下文。
+                let mut invocation = if let Some(feedback) = outline_revision_feedback.as_deref() {
+                    match WorkItemSplitEngine::build_outline_revision_invocation(
+                        &request,
+                        &issue,
+                        &repository,
+                        author_provider,
+                        feedback,
+                    ) {
+                        Ok(invocation) => invocation,
+                        Err(error) => {
+                            engine.mark_active_run_finished(&run_label);
+                            let err = WsOutMessage::Error {
+                                message: format!(
+                                    "outline revision invocation failed: {}",
+                                    error.message
+                                ),
+                            };
+                            let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                            return;
+                        }
+                    }
+                } else {
+                    let context_resolutions = match load_work_item_plan_outline_context_resolutions(
+                        &app_paths_for_run,
+                        &session_record_for_run,
+                        &request,
+                        &lifecycle_for_run,
+                        &issue,
+                    ) {
+                        Ok(resolutions) => resolutions,
+                        Err(message) => {
+                            engine.mark_active_run_finished(&run_label);
+                            drop(engine);
+                            let err = WsOutMessage::Error { message };
+                            let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                            return;
+                        }
+                    };
+                    match WorkItemSplitEngine::build_outline_invocation(
+                        &request,
+                        &lifecycle_for_run,
+                        &issue,
+                        &repository,
+                        author_provider,
+                        &context_resolutions,
+                    ) {
+                        Ok(invocation) => invocation,
+                        Err(error) => {
+                            engine.mark_active_run_finished(&run_label);
+                            let err = WsOutMessage::Error {
+                                message: format!("split generate failed: {}", error.message),
+                            };
+                            let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                            return;
+                        }
                     }
                 };
-                let invocation = match WorkItemSplitEngine::build_outline_invocation(
-                    &request,
-                    &lifecycle_for_run,
-                    &issue,
-                    &repository,
-                    author_provider,
-                    &context_resolutions,
-                ) {
-                    Ok(invocation) => invocation,
-                    Err(error) => {
-                        engine.mark_active_run_finished(&run_label);
-                        let err = WsOutMessage::Error {
-                            message: format!("split generate failed: {}", error.message),
-                        };
-                        let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
-                        return;
-                    }
-                };
+
                 let node_id = if engine.active_node_type()
                     == Some(
                         crate::web::workspace_ws_types::TimelineNodeType::WorkItemPlanOutlineRun,
@@ -2102,10 +2174,23 @@ async fn spawn_provider_run_from_handler(
                 } else {
                     engine.begin_work_item_plan_outline_run().await
                 };
+                engine
+                    .emit_provider_prompt_event(
+                        &node_id,
+                        invocation.prompt.clone(),
+                        if outline_revision_feedback.is_some() {
+                            "发送给 WorkItemPlan provider 的增量返修提示词"
+                        } else {
+                            "发送给 WorkItemPlan provider 的完整提示词"
+                        },
+                        Some(invocation.author_provider.clone()),
+                    )
+                    .await;
                 let provider_input = engine.build_work_item_plan_streaming_input(
                     invocation.provider_type.clone(),
                     invocation.prompt.clone(),
                     invocation.worktree_path.clone(),
+                    invocation.author_provider.clone(),
                 );
                 let provider_session = provider_for_run
                     .start(provider_input, run_cancel.clone())
@@ -2143,9 +2228,7 @@ async fn spawn_provider_run_from_handler(
                     }
                 };
 
-                // 使用本地循环处理 AutoRevision，直接复用 Task 1 的 `generate_revision`
-                //（retained/redo 均为空，feedback 来自 validator findings），避免跨 spawn
-                // 边界传递非 `Send` future 导致编译失败。
+                // 本地循环处理 AutoRevision：基于同一会话增量返修，不重复完整上下文。
                 // 循环上限由 `complete_work_item_plan_author` 内部的
                 // `work_item_plan_author_retry_count` 控制（达到 3 次后返回 HumanConfirm）；
                 // 下方的 `revision_iterations` 作为硬兜底。
@@ -2189,54 +2272,45 @@ async fn spawn_provider_run_from_handler(
                                 return;
                             }
 
-                            request.revision_feedback =
-                                Some(work_item_plan_findings_feedback(&findings));
-                            let author_provider = { engine.session().author_provider.clone() };
-                            let context_resolutions =
-                                match load_work_item_plan_outline_context_resolutions(
-                                    &app_paths_for_run,
-                                    &session_record_for_run,
+                            let feedback = work_item_plan_findings_feedback(&findings);
+                            let author_provider = engine.session().author_provider.clone();
+                            invocation =
+                                match WorkItemSplitEngine::build_outline_revision_invocation(
                                     &request,
-                                    &lifecycle_for_run,
                                     &issue,
+                                    &repository,
+                                    author_provider,
+                                    &feedback,
                                 ) {
-                                    Ok(resolutions) => resolutions,
-                                    Err(message) => {
+                                    Ok(invocation) => invocation,
+                                    Err(error) => {
                                         engine.mark_active_run_finished(&run_label);
                                         drop(engine);
-                                        let err = WsOutMessage::Error { message };
+                                        let err = WsOutMessage::Error {
+                                            message: format!(
+                                                "outline revision invocation failed: {}",
+                                                error.message
+                                            ),
+                                        };
                                         let _ =
                                             send_json_outbound(&outbound_tx_for_task, &err).await;
                                         return;
                                     }
                                 };
-                            let invocation = match WorkItemSplitEngine::build_outline_invocation(
-                                &request,
-                                &lifecycle_for_run,
-                                &issue,
-                                &repository,
-                                author_provider,
-                                &context_resolutions,
-                            ) {
-                                Ok(invocation) => invocation,
-                                Err(error) => {
-                                    engine.mark_active_run_finished(&run_label);
-                                    drop(engine);
-                                    let err = WsOutMessage::Error {
-                                        message: format!(
-                                            "outline generate_revision failed: {}",
-                                            error.message
-                                        ),
-                                    };
-                                    let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
-                                    return;
-                                }
-                            };
                             let node_id = engine.begin_work_item_plan_outline_run().await;
+                            engine
+                                .emit_provider_prompt_event(
+                                    &node_id,
+                                    invocation.prompt.clone(),
+                                    "发送给 WorkItemPlan provider 的增量返修提示词",
+                                    Some(invocation.author_provider.clone()),
+                                )
+                                .await;
                             let provider_input = engine.build_work_item_plan_streaming_input(
                                 invocation.provider_type.clone(),
                                 invocation.prompt.clone(),
                                 invocation.worktree_path.clone(),
+                                invocation.author_provider.clone(),
                             );
                             let provider_session = provider_for_run
                                 .start(provider_input, run_cancel.clone())
@@ -2528,6 +2602,7 @@ async fn spawn_provider_run_from_handler(
                     invocation.provider_type.clone(),
                     invocation.prompt.clone(),
                     invocation.worktree_path.clone(),
+                    invocation.author_provider.clone(),
                 );
                 let provider_session = provider_for_run
                     .start(provider_input, run_cancel.clone())
@@ -2687,6 +2762,7 @@ async fn spawn_provider_run_from_handler(
                                 invocation.provider_type.clone(),
                                 invocation.prompt.clone(),
                                 invocation.worktree_path.clone(),
+                                invocation.author_provider.clone(),
                             );
                             let provider_session = provider_for_run
                                 .start(provider_input, run_cancel.clone())
@@ -3064,6 +3140,7 @@ async fn drive_current_work_item_plan_outline_run(
             invocation.provider_type.clone(),
             invocation.prompt.clone(),
             invocation.worktree_path.clone(),
+            invocation.author_provider.clone(),
         );
         let provider_session = provider.start(provider_input, run_cancel.clone()).await;
         let full_output = engine

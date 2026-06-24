@@ -417,6 +417,29 @@ impl WorkItemSplitEngine {
         })
     }
 
+    /// 基于同一会话中上一版 outline 进行增量返修。
+    ///
+    /// Prompt 不再重复 issue/story/design/repository 完整上下文，而是依赖
+    /// `resume_provider_session_id` 复用 provider 会话历史；仅注入需要修改的
+    /// revision feedback，要求输出完整更新后的 outline JSON。
+    pub fn build_outline_revision_invocation(
+        request: &GenerateWorkItemsRequest,
+        issue: &IssueRecord,
+        repository: &RepositoryRecord,
+        author_provider: ProviderName,
+        feedback: &str,
+    ) -> ApiResult<WorkItemSplitInvocation> {
+        let (prompt, sentinel_nonce) = build_outline_revision_prompt(request, issue, feedback);
+
+        Ok(WorkItemSplitInvocation {
+            prompt,
+            provider_type: provider_name_to_type(&author_provider),
+            worktree_path: repository.path.to_string_lossy().to_string(),
+            author_provider,
+            sentinel_nonce,
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn build_revision_invocation(
         request: &GenerateWorkItemsRequest,
@@ -978,6 +1001,44 @@ fn build_outline_prompt_with_nonce(
         include_e2e_tests = request.include_e2e_tests.unwrap_or(false),
         force_frontend_backend_split = request.force_frontend_backend_split.unwrap_or(false),
         require_execution_plan_confirm = request.require_execution_plan_confirm.unwrap_or(false),
+        nonce = nonce,
+        schema = WORK_ITEM_PLAN_OUTLINE_OUTPUT_SCHEMA,
+    );
+    (prompt, nonce)
+}
+
+fn build_outline_revision_prompt(
+    _request: &GenerateWorkItemsRequest,
+    issue: &IssueRecord,
+    feedback: &str,
+) -> (String, String) {
+    let nonce = structured_output_nonce();
+    let prompt = format!(
+        "你是 Aria 的 WorkItemPlan Outline Planner。当前请求是基于同一会话中上一版 outline 进行增量返修。\n\n\
+         不要重新分析完整 issue、story/design 上下文或仓库结构；上一版 outline 已在同一会话上下文中。\
+         请仅根据以下反馈修改 outline，输出完整更新后的 outline。\n\n\
+         [issue_ref]\n\
+         project_id: {project_id}\n\
+         issue_id: {issue_id}\n\
+         title: {title}\n\n\
+         [revision_feedback]\n{feedback}\n\n\
+         [strict_output_contract]\n\
+         只能输出 WorkItemPlan Outline，不得输出完整 Work Item。\n\
+         不得输出 VerificationPlan、verification_plan、verification_plans、work_item_id、work_item_ids。\n\
+         不得输出 repository_profile，不得输出 parallel_groups。\n\
+         不要输出 implementation plan 或旧版 Work Item 拆分计划字段：work_item_outlines[] 中不要使用 id、layer、summary、key_paths、reuse_modules、test_strategy、acceptance_refs。\n\
+         work_item_outlines[] 的条目标识字段必须叫 outline_id；dependency_graph[] 必须使用 from_outline_id/to_outline_id 边，不要使用 work_item_id/depends_on 形式。\n\
+         不得修改仓库文件，不得创建计划文档。\n\
+         可以在最终结构化 JSON 前输出简短、可读的修改说明，供 Workbench 流式展示。\n\
+         最后必须输出一个 nonce sentinel JSON block。\n\
+         后端只解析最后一个 nonce 匹配的 <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">...</ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\"> block。\n\
+         标签内部必须是一个完整 JSON object，不要输出 Markdown code fence。\n\
+         严格按以下 JSON schema 输出。\n\n\
+         {schema}",
+        project_id = issue.project_id,
+        issue_id = issue.id,
+        title = issue.title,
+        feedback = feedback,
         nonce = nonce,
         schema = WORK_ITEM_PLAN_OUTLINE_OUTPUT_SCHEMA,
     );
@@ -2242,6 +2303,69 @@ mod tests {
         assert!(
             prompt.contains("missing write scope"),
             "prompt should contain feedback content: {prompt}"
+        );
+    }
+
+    #[test]
+    fn build_outline_revision_prompt_is_delta_only() {
+        let request = GenerateWorkItemsRequest {
+            title: "test plan".to_string(),
+            story_spec_ids: vec![],
+            design_spec_ids: vec![],
+            include_integration_tests: None,
+            include_e2e_tests: None,
+            force_frontend_backend_split: None,
+            require_execution_plan_confirm: None,
+            author_provider: None,
+            reviewer_provider: None,
+            review_rounds: None,
+            superpowers_enabled: None,
+            openspec_enabled: None,
+            revision_feedback: None,
+        };
+        let issue = IssueRecord {
+            id: "issue_0001".to_string(),
+            project_id: "project_0001".to_string(),
+            repo_id: None,
+            title: "Test Issue".to_string(),
+            description: None,
+            change_id: "change_0001".to_string(),
+            phase: IssuePhase::Clarification,
+            status: IssueStatus::Draft,
+            active_binding_id: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+
+        let (prompt, nonce) = build_outline_revision_prompt(
+            &request,
+            &issue,
+            "add dependency edge between backend and frontend",
+        );
+
+        assert!(
+            prompt.contains("[revision_feedback]"),
+            "delta prompt should contain revision feedback section: {prompt}"
+        );
+        assert!(
+            prompt.contains("add dependency edge between backend and frontend"),
+            "delta prompt should contain feedback content: {prompt}"
+        );
+        assert!(
+            !prompt.contains("[confirmed_story_specs]"),
+            "delta prompt should not repeat full story/design context: {prompt}"
+        );
+        assert!(
+            !prompt.contains("[repository_structure_summary]"),
+            "delta prompt should not repeat repository structure: {prompt}"
+        );
+        assert!(
+            prompt.contains(&format!("nonce=\"{nonce}\"")),
+            "delta prompt should include nonce sentinel: {prompt}"
+        );
+        assert!(
+            prompt.contains("\"outline\""),
+            "delta prompt should include output schema: {prompt}"
         );
     }
 
