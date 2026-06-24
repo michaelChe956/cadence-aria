@@ -19,6 +19,7 @@ use super::types::{
     parse_verification_scope, parse_work_item_kind, product_store_api_error,
 };
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn materialize_revision_output(
     lifecycle: &LifecycleStore,
     request: &GenerateWorkItemsRequest,
