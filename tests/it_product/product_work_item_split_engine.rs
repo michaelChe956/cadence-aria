@@ -13,7 +13,7 @@ use cadence_aria::product::models::{
 use cadence_aria::product::project_store::{CreateProjectInput, ProjectStore};
 use cadence_aria::product::repository_store::{CreateRepositoryInput, RepositoryStore};
 use cadence_aria::product::work_item_split_engine::{
-    RedoSpec, WorkItemSplitEngine, repatch_dependencies,
+    RedoSpec, WorkItemSplitEngine, parse_work_item_plan_outline_output, repatch_dependencies,
 };
 use cadence_aria::protocol::contracts::{AdapterInput, AdapterOutput, TimeoutStatus};
 use cadence_aria::web::types::GenerateWorkItemsRequest;
@@ -358,6 +358,61 @@ fn engine_with_output(output: Value) -> WorkItemSplitEngine {
     WorkItemSplitEngine::new(Arc::new(MockSplitProviderAdapter { output }))
 }
 
+fn valid_outline_author_output() -> Value {
+    json!({
+        "outline": {
+            "id": "outline_artifact_1",
+            "project_id": "project_0001",
+            "issue_id": "issue_0001",
+            "source_story_spec_ids": ["story_spec_0001"],
+            "source_design_spec_ids": ["design_spec_0001"],
+            "strategy_summary": "先后端后前端",
+            "work_item_outlines": [
+                {
+                    "outline_id": "outline_backend",
+                    "title": "后端 API",
+                    "kind": "backend",
+                    "goal": "实现 API",
+                    "scope": ["src/product"],
+                    "non_goals": [],
+                    "source_story_spec_ids": ["story_spec_0001"],
+                    "source_design_spec_ids": ["design_spec_0001"],
+                    "exclusive_write_scopes": ["src/product/**"],
+                    "forbidden_write_scopes": ["web/**"],
+                    "depends_on": [],
+                    "verification_intent": ["cargo test --locked --lib api"],
+                    "handoff_notes": "提供 API contract"
+                },
+                {
+                    "outline_id": "outline_frontend",
+                    "title": "前端 UI",
+                    "kind": "frontend",
+                    "goal": "接入 API",
+                    "scope": ["web/src"],
+                    "non_goals": [],
+                    "source_story_spec_ids": ["story_spec_0001"],
+                    "source_design_spec_ids": ["design_spec_0001"],
+                    "exclusive_write_scopes": ["web/src/**"],
+                    "forbidden_write_scopes": ["src/product/**"],
+                    "depends_on": ["outline_backend"],
+                    "verification_intent": ["pnpm -C web test"],
+                    "handoff_notes": "消费 API contract"
+                }
+            ],
+            "dependency_graph": [
+                {
+                    "from_outline_id": "outline_backend",
+                    "to_outline_id": "outline_frontend"
+                }
+            ],
+            "risks": [],
+            "handoff_strategy": "后端输出 contract 给前端",
+            "status": "draft"
+        },
+        "context_blockers": []
+    })
+}
+
 #[test]
 fn repatch_dependencies_reconnects_dependents() {
     use cadence_aria::product::models::IssueWorkItemDependencyEdge;
@@ -407,6 +462,23 @@ fn repatch_dependencies_reconnects_dependents() {
                 && e.to_work_item_id == "work_item_0003")
     );
     assert_eq!(repatched.len(), 3);
+}
+
+#[test]
+fn outline_output_rejects_mixed_outline_and_context_blockers() {
+    let mut output = valid_outline_author_output();
+    output["context_blockers"] = json!([
+        {
+            "code": "missing_repository_structure",
+            "message": "无法确认 src/websocket 是否存在",
+            "needed_context": ["请补充 WebSocket handler 路径"]
+        }
+    ]);
+
+    let error =
+        parse_work_item_plan_outline_output(output).expect_err("mixed outline/blocker output");
+
+    assert_eq!(error.code, "outline_mixed_context_blockers");
 }
 
 #[tokio::test]

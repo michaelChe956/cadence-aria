@@ -266,9 +266,20 @@ const WORK_ITEM_PLAN_OUTLINE_OUTPUT_SCHEMA: &str = r#"{
       }
     }
   },
-  "anyOf": [
-    { "required": ["outline"] },
-    { "required": ["context_blockers"] }
+  "oneOf": [
+    {
+      "required": ["outline"],
+      "properties": {
+        "context_blockers": { "maxItems": 0 }
+      }
+    },
+    {
+      "required": ["context_blockers"],
+      "properties": {
+        "context_blockers": { "minItems": 1 }
+      },
+      "not": { "required": ["outline"] }
+    }
   ],
   "additionalProperties": false
 }"#;
@@ -978,6 +989,9 @@ fn build_outline_prompt_with_nonce(
          work_item_outlines[] 的条目标识字段必须叫 outline_id；dependency_graph[] 必须使用 from_outline_id/to_outline_id 边，不要使用 work_item_id/depends_on 形式。\n\
          不得修改仓库文件，不得创建计划文档。\n\
          如果无法补齐模块边界、关键路径或测试策略，请不要猜测完整拆分；请在 context_blockers 数组中写明需要用户补充的上下文。\n\
+         如果能输出完整 outline，不得输出非空 context_blockers。\n\
+         只有完全无法产出 outline 时才输出 context_blockers，且不要同时输出 outline。\n\
+         路径不确定性写入 risks 或 handoff_notes，不要用 context_blockers 阻塞。\n\
          可以在最终结构化 JSON 前输出简短、可读的规划过程，供 Workbench 流式展示。\n\
          最后必须输出一个 nonce sentinel JSON block。\n\
          后端只解析最后一个 nonce 匹配的 <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">...</ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\"> block。\n\
@@ -1029,6 +1043,9 @@ fn build_outline_revision_prompt(
          不要输出 implementation plan 或旧版 Work Item 拆分计划字段：work_item_outlines[] 中不要使用 id、layer、summary、key_paths、reuse_modules、test_strategy、acceptance_refs。\n\
          work_item_outlines[] 的条目标识字段必须叫 outline_id；dependency_graph[] 必须使用 from_outline_id/to_outline_id 边，不要使用 work_item_id/depends_on 形式。\n\
          不得修改仓库文件，不得创建计划文档。\n\
+         如果能输出完整 outline，不得输出非空 context_blockers。\n\
+         只有完全无法产出 outline 时才输出 context_blockers，且不要同时输出 outline。\n\
+         路径不确定性写入 risks 或 handoff_notes，不要用 context_blockers 阻塞。\n\
          可以在最终结构化 JSON 前输出简短、可读的修改说明，供 Workbench 流式展示。\n\
          最后必须输出一个 nonce sentinel JSON block。\n\
          后端只解析最后一个 nonce 匹配的 <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">...</ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\"> block。\n\
@@ -1315,6 +1332,13 @@ pub fn parse_work_item_plan_outline_output(
         return Err(ApiError::validation(
             "outline_empty_output",
             "WorkItemPlan Outline output must include outline or context_blockers",
+        ));
+    }
+
+    if output.outline.is_some() && !output.context_blockers.is_empty() {
+        return Err(ApiError::validation(
+            "outline_mixed_context_blockers",
+            "WorkItemPlan Outline output must not include context_blockers when outline is present",
         ));
     }
 
@@ -2510,6 +2534,60 @@ cargo test 与 vitest。
                 || prompt.contains("不要输出 Implementation Plan"),
             "outline prompt must explicitly steer away from old implementation-plan fields: {prompt}"
         );
+    }
+
+    #[test]
+    fn outline_author_prompts_make_context_blockers_outline_alternative() {
+        let (request, issue, repository) = split_prompt_fixture();
+        let prompt = build_outline_prompt(
+            &request,
+            &issue,
+            &repository,
+            &["story context".to_string()],
+            &["design context".to_string()],
+            "(empty)",
+            &["missing_test_strategy".to_string()],
+            &[],
+        );
+        let (revision_prompt, _) =
+            build_outline_revision_prompt(&request, &issue, "补充前后端依赖边");
+
+        for prompt in [prompt, revision_prompt] {
+            assert!(
+                prompt.contains("如果能输出完整 outline，不得输出非空 context_blockers"),
+                "outline prompt must forbid mixed outline/context_blockers output: {prompt}"
+            );
+            assert!(
+                prompt.contains("只有完全无法产出 outline 时才输出 context_blockers"),
+                "outline prompt must reserve context_blockers for blocker-only output: {prompt}"
+            );
+            assert!(
+                prompt.contains("路径不确定性写入 risks 或 handoff_notes"),
+                "outline prompt must steer non-blocking uncertainty into outline fields: {prompt}"
+            );
+        }
+    }
+
+    #[test]
+    fn outline_output_schema_makes_outline_and_context_blockers_mutually_exclusive() {
+        let schema: serde_json::Value =
+            serde_json::from_str(WORK_ITEM_PLAN_OUTLINE_OUTPUT_SCHEMA).expect("schema json");
+
+        assert!(
+            schema.get("anyOf").is_none(),
+            "outline schema must not allow mixed outline/context_blockers output"
+        );
+        let one_of = schema["oneOf"].as_array().expect("schema oneOf");
+        assert_eq!(one_of.len(), 2);
+        assert_eq!(
+            one_of[0]["properties"]["context_blockers"]["maxItems"],
+            serde_json::json!(0)
+        );
+        assert_eq!(
+            one_of[1]["properties"]["context_blockers"]["minItems"],
+            serde_json::json!(1)
+        );
+        assert_eq!(one_of[1]["not"]["required"], serde_json::json!(["outline"]));
     }
 
     #[test]

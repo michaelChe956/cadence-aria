@@ -515,6 +515,139 @@ async fn outline_review_revise_requires_decision_before_next_outline_provider_ru
 }
 
 #[tokio::test]
+async fn work_item_plan_outline_review_revision_reenters_review_after_revised_outline_confirm() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let _test_controls = enable_test_controls().await;
+    let (app, _repo, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
+        valid_outline_output(),
+        valid_outline_output(),
+    ])
+    .await;
+
+    let (_status, prepare_resp) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-item-plans:prepare",
+        json!({
+            "title": "登录拆分",
+            "story_spec_ids": ["story_spec_0001"],
+            "design_spec_ids": ["design_spec_0001"],
+            "include_integration_tests": true,
+            "include_e2e_tests": false,
+            "force_frontend_backend_split": true,
+            "require_execution_plan_confirm": false,
+            "review_rounds": 1
+        }),
+    )
+    .await;
+
+    let session_id = prepare_resp["workspace_session"]["workspace_session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let mut ws = connect_ws(app.clone(), &session_id).await;
+
+    ws.send(Message::Text(
+        json!({
+            "type": "start_generation",
+            "provider_config": { "author": "fake", "reviewer": "codex", "review_rounds": 1 },
+            "reviewer_enabled": true
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .expect("send start_generation");
+
+    let _messages = recv_ws_until(&mut ws, Duration::from_secs(10), |messages| {
+        messages.iter().any(|message| {
+            message["type"] == "timeline_node_created"
+                && message["node"]["node_type"] == "work_item_plan_outline_confirm"
+        })
+    })
+    .await;
+
+    enable_work_item_plan_review_fixture(&app, &session_id, outline_review_revise()).await;
+
+    ws.send(Message::Text(
+        json!({ "type": "author_decision", "decision": "accept" })
+            .to_string()
+            .into(),
+    ))
+    .await
+    .expect("send first outline accept");
+
+    let messages = recv_ws_until(&mut ws, Duration::from_secs(10), |messages| {
+        messages
+            .iter()
+            .any(|message| message["type"] == "review_decision_required")
+    })
+    .await;
+    assert!(
+        messages
+            .iter()
+            .any(|message| message["type"] == "review_decision_required"),
+        "expected first outline review revise to pause for review decision"
+    );
+
+    ws.send(Message::Text(
+        json!({
+            "type": "review_decision_response",
+            "decision": "continue",
+            "extra_context": null
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .expect("send review_decision_response continue");
+
+    let messages = recv_ws_until(&mut ws, Duration::from_secs(10), |messages| {
+        messages.iter().any(|message| {
+            message["type"] == "timeline_node_created"
+                && message["node"]["node_type"] == "work_item_plan_outline_confirm"
+        })
+    })
+    .await;
+    assert!(
+        messages.iter().any(|message| {
+            message["type"] == "timeline_node_created"
+                && message["node"]["node_type"] == "work_item_plan_outline_confirm"
+        }),
+        "expected revised outline to return to author confirm"
+    );
+
+    enable_work_item_plan_review_fixture(&app, &session_id, outline_review_pass()).await;
+
+    ws.send(Message::Text(
+        json!({ "type": "author_decision", "decision": "accept" })
+            .to_string()
+            .into(),
+    ))
+    .await
+    .expect("send revised outline accept");
+
+    let messages = recv_ws_until(&mut ws, Duration::from_secs(10), |messages| {
+        messages.iter().any(|message| {
+            message["type"] == "timeline_node_created"
+                && message["node"]["node_type"] == "work_item_plan_outline_review"
+                && message["node"]["round"] == 2
+        })
+    })
+    .await;
+    assert!(
+        messages.iter().any(|message| {
+            message["type"] == "timeline_node_created"
+                && message["node"]["node_type"] == "work_item_plan_outline_review"
+                && message["node"]["round"] == 2
+        }),
+        "expected revised outline accept to create WorkItemPlan Outline Review Round 2"
+    );
+
+    ws.close(None).await.ok();
+}
+
+#[tokio::test]
 #[ignore = "legacy full-candidate revision flow is superseded by WP2 outline generation; WP3+ will replace this coverage"]
 async fn work_item_plan_revision_streams_provider_output_before_candidate_artifact() {
     let _guard = WS_TEST_LOCK.lock().await;
@@ -964,5 +1097,15 @@ fn outline_review_revise() -> Value {
             "impact": "后续 work item 无法安全并行",
             "required_action": "重新拆分 exclusive_write_scopes"
         }]
+    })
+}
+
+fn outline_review_pass() -> Value {
+    json!({
+        "verdict": "pass",
+        "summary": "Outline 可以进入下一阶段",
+        "generation_round_id": "round_002",
+        "affects_items": [],
+        "findings": []
     })
 }
