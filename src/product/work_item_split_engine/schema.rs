@@ -110,6 +110,93 @@ pub(crate) const WORK_ITEM_SPLIT_OUTPUT_SCHEMA: &str = r#"{
   "required": ["repository_profile", "work_items", "verification_plans"]
 }"#;
 
+pub(crate) const WORK_ITEM_DRAFT_OUTPUT_SCHEMA: &str = r#"{
+  "type": "object",
+  "properties": {
+    "draft": {
+      "type": "object",
+      "properties": {
+        "outline_id": { "type": "string" },
+        "title": { "type": "string" },
+        "kind": { "type": "string" },
+        "goal": { "type": "string" },
+        "implementation_context": { "type": "string" },
+        "exclusive_write_scopes": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "forbidden_write_scopes": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "depends_on_outline_ids": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "required_handoff_from_outline_ids": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "handoff_summary": { "type": "string" },
+        "verification_plan": {
+          "type": "object",
+          "properties": {
+            "commands": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": { "type": "string" },
+                  "label": { "type": "string" },
+                  "command": { "type": "string" },
+                  "cwd": { "type": "string" },
+                  "purpose": { "type": "string" },
+                  "required": { "type": "boolean" },
+                  "timeout_seconds": { "type": "integer" },
+                  "safety": { "type": "string" }
+                },
+                "required": ["id", "label", "command", "purpose"]
+              }
+            },
+            "manual_checks": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": { "type": "string" },
+                  "label": { "type": "string" },
+                  "instructions": { "type": "string" },
+                  "required": { "type": "boolean" }
+                },
+                "required": ["id", "label", "instructions"]
+              }
+            },
+            "required_gates": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          },
+          "required": ["commands", "manual_checks", "required_gates"]
+        }
+      },
+      "required": [
+        "outline_id",
+        "title",
+        "kind",
+        "goal",
+        "implementation_context",
+        "exclusive_write_scopes",
+        "forbidden_write_scopes",
+        "depends_on_outline_ids",
+        "required_handoff_from_outline_ids",
+        "handoff_summary",
+        "verification_plan"
+      ]
+    }
+  },
+  "required": ["draft"]
+}"#;
+
 pub(crate) const WORK_ITEM_PLAN_OUTLINE_OUTPUT_SCHEMA: &str = r#"{
   "type": "object",
   "properties": {

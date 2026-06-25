@@ -1,7 +1,4 @@
-use crate::cross_cutting::streaming_provider::{
-    ProviderEvent, ProviderPermissionMode, StreamingProviderAdapter,
-};
-
+#[cfg(target_os = "linux")]
 use super::*;
 
 #[tokio::test]

@@ -106,7 +106,7 @@ describe("WorkItemPlanArtifactPanel", () => {
                 title: "后端数据层",
                 kind: "backend",
                 goal: "实现 ProviderCatalog 与全局状态持久化。",
-                implementation_context: "需要复用 json_store 原子写和 flock 文件锁。",
+                implementation_context: "{&quot;required_gates&quot;:[&quot;cmd_check&quot;]}",
                 exclusive_write_scopes: ["src/web/provider_catalog.rs"],
                 forbidden_write_scopes: ["web/src/"],
                 depends_on_outline_ids: [],
@@ -130,7 +130,7 @@ describe("WorkItemPlanArtifactPanel", () => {
                     },
                   ],
                 },
-                handoff_summary: "后续安装器可调用 ProviderCatalog::required。",
+                handoff_summary: "后续安装器可调用 &quot;ProviderCatalog::required&quot;。",
               },
               status: "draft",
               active: true,
@@ -160,13 +160,15 @@ describe("WorkItemPlanArtifactPanel", () => {
     const panel = screen.getByTestId("work-item-plan-artifact-panel");
     expect(panel).toHaveTextContent("后端数据层");
     expect(panel).toHaveTextContent("实现 ProviderCatalog 与全局状态持久化。");
-    expect(panel).toHaveTextContent("需要复用 json_store 原子写和 flock 文件锁。");
+    expect(panel).toHaveTextContent('"required_gates": [');
+    expect(panel).toHaveTextContent('"cmd_check"');
     expect(panel).toHaveTextContent("src/web/provider_catalog.rs");
     expect(panel).toHaveTextContent("web/src/");
     expect(panel).toHaveTextContent("cargo test --locked --lib provider_catalog");
     expect(panel).toHaveTextContent("后端数据层验证");
-    expect(panel).toHaveTextContent("后续安装器可调用 ProviderCatalog::required。");
+    expect(panel).toHaveTextContent('后续安装器可调用 "ProviderCatalog::required"。');
     expect(panel).toHaveTextContent("missing_scope");
+    expect(panel).not.toHaveTextContent("&quot;");
   });
 
   it("switches to a JSON source view rendered with Monaco", async () => {

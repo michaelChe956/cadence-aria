@@ -78,6 +78,22 @@ describe("chat workspace entries", () => {
     expect(screen.getByText(/n=1/)).toBeInTheDocument();
   });
 
+  it("decodes html entity escaped provider stream JSON-like content", () => {
+    const { container } = render(
+      <ProviderStreamEntry
+        entry={makeEntry({
+          type: "provider_stream",
+          role: "author",
+          content: "{&quot;required_gates&quot;:[&quot;cmd_check&quot;]}",
+        })}
+      />,
+    );
+
+    expect(container.textContent).toContain('"required_gates": [');
+    expect(container.textContent).toContain('"cmd_check"');
+    expect(container.textContent).not.toContain("&quot;");
+  });
+
   it("renders provider stream markdown semantics inside message bubbles", () => {
     const entry = makeEntry({
       type: "provider_stream",

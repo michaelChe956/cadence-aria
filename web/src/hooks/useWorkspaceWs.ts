@@ -29,6 +29,8 @@ import {
   type TimelineNode,
   type TimelineNodeStatus,
 } from "../state/workspace-ws-store";
+import { workItemPlanArtifactUpdateSummary } from "../state/work-item-plan-artifact-summary";
+import { stageChangeContent } from "../state/workspace-stage-labels";
 
 interface WsServerMessage {
   type: string;
@@ -281,23 +283,24 @@ export function useWorkspaceWs(sessionId: string | null) {
         break;
       case "stage_change":
         {
-          const nextStage = msg.stage as string;
+          const nextStage = typeof msg.stage === "string" ? msg.stage : "unknown";
           if (!ACTIVE_PROVIDER_STAGES.has(nextStage) && store.activeNodeId) {
             invalidatedPreStageNodeIdsRef.current.add(store.activeNodeId);
           }
           store.setStage(nextStage);
-        }
-        store.appendChatEntry({
-          id: chatEntryId("stage_change", `${msg.stage as string}:${store.chatEntries.length}`),
-          type: "stage_change",
-          role: "system",
-          content: `阶段变更 -> ${msg.stage as string}`,
-          timestamp: new Date().toISOString(),
-        });
-        if (msg.stage === "human_confirm") {
-          const gatePrompt = gatePromptEntryForState(useWorkspaceStore.getState());
-          if (gatePrompt) {
-            store.appendChatEntry(gatePrompt);
+          store.appendChatEntry({
+            id: chatEntryId("stage_change", `${nextStage}:${store.chatEntries.length}`),
+            type: "stage_change",
+            role: "system",
+            content: stageChangeContent(nextStage),
+            timestamp: new Date().toISOString(),
+            metadata: { stage: nextStage },
+          });
+          if (nextStage === "human_confirm") {
+            const gatePrompt = gatePromptEntryForState(useWorkspaceStore.getState());
+            if (gatePrompt) {
+              store.appendChatEntry(gatePrompt);
+            }
           }
         }
         break;
@@ -321,16 +324,14 @@ export function useWorkspaceWs(sessionId: string | null) {
             const workItemPlanArtifact = workItemPlanArtifactFromMessage(msg);
             if (workItemPlanArtifact) {
               store.setWorkItemPlanArtifact(workItemPlanArtifact, version);
+              const summary = workItemPlanArtifactUpdateSummary(workItemPlanArtifact, version);
               store.appendChatEntry({
                 id: chatEntryId("artifact_update", `${workItemPlanArtifact.type}:${String(version)}`),
                 type: "artifact_update",
                 role: "system",
-                content: `Work Item Plan staged artifact 已更新 -> v${version}`,
+                content: summary.content,
                 timestamp: new Date().toISOString(),
-                metadata: {
-                  version,
-                  artifact_type: workItemPlanArtifact.type,
-                },
+                metadata: summary.metadata,
               });
             } else {
               const markdown = msg.markdown as string;

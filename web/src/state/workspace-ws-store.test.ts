@@ -2337,6 +2337,78 @@ describe("workspace ws store", () => {
     expect(useWorkspaceStore.getState().artifactVersions).toHaveLength(1);
   });
 
+  it("rebuilds staged draft artifact updates with business labels", () => {
+    const store = useWorkspaceStore.getState();
+    const draftCandidate = makeDraftArtifactPayload();
+
+    store.setSessionState({
+      session_id: "session_draft_artifact_rebuild",
+      workspace_type: "work_item_plan",
+      stage: "author_confirm",
+      messages: [],
+      checkpoints: [],
+      artifact: { draft_candidate: draftCandidate } as never,
+      providers: { author: "claude_code", reviewer: null },
+      active_node_id: "node_draft",
+      timeline_nodes: [
+        {
+          node_id: "node_draft",
+          node_type: "work_item_draft_run",
+          agent: "claude_code",
+          stage: "running",
+          round: null,
+          status: "completed",
+          title: "Work Item Draft 生成",
+          summary: null,
+          started_at: "2026-06-23T00:00:00Z",
+          completed_at: "2026-06-23T00:01:00Z",
+          duration_ms: null,
+          artifact_ref: "artifact_current",
+          provider_config_snapshot: {
+            author: "claude_code",
+            reviewer: null,
+            review_rounds: 0,
+          },
+        },
+      ],
+      timeline_node_details: {
+        node_draft: makeNodeDetail({
+          node_id: "node_draft",
+          node_type: "work_item_draft_run",
+        }),
+      },
+      artifact_version_summaries: [
+        {
+          version: 4,
+          generated_by: "claude_code",
+          reviewed_by: null,
+          review_verdict: null,
+          confirmed_by: null,
+          is_current: true,
+          created_at: "2026-06-23T00:01:00Z",
+          source_node_id: "node_draft",
+        },
+      ],
+    });
+
+    const artifactEntry = useWorkspaceStore
+      .getState()
+      .chatEntries.find((entry) => entry.type === "artifact_update");
+
+    expect(artifactEntry).toMatchObject({
+      type: "artifact_update",
+      content: "Draft 已更新 · outline_backend · draft_backend_001",
+      metadata: expect.objectContaining({
+        version: 4,
+        version_label: "内部版本 v4",
+        artifact_label: "Draft",
+        object_id: "outline_backend",
+        draft_id: "draft_backend_001",
+      }),
+    });
+    expect(artifactEntry?.content).not.toContain("-> v4");
+  });
+
   it("stores compile report payload from session state", () => {
     const store = useWorkspaceStore.getState();
     const compileReport = makeCompileArtifactPayload();

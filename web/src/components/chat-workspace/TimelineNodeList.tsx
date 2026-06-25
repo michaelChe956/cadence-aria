@@ -94,7 +94,9 @@ function TimelineNodeButton({
             </span>
           </div>
           {node.summary ? (
-            <p className="mt-1 truncate text-xs text-[var(--aria-ink-muted)]">{node.summary}</p>
+            <p className="mt-1 line-clamp-2 break-words text-xs leading-4 text-[var(--aria-ink-muted)]">
+              {node.summary}
+            </p>
           ) : null}
         </div>
       </div>

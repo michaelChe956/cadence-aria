@@ -10,6 +10,7 @@ import type {
   WorkItemPlanOutline,
   WorkItemPlanOutlineItem,
 } from "../../api/types";
+import { normalizeDisplayText } from "../chat-workspace/text-display";
 import { MonacoViewer } from "../shared/MonacoViewer";
 
 export interface WorkItemPlanArtifactPanelProps {
@@ -359,18 +360,23 @@ function Header({ title, meta }: { title: string; meta: string }) {
 }
 
 function Paragraph({ children }: { children: string }) {
-  return <p className="break-words text-sm leading-6 text-[var(--aria-ink)]">{children}</p>;
+  return (
+    <p className="break-words text-sm leading-6 text-[var(--aria-ink)]">
+      {normalizeDisplayText(children)}
+    </p>
+  );
 }
 
 function ReadableBlock({ title, content }: { title: string; content: string }) {
-  if (!content.trim()) {
+  const displayContent = normalizeDisplayText(content);
+  if (!displayContent.trim()) {
     return null;
   }
   return (
     <div className="mt-3">
       <div className="mb-1 text-xs font-semibold text-[var(--aria-ink-muted)]">{title}</div>
       <div className="whitespace-pre-wrap break-words text-sm leading-6 text-[var(--aria-ink)]">
-        {content}
+        {displayContent}
       </div>
     </div>
   );
@@ -386,7 +392,7 @@ function BulletList({ title, items }: { title: string; items: string[] }) {
       <ul className="list-disc space-y-1 pl-5 text-sm leading-6 text-[var(--aria-ink)]">
         {items.map((item, index) => (
           <li key={`${item}-${index}`} className="break-words">
-            {item}
+            {normalizeDisplayText(item)}
           </li>
         ))}
       </ul>
@@ -409,10 +415,11 @@ function DetailLists({ rows }: { rows: Array<[string, string[] | undefined]> }) 
 }
 
 function KeyValue({ label, value }: { label: string; value: string }) {
+  const displayValue = normalizeDisplayText(value);
   return (
     <div className="grid grid-cols-[8rem_minmax(0,1fr)] gap-3 text-sm">
       <span className="text-[var(--aria-ink-muted)]">{label}</span>
-      <span className="min-w-0 break-words text-[var(--aria-ink)]">{value}</span>
+      <span className="min-w-0 break-words text-[var(--aria-ink)]">{displayValue}</span>
     </div>
   );
 }

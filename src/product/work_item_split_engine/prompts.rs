@@ -11,7 +11,10 @@ use super::context::{
     collect_design_context, collect_story_context, design_context_gaps,
     merge_design_context_capabilities, summarize_repository_structure,
 };
-use super::schema::{WORK_ITEM_PLAN_OUTLINE_OUTPUT_SCHEMA, WORK_ITEM_SPLIT_OUTPUT_SCHEMA};
+use super::schema::{
+    WORK_ITEM_DRAFT_OUTPUT_SCHEMA, WORK_ITEM_PLAN_OUTLINE_OUTPUT_SCHEMA,
+    WORK_ITEM_SPLIT_OUTPUT_SCHEMA,
+};
 use super::types::{
     RedoSpec, WorkItemSplitInvocation, format_context_resolutions, format_string_list,
     prompt_nonce, provider_name_to_type, structured_output_nonce, work_item_kind_text,
@@ -491,10 +494,16 @@ pub(crate) fn build_work_item_draft_prompt(
          - 只能输出一个 WorkItemDraftCandidate，字段必须对应当前 outline_id `{outline_id}`。\n\
          - 不得修改 Outline，不得新增、删除或重命名 outline。\n\
          - 不得输出 work_item_id、draft_id、status、generated_from_node_id、accepted_at、batch_id 等后端状态字段。\n\
-         - verification_plan 可以是对象，但 required_gates 只能引用同一 verification_plan 内的 command/manual_check id。\n\
+         - verification_plan 必须包含 commands、manual_checks、required_gates 三个字段；没有 manual check 时输出 []。\n\
+         - verification_plan.required_gates 必须是字符串数组，只能写同一 verification_plan 内 command/manual_check 的 id，例如 [\"cmd_unit\"]。\n\
+         - 不要输出 required_gates gate 对象；禁止写 {{\"id\":\"gate_unit\",\"type\":\"command\",\"command_id\":\"cmd_unit\",\"expected\":\"exit 0\"}} 这类对象。\n\
          - 可以先输出简短可读状态；最终 JSON 必须放在最后一个 nonce sentinel block 中，不要输出 Markdown code fence。\n\n\
          [output]\n\
-         <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">{{\"draft\":{{\"outline_id\":\"{outline_id}\",\"title\":\"...\",\"kind\":\"backend|frontend|integration|e2e|docs|infra|other\",\"goal\":\"...\",\"implementation_context\":\"...\",\"exclusive_write_scopes\":[],\"forbidden_write_scopes\":[],\"depends_on_outline_ids\":[],\"required_handoff_from_outline_ids\":[],\"handoff_summary\":\"...\",\"verification_plan\":{{}}}}}}</ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">",
+         <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">{{\"draft\":{{\"outline_id\":\"{outline_id}\",\"title\":\"...\",\"kind\":\"backend|frontend|integration|e2e|docs|infra|other\",\"goal\":\"...\",\"implementation_context\":\"...\",\"exclusive_write_scopes\":[],\"forbidden_write_scopes\":[],\"depends_on_outline_ids\":[],\"required_handoff_from_outline_ids\":[],\"handoff_summary\":\"...\",\"verification_plan\":{{\"commands\":[{{\"id\":\"cmd_unit\",\"label\":\"unit tests\",\"command\":\"cargo test --locked --lib <filter>\",\"cwd\":\"\",\"purpose\":\"验证当前 work item\",\"required\":true,\"timeout_seconds\":120,\"safety\":\"approved\"}}],\"manual_checks\":[],\"required_gates\":[\"cmd_unit\"]}}}}}}</ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">\n\n\
+         [output_schema]\n\
+         严格按以下 JSON schema 输出。\n\n\
+         {schema}",
         outline_id = current_outline.outline_id,
+        schema = WORK_ITEM_DRAFT_OUTPUT_SCHEMA,
     )
 }

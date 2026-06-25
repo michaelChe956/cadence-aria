@@ -266,6 +266,28 @@ describe("useWorkspaceWs", () => {
     });
   });
 
+  it("stores stage change entries with readable labels and original stage metadata", () => {
+    const harness = renderWorkspaceHook();
+
+    act(() => {
+      harness.ws.receive({
+        type: "stage_change",
+        stage: "author_confirm",
+      });
+    });
+
+    expect(useWorkspaceStore.getState().stage).toBe("author_confirm");
+    expect(useWorkspaceStore.getState().chatEntries.at(-1)).toMatchObject({
+      type: "stage_change",
+      role: "system",
+      content: "等待作者确认",
+      metadata: { stage: "author_confirm" },
+    });
+    expect(useWorkspaceStore.getState().chatEntries.at(-1)?.content).not.toContain(
+      "author_confirm",
+    );
+  });
+
   it("stores execution events from websocket messages", () => {
     const harness = renderWorkspaceHook();
 
@@ -2278,11 +2300,36 @@ describe("useWorkspaceWs", () => {
     });
     expect(useWorkspaceStore.getState().workItemPlanCandidate).toBeNull();
     expect(useWorkspaceStore.getState().artifact).toBeNull();
+    const draftEntry = useWorkspaceStore
+      .getState()
+      .chatEntries.find((entry) => entry.metadata?.artifact_type === "draft_candidate");
+    expect(draftEntry).toMatchObject({
+      type: "artifact_update",
+      content: "Draft 已更新 · outline_backend · draft_backend_001",
+      metadata: expect.objectContaining({
+        version: 2,
+        version_label: "内部版本 v2",
+        artifact_type: "draft_candidate",
+        artifact_label: "Draft",
+        object_id: "outline_backend",
+        object_title: "Backend flow",
+        draft_id: "draft_backend_001",
+        status_label: "draft",
+      }),
+    });
     expect(useWorkspaceStore.getState().chatEntries.at(-1)).toMatchObject({
       type: "artifact_update",
-      content: "Work Item Plan staged artifact 已更新 -> v4",
-      metadata: { version: 4, artifact_type: "compile_report" },
+      content: "Compile Report 已更新 · committed",
+      metadata: {
+        version: 4,
+        version_label: "内部版本 v4",
+        artifact_type: "compile_report",
+        artifact_label: "Compile Report",
+        object_id: "compile_001",
+        status_label: "committed",
+      },
     });
+    expect(useWorkspaceStore.getState().chatEntries.at(-1)?.content).not.toContain("-> v4");
   });
 
   it("sends revert_work_item messages", () => {

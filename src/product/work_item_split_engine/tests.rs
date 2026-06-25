@@ -426,6 +426,45 @@ fn single_item_prompt_forbids_work_item_id_and_outline_changes() {
 }
 
 #[test]
+fn single_item_prompt_requires_required_gates_as_string_id_array() {
+    let outline = parse_work_item_plan_outline_output(valid_outline_author_output())
+        .expect("outline output")
+        .outline
+        .expect("outline");
+
+    let invocation = build_work_item_draft_invocation(
+        &outline,
+        "outline_backend",
+        WorkItemGenerationMode::Serial,
+        &[],
+        None,
+    )
+    .expect("draft invocation");
+
+    assert!(
+        invocation
+            .prompt
+            .contains("required_gates 必须是字符串数组"),
+        "draft prompt must explicitly state required_gates uses string ids: {}",
+        invocation.prompt
+    );
+    assert!(
+        invocation
+            .prompt
+            .contains("\"required_gates\":[\"cmd_unit\"]"),
+        "draft prompt must include a minimal valid required_gates example: {}",
+        invocation.prompt
+    );
+    assert!(
+        invocation
+            .prompt
+            .contains("不要输出 required_gates gate 对象"),
+        "draft prompt must forbid gate object output: {}",
+        invocation.prompt
+    );
+}
+
+#[test]
 fn single_item_parser_rejects_multiple_work_items() {
     let error = parse_work_item_draft_output(serde_json::json!({
         "drafts": [

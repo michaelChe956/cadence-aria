@@ -130,6 +130,12 @@ impl WorkspaceEngine {
 
         let validator_findings = work_item_split_findings_to_dto(&report.findings);
         let can_accept = !report.has_errors();
+        let completion_summary = format!(
+            "{} · {} · {}",
+            record.outline_id,
+            record.draft_id,
+            work_item_draft_status_label(&record.status)
+        );
         self.update_artifact(ArtifactPayload::WorkItemDraftCandidate {
             draft_candidate: Box::new(WorkItemDraftCandidatePayload {
                 draft_record: record,
@@ -138,12 +144,7 @@ impl WorkspaceEngine {
             }),
         })
         .await;
-        self.complete_active_node(Some(if can_accept {
-            "Work Item Draft 生成完成，等待确认".to_string()
-        } else {
-            "Work Item Draft 局部校验失败，等待重写或暂停".to_string()
-        }))
-        .await;
+        self.complete_active_node(Some(completion_summary)).await;
         self.enter_work_item_draft_confirm(Some("请确认当前 Work Item Draft".to_string()))
             .await;
         Ok(())

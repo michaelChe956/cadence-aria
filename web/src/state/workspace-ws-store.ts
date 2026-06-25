@@ -24,6 +24,7 @@ import {
   setWorkspaceContentCacheEntry,
   type WorkspaceContentCache,
 } from "./workspace-content-cache";
+import { workItemPlanArtifactUpdateSummary } from "./work-item-plan-artifact-summary";
 
 type WorkspaceArtifact =
   | string
@@ -1521,21 +1522,29 @@ function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
       .filter((artifact) => artifact.source_node_id === node.node_id)
       .sort((left, right) => left.version - right.version);
     for (const artifact of artifactVersions) {
+      const typedArtifact = state.workItemPlanArtifactVersions.find(
+        (candidate) => candidate.version === artifact.version,
+      )?.artifact;
+      const summary = typedArtifact
+        ? workItemPlanArtifactUpdateSummary(typedArtifact, artifact.version)
+        : null;
+      const artifactMetadata = {
+        version: artifact.version,
+        generated_by: artifact.generated_by,
+        reviewed_by: artifact.reviewed_by ?? null,
+        review_verdict: artifact.review_verdict ?? null,
+        confirmed_by: artifact.confirmed_by ?? null,
+        source_node_id: artifact.source_node_id,
+        ...(summary?.metadata ?? {}),
+      };
       entries.push({
         id: chatEntryId(node.node_id, `artifact-${artifact.version}`),
         type: "artifact_update",
         role: "system",
-        content: `产物已更新 -> v${artifact.version}`,
+        content: summary?.content ?? `产物已更新 -> v${artifact.version}`,
         timestamp: artifact.created_at,
         node_id: node.node_id,
-        metadata: {
-          version: artifact.version,
-          generated_by: artifact.generated_by,
-          reviewed_by: artifact.reviewed_by ?? null,
-          review_verdict: artifact.review_verdict ?? null,
-          confirmed_by: artifact.confirmed_by ?? null,
-          source_node_id: artifact.source_node_id,
-        },
+        metadata: artifactMetadata,
         content_ref: {
           kind: "artifact_version",
           version: artifact.version,

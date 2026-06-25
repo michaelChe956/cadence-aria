@@ -177,19 +177,33 @@ impl WorkspaceEngine {
 
     pub(crate) async fn create_serial_work_item_draft_run_node(&mut self, outline_id: &str) {
         self.transition_stage(WorkspaceStage::Running).await;
+        let outline_title = self.work_item_outline_title_for(outline_id);
         let _ = self
             .create_timeline_node(TimelineNodeDraft {
                 node_type: TimelineNodeType::WorkItemDraftRun,
                 agent: Some(self.session.author_provider.clone()),
                 stage: WorkspaceStage::Running,
                 round: None,
-                title: "Work Item Draft 生成".to_string(),
-                summary: Some(format!(
-                    "准备生成 outline `{outline_id}` 的 Work Item Draft"
-                )),
+                title: format!("Draft · {outline_title}"),
+                summary: Some(format!("{outline_id} · pending")),
                 status: TimelineNodeStatus::Active,
             })
             .await;
+    }
+
+    fn work_item_outline_title_for(&self, outline_id: &str) -> String {
+        self.latest_work_item_plan_outline_candidate()
+            .ok()
+            .and_then(|candidate| {
+                candidate
+                    .outline
+                    .work_item_outlines
+                    .into_iter()
+                    .find(|item| item.outline_id == outline_id)
+                    .map(|item| item.title)
+            })
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or_else(|| outline_id.to_string())
     }
 
     pub fn build_current_work_item_draft_streaming_input(

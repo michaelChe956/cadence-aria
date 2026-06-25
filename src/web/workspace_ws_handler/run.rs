@@ -592,6 +592,18 @@ pub(crate) async fn spawn_provider_run_from_handler(
                     }
                 };
                 let author_provider = engine.session().author_provider.clone();
+                engine
+                    .emit_provider_prompt_event(
+                        &node_id,
+                        provider_input.prompt.clone(),
+                        if feedback.is_some() {
+                            "发送给 WorkItemDraft provider 的增量返修提示词"
+                        } else {
+                            "发送给 WorkItemDraft provider 的完整提示词"
+                        },
+                        Some(author_provider.clone()),
+                    )
+                    .await;
                 let provider_session = provider_for_run
                     .start(provider_input, run_cancel.clone())
                     .await;

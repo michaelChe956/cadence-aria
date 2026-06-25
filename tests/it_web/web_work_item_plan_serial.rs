@@ -262,6 +262,8 @@ async fn serial_mode_starts_first_outline_by_topological_order() {
         })
         .expect("draft run node");
     assert_eq!(node["node"]["stage"], "running");
+    assert_eq!(node["node"]["title"], "Draft · 实现后端登录会话 API");
+    assert_eq!(node["node"]["summary"], "outline_backend_session · pending");
 
     let index = WorkItemPlanStore::new(ProductAppPaths::new(root.path().join(".aria")))
         .load_active_index("project_0001", "issue_0001", &plan_id)
@@ -270,6 +272,51 @@ async fn serial_mode_starts_first_outline_by_topological_order() {
     assert_eq!(
         index.active_outline_id.as_deref(),
         Some("outline_backend_session")
+    );
+
+    ws.close(None).await.ok();
+}
+
+#[tokio::test]
+async fn serial_draft_run_emits_provider_prompt_event() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let _test_guard = enable_test_controls().await;
+    let (app, _root, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
+        valid_outline_output(),
+        valid_draft_output("outline_backend_session"),
+    ])
+    .await;
+    let (_session_id, _plan_id, mut ws) = prepare_plan_accept_outline_and_select_serial(&app).await;
+
+    let messages = recv_ws_until(&mut ws, Duration::from_secs(10), |messages| {
+        messages.iter().any(|message| {
+            message["type"] == "execution_event"
+                && message["event"]["title"] == "Provider Prompt"
+                && message["event"]["node_id"].as_str().is_some_and(|node_id| {
+                    messages.iter().any(|created| {
+                        created["type"] == "timeline_node_created"
+                            && created["node"]["node_id"] == node_id
+                            && created["node"]["node_type"] == "work_item_draft_run"
+                    })
+                })
+        })
+    })
+    .await;
+
+    let prompt_event = messages
+        .iter()
+        .find(|message| {
+            message["type"] == "execution_event" && message["event"]["title"] == "Provider Prompt"
+        })
+        .expect("draft Provider Prompt event");
+
+    assert_eq!(prompt_event["event"]["kind"], "output");
+    assert_eq!(prompt_event["event"]["status"], "started");
+    assert!(
+        prompt_event["event"]["output"]
+            .as_str()
+            .expect("prompt output")
+            .contains("Work Item Draft author")
     );
 
     ws.close(None).await.ok();
@@ -302,6 +349,24 @@ async fn serial_item_run_writes_draft_record_not_real_work_item() {
         })
         .expect("draft confirm node");
     assert_eq!(node["node"]["stage"], "author_confirm");
+    let draft_run_node_id = messages
+        .iter()
+        .find(|message| {
+            message["type"] == "timeline_node_created"
+                && message["node"]["node_type"] == "work_item_draft_run"
+        })
+        .and_then(|message| message["node"]["node_id"].as_str())
+        .expect("draft run node id");
+    let draft_run_update = messages
+        .iter()
+        .find(|message| {
+            message["type"] == "timeline_node_updated" && message["node_id"] == draft_run_node_id
+        })
+        .expect("draft run update");
+    assert_eq!(
+        draft_run_update["summary"],
+        "outline_backend_session · draft_001 · draft"
+    );
 
     let paths = ProductAppPaths::new(root.path().join(".aria"));
     let draft_store = WorkItemPlanStore::new(paths.clone());

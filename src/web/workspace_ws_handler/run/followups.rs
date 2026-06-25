@@ -576,6 +576,14 @@ macro_rules! workspace_ws_provider_run_followups {
                     return;
                 }
             };
+            $engine
+                .emit_provider_prompt_event(
+                    &node_id,
+                    provider_input.prompt.clone(),
+                    "发送给 WorkItemDraft provider 的完整提示词",
+                    Some(author_name.clone()),
+                )
+                .await;
             let provider_session = provider_for_draft
                 .start(provider_input, $run_cancel.clone())
                 .await;

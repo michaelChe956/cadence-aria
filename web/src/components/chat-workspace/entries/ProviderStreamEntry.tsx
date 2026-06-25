@@ -2,6 +2,7 @@ import { useMemo, useState, type ReactNode } from "react";
 import { lexer, type Token, type Tokens } from "marked";
 import type { ChatEntry } from "../../../state/chat-entries";
 import { ChatEntryContainer } from "../ChatEntryContainer";
+import { normalizeDisplayText } from "../text-display";
 
 export function ProviderStreamEntry({ entry }: { entry: ChatEntry }) {
   const content = normalizeProviderStreamEntryContent(entry);
@@ -138,7 +139,7 @@ function renderBlockToken(token: Token, key: string): ReactNode {
           key={key}
           className="overflow-x-auto rounded border border-[var(--aria-border)] bg-white/70 px-3 py-2 text-xs"
         >
-          <code>{codeToken.text}</code>
+          <code>{normalizeDisplayText(codeToken.text)}</code>
         </pre>
       );
     }
@@ -163,7 +164,7 @@ function renderBlockToken(token: Token, key: string): ReactNode {
       const htmlToken = token as Tokens.HTML;
       return (
         <p key={key} className="whitespace-pre-wrap break-words">
-          {htmlToken.raw || htmlToken.text}
+          {normalizeDisplayText(htmlToken.raw || htmlToken.text)}
         </p>
       );
     }
@@ -173,7 +174,7 @@ function renderBlockToken(token: Token, key: string): ReactNode {
     default:
       return (
         <p key={key} className="whitespace-pre-wrap break-words">
-          {token.raw}
+          {normalizeDisplayText(token.raw)}
         </p>
       );
   }
@@ -300,7 +301,7 @@ function renderInlineTokens(
   keyPrefix: string,
 ): ReactNode {
   if (!tokens || tokens.length === 0) {
-    return fallback;
+    return normalizeDisplayText(fallback);
   }
 
   return tokens.map((token, index) => renderInlineToken(token, `${keyPrefix}-inline-${index}`));
@@ -310,7 +311,7 @@ function renderInlineToken(token: Token, key: string): ReactNode {
   switch (token.type) {
     case "text":
     case "escape":
-      return (token as Tokens.Text | Tokens.Escape).text;
+      return normalizeDisplayText((token as Tokens.Text | Tokens.Escape).text);
     case "strong": {
       const strongToken = token as Tokens.Strong;
       return (
@@ -330,7 +331,7 @@ function renderInlineToken(token: Token, key: string): ReactNode {
           key={key}
           className="rounded border border-[var(--aria-border)] bg-white/70 px-1 py-0.5 text-[0.85em]"
         >
-          {codespanToken.text}
+          {normalizeDisplayText(codespanToken.text)}
         </code>
       );
     }
@@ -344,14 +345,14 @@ function renderInlineToken(token: Token, key: string): ReactNode {
       return renderLinkToken(token as Tokens.Link, key);
     case "image": {
       const imageToken = token as Tokens.Image;
-      return imageToken.text || imageToken.href;
+      return normalizeDisplayText(imageToken.text || imageToken.href);
     }
     case "html": {
       const htmlToken = token as Tokens.HTML;
-      return htmlToken.raw || htmlToken.text;
+      return normalizeDisplayText(htmlToken.raw || htmlToken.text);
     }
     default:
-      return token.raw;
+      return normalizeDisplayText(token.raw);
   }
 }
 
@@ -406,7 +407,9 @@ function isExternalHref(href: string) {
 }
 
 function normalizeProviderContent(content: string) {
-  const normalized = content.replace(/\r\n?/g, "\n").replace(/\\n/g, "\n");
+  const normalized = normalizeDisplayText(content)
+    .replace(/\r\n?/g, "\n")
+    .replace(/\\n/g, "\n");
   return normalized
     .split("\n")
     .map((line) =>
@@ -436,7 +439,7 @@ function formatRawTesterPlanJson(
 
   let payload: TesterPlanPayload;
   try {
-    const parsed = JSON.parse(decodeJsonHtmlEntities(content.trim()));
+    const parsed = JSON.parse(normalizeDisplayText(content.trim()));
     if (!isRecord(parsed)) {
       return null;
     }
@@ -488,23 +491,6 @@ function formatRawTesterPlanJson(
   }
 
   return lines.join("\n");
-}
-
-function decodeJsonHtmlEntities(content: string) {
-  if (!content.includes("&")) {
-    return content;
-  }
-
-  return content
-    .replace(/&quot;/g, '"')
-    .replace(/&#34;/g, '"')
-    .replace(/&#x22;/gi, '"')
-    .replace(/&apos;/g, "'")
-    .replace(/&#39;/g, "'")
-    .replace(/&#x27;/gi, "'")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
