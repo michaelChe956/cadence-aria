@@ -10,7 +10,7 @@
 - 规则状态：**已启用**
 - 适用范围：cadence-aria 全部分支与 worktree
 - 目标读者：项目开发者、维护者、AI Agent
-- 工具链来源：仓库根目录 `rust-toolchain.toml`（当前 `1.95.0`），唯一声明来源
+- 工具链来源：仓库根目录 `rust-toolchain.toml`（当前 `stable`），唯一声明来源
 - 并行度托管：`.cargo/config.toml` 的 `[build] jobs = 8`
 
 ## 1. 标准命令（全量验证）

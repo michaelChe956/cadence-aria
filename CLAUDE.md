@@ -50,7 +50,7 @@
 - **禁止使用**：npm（前端）、pip（Python）、yarn（前端）
 
 ### 项目技术栈
-- **语言**：Rust（edition 2024，工具链固定 `rust-toolchain.toml` 的 1.95.0）
+- **语言**：Rust（edition 2024，工具链固定 `rust-toolchain.toml` 的 stable）
 - **包管理器**：Cargo
 - **测试命令**：`cargo test --locked`（🔴 禁止 `-j 1`；定向单测用 `cargo test --locked --lib <过滤名>`）
 - **检查命令**：`cargo check --locked` / `cargo clippy --all-targets --all-features --locked -- -D warnings`
