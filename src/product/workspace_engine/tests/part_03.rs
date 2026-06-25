@@ -53,6 +53,89 @@ fn work_item_plan_review_revise_batch_maps_to_needs_human_generic_verdict_with_e
 }
 
 #[test]
+fn work_item_plan_item_review_pass_with_strong_finding_requires_current_item_revision() {
+    let json = r#"{
+        "verdict": "pass",
+        "review_scope": "item",
+        "target_outline_id": "outline_api",
+        "generation_round_id": "round_0001",
+        "draft_id": "draft_0001",
+        "summary": "整体可继续，但存在运行时阻塞问题",
+        "affects_items": [{ "target_outline_id": "outline_api" }],
+        "findings": [{
+            "severity": "strong_recommend_fix",
+            "message": "sync 方法在 tokio runtime 内 block_on 会 panic",
+            "evidence": "snapshot 被 tokio::spawn 调用",
+            "impact": "后续实现会在运行时崩溃",
+            "required_action": "当前 draft 需明确 spawn_blocking 或改为 async 方案"
+        }]
+    }"#;
+
+    let verdict = parse_work_item_plan_review_json(
+        json,
+        "raw comments",
+        &["outline_api".to_string()],
+        WorkItemPlanReviewScope::Item,
+    )
+    .expect("work item plan review");
+
+    assert_eq!(verdict.verdict, ReviewVerdictType::Revise);
+    assert_eq!(verdict.review_gate, ReviewGate::RequiresRevision);
+    assert_eq!(verdict.findings.len(), 1);
+    assert_eq!(
+        verdict.findings[0].severity,
+        ReviewFindingSeverity::StrongRecommendFix
+    );
+    let review = verdict
+        .work_item_plan_review
+        .expect("work item plan extension");
+    assert_eq!(review.verdict, WorkItemPlanReviewVerdict::Revise);
+    assert_eq!(review.review_action, WorkItemPlanReviewAction::ReviseCurrentItem);
+    assert_eq!(
+        review.gates,
+        vec![WorkItemPlanReviewGate::RequiresCurrentItemRevision]
+    );
+}
+
+#[test]
+fn work_item_plan_outline_review_pass_with_strong_finding_requires_outline_revision() {
+    let json = r#"{
+        "verdict": "pass",
+        "review_scope": "outline",
+        "generation_round_id": "round_0001",
+        "summary": "整体可继续，但依赖图存在阻塞问题",
+        "affects_items": [{ "target_outline_id": "outline_api" }],
+        "findings": [{
+            "severity": "must_fix",
+            "message": "依赖图遗漏必需前置 item",
+            "evidence": "outline_api 消费 outline_store 但 depends_on 为空",
+            "impact": "串行生成时会缺少上游 handoff",
+            "required_action": "补充 depends_on"
+        }]
+    }"#;
+
+    let verdict = parse_work_item_plan_review_json(
+        json,
+        "raw comments",
+        &["outline_api".to_string(), "outline_store".to_string()],
+        WorkItemPlanReviewScope::Outline,
+    )
+    .expect("work item plan review");
+
+    assert_eq!(verdict.verdict, ReviewVerdictType::Revise);
+    assert_eq!(verdict.review_gate, ReviewGate::RequiresRevision);
+    let review = verdict
+        .work_item_plan_review
+        .expect("work item plan extension");
+    assert_eq!(review.verdict, WorkItemPlanReviewVerdict::Revise);
+    assert_eq!(review.review_action, WorkItemPlanReviewAction::ReviseOutline);
+    assert_eq!(
+        review.gates,
+        vec![WorkItemPlanReviewGate::RequiresPlanReopen]
+    );
+}
+
+#[test]
 fn work_item_plan_review_invalid_target_outline_id_downgrades_to_needs_human() {
     let json = r#"{
         "verdict": "plan_reopen_required",

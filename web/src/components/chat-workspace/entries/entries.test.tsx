@@ -245,6 +245,45 @@ describe("chat workspace entries", () => {
     expect(container.textContent).not.toContain('"findings"');
   });
 
+  it("keeps work item draft structured output out of the main message bubble", () => {
+    const entry = makeEntry({
+      type: "provider_stream",
+      role: "author",
+      content:
+        '## Work Item Draft\n\n实现 Provider 依赖探测。\n\n<ARIA_STRUCTURED_OUTPUT nonce="draft-nonce">\n{"outline_id":"outline_backend_probe","draft_id":"draft_004","title":"后端 - Provider 探测","handoff_summary":"给 installer 消费 refresh_into。"}\n</ARIA_STRUCTURED_OUTPUT nonce="draft-nonce">',
+    });
+
+    const { container } = render(<ProviderStreamEntry entry={entry} />);
+
+    expect(screen.getByRole("heading", { name: "Work Item Draft" })).toBeInTheDocument();
+    expect(screen.getByText("实现 Provider 依赖探测。")).toBeInTheDocument();
+    expect(screen.getByText("结构化输出")).toBeInTheDocument();
+    expect(screen.getByText("draft_004")).toBeInTheDocument();
+    expect(screen.getByText("outline_backend_probe")).toBeInTheDocument();
+    expect(container.textContent).not.toContain("ARIA_STRUCTURED_OUTPUT");
+  });
+
+  it("summarizes work item review structured output before collapsed raw JSON", () => {
+    const entry = makeEntry({
+      type: "provider_stream",
+      role: "reviewer",
+      content:
+        '发现当前 draft 仍需返修。\n\n<ARIA_STRUCTURED_OUTPUT nonce="review-nonce">\n{"verdict":"pass","review_scope":"item","target_outline_id":"outline_backend_probe","draft_id":"draft_004","summary":"需要修正写域。","findings":[{"severity":"strong_recommend_fix","message":"写域包含 installer 文件","evidence":"exclusive_write_scopes 包含 src/web/provider_installer.rs","impact":"会导致后续 item 边界漂移","required_action":"移除 installer 写域"}]}\n</ARIA_STRUCTURED_OUTPUT nonce="review-nonce">',
+    });
+
+    const { container } = render(<ProviderStreamEntry entry={entry} />);
+
+    expect(screen.getByText("发现当前 draft 仍需返修。")).toBeInTheDocument();
+    expect(screen.getByText("结构化输出")).toBeInTheDocument();
+    expect(screen.getByText("verdict: pass")).toBeInTheDocument();
+    expect(screen.getByText("最高严重度: strong_recommend_fix")).toBeInTheDocument();
+    expect(screen.getByText("需要修正写域。")).toBeInTheDocument();
+    const details = container.querySelector("details");
+    expect(details).not.toBeNull();
+    expect(details?.open).toBe(false);
+    expect(container.textContent).not.toContain("ARIA_STRUCTURED_OUTPUT");
+  });
+
   it("does not inject raw HTML or unsafe markdown links in message bubbles", () => {
     const entry = makeEntry({
       type: "provider_stream",

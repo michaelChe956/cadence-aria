@@ -169,10 +169,12 @@ pub(crate) fn parse_work_item_plan_review_json(
         .get("batch_id")
         .and_then(|value| value.as_str())
         .map(ToString::to_string);
+    let effective_verdict =
+        effective_work_item_plan_review_verdict(&parsed_verdict, &scope, &parsed_findings);
     let (generic_verdict, review_gate, review_action, gates) =
-        work_item_plan_review_routing(&parsed_verdict, &scope);
+        work_item_plan_review_routing(&effective_verdict, &scope);
     let extension = WorkItemPlanReviewComplete {
-        verdict: parsed_verdict,
+        verdict: effective_verdict,
         review_scope: scope,
         target_outline_id,
         generation_round_id,
@@ -203,6 +205,34 @@ pub(crate) fn parse_work_item_plan_review_verdict(value: &str) -> WorkItemPlanRe
         "plan_reopen_required" => WorkItemPlanReviewVerdict::PlanReopenRequired,
         _ => WorkItemPlanReviewVerdict::NeedsHuman,
     }
+}
+
+fn effective_work_item_plan_review_verdict(
+    verdict: &WorkItemPlanReviewVerdict,
+    scope: &WorkItemPlanReviewScope,
+    parsed_findings: &ParsedReviewFindings,
+) -> WorkItemPlanReviewVerdict {
+    if parsed_findings.malformed {
+        return WorkItemPlanReviewVerdict::NeedsHuman;
+    }
+    if verdict == &WorkItemPlanReviewVerdict::Pass
+        && parsed_findings.findings.iter().any(|finding| {
+            matches!(
+                finding.severity,
+                ReviewFindingSeverity::Blocking
+                    | ReviewFindingSeverity::MustFix
+                    | ReviewFindingSeverity::StrongRecommendFix
+            )
+        })
+    {
+        return match scope {
+            WorkItemPlanReviewScope::Outline | WorkItemPlanReviewScope::Item => {
+                WorkItemPlanReviewVerdict::Revise
+            }
+            WorkItemPlanReviewScope::Batch => WorkItemPlanReviewVerdict::ReviseBatch,
+        };
+    }
+    verdict.clone()
 }
 
 pub(crate) fn work_item_plan_review_routing(

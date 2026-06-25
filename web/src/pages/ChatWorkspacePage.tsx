@@ -13,7 +13,12 @@ import {
   fetchWorkspaceNodeDetail,
   fetchWorkspacePrompt,
 } from "../api/workspace-content";
-import type { RevisionPath, WorkspaceProviderName } from "../api/types";
+import type {
+  RevisionPath,
+  WorkItemPlanArtifactPayload,
+  WorkItemPlanArtifactVersion,
+  WorkspaceProviderName,
+} from "../api/types";
 import { ArtifactPane } from "../components/chat-workspace/ArtifactPane";
 import { ChatEntryList, type ChatEntryListHandle } from "../components/chat-workspace/ChatEntryList";
 import { ChatInputBar } from "../components/chat-workspace/ChatInputBar";
@@ -100,6 +105,8 @@ export function ChatWorkspacePage({
   const chatListRef = useRef<ChatEntryListHandle | null>(null);
   const hydratedNodeIdsRef = useRef<Set<string>>(new Set());
   const [activePanel, setActivePanel] = useState<"chat" | "artifact">("chat");
+  const [selectedWorkItemPlanArtifactVersionNumber, setSelectedWorkItemPlanArtifactVersionNumber] =
+    useState<number | null>(null);
   const sessionReady = storeSessionId === sessionId;
   const inputDisabled = !sessionReady || connectionStatus !== "connected";
   const selectedEntryId = useMemo(
@@ -128,10 +135,26 @@ export function ChatWorkspacePage({
         : undefined,
     [selectedNodeId, workItemPlanArtifactVersions],
   );
+  const manuallySelectedWorkItemPlanArtifactVersion = useMemo(
+    () =>
+      selectedWorkItemPlanArtifactVersionNumber === null
+        ? undefined
+        : workItemPlanArtifactVersions.find(
+            (version) => version.version === selectedWorkItemPlanArtifactVersionNumber,
+          ),
+    [selectedWorkItemPlanArtifactVersionNumber, workItemPlanArtifactVersions],
+  );
   const displayedWorkItemPlanArtifact =
-    selectedWorkItemPlanArtifactVersion?.artifact ?? workItemPlanArtifact;
+    manuallySelectedWorkItemPlanArtifactVersion?.artifact ??
+    selectedWorkItemPlanArtifactVersion?.artifact ??
+    workItemPlanArtifact;
+  const displayedWorkItemPlanArtifactVersion =
+    manuallySelectedWorkItemPlanArtifactVersion ?? selectedWorkItemPlanArtifactVersion;
   const showingHistoricalWorkItemPlanArtifact = Boolean(
-    selectedWorkItemPlanArtifactVersion?.artifact && selectedNodeId !== activeNodeId,
+    displayedWorkItemPlanArtifactVersion?.artifact &&
+      (manuallySelectedWorkItemPlanArtifactVersion
+        ? !manuallySelectedWorkItemPlanArtifactVersion.is_current
+        : selectedNodeId !== activeNodeId),
   );
   const abortedByDisconnectNode = latestUnacknowledgedAbortedNode(
     timelineNodes,
@@ -374,7 +397,13 @@ export function ChatWorkspacePage({
           {activePanel === "artifact" ? (
             workspaceType === "work_item_plan" ? (
               displayedWorkItemPlanArtifact ? (
-                <div className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)]">
+                <div className="grid min-h-0 grid-rows-[auto_auto_minmax(0,1fr)]">
+                  <WorkItemPlanArtifactVersionRail
+                    versions={workItemPlanArtifactVersions}
+                    selectedVersion={displayedWorkItemPlanArtifactVersion?.version ?? null}
+                    currentArtifact={workItemPlanArtifact}
+                    onSelectVersion={setSelectedWorkItemPlanArtifactVersionNumber}
+                  />
                   {showingHistoricalWorkItemPlanArtifact ? null : (
                     <WorkItemPlanStagedPanel
                       activeNodeType={activeNode?.node_type ?? null}
@@ -466,6 +495,87 @@ export function ChatWorkspacePage({
       />
     </div>
   );
+}
+
+function WorkItemPlanArtifactVersionRail({
+  versions,
+  selectedVersion,
+  currentArtifact,
+  onSelectVersion,
+}: {
+  versions: WorkItemPlanArtifactVersion[];
+  selectedVersion: number | null;
+  currentArtifact: WorkItemPlanArtifactPayload | null;
+  onSelectVersion: (version: number | null) => void;
+}) {
+  if (versions.length === 0) {
+    return null;
+  }
+
+  return (
+    <div
+      data-testid="work-item-plan-artifact-version-list"
+      className="flex min-h-0 items-center gap-2 overflow-x-auto border-b border-[var(--aria-line)] bg-white px-3 py-2"
+    >
+      {currentArtifact ? (
+        <button
+          type="button"
+          onClick={() => onSelectVersion(null)}
+          className={`flex h-9 shrink-0 items-center gap-2 rounded-md border px-3 text-left text-xs transition-colors ${
+            selectedVersion === null
+              ? "border-[var(--aria-primary)] bg-blue-50 text-[var(--aria-ink)]"
+              : "border-[var(--aria-line)] text-[var(--aria-ink-muted)] hover:bg-[var(--aria-panel-muted)]"
+          }`}
+        >
+          <span className="font-semibold">Current</span>
+          <span className="font-mono">{workItemPlanArtifactLabel(currentArtifact)}</span>
+        </button>
+      ) : null}
+      {versions.map((version) => {
+        const artifact = version.artifact ?? null;
+        const selected = selectedVersion === version.version;
+        return (
+          <button
+            key={version.version}
+            type="button"
+            data-testid={`work-item-plan-artifact-version-${version.version}`}
+            onClick={() => (artifact ? onSelectVersion(version.version) : undefined)}
+            disabled={!artifact}
+            className={`flex h-9 shrink-0 items-center gap-2 rounded-md border px-3 text-left text-xs transition-colors disabled:opacity-50 ${
+              selected
+                ? "border-[var(--aria-primary)] bg-blue-50 text-[var(--aria-ink)]"
+                : "border-[var(--aria-line)] text-[var(--aria-ink-muted)] hover:bg-[var(--aria-panel-muted)]"
+            }`}
+          >
+            <span className="font-mono">v{version.version}</span>
+            <span className="font-semibold">{artifact ? workItemPlanArtifactLabel(artifact) : "无内容"}</span>
+            {version.is_current ? (
+              <span className="rounded border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700">
+                current
+              </span>
+            ) : null}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function workItemPlanArtifactLabel(artifact: WorkItemPlanArtifactPayload): string {
+  switch (artifact.type) {
+    case "outline_candidate":
+      return "Plan Outline";
+    case "draft_candidate":
+      return `${artifact.payload.draft_record.outline_id} / ${artifact.payload.draft_record.draft_id}`;
+    case "batch_state":
+      return `Batch / ${artifact.payload.batch_id}`;
+    case "compile_report":
+      return `Compile / ${artifact.payload.compile_id}`;
+    case "context_blocker":
+      return `Context Blocker / ${artifact.payload.context_blockers.length}`;
+    default:
+      return "Artifact";
+  }
 }
 
 function ReviewDecisionActionBar({

@@ -608,6 +608,130 @@ fn build_review_input_routes_work_item_plan_to_dedicated_helper() {
 }
 
 #[test]
+fn build_work_item_draft_review_input_requires_verdict_and_severity_consistency() {
+    let (_tmp, _checkpoint_store, lifecycle, plan_id, mut engine) =
+        make_work_item_plan_engine_with_draft_candidate("sess_wip_draft_review_prompt_gate");
+    let store = WorkItemPlanStore::new(lifecycle.app_paths());
+    let outline_id = "outline_backend";
+    let round_id = "round_0001";
+    let draft_id = "draft_0001";
+    let now = chrono::Utc::now().to_rfc3339();
+    let outline = WorkItemPlanOutline {
+        id: "outline_artifact_0001".to_string(),
+        project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        source_story_spec_ids: vec!["story_spec_0001".to_string()],
+        source_design_spec_ids: vec!["design_spec_0001".to_string()],
+        strategy_summary: "serial backend split".to_string(),
+        work_item_outlines: vec![WorkItemOutline {
+            outline_id: outline_id.to_string(),
+            title: "Backend".to_string(),
+            kind: WorkItemKind::Backend,
+            goal: "实现后端能力".to_string(),
+            scope: vec!["实现 src/backend.rs".to_string()],
+            non_goals: vec![],
+            source_story_spec_ids: vec!["story_spec_0001".to_string()],
+            source_design_spec_ids: vec!["design_spec_0001".to_string()],
+            exclusive_write_scopes: vec!["src/backend.rs".to_string()],
+            forbidden_write_scopes: vec![],
+            depends_on: vec![],
+            verification_intent: vec!["cargo test".to_string()],
+            handoff_notes: "handoff".to_string(),
+        }],
+        dependency_graph: vec![],
+        risks: vec![],
+        handoff_strategy: "serial".to_string(),
+        status: "draft".to_string(),
+    };
+    engine.session.artifact = Some(ArtifactPayload::WorkItemPlanOutlineCandidate {
+        outline_candidate: Box::new(WorkItemPlanOutlineCandidateDto {
+            outline,
+            design_context_gaps: vec![],
+            validator_findings: vec![],
+            context_blockers: vec![],
+            current_generation_round_id: Some(round_id.to_string()),
+            selected_generation_mode: Some(WorkItemGenerationModeDto::Serial),
+        }),
+    });
+    store
+        .save_active_index(&WorkItemPlanDraftActiveIndex {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            plan_id: plan_id.clone(),
+            current_generation_round_id: round_id.to_string(),
+            outline_state: "confirmed".to_string(),
+            active_outline_id: Some(outline_id.to_string()),
+            outline_to_current_draft_id: BTreeMap::new(),
+            draft_statuses: BTreeMap::new(),
+            batches: vec![],
+            updated_at: now.clone(),
+        })
+        .expect("save active index");
+    let draft_payload = WorkItemDraftCandidatePayload {
+        draft_record: WorkItemDraftRecord {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            plan_id,
+            draft_id: draft_id.to_string(),
+            outline_id: outline_id.to_string(),
+            generation_round_id: round_id.to_string(),
+            batch_id: None,
+            attempt_index: 1,
+            outline_version_ref: "outline_artifact_0001".to_string(),
+            generation_mode: WorkItemGenerationMode::Serial,
+            candidate: WorkItemDraftCandidate {
+                outline_id: outline_id.to_string(),
+                title: "Backend".to_string(),
+                kind: WorkItemKind::Backend,
+                goal: "实现后端能力".to_string(),
+                implementation_context: "实现 src/backend.rs".to_string(),
+                exclusive_write_scopes: vec!["src/backend.rs".to_string()],
+                forbidden_write_scopes: vec![],
+                depends_on_outline_ids: vec![],
+                required_handoff_from_outline_ids: vec![],
+                handoff_summary: "handoff".to_string(),
+                verification_plan: serde_json::json!({
+                    "commands": [],
+                    "manual_checks": [],
+                    "required_gates": []
+                }),
+            },
+            status: WorkItemDraftStatus::Draft,
+            active: true,
+            superseded_by_draft_id: None,
+            supersede_reason: None,
+            copied_from_draft_id: None,
+            review_node_id: None,
+            review_verdict_ref: None,
+            generated_from_node_id: "timeline_node_001".to_string(),
+            accepted_at: None,
+            superseded_at: None,
+            created_at: now.clone(),
+            updated_at: now,
+        },
+        validator_findings: vec![],
+        can_accept: true,
+    };
+
+    let input = engine
+        .build_work_item_draft_review_input(&draft_payload)
+        .expect("draft review input");
+
+    assert!(input.prompt.contains("blocking|must_fix|strong_recommend_fix"));
+    assert!(input.prompt.contains("suggestion|minor|optional"));
+    assert!(
+        input
+            .prompt
+            .contains("不要输出 `verdict=pass` 同时给出 blocking/must_fix/strong_recommend_fix finding")
+    );
+    assert!(
+        input
+            .prompt
+            .contains("如果问题只需当前 item author 修改，必须返回 `revise`")
+    );
+}
+
+#[test]
 fn build_work_item_plan_review_input_returns_error_when_lifecycle_store_missing() {
     let (_tmp, _checkpoint_store, _lifecycle, _plan_id, mut engine) =
         make_work_item_plan_engine_with_draft_candidate("sess_wip_review_no_lifecycle");

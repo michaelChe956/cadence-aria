@@ -59,6 +59,22 @@ export function workItemPlanArtifactUpdateSummary(
     };
   }
 
+  if (artifact.type === "context_blocker") {
+    const firstBlocker = artifact.payload.context_blockers[0];
+    const blockerCount = artifact.payload.context_blockers.length;
+    return {
+      content: `Context Blocker 已更新 · ${blockerCount} blockers`,
+      metadata: {
+        version,
+        version_label: versionLabel,
+        artifact_type: artifact.type,
+        artifact_label: "Context Blocker",
+        object_id: firstBlocker?.code ?? "context_blocker",
+        status_label: "blocked",
+      },
+    };
+  }
+
   return {
     content: `Compile Report 已更新 · ${artifact.payload.status}`,
     metadata: {

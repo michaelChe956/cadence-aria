@@ -1450,6 +1450,94 @@ describe("ChatWorkspacePage", () => {
     expect(screen.getByTestId("work-item-plan-artifact-panel")).toHaveTextContent("只读历史");
   });
 
+  it("lists all work item plan artifact versions and switches between draft history", async () => {
+    mockWorkspaceWs();
+    const oldDraft = workItemDraftPayload("Backend flow v1");
+    const currentDraft = workItemDraftPayload("Backend flow v2");
+    useWorkspaceStore.setState({
+      sessionId: "workspace_session_0001",
+      workspaceType: "work_item_plan",
+      stage: "author_confirm",
+      providers: { author: "claude_code", reviewer: "codex" },
+      activeNodeId: "node_current_draft",
+      selectedNodeId: "node_current_draft",
+      timelineNodes: [
+        timelineNode({
+          node_id: "node_outline",
+          node_type: "work_item_plan_outline_confirm",
+          stage: "author_confirm",
+          title: "Plan Outline",
+          status: "completed",
+        }),
+        timelineNode({
+          node_id: "node_old_draft",
+          node_type: "work_item_draft_confirm",
+          stage: "author_confirm",
+          title: "历史 Draft",
+          status: "completed",
+        }),
+        timelineNode({
+          node_id: "node_current_draft",
+          node_type: "work_item_draft_confirm",
+          stage: "author_confirm",
+          title: "当前 Draft",
+          status: "active",
+        }),
+      ],
+      workItemPlanArtifact: { type: "draft_candidate", payload: currentDraft },
+      workItemPlanArtifactVersions: [
+        {
+          version: 1,
+          generated_by: "claude_code",
+          reviewed_by: null,
+          review_verdict: null,
+          confirmed_by: null,
+          is_current: false,
+          created_at: "2026-06-23T00:00:00Z",
+          source_node_id: "node_outline",
+          artifact: { type: "outline_candidate", payload: workItemPlanOutlinePayload() },
+        },
+        {
+          version: 2,
+          generated_by: "claude_code",
+          reviewed_by: null,
+          review_verdict: null,
+          confirmed_by: null,
+          is_current: false,
+          created_at: "2026-06-23T00:01:00Z",
+          source_node_id: "node_old_draft",
+          artifact: { type: "draft_candidate", payload: oldDraft },
+        },
+        {
+          version: 3,
+          generated_by: "claude_code",
+          reviewed_by: null,
+          review_verdict: null,
+          confirmed_by: null,
+          is_current: true,
+          created_at: "2026-06-23T00:02:00Z",
+          source_node_id: "node_current_draft",
+          artifact: { type: "draft_candidate", payload: currentDraft },
+        },
+      ],
+    });
+
+    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
+
+    const versionList = screen.getByTestId("work-item-plan-artifact-version-list");
+    expect(versionList).toHaveTextContent("Plan Outline");
+    expect(versionList).toHaveTextContent("outline_backend / draft_backend_001");
+    expect(versionList).toHaveTextContent("v3");
+
+    await userEvent.click(screen.getByTestId("work-item-plan-artifact-version-2"));
+
+    expect(screen.getByTestId("work-item-plan-artifact-panel")).toHaveTextContent(
+      "Backend flow v1",
+    );
+    expect(screen.getByTestId("work-item-plan-artifact-panel")).toHaveTextContent("只读历史");
+  });
+
   it("unknown work item plan node type renders processing card", async () => {
     mockWorkspaceWs();
     useWorkspaceStore.setState({

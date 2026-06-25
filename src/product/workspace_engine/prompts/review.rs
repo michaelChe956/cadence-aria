@@ -540,8 +540,9 @@ impl WorkspaceEngine {
             &nonce,
             &schema,
             "\n\n请输出审核意见；可以先输出简短可读说明，最终 JSON 必须放在 nonce sentinel block 中，不得使用 Markdown code fence：\n\
-             - `pass`：当前 draft 可进入下一项。\n\
-             - `revise`：只允许重写当前 target_outline_id 对应的 draft。\n\
+             - `pass`：当前 draft 可进入下一项；只允许没有 blocking/must_fix/strong_recommend_fix finding，或只有 suggestion/minor/optional finding。\n\
+             - 不要输出 `verdict=pass` 同时给出 blocking/must_fix/strong_recommend_fix finding；这类输出会被系统判定为需要返修。\n\
+             - `revise`：只允许重写当前 target_outline_id 对应的 draft；如果问题只需当前 item author 修改，必须返回 `revise`。\n\
              - `plan_reopen_required`：需要修改前序 item、拆分边界或 Outline 依赖。\n\
              - `needs_human`：需要用户做范围或产品判断。\n",
         ));

@@ -1,5 +1,7 @@
 #[cfg(target_os = "linux")]
 use super::*;
+#[cfg(target_os = "linux")]
+use crate::cross_cutting::streaming_provider::StreamingProviderAdapter;
 
 #[tokio::test]
 #[cfg(target_os = "linux")]
