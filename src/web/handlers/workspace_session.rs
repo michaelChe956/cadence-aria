@@ -136,9 +136,37 @@ pub async fn workspace_session_artifact_version(
                 json!({}),
             )
         })?;
-    Ok(Json(
-        json!({"version": version.version, "markdown": version.markdown()}),
-    ))
+    let artifact = serde_json::to_value(&version.payload).map_err(|error| {
+        ApiError::runtime(
+            "artifact_version_serialize_failed",
+            format!("artifact version serialize failed: {error}"),
+            json!({ "version": version.version }),
+        )
+    })?;
+    let markdown = version.markdown().to_string();
+    let generated_by = provider_name_text(&version.generated_by).to_string();
+    let reviewed_by = version
+        .reviewed_by
+        .as_ref()
+        .map(provider_name_text)
+        .map(str::to_string);
+    let review_verdict = version
+        .review_verdict
+        .as_ref()
+        .map(review_verdict_text)
+        .map(str::to_string);
+    Ok(Json(json!({
+        "version": version.version,
+        "markdown": markdown,
+        "artifact": artifact,
+        "generated_by": generated_by,
+        "reviewed_by": reviewed_by,
+        "review_verdict": review_verdict,
+        "confirmed_by": version.confirmed_by,
+        "is_current": version.is_current,
+        "created_at": version.created_at,
+        "source_node_id": version.source_node_id,
+    })))
 }
 
 pub(crate) fn validate_workspace_message(
@@ -171,4 +199,64 @@ pub(crate) fn provider_workspace_prompt(prompt: String) -> String {
         "revision_result": "revision completed"
     });
     format!("{prompt}\n\n{STRUCTURED_OUTPUT_START}\n{structured}\n{STRUCTURED_OUTPUT_END}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn workspace_session_artifact_version_includes_serialized_artifact_payload() {
+        let tmp = TempDir::new().expect("temp dir");
+        let root = tmp.path().to_path_buf();
+        let state = WebAppState::new(root.clone(), WebRuntime::new_fake(root.clone()));
+        let lifecycle = LifecycleStore::new(ProductAppPaths::new(root.join(".aria")));
+        let session = lifecycle
+            .create_workspace_session(CreateWorkspaceSessionInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                entity_id: "story_spec_0001".to_string(),
+                workspace_type: WorkspaceType::Story,
+                author_provider: ProviderName::ClaudeCode,
+                reviewer_provider: ProviderName::Codex,
+                review_rounds: 1,
+                superpowers_enabled: false,
+                openspec_enabled: false,
+            })
+            .expect("create workspace session");
+        lifecycle
+            .save_artifact_versions(
+                &session.id,
+                &[ArtifactVersion {
+                    version: 1,
+                    payload: crate::web::workspace_ws_types::ArtifactPayload::Markdown {
+                        markdown: "# Artifact\n".to_string(),
+                        diff: None,
+                    },
+                    generated_by: ProviderName::ClaudeCode,
+                    reviewed_by: Some(ProviderName::Codex),
+                    review_verdict: Some(ReviewVerdictType::Pass),
+                    confirmed_by: Some("user".to_string()),
+                    is_current: true,
+                    created_at: "2026-06-26T00:00:00Z".to_string(),
+                    source_node_id: "timeline_node_001".to_string(),
+                }],
+            )
+            .expect("save artifact versions");
+
+        let Json(value) = workspace_session_artifact_version(State(state), Path((session.id, 1)))
+            .await
+            .expect("artifact version response");
+
+        assert_eq!(value["version"], 1);
+        assert_eq!(value["markdown"], "# Artifact\n");
+        assert_eq!(value["artifact"]["markdown"], "# Artifact\n");
+        assert!(value["artifact"]["diff"].is_null());
+        assert_eq!(value["generated_by"], "claude_code");
+        assert_eq!(value["reviewed_by"], "codex");
+        assert_eq!(value["review_verdict"], "pass");
+        assert_eq!(value["confirmed_by"], "user");
+        assert_eq!(value["source_node_id"], "timeline_node_001");
+    }
 }

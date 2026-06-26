@@ -23,6 +23,7 @@ import {
 import type {
   RevisionPath,
   WorkItemPlanArtifactPayload,
+  WorkspaceArtifactVersionResponse,
   WorkspaceProviderName,
 } from "../api/types";
 import { ArtifactPane } from "../components/chat-workspace/ArtifactPane";
@@ -247,6 +248,45 @@ export function ChatWorkspacePage({
         });
     }
   }, [activeNodeId, selectedNodeId, sessionId, sessionReady]);
+
+  useEffect(() => {
+    if (
+      !sessionReady ||
+      workspaceType !== "work_item_plan" ||
+      !manuallySelectedWorkItemPlanArtifactVersion ||
+      manuallySelectedWorkItemPlanArtifactVersion.artifact
+    ) {
+      return;
+    }
+    let cancelled = false;
+    fetchWorkspaceArtifactVersion(
+      sessionId,
+      manuallySelectedWorkItemPlanArtifactVersion.version,
+    )
+      .then((response) => {
+        if (cancelled) {
+          return;
+        }
+        const artifact = normalizeWorkItemPlanArtifactResponse(response.artifact);
+        if (!artifact) {
+          return;
+        }
+        const state = useWorkspaceStore.getState();
+        if (state.sessionId !== sessionId) {
+          return;
+        }
+        state.setWorkItemPlanArtifact(artifact, response.version);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    manuallySelectedWorkItemPlanArtifactVersion,
+    sessionId,
+    sessionReady,
+    workspaceType,
+  ]);
 
   useUnloadGuard({
     enabled: UNLOAD_GUARDED_STAGES.has(stage),
@@ -658,6 +698,65 @@ function isOptionalReviewFinding(finding: unknown): boolean {
   return (
     severity === "suggestion" || severity === "minor" || severity === "optional"
   );
+}
+
+function normalizeWorkItemPlanArtifactResponse(
+  artifact: WorkspaceArtifactVersionResponse["artifact"],
+): WorkItemPlanArtifactPayload | null {
+  if (!isRecord(artifact)) {
+    return null;
+  }
+  const artifactRecord: Record<string, unknown> = artifact;
+  const artifactType =
+    typeof artifactRecord.type === "string" ? artifactRecord.type : null;
+  if (
+    artifactType &&
+    "payload" in artifactRecord &&
+    [
+      "outline_candidate",
+      "context_blocker",
+      "draft_candidate",
+      "batch_state",
+      "compile_report",
+    ].includes(artifactType)
+  ) {
+    return artifact as WorkItemPlanArtifactPayload;
+  }
+  if ("outline_candidate" in artifactRecord) {
+    return {
+      type: "outline_candidate",
+      payload: artifactRecord.outline_candidate,
+    } as WorkItemPlanArtifactPayload;
+  }
+  if ("context_blocker" in artifactRecord) {
+    return {
+      type: "context_blocker",
+      payload: artifactRecord.context_blocker,
+    } as WorkItemPlanArtifactPayload;
+  }
+  if ("draft_candidate" in artifactRecord) {
+    return {
+      type: "draft_candidate",
+      payload: artifactRecord.draft_candidate,
+    } as WorkItemPlanArtifactPayload;
+  }
+  if ("batch_state" in artifactRecord) {
+    return {
+      type: "batch_state",
+      payload: artifactRecord.batch_state,
+    } as WorkItemPlanArtifactPayload;
+  }
+  if ("compile_report" in artifactRecord) {
+    return {
+      type: "compile_report",
+      payload: artifactRecord.compile_report,
+    } as WorkItemPlanArtifactPayload;
+  }
+  return null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 function WorkspacePanelTabs({

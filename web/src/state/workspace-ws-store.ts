@@ -411,6 +411,14 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
 
       const { artifactMarkdown, workItemPlanCandidate, workItemPlanArtifact } =
         normalizeWorkspaceArtifact(state.artifact);
+      const artifactVersions = state.artifact_version_summaries ?? state.artifact_versions ?? [];
+      const workItemPlanArtifactVersions = workItemPlanVersionsFromSession(
+        artifactVersions,
+        workItemPlanArtifact,
+        state.active_node_id ?? null,
+        state.providers.author,
+        state.providers.reviewer ?? null,
+      );
 
       const nextState: WorkspaceWsState = {
         ...prev,
@@ -426,21 +434,7 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
         artifact: artifactMarkdown,
         workItemPlanCandidate,
         workItemPlanArtifact,
-        workItemPlanArtifactVersions: workItemPlanArtifact
-          ? [
-              {
-                version: Math.max(0, ...(state.artifact_version_summaries ?? []).map((item) => item.version)),
-                generated_by: state.providers.author,
-                reviewed_by: state.providers.reviewer ?? null,
-                review_verdict: null,
-                confirmed_by: null,
-                is_current: true,
-                created_at: new Date().toISOString(),
-                source_node_id: state.active_node_id ?? "",
-                artifact: workItemPlanArtifact,
-              },
-            ]
-          : [],
+        workItemPlanArtifactVersions,
         providers: state.providers,
         streamingContent: "",
         streamBuffers: {},
@@ -462,7 +456,7 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
           prev.sessionId === state.session_id
             ? prev.artifactContentCache
             : emptyWorkspaceContentCache(),
-        artifactVersions: state.artifact_version_summaries ?? state.artifact_versions ?? [],
+        artifactVersions,
         pendingDecision: null,
         pendingReviewDecision: null,
         pendingReviewerSummary: null,
@@ -714,46 +708,59 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
     })),
 
   setWorkItemPlanArtifact: (artifact, version) =>
-    set((prev) => ({
-      workItemPlanArtifact: artifact,
-      workItemPlanCandidate: artifact ? null : prev.workItemPlanCandidate,
-      artifact: artifact ? null : prev.artifact,
-      artifactVersions:
-        artifact && version !== undefined
-          ? [
-              ...prev.artifactVersions.filter((artifactVersion) => artifactVersion.version !== version),
-              {
-                version,
-                generated_by: prev.providers?.author ?? "fake",
-                reviewed_by: null,
-                review_verdict: null,
-                confirmed_by: null,
-                is_current: true,
-                created_at: new Date().toISOString(),
-                source_node_id: prev.activeNodeId ?? "",
-              },
-            ].sort((left, right) => left.version - right.version)
-          : prev.artifactVersions,
-      workItemPlanArtifactVersions:
-        artifact && version !== undefined
-          ? [
-              ...prev.workItemPlanArtifactVersions.filter(
-                (artifactVersion) => artifactVersion.version !== version,
-              ),
-              {
-                version,
-                generated_by: prev.providers?.author ?? "fake",
-                reviewed_by: prev.providers?.reviewer ?? null,
-                review_verdict: null,
-                confirmed_by: null,
-                is_current: true,
-                created_at: new Date().toISOString(),
-                source_node_id: prev.activeNodeId ?? "",
-                artifact,
-              },
-            ].sort((left, right) => left.version - right.version)
-          : prev.workItemPlanArtifactVersions,
-    })),
+    set((prev) => {
+      const existingArtifactVersion = version === undefined
+        ? undefined
+        : prev.artifactVersions.find((artifactVersion) => artifactVersion.version === version);
+      const existingWorkItemPlanVersion = version === undefined
+        ? undefined
+        : prev.workItemPlanArtifactVersions.find(
+            (artifactVersion) => artifactVersion.version === version,
+          );
+      const replacesCurrentArtifact =
+        artifact &&
+        (version === undefined || existingWorkItemPlanVersion?.is_current !== false);
+      return {
+        workItemPlanArtifact: replacesCurrentArtifact ? artifact : prev.workItemPlanArtifact,
+        workItemPlanCandidate: replacesCurrentArtifact ? null : prev.workItemPlanCandidate,
+        artifact: replacesCurrentArtifact ? null : prev.artifact,
+        artifactVersions:
+          artifact && version !== undefined
+            ? [
+                ...prev.artifactVersions.filter((artifactVersion) => artifactVersion.version !== version),
+                {
+                  version,
+                  generated_by: existingArtifactVersion?.generated_by ?? prev.providers?.author ?? "fake",
+                  reviewed_by: existingArtifactVersion?.reviewed_by ?? null,
+                  review_verdict: existingArtifactVersion?.review_verdict ?? null,
+                  confirmed_by: existingArtifactVersion?.confirmed_by ?? null,
+                  is_current: existingArtifactVersion?.is_current ?? false,
+                  created_at: existingArtifactVersion?.created_at ?? new Date().toISOString(),
+                  source_node_id: existingArtifactVersion?.source_node_id ?? prev.activeNodeId ?? "",
+                },
+              ].sort((left, right) => left.version - right.version)
+            : prev.artifactVersions,
+        workItemPlanArtifactVersions:
+          artifact && version !== undefined
+            ? [
+                ...prev.workItemPlanArtifactVersions.filter(
+                  (artifactVersion) => artifactVersion.version !== version,
+                ),
+                {
+                  version,
+                  generated_by: existingWorkItemPlanVersion?.generated_by ?? prev.providers?.author ?? "fake",
+                  reviewed_by: existingWorkItemPlanVersion?.reviewed_by ?? prev.providers?.reviewer ?? null,
+                  review_verdict: existingWorkItemPlanVersion?.review_verdict ?? null,
+                  confirmed_by: existingWorkItemPlanVersion?.confirmed_by ?? null,
+                  is_current: existingWorkItemPlanVersion?.is_current ?? false,
+                  created_at: existingWorkItemPlanVersion?.created_at ?? new Date().toISOString(),
+                  source_node_id: existingWorkItemPlanVersion?.source_node_id ?? prev.activeNodeId ?? "",
+                  artifact,
+                },
+              ].sort((left, right) => left.version - right.version)
+            : prev.workItemPlanArtifactVersions,
+      };
+    }),
 
   addTimelineNode: (node) =>
     set((prev) => {
@@ -1241,6 +1248,46 @@ function normalizeWorkspaceArtifact(
     workItemPlanCandidate: null,
     workItemPlanArtifact: null,
   };
+}
+
+function workItemPlanVersionsFromSession(
+  versions: ArtifactVersionSummary[],
+  currentArtifact: WorkItemPlanArtifactPayload | null,
+  activeNodeId: string | null,
+  authorProvider: WorkspaceProviderName,
+  reviewerProvider: WorkspaceProviderName | null,
+): WorkItemPlanArtifactVersion[] {
+  if (versions.length === 0) {
+    return currentArtifact
+      ? [
+          {
+            version: 0,
+            generated_by: authorProvider,
+            reviewed_by: reviewerProvider,
+            review_verdict: null,
+            confirmed_by: null,
+            is_current: true,
+            created_at: new Date().toISOString(),
+            source_node_id: activeNodeId ?? "",
+            artifact: currentArtifact,
+          },
+        ]
+      : [];
+  }
+
+  const currentVersion =
+    versions.find((version) => version.is_current)?.version ??
+    Math.max(...versions.map((version) => version.version));
+
+  return versions
+    .map((version) => ({
+      ...version,
+      artifact:
+        currentArtifact && version.version === currentVersion
+          ? currentArtifact
+          : null,
+    }))
+    .sort((left, right) => left.version - right.version);
 }
 
 function ensureNodeDetail(details: Record<string, TimelineNodeDetail>, nodeId: string) {

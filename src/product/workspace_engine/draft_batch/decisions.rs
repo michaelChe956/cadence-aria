@@ -189,14 +189,14 @@ impl WorkspaceEngine {
         let review_enabled =
             self.session.review_rounds > 0 && self.session.reviewer_provider.is_some();
 
-        self.update_artifact(ArtifactPayload::WorkItemDraftCandidate {
+        self.replace_current_artifact_payload(ArtifactPayload::WorkItemDraftCandidate {
             draft_candidate: Box::new(WorkItemDraftCandidatePayload {
                 draft_record: record.clone(),
                 validator_findings: draft_candidate.validator_findings.clone(),
                 can_accept: true,
             }),
         })
-        .await;
+        .await?;
         self.complete_active_node(Some("Work Item Draft 已接受".to_string()))
             .await;
 

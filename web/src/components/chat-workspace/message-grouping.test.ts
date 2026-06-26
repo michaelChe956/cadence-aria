@@ -68,6 +68,23 @@ describe("groupEntries", () => {
     ]);
   });
 
+  it("keeps gate prompts standalone after reviewer verdicts", () => {
+    const items = groupEntries([
+      makeEntry("review-1", "review_verdict", "reviewer", "仅有可选建议", "node-review"),
+      makeEntry("gate-1", "gate_prompt", "system", "等待人工确认", "node-human"),
+    ]);
+
+    expect(items).toHaveLength(2);
+    expect(items[0]).toMatchObject({
+      kind: "entry",
+      entry: expect.objectContaining({ id: "review-1" }),
+    });
+    expect(items[1]).toMatchObject({
+      kind: "entry",
+      entry: expect.objectContaining({ id: "gate-1" }),
+    });
+  });
+
   it("groups coding roles by node and keeps analyst verdicts standalone", () => {
     const items = groupEntries([
       makeEntry("tester-stream", "provider_stream", "tester", "测试中", "coding_node_0002"),

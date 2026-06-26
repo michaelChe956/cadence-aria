@@ -206,6 +206,96 @@ describe("ChatWorkspacePage", () => {
     ).toBe("# Loaded Artifact\n\n内容");
   });
 
+  it("loads missing typed work item plan artifact versions before displaying history", async () => {
+    mockWorkspaceWs();
+    const outlineArtifact = {
+      type: "outline_candidate" as const,
+      payload: workItemPlanOutlinePayload(),
+    };
+    const compileArtifact = {
+      type: "compile_report" as const,
+      payload: workItemCompileReportPayload("committed"),
+    };
+    vi.mocked(fetchWorkspaceArtifactVersion).mockResolvedValue({
+      version: 10,
+      markdown: "",
+      artifact: outlineArtifact,
+    } as never);
+    useWorkspaceStore.setState({
+      sessionId: "workspace_session_0001",
+      workspaceType: "work_item_plan",
+      stage: "human_confirm",
+      providers: { author: "claude_code", reviewer: "codex" },
+      workItemPlanArtifact: compileArtifact,
+      workItemPlanArtifactVersions: [
+        {
+          version: 10,
+          generated_by: "claude_code",
+          reviewed_by: "codex",
+          review_verdict: "pass",
+          confirmed_by: "user",
+          is_current: false,
+          created_at: "2026-06-26T10:00:00Z",
+          source_node_id: "node_outline",
+          artifact: null,
+        },
+        {
+          version: 12,
+          generated_by: "claude_code",
+          reviewed_by: null,
+          review_verdict: null,
+          confirmed_by: null,
+          is_current: true,
+          created_at: "2026-06-26T10:02:00Z",
+          source_node_id: "node_compile",
+          artifact: compileArtifact,
+        },
+      ],
+      artifactVersions: [
+        {
+          version: 10,
+          generated_by: "claude_code",
+          reviewed_by: "codex",
+          review_verdict: "pass",
+          confirmed_by: "user",
+          is_current: false,
+          created_at: "2026-06-26T10:00:00Z",
+          source_node_id: "node_outline",
+        },
+        {
+          version: 12,
+          generated_by: "claude_code",
+          reviewed_by: null,
+          review_verdict: null,
+          confirmed_by: null,
+          is_current: true,
+          created_at: "2026-06-26T10:02:00Z",
+          source_node_id: "node_compile",
+        },
+      ],
+    });
+
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
+    await userEvent.click(screen.getByTestId("work-item-plan-version-10"));
+
+    await waitFor(() => {
+      expect(fetchWorkspaceArtifactVersion).toHaveBeenCalledWith(
+        "workspace_session_0001",
+        10,
+      );
+    });
+    expect(
+      useWorkspaceStore
+        .getState()
+        .workItemPlanArtifactVersions.find((version) => version.version === 10)
+        ?.artifact,
+    ).toEqual(outlineArtifact);
+    expect(await screen.findByText("Split frontend and backend work.")).toBeInTheDocument();
+  });
+
   it("does not cache artifact content when the workspace session changes before load resolves", async () => {
     mockWorkspaceWs();
     let resolveArtifact!: (value: {
@@ -1768,10 +1858,10 @@ describe("ChatWorkspacePage", () => {
     ).not.toBeInTheDocument();
     expect(
       screen.getByTestId("work-item-plan-artifact-panel"),
-    ).toHaveTextContent("Before");
+    ).toHaveTextContent("work_item_backend");
     expect(
-      screen.getByTestId("work-item-plan-artifact-panel"),
-    ).toHaveTextContent("After");
+      screen.queryByTestId("compile-report-before-after"),
+    ).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "继续" }));
     await userEvent.click(screen.getByRole("button", { name: "转人工" }));
 

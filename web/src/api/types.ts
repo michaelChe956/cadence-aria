@@ -1493,6 +1493,23 @@ export type WorkspaceEventOutputResponse = {
 export type WorkspaceArtifactVersionResponse = {
   version: number;
   markdown: string;
+  artifact?:
+    | { markdown: string; diff?: string | null }
+    | { candidate: WorkItemPlanCandidateDto }
+    | { outline_candidate: WorkItemPlanOutlineCandidatePayload }
+    | { context_blocker: WorkItemPlanContextBlockerPayload }
+    | { draft_candidate: WorkItemDraftCandidatePayload }
+    | { batch_state: WorkItemBatchStatePayload }
+    | { compile_report: WorkItemPlanCompileReportPayload }
+    | WorkItemPlanArtifactPayload
+    | null;
+  generated_by?: WorkspaceProviderName;
+  reviewed_by?: WorkspaceProviderName | null;
+  review_verdict?: ReviewVerdictType | null;
+  confirmed_by?: string | null;
+  is_current?: boolean;
+  created_at?: string;
+  source_node_id?: string;
 };
 
 export type WsOutMessage =

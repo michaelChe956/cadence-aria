@@ -40,6 +40,30 @@ pub(crate) async fn handle_review_decision_from_handler(
                 let _ = send_json_outbound(&outbound_tx, &err).await;
             }
         }
+        Ok(ReviewDecisionOutcome::StartWorkItemDraft { feedback }) => {
+            if let Err(message) = spawn_provider_run_from_handler(
+                run_context,
+                ProviderRunKind::WorkItemPlanDraft { feedback },
+                outbound_tx.clone(),
+            )
+            .await
+            {
+                let err = WsOutMessage::Error { message };
+                let _ = send_json_outbound(&outbound_tx, &err).await;
+            }
+        }
+        Ok(ReviewDecisionOutcome::StartWorkItemBatch) => {
+            if let Err(message) = spawn_provider_run_from_handler(
+                run_context,
+                ProviderRunKind::WorkItemPlanBatch,
+                outbound_tx.clone(),
+            )
+            .await
+            {
+                let err = WsOutMessage::Error { message };
+                let _ = send_json_outbound(&outbound_tx, &err).await;
+            }
+        }
         Ok(ReviewDecisionOutcome::StartRevision) => {
             let run_kind = {
                 let engine = run_context.engine.lock().await;
@@ -136,6 +160,30 @@ pub(crate) async fn handle_human_confirm_from_handler(
             if let Err(message) = spawn_provider_run_from_handler(
                 run_context,
                 ProviderRunKind::WorkItemPlanOutlineRevision { feedback },
+                outbound_tx.clone(),
+            )
+            .await
+            {
+                let err = WsOutMessage::Error { message };
+                let _ = send_json_outbound(&outbound_tx, &err).await;
+            }
+        }
+        Ok(ReviewDecisionOutcome::StartWorkItemDraft { feedback }) => {
+            if let Err(message) = spawn_provider_run_from_handler(
+                run_context,
+                ProviderRunKind::WorkItemPlanDraft { feedback },
+                outbound_tx.clone(),
+            )
+            .await
+            {
+                let err = WsOutMessage::Error { message };
+                let _ = send_json_outbound(&outbound_tx, &err).await;
+            }
+        }
+        Ok(ReviewDecisionOutcome::StartWorkItemBatch) => {
+            if let Err(message) = spawn_provider_run_from_handler(
+                run_context,
+                ProviderRunKind::WorkItemPlanBatch,
                 outbound_tx.clone(),
             )
             .await
@@ -694,6 +742,30 @@ pub(crate) async fn handle_workspace_inbound_message(
                         if let Err(message) = spawn_provider_run_from_handler(
                             run_context.clone(),
                             ProviderRunKind::WorkItemPlanOutlineRevision { feedback },
+                            outbound_tx.clone(),
+                        )
+                        .await
+                        {
+                            let err = WsOutMessage::Error { message };
+                            let _ = send_json_outbound(&outbound_tx, &err).await;
+                        }
+                    }
+                    Ok(ReviewDecisionOutcome::StartWorkItemDraft { feedback }) => {
+                        if let Err(message) = spawn_provider_run_from_handler(
+                            run_context.clone(),
+                            ProviderRunKind::WorkItemPlanDraft { feedback },
+                            outbound_tx.clone(),
+                        )
+                        .await
+                        {
+                            let err = WsOutMessage::Error { message };
+                            let _ = send_json_outbound(&outbound_tx, &err).await;
+                        }
+                    }
+                    Ok(ReviewDecisionOutcome::StartWorkItemBatch) => {
+                        if let Err(message) = spawn_provider_run_from_handler(
+                            run_context.clone(),
+                            ProviderRunKind::WorkItemPlanBatch,
                             outbound_tx.clone(),
                         )
                         .await

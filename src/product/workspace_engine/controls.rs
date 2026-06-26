@@ -250,4 +250,31 @@ impl WorkspaceEngine {
             .await;
         artifact_ref
     }
+
+    pub(crate) async fn replace_current_artifact_payload(
+        &mut self,
+        payload: ArtifactPayload,
+    ) -> Result<u32, String> {
+        self.session.artifact = Some(payload.clone());
+        let Some(version) = self
+            .artifact_versions
+            .iter_mut()
+            .rev()
+            .find(|version| version.is_current)
+        else {
+            let artifact_ref = self.update_artifact(payload).await;
+            return Ok(artifact_ref.version);
+        };
+        version.payload = payload.clone();
+        let version_number = version.version;
+        self.persist_artifact_versions();
+        let _ = self
+            .event_tx
+            .send(EngineEvent::ArtifactUpdate {
+                version: version_number,
+                payload,
+            })
+            .await;
+        Ok(version_number)
+    }
 }

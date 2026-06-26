@@ -190,11 +190,24 @@ describe("WorkItemPlanArtifactPanel", () => {
     expect(screen.getByTestId("work-item-version-group-drafts")).toHaveTextContent(
       "Drafts",
     );
-    expect(screen.getByText("无内容")).toBeInTheDocument();
+    expect(screen.getByText("按需加载")).toBeInTheDocument();
 
     fireEvent.click(screen.getByTestId("work-item-plan-version-2"));
+    fireEvent.click(screen.getByTestId("work-item-plan-version-3"));
 
     expect(onSelectVersion).toHaveBeenCalledWith(2);
+    expect(onSelectVersion).toHaveBeenCalledWith(3);
+  });
+
+  it("renders compile report as a structured summary without before after debug json", () => {
+    render(<WorkItemPlanArtifactPanel artifact={workItemCompileArtifact()} />);
+
+    expect(screen.getByText("Compile Report")).toBeInTheDocument();
+    expect(screen.getByText(/work_item_backend/)).toBeInTheDocument();
+    expect(screen.getByText(/verification_backend/)).toBeInTheDocument();
+    expect(screen.getByText(/child_session_backend/)).toBeInTheDocument();
+    expect(screen.queryByText("Before")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("compile-report-before-after")).not.toBeInTheDocument();
   });
 
   it("shows structured diff for outline and draft versions", () => {

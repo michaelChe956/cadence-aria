@@ -2337,6 +2337,65 @@ describe("workspace ws store", () => {
     expect(useWorkspaceStore.getState().artifactVersions).toHaveLength(1);
   });
 
+  it("restores all work item plan artifact versions from summaries and attaches the current typed artifact", () => {
+    const store = useWorkspaceStore.getState();
+    const compileReport = makeCompileArtifactPayload();
+
+    store.setSessionState({
+      session_id: "session_work_item_plan_history",
+      workspace_type: "work_item_plan",
+      stage: "human_confirm",
+      messages: [],
+      checkpoints: [],
+      artifact: { compile_report: compileReport } as never,
+      providers: { author: "claude_code", reviewer: "codex" },
+      active_node_id: "node_compile",
+      artifact_versions: [],
+      artifact_version_summaries: [
+        {
+          version: 10,
+          generated_by: "claude_code",
+          reviewed_by: "codex",
+          review_verdict: "pass",
+          confirmed_by: "user",
+          is_current: false,
+          created_at: "2026-06-26T10:00:00Z",
+          source_node_id: "node_outline",
+        },
+        {
+          version: 11,
+          generated_by: "claude_code",
+          reviewed_by: "codex",
+          review_verdict: "pass",
+          confirmed_by: "user",
+          is_current: false,
+          created_at: "2026-06-26T10:01:00Z",
+          source_node_id: "node_draft",
+        },
+        {
+          version: 12,
+          generated_by: "claude_code",
+          reviewed_by: null,
+          review_verdict: null,
+          confirmed_by: null,
+          is_current: true,
+          created_at: "2026-06-26T10:02:00Z",
+          source_node_id: "node_compile",
+        },
+      ],
+    });
+
+    expect(useWorkspaceStore.getState().artifactVersions).toHaveLength(3);
+    expect(useWorkspaceStore.getState().workItemPlanArtifactVersions).toMatchObject([
+      { version: 10, artifact: null },
+      { version: 11, artifact: null },
+      {
+        version: 12,
+        artifact: { type: "compile_report", payload: compileReport },
+      },
+    ]);
+  });
+
   it("rebuilds staged draft artifact updates with business labels", () => {
     const store = useWorkspaceStore.getState();
     const draftCandidate = makeDraftArtifactPayload();

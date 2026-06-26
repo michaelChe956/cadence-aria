@@ -195,6 +195,11 @@ impl WorkspaceEngine {
 
         match item_verdict {
             WorkItemPlanReviewVerdict::Pass => {
+                if Self::work_item_plan_optional_pass_review(&verdict) {
+                    let round = self.active_review_round().unwrap_or(1);
+                    self.enter_review_decision(round, verdict.summary).await;
+                    return;
+                }
                 if let Err(message) = self
                     .continue_after_work_item_draft_review_pass(&current_outline_id)
                     .await
@@ -255,6 +260,11 @@ impl WorkspaceEngine {
 
         match batch_verdict {
             WorkItemPlanReviewVerdict::Pass => {
+                if Self::work_item_plan_optional_pass_review(&verdict) {
+                    let round = self.active_review_round().unwrap_or(1);
+                    self.enter_review_decision(round, verdict.summary).await;
+                    return;
+                }
                 if let Err(message) = self.mark_current_work_item_batch_review_done() {
                     let _ = self.event_tx.send(EngineEvent::Error { message }).await;
                     self.enter_human_confirm(Some("Batch review 状态保存失败".to_string()))

@@ -132,19 +132,16 @@ function WorkItemPlanArtifactVersionRail({
               const selected = selectedVersion === version.version;
               const label = version.artifact
                 ? workItemPlanArtifactLabel(version.artifact)
-                : "无内容";
+                : "按需加载";
               return (
                 <button
                   key={version.version}
                   type="button"
                   data-testid={`work-item-plan-version-${version.version}`}
-                  disabled={!version.artifact}
                   onClick={() => {
-                    if (version.artifact) {
-                      onSelectVersion?.(version.version);
-                    }
+                    onSelectVersion?.(version.version);
                   }}
-                  className={`flex h-8 shrink-0 items-center gap-2 rounded-md border px-2 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] disabled:cursor-not-allowed disabled:opacity-50 ${
+                  className={`flex h-8 shrink-0 items-center gap-2 rounded-md border px-2 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] ${
                     selected
                       ? "border-[var(--aria-primary)] bg-blue-50 text-[var(--aria-ink)]"
                       : "border-[var(--aria-line)] text-[var(--aria-ink-muted)] hover:bg-[var(--aria-panel-muted)]"
@@ -484,28 +481,6 @@ function CompileReportArtifact({
         value={artifact.verification_plan_ids.join(", ") || "--"}
       />
       <KeyValue label="child sessions" value={artifact.child_session_ids.join(", ") || "--"} />
-      <div className="grid gap-3 md:grid-cols-2" data-testid="compile-report-before-after">
-        <div className="rounded-md border border-[var(--aria-line)] p-3">
-          <div className="mb-2 text-xs font-semibold text-[var(--aria-ink-muted)]">Before</div>
-          <pre className="whitespace-pre-wrap break-words text-xs text-[var(--aria-ink)]">
-            {JSON.stringify({ materialized_work_items: [], child_sessions: [] }, null, 2)}
-          </pre>
-        </div>
-        <div className="rounded-md border border-[var(--aria-line)] p-3">
-          <div className="mb-2 text-xs font-semibold text-[var(--aria-ink-muted)]">After</div>
-          <pre className="whitespace-pre-wrap break-words text-xs text-[var(--aria-ink)]">
-            {JSON.stringify(
-              {
-                work_item_ids: artifact.work_item_ids,
-                verification_plan_ids: artifact.verification_plan_ids,
-                child_session_ids: artifact.child_session_ids,
-              },
-              null,
-              2,
-            )}
-          </pre>
-        </div>
-      </div>
       <ValidatorFindings findings={artifact.validator_findings} />
     </section>
   );

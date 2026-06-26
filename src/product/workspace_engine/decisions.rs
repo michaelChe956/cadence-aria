@@ -189,6 +189,64 @@ impl WorkspaceEngine {
                             .to_string(),
                     );
                 }
+                if decision == "apply_optional_findings" {
+                    let review = self
+                        .latest_work_item_plan_optional_pass_review()
+                        .cloned()
+                        .ok_or_else(|| {
+                            "apply_optional_findings is only available for optional work item plan findings"
+                                .to_string()
+                        })?;
+                    match review.review_scope {
+                        WorkItemPlanReviewScope::Item => {
+                            let target_outline_id = review
+                                .target_outline_id
+                                .clone()
+                                .or_else(|| {
+                                    self.current_work_item_draft_candidate_payload()
+                                        .ok()
+                                        .map(|payload| payload.draft_record.outline_id)
+                                })
+                                .ok_or_else(|| {
+                                    "optional item review target outline is missing".to_string()
+                                })?;
+                            let feedback = self
+                                .latest_review_verdict
+                                .as_ref()
+                                .map(|verdict| verdict.comments.clone());
+                            self.pending_revision_context = feedback;
+                            self.complete_active_node(Some(
+                                "已选择修复当前 Work Item Draft 的可选建议".to_string(),
+                            ))
+                            .await;
+                            self.start_serial_work_item_draft_run_for(&target_outline_id)
+                                .await?;
+                            return Ok(ReviewDecisionOutcome::StartWorkItemDraft {
+                                feedback: None,
+                            });
+                        }
+                        WorkItemPlanReviewScope::Batch => {
+                            self.pending_revision_context = self
+                                .latest_review_verdict
+                                .as_ref()
+                                .map(|verdict| verdict.comments.clone());
+                            let outcome = self.rewrite_current_work_item_batch().await?;
+                            return match outcome {
+                                WorkItemBatchDecisionOutcome::StartBatchRun => {
+                                    Ok(ReviewDecisionOutcome::StartWorkItemBatch)
+                                }
+                                WorkItemBatchDecisionOutcome::StartDraftRun => {
+                                    Ok(ReviewDecisionOutcome::StartWorkItemDraft { feedback: None })
+                                }
+                                WorkItemBatchDecisionOutcome::HumanConfirm
+                                | WorkItemBatchDecisionOutcome::StartReview => {
+                                    Ok(ReviewDecisionOutcome::HumanConfirm)
+                                }
+                            };
+                        }
+                        WorkItemPlanReviewScope::Outline => {}
+                    }
+                }
                 let normalized_context = if decision == "continue_with_context" {
                     extra_context.and_then(|context| {
                         let trimmed = context.trim().to_string();
@@ -264,20 +322,44 @@ impl WorkspaceEngine {
                 "skip_optional_findings is only available for optional work item plan findings"
                     .to_string()
             })?;
-        if review.review_scope != WorkItemPlanReviewScope::Outline {
-            return Err(
-                "skip_optional_findings currently requires work item plan outline review"
-                    .to_string(),
-            );
+        match review.review_scope {
+            WorkItemPlanReviewScope::Outline => {
+                self.complete_active_node(Some("已选择不修复可选建议".to_string()))
+                    .await;
+                self.enter_work_item_generation_mode(Some(
+                    "已跳过可选建议，请选择 Work Item 生成模式".to_string(),
+                ))
+                .await;
+                Ok(ReviewDecisionOutcome::HumanConfirm)
+            }
+            WorkItemPlanReviewScope::Item => {
+                let target_outline_id = review
+                    .target_outline_id
+                    .clone()
+                    .or_else(|| {
+                        self.current_work_item_draft_candidate_payload()
+                            .ok()
+                            .map(|payload| payload.draft_record.outline_id)
+                    })
+                    .ok_or_else(|| "optional item review target outline is missing".to_string())?;
+                self.complete_active_node(Some("已选择不修复当前 Draft 可选建议".to_string()))
+                    .await;
+                self.continue_after_work_item_draft_review_pass(&target_outline_id)
+                    .await?;
+                if self.active_node_type() == Some(TimelineNodeType::WorkItemDraftRun) {
+                    Ok(ReviewDecisionOutcome::StartWorkItemDraft { feedback: None })
+                } else {
+                    Ok(ReviewDecisionOutcome::HumanConfirm)
+                }
+            }
+            WorkItemPlanReviewScope::Batch => {
+                self.complete_active_node(Some("已选择不修复 Batch 可选建议".to_string()))
+                    .await;
+                self.mark_current_work_item_batch_review_done()?;
+                self.enter_work_item_plan_compile().await;
+                Ok(ReviewDecisionOutcome::HumanConfirm)
+            }
         }
-
-        self.complete_active_node(Some("已选择不修复可选建议".to_string()))
-            .await;
-        self.enter_work_item_generation_mode(Some(
-            "已跳过可选建议，请选择 Work Item 生成模式".to_string(),
-        ))
-        .await;
-        Ok(ReviewDecisionOutcome::HumanConfirm)
     }
 
     pub(crate) fn review_decision_restarts_work_item_plan_outline(&self) -> bool {

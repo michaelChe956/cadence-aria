@@ -203,6 +203,10 @@ pub enum ReviewDecisionOutcome {
     StartWorkItemPlanOutlineRevision {
         feedback: Option<String>,
     },
+    StartWorkItemDraft {
+        feedback: Option<String>,
+    },
+    StartWorkItemBatch,
     HumanConfirm,
     ConfirmedWithChildSessions {
         child_sessions: Vec<WorkspaceSessionRecord>,

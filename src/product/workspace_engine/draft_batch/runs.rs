@@ -264,11 +264,12 @@ impl WorkspaceEngine {
     }
 
     pub fn build_current_work_item_batch_draft_streaming_input(
-        &self,
+        &mut self,
     ) -> Result<StreamingProviderInput, String> {
         if self.active_node_type() != Some(TimelineNodeType::WorkItemBatchRun) {
             return Err("batch draft input requires active work_item_batch_run node".to_string());
         }
+        let effective_feedback = self.pending_revision_context.take();
         let store = self.work_item_plan_store()?;
         let index = store
             .load_active_index(
@@ -291,7 +292,7 @@ impl WorkspaceEngine {
             &active_outline_id,
             WorkItemGenerationMode::Batch,
             &batch_drafts,
-            None,
+            effective_feedback.as_deref(),
         )
         .map_err(|error| error.message)?;
         let working_dir = self
