@@ -20,6 +20,15 @@ use super::types::{
     prompt_nonce, provider_name_to_type, structured_output_nonce, work_item_kind_text,
 };
 
+const OUTLINE_WRITE_SCOPE_RULES: &str = "\
+         [write_scope_partition_rules]\n\
+         依赖链上的 exclusive_write_scopes 必须互斥：如果 A depends_on B，或 dependency_graph 中 B -> A，则 A 与 B 不得拥有相同路径、父子路径或可能匹配同一文件的 glob。\n\
+         integration/e2e 测试 outline 只能拥有与实现目录不共享前缀的测试、fixtures、mock 或 CI 配置路径；不要把被测功能实现目录写入测试 outline 的 exclusive_write_scopes。\n\
+         不要让 outline_frontend 与 outline_integration_tests 同时拥有 web/src/**；也不要把 web/src/**/*.test.tsx 交给 integration/e2e outline，因为它会与 web/src/components/**、web/src/pages/** 等 frontend 实现范围重叠。\n\
+         常见做法是 frontend outline 拥有 web/src/components/**、web/src/pages/** 及其同目录单元测试；integration_tests/e2e outline 只拥有 web/e2e/**、tests/e2e/**、fixtures/**、mocks/**、playwright.config.* 或 CI 配置。\n\
+         如果两个依赖 outline 都需要改同一个 shared helper、schema、fixture 或 test harness，请拆出独立前置 outline 作为唯一 owner，其他 outline 通过 depends_on 读取 handoff；若 shared 文件位于 web/src/** 下，不要再让 frontend outline 拥有覆盖它的父级 glob。\n\
+         forbidden_write_scopes 应显式写出依赖方或被依赖方已拥有的实现目录，帮助后续 draft 避免越界。\n\n";
+
 impl WorkItemSplitEngine {
     pub fn build_generate_invocation(
         request: &GenerateWorkItemsRequest,
@@ -208,6 +217,7 @@ pub(crate) fn build_outline_prompt_with_nonce(
          include_e2e_tests: {include_e2e_tests}\n\
          force_frontend_backend_split: {force_frontend_backend_split}\n\
          require_execution_plan_confirm: {require_execution_plan_confirm}\n\n\
+         {outline_write_scope_rules}\
          [strict_output_contract]\n\
          只能输出 WorkItemPlan Outline，不得输出完整 Work Item。\n\
          不得输出 VerificationPlan、verification_plan、verification_plans、work_item_id、work_item_ids。\n\
@@ -243,6 +253,7 @@ pub(crate) fn build_outline_prompt_with_nonce(
         include_e2e_tests = request.include_e2e_tests.unwrap_or(false),
         force_frontend_backend_split = request.force_frontend_backend_split.unwrap_or(false),
         require_execution_plan_confirm = request.require_execution_plan_confirm.unwrap_or(false),
+        outline_write_scope_rules = OUTLINE_WRITE_SCOPE_RULES,
         nonce = nonce,
         schema = WORK_ITEM_PLAN_OUTLINE_OUTPUT_SCHEMA,
     );
@@ -264,6 +275,7 @@ pub(crate) fn build_outline_revision_prompt(
          issue_id: {issue_id}\n\
          title: {title}\n\n\
          [revision_feedback]\n{feedback}\n\n\
+         {outline_write_scope_rules}\
          [strict_output_contract]\n\
          只能输出 WorkItemPlan Outline，不得输出完整 Work Item。\n\
          不得输出 VerificationPlan、verification_plan、verification_plans、work_item_id、work_item_ids。\n\
@@ -285,6 +297,7 @@ pub(crate) fn build_outline_revision_prompt(
         issue_id = issue.id,
         title = issue.title,
         feedback = feedback,
+        outline_write_scope_rules = OUTLINE_WRITE_SCOPE_RULES,
         nonce = nonce,
         schema = WORK_ITEM_PLAN_OUTLINE_OUTPUT_SCHEMA,
     );

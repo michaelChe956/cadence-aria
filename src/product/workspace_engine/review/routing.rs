@@ -96,13 +96,45 @@ impl WorkspaceEngine {
             .send(EngineEvent::ReviewDecisionRequired {
                 node_id: decision_node_id,
                 round,
-                options: vec![
-                    "continue".to_string(),
-                    "continue_with_context".to_string(),
-                    "human_intervene".to_string(),
-                ],
+                options: self.review_decision_options(),
             })
             .await;
+    }
+
+    pub(crate) fn review_decision_options(&self) -> Vec<String> {
+        if self.latest_work_item_plan_optional_pass_review().is_some() {
+            return vec![
+                "apply_optional_findings".to_string(),
+                "skip_optional_findings".to_string(),
+            ];
+        }
+        vec![
+            "continue".to_string(),
+            "continue_with_context".to_string(),
+            "human_intervene".to_string(),
+        ]
+    }
+
+    pub(crate) fn latest_work_item_plan_optional_pass_review(
+        &self,
+    ) -> Option<&WorkItemPlanReviewComplete> {
+        self.latest_review_verdict
+            .as_ref()
+            .filter(|verdict| Self::work_item_plan_optional_pass_review(verdict))
+            .and_then(|verdict| verdict.work_item_plan_review.as_ref())
+    }
+
+    pub(crate) fn work_item_plan_optional_pass_review(verdict: &ReviewVerdict) -> bool {
+        verdict.verdict == ReviewVerdictType::Pass
+            && verdict.review_gate == ReviewGate::UserConfirmAllowed
+            && !verdict.findings.is_empty()
+            && verdict
+                .work_item_plan_review
+                .as_ref()
+                .is_some_and(|review| {
+                    review.verdict == WorkItemPlanReviewVerdict::Pass
+                        && review.review_action == WorkItemPlanReviewAction::Continue
+                })
     }
 
     pub(crate) async fn route_work_item_plan_outline_review(&mut self, verdict: ReviewVerdict) {
@@ -116,6 +148,11 @@ impl WorkspaceEngine {
             ReviewVerdictType::NeedsHuman => WorkItemPlanReviewVerdict::NeedsHuman,
         }) {
             WorkItemPlanReviewVerdict::Pass => {
+                if Self::work_item_plan_optional_pass_review(&verdict) {
+                    let round = self.active_review_round().unwrap_or(1);
+                    self.enter_review_decision(round, verdict.summary).await;
+                    return;
+                }
                 self.enter_work_item_generation_mode(Some(
                     "Outline review 通过，请选择 Work Item 生成模式".to_string(),
                 ))

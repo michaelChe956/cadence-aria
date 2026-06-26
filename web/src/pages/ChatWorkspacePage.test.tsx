@@ -46,7 +46,13 @@ vi.mock("../components/shared/MonacoViewer", () => ({
 }));
 
 vi.mock("../components/shared/MonacoDiffViewer", () => ({
-  MonacoDiffViewer: ({ original, modified }: { original: string; modified: string }) => (
+  MonacoDiffViewer: ({
+    original,
+    modified,
+  }: {
+    original: string;
+    modified: string;
+  }) => (
     <div data-testid="monaco-diff-viewer">
       {original}
       {modified}
@@ -126,22 +132,35 @@ describe("ChatWorkspacePage", () => {
       ],
     });
 
-    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
 
-    expect(screen.getAllByText(/Story Spec #workspace_session_0001/).length).toBeGreaterThan(0);
+    expect(
+      screen.getAllByText(/Story Spec #workspace_session_0001/).length,
+    ).toBeGreaterThan(0);
     expect(screen.getByTestId("timeline-node-list")).toBeInTheDocument();
-    expect(screen.getByTestId("chat-entry-list")).toHaveTextContent("review output");
+    expect(screen.getByTestId("chat-entry-list")).toHaveTextContent(
+      "review output",
+    );
     expect(screen.queryByTestId("monaco-viewer")).not.toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
 
-    expect(screen.getByTestId("monaco-viewer")).toHaveTextContent("Artifact v1");
-    expect(screen.getByTestId("workspace-status-bar")).toHaveTextContent("running");
+    expect(screen.getByTestId("monaco-viewer")).toHaveTextContent(
+      "Artifact v1",
+    );
+    expect(screen.getByTestId("workspace-status-bar")).toHaveTextContent(
+      "running",
+    );
   });
 
   it("loads artifact summary markdown through the workspace content cache", async () => {
     mockWorkspaceWs();
-    let resolveArtifact!: (value: { version: number; markdown: string }) => void;
+    let resolveArtifact!: (value: {
+      version: number;
+      markdown: string;
+    }) => void;
     vi.mocked(fetchWorkspaceArtifactVersion).mockReturnValue(
       new Promise((resolve) => {
         resolveArtifact = resolve;
@@ -163,24 +182,36 @@ describe("ChatWorkspacePage", () => {
       artifactContentCache: emptyWorkspaceContentCache(),
     });
 
-    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
     await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
 
     await waitFor(() => {
-      expect(screen.getByTestId("artifact-loading")).toHaveTextContent("正在加载 v1");
+      expect(screen.getByTestId("artifact-loading")).toHaveTextContent(
+        "正在加载 v1",
+      );
     });
     resolveArtifact({ version: 1, markdown: "# Loaded Artifact\n\n内容" });
 
     expect(await screen.findByText(/Loaded Artifact/)).toBeInTheDocument();
-    expect(fetchWorkspaceArtifactVersion).toHaveBeenCalledWith("workspace_session_0001", 1);
-    expect(workspaceContentCacheValues(useWorkspaceStore.getState().artifactContentCache)["1"]).toBe(
-      "# Loaded Artifact\n\n内容",
+    expect(fetchWorkspaceArtifactVersion).toHaveBeenCalledWith(
+      "workspace_session_0001",
+      1,
     );
+    expect(
+      workspaceContentCacheValues(
+        useWorkspaceStore.getState().artifactContentCache,
+      )["1"],
+    ).toBe("# Loaded Artifact\n\n内容");
   });
 
   it("does not cache artifact content when the workspace session changes before load resolves", async () => {
     mockWorkspaceWs();
-    let resolveArtifact!: (value: { version: number; markdown: string }) => void;
+    let resolveArtifact!: (value: {
+      version: number;
+      markdown: string;
+    }) => void;
     vi.mocked(fetchWorkspaceArtifactVersion).mockReturnValue(
       new Promise((resolve) => {
         resolveArtifact = resolve;
@@ -202,9 +233,16 @@ describe("ChatWorkspacePage", () => {
       artifactContentCache: emptyWorkspaceContentCache(),
     });
 
-    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
     await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
-    await waitFor(() => expect(fetchWorkspaceArtifactVersion).toHaveBeenCalledWith("workspace_session_0001", 1));
+    await waitFor(() =>
+      expect(fetchWorkspaceArtifactVersion).toHaveBeenCalledWith(
+        "workspace_session_0001",
+        1,
+      ),
+    );
 
     useWorkspaceStore.setState({
       sessionId: "workspace_session_0002",
@@ -213,12 +251,20 @@ describe("ChatWorkspacePage", () => {
     resolveArtifact({ version: 1, markdown: "# Stale Artifact" });
     await Promise.resolve();
 
-    expect(workspaceContentCacheValues(useWorkspaceStore.getState().artifactContentCache)["1"]).toBeUndefined();
+    expect(
+      workspaceContentCacheValues(
+        useWorkspaceStore.getState().artifactContentCache,
+      )["1"],
+    ).toBeUndefined();
   });
 
   it("does not cache chat content when the workspace session changes before load resolves", async () => {
     mockWorkspaceWs();
-    let resolveOutput!: (value: { node_id: string; event_id: string; output: string }) => void;
+    let resolveOutput!: (value: {
+      node_id: string;
+      event_id: string;
+      output: string;
+    }) => void;
     vi.mocked(fetchWorkspaceEventOutput).mockReturnValue(
       new Promise((resolve) => {
         resolveOutput = resolve;
@@ -258,8 +304,12 @@ describe("ChatWorkspacePage", () => {
       ],
     });
 
-    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
-    await userEvent.click(screen.getByRole("button", { name: /Execution Output/ }));
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: /Execution Output/ }),
+    );
     await waitFor(() => {
       expect(fetchWorkspaceEventOutput).toHaveBeenCalledWith(
         "workspace_session_0001",
@@ -281,7 +331,9 @@ describe("ChatWorkspacePage", () => {
       expect(fetchWorkspaceEventOutput).toHaveResolved();
     });
 
-    expect(workspaceContentCacheValues(useWorkspaceStore.getState().contentCache)).toEqual({});
+    expect(
+      workspaceContentCacheValues(useWorkspaceStore.getState().contentCache),
+    ).toEqual({});
   });
 
   it("hydrates selected node detail after restored lightweight session state", async () => {
@@ -323,7 +375,9 @@ describe("ChatWorkspacePage", () => {
       },
     });
 
-    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
 
     await waitFor(() => {
       expect(fetchWorkspaceNodeDetail).toHaveBeenCalledWith(
@@ -344,7 +398,9 @@ describe("ChatWorkspacePage", () => {
       reviewRounds: 1,
     });
 
-    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
     useWorkspaceStore.setState({
       providers: { author: "fake", reviewer: "codex" },
       reviewerEnabled: true,
@@ -403,7 +459,9 @@ describe("ChatWorkspacePage", () => {
       artifact: "# Story Spec",
     });
 
-    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
 
     await userEvent.click(screen.getByRole("button", { name: "进入 Review" }));
     await userEvent.click(screen.getByRole("button", { name: "重新编写" }));
@@ -444,15 +502,33 @@ describe("ChatWorkspacePage", () => {
         ],
       });
 
-      render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+      render(
+        <ChatWorkspacePage
+          sessionId="workspace_session_0001"
+          onBack={vi.fn()}
+        />,
+      );
 
-      expect(screen.getByRole("button", { name: "接受修订建议" })).toBeInTheDocument();
-      expect(screen.getByRole("button", { name: "补充上下文后修订" })).toBeInTheDocument();
-      expect(screen.getByRole("button", { name: "跳过，人工处理" })).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "接受修订建议" }),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "补充上下文后修订" }),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "跳过，人工处理" }),
+      ).toBeInTheDocument();
 
-      await userEvent.click(screen.getByRole("button", { name: "补充上下文后修订" }));
-      await userEvent.type(screen.getByLabelText("补充返修上下文"), "补充 provider gate 细节");
-      await userEvent.click(screen.getByRole("button", { name: "提交补充并修订" }));
+      await userEvent.click(
+        screen.getByRole("button", { name: "补充上下文后修订" }),
+      );
+      await userEvent.type(
+        screen.getByLabelText("补充返修上下文"),
+        "补充 provider gate 细节",
+      );
+      await userEvent.click(
+        screen.getByRole("button", { name: "提交补充并修订" }),
+      );
 
       expect(api.sendSelectRevisionPath).toHaveBeenCalledWith(
         "revise-with-context",
@@ -483,11 +559,17 @@ describe("ChatWorkspacePage", () => {
       ],
     });
 
-    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
 
     await userEvent.click(screen.getByRole("button", { name: "允许" }));
 
-    expect(api.respondPermission).toHaveBeenCalledWith("perm_001", true, undefined);
+    expect(api.respondPermission).toHaveBeenCalledWith(
+      "perm_001",
+      true,
+      undefined,
+    );
   });
 
   it("selects timeline nodes and scrolls to their first chat entry", async () => {
@@ -500,8 +582,16 @@ describe("ChatWorkspacePage", () => {
     useWorkspaceStore.setState({
       sessionId: "workspace_session_0001",
       timelineNodes: [
-        timelineNode({ node_id: "node-1", node_type: "context_note", title: "补充上下文" }),
-        timelineNode({ node_id: "node-2", node_type: "author_run", title: "Story Spec 生成" }),
+        timelineNode({
+          node_id: "node-1",
+          node_type: "context_note",
+          title: "补充上下文",
+        }),
+        timelineNode({
+          node_id: "node-2",
+          node_type: "author_run",
+          title: "Story Spec 生成",
+        }),
       ],
       activeNodeId: "node-2",
       selectedNodeId: "node-1",
@@ -511,7 +601,9 @@ describe("ChatWorkspacePage", () => {
       ],
     });
 
-    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
 
     await userEvent.click(screen.getByTestId("timeline-node-author_run"));
 
@@ -538,7 +630,11 @@ describe("ChatWorkspacePage", () => {
         sessionId: "workspace_session_0001",
         workspaceType,
         timelineNodes: [
-          timelineNode({ node_id: "node-1", node_type: "context_note", title: "补充上下文" }),
+          timelineNode({
+            node_id: "node-1",
+            node_type: "context_note",
+            title: "补充上下文",
+          }),
           timelineNode({ node_id: "node-2", node_type: "author_run", title }),
         ],
         activeNodeId: "node-2",
@@ -567,7 +663,12 @@ describe("ChatWorkspacePage", () => {
         ],
       });
 
-      render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+      render(
+        <ChatWorkspacePage
+          sessionId="workspace_session_0001"
+          onBack={vi.fn()}
+        />,
+      );
       scrolledEntryIds.length = 0;
 
       await userEvent.click(screen.getByTestId("timeline-node-author_run"));
@@ -591,7 +692,11 @@ describe("ChatWorkspacePage", () => {
         sessionId: "workspace_session_0001",
         workspaceType,
         timelineNodes: [
-          timelineNode({ node_id: "node-1", node_type: "revision", title: "Author 返修 Round 2" }),
+          timelineNode({
+            node_id: "node-1",
+            node_type: "revision",
+            title: "Author 返修 Round 2",
+          }),
           timelineNode({
             node_id: "node-2",
             node_type: "author_confirm",
@@ -619,7 +724,12 @@ describe("ChatWorkspacePage", () => {
         ],
       });
 
-      render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+      render(
+        <ChatWorkspacePage
+          sessionId="workspace_session_0001"
+          onBack={vi.fn()}
+        />,
+      );
       scrolledEntryIds.length = 0;
 
       await userEvent.click(screen.getByTestId("timeline-node-author_confirm"));
@@ -639,7 +749,9 @@ describe("ChatWorkspacePage", () => {
       },
     });
 
-    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
 
     expect(screen.getByTestId("protocol-error-alert")).toHaveTextContent(
       "INVALID_MESSAGE_FOR_STAGE",
@@ -669,12 +781,158 @@ describe("ChatWorkspacePage", () => {
       ],
     });
 
-    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
 
     expect(screen.getByTestId("review-verdict-entry")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "接受修订建议" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "补充上下文后修订" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "跳过，人工处理" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "接受修订建议" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "补充上下文后修订" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "跳过，人工处理" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders optional review decision actions from pending decision options", async () => {
+    const api = mockWorkspaceWs();
+    useWorkspaceStore.setState({
+      sessionId: "workspace_session_0001",
+      workspaceType: "work_item_plan",
+      stage: "review_decision",
+      providers: { author: "claude_code", reviewer: "codex" },
+      pendingDecision: {
+        node_id: "timeline_node_decision",
+        round: 1,
+        options: ["apply_optional_findings", "skip_optional_findings"],
+      },
+      timelineNodes: [
+        timelineNode({
+          node_id: "timeline_node_decision",
+          node_type: "review_decision",
+          stage: "review_decision",
+          status: "paused",
+          title: "Review Decision Round 1",
+          summary: "仅有可选建议",
+        }),
+      ],
+      chatEntries: [
+        chatEntry({
+          type: "review_verdict",
+          role: "reviewer",
+          content: "仅有可选建议",
+          metadata: {
+            verdict: "pass",
+            comments: "当前 outline 可继续，但建议补充 handoff。",
+            summary: "仅有可选建议",
+            review_gate: "user_confirm_allowed",
+            findings: [
+              {
+                severity: "optional",
+                message: "handoff 描述可以更明确",
+                evidence: "handoff_strategy 只有简短描述",
+                impact: "不影响 Draft 生成",
+                required_action: "补充上下游交接说明",
+              },
+            ],
+          },
+        }),
+      ],
+    });
+
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
+
+    expect(
+      screen.getByRole("button", { name: "修复这些建议" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "不修复，继续生成" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "跳过，人工处理" }),
+    ).not.toBeInTheDocument();
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "不修复，继续生成" }),
+    );
+    await userEvent.click(screen.getByRole("button", { name: "修复这些建议" }));
+
+    expect(api.sendReviewDecision).toHaveBeenNthCalledWith(
+      1,
+      "skip_optional_findings",
+    );
+    expect(api.sendReviewDecision).toHaveBeenNthCalledWith(
+      2,
+      "apply_optional_findings",
+    );
+    expect(api.sendSelectRevisionPath).not.toHaveBeenCalled();
+  });
+
+  it("infers optional review decision actions from the latest work item plan verdict", async () => {
+    const api = mockWorkspaceWs();
+    useWorkspaceStore.setState({
+      sessionId: "workspace_session_0001",
+      workspaceType: "work_item_plan",
+      stage: "review_decision",
+      providers: { author: "claude_code", reviewer: "codex" },
+      pendingDecision: null,
+      timelineNodes: [
+        timelineNode({
+          node_id: "timeline_node_decision",
+          node_type: "review_decision",
+          stage: "review_decision",
+          status: "paused",
+          title: "Review Decision Round 1",
+          summary: "仅有可选建议",
+        }),
+      ],
+      chatEntries: [
+        chatEntry({
+          type: "review_verdict",
+          role: "reviewer",
+          content: "仅有可选建议",
+          metadata: {
+            verdict: "pass",
+            comments: "当前 outline 可继续，但建议补充 handoff。",
+            summary: "仅有可选建议",
+            review_gate: "user_confirm_allowed",
+            findings: [
+              {
+                severity: "minor",
+                message: "handoff 描述可以更明确",
+                evidence: "handoff_strategy 只有简短描述",
+                impact: "不影响 Draft 生成",
+                required_action: "补充上下游交接说明",
+              },
+            ],
+          },
+        }),
+      ],
+    });
+
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
+
+    expect(
+      screen.getByRole("button", { name: "修复这些建议" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "不修复，继续生成" }),
+    ).toBeInTheDocument();
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "不修复，继续生成" }),
+    );
+
+    expect(api.sendReviewDecision).toHaveBeenCalledWith(
+      "skip_optional_findings",
+    );
   });
 
   it("allows confirming the current version from human confirm after optional review findings", async () => {
@@ -729,9 +987,13 @@ describe("ChatWorkspacePage", () => {
       ],
     });
 
-    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
 
-    await userEvent.click(screen.getByRole("button", { name: "确认使用当前版本" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "确认使用当前版本" }),
+    );
 
     expect(api.sendHumanConfirm).toHaveBeenCalledWith("confirm");
   });
@@ -799,9 +1061,13 @@ describe("ChatWorkspacePage", () => {
       ],
     });
 
-    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
 
-    await userEvent.click(screen.getByRole("button", { name: "采纳建议并返修" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "采纳建议并返修" }),
+    );
 
     expect(api.sendHumanConfirm).toHaveBeenCalledWith(
       "request-change",
@@ -809,7 +1075,9 @@ describe("ChatWorkspacePage", () => {
         description: expect.stringContaining("建议补充说明"),
       }),
     );
-    const payload = vi.mocked(api.sendHumanConfirm).mock.calls[0][1] as { description: string };
+    const payload = vi.mocked(api.sendHumanConfirm).mock.calls[0][1] as {
+      description: string;
+    };
     expect(payload.description).toContain("补充说明段落");
   });
 
@@ -823,10 +1091,14 @@ describe("ChatWorkspacePage", () => {
       workItemPlanCandidate: workItemPlanCandidate(),
     });
 
-    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
     await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
 
-    expect(screen.getByTestId("work-item-plan-candidate-panel")).toBeInTheDocument();
+    expect(
+      screen.getByTestId("work-item-plan-candidate-panel"),
+    ).toBeInTheDocument();
     expect(screen.getByText("Work Item Plan 候选")).toBeInTheDocument();
 
     await userEvent.click(screen.getByTestId("accept-plan-button"));
@@ -864,10 +1136,16 @@ describe("ChatWorkspacePage", () => {
       ],
     });
 
-    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
 
-    expect(screen.getByTestId("chat-entry-list")).toHaveTextContent("正在生成 Work Item Plan");
-    expect(screen.getAllByText("Work Item Plan #workspace_session_0001").length).toBeGreaterThan(0);
+    expect(screen.getByTestId("chat-entry-list")).toHaveTextContent(
+      "正在生成 Work Item Plan",
+    );
+    expect(
+      screen.getAllByText("Work Item Plan #workspace_session_0001").length,
+    ).toBeGreaterThan(0);
   });
 
   it("work_item_plan candidate panel supports revert, request revision and accept", async () => {
@@ -901,13 +1179,22 @@ describe("ChatWorkspacePage", () => {
       }),
     });
 
-    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
     await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
 
     await userEvent.click(screen.getByTestId("start-revert-wi_001"));
-    await userEvent.type(screen.getByTestId("revert-feedback-input-wi_001"), "拆得太粗");
+    await userEvent.type(
+      screen.getByTestId("revert-feedback-input-wi_001"),
+      "拆得太粗",
+    );
     await userEvent.click(screen.getByTestId("submit-revert-wi_001"));
-    expect(api.sendRevertWorkItem).toHaveBeenCalledWith("wi_001", "拆得太粗", false);
+    expect(api.sendRevertWorkItem).toHaveBeenCalledWith(
+      "wi_001",
+      "拆得太粗",
+      false,
+    );
 
     useWorkspaceStore.getState().setWorkItemPlanCandidate(
       workItemPlanCandidate({
@@ -936,7 +1223,9 @@ describe("ChatWorkspacePage", () => {
       }),
     );
 
-    await waitFor(() => expect(screen.getByText(/已标记撤销/)).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByText(/已标记撤销/)).toBeInTheDocument(),
+    );
     const requestRevisionButton = screen.getByTestId("request-revision-button");
     await waitFor(() => expect(requestRevisionButton).not.toBeDisabled());
     expect(requestRevisionButton).toHaveTextContent("重新生成被标记的 1 项");
@@ -957,11 +1246,17 @@ describe("ChatWorkspacePage", () => {
       workItemPlanCandidate: null,
     });
 
-    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
     await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
 
-    expect(screen.queryByTestId("work-item-plan-candidate-panel")).not.toBeInTheDocument();
-    expect(screen.getByText("尚未生成候选，请点击开始生成")).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("work-item-plan-candidate-panel"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText("尚未生成候选，请点击开始生成"),
+    ).toBeInTheDocument();
   });
 
   it("generation mode node shows serial batch revision buttons", async () => {
@@ -981,22 +1276,35 @@ describe("ChatWorkspacePage", () => {
           title: "选择生成模式",
         }),
       ],
-      workItemPlanArtifact: { type: "outline_candidate", payload: workItemPlanOutlinePayload() },
+      workItemPlanArtifact: {
+        type: "outline_candidate",
+        payload: workItemPlanOutlinePayload(),
+      },
     });
 
-    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
     await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
 
     await userEvent.click(screen.getByRole("button", { name: "逐个生成" }));
     await userEvent.click(screen.getByRole("button", { name: "自动生成" }));
-    await userEvent.click(screen.getByRole("button", { name: "返回 Outline 返修" }));
-
-    expect(api.sendSelectWorkItemGenerationMode).toHaveBeenNthCalledWith(1, "serial");
-    expect(api.sendSelectWorkItemGenerationMode).toHaveBeenNthCalledWith(2, "batch");
-    expect(api.sendRequestOutlineRevision).toHaveBeenCalledWith();
-    expect(screen.getByTestId("work-item-plan-artifact-panel")).toHaveTextContent(
-      "Split frontend and backend work.",
+    await userEvent.click(
+      screen.getByRole("button", { name: "返回 Outline 返修" }),
     );
+
+    expect(api.sendSelectWorkItemGenerationMode).toHaveBeenNthCalledWith(
+      1,
+      "serial",
+    );
+    expect(api.sendSelectWorkItemGenerationMode).toHaveBeenNthCalledWith(
+      2,
+      "batch",
+    );
+    expect(api.sendRequestOutlineRevision).toHaveBeenCalledWith();
+    expect(
+      screen.getByTestId("work-item-plan-artifact-panel"),
+    ).toHaveTextContent("Split frontend and backend work.");
   });
 
   it("generation mode node shows mode actions in chat controls instead of review actions", async () => {
@@ -1016,24 +1324,41 @@ describe("ChatWorkspacePage", () => {
           title: "选择生成模式",
         }),
       ],
-      workItemPlanArtifact: { type: "outline_candidate", payload: workItemPlanOutlinePayload() },
+      workItemPlanArtifact: {
+        type: "outline_candidate",
+        payload: workItemPlanOutlinePayload(),
+      },
     });
 
-    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
 
     expect(screen.getByRole("textbox")).toHaveAttribute(
       "placeholder",
       "请选择 Work Item 生成模式",
     );
-    expect(screen.queryByRole("button", { name: "进入 Review" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "重新编写" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "进入 Review" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "重新编写" }),
+    ).not.toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: "逐个生成" }));
     await userEvent.click(screen.getByRole("button", { name: "自动生成" }));
-    await userEvent.click(screen.getByRole("button", { name: "返回 Outline 返修" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "返回 Outline 返修" }),
+    );
 
-    expect(api.sendSelectWorkItemGenerationMode).toHaveBeenNthCalledWith(1, "serial");
-    expect(api.sendSelectWorkItemGenerationMode).toHaveBeenNthCalledWith(2, "batch");
+    expect(api.sendSelectWorkItemGenerationMode).toHaveBeenNthCalledWith(
+      1,
+      "serial",
+    );
+    expect(api.sendSelectWorkItemGenerationMode).toHaveBeenNthCalledWith(
+      2,
+      "batch",
+    );
     expect(api.sendRequestOutlineRevision).toHaveBeenCalledWith();
     expect(api.sendAuthorDecision).not.toHaveBeenCalled();
   });
@@ -1055,10 +1380,15 @@ describe("ChatWorkspacePage", () => {
           title: "确认 Outline",
         }),
       ],
-      workItemPlanArtifact: { type: "outline_candidate", payload: workItemPlanOutlinePayload() },
+      workItemPlanArtifact: {
+        type: "outline_candidate",
+        payload: workItemPlanOutlinePayload(),
+      },
     });
 
-    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
     await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
 
     await userEvent.click(screen.getByRole("button", { name: "接受 Outline" }));
@@ -1085,15 +1415,20 @@ describe("ChatWorkspacePage", () => {
           title: "确认 Outline",
         }),
       ],
-      workItemPlanArtifact: { type: "outline_candidate", payload: workItemPlanOutlinePayload() },
+      workItemPlanArtifact: {
+        type: "outline_candidate",
+        payload: workItemPlanOutlinePayload(),
+      },
     });
 
-    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
     await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
 
-    expect(screen.getByTestId("work-item-plan-artifact-panel")).toHaveTextContent(
-      "Split frontend and backend work.",
-    );
+    expect(
+      screen.getByTestId("work-item-plan-artifact-panel"),
+    ).toHaveTextContent("Split frontend and backend work.");
     await userEvent.click(screen.getByRole("button", { name: "接受 Outline" }));
     expect(api.sendAuthorDecision).toHaveBeenCalledWith("accept");
 
@@ -1108,9 +1443,16 @@ describe("ChatWorkspacePage", () => {
           title: "选择生成模式",
         }),
       ],
-      workItemPlanArtifact: { type: "outline_candidate", payload: workItemPlanOutlinePayload() },
+      workItemPlanArtifact: {
+        type: "outline_candidate",
+        payload: workItemPlanOutlinePayload(),
+      },
     });
-    await waitFor(() => expect(screen.getByRole("button", { name: "逐个生成" })).toBeInTheDocument());
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "逐个生成" }),
+      ).toBeInTheDocument(),
+    );
     await userEvent.click(screen.getByRole("button", { name: "逐个生成" }));
     expect(api.sendSelectWorkItemGenerationMode).toHaveBeenCalledWith("serial");
 
@@ -1125,12 +1467,22 @@ describe("ChatWorkspacePage", () => {
           title: "确认 Draft",
         }),
       ],
-      workItemPlanArtifact: { type: "draft_candidate", payload: workItemDraftPayload() },
+      workItemPlanArtifact: {
+        type: "draft_candidate",
+        payload: workItemDraftPayload(),
+      },
     });
-    await waitFor(() => expect(screen.getByRole("button", { name: "接受" })).toBeInTheDocument());
-    expect(screen.getByTestId("work-item-plan-artifact-panel")).toHaveTextContent("Backend flow");
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "接受" })).toBeInTheDocument(),
+    );
+    expect(
+      screen.getByTestId("work-item-plan-artifact-panel"),
+    ).toHaveTextContent("Backend flow");
     await userEvent.click(screen.getByRole("button", { name: "接受" }));
-    expect(api.sendWorkItemDraftDecision).toHaveBeenCalledWith("outline_backend", "accept");
+    expect(api.sendWorkItemDraftDecision).toHaveBeenCalledWith(
+      "outline_backend",
+      "accept",
+    );
   });
 
   it("draft confirm hides accept when validation failed", async () => {
@@ -1156,10 +1508,14 @@ describe("ChatWorkspacePage", () => {
       },
     });
 
-    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
     await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
 
-    expect(screen.queryByRole("button", { name: "接受" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "接受" }),
+    ).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "重写" }));
     await userEvent.click(screen.getByRole("button", { name: "暂停" }));
 
@@ -1192,17 +1548,26 @@ describe("ChatWorkspacePage", () => {
           title: "确认 Draft",
         }),
       ],
-      workItemPlanArtifact: { type: "draft_candidate", payload: workItemDraftPayload() },
+      workItemPlanArtifact: {
+        type: "draft_candidate",
+        payload: workItemDraftPayload(),
+      },
     });
 
-    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
 
     expect(screen.getByRole("textbox")).toHaveAttribute(
       "placeholder",
       "请确认当前 Work Item Draft",
     );
-    expect(screen.queryByRole("button", { name: "进入 Review" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "重新编写" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "进入 Review" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "重新编写" }),
+    ).not.toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: "接受" }));
     await userEvent.click(screen.getByRole("button", { name: "重写" }));
@@ -1249,10 +1614,16 @@ describe("ChatWorkspacePage", () => {
       },
     });
 
-    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
 
-    expect(screen.queryByRole("button", { name: "接受" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "进入 Review" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "接受" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "进入 Review" }),
+    ).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "重写" }));
     await userEvent.click(screen.getByRole("button", { name: "暂停" }));
 
@@ -1295,15 +1666,17 @@ describe("ChatWorkspacePage", () => {
       },
     });
 
-    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
     await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
 
-    expect(screen.getByTestId("work-item-plan-artifact-panel")).toHaveTextContent(
-      "outline_backend -> outline_frontend",
-    );
-    expect(screen.getByTestId("work-item-plan-artifact-panel")).toHaveTextContent(
-      "validation_failed",
-    );
+    expect(
+      screen.getByTestId("work-item-plan-artifact-panel"),
+    ).toHaveTextContent("outline_backend -> outline_frontend");
+    expect(
+      screen.getByTestId("work-item-plan-artifact-panel"),
+    ).toHaveTextContent("validation_failed");
     await userEvent.click(screen.getByRole("button", { name: "降级串行" }));
     expect(api.sendWorkItemBatchDecision).toHaveBeenCalledWith(
       "downgrade_to_serial",
@@ -1329,10 +1702,15 @@ describe("ChatWorkspacePage", () => {
           title: "确认 Batch",
         }),
       ],
-      workItemPlanArtifact: { type: "batch_state", payload: workItemBatchPayload(true) },
+      workItemPlanArtifact: {
+        type: "batch_state",
+        payload: workItemBatchPayload(true),
+      },
     });
 
-    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
     await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
 
     await userEvent.click(screen.getByRole("button", { name: "接受全部" }));
@@ -1340,8 +1718,14 @@ describe("ChatWorkspacePage", () => {
     await userEvent.click(screen.getByRole("button", { name: "暂停" }));
     await userEvent.click(screen.getByRole("button", { name: "降级串行" }));
 
-    expect(api.sendWorkItemBatchDecision).toHaveBeenNthCalledWith(1, "accept_all");
-    expect(api.sendWorkItemBatchDecision).toHaveBeenNthCalledWith(2, "rewrite_batch");
+    expect(api.sendWorkItemBatchDecision).toHaveBeenNthCalledWith(
+      1,
+      "accept_all",
+    );
+    expect(api.sendWorkItemBatchDecision).toHaveBeenNthCalledWith(
+      2,
+      "rewrite_batch",
+    );
     expect(api.sendWorkItemBatchDecision).toHaveBeenNthCalledWith(3, "pause");
     expect(api.sendWorkItemBatchDecision).toHaveBeenNthCalledWith(
       4,
@@ -1374,17 +1758,31 @@ describe("ChatWorkspacePage", () => {
       },
     });
 
-    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
     await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
 
-    expect(screen.queryByRole("button", { name: "放弃并回滚" })).not.toBeInTheDocument();
-    expect(screen.getByTestId("work-item-plan-artifact-panel")).toHaveTextContent("Before");
-    expect(screen.getByTestId("work-item-plan-artifact-panel")).toHaveTextContent("After");
+    expect(
+      screen.queryByRole("button", { name: "放弃并回滚" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByTestId("work-item-plan-artifact-panel"),
+    ).toHaveTextContent("Before");
+    expect(
+      screen.getByTestId("work-item-plan-artifact-panel"),
+    ).toHaveTextContent("After");
     await userEvent.click(screen.getByRole("button", { name: "继续" }));
     await userEvent.click(screen.getByRole("button", { name: "转人工" }));
 
-    expect(api.sendWorkItemPlanCompileRecoveryAction).toHaveBeenNthCalledWith(1, "continue");
-    expect(api.sendWorkItemPlanCompileRecoveryAction).toHaveBeenNthCalledWith(2, "human_triage");
+    expect(api.sendWorkItemPlanCompileRecoveryAction).toHaveBeenNthCalledWith(
+      1,
+      "continue",
+    );
+    expect(api.sendWorkItemPlanCompileRecoveryAction).toHaveBeenNthCalledWith(
+      2,
+      "human_triage",
+    );
   });
 
   it("timeline selection shows historical draft artifact as readonly", async () => {
@@ -1441,13 +1839,20 @@ describe("ChatWorkspacePage", () => {
       ],
     });
 
-    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
     await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
 
-    expect(screen.getByTestId("work-item-plan-artifact-panel")).toHaveTextContent(
-      "Backend flow v1",
-    );
-    expect(screen.getByTestId("work-item-plan-artifact-panel")).toHaveTextContent("只读历史");
+    expect(
+      screen.getByTestId("work-item-plan-artifact-panel"),
+    ).toHaveTextContent("Backend flow v1");
+    expect(
+      screen.getByTestId("work-item-plan-artifact-panel"),
+    ).toHaveTextContent("只读历史");
+    expect(
+      screen.getByTestId("work-item-plan-artifact-panel"),
+    ).toHaveTextContent("正在查看历史版本 v1，不影响当前流程。");
   });
 
   it("lists all work item plan artifact versions and switches between draft history", async () => {
@@ -1495,7 +1900,10 @@ describe("ChatWorkspacePage", () => {
           is_current: false,
           created_at: "2026-06-23T00:00:00Z",
           source_node_id: "node_outline",
-          artifact: { type: "outline_candidate", payload: workItemPlanOutlinePayload() },
+          artifact: {
+            type: "outline_candidate",
+            payload: workItemPlanOutlinePayload(),
+          },
         },
         {
           version: 2,
@@ -1522,20 +1930,32 @@ describe("ChatWorkspacePage", () => {
       ],
     });
 
-    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
     await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
 
-    const versionList = screen.getByTestId("work-item-plan-artifact-version-list");
-    expect(versionList).toHaveTextContent("Plan Outline");
-    expect(versionList).toHaveTextContent("outline_backend / draft_backend_001");
-    expect(versionList).toHaveTextContent("v3");
-
-    await userEvent.click(screen.getByTestId("work-item-plan-artifact-version-2"));
-
-    expect(screen.getByTestId("work-item-plan-artifact-panel")).toHaveTextContent(
-      "Backend flow v1",
+    const versionRail = screen.getByTestId("work-item-plan-version-rail");
+    expect(versionRail).toHaveTextContent("Outline");
+    expect(versionRail).toHaveTextContent("Drafts");
+    expect(versionRail).toHaveTextContent(
+      "outline_backend / draft_backend_001",
     );
-    expect(screen.getByTestId("work-item-plan-artifact-panel")).toHaveTextContent("只读历史");
+    expect(versionRail).toHaveTextContent("v3");
+
+    await userEvent.click(
+      screen.getByTestId("work-item-plan-version-2"),
+    );
+
+    expect(
+      screen.getByTestId("work-item-plan-artifact-panel"),
+    ).toHaveTextContent("Backend flow v1");
+    expect(
+      screen.getByTestId("work-item-plan-artifact-panel"),
+    ).toHaveTextContent("只读历史");
+    expect(
+      screen.getByTestId("work-item-plan-artifact-panel"),
+    ).toHaveTextContent("正在查看历史版本 v2，不影响当前流程。");
   });
 
   it("unknown work item plan node type renders processing card", async () => {
@@ -1555,13 +1975,20 @@ describe("ChatWorkspacePage", () => {
           title: "Future phase",
         }),
       ],
-      workItemPlanArtifact: { type: "outline_candidate", payload: workItemPlanOutlinePayload() },
+      workItemPlanArtifact: {
+        type: "outline_candidate",
+        payload: workItemPlanOutlinePayload(),
+      },
     });
 
-    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
     await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
 
-    expect(screen.getByTestId("work-item-plan-staged-panel")).toHaveTextContent("系统处理中");
+    expect(screen.getByTestId("work-item-plan-staged-panel")).toHaveTextContent(
+      "系统处理中",
+    );
     expect(screen.getByTestId("work-item-plan-staged-panel")).toHaveTextContent(
       "work_item_plan_future_phase",
     );
@@ -1586,10 +2013,14 @@ describe("ChatWorkspacePage", () => {
       ],
     });
 
-    render(<ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />);
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
     await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
 
-    expect(screen.queryByTestId("work-item-plan-candidate-panel")).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("work-item-plan-candidate-panel"),
+    ).not.toBeInTheDocument();
     expect(screen.getByTestId("monaco-viewer")).toHaveTextContent("# Story");
   });
 });

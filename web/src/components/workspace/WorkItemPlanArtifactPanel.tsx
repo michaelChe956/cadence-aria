@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type {
   ValidatorFindingDto,
   WorkItemBatchStatePayload,
@@ -7,23 +7,43 @@ import type {
   WorkItemDraftVerificationCommand,
   WorkItemDraftVerificationPlan,
   WorkItemPlanArtifactPayload,
+  WorkItemPlanArtifactVersion,
   WorkItemPlanOutline,
   WorkItemPlanOutlineItem,
 } from "../../api/types";
 import { normalizeDisplayText } from "../chat-workspace/text-display";
 import { MonacoViewer } from "../shared/MonacoViewer";
 
+type WorkItemPlanArtifactTab = "overview" | "outline" | "drafts" | "diff" | "review" | "json";
+
 export interface WorkItemPlanArtifactPanelProps {
   artifact: WorkItemPlanArtifactPayload | null;
+  versions?: WorkItemPlanArtifactVersion[];
+  selectedVersion?: number | null;
+  onSelectVersion?: (version: number | null) => void;
+  activeNodeType?: string | null;
   readonly?: boolean;
   className?: string;
 }
 
 export function WorkItemPlanArtifactPanel({
   artifact,
+  versions = [],
+  selectedVersion = null,
+  onSelectVersion,
   readonly = false,
   className = "",
 }: WorkItemPlanArtifactPanelProps) {
+  const [activeTab, setActiveTab] = useState<WorkItemPlanArtifactTab>(() =>
+    artifact ? defaultArtifactTab(artifact) : "overview",
+  );
+
+  useEffect(() => {
+    if (artifact) {
+      setActiveTab(defaultArtifactTab(artifact));
+    }
+  }, [artifact?.type]);
+
   if (!artifact) {
     return (
       <div
@@ -40,83 +60,631 @@ export function WorkItemPlanArtifactPanel({
       data-testid="work-item-plan-artifact-panel"
       className={`min-h-0 overflow-auto p-4 ${className}`}
     >
+      <section className="mb-4 space-y-3 border-b border-[var(--aria-line)] pb-4">
+        <div className="flex min-w-0 flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h2 className="text-sm font-semibold text-[var(--aria-ink)]">
+              Work Item Plan 工作台
+            </h2>
+            <p
+              aria-live="polite"
+              className="mt-1 break-words text-xs leading-5 text-[var(--aria-ink-muted)]"
+            >
+              {artifactStatusMessage(artifact, readonly, selectedVersion)}
+            </p>
+          </div>
+          <span className="rounded border border-[var(--aria-line)] px-2 py-0.5 font-mono text-[11px] text-[var(--aria-ink-muted)]">
+            {selectedVersion ? `v${selectedVersion}` : "Current"}
+          </span>
+        </div>
+        <WorkItemPlanArtifactVersionRail
+          versions={versions}
+          selectedVersion={selectedVersion}
+          onSelectVersion={onSelectVersion}
+        />
+        <WorkItemPlanTabs activeTab={activeTab} onSelectTab={setActiveTab} />
+      </section>
+
       {readonly ? (
         <div className="mb-3 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-800">
           只读历史
         </div>
       ) : null}
 
-      {artifact.type === "outline_candidate" ? (
-        <OutlineArtifact artifact={artifact.payload} />
-      ) : null}
-
-      {artifact.type === "context_blocker" ? (
-        <section className="space-y-3">
-          <Header title="Context Blocker" meta={`${artifact.payload.context_blockers.length}`} />
-          <Paragraph>{artifact.payload.exploration_summary}</Paragraph>
-          {artifact.payload.context_blockers.map((blocker) => (
-            <KeyValue key={blocker.code} label={blocker.code} value={blocker.message} />
-          ))}
-        </section>
-      ) : null}
-
-      {artifact.type === "draft_candidate" ? (
-        <section className="space-y-3">
-          <Header
-            title="Work Item Draft"
-            meta={`${artifact.payload.draft_record.outline_id} / ${artifact.payload.draft_record.status}`}
-          />
-          <WorkItemDraftCard
-            record={artifact.payload.draft_record}
-            canAccept={artifact.payload.can_accept}
-          />
-          <ValidatorFindings findings={artifact.payload.validator_findings} />
-        </section>
-      ) : null}
-
-      {artifact.type === "batch_state" ? <BatchArtifact payload={artifact.payload} /> : null}
-
-      {artifact.type === "compile_report" ? (
-        <section className="space-y-3">
-          <Header title="Compile Report" meta={artifact.payload.status} />
-          <KeyValue label="compile" value={artifact.payload.compile_id} />
-          <KeyValue label="commit state" value={artifact.payload.plan_commit_state} />
-          <KeyValue label="work items" value={artifact.payload.work_item_ids.join(", ") || "--"} />
-          <KeyValue
-            label="verification plans"
-            value={artifact.payload.verification_plan_ids.join(", ") || "--"}
-          />
-          <KeyValue
-            label="child sessions"
-            value={artifact.payload.child_session_ids.join(", ") || "--"}
-          />
-          <div className="grid gap-3 md:grid-cols-2" data-testid="compile-report-before-after">
-            <div className="rounded-md border border-[var(--aria-line)] p-3">
-              <div className="mb-2 text-xs font-semibold text-[var(--aria-ink-muted)]">Before</div>
-              <pre className="whitespace-pre-wrap break-words text-xs text-[var(--aria-ink)]">
-                {JSON.stringify({ materialized_work_items: [], child_sessions: [] }, null, 2)}
-              </pre>
-            </div>
-            <div className="rounded-md border border-[var(--aria-line)] p-3">
-              <div className="mb-2 text-xs font-semibold text-[var(--aria-ink-muted)]">After</div>
-              <pre className="whitespace-pre-wrap break-words text-xs text-[var(--aria-ink)]">
-                {JSON.stringify(
-                  {
-                    work_item_ids: artifact.payload.work_item_ids,
-                    verification_plan_ids: artifact.payload.verification_plan_ids,
-                    child_session_ids: artifact.payload.child_session_ids,
-                  },
-                  null,
-                  2,
-                )}
-              </pre>
-            </div>
-          </div>
-          <ValidatorFindings findings={artifact.payload.validator_findings} />
-        </section>
-      ) : null}
+      <WorkItemPlanArtifactTabContent
+        artifact={artifact}
+        activeTab={activeTab}
+        versions={versions}
+        selectedVersion={selectedVersion}
+      />
     </div>
   );
+}
+
+function WorkItemPlanArtifactVersionRail({
+  versions,
+  selectedVersion,
+  onSelectVersion,
+}: {
+  versions: WorkItemPlanArtifactVersion[];
+  selectedVersion: number | null;
+  onSelectVersion?: (version: number | null) => void;
+}) {
+  const groups = groupWorkItemPlanArtifactVersions(versions);
+  return (
+    <div
+      data-testid="work-item-plan-version-rail"
+      className="flex min-w-0 gap-3 overflow-x-auto rounded-md border border-[var(--aria-line)] bg-white p-2"
+    >
+      {versions.length === 0 ? (
+        <span className="text-xs text-[var(--aria-ink-muted)]">暂无版本</span>
+      ) : (
+        groups.map((group) => (
+          <div
+            key={group.key}
+            data-testid={`work-item-version-group-${group.key}`}
+            className="flex shrink-0 items-center gap-2"
+          >
+            <span className="text-[11px] font-semibold uppercase text-[var(--aria-ink-muted)]">
+              {group.label}
+            </span>
+            {group.versions.map((version) => {
+              const selected = selectedVersion === version.version;
+              const label = version.artifact
+                ? workItemPlanArtifactLabel(version.artifact)
+                : "无内容";
+              return (
+                <button
+                  key={version.version}
+                  type="button"
+                  data-testid={`work-item-plan-version-${version.version}`}
+                  disabled={!version.artifact}
+                  onClick={() => {
+                    if (version.artifact) {
+                      onSelectVersion?.(version.version);
+                    }
+                  }}
+                  className={`flex h-8 shrink-0 items-center gap-2 rounded-md border px-2 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] disabled:cursor-not-allowed disabled:opacity-50 ${
+                    selected
+                      ? "border-[var(--aria-primary)] bg-blue-50 text-[var(--aria-ink)]"
+                      : "border-[var(--aria-line)] text-[var(--aria-ink-muted)] hover:bg-[var(--aria-panel-muted)]"
+                  }`}
+                >
+                  <span className="font-mono">v{version.version}</span>
+                  <span>{label}</span>
+                  {version.is_current ? (
+                    <span className="rounded border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700">
+                      current
+                    </span>
+                  ) : null}
+                </button>
+              );
+            })}
+          </div>
+        ))
+      )}
+    </div>
+  );
+}
+
+function WorkItemPlanTabs({
+  activeTab,
+  onSelectTab,
+}: {
+  activeTab: WorkItemPlanArtifactTab;
+  onSelectTab: (tab: WorkItemPlanArtifactTab) => void;
+}) {
+  const tabs: Array<[WorkItemPlanArtifactTab, string]> = [
+    ["overview", "Overview"],
+    ["outline", "Outline"],
+    ["drafts", "Drafts"],
+    ["diff", "Diff"],
+    ["review", "Review"],
+    ["json", "JSON"],
+  ];
+  return (
+    <div
+      aria-label="Work Item Plan artifact views"
+      className="flex min-w-0 gap-1 overflow-x-auto rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-1 text-xs"
+    >
+      {tabs.map(([tab, label]) => (
+        <button
+          key={tab}
+          type="button"
+          aria-pressed={activeTab === tab}
+          onClick={() => onSelectTab(tab)}
+          className={`h-8 shrink-0 rounded px-3 font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] ${
+            activeTab === tab
+              ? "bg-white text-[var(--aria-ink)] shadow-sm"
+              : "text-[var(--aria-ink-muted)] hover:bg-white hover:text-[var(--aria-ink)]"
+          }`}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function artifactStatusMessage(
+  artifact: WorkItemPlanArtifactPayload,
+  readonly: boolean,
+  selectedVersion?: number | null,
+) {
+  if (readonly && selectedVersion) {
+    return `正在查看历史版本 v${selectedVersion}，不影响当前流程。`;
+  }
+  switch (artifact.type) {
+    case "outline_candidate":
+      return "Outline 已生成，等待确认。Work Item 尚未生成。";
+    case "draft_candidate":
+      return "当前仅展示单个 Draft，不代表整组 Work Item 完成。";
+    case "batch_state":
+      return `已生成 ${artifact.payload.draft_records.length} 个 Draft，等待接受全部或返修。`;
+    case "compile_report":
+      if (artifact.payload.status === "committed") {
+        return `Compile 已提交，生成 ${artifact.payload.work_item_ids.length} 个 Work Item、${artifact.payload.verification_plan_ids.length} 个 Verification Plan、${artifact.payload.child_session_ids.length} 个 child session。`;
+      }
+      return `Compile ${artifact.payload.status}，Work Item 尚未确认完成。`;
+    case "context_blocker":
+      return "缺少上下文，Work Item Plan 暂时无法继续。";
+    default:
+      return "Work Item Plan artifact 已更新。";
+  }
+}
+
+function defaultArtifactTab(artifact: WorkItemPlanArtifactPayload): WorkItemPlanArtifactTab {
+  switch (artifact.type) {
+    case "outline_candidate":
+      return "outline";
+    case "draft_candidate":
+    case "batch_state":
+      return "drafts";
+    case "context_blocker":
+      return "review";
+    case "compile_report":
+      return "overview";
+    default:
+      return "overview";
+  }
+}
+
+function WorkItemPlanArtifactTabContent({
+  artifact,
+  activeTab,
+  versions,
+  selectedVersion,
+}: {
+  artifact: WorkItemPlanArtifactPayload;
+  activeTab: WorkItemPlanArtifactTab;
+  versions: WorkItemPlanArtifactVersion[];
+  selectedVersion: number | null;
+}) {
+  if (activeTab === "json") {
+    return (
+      <div className="h-[420px] overflow-hidden rounded-md border border-[var(--aria-line)]">
+        <MonacoViewer value={JSON.stringify(artifact, null, 2)} language="json" height="100%" />
+      </div>
+    );
+  }
+
+  if (activeTab === "review") {
+    return <ReviewTab artifact={artifact} />;
+  }
+
+  if (activeTab === "diff") {
+    return (
+      <DiffTab
+        artifact={artifact}
+        versions={versions}
+        selectedVersion={selectedVersion}
+      />
+    );
+  }
+
+  if (activeTab === "overview") {
+    return <OverviewTab artifact={artifact} />;
+  }
+
+  if (activeTab === "outline") {
+    return artifact.type === "outline_candidate" ? (
+      <OutlineArtifact artifact={artifact.payload} />
+    ) : (
+      <EmptyTab message="当前 artifact 不包含 Outline。" />
+    );
+  }
+
+  if (activeTab === "drafts") {
+    return <DraftsTab artifact={artifact} />;
+  }
+
+  return null;
+}
+
+function DiffTab({
+  artifact,
+  versions,
+  selectedVersion,
+}: {
+  artifact: WorkItemPlanArtifactPayload;
+  versions: WorkItemPlanArtifactVersion[];
+  selectedVersion: number | null;
+}) {
+  const compareArtifact =
+    versions.find((version) => version.version === selectedVersion)?.artifact ?? artifact;
+  const baseArtifact = latestComparableArtifact(versions, compareArtifact, selectedVersion);
+  const rows = baseArtifact
+    ? diffWorkItemPlanArtifacts(baseArtifact, compareArtifact)
+    : [];
+
+  return (
+    <section
+      data-testid="work-item-diff-tab"
+      className="space-y-3 rounded-md border border-[var(--aria-line)] bg-white p-3"
+    >
+      {baseArtifact && rows.length > 0 ? (
+        rows.map((row) => (
+          <div
+            key={row.field}
+            className="grid gap-2 rounded border border-[var(--aria-line)] p-3 text-sm md:grid-cols-[12rem_minmax(0,1fr)_minmax(0,1fr)]"
+          >
+            <div className="font-mono text-xs font-semibold text-[var(--aria-ink)]">
+              {row.field}
+            </div>
+            <div className="min-w-0 break-words text-red-700">{row.before || "--"}</div>
+            <div className="min-w-0 break-words text-emerald-700">{row.after || "--"}</div>
+          </div>
+        ))
+      ) : (
+        <p className="text-sm text-[var(--aria-ink-muted)]">
+          暂无可比较的 Outline/Draft 版本
+        </p>
+      )}
+    </section>
+  );
+}
+
+function OverviewTab({ artifact }: { artifact: WorkItemPlanArtifactPayload }) {
+  if (artifact.type === "compile_report") {
+    return <CompileReportArtifact artifact={artifact.payload} />;
+  }
+  if (artifact.type === "context_blocker") {
+    return <ContextBlockerArtifact artifact={artifact.payload} />;
+  }
+  if (artifact.type === "batch_state") {
+    return <BatchArtifact payload={artifact.payload} />;
+  }
+  if (artifact.type === "draft_candidate") {
+    return <DraftsTab artifact={artifact} />;
+  }
+  return <OutlineArtifact artifact={artifact.payload} />;
+}
+
+function DraftsTab({ artifact }: { artifact: WorkItemPlanArtifactPayload }) {
+  if (artifact.type === "draft_candidate") {
+    return (
+      <section className="space-y-3">
+        <Header
+          title="Work Item Draft"
+          meta={`${artifact.payload.draft_record.outline_id} / ${artifact.payload.draft_record.status}`}
+        />
+        <WorkItemDraftCard
+          record={artifact.payload.draft_record}
+          canAccept={artifact.payload.can_accept}
+        />
+        <ValidatorFindings findings={artifact.payload.validator_findings} />
+      </section>
+    );
+  }
+
+  if (artifact.type === "batch_state") {
+    const selectedRecord = artifact.payload.draft_records[0] ?? null;
+    return (
+      <section className="space-y-4">
+        <Header title="Work Item Drafts" meta={artifact.payload.batch_status} />
+        <KeyValue label="batch" value={artifact.payload.batch_id} />
+        <KeyValue label="queue" value={artifact.payload.queue.join(" -> ") || "--"} />
+        {artifact.payload.failure_summary.length > 0 ? (
+          <BulletList
+            title="Failures"
+            items={artifact.payload.failure_summary.map(
+              (failure) => `${failure.outline_id} / ${failure.draft_id} / ${failure.status}`,
+            )}
+          />
+        ) : null}
+        <div
+          data-testid="work-item-draft-list"
+          className="grid gap-2 rounded-md border border-[var(--aria-line)] bg-white p-2 md:grid-cols-2"
+        >
+          {artifact.payload.draft_records.map((record) => (
+            <div
+              key={record.draft_id}
+              className="rounded border border-[var(--aria-line)] px-3 py-2 text-xs"
+            >
+              <div className="font-mono font-semibold text-[var(--aria-ink)]">
+                {record.draft_id}
+              </div>
+              <div className="mt-1 text-[var(--aria-ink-muted)]">
+                {record.outline_id} / {record.status}
+              </div>
+            </div>
+          ))}
+        </div>
+        {selectedRecord ? (
+          <div data-testid="work-item-draft-detail">
+            <WorkItemDraftCard record={selectedRecord} />
+          </div>
+        ) : null}
+      </section>
+    );
+  }
+
+  return <EmptyTab message="当前 artifact 不包含 Draft。" />;
+}
+
+function ReviewTab({ artifact }: { artifact: WorkItemPlanArtifactPayload }) {
+  const findings = artifactFindings(artifact);
+  return (
+    <section
+      data-testid="work-item-review-tab"
+      className="space-y-3 rounded-md border border-[var(--aria-line)] bg-white p-3"
+    >
+      <div className="text-xs font-semibold text-[var(--aria-ink-muted)]">
+        Blocking findings
+      </div>
+      {findings.length > 0 ? (
+        <ValidatorFindings findings={findings} />
+      ) : (
+        <p className="text-sm text-[var(--aria-ink-muted)]">暂无 findings</p>
+      )}
+      {artifact.type === "context_blocker" ? (
+        <ContextBlockerArtifact artifact={artifact.payload} />
+      ) : null}
+    </section>
+  );
+}
+
+function EmptyTab({ message }: { message: string }) {
+  return (
+    <section className="rounded-md border border-[var(--aria-line)] bg-white p-3 text-sm text-[var(--aria-ink-muted)]">
+      {message}
+    </section>
+  );
+}
+
+function ContextBlockerArtifact({
+  artifact,
+}: {
+  artifact: Extract<WorkItemPlanArtifactPayload, { type: "context_blocker" }>["payload"];
+}) {
+  return (
+    <section className="space-y-3">
+      <Header title="Context Blocker" meta={`${artifact.context_blockers.length}`} />
+      <Paragraph>{artifact.exploration_summary}</Paragraph>
+      {artifact.context_blockers.map((blocker) => (
+        <KeyValue key={blocker.code} label={blocker.code} value={blocker.message} />
+      ))}
+    </section>
+  );
+}
+
+function CompileReportArtifact({
+  artifact,
+}: {
+  artifact: Extract<WorkItemPlanArtifactPayload, { type: "compile_report" }>["payload"];
+}) {
+  return (
+    <section className="space-y-3">
+      <Header title="Compile Report" meta={artifact.status} />
+      <KeyValue label="compile" value={artifact.compile_id} />
+      <KeyValue label="commit state" value={artifact.plan_commit_state} />
+      <KeyValue label="work items" value={artifact.work_item_ids.join(", ") || "--"} />
+      <KeyValue
+        label="verification plans"
+        value={artifact.verification_plan_ids.join(", ") || "--"}
+      />
+      <KeyValue label="child sessions" value={artifact.child_session_ids.join(", ") || "--"} />
+      <div className="grid gap-3 md:grid-cols-2" data-testid="compile-report-before-after">
+        <div className="rounded-md border border-[var(--aria-line)] p-3">
+          <div className="mb-2 text-xs font-semibold text-[var(--aria-ink-muted)]">Before</div>
+          <pre className="whitespace-pre-wrap break-words text-xs text-[var(--aria-ink)]">
+            {JSON.stringify({ materialized_work_items: [], child_sessions: [] }, null, 2)}
+          </pre>
+        </div>
+        <div className="rounded-md border border-[var(--aria-line)] p-3">
+          <div className="mb-2 text-xs font-semibold text-[var(--aria-ink-muted)]">After</div>
+          <pre className="whitespace-pre-wrap break-words text-xs text-[var(--aria-ink)]">
+            {JSON.stringify(
+              {
+                work_item_ids: artifact.work_item_ids,
+                verification_plan_ids: artifact.verification_plan_ids,
+                child_session_ids: artifact.child_session_ids,
+              },
+              null,
+              2,
+            )}
+          </pre>
+        </div>
+      </div>
+      <ValidatorFindings findings={artifact.validator_findings} />
+    </section>
+  );
+}
+
+function artifactFindings(artifact: WorkItemPlanArtifactPayload) {
+  switch (artifact.type) {
+    case "outline_candidate":
+      return artifact.payload.validator_findings;
+    case "draft_candidate":
+      return artifact.payload.validator_findings;
+    case "compile_report":
+      return artifact.payload.validator_findings;
+    default:
+      return [];
+  }
+}
+
+function groupWorkItemPlanArtifactVersions(versions: WorkItemPlanArtifactVersion[]) {
+  const groups: Array<{
+    key: string;
+    label: string;
+    versions: WorkItemPlanArtifactVersion[];
+  }> = [];
+  for (const version of versions) {
+    const group = versionGroup(version.artifact ?? null);
+    let existing = groups.find((item) => item.key === group.key);
+    if (!existing) {
+      existing = { ...group, versions: [] };
+      groups.push(existing);
+    }
+    existing.versions.push(version);
+  }
+  return groups;
+}
+
+function versionGroup(artifact: WorkItemPlanArtifactPayload | null) {
+  switch (artifact?.type) {
+    case "outline_candidate":
+      return { key: "outline", label: "Outline" };
+    case "draft_candidate":
+    case "batch_state":
+      return { key: "drafts", label: "Drafts" };
+    case "compile_report":
+      return { key: "compile", label: "Compile" };
+    case "context_blocker":
+      return { key: "blockers", label: "Blockers" };
+    default:
+      return { key: "unknown", label: "Other" };
+  }
+}
+
+function latestComparableArtifact(
+  versions: WorkItemPlanArtifactVersion[],
+  compareArtifact: WorkItemPlanArtifactPayload,
+  selectedVersion: number | null,
+) {
+  const ordered = [...versions]
+    .filter((version) => version.artifact && version.artifact !== compareArtifact)
+    .filter((version) => selectedVersion === null || version.version < selectedVersion)
+    .sort((left, right) => right.version - left.version);
+  return ordered.find((version) =>
+    version.artifact ? comparableArtifacts(version.artifact, compareArtifact) : false,
+  )?.artifact ?? null;
+}
+
+function comparableArtifacts(
+  base: WorkItemPlanArtifactPayload,
+  compare: WorkItemPlanArtifactPayload,
+) {
+  if (base.type !== compare.type) {
+    return false;
+  }
+  if (base.type === "draft_candidate" && compare.type === "draft_candidate") {
+    return base.payload.draft_record.outline_id === compare.payload.draft_record.outline_id;
+  }
+  return base.type === "outline_candidate";
+}
+
+function diffWorkItemPlanArtifacts(
+  base: WorkItemPlanArtifactPayload,
+  compare: WorkItemPlanArtifactPayload,
+) {
+  if (base.type === "outline_candidate" && compare.type === "outline_candidate") {
+    return diffOutlineArtifacts(base.payload.outline, compare.payload.outline);
+  }
+  if (base.type === "draft_candidate" && compare.type === "draft_candidate") {
+    return diffDraftArtifacts(base.payload.draft_record, compare.payload.draft_record);
+  }
+  return [];
+}
+
+function diffOutlineArtifacts(base: WorkItemPlanOutline, compare: WorkItemPlanOutline) {
+  const rows: Array<{ field: string; before: string; after: string }> = [];
+  const baseItems = new Map(outlineItems(base).map((item) => [item.outline_id, item]));
+  for (const compareItem of outlineItems(compare)) {
+    const baseItem = baseItems.get(compareItem.outline_id);
+    if (!baseItem) {
+      rows.push({
+        field: `${compareItem.outline_id}.added`,
+        before: "",
+        after: compareItem.title,
+      });
+      continue;
+    }
+    pushDiffRow(
+      rows,
+      "title",
+      baseItem.title,
+      compareItem.title,
+    );
+    pushDiffRow(
+      rows,
+      "exclusive_write_scopes",
+      baseItem.exclusive_write_scopes,
+      compareItem.exclusive_write_scopes,
+    );
+    pushDiffRow(
+      rows,
+      "forbidden_write_scopes",
+      baseItem.forbidden_write_scopes,
+      compareItem.forbidden_write_scopes,
+    );
+    pushDiffRow(
+      rows,
+      "verification_intent",
+      baseItem.verification_intent ?? [],
+      compareItem.verification_intent ?? [],
+    );
+  }
+  return rows;
+}
+
+function diffDraftArtifacts(base: WorkItemDraftRecord, compare: WorkItemDraftRecord) {
+  const rows: Array<{ field: string; before: string; after: string }> = [];
+  pushDiffRow(rows, "title", base.candidate.title, compare.candidate.title);
+  pushDiffRow(
+    rows,
+    "implementation_context",
+    base.candidate.implementation_context,
+    compare.candidate.implementation_context,
+  );
+  pushDiffRow(
+    rows,
+    "exclusive_write_scopes",
+    base.candidate.exclusive_write_scopes,
+    compare.candidate.exclusive_write_scopes,
+  );
+  pushDiffRow(
+    rows,
+    "verification.commands",
+    base.candidate.verification_plan.commands.map(commandLabel).filter(isPresent),
+    compare.candidate.verification_plan.commands.map(commandLabel).filter(isPresent),
+  );
+  pushDiffRow(
+    rows,
+    "handoff_summary",
+    base.candidate.handoff_summary,
+    compare.candidate.handoff_summary,
+  );
+  return rows;
+}
+
+function pushDiffRow(
+  rows: Array<{ field: string; before: string; after: string }>,
+  field: string,
+  before: string | string[],
+  after: string | string[],
+) {
+  const beforeValue = Array.isArray(before) ? before.join(", ") : before;
+  const afterValue = Array.isArray(after) ? after.join(", ") : after;
+  if (beforeValue === afterValue) {
+    return;
+  }
+  rows.push({ field, before: beforeValue, after: afterValue });
+}
+
+function isPresent(value: string | null): value is string {
+  return Boolean(value);
 }
 
 function OutlineArtifact({
@@ -184,7 +752,7 @@ function OutlineArtifact({
               })}
             />
           ) : null}
-          <div className="space-y-3">
+          <div className="space-y-3" data-testid="work-item-outline-table">
             {items.map((item, index) => (
               <WorkItemOutlineCard key={item.outline_id} item={item} index={index} />
             ))}
@@ -426,6 +994,25 @@ function KeyValue({ label, value }: { label: string; value: string }) {
 
 function outlineItems(outline: WorkItemPlanOutline) {
   return outline.work_item_outlines ?? outline.work_items ?? [];
+}
+
+function workItemPlanArtifactLabel(
+  artifact: WorkItemPlanArtifactPayload,
+): string {
+  switch (artifact.type) {
+    case "outline_candidate":
+      return `Outline · ${outlineItems(artifact.payload.outline).length} items`;
+    case "draft_candidate":
+      return `${artifact.payload.draft_record.outline_id} / ${artifact.payload.draft_record.draft_id}`;
+    case "batch_state":
+      return `Batch / ${artifact.payload.batch_id}`;
+    case "compile_report":
+      return `Compile / ${artifact.payload.compile_id}`;
+    case "context_blocker":
+      return `Blocker / ${artifact.payload.context_blockers.length}`;
+    default:
+      return "Artifact";
+  }
 }
 
 function commandLabel(command: WorkItemDraftVerificationCommand) {

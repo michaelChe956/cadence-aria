@@ -249,6 +249,32 @@ pub(crate) fn latest_review_verdict_from_messages(
         .map(|message| WorkspaceEngine::parse_review_verdict(&message.content))
 }
 
+pub(crate) fn latest_review_verdict_from_node_details(
+    lifecycle_store: &LifecycleStore,
+    session_id: &str,
+    timeline_nodes: &[TimelineNode],
+) -> Option<ReviewVerdict> {
+    timeline_nodes
+        .iter()
+        .rev()
+        .filter(|node| {
+            matches!(
+                node.node_type,
+                TimelineNodeType::ReviewerRun
+                    | TimelineNodeType::WorkItemPlanOutlineReview
+                    | TimelineNodeType::WorkItemDraftReview
+                    | TimelineNodeType::WorkItemBatchReview
+            )
+        })
+        .filter_map(|node| {
+            lifecycle_store
+                .load_node_detail(session_id, &node.node_id)
+                .ok()
+                .and_then(|detail| detail.verdict)
+        })
+        .find_map(|verdict| serde_json::from_value::<ReviewVerdict>(verdict).ok())
+}
+
 pub(crate) fn review_complete_event_from_verdict(
     node_id: String,
     round: u32,

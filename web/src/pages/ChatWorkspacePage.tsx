@@ -6,7 +6,14 @@ import {
   WifiOff,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ComponentProps,
+} from "react";
 import {
   fetchWorkspaceArtifactVersion,
   fetchWorkspaceEventOutput,
@@ -16,11 +23,13 @@ import {
 import type {
   RevisionPath,
   WorkItemPlanArtifactPayload,
-  WorkItemPlanArtifactVersion,
   WorkspaceProviderName,
 } from "../api/types";
 import { ArtifactPane } from "../components/chat-workspace/ArtifactPane";
-import { ChatEntryList, type ChatEntryListHandle } from "../components/chat-workspace/ChatEntryList";
+import {
+  ChatEntryList,
+  type ChatEntryListHandle,
+} from "../components/chat-workspace/ChatEntryList";
 import { ChatInputBar } from "../components/chat-workspace/ChatInputBar";
 import { ReviewDecisionActions } from "../components/chat-workspace/ReviewDecisionActions";
 import { TimelineNodeList } from "../components/chat-workspace/TimelineNodeList";
@@ -36,7 +45,11 @@ import { WorkspaceHeader } from "../components/workspace/WorkspaceHeader";
 import { useStageUI } from "../hooks/useStageUI";
 import { useUnloadGuard } from "../hooks/useUnloadGuard";
 import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
-import type { ChatEntry, ChoiceResponsePayload, WorkspaceContentRef } from "../state/chat-entries";
+import type {
+  ChatEntry,
+  ChoiceResponsePayload,
+  WorkspaceContentRef,
+} from "../state/chat-entries";
 import {
   useWorkspaceStore,
   type ProviderConfigSnapshot,
@@ -45,7 +58,8 @@ import {
 import { workspaceContentCacheValues } from "../state/workspace-content-cache";
 
 const UNLOAD_GUARDED_STAGES = new Set(["running", "cross_review", "revision"]);
-const UNLOAD_GUARD_MESSAGE = "运行中。刷新/关闭将中止当前 Provider 运行，是否继续？";
+const UNLOAD_GUARD_MESSAGE =
+  "运行中。刷新/关闭将中止当前 Provider 运行，是否继续？";
 
 export function ChatWorkspacePage({
   sessionId,
@@ -71,6 +85,7 @@ export function ChatWorkspacePage({
     selectProvider,
     respondPermission,
     sendChoiceResponse,
+    sendReviewDecision,
     connectionStatus,
     isReconnecting,
     reconnectAttemptCount,
@@ -83,32 +98,51 @@ export function ChatWorkspacePage({
   const reviewRounds = useWorkspaceStore((state) => state.reviewRounds);
   const providerLocked = useWorkspaceStore((state) => state.providerLocked);
   const providerLockedAt = useWorkspaceStore((state) => state.providerLockedAt);
-  const superpowersEnabled = useWorkspaceStore((state) => state.superpowersEnabled);
+  const superpowersEnabled = useWorkspaceStore(
+    (state) => state.superpowersEnabled,
+  );
   const openSpecEnabled = useWorkspaceStore((state) => state.openSpecEnabled);
   const chatEntries = useWorkspaceStore((state) => state.chatEntries);
+  const pendingDecision = useWorkspaceStore((state) => state.pendingDecision);
   const contentCache = useWorkspaceStore((state) => state.contentCache);
   const selectedNodeId = useWorkspaceStore((state) => state.selectedNodeId);
   const timelineNodes = useWorkspaceStore((state) => state.timelineNodes);
   const activeNodeId = useWorkspaceStore((state) => state.activeNodeId);
   const artifactVersions = useWorkspaceStore((state) => state.artifactVersions);
-  const artifactContentCache = useWorkspaceStore((state) => state.artifactContentCache);
+  const artifactContentCache = useWorkspaceStore(
+    (state) => state.artifactContentCache,
+  );
   const artifact = useWorkspaceStore((state) => state.artifact);
-  const workItemPlanCandidate = useWorkspaceStore((state) => state.workItemPlanCandidate);
-  const workItemPlanArtifact = useWorkspaceStore((state) => state.workItemPlanArtifact);
+  const workItemPlanCandidate = useWorkspaceStore(
+    (state) => state.workItemPlanCandidate,
+  );
+  const workItemPlanArtifact = useWorkspaceStore(
+    (state) => state.workItemPlanArtifact,
+  );
   const workItemPlanArtifactVersions = useWorkspaceStore(
     (state) => state.workItemPlanArtifactVersions,
   );
   const protocolError = useWorkspaceStore((state) => state.protocolError);
-  const acknowledgedAbortedNodes = useWorkspaceStore((state) => state.acknowledgedAbortedNodes);
+  const acknowledgedAbortedNodes = useWorkspaceStore(
+    (state) => state.acknowledgedAbortedNodes,
+  );
   const reviewerEnabled = useWorkspaceStore((state) => state.reviewerEnabled);
   const stageConfig = useStageUI(stage);
   const chatListRef = useRef<ChatEntryListHandle | null>(null);
   const hydratedNodeIdsRef = useRef<Set<string>>(new Set());
   const [activePanel, setActivePanel] = useState<"chat" | "artifact">("chat");
-  const [selectedWorkItemPlanArtifactVersionNumber, setSelectedWorkItemPlanArtifactVersionNumber] =
-    useState<number | null>(null);
+  const [
+    selectedWorkItemPlanArtifactVersionNumber,
+    setSelectedWorkItemPlanArtifactVersionNumber,
+  ] = useState<number | null>(null);
   const sessionReady = storeSessionId === sessionId;
   const inputDisabled = !sessionReady || connectionStatus !== "connected";
+  const reviewDecisionOptions = useMemo(
+    () =>
+      pendingDecision?.options ??
+      optionalWorkItemPlanReviewDecisionOptions(workspaceType, chatEntries),
+    [chatEntries, pendingDecision?.options, workspaceType],
+  );
   const selectedEntryId = useMemo(
     () =>
       selectedNodeId
@@ -131,7 +165,9 @@ export function ChatWorkspacePage({
   const selectedWorkItemPlanArtifactVersion = useMemo(
     () =>
       selectedNodeId
-        ? workItemPlanArtifactVersions.find((version) => version.source_node_id === selectedNodeId)
+        ? workItemPlanArtifactVersions.find(
+            (version) => version.source_node_id === selectedNodeId,
+          )
         : undefined,
     [selectedNodeId, workItemPlanArtifactVersions],
   );
@@ -140,7 +176,8 @@ export function ChatWorkspacePage({
       selectedWorkItemPlanArtifactVersionNumber === null
         ? undefined
         : workItemPlanArtifactVersions.find(
-            (version) => version.version === selectedWorkItemPlanArtifactVersionNumber,
+            (version) =>
+              version.version === selectedWorkItemPlanArtifactVersionNumber,
           ),
     [selectedWorkItemPlanArtifactVersionNumber, workItemPlanArtifactVersions],
   );
@@ -149,7 +186,8 @@ export function ChatWorkspacePage({
     selectedWorkItemPlanArtifactVersion?.artifact ??
     workItemPlanArtifact;
   const displayedWorkItemPlanArtifactVersion =
-    manuallySelectedWorkItemPlanArtifactVersion ?? selectedWorkItemPlanArtifactVersion;
+    manuallySelectedWorkItemPlanArtifactVersion ??
+    selectedWorkItemPlanArtifactVersion;
   const showingHistoricalWorkItemPlanArtifact = Boolean(
     displayedWorkItemPlanArtifactVersion?.artifact &&
       (manuallySelectedWorkItemPlanArtifactVersion
@@ -164,7 +202,9 @@ export function ChatWorkspacePage({
   useEffect(() => {
     const acknowledgedNodes = loadAcknowledgedAbortedNodes();
     if (acknowledgedNodes.length > 0) {
-      useWorkspaceStore.getState().setAcknowledgedAbortedNodes(acknowledgedNodes);
+      useWorkspaceStore
+        .getState()
+        .setAcknowledgedAbortedNodes(acknowledgedNodes);
     }
   }, []);
 
@@ -183,7 +223,8 @@ export function ChatWorkspacePage({
       return;
     }
     const nodeIds = [selectedNodeId, activeNodeId].filter(
-      (nodeId): nodeId is string => typeof nodeId === "string" && nodeId.length > 0,
+      (nodeId): nodeId is string =>
+        typeof nodeId === "string" && nodeId.length > 0,
     );
     for (const nodeId of nodeIds) {
       if (hydratedNodeIdsRef.current.has(nodeId)) {
@@ -213,7 +254,8 @@ export function ChatWorkspacePage({
   });
 
   function handleStartGeneration() {
-    const { providers, reviewerEnabled, reviewRounds } = useWorkspaceStore.getState();
+    const { providers, reviewerEnabled, reviewRounds } =
+      useWorkspaceStore.getState();
     sendStartGeneration(
       providerConfigFor(providers, reviewerEnabled, reviewRounds),
       reviewerEnabled,
@@ -228,12 +270,19 @@ export function ChatWorkspacePage({
     respondPermission(requestId, approved, undefined);
   }
 
-  function handleChoiceResponse(entry: ChatEntry, response: ChoiceResponsePayload) {
+  function handleChoiceResponse(
+    entry: ChatEntry,
+    response: ChoiceResponsePayload,
+  ) {
     const requestId = requestIdFromEntry(entry);
     if (!requestId) {
       return;
     }
-    sendChoiceResponse(requestId, response.selected_option_ids, response.free_text);
+    sendChoiceResponse(
+      requestId,
+      response.selected_option_ids,
+      response.free_text,
+    );
   }
 
   function handleSelectNode(nodeId: string) {
@@ -259,38 +308,57 @@ export function ChatWorkspacePage({
     sendAuthorDecision(decision);
   }
 
-  const handleLoadContent = useCallback(async (currentSessionId: string, ref: WorkspaceContentRef) => {
-    if (ref.kind === "execution_output") {
-      const response = await fetchWorkspaceEventOutput(currentSessionId, ref.nodeId, ref.eventId);
-      return response.output;
-    }
-    if (ref.kind === "provider_prompt") {
-      const response = await fetchWorkspacePrompt(currentSessionId, ref.nodeId);
-      return response.prompt;
-    }
-    throw new Error("不支持加载该内容类型");
-  }, []);
+  const handleLoadContent = useCallback(
+    async (currentSessionId: string, ref: WorkspaceContentRef) => {
+      if (ref.kind === "execution_output") {
+        const response = await fetchWorkspaceEventOutput(
+          currentSessionId,
+          ref.nodeId,
+          ref.eventId,
+        );
+        return response.output;
+      }
+      if (ref.kind === "provider_prompt") {
+        const response = await fetchWorkspacePrompt(
+          currentSessionId,
+          ref.nodeId,
+        );
+        return response.prompt;
+      }
+      throw new Error("不支持加载该内容类型");
+    },
+    [],
+  );
 
-  const handleCacheContent = useCallback((key: string, value: string) => {
-    const state = useWorkspaceStore.getState();
-    if (state.sessionId !== sessionId) {
-      return;
-    }
-    state.setContentCacheEntry(key, value);
-  }, [sessionId]);
+  const handleCacheContent = useCallback(
+    (key: string, value: string) => {
+      const state = useWorkspaceStore.getState();
+      if (state.sessionId !== sessionId) {
+        return;
+      }
+      state.setContentCacheEntry(key, value);
+    },
+    [sessionId],
+  );
 
-  const handleLoadArtifactVersion = useCallback(async (version: number) => {
-    const response = await fetchWorkspaceArtifactVersion(sessionId, version);
-    return response.markdown;
-  }, [sessionId]);
+  const handleLoadArtifactVersion = useCallback(
+    async (version: number) => {
+      const response = await fetchWorkspaceArtifactVersion(sessionId, version);
+      return response.markdown;
+    },
+    [sessionId],
+  );
 
-  const handleCacheArtifactContent = useCallback((version: number, value: string) => {
-    const state = useWorkspaceStore.getState();
-    if (state.sessionId !== sessionId) {
-      return;
-    }
-    state.setArtifactContentCacheEntry(version, value);
-  }, [sessionId]);
+  const handleCacheArtifactContent = useCallback(
+    (version: number, value: string) => {
+      const state = useWorkspaceStore.getState();
+      if (state.sessionId !== sessionId) {
+        return;
+      }
+      state.setArtifactContentCacheEntry(version, value);
+    },
+    [sessionId],
+  );
 
   const providerPanel = (
     <ProviderConfigDialogButton
@@ -298,7 +366,9 @@ export function ChatWorkspacePage({
       editable={stageConfig.providerEditable}
       onSelectProvider={(role, provider) => selectProvider(role, provider)}
       reviewerEnabled={reviewerEnabled}
-      onToggleReviewer={(enabled) => useWorkspaceStore.setState({ reviewerEnabled: enabled })}
+      onToggleReviewer={(enabled) =>
+        useWorkspaceStore.setState({ reviewerEnabled: enabled })
+      }
       rounds={reviewRounds}
       onChangeRounds={(rounds) =>
         useWorkspaceStore.setState({ reviewRounds: clampReviewRounds(rounds) })
@@ -338,7 +408,9 @@ export function ChatWorkspacePage({
           abortedByDisconnectNode
             ? {
                 nodeId: abortedByDisconnectNode.node_id,
-                ts: abortedByDisconnectNode.completed_at ?? abortedByDisconnectNode.started_at,
+                ts:
+                  abortedByDisconnectNode.completed_at ??
+                  abortedByDisconnectNode.started_at,
               }
             : null
         }
@@ -347,7 +419,10 @@ export function ChatWorkspacePage({
         }
         onViewTimeline={
           abortedByDisconnectNode
-            ? () => useWorkspaceStore.getState().setSelectedNode(abortedByDisconnectNode.node_id)
+            ? () =>
+                useWorkspaceStore
+                  .getState()
+                  .setSelectedNode(abortedByDisconnectNode.node_id)
             : undefined
         }
       />
@@ -373,7 +448,9 @@ export function ChatWorkspacePage({
         >
           <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
           <div className="min-w-0 break-words">
-            <span className="font-mono text-xs font-semibold">{protocolError.code}</span>
+            <span className="font-mono text-xs font-semibold">
+              {protocolError.code}
+            </span>
             <span className="mx-2 text-red-300">/</span>
             <span>{protocolError.message}</span>
           </div>
@@ -397,27 +474,33 @@ export function ChatWorkspacePage({
           {activePanel === "artifact" ? (
             workspaceType === "work_item_plan" ? (
               displayedWorkItemPlanArtifact ? (
-                <div className="grid min-h-0 grid-rows-[auto_auto_minmax(0,1fr)]">
-                  <WorkItemPlanArtifactVersionRail
-                    versions={workItemPlanArtifactVersions}
-                    selectedVersion={displayedWorkItemPlanArtifactVersion?.version ?? null}
-                    currentArtifact={workItemPlanArtifact}
-                    onSelectVersion={setSelectedWorkItemPlanArtifactVersionNumber}
-                  />
+                <div className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)]">
                   {showingHistoricalWorkItemPlanArtifact ? null : (
                     <WorkItemPlanStagedPanel
                       activeNodeType={activeNode?.node_type ?? null}
                       artifact={displayedWorkItemPlanArtifact}
                       onAcceptOutline={() => sendAuthorDecision("accept")}
                       onSelectMode={sendSelectWorkItemGenerationMode}
-                      onRequestOutlineRevision={() => sendRequestOutlineRevision()}
+                      onRequestOutlineRevision={() =>
+                        sendRequestOutlineRevision()
+                      }
                       onDraftDecision={sendWorkItemDraftDecision}
                       onBatchDecision={sendWorkItemBatchDecision}
-                      onCompileRecoveryAction={sendWorkItemPlanCompileRecoveryAction}
+                      onCompileRecoveryAction={
+                        sendWorkItemPlanCompileRecoveryAction
+                      }
                     />
                   )}
                   <WorkItemPlanArtifactPanel
                     artifact={displayedWorkItemPlanArtifact}
+                    versions={workItemPlanArtifactVersions}
+                    selectedVersion={
+                      displayedWorkItemPlanArtifactVersion?.version ?? null
+                    }
+                    onSelectVersion={
+                      setSelectedWorkItemPlanArtifactVersionNumber
+                    }
+                    activeNodeType={activeNode?.node_type ?? null}
                     readonly={showingHistoricalWorkItemPlanArtifact}
                     className="min-h-0"
                   />
@@ -465,7 +548,11 @@ export function ChatWorkspacePage({
                 onCacheContent={handleCacheContent}
               />
               {stage === "review_decision" ? (
-                <ReviewDecisionActionBar onSelectRevisionPath={handleSelectRevisionPath} />
+                <ReviewDecisionActionBar
+                  options={reviewDecisionOptions}
+                  onSelectDecision={sendReviewDecision}
+                  onSelectRevisionPath={handleSelectRevisionPath}
+                />
               ) : null}
               <ChatInputBar
                 stage={stage}
@@ -474,9 +561,13 @@ export function ChatWorkspacePage({
                 disabled={inputDisabled}
                 onSendContextNote={sendContextNote}
                 onStartGeneration={handleStartGeneration}
-                onSendHumanDecision={(content) => sendHumanConfirm("request-change", content)}
+                onSendHumanDecision={(content) =>
+                  sendHumanConfirm("request-change", content)
+                }
                 onAuthorDecision={handleAuthorDecision}
-                onSelectWorkItemGenerationMode={sendSelectWorkItemGenerationMode}
+                onSelectWorkItemGenerationMode={
+                  sendSelectWorkItemGenerationMode
+                }
                 onRequestOutlineRevision={() => sendRequestOutlineRevision()}
                 onWorkItemDraftDecision={sendWorkItemDraftDecision}
                 onWorkItemBatchDecision={sendWorkItemBatchDecision}
@@ -497,96 +588,75 @@ export function ChatWorkspacePage({
   );
 }
 
-function WorkItemPlanArtifactVersionRail({
-  versions,
-  selectedVersion,
-  currentArtifact,
-  onSelectVersion,
+function ReviewDecisionActionBar({
+  onSelectRevisionPath,
+  onSelectDecision,
+  options,
 }: {
-  versions: WorkItemPlanArtifactVersion[];
-  selectedVersion: number | null;
-  currentArtifact: WorkItemPlanArtifactPayload | null;
-  onSelectVersion: (version: number | null) => void;
+  onSelectRevisionPath: (path: RevisionPath, extraContext?: string) => void;
+  onSelectDecision: (decision: string) => void;
+  options?: string[];
 }) {
-  if (versions.length === 0) {
-    return null;
-  }
-
   return (
-    <div
-      data-testid="work-item-plan-artifact-version-list"
-      className="flex min-h-0 items-center gap-2 overflow-x-auto border-b border-[var(--aria-line)] bg-white px-3 py-2"
-    >
-      {currentArtifact ? (
-        <button
-          type="button"
-          onClick={() => onSelectVersion(null)}
-          className={`flex h-9 shrink-0 items-center gap-2 rounded-md border px-3 text-left text-xs transition-colors ${
-            selectedVersion === null
-              ? "border-[var(--aria-primary)] bg-blue-50 text-[var(--aria-ink)]"
-              : "border-[var(--aria-line)] text-[var(--aria-ink-muted)] hover:bg-[var(--aria-panel-muted)]"
-          }`}
-        >
-          <span className="font-semibold">Current</span>
-          <span className="font-mono">{workItemPlanArtifactLabel(currentArtifact)}</span>
-        </button>
-      ) : null}
-      {versions.map((version) => {
-        const artifact = version.artifact ?? null;
-        const selected = selectedVersion === version.version;
-        return (
-          <button
-            key={version.version}
-            type="button"
-            data-testid={`work-item-plan-artifact-version-${version.version}`}
-            onClick={() => (artifact ? onSelectVersion(version.version) : undefined)}
-            disabled={!artifact}
-            className={`flex h-9 shrink-0 items-center gap-2 rounded-md border px-3 text-left text-xs transition-colors disabled:opacity-50 ${
-              selected
-                ? "border-[var(--aria-primary)] bg-blue-50 text-[var(--aria-ink)]"
-                : "border-[var(--aria-line)] text-[var(--aria-ink-muted)] hover:bg-[var(--aria-panel-muted)]"
-            }`}
-          >
-            <span className="font-mono">v{version.version}</span>
-            <span className="font-semibold">{artifact ? workItemPlanArtifactLabel(artifact) : "无内容"}</span>
-            {version.is_current ? (
-              <span className="rounded border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700">
-                current
-              </span>
-            ) : null}
-          </button>
-        );
-      })}
+    <div className="border-t border-amber-200 bg-amber-50/80 px-3 py-2">
+      <ReviewDecisionActions
+        options={options}
+        onSelectDecision={onSelectDecision}
+        onSelectPath={onSelectRevisionPath}
+      />
     </div>
   );
 }
 
-function workItemPlanArtifactLabel(artifact: WorkItemPlanArtifactPayload): string {
-  switch (artifact.type) {
-    case "outline_candidate":
-      return "Plan Outline";
-    case "draft_candidate":
-      return `${artifact.payload.draft_record.outline_id} / ${artifact.payload.draft_record.draft_id}`;
-    case "batch_state":
-      return `Batch / ${artifact.payload.batch_id}`;
-    case "compile_report":
-      return `Compile / ${artifact.payload.compile_id}`;
-    case "context_blocker":
-      return `Context Blocker / ${artifact.payload.context_blockers.length}`;
-    default:
-      return "Artifact";
+function optionalWorkItemPlanReviewDecisionOptions(
+  workspaceType: string | null,
+  entries: ChatEntry[],
+): string[] | undefined {
+  if (workspaceType !== "work_item_plan") {
+    return undefined;
   }
+
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (entry.type !== "review_verdict") {
+      continue;
+    }
+    if (isOptionalWorkItemPlanPassVerdict(entry.metadata)) {
+      return ["apply_optional_findings", "skip_optional_findings"];
+    }
+    return undefined;
+  }
+
+  return undefined;
 }
 
-function ReviewDecisionActionBar({
-  onSelectRevisionPath,
-}: {
-  onSelectRevisionPath: (path: RevisionPath, extraContext?: string) => void;
-}) {
+function isOptionalWorkItemPlanPassVerdict(
+  metadata: Record<string, unknown> | undefined,
+): boolean {
+  if (!metadata) {
+    return false;
+  }
+  if (
+    metadata.verdict !== "pass" ||
+    metadata.review_gate !== "user_confirm_allowed"
+  ) {
+    return false;
+  }
+  const findings = metadata.findings;
   return (
-    <div className="border-t border-amber-200 bg-amber-50/80 px-3 py-2">
-      <ReviewDecisionActions onSelectPath={onSelectRevisionPath} />
-    </div>
+    Array.isArray(findings) &&
+    findings.length > 0 &&
+    findings.every(isOptionalReviewFinding)
+  );
+}
+
+function isOptionalReviewFinding(finding: unknown): boolean {
+  if (!finding || typeof finding !== "object") {
+    return false;
+  }
+  const severity = (finding as { severity?: unknown }).severity;
+  return (
+    severity === "suggestion" || severity === "minor" || severity === "optional"
   );
 }
 
@@ -628,10 +698,9 @@ function numericContentCacheValues(
   cache: ReturnType<typeof useWorkspaceStore.getState>["artifactContentCache"],
 ) {
   return Object.fromEntries(
-    Object.entries(workspaceContentCacheValues(cache)).map(([version, markdown]) => [
-      Number(version),
-      markdown,
-    ]),
+    Object.entries(workspaceContentCacheValues(cache)).map(
+      ([version, markdown]) => [Number(version), markdown],
+    ),
   );
 }
 
@@ -644,7 +713,9 @@ function panelTabClass(active: boolean) {
   ].join(" ");
 }
 
-type ProviderConfigDialogButtonProps = ComponentProps<typeof ProviderConfigPanel>;
+type ProviderConfigDialogButtonProps = ComponentProps<
+  typeof ProviderConfigPanel
+>;
 
 function ProviderConfigDialogButton(props: ProviderConfigDialogButtonProps) {
   const [open, setOpen] = useState(false);
@@ -725,7 +796,10 @@ function requestIdFromEntry(entry: ChatEntry) {
   return typeof requestId === "string" ? requestId : null;
 }
 
-function latestUnacknowledgedAbortedNode(nodes: TimelineNode[], acknowledgedNodeIds: string[]) {
+function latestUnacknowledgedAbortedNode(
+  nodes: TimelineNode[],
+  acknowledgedNodeIds: string[],
+) {
   const acknowledged = new Set(acknowledgedNodeIds);
   const latest = nodes.at(-1);
   if (latest?.node_type !== "aborted_by_disconnect") {
@@ -748,7 +822,9 @@ function providerConfigFor(
   reviewerEnabled: boolean,
   reviewRounds: number,
 ): ProviderConfigSnapshot {
-  const reviewer = reviewerEnabled ? providerNameFor(providers?.reviewer, "codex") : null;
+  const reviewer = reviewerEnabled
+    ? providerNameFor(providers?.reviewer, "codex")
+    : null;
   return {
     author: providerNameFor(providers?.author, "claude_code"),
     reviewer,
@@ -787,7 +863,9 @@ function elapsedText(node: TimelineNode) {
   if (Number.isNaN(startedAt)) {
     return "--";
   }
-  const endedAt = node.completed_at ? Date.parse(node.completed_at) : Date.now();
+  const endedAt = node.completed_at
+    ? Date.parse(node.completed_at)
+    : Date.now();
   if (Number.isNaN(endedAt)) {
     return "--";
   }

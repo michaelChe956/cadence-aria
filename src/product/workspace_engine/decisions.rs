@@ -179,7 +179,16 @@ impl WorkspaceEngine {
 
         let round = self.active_review_round().unwrap_or(1);
         match decision.as_str() {
-            "continue" | "continue_with_context" => {
+            "skip_optional_findings" => self.skip_work_item_plan_optional_findings().await,
+            "continue" | "continue_with_context" | "apply_optional_findings" => {
+                if decision == "apply_optional_findings"
+                    && self.latest_work_item_plan_optional_pass_review().is_none()
+                {
+                    return Err(
+                        "apply_optional_findings is only available for optional work item plan findings"
+                            .to_string(),
+                    );
+                }
                 let normalized_context = if decision == "continue_with_context" {
                     extra_context.and_then(|context| {
                         let trimmed = context.trim().to_string();
@@ -243,6 +252,32 @@ impl WorkspaceEngine {
             }
             _ => Err(format!("unknown review decision: {decision}")),
         }
+    }
+
+    pub(crate) async fn skip_work_item_plan_optional_findings(
+        &mut self,
+    ) -> Result<ReviewDecisionOutcome, String> {
+        let review = self
+            .latest_work_item_plan_optional_pass_review()
+            .cloned()
+            .ok_or_else(|| {
+                "skip_optional_findings is only available for optional work item plan findings"
+                    .to_string()
+            })?;
+        if review.review_scope != WorkItemPlanReviewScope::Outline {
+            return Err(
+                "skip_optional_findings currently requires work item plan outline review"
+                    .to_string(),
+            );
+        }
+
+        self.complete_active_node(Some("已选择不修复可选建议".to_string()))
+            .await;
+        self.enter_work_item_generation_mode(Some(
+            "已跳过可选建议，请选择 Work Item 生成模式".to_string(),
+        ))
+        .await;
+        Ok(ReviewDecisionOutcome::HumanConfirm)
     }
 
     pub(crate) fn review_decision_restarts_work_item_plan_outline(&self) -> bool {

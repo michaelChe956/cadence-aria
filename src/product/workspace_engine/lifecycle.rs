@@ -63,7 +63,12 @@ impl WorkspaceEngine {
             }
             (persisted_timeline_nodes, active_node_id)
         };
-        let latest_review_verdict = latest_review_verdict_from_messages(&session.messages);
+        let latest_review_verdict = latest_review_verdict_from_node_details(
+            &lifecycle_store,
+            &session.session_id,
+            &timeline_nodes,
+        )
+        .or_else(|| latest_review_verdict_from_messages(&session.messages));
         let pending_author_choice =
             recover_pending_author_choice(&session, active_node_id.as_deref(), &timeline_nodes);
         Self {

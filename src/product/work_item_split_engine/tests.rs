@@ -308,6 +308,46 @@ fn outline_author_prompts_make_context_blockers_outline_alternative() {
 }
 
 #[test]
+fn outline_author_prompts_require_dependency_write_scope_partitioning() {
+    let (request, issue, repository) = split_prompt_fixture();
+    let prompt = build_outline_prompt(
+        &request,
+        &issue,
+        &repository,
+        &["story context".to_string()],
+        &["design context".to_string()],
+        "(empty)",
+        &[],
+        &[],
+    );
+    let (revision_prompt, _) =
+        build_outline_revision_prompt(&request, &issue, "修复 exclusive_write_scopes 重叠");
+
+    for prompt in [prompt, revision_prompt] {
+        assert!(
+            prompt.contains("依赖链上的 exclusive_write_scopes 必须互斥"),
+            "outline prompt must explain dependent write scopes cannot overlap: {prompt}"
+        );
+        assert!(
+            prompt.contains(
+                "integration/e2e 测试 outline 只能拥有与实现目录不共享前缀的测试、fixtures、mock 或 CI 配置路径"
+            ),
+            "outline prompt must steer test outlines away from implementation scopes: {prompt}"
+        );
+        assert!(
+            prompt.contains(
+                "不要让 outline_frontend 与 outline_integration_tests 同时拥有 web/src/**"
+            ),
+            "outline prompt must include the common frontend/integration overlap anti-pattern: {prompt}"
+        );
+        assert!(
+            prompt.contains("不要把 web/src/**/*.test.tsx 交给 integration/e2e outline"),
+            "outline prompt must avoid colocated frontend tests as integration exclusive scopes: {prompt}"
+        );
+    }
+}
+
+#[test]
 fn outline_output_schema_makes_outline_and_context_blockers_mutually_exclusive() {
     let schema: serde_json::Value =
         serde_json::from_str(WORK_ITEM_PLAN_OUTLINE_OUTPUT_SCHEMA).expect("schema json");

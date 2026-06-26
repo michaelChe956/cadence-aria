@@ -51,11 +51,17 @@ impl WorkspaceEngine {
         &mut self,
         feedback: Option<String>,
     ) -> Result<(), String> {
-        if self.session.stage != WorkspaceStage::AuthorConfirm
-            || self.active_node_type() != Some(TimelineNodeType::WorkItemGenerationMode)
-        {
+        let active_node_type = self.active_node_type();
+        let is_allowed_node = matches!(
+            active_node_type,
+            Some(
+                TimelineNodeType::WorkItemPlanOutlineConfirm
+                    | TimelineNodeType::WorkItemGenerationMode
+            )
+        );
+        if self.session.stage != WorkspaceStage::AuthorConfirm || !is_allowed_node {
             return Err(
-                "request_outline_revision requires active work_item_generation_mode node"
+                "request_outline_revision requires active work_item_plan_outline_confirm or work_item_generation_mode node"
                     .to_string(),
             );
         }
