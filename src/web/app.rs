@@ -89,6 +89,10 @@ pub fn build_web_router(state: WebAppState) -> Router {
             delete(handlers::delete_work_item),
         )
         .route(
+            "/api/projects/{project_id}/issues/{issue_id}/work-item-plans/{plan_id}/coding-attempts",
+            post(handlers::create_group_coding_attempt),
+        )
+        .route(
             "/api/projects/{project_id}/issues/{issue_id}/work-items/{work_item_id}/coding-attempts",
             post(handlers::create_coding_attempt),
         )

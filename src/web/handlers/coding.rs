@@ -2,6 +2,158 @@ use super::dto::*;
 use super::support::*;
 use super::*;
 
+pub async fn create_group_coding_attempt(
+    State(state): State<WebAppState>,
+    Path((project_id, issue_id, plan_id)): Path<(String, String, String)>,
+) -> ApiResult<Json<CodingAttemptDto>> {
+    let app_paths = product_app_paths(&state);
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    let plan = lifecycle
+        .get_issue_work_item_plan(&project_id, &issue_id, &plan_id)
+        .map_err(product_store_api_error)?;
+    if plan.status != IssueWorkItemPlanStatus::Confirmed {
+        return Err(ApiError::validation(
+            "work_item_plan_not_confirmed",
+            "work item plan must be confirmed before group coding",
+        ));
+    }
+
+    let all_work_items = lifecycle
+        .list_work_items(&project_id, &issue_id)
+        .map_err(product_store_api_error)?;
+    let ordered = group_work_item_execution_order(&plan, &all_work_items)?;
+    if ordered.is_empty() {
+        return Err(ApiError::validation(
+            "work_item_group_empty",
+            "work item group has no compiled work items",
+        ));
+    }
+    if let Some(mismatched) = ordered
+        .iter()
+        .find(|item| item.work_item_set_id.as_deref() != Some(plan_id.as_str()))
+    {
+        return Err(ApiError::validation_with_details(
+            "work_item_group_mismatch",
+            "compiled work item does not belong to the selected group",
+            json!({ "work_item_id": mismatched.id }),
+        ));
+    }
+
+    let current_work_item = ordered.first().expect("checked non-empty");
+    let repository = find_repository(&app_paths, &project_id, &current_work_item.repository_id)?;
+    if !is_git_repo(&repository.path) {
+        return Err(ApiError::validation(
+            "repository_path_not_git_repo",
+            "repository path must point to a git work tree",
+        ));
+    }
+
+    let branch_name = format!("aria/issues/{issue_id}");
+    let base_branch = current_git_branch(&repository.path).unwrap_or_else(|| "HEAD".to_string());
+    let shared_worktree_path = repository
+        .path
+        .join(".worktrees")
+        .join("aria-issues")
+        .join(&issue_id);
+    lifecycle
+        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
+            project_id: project_id.clone(),
+            issue_id: issue_id.clone(),
+            repository_id: repository.id.clone(),
+            branch_name: branch_name.clone(),
+            worktree_path: shared_worktree_path,
+            base_branch: base_branch.clone(),
+        })
+        .map_err(product_store_api_error)?;
+    let already_locked_by_current = lifecycle
+        .get_issue_shared_worktree(&project_id, &issue_id)
+        .map_err(product_store_api_error)?
+        .and_then(|record| record.current_active_work_item_id)
+        .as_deref()
+        == Some(current_work_item.id.as_str());
+    let _lock = lifecycle
+        .try_acquire_issue_worktree_lock(&project_id, &issue_id, &current_work_item.id)
+        .map_err(|error| match error {
+            ProductStoreError::Io(ref msg) if msg.contains("issue_worktree_active") => {
+                ApiError::runtime(
+                    "issue_worktree_active",
+                    "another work item is already active on the issue shared worktree",
+                    json!({}),
+                )
+            }
+            _ => product_store_api_error(error),
+        })?;
+
+    let provider_config_snapshot = coding_provider_config_snapshot(
+        &lifecycle,
+        current_work_item,
+        &repository.default_provider_mode,
+        &*state.provider_availability,
+    )?;
+    let coding_store = CodingAttemptStore::new(app_paths.clone());
+    let attempt = match coding_store.create_group_attempt(CreateGroupCodingAttemptInput {
+        project_id: project_id.clone(),
+        issue_id: issue_id.clone(),
+        plan_id: plan_id.clone(),
+        current_work_item_id: current_work_item.id.clone(),
+        base_branch,
+        branch_name,
+        worktree_path: None,
+        provider_config_snapshot,
+        max_auto_rework: 2,
+    }) {
+        Ok(attempt) => attempt,
+        Err(error) => {
+            if !already_locked_by_current {
+                let _ = lifecycle.release_issue_worktree_lock(
+                    &project_id,
+                    &issue_id,
+                    &current_work_item.id,
+                );
+            }
+            return Err(match error {
+                ProductStoreError::Io(message)
+                    if message.starts_with("active_coding_attempt_exists:") =>
+                {
+                    ApiError::runtime(
+                        "issue_worktree_active",
+                        "another work item is already active on the issue shared worktree",
+                        json!({}),
+                    )
+                }
+                other => product_store_api_error(other),
+            });
+        }
+    };
+
+    for (index, item) in ordered.iter().enumerate() {
+        if let Err(error) = coding_store.create_coding_unit(CreateCodingExecutionUnitInput {
+            attempt_id: attempt.id.clone(),
+            project_id: project_id.clone(),
+            issue_id: issue_id.clone(),
+            plan_id: plan_id.clone(),
+            work_item_id: item.id.clone(),
+            order_index: index as u32,
+            status: if index == 0 {
+                CodingExecutionUnitStatus::Running
+            } else {
+                CodingExecutionUnitStatus::Pending
+            },
+        }) {
+            if !already_locked_by_current {
+                let _ = lifecycle.release_issue_worktree_lock(
+                    &project_id,
+                    &issue_id,
+                    &current_work_item.id,
+                );
+            }
+            return Err(product_store_api_error(error));
+        }
+    }
+
+    Ok(Json(coding_attempt_dto(&attempt)))
+}
+
 pub async fn create_coding_attempt(
     State(state): State<WebAppState>,
     Path((project_id, issue_id, work_item_id)): Path<(String, String, String)>,
@@ -224,6 +376,39 @@ pub(crate) fn save_work_item_execution_plan_for_attempt(
     coding_store
         .save_work_item_execution_plan(&plan)
         .map_err(product_store_api_error)
+}
+
+pub(crate) fn group_work_item_execution_order(
+    plan: &IssueWorkItemPlanRecord,
+    work_items: &[LifecycleWorkItemRecord],
+) -> Result<Vec<LifecycleWorkItemRecord>, ApiError> {
+    let mut selected = plan
+        .work_item_ids
+        .iter()
+        .enumerate()
+        .map(|(index, id)| {
+            work_items
+                .iter()
+                .find(|item| &item.id == id)
+                .cloned()
+                .map(|item| (index, item))
+                .ok_or_else(|| {
+                    ApiError::runtime(
+                        "work_item_not_found",
+                        "plan work item not found",
+                        json!({ "work_item_id": id }),
+                    )
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    selected.sort_by(|(left_index, left_item), (right_index, right_item)| {
+        left_item
+            .sequence_hint
+            .unwrap_or(u32::MAX)
+            .cmp(&right_item.sequence_hint.unwrap_or(u32::MAX))
+            .then_with(|| left_index.cmp(right_index))
+    });
+    Ok(selected.into_iter().map(|(_, item)| item).collect())
 }
 
 pub(crate) fn next_execution_plan_id(

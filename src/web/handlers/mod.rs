@@ -19,10 +19,14 @@ use crate::cross_cutting::provider_adapter::{
 };
 use crate::interactive::models::WebWorkspaceProjection;
 use crate::product::app_paths::ProductAppPaths;
-use crate::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
+use crate::product::coding_attempt_store::{
+    CodingAttemptStore, CreateCodingAttemptInput, CreateCodingExecutionUnitInput,
+    CreateGroupCodingAttemptInput,
+};
 use crate::product::coding_models::{
-    CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage, CodingTimelineNode,
-    CodingTimelineNodeStatus, PushStatus, WorkItemDependencyHandoffRef, WorkItemExecutionPlan,
+    CodingAttemptScope, CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
+    CodingExecutionUnitStatus, CodingTimelineNode, CodingTimelineNodeStatus, PushStatus,
+    WorkItemDependencyHandoffRef, WorkItemExecutionPlan,
 };
 use crate::product::coding_workspace_engine::{CodingWorkspaceEngine, CodingWorkspaceEngineError};
 use crate::product::gate_store::GateStore;
@@ -76,7 +80,7 @@ mod support;
 mod workspace_session;
 
 #[rustfmt::skip]
-pub use coding::{abort_coding_attempt, coding_attempt_artifact_content, coding_attempt_diff, confirm_work_item_execution_plan, create_coding_attempt, delete_coding_attempt, get_coding_attempt, request_work_item_execution_plan_change};
+pub use coding::{abort_coding_attempt, coding_attempt_artifact_content, coding_attempt_diff, confirm_work_item_execution_plan, create_coding_attempt, create_group_coding_attempt, delete_coding_attempt, get_coding_attempt, request_work_item_execution_plan_change};
 pub use health::{health, runtime_info};
 #[rustfmt::skip]
 pub use lifecycle::{confirm_gate, delete_design_spec, delete_story_spec, delete_work_item, delete_work_item_plan, generate_design_specs, generate_story_specs, issue_lifecycle, prepare_work_item_plan, request_gate_change, terminate_gate};

@@ -522,6 +522,144 @@ async fn bootstrap_completed_dependency_without_handoff(
         .expect("create item2 with handoff dependency");
 }
 
+async fn bootstrap_confirmed_work_item_plan_group(app: axum::Router, repo_path: &std::path::Path) {
+    bootstrap_work_item_plan_group(app, repo_path, IssueWorkItemPlanStatus::Confirmed).await;
+}
+
+async fn bootstrap_draft_work_item_plan_group(app: axum::Router, repo_path: &std::path::Path) {
+    bootstrap_work_item_plan_group(app, repo_path, IssueWorkItemPlanStatus::Draft).await;
+}
+
+async fn bootstrap_work_item_plan_group(
+    app: axum::Router,
+    repo_path: &std::path::Path,
+    plan_status: IssueWorkItemPlanStatus,
+) {
+    bootstrap_story_and_design(app.clone(), repo_path).await;
+    let app_paths = ProductAppPaths::new(workspace_root_from_app(app).await.join(".aria"));
+    let lifecycle = LifecycleStore::new(app_paths);
+
+    lifecycle
+        .create_verification_plan(CreateVerificationPlanInput {
+            id: Some("verification_plan_0001".to_string()),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            work_item_id: "work_item_0001".to_string(),
+            repository_profile_ref: None,
+            provider_run_ref: None,
+            scope: VerificationScope::Unit,
+            commands: vec![VerificationCommand {
+                id: "cmd_001".to_string(),
+                label: "cargo test".to_string(),
+                command: "cargo test --lib".to_string(),
+                cwd: String::new(),
+                purpose: "unit tests".to_string(),
+                required: true,
+                timeout_seconds: 120,
+                source: VerificationCommandSource::Provider,
+                safety: VerificationCommandSafety::Approved,
+            }],
+            manual_checks: Vec::new(),
+            required_gates: vec!["unit_tests".to_string()],
+            risk_notes: Vec::new(),
+            confidence: RepositoryProfileConfidence::High,
+            fallback_policy: VerificationFallbackPolicy::ManualGate,
+        })
+        .expect("create verification plan 1");
+    lifecycle
+        .create_verification_plan(CreateVerificationPlanInput {
+            id: Some("verification_plan_0002".to_string()),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            work_item_id: "work_item_0002".to_string(),
+            repository_profile_ref: None,
+            provider_run_ref: None,
+            scope: VerificationScope::Unit,
+            commands: vec![VerificationCommand {
+                id: "cmd_002".to_string(),
+                label: "cargo test".to_string(),
+                command: "cargo test --lib".to_string(),
+                cwd: String::new(),
+                purpose: "unit tests".to_string(),
+                required: true,
+                timeout_seconds: 120,
+                source: VerificationCommandSource::Provider,
+                safety: VerificationCommandSafety::Approved,
+            }],
+            manual_checks: Vec::new(),
+            required_gates: vec!["unit_tests".to_string()],
+            risk_notes: Vec::new(),
+            confidence: RepositoryProfileConfidence::High,
+            fallback_policy: VerificationFallbackPolicy::ManualGate,
+        })
+        .expect("create verification plan 2");
+
+    lifecycle
+        .create_work_item(CreateWorkItemInput {
+            id: Some("work_item_0001".to_string()),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            story_spec_ids: vec!["story_spec_0001".to_string()],
+            design_spec_ids: vec!["design_spec_0001".to_string()],
+            title: "实现爬楼梯".to_string(),
+            work_item_set_id: Some("work_item_plan_0001".to_string()),
+            sequence_hint: Some(10),
+            verification_plan_ref: Some("verification_plan_0001".to_string()),
+            plan_status: WorkItemPlanStatus::Confirmed,
+            ..Default::default()
+        })
+        .expect("create group item1");
+    lifecycle
+        .create_work_item(CreateWorkItemInput {
+            id: Some("work_item_0002".to_string()),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            story_spec_ids: vec!["story_spec_0001".to_string()],
+            design_spec_ids: vec!["design_spec_0001".to_string()],
+            title: "实现爬楼梯 part 2".to_string(),
+            work_item_set_id: Some("work_item_plan_0001".to_string()),
+            kind: WorkItemKind::Backend,
+            sequence_hint: Some(20),
+            depends_on: vec!["work_item_0001".to_string()],
+            exclusive_write_scopes: vec!["src/".to_string()],
+            verification_plan_ref: Some("verification_plan_0002".to_string()),
+            plan_status: WorkItemPlanStatus::Confirmed,
+            ..Default::default()
+        })
+        .expect("create group item2");
+
+    lifecycle
+        .create_issue_work_item_plan(CreateIssueWorkItemPlanInput {
+            id: Some("work_item_plan_0001".to_string()),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            source_story_spec_ids: vec!["story_spec_0001".to_string()],
+            source_design_spec_ids: vec!["design_spec_0001".to_string()],
+            options: IssueWorkItemPlanOptions {
+                include_integration_tests: true,
+                include_e2e_tests: false,
+                force_frontend_backend_split: true,
+                require_execution_plan_confirm: false,
+            },
+            status: plan_status,
+            work_item_ids: vec!["work_item_0001".to_string(), "work_item_0002".to_string()],
+            repository_profile_ref: None,
+            verification_plan_ids: vec![
+                "verification_plan_0001".to_string(),
+                "verification_plan_0002".to_string(),
+            ],
+            dependency_graph: vec![cadence_aria::product::models::IssueWorkItemDependencyEdge {
+                from_work_item_id: "work_item_0001".to_string(),
+                to_work_item_id: "work_item_0002".to_string(),
+            }],
+            created_from_provider_run: None,
+            validator_findings: Vec::new(),
+        })
+        .expect("create work item plan group");
+}
+
 pub(crate) async fn bootstrap_story_and_design(app: axum::Router, repo_path: &std::path::Path) {
     request_json(
         app.clone(),
@@ -674,4 +812,3 @@ fn branch_exists(repo_path: &std::path::Path, branch_name: &str) -> bool {
         .map(|status| status.success())
         .unwrap_or(false)
 }
-

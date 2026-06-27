@@ -360,6 +360,10 @@ pub(crate) fn coding_attempt_dto(attempt: &CodingExecutionAttempt) -> CodingAtte
     CodingAttemptDto {
         attempt_id: attempt.id.clone(),
         work_item_id: attempt.work_item_id.clone(),
+        attempt_scope: coding_attempt_scope_text(&attempt.scope).to_string(),
+        work_item_group_id: attempt.work_item_group_id.clone(),
+        current_work_item_id: attempt.current_work_item_id.clone(),
+        active_unit_id: attempt.active_unit_id.clone(),
         attempt_no: attempt.attempt_no,
         status: coding_attempt_status_text(&attempt.status).to_string(),
         stage: coding_execution_stage_text(&attempt.stage).to_string(),
@@ -378,6 +382,13 @@ pub(crate) fn coding_attempt_dto(attempt: &CodingExecutionAttempt) -> CodingAtte
         review_request_url: None,
         created_at: attempt.created_at.clone(),
         updated_at: attempt.updated_at.clone(),
+    }
+}
+
+pub(crate) fn coding_attempt_scope_text(scope: &CodingAttemptScope) -> &'static str {
+    match scope {
+        CodingAttemptScope::WorkItem => "work_item",
+        CodingAttemptScope::WorkItemGroup => "work_item_group",
     }
 }
 

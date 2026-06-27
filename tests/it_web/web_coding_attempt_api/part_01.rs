@@ -237,6 +237,84 @@ async fn rejects_second_active_work_item_on_same_issue_shared_worktree() {
 }
 
 #[tokio::test]
+async fn creates_group_coding_attempt_from_confirmed_work_item_plan() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    bootstrap_confirmed_work_item_plan_group(app.clone(), repo.path()).await;
+
+    let (status, body) = request_json(
+        app,
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-item-plans/work_item_plan_0001/coding-attempts",
+        json!({}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["attempt_scope"], "work_item_group");
+    assert_eq!(body["work_item_group_id"], "work_item_plan_0001");
+    assert_eq!(body["current_work_item_id"], "work_item_0001");
+    assert_eq!(body["branch_name"], "aria/issues/issue_0001");
+}
+
+#[tokio::test]
+async fn rejects_group_coding_attempt_for_unconfirmed_plan() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    bootstrap_draft_work_item_plan_group(app.clone(), repo.path()).await;
+
+    let (status, body) = request_json(
+        app,
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-item-plans/work_item_plan_0001/coding-attempts",
+        json!({}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "work_item_plan_not_confirmed");
+}
+
+#[tokio::test]
+async fn rejects_group_coding_attempt_when_single_item_attempt_holds_issue_lock() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    bootstrap_confirmed_work_item_plan_group(app.clone(), repo.path()).await;
+
+    let (single_status, _) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001/coding-attempts",
+        json!({}),
+    )
+    .await;
+    assert_eq!(single_status, StatusCode::OK);
+
+    let (status, body) = request_json(
+        app,
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-item-plans/work_item_plan_0001/coding-attempts",
+        json!({}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["code"], "issue_worktree_active");
+}
+
+#[tokio::test]
 async fn rejects_coding_attempt_when_required_dependency_handoff_is_missing() {
     let root = tempdir().expect("root");
     let repo = git_repo();
@@ -684,4 +762,3 @@ async fn delete_work_item_cascades_coding_attempts_worktrees_and_branches() {
     assert!(lifecycle["work_items"].as_array().unwrap().is_empty());
     assert!(lifecycle["coding_attempts"].as_array().unwrap().is_empty());
 }
-

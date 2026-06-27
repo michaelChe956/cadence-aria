@@ -482,6 +482,10 @@ impl Default for WorkItemContextBudgetDto {
 pub struct CodingAttemptDto {
     pub attempt_id: String,
     pub work_item_id: String,
+    pub attempt_scope: String,
+    pub work_item_group_id: Option<String>,
+    pub current_work_item_id: Option<String>,
+    pub active_unit_id: Option<String>,
     pub attempt_no: u32,
     pub status: String,
     pub stage: String,
