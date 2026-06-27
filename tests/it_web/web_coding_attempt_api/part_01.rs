@@ -263,6 +263,44 @@ async fn creates_group_coding_attempt_from_confirmed_work_item_plan() {
 }
 
 #[tokio::test]
+async fn returns_group_coding_attempt_snapshot_with_units() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    bootstrap_confirmed_work_item_plan_group(app.clone(), repo.path()).await;
+
+    let (status, attempt) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-item-plans/work_item_plan_0001/coding-attempts",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let attempt_id = attempt["attempt_id"].as_str().expect("attempt id");
+
+    let (status, snapshot) = request_json(
+        app,
+        Method::GET,
+        &format!("/api/coding-attempts/{attempt_id}"),
+        json!({}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(snapshot["attempt_scope"], "work_item_group");
+    assert_eq!(snapshot["work_item_group_id"], "work_item_plan_0001");
+    assert_eq!(snapshot["current_work_item_id"], "work_item_0001");
+    assert_eq!(snapshot["active_unit_id"], "coding_unit_0001");
+    assert_eq!(snapshot["units"].as_array().expect("units").len(), 2);
+    assert_eq!(snapshot["units"][0]["status"], "running");
+    assert_eq!(snapshot["units"][1]["status"], "pending");
+}
+
+#[tokio::test]
 async fn rejects_group_coding_attempt_for_unconfirmed_plan() {
     let root = tempdir().expect("root");
     let repo = git_repo();
