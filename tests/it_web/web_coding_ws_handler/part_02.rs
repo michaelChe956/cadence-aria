@@ -19,7 +19,10 @@ async fn coding_ws_prepare_context_sends_work_item_context_and_updates_provider_
             provider_config_snapshot,
             ..
         } => {
-            let markdown = work_item_markdown.expect("work item markdown");
+            let markdown = work_item_markdown
+                .as_ref()
+                .as_ref()
+                .expect("work item markdown");
             assert!(markdown.contains("实现爬楼梯问题"));
             assert!(markdown.contains("climb_stairs"));
             assert_eq!(
@@ -667,4 +670,3 @@ async fn coding_ws_start_coding_drives_full_happy_path_to_final_confirm() {
     ws.close(None).await.expect("close ws");
     server.abort();
 }
-
