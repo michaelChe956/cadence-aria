@@ -140,18 +140,41 @@ pub async fn create_group_coding_attempt(
                 CodingExecutionUnitStatus::Pending
             },
         }) {
-            if !already_locked_by_current {
-                let _ = lifecycle.release_issue_worktree_lock(
-                    &project_id,
-                    &issue_id,
-                    &current_work_item.id,
-                );
-            }
+            rollback_group_attempt_creation(
+                &coding_store,
+                &lifecycle,
+                &project_id,
+                &issue_id,
+                &current_work_item.id,
+                &attempt.id,
+                already_locked_by_current,
+            )
+            .map_err(product_store_api_error)?;
             return Err(product_store_api_error(error));
         }
     }
 
-    Ok(Json(coding_attempt_dto(&attempt)))
+    let persisted_attempt = coding_store
+        .get_attempt(&project_id, &issue_id, &attempt.id)
+        .map_err(product_store_api_error)?;
+
+    Ok(Json(coding_attempt_dto(&persisted_attempt)))
+}
+
+pub(crate) fn rollback_group_attempt_creation(
+    coding_store: &CodingAttemptStore,
+    lifecycle: &LifecycleStore,
+    project_id: &str,
+    issue_id: &str,
+    lock_work_item_id: &str,
+    attempt_id: &str,
+    already_locked_by_current: bool,
+) -> Result<(), ProductStoreError> {
+    coding_store.delete_attempt(project_id, issue_id, attempt_id)?;
+    if !already_locked_by_current {
+        lifecycle.release_issue_worktree_lock(project_id, issue_id, lock_work_item_id)?;
+    }
+    Ok(())
 }
 
 pub async fn create_coding_attempt(

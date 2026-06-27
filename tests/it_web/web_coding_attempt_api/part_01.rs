@@ -258,6 +258,7 @@ async fn creates_group_coding_attempt_from_confirmed_work_item_plan() {
     assert_eq!(body["attempt_scope"], "work_item_group");
     assert_eq!(body["work_item_group_id"], "work_item_plan_0001");
     assert_eq!(body["current_work_item_id"], "work_item_0001");
+    assert_eq!(body["active_unit_id"], "coding_unit_0001");
     assert_eq!(body["branch_name"], "aria/issues/issue_0001");
 }
 
@@ -312,6 +313,55 @@ async fn rejects_group_coding_attempt_when_single_item_attempt_holds_issue_lock(
 
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(body["code"], "issue_worktree_active");
+}
+
+#[tokio::test]
+async fn group_coding_attempt_retry_is_not_blocked_after_unit_creation_failure() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    bootstrap_confirmed_work_item_plan_group(app.clone(), repo.path()).await;
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    let units_blocker = app_paths
+        .issue_lifecycle_root("project_0001", "issue_0001")
+        .join("coding-attempts")
+        .join("coding_attempt_0001")
+        .join("units");
+    fs::create_dir_all(units_blocker.parent().expect("attempt dir")).expect("attempt dir");
+    fs::write(&units_blocker, "block unit directory creation").expect("units blocker");
+
+    let (first_status, _first_body) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-item-plans/work_item_plan_0001/coding-attempts",
+        json!({}),
+    )
+    .await;
+    assert_eq!(first_status, StatusCode::INTERNAL_SERVER_ERROR);
+
+    let coding_store = CodingAttemptStore::new(app_paths.clone());
+    assert!(
+        coding_store
+            .list_attempts_for_work_item("project_0001", "issue_0001", "work_item_0001")
+            .expect("list attempts after failed create")
+            .is_empty()
+    );
+    assert!(!units_blocker.exists());
+
+    let (retry_status, retry_body) = request_json(
+        app,
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-item-plans/work_item_plan_0001/coding-attempts",
+        json!({}),
+    )
+    .await;
+
+    assert_eq!(retry_status, StatusCode::OK);
+    assert_eq!(retry_body["attempt_id"], "coding_attempt_0001");
+    assert_eq!(retry_body["active_unit_id"], "coding_unit_0001");
 }
 
 #[tokio::test]
