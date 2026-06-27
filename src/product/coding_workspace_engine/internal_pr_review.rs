@@ -1,6 +1,108 @@
 use super::*;
+use crate::product::coding_models::CodingAttemptScope;
 
 impl CodingWorkspaceEngine {
+    pub async fn build_group_internal_pr_review_prompt_for_test(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<String, CodingWorkspaceEngineError> {
+        let review_request = self
+            .store
+            .list_review_requests(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+            .into_iter()
+            .last()
+            .unwrap_or(ReviewRequest {
+                id: "review_request_for_test".to_string(),
+                attempt_id: attempt.id.clone(),
+                kind: ReviewRequestKind::GitBranchOnly,
+                remote_kind: crate::product::coding_models::RemoteKind::GenericGit,
+                remote: "origin".to_string(),
+                base_branch: attempt.base_branch.clone(),
+                branch_name: attempt.branch_name.clone(),
+                commit_sha: attempt
+                    .head_commit
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string()),
+                push_status: PushStatus::Pushed,
+                external_url: None,
+                manual_instructions: Vec::new(),
+                created_at: Utc::now().to_rfc3339(),
+                updated_at: Utc::now().to_rfc3339(),
+            });
+        let handoffs = self.collect_completed_group_unit_handoffs(attempt)?;
+        Ok(format!(
+            "Review Request: {}\nCompleted Units:\n{}",
+            review_request.id,
+            self.format_group_unit_handoff_section(&handoffs)
+        ))
+    }
+
+    async fn build_group_internal_pr_review_prompt(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        review_request: &ReviewRequest,
+        worktree_path: Option<&Path>,
+        retry_diagnostic: Option<&str>,
+    ) -> Result<String, CodingWorkspaceEngineError> {
+        let handoffs = self.collect_completed_group_unit_handoffs(attempt)?;
+        let units_section = self.format_group_unit_handoff_section(&handoffs);
+        let evaluation_context_json = self
+            .evaluation_context_json_for_role(attempt, EvaluationContextRole::InternalReviewer)?;
+        let diff = match worktree_path {
+            Some(path) => {
+                self._git_service
+                    .git_diff(path, &attempt.base_branch)
+                    .await?
+            }
+            None => String::new(),
+        };
+        let retry_diagnostic_section = retry_diagnostic
+            .map(|summary| format!("\n上一轮 role run 诊断摘要:\n{}\n", summary))
+            .unwrap_or_default();
+        let worktree_display = worktree_path
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "未提供".to_string());
+
+        Ok(format!(
+            "Coding Workspace InternalReviewer\n\
+             {}\n\
+             你是整组 PR 的最终 reviewer，在所有 coding units 完成后对整组变更做内部 PR 审查。\n\
+             Project: {}\n\
+             Issue: {}\n\
+             Scope: WorkItemGroup\n\
+             Attempt: {}\n\
+             Branch: {}\n\
+             Review Request: {}\n\
+             Review Remote: {}\n\
+             Commit: {}\n\
+             Worktree: {}\n\
+             \nCompleted Units:\n{}\n\
+             \nEvaluationContextPack:\n````json\n{}\n````\n\
+             \n完整变更 git diff:\n````diff\n{}\n````\n\
+             {}\
+             \n输出要求:\n\
+             - 基于所有 completed units 的 handoff 汇总评估整组风险、测试覆盖和剩余问题。\n\
+             - 分析影响范围（影响范围/impact_scope）。\n\
+             - 给出 PR description 预览。\n\
+             - 给出 commit message 建议。\n\
+             - findings 必须包含 source_stage=internal_pr_review。\n\
+             \n只输出 JSON：{{\"verdict\":\"approve|request_changes|blocked\",\"summary\":\"...\",\"findings\":[...],\"impact_scope\":[\"...\"],\"pr_description\":\"...\",\"commit_message_suggestion\":\"...\"}}\n",
+            provider_runtime_contract("InternalReviewer"),
+            attempt.project_id,
+            attempt.issue_id,
+            attempt.id,
+            attempt.branch_name,
+            review_request.id,
+            review_request.remote,
+            review_request.commit_sha,
+            worktree_display,
+            units_section,
+            evaluation_context_json,
+            truncate_prompt_section(&diff, 30_000),
+            retry_diagnostic_section
+        ))
+    }
+
     pub async fn execute_internal_pr_review(
         &self,
         attempt: &CodingExecutionAttempt,
@@ -70,14 +172,23 @@ impl CodingWorkspaceEngine {
             .get_role_provider_config_snapshot(&attempt.project_id, &attempt.issue_id, &attempt.id)?
             .internal_reviewer;
         let retry_diagnostic = self.retry_diagnostic_for_previous_run(&attempt, &role_run)?;
-        let prompt = self
-            .build_internal_pr_review_prompt(
+        let prompt = if attempt.scope == CodingAttemptScope::WorkItemGroup {
+            self.build_group_internal_pr_review_prompt(
+                &attempt,
+                &review_request,
+                Some(worktree_path.as_path()),
+                retry_diagnostic.as_deref(),
+            )
+            .await?
+        } else {
+            self.build_internal_pr_review_prompt(
                 &attempt,
                 &review_request,
                 worktree_path,
                 retry_diagnostic.as_deref(),
             )
-            .await?;
+            .await?
+        };
         let _ = self
             .event_tx
             .send(CodingWsOutMessage::CodingExecutionEvent {

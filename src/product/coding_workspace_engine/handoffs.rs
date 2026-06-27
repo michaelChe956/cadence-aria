@@ -23,6 +23,13 @@ impl CodingWorkspaceEngine {
                 attempt_id.to_string(),
             ));
         }
+        if current.scope == CodingAttemptScope::WorkItemGroup
+            && !self.group_attempt_ready_for_final_review(&current)?
+        {
+            return Err(CodingWorkspaceEngineError::FinalConfirmNotReady(
+                attempt_id.to_string(),
+            ));
+        }
 
         self.generate_and_save_work_item_handoff_if_missing(&current)
             .await?;
@@ -34,18 +41,28 @@ impl CodingWorkspaceEngine {
             attempt_id,
             CodingAttemptStatus::Completed,
         )?;
-        let current_work_item_id = self.current_work_item_id_for_handoff(&updated);
-        LifecycleStore::new(self.store.paths()).update_work_item_execution_status(
-            &updated.project_id,
-            &updated.issue_id,
-            current_work_item_id,
-            WorkItemStatus::Completed,
-        )?;
-        self.mark_issue_shared_worktree_completed_if_present(
-            project_id,
-            issue_id,
-            current_work_item_id,
-        )?;
+        if updated.scope == CodingAttemptScope::WorkItemGroup {
+            self.mark_completed_group_work_items_if_present(&updated)?;
+            let current_work_item_id = self.current_work_item_id_for_handoff(&current).to_string();
+            self.release_issue_shared_worktree_lock_if_holder(
+                project_id,
+                issue_id,
+                &current_work_item_id,
+            )?;
+        } else {
+            let current_work_item_id = self.current_work_item_id_for_handoff(&updated);
+            LifecycleStore::new(self.store.paths()).update_work_item_execution_status(
+                &updated.project_id,
+                &updated.issue_id,
+                current_work_item_id,
+                WorkItemStatus::Completed,
+            )?;
+            self.mark_issue_shared_worktree_completed_if_present(
+                project_id,
+                issue_id,
+                current_work_item_id,
+            )?;
+        }
         if let Some(node_id) =
             self.active_final_confirm_node_id(project_id, issue_id, attempt_id)?
         {
@@ -498,6 +515,39 @@ impl CodingWorkspaceEngine {
             .await?;
         self.complete_current_group_unit(attempt, Some("当前 Work Item 已完成".to_string()))
             .await
+    }
+
+    fn mark_completed_group_work_items_if_present(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<(), CodingWorkspaceEngineError> {
+        let lifecycle = LifecycleStore::new(self.store.paths());
+        let existing_work_item_ids = lifecycle
+            .list_work_items(&attempt.project_id, &attempt.issue_id)?
+            .into_iter()
+            .map(|work_item| work_item.id)
+            .collect::<std::collections::HashSet<_>>();
+        let completed_units =
+            self.store
+                .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+        for unit in completed_units.into_iter().filter(|unit| {
+            unit.status == crate::product::coding_models::CodingExecutionUnitStatus::Completed
+        }) {
+            if existing_work_item_ids.contains(&unit.work_item_id) {
+                lifecycle.update_work_item_execution_status(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &unit.work_item_id,
+                    WorkItemStatus::Completed,
+                )?;
+                self.mark_issue_shared_worktree_completed_if_present(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &unit.work_item_id,
+                )?;
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn mark_work_item_completed_if_present(

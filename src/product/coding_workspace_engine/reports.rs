@@ -1,6 +1,79 @@
 use super::*;
+use crate::product::coding_models::{CodingExecutionUnit, CodingExecutionUnitStatus};
 
 impl CodingWorkspaceEngine {
+    pub(crate) fn collect_completed_group_unit_handoffs(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<Vec<(CodingExecutionUnit, WorkItemHandoff)>, CodingWorkspaceEngineError> {
+        let units =
+            self.store
+                .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+        let mut handoffs = Vec::new();
+        for unit in units
+            .into_iter()
+            .filter(|unit| unit.status == CodingExecutionUnitStatus::Completed)
+        {
+            let handoff = self
+                .store
+                .get_coding_unit_handoff(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &attempt.id,
+                    &unit.id,
+                )?
+                .ok_or_else(|| {
+                    CodingWorkspaceEngineError::WorkItemHandoffMissing(format!(
+                        "{}:{}",
+                        attempt.id, unit.id
+                    ))
+                })?;
+            handoffs.push((unit, handoff));
+        }
+        Ok(handoffs)
+    }
+
+    pub(crate) fn format_group_unit_handoff_section(
+        &self,
+        handoffs: &[(CodingExecutionUnit, WorkItemHandoff)],
+    ) -> String {
+        if handoffs.is_empty() {
+            return "- 无 completed units".to_string();
+        }
+
+        handoffs
+            .iter()
+            .map(|(unit, handoff)| {
+                let completion_commit = unit
+                    .completion_commit
+                    .as_deref()
+                    .or(handoff.commit_sha.as_deref())
+                    .unwrap_or("无");
+                let tests_run = if handoff.tests_run.is_empty() {
+                    "无".to_string()
+                } else {
+                    handoff.tests_run.join("; ")
+                };
+                let risk_notes = if handoff.open_risks.is_empty() {
+                    "无".to_string()
+                } else {
+                    handoff.open_risks.join("; ")
+                };
+                format!(
+                    "- Unit: {}\n  Work Item: {}\n  Status: {:?}\n  Completion Commit: {}\n  Handoff Summary: {}\n  Tests Run: {}\n  Risk Notes: {}",
+                    unit.id,
+                    unit.work_item_id,
+                    unit.status,
+                    completion_commit,
+                    handoff.summary,
+                    tests_run,
+                    risk_notes
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     pub(crate) fn evaluation_context_json_for_role(
         &self,
         attempt: &CodingExecutionAttempt,
