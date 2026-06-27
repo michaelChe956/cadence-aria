@@ -16,6 +16,39 @@ import type { DrawerEntity } from "./LifecycleCardDrawer";
 type ProviderWorkspaceLaunchTarget = "story" | "design" | "work_item";
 
 const DELETE_EXIT_ANIMATION_MS = 220;
+const ACTIVE_GROUP_ATTEMPT_STATUSES = new Set<CodingAttempt["status"]>([
+  "created",
+  "running",
+  "waiting_for_human",
+  "blocked",
+]);
+
+export function resolveGroupCodingAttempt(
+  raw: unknown,
+  codingAttempts: CodingAttempt[],
+  planId: string,
+): CodingAttempt | null {
+  const directAttempt =
+    typeof raw === "object" &&
+    raw !== null &&
+    "latest_group_attempt" in raw &&
+    raw.latest_group_attempt &&
+    typeof raw.latest_group_attempt === "object"
+      ? (raw.latest_group_attempt as CodingAttempt)
+      : null;
+
+  if (directAttempt) {
+    return directAttempt;
+  }
+
+  return (
+    codingAttempts.find(
+      (attempt) =>
+        attempt.work_item_group_id === planId &&
+        ACTIVE_GROUP_ATTEMPT_STATUSES.has(attempt.status),
+    ) ?? null
+  );
+}
 
 export function IssueCardList({
   cards,
@@ -429,6 +462,7 @@ export function findCardInColumns(
 export function toDrawerEntity(
   card: LifecycleCardData,
   allWorkItems?: LifecycleWorkItem[],
+  codingAttempts: CodingAttempt[] = [],
 ): DrawerEntity {
   const base = {
     id: card.id,
@@ -456,14 +490,11 @@ export function toDrawerEntity(
   }
 
   if (card.kind === "work_item_group") {
-    const latestGroupAttempt: CodingAttempt | null =
-      typeof card.raw === "object" &&
-      card.raw !== null &&
-      "latest_group_attempt" in card.raw &&
-      card.raw.latest_group_attempt &&
-      typeof card.raw.latest_group_attempt === "object"
-        ? (card.raw.latest_group_attempt as CodingAttempt)
-        : null;
+    const latestGroupAttempt = resolveGroupCodingAttempt(
+      card.raw,
+      codingAttempts,
+      card.id,
+    );
     const itemsById = new Map(
       (allWorkItems ?? []).map((item) => [item.work_item_id, item]),
     );

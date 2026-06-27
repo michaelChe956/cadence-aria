@@ -7,6 +7,7 @@ import {
   IssueLifecycleWorkbench,
 } from "./IssueLifecycleWorkbench";
 import {
+  codingGroupAttemptRecord,
   deferred,
   installIssueLifecycleWorkbenchTestHooks,
   issueWorkItemPlanRecord,
@@ -147,6 +148,98 @@ describe("IssueLifecycleWorkbench drawer and work item groups", () => {
     await user.click(
       await screen.findByRole("button", { name: "Work Item Group" }),
     );
+    await user.click(screen.getByTestId("drawer-open-coding-workspace"));
+
+    await waitFor(() =>
+      expect(onOpenCodingWorkspace).toHaveBeenCalledWith("coding_attempt_0001"),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/project_0001/issues/issue_0001/work-item-plans/issue_plan_0001/coding-attempts",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("shows existing group coding label and reuses the active fallback attempt", async () => {
+    const fetchMock = lifecycleFetch({
+      confirmedWorkItem: true,
+      splitWorkItems: true,
+      workItemPlans: [
+        issueWorkItemPlanRecord({
+          id: "issue_plan_0001",
+          status: "confirmed",
+          work_item_ids: ["work_item_backend", "work_item_frontend"],
+        }),
+      ],
+      codingAttempts: [
+        {
+          ...codingGroupAttemptRecord("issue_plan_0001"),
+          attempt_id: "coding_attempt_active_group_0001",
+          status: "running",
+        },
+      ],
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    const onOpenCodingWorkspace = vi.fn();
+
+    render(
+      <IssueLifecycleWorkbench onOpenCodingWorkspace={onOpenCodingWorkspace} />,
+    );
+
+    await user.click(
+      await screen.findByRole("button", { name: "Work Item Group" }),
+    );
+
+    expect(
+      screen.getByRole("button", { name: "进入 Coding Workspace" }),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByTestId("drawer-open-coding-workspace"));
+
+    await waitFor(() =>
+      expect(onOpenCodingWorkspace).toHaveBeenCalledWith(
+        "coding_attempt_active_group_0001",
+      ),
+    );
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      "/api/projects/project_0001/issues/issue_0001/work-item-plans/issue_plan_0001/coding-attempts",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("creates a new group coding attempt when fallback only finds a completed group attempt", async () => {
+    const fetchMock = lifecycleFetch({
+      confirmedWorkItem: true,
+      splitWorkItems: true,
+      workItemPlans: [
+        issueWorkItemPlanRecord({
+          id: "issue_plan_0001",
+          status: "confirmed",
+          work_item_ids: ["work_item_backend", "work_item_frontend"],
+        }),
+      ],
+      codingAttempts: [
+        {
+          ...codingGroupAttemptRecord("issue_plan_0001"),
+          attempt_id: "coding_attempt_completed_group_0001",
+          status: "completed",
+        },
+      ],
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    const onOpenCodingWorkspace = vi.fn();
+
+    render(
+      <IssueLifecycleWorkbench onOpenCodingWorkspace={onOpenCodingWorkspace} />,
+    );
+
+    await user.click(
+      await screen.findByRole("button", { name: "Work Item Group" }),
+    );
+
+    expect(screen.getByRole("button", { name: "开始 Coding" })).toBeInTheDocument();
+
     await user.click(screen.getByTestId("drawer-open-coding-workspace"));
 
     await waitFor(() =>

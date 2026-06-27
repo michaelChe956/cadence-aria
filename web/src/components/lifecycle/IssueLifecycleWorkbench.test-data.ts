@@ -122,6 +122,7 @@ export function initialLifecycleData(
   splitWorkItems: boolean | undefined,
   workItemPlans: unknown[] | undefined,
   skippedIntegrationRisk: boolean | undefined,
+  codingAttempts?: CodingAttempt[],
 ): MockLifecycleData {
   if (empty) {
     return {
@@ -242,7 +243,7 @@ export function initialLifecycleData(
         "workspace_session_plan_group_0001",
       ),
     ],
-    coding_attempts: [],
+    coding_attempts: codingAttempts ?? [],
   };
 }
 

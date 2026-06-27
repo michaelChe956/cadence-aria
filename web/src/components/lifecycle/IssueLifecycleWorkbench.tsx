@@ -22,7 +22,6 @@ import {
   listRepositories,
 } from "../../api/client";
 import type {
-  CodingAttempt,
   IssueLifecycleResponse,
   Project,
   Repository,
@@ -60,6 +59,7 @@ import {
   findWorkspaceSession,
   lifecycleCardKey,
   normalizeLifecycleResponse,
+  resolveGroupCodingAttempt,
   selectedLifecycleColumns,
   toDrawerEntity,
   waitForDeleteExitAnimation,
@@ -76,28 +76,6 @@ const DEFAULT_WORK_ITEM_PLAN_OPTIONS = {
   force_frontend_backend_split: true,
   require_execution_plan_confirm: false,
 } satisfies WorkItemPlanOptionsFormValue;
-
-function latestGroupAttemptFromPlan(
-  raw: unknown,
-  lifecycle: IssueLifecycleResponse | undefined,
-  planId: string,
-): CodingAttempt | null {
-  const directAttempt =
-    typeof raw === "object" &&
-    raw !== null &&
-    "latest_group_attempt" in raw &&
-    raw.latest_group_attempt &&
-    typeof raw.latest_group_attempt === "object"
-      ? (raw.latest_group_attempt as CodingAttempt)
-      : null;
-  return (
-    directAttempt ??
-    lifecycle?.coding_attempts.find(
-      (attempt) => attempt.work_item_group_id === planId,
-    ) ??
-    null
-  );
-}
 
 export function IssueLifecycleWorkbench({
   focusEntityId,
@@ -326,9 +304,9 @@ export function IssueLifecycleWorkbench({
     const lifecycle = lifecycles.find(
       (candidate) => candidate.issue.issue_id === card.issueId,
     );
-    const latestGroupAttempt = latestGroupAttemptFromPlan(
+    const latestGroupAttempt = resolveGroupCodingAttempt(
       card.raw,
-      lifecycle,
+      lifecycle?.coding_attempts ?? [],
       card.id,
     );
 
@@ -709,6 +687,10 @@ export function IssueLifecycleWorkbench({
                 (lifecycle) =>
                   lifecycle.issue.issue_id === focusedEntity.issueId,
               )?.work_items ?? [],
+              lifecycles.find(
+                (lifecycle) =>
+                  lifecycle.issue.issue_id === focusedEntity.issueId,
+              )?.coding_attempts ?? [],
             )}
             onClose={closeDrawer}
             onOpenWorkspace={() =>

@@ -1,5 +1,5 @@
 import { beforeEach, vi } from "vitest";
-import type { IssueWorkItemPlanDetailDto } from "../../api/types";
+import type { CodingAttempt, IssueWorkItemPlanDetailDto } from "../../api/types";
 import { useLifecycleWorkbenchStore } from "../../state/lifecycle-workbench-store";
 import {
   codingAttemptRecord,
@@ -42,6 +42,7 @@ export function lifecycleFetch(options?: {
   splitWorkItems?: boolean;
   workItemPlans?: unknown[];
   skippedIntegrationRisk?: boolean;
+  codingAttempts?: CodingAttempt[];
 }) {
   const projects = [
     ...(options?.projects ?? [projectRecord("project_0001", "Aria")]),
@@ -73,6 +74,7 @@ export function lifecycleFetch(options?: {
       options?.splitWorkItems,
       options?.workItemPlans,
       options?.skippedIntegrationRisk,
+      options?.codingAttempts,
     );
     lifecycleByIssue.set(issueId, initial);
     return initial;
