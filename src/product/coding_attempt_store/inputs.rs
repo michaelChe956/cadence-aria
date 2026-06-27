@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
 use crate::product::coding_models::{
-    CodingChoiceOption, CodingExecutionStage, CodingGateAction, CodingProviderRole,
+    CodingChoiceOption, CodingExecutionStage, CodingExecutionUnitStatus, CodingGateAction,
+    CodingProviderRole,
 };
 use crate::product::models::ProviderName;
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
@@ -16,6 +17,30 @@ pub struct CreateCodingAttemptInput {
     pub worktree_path: Option<PathBuf>,
     pub provider_config_snapshot: ProviderConfigSnapshot,
     pub max_auto_rework: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateGroupCodingAttemptInput {
+    pub project_id: String,
+    pub issue_id: String,
+    pub plan_id: String,
+    pub current_work_item_id: String,
+    pub base_branch: String,
+    pub branch_name: String,
+    pub worktree_path: Option<PathBuf>,
+    pub provider_config_snapshot: ProviderConfigSnapshot,
+    pub max_auto_rework: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateCodingExecutionUnitInput {
+    pub attempt_id: String,
+    pub project_id: String,
+    pub issue_id: String,
+    pub plan_id: String,
+    pub work_item_id: String,
+    pub order_index: u32,
+    pub status: CodingExecutionUnitStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

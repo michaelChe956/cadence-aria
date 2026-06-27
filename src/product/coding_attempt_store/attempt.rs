@@ -2,7 +2,7 @@ use chrono::Utc;
 
 use crate::product::coding_attempt_store::CreateCodingAttemptInput;
 use crate::product::coding_models::{
-    CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
+    CodingAttemptScope, CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
     CodingRoleProviderConfigSnapshot,
 };
 use crate::product::coding_models::{WorkItemExecutionPlan, WorkItemHandoff};
@@ -41,12 +41,14 @@ impl super::CodingAttemptStore {
             .unwrap_or(0)
             + 1;
         let now = Utc::now().to_rfc3339();
+        let current_work_item_id = input.work_item_id.clone();
         let attempt = CodingExecutionAttempt {
             id: id.clone(),
             project_id: input.project_id,
             issue_id: input.issue_id,
             work_item_id: input.work_item_id,
             attempt_no,
+            scope: CodingAttemptScope::WorkItem,
             status: CodingAttemptStatus::Created,
             stage: CodingExecutionStage::PrepareContext,
             base_branch: input.base_branch,
@@ -55,6 +57,9 @@ impl super::CodingAttemptStore {
             provider_config_snapshot: input.provider_config_snapshot,
             rework_count: 0,
             max_auto_rework: input.max_auto_rework,
+            work_item_group_id: None,
+            current_work_item_id: Some(current_work_item_id),
+            active_unit_id: None,
             head_commit: None,
             pushed_remote: None,
             review_request_id: None,

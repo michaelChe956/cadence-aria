@@ -65,6 +65,27 @@ impl super::CodingAttemptStore {
             .join("rework-instructions")
     }
 
+    pub(crate) fn coding_units_root(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> PathBuf {
+        self.attempt_dir(project_id, issue_id, attempt_id)
+            .join("units")
+    }
+
+    pub(crate) fn coding_unit_path(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        unit_id: &str,
+    ) -> PathBuf {
+        self.coding_units_root(project_id, issue_id, attempt_id)
+            .join(format!("{unit_id}.json"))
+    }
+
     pub(crate) fn analyst_decisions_root(
         &self,
         project_id: &str,

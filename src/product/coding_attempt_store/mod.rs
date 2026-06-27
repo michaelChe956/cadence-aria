@@ -5,6 +5,7 @@ use crate::product::json_store::{ProductStoreError, read_json, validate_relative
 mod attempt;
 mod context;
 mod gate;
+mod group;
 mod inputs;
 mod paths;
 mod report;

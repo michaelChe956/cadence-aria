@@ -3,8 +3,9 @@ use tempfile::TempDir;
 use super::*;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_models::{
-    CodingExecutionStage, CodingGateAction, CodingGateActionType, CodingProviderRole, TestPlan,
-    TestPlanRiskLevel, TestPlanStep, TestPlanTool,
+    CodingAttemptScope, CodingExecutionStage, CodingExecutionUnitStatus, CodingGateAction,
+    CodingGateActionType, CodingProviderRole, TestPlan, TestPlanRiskLevel, TestPlanStep,
+    TestPlanTool,
 };
 use crate::product::models::ProviderName;
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
@@ -33,6 +34,107 @@ fn setup() -> (TempDir, CodingAttemptStore, CodingExecutionAttempt) {
         })
         .unwrap();
     (tmp, store, attempt)
+}
+
+fn provider_snapshot() -> ProviderConfigSnapshot {
+    ProviderConfigSnapshot {
+        author: ProviderName::Codex,
+        reviewer: Some(ProviderName::ClaudeCode),
+        review_rounds: 1,
+    }
+}
+
+#[test]
+fn legacy_attempt_without_scope_deserializes_as_work_item_scope() {
+    let json = serde_json::json!({
+        "id": "coding_attempt_0001",
+        "project_id": "project_0001",
+        "issue_id": "issue_0001",
+        "work_item_id": "work_item_0001",
+        "attempt_no": 1,
+        "status": "created",
+        "stage": "prepare_context",
+        "base_branch": "main",
+        "branch_name": "aria/issues/issue_0001",
+        "worktree_path": null,
+        "provider_config_snapshot": { "author": "codex", "reviewer": "codex", "review_rounds": 1 },
+        "rework_count": 0,
+        "max_auto_rework": 2,
+        "head_commit": null,
+        "pushed_remote": null,
+        "review_request_id": null,
+        "provider_conversations": [],
+        "created_at": "2026-06-27T00:00:00Z",
+        "updated_at": "2026-06-27T00:00:00Z",
+        "completed_at": null
+    });
+
+    let attempt: CodingExecutionAttempt = serde_json::from_value(json).expect("attempt");
+
+    assert_eq!(attempt.scope, CodingAttemptScope::WorkItem);
+    assert_eq!(
+        attempt.current_work_item_id.as_deref(),
+        Some("work_item_0001")
+    );
+    assert!(attempt.work_item_group_id.is_none());
+}
+
+#[test]
+fn creates_group_attempt_and_units_with_single_active_unit() {
+    let (_tmp, store, _attempt) = setup();
+
+    let group_attempt = store
+        .create_group_attempt(CreateGroupCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            plan_id: "work_item_plan_0001".to_string(),
+            current_work_item_id: "work_item_0001".to_string(),
+            base_branch: "main".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: provider_snapshot(),
+            max_auto_rework: 2,
+        })
+        .expect("group attempt");
+
+    store
+        .create_coding_unit(CreateCodingExecutionUnitInput {
+            attempt_id: group_attempt.id.clone(),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            plan_id: "work_item_plan_0001".to_string(),
+            work_item_id: "work_item_0001".to_string(),
+            order_index: 0,
+            status: CodingExecutionUnitStatus::Running,
+        })
+        .expect("unit 1");
+    store
+        .create_coding_unit(CreateCodingExecutionUnitInput {
+            attempt_id: group_attempt.id.clone(),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            plan_id: "work_item_plan_0001".to_string(),
+            work_item_id: "work_item_0002".to_string(),
+            order_index: 1,
+            status: CodingExecutionUnitStatus::Pending,
+        })
+        .expect("unit 2");
+
+    let units = store
+        .list_coding_units("project_0001", "issue_0001", &group_attempt.id)
+        .expect("units");
+    let active = store
+        .get_active_coding_unit("project_0001", "issue_0001", &group_attempt.id)
+        .expect("active lookup")
+        .expect("active");
+
+    assert_eq!(group_attempt.scope, CodingAttemptScope::WorkItemGroup);
+    assert_eq!(
+        group_attempt.work_item_group_id.as_deref(),
+        Some("work_item_plan_0001")
+    );
+    assert_eq!(units.len(), 2);
+    assert_eq!(active.work_item_id, "work_item_0001");
 }
 
 #[test]

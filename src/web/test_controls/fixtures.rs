@@ -337,6 +337,7 @@ fn create_coding_role_run_fixture(
         issue_id: issue.id.clone(),
         work_item_id: work_item.id.clone(),
         attempt_no: 1,
+        scope: crate::product::coding_models::CodingAttemptScope::WorkItem,
         status: CodingAttemptStatus::Blocked,
         stage: if blocked_stage_internal {
             FixtureStage::InternalPrReview
@@ -349,6 +350,9 @@ fn create_coding_role_run_fixture(
         provider_config_snapshot: provider_snapshot.clone(),
         rework_count: if blocked_stage_internal { 0 } else { 1 },
         max_auto_rework: 2,
+        work_item_group_id: None,
+        current_work_item_id: Some(work_item.id.clone()),
+        active_unit_id: None,
         head_commit: None,
         pushed_remote: None,
         review_request_id: None,
