@@ -223,3 +223,92 @@ async fn coding_ws_group_attempt_completes_first_unit_before_review_request_and_
     ws.close(None).await.expect("close ws");
     server.abort();
 }
+
+#[tokio::test]
+async fn coding_ws_group_session_state_hides_completed_unit_handoff_from_active_unit_snapshot() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let app = app_with_group_attempt(root.path());
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    store
+        .save_coding_unit_handoff(
+            "project_0001",
+            "issue_0001",
+            "coding_attempt_0001",
+            "coding_unit_0001",
+            &cadence_aria::product::coding_models::WorkItemHandoff {
+                id: "work_item_handoff_0001".to_string(),
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                work_item_id: "work_item_0001".to_string(),
+                attempt_id: "coding_attempt_0001".to_string(),
+                provider_run_ref: None,
+                summary: "unit1 done".to_string(),
+                files_changed: Vec::new(),
+                commit_sha: None,
+                diff_summary: String::new(),
+                tests_run: Vec::new(),
+                test_result_summary: String::new(),
+                review_summary: None,
+                api_or_contract_changes: Vec::new(),
+                open_risks: Vec::new(),
+                next_work_item_notes: Vec::new(),
+                created_at: "2026-06-27T00:00:00Z".to_string(),
+            },
+        )
+        .expect("save unit1 handoff");
+    store
+        .update_coding_unit_handoff_ref(
+            "project_0001",
+            "issue_0001",
+            "coding_attempt_0001",
+            "coding_unit_0001",
+            Some("units/coding_unit_0001/work-item-handoff.json".to_string()),
+        )
+        .expect("update unit1 handoff ref");
+    store
+        .update_coding_unit_status(
+            "project_0001",
+            "issue_0001",
+            "coding_attempt_0001",
+            "coding_unit_0001",
+            CodingExecutionUnitStatus::Completed,
+            Some("unit1 done".to_string()),
+        )
+        .expect("complete unit1");
+    store
+        .update_coding_unit_status(
+            "project_0001",
+            "issue_0001",
+            "coding_attempt_0001",
+            "coding_unit_0002",
+            CodingExecutionUnitStatus::Running,
+            Some("unit2 running".to_string()),
+        )
+        .expect("start unit2");
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let state = match ws.next().await {
+        Some(Ok(Message::Text(text))) => {
+            serde_json::from_str::<serde_json::Value>(&text).expect("session state json")
+        }
+        other => panic!("expected text websocket message, got {other:?}"),
+    };
+
+    assert_eq!(state["current_work_item_id"], "work_item_0002");
+    assert!(state["work_item_handoff"].is_null());
+    assert_eq!(
+        state["units"][0]["handoff_ref"],
+        "units/coding_unit_0001/work-item-handoff.json"
+    );
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}

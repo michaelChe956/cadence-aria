@@ -5,7 +5,9 @@ use crate::product::coding_models::{
     CodingExecutionUnit, CodingExecutionUnitStatus, CodingRoleProviderConfigSnapshot,
 };
 use crate::product::id::next_sequential_id;
-use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
+use crate::product::json_store::{
+    ProductStoreError, read_json, validate_relative_artifact_ref, validate_relative_id, write_json,
+};
 
 use super::{CreateCodingExecutionUnitInput, CreateGroupCodingAttemptInput};
 
@@ -256,6 +258,29 @@ impl super::CodingAttemptStore {
         attempt.updated_at = Utc::now().to_rfc3339();
         self.save_coding_attempt(&attempt)?;
 
+        Ok(unit)
+    }
+
+    pub fn update_coding_unit_handoff_ref(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        unit_id: &str,
+        handoff_ref: Option<String>,
+    ) -> Result<CodingExecutionUnit, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(attempt_id)?;
+        validate_relative_id(unit_id)?;
+        if let Some(handoff_ref) = handoff_ref.as_deref() {
+            validate_relative_artifact_ref(handoff_ref)?;
+        }
+        let path = self.coding_unit_path(project_id, issue_id, attempt_id, unit_id);
+        let mut unit: CodingExecutionUnit = read_json(&path)?;
+        unit.handoff_ref = handoff_ref;
+        unit.updated_at = Utc::now().to_rfc3339();
+        write_json(&path, &unit)?;
         Ok(unit)
     }
 }

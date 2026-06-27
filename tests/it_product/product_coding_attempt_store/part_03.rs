@@ -139,3 +139,70 @@ fn saves_and_loads_work_item_handoff() {
         .expect("handoff exists");
     assert_eq!(loaded.summary, handoff.summary);
 }
+
+#[test]
+fn saves_and_loads_group_unit_work_item_handoff() {
+    let root = tempdir().expect("tempdir");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_group_attempt(CreateGroupCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            plan_id: "work_item_plan_0001".to_string(),
+            current_work_item_id: "work_item_0001".to_string(),
+            base_branch: "main".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Fake,
+                reviewer: Some(ProviderName::Fake),
+                review_rounds: 1,
+            },
+            max_auto_rework: 2,
+        })
+        .expect("create group attempt");
+    store
+        .create_coding_unit(CreateCodingExecutionUnitInput {
+            attempt_id: attempt.id.clone(),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            plan_id: "work_item_plan_0001".to_string(),
+            work_item_id: "work_item_0001".to_string(),
+            order_index: 0,
+            status: CodingExecutionUnitStatus::Running,
+        })
+        .expect("create unit");
+    let handoff = WorkItemHandoff {
+        id: "work_item_handoff_0001".to_string(),
+        project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        work_item_id: "work_item_0001".to_string(),
+        attempt_id: attempt.id.clone(),
+        provider_run_ref: None,
+        summary: "group unit handoff".to_string(),
+        files_changed: vec!["src/lib.rs".to_string()],
+        commit_sha: Some("abc123".to_string()),
+        diff_summary: "group unit diff".to_string(),
+        tests_run: vec!["cargo test".to_string()],
+        test_result_summary: "passed".to_string(),
+        review_summary: Some("ok".to_string()),
+        api_or_contract_changes: Vec::new(),
+        open_risks: Vec::new(),
+        next_work_item_notes: vec!["next".to_string()],
+        created_at: "2026-06-27T00:00:00Z".to_string(),
+    };
+
+    store
+        .save_coding_unit_handoff("project_0001", "issue_0001", &attempt.id, "coding_unit_0001", &handoff)
+        .expect("save unit handoff");
+
+    let loaded = store
+        .get_coding_unit_handoff("project_0001", "issue_0001", &attempt.id, "coding_unit_0001")
+        .expect("load unit handoff")
+        .expect("unit handoff exists");
+    assert_eq!(loaded.summary, handoff.summary);
+    assert!(store
+        .get_work_item_handoff("project_0001", "issue_0001", &attempt.id)
+        .expect("attempt handoff")
+        .is_none());
+}

@@ -1,4 +1,5 @@
 use super::*;
+use crate::product::coding_models::CodingAttemptScope;
 
 impl CodingWorkspaceEngine {
     fn current_work_item_id_for_handoff<'a>(&self, attempt: &'a CodingExecutionAttempt) -> &'a str {
@@ -186,6 +187,76 @@ impl CodingWorkspaceEngine {
         &self,
         attempt: &CodingExecutionAttempt,
     ) -> Result<(), CodingWorkspaceEngineError> {
+        if attempt.scope == CodingAttemptScope::WorkItemGroup {
+            let active = self
+                .store
+                .get_active_coding_unit(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+                .ok_or_else(|| {
+                    CodingWorkspaceEngineError::WorkItemHandoffMissing(attempt.id.clone())
+                })?;
+            let handoff_ref = format!("units/{}/work-item-handoff.json", active.id);
+            if self
+                .store
+                .get_coding_unit_handoff(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &attempt.id,
+                    &active.id,
+                )?
+                .is_some()
+            {
+                if active.handoff_ref.as_deref() != Some(handoff_ref.as_str()) {
+                    self.store.update_coding_unit_handoff_ref(
+                        &attempt.project_id,
+                        &attempt.issue_id,
+                        &attempt.id,
+                        &active.id,
+                        Some(handoff_ref),
+                    )?;
+                }
+                return Ok(());
+            }
+
+            let handoff = if let Some(provider) = self.provider.as_ref() {
+                self.generate_work_item_handoff_from_provider(provider, attempt)
+                    .await?
+            } else {
+                self.generate_placeholder_work_item_handoff(attempt).await?
+            };
+            self.store.save_coding_unit_handoff(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &active.id,
+                &handoff,
+            )?;
+            self.store.update_coding_unit_handoff_ref(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &active.id,
+                Some(handoff_ref.clone()),
+            )?;
+
+            let lifecycle = LifecycleStore::new(self.store.paths());
+            let current_work_item_id = self.current_work_item_id_for_handoff(attempt);
+            if lifecycle
+                .list_work_items(&attempt.project_id, &attempt.issue_id)?
+                .iter()
+                .any(|item| item.id == current_work_item_id)
+            {
+                lifecycle.update_work_item_handoff_summary(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    current_work_item_id,
+                    Some(handoff_ref),
+                    handoff.commit_sha.clone(),
+                )?;
+            }
+
+            return Ok(());
+        }
+
         if self
             .store
             .get_work_item_handoff(&attempt.project_id, &attempt.issue_id, &attempt.id)?

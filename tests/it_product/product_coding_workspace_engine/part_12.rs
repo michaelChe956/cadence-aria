@@ -150,3 +150,56 @@ async fn completing_last_group_unit_enters_review_request_stage() {
         .iter()
         .all(|unit| unit.status == CodingExecutionUnitStatus::Completed));
 }
+
+#[tokio::test]
+async fn completing_group_units_saves_distinct_handoffs_per_unit() {
+    let (_root, _paths, store, engine, attempt) = group_engine_with_two_units();
+
+    let after_first = engine
+        .complete_group_unit_after_code_review(&attempt)
+        .await
+        .expect("complete first unit");
+    let unit1_handoff = store
+        .get_coding_unit_handoff(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            "coding_unit_0001",
+        )
+        .expect("load unit1 handoff")
+        .expect("unit1 handoff exists");
+    assert_eq!(unit1_handoff.work_item_id, "work_item_0001");
+    assert!(store
+        .get_work_item_handoff(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("attempt handoff")
+        .is_none());
+
+    let after_second = engine
+        .complete_group_unit_after_code_review(&after_first)
+        .await
+        .expect("complete second unit");
+    let unit2_handoff = store
+        .get_coding_unit_handoff(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            "coding_unit_0002",
+        )
+        .expect("load unit2 handoff")
+        .expect("unit2 handoff exists");
+    let units = store
+        .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("units");
+
+    assert_eq!(after_second.stage, CodingExecutionStage::ReviewRequest);
+    assert_eq!(unit2_handoff.work_item_id, "work_item_0002");
+    assert_eq!(
+        units[0].handoff_ref.as_deref(),
+        Some("units/coding_unit_0001/work-item-handoff.json")
+    );
+    assert_eq!(
+        units[1].handoff_ref.as_deref(),
+        Some("units/coding_unit_0002/work-item-handoff.json")
+    );
+    assert_ne!(unit1_handoff.work_item_id, unit2_handoff.work_item_id);
+}

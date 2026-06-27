@@ -3,17 +3,19 @@ use std::path::PathBuf;
 use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::coding_attempt_store::{
     CodingAttemptStore, CreateChoiceGateInput, CreateCodingAttemptInput,
+    CreateCodingExecutionUnitInput, CreateGroupCodingAttemptInput,
 };
 use cadence_aria::product::coding_models::{
     AnalystDecisionNextStage, AnalystDecisionRecord, AnalystDecisionVerdict,
     AnalystReworkInstructions, CodeReviewReport, CodingAgentRole, CodingAttemptStatus,
     CodingChatEntry, CodingChoiceGateStatus, CodingChoiceOption, CodingContextNote,
-    CodingEntryType, CodingExecutionStage, CodingProviderRole, CodingReworkInstruction,
-    CodingRolePermissionModes, CodingRoleProviderConfigSnapshot, CodingRoleRunEventType,
-    CodingRoleRunStatus, CodingRoleRunTrigger, CodingStageGateStatus, CodingTimelineNode,
-    CodingTimelineNodeStatus, FindingSeverity, InternalPrReview, PushStatus, RemoteKind,
-    ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict, TestCommand, TestCommandStatus,
-    TestingOverallStatus, TestingReport, WorkItemExecutionPlan, WorkItemHandoff,
+    CodingEntryType, CodingExecutionStage, CodingExecutionUnitStatus, CodingProviderRole,
+    CodingReworkInstruction, CodingRolePermissionModes, CodingRoleProviderConfigSnapshot,
+    CodingRoleRunEventType, CodingRoleRunStatus, CodingRoleRunTrigger, CodingStageGateStatus,
+    CodingTimelineNode, CodingTimelineNodeStatus, FindingSeverity, InternalPrReview, PushStatus,
+    RemoteKind, ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict, TestCommand,
+    TestCommandStatus, TestingOverallStatus, TestingReport, WorkItemExecutionPlan,
+    WorkItemHandoff,
 };
 use cadence_aria::product::models::WorkItemExecutionPlanStatus;
 use cadence_aria::product::models::{
@@ -689,4 +691,3 @@ fn store_persists_and_resolves_stage_gates_in_attempt_scope() {
             .is_empty()
     );
 }
-

@@ -67,8 +67,7 @@ pub(crate) fn build_coding_session_state(
         &attempt.issue_id,
         &attempt.id,
     )?;
-    let work_item_handoff =
-        coding_store.get_work_item_handoff(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+    let work_item_handoff = coding_store.get_visible_work_item_handoff(&attempt)?;
     let units = if matches!(attempt.scope, CodingAttemptScope::WorkItemGroup) {
         coding_store
             .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)?

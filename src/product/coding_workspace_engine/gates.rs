@@ -243,11 +243,7 @@ impl CodingWorkspaceEngine {
             }
         }
 
-        if self
-            .store
-            .get_work_item_handoff(&attempt.project_id, &attempt.issue_id, &attempt.id)?
-            .is_none()
-        {
+        if self.store.get_visible_work_item_handoff(attempt)?.is_none() {
             return Err(CodingWorkspaceEngineError::WorkItemHandoffMissing(
                 attempt.id.clone(),
             ));

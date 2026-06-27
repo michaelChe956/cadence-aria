@@ -86,6 +86,18 @@ impl super::CodingAttemptStore {
             .join(format!("{unit_id}.json"))
     }
 
+    pub(crate) fn coding_unit_handoff_path(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        unit_id: &str,
+    ) -> PathBuf {
+        self.coding_units_root(project_id, issue_id, attempt_id)
+            .join(unit_id)
+            .join("work-item-handoff.json")
+    }
+
     pub(crate) fn analyst_decisions_root(
         &self,
         project_id: &str,
