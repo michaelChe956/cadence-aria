@@ -37,6 +37,7 @@ export function MessageGroupView({
   loadContent,
   onCacheContent,
 }: MessageGroupViewProps) {
+  const retry = retryForGroup(group);
   return (
     <ChatEntryContainer
       role={group.role}
@@ -44,6 +45,7 @@ export function MessageGroupView({
       testId="message-group"
     >
       <div className="space-y-3">
+        {retry ? <AutoRetryNotice retry={retry} /> : null}
         {group.primaryEntry ? (
           <MarkdownContent content={normalizeProviderStreamEntryContent(group.primaryEntry)} />
         ) : null}
@@ -106,7 +108,13 @@ function groupTitle(group: MessageGroup) {
   const base = ROLE_LABELS[group.role] ?? group.role;
   const provider = providerForGroup(group);
   const runNo = runNoForGroup(group);
-  return [base, provider ? providerLabel(provider) : null, runNo ? `Run #${runNo}` : null]
+  const retry = retryForGroup(group);
+  return [
+    base,
+    provider ? providerLabel(provider) : null,
+    runNo ? `Run #${runNo}` : null,
+    retry ? `自动重跑 #${retry.retry_attempt}` : null,
+  ]
     .filter(Boolean)
     .join(" · ");
 }
@@ -160,4 +168,76 @@ function metadataProvider(metadata: ChatEntry["metadata"]) {
 
 function providerLabel(provider: string) {
   return PROVIDER_LABELS[provider] ?? provider;
+}
+
+interface RetryMetadata {
+  retry_of_node_id: string;
+  retry_attempt: number;
+  retry_reason: string;
+  retry_error: {
+    code: string;
+    message: string;
+  };
+}
+
+function AutoRetryNotice({ retry }: { retry: RetryMetadata }) {
+  return (
+    <div className="rounded-md border border-blue-200 bg-white/70 px-2.5 py-2 text-xs text-blue-900">
+      <div className="font-medium">自动重跑 #{retry.retry_attempt}</div>
+      <details className="mt-1">
+        <summary className="cursor-pointer text-blue-700">上一轮错误</summary>
+        <div className="mt-1 break-words rounded border border-blue-100 bg-blue-50 px-2 py-1 font-mono text-[11px] leading-5 text-blue-950">
+          {retry.retry_error.message}
+        </div>
+      </details>
+    </div>
+  );
+}
+
+function retryForGroup(group: MessageGroup): RetryMetadata | null {
+  const entries = [
+    group.primaryEntry,
+    ...group.inlineEvents,
+    ...group.interruptEntries,
+  ].filter((entry): entry is ChatEntry => Boolean(entry));
+  for (const entry of entries) {
+    const retry = retryForMetadata(entry.metadata);
+    if (retry) {
+      return retry;
+    }
+  }
+  return null;
+}
+
+function retryForMetadata(metadata: ChatEntry["metadata"]): RetryMetadata | null {
+  const retry = metadata?.retry;
+  if (!isRecord(retry)) {
+    return null;
+  }
+  const retryError = retry.retry_error;
+  if (!isRecord(retryError)) {
+    return null;
+  }
+  if (
+    typeof retry.retry_of_node_id !== "string" ||
+    typeof retry.retry_attempt !== "number" ||
+    typeof retry.retry_reason !== "string" ||
+    typeof retryError.code !== "string" ||
+    typeof retryError.message !== "string"
+  ) {
+    return null;
+  }
+  return {
+    retry_of_node_id: retry.retry_of_node_id,
+    retry_attempt: retry.retry_attempt,
+    retry_reason: retry.retry_reason,
+    retry_error: {
+      code: retryError.code,
+      message: retryError.message,
+    },
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

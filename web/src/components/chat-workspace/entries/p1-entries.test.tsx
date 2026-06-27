@@ -31,25 +31,33 @@ describe("chat workspace p1 entries", () => {
     const entry = makeEntry({
       type: "stage_change",
       role: "system",
-      content: "阶段变更 -> running",
+      content: "阶段变更 -> author_confirm",
+      metadata: { stage: "author_confirm" },
     });
 
     render(<StageChangeEntry entry={entry} />);
 
-    expect(screen.getByText("阶段变更 -> running")).toBeInTheDocument();
+    expect(screen.getByText("等待作者确认")).toBeInTheDocument();
+    expect(screen.queryByText("author_confirm")).not.toBeInTheDocument();
   });
 
   it("renders artifact update entries", () => {
     const entry = makeEntry({
       type: "artifact_update",
       role: "system",
-      content: "产物已更新 -> v2",
-      metadata: { version: 2 },
+      content: "Draft 已更新 · outline_backend · draft_backend_001",
+      metadata: {
+        version: 2,
+        version_label: "内部版本 v2",
+        object_title: "Backend flow",
+      },
     });
 
     render(<ArtifactUpdateEntry entry={entry} />);
 
-    expect(screen.getByText("产物已更新 -> v2")).toBeInTheDocument();
+    expect(screen.getByText("Draft 已更新 · outline_backend · draft_backend_001")).toBeInTheDocument();
+    expect(screen.getByText("Backend flow")).toBeInTheDocument();
+    expect(screen.getByText("内部版本 v2")).toBeInTheDocument();
   });
 
   it("renders review verdict entries and path actions", () => {

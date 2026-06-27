@@ -2,6 +2,7 @@ import { useMemo, useState, type ReactNode } from "react";
 import { lexer, type Token, type Tokens } from "marked";
 import type { ChatEntry } from "../../../state/chat-entries";
 import { ChatEntryContainer } from "../ChatEntryContainer";
+import { normalizeDisplayText } from "../text-display";
 
 export function ProviderStreamEntry({ entry }: { entry: ChatEntry }) {
   const content = normalizeProviderStreamEntryContent(entry);
@@ -32,6 +33,21 @@ type TesterPlanPayload = {
   steps?: unknown;
 };
 
+type StructuredOutputBlock = {
+  formattedJson: string;
+  summary: StructuredOutputSummary;
+};
+
+type StructuredOutputSummary = {
+  label: string;
+  summaryText: string | null;
+  targetId: string | null;
+  draftId: string | null;
+  verdict: string | null;
+  highestSeverity: string | null;
+  firstFinding: string | null;
+};
+
 const PROVIDER_LABELS: Record<string, string> = {
   claude_code: "Claude Code",
   codex: "Codex",
@@ -40,6 +56,16 @@ const PROVIDER_LABELS: Record<string, string> = {
 
 const LARGE_MARKDOWN_COLLAPSE_CHARS = 80_000;
 const LARGE_MARKDOWN_PREVIEW_CHARS = 8_000;
+const STRUCTURED_OUTPUT_PATTERN =
+  /<ARIA_STRUCTURED_OUTPUT\b[^>]*>\s*([\s\S]*?)\s*<\/ARIA_STRUCTURED_OUTPUT\b[^>]*>/gu;
+const SEVERITY_RANK: Record<string, number> = {
+  blocking: 0,
+  must_fix: 1,
+  strong_recommend_fix: 2,
+  suggestion: 3,
+  minor: 4,
+  optional: 5,
+};
 
 function entryTitle(entry: ChatEntry) {
   const base = ROLE_LABELS[entry.role] ?? entry.role;
@@ -77,14 +103,18 @@ function MarkdownContent({ content }: { content: string }) {
     () => normalizeProviderContent(visibleContent),
     [visibleContent],
   );
-  const tokens = useMemo(
-    () =>
-      lexer(normalizedContent).filter(
-        (token) => token.type !== "space" && token.type !== "def",
-      ),
+  const structuredContent = useMemo(
+    () => extractStructuredOutputs(normalizedContent),
     [normalizedContent],
   );
-  if (tokens.length === 0) {
+  const tokens = useMemo(
+    () =>
+      lexer(structuredContent.markdown).filter(
+        (token) => token.type !== "space" && token.type !== "def",
+      ),
+    [structuredContent.markdown],
+  );
+  if (tokens.length === 0 && structuredContent.outputs.length === 0) {
     return <div className="whitespace-pre-wrap text-sm text-[var(--aria-ink)]" />;
   }
 
@@ -96,6 +126,9 @@ function MarkdownContent({ content }: { content: string }) {
         </div>
       ) : null}
       {tokens.map((token, index) => renderBlockToken(token, `block-${index}`))}
+      {structuredContent.outputs.length > 0 ? (
+        <StructuredOutputList outputs={structuredContent.outputs} />
+      ) : null}
       {isLarge ? (
         <button
           className="rounded-md border border-[var(--aria-line)] bg-white px-3 py-1 text-xs font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)]"
@@ -106,6 +139,60 @@ function MarkdownContent({ content }: { content: string }) {
         </button>
       ) : null}
     </div>
+  );
+}
+
+function StructuredOutputList({ outputs }: { outputs: StructuredOutputBlock[] }) {
+  return (
+    <div className="space-y-2">
+      {outputs.map((output, index) => (
+        <StructuredOutputPanel key={`${output.summary.label}-${index}`} output={output} />
+      ))}
+    </div>
+  );
+}
+
+function StructuredOutputPanel({ output }: { output: StructuredOutputBlock }) {
+  const chips = structuredOutputChips(output.summary);
+  return (
+    <section className="rounded-md border border-[var(--aria-line)] bg-white/80 px-3 py-2">
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
+        <span className="text-xs font-semibold text-[var(--aria-ink)]">结构化输出</span>
+        <span className="rounded border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--aria-ink-muted)]">
+          {output.summary.label}
+        </span>
+      </div>
+      {chips.length > 0 ? (
+        <div className="mt-2 flex min-w-0 flex-wrap gap-1.5">
+          {chips.map((chip) => (
+            <span
+              key={chip}
+              className="max-w-full truncate rounded border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-1.5 py-0.5 font-mono text-[11px] text-[var(--aria-ink)]"
+            >
+              {chip}
+            </span>
+          ))}
+        </div>
+      ) : null}
+      {output.summary.summaryText ? (
+        <p className="mt-2 text-xs text-[var(--aria-ink-muted)]">
+          {output.summary.summaryText}
+        </p>
+      ) : null}
+      {output.summary.firstFinding ? (
+        <p className="mt-2 text-xs text-[var(--aria-ink)]">
+          关键问题：{output.summary.firstFinding}
+        </p>
+      ) : null}
+      <details className="mt-2 rounded border border-[var(--aria-line)] bg-[var(--aria-panel-muted)]">
+        <summary className="cursor-pointer px-2 py-1 text-xs font-medium text-[var(--aria-ink-muted)]">
+          查看 JSON
+        </summary>
+        <pre className="max-h-72 overflow-auto whitespace-pre-wrap border-t border-[var(--aria-line)] bg-white px-2 py-2 font-mono text-xs text-[var(--aria-ink)]">
+          <code>{output.formattedJson}</code>
+        </pre>
+      </details>
+    </section>
   );
 }
 
@@ -138,7 +225,7 @@ function renderBlockToken(token: Token, key: string): ReactNode {
           key={key}
           className="overflow-x-auto rounded border border-[var(--aria-border)] bg-white/70 px-3 py-2 text-xs"
         >
-          <code>{codeToken.text}</code>
+          <code>{normalizeDisplayText(codeToken.text)}</code>
         </pre>
       );
     }
@@ -163,7 +250,7 @@ function renderBlockToken(token: Token, key: string): ReactNode {
       const htmlToken = token as Tokens.HTML;
       return (
         <p key={key} className="whitespace-pre-wrap break-words">
-          {htmlToken.raw || htmlToken.text}
+          {normalizeDisplayText(htmlToken.raw || htmlToken.text)}
         </p>
       );
     }
@@ -173,7 +260,7 @@ function renderBlockToken(token: Token, key: string): ReactNode {
     default:
       return (
         <p key={key} className="whitespace-pre-wrap break-words">
-          {token.raw}
+          {normalizeDisplayText(token.raw)}
         </p>
       );
   }
@@ -300,7 +387,7 @@ function renderInlineTokens(
   keyPrefix: string,
 ): ReactNode {
   if (!tokens || tokens.length === 0) {
-    return fallback;
+    return normalizeDisplayText(fallback);
   }
 
   return tokens.map((token, index) => renderInlineToken(token, `${keyPrefix}-inline-${index}`));
@@ -310,7 +397,7 @@ function renderInlineToken(token: Token, key: string): ReactNode {
   switch (token.type) {
     case "text":
     case "escape":
-      return (token as Tokens.Text | Tokens.Escape).text;
+      return normalizeDisplayText((token as Tokens.Text | Tokens.Escape).text);
     case "strong": {
       const strongToken = token as Tokens.Strong;
       return (
@@ -330,7 +417,7 @@ function renderInlineToken(token: Token, key: string): ReactNode {
           key={key}
           className="rounded border border-[var(--aria-border)] bg-white/70 px-1 py-0.5 text-[0.85em]"
         >
-          {codespanToken.text}
+          {normalizeDisplayText(codespanToken.text)}
         </code>
       );
     }
@@ -344,14 +431,14 @@ function renderInlineToken(token: Token, key: string): ReactNode {
       return renderLinkToken(token as Tokens.Link, key);
     case "image": {
       const imageToken = token as Tokens.Image;
-      return imageToken.text || imageToken.href;
+      return normalizeDisplayText(imageToken.text || imageToken.href);
     }
     case "html": {
       const htmlToken = token as Tokens.HTML;
-      return htmlToken.raw || htmlToken.text;
+      return normalizeDisplayText(htmlToken.raw || htmlToken.text);
     }
     default:
-      return token.raw;
+      return normalizeDisplayText(token.raw);
   }
 }
 
@@ -406,13 +493,147 @@ function isExternalHref(href: string) {
 }
 
 function normalizeProviderContent(content: string) {
-  const normalized = content.replace(/\r\n?/g, "\n").replace(/\\n/g, "\n");
+  const normalized = normalizeDisplayText(content)
+    .replace(/\r\n?/g, "\n")
+    .replace(/\\n/g, "\n");
   return normalized
     .split("\n")
     .map((line) =>
       line.length > 80 ? line.replace(/([。！？.!?])\s+(?=\S)/g, "$1\n") : line,
     )
     .join("\n");
+}
+
+function extractStructuredOutputs(content: string): {
+  markdown: string;
+  outputs: StructuredOutputBlock[];
+} {
+  const outputs: StructuredOutputBlock[] = [];
+  const markdownParts: string[] = [];
+  let cursor = 0;
+
+  for (const match of content.matchAll(STRUCTURED_OUTPUT_PATTERN)) {
+    const index = match.index ?? 0;
+    markdownParts.push(content.slice(cursor, index));
+    const rawJson = match[1]?.trim() ?? "";
+    outputs.push(formatStructuredOutputBlock(rawJson));
+    cursor = index + match[0].length;
+  }
+
+  if (outputs.length === 0) {
+    return { markdown: content, outputs: [] };
+  }
+
+  markdownParts.push(content.slice(cursor));
+  return {
+    markdown: markdownParts.join("\n").trim(),
+    outputs,
+  };
+}
+
+function formatStructuredOutputBlock(rawJson: string): StructuredOutputBlock {
+  const parsed = parseStructuredOutputJson(rawJson);
+  return {
+    formattedJson: parsed ? JSON.stringify(parsed, null, 2) : rawJson,
+    summary: summarizeStructuredOutput(parsed),
+  };
+}
+
+function parseStructuredOutputJson(rawJson: string): unknown | null {
+  try {
+    return JSON.parse(rawJson);
+  } catch {
+    return null;
+  }
+}
+
+function summarizeStructuredOutput(value: unknown): StructuredOutputSummary {
+  const record = isRecord(value) ? value : {};
+  const verdict = stringValue(record.verdict);
+  const highestSeverity = highestFindingSeverity(record.findings);
+  return {
+    label: structuredOutputLabel(record),
+    summaryText: stringValue(record.summary) ?? stringValue(record.title),
+    targetId:
+      stringValue(record.target_outline_id) ??
+      stringValue(record.outline_id) ??
+      stringValue(record.target_artifact_id),
+    draftId: stringValue(record.draft_id),
+    verdict,
+    highestSeverity,
+    firstFinding: firstFindingMessage(record.findings),
+  };
+}
+
+function structuredOutputLabel(record: Record<string, unknown>) {
+  if (stringValue(record.verdict)) {
+    return "Review";
+  }
+  if (stringValue(record.draft_id)) {
+    return "Draft";
+  }
+  if (Array.isArray(record.outline_items) || Array.isArray(record.items)) {
+    return "Plan Outline";
+  }
+  return "Structured JSON";
+}
+
+function structuredOutputChips(summary: StructuredOutputSummary) {
+  const chips: string[] = [];
+  if (summary.verdict) {
+    chips.push(`verdict: ${summary.verdict}`);
+  }
+  if (summary.highestSeverity) {
+    chips.push(`最高严重度: ${summary.highestSeverity}`);
+  }
+  if (summary.draftId) {
+    chips.push(summary.draftId);
+  }
+  if (summary.targetId) {
+    chips.push(summary.targetId);
+  }
+  return chips;
+}
+
+function highestFindingSeverity(findings: unknown) {
+  if (!Array.isArray(findings)) {
+    return null;
+  }
+
+  let selected: string | null = null;
+  let selectedRank = Number.POSITIVE_INFINITY;
+  for (const finding of findings) {
+    if (!isRecord(finding)) {
+      continue;
+    }
+    const severity = stringValue(finding.severity);
+    if (!severity) {
+      continue;
+    }
+    const rank = SEVERITY_RANK[severity] ?? Number.POSITIVE_INFINITY;
+    if (selected === null || rank < selectedRank) {
+      selected = severity;
+      selectedRank = rank;
+    }
+  }
+  return selected;
+}
+
+function firstFindingMessage(findings: unknown) {
+  if (!Array.isArray(findings)) {
+    return null;
+  }
+
+  for (const finding of findings) {
+    if (!isRecord(finding)) {
+      continue;
+    }
+    const message = stringValue(finding.message);
+    if (message) {
+      return message;
+    }
+  }
+  return null;
 }
 
 function normalizeEntryContent(entry: ChatEntry) {
@@ -436,7 +657,7 @@ function formatRawTesterPlanJson(
 
   let payload: TesterPlanPayload;
   try {
-    const parsed = JSON.parse(decodeJsonHtmlEntities(content.trim()));
+    const parsed = JSON.parse(normalizeDisplayText(content.trim()));
     if (!isRecord(parsed)) {
       return null;
     }
@@ -488,23 +709,6 @@ function formatRawTesterPlanJson(
   }
 
   return lines.join("\n");
-}
-
-function decodeJsonHtmlEntities(content: string) {
-  if (!content.includes("&")) {
-    return content;
-  }
-
-  return content
-    .replace(/&quot;/g, '"')
-    .replace(/&#34;/g, '"')
-    .replace(/&#x22;/gi, '"')
-    .replace(/&apos;/g, "'")
-    .replace(/&#39;/g, "'")
-    .replace(/&#x27;/gi, "'")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

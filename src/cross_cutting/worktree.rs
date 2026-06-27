@@ -331,7 +331,7 @@ fn scope_pair_may_overlap(left: &str, right: &str, case_sensitive: bool) -> bool
     false
 }
 
-fn scope_allows_path(scope: &str, relative_path: &str, case_sensitive: bool) -> bool {
+pub(crate) fn scope_allows_path(scope: &str, relative_path: &str, case_sensitive: bool) -> bool {
     let pattern = ScopePattern::parse(scope, case_sensitive);
     let path = normalize_scope_text(relative_path, case_sensitive);
     if pattern.all {

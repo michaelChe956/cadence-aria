@@ -2,6 +2,7 @@ import { ChevronDown, ChevronRight, Wrench } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { ChatEntry, WorkspaceContentRef } from "../../state/chat-entries";
 import { workspaceContentCacheKey } from "../../state/workspace-ws-store";
+import { normalizeDisplayText } from "./text-display";
 
 interface InlineEventRowProps {
   entry: ChatEntry;
@@ -33,6 +34,10 @@ export function InlineEventRow({
   const loadableRef = entry.content_ref?.kind === "execution_output" || entry.content_ref?.kind === "provider_prompt" ? entry.content_ref : null;
   const shouldLoadExecutionOutput =
     loadableRef !== null && !metadataOutput && !cachedOutput;
+  const displayContent = normalizeDisplayText(entry.content);
+  const displayDetail = detail ? normalizeDisplayText(detail) : null;
+  const displayCommand = command ? normalizeDisplayText(command) : null;
+  const displayOutput = output ? normalizeDisplayText(output) : null;
 
   useEffect(() => {
     return () => {
@@ -87,24 +92,26 @@ export function InlineEventRow({
           <ChevronRight className="h-3.5 w-3.5 shrink-0 text-[var(--aria-ink-muted)]" />
         )}
         <Wrench className="h-3.5 w-3.5 shrink-0 text-[var(--aria-primary)]" />
-        <span className="min-w-0 truncate">{entry.content}</span>
+        <span className="min-w-0 truncate">{displayContent}</span>
       </button>
       {expanded ? (
         <div className="space-y-2 border-t border-[var(--aria-line)] px-2 py-2">
-          {detail ? <div className="text-xs text-[var(--aria-ink-muted)]">{detail}</div> : null}
-          {command ? (
+          {displayDetail ? (
+            <div className="text-xs text-[var(--aria-ink-muted)]">{displayDetail}</div>
+          ) : null}
+          {displayCommand ? (
             <div className="rounded bg-white px-2 py-1 font-mono text-xs text-[var(--aria-ink-muted)]">
-              {command}
+              {displayCommand}
             </div>
           ) : null}
-          {output ? (
+          {displayOutput ? (
             <pre className="max-h-40 overflow-auto whitespace-pre-wrap rounded bg-white px-2 py-1 font-mono text-xs text-[var(--aria-ink)]">
-              {output}
+              {displayOutput}
             </pre>
           ) : null}
           {loading ? <div className="text-xs text-[var(--aria-ink-muted)]">加载输出中...</div> : null}
           {error ? <div className="text-xs text-red-700">{error}</div> : null}
-          {!output && !loading && !error ? (
+          {!displayOutput && !loading && !error ? (
             <div className="text-xs text-[var(--aria-ink-muted)]">暂无输出</div>
           ) : null}
         </div>

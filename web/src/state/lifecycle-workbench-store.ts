@@ -3,9 +3,11 @@ import type {
   ArtifactVersion,
   DesignSpec,
   IssueLifecycleResponse,
+  IssueWorkItemPlanDetailDto,
   LifecycleWorkItem,
   ProductIssue,
   StorySpec,
+  WorkItemKind,
 } from "../api/types";
 
 export type LifecycleCard =
@@ -55,6 +57,19 @@ export type LifecycleCard =
       sourceIds: string[];
       artifactVersions: ArtifactVersion[];
       raw: LifecycleWorkItem;
+    }
+  | {
+      kind: "work_item_group";
+      id: string;
+      issueId: string;
+      title: string;
+      status: string;
+      version: number | null;
+      preview: string | null;
+      sourceIds: string[];
+      childWorkItemIds: string[];
+      artifactVersions: ArtifactVersion[];
+      raw: IssueWorkItemPlanDetailDto;
     };
 
 export type LifecycleColumns = {
@@ -111,26 +126,44 @@ export function groupLifecycleCards(lifecycles: IssueLifecycleResponse[]): Lifec
         });
       });
 
-      lifecycle.work_items.forEach((item) => {
-        const artifactVersions = item.artifact_versions ?? [];
+      const workItemPlan = latestIssueWorkItemPlan(lifecycle.work_item_plans ?? []);
+      if (workItemPlan) {
         columns.work_item.push({
-          kind: "work_item",
-          id: item.work_item_id,
-          issueId: item.issue_id,
-          title: item.title,
-          status: item.execution_status,
-          version: latestArtifactVersion(artifactVersions),
-          preview: null,
-          sourceIds: [...item.story_spec_ids, ...item.design_spec_ids],
-          artifactVersions,
-          raw: item,
+          kind: "work_item_group",
+          id: workItemPlan.id,
+          issueId: workItemPlan.issue_id,
+          title: "Work Item Group",
+          status: workItemPlan.status,
+          version: null,
+          preview: `${workItemPlan.work_item_ids.length} 个 Work Item`,
+          sourceIds: [
+            ...workItemPlan.source_story_spec_ids,
+            ...workItemPlan.source_design_spec_ids,
+          ],
+          childWorkItemIds: [...workItemPlan.work_item_ids],
+          artifactVersions: [],
+          raw: workItemPlan,
         });
-      });
+      }
 
       return columns;
     },
     { issue: [], story_spec: [], design_spec: [], work_item: [] },
   );
+}
+
+function latestIssueWorkItemPlan(plans: IssueWorkItemPlanDetailDto[]) {
+  return plans.reduce<IssueWorkItemPlanDetailDto | null>((latest, plan) => {
+    if (!latest) {
+      return plan;
+    }
+    return planTimestamp(plan) >= planTimestamp(latest) ? plan : latest;
+  }, null);
+}
+
+function planTimestamp(plan: IssueWorkItemPlanDetailDto) {
+  const parsed = Date.parse(plan.updated_at || plan.created_at);
+  return Number.isNaN(parsed) ? 0 : parsed;
 }
 
 export function visibleLifecycle(
@@ -182,11 +215,59 @@ export function lifecycleBlockedReason(
   return null;
 }
 
-function latestArtifactVersion(versions: ArtifactVersion[]): number | null {
-  if (versions.length === 0) {
-    return null;
+export function workItemKindLabel(kind: WorkItemKind): string {
+  switch (kind) {
+    case "backend":
+      return "后端";
+    case "frontend":
+      return "前端";
+    case "integration":
+      return "贯通";
+    case "e2e":
+      return "E2E";
+    case "docs":
+      return "文档";
+    case "infra":
+      return "基础设施";
+    case "other":
+      return "其他";
   }
-  return Math.max(...versions.map((version) => version.version));
+}
+
+export function workItemWaitingReason(
+  item: LifecycleWorkItem,
+  allItems: LifecycleWorkItem[],
+): string | null {
+  const pendingDependencies = item.depends_on
+    .map((id) => allItems.find((candidate) => candidate.work_item_id === id))
+    .filter(
+      (dependency): dependency is LifecycleWorkItem =>
+        dependency !== undefined && dependency.execution_status !== "completed",
+    );
+  if (pendingDependencies.length > 0) {
+    const titles = pendingDependencies.map((dependency) => dependency.title).join("、");
+    return `等待依赖完成：${titles}`;
+  }
+
+  const missingHandoffs = item.required_handoff_from
+    .map((id) => allItems.find((candidate) => candidate.work_item_id === id))
+    .filter(
+      (dependency): dependency is LifecycleWorkItem =>
+        dependency !== undefined && dependency.handoff_summary_ref === null,
+    );
+  if (missingHandoffs.length > 0) {
+    const titles = missingHandoffs.map((dependency) => dependency.title).join("、");
+    return `等待交接摘要：${titles}`;
+  }
+
+  if (
+    item.latest_attempt &&
+    ["created", "running"].includes(item.latest_attempt.status)
+  ) {
+    return "正在编码";
+  }
+
+  return null;
 }
 
 export interface LifecycleWorkbenchState {

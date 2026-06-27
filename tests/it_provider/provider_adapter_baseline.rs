@@ -78,6 +78,47 @@ fn parser_accepts_fenced_json_inside_structured_output_sentinel() {
 }
 
 #[test]
+fn provider_adapter_parses_nonce_structured_output_sentinel() {
+    let stdout = "provider log\n<ARIA_STRUCTURED_OUTPUT nonce=\"a1b2c3d4\">\n{\"artifact_kind\":\"clarification_record\",\"goal_summary\":\"nonce\"}\n</ARIA_STRUCTURED_OUTPUT nonce=\"a1b2c3d4\">\n";
+    let structured = parse_last_structured_output(stdout)
+        .expect("parse nonce sentinel")
+        .expect("structured output");
+
+    assert_eq!(structured["artifact_kind"], json!("clarification_record"));
+    assert_eq!(structured["goal_summary"], json!("nonce"));
+}
+
+#[test]
+fn provider_adapter_nonce_parser_uses_last_complete_block() {
+    let stdout = "provider log\n<ARIA_STRUCTURED_OUTPUT nonce=\"old00001\">{\"artifact_kind\":\"old\"}</ARIA_STRUCTURED_OUTPUT nonce=\"old00001\">\ntext\n<ARIA_STRUCTURED_OUTPUT nonce=\"new00002\">{\"artifact_kind\":\"new\"}</ARIA_STRUCTURED_OUTPUT nonce=\"new00002\">\n";
+    let structured = parse_last_structured_output(stdout)
+        .expect("parse nonce sentinel")
+        .expect("structured output");
+
+    assert_eq!(structured["artifact_kind"], json!("new"));
+}
+
+#[test]
+fn provider_adapter_rejects_nonce_mismatch() {
+    let stdout = "provider log\n<ARIA_STRUCTURED_OUTPUT nonce=\"a1b2c3d4\">{\"artifact_kind\":\"clarification_record\"}</ARIA_STRUCTURED_OUTPUT nonce=\"deadbeef\">\n";
+    let error = parse_last_structured_output(stdout).expect_err("nonce mismatch should fail");
+
+    assert!(
+        error.details.contains("structured output nonce mismatch"),
+        "unexpected parse error: {}",
+        error.details
+    );
+}
+
+#[test]
+fn parser_does_not_parse_truncated_json_with_only_end_sentinel() {
+    let stdout = "\"work_items\": []\n}</ARIA_STRUCTURED_OUTPUT>\n";
+    let parsed = parse_last_structured_output(stdout).expect("parse should not fail");
+
+    assert!(parsed.is_none(), "missing start sentinel must stay invalid");
+}
+
+#[test]
 fn provider_router_records_completed_run_with_external_raw_output_refs() {
     let input = adapter_input(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),

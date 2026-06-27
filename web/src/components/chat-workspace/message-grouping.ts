@@ -19,6 +19,7 @@ const STANDALONE_ENTRY_TYPES = new Set<string>([
   "artifact_update",
   "review_verdict",
   "analyst_verdict",
+  "gate_prompt",
   "stage_change",
   "human_decision",
   "start_generation",
@@ -28,7 +29,6 @@ const STANDALONE_ENTRY_TYPES = new Set<string>([
 
 const INTERRUPT_ENTRY_TYPES = new Set<string>([
   "permission_request",
-  "gate_prompt",
   "choice_request",
 ]);
 

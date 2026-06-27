@@ -152,6 +152,77 @@ async fn stages_source_changes_without_runtime_artifacts() {
     );
 }
 
+#[tokio::test]
+async fn git_workspace_service_allows_issue_shared_branch_and_worktree_prefix() {
+    let root = tempdir().expect("tempdir");
+    let repo = root.path().join("repo");
+    init_repo(&repo);
+    let service = GitWorkspaceService::new();
+
+    service
+        .create_branch(&repo, "aria/issues/issue_0001", "HEAD")
+        .await
+        .expect("create issue branch");
+    let worktree = repo
+        .join(".worktrees")
+        .join("aria-issues")
+        .join("issue_0001");
+    service
+        .create_worktree(&repo, "aria/issues/issue_0001", &worktree)
+        .await
+        .expect("create issue worktree");
+
+    assert!(worktree.join(".git").exists());
+}
+
+#[tokio::test]
+async fn git_workspace_service_still_rejects_unsafe_issue_branch_names() {
+    let root = tempdir().expect("tempdir");
+    let repo = root.path().join("repo");
+    init_repo(&repo);
+    let service = GitWorkspaceService::new();
+
+    let error = service
+        .create_branch(&repo, "aria/issues/../main", "HEAD")
+        .await
+        .expect_err("unsafe branch rejected");
+
+    assert!(format!("{error}").contains("outside allowed aria branch prefixes"));
+}
+
+#[tokio::test]
+async fn git_workspace_service_reuses_existing_issue_branch_and_worktree() {
+    let root = tempdir().expect("tempdir");
+    let repo = root.path().join("repo");
+    init_repo(&repo);
+    let service = GitWorkspaceService::new();
+
+    service
+        .create_branch(&repo, "aria/issues/issue_0001", "HEAD")
+        .await
+        .expect("create issue branch first time");
+    let worktree = repo
+        .join(".worktrees")
+        .join("aria-issues")
+        .join("issue_0001");
+    service
+        .create_worktree(&repo, "aria/issues/issue_0001", &worktree)
+        .await
+        .expect("create issue worktree first time");
+
+    // 第二次调用必须幂等复用，不得报错。
+    service
+        .create_branch(&repo, "aria/issues/issue_0001", "HEAD")
+        .await
+        .expect("reuse existing issue branch");
+    service
+        .create_worktree(&repo, "aria/issues/issue_0001", &worktree)
+        .await
+        .expect("reuse existing issue worktree");
+
+    assert!(worktree.join(".git").exists());
+}
+
 fn init_repo(repo: &Path) {
     fs::create_dir_all(repo).expect("create repo");
     run_git(repo, &["init"]);

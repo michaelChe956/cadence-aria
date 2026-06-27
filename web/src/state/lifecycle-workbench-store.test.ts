@@ -1,11 +1,84 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import type { IssueLifecycleResponse } from "../api/types";
+import type {
+  IssueLifecycleResponse,
+  IssueWorkItemPlanDetailDto,
+  LifecycleWorkItem,
+} from "../api/types";
 import {
   groupLifecycleCards,
   lifecycleBlockedReason,
   useLifecycleWorkbenchStore,
   visibleLifecycle,
+  workItemKindLabel,
+  workItemWaitingReason,
 } from "./lifecycle-workbench-store";
+
+function lifecycleWorkItem(
+  overrides: Partial<LifecycleWorkItem> = {},
+): LifecycleWorkItem {
+  return {
+    work_item_id: "work_item_default",
+    issue_id: "issue_0001",
+    repository_id: "repository_0001",
+    story_spec_ids: [],
+    design_spec_ids: [],
+    title: "默认 Work Item",
+    plan_status: "confirmed",
+    execution_status: "pending",
+    latest_attempt: null,
+    artifact_versions: [],
+    work_item_set_id: null,
+    kind: "backend",
+    sequence_hint: null,
+    depends_on: [],
+    exclusive_write_scopes: [],
+    forbidden_write_scopes: [],
+    context_budget: {
+      target_context_k: "30-50",
+      max_summary_chars: 20000,
+      max_handoff_chars: 12000,
+      max_code_context_chars: 30000,
+      max_context_file_refs: 80,
+      max_traceability_refs: 40,
+      max_dependency_handoffs: 3,
+    },
+    required_handoff_from: [],
+    verification_plan_ref: null,
+    require_execution_plan_confirm: false,
+    execution_plan_status: "not_started",
+    handoff_summary_ref: null,
+    completion_commit: null,
+    completion_diff_summary_ref: null,
+    ...overrides,
+  };
+}
+
+function makeIssueWorkItemPlan(
+  overrides: Partial<IssueWorkItemPlanDetailDto> = {},
+): IssueWorkItemPlanDetailDto {
+  return {
+    id: "issue_work_item_plan_default",
+    issue_id: "issue_0001",
+    project_id: "project_0001",
+    status: "draft",
+    source_story_spec_ids: [],
+    source_design_spec_ids: [],
+    work_item_ids: [],
+    verification_plan_ids: [],
+    dependency_graph: [],
+    repository_profile_ref: null,
+    options: {
+      include_integration_tests: true,
+      include_e2e_tests: false,
+      force_frontend_backend_split: true,
+      require_execution_plan_confirm: false,
+    },
+    validator_findings: [],
+    created_at: "2026-06-19T00:00:00Z",
+    updated_at: "2026-06-19T00:00:00Z",
+    ...overrides,
+  };
+}
 
 const lifecycle: IssueLifecycleResponse = {
   issue: {
@@ -53,7 +126,6 @@ const lifecycle: IssueLifecycleResponse = {
       design_spec_id: "design_spec_0001",
       issue_id: "issue_0001",
       story_spec_ids: ["story_spec_0001"],
-      design_kind: "frontend",
       title: "前端提示设计",
       current_version: 1,
       current_markdown_preview: "## 关键决策\n\n[DEC-001] 使用全局提示条。",
@@ -72,6 +144,7 @@ const lifecycle: IssueLifecycleResponse = {
       ],
     },
   ],
+  work_item_plans: [],
   work_items: [],
   workspace_sessions: [],
   coding_attempts: [],
@@ -101,7 +174,6 @@ const otherLifecycle: IssueLifecycleResponse = {
       design_spec_id: "design_spec_0002",
       issue_id: "issue_0002",
       story_spec_ids: ["story_spec_0002"],
-      design_kind: "backend",
       title: "验证码服务设计",
       current_version: 1,
       current_markdown_preview: "## 关键决策\n\n[DEC-001] 提供验证码 API。",
@@ -109,17 +181,22 @@ const otherLifecycle: IssueLifecycleResponse = {
       artifact_versions: [],
     },
   ],
+  work_item_plans: [
+    makeIssueWorkItemPlan({
+      id: "issue_work_item_plan_0002",
+      issue_id: "issue_0002",
+      source_story_spec_ids: ["story_spec_0002"],
+      source_design_spec_ids: ["design_spec_0002"],
+      work_item_ids: ["work_item_0002"],
+    }),
+  ],
   work_items: [
-    {
+    lifecycleWorkItem({
       work_item_id: "work_item_0002",
       issue_id: "issue_0002",
-      repository_id: "repository_0001",
       story_spec_ids: ["story_spec_0002"],
       design_spec_ids: ["design_spec_0002"],
       title: "实现验证码服务",
-      plan_status: "confirmed",
-      execution_status: "pending",
-      latest_attempt: null,
       artifact_versions: [
         {
           version: 1,
@@ -132,7 +209,7 @@ const otherLifecycle: IssueLifecycleResponse = {
           source_node_id: "timeline_node_work_item_001",
         },
       ],
-    },
+    }),
   ],
 };
 
@@ -155,24 +232,99 @@ describe("lifecycle workbench store", () => {
     expect(lifecycle.design_specs[0].story_spec_ids).toEqual(["story_spec_0001"]);
   });
 
-  it("passes story, design, and work item artifact versions through card data", () => {
+  it("groups work items under issue work item plan cards", () => {
+    const columns = groupLifecycleCards([
+      {
+        ...lifecycle,
+        work_item_plans: [
+          makeIssueWorkItemPlan({
+            id: "issue_work_item_plan_0001",
+            work_item_ids: ["work_item_frontend", "work_item_backend"],
+          }),
+        ],
+        work_items: [
+          lifecycleWorkItem({
+            work_item_id: "work_item_frontend",
+            title: "前端登录提示",
+          }),
+          lifecycleWorkItem({
+            work_item_id: "work_item_backend",
+            title: "后端会话状态",
+          }),
+        ],
+      },
+    ]);
+
+    expect(columns.work_item).toHaveLength(1);
+    const card = columns.work_item[0];
+    if (card.kind !== "work_item_group") {
+      throw new Error("unexpected card kind");
+    }
+    expect(card).toMatchObject({
+      kind: "work_item_group",
+      id: "issue_work_item_plan_0001",
+      title: "Work Item Group",
+      status: "draft",
+    });
+    expect(card.childWorkItemIds).toEqual([
+      "work_item_frontend",
+      "work_item_backend",
+    ]);
+  });
+
+  it("shows only the latest work item group for an issue with multiple plans", () => {
+    const columns = groupLifecycleCards([
+      {
+        ...lifecycle,
+        work_item_plans: [
+          makeIssueWorkItemPlan({
+            id: "issue_work_item_plan_old",
+            work_item_ids: ["work_item_old"],
+            updated_at: "2026-06-18T00:00:00Z",
+          }),
+          makeIssueWorkItemPlan({
+            id: "issue_work_item_plan_latest",
+            work_item_ids: ["work_item_latest_frontend", "work_item_latest_backend"],
+            updated_at: "2026-06-19T00:00:00Z",
+          }),
+        ],
+        work_items: [
+          lifecycleWorkItem({ work_item_id: "work_item_old" }),
+          lifecycleWorkItem({ work_item_id: "work_item_latest_frontend" }),
+          lifecycleWorkItem({ work_item_id: "work_item_latest_backend" }),
+        ],
+      },
+    ]);
+
+    expect(columns.work_item).toHaveLength(1);
+    const card = columns.work_item[0];
+    if (card.kind !== "work_item_group") {
+      throw new Error("unexpected card kind");
+    }
+    expect(card.id).toBe("issue_work_item_plan_latest");
+    expect(card.childWorkItemIds).toEqual([
+      "work_item_latest_frontend",
+      "work_item_latest_backend",
+    ]);
+  });
+
+  it("passes story and design artifact versions through card data", () => {
     const grouped = groupLifecycleCards([lifecycle, otherLifecycle]);
     const storyCard = grouped.story_spec[0];
     const designCard = grouped.design_spec[0];
-    const workItemCard = grouped.work_item[0];
+    const workItemGroupCard = grouped.work_item[0];
 
     if (
       storyCard.kind !== "story_spec" ||
       designCard.kind !== "design_spec" ||
-      workItemCard.kind !== "work_item"
+      workItemGroupCard.kind !== "work_item_group"
     ) {
       throw new Error("unexpected card kind");
     }
     expect(storyCard.artifactVersions).toEqual(lifecycle.story_specs[0].artifact_versions);
     expect(designCard.artifactVersions).toEqual(lifecycle.design_specs[0].artifact_versions);
-    expect(workItemCard.artifactVersions).toEqual(
-      otherLifecycle.work_items[0].artifact_versions,
-    );
+    expect(workItemGroupCard.artifactVersions).toEqual([]);
+    expect(workItemGroupCard.childWorkItemIds).toEqual(["work_item_0002"]);
   });
 
   it("filters cards by focused issue", () => {
@@ -220,6 +372,57 @@ describe("lifecycle workbench store", () => {
     };
 
     expect(lifecycleBlockedReason("work_item", confirmedDesign)).toBeNull();
+  });
+
+  it("computes work item dependency waiting reasons", () => {
+    const backend = lifecycleWorkItem({
+      work_item_id: "work_item_0001",
+      title: "后端 API",
+      kind: "backend",
+      execution_status: "pending",
+      depends_on: [],
+    });
+    const frontend = lifecycleWorkItem({
+      work_item_id: "work_item_0002",
+      title: "前端 UI",
+      kind: "frontend",
+      execution_status: "pending",
+      depends_on: ["work_item_0001"],
+    });
+
+    expect(workItemWaitingReason(frontend, [backend, frontend])).toBe(
+      "等待依赖完成：后端 API",
+    );
+  });
+
+  it("does not block work item when dependencies are completed and handoffs exist", () => {
+    const backend = lifecycleWorkItem({
+      work_item_id: "work_item_0001",
+      title: "后端 API",
+      kind: "backend",
+      execution_status: "completed",
+      handoff_summary_ref: "handoffs/work_item_0001.json",
+    });
+    const frontend = lifecycleWorkItem({
+      work_item_id: "work_item_0002",
+      title: "前端 UI",
+      kind: "frontend",
+      execution_status: "pending",
+      depends_on: ["work_item_0001"],
+      required_handoff_from: ["work_item_0001"],
+    });
+
+    expect(workItemWaitingReason(frontend, [backend, frontend])).toBeNull();
+  });
+
+  it("labels work item kinds", () => {
+    expect(workItemKindLabel("backend")).toBe("后端");
+    expect(workItemKindLabel("frontend")).toBe("前端");
+    expect(workItemKindLabel("integration")).toBe("贯通");
+    expect(workItemKindLabel("e2e")).toBe("E2E");
+    expect(workItemKindLabel("docs")).toBe("文档");
+    expect(workItemKindLabel("infra")).toBe("基础设施");
+    expect(workItemKindLabel("other")).toBe("其他");
   });
 });
 

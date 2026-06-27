@@ -65,6 +65,35 @@ describe("TimelineNodeList", () => {
       "Author 返修 Round 1",
     );
   });
+
+  it("renders work item draft nodes with outline id and readable summary", () => {
+    render(
+      <TimelineNodeList
+        nodes={[
+          timelineNode({
+            node_id: "draft-run-1",
+            node_type: "work_item_draft_run",
+            title: "Draft · Provider 依赖 HTTP API 端点",
+            summary: "outline_backend_api · draft_002 · draft",
+            status: "active",
+          }),
+        ]}
+        activeNodeId="draft-run-1"
+        selectedNodeId={null}
+        onSelectNode={vi.fn()}
+      />,
+    );
+
+    const node = screen.getByTestId("timeline-node-work_item_draft_run");
+    expect(node).toHaveTextContent("Draft · Provider 依赖 HTTP API 端点");
+    expect(node).toHaveTextContent("outline_backend_api");
+    expect(node).toHaveTextContent("draft_002");
+
+    const summary = screen.getByText("outline_backend_api · draft_002 · draft");
+    expect(summary).toHaveClass("line-clamp-2");
+    expect(summary).toHaveClass("break-words");
+    expect(summary).not.toHaveClass("truncate");
+  });
 });
 
 function timelineNode(overrides: Partial<TimelineNode> = {}): TimelineNode {

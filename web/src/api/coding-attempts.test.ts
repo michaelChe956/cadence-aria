@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   abortCodingAttempt,
   createCodingAttempt,
+  createGroupCodingAttempt,
   getCodingAttemptArtifact,
   getCodingAttemptDiff,
   getCodingAttemptSnapshot,
@@ -100,6 +101,24 @@ describe("coding attempts api client", () => {
       details: { attempt_id: "coding_attempt_0001" },
     });
   });
+
+  it("creates group coding attempts from work item plan route", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify(codingAttemptResponse()), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await createGroupCodingAttempt(
+      "project/with space",
+      "issue/with space",
+      "plan/1",
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/project%2Fwith%20space/issues/issue%2Fwith%20space/work-item-plans/plan%2F1/coding-attempts",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
 });
 
 function codingAttemptResponse() {
@@ -164,6 +183,9 @@ function codingAttemptSnapshotResponse() {
       },
     ],
     pending_choices: [],
+    work_item_execution_plan: null,
+    work_item_handoff: null,
+    require_execution_plan_confirm: false,
   };
 }
 

@@ -10,14 +10,16 @@ import type {
   GenerateDesignSpecsResponse,
   GenerateStorySpecsRequest,
   GenerateStorySpecsResponse,
-  GenerateWorkItemsRequest,
   GenerateWorkItemsResponse,
   IssueLifecycleResponse,
+  PrepareWorkItemPlanRequest,
+  PrepareWorkItemPlanResponse,
   ProductIssue,
   ProductIssueListResponse,
   Project,
   Repository,
   RepositoryListResponse,
+  WorkItemExecutionPlan,
 } from "./types";
 
 export class ApiRequestError extends Error implements ApiError {
@@ -187,6 +189,19 @@ export function deleteWorkItem(
   );
 }
 
+export function deleteWorkItemPlan(
+  projectId: string,
+  issueId: string,
+  planId: string,
+): Promise<{ status: string }> {
+  return requestJson<{ status: string }>(
+    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/work-item-plans/${encodeURIComponent(planId)}`,
+    {
+      method: "DELETE",
+    },
+  );
+}
+
 export function getIssueLifecycle(
   issueId: string,
   projectId: string,
@@ -224,13 +239,13 @@ export function generateDesignSpecs(
   );
 }
 
-export function generateWorkItems(
+export function prepareWorkItemPlan(
   projectId: string,
   issueId: string,
-  payload: GenerateWorkItemsRequest,
-): Promise<GenerateWorkItemsResponse> {
-  return requestJson<GenerateWorkItemsResponse>(
-    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/work-items:generate`,
+  payload: PrepareWorkItemPlanRequest,
+): Promise<PrepareWorkItemPlanResponse> {
+  return requestJson<PrepareWorkItemPlanResponse>(
+    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/work-item-plans:prepare`,
     {
       method: "POST",
       body: JSON.stringify(payload),
@@ -245,6 +260,20 @@ export function createCodingAttempt(
 ): Promise<CodingAttempt> {
   return requestJson<CodingAttempt>(
     `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/work-items/${encodeURIComponent(workItemId)}/coding-attempts`,
+    {
+      method: "POST",
+      body: JSON.stringify({}),
+    },
+  );
+}
+
+export function createGroupCodingAttempt(
+  projectId: string,
+  issueId: string,
+  planId: string,
+): Promise<CodingAttempt> {
+  return requestJson<CodingAttempt>(
+    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/work-item-plans/${encodeURIComponent(planId)}/coding-attempts`,
     {
       method: "POST",
       body: JSON.stringify({}),
@@ -295,5 +324,30 @@ export function getCodingAttemptArtifact(
 ): Promise<ArtifactContentResponse> {
   return requestJson<ArtifactContentResponse>(
     `/api/coding-attempts/${encodeURIComponent(attemptId)}/artifacts/${encodeURIComponent(artifactId)}`,
+  );
+}
+
+export function confirmWorkItemExecutionPlan(
+  attemptId: string,
+): Promise<WorkItemExecutionPlan> {
+  return requestJson<WorkItemExecutionPlan>(
+    `/api/coding-attempts/${encodeURIComponent(attemptId)}/execution-plan/confirm`,
+    {
+      method: "POST",
+      body: JSON.stringify({}),
+    },
+  );
+}
+
+export function requestWorkItemExecutionPlanChange(
+  attemptId: string,
+  payload: { note: string },
+): Promise<WorkItemExecutionPlan> {
+  return requestJson<WorkItemExecutionPlan>(
+    `/api/coding-attempts/${encodeURIComponent(attemptId)}/execution-plan/change-request`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
   );
 }

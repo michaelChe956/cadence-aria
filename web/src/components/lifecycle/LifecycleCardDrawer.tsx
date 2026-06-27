@@ -10,11 +10,30 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import type { ArtifactVersion, CodingAttempt, ProductIssueArtifact } from "../../api/types";
+import type {
+  ArtifactVersion,
+  CodingAttempt,
+  IssueWorkItemPlanDependencyEdgeDto,
+  ProductIssueArtifact,
+  WorkItemContextBudget,
+  WorkItemExecutionPlanStatus,
+  WorkItemKind,
+  LifecycleWorkItem,
+  WorkItemSplitFinding,
+} from "../../api/types";
+import {
+  workItemKindLabel,
+  workItemWaitingReason,
+} from "../../state/lifecycle-workbench-store";
 import { MonacoDiffViewer } from "../shared/MonacoDiffViewer";
 import { MonacoViewer } from "../shared/MonacoViewer";
 
-export type DrawerEntityKind = "issue" | "story_spec" | "design_spec" | "work_item";
+export type DrawerEntityKind =
+  | "issue"
+  | "story_spec"
+  | "design_spec"
+  | "work_item"
+  | "work_item_group";
 
 export interface DrawerEntity {
   id: string;
@@ -28,6 +47,25 @@ export interface DrawerEntity {
   phase?: string;
   createdAt?: string;
   latestAttempt?: CodingAttempt | null;
+  // Work item split metadata
+  workItemKind?: WorkItemKind;
+  dependsOn?: string[];
+  exclusiveWriteScopes?: string[];
+  forbiddenWriteScopes?: string[];
+  contextBudget?: WorkItemContextBudget;
+  requiredHandoffFrom?: string[];
+  verificationPlanRef?: string | null;
+  requireExecutionPlanConfirm?: boolean;
+  executionPlanStatus?: WorkItemExecutionPlanStatus;
+  handoffSummaryRef?: string | null;
+  completionCommit?: string | null;
+  completionDiffSummaryRef?: string | null;
+  allWorkItems?: LifecycleWorkItem[];
+  childWorkItems?: LifecycleWorkItem[];
+  workItemPlanSourceStorySpecIds?: string[];
+  workItemPlanSourceDesignSpecIds?: string[];
+  workItemPlanValidatorFindings?: WorkItemSplitFinding[];
+  workItemPlanDependencyGraph?: IssueWorkItemPlanDependencyEdgeDto[];
 }
 
 interface LifecycleCardDrawerProps {
@@ -44,6 +82,7 @@ const KIND_LABELS: Record<DrawerEntityKind, string> = {
   story_spec: "Story Spec",
   design_spec: "Design Spec",
   work_item: "Work Item",
+  work_item_group: "Work Item Group",
 };
 
 const STATUS_LABELS: Record<string, string> = {
@@ -85,6 +124,14 @@ export function LifecycleCardDrawer({
   const canShowDiff = selectedVersionIndex > 0 && selectedArtifact !== null && latestVersion !== null;
   const nextActionLabel = entity.status === "confirmed" ? NEXT_ACTION_LABELS[entity.kind] : null;
   const codingActionLabel = entity.latestAttempt ? "进入 Coding Workspace" : "开始 Coding";
+  const deleteActionLabel =
+    entity.kind === "work_item_group"
+      ? "删除 Work Item Group"
+      : "删除 Work Item";
+  const deleteActionTestId =
+    entity.kind === "work_item_group"
+      ? "drawer-delete-work-item-group"
+      : "drawer-delete-work-item";
   const Icon = iconForKind(entity.kind);
 
   useEffect(() => {
@@ -208,6 +255,11 @@ export function LifecycleCardDrawer({
             </div>
           </section>
         ) : null}
+
+        {entity.kind === "work_item_group" ? (
+          <WorkItemGroupDetail entity={entity} />
+        ) : null}
+        {entity.kind === "work_item" ? <WorkItemDetail entity={entity} /> : null}
       </div>
 
       {artifactPreviewOpen && selectedArtifact ? (
@@ -316,7 +368,8 @@ export function LifecycleCardDrawer({
             {nextActionLabel}
           </button>
         ) : null}
-        {entity.kind === "work_item" && onOpenCodingWorkspace ? (
+        {(entity.kind === "work_item" || entity.kind === "work_item_group") &&
+        onOpenCodingWorkspace ? (
           <button
             data-testid="drawer-open-coding-workspace"
             type="button"
@@ -327,15 +380,16 @@ export function LifecycleCardDrawer({
             {codingActionLabel}
           </button>
         ) : null}
-        {entity.kind === "work_item" && onDelete ? (
+        {(entity.kind === "work_item" || entity.kind === "work_item_group") &&
+        onDelete ? (
           <button
-            data-testid="drawer-delete-work-item"
+            data-testid={deleteActionTestId}
             type="button"
             onClick={onDelete}
             className="inline-flex h-9 w-full items-center justify-center gap-2 rounded-md border border-[var(--aria-danger)] bg-white px-3 text-sm font-semibold text-[var(--aria-danger)] hover:bg-red-50"
           >
             <Trash2 className="h-4 w-4" />
-            删除 Work Item
+            {deleteActionLabel}
           </button>
         ) : null}
       </footer>
@@ -408,6 +462,290 @@ function IssueDetail({
         </section>
       ) : null}
     </>
+  );
+}
+
+function WorkItemGroupDetail({ entity }: { entity: DrawerEntity }) {
+  const childWorkItems = entity.childWorkItems ?? [];
+  const sourceStoryIds = entity.workItemPlanSourceStorySpecIds ?? [];
+  const sourceDesignIds = entity.workItemPlanSourceDesignSpecIds ?? [];
+  const validatorFindings = entity.workItemPlanValidatorFindings ?? [];
+  const dependencyGraph = entity.workItemPlanDependencyGraph ?? [];
+
+  return (
+    <section className="space-y-3 border-t border-[var(--aria-line)] px-4 py-3">
+      <h3 className="text-sm font-semibold text-[var(--aria-ink)]">
+        Work Item Group 明细
+      </h3>
+
+      <div className="text-xs text-[var(--aria-ink-muted)]">
+        Plan status:{" "}
+        <span className="font-medium text-[var(--aria-ink)]">
+          {entity.status}
+        </span>
+      </div>
+
+      <div className="grid gap-2 text-xs text-[var(--aria-ink-muted)]">
+        <SourceIdList title="Source Story Spec" ids={sourceStoryIds} />
+        <SourceIdList title="Source Design Spec" ids={sourceDesignIds} />
+      </div>
+
+      <div>
+        <div className="mb-1 text-xs font-medium text-[var(--aria-ink-muted)]">
+          子 Work Item
+        </div>
+        <div
+          data-testid="work-item-group-children"
+          className="space-y-2"
+        >
+          {childWorkItems.length > 0 ? (
+            childWorkItems.map((item) => (
+              <div
+                key={item.work_item_id}
+                className="rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-2 text-xs"
+              >
+                <div className="font-semibold text-[var(--aria-ink)]">
+                  {item.title}
+                </div>
+                <div className="mt-1 flex flex-wrap gap-1.5 font-mono text-[11px] text-[var(--aria-ink-muted)]">
+                  <span>{item.work_item_id}</span>
+                  <span>kind: {item.kind}</span>
+                  <span>plan_status: {item.plan_status}</span>
+                  <span>execution_status: {item.execution_status}</span>
+                </div>
+              </div>
+            ))
+          ) : (
+            <div className="rounded-md border border-dashed border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-2 text-xs text-[var(--aria-ink-muted)]">
+              暂无子 Work Item
+            </div>
+          )}
+        </div>
+      </div>
+
+      {validatorFindings.length > 0 ? (
+        <div>
+          <div className="mb-1 text-xs font-medium text-[var(--aria-ink-muted)]">
+            Validator Findings
+          </div>
+          <ul className="space-y-1">
+            {validatorFindings.map((finding) => (
+              <li
+                key={finding.finding_id}
+                className="rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-xs text-amber-800"
+              >
+                {finding.message}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      {dependencyGraph.length > 0 ? (
+        <div>
+          <div className="mb-1 text-xs font-medium text-[var(--aria-ink-muted)]">
+            Dependency Graph
+          </div>
+          <ul className="space-y-1">
+            {dependencyGraph.map((edge) => (
+              <li
+                key={`${edge.from_work_item_id}->${edge.to_work_item_id}`}
+                className="font-mono text-xs text-[var(--aria-ink)]"
+              >
+                {edge.from_work_item_id} {"->"} {edge.to_work_item_id}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function SourceIdList({ title, ids }: { title: string; ids: string[] }) {
+  return (
+    <div>
+      <div className="mb-1 font-medium">{title}</div>
+      {ids.length > 0 ? (
+        <div className="flex flex-wrap gap-1">
+          {ids.map((id) => (
+            <span
+              key={id}
+              className="rounded border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-1.5 py-0.5 font-mono text-[11px] text-[var(--aria-ink)]"
+            >
+              {id}
+            </span>
+          ))}
+        </div>
+      ) : (
+        <div className="text-[var(--aria-ink-muted)]">无</div>
+      )}
+    </div>
+  );
+}
+
+function WorkItemDetail({ entity }: { entity: DrawerEntity }) {
+  const titleMap = useMemo(() => {
+    const map: Record<string, string> = {};
+    (entity.allWorkItems ?? []).forEach((item) => {
+      map[item.work_item_id] = item.title;
+    });
+    return map;
+  }, [entity.allWorkItems]);
+
+  const waitingReason = useMemo(() => {
+    if (!entity.allWorkItems || entity.workItemKind === undefined) {
+      return null;
+    }
+    const synthetic: LifecycleWorkItem = {
+      work_item_id: entity.id,
+      issue_id: "",
+      repository_id: "",
+      story_spec_ids: [],
+      design_spec_ids: [],
+      title: entity.title,
+      plan_status: "confirmed",
+      execution_status: (entity.status as LifecycleWorkItem["execution_status"]) ?? "pending",
+      latest_attempt: entity.latestAttempt ?? null,
+      artifact_versions: [],
+      work_item_set_id: null,
+      kind: entity.workItemKind ?? "other",
+      sequence_hint: null,
+      depends_on: entity.dependsOn ?? [],
+      exclusive_write_scopes: entity.exclusiveWriteScopes ?? [],
+      forbidden_write_scopes: entity.forbiddenWriteScopes ?? [],
+      context_budget: entity.contextBudget ?? {
+        target_context_k: "30-50",
+        max_summary_chars: 20000,
+        max_handoff_chars: 12000,
+        max_code_context_chars: 30000,
+        max_context_file_refs: 80,
+        max_traceability_refs: 40,
+        max_dependency_handoffs: 3,
+      },
+      required_handoff_from: entity.requiredHandoffFrom ?? [],
+      verification_plan_ref: entity.verificationPlanRef ?? null,
+      require_execution_plan_confirm: entity.requireExecutionPlanConfirm ?? false,
+      execution_plan_status: entity.executionPlanStatus ?? "not_started",
+      handoff_summary_ref: entity.handoffSummaryRef ?? null,
+      completion_commit: entity.completionCommit ?? null,
+      completion_diff_summary_ref: entity.completionDiffSummaryRef ?? null,
+    };
+    return workItemWaitingReason(synthetic, entity.allWorkItems);
+  }, [entity]);
+
+  const hasHandoff = entity.handoffSummaryRef && entity.handoffSummaryRef.length > 0;
+
+  return (
+    <section className="space-y-3 border-t border-[var(--aria-line)] px-4 py-3">
+      <h3 className="text-sm font-semibold text-[var(--aria-ink)]">Work Item 拆分信息</h3>
+
+      {entity.workItemKind ? (
+        <div className="text-xs text-[var(--aria-ink-muted)]">
+          类型: <span className="font-medium text-[var(--aria-ink)]">{workItemKindLabel(entity.workItemKind)}</span>
+        </div>
+      ) : null}
+
+      {waitingReason ? (
+        <div className="rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-xs text-amber-800">
+          {waitingReason}
+        </div>
+      ) : null}
+
+      {entity.requireExecutionPlanConfirm ? (
+        <div className="rounded border border-[var(--aria-primary)] px-2 py-1.5 text-xs text-[var(--aria-primary)]">
+          需要确认执行计划
+        </div>
+      ) : null}
+
+      {entity.dependsOn && entity.dependsOn.length > 0 ? (
+        <div>
+          <div className="mb-1 text-xs font-medium text-[var(--aria-ink-muted)]">依赖</div>
+          <ul className="space-y-1">
+            {entity.dependsOn.map((id) => (
+              <li key={id} className="font-mono text-xs text-[var(--aria-ink)]">
+                {titleMap[id] ? `${titleMap[id]} (${id})` : id}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      {entity.requiredHandoffFrom && entity.requiredHandoffFrom.length > 0 ? (
+        <div>
+          <div className="mb-1 text-xs font-medium text-[var(--aria-ink-muted)]">需要交接摘要</div>
+          <ul className="space-y-1">
+            {entity.requiredHandoffFrom.map((id) => (
+              <li key={id} className="font-mono text-xs text-[var(--aria-ink)]">
+                {titleMap[id] ? `${titleMap[id]} (${id})` : id}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      {(entity.exclusiveWriteScopes && entity.exclusiveWriteScopes.length > 0) ||
+      (entity.forbiddenWriteScopes && entity.forbiddenWriteScopes.length > 0) ? (
+        <div className="space-y-1">
+          <div className="text-xs font-medium text-[var(--aria-ink-muted)]">写入范围</div>
+          {entity.exclusiveWriteScopes && entity.exclusiveWriteScopes.length > 0 ? (
+            <div className="space-y-1">
+              <div className="text-[10px] text-[var(--aria-ink-muted)]">允许</div>
+              {entity.exclusiveWriteScopes.map((scope) => (
+                <span
+                  key={scope}
+                  className="mr-1 inline-block rounded border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 font-mono text-[10px] text-emerald-800"
+                >
+                  {scope}
+                </span>
+              ))}
+            </div>
+          ) : null}
+          {entity.forbiddenWriteScopes && entity.forbiddenWriteScopes.length > 0 ? (
+            <div className="space-y-1">
+              <div className="text-[10px] text-[var(--aria-ink-muted)]">禁止</div>
+              {entity.forbiddenWriteScopes.map((scope) => (
+                <span
+                  key={scope}
+                  className="mr-1 inline-block rounded border border-red-200 bg-red-50 px-1.5 py-0.5 font-mono text-[10px] text-red-800"
+                >
+                  {scope}
+                </span>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {entity.contextBudget ? (
+        <div className="text-xs text-[var(--aria-ink-muted)]">
+          预算: <span className="font-medium text-[var(--aria-ink)]">{entity.contextBudget.target_context_k}K</span>
+          {" · "}
+          文件引用上限 {entity.contextBudget.max_context_file_refs}
+          {" · "}
+          依赖交接上限 {entity.contextBudget.max_dependency_handoffs}
+        </div>
+      ) : null}
+
+      <div className="text-xs text-[var(--aria-ink-muted)]">
+        交接状态:
+        {" "}
+        <span
+          className={[
+            "font-medium",
+            hasHandoff ? "text-emerald-700" : "text-amber-700",
+          ].join(" ")}
+        >
+          {hasHandoff ? "交接摘要已生成" : "等待交接摘要"}
+        </span>
+      </div>
+
+      {entity.verificationPlanRef ? (
+        <div className="text-xs text-[var(--aria-ink-muted)]">
+          验证计划: <span className="font-mono text-[var(--aria-ink)]">{entity.verificationPlanRef}</span>
+        </div>
+      ) : null}
+    </section>
   );
 }
 

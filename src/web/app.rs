@@ -77,12 +77,20 @@ pub fn build_web_router(state: WebAppState) -> Router {
             delete(handlers::delete_design_spec),
         )
         .route(
-            "/api/projects/{project_id}/issues/{issue_id}/work-items:generate",
-            post(handlers::generate_work_items),
+            "/api/projects/{project_id}/issues/{issue_id}/work-item-plans:prepare",
+            post(handlers::prepare_work_item_plan),
+        )
+        .route(
+            "/api/projects/{project_id}/issues/{issue_id}/work-item-plans/{plan_id}",
+            delete(handlers::delete_work_item_plan),
         )
         .route(
             "/api/projects/{project_id}/issues/{issue_id}/work-items/{work_item_id}",
             delete(handlers::delete_work_item),
+        )
+        .route(
+            "/api/projects/{project_id}/issues/{issue_id}/work-item-plans/{plan_id}/coding-attempts",
+            post(handlers::create_group_coding_attempt),
         )
         .route(
             "/api/projects/{project_id}/issues/{issue_id}/work-items/{work_item_id}/coding-attempts",
@@ -99,6 +107,14 @@ pub fn build_web_router(state: WebAppState) -> Router {
         .route(
             "/api/coding-attempts/{attempt_id}/abort",
             post(handlers::abort_coding_attempt),
+        )
+        .route(
+            "/api/coding-attempts/{attempt_id}/execution-plan/confirm",
+            post(handlers::confirm_work_item_execution_plan),
+        )
+        .route(
+            "/api/coding-attempts/{attempt_id}/execution-plan/change-request",
+            post(handlers::request_work_item_execution_plan_change),
         )
         .route(
             "/api/coding-attempts/{attempt_id}/artifacts/{artifact_id}",

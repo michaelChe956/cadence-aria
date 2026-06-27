@@ -19,6 +19,8 @@ mod design_projection;
 mod document_ops;
 #[path = "it_core/issue_rollback.rs"]
 mod issue_rollback;
+#[path = "it_core/large_file_guard.rs"]
+mod large_file_guard;
 #[path = "it_core/openspec_bundle.rs"]
 mod openspec_bundle;
 #[path = "it_core/openspec_bundle_schema.rs"]

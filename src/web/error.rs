@@ -31,6 +31,18 @@ impl ApiError {
             details,
         }
     }
+
+    pub fn validation_with_details(
+        code: impl Into<String>,
+        message: impl Into<String>,
+        details: Value,
+    ) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            details,
+        }
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -73,7 +85,13 @@ impl IntoResponse for ApiError {
             | "workspace_path_not_directory"
             | "workspace_path_not_git_repo"
             | "work_item_plan_not_confirmed"
-            | "repository_path_not_git_repo" => StatusCode::BAD_REQUEST,
+            | "work_item_dependency_not_completed"
+            | "work_item_handoff_missing"
+            | "work_item_execution_plan_not_confirmed"
+            | "work_item_group_empty"
+            | "repository_path_not_git_repo"
+            | "work_item_split_invalid" => StatusCode::BAD_REQUEST,
+            "issue_worktree_active" | "shared_worktree_dirty_manual_gate" => StatusCode::CONFLICT,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, Json(self)).into_response()
@@ -95,5 +113,21 @@ impl From<crate::web::workspace_registry::WorkspaceRegistryError> for ApiError {
 impl From<crate::web::issue_registry::IssueRegistryError> for ApiError {
     fn from(error: crate::web::issue_registry::IssueRegistryError) -> Self {
         ApiError::runtime(error.code(), error.message(), json!({}))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn work_item_group_empty_is_bad_request() {
+        let response = ApiError::validation(
+            "work_item_group_empty",
+            "work item group has no compiled work items",
+        )
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }

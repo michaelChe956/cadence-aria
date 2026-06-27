@@ -52,5 +52,12 @@ fn workspace_repository_id(
                 kind: "work_item",
                 id: session.entity_id.clone(),
             }),
+        WorkspaceType::WorkItemPlan => IssueStore::new(app_paths.clone())
+            .get(&session.project_id, &session.issue_id)?
+            .repo_id
+            .ok_or_else(|| ProductStoreError::NotFound {
+                kind: "repository",
+                id: format!("issue:{}:repo_id", session.issue_id),
+            }),
     }
 }

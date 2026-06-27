@@ -4,7 +4,8 @@ use std::path::PathBuf;
 
 use crate::product::coding_models::{
     AnalystDecisionRecord, CodeReviewReport, CodingChoiceGate, CodingGateRequired,
-    CodingTimelineNode, InternalPrReview, ReviewRequest, TestingReport,
+    CodingTimelineNode, InternalPrReview, ReviewRequest, TestingReport, WorkItemExecutionPlan,
+    WorkItemHandoff,
 };
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
@@ -376,6 +377,7 @@ pub struct IssueLifecycleResponse {
     pub issue: ProductIssueDto,
     pub story_specs: Vec<StorySpecDto>,
     pub design_specs: Vec<DesignSpecDto>,
+    pub work_item_plans: Vec<IssueWorkItemPlanDetailDto>,
     pub work_items: Vec<LifecycleWorkItemDto>,
     pub workspace_sessions: Vec<WorkspaceSessionDto>,
     pub coding_attempts: Vec<CodingAttemptDto>,
@@ -413,7 +415,6 @@ pub struct DesignSpecDto {
     pub design_spec_id: String,
     pub issue_id: String,
     pub story_spec_ids: Vec<String>,
-    pub design_kind: String,
     pub title: String,
     pub current_version: Option<u32>,
     pub current_markdown_preview: Option<String>,
@@ -434,6 +435,46 @@ pub struct LifecycleWorkItemDto {
     pub execution_status: String,
     pub latest_attempt: Option<CodingAttemptDto>,
     pub artifact_versions: Vec<ArtifactVersionDto>,
+    pub work_item_set_id: Option<String>,
+    pub kind: String,
+    pub sequence_hint: Option<u32>,
+    pub depends_on: Vec<String>,
+    pub exclusive_write_scopes: Vec<String>,
+    pub forbidden_write_scopes: Vec<String>,
+    pub context_budget: WorkItemContextBudgetDto,
+    pub required_handoff_from: Vec<String>,
+    pub verification_plan_ref: Option<String>,
+    pub require_execution_plan_confirm: bool,
+    pub execution_plan_status: String,
+    pub handoff_summary_ref: Option<String>,
+    pub completion_commit: Option<String>,
+    pub completion_diff_summary_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkItemContextBudgetDto {
+    pub target_context_k: String,
+    pub max_summary_chars: usize,
+    pub max_handoff_chars: usize,
+    pub max_code_context_chars: usize,
+    pub max_context_file_refs: usize,
+    pub max_traceability_refs: usize,
+    pub max_dependency_handoffs: usize,
+}
+
+impl Default for WorkItemContextBudgetDto {
+    fn default() -> Self {
+        Self {
+            target_context_k: "30-50".to_string(),
+            max_summary_chars: 20_000,
+            max_handoff_chars: 12_000,
+            max_code_context_chars: 30_000,
+            max_context_file_refs: 80,
+            max_traceability_refs: 40,
+            max_dependency_handoffs: 3,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -441,6 +482,10 @@ pub struct LifecycleWorkItemDto {
 pub struct CodingAttemptDto {
     pub attempt_id: String,
     pub work_item_id: String,
+    pub attempt_scope: String,
+    pub work_item_group_id: Option<String>,
+    pub current_work_item_id: Option<String>,
+    pub active_unit_id: Option<String>,
     pub attempt_no: u32,
     pub status: String,
     pub stage: String,
@@ -455,10 +500,35 @@ pub struct CodingAttemptDto {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct CodingExecutionUnitDto {
+    pub unit_id: String,
+    pub work_item_id: String,
+    pub order_index: u32,
+    pub status: String,
+    pub summary: Option<String>,
+    pub handoff_ref: Option<String>,
+    pub completion_commit: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RequestExecutionPlanChangeRequest {
+    #[serde(default)]
+    pub note: String,
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct CodingAttemptSnapshotResponse {
     pub attempt: CodingAttemptDto,
+    pub attempt_scope: String,
+    pub work_item_group_id: Option<String>,
+    pub current_work_item_id: Option<String>,
+    pub active_unit_id: Option<String>,
+    #[serde(default)]
+    pub units: Vec<CodingExecutionUnitDto>,
     pub provider_config_snapshot: ProviderConfigSnapshot,
     pub timeline_nodes: Vec<CodingTimelineNode>,
     pub active_node_id: Option<String>,
@@ -469,6 +539,10 @@ pub struct CodingAttemptSnapshotResponse {
     pub pending_gates: Vec<CodingGateRequired>,
     pub pending_choices: Vec<CodingChoiceGate>,
     pub latest_analyst_decision: Option<AnalystDecisionRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_item_execution_plan: Option<WorkItemExecutionPlan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_item_handoff: Option<WorkItemHandoff>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -494,7 +568,6 @@ pub struct GenerateStorySpecsResponse {
 pub struct GenerateDesignSpecsRequest {
     pub title: String,
     pub story_spec_ids: Vec<String>,
-    pub design_kind: String,
     pub author_provider: Option<String>,
     pub reviewer_provider: Option<String>,
     pub review_rounds: Option<u32>,
@@ -515,18 +588,86 @@ pub struct GenerateWorkItemsRequest {
     pub title: String,
     pub story_spec_ids: Vec<String>,
     pub design_spec_ids: Vec<String>,
+    pub include_integration_tests: Option<bool>,
+    pub include_e2e_tests: Option<bool>,
+    pub force_frontend_backend_split: Option<bool>,
+    pub require_execution_plan_confirm: Option<bool>,
     pub author_provider: Option<String>,
     pub reviewer_provider: Option<String>,
     pub review_rounds: Option<u32>,
     pub superpowers_enabled: Option<bool>,
     pub openspec_enabled: Option<bool>,
+    /// 重生时注入上一次 validate findings，让 provider 针对问题返修。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision_feedback: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkItemSplitOptions {
+    pub include_integration_tests: bool,
+    pub include_e2e_tests: bool,
+    pub force_frontend_backend_split: bool,
+    pub require_execution_plan_confirm: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkItemSplitFinding {
+    pub finding_id: String,
+    pub level: String,
+    pub message: String,
+    pub affected_scopes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PrepareWorkItemPlanRequest {
+    pub title: String,
+    pub story_spec_ids: Vec<String>,
+    pub design_spec_ids: Vec<String>,
+    pub author_provider: Option<String>,
+    pub reviewer_provider: Option<String>,
+    pub review_rounds: Option<u32>,
+    pub superpowers_enabled: Option<bool>,
+    pub openspec_enabled: Option<bool>,
+    pub include_integration_tests: Option<bool>,
+    pub include_e2e_tests: Option<bool>,
+    pub force_frontend_backend_split: Option<bool>,
+    pub require_execution_plan_confirm: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub struct GenerateWorkItemsResponse {
-    pub work_items: Vec<LifecycleWorkItemDto>,
+pub struct PrepareWorkItemPlanResponse {
+    pub work_item_plan: IssueWorkItemPlanDetailDto,
     pub workspace_session: WorkspaceSessionDto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct IssueWorkItemPlanDetailDto {
+    pub id: String,
+    pub issue_id: String,
+    pub project_id: String,
+    pub status: String,
+    pub source_story_spec_ids: Vec<String>,
+    pub source_design_spec_ids: Vec<String>,
+    pub work_item_ids: Vec<String>,
+    pub verification_plan_ids: Vec<String>,
+    pub dependency_graph: Vec<IssueWorkItemPlanDependencyEdgeDto>,
+    pub repository_profile_ref: Option<String>,
+    pub options: WorkItemSplitOptions,
+    pub validator_findings: Vec<WorkItemSplitFinding>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct IssueWorkItemPlanDependencyEdgeDto {
+    pub from_work_item_id: String,
+    pub to_work_item_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

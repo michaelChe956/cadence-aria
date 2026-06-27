@@ -2,9 +2,11 @@ import { create } from "zustand";
 import type {
   AnalystDecisionRecord,
   CodeReviewReport,
+  CodingAttemptScope,
   CodingAttemptStatus,
   CodingChoiceGate,
   CodingExecutionStage,
+  CodingExecutionUnit,
   CodingGateRequired,
   CodingProviderRole,
   CodingRoleProviderConfigSnapshot,
@@ -17,6 +19,8 @@ import type {
   ProviderConfigSnapshot,
   ReviewRequest,
   TestingReport,
+  WorkItemExecutionPlan,
+  WorkItemHandoff,
   WorkspaceProviderName,
 } from "../api/types";
 import type { ChatEntry, ChatEntryRole } from "./chat-entries";
@@ -49,6 +53,11 @@ export type CodingPendingGate = CodingGateRequired & {
 export interface CodingWorkspaceState {
   attemptId: string | null;
   workItemId: string | null;
+  attemptScope: CodingAttemptScope | null;
+  workItemGroupId: string | null;
+  currentWorkItemId: string | null;
+  activeUnitId: string | null;
+  units: CodingExecutionUnit[];
   issueId: string | null;
   projectId: string | null;
   status: CodingAttemptStatus | null;
@@ -81,6 +90,10 @@ export interface CodingWorkspaceState {
   pendingGates: CodingPendingGate[];
   protocolError: CodingProtocolError | null;
   tabLockedByUser: boolean;
+  workItemExecutionPlan: WorkItemExecutionPlan | null;
+  workItemHandoff: WorkItemHandoff | null;
+  // 门禁开关唯一来源：work item / snapshot 上的 require_execution_plan_confirm
+  requireExecutionPlanConfirm: boolean;
 }
 
 export interface CodingWorkspaceActions {
@@ -119,6 +132,11 @@ export interface CodingWorkspaceActions {
 const initialState: CodingWorkspaceState = {
   attemptId: null,
   workItemId: null,
+  attemptScope: null,
+  workItemGroupId: null,
+  currentWorkItemId: null,
+  activeUnitId: null,
+  units: [],
   issueId: null,
   projectId: null,
   status: null,
@@ -151,6 +169,9 @@ const initialState: CodingWorkspaceState = {
   pendingGates: [],
   protocolError: null,
   tabLockedByUser: false,
+  workItemExecutionPlan: null,
+  workItemHandoff: null,
+  requireExecutionPlanConfirm: false,
 };
 
 export const useCodingWorkspaceStore = create<
@@ -169,6 +190,11 @@ export const useCodingWorkspaceStore = create<
       const nextTab = selectedNode ? stageToArtifactTab(selectedNode.stage) : null;
       return {
         attemptId: snapshot.attempt_id,
+        attemptScope: snapshot.attempt_scope,
+        workItemGroupId: snapshot.work_item_group_id,
+        currentWorkItemId: snapshot.current_work_item_id,
+        activeUnitId: snapshot.active_unit_id,
+        units: snapshot.units ?? [],
         status: snapshot.status,
         stage: snapshot.stage,
         branchName: snapshot.branch_name,
@@ -194,6 +220,9 @@ export const useCodingWorkspaceStore = create<
         latestAnalystDecision: snapshot.latest_analyst_decision ?? null,
         roleRuns: snapshot.role_runs ?? [],
         pendingGates: mergeSnapshotPendingGates(snapshot.pending_gates, prev.pendingGates),
+        workItemExecutionPlan: snapshot.work_item_execution_plan ?? null,
+        workItemHandoff: snapshot.work_item_handoff ?? null,
+        requireExecutionPlanConfirm: snapshot.require_execution_plan_confirm ?? false,
         protocolError: null,
         streamingContent: null,
         activeStreamNodeId: null,

@@ -37,6 +37,32 @@ describe("InlineEventRow", () => {
     expect(screen.queryByText("ok")).not.toBeInTheDocument();
   });
 
+  it("decodes and formats html entity escaped event detail, command and output", () => {
+    const { container } = render(
+      <InlineEventRow
+        entry={{
+          id: "event-entity",
+          type: "execution_event",
+          role: "system",
+          content: "校验 Draft",
+          timestamp: "2026-05-26T10:00:00Z",
+          metadata: {
+            detail: "当前 &quot;Draft&quot; 输出",
+            command: "echo &quot;safe&quot;",
+            output: "{&quot;required_gates&quot;:[&quot;cmd_check&quot;]}",
+          },
+        }}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /校验 Draft/ }));
+
+    expect(screen.getByText('当前 "Draft" 输出')).toBeInTheDocument();
+    expect(screen.getByText('echo "safe"')).toBeInTheDocument();
+    expect(container.textContent).toContain('"required_gates": [');
+    expect(container.textContent).not.toContain("&quot;");
+  });
+
   it("按需加载 execution output 并复用缓存", async () => {
     let resolveContent: (value: string) => void = () => undefined;
     const loadContent = vi.fn().mockImplementation(

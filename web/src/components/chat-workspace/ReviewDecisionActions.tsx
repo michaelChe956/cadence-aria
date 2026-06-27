@@ -4,13 +4,43 @@ import type { RevisionPath } from "../../api/types";
 
 export function ReviewDecisionActions({
   onSelectPath,
+  onSelectDecision,
+  options,
 }: {
   onSelectPath: (path: RevisionPath, extraContext?: string) => void;
+  onSelectDecision?: (decision: string) => void;
+  options?: string[];
 }) {
   const [isContextFormOpen, setIsContextFormOpen] = useState(false);
   const [contextDraft, setContextDraft] = useState("");
   const contextFieldId = useId();
   const trimmedContext = contextDraft.trim();
+  const hasOptionalFindingOptions =
+    options?.includes("apply_optional_findings") &&
+    options.includes("skip_optional_findings");
+
+  if (hasOptionalFindingOptions && onSelectDecision) {
+    return (
+      <div className="flex flex-wrap justify-end gap-2">
+        <button
+          type="button"
+          onClick={() => onSelectDecision("apply_optional_findings")}
+          className="inline-flex h-8 items-center gap-1 rounded-md border border-amber-300 bg-white px-3 text-xs font-semibold text-amber-800 hover:bg-amber-100"
+        >
+          <GitBranch className="h-3.5 w-3.5" />
+          修复这些建议
+        </button>
+        <button
+          type="button"
+          onClick={() => onSelectDecision("skip_optional_findings")}
+          className="inline-flex h-8 items-center gap-1 rounded-md border border-emerald-300 bg-white px-3 text-xs font-semibold text-emerald-800 hover:bg-emerald-50"
+        >
+          <GitBranch className="h-3.5 w-3.5" />
+          不修复，继续生成
+        </button>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-2">
@@ -42,7 +72,10 @@ export function ReviewDecisionActions({
       </div>
       {isContextFormOpen ? (
         <div className="space-y-2 rounded-md border border-amber-200 bg-white p-2">
-          <label className="block text-xs font-medium text-amber-900" htmlFor={contextFieldId}>
+          <label
+            className="block text-xs font-medium text-amber-900"
+            htmlFor={contextFieldId}
+          >
             补充返修上下文
           </label>
           <textarea
@@ -67,7 +100,9 @@ export function ReviewDecisionActions({
             <button
               type="button"
               disabled={!trimmedContext}
-              onClick={() => onSelectPath("revise-with-context", trimmedContext)}
+              onClick={() =>
+                onSelectPath("revise-with-context", trimmedContext)
+              }
               className="inline-flex h-8 items-center rounded-md border border-amber-400 bg-amber-100 px-3 text-xs font-semibold text-amber-900 hover:bg-amber-200 disabled:cursor-not-allowed disabled:border-amber-200 disabled:bg-amber-50 disabled:text-amber-300"
             >
               提交补充并修订

@@ -1,4 +1,34 @@
 //! 集成测试入口：web 域。各子模块原为独立 tests/*.rs，合并以减少二进制数量。
+static TEST_CONTROLS_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+pub(crate) struct TestControlsEnvGuard {
+    _guard: tokio::sync::MutexGuard<'static, ()>,
+}
+
+impl Drop for TestControlsEnvGuard {
+    fn drop(&mut self) {
+        unsafe {
+            std::env::remove_var("ARIA_E2E_TEST_CONTROLS");
+        }
+    }
+}
+
+pub(crate) async fn enable_test_controls() -> TestControlsEnvGuard {
+    let guard = TEST_CONTROLS_ENV_LOCK.lock().await;
+    unsafe {
+        std::env::set_var("ARIA_E2E_TEST_CONTROLS", "1");
+    }
+    TestControlsEnvGuard { _guard: guard }
+}
+
+pub(crate) async fn disable_test_controls() -> tokio::sync::MutexGuard<'static, ()> {
+    let guard = TEST_CONTROLS_ENV_LOCK.lock().await;
+    unsafe {
+        std::env::remove_var("ARIA_E2E_TEST_CONTROLS");
+    }
+    guard
+}
+
 #[path = "it_web/web_api_handlers.rs"]
 mod web_api_handlers;
 #[path = "it_web/web_cli.rs"]
@@ -47,3 +77,29 @@ mod web_static_assets;
 mod web_test_controls;
 #[path = "it_web/web_types.rs"]
 mod web_types;
+#[path = "it_web/web_work_item_generation.rs"]
+mod web_work_item_generation;
+#[path = "it_web/web_work_item_plan_author.rs"]
+mod web_work_item_plan_author;
+#[path = "it_web/web_work_item_plan_batch.rs"]
+mod web_work_item_plan_batch;
+#[path = "it_web/web_work_item_plan_compile.rs"]
+mod web_work_item_plan_compile;
+#[path = "it_web/web_work_item_plan_confirm.rs"]
+mod web_work_item_plan_confirm;
+#[path = "it_web/web_work_item_plan_mode.rs"]
+mod web_work_item_plan_mode;
+#[path = "it_web/web_work_item_plan_outline.rs"]
+mod web_work_item_plan_outline;
+#[path = "it_web/web_work_item_plan_revert.rs"]
+mod web_work_item_plan_revert;
+#[path = "it_web/web_work_item_plan_review.rs"]
+mod web_work_item_plan_review;
+#[path = "it_web/web_work_item_plan_serial.rs"]
+mod web_work_item_plan_serial;
+#[path = "it_web/web_work_item_plan_staged_flow.rs"]
+mod web_work_item_plan_staged_flow;
+#[path = "it_web/web_work_item_split_flow.rs"]
+mod web_work_item_split_flow;
+#[path = "it_web/web_workspace_recovery_consistency.rs"]
+mod web_workspace_recovery_consistency;

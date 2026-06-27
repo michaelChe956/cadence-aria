@@ -5,23 +5,24 @@ import type {
   ProviderConfigSnapshot,
   RevisionPath,
   WorkspaceProviderName,
+  WorkItemBatchDecision,
+  WorkItemDraftDecision,
+  WorkItemGenerationMode,
+  WorkItemPlanCompileRecoveryAction,
   WsInMessage,
 } from "../api/types";
-import type { ChatEntry, ChatEntryRole } from "../state/chat-entries";
 import { useWorkspaceWsReconnect } from "./useWorkspaceWsReconnect";
 import {
   useWorkspaceStore,
-  type ExecutionEvent,
-  type ProviderStatus,
-  type ReviewVerdict,
-  type TimelineNode,
-  type TimelineNodeStatus,
 } from "../state/workspace-ws-store";
+import {
+  ACTIVE_PROVIDER_STAGES,
+  handleWorkspaceWsMessage,
+  providerName,
+  type WsServerMessage,
+  wsReadyStateName,
+} from "./workspace-ws-message-handler";
 
-interface WsServerMessage {
-  type: string;
-  [key: string]: unknown;
-}
 
 type WorkspaceWsSendMessage =
   | WsInMessage
@@ -33,12 +34,12 @@ const STALE_SOCKET_CLOSE_CODE = 4000;
 const SERVER_SILENCE_CHECK_INTERVAL_MS = 15_000;
 const CONNECT_TIMEOUT_MS = 5_000;
 const STREAM_FLUSH_INTERVAL_MS = 80;
-const ACTIVE_PROVIDER_STAGES = new Set(["running", "cross_review", "revision"]);
 
 export function useWorkspaceWs(sessionId: string | null) {
   const wsRef = useRef<WebSocket | null>(null);
   const connectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const streamFlushTimeoutsRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const invalidatedPreStageNodeIdsRef = useRef<Set<string>>(new Set());
   const lastMessageAtRef = useRef(Date.now());
   const [closeCode, setCloseCode] = useState<number | undefined>();
   const connectionStatus = useWorkspaceStore((state) => state.connectionStatus);
@@ -189,288 +190,11 @@ export function useWorkspaceWs(sessionId: string | null) {
   }, [connectionStatus, resetReconnect]);
 
   function handleMessage(msg: WsServerMessage) {
-    const store = useWorkspaceStore.getState();
-    switch (msg.type) {
-      case "session_state":
-        store.setSessionState(msg as never);
-        store.rebuildChatEntries();
-        break;
-      case "stream_chunk":
-        if (!ACTIVE_PROVIDER_STAGES.has(store.stage) && store.activeRunId) {
-          break;
-        }
-        {
-          const nodeId = msg.node_id as string | null | undefined;
-          if (nodeId) {
-            const role = entryRoleForNode(
-              store,
-              nodeId,
-              chatEntryRole((msg.role as string | undefined) ?? "author"),
-            );
-            store.appendStreamChunk(msg.content as string, nodeId);
-            store.appendBufferedStreamChunk(msg.content as string, nodeId, role);
-            scheduleFlush(nodeId);
-          } else {
-            store.appendStreamChunk(msg.content as string, nodeId);
-            handleStreamChunk(store, msg as never);
-          }
-        }
-        break;
-      case "message_complete":
-        if (msg.node_id) {
-          const nodeId = msg.node_id as string;
-          const timeout = streamFlushTimeoutsRef.current[nodeId];
-          if (timeout) {
-            clearTimeout(timeout);
-            delete streamFlushTimeoutsRef.current[nodeId];
-          }
-          store.completeBufferedStream(
-            nodeId,
-            msg.message_id as string,
-            msg.checkpoint_id as string,
-          );
-          store.finalizeStreamingEntry(resolveStreamEntryId(store, nodeId));
-          break;
-        }
-        store.completeMessage(
-          msg.message_id as string,
-          msg.checkpoint_id as string,
-          msg.node_id as string | null | undefined,
-        );
-        store.finalizeStreamingEntry(resolveStreamEntryId(store, msg.node_id as string | null | undefined));
-        break;
-      case "stage_change":
-        store.setStage(msg.stage as string);
-        store.appendChatEntry({
-          id: chatEntryId("stage_change", `${msg.stage as string}:${store.chatEntries.length}`),
-          type: "stage_change",
-          role: "system",
-          content: `阶段变更 -> ${msg.stage as string}`,
-          timestamp: new Date().toISOString(),
-        });
-        if (msg.stage === "human_confirm") {
-          const gatePrompt = gatePromptEntryForState(useWorkspaceStore.getState());
-          if (gatePrompt) {
-            store.appendChatEntry(gatePrompt);
-          }
-        }
-        break;
-      case "artifact_update":
-        {
-          const markdown = msg.markdown as string;
-          const version = msg.version as number | undefined;
-          store.setArtifact(markdown, version);
-          store.appendChatEntry({
-            id: chatEntryId("artifact_update", String(version)),
-            type: "artifact_update",
-            role: "system",
-            content: `产物已更新 -> v${version}`,
-            timestamp: new Date().toISOString(),
-            metadata: {
-              version,
-              diff: (msg as { diff?: string | null }).diff ?? null,
-            },
-            content_ref:
-              version === undefined
-                ? undefined
-                : {
-                    kind: "artifact_version",
-                    version,
-                    sourceNodeId: store.activeNodeId ?? undefined,
-                  },
-            content_size: markdown.length,
-            has_full_content: true,
-          });
-        }
-        break;
-      case "permission_request":
-        store.addPermissionRequest({
-          id: msg.id as string,
-          tool_name: msg.tool_name as string,
-          description: msg.description as string,
-          risk_level: msg.risk_level as "low" | "medium" | "high",
-        });
-        store.appendChatEntry({
-          id: chatEntryId("permission_request", msg.id as string),
-          type: "permission_request",
-          role: "system",
-          content: permissionRequestContent({
-            tool_name: msg.tool_name as string,
-            description: msg.description as string,
-          }),
-          timestamp: new Date().toISOString(),
-          node_id: store.activeNodeId ?? undefined,
-          metadata: {
-            request_id: msg.id as string,
-            tool_name: msg.tool_name as string,
-            description: msg.description as string,
-            risk_level: msg.risk_level as "low" | "medium" | "high",
-          },
-        });
-        break;
-      case "choice_request":
-        store.appendChatEntry({
-          id: chatEntryId("choice_request", msg.id as string),
-          type: "choice_request",
-          role: "system",
-          content: msg.prompt as string,
-          timestamp: new Date().toISOString(),
-          node_id: store.activeNodeId ?? undefined,
-          metadata: {
-            request_id: msg.id as string,
-            prompt: msg.prompt as string,
-            options: (msg.options as unknown[]) ?? [],
-            allow_multiple: msg.allow_multiple === true,
-            allow_free_text: msg.allow_free_text === true,
-            source: typeof msg.source === "string" ? msg.source : "provider_choice",
-          },
-        });
-        break;
-      case "provider_status":
-        store.setProviderStatus(msg.status as ProviderStatus);
-        break;
-      case "execution_event":
-        {
-          const event = msg.event as ExecutionEvent;
-          const provider = providerNameForNode(store, event.node_id ?? null, event.agent ?? null);
-          store.upsertExecutionEvent(event);
-          if (isProviderPromptEvent(event)) {
-            store.appendChatEntry({
-              id: providerPromptChatEntryId(event),
-              type: "execution_event",
-              role: entryRoleForNode(store, event.node_id ?? null, "system"),
-              content: `${executionEventContent(event, nodeTitleForEvent(store, event))} · ${formatContentSize(event.output.length)}`,
-              timestamp: new Date().toISOString(),
-              node_id: event.node_id ?? undefined,
-              metadata: providerPromptEventMetadata(event, provider),
-              content_ref: event.node_id
-                ? { kind: "provider_prompt", nodeId: event.node_id }
-                : undefined,
-              content_size: event.output.length,
-              has_full_content: true,
-            });
-            break;
-          }
-          store.appendChatEntry({
-            id: chatEntryId("execution_event", event.event_id),
-            type: "execution_event",
-            role: entryRoleForNode(store, event.node_id ?? null, "system"),
-            content: executionEventContent(event, nodeTitleForEvent(store, event)),
-            timestamp: new Date().toISOString(),
-            node_id: event.node_id ?? undefined,
-            metadata: provider ? { ...event, provider } : { ...event },
-          });
-        }
-        break;
-      case "timeline_node_created":
-        store.addTimelineNode(msg.node as TimelineNode);
-        break;
-      case "timeline_node_updated":
-        store.updateTimelineNode(
-          msg.node_id as string,
-          msg.status as TimelineNodeStatus,
-          msg.summary as string | null | undefined,
-          msg.completed_at as string | null | undefined,
-        );
-        break;
-      case "review_complete":
-        {
-          const findings = Array.isArray(msg.findings) ? msg.findings : [];
-          const reviewGate =
-            typeof msg.review_gate === "string" ? msg.review_gate : undefined;
-          const verdict = {
-            verdict: msg.verdict,
-            comments: msg.comments,
-            summary: msg.summary,
-            findings,
-            ...(reviewGate ? { review_gate: reviewGate } : {}),
-          } as ReviewVerdict;
-          store.setNodeVerdict(msg.node_id as string, verdict);
-          store.appendChatEntry({
-            id: chatEntryId("review_verdict", msg.node_id as string),
-            type: "review_verdict",
-            role: "reviewer",
-            content: msg.summary as string,
-            timestamp: new Date().toISOString(),
-            node_id: msg.node_id as string,
-            metadata: {
-              verdict: msg.verdict as string,
-              comments: msg.comments as string,
-              summary: msg.summary as string,
-              round: msg.round as number,
-              findings,
-              ...(reviewGate ? { review_gate: reviewGate } : {}),
-            },
-          });
-        }
-        break;
-      case "review_decision_required":
-        store.setPendingDecision({
-          node_id: msg.node_id as string,
-          round: msg.round as number,
-          options: msg.options as string[],
-        });
-        break;
-      case "error":
-        store.setError(msg.message as string);
-        store.appendChatEntry({
-          id: chatEntryId("error", msg.message as string),
-          type: "error",
-          role: "system",
-          content: msg.message as string,
-          timestamp: new Date().toISOString(),
-          metadata: {
-            message: msg.message as string,
-          },
-        });
-        break;
-      case "protocol_error":
-        {
-          const code = msg.code as string;
-          const message = msg.message as string;
-          if (code === "CHOICE_ID_UNMATCHED") {
-            const choiceId = choiceIdFromProtocolError(msg.context, message);
-            if (choiceId) {
-              store.rejectChoiceRequest(choiceId, message);
-            }
-          }
-          store.setProtocolError({
-            code,
-            message,
-          });
-        }
-        store.appendChatEntry({
-          id: chatEntryId("protocol_error", `${msg.code as string}:${msg.message as string}`),
-          type: "error",
-          role: "system",
-          content: `${msg.code as string} · ${msg.message as string}`,
-          timestamp: new Date().toISOString(),
-          metadata: {
-            code: msg.code as string,
-            message: msg.message as string,
-          },
-        });
-        break;
-      case "provider_locked":
-        store.setProviderLocked({
-          snapshot: msg.snapshot as ProviderConfigSnapshot,
-          locked_at: msg.locked_at as string,
-        });
-        store.appendChatEntry({
-          id: chatEntryId("start_generation", msg.locked_at as string),
-          type: "start_generation",
-          role: "system",
-          content: "开始生成",
-          timestamp: msg.locked_at as string,
-          metadata: {
-            snapshot: msg.snapshot as ProviderConfigSnapshot,
-            locked_at: msg.locked_at as string,
-          },
-        });
-        break;
-      case "pong":
-        break;
-    }
+    handleWorkspaceWsMessage(msg, {
+      invalidatedPreStageNodeIds: invalidatedPreStageNodeIdsRef.current,
+      scheduleFlush,
+      streamFlushTimeouts: streamFlushTimeoutsRef.current,
+    });
   }
 
   const sendJson = useCallback((message: WorkspaceWsSendMessage) => {
@@ -576,6 +300,93 @@ export function useWorkspaceWs(sessionId: string | null) {
   const sendAuthorDecision = useCallback(
     (decision: AuthorDecision) => {
       sendJson({ type: "author_decision", decision });
+    },
+    [sendJson],
+  );
+
+  const sendRequestRevision = useCallback(
+    (feedback?: string) => {
+      const trimmedFeedback = feedback?.trim();
+      sendJson({
+        type: "request_revision",
+        feedback: {
+          feedback_types: ["revision"],
+          description: trimmedFeedback ?? "",
+        },
+      });
+    },
+    [sendJson],
+  );
+
+  const sendRevertWorkItem = useCallback(
+    (workItemId: string, feedback?: string, clear = false) => {
+      sendJson({
+        type: "revert_work_item",
+        work_item_id: workItemId,
+        feedback: feedback?.trim() ?? null,
+        clear,
+      });
+    },
+    [sendJson],
+  );
+
+  const sendSelectWorkItemGenerationMode = useCallback(
+    (mode: WorkItemGenerationMode) => {
+      sendJson({ type: "select_work_item_generation_mode", mode });
+    },
+    [sendJson],
+  );
+
+  const sendRequestOutlineRevision = useCallback(
+    (feedback?: string) => {
+      const trimmedFeedback = feedback?.trim();
+      sendJson({
+        type: "request_outline_revision",
+        feedback: trimmedFeedback ? trimmedFeedback : null,
+      });
+    },
+    [sendJson],
+  );
+
+  const sendWorkItemDraftDecision = useCallback(
+    (outlineId: string, decision: WorkItemDraftDecision, feedback?: string) => {
+      const trimmedFeedback = feedback?.trim();
+      sendJson({
+        type: "work_item_draft_decision",
+        outline_id: outlineId,
+        decision,
+        feedback: trimmedFeedback ? trimmedFeedback : null,
+      });
+    },
+    [sendJson],
+  );
+
+  const sendWorkItemBatchDecision = useCallback(
+    (
+      decision: WorkItemBatchDecision,
+      feedback?: string,
+      firstAffectedOutlineId?: string,
+    ) => {
+      const trimmedFeedback = feedback?.trim();
+      const trimmedOutlineId = firstAffectedOutlineId?.trim();
+      sendJson({
+        type: "work_item_batch_decision",
+        decision,
+        feedback: trimmedFeedback ? trimmedFeedback : null,
+        first_affected_outline_id: trimmedOutlineId ? trimmedOutlineId : null,
+      });
+    },
+    [sendJson],
+  );
+
+  const sendWorkItemPlanCompileRecoveryAction = useCallback(
+    (action: WorkItemPlanCompileRecoveryAction, reason?: string) => {
+      const trimmedReason = reason?.trim();
+      sendJson({
+        type: "work_item_plan_compile_recovery_action",
+        action,
+        reason: trimmedReason ? trimmedReason : null,
+      });
     },
     [sendJson],
   );
@@ -691,6 +502,13 @@ export function useWorkspaceWs(sessionId: string | null) {
     sendStartGeneration,
     sendSelectRevisionPath,
     sendAuthorDecision,
+    sendRequestRevision,
+    sendRevertWorkItem,
+    sendSelectWorkItemGenerationMode,
+    sendRequestOutlineRevision,
+    sendWorkItemDraftDecision,
+    sendWorkItemBatchDecision,
+    sendWorkItemPlanCompileRecoveryAction,
     sendHumanConfirm,
     sendHello,
     sendPing,
@@ -708,216 +526,5 @@ export function useWorkspaceWs(sessionId: string | null) {
     isReconnecting,
     reconnectAttemptCount,
     retryNow,
-  };
-}
-
-function handleStreamChunk(store: ReturnType<typeof useWorkspaceStore.getState>, msg: WsServerMessage) {
-  const nodeId = resolveStreamEntryNodeId(store, msg.node_id as string | null | undefined);
-  const entryId = streamEntryId(nodeId);
-  const role = chatEntryRole((msg.role as string | undefined) ?? "author");
-  const provider = providerNameForNode(store, nodeId, null);
-  if (!store.chatEntries.some((entry) => entry.id === entryId)) {
-    store.appendChatEntry({
-      id: entryId,
-      type: "provider_stream",
-      role,
-      content: "",
-      timestamp: new Date().toISOString(),
-      node_id: nodeId === "global" ? undefined : nodeId,
-      metadata: provider ? { provider } : undefined,
-    });
-  }
-  store.updateStreamingEntry(entryId, msg.content as string);
-}
-
-function chatEntryRole(role: string): ChatEntryRole {
-  return role === "reviewer" ? "reviewer" : "author";
-}
-
-function resolveStreamEntryId(
-  store: ReturnType<typeof useWorkspaceStore.getState>,
-  nodeId?: string | null,
-) {
-  if (nodeId) {
-    return `${nodeId}:stream-active`;
-  }
-  return streamEntryId(resolveStreamEntryNodeId(store, nodeId));
-}
-
-function resolveStreamEntryNodeId(
-  store: ReturnType<typeof useWorkspaceStore.getState>,
-  nodeId?: string | null,
-) {
-  return nodeId ?? store.activeNodeId ?? "global";
-}
-
-function streamEntryId(nodeId: string | null | undefined) {
-  return `${nodeId ?? "global"}:stream`;
-}
-
-function chatEntryId(kind: string, suffix: string) {
-  return `${kind}:${suffix}`;
-}
-
-function permissionRequestContent(request: { tool_name: string; description: string }) {
-  return request.description ? `${request.tool_name} · ${request.description}` : request.tool_name;
-}
-
-function executionEventContent(event: ExecutionEvent, nodeTitle?: string | null) {
-  const command = event.kind === "command" ? event.command?.trim() : "";
-  if (command) {
-    return command;
-  }
-  if (event.title === "Provider Prompt" && typeof event.output === "string" && nodeTitle) {
-    return `${nodeTitle} · Provider Prompt`;
-  }
-  return event.detail ? `${event.title} · ${event.detail}` : event.title;
-}
-
-function isProviderPromptEvent(
-  event: Pick<ExecutionEvent, "title" | "output">,
-): event is Pick<ExecutionEvent, "title" | "output"> & { output: string } {
-  return event.title === "Provider Prompt" && typeof event.output === "string";
-}
-
-function providerPromptChatEntryId(event: ExecutionEvent) {
-  return event.node_id
-    ? chatEntryId(event.node_id, "provider-prompt")
-    : chatEntryId("execution_event", event.event_id);
-}
-
-function providerPromptEventMetadata(event: ExecutionEvent, provider?: string | null) {
-  return {
-    event_id: event.event_id,
-    node_id: event.node_id ?? null,
-    agent: event.agent ?? null,
-    kind: event.kind,
-    status: event.status,
-    title: event.title,
-    detail: event.detail ?? null,
-    command: event.command ?? null,
-    cwd: event.cwd ?? null,
-    exit_code: event.exit_code ?? null,
-    ...(provider ? { provider } : {}),
-  };
-}
-
-function formatContentSize(chars: number) {
-  if (chars < 1024) {
-    return `${chars} 字符`;
-  }
-  return `约 ${Math.ceil(chars / 1024)}KB`;
-}
-
-function nodeTitleForEvent(
-  store: ReturnType<typeof useWorkspaceStore.getState>,
-  event: ExecutionEvent,
-) {
-  return event.node_id
-    ? store.timelineNodes.find((candidate) => candidate.node_id === event.node_id)?.title ?? null
-    : null;
-}
-
-function entryRoleForNode(
-  store: ReturnType<typeof useWorkspaceStore.getState>,
-  nodeId: string | null | undefined,
-  fallback: ChatEntryRole,
-) {
-  const node = nodeId
-    ? store.timelineNodes.find((candidate) => candidate.node_id === nodeId)
-    : null;
-  if (node?.node_type === "reviewer_run") {
-    return "reviewer";
-  }
-  if (node?.node_type === "author_run") {
-    return "author";
-  }
-  const detail = nodeId ? store.nodeDetails[nodeId] : null;
-  if (detail?.agent_role === "reviewer") {
-    return "reviewer";
-  }
-  if (detail?.agent_role === "author") {
-    return "author";
-  }
-  return fallback;
-}
-
-function providerNameForNode(
-  store: ReturnType<typeof useWorkspaceStore.getState>,
-  nodeId: string | null | undefined,
-  fallback: string | null,
-) {
-  const node = nodeId
-    ? store.timelineNodes.find((candidate) => candidate.node_id === nodeId)
-    : null;
-  const detail = nodeId ? store.nodeDetails[nodeId] : null;
-  const provider = node?.agent ?? detail?.provider?.name ?? fallback;
-  return typeof provider === "string" && provider.length > 0 ? provider : null;
-}
-
-function providerName(value: string): WorkspaceProviderName | null {
-  if (value === "claude_code" || value === "codex" || value === "fake") {
-    return value;
-  }
-  return null;
-}
-
-function choiceIdFromProtocolError(context: unknown, message: string) {
-  if (isRecord(context) && typeof context.choice_id === "string") {
-    return context.choice_id;
-  }
-  return message.match(/^ChoiceResponse id=(.+) not found in pending$/)?.[1] ?? null;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-function wsReadyStateName(socket: WebSocket | null) {
-  switch (socket?.readyState) {
-    case WebSocket.CONNECTING:
-      return "connecting";
-    case WebSocket.OPEN:
-      return "open";
-    case WebSocket.CLOSING:
-      return "closing";
-    case WebSocket.CLOSED:
-      return "closed";
-    default:
-      return "missing";
-  }
-}
-
-function gatePromptEntryForState(state: ReturnType<typeof useWorkspaceStore.getState>): ChatEntry | null {
-  if (state.stage !== "human_confirm") {
-    return null;
-  }
-
-  const gatePromptNode =
-    [...state.timelineNodes].reverse().find((node) => node.node_type === "human_confirm") ??
-    state.timelineNodes.at(-1);
-  const latestReview = state.chatEntries.filter((entry) => entry.type === "review_verdict").at(-1);
-  const summary = latestReview?.metadata?.summary?.toString() ?? "";
-  const verdict = latestReview?.metadata?.verdict?.toString() ?? "";
-  const comments = latestReview?.metadata?.comments?.toString() ?? "";
-  const findings = Array.isArray(latestReview?.metadata?.findings)
-    ? latestReview.metadata.findings
-    : [];
-  const reviewGate = latestReview?.metadata?.review_gate?.toString() ?? "";
-  const metadata = {
-    ...(summary ? { summary } : {}),
-    ...(verdict ? { verdict } : {}),
-    ...(comments ? { comments } : {}),
-    ...(findings.length > 0 ? { findings } : {}),
-    ...(reviewGate ? { review_gate: reviewGate } : {}),
-  };
-  return {
-    id: `${gatePromptNode?.node_id ?? "human_confirm"}:gate-prompt`,
-    type: "gate_prompt",
-    role: "system",
-    content: verdict === "needs_human" ? "需要人工确认" : "等待人工确认",
-    timestamp: gatePromptNode?.completed_at ?? gatePromptNode?.started_at ?? new Date().toISOString(),
-    node_id: gatePromptNode?.node_id,
-    metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
   };
 }

@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use crate::cross_cutting::claude_code_provider::ClaudeCodeProvider;
 use crate::cross_cutting::codex_provider::CodexProvider;
+use crate::cross_cutting::provider_adapter::ProviderAdapter;
 use crate::cross_cutting::provider_registry::ProviderRegistry;
 use crate::cross_cutting::streaming_provider::ProviderCommand;
 use crate::product::models::ProviderName;
@@ -87,6 +88,7 @@ pub struct WebAppState {
     pub events: EventHub,
     pub provider_registry: Arc<ProviderRegistry>,
     pub provider_availability: Arc<dyn Fn(&ProviderName) -> bool + Send + Sync>,
+    pub provider_adapter: Arc<dyn ProviderAdapter + Send + Sync>,
     pub test_controls: TestControls,
     pub workspace_runs: WorkspaceRunRegistry,
 }
@@ -104,12 +106,14 @@ impl WebAppState {
             } else {
                 Arc::new(|_| true)
             };
+        let provider_adapter = runtime.provider_adapter();
         Self {
             workspace_root,
             runtime: Arc::new(StdMutex::new(runtime)),
             events,
             provider_registry: default_provider_registry(test_controls.clone()),
             provider_availability,
+            provider_adapter,
             test_controls,
             workspace_runs: WorkspaceRunRegistry::default(),
         }
@@ -153,15 +157,25 @@ impl WebAppState {
             } else {
                 Arc::new(|_| true)
             };
+        let provider_adapter = runtime.provider_adapter();
         Self {
             workspace_root,
             runtime: Arc::new(StdMutex::new(runtime)),
             events,
             provider_registry,
             provider_availability,
+            provider_adapter,
             test_controls: TestControls::default(),
             workspace_runs: WorkspaceRunRegistry::default(),
         }
+    }
+
+    pub fn with_provider_adapter(
+        mut self,
+        provider_adapter: Arc<dyn ProviderAdapter + Send + Sync>,
+    ) -> Self {
+        self.provider_adapter = provider_adapter;
+        self
     }
 }
 

@@ -8,6 +8,9 @@ use tokio::time::timeout;
 
 use crate::product::coding_models::{PushStatus, RemoteKind};
 
+const SAFE_WORKTREE_PREFIXES: &[&str] = &["aria-work-items", "aria-issues"];
+const SAFE_BRANCH_PREFIXES: &[&str] = &["aria/work-items/", "aria/issues/"];
+
 #[derive(Debug, thiserror::Error)]
 pub enum GitWorkspaceError {
     #[error("git_workspace_io: {0}")]
@@ -78,6 +81,14 @@ impl GitWorkspaceService {
         base_branch: &str,
     ) -> Result<(), GitWorkspaceError> {
         ensure_git_repo(repo_path).await?;
+        ensure_safe_aria_branch_name(branch_name)?;
+        let ref_name = format!("refs/heads/{branch_name}");
+        let exists = self
+            .run_git_allow_failure(repo_path, &["show-ref", "--verify", "--quiet", &ref_name])
+            .await?;
+        if exists.status_success {
+            return Ok(());
+        }
         self.run_git(repo_path, &["branch", branch_name, base_branch])
             .await
             .map(|_| ())
@@ -90,7 +101,21 @@ impl GitWorkspaceService {
         worktree_path: &Path,
     ) -> Result<(), GitWorkspaceError> {
         ensure_git_repo(repo_path).await?;
+        ensure_safe_aria_branch_name(branch_name)?;
         ensure_safe_worktree_path(repo_path, worktree_path)?;
+
+        if let Some(existing_branch) = self.find_worktree_branch(repo_path, worktree_path).await? {
+            if existing_branch == branch_name {
+                return Ok(());
+            }
+            return Err(GitWorkspaceError::UnsafePath(format!(
+                "worktree {} already bound to branch {} not {}",
+                worktree_path.display(),
+                existing_branch,
+                branch_name
+            )));
+        }
+
         if let Some(parent) = worktree_path.parent() {
             std::fs::create_dir_all(parent).map_err(|error| {
                 GitWorkspaceError::Io(format!("create {}: {error}", parent.display()))
@@ -131,7 +156,7 @@ impl GitWorkspaceService {
         branch_name: &str,
     ) -> Result<(), GitWorkspaceError> {
         ensure_git_repo(repo_path).await?;
-        ensure_safe_attempt_branch_name(branch_name)?;
+        ensure_safe_aria_branch_name(branch_name)?;
         let ref_name = format!("refs/heads/{branch_name}");
         let exists = self
             .run_git_allow_failure(repo_path, &["show-ref", "--verify", "--quiet", &ref_name])
@@ -317,6 +342,41 @@ impl GitWorkspaceService {
         Ok(diff)
     }
 
+    async fn find_worktree_branch(
+        &self,
+        repo_path: &Path,
+        worktree_path: &Path,
+    ) -> Result<Option<String>, GitWorkspaceError> {
+        let output = self
+            .run_git(repo_path, &["worktree", "list", "--porcelain"])
+            .await?;
+        let target = worktree_path
+            .canonicalize()
+            .unwrap_or_else(|_| worktree_path.to_path_buf());
+        let mut current_path: Option<String> = None;
+        for line in output.stdout.lines() {
+            if let Some(path) = line.strip_prefix("worktree ") {
+                current_path = Some(path.to_string());
+            } else if let Some(branch) = line.strip_prefix("branch ") {
+                if let Some(path) = current_path.take() {
+                    let path_buf = PathBuf::from(&path);
+                    let normalized = path_buf.canonicalize().unwrap_or_else(|_| path_buf.clone());
+                    if normalized == target {
+                        return Ok(Some(
+                            branch
+                                .strip_prefix("refs/heads/")
+                                .unwrap_or(branch)
+                                .to_string(),
+                        ));
+                    }
+                }
+            } else if line.is_empty() {
+                current_path = None;
+            }
+        }
+        Ok(None)
+    }
+
     async fn run_git(
         &self,
         cwd: &Path,
@@ -414,13 +474,31 @@ fn ensure_safe_worktree_path(
         repo_root.join(worktree_path)
     };
     let normalized = normalize_existing_prefix(&absolute)?;
-    let expected = repo_root.join(".worktrees").join("aria-work-items");
-    let expected = normalize_existing_prefix(&expected)?;
-    if !normalized.starts_with(&expected) {
+    let worktrees_root = normalize_existing_prefix(&repo_root.join(".worktrees"))?;
+    if !normalized.starts_with(&worktrees_root) {
         return Err(GitWorkspaceError::UnsafePath(format!(
             "{} is outside {}",
             worktree_path.display(),
-            expected.display()
+            worktrees_root.display()
+        )));
+    }
+    let relative = normalized
+        .strip_prefix(&worktrees_root)
+        .expect("normalized starts with worktrees_root");
+    let first_component = relative
+        .components()
+        .next()
+        .and_then(|component| component.as_os_str().to_str())
+        .ok_or_else(|| {
+            GitWorkspaceError::UnsafePath(format!(
+                "{} has no worktree prefix",
+                worktree_path.display()
+            ))
+        })?;
+    if !SAFE_WORKTREE_PREFIXES.contains(&first_component) {
+        return Err(GitWorkspaceError::UnsafePath(format!(
+            "{} is outside allowed aria worktree prefixes",
+            worktree_path.display()
         )));
     }
     Ok(())
@@ -439,13 +517,18 @@ fn reject_parent_dir_components(path: &Path) -> Result<(), GitWorkspaceError> {
     Ok(())
 }
 
-fn ensure_safe_attempt_branch_name(branch_name: &str) -> Result<(), GitWorkspaceError> {
-    if branch_name.starts_with("aria/work-items/") && !branch_name.contains("..") {
-        return Ok(());
+fn ensure_safe_aria_branch_name(branch_name: &str) -> Result<(), GitWorkspaceError> {
+    if branch_name.starts_with('/')
+        || branch_name.contains("..")
+        || !SAFE_BRANCH_PREFIXES
+            .iter()
+            .any(|prefix| branch_name.starts_with(*prefix))
+    {
+        return Err(GitWorkspaceError::UnsafePath(format!(
+            "{branch_name} is outside allowed aria branch prefixes"
+        )));
     }
-    Err(GitWorkspaceError::UnsafePath(format!(
-        "{branch_name} is outside aria/work-items"
-    )))
+    Ok(())
 }
 
 fn normalize_existing_prefix(path: &Path) -> Result<PathBuf, GitWorkspaceError> {

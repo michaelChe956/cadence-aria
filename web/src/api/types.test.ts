@@ -7,11 +7,17 @@ import type {
   CodingAttemptSnapshotResponse,
   CodingWsInMessage,
   CodingWsOutMessage,
+  GenerateWorkItemsRequest,
   IssueLifecycleResponse,
+  IssueWorkItemPlanDetailDto,
   InternalPrReview,
+  LifecycleWorkItem,
   NodeDetail,
+  PrepareWorkItemPlanRequest,
+  PrepareWorkItemPlanResponse,
   TestingReport,
   TimelineNodeType,
+  WorkItemExecutionPlan,
   WsInMessage,
   WsOutMessage,
 } from "./types";
@@ -81,6 +87,10 @@ describe("workspace websocket protocol types", () => {
     const attempt: CodingAttempt = {
       attempt_id: "coding_attempt_0001",
       work_item_id: "work_item_0001",
+      attempt_scope: "work_item",
+      work_item_group_id: null,
+      current_work_item_id: "work_item_0001",
+      active_unit_id: null,
       attempt_no: 1,
       status: "created",
       stage: "prepare_context",
@@ -98,6 +108,7 @@ describe("workspace websocket protocol types", () => {
       issue: {} as IssueLifecycleResponse["issue"],
       story_specs: [],
       design_specs: [],
+      work_item_plans: [],
       work_items: [
         {
           work_item_id: "work_item_0001",
@@ -110,6 +121,28 @@ describe("workspace websocket protocol types", () => {
           execution_status: "pending",
           latest_attempt: attempt,
           artifact_versions: [],
+          work_item_set_id: null,
+          kind: "backend",
+          sequence_hint: null,
+          depends_on: [],
+          exclusive_write_scopes: [],
+          forbidden_write_scopes: [],
+          context_budget: {
+            target_context_k: "30-50",
+            max_summary_chars: 20000,
+            max_handoff_chars: 12000,
+            max_code_context_chars: 30000,
+            max_context_file_refs: 80,
+            max_traceability_refs: 40,
+            max_dependency_handoffs: 3,
+          },
+          required_handoff_from: [],
+          verification_plan_ref: null,
+          require_execution_plan_confirm: false,
+          execution_plan_status: "not_started",
+          handoff_summary_ref: null,
+          completion_commit: null,
+          completion_diff_summary_ref: null,
         },
       ],
       workspace_sessions: [],
@@ -120,10 +153,52 @@ describe("workspace websocket protocol types", () => {
     expect(lifecycle.coding_attempts[0].stage).toBe("prepare_context");
   });
 
+  it("accepts lifecycle responses with issue work item plan detail fields", () => {
+    const plan = {
+      id: "issue_plan_0001",
+      project_id: "project_0001",
+      issue_id: "issue_0001",
+      source_story_spec_ids: ["story_spec_0001"],
+      source_design_spec_ids: ["design_spec_0001"],
+      options: {
+        include_integration_tests: true,
+        include_e2e_tests: false,
+        force_frontend_backend_split: true,
+        require_execution_plan_confirm: false,
+      },
+      status: "draft",
+      work_item_ids: ["work_item_frontend", "work_item_backend"],
+      repository_profile_ref: null,
+      verification_plan_ids: [],
+      dependency_graph: [],
+      validator_findings: [],
+      created_at: "2026-06-19T00:00:00Z",
+      updated_at: "2026-06-19T00:00:00Z",
+    } satisfies IssueWorkItemPlanDetailDto;
+    const response = {
+      issue: {} as IssueLifecycleResponse["issue"],
+      story_specs: [],
+      design_specs: [],
+      work_item_plans: [plan],
+      work_items: [],
+      workspace_sessions: [],
+      coding_attempts: [],
+    } satisfies IssueLifecycleResponse;
+
+    expect(response.work_item_plans[0].work_item_ids).toEqual([
+      "work_item_frontend",
+      "work_item_backend",
+    ]);
+  });
+
   it("describes coding attempt snapshots and websocket messages", () => {
     const attempt: CodingAttempt = {
       attempt_id: "coding_attempt_0001",
       work_item_id: "work_item_0001",
+      attempt_scope: "work_item",
+      work_item_group_id: null,
+      current_work_item_id: "work_item_0001",
+      active_unit_id: null,
       attempt_no: 1,
       status: "running",
       stage: "worktree_prepare",
@@ -139,6 +214,21 @@ describe("workspace websocket protocol types", () => {
     };
     const snapshot: CodingAttemptSnapshotResponse = {
       attempt,
+      attempt_scope: "work_item_group",
+      work_item_group_id: "work_item_plan_0001",
+      current_work_item_id: "work_item_0001",
+      active_unit_id: "coding_unit_0001",
+      units: [
+        {
+          unit_id: "coding_unit_0001",
+          work_item_id: "work_item_0001",
+          order_index: 0,
+          status: "running",
+          summary: null,
+          handoff_ref: null,
+          completion_commit: null,
+        },
+      ],
       provider_config_snapshot: { author: "fake", reviewer: "fake", review_rounds: 1 },
       timeline_nodes: [
         {
@@ -161,6 +251,9 @@ describe("workspace websocket protocol types", () => {
       internal_pr_review: null,
       pending_gates: [],
       pending_choices: [],
+      work_item_execution_plan: null,
+      work_item_handoff: null,
+      require_execution_plan_confirm: false,
       latest_analyst_decision: {
         id: "analyst_decision_0001",
         attempt_id: "coding_attempt_0001",
@@ -180,6 +273,11 @@ describe("workspace websocket protocol types", () => {
     const outbound: Extract<CodingWsOutMessage, { type: "coding_session_state" }> = {
       type: "coding_session_state",
       attempt_id: "coding_attempt_0001",
+      attempt_scope: "work_item_group",
+      work_item_group_id: "work_item_plan_0001",
+      current_work_item_id: "work_item_0001",
+      active_unit_id: "coding_unit_0001",
+      units: snapshot.units,
       status: "running",
       stage: "worktree_prepare",
       branch_name: "aria/work-items/work_item_0001/attempt-1",
@@ -206,6 +304,11 @@ describe("workspace websocket protocol types", () => {
       },
       provider_config_snapshot: { author: "fake", reviewer: "fake", review_rounds: 1 },
       chat_entries: [],
+      work_item_markdown: null,
+      verification_commands: [],
+      work_item_execution_plan: null,
+      work_item_handoff: null,
+      require_execution_plan_confirm: false,
       timeline_nodes: snapshot.timeline_nodes,
       role_runs: [
         {
@@ -261,6 +364,7 @@ describe("workspace websocket protocol types", () => {
     expect(outbound.role_runs?.[0].event_summary?.event_count).toBe(2);
     expect(outbound.role_runs?.[0].recent_events?.[0].detail).toBe("No tasks found");
     expect(outbound.latest_analyst_decision?.next_stage).toBe("coding");
+    expect(outbound.units[0].unit_id).toBe("coding_unit_0001");
     expect(inbound.type).toBe("start_coding");
   });
 
@@ -371,6 +475,64 @@ describe("workspace websocket protocol types", () => {
     expect(decision.run_no).toBe(1);
   });
 
+  it("accepts prepare work item plan request and response shapes", () => {
+    const request: PrepareWorkItemPlanRequest = {
+      title: "爬楼梯 Work Item Plan",
+      story_spec_ids: ["story_spec_0001"],
+      design_spec_ids: ["design_spec_0001"],
+      include_integration_tests: false,
+      include_e2e_tests: false,
+      force_frontend_backend_split: false,
+      require_execution_plan_confirm: true,
+      author_provider: "claude_code",
+      reviewer_provider: "codex",
+      review_rounds: 1,
+      superpowers_enabled: true,
+      openspec_enabled: true,
+    };
+    const response: PrepareWorkItemPlanResponse = {
+      work_item_plan: {
+        id: "issue_plan_0001",
+        project_id: "project_0001",
+        issue_id: "issue_0001",
+        source_story_spec_ids: request.story_spec_ids ?? [],
+        source_design_spec_ids: request.design_spec_ids ?? [],
+        options: {
+          include_integration_tests: false,
+          include_e2e_tests: false,
+          force_frontend_backend_split: false,
+          require_execution_plan_confirm: true,
+        },
+        status: "draft",
+        work_item_ids: [],
+        repository_profile_ref: null,
+        verification_plan_ids: [],
+        dependency_graph: [],
+        validator_findings: [],
+        created_at: "2026-06-17T00:00:00Z",
+        updated_at: "2026-06-17T00:00:00Z",
+      },
+      workspace_session: {
+        workspace_session_id: "workspace_session_plan_group_0001",
+        issue_id: "issue_0001",
+        entity_id: "issue_plan_0001",
+        workspace_type: "work_item_plan",
+        status: "open",
+        author_provider: "claude_code",
+        reviewer_provider: "codex",
+        review_rounds: 1,
+        superpowers_enabled: true,
+        openspec_enabled: true,
+        messages: [],
+      },
+    };
+
+    expect(response.work_item_plan.id).toBe("issue_plan_0001");
+    expect(response.work_item_plan.work_item_ids).toEqual([]);
+    expect(response.workspace_session.entity_id).toBe(response.work_item_plan.id);
+    expect(response.workspace_session.workspace_type).toBe("work_item_plan");
+  });
+
   it("accepts role run metadata on review reports", () => {
     const report: CodeReviewReport = {
       id: "code_review_0001",
@@ -407,5 +569,84 @@ describe("workspace websocket protocol types", () => {
 
     expect(report.run_no).toBe(1);
     expect(internal.role_run_id).toBe("coding_role_run_0002");
+  });
+
+  it("describes work item execution plan and handoff in coding snapshots", () => {
+    const plan: WorkItemExecutionPlan = {
+      id: "work_item_execution_plan_0001",
+      project_id: "project_0001",
+      issue_id: "issue_0001",
+      work_item_id: "work_item_0001",
+      attempt_id: "coding_attempt_0001",
+      status: "draft",
+      goal: "实现后端 API",
+      allowed_write_scopes: ["src/product/**"],
+      forbidden_write_scopes: ["web/**"],
+      dependency_handoffs: [],
+      story_refs: ["story_spec_0001"],
+      design_refs: ["design_spec_0001"],
+      openspec_refs: ["REQ-001"],
+      superpowers_contract: "use superpowers:test-driven-development",
+      tdd_contract: "先写失败测试，再写实现",
+      verification_plan_ref: "verification_plan_work_item_0001",
+      verification_summary: "provider supplied required gate verify_backend_unit",
+      risk_notes: [],
+      created_at: "2026-06-16T00:00:00Z",
+      updated_at: "2026-06-16T00:00:00Z",
+    };
+
+    expect(plan.allowed_write_scopes).toEqual(["src/product/**"]);
+  });
+});
+
+describe("work item split lifecycle types", () => {
+  it("describes split work item lifecycle metadata", () => {
+    const workItem = {
+      work_item_id: "work_item_0001",
+      issue_id: "issue_0001",
+      repository_id: "repository_0001",
+      story_spec_ids: ["story_spec_0001"],
+      design_spec_ids: ["design_spec_0001"],
+      title: "后端 API",
+      plan_status: "confirmed",
+      execution_status: "pending",
+      latest_attempt: null,
+      artifact_versions: [],
+      work_item_set_id: "work_item_set_0001",
+      kind: "backend",
+      sequence_hint: 10,
+      depends_on: [],
+      exclusive_write_scopes: ["src/product/**"],
+      forbidden_write_scopes: ["web/**"],
+      context_budget: {
+        target_context_k: "30-50",
+        max_summary_chars: 20000,
+        max_handoff_chars: 12000,
+        max_code_context_chars: 30000,
+        max_context_file_refs: 80,
+        max_traceability_refs: 40,
+        max_dependency_handoffs: 3,
+      },
+      required_handoff_from: [],
+      verification_plan_ref: "verification_plan_work_item_0001",
+      require_execution_plan_confirm: false,
+      execution_plan_status: "not_started",
+      handoff_summary_ref: null,
+      completion_commit: null,
+      completion_diff_summary_ref: null,
+    } satisfies LifecycleWorkItem;
+
+    const request = {
+      title: "登录会话拆分实现",
+      story_spec_ids: ["story_spec_0001"],
+      design_spec_ids: ["design_spec_0001"],
+      include_integration_tests: true,
+      include_e2e_tests: false,
+      force_frontend_backend_split: true,
+      require_execution_plan_confirm: false,
+    } satisfies GenerateWorkItemsRequest;
+
+    expect(workItem.kind).toBe("backend");
+    expect(request.include_integration_tests).toBe(true);
   });
 });
