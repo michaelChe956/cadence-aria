@@ -22,13 +22,12 @@ impl super::CodingAttemptStore {
         let existing_attempts: Vec<CodingExecutionAttempt> = super::list_json_records(
             &self.coding_attempts_root(&input.project_id, &input.issue_id),
         )?;
-        if let Some(active) = existing_attempts.into_iter().find(|attempt| {
-            attempt.scope == CodingAttemptScope::WorkItemGroup
-                && attempt.work_item_group_id.as_deref() == Some(input.plan_id.as_str())
-                && attempt.status.is_active()
-        }) {
+        if let Some(active) = existing_attempts
+            .into_iter()
+            .find(|attempt| attempt.status.is_active())
+        {
             return Err(ProductStoreError::Io(format!(
-                "active_group_coding_attempt_exists: {}",
+                "active_coding_attempt_exists: {}",
                 active.id
             )));
         }
@@ -108,11 +107,22 @@ impl super::CodingAttemptStore {
                 attempt.id
             )));
         }
+        if input.status.is_active()
+            && self
+                .list_coding_units(&input.project_id, &input.issue_id, &input.attempt_id)?
+                .into_iter()
+                .any(|unit| unit.status.is_active())
+        {
+            return Err(ProductStoreError::Io(format!(
+                "active_coding_unit_exists: {}",
+                input.attempt_id
+            )));
+        }
 
         let root = self.coding_units_root(&input.project_id, &input.issue_id, &input.attempt_id);
         let id = next_sequential_id("coding_unit", super::count_json_files(&root)?);
         let now = Utc::now().to_rfc3339();
-        let started_at = if matches!(input.status, CodingExecutionUnitStatus::Running) {
+        let started_at = if input.status.is_active() {
             Some(now.clone())
         } else {
             None
@@ -204,8 +214,19 @@ impl super::CodingAttemptStore {
         validate_relative_id(unit_id)?;
         let path = self.coding_unit_path(project_id, issue_id, attempt_id, unit_id);
         let mut unit: CodingExecutionUnit = read_json(&path)?;
+        if status.is_active()
+            && self
+                .list_coding_units(project_id, issue_id, attempt_id)?
+                .into_iter()
+                .any(|existing| existing.id != unit_id && existing.status.is_active())
+        {
+            return Err(ProductStoreError::Io(format!(
+                "active_coding_unit_exists: {}",
+                attempt_id
+            )));
+        }
         let now = Utc::now().to_rfc3339();
-        if matches!(status, CodingExecutionUnitStatus::Running) && unit.started_at.is_none() {
+        if status.is_active() && unit.started_at.is_none() {
             unit.started_at = Some(now.clone());
         }
         if matches!(
@@ -227,7 +248,10 @@ impl super::CodingAttemptStore {
                 attempt.active_unit_id = Some(active.id.clone());
                 attempt.current_work_item_id = Some(active.work_item_id.clone());
             }
-            None => attempt.active_unit_id = None,
+            None => {
+                attempt.active_unit_id = None;
+                attempt.current_work_item_id = None;
+            }
         }
         attempt.updated_at = Utc::now().to_rfc3339();
         self.save_coding_attempt(&attempt)?;

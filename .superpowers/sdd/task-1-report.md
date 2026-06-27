@@ -105,3 +105,58 @@ cargo test --locked --lib coding_attempt_store
 
 - `create_group_attempt` 的 `attempt_no` 当前沿用“按 `current_work_item_id` 统计”的最小实现；brief 未明确 group attempt 是否应改为按 `plan_id` 维度计数。
 - `active_unit_id` 在 `create_coding_unit`/`update_coding_unit_status` 中做了最小同步，但目前没有额外单测覆盖该字段的持久化细节。
+
+## 修复追加（review findings）
+
+### 修复内容
+
+- 在 `src/product/coding_attempt_store/group.rs` 强化写入期约束：
+  - `create_coding_unit` 在写入前拒绝为同一 attempt 创建第二个 active unit
+  - `update_coding_unit_status` 在写入前拒绝把一个 unit 提升为 active，若同 attempt 已有其他 active unit
+- 强化 `create_group_attempt`：
+  - 只要同 `project_id/issue_id` 下存在任意 active attempt，即拒绝创建新的 group attempt
+  - 覆盖“另一个 active group attempt（不同 plan）”和“active single WorkItem attempt”两类场景
+  - 错误字符串统一为 `active_coding_attempt_exists: <id>`
+- 修正 active unit 清空后的 attempt 同步：
+  - 当 `update_coding_unit_status` 使 attempt 内不再存在 active unit 时，同时清空 `active_unit_id` 与 `current_work_item_id`
+- 收窄 legacy serde 兼容范围：
+  - 只有 `scope == WorkItem` 且缺失 `current_work_item_id` 时，才回填为 `work_item_id`
+  - 避免 group attempt 在显式保存 `None` 后，重载时被错误回填
+
+### RED/GREEN 证据
+
+1. RED：
+
+```bash
+cargo test --locked --lib coding_attempt_store
+```
+
+结果：失败，新增 5 个回归测试暴露以下问题：
+
+- 允许写入第二个 active unit
+- 允许把 pending unit 提升为第二个 active unit
+- 允许在已有 active attempt 时创建 group attempt
+- 最后一个 active unit 完成后，`current_work_item_id` 未清空
+
+2. GREEN：
+
+```bash
+cargo test --locked --lib coding_attempt_store
+```
+
+结果：通过，`9 passed; 0 failed`
+
+3. 格式化后回归：
+
+```bash
+cargo fmt
+cargo test --locked --lib coding_attempt_store
+```
+
+结果：通过，`9 passed; 0 failed`
+
+### 本轮变更文件
+
+- `src/product/coding_attempt_store/group.rs`
+- `src/product/coding_attempt_store/tests.rs`
+- `src/product/coding_models/execution.rs`

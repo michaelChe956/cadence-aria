@@ -156,9 +156,13 @@ impl<'de> Deserialize<'de> for CodingExecutionAttempt {
         D: Deserializer<'de>,
     {
         let raw = CodingExecutionAttemptSerde::deserialize(deserializer)?;
-        let current_work_item_id = raw
-            .current_work_item_id
-            .or_else(|| Some(raw.work_item_id.clone()));
+        let current_work_item_id = raw.current_work_item_id.or_else(|| {
+            if raw.scope == CodingAttemptScope::WorkItem {
+                Some(raw.work_item_id.clone())
+            } else {
+                None
+            }
+        });
         Ok(Self {
             id: raw.id,
             project_id: raw.project_id,

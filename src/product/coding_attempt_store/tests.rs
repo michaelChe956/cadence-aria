@@ -14,9 +14,14 @@ const PROJECT_ID: &str = "project_0001";
 const ISSUE_ID: &str = "issue_0001";
 const WORK_ITEM_ID: &str = "work_item_0001";
 
-fn setup() -> (TempDir, CodingAttemptStore, CodingExecutionAttempt) {
+fn setup_store() -> (TempDir, CodingAttemptStore) {
     let tmp = TempDir::new().unwrap();
     let store = CodingAttemptStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
+    (tmp, store)
+}
+
+fn setup() -> (TempDir, CodingAttemptStore, CodingExecutionAttempt) {
+    let (tmp, store) = setup_store();
     let attempt = store
         .create_attempt(CreateCodingAttemptInput {
             project_id: PROJECT_ID.to_string(),
@@ -81,7 +86,7 @@ fn legacy_attempt_without_scope_deserializes_as_work_item_scope() {
 
 #[test]
 fn creates_group_attempt_and_units_with_single_active_unit() {
-    let (_tmp, store, _attempt) = setup();
+    let (_tmp, store) = setup_store();
 
     let group_attempt = store
         .create_group_attempt(CreateGroupCodingAttemptInput {
@@ -135,6 +140,224 @@ fn creates_group_attempt_and_units_with_single_active_unit() {
     );
     assert_eq!(units.len(), 2);
     assert_eq!(active.work_item_id, "work_item_0001");
+}
+
+#[test]
+fn rejects_creating_second_active_unit_for_same_attempt() {
+    let (_tmp, store) = setup_store();
+    let group_attempt = store
+        .create_group_attempt(CreateGroupCodingAttemptInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            plan_id: "work_item_plan_0001".to_string(),
+            current_work_item_id: WORK_ITEM_ID.to_string(),
+            base_branch: "main".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: provider_snapshot(),
+            max_auto_rework: 2,
+        })
+        .expect("group attempt");
+
+    store
+        .create_coding_unit(CreateCodingExecutionUnitInput {
+            attempt_id: group_attempt.id.clone(),
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            plan_id: "work_item_plan_0001".to_string(),
+            work_item_id: WORK_ITEM_ID.to_string(),
+            order_index: 0,
+            status: CodingExecutionUnitStatus::Running,
+        })
+        .expect("first running unit");
+
+    let error = store
+        .create_coding_unit(CreateCodingExecutionUnitInput {
+            attempt_id: group_attempt.id.clone(),
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            plan_id: "work_item_plan_0001".to_string(),
+            work_item_id: "work_item_0002".to_string(),
+            order_index: 1,
+            status: CodingExecutionUnitStatus::Running,
+        })
+        .expect_err("should reject second active unit");
+
+    assert!(error.to_string().contains("active_coding_unit_exists"));
+}
+
+#[test]
+fn rejects_updating_pending_unit_to_active_when_another_unit_is_active() {
+    let (_tmp, store) = setup_store();
+    let group_attempt = store
+        .create_group_attempt(CreateGroupCodingAttemptInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            plan_id: "work_item_plan_0001".to_string(),
+            current_work_item_id: WORK_ITEM_ID.to_string(),
+            base_branch: "main".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: provider_snapshot(),
+            max_auto_rework: 2,
+        })
+        .expect("group attempt");
+
+    let running = store
+        .create_coding_unit(CreateCodingExecutionUnitInput {
+            attempt_id: group_attempt.id.clone(),
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            plan_id: "work_item_plan_0001".to_string(),
+            work_item_id: WORK_ITEM_ID.to_string(),
+            order_index: 0,
+            status: CodingExecutionUnitStatus::Running,
+        })
+        .expect("running unit");
+    let pending = store
+        .create_coding_unit(CreateCodingExecutionUnitInput {
+            attempt_id: group_attempt.id.clone(),
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            plan_id: "work_item_plan_0001".to_string(),
+            work_item_id: "work_item_0002".to_string(),
+            order_index: 1,
+            status: CodingExecutionUnitStatus::Pending,
+        })
+        .expect("pending unit");
+
+    let error = store
+        .update_coding_unit_status(
+            PROJECT_ID,
+            ISSUE_ID,
+            &group_attempt.id,
+            &pending.id,
+            CodingExecutionUnitStatus::Running,
+            None,
+        )
+        .expect_err("should reject conflicting active update");
+
+    assert!(error.to_string().contains("active_coding_unit_exists"));
+    let reloaded_running = store
+        .get_active_coding_unit(PROJECT_ID, ISSUE_ID, &group_attempt.id)
+        .expect("active lookup")
+        .expect("active unit");
+    assert_eq!(reloaded_running.id, running.id);
+}
+
+#[test]
+fn rejects_group_attempt_when_active_group_attempt_already_exists_for_other_plan() {
+    let (_tmp, store) = setup_store();
+
+    let first = store
+        .create_group_attempt(CreateGroupCodingAttemptInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            plan_id: "work_item_plan_0001".to_string(),
+            current_work_item_id: WORK_ITEM_ID.to_string(),
+            base_branch: "main".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: provider_snapshot(),
+            max_auto_rework: 2,
+        })
+        .expect("first group attempt");
+
+    let error = store
+        .create_group_attempt(CreateGroupCodingAttemptInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            plan_id: "work_item_plan_0002".to_string(),
+            current_work_item_id: "work_item_0002".to_string(),
+            base_branch: "main".to_string(),
+            branch_name: "aria/issues/issue_0001-b".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: provider_snapshot(),
+            max_auto_rework: 2,
+        })
+        .expect_err("should reject second active attempt");
+
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "product_store_io: active_coding_attempt_exists: {}",
+            first.id
+        )
+    );
+}
+
+#[test]
+fn rejects_group_attempt_when_active_work_item_attempt_exists() {
+    let (_tmp, store, attempt) = setup();
+
+    let error = store
+        .create_group_attempt(CreateGroupCodingAttemptInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            plan_id: "work_item_plan_0001".to_string(),
+            current_work_item_id: "work_item_0002".to_string(),
+            base_branch: "main".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: provider_snapshot(),
+            max_auto_rework: 2,
+        })
+        .expect_err("should reject when single attempt is active");
+
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "product_store_io: active_coding_attempt_exists: {}",
+            attempt.id
+        )
+    );
+}
+
+#[test]
+fn clears_current_work_item_when_last_active_unit_completes() {
+    let (_tmp, store) = setup_store();
+    let group_attempt = store
+        .create_group_attempt(CreateGroupCodingAttemptInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            plan_id: "work_item_plan_0001".to_string(),
+            current_work_item_id: WORK_ITEM_ID.to_string(),
+            base_branch: "main".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: provider_snapshot(),
+            max_auto_rework: 2,
+        })
+        .expect("group attempt");
+
+    let running = store
+        .create_coding_unit(CreateCodingExecutionUnitInput {
+            attempt_id: group_attempt.id.clone(),
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            plan_id: "work_item_plan_0001".to_string(),
+            work_item_id: WORK_ITEM_ID.to_string(),
+            order_index: 0,
+            status: CodingExecutionUnitStatus::Running,
+        })
+        .expect("running unit");
+
+    store
+        .update_coding_unit_status(
+            PROJECT_ID,
+            ISSUE_ID,
+            &group_attempt.id,
+            &running.id,
+            CodingExecutionUnitStatus::Completed,
+            Some("done".to_string()),
+        )
+        .expect("complete running unit");
+
+    let reloaded_attempt = store
+        .get_attempt(PROJECT_ID, ISSUE_ID, &group_attempt.id)
+        .expect("reload attempt");
+    assert!(reloaded_attempt.active_unit_id.is_none());
+    assert!(reloaded_attempt.current_work_item_id.is_none());
 }
 
 #[test]
