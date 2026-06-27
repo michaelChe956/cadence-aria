@@ -536,7 +536,7 @@ pub async fn get_coding_attempt(
         .get_work_item_execution_plan(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .map_err(product_store_api_error)?;
     let work_item_handoff = coding_store
-        .get_work_item_handoff(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .get_visible_work_item_handoff(&attempt)
         .map_err(product_store_api_error)?;
     let units = if matches!(attempt.scope, CodingAttemptScope::WorkItemGroup) {
         coding_store

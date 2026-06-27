@@ -188,12 +188,19 @@ impl CodingWorkspaceEngine {
         attempt: &CodingExecutionAttempt,
     ) -> Result<(), CodingWorkspaceEngineError> {
         if attempt.scope == CodingAttemptScope::WorkItemGroup {
-            let active = self
-                .store
-                .get_active_coding_unit(&attempt.project_id, &attempt.issue_id, &attempt.id)?
-                .ok_or_else(|| {
-                    CodingWorkspaceEngineError::WorkItemHandoffMissing(attempt.id.clone())
-                })?;
+            let Some(active) = self.store.get_active_coding_unit(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+            )?
+            else {
+                if self.store.get_visible_work_item_handoff(attempt)?.is_some() {
+                    return Ok(());
+                }
+                return Err(CodingWorkspaceEngineError::WorkItemHandoffMissing(
+                    attempt.id.clone(),
+                ));
+            };
             let handoff_ref = format!("units/{}/work-item-handoff.json", active.id);
             if self
                 .store

@@ -241,16 +241,31 @@ impl super::CodingAttemptStore {
         if attempt.scope != CodingAttemptScope::WorkItemGroup {
             return self.get_work_item_handoff(&attempt.project_id, &attempt.issue_id, &attempt.id);
         }
-        let Some(active_unit) =
+        if let Some(active_unit) =
             self.get_active_coding_unit(&attempt.project_id, &attempt.issue_id, &attempt.id)?
-        else {
+        {
+            return self.get_coding_unit_handoff(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &active_unit.id,
+            );
+        }
+        let last_completed = self
+            .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+            .into_iter()
+            .filter(|unit| {
+                unit.status == crate::product::coding_models::CodingExecutionUnitStatus::Completed
+            })
+            .max_by_key(|unit| unit.order_index);
+        let Some(last_completed) = last_completed else {
             return Ok(None);
         };
         self.get_coding_unit_handoff(
             &attempt.project_id,
             &attempt.issue_id,
             &attempt.id,
-            &active_unit.id,
+            &last_completed.id,
         )
     }
 

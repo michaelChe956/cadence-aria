@@ -203,3 +203,85 @@ async fn completing_group_units_saves_distinct_handoffs_per_unit() {
     );
     assert_ne!(unit1_handoff.work_item_id, unit2_handoff.work_item_id);
 }
+
+#[test]
+fn group_visible_handoff_returns_last_completed_unit_when_no_active_unit_exists() {
+    let (_root, _paths, store, _engine, attempt) = group_engine_with_last_running_unit();
+    store
+        .save_coding_unit_handoff(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            "coding_unit_0001",
+            &WorkItemHandoff {
+                id: "work_item_handoff_0001".to_string(),
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                work_item_id: "work_item_0001".to_string(),
+                attempt_id: attempt.id.clone(),
+                provider_run_ref: None,
+                summary: "unit1".to_string(),
+                files_changed: Vec::new(),
+                commit_sha: None,
+                diff_summary: String::new(),
+                tests_run: Vec::new(),
+                test_result_summary: String::new(),
+                review_summary: None,
+                api_or_contract_changes: Vec::new(),
+                open_risks: Vec::new(),
+                next_work_item_notes: Vec::new(),
+                created_at: "2026-06-27T00:00:00Z".to_string(),
+            },
+        )
+        .expect("save unit1 handoff");
+    store
+        .save_coding_unit_handoff(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            "coding_unit_0002",
+            &WorkItemHandoff {
+                id: "work_item_handoff_0002".to_string(),
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                work_item_id: "work_item_0002".to_string(),
+                attempt_id: attempt.id.clone(),
+                provider_run_ref: None,
+                summary: "unit2".to_string(),
+                files_changed: Vec::new(),
+                commit_sha: None,
+                diff_summary: String::new(),
+                tests_run: Vec::new(),
+                test_result_summary: String::new(),
+                review_summary: None,
+                api_or_contract_changes: Vec::new(),
+                open_risks: Vec::new(),
+                next_work_item_notes: Vec::new(),
+                created_at: "2026-06-27T00:00:00Z".to_string(),
+            },
+        )
+        .expect("save unit2 handoff");
+    store
+        .update_coding_unit_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            "coding_unit_0002",
+            CodingExecutionUnitStatus::Completed,
+            Some("done".to_string()),
+        )
+        .expect("complete last unit");
+    let updated = store
+        .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("updated");
+
+    let visible = store
+        .get_visible_work_item_handoff(&updated)
+        .expect("visible handoff")
+        .expect("last completed handoff exists");
+
+    assert!(updated.active_unit_id.is_none());
+    assert!(updated.current_work_item_id.is_none());
+    assert_eq!(visible.work_item_id, "work_item_0002");
+    assert_eq!(visible.summary, "unit2");
+}

@@ -5,13 +5,16 @@ use std::process::Command;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use cadence_aria::product::app_paths::ProductAppPaths;
-use cadence_aria::product::coding_attempt_store::{CodingAttemptStore, CreateChoiceGateInput};
+use cadence_aria::product::coding_attempt_store::{
+    CodingAttemptStore, CreateChoiceGateInput, CreateCodingExecutionUnitInput,
+    CreateGroupCodingAttemptInput,
+};
 use cadence_aria::product::coding_models::{
     CodeReviewReport, CodingAgentRole, CodingChoiceOption, CodingExecutionAttempt,
-    CodingExecutionStage, CodingProviderRole, CodingTimelineNode, CodingTimelineNodeStatus,
-    FindingSeverity, InternalPrReview, PushStatus, RemoteKind, ReviewFinding, ReviewRequest,
-    ReviewRequestKind, ReviewVerdict, TestCommand, TestCommandStatus, TestingOverallStatus,
-    TestingReport,
+    CodingExecutionStage, CodingExecutionUnitStatus, CodingProviderRole, CodingTimelineNode,
+    CodingTimelineNodeStatus, FindingSeverity, InternalPrReview, PushStatus, RemoteKind,
+    ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict, TestCommand,
+    TestCommandStatus, TestingOverallStatus, TestingReport, WorkItemHandoff,
 };
 use cadence_aria::product::lifecycle_store::{
     CreateIssueWorkItemPlanInput, CreateVerificationPlanInput, CreateWorkItemInput,
@@ -298,6 +301,127 @@ async fn returns_group_coding_attempt_snapshot_with_units() {
     assert_eq!(snapshot["units"].as_array().expect("units").len(), 2);
     assert_eq!(snapshot["units"][0]["status"], "running");
     assert_eq!(snapshot["units"][1]["status"], "pending");
+}
+
+#[tokio::test]
+async fn group_coding_attempt_snapshot_uses_visible_handoff_instead_of_attempt_level_file() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    bootstrap_confirmed_work_item_plan_group(app.clone(), repo.path()).await;
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_group_attempt(CreateGroupCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            plan_id: "work_item_plan_0001".to_string(),
+            current_work_item_id: "work_item_0001".to_string(),
+            base_branch: "HEAD".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: cadence_aria::web::workspace_ws_types::ProviderConfigSnapshot {
+                author: ProviderName::Fake,
+                reviewer: Some(ProviderName::Fake),
+                review_rounds: 1,
+            },
+            max_auto_rework: 2,
+        })
+        .expect("create group attempt");
+    store
+        .create_coding_unit(CreateCodingExecutionUnitInput {
+            attempt_id: attempt.id.clone(),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            plan_id: "work_item_plan_0001".to_string(),
+            work_item_id: "work_item_0001".to_string(),
+            order_index: 0,
+            status: CodingExecutionUnitStatus::Running,
+        })
+        .expect("create unit1");
+    store
+        .create_coding_unit(CreateCodingExecutionUnitInput {
+            attempt_id: attempt.id.clone(),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            plan_id: "work_item_plan_0001".to_string(),
+            work_item_id: "work_item_0002".to_string(),
+            order_index: 1,
+            status: CodingExecutionUnitStatus::Pending,
+        })
+        .expect("create unit2");
+    store
+        .save_work_item_handoff(&WorkItemHandoff {
+            id: "work_item_handoff_stale".to_string(),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            work_item_id: "work_item_9999".to_string(),
+            attempt_id: attempt.id.clone(),
+            provider_run_ref: None,
+            summary: "stale attempt-level handoff".to_string(),
+            files_changed: Vec::new(),
+            commit_sha: None,
+            diff_summary: String::new(),
+            tests_run: Vec::new(),
+            test_result_summary: String::new(),
+            review_summary: None,
+            api_or_contract_changes: Vec::new(),
+            open_risks: Vec::new(),
+            next_work_item_notes: Vec::new(),
+            created_at: "2026-06-27T00:00:00Z".to_string(),
+        })
+        .expect("save stale attempt handoff");
+    store
+        .save_coding_unit_handoff(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            "coding_unit_0001",
+            &WorkItemHandoff {
+                id: "work_item_handoff_0001".to_string(),
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                work_item_id: "work_item_0001".to_string(),
+                attempt_id: attempt.id.clone(),
+                provider_run_ref: None,
+                summary: "unit1 handoff".to_string(),
+                files_changed: Vec::new(),
+                commit_sha: None,
+                diff_summary: String::new(),
+                tests_run: Vec::new(),
+                test_result_summary: String::new(),
+                review_summary: None,
+                api_or_contract_changes: Vec::new(),
+                open_risks: Vec::new(),
+                next_work_item_notes: Vec::new(),
+                created_at: "2026-06-27T00:00:00Z".to_string(),
+            },
+        )
+        .expect("save unit1 handoff");
+    store
+        .update_coding_unit_handoff_ref(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            "coding_unit_0001",
+            Some("units/coding_unit_0001/work-item-handoff.json".to_string()),
+        )
+        .expect("set handoff ref");
+
+    let (status, snapshot) = request_json(
+        app,
+        Method::GET,
+        &format!("/api/coding-attempts/{}", attempt.id),
+        json!({}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(snapshot["attempt_scope"], "work_item_group");
+    assert_eq!(snapshot["work_item_handoff"]["work_item_id"], "work_item_0001");
+    assert_eq!(snapshot["work_item_handoff"]["summary"], "unit1 handoff");
 }
 
 #[tokio::test]
