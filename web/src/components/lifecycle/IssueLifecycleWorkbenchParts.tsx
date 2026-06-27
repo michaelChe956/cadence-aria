@@ -1,5 +1,6 @@
 import { PanelRightOpen } from "lucide-react";
 import type {
+  CodingAttempt,
   IssueLifecycleResponse,
   LifecycleWorkItem,
   ProductIssue,
@@ -455,11 +456,20 @@ export function toDrawerEntity(
   }
 
   if (card.kind === "work_item_group") {
+    const latestGroupAttempt: CodingAttempt | null =
+      typeof card.raw === "object" &&
+      card.raw !== null &&
+      "latest_group_attempt" in card.raw &&
+      card.raw.latest_group_attempt &&
+      typeof card.raw.latest_group_attempt === "object"
+        ? (card.raw.latest_group_attempt as CodingAttempt)
+        : null;
     const itemsById = new Map(
       (allWorkItems ?? []).map((item) => [item.work_item_id, item]),
     );
     return {
       ...base,
+      latestAttempt: latestGroupAttempt,
       artifactVersions: card.artifactVersions,
       childWorkItems: card.childWorkItemIds
         .map((id) => itemsById.get(id))

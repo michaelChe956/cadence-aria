@@ -3,6 +3,7 @@ import type { IssueWorkItemPlanDetailDto } from "../../api/types";
 import { useLifecycleWorkbenchStore } from "../../state/lifecycle-workbench-store";
 import {
   codingAttemptRecord,
+  codingGroupAttemptRecord,
   findDesignBySession,
   findSession,
   findStoryBySession,
@@ -529,6 +530,17 @@ export function lifecycleFetch(options?: {
         workItem.latest_attempt = attempt;
         workItem.execution_status = "coding";
       }
+      return jsonResponse(attempt);
+    }
+    const groupCodingAttemptCreateMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/issues\/([^/]+)\/work-item-plans\/([^/]+)\/coding-attempts$/,
+    );
+    if (groupCodingAttemptCreateMatch && init?.method === "POST") {
+      const issueId = groupCodingAttemptCreateMatch[2];
+      const planId = groupCodingAttemptCreateMatch[3];
+      const lifecycle = lifecycleData(issueId);
+      const attempt = codingGroupAttemptRecord(planId);
+      lifecycle.coding_attempts.push(attempt);
       return jsonResponse(attempt);
     }
     const issuesMatch = url.match(/^\/api\/projects\/([^/]+)\/issues$/);

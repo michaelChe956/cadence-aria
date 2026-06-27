@@ -267,6 +267,20 @@ export function createCodingAttempt(
   );
 }
 
+export function createGroupCodingAttempt(
+  projectId: string,
+  issueId: string,
+  planId: string,
+): Promise<CodingAttempt> {
+  return requestJson<CodingAttempt>(
+    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/work-item-plans/${encodeURIComponent(planId)}/coding-attempts`,
+    {
+      method: "POST",
+      body: JSON.stringify({}),
+    },
+  );
+}
+
 export function getCodingAttemptSnapshot(
   attemptId: string,
 ): Promise<CodingAttemptSnapshotResponse> {

@@ -23,6 +23,7 @@ import {
   lockedProviderRole,
   requestIdFromEntry,
 } from "./CodingWorkspaceControls";
+import { CodingWorkspaceGroupProgress } from "./CodingWorkspaceGroupProgress";
 import { PrepareExecutionPlanPanel, StatusBadge } from "./CodingWorkspaceReports";
 
 export function CodingWorkspacePage({
@@ -121,6 +122,13 @@ export function CodingWorkspacePage({
           <ActionButtons api={api} stage={store.stage} status={store.status} />
         </div>
       </header>
+      {store.attemptScope === "work_item_group" && store.units.length > 0 ? (
+        <CodingWorkspaceGroupProgress
+          planId={store.workItemGroupId}
+          currentWorkItemId={store.currentWorkItemId}
+          units={store.units}
+        />
+      ) : null}
 
       <main className="grid min-h-0 min-w-0 flex-1 grid-cols-1 overflow-hidden md:grid-cols-[16rem_minmax(0,1fr)]">
         <CodingTimeline

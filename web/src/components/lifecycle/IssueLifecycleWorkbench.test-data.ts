@@ -269,6 +269,29 @@ export function codingAttemptRecord(workItemId: string): CodingAttempt {
   };
 }
 
+export function codingGroupAttemptRecord(planId: string): CodingAttempt {
+  return {
+    attempt_id: "coding_attempt_0001",
+    work_item_id: "work_item_backend",
+    attempt_scope: "work_item_group",
+    work_item_group_id: planId,
+    current_work_item_id: "work_item_backend",
+    active_unit_id: "coding_unit_0001",
+    attempt_no: 1,
+    status: "created",
+    stage: "prepare_context",
+    branch_name: `aria/issues/issue_0001/${planId}/attempt-1`,
+    base_branch: "main",
+    worktree_path: null,
+    rework_count: 0,
+    head_commit: null,
+    push_status: null,
+    review_request_url: null,
+    created_at: "2026-05-23T00:00:00Z",
+    updated_at: "2026-05-23T00:00:00Z",
+  };
+}
+
 export function issueWorkItemPlanRecord(
   overrides: Partial<IssueWorkItemPlanDetailDto> = {},
 ): IssueWorkItemPlanDetailDto {

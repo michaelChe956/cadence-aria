@@ -368,7 +368,8 @@ export function LifecycleCardDrawer({
             {nextActionLabel}
           </button>
         ) : null}
-        {entity.kind === "work_item" && onOpenCodingWorkspace ? (
+        {(entity.kind === "work_item" || entity.kind === "work_item_group") &&
+        onOpenCodingWorkspace ? (
           <button
             data-testid="drawer-open-coding-workspace"
             type="button"

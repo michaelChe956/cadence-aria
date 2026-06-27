@@ -2,6 +2,7 @@ import { Plus, RefreshCw } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   createCodingAttempt,
+  createGroupCodingAttempt,
   createProject,
   createProductIssue,
   createRepository,
@@ -21,6 +22,7 @@ import {
   listRepositories,
 } from "../../api/client";
 import type {
+  CodingAttempt,
   IssueLifecycleResponse,
   Project,
   Repository,
@@ -74,6 +76,28 @@ const DEFAULT_WORK_ITEM_PLAN_OPTIONS = {
   force_frontend_backend_split: true,
   require_execution_plan_confirm: false,
 } satisfies WorkItemPlanOptionsFormValue;
+
+function latestGroupAttemptFromPlan(
+  raw: unknown,
+  lifecycle: IssueLifecycleResponse | undefined,
+  planId: string,
+): CodingAttempt | null {
+  const directAttempt =
+    typeof raw === "object" &&
+    raw !== null &&
+    "latest_group_attempt" in raw &&
+    raw.latest_group_attempt &&
+    typeof raw.latest_group_attempt === "object"
+      ? (raw.latest_group_attempt as CodingAttempt)
+      : null;
+  return (
+    directAttempt ??
+    lifecycle?.coding_attempts.find(
+      (attempt) => attempt.work_item_group_id === planId,
+    ) ??
+    null
+  );
+}
 
 export function IssueLifecycleWorkbench({
   focusEntityId,
@@ -273,19 +297,49 @@ export function IssueLifecycleWorkbench({
   }
 
   async function handleOpenCodingWorkspaceFromDrawer(card: LifecycleCardData) {
-    if (!selectedProjectId || card.kind !== "work_item") {
+    if (
+      !selectedProjectId ||
+      (card.kind !== "work_item" && card.kind !== "work_item_group")
+    ) {
       setError("缺少 Project 或 Work Item");
       return;
     }
 
-    if (card.raw.latest_attempt) {
+    if (card.kind === "work_item") {
+      if (card.raw.latest_attempt) {
+        setError(null);
+        onOpenCodingWorkspace(card.raw.latest_attempt.attempt_id);
+        return;
+      }
+
       setError(null);
-      onOpenCodingWorkspace(card.raw.latest_attempt.attempt_id);
+      const attempt = await createCodingAttempt(
+        selectedProjectId,
+        card.issueId,
+        card.id,
+      );
+      await refresh(selectedProjectId);
+      onOpenCodingWorkspace(attempt.attempt_id);
+      return;
+    }
+
+    const lifecycle = lifecycles.find(
+      (candidate) => candidate.issue.issue_id === card.issueId,
+    );
+    const latestGroupAttempt = latestGroupAttemptFromPlan(
+      card.raw,
+      lifecycle,
+      card.id,
+    );
+
+    if (latestGroupAttempt) {
+      setError(null);
+      onOpenCodingWorkspace(latestGroupAttempt.attempt_id);
       return;
     }
 
     setError(null);
-    const attempt = await createCodingAttempt(
+    const attempt = await createGroupCodingAttempt(
       selectedProjectId,
       card.issueId,
       card.id,
@@ -661,8 +715,10 @@ export function IssueLifecycleWorkbench({
               void handleOpenWorkspaceFromDrawer(focusedEntity)
             }
             onOpenCodingWorkspace={
-              focusedEntity.kind === "work_item" &&
-              focusedEntity.raw.plan_status === "confirmed"
+              ((focusedEntity.kind === "work_item" &&
+                focusedEntity.raw.plan_status === "confirmed") ||
+                (focusedEntity.kind === "work_item_group" &&
+                  focusedEntity.raw.status === "confirmed"))
                 ? () => void handleOpenCodingWorkspaceFromDrawer(focusedEntity)
                 : undefined
             }

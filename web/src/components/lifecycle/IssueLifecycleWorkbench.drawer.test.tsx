@@ -119,11 +119,43 @@ describe("IssueLifecycleWorkbench drawer and work item groups", () => {
     expect(children).toHaveTextContent("backend");
     expect(children).toHaveTextContent("confirmed");
     expect(children).toHaveTextContent("planning");
-    expect(screen.queryByRole("button", { name: "开始 Coding" })).not.toBeInTheDocument();
-    expect(
-      screen.queryByTestId("drawer-open-coding-workspace"),
-    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "开始 Coding" })).toBeInTheDocument();
+    expect(screen.getByTestId("drawer-open-coding-workspace")).toBeInTheDocument();
     expect(screen.queryByTestId("drawer-delete-work-item")).not.toBeInTheDocument();
+  });
+
+  it("creates a group coding attempt from the group drawer when no group attempt exists", async () => {
+    const fetchMock = lifecycleFetch({
+      confirmedWorkItem: true,
+      splitWorkItems: true,
+      workItemPlans: [
+        issueWorkItemPlanRecord({
+          id: "issue_plan_0001",
+          status: "confirmed",
+          work_item_ids: ["work_item_backend", "work_item_frontend"],
+        }),
+      ],
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    const onOpenCodingWorkspace = vi.fn();
+
+    render(
+      <IssueLifecycleWorkbench onOpenCodingWorkspace={onOpenCodingWorkspace} />,
+    );
+
+    await user.click(
+      await screen.findByRole("button", { name: "Work Item Group" }),
+    );
+    await user.click(screen.getByTestId("drawer-open-coding-workspace"));
+
+    await waitFor(() =>
+      expect(onOpenCodingWorkspace).toHaveBeenCalledWith("coding_attempt_0001"),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/project_0001/issues/issue_0001/work-item-plans/issue_plan_0001/coding-attempts",
+      expect.objectContaining({ method: "POST" }),
+    );
   });
 
   it("keeps drawer URL focus while opening the work item plan workspace", async () => {
