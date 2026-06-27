@@ -218,6 +218,39 @@ async fn completing_group_unit_marks_current_unit_completed_and_next_running() {
 }
 
 #[tokio::test]
+async fn completing_group_unit_moves_issue_shared_lock_to_next_unit() {
+    let (_root, paths, _store, engine, attempt) = group_engine_with_two_units();
+    let lifecycle = LifecycleStore::new(paths.clone());
+    lifecycle
+        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: paths.root().join("shared-worktree"),
+            base_branch: "HEAD".to_string(),
+        })
+        .expect("upsert shared worktree");
+    lifecycle
+        .try_acquire_issue_worktree_lock("project_0001", "issue_0001", "work_item_0001")
+        .expect("acquire shared lock for first unit");
+
+    engine
+        .complete_current_group_unit(&attempt, Some("unit handoff saved".to_string()))
+        .await
+        .expect("complete unit");
+
+    let shared = lifecycle
+        .get_issue_shared_worktree("project_0001", "issue_0001")
+        .expect("shared worktree")
+        .expect("existing shared worktree");
+    assert_eq!(
+        shared.current_active_work_item_id.as_deref(),
+        Some("work_item_0002")
+    );
+}
+
+#[tokio::test]
 async fn completing_last_group_unit_enters_review_request_stage() {
     let (_root, _paths, store, engine, attempt) = group_engine_with_last_running_unit();
 
@@ -456,6 +489,134 @@ async fn group_final_confirm_rejects_unit_handoff_outside_exclusive_scope() {
 }
 
 #[tokio::test]
+async fn group_final_confirm_requires_testing_report_for_each_unit_plan() {
+    let (_root, paths, store, engine, attempt) = group_engine_with_last_running_unit();
+    let lifecycle = LifecycleStore::new(paths.clone());
+    for (work_item_id, plan_id) in [
+        ("work_item_0001", "verification_plan_0001"),
+        ("work_item_0002", "verification_plan_0002"),
+    ] {
+        create_required_verification_plan(&lifecycle, work_item_id, plan_id);
+        lifecycle
+            .create_work_item(CreateWorkItemInput {
+                id: Some(work_item_id.to_string()),
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                repository_id: "repository_0001".to_string(),
+                story_spec_ids: Vec::new(),
+                design_spec_ids: Vec::new(),
+                title: format!("title for {work_item_id}"),
+                verification_plan_ref: Some(plan_id.to_string()),
+                ..Default::default()
+            })
+            .expect("create work item");
+    }
+    for (unit_id, work_item_id) in [
+        ("coding_unit_0001", "work_item_0001"),
+        ("coding_unit_0002", "work_item_0002"),
+    ] {
+        save_minimal_unit_handoff(&store, &attempt, unit_id, work_item_id);
+        store
+            .update_coding_unit_handoff_ref(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                unit_id,
+                Some(format!("units/{unit_id}/work-item-handoff.json")),
+            )
+            .expect("set handoff ref");
+    }
+    store
+        .update_coding_unit_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            "coding_unit_0002",
+            CodingExecutionUnitStatus::Completed,
+            Some("frontend done".to_string()),
+        )
+        .expect("complete unit2");
+    store
+        .save_testing_report(&passed_testing_report_for_plan(
+            &attempt.id,
+            "testing_report_0001",
+            "verification_plan_0001",
+        ))
+        .expect("save unit1 testing report");
+    let attempt = store
+        .update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("set running");
+    let attempt = store
+        .update_attempt_stage(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingExecutionStage::FinalConfirm,
+        )
+        .expect("final confirm stage");
+    let attempt = store
+        .update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::WaitingForHuman,
+        )
+        .expect("waiting for human");
+    let attempt = store
+        .update_attempt_head_commit(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            Some("deadbeef".to_string()),
+        )
+        .expect("set head commit");
+    lifecycle
+        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: paths.root().join("shared-worktree"),
+            base_branch: "HEAD".to_string(),
+        })
+        .expect("upsert shared worktree");
+    lifecycle
+        .try_acquire_issue_worktree_lock("project_0001", "issue_0001", "work_item_0002")
+        .expect("acquire shared worktree lock");
+    store
+        .save_timeline_node(CodingTimelineNode {
+            id: "coding_node_0001".to_string(),
+            attempt_id: attempt.id.clone(),
+            stage: CodingExecutionStage::FinalConfirm,
+            title: "最终确认".to_string(),
+            status: CodingTimelineNodeStatus::Running,
+            agent_role: Some(CodingAgentRole::System),
+            summary: None,
+            started_at: "2026-06-27T00:00:00Z".to_string(),
+            completed_at: None,
+            artifact_refs: Vec::new(),
+        })
+        .expect("save final confirm node");
+
+    let error = engine
+        .handle_final_confirm(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .await
+        .expect_err("unit2 has no matching testing report");
+
+    match error {
+        cadence_aria::product::coding_workspace_engine::CodingWorkspaceEngineError::VerificationGateResultMissing(attempt_id) => {
+            assert_eq!(attempt_id, attempt.id);
+        }
+        other => panic!("expected missing verification gate result, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn group_final_confirm_rejects_when_any_unit_not_completed() {
     let (_root, paths, store, engine, attempt) = group_engine_with_last_running_unit();
     let lifecycle = LifecycleStore::new(paths.clone());
@@ -507,4 +668,109 @@ async fn group_final_confirm_rejects_when_any_unit_not_completed() {
         cadence_aria::product::coding_workspace_engine::CodingWorkspaceEngineError::FinalConfirmNotReady(id)
             if id == attempt.id
     ));
+}
+
+fn create_required_verification_plan(
+    lifecycle: &LifecycleStore,
+    work_item_id: &str,
+    plan_id: &str,
+) {
+    lifecycle
+        .create_verification_plan(CreateVerificationPlanInput {
+            id: Some(plan_id.to_string()),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            work_item_id: work_item_id.to_string(),
+            repository_profile_ref: None,
+            provider_run_ref: None,
+            scope: VerificationScope::Unit,
+            commands: vec![VerificationCommand {
+                id: "unit_tests".to_string(),
+                label: "Unit tests".to_string(),
+                command: "cargo test --locked --lib unit".to_string(),
+                cwd: ".".to_string(),
+                purpose: "unit tests".to_string(),
+                required: true,
+                timeout_seconds: 120,
+                source: VerificationCommandSource::Provider,
+                safety: VerificationCommandSafety::Approved,
+            }],
+            manual_checks: Vec::new(),
+            required_gates: vec!["unit_tests".to_string()],
+            risk_notes: Vec::new(),
+            confidence: RepositoryProfileConfidence::High,
+            fallback_policy: VerificationFallbackPolicy::ManualGate,
+        })
+        .expect("create verification plan");
+}
+
+fn save_minimal_unit_handoff(
+    store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+    unit_id: &str,
+    work_item_id: &str,
+) {
+    store
+        .save_coding_unit_handoff(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            unit_id,
+            &WorkItemHandoff {
+                id: format!("work_item_handoff_{unit_id}"),
+                project_id: attempt.project_id.clone(),
+                issue_id: attempt.issue_id.clone(),
+                work_item_id: work_item_id.to_string(),
+                attempt_id: attempt.id.clone(),
+                provider_run_ref: None,
+                summary: format!("handoff summary for {work_item_id}"),
+                files_changed: Vec::new(),
+                commit_sha: Some(format!("{work_item_id}-sha")),
+                diff_summary: String::new(),
+                tests_run: vec!["cargo test --locked --lib unit".to_string()],
+                test_result_summary: "passed".to_string(),
+                review_summary: None,
+                api_or_contract_changes: Vec::new(),
+                open_risks: Vec::new(),
+                next_work_item_notes: Vec::new(),
+                created_at: "2026-06-27T00:00:00Z".to_string(),
+            },
+        )
+        .expect("save unit handoff");
+}
+
+fn passed_testing_report_for_plan(
+    attempt_id: &str,
+    report_id: &str,
+    plan_id: &str,
+) -> TestingReport {
+    TestingReport {
+        id: report_id.to_string(),
+        attempt_id: attempt_id.to_string(),
+        role_run_id: None,
+        run_no: None,
+        commands: vec![TestCommand {
+            command: vec!["cargo".to_string(), "test".to_string()],
+            cwd: PathBuf::from("/tmp/worktree"),
+            exit_code: Some(0),
+            duration_ms: 100,
+            stdout_ref: "artifacts/stdout.txt".to_string(),
+            stderr_ref: "artifacts/stderr.txt".to_string(),
+            status: TestCommandStatus::Passed,
+        }],
+        overall_status: TestingOverallStatus::Passed,
+        provider_claim: None,
+        backend_verified: true,
+        started_at: "2026-06-27T00:00:00Z".to_string(),
+        completed_at: Some("2026-06-27T00:01:00Z".to_string()),
+        plan_id: Some(plan_id.to_string()),
+        plan_summary: None,
+        steps: Vec::new(),
+        unplanned_commands: Vec::new(),
+        unplanned_evidence: Vec::new(),
+        missing_required_steps: Vec::new(),
+        skipped_required_steps: Vec::new(),
+        context_warnings: Vec::new(),
+        raw_provider_output_ref: None,
+    }
 }

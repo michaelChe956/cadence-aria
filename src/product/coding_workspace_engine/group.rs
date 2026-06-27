@@ -33,6 +33,7 @@ impl CodingWorkspaceEngine {
         &self,
         attempt: &CodingExecutionAttempt,
     ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
+        let current_work_item_id = self.active_work_item_id_for_attempt(attempt).to_string();
         let units =
             self.store
                 .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
@@ -60,6 +61,18 @@ impl CodingWorkspaceEngine {
             updated.status = CodingAttemptStatus::Running;
             updated.updated_at = Utc::now().to_rfc3339();
             self.store.save_coding_attempt(&updated)?;
+            let lifecycle = LifecycleStore::new(self.store.paths());
+            if lifecycle
+                .get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)?
+                .is_some()
+            {
+                lifecycle.transfer_issue_worktree_lock(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &current_work_item_id,
+                    &next.work_item_id,
+                )?;
+            }
             return Ok(updated);
         }
 

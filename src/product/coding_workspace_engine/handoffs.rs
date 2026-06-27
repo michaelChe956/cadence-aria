@@ -2,7 +2,10 @@ use super::*;
 use crate::product::coding_models::CodingAttemptScope;
 
 impl CodingWorkspaceEngine {
-    fn current_work_item_id_for_handoff<'a>(&self, attempt: &'a CodingExecutionAttempt) -> &'a str {
+    pub(crate) fn active_work_item_id_for_attempt<'a>(
+        &self,
+        attempt: &'a CodingExecutionAttempt,
+    ) -> &'a str {
         attempt
             .current_work_item_id
             .as_deref()
@@ -49,14 +52,14 @@ impl CodingWorkspaceEngine {
         )?;
         if updated.scope == CodingAttemptScope::WorkItemGroup {
             self.mark_completed_group_work_items_if_present(&updated)?;
-            let current_work_item_id = self.current_work_item_id_for_handoff(&current).to_string();
+            let current_work_item_id = self.active_work_item_id_for_attempt(&current).to_string();
             self.release_issue_shared_worktree_lock_if_holder(
                 project_id,
                 issue_id,
                 &current_work_item_id,
             )?;
         } else {
-            let current_work_item_id = self.current_work_item_id_for_handoff(&updated);
+            let current_work_item_id = self.active_work_item_id_for_attempt(&updated);
             LifecycleStore::new(self.store.paths()).update_work_item_execution_status(
                 &updated.project_id,
                 &updated.issue_id,
@@ -102,11 +105,12 @@ impl CodingWorkspaceEngine {
         attempt_id: &str,
     ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
         let current = self.store.get_attempt(project_id, issue_id, attempt_id)?;
+        let active_work_item_id = self.active_work_item_id_for_attempt(&current).to_string();
         self.ensure_issue_shared_worktree_clean(
             project_id,
             issue_id,
             attempt_id,
-            &current.work_item_id,
+            &active_work_item_id,
         )
         .await?;
 
@@ -119,7 +123,7 @@ impl CodingWorkspaceEngine {
         self.release_issue_shared_worktree_lock_if_holder(
             project_id,
             issue_id,
-            &updated.work_item_id,
+            &active_work_item_id,
         )?;
         if let Some(node_id) = self.active_timeline_node_id(project_id, issue_id, attempt_id)? {
             let completed_at = Utc::now().to_rfc3339();
@@ -167,13 +171,13 @@ impl CodingWorkspaceEngine {
             project_id,
             issue_id,
             attempt_id,
-            &updated.work_item_id,
+            self.active_work_item_id_for_attempt(&updated),
         )
         .await?;
         self.release_issue_shared_worktree_lock_if_holder(
             project_id,
             issue_id,
-            &updated.work_item_id,
+            self.active_work_item_id_for_attempt(&updated),
         )?;
         Ok(updated)
     }
@@ -185,14 +189,15 @@ impl CodingWorkspaceEngine {
         attempt_id: &str,
     ) -> Result<(), CodingWorkspaceEngineError> {
         let current = self.store.get_attempt(project_id, issue_id, attempt_id)?;
+        let active_work_item_id = self.active_work_item_id_for_attempt(&current).to_string();
         self.ensure_issue_shared_worktree_clean(
             project_id,
             issue_id,
             attempt_id,
-            &current.work_item_id,
+            &active_work_item_id,
         )
         .await?;
-        let updated = self.store.update_attempt_status(
+        self.store.update_attempt_status(
             project_id,
             issue_id,
             attempt_id,
@@ -201,7 +206,7 @@ impl CodingWorkspaceEngine {
         self.release_issue_shared_worktree_lock_if_holder(
             project_id,
             issue_id,
-            &updated.work_item_id,
+            &active_work_item_id,
         )?;
         Ok(())
     }
@@ -269,7 +274,7 @@ impl CodingWorkspaceEngine {
             )?;
 
             let lifecycle = LifecycleStore::new(self.store.paths());
-            let current_work_item_id = self.current_work_item_id_for_handoff(attempt);
+            let current_work_item_id = self.active_work_item_id_for_attempt(attempt);
             if lifecycle
                 .list_work_items(&attempt.project_id, &attempt.issue_id)?
                 .iter()
@@ -305,7 +310,7 @@ impl CodingWorkspaceEngine {
         self.store.save_work_item_handoff(&handoff)?;
 
         let lifecycle = LifecycleStore::new(self.store.paths());
-        let current_work_item_id = self.current_work_item_id_for_handoff(attempt);
+        let current_work_item_id = self.active_work_item_id_for_attempt(attempt);
         if lifecycle
             .list_work_items(&attempt.project_id, &attempt.issue_id)?
             .iter()
@@ -356,7 +361,7 @@ impl CodingWorkspaceEngine {
             ),
             project_id: attempt.project_id.clone(),
             issue_id: attempt.issue_id.clone(),
-            work_item_id: self.current_work_item_id_for_handoff(attempt).to_string(),
+            work_item_id: self.active_work_item_id_for_attempt(attempt).to_string(),
             attempt_id: attempt.id.clone(),
             provider_run_ref: None,
             summary: "Handoff generated from attempt artifacts".to_string(),
@@ -419,7 +424,7 @@ impl CodingWorkspaceEngine {
             ),
             project_id: attempt.project_id.clone(),
             issue_id: attempt.issue_id.clone(),
-            work_item_id: self.current_work_item_id_for_handoff(attempt).to_string(),
+            work_item_id: self.active_work_item_id_for_attempt(attempt).to_string(),
             attempt_id: attempt.id.clone(),
             provider_run_ref: None,
             summary: structured
@@ -503,7 +508,7 @@ impl CodingWorkspaceEngine {
         self.mark_issue_shared_worktree_completed_if_present(
             &attempt.project_id,
             &attempt.issue_id,
-            &attempt.work_item_id,
+            self.active_work_item_id_for_attempt(attempt),
         )?;
         let node = self.create_completed_final_confirm_timeline_node(&completed)?;
         let _ = self

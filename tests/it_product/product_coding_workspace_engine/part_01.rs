@@ -25,19 +25,21 @@ use cadence_aria::product::coding_models::{
     CodingReworkInstruction, CodingRolePermissionModes, CodingRoleProviderConfigSnapshot,
     CodingRoleRunEventType, CodingRoleRunStatus, CodingRoleRunTrigger, CodingTimelineNode,
     CodingTimelineNodeStatus, FindingSeverity, PushStatus, RemoteKind, ReviewRequest,
-    ReviewRequestKind, ReviewVerdict, TestCommandStatus, TestingOverallStatus, TestingReport,
-    TestingStepResult, WorkItemHandoff,
+    ReviewRequestKind, ReviewVerdict, TestCommand, TestCommandStatus, TestingOverallStatus,
+    TestingReport, TestingStepResult, WorkItemHandoff,
 };
 use cadence_aria::product::coding_workspace_engine::{
     CodingExecutionContext, CodingWorkspaceEngine, testing_report_should_enter_analyst,
 };
 use cadence_aria::product::git_workspace_service::GitWorkspaceService;
 use cadence_aria::product::lifecycle_store::{
-    CreateWorkItemInput, CreateWorkspaceSessionInput, LifecycleStore,
+    CreateVerificationPlanInput, CreateWorkItemInput, CreateWorkspaceSessionInput, LifecycleStore,
     UpsertIssueSharedWorktreeInput,
 };
 use cadence_aria::product::models::{
-    ProviderConversationRef, ProviderConversationRole, ProviderName, WorkItemStatus, WorkspaceType,
+    ProviderConversationRef, ProviderConversationRole, ProviderName, RepositoryProfileConfidence,
+    VerificationCommand, VerificationCommandSafety, VerificationCommandSource,
+    VerificationFallbackPolicy, VerificationScope, WorkItemStatus, WorkspaceType,
 };
 use cadence_aria::product::test_executor::TestCommandSpec;
 use cadence_aria::product::tester_agent_loop::TesterAgentOptions;

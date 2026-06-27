@@ -324,8 +324,12 @@ impl CodingWorkspaceEngine {
             )?;
             if !verification_plan.required_gates.is_empty() {
                 let passed = reports.iter().any(|report| {
-                    report.overall_status == TestingOverallStatus::Passed
-                        || report.overall_status == TestingOverallStatus::PassedWithWarnings
+                    let passed_status = report.overall_status == TestingOverallStatus::Passed
+                        || report.overall_status == TestingOverallStatus::PassedWithWarnings;
+                    let plan_matches = attempt.scope
+                        != crate::product::coding_models::CodingAttemptScope::WorkItemGroup
+                        || report.plan_id.as_deref() == Some(plan_ref);
+                    passed_status && plan_matches
                 });
                 if !passed {
                     return Err(CodingWorkspaceEngineError::VerificationGateResultMissing(

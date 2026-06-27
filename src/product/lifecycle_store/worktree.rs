@@ -97,6 +97,45 @@ impl LifecycleStore {
         Ok(record)
     }
 
+    pub fn transfer_issue_worktree_lock(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        current_work_item_id: &str,
+        next_work_item_id: &str,
+    ) -> Result<IssueSharedWorktree, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(current_work_item_id)?;
+        validate_relative_id(next_work_item_id)?;
+
+        let path = self.issue_shared_worktree_path(project_id, issue_id);
+        let mut record: IssueSharedWorktree = read_json(&path).map_err(|error| match error {
+            ProductStoreError::NotFound { .. } => ProductStoreError::NotFound {
+                kind: "issue_shared_worktree",
+                id: format!("{project_id}/{issue_id}"),
+            },
+            other => other,
+        })?;
+
+        match record.current_active_work_item_id.as_deref() {
+            Some(active_id)
+                if active_id == current_work_item_id || active_id == next_work_item_id => {}
+            None => {}
+            Some(active_id) => {
+                return Err(ProductStoreError::Io(format!(
+                    "issue_worktree_active: issue {issue_id} locked by {active_id}"
+                )));
+            }
+        }
+
+        record.current_active_work_item_id = Some(next_work_item_id.to_string());
+        record.status = IssueSharedWorktreeStatus::Running;
+        record.updated_at = Utc::now().to_rfc3339();
+        write_json(&path, &record)?;
+        Ok(record)
+    }
+
     pub fn release_issue_worktree_lock(
         &self,
         project_id: &str,

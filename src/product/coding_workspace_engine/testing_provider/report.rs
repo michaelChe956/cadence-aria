@@ -229,7 +229,7 @@ impl CodingWorkspaceEngine {
                 &attempt.project_id,
                 &attempt.issue_id,
                 &attempt.id,
-                &attempt.work_item_id,
+                self.active_work_item_id_for_attempt(&attempt),
             )
             .await?;
         }

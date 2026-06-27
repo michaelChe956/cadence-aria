@@ -73,7 +73,7 @@ impl CodingWorkspaceEngine {
                 &attempt.project_id,
                 &attempt.issue_id,
                 &attempt.id,
-                &attempt.work_item_id,
+                self.active_work_item_id_for_attempt(&attempt),
             )
             .await?;
         }
@@ -130,7 +130,7 @@ impl CodingWorkspaceEngine {
                 &current.project_id,
                 &current.issue_id,
                 &current.id,
-                &current.work_item_id,
+                self.active_work_item_id_for_attempt(&current),
             )
             .await?;
         }
@@ -207,7 +207,7 @@ impl CodingWorkspaceEngine {
                 &attempt.project_id,
                 &attempt.issue_id,
                 &attempt.id,
-                &attempt.work_item_id,
+                self.active_work_item_id_for_attempt(attempt),
             )
             .await?;
             let gate = self.store.create_blocked_gate(CreateBlockedGateInput {

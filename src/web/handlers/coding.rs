@@ -627,22 +627,26 @@ pub async fn delete_coding_attempt(
     let attempt = coding_store
         .get_attempt_by_id(&attempt_id)
         .map_err(product_store_api_error)?;
+    let active_work_item_id = attempt
+        .current_work_item_id
+        .as_deref()
+        .unwrap_or(&attempt.work_item_id);
     let work_item = lifecycle
         .list_work_items(&attempt.project_id, &attempt.issue_id)
         .map_err(product_store_api_error)?
         .into_iter()
-        .find(|work_item| work_item.id == attempt.work_item_id)
+        .find(|work_item| work_item.id == active_work_item_id)
         .ok_or_else(|| {
             product_store_api_error(ProductStoreError::NotFound {
                 kind: "work_item",
-                id: attempt.work_item_id.clone(),
+                id: active_work_item_id.to_string(),
             })
         })?;
     let repository = find_repository(&app_paths, &attempt.project_id, &work_item.repository_id)?;
 
     if let Ok(Some(shared)) =
         lifecycle.get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)
-        && shared.current_active_work_item_id.as_deref() == Some(&attempt.work_item_id)
+        && shared.current_active_work_item_id.as_deref() == Some(active_work_item_id)
     {
         let engine = coding_workspace_engine_with_dummy_events(coding_store.clone());
         engine
