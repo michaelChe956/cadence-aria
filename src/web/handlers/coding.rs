@@ -1,6 +1,7 @@
 use super::dto::*;
 use super::support::*;
 use super::*;
+use crate::product::coding_models::CodingAttemptScope;
 
 pub async fn create_group_coding_attempt(
     State(state): State<WebAppState>,
@@ -537,9 +538,24 @@ pub async fn get_coding_attempt(
     let work_item_handoff = coding_store
         .get_work_item_handoff(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .map_err(product_store_api_error)?;
+    let units = if matches!(attempt.scope, CodingAttemptScope::WorkItemGroup) {
+        coding_store
+            .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .map_err(product_store_api_error)?
+            .into_iter()
+            .map(|unit| coding_execution_unit_dto(&unit))
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     Ok(Json(CodingAttemptSnapshotResponse {
         attempt: coding_attempt_dto(&attempt),
+        attempt_scope: coding_attempt_scope_text(&attempt.scope).to_string(),
+        work_item_group_id: attempt.work_item_group_id.clone(),
+        current_work_item_id: attempt.current_work_item_id.clone(),
+        active_unit_id: attempt.active_unit_id.clone(),
+        units,
         provider_config_snapshot: attempt.provider_config_snapshot,
         timeline_nodes,
         active_node_id,

@@ -19,6 +19,8 @@ export type CodingAttemptStatus =
   | "failed"
   | "aborted";
 
+export type CodingAttemptScope = "work_item" | "work_item_group";
+
 export type CodingExecutionStage =
   | "prepare_context"
   | "worktree_prepare"
@@ -30,9 +32,32 @@ export type CodingExecutionStage =
   | "internal_pr_review"
   | "final_confirm";
 
+export type CodingExecutionUnitStatus =
+  | "pending"
+  | "running"
+  | "waiting_for_human"
+  | "completed"
+  | "failed"
+  | "blocked"
+  | "skipped";
+
+export type CodingExecutionUnit = {
+  unit_id: string;
+  work_item_id: string;
+  order_index: number;
+  status: CodingExecutionUnitStatus;
+  summary: string | null;
+  handoff_ref: string | null;
+  completion_commit: string | null;
+};
+
 export type CodingAttempt = {
   attempt_id: string;
   work_item_id: string;
+  attempt_scope: CodingAttemptScope;
+  work_item_group_id: string | null;
+  current_work_item_id: string | null;
+  active_unit_id: string | null;
   attempt_no: number;
   status: CodingAttemptStatus;
   stage: CodingExecutionStage;
@@ -447,6 +472,11 @@ export type CodingChoiceGate = {
 
 export type CodingAttemptSnapshotResponse = {
   attempt: CodingAttempt;
+  attempt_scope: CodingAttemptScope;
+  work_item_group_id: string | null;
+  current_work_item_id: string | null;
+  active_unit_id: string | null;
+  units: CodingExecutionUnit[];
   provider_config_snapshot: ProviderConfigSnapshot;
   timeline_nodes: CodingTimelineNode[];
   active_node_id: string | null;
@@ -513,6 +543,11 @@ export type CodingWsOutMessage =
   | ({
       type: "coding_session_state";
       attempt_id: string;
+      attempt_scope: CodingAttemptScope;
+      work_item_group_id: string | null;
+      current_work_item_id: string | null;
+      active_unit_id: string | null;
+      units: CodingExecutionUnit[];
       status: CodingAttemptStatus;
       stage: CodingExecutionStage;
       branch_name: string;
@@ -524,6 +559,8 @@ export type CodingWsOutMessage =
       pushed_remote: string | null;
       role_provider_config_snapshot: CodingRoleProviderConfigSnapshot;
       chat_entries: CodingChatEntry[];
+      work_item_markdown: string | null;
+      verification_commands: string[];
       work_item_execution_plan: WorkItemExecutionPlan | null;
       work_item_handoff: WorkItemHandoff | null;
       require_execution_plan_confirm: boolean;

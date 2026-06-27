@@ -385,10 +385,38 @@ pub(crate) fn coding_attempt_dto(attempt: &CodingExecutionAttempt) -> CodingAtte
     }
 }
 
+pub(crate) fn coding_execution_unit_dto(
+    unit: &crate::product::coding_models::CodingExecutionUnit,
+) -> CodingExecutionUnitDto {
+    CodingExecutionUnitDto {
+        unit_id: unit.id.clone(),
+        work_item_id: unit.work_item_id.clone(),
+        order_index: unit.order_index,
+        status: coding_execution_unit_status_text(&unit.status).to_string(),
+        summary: unit.summary.clone(),
+        handoff_ref: unit.handoff_ref.clone(),
+        completion_commit: unit.completion_commit.clone(),
+    }
+}
+
 pub(crate) fn coding_attempt_scope_text(scope: &CodingAttemptScope) -> &'static str {
     match scope {
         CodingAttemptScope::WorkItem => "work_item",
         CodingAttemptScope::WorkItemGroup => "work_item_group",
+    }
+}
+
+pub(crate) fn coding_execution_unit_status_text(
+    status: &CodingExecutionUnitStatus,
+) -> &'static str {
+    match status {
+        CodingExecutionUnitStatus::Pending => "pending",
+        CodingExecutionUnitStatus::Running => "running",
+        CodingExecutionUnitStatus::WaitingForHuman => "waiting_for_human",
+        CodingExecutionUnitStatus::Completed => "completed",
+        CodingExecutionUnitStatus::Failed => "failed",
+        CodingExecutionUnitStatus::Blocked => "blocked",
+        CodingExecutionUnitStatus::Skipped => "skipped",
     }
 }
 

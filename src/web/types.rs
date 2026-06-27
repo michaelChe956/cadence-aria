@@ -502,6 +502,18 @@ pub struct CodingAttemptDto {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub struct CodingExecutionUnitDto {
+    pub unit_id: String,
+    pub work_item_id: String,
+    pub order_index: u32,
+    pub status: String,
+    pub summary: Option<String>,
+    pub handoff_ref: Option<String>,
+    pub completion_commit: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct RequestExecutionPlanChangeRequest {
     #[serde(default)]
     pub note: String,
@@ -511,6 +523,12 @@ pub struct RequestExecutionPlanChangeRequest {
 #[serde(rename_all = "snake_case")]
 pub struct CodingAttemptSnapshotResponse {
     pub attempt: CodingAttemptDto,
+    pub attempt_scope: String,
+    pub work_item_group_id: Option<String>,
+    pub current_work_item_id: Option<String>,
+    pub active_unit_id: Option<String>,
+    #[serde(default)]
+    pub units: Vec<CodingExecutionUnitDto>,
     pub provider_config_snapshot: ProviderConfigSnapshot,
     pub timeline_nodes: Vec<CodingTimelineNode>,
     pub active_node_id: Option<String>,

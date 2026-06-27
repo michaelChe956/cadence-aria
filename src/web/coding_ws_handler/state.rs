@@ -2,12 +2,13 @@ use tokio::sync::mpsc;
 
 use crate::product::coding_attempt_store::CodingAttemptStore;
 use crate::product::coding_models::{
-    CodingExecutionAttempt, CodingGateRequired as CodingGateRequiredModel, CodingRoleRunEvent,
-    CodingRoleRunEventPreview, CodingRoleRunEventSummary, CodingRoleRunEventType,
-    CodingRoleRunSnapshot, CodingTimelineNode, CodingTimelineNodeStatus,
+    CodingAttemptScope, CodingExecutionAttempt, CodingGateRequired as CodingGateRequiredModel,
+    CodingRoleRunEvent, CodingRoleRunEventPreview, CodingRoleRunEventSummary,
+    CodingRoleRunEventType, CodingRoleRunSnapshot, CodingTimelineNode, CodingTimelineNodeStatus,
 };
 use crate::product::coding_workspace_engine::CodingWorkspaceEngineError;
 use crate::product::json_store::ProductStoreError;
+use crate::web::handlers::{coding_attempt_scope_text, coding_execution_unit_dto};
 
 use super::{CodingWsOutMessage, coding_execution_context, stage_gate_required};
 
@@ -68,9 +69,23 @@ pub(crate) fn build_coding_session_state(
     )?;
     let work_item_handoff =
         coding_store.get_work_item_handoff(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+    let units = if matches!(attempt.scope, CodingAttemptScope::WorkItemGroup) {
+        coding_store
+            .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+            .into_iter()
+            .map(|unit| coding_execution_unit_dto(&unit))
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     Ok(CodingWsOutMessage::CodingSessionState {
-        attempt_id: attempt.id,
+        attempt_id: attempt.id.clone(),
+        attempt_scope: coding_attempt_scope_text(&attempt.scope).to_string(),
+        work_item_group_id: attempt.work_item_group_id.clone(),
+        current_work_item_id: attempt.current_work_item_id.clone(),
+        active_unit_id: attempt.active_unit_id.clone(),
+        units,
         status: attempt.status,
         stage: attempt.stage,
         branch_name: attempt.branch_name,

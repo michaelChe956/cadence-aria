@@ -250,6 +250,10 @@ export function codingAttemptRecord(workItemId: string): CodingAttempt {
   return {
     attempt_id: "coding_attempt_0001",
     work_item_id: workItemId,
+    attempt_scope: "work_item",
+    work_item_group_id: null,
+    current_work_item_id: workItemId,
+    active_unit_id: null,
     attempt_no: 1,
     status: "created",
     stage: "prepare_context",

@@ -2,9 +2,11 @@ import { create } from "zustand";
 import type {
   AnalystDecisionRecord,
   CodeReviewReport,
+  CodingAttemptScope,
   CodingAttemptStatus,
   CodingChoiceGate,
   CodingExecutionStage,
+  CodingExecutionUnit,
   CodingGateRequired,
   CodingProviderRole,
   CodingRoleProviderConfigSnapshot,
@@ -51,6 +53,11 @@ export type CodingPendingGate = CodingGateRequired & {
 export interface CodingWorkspaceState {
   attemptId: string | null;
   workItemId: string | null;
+  attemptScope: CodingAttemptScope | null;
+  workItemGroupId: string | null;
+  currentWorkItemId: string | null;
+  activeUnitId: string | null;
+  units: CodingExecutionUnit[];
   issueId: string | null;
   projectId: string | null;
   status: CodingAttemptStatus | null;
@@ -125,6 +132,11 @@ export interface CodingWorkspaceActions {
 const initialState: CodingWorkspaceState = {
   attemptId: null,
   workItemId: null,
+  attemptScope: null,
+  workItemGroupId: null,
+  currentWorkItemId: null,
+  activeUnitId: null,
+  units: [],
   issueId: null,
   projectId: null,
   status: null,
@@ -178,6 +190,11 @@ export const useCodingWorkspaceStore = create<
       const nextTab = selectedNode ? stageToArtifactTab(selectedNode.stage) : null;
       return {
         attemptId: snapshot.attempt_id,
+        attemptScope: snapshot.attempt_scope,
+        workItemGroupId: snapshot.work_item_group_id,
+        currentWorkItemId: snapshot.current_work_item_id,
+        activeUnitId: snapshot.active_unit_id,
+        units: snapshot.units ?? [],
         status: snapshot.status,
         stage: snapshot.stage,
         branchName: snapshot.branch_name,

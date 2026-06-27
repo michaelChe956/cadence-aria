@@ -10,6 +10,7 @@ use crate::product::coding_models::{
     ReviewRequest, TestingReport, WorkItemExecutionPlan, WorkItemHandoff,
 };
 use crate::product::models::ProviderName;
+use crate::web::types::CodingExecutionUnitDto;
 use crate::web::workspace_ws_types::{
     ChoiceOption, ProviderConfigSnapshot, WsExecutionEvent, WsPermissionRiskLevel,
 };
@@ -19,6 +20,11 @@ use crate::web::workspace_ws_types::{
 pub enum CodingWsOutMessage {
     CodingSessionState {
         attempt_id: String,
+        attempt_scope: String,
+        work_item_group_id: Option<String>,
+        current_work_item_id: Option<String>,
+        active_unit_id: Option<String>,
+        units: Vec<CodingExecutionUnitDto>,
         status: CodingAttemptStatus,
         stage: CodingExecutionStage,
         branch_name: String,

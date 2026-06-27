@@ -185,6 +185,11 @@ function sessionState(
   return {
     type: "coding_session_state",
     attempt_id: "coding_attempt_0001",
+    attempt_scope: "work_item",
+    work_item_group_id: null,
+    current_work_item_id: "work_item_0001",
+    active_unit_id: null,
+    units: [],
     status: "running",
     stage: "coding",
     branch_name: "aria/work-items/work_item_0001/attempt-1",
@@ -206,6 +211,8 @@ function sessionState(
     pending_choices: [],
     latest_analyst_decision: null,
     chat_entries: [],
+    work_item_markdown: null,
+    verification_commands: [],
     work_item_execution_plan: null,
     work_item_handoff: null,
     require_execution_plan_confirm: false,
@@ -265,6 +272,70 @@ describe("coding workspace store", () => {
     expect(state.activeNodeId).toBe("coding_node_0001");
     expect(state.selectedNodeId).toBe("coding_node_0001");
     expect(state.codeReviewReports).toHaveLength(1);
+  });
+
+  it("restores group context from coding session snapshot", () => {
+    const store = useCodingWorkspaceStore.getState();
+
+    store.setSessionState({
+      type: "coding_session_state",
+      attempt_id: "coding_attempt_0001",
+      attempt_scope: "work_item_group",
+      work_item_group_id: "work_item_plan_0001",
+      current_work_item_id: "work_item_0001",
+      active_unit_id: "coding_unit_0001",
+      units: [
+        {
+          unit_id: "coding_unit_0001",
+          work_item_id: "work_item_0001",
+          order_index: 0,
+          status: "running",
+          summary: null,
+          handoff_ref: null,
+          completion_commit: null,
+        },
+        {
+          unit_id: "coding_unit_0002",
+          work_item_id: "work_item_0002",
+          order_index: 1,
+          status: "pending",
+          summary: null,
+          handoff_ref: null,
+          completion_commit: null,
+        },
+      ],
+      status: "running",
+      stage: "coding",
+      branch_name: "aria/issues/issue_0001",
+      base_branch: "main",
+      worktree_path: null,
+      rework_count: 0,
+      max_auto_rework: 2,
+      head_commit: null,
+      pushed_remote: null,
+      provider_config_snapshot: providerConfig,
+      role_provider_config_snapshot: roleProviderConfig,
+      chat_entries: [],
+      timeline_nodes: [],
+      active_node_id: null,
+      testing_report: null,
+      code_review_reports: [],
+      review_request: null,
+      internal_pr_review: null,
+      pending_gates: [],
+      pending_choices: [],
+      latest_analyst_decision: null,
+      role_runs: [],
+      work_item_markdown: null,
+      verification_commands: [],
+      work_item_execution_plan: null,
+      work_item_handoff: null,
+      require_execution_plan_confirm: false,
+    });
+
+    expect(useCodingWorkspaceStore.getState().attemptScope).toBe("work_item_group");
+    expect(useCodingWorkspaceStore.getState().units).toHaveLength(2);
+    expect(useCodingWorkspaceStore.getState().currentWorkItemId).toBe("work_item_0001");
   });
 
   it("hydrates persisted coding chat entries from a websocket session snapshot", () => {

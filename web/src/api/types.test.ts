@@ -87,6 +87,10 @@ describe("workspace websocket protocol types", () => {
     const attempt: CodingAttempt = {
       attempt_id: "coding_attempt_0001",
       work_item_id: "work_item_0001",
+      attempt_scope: "work_item",
+      work_item_group_id: null,
+      current_work_item_id: "work_item_0001",
+      active_unit_id: null,
       attempt_no: 1,
       status: "created",
       stage: "prepare_context",
@@ -191,6 +195,10 @@ describe("workspace websocket protocol types", () => {
     const attempt: CodingAttempt = {
       attempt_id: "coding_attempt_0001",
       work_item_id: "work_item_0001",
+      attempt_scope: "work_item",
+      work_item_group_id: null,
+      current_work_item_id: "work_item_0001",
+      active_unit_id: null,
       attempt_no: 1,
       status: "running",
       stage: "worktree_prepare",
@@ -206,6 +214,21 @@ describe("workspace websocket protocol types", () => {
     };
     const snapshot: CodingAttemptSnapshotResponse = {
       attempt,
+      attempt_scope: "work_item_group",
+      work_item_group_id: "work_item_plan_0001",
+      current_work_item_id: "work_item_0001",
+      active_unit_id: "coding_unit_0001",
+      units: [
+        {
+          unit_id: "coding_unit_0001",
+          work_item_id: "work_item_0001",
+          order_index: 0,
+          status: "running",
+          summary: null,
+          handoff_ref: null,
+          completion_commit: null,
+        },
+      ],
       provider_config_snapshot: { author: "fake", reviewer: "fake", review_rounds: 1 },
       timeline_nodes: [
         {
@@ -250,6 +273,11 @@ describe("workspace websocket protocol types", () => {
     const outbound: Extract<CodingWsOutMessage, { type: "coding_session_state" }> = {
       type: "coding_session_state",
       attempt_id: "coding_attempt_0001",
+      attempt_scope: "work_item_group",
+      work_item_group_id: "work_item_plan_0001",
+      current_work_item_id: "work_item_0001",
+      active_unit_id: "coding_unit_0001",
+      units: snapshot.units,
       status: "running",
       stage: "worktree_prepare",
       branch_name: "aria/work-items/work_item_0001/attempt-1",
@@ -276,6 +304,8 @@ describe("workspace websocket protocol types", () => {
       },
       provider_config_snapshot: { author: "fake", reviewer: "fake", review_rounds: 1 },
       chat_entries: [],
+      work_item_markdown: null,
+      verification_commands: [],
       work_item_execution_plan: null,
       work_item_handoff: null,
       require_execution_plan_confirm: false,
@@ -334,6 +364,7 @@ describe("workspace websocket protocol types", () => {
     expect(outbound.role_runs?.[0].event_summary?.event_count).toBe(2);
     expect(outbound.role_runs?.[0].recent_events?.[0].detail).toBe("No tasks found");
     expect(outbound.latest_analyst_decision?.next_stage).toBe("coding");
+    expect(outbound.units[0].unit_id).toBe("coding_unit_0001");
     expect(inbound.type).toBe("start_coding");
   });
 
