@@ -68,6 +68,7 @@ use crate::web::workspace_ws_types::{
 mod analyst_parser;
 mod code_review;
 mod gates;
+mod group;
 mod handoffs;
 mod internal_pr_review;
 mod lifecycle;
@@ -94,6 +95,8 @@ pub use types::{
 
 #[allow(unused_imports)]
 pub(crate) use analyst_parser::*;
+#[allow(unused_imports)]
+pub(crate) use group::*;
 #[allow(unused_imports)]
 pub(crate) use prompts::*;
 #[allow(unused_imports)]

@@ -9,3 +9,4 @@ include!("product_coding_workspace_engine/part_08.rs");
 include!("product_coding_workspace_engine/part_09.rs");
 include!("product_coding_workspace_engine/part_10.rs");
 include!("product_coding_workspace_engine/part_11.rs");
+include!("product_coding_workspace_engine/part_12.rs");

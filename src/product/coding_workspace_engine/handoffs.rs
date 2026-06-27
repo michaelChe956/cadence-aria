@@ -1,6 +1,13 @@
 use super::*;
 
 impl CodingWorkspaceEngine {
+    fn current_work_item_id_for_handoff<'a>(&self, attempt: &'a CodingExecutionAttempt) -> &'a str {
+        attempt
+            .current_work_item_id
+            .as_deref()
+            .unwrap_or(&attempt.work_item_id)
+    }
+
     pub async fn handle_final_confirm(
         &self,
         project_id: &str,
@@ -26,16 +33,17 @@ impl CodingWorkspaceEngine {
             attempt_id,
             CodingAttemptStatus::Completed,
         )?;
+        let current_work_item_id = self.current_work_item_id_for_handoff(&updated);
         LifecycleStore::new(self.store.paths()).update_work_item_execution_status(
             &updated.project_id,
             &updated.issue_id,
-            &updated.work_item_id,
+            current_work_item_id,
             WorkItemStatus::Completed,
         )?;
         self.mark_issue_shared_worktree_completed_if_present(
             project_id,
             issue_id,
-            &updated.work_item_id,
+            current_work_item_id,
         )?;
         if let Some(node_id) =
             self.active_final_confirm_node_id(project_id, issue_id, attempt_id)?
@@ -196,15 +204,16 @@ impl CodingWorkspaceEngine {
         self.store.save_work_item_handoff(&handoff)?;
 
         let lifecycle = LifecycleStore::new(self.store.paths());
+        let current_work_item_id = self.current_work_item_id_for_handoff(attempt);
         if lifecycle
             .list_work_items(&attempt.project_id, &attempt.issue_id)?
             .iter()
-            .any(|item| item.id == attempt.work_item_id)
+            .any(|item| item.id == current_work_item_id)
         {
             lifecycle.update_work_item_handoff_summary(
                 &attempt.project_id,
                 &attempt.issue_id,
-                &attempt.work_item_id,
+                current_work_item_id,
                 Some(format!(
                     "projects/{}/issues/{}/coding-attempts/{}/work-item-handoff.json",
                     attempt.project_id, attempt.issue_id, attempt.id
@@ -246,7 +255,7 @@ impl CodingWorkspaceEngine {
             ),
             project_id: attempt.project_id.clone(),
             issue_id: attempt.issue_id.clone(),
-            work_item_id: attempt.work_item_id.clone(),
+            work_item_id: self.current_work_item_id_for_handoff(attempt).to_string(),
             attempt_id: attempt.id.clone(),
             provider_run_ref: None,
             summary: "Handoff generated from attempt artifacts".to_string(),
@@ -309,7 +318,7 @@ impl CodingWorkspaceEngine {
             ),
             project_id: attempt.project_id.clone(),
             issue_id: attempt.issue_id.clone(),
-            work_item_id: attempt.work_item_id.clone(),
+            work_item_id: self.current_work_item_id_for_handoff(attempt).to_string(),
             attempt_id: attempt.id.clone(),
             provider_run_ref: None,
             summary: structured
@@ -401,6 +410,16 @@ impl CodingWorkspaceEngine {
             .send(CodingWsOutMessage::CodingTimelineNodeCreated { node })
             .await;
         Ok(completed)
+    }
+
+    pub async fn complete_group_unit_after_code_review(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
+        self.generate_and_save_work_item_handoff_if_missing(attempt)
+            .await?;
+        self.complete_current_group_unit(attempt, Some("当前 Work Item 已完成".to_string()))
+            .await
     }
 
     pub(crate) fn mark_work_item_completed_if_present(

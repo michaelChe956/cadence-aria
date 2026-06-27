@@ -15,16 +15,18 @@ use cadence_aria::cross_cutting::streaming_provider::{
 use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::coding_attempt_store::{
     CodingAttemptStore, CreateBlockedGateInput, CreateCodingAttemptInput,
+    CreateCodingExecutionUnitInput, CreateGroupCodingAttemptInput,
 };
 use cadence_aria::product::coding_models::{
     AnalystDecisionNextStage, AnalystDecisionVerdict, AnalystVerdict, CodingAgentRole,
-    CodingAttemptStatus, CodingChoiceGateStatus, CodingEntryType, CodingExecutionAttempt,
-    CodingExecutionStage, CodingGateAction, CodingGateActionType, CodingProviderPermissionMode,
-    CodingProviderRole, CodingReworkInstruction, CodingRolePermissionModes,
-    CodingRoleProviderConfigSnapshot, CodingRoleRunEventType, CodingRoleRunStatus,
-    CodingRoleRunTrigger, CodingTimelineNode, CodingTimelineNodeStatus, FindingSeverity,
-    PushStatus, RemoteKind, ReviewRequest, ReviewRequestKind, ReviewVerdict, TestCommandStatus,
-    TestingOverallStatus, TestingReport, TestingStepResult,
+    CodingAttemptScope, CodingAttemptStatus, CodingChoiceGateStatus, CodingEntryType,
+    CodingExecutionAttempt, CodingExecutionStage, CodingExecutionUnitStatus, CodingGateAction,
+    CodingGateActionType, CodingProviderPermissionMode, CodingProviderRole,
+    CodingReworkInstruction, CodingRolePermissionModes, CodingRoleProviderConfigSnapshot,
+    CodingRoleRunEventType, CodingRoleRunStatus, CodingRoleRunTrigger, CodingTimelineNode,
+    CodingTimelineNodeStatus, FindingSeverity, PushStatus, RemoteKind, ReviewRequest,
+    ReviewRequestKind, ReviewVerdict, TestCommandStatus, TestingOverallStatus, TestingReport,
+    TestingStepResult,
 };
 use cadence_aria::product::coding_workspace_engine::{
     CodingExecutionContext, CodingWorkspaceEngine, testing_report_should_enter_analyst,
@@ -617,4 +619,3 @@ async fn coding_coder_rework_with_resume_uses_delta_prompt() {
             .contains("不要只输出计划或 Story/Design/Work Item 文档")
     );
 }
-
