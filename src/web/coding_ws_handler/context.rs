@@ -27,23 +27,31 @@ use crate::product::test_executor::{
     TestCommandSpec, discover_test_commands, planned_test_commands_from_markdown,
 };
 
+pub(crate) fn current_work_item_id_for_attempt(attempt: &CodingExecutionAttempt) -> &str {
+    attempt
+        .current_work_item_id
+        .as_deref()
+        .unwrap_or(&attempt.work_item_id)
+}
+
 pub(crate) fn coding_execution_context(
     app_paths: &ProductAppPaths,
     attempt: &CodingExecutionAttempt,
 ) -> Result<CodingExecutionContext, ProductStoreError> {
+    let current_work_item_id = current_work_item_id_for_attempt(attempt);
     let lifecycle = LifecycleStore::new(app_paths.clone());
     let sessions = lifecycle.list_workspace_sessions(&attempt.project_id, &attempt.issue_id)?;
     let work_item_session = sessions
         .iter()
         .rev()
         .find(|session| {
-            session.entity_id == attempt.work_item_id
+            session.entity_id == current_work_item_id
                 && session.workspace_type == WorkspaceType::WorkItem
                 && session.status == WorkspaceSessionStatus::Confirmed
         })
         .or_else(|| {
             sessions.iter().rev().find(|session| {
-                session.entity_id == attempt.work_item_id
+                session.entity_id == current_work_item_id
                     && session.workspace_type == WorkspaceType::WorkItem
             })
         });
@@ -75,11 +83,12 @@ pub(crate) fn ensure_work_item_execution_plan_confirmed(
     app_paths: &ProductAppPaths,
     attempt: &CodingExecutionAttempt,
 ) -> Result<(), CodingWorkspaceEngineError> {
+    let current_work_item_id = current_work_item_id_for_attempt(attempt);
     let lifecycle = LifecycleStore::new(app_paths.clone());
     let work_items = lifecycle.list_work_items(&attempt.project_id, &attempt.issue_id)?;
     let Some(work_item) = work_items
         .iter()
-        .find(|item| item.id == attempt.work_item_id)
+        .find(|item| item.id == current_work_item_id)
     else {
         return Ok(());
     };
@@ -105,13 +114,14 @@ pub(crate) fn repository_path_for_attempt(
     app_paths: &ProductAppPaths,
     attempt: &CodingExecutionAttempt,
 ) -> Result<PathBuf, CodingWorkspaceEngineError> {
+    let current_work_item_id = current_work_item_id_for_attempt(attempt);
     let work_item = LifecycleStore::new(app_paths.clone())
         .list_work_items(&attempt.project_id, &attempt.issue_id)?
         .into_iter()
-        .find(|work_item| work_item.id == attempt.work_item_id)
+        .find(|work_item| work_item.id == current_work_item_id)
         .ok_or_else(|| ProductStoreError::NotFound {
             kind: "work_item",
-            id: attempt.work_item_id.clone(),
+            id: current_work_item_id.to_string(),
         })?;
     RepositoryStore::new(app_paths.clone())
         .list(&attempt.project_id)?

@@ -21,6 +21,7 @@ pub(super) const MAX_DIFF_CONTEXT_CHARS: usize = 12_000;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EvaluationContextRole {
+    Coder,
     Tester,
     Analyst,
     CodeReviewer,
@@ -35,6 +36,7 @@ pub struct EvaluationContextPack {
     pub story_specs: Vec<EvaluationSpecContext>,
     pub design_specs: Vec<EvaluationSpecContext>,
     pub work_item: EvaluationWorkItemContext,
+    pub group_context: Option<CodingGroupContextPack>,
     pub repo_context: EvaluationRepoContext,
     pub openspec_context: OpenSpecContext,
     pub superpowers_context: SuperpowersContext,
@@ -63,6 +65,16 @@ pub struct EvaluationWorkItemContext {
     pub design_spec_ids: Vec<String>,
     pub raw_markdown_or_sections: String,
     pub workspace_session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodingGroupContextPack {
+    pub plan_id: String,
+    pub current_work_item_id: String,
+    pub sibling_work_item_ids: Vec<String>,
+    pub dependency_handoff_refs: Vec<String>,
+    pub source_outline_id: Option<String>,
+    pub source_draft_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
