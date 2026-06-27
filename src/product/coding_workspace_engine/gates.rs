@@ -195,53 +195,15 @@ impl CodingWorkspaceEngine {
 
         let changed_files = self.changed_files_for_attempt(attempt, &work_item).await?;
         let worktree_path = self.attempt_worktree_path(attempt).await.ok();
-        for relative_path in &changed_files {
-            let candidate = std::path::Path::new(relative_path);
-            if work_item
-                .forbidden_write_scopes
-                .iter()
-                .any(|scope| scope_allows_path(scope, relative_path, true))
-            {
-                return Err(CodingWorkspaceEngineError::WorkItemDiffScopeViolation(
-                    relative_path.clone(),
-                ));
-            }
-            if !work_item.exclusive_write_scopes.is_empty()
-                && let Some(ref base) = worktree_path
-            {
-                let _ =
-                    validate_write_path(base, &work_item.exclusive_write_scopes, candidate, true)
-                        .map_err(|_| {
-                        CodingWorkspaceEngineError::WorkItemDiffScopeViolation(
-                            relative_path.clone(),
-                        )
-                    })?;
-            }
-        }
-
-        if let Some(plan_ref) = &work_item.verification_plan_ref {
-            let verification_plan = lifecycle.get_verification_plan(
-                &attempt.project_id,
-                &attempt.issue_id,
-                plan_ref,
-            )?;
-            if !verification_plan.required_gates.is_empty() {
-                let reports = self.store.list_testing_reports(
-                    &attempt.project_id,
-                    &attempt.issue_id,
-                    &attempt.id,
-                )?;
-                let passed = reports.iter().any(|report| {
-                    report.overall_status == TestingOverallStatus::Passed
-                        || report.overall_status == TestingOverallStatus::PassedWithWarnings
-                });
-                if !passed {
-                    return Err(CodingWorkspaceEngineError::VerificationGateResultMissing(
-                        attempt.id.clone(),
-                    ));
-                }
-            }
-        }
+        self.validate_changed_files_for_work_item(
+            &work_item,
+            &changed_files,
+            worktree_path.as_ref(),
+        )?;
+        let reports =
+            self.store
+                .list_testing_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+        self.verify_required_gates_satisfied(attempt, &lifecycle, &work_item, &reports)?;
 
         if self.store.get_visible_work_item_handoff(attempt)?.is_none() {
             return Err(CodingWorkspaceEngineError::WorkItemHandoffMissing(
@@ -258,6 +220,121 @@ impl CodingWorkspaceEngine {
         .await?;
 
         Ok(CompletionGateReport)
+    }
+
+    pub(crate) async fn run_group_completion_gates(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<CompletionGateReport, CodingWorkspaceEngineError> {
+        if attempt.head_commit.is_none() {
+            return Err(CodingWorkspaceEngineError::CompletionCommitMissing(
+                attempt.id.clone(),
+            ));
+        }
+        if !self.group_attempt_ready_for_final_review(attempt)? {
+            return Err(CodingWorkspaceEngineError::FinalConfirmNotReady(
+                attempt.id.clone(),
+            ));
+        }
+
+        let handoffs = self.collect_completed_group_unit_handoffs(attempt)?;
+        let lifecycle = LifecycleStore::new(self.store.paths());
+        let work_items = lifecycle.list_work_items(&attempt.project_id, &attempt.issue_id)?;
+        let reports =
+            self.store
+                .list_testing_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+        let worktree_path = self.attempt_worktree_path(attempt).await.ok();
+
+        for (unit, handoff) in &handoffs {
+            let work_item = work_items
+                .iter()
+                .find(|item| item.id == unit.work_item_id)
+                .ok_or_else(|| {
+                    CodingWorkspaceEngineError::FinalConfirmNotReady(attempt.id.clone())
+                })?;
+            self.validate_changed_files_for_work_item(
+                work_item,
+                &handoff.files_changed,
+                worktree_path.as_ref(),
+            )?;
+            self.verify_required_gates_satisfied(attempt, &lifecycle, work_item, &reports)?;
+        }
+
+        let lock_holder_work_item_id = lifecycle
+            .get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)?
+            .and_then(|shared| shared.current_active_work_item_id)
+            .or_else(|| attempt.current_work_item_id.clone())
+            .or_else(|| handoffs.last().map(|(unit, _)| unit.work_item_id.clone()))
+            .unwrap_or_else(|| attempt.work_item_id.clone());
+        self.ensure_issue_shared_worktree_clean(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &lock_holder_work_item_id,
+        )
+        .await?;
+
+        Ok(CompletionGateReport)
+    }
+
+    fn validate_changed_files_for_work_item(
+        &self,
+        work_item: &LifecycleWorkItemRecord,
+        changed_files: &[String],
+        worktree_path: Option<&PathBuf>,
+    ) -> Result<(), CodingWorkspaceEngineError> {
+        for relative_path in changed_files {
+            let candidate = std::path::Path::new(relative_path);
+            if work_item
+                .forbidden_write_scopes
+                .iter()
+                .any(|scope| scope_allows_path(scope, relative_path, true))
+            {
+                return Err(CodingWorkspaceEngineError::WorkItemDiffScopeViolation(
+                    relative_path.clone(),
+                ));
+            }
+            if !work_item.exclusive_write_scopes.is_empty()
+                && let Some(base) = worktree_path
+            {
+                let _ =
+                    validate_write_path(base, &work_item.exclusive_write_scopes, candidate, true)
+                        .map_err(|_| {
+                        CodingWorkspaceEngineError::WorkItemDiffScopeViolation(
+                            relative_path.clone(),
+                        )
+                    })?;
+            }
+        }
+        Ok(())
+    }
+
+    fn verify_required_gates_satisfied(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        lifecycle: &LifecycleStore,
+        work_item: &LifecycleWorkItemRecord,
+        reports: &[TestingReport],
+    ) -> Result<(), CodingWorkspaceEngineError> {
+        if let Some(plan_ref) = &work_item.verification_plan_ref {
+            let verification_plan = lifecycle.get_verification_plan(
+                &attempt.project_id,
+                &attempt.issue_id,
+                plan_ref,
+            )?;
+            if !verification_plan.required_gates.is_empty() {
+                let passed = reports.iter().any(|report| {
+                    report.overall_status == TestingOverallStatus::Passed
+                        || report.overall_status == TestingOverallStatus::PassedWithWarnings
+                });
+                if !passed {
+                    return Err(CodingWorkspaceEngineError::VerificationGateResultMissing(
+                        attempt.id.clone(),
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     pub(crate) async fn changed_files_for_attempt(

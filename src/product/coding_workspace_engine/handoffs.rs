@@ -30,10 +30,16 @@ impl CodingWorkspaceEngine {
                 attempt_id.to_string(),
             ));
         }
-
-        self.generate_and_save_work_item_handoff_if_missing(&current)
-            .await?;
-        self.run_completion_gates(&current).await?;
+        match current.scope {
+            CodingAttemptScope::WorkItemGroup => {
+                self.run_group_completion_gates(&current).await?;
+            }
+            CodingAttemptScope::WorkItem => {
+                self.generate_and_save_work_item_handoff_if_missing(&current)
+                    .await?;
+                self.run_completion_gates(&current).await?;
+            }
+        }
 
         let updated = self.store.update_attempt_status(
             project_id,

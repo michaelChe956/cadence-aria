@@ -408,6 +408,201 @@ fn group_attempt_waiting_for_final_confirm() -> (
     (root, paths, store, engine, attempt)
 }
 
+fn group_attempt_waiting_for_final_confirm_with_scoped_work_items() -> (
+    tempfile::TempDir,
+    ProductAppPaths,
+    CodingAttemptStore,
+    CodingWorkspaceEngine,
+    CodingExecutionAttempt,
+) {
+    let (root, paths, store, engine, attempt) = group_engine_with_last_running_unit();
+    let lifecycle = LifecycleStore::new(paths.clone());
+    let shared_worktree = paths.root().join("shared-worktree");
+    std::fs::create_dir_all(&shared_worktree).expect("create shared worktree dir");
+    std::fs::create_dir_all(shared_worktree.join("src")).expect("create src dir");
+    std::fs::create_dir_all(shared_worktree.join("web/src")).expect("create web src dir");
+    std::fs::write(shared_worktree.join("src/backend.rs"), "// backend\n")
+        .expect("write backend file");
+    std::fs::write(shared_worktree.join("src/frontend.rs"), "// frontend\n")
+        .expect("write frontend file");
+    std::fs::write(shared_worktree.join("web/src/app.tsx"), "// app\n")
+        .expect("write invalid app file");
+    Command::new("git")
+        .arg("init")
+        .current_dir(&shared_worktree)
+        .output()
+        .expect("git init shared worktree");
+    for (work_item_id, scope) in [
+        ("work_item_0001", "src/backend.rs"),
+        ("work_item_0002", "src/frontend.rs"),
+    ] {
+        lifecycle
+            .create_work_item(CreateWorkItemInput {
+                id: Some(work_item_id.to_string()),
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                repository_id: "repository_0001".to_string(),
+                story_spec_ids: Vec::new(),
+                design_spec_ids: Vec::new(),
+                title: format!("title for {work_item_id}"),
+                exclusive_write_scopes: vec![scope.to_string()],
+                forbidden_write_scopes: Vec::new(),
+                ..Default::default()
+            })
+            .expect("create scoped work item");
+        lifecycle
+            .update_work_item_execution_status(
+                "project_0001",
+                "issue_0001",
+                work_item_id,
+                WorkItemStatus::Coding,
+            )
+            .expect("set coding status");
+    }
+    store
+        .save_coding_unit_handoff(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            "coding_unit_0001",
+            &WorkItemHandoff {
+                id: "work_item_handoff_0001".to_string(),
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                work_item_id: "work_item_0001".to_string(),
+                attempt_id: attempt.id.clone(),
+                provider_run_ref: None,
+                summary: "handoff summary for backend".to_string(),
+                files_changed: vec!["src/backend.rs".to_string()],
+                commit_sha: Some("backend-sha".to_string()),
+                diff_summary: String::new(),
+                tests_run: vec!["cargo test --locked --lib backend".to_string()],
+                test_result_summary: "passed".to_string(),
+                review_summary: None,
+                api_or_contract_changes: Vec::new(),
+                open_risks: vec!["backend risk".to_string()],
+                next_work_item_notes: Vec::new(),
+                created_at: "2026-06-27T00:00:00Z".to_string(),
+            },
+        )
+        .expect("save unit1 handoff");
+    store
+        .update_coding_unit_handoff_ref(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            "coding_unit_0001",
+            Some("units/coding_unit_0001/work-item-handoff.json".to_string()),
+        )
+        .expect("set unit1 handoff ref");
+    store
+        .update_coding_unit_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            "coding_unit_0002",
+            CodingExecutionUnitStatus::Completed,
+            Some("frontend done".to_string()),
+        )
+        .expect("complete last unit");
+    store
+        .save_coding_unit_handoff(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            "coding_unit_0002",
+            &WorkItemHandoff {
+                id: "work_item_handoff_0002".to_string(),
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                work_item_id: "work_item_0002".to_string(),
+                attempt_id: attempt.id.clone(),
+                provider_run_ref: None,
+                summary: "handoff summary for frontend".to_string(),
+                files_changed: vec!["src/frontend.rs".to_string()],
+                commit_sha: Some("frontend-sha".to_string()),
+                diff_summary: String::new(),
+                tests_run: vec!["cargo test --locked --lib frontend".to_string()],
+                test_result_summary: "passed".to_string(),
+                review_summary: None,
+                api_or_contract_changes: Vec::new(),
+                open_risks: vec!["frontend risk".to_string()],
+                next_work_item_notes: Vec::new(),
+                created_at: "2026-06-27T00:00:00Z".to_string(),
+            },
+        )
+        .expect("save unit2 handoff");
+    store
+        .update_coding_unit_handoff_ref(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            "coding_unit_0002",
+            Some("units/coding_unit_0002/work-item-handoff.json".to_string()),
+        )
+        .expect("set unit2 handoff ref");
+    let attempt = store
+        .update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("set running");
+    let attempt = store
+        .update_attempt_stage(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingExecutionStage::FinalConfirm,
+        )
+        .expect("final confirm stage");
+    let attempt = store
+        .update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::WaitingForHuman,
+        )
+        .expect("waiting for human");
+    let attempt = store
+        .update_attempt_head_commit(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            Some("deadbeef".to_string()),
+        )
+        .expect("set head commit");
+    lifecycle
+        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: shared_worktree,
+            base_branch: "HEAD".to_string(),
+        })
+        .expect("upsert shared worktree");
+    lifecycle
+        .try_acquire_issue_worktree_lock("project_0001", "issue_0001", "work_item_0002")
+        .expect("acquire shared worktree lock");
+    store
+        .save_timeline_node(CodingTimelineNode {
+            id: "coding_node_0001".to_string(),
+            attempt_id: attempt.id.clone(),
+            stage: CodingExecutionStage::FinalConfirm,
+            title: "最终确认".to_string(),
+            status: CodingTimelineNodeStatus::Running,
+            agent_role: Some(CodingAgentRole::System),
+            summary: None,
+            started_at: "2026-06-27T00:00:00Z".to_string(),
+            completed_at: None,
+            artifact_refs: Vec::new(),
+        })
+        .expect("save final confirm node");
+    (root, paths, store, engine, attempt)
+}
+
 #[tokio::test]
 async fn completing_group_unit_marks_current_unit_completed_and_next_running() {
     let (_root, paths, store, engine, attempt) = group_engine_with_two_units();
@@ -630,4 +825,96 @@ async fn group_final_confirm_completes_attempt_after_all_units_completed() {
         shared.last_completed_work_item_id.as_deref(),
         Some("work_item_0002")
     );
+}
+
+#[tokio::test]
+async fn group_final_confirm_rejects_unit_handoff_outside_exclusive_scope() {
+    let (_root, _paths, store, engine, attempt) =
+        group_attempt_waiting_for_final_confirm_with_scoped_work_items();
+    store
+        .save_coding_unit_handoff(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            "coding_unit_0002",
+            &WorkItemHandoff {
+                files_changed: vec!["web/src/app.tsx".to_string()],
+                ..store
+                    .get_coding_unit_handoff(
+                        &attempt.project_id,
+                        &attempt.issue_id,
+                        &attempt.id,
+                        "coding_unit_0002",
+                    )
+                    .expect("get unit2 handoff")
+                    .expect("existing unit2 handoff")
+            },
+        )
+        .expect("overwrite unit2 handoff");
+
+    let error = engine
+        .handle_final_confirm(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .await
+        .expect_err("group final confirm should fail");
+
+    match error {
+        cadence_aria::product::coding_workspace_engine::CodingWorkspaceEngineError::WorkItemDiffScopeViolation(path) => {
+            assert_eq!(path, "web/src/app.tsx");
+        }
+        other => panic!("expected diff scope violation, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn group_final_confirm_rejects_when_any_unit_not_completed() {
+    let (_root, paths, store, engine, attempt) = group_engine_with_last_running_unit();
+    let lifecycle = LifecycleStore::new(paths.clone());
+    for work_item_id in ["work_item_0001", "work_item_0002"] {
+        lifecycle
+            .create_work_item(CreateWorkItemInput {
+                id: Some(work_item_id.to_string()),
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                repository_id: "repository_0001".to_string(),
+                story_spec_ids: Vec::new(),
+                design_spec_ids: Vec::new(),
+                title: format!("title for {work_item_id}"),
+                ..Default::default()
+            })
+            .expect("create work item");
+    }
+    let attempt = store
+        .update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("set running");
+    let attempt = store
+        .update_attempt_stage(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingExecutionStage::FinalConfirm,
+        )
+        .expect("set final confirm");
+    let attempt = store
+        .update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::WaitingForHuman,
+        )
+        .expect("set waiting");
+    let error = engine
+        .handle_final_confirm(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .await
+        .expect_err("group final confirm should reject incomplete units");
+
+    assert!(matches!(
+        error,
+        cadence_aria::product::coding_workspace_engine::CodingWorkspaceEngineError::FinalConfirmNotReady(id)
+            if id == attempt.id
+    ));
 }
