@@ -1,0 +1,673 @@
+use cadence_aria::cross_cutting::integration_queue::IntegrationQueue;
+use cadence_aria::cross_cutting::provider_adapter::{
+    ProviderAdapter, ProviderAdapterError, STRUCTURED_OUTPUT_END, STRUCTURED_OUTPUT_START,
+    parse_last_structured_output,
+};
+use cadence_aria::cross_cutting::worktree::{WorktreeLeaseManager, WorktreeLeaseStatus};
+use cadence_aria::protocol::contracts::{
+    AdapterInput, AdapterOutput, ProviderRunStatus, TimeoutStatus,
+};
+use cadence_aria::protocol::loop_counters::{LoopCounterName, LoopCounterRegistry};
+use cadence_aria::protocol::projections::{ExecutionMode, PlanProjection, WorkPackageProjection};
+use cadence_aria::runtime_units::RuntimeUnit;
+use cadence_aria::runtime_units::coding::{ExecutionWorktaskInput, run_worktask_execution_chain};
+use cadence_aria::runtime_units::execution_setup::{
+    ExecutionSetupInput, ExecutionSetupUnit, run_execution_setup,
+};
+use cadence_aria::runtime_units::integration_execute::{
+    IntegrationExecuteInput, run_integration_execute,
+};
+use cadence_aria::runtime_units::integration_prepare::{
+    IntegrationPrepareInput, IntegrationPrepareUnit, run_integration_prepare,
+};
+use cadence_aria::runtime_units::integration_verify::{
+    IntegrationVerifyInput, run_integration_verify,
+};
+use serde_json::json;
+use std::collections::VecDeque;
+use std::fs;
+use std::path::Path;
+use std::process::Command;
+use std::sync::Mutex;
+
+#[test]
+fn execution_setup_registers_worktasks_prepares_worktree_and_resolves_routes() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let mut manager =
+        WorktreeLeaseManager::new("session_001", "task_001", workspace.path(), "main");
+    let unit = ExecutionSetupUnit;
+    assert_eq!(unit.covered_protocol_nodes(), vec!["N13", "N14", "N15"]);
+
+    let result = run_execution_setup(execution_input(workspace.path()), &mut manager)
+        .expect("execution setup");
+
+    assert_eq!(
+        result
+            .protocol_steps
+            .iter()
+            .map(|step| step.node_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["N13", "N14", "N15"]
+    );
+    assert_eq!(
+        result.protocol_steps[0].node_specific_fields["worktask_id"],
+        "worktask_001"
+    );
+    assert_eq!(
+        result.protocol_steps[0].node_specific_fields["routing_ref"],
+        "dispatch_pkg_001#worktask_001"
+    );
+    assert_eq!(
+        result.protocol_steps[0].node_specific_fields["state"],
+        "registered"
+    );
+    assert_eq!(
+        result.protocol_steps[1].node_specific_fields["base_ref"],
+        "main"
+    );
+    assert_eq!(
+        result.protocol_steps[1].node_specific_fields["branch_name"],
+        "aria/worktask_001"
+    );
+    assert_eq!(
+        result.protocol_steps[2].node_specific_fields["dispatch_package_ref"],
+        "dispatch_pkg_001"
+    );
+    assert_eq!(result.route_contexts[0].source_work_package_id, "WP-001");
+    assert_eq!(
+        result.route_contexts[0].traceability_refs,
+        vec!["REQ-001".to_string()]
+    );
+    assert_eq!(
+        result.route_contexts[0].acceptance_targets,
+        vec!["cargo test --test execution_chain_fake_provider".to_string()]
+    );
+
+    let lease = manager
+        .lease(&result.route_contexts[0].lease_id)
+        .expect("lease exists");
+    assert_eq!(lease.status, WorktreeLeaseStatus::Acquired);
+    assert_eq!(lease.allowed_write_scope, vec!["src/feature/".to_string()]);
+    assert!(manager.events().iter().any(|event| {
+        event.event_type == "worktree.lease_acquired"
+            && event.payload["lease_id"] == lease.lease_id
+            && event.payload["worktree_path"].as_str()
+                == Some(workspace.path().to_string_lossy().as_ref())
+            && event.payload["worktask_id"] == "worktask_001"
+    }));
+}
+
+#[test]
+fn execution_setup_rejects_worktask_routing_without_plan_work_package() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let mut input = execution_input(workspace.path());
+    input.dispatch_package["_aria"]["worktask_routing"][0]["source_work_package_id"] =
+        json!("WP-MISSING");
+    let mut manager =
+        WorktreeLeaseManager::new("session_001", "task_001", workspace.path(), "main");
+
+    let error = run_execution_setup(input, &mut manager).expect_err("missing source package");
+
+    assert_eq!(error.code, "worktask_source_work_package_missing");
+    assert!(error.message.contains("WP-MISSING"));
+}
+
+#[test]
+fn fake_provider_runs_n16_to_n18_happy_path_with_normalized_traceability() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let provider = ScriptedExecutionProvider::happy();
+
+    let result =
+        run_worktask_execution_chain(execution_worktask_input(workspace.path()), &provider)
+            .expect("execution chain");
+
+    assert_eq!(
+        result
+            .protocol_steps
+            .iter()
+            .map(|step| step.node_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["N16", "N17", "N18"]
+    );
+    assert_eq!(
+        provider.seen_output_schemas(),
+        vec![
+            "schema://aria/artifacts/coding_report/v1".to_string(),
+            "schema://aria/artifacts/testing_report/v1".to_string(),
+            "schema://aria/artifacts/code_review_report/v1".to_string(),
+        ]
+    );
+    for trace in &result.node_traces {
+        assert_eq!(
+            trace.execution_chain,
+            vec![
+                "canonical_node_input",
+                "projection_or_bundle",
+                "provider_context_package",
+                "adapter_input",
+                "provider_call",
+                "provider_run_record",
+                "normalize_output",
+                "artifact_validate",
+                "phase1_profile_validate",
+                "openspec_coverage",
+                "checkpoint",
+            ],
+            "{} must use the unified execution chain",
+            trace.node_id
+        );
+    }
+    for artifact_kind in ["coding_report", "testing_report", "code_review_report"] {
+        let artifact = result
+            .artifacts
+            .iter()
+            .find(|artifact| artifact["artifact_kind"] == artifact_kind)
+            .expect("artifact exists");
+        assert_eq!(
+            artifact["_aria"]["traceability_refs"],
+            json!(["req-001", "dd-001", "task-001"])
+        );
+        assert_eq!(
+            artifact["_aria"]["provider_run_refs"]
+                .as_array()
+                .expect("provider runs")
+                .len(),
+            1
+        );
+    }
+    assert_eq!(result.next_node, "M20");
+    assert_eq!(result.rework_counter, 0);
+}
+
+#[test]
+fn provider_candidate_traceability_refs_are_candidates_not_trusted_coverage() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let provider = ScriptedExecutionProvider::with_candidate_refs(["req-999"]);
+
+    let result =
+        run_worktask_execution_chain(execution_worktask_input(workspace.path()), &provider).expect(
+            "execution chain should reject unknown candidate refs without closing coverage",
+        );
+
+    let coding_report = result
+        .artifacts
+        .iter()
+        .find(|artifact| artifact["artifact_kind"] == "coding_report")
+        .expect("coding report");
+    assert_eq!(
+        coding_report["_aria"]["traceability_refs"],
+        json!(["req-001", "dd-001", "task-001"])
+    );
+    assert!(
+        !coding_report["_aria"]["traceability_refs"]
+            .as_array()
+            .expect("traceability refs")
+            .iter()
+            .any(|value| value == "req-999"),
+        "provider candidate ref must not become trusted coverage"
+    );
+}
+
+#[test]
+fn testing_failure_routes_to_rework_then_back_to_testing_and_review() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let provider = ScriptedExecutionProvider::testing_fails_then_passes();
+
+    let result =
+        run_worktask_execution_chain(execution_worktask_input(workspace.path()), &provider)
+            .expect("execution chain with rework");
+
+    assert_eq!(
+        result
+            .protocol_steps
+            .iter()
+            .map(|step| step.node_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["N16", "N17", "N19", "N17", "N18"]
+    );
+    assert_eq!(result.rework_counter, 1);
+    assert_eq!(
+        result.protocol_steps[2].node_specific_fields["rework_scope"]["source"],
+        "testing_report_worktask_001_0001"
+    );
+    assert_eq!(
+        result.protocol_steps[2].node_specific_fields["superseded_report_refs"],
+        json!(["coding_report_worktask_001_0001"])
+    );
+    assert!(
+        result
+            .workflow_skills_activated
+            .contains(&"systematic-debugging".to_string())
+    );
+    assert_eq!(result.next_node, "M20");
+}
+
+#[test]
+fn testing_report_with_only_out_of_scope_failures_allows_current_worktask_to_continue() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let provider = ScriptedExecutionProvider::testing_has_only_out_of_scope_failure();
+
+    let result =
+        run_worktask_execution_chain(execution_worktask_input(workspace.path()), &provider)
+            .expect("execution chain should continue after scoped verification passed");
+
+    assert_eq!(
+        result
+            .protocol_steps
+            .iter()
+            .map(|step| step.node_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["N16", "N17", "N18"]
+    );
+    assert_eq!(result.rework_counter, 0);
+    assert_eq!(result.next_node, "M20");
+    assert!(
+        !result
+            .workflow_skills_activated
+            .contains(&"systematic-debugging".to_string()),
+        "out-of-scope acceptance failures must not trigger current worktask rework"
+    );
+}
+
+#[test]
+fn testing_node_inherits_latest_coding_report_commands_when_route_has_no_verification_commands() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let provider = ScriptedExecutionProvider::happy();
+    let mut input = execution_worktask_input(workspace.path());
+    input.dispatch_package["_aria"]["worktask_routing"][0]["verification_commands"] = json!([]);
+
+    run_worktask_execution_chain(input, &provider).expect("execution chain");
+
+    let testing_prompt = provider
+        .seen_prompts_for_schema("schema://aria/artifacts/testing_report/v1")
+        .into_iter()
+        .next()
+        .expect("testing prompt should be captured");
+    assert!(
+        testing_prompt.contains("cargo test --test execution_chain_fake_provider"),
+        "N17 prompt should inherit commands_run from the latest coding_report when routing commands are empty"
+    );
+}
+
+#[test]
+fn coding_prompt_includes_worktask_plan_and_routing_context_for_real_providers() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let provider = ScriptedExecutionProvider::happy();
+
+    run_worktask_execution_chain(execution_worktask_input(workspace.path()), &provider)
+        .expect("execution chain");
+
+    let coding_prompt = provider
+        .seen_prompts_for_schema("schema://aria/artifacts/coding_report/v1")
+        .into_iter()
+        .next()
+        .expect("coding prompt should be captured");
+    assert!(
+        coding_prompt.contains("实现执行链"),
+        "N16 prompt should include the active plan work package description"
+    );
+    assert!(
+        coding_prompt.contains("\"source_work_package_id\":\"WP-001\""),
+        "N16 prompt should include the source work package id"
+    );
+    assert!(
+        coding_prompt.contains("cargo test --test execution_chain_fake_provider"),
+        "N16 prompt should include acceptance targets or verification commands"
+    );
+    assert!(
+        coding_prompt.contains("\"allowed_write_scope\":[\"src/feature/\"]"),
+        "N16 prompt should include the routed write scope"
+    );
+}
+
+#[test]
+fn review_prompt_includes_prior_coding_and_testing_reports_for_real_providers() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let provider = ScriptedExecutionProvider::happy();
+
+    run_worktask_execution_chain(execution_worktask_input(workspace.path()), &provider)
+        .expect("execution chain");
+
+    let review_prompt = provider
+        .seen_prompts_for_schema("schema://aria/artifacts/code_review_report/v1")
+        .into_iter()
+        .next()
+        .expect("review prompt should be captured");
+    assert!(
+        review_prompt.contains("coding_report_worktask_001_0001"),
+        "N18 prompt should include the prior coding report"
+    );
+    assert!(
+        review_prompt.contains("\"files_modified\":[\"src/feature/lib.rs\"]"),
+        "N18 prompt should include changed files from the coding report"
+    );
+    assert!(
+        review_prompt.contains("testing_report_worktask_001_0001"),
+        "N18 prompt should include the prior testing report"
+    );
+    assert!(
+        review_prompt.contains("\"tests_passed\":true"),
+        "N18 prompt should include testing status"
+    );
+}
+
+#[test]
+fn review_revise_routes_to_rework_and_rechecks_before_ready() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let provider = ScriptedExecutionProvider::review_revises_then_passes();
+
+    let result =
+        run_worktask_execution_chain(execution_worktask_input(workspace.path()), &provider)
+            .expect("execution chain with review revise");
+
+    assert_eq!(
+        result
+            .protocol_steps
+            .iter()
+            .map(|step| step.node_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["N16", "N17", "N18", "N19", "N17", "N18"]
+    );
+    assert_eq!(result.rework_counter, 1);
+    assert_eq!(
+        result.protocol_steps[3].node_specific_fields["rework_scope"]["source"],
+        "code_review_report_worktask_001_0001"
+    );
+    assert_eq!(result.next_node, "M20");
+}
+
+#[test]
+fn testing_rework_source_uses_actual_failed_testing_report_ref() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let provider = ScriptedExecutionProvider::testing_fails_then_passes()
+        .with_testing_artifact_ref("testing_report_custom_0001");
+
+    let result =
+        run_worktask_execution_chain(execution_worktask_input(workspace.path()), &provider)
+            .expect("execution chain with rework");
+
+    assert_eq!(
+        result.protocol_steps[2].node_specific_fields["rework_scope"]["source"],
+        "testing_report_custom_0001"
+    );
+}
+
+#[test]
+fn rework_counter_limit_routes_to_manual_intervention_hold() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let provider = ScriptedExecutionProvider::testing_always_fails();
+    assert_eq!(
+        LoopCounterRegistry::phase1().threshold(LoopCounterName::Rework),
+        3
+    );
+
+    let result =
+        run_worktask_execution_chain(execution_worktask_input(workspace.path()), &provider)
+            .expect("execution chain reaches manual hold");
+
+    assert_eq!(result.next_node, "X08");
+    assert_eq!(result.rework_counter, 4);
+    assert_eq!(
+        result.manual_intervention_reason.as_deref(),
+        Some("rework_limit_exceeded")
+    );
+    assert_eq!(
+        result
+            .protocol_steps
+            .last()
+            .expect("manual hold step")
+            .node_id,
+        "X08"
+    );
+}
+
+#[test]
+fn provider_error_routes_execution_chain_to_manual_hold_and_keeps_failed_run_record() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let provider = ScriptedExecutionProvider::testing_provider_errors();
+
+    let result =
+        run_worktask_execution_chain(execution_worktask_input(workspace.path()), &provider)
+            .expect("provider execution error should become a manual hold result");
+
+    assert_eq!(
+        result
+            .protocol_steps
+            .iter()
+            .map(|step| step.node_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["N16", "X08"]
+    );
+    assert_eq!(result.next_node, "X08");
+    assert_eq!(
+        result.manual_intervention_reason.as_deref(),
+        Some("provider_execution_failed")
+    );
+    let failed_run = result
+        .provider_run_records
+        .iter()
+        .find(|record| record.provider_run_id == "run_n17_0001")
+        .expect("failed N17 provider run must be retained");
+    assert_eq!(failed_run.status, ProviderRunStatus::Failed);
+    assert_eq!(
+        failed_run.error_code.as_deref(),
+        Some("provider_execution_failed")
+    );
+
+    let events = fs::read_to_string(
+        workspace
+            .path()
+            .join("worktree/.aria/runtime/tasks/task_001/logs/node-events.jsonl"),
+    )
+    .expect("node events");
+    assert!(events.contains(r#""node_id":"N17""#));
+    assert!(events.contains(r#""status":"failed""#));
+}
+
+#[test]
+fn integration_prepare_execute_verify_uses_candidate_commit_and_integration_worktree() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let repo = prepare_git_worktask_repo(workspace.path());
+    let integration_worktree = workspace.path().join("integration-worktree");
+    let mut queue = IntegrationQueue::default();
+    let unit = IntegrationPrepareUnit;
+    assert_eq!(unit.covered_protocol_nodes(), vec!["N20", "N21", "N22"]);
+
+    let prepare = run_integration_prepare(
+        IntegrationPrepareInput {
+            session_id: "session_001".to_string(),
+            task_id: "task_001".to_string(),
+            worktask_id: "worktask_001".to_string(),
+            worktree_path: repo.clone(),
+            integration_worktree_path: integration_worktree.clone(),
+            integration_branch: "aria/integration/task_001".to_string(),
+            base_ref: "main".to_string(),
+            allowed_write_scope: vec!["src/feature/".to_string()],
+        },
+        &mut queue,
+    )
+    .expect("integration prepare");
+
+    assert_eq!(
+        prepare
+            .protocol_steps
+            .iter()
+            .map(|step| step.node_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["N20", "N21", "N22"]
+    );
+    assert_eq!(
+        prepare.protocol_steps[0].node_specific_fields["ready_decision"],
+        "ready"
+    );
+    assert_eq!(
+        prepare.protocol_steps[0].node_specific_fields["candidate_commit_sha"],
+        prepare.candidate_commit_sha
+    );
+    assert_eq!(
+        prepare.protocol_steps[1].node_specific_fields["queue_position"],
+        1
+    );
+    assert_eq!(
+        prepare.protocol_steps[2].node_specific_fields["candidate_commit_sha"],
+        prepare.candidate_commit_sha
+    );
+    assert_eq!(
+        queue.records()[0].candidate_commit_sha,
+        prepare.candidate_commit_sha
+    );
+    assert!(integration_worktree.exists());
+    assert_eq!(
+        git_output(&repo, &["branch", "--show-current"]),
+        "aria/worktask_001"
+    );
+
+    let execute = run_integration_execute(IntegrationExecuteInput {
+        worktask_id: "worktask_001".to_string(),
+        integration_worktree_path: integration_worktree.clone(),
+        candidate_commit_sha: prepare.candidate_commit_sha.clone(),
+        pre_merge_sha: prepare.pre_merge_sha.clone(),
+    })
+    .expect("integration execute");
+    assert_eq!(execute.protocol_step.node_id, "N23");
+    assert_eq!(execute.integration_report["status"], "completed");
+    assert_eq!(
+        execute.integration_report["node_specific_fields"]["integration_commit_sha"],
+        execute
+            .integration_commit_sha
+            .clone()
+            .expect("integration commit")
+    );
+    assert_eq!(execute.next_decision, "verify");
+    assert_ne!(execute.post_merge_sha, Some(prepare.pre_merge_sha.clone()));
+    assert_eq!(
+        git_output(&repo, &["branch", "--show-current"]),
+        "aria/worktask_001"
+    );
+
+    let verify = run_integration_verify(IntegrationVerifyInput {
+        worktask_id: "worktask_001".to_string(),
+        integration_worktree_path: integration_worktree,
+        pre_merge_sha: prepare.pre_merge_sha,
+        verify_passed: true,
+    })
+    .expect("integration verify");
+    assert_eq!(verify.protocol_step.node_id, "N24");
+    assert_eq!(verify.verify_decision, "pass");
+    assert_eq!(verify.next_decision, "N25");
+}
+
+#[test]
+fn integration_prepare_ignores_aria_runtime_files_when_collecting_candidate_diff() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let repo = prepare_git_worktask_repo(workspace.path());
+    let runtime_log = repo.join(".aria/runtime/tasks/task_001/logs/node-events.jsonl");
+    fs::create_dir_all(runtime_log.parent().expect("runtime log parent")).expect("runtime dirs");
+    fs::write(&runtime_log, "{}\n").expect("runtime log");
+    let mut queue = IntegrationQueue::default();
+
+    let prepare = run_integration_prepare(
+        IntegrationPrepareInput {
+            session_id: "session_001".to_string(),
+            task_id: "task_001".to_string(),
+            worktask_id: "worktask_001".to_string(),
+            worktree_path: repo.clone(),
+            integration_worktree_path: workspace.path().join("integration-worktree"),
+            integration_branch: "aria/integration/task_001".to_string(),
+            base_ref: "main".to_string(),
+            allowed_write_scope: vec!["src/feature/".to_string()],
+        },
+        &mut queue,
+    )
+    .expect("integration prepare should ignore .aria runtime files");
+
+    let committed_files = git_output(&repo, &["show", "--name-only", "--pretty=format:", "HEAD"]);
+    assert_eq!(
+        prepare.candidate_commit_sha,
+        git_output(&repo, &["rev-parse", "HEAD"])
+    );
+    assert!(committed_files.contains("src/feature/lib.rs"));
+    assert!(!committed_files.contains(".aria/runtime"));
+}
+
+fn execution_input(worktree_path: &std::path::Path) -> ExecutionSetupInput {
+    ExecutionSetupInput {
+        session_id: "session_001".to_string(),
+        task_id: "task_001".to_string(),
+        dispatch_package_ref: "dispatch_pkg_001".to_string(),
+        dispatch_package: json!({
+            "artifact_kind": "dispatch_package",
+            "_aria": {
+                "worktask_routing": [
+                    {
+                        "worktask_id": "worktask_001",
+                        "source_work_package_id": "WP-001",
+                        "execution_mode": "agent_only",
+                        "allowed_write_scope": ["src/feature/"]
+                    }
+                ]
+            }
+        }),
+        plan_projection: json!({
+            "work_packages": [
+                {
+                    "work_package_id": "WP-001",
+                    "traceability_refs": ["REQ-001"],
+                    "acceptance_targets": ["cargo test --test execution_chain_fake_provider"]
+                }
+            ]
+        }),
+        worktree_path: worktree_path.to_path_buf(),
+        base_ref: "main".to_string(),
+    }
+}
+
+fn prepare_git_worktask_repo(workspace: &Path) -> std::path::PathBuf {
+    let repo = workspace.join("repo");
+    fs::create_dir_all(repo.join("src/feature")).expect("repo dirs");
+    git(&repo, &["init", "-b", "main"]);
+    git(&repo, &["config", "user.email", "aria@example.invalid"]);
+    git(&repo, &["config", "user.name", "Aria Test"]);
+    fs::write(repo.join("README.md"), "base\n").expect("readme");
+    git(&repo, &["add", "README.md"]);
+    git(&repo, &["commit", "-m", "base"]);
+    git(&repo, &["checkout", "-b", "aria/worktask_001"]);
+    fs::write(
+        repo.join("src/feature/lib.rs"),
+        "pub fn value() -> u32 { 1 }\n",
+    )
+    .expect("feature file");
+    repo
+}
+
+fn git(cwd: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .expect("git command");
+    assert!(
+        output.status.success(),
+        "git {:?} failed\nstdout={}\nstderr={}",
+        args,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn git_output(cwd: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .expect("git command");
+    assert!(
+        output.status.success(),
+        "git {:?} failed\nstdout={}\nstderr={}",
+        args,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
