@@ -153,30 +153,18 @@ impl WorkspaceEngine {
             .iter()
             .filter_map(|outline_id| outline_to_verification_plan_id.get(outline_id).cloned())
             .collect();
-        let dependency_graph = self
-            .latest_work_item_plan_outline_candidate()?
-            .outline
-            .dependency_graph
+        let dependency_graph = work_items
             .iter()
-            .map(|edge| {
-                let from_work_item_id = outline_to_work_item_id
-                    .get(&edge.from_outline_id)
-                    .cloned()
-                    .ok_or_else(|| {
-                        format!("dependency from outline `{}` missing", edge.from_outline_id)
-                    })?;
-                let to_work_item_id = outline_to_work_item_id
-                    .get(&edge.to_outline_id)
-                    .cloned()
-                    .ok_or_else(|| {
-                        format!("dependency to outline `{}` missing", edge.to_outline_id)
-                    })?;
-                Ok(IssueWorkItemDependencyEdge {
-                    from_work_item_id,
-                    to_work_item_id,
-                })
+            .flat_map(|work_item| {
+                work_item
+                    .depends_on
+                    .iter()
+                    .map(|dependency_id| IssueWorkItemDependencyEdge {
+                        from_work_item_id: dependency_id.clone(),
+                        to_work_item_id: work_item.id.clone(),
+                    })
             })
-            .collect::<Result<Vec<_>, String>>()?;
+            .collect();
         let mut compiled_plan = previous_plan.clone();
         compiled_plan.status = crate::product::models::IssueWorkItemPlanStatus::Confirmed;
         compiled_plan.work_item_ids = work_item_ids;

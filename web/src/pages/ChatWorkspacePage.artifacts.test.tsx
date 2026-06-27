@@ -369,15 +369,13 @@ describe("ChatWorkspacePage work item plan artifacts", () => {
 
     const versionRail = screen.getByTestId("work-item-plan-version-rail");
     expect(versionRail).toHaveTextContent("Outline");
-    expect(versionRail).toHaveTextContent("Drafts");
+    expect(versionRail).toHaveTextContent("Draft");
     expect(versionRail).toHaveTextContent(
       "outline_backend / draft_backend_001",
     );
     expect(versionRail).toHaveTextContent("v3");
 
-    await userEvent.click(
-      screen.getByTestId("work-item-plan-version-2"),
-    );
+    await userEvent.selectOptions(screen.getByLabelText("Artifact version"), "2");
 
     expect(
       screen.getByTestId("work-item-plan-artifact-panel"),

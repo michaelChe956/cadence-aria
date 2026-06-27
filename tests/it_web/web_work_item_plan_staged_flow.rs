@@ -443,9 +443,10 @@ async fn session_state_restores_work_item_plan_staged_artifacts() {
         state["artifact"]["batch_state"]["active_outline_id"],
         Value::Null
     );
-    let current_batch_summary = state["artifact_version_summaries"]
+    let artifact_summaries = state["artifact_version_summaries"]
         .as_array()
-        .expect("artifact version summaries")
+        .expect("artifact version summaries");
+    let current_batch_summary = artifact_summaries
         .iter()
         .find(|summary| {
             summary["is_current"] == true
@@ -465,13 +466,26 @@ async fn session_state_restores_work_item_plan_staged_artifacts() {
         .expect("batch artifact source node exists in timeline");
     assert_eq!(batch_source_node["node_type"], "work_item_batch_run");
     assert_eq!(
-        state["artifact_version_summaries"]
-            .as_array()
-            .expect("artifact version summaries")
-            .len(),
-        7,
-        "artifact_version_summaries should preserve outline, mode, draft, and batch indexes"
+        artifact_summaries.len(),
+        5,
+        "artifact_version_summaries should preserve outline, draft, and batch indexes without duplicating mode metadata"
     );
+    for expected_preview in [
+        "先实现后端会话 API",
+        "outline_backend_session",
+        "outline_frontend_expiry",
+        "outline_integration_session",
+        "(3 drafts)",
+    ] {
+        assert!(
+            artifact_summaries.iter().any(|summary| {
+                summary["markdown_preview"]
+                    .as_str()
+                    .is_some_and(|preview| preview.contains(expected_preview))
+            }),
+            "missing artifact summary preview containing {expected_preview}"
+        );
+    }
 
     recovered.close(None).await.ok();
 }

@@ -161,12 +161,13 @@ describe("WorkItemPlanArtifactPanel", () => {
     expect(editor).toHaveTextContent("missing_scope");
   });
 
-  it("groups artifact versions by phase and keeps missing typed artifacts visible", () => {
+  it("uses cascading phase and version selects for artifact versions", () => {
     const onSelectVersion = vi.fn();
     const outlineArtifact = workItemPlanOutlineArtifact("后端数据层 v2", [
       "src/product/provider_catalog.rs",
     ]);
     const draftArtifact = workItemDraftArtifact("outline_backend", "draft_backend_001");
+    const compileArtifact = workItemCompileArtifact();
 
     render(
       <WorkItemPlanArtifactPanel
@@ -174,29 +175,29 @@ describe("WorkItemPlanArtifactPanel", () => {
         versions={[
           workItemPlanArtifactVersion(1, outlineArtifact, false),
           workItemPlanArtifactVersion(2, draftArtifact, true),
-          {
-            ...workItemPlanArtifactVersion(3, outlineArtifact, false),
-            artifact: null,
-          },
+          workItemPlanArtifactVersion(3, compileArtifact, false),
+          workItemPlanArtifactVersion(4, compileArtifact, false),
         ]}
         selectedVersion={1}
         onSelectVersion={onSelectVersion}
       />,
     );
 
-    expect(screen.getByTestId("work-item-version-group-outline")).toHaveTextContent(
-      "Outline",
-    );
-    expect(screen.getByTestId("work-item-version-group-drafts")).toHaveTextContent(
-      "Drafts",
-    );
-    expect(screen.getByText("按需加载")).toBeInTheDocument();
+    const phaseSelect = screen.getByLabelText("Artifact phase");
+    const versionSelect = screen.getByLabelText("Artifact version");
+    expect(phaseSelect).toHaveValue("outline");
+    expect(versionSelect).toHaveValue("1");
 
-    fireEvent.click(screen.getByTestId("work-item-plan-version-2"));
-    fireEvent.click(screen.getByTestId("work-item-plan-version-3"));
-
+    fireEvent.change(phaseSelect, { target: { value: "drafts" } });
     expect(onSelectVersion).toHaveBeenCalledWith(2);
+
+    fireEvent.change(phaseSelect, { target: { value: "compile" } });
+    expect(onSelectVersion).toHaveBeenCalledWith(4);
+
+    fireEvent.change(versionSelect, { target: { value: "3" } });
+
     expect(onSelectVersion).toHaveBeenCalledWith(3);
+    expect(phaseSelect).toHaveTextContent("Final Compile");
   });
 
   it("renders compile report as a structured summary without before after debug json", () => {

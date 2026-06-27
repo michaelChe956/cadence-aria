@@ -333,10 +333,10 @@ impl WorkspaceEngine {
             outline_candidate.current_generation_round_id = generation_round_id;
         }
         outline_candidate.selected_generation_mode = selected_mode;
-        self.update_artifact(ArtifactPayload::WorkItemPlanOutlineCandidate {
+        self.replace_current_artifact_payload(ArtifactPayload::WorkItemPlanOutlineCandidate {
             outline_candidate: Box::new(outline_candidate),
         })
-        .await;
+        .await?;
         Ok(())
     }
 }

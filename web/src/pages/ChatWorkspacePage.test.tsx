@@ -241,7 +241,8 @@ describe("ChatWorkspacePage shell and content loading", () => {
       <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
     );
     await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
-    await userEvent.click(screen.getByTestId("work-item-plan-version-10"));
+    await userEvent.selectOptions(screen.getByLabelText("Artifact phase"), "unknown");
+    await userEvent.selectOptions(screen.getByLabelText("Artifact version"), "10");
 
     await waitFor(() => {
       expect(fetchWorkspaceArtifactVersion).toHaveBeenCalledWith(

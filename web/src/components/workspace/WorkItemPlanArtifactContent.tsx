@@ -292,9 +292,9 @@ function versionGroup(artifact: WorkItemPlanArtifactPayload | null) {
       return { key: "outline", label: "Outline" };
     case "draft_candidate":
     case "batch_state":
-      return { key: "drafts", label: "Drafts" };
+      return { key: "drafts", label: "Draft" };
     case "compile_report":
-      return { key: "compile", label: "Compile" };
+      return { key: "compile", label: "Final Compile" };
     case "context_blocker":
       return { key: "blockers", label: "Blockers" };
     default:
@@ -751,7 +751,7 @@ export function workItemPlanArtifactLabel(
     case "batch_state":
       return `Batch / ${artifact.payload.batch_id}`;
     case "compile_report":
-      return `Compile / ${artifact.payload.compile_id}`;
+      return `Final Compile / ${artifact.payload.compile_id}`;
     case "context_blocker":
       return `Blocker / ${artifact.payload.context_blockers.length}`;
     default:

@@ -134,6 +134,12 @@ impl WorkspaceEngine {
                 return Err("cannot confirm a change_requested WorkItemPlan".to_string());
             }
         };
+        if plan.work_item_ids.is_empty() {
+            return Err(
+                "cannot confirm WorkItemPlan without compiled WorkItem records; run Final Compile successfully first"
+                    .to_string(),
+            );
+        }
 
         let _created_sessions = lifecycle
             .ensure_work_item_sessions_for_plan(

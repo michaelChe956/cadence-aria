@@ -382,6 +382,16 @@ impl WorkspaceEngine {
         );
         tx.validator_findings = report.findings.clone();
         if report.has_errors() {
+            let failure_report = WorkItemPlanCompileReportPayload {
+                compile_id: compile_id.clone(),
+                generation_round_id: index.current_generation_round_id.clone(),
+                status: WorkItemPlanCompileStatus::Failed,
+                plan_commit_state: WorkItemPlanCommitState::NotStarted,
+                work_item_ids: Vec::new(),
+                verification_plan_ids: Vec::new(),
+                child_session_ids: Vec::new(),
+                validator_findings: work_item_split_findings_to_dto(&tx.validator_findings),
+            };
             tx.status = WorkItemPlanCompileStatus::Failed;
             tx.failure_reason = Some(work_item_plan_findings_summary(
                 "Final Compile strict validator failed",
@@ -391,6 +401,10 @@ impl WorkspaceEngine {
             store
                 .put_compile_transaction(&tx)
                 .map_err(|error| format!("save failed compile transaction failed: {error}"))?;
+            self.update_artifact(ArtifactPayload::WorkItemPlanCompileReport {
+                compile_report: Box::new(failure_report),
+            })
+            .await;
             return Err(work_item_plan_findings_summary(
                 "Final Compile strict validator failed",
                 &report.findings,
