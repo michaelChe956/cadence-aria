@@ -122,7 +122,7 @@ impl super::CodingAttemptStore {
         let root = self.coding_units_root(&input.project_id, &input.issue_id, &input.attempt_id);
         let id = next_sequential_id("coding_unit", super::count_json_files(&root)?);
         let now = Utc::now().to_rfc3339();
-        let started_at = if input.status.is_active() {
+        let started_at = if matches!(input.status, CodingExecutionUnitStatus::Running) {
             Some(now.clone())
         } else {
             None
@@ -226,7 +226,7 @@ impl super::CodingAttemptStore {
             )));
         }
         let now = Utc::now().to_rfc3339();
-        if status.is_active() && unit.started_at.is_none() {
+        if matches!(status, CodingExecutionUnitStatus::Running) && unit.started_at.is_none() {
             unit.started_at = Some(now.clone());
         }
         if matches!(

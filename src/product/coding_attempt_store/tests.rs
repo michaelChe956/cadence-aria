@@ -361,6 +361,73 @@ fn clears_current_work_item_when_last_active_unit_completes() {
 }
 
 #[test]
+fn blocked_or_waiting_units_do_not_set_started_at() {
+    let (_tmp, store) = setup_store();
+    let group_attempt = store
+        .create_group_attempt(CreateGroupCodingAttemptInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            plan_id: "work_item_plan_0001".to_string(),
+            current_work_item_id: WORK_ITEM_ID.to_string(),
+            base_branch: "main".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: provider_snapshot(),
+            max_auto_rework: 2,
+        })
+        .expect("group attempt");
+
+    let blocked = store
+        .create_coding_unit(CreateCodingExecutionUnitInput {
+            attempt_id: group_attempt.id.clone(),
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            plan_id: "work_item_plan_0001".to_string(),
+            work_item_id: WORK_ITEM_ID.to_string(),
+            order_index: 0,
+            status: CodingExecutionUnitStatus::Blocked,
+        })
+        .expect("blocked unit");
+    assert!(blocked.started_at.is_none());
+
+    store
+        .update_coding_unit_status(
+            PROJECT_ID,
+            ISSUE_ID,
+            &group_attempt.id,
+            &blocked.id,
+            CodingExecutionUnitStatus::Completed,
+            None,
+        )
+        .expect("complete blocked unit");
+
+    let pending = store
+        .create_coding_unit(CreateCodingExecutionUnitInput {
+            attempt_id: group_attempt.id.clone(),
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            plan_id: "work_item_plan_0001".to_string(),
+            work_item_id: "work_item_0002".to_string(),
+            order_index: 1,
+            status: CodingExecutionUnitStatus::Pending,
+        })
+        .expect("pending unit");
+    assert!(pending.started_at.is_none());
+
+    let waiting = store
+        .update_coding_unit_status(
+            PROJECT_ID,
+            ISSUE_ID,
+            &group_attempt.id,
+            &pending.id,
+            CodingExecutionUnitStatus::WaitingForHuman,
+            None,
+        )
+        .expect("waiting unit");
+    assert!(waiting.started_at.is_none());
+}
+
+#[test]
 fn persists_test_plan_raw_output_and_blocked_gate() {
     let (_tmp, store, attempt) = setup();
 

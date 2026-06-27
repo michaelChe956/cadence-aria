@@ -160,3 +160,47 @@ cargo test --locked --lib coding_attempt_store
 - `src/product/coding_attempt_store/group.rs`
 - `src/product/coding_attempt_store/tests.rs`
 - `src/product/coding_models/execution.rs`
+
+## 第二次修复追加（started_at 语义收紧）
+
+### 修复内容
+
+- 在 `src/product/coding_attempt_store/group.rs` 收紧 `started_at` 赋值语义：
+  - `create_coding_unit` 仅在初始状态为 `Running` 时设置 `started_at`
+  - `update_coding_unit_status` 仅在目标状态为 `Running` 且当前 `started_at` 为空时设置 `started_at`
+- 保持 active-unit 互斥逻辑不变：
+  - `Running | WaitingForHuman | Blocked` 仍然被视为 active，用于单 active unit 约束
+
+### RED/GREEN 证据
+
+1. RED：
+
+```bash
+cargo test --locked --lib coding_attempt_store
+```
+
+结果：失败，新增回归测试 `blocked_or_waiting_units_do_not_set_started_at` 证明：
+
+- 创建 `Blocked` unit 时错误设置了 `started_at`
+
+2. GREEN：
+
+```bash
+cargo test --locked --lib coding_attempt_store
+```
+
+结果：通过，`10 passed; 0 failed`
+
+3. 格式化后回归：
+
+```bash
+cargo fmt
+cargo test --locked --lib coding_attempt_store
+```
+
+结果：通过，`10 passed; 0 failed`
+
+### 本轮变更文件
+
+- `src/product/coding_attempt_store/group.rs`
+- `src/product/coding_attempt_store/tests.rs`
