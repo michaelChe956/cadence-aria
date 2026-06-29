@@ -34,15 +34,11 @@
 其中 **Rust 构建/测试/检查命令规范**（标准命令、🔴 禁止 `-j 1`、定向快反馈命令）详见 `cadence/project-rules/build-test-commands.md`，本地与 CI 必须遵循。
 
 ### 7. 代码阅读规则
-- **结构化优先，使用 `ast-grep outline` 避免盲读** → 详见 `.claude/rules/code-reading.md`
+- **大范围检索使用 CodeGraph，精确结构阅读优先使用 `ast-grep outline`** → 详见 `.claude/rules/code-reading.md`
 
 ## 项目配置
 
 > 以下内容由初始化脚本根据项目环境自动检测生成，非通用规则。
-> 待办：技术栈确定后需补充：
-> 1. 更新「项目技术栈」和「包管理器规则」部分
-> 2. 补充具体的测试命令、检查命令、格式化命令
-> 3. 根据最终技术栈调整覆盖率阈值（当前默认 80%）
 
 ### 包管理器规则
 - **前端项目**：必须使用 `pnpm` 作为包管理器
@@ -50,14 +46,29 @@
 - **禁止使用**：npm（前端）、pip（Python）、yarn（前端）
 
 ### 项目技术栈
+
+**后端（Rust）**：
 - **语言**：Rust（edition 2024，工具链固定 `rust-toolchain.toml` 的 stable）
 - **包管理器**：Cargo
 - **测试命令**：`cargo test --locked`（🔴 禁止 `-j 1`；定向单测用 `cargo test --locked --lib <过滤名>`）
 - **检查命令**：`cargo check --locked` / `cargo clippy --all-targets --all-features --locked -- -D warnings`
 - **格式化命令**：`cargo fmt --check`（应用：`cargo fmt`）
-- **覆盖率阈值**：80%（默认值）
 - **命令规范**：详见 `cadence/project-rules/build-test-commands.md`
+
+**前端（web/）**：
+- **语言**：TypeScript + React
+- **构建工具**：Vite
+- **包管理器**：pnpm
+- **状态管理**：Zustand
+- **路由**：TanStack Router
+- **样式**：Tailwind CSS
+- **测试命令**：`cd web && pnpm test`（Vitest）
+- **E2E 测试**：`cd web && pnpm test:e2e`（Playwright）
+- **检查命令**：`cd web && pnpm tsc -b`
+- **开发服务器**：`cd web && pnpm dev`
+
+**覆盖率阈值**：80%（默认值）
 
 ## 当前日期
 
-Today's date is 2026/04/16。
+Today's date is 2026/06/29。

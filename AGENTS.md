@@ -34,7 +34,7 @@
 其中 **Rust 构建/测试/检查命令规范**（标准命令、🔴 禁止 `-j 1`、定向快反馈命令）详见 `cadence/project-rules/build-test-commands.md`，本地与 CI 必须遵循。
 
 ### 7. 代码阅读规则
-- **结构化优先，使用 `ast-grep outline` 避免盲读** → 详见 `.claude/rules/code-reading.md`
+- **大范围检索使用 CodeGraph，精确结构阅读优先使用 `ast-grep outline`** → 详见 `.claude/rules/code-reading.md`
 
 ## 与 CLAUDE.md 的关系
 

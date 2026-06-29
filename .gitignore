@@ -15,3 +15,6 @@ target/
 npm/cli-*/bin/
 npm/cli-*/package.json
 npm/*.tgz
+
+# CodeGraph 本地索引
+.codegraph/
