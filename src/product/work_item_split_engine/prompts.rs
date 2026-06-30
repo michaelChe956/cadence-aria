@@ -29,6 +29,23 @@ const OUTLINE_WRITE_SCOPE_RULES: &str = "\
          如果两个依赖 outline 都需要改同一个 shared helper、schema、fixture 或 test harness，请拆出独立前置 outline 作为唯一 owner，其他 outline 通过 depends_on 读取 handoff；若 shared 文件位于 web/src/** 下，不要再让 frontend outline 拥有覆盖它的父级 glob。\n\
          forbidden_write_scopes 应显式写出依赖方或被依赖方已拥有的实现目录，帮助后续 draft 避免越界。\n\n";
 
+fn work_item_plan_runtime_contract(role: &str) -> String {
+    format!(
+        "[openspec_contract]\n\
+         Role: {role}\n\
+         - 必须基于已确认 Story Spec 与 Design Spec 的 requirement/design trace 进行拆分。\n\
+         - 必须维护 Story/Design/Work Item 追踪关系，并在任务拆分中保留来源证据。\n\
+         - 每个 outline/draft 必须能追溯到 source_story_spec_ids 与 source_design_spec_ids。\n\
+         - 发现 Story/Design/Work Item 之间冲突、缺失验收依据或无法确定写入边界时，必须输出 blocker 或 reviewer 可处理的风险，而不是猜测。\n\
+         - 不得声称已写回 OpenSpec；当前仅生成可供 daemon 后续写回 OpenSpec tasks constraints 的结构化候选。\n\n\
+         [superpowers_contract]\n\
+         - 必须遵守 using-superpowers 的先读规则与 writing-plans 的计划结构要求。\n\
+         - 生成的是计划和任务拆分，不执行代码修改。\n\
+         - 每个 draft 必须给出后续 coding agent 可执行的目标、范围、非目标、TDD 顺序、验证命令、依赖输入、交接输出和风险。\n\
+         - 结论必须能追溯到已提供的 Story/Design/Outline/Draft 证据。\n\n"
+    )
+}
+
 impl WorkItemSplitEngine {
     pub fn build_generate_invocation(
         request: &GenerateWorkItemsRequest,
@@ -188,6 +205,7 @@ pub(crate) fn build_outline_prompt_with_nonce(
     context_resolutions: &[OutlineContextBlockerResolution],
 ) -> (String, String) {
     let nonce = structured_output_nonce();
+    let runtime_contract = work_item_plan_runtime_contract("WorkItemPlan Outline Planner");
     let revision_feedback_section = request
         .revision_feedback
         .as_deref()
@@ -200,6 +218,7 @@ pub(crate) fn build_outline_prompt_with_nonce(
         .unwrap_or_default();
     let prompt = format!(
         "你是 Aria 的 WorkItemPlan Outline Planner。请基于以下输入生成第一阶段 WorkItemPlan Outline。\n\n\
+         {runtime_contract}\
          [issue]\n\
          title: {title}\n\
          description: {description}\n\n\
@@ -238,6 +257,7 @@ pub(crate) fn build_outline_prompt_with_nonce(
          严格按以下 JSON schema 输出。\n\n\
          {schema}",
         title = issue.title,
+        runtime_contract = runtime_contract,
         description = issue.description.as_deref().unwrap_or("无"),
         repo_id = repository.id,
         project_id = issue.project_id,
@@ -266,8 +286,10 @@ pub(crate) fn build_outline_revision_prompt(
     feedback: &str,
 ) -> (String, String) {
     let nonce = structured_output_nonce();
+    let runtime_contract = work_item_plan_runtime_contract("WorkItemPlan Outline Planner");
     let prompt = format!(
         "你是 Aria 的 WorkItemPlan Outline Planner。当前请求是基于同一会话中上一版 outline 进行增量返修。\n\n\
+         {runtime_contract}\
          不要重新分析完整 issue、story/design 上下文或仓库结构；上一版 outline 已在同一会话上下文中。\
          请仅根据以下反馈修改 outline，输出完整更新后的 outline。\n\n\
          [issue_ref]\n\
@@ -294,6 +316,7 @@ pub(crate) fn build_outline_revision_prompt(
          严格按以下 JSON schema 输出。\n\n\
          {schema}",
         project_id = issue.project_id,
+        runtime_contract = runtime_contract,
         issue_id = issue.id,
         title = issue.title,
         feedback = feedback,
@@ -313,6 +336,7 @@ pub(crate) fn build_split_prompt(
     repository_structure: &str,
 ) -> String {
     let nonce = structured_output_nonce();
+    let runtime_contract = work_item_plan_runtime_contract("Work Item Splitter");
     let revision_feedback_section = request
         .revision_feedback
         .as_deref()
@@ -326,6 +350,7 @@ pub(crate) fn build_split_prompt(
 
     format!(
         "你是 Aria 的 Work Item Splitter。请基于以下输入生成 IssueWorkItemPlan 候选拆分。\n\n\
+         {runtime_contract}\
          [issue]\n\
          title: {title}\n\
          description: {description}\n\n\
@@ -357,6 +382,7 @@ pub(crate) fn build_split_prompt(
          每个 work_item 必须包含 `kind` 字段（不要写成 `type`），合法取值为以下之一：backend、frontend、integration、e2e、docs、infra、other。\n\n\
          {schema}",
         title = issue.title,
+        runtime_contract = runtime_contract,
         description = issue.description.as_deref().unwrap_or("无"),
         repo_id = repository.id,
         repo_path = repository.path.display(),
@@ -398,6 +424,7 @@ pub(crate) fn build_revision_prompt(
     }
 
     let nonce = structured_output_nonce();
+    let runtime_contract = work_item_plan_runtime_contract("Work Item Splitter");
     let retained_section = if retained.is_empty() {
         "(无)".to_string()
     } else {
@@ -423,6 +450,7 @@ pub(crate) fn build_revision_prompt(
 
     format!(
         "你是 Aria 的 Work Item Splitter。当前请求是局部重做（revision）。请基于以下输入，仅输出需要重做的 work_items 与 verification_plans。\n\n\
+         {runtime_contract}\
          [issue]\n\
          title: {title}\n\
          description: {description}\n\n\
@@ -449,6 +477,7 @@ pub(crate) fn build_revision_prompt(
          每个 work_item 必须包含 `kind` 字段（不要写成 `type`），合法取值为以下之一：backend、frontend、integration、e2e、docs、infra、other。\n\n\
          {schema}",
         title = issue.title,
+        runtime_contract = runtime_contract,
         description = issue.description.as_deref().unwrap_or("无"),
         repo_id = repository.id,
         repo_path = repository.path.display(),
@@ -471,6 +500,7 @@ pub(crate) fn build_work_item_draft_prompt(
     feedback: Option<&str>,
     nonce: &str,
 ) -> String {
+    let runtime_contract = work_item_plan_runtime_contract("Work Item Draft author");
     let outline_json = serde_json::to_string_pretty(outline).unwrap_or_else(|_| "{}".to_string());
     let current_outline_json =
         serde_json::to_string_pretty(current_outline).unwrap_or_else(|_| "{}".to_string());
@@ -497,6 +527,7 @@ pub(crate) fn build_work_item_draft_prompt(
 
     format!(
         "你是 Aria 的 Work Item Draft author。请只为当前 WorkItemPlan Outline 中的一个 item 生成 WorkItemDraftCandidate。\n\n\
+         {runtime_contract}\
          [generation_mode]\n{mode}\n\n\
          [confirmed_outline]\n{outline_json}\n\n\
          [current_work_item_outline]\n{current_outline_json}\n\n\
@@ -510,6 +541,10 @@ pub(crate) fn build_work_item_draft_prompt(
          - verification_plan 必须包含 commands、manual_checks、required_gates 三个字段；没有 manual check 时输出 []。\n\
          - verification_plan.required_gates 必须是字符串数组，只能写同一 verification_plan 内 command/manual_check 的 id，例如 [\"cmd_unit\"]。\n\
          - 不要输出 required_gates gate 对象；禁止写 {{\"id\":\"gate_unit\",\"type\":\"command\",\"command_id\":\"cmd_unit\",\"expected\":\"exit 0\"}} 这类对象。\n\
+         - implementation_context 必须写给后续 coding agent，包含具体模块/文件边界、已有代码入口、TDD 起点、不要触碰的范围、验收命令顺序。\n\
+         - handoff_summary 必须写给依赖它的后续 work item，列出本项完成后必须交付的类型、API、状态、测试 seam、错误码或 UI 契约。\n\
+         - verification_plan.commands 必须优先包含定向快反馈命令，再包含必要的 fmt/clippy/check/test；Rust 命令必须遵守 cadence/project-rules/build-test-commands.md，禁止 -j 1。\n\
+         - 若 Story/Design/Outline 证据不足以指导 coding agent，必须在 implementation_context 中显式写出阻塞点或待确认项，不得编造文件路径。\n\
          - 可以先输出简短可读状态；最终 JSON 必须放在最后一个 nonce sentinel block 中，不要输出 Markdown code fence。\n\n\
          [output]\n\
          <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">{{\"draft\":{{\"outline_id\":\"{outline_id}\",\"title\":\"...\",\"kind\":\"backend|frontend|integration|e2e|docs|infra|other\",\"goal\":\"...\",\"implementation_context\":\"...\",\"exclusive_write_scopes\":[],\"forbidden_write_scopes\":[],\"depends_on_outline_ids\":[],\"required_handoff_from_outline_ids\":[],\"handoff_summary\":\"...\",\"verification_plan\":{{\"commands\":[{{\"id\":\"cmd_unit\",\"label\":\"unit tests\",\"command\":\"cargo test --locked --lib <filter>\",\"cwd\":\"\",\"purpose\":\"验证当前 work item\",\"required\":true,\"timeout_seconds\":120,\"safety\":\"approved\"}}],\"manual_checks\":[],\"required_gates\":[\"cmd_unit\"]}}}}}}</ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">\n\n\
@@ -517,6 +552,7 @@ pub(crate) fn build_work_item_draft_prompt(
          严格按以下 JSON schema 输出。\n\n\
          {schema}",
         outline_id = current_outline.outline_id,
+        runtime_contract = runtime_contract,
         schema = WORK_ITEM_DRAFT_OUTPUT_SCHEMA,
     )
 }

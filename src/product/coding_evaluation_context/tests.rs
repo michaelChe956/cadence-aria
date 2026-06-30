@@ -438,6 +438,28 @@ fn group_context_includes_source_draft_mapping_when_compile_context_exists() {
 }
 
 #[test]
+fn group_context_prefers_work_item_source_fields_when_available() {
+    let (_tmp, paths, attempt) = group_attempt_with_explicit_work_item_source();
+
+    let pack = build_evaluation_context_pack(paths, &attempt, EvaluationContextRole::Coder)
+        .expect("context pack");
+    let group_context = pack.group_context.expect("group context");
+
+    assert_eq!(
+        group_context.source_outline_id.as_deref(),
+        Some("outline_explicit")
+    );
+    assert_eq!(
+        group_context.source_draft_id.as_deref(),
+        Some("draft_explicit")
+    );
+    assert!(
+        pack.context_warnings
+            .contains(&"group_draft_context_loaded_from_work_item".to_string())
+    );
+}
+
+#[test]
 fn group_context_warns_when_compile_draft_mapping_is_unavailable() {
     let (_tmp, paths, attempt) = group_attempt_with_two_work_items(false);
 
@@ -456,10 +478,22 @@ fn group_context_warns_when_compile_draft_mapping_is_unavailable() {
 fn group_attempt_with_two_work_items(
     with_compile_context: bool,
 ) -> (TempDir, ProductAppPaths, CodingExecutionAttempt) {
+    group_attempt_fixture(with_compile_context, false)
+}
+
+fn group_attempt_with_explicit_work_item_source()
+-> (TempDir, ProductAppPaths, CodingExecutionAttempt) {
+    group_attempt_fixture(false, true)
+}
+
+fn group_attempt_fixture(
+    with_compile_context: bool,
+    with_explicit_source: bool,
+) -> (TempDir, ProductAppPaths, CodingExecutionAttempt) {
     let tmp = TempDir::new().expect("tmp");
     let paths = ProductAppPaths::new(tmp.path().join(".aria"));
     let lifecycle = LifecycleStore::new(paths.clone());
-    let plan = create_group_plan_fixture(&lifecycle);
+    let plan = create_group_plan_fixture(&lifecycle, with_explicit_source);
     if with_compile_context {
         save_compile_context_fixture(&paths, &plan);
     }
@@ -497,7 +531,10 @@ fn group_attempt_with_two_work_items(
     (tmp, paths, attempt)
 }
 
-fn create_group_plan_fixture(lifecycle: &LifecycleStore) -> IssueWorkItemPlan {
+fn create_group_plan_fixture(
+    lifecycle: &LifecycleStore,
+    with_explicit_source: bool,
+) -> IssueWorkItemPlan {
     lifecycle
         .create_work_item(CreateWorkItemInput {
             id: Some("work_item_0001".to_string()),
@@ -508,6 +545,14 @@ fn create_group_plan_fixture(lifecycle: &LifecycleStore) -> IssueWorkItemPlan {
             design_spec_ids: Vec::new(),
             title: "Work Item 1".to_string(),
             work_item_set_id: Some("work_item_plan_0001".to_string()),
+            source_work_item_plan_id: with_explicit_source
+                .then(|| "work_item_plan_0001".to_string()),
+            source_outline_id: with_explicit_source.then(|| "outline_explicit".to_string()),
+            source_draft_id: with_explicit_source.then(|| "draft_explicit".to_string()),
+            planned_implementation_context: with_explicit_source
+                .then(|| "explicit planned context".to_string()),
+            planned_handoff_summary: with_explicit_source
+                .then(|| "explicit planned handoff".to_string()),
             kind: Default::default(),
             sequence_hint: Some(10),
             depends_on: Vec::new(),
@@ -530,6 +575,11 @@ fn create_group_plan_fixture(lifecycle: &LifecycleStore) -> IssueWorkItemPlan {
             design_spec_ids: Vec::new(),
             title: "Work Item 2".to_string(),
             work_item_set_id: Some("work_item_plan_0001".to_string()),
+            source_work_item_plan_id: None,
+            source_outline_id: None,
+            source_draft_id: None,
+            planned_implementation_context: None,
+            planned_handoff_summary: None,
             kind: Default::default(),
             sequence_hint: Some(20),
             depends_on: vec!["work_item_0001".to_string()],

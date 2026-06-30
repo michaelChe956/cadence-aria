@@ -134,6 +134,28 @@ pub(super) fn output_schema_for(workspace_type: &WorkspaceType) -> &'static str 
     }
 }
 
+pub(super) fn runtime_contract_for(session: &WorkspaceSessionRecord) -> String {
+    let openspec = if session.openspec_enabled {
+        "[openspec_contract]\n\
+         - 必须保持 Story/Design/Work Item 追踪关系。\n\
+         - 不得忽略 source ids、verification commands 或 planned context。\n\
+         - 不要直接修改 OpenSpec；由 daemon 负责后续写回与 projection。"
+    } else {
+        "[openspec_contract]\n\
+         - OpenSpec 未启用，但仍需保持产物可追踪。"
+    };
+    let superpowers = if session.superpowers_enabled {
+        "[superpowers_contract]\n\
+         - 必须遵守 using-superpowers。\n\
+         - Work Item / Work Item Plan 必须按 writing-plans 风格组织目标、范围、任务、验证、风险与追踪关系。\n\
+         - 生成计划，不执行代码。"
+    } else {
+        "[superpowers_contract]\n\
+         - Superpowers 未启用，但仍需明确假设、风险、验证与下一步。"
+    };
+    format!("{openspec}\n\n{superpowers}")
+}
+
 pub(super) fn completion_or_failure_for(session: &WorkspaceSessionRecord) -> &'static str {
     if session.openspec_enabled {
         "不要直接修改 OpenSpec。不要直接生成 projection。daemon 会做结构化落盘、OpenSpec 写回与约束编译。"

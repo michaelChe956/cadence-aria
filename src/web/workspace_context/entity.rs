@@ -107,9 +107,35 @@ pub(super) fn work_item_context_summary(
     } else {
         "(no verification plan)".to_string()
     };
+    let source_context = if work_item.source_work_item_plan_id.is_some()
+        || work_item.source_outline_id.is_some()
+        || work_item.source_draft_id.is_some()
+        || work_item.planned_implementation_context.is_some()
+        || work_item.planned_handoff_summary.is_some()
+    {
+        format!(
+            "\n[work_item_plan_source]\nsource_work_item_plan_id: {}\nsource_outline_id: {}\nsource_draft_id: {}\nplanned_implementation_context:\n{}\nplanned_handoff_summary:\n{}",
+            work_item
+                .source_work_item_plan_id
+                .as_deref()
+                .unwrap_or("(none)"),
+            work_item.source_outline_id.as_deref().unwrap_or("(none)"),
+            work_item.source_draft_id.as_deref().unwrap_or("(none)"),
+            work_item
+                .planned_implementation_context
+                .as_deref()
+                .unwrap_or("(none)"),
+            work_item
+                .planned_handoff_summary
+                .as_deref()
+                .unwrap_or("(none)")
+        )
+    } else {
+        String::new()
+    };
 
     Ok(format!(
-        "kind: {:?}\ndepends_on: [{}]\nexclusive_write_scopes: [{}]\nforbidden_write_scopes: [{}]\ncontext_budget: target_context_k={}, max_summary_chars={}, max_code_context_chars={}\nverification_commands:\n{}",
+        "kind: {:?}\ndepends_on: [{}]\nexclusive_write_scopes: [{}]\nforbidden_write_scopes: [{}]\ncontext_budget: target_context_k={}, max_summary_chars={}, max_code_context_chars={}\nverification_commands:\n{}{source_context}",
         work_item.kind,
         work_item.depends_on.join(", "),
         work_item.exclusive_write_scopes.join(", "),

@@ -169,8 +169,21 @@ fn build_group_context(
     }
     let dependency_handoff_refs =
         dependency_handoff_refs_for_current(work_items, current_work_item_id).unwrap_or_default();
-    let (source_outline_id, source_draft_id) =
-        resolve_group_draft_context(lifecycle_paths, &plan, current_work_item_id, warnings)?;
+    let current_work_item = work_items
+        .iter()
+        .find(|record| record.id == current_work_item_id);
+    let explicit_source = current_work_item.and_then(|item| {
+        item.source_outline_id
+            .clone()
+            .zip(item.source_draft_id.clone())
+    });
+    let (source_outline_id, source_draft_id) = if let Some((outline_id, draft_id)) = explicit_source
+    {
+        warnings.push("group_draft_context_loaded_from_work_item".to_string());
+        (Some(outline_id), Some(draft_id))
+    } else {
+        resolve_group_draft_context(lifecycle_paths, &plan, current_work_item_id, warnings)?
+    };
 
     Ok(Some(CodingGroupContextPack {
         plan_id: plan.id,
