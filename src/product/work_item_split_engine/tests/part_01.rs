@@ -115,6 +115,42 @@ fn build_split_prompt_includes_revision_feedback() {
 }
 
 #[test]
+fn work_item_plan_outline_prompt_includes_runtime_contracts() {
+    let (request, issue, repository) = split_prompt_fixture();
+
+    let prompt = build_outline_prompt(
+        &request,
+        &issue,
+        &repository,
+        &["Story context [REQ-001]".to_string()],
+        &["Design context [DEC-001]".to_string()],
+        "src/product\nweb/src",
+        &[],
+        &[],
+    );
+
+    assert!(prompt.contains("[openspec_contract]"));
+    assert!(prompt.contains("[superpowers_contract]"));
+    assert!(prompt.contains("writing-plans"));
+    assert!(prompt.contains("任务拆分"));
+    assert!(prompt.contains("追踪关系"));
+}
+
+#[test]
+fn work_item_plan_outline_revision_prompt_includes_runtime_contracts() {
+    let (request, issue, _repository) = split_prompt_fixture();
+
+    let (prompt, _nonce) =
+        build_outline_revision_prompt(&request, &issue, "补齐 forbidden_write_scopes");
+
+    assert!(prompt.contains("[openspec_contract]"));
+    assert!(prompt.contains("[superpowers_contract]"));
+    assert!(prompt.contains("writing-plans"));
+    assert!(prompt.contains("任务拆分"));
+    assert!(prompt.contains("追踪关系"));
+}
+
+#[test]
 fn build_outline_revision_prompt_is_delta_only() {
     let request = GenerateWorkItemsRequest {
         title: "test plan".to_string(),
@@ -466,6 +502,31 @@ fn single_item_prompt_forbids_work_item_id_and_outline_changes() {
 }
 
 #[test]
+fn single_item_prompt_requires_executable_plan_runtime_contracts() {
+    let outline = parse_work_item_plan_outline_output(valid_outline_author_output())
+        .expect("outline output")
+        .outline
+        .expect("outline");
+
+    let invocation = build_work_item_draft_invocation(
+        &outline,
+        "outline_backend",
+        WorkItemGenerationMode::Serial,
+        &[],
+        None,
+    )
+    .expect("draft invocation");
+
+    assert!(invocation.prompt.contains("[openspec_contract]"));
+    assert!(invocation.prompt.contains("[superpowers_contract]"));
+    assert!(invocation.prompt.contains("writing-plans"));
+    assert!(invocation.prompt.contains("TDD"));
+    assert!(invocation.prompt.contains("implementation_context"));
+    assert!(invocation.prompt.contains("handoff_summary"));
+    assert!(invocation.prompt.contains("后续 coding agent"));
+}
+
+#[test]
 fn single_item_prompt_requires_required_gates_as_string_id_array() {
     let outline = parse_work_item_plan_outline_output(valid_outline_author_output())
         .expect("outline output")
@@ -684,4 +745,3 @@ fn revision_prompt_requests_progress_before_long_operations() {
     assert!(prompt.contains("先输出一行简短可读状态"));
     assert!(prompt.contains("每完成一组探索后输出一句当前发现摘要"));
 }
-
