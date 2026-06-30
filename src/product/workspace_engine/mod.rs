@@ -67,6 +67,7 @@ use crate::web::workspace_ws_types::{
     WsOutMessage, WsProviderConfig,
 };
 
+mod artifact_constraints;
 mod author_confirm;
 mod compile;
 mod controls;
@@ -92,6 +93,7 @@ pub use types::{
     WorkspaceEngine, WorkspaceSession, WorkspaceStage,
 };
 
+pub(crate) use artifact_constraints::*;
 pub(crate) use compile::*;
 pub(crate) use mappings::*;
 pub(crate) use parsers::*;

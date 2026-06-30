@@ -101,6 +101,20 @@ impl WorkspaceSession {
         }
     }
 
+    pub(crate) fn replace_messages_from_records(&mut self, messages: Vec<WorkspaceMessageRecord>) {
+        self.messages = messages
+            .into_iter()
+            .enumerate()
+            .map(|(idx, message)| SessionMessage {
+                id: format!("msg_{:03}", idx + 1),
+                role: message.role,
+                content: message.content,
+                checkpoint_id: None,
+                created_at: message.created_at,
+            })
+            .collect();
+    }
+
     pub fn restore_checkpoint_ids(
         &mut self,
         checkpoints: &[crate::product::checkpoint_store::Checkpoint],

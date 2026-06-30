@@ -30,20 +30,22 @@ impl StreamingProviderAdapter for DesignArtifactRetryProvider {
                 return;
             }
 
-            let output = "```artifact\n# Retried Design Spec\n\n\
-                ## 设计决策\n\
-                - [DEC-001] 返修时直接输出完整设计产物。\n\n\
-                ## 公共组件\n\
-                - [CMP-001] ProviderDependencyDialog。\n\
-                ```";
+            let output = format!(
+                "```artifact\n{}```",
+                complete_design_artifact(
+                    "返修时直接输出完整设计产物。",
+                    "ProviderDependencyDialog::submit。",
+                )
+                .replacen("# Design Spec", "# Retried Design Spec", 1)
+            );
             let _ = event_tx
                 .send(ProviderEvent::TextDelta {
-                    content: output.to_string(),
+                    content: output.clone(),
                 })
                 .await;
             let _ = event_tx
                 .send(ProviderEvent::Completed {
-                    full_output: output.to_string(),
+                    full_output: output,
                     provider_session_id: Some("design-retry-session-2".to_string()),
                 })
                 .await;

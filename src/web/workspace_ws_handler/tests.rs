@@ -1,4 +1,8 @@
 use super::*;
+use crate::cross_cutting::provider_adapter::ProviderAdapterError;
+use crate::cross_cutting::streaming_provider::{
+    ProviderEvent, ProviderSession, StreamChunk, StreamingProviderInput,
+};
 use crate::web::workspace_ws_types::{
     AuthorDecision, HumanConfirmDecision, ProviderConfigSnapshot, RevisionPath, StructuredFeedback,
 };
@@ -304,6 +308,300 @@ fn revision_path_maps_to_existing_review_decision_contract() {
         map_revision_path(RevisionPath::SkipToHuman, Some("ignored".to_string())),
         ("human_intervene".to_string(), None)
     );
+}
+
+#[tokio::test]
+async fn start_generation_refreshes_stale_provider_guidance_before_prompting_author() {
+    use crate::product::issue_store::{CreateProductIssueInput, IssueStore};
+    use crate::product::lifecycle_store::{CreateStorySpecInput, CreateWorkspaceSessionInput};
+    use crate::product::models::WorkspaceType;
+    use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
+
+    let root = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    let repository = RepositoryStore::new(app_paths.clone())
+        .create(CreateRepositoryInput {
+            project_id: "project_0001".to_string(),
+            name: "Repo".to_string(),
+            path: repo.path().to_path_buf(),
+            default_policy_preset: None,
+            default_provider_mode: None,
+        })
+        .unwrap();
+    IssueStore::new(app_paths.clone())
+        .create(CreateProductIssueInput {
+            project_id: "project_0001".to_string(),
+            repo_id: Some(repository.id.clone()),
+            title: "Provider guidance refresh".to_string(),
+            description: Some("旧 context 不能把 Codex 交互纪律注入 Claude Code run".to_string()),
+            change_id: None,
+        })
+        .unwrap();
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    let story = lifecycle
+        .create_story_spec(CreateStorySpecInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: repository.id.clone(),
+            title: "Provider guidance Story Spec".to_string(),
+        })
+        .unwrap();
+    let session_record = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: story.id,
+            workspace_type: WorkspaceType::Story,
+            author_provider: ProviderName::Codex,
+            reviewer_provider: ProviderName::ClaudeCode,
+            review_rounds: 1,
+            superpowers_enabled: true,
+            openspec_enabled: true,
+        })
+        .unwrap();
+    let session_record = ensure_workspace_context_message(&app_paths, &lifecycle, session_record)
+        .expect("initial context");
+    assert!(
+        session_record.messages[0]
+            .content
+            .contains("当前 author provider 是 Codex")
+    );
+
+    let checkpoint_store = Arc::new(CheckpointStore::new(root.path().join("checkpoints")));
+    let (engine_tx, _engine_rx) = mpsc::channel::<EngineEvent>(64);
+    let mut session = WorkspaceSession::from_record(session_record.clone());
+    session.repository_path = Some(repo.path().to_path_buf());
+    let engine = Arc::new(Mutex::new(WorkspaceEngine::new_persistent(
+        checkpoint_store,
+        lifecycle.clone(),
+        engine_tx,
+        session,
+    )));
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::ClaudeCode,
+        Arc::new(PromptRecordingProvider { input_tx }),
+    );
+
+    let current_run = Arc::new(Mutex::new(None));
+    let workspace_runs = WorkspaceRunRegistry::default();
+    let run_context = ProviderRunContext {
+        provider_registry: Arc::new(registry),
+        engine: engine.clone(),
+        current_run: current_run.clone(),
+        workspace_runs: workspace_runs.clone(),
+        session_id: session_record.id.clone(),
+        next_run_id: Arc::new(Mutex::new(0)),
+        app_paths: app_paths.clone(),
+        session_record: session_record.clone(),
+    };
+    let (outbound_tx, _outbound_rx) = mpsc::channel::<OutboundControl>(64);
+    let inbound_context = WorkspaceInboundContext {
+        engine,
+        run_context,
+        outbound_tx,
+        current_run,
+        workspace_runs,
+        session_id: session_record.id,
+    };
+
+    handle_workspace_inbound_message(
+        inbound_context,
+        WsInMessage::StartGeneration {
+            provider_config: ProviderConfigSnapshot {
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::Codex),
+                review_rounds: 1,
+            },
+            reviewer_enabled: true,
+        },
+    )
+    .await;
+
+    let input = tokio::time::timeout(std::time::Duration::from_secs(1), input_rx.recv())
+        .await
+        .expect("provider input should be sent")
+        .expect("provider input");
+    assert!(input.prompt.contains("当前 author provider 是 Claude Code"));
+    assert!(input.prompt.contains("必须使用结构化 AskUserQuestion"));
+    assert!(!input.prompt.contains("当前 author provider 是 Codex"));
+    assert!(!input.prompt.contains("requestUserInput"));
+}
+
+#[tokio::test]
+async fn provider_select_refreshes_provider_guidance_in_session_state() {
+    use crate::product::issue_store::{CreateProductIssueInput, IssueStore};
+    use crate::product::lifecycle_store::{CreateStorySpecInput, CreateWorkspaceSessionInput};
+    use crate::product::models::WorkspaceType;
+    use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
+
+    let root = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    let repository = RepositoryStore::new(app_paths.clone())
+        .create(CreateRepositoryInput {
+            project_id: "project_0001".to_string(),
+            name: "Repo".to_string(),
+            path: repo.path().to_path_buf(),
+            default_policy_preset: None,
+            default_provider_mode: None,
+        })
+        .unwrap();
+    IssueStore::new(app_paths.clone())
+        .create(CreateProductIssueInput {
+            project_id: "project_0001".to_string(),
+            repo_id: Some(repository.id.clone()),
+            title: "Provider guidance select refresh".to_string(),
+            description: Some(
+                "prepare context should reflect selected author provider".to_string(),
+            ),
+            change_id: None,
+        })
+        .unwrap();
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    let story = lifecycle
+        .create_story_spec(CreateStorySpecInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: repository.id,
+            title: "Provider guidance Story Spec".to_string(),
+        })
+        .unwrap();
+    let session_record = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: story.id,
+            workspace_type: WorkspaceType::Story,
+            author_provider: ProviderName::Codex,
+            reviewer_provider: ProviderName::ClaudeCode,
+            review_rounds: 1,
+            superpowers_enabled: true,
+            openspec_enabled: true,
+        })
+        .unwrap();
+    let session_record = ensure_workspace_context_message(&app_paths, &lifecycle, session_record)
+        .expect("initial context");
+    assert!(
+        session_record.messages[0]
+            .content
+            .contains("当前 author provider 是 Codex")
+    );
+
+    let checkpoint_store = Arc::new(CheckpointStore::new(root.path().join("checkpoints")));
+    let (engine_tx, _engine_rx) = mpsc::channel::<EngineEvent>(64);
+    let mut session = WorkspaceSession::from_record(session_record.clone());
+    session.repository_path = Some(repo.path().to_path_buf());
+    let engine = Arc::new(Mutex::new(WorkspaceEngine::new_persistent(
+        checkpoint_store,
+        lifecycle,
+        engine_tx,
+        session,
+    )));
+    let current_run = Arc::new(Mutex::new(None));
+    let workspace_runs = WorkspaceRunRegistry::default();
+    let run_context = ProviderRunContext {
+        provider_registry: Arc::new(ProviderRegistry::new()),
+        engine: engine.clone(),
+        current_run: current_run.clone(),
+        workspace_runs: workspace_runs.clone(),
+        session_id: session_record.id.clone(),
+        next_run_id: Arc::new(Mutex::new(0)),
+        app_paths,
+        session_record: session_record.clone(),
+    };
+    let (outbound_tx, mut outbound_rx) = mpsc::channel::<OutboundControl>(64);
+    let inbound_context = WorkspaceInboundContext {
+        engine,
+        run_context,
+        outbound_tx,
+        current_run,
+        workspace_runs,
+        session_id: session_record.id,
+    };
+
+    handle_workspace_inbound_message(
+        inbound_context,
+        WsInMessage::ProviderSelect {
+            role: "author".to_string(),
+            provider: ProviderName::ClaudeCode,
+        },
+    )
+    .await;
+
+    let control = tokio::time::timeout(std::time::Duration::from_secs(1), outbound_rx.recv())
+        .await
+        .expect("session state should be sent")
+        .expect("outbound control");
+    let OutboundControl::Text(text) = control else {
+        panic!("expected text outbound control");
+    };
+    let message = serde_json::from_str::<WsOutMessage>(&text).expect("ws out message");
+    let WsOutMessage::SessionState {
+        messages,
+        providers,
+        ..
+    } = message
+    else {
+        panic!("expected session state");
+    };
+    assert_eq!(providers.author, ProviderName::ClaudeCode);
+    let context = &messages[0].content;
+    assert!(context.contains("当前 author provider 是 Claude Code"));
+    assert!(context.contains("必须使用结构化 AskUserQuestion"));
+    assert!(!context.contains("当前 author provider 是 Codex"));
+    assert!(!context.contains("requestUserInput"));
+}
+
+struct PromptRecordingProvider {
+    input_tx: mpsc::UnboundedSender<StreamingProviderInput>,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for PromptRecordingProvider {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let _ = self.input_tx.send(input);
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let (command_tx, _command_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            let output = "# Story Spec\n\n\
+                ## 范围\n来源 source id: Issue issue_0001；Provider guidance refresh.\n\n\
+                ## 用户故事\n作为用户，我希望 provider guidance 与所选 provider 一致。\n\n\
+                ## 功能需求\n- [REQ-001] provider guidance 与 Claude Code 匹配。\n\n\
+                ## 成功标准\n- [AC-001] prompt 不包含 Codex requestUserInput 纪律。\n\n\
+                ## 待确认项\n无。\n\n\
+                ## 非功能需求\n无。\n";
+            let _ = event_tx
+                .send(ProviderEvent::Completed {
+                    full_output: output.to_string(),
+                    provider_session_id: None,
+                })
+                .await;
+        });
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+
+    async fn run_streaming(
+        &self,
+        _input: &crate::protocol::contracts::AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+        Err(ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "run_streaming is not used by workspace ws handler tests",
+            0,
+        ))
+    }
 }
 
 #[test]

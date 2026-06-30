@@ -1,6 +1,6 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   fetchWorkspaceArtifactVersion,
   fetchWorkspaceEventOutput,
@@ -71,6 +71,9 @@ vi.mock("../components/shared/MonacoDiffViewer", () => ({
 
 describe("ChatWorkspacePage shell and content loading", () => {
   installChatWorkspacePageTestHooks();
+  beforeEach(() => {
+    vi.mocked(fetchWorkspaceNodeDetail).mockResolvedValue(makeNodeDetail());
+  });
 
   it("renders chat workspace shell with timeline and keeps artifact content secondary until selected", async () => {
     mockWorkspaceWs();
@@ -439,5 +442,63 @@ describe("ChatWorkspacePage shell and content loading", () => {
       );
     });
     expect(await screen.findByText("完整 review 输出")).toBeInTheDocument();
+  });
+
+  it("hydrates active node detail when restored state has only timeline nodes", async () => {
+    mockWorkspaceWs();
+    vi.mocked(fetchWorkspaceNodeDetail).mockResolvedValue(
+      makeNodeDetail({
+        node_id: "timeline_node_codegen",
+        node_type: "author_run",
+        agent_role: "author",
+        streaming_content: "",
+        execution_events: [
+          {
+            event_id: "event_codegraph",
+            node_id: "timeline_node_codegen",
+            agent: "claude_code",
+            kind: "command",
+            status: "completed",
+            title: "mcp__codegraph__codegraph_explore",
+            command: "mcp__codegraph__codegraph_explore",
+            cwd: null,
+            output: "CodeGraph output",
+            exit_code: 0,
+          },
+        ],
+      }),
+    );
+    useWorkspaceStore.setState({
+      sessionId: "workspace_session_0001",
+      workspaceType: "story",
+      stage: "running",
+      providers: { author: "claude_code", reviewer: "codex" },
+      selectedNodeId: "timeline_node_codegen",
+      activeNodeId: "timeline_node_codegen",
+      timelineNodes: [
+        timelineNode({
+          node_id: "timeline_node_codegen",
+          node_type: "author_run",
+          title: "Author Run",
+          status: "completed",
+        }),
+      ],
+      nodeDetails: {},
+      chatEntries: [],
+    });
+
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
+
+    await waitFor(() => {
+      expect(fetchWorkspaceNodeDetail).toHaveBeenCalledWith(
+        "workspace_session_0001",
+        "timeline_node_codegen",
+      );
+    });
+    expect(
+      await screen.findByText("mcp__codegraph__codegraph_explore"),
+    ).toBeInTheDocument();
   });
 });

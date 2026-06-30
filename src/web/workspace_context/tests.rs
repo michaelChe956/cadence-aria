@@ -1,5 +1,5 @@
 use super::builder::ensure_workspace_context_message;
-use super::prompts::output_schema_for;
+use super::prompts::{output_schema_for, runtime_contract_for, workflow_discipline_for};
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::issue_store::{CreateProductIssueInput, IssueStore};
 use crate::product::lifecycle_store::{
@@ -8,7 +8,7 @@ use crate::product::lifecycle_store::{
 };
 use crate::product::models::{
     IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, LifecycleConfirmationStatus, ProviderName,
-    WorkspaceMessageRecord, WorkspaceType,
+    WorkspaceMessageRecord, WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType,
 };
 use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
 use tempfile::tempdir;
@@ -38,6 +38,84 @@ fn design_output_schema_uses_canonical_projection_headings() {
     assert!(schema.contains("API 契约"));
     assert!(schema.contains("数据模型"));
     assert!(!schema.contains("关键决策"));
+}
+
+#[test]
+fn story_and_design_runtime_contracts_do_not_inherit_work_item_plan_discipline() {
+    for workspace_type in [WorkspaceType::Story, WorkspaceType::Design] {
+        let contract = runtime_contract_for(&workspace_session_record(
+            workspace_type.clone(),
+            ProviderName::Codex,
+        ));
+
+        assert!(
+            !contract.contains("writing-plans"),
+            "{workspace_type:?} runtime contract must not mention writing-plans"
+        );
+        assert!(!contract.contains("必须按 writing-plans"));
+        assert!(
+            contract.contains("[forbidden_outputs]"),
+            "{workspace_type:?} runtime contract should include explicit forbidden outputs"
+        );
+    }
+}
+
+#[test]
+fn work_item_output_schema_describes_single_task_not_issue_level_split() {
+    let schema = output_schema_for(&WorkspaceType::WorkItem);
+
+    assert!(schema.contains("实现步骤") || schema.contains("子步骤"));
+    assert!(schema.contains("单个可执行任务"));
+    assert!(schema.contains("20k"));
+    assert!(schema.contains("禁止跨任务"));
+    assert!(!schema.contains("任务拆分"));
+}
+
+#[test]
+fn output_schemas_require_visible_source_id_traceability() {
+    let story = output_schema_for(&WorkspaceType::Story);
+    assert!(story.contains("source id") || story.contains("source ids"));
+    assert!(story.contains("Issue"));
+    assert!(story.contains("追踪"));
+
+    let design = output_schema_for(&WorkspaceType::Design);
+    assert!(design.contains("source id") || design.contains("source ids"));
+    assert!(design.contains("Story Spec"));
+    assert!(design.contains("追踪关系"));
+
+    let work_item = output_schema_for(&WorkspaceType::WorkItem);
+    assert!(work_item.contains("source id") || work_item.contains("source ids"));
+    assert!(work_item.contains("Story/Design"));
+    assert!(work_item.contains("追踪关系"));
+
+    let work_item_plan = output_schema_for(&WorkspaceType::WorkItemPlan);
+    assert!(work_item_plan.contains("source id") || work_item_plan.contains("source ids"));
+    assert!(work_item_plan.contains("Story/Design"));
+    assert!(work_item_plan.contains("追踪关系"));
+}
+
+#[test]
+fn work_item_workflow_discipline_describes_single_task_not_task_split() {
+    let guidance = workflow_discipline_for(&workspace_session_record(
+        WorkspaceType::WorkItem,
+        ProviderName::Codex,
+    ));
+
+    assert!(guidance.contains("单个可执行任务"));
+    assert!(!guidance.contains("任务拆分"));
+}
+
+#[test]
+fn fake_story_provider_uses_daemon_pause_guidance_not_fake_tool_call() {
+    let guidance = workflow_discipline_for(&workspace_session_record(
+        WorkspaceType::Story,
+        ProviderName::Fake,
+    ));
+
+    assert!(guidance.contains("daemon"));
+    assert!(guidance.contains("text_fallback"));
+    assert!(!guidance.contains("必须使用结构化 AskUserQuestion"));
+    assert!(!guidance.contains("必须使用结构化 requestUserInput"));
 }
 
 #[test]
@@ -96,6 +174,29 @@ fn claude_code_story_context_requires_structured_ask_user_question() {
     assert!(context.contains("禁止输出文本 A/B/C 选择题"));
     assert!(context.contains("text_fallback 异常兜底"));
     assert!(context.contains("只追加 compact QA"));
+}
+
+fn workspace_session_record(
+    workspace_type: WorkspaceType,
+    author_provider: ProviderName,
+) -> WorkspaceSessionRecord {
+    WorkspaceSessionRecord {
+        id: "workspace_session_test".to_string(),
+        project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: "entity_0001".to_string(),
+        workspace_type,
+        status: WorkspaceSessionStatus::Open,
+        author_provider,
+        reviewer_provider: ProviderName::Codex,
+        review_rounds: 1,
+        superpowers_enabled: true,
+        openspec_enabled: true,
+        provider_conversations: Vec::new(),
+        messages: Vec::new(),
+        created_at: "2026-06-30T00:00:00Z".to_string(),
+        updated_at: "2026-06-30T00:00:00Z".to_string(),
+    }
 }
 
 #[test]

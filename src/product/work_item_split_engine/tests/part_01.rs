@@ -131,6 +131,10 @@ fn work_item_plan_outline_prompt_includes_runtime_contracts() {
 
     assert!(prompt.contains("[openspec_contract]"));
     assert!(prompt.contains("[superpowers_contract]"));
+    assert!(prompt.contains("[allowed_outputs]"));
+    assert!(prompt.contains("多任务拆解、任务追踪关系、依赖图、验收与验证建议"));
+    assert!(prompt.contains("[forbidden_outputs]"));
+    assert!(prompt.contains("代码实现、Story/Design 重写"));
     assert!(prompt.contains("writing-plans"));
     assert!(prompt.contains("任务拆分"));
     assert!(prompt.contains("追踪关系"));
@@ -145,6 +149,10 @@ fn work_item_plan_outline_revision_prompt_includes_runtime_contracts() {
 
     assert!(prompt.contains("[openspec_contract]"));
     assert!(prompt.contains("[superpowers_contract]"));
+    assert!(prompt.contains("[allowed_outputs]"));
+    assert!(prompt.contains("多任务拆解、任务追踪关系、依赖图、验收与验证建议"));
+    assert!(prompt.contains("[forbidden_outputs]"));
+    assert!(prompt.contains("代码实现、Story/Design 重写"));
     assert!(prompt.contains("writing-plans"));
     assert!(prompt.contains("任务拆分"));
     assert!(prompt.contains("追踪关系"));
@@ -519,6 +527,10 @@ fn single_item_prompt_requires_executable_plan_runtime_contracts() {
 
     assert!(invocation.prompt.contains("[openspec_contract]"));
     assert!(invocation.prompt.contains("[superpowers_contract]"));
+    assert!(invocation.prompt.contains("[allowed_outputs]"));
+    assert!(invocation.prompt.contains("多任务拆解、任务追踪关系、依赖图、验收与验证建议"));
+    assert!(invocation.prompt.contains("[forbidden_outputs]"));
+    assert!(invocation.prompt.contains("代码实现、Story/Design 重写"));
     assert!(invocation.prompt.contains("writing-plans"));
     assert!(invocation.prompt.contains("TDD"));
     assert!(invocation.prompt.contains("implementation_context"));

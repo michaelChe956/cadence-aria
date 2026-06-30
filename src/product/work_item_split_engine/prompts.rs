@@ -1,8 +1,9 @@
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::models::{
     IssueRecord, LifecycleWorkItemRecord, OutlineContextBlockerResolution, ProviderName,
-    RepositoryRecord, WorkItemDraftRecord, WorkItemGenerationMode,
+    RepositoryRecord, WorkItemDraftRecord, WorkItemGenerationMode, WorkspaceType,
 };
+use crate::product::workspace_engine::{allowed_outputs_for, forbidden_outputs_for};
 use crate::web::error::ApiResult;
 use crate::web::types::GenerateWorkItemsRequest;
 
@@ -30,6 +31,7 @@ const OUTLINE_WRITE_SCOPE_RULES: &str = "\
          forbidden_write_scopes 应显式写出依赖方或被依赖方已拥有的实现目录，帮助后续 draft 避免越界。\n\n";
 
 fn work_item_plan_runtime_contract(role: &str) -> String {
+    let workspace_type = WorkspaceType::WorkItemPlan;
     format!(
         "[openspec_contract]\n\
          Role: {role}\n\
@@ -42,7 +44,13 @@ fn work_item_plan_runtime_contract(role: &str) -> String {
          - 必须遵守 using-superpowers 的先读规则与 writing-plans 的计划结构要求。\n\
          - 生成的是计划和任务拆分，不执行代码修改。\n\
          - 每个 draft 必须给出后续 coding agent 可执行的目标、范围、非目标、TDD 顺序、验证命令、依赖输入、交接输出和风险。\n\
-         - 结论必须能追溯到已提供的 Story/Design/Outline/Draft 证据。\n\n"
+         - 结论必须能追溯到已提供的 Story/Design/Outline/Draft 证据。\n\n\
+         [allowed_outputs]\n\
+         {allowed_outputs}\n\n\
+         [forbidden_outputs]\n\
+         {forbidden_outputs}\n\n",
+        allowed_outputs = allowed_outputs_for(&workspace_type),
+        forbidden_outputs = forbidden_outputs_for(&workspace_type),
     )
 }
 

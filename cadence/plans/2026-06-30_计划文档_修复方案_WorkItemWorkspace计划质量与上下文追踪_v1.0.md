@@ -31,13 +31,13 @@
 
 ### 需要修改
 
-- `src/product/work_item_split_engine/prompts.rs`  
+- `src/product/work_item_split_engine/prompts.rs`
   给 Work Item Plan outline、outline revision、split legacy、draft prompt 注入统一 runtime contract；强化 draft 输出为 coding-agent 可执行计划。
 
-- `src/product/work_item_split_engine/tests/part_02.rs` 或新增 `src/product/work_item_split_engine/tests/part_03.rs`  
+- `src/product/work_item_split_engine/tests/part_02.rs` 或新增 `src/product/work_item_split_engine/tests/part_03.rs`
   增加 prompt contract 单测，断言 OpenSpec/Superpowers/writing-plans marker 存在。
 
-- `src/product/models/lifecycle.rs`  
+- `src/product/models/lifecycle.rs`
   给 `LifecycleWorkItemRecord` 增加计划来源字段，建议字段：
   - `source_work_item_plan_id: Option<String>`
   - `source_outline_id: Option<String>`
@@ -45,31 +45,31 @@
   - `planned_implementation_context: Option<String>`
   - `planned_handoff_summary: Option<String>`
 
-- `src/product/lifecycle_store/inputs.rs`  
+- `src/product/lifecycle_store/inputs.rs`
   给 `CreateWorkItemInput` 增加同名可选字段，默认 `None`。
 
-- `src/product/lifecycle_store/work_item.rs`  
+- `src/product/lifecycle_store/work_item.rs`
   `create_work_item` 写入新增计划来源字段。
 
-- `src/product/workspace_engine/draft_batch/compile_support.rs`  
+- `src/product/workspace_engine/draft_batch/compile_support.rs`
   从 accepted draft 投影到 `LifecycleWorkItemRecord` 时写入 source plan/outline/draft 和 planned context。
 
-- `src/product/workspace_engine/compile.rs`  
+- `src/product/workspace_engine/compile.rs`
   调用 `create_work_item` 时传递新增字段。
 
-- `src/product/workspace_engine/tests/part_03/part_04.rs`  
+- `src/product/workspace_engine/tests/part_03/part_04.rs`
   增加 Final Compile 投影回归测试，断言最终 Work Item 带 source outline/draft 和 planned context。
 
-- `src/web/workspace_context/entity.rs`  
+- `src/web/workspace_context/entity.rs`
   `work_item_context_summary` 注入 `[work_item_plan_source]` 信息，包括 source ids、implementation context、planned handoff、verification commands。
 
-- `src/web/workspace_context/prompts.rs`  
+- `src/web/workspace_context/prompts.rs`
   WorkItem / WorkItemPlan 的 context message 输出显式 `[openspec_contract]` / `[superpowers_contract]`，而不是只放一句弱文本。
 
-- `src/web/workspace_context/tests.rs`  
+- `src/web/workspace_context/tests.rs`
   增加 Work Item workspace context 回归测试，断言 child workspace system message 包含 source draft context 与 runtime contracts。
 
-- `src/web/handlers/dto.rs` 与 `src/web/types.rs`  
+- `src/web/handlers/dto.rs` 与 `src/web/types.rs`
   若前端 Work Item detail 需要展示新增字段，同步 DTO；否则本任务可只服务后端 prompt/context，不强制前端展示。
 
 ### 不建议修改
@@ -709,4 +709,3 @@ Expected: 全部 PASS。
 
 - Backend: `http://127.0.0.1:4317/api/health`
 - Frontend: `http://127.0.0.1:5173/`
-

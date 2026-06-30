@@ -1,4 +1,161 @@
 #[test]
+fn artifact_constraint_spec_defines_story_required_and_forbidden_rules() {
+    let spec = artifact_constraint_spec_for(&WorkspaceType::Story);
+
+    assert!(
+        spec.required_headings
+            .iter()
+            .any(|rule| rule.label == "功能需求")
+    );
+    assert!(
+        spec.required_headings
+            .iter()
+            .any(|rule| rule.label == "成功标准")
+    );
+    assert!(
+        spec.required_id_patterns
+            .iter()
+            .any(|rule| rule.label == "[REQ-*]")
+    );
+    assert!(
+        spec.required_id_patterns
+            .iter()
+            .any(|rule| rule.label == "[AC-*]")
+    );
+    assert!(
+        spec.forbidden_headings
+            .iter()
+            .any(|rule| rule.label == "Work Items")
+    );
+    assert!(
+        spec.forbidden_headings
+            .iter()
+            .any(|rule| rule.label == "任务拆分")
+    );
+    assert!(
+        spec.forbidden_tokens
+            .iter()
+            .any(|rule| rule.label == "[TASK-*]")
+    );
+    assert!(
+        spec.reviewer_must_fix_rules
+            .iter()
+            .any(|rule| rule.contains("must_fix") && rule.contains("Story"))
+    );
+}
+
+#[test]
+fn story_artifact_constraint_report_rejects_work_item_leakage() {
+    let report = validate_workspace_artifact_constraints(
+        "# Story Spec\n\n\
+         ## 范围\n覆盖基础流程。\n\n\
+         ## 用户故事\n作为用户，我要完成操作。\n\n\
+         ## 功能需求\n- [REQ-001] 系统支持操作。\n\n\
+         ## 成功标准\n- [AC-001] 操作成功。\n\n\
+         ## 待确认项\n无。\n\n\
+         ## 非功能需求\n无。\n\n\
+         ## Work Items\n- [TASK-001] 实现后端。\n",
+        &WorkspaceType::Story,
+    );
+
+    assert!(!report.passed);
+    assert!(
+        report
+            .forbidden_headings
+            .iter()
+            .any(|heading| heading.contains("Work Items"))
+    );
+    assert!(
+        report
+            .forbidden_tokens
+            .iter()
+            .any(|token| token.contains("[TASK-001]"))
+    );
+    assert!(
+        !content_has_complete_workspace_artifact(
+            "# Story Spec\n\n## 功能需求\n- [REQ-001] A\n\n## 成功标准\n- [AC-001] B\n\n## Work Items\n- [TASK-001] C",
+            &WorkspaceType::Story,
+        ),
+        "compat wrapper should reject forbidden Story leakage"
+    );
+}
+
+#[test]
+fn work_item_plan_constraints_allow_task_ids() {
+    let report = validate_workspace_artifact_constraints(
+        "# Work Item Plan\n\n\
+         ## 计划范围\n本计划覆盖 Issue。\n\n\
+         ## 任务拆分\n- [TASK-001] 后端。\n\n\
+         ## 依赖图\n无。\n\n\
+         ## 验证计划\ncargo test --locked。\n\n\
+         ## 执行顺序\n先后端。\n\n\
+         ## 风险\n无。\n\n\
+         ## 追踪关系\nsource ids: Story Spec story_spec_0001, Design Spec design_spec_0001。\n\
+         [TASK-001] -> [REQ-001]\n",
+        &WorkspaceType::WorkItemPlan,
+    );
+
+    assert!(report.passed, "{report:?}");
+}
+
+#[test]
+fn work_item_artifact_constraint_report_rejects_sibling_task_split() {
+    let report = validate_workspace_artifact_constraints(
+        "# Work Item\n\n\
+         ## 目标\n实现当前任务。\n\n\
+         ## 范围\n仅当前任务。\n\n\
+         ## 实现步骤\n- 接入接口。\n\n\
+         ## 依赖\n无。\n\n\
+         ## 验证命令\ncargo test --locked --lib current_task。\n\n\
+         ## 风险\n无。\n\n\
+         ## 追踪关系\n[REQ-001]\n\n\
+         ## 任务拆分\n- [TASK-001] 后端。\n- [TASK-002] 前端。\n",
+        &WorkspaceType::WorkItem,
+    );
+
+    assert!(!report.passed);
+    assert!(
+        report
+            .forbidden_headings
+            .iter()
+            .any(|heading| heading.contains("任务拆分")),
+        "{report:?}"
+    );
+    assert!(
+        report
+            .forbidden_tokens
+            .iter()
+            .any(|token| token.contains("[TASK-001]") && token.contains("[TASK-002]")),
+        "{report:?}"
+    );
+}
+
+#[test]
+fn workspace_artifact_gate_is_enabled_for_markdown_workspace_types() {
+    for workspace_type in [
+        WorkspaceType::Story,
+        WorkspaceType::Design,
+        WorkspaceType::WorkItem,
+        WorkspaceType::WorkItemPlan,
+    ] {
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let mut session = make_session(&format!("sess_artifact_gate_{workspace_type:?}"));
+        session.workspace_type = workspace_type.clone();
+        let checkpoint_tmp = TempDir::new().unwrap();
+        let engine = WorkspaceEngine::new(
+            Arc::new(CheckpointStore::new(checkpoint_tmp.path().to_path_buf())),
+            event_tx,
+            session,
+        );
+
+        assert!(
+            engine.workspace_requires_artifact_gate(),
+            "{workspace_type:?} should use workspace artifact gate"
+        );
+    }
+}
+
+#[test]
 fn workspace_provider_inputs_use_three_hour_timeout() {
     let (event_tx, _event_rx) = mpsc::channel(8);
     let mut session = make_session("sess_workspace_timeout");
@@ -137,6 +294,48 @@ fn review_input_marks_design_artifact_as_extracted_markdown_without_outer_fence(
         "reviewer should not reject extracted artifact for missing outer fence: {}",
         input.prompt
     );
+}
+
+#[test]
+fn review_input_injects_artifact_boundary_must_fix_rules_for_workspace_types() {
+    for (workspace_type, expected_rule) in [
+        (
+            WorkspaceType::Story,
+            "Story artifact: Work Item heading, task splitting, [TASK-*], or WI-* content must be reported as must_fix.",
+        ),
+        (
+            WorkspaceType::Design,
+            "Design artifact: Work Item Plan, development task list, task splitting, or execution checklist content must be reported as must_fix.",
+        ),
+        (
+            WorkspaceType::WorkItem,
+            "Work Item artifact: sibling tasks, issue-level full plans, or cross-task content must be reported as must_fix.",
+        ),
+    ] {
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let mut session = make_session(&format!("sess_review_boundary_{workspace_type:?}"));
+        session.workspace_type = workspace_type.clone();
+        session.artifact = Some(artifact_payload("# Artifact\n\n## 内容\n待审核。\n"));
+        let checkpoint_tmp = TempDir::new().unwrap();
+        let engine = WorkspaceEngine::new(
+            Arc::new(CheckpointStore::new(checkpoint_tmp.path().to_path_buf())),
+            event_tx,
+            session,
+        );
+
+        let input = engine.build_review_input().expect("review input");
+
+        assert!(
+            input.prompt.contains("[artifact_boundary_must_fix_rules]"),
+            "review prompt should include boundary rule section for {workspace_type:?}: {}",
+            input.prompt
+        );
+        assert!(
+            input.prompt.contains(expected_rule),
+            "review prompt should include type-specific must_fix rule for {workspace_type:?}: {}",
+            input.prompt
+        );
+    }
 }
 
 fn persistent_test_engine() -> (TempDir, LifecycleStore, WorkspaceEngine) {
@@ -506,181 +705,4 @@ async fn fake_reviewer_creates_skipped_review_node_and_enters_human_confirm() {
         }
         _ => panic!("expected SessionState"),
     }
-}
-
-#[test]
-fn parse_review_verdict_reads_json_contract_from_tail_block() {
-    let output = "整体可用，但需要补充异常路径。\n\n```json\n{\"verdict\":\"revise\",\"summary\":\"补充异常路径\"}\n```";
-
-    let verdict = WorkspaceEngine::parse_review_verdict(output);
-
-    assert_eq!(verdict.verdict, ReviewVerdictType::NeedsHuman);
-    assert_eq!(verdict.review_gate, ReviewGate::UserTriageRequired);
-    assert_eq!(verdict.summary, "补充异常路径");
-    assert_eq!(verdict.comments.trim(), "整体可用，但需要补充异常路径。");
-}
-
-#[test]
-fn reviewer_prompt_requires_nonce_sentinel() {
-    let (event_tx, _event_rx) = mpsc::channel(8);
-    let mut session = make_session("sess_reviewer_nonce_prompt");
-    session.artifact = Some(artifact_payload(
-        "# Story Spec\n\n## 功能需求\n- [REQ-001] Draft.",
-    ));
-    session.reviewer_provider = Some(ProviderName::Codex);
-    let checkpoint_tmp = TempDir::new().unwrap();
-    let engine = WorkspaceEngine::new(
-        Arc::new(CheckpointStore::new(checkpoint_tmp.path().to_path_buf())),
-        event_tx,
-        session,
-    );
-
-    let input = engine.build_review_input().expect("review input");
-
-    assert!(input.prompt.contains("<ARIA_STRUCTURED_OUTPUT nonce=\""));
-    assert!(input.prompt.contains("</ARIA_STRUCTURED_OUTPUT nonce=\""));
-    assert!(input.prompt.contains("不得使用 Markdown code fence"));
-    assert!(!input.prompt.contains("```json"));
-}
-
-#[test]
-fn extract_structured_json_prefers_last_matching_nonce_block() {
-    let output = "第一次输出\n\
-        <ARIA_STRUCTURED_OUTPUT nonce=\"old00001\">{\"verdict\":\"needs_human\",\"summary\":\"old\"}</ARIA_STRUCTURED_OUTPUT nonce=\"old00001\">\n\
-        最终输出\n\
-        <ARIA_STRUCTURED_OUTPUT nonce=\"new00002\">{\"verdict\":\"pass\",\"summary\":\"new\"}</ARIA_STRUCTURED_OUTPUT nonce=\"new00002\">";
-
-    let (comments, json) = extract_structured_json(output).expect("structured json");
-
-    assert!(comments.contains("最终输出"));
-    assert!(json.contains("\"summary\":\"new\""));
-}
-
-#[test]
-fn extract_structured_json_ignores_nonce_mismatch() {
-    let output = "review text\n\
-        <ARIA_STRUCTURED_OUTPUT nonce=\"a1b2c3d4\">{\"verdict\":\"pass\",\"summary\":\"ok\"}</ARIA_STRUCTURED_OUTPUT nonce=\"deadbeef\">";
-
-    assert!(extract_structured_json(output).is_none());
-}
-
-#[test]
-fn extract_structured_json_falls_back_to_markdown_fence() {
-    let output = "review text\n\n```json\n{\"verdict\":\"pass\",\"summary\":\"ok\"}\n```";
-
-    let (comments, json) = extract_structured_json(output).expect("markdown fallback json");
-
-    assert_eq!(comments.trim(), "review text");
-    assert!(json.contains("\"summary\":\"ok\""));
-}
-
-#[test]
-fn extract_structured_json_treats_non_nonce_sentinel_as_text() {
-    let output =
-        "review text\n<ARIA_STRUCTURED_OUTPUT>{\"verdict\":\"pass\"}</ARIA_STRUCTURED_OUTPUT>";
-
-    assert!(extract_structured_json(output).is_none());
-}
-
-#[test]
-fn parse_review_verdict_does_not_upgrade_actionable_comments_without_strong_findings() {
-    let output = "**审核结论**\n\n\
-        不建议通过。当前 Story Spec 覆盖主方向，但安装任务 API 设计存在实现级歧义。\n\n\
-        **主要问题**\n\n\
-        - **High**：进度接口无法区分并发安装、重试安装、页面刷新后重连到哪一次任务。\n\n\
-        ```json\n\
-        {\"verdict\":\"needs_human\",\"summary\":\"安装任务 API 设计需修正。\"}\n\
-        ```";
-
-    let verdict = WorkspaceEngine::parse_review_verdict(output);
-
-    assert_eq!(verdict.verdict, ReviewVerdictType::NeedsHuman);
-    assert_eq!(verdict.review_gate, ReviewGate::UserTriageRequired);
-    assert_eq!(verdict.summary, "安装任务 API 设计需修正。");
-    assert!(verdict.comments.contains("不建议通过"));
-}
-
-#[test]
-fn parse_review_verdict_defaults_to_needs_human_when_contract_missing() {
-    let output = "我无法确定是否通过，请人工确认。";
-
-    let verdict = WorkspaceEngine::parse_review_verdict(output);
-
-    assert_eq!(verdict.verdict, ReviewVerdictType::NeedsHuman);
-    assert_eq!(verdict.review_gate, ReviewGate::UserTriageRequired);
-    assert_eq!(verdict.summary, "需要人工确认");
-    assert_eq!(verdict.comments, output);
-}
-
-#[test]
-fn parse_review_verdict_classifies_optional_findings_as_user_confirm_allowed() {
-    let output = r#"整体可用，建议补充措辞。
-
-```json
-{
-  "verdict": "revise",
-  "summary": "有非阻塞建议",
-  "findings": [
-{
-  "severity": "suggestion",
-  "message": "建议补充边界说明",
-  "evidence": "验收标准已经覆盖主路径",
-  "impact": "不影响下一阶段执行",
-  "required_action": "可在后续优化中补充"
-}
-  ]
-}
-```"#;
-
-    let verdict = WorkspaceEngine::parse_review_verdict(output);
-
-    assert_eq!(verdict.verdict, ReviewVerdictType::NeedsHuman);
-    assert_eq!(verdict.review_gate, ReviewGate::UserConfirmAllowed);
-    assert_eq!(verdict.findings.len(), 1);
-    assert_eq!(
-        verdict.findings[0].severity,
-        ReviewFindingSeverity::Suggestion
-    );
-}
-
-#[test]
-fn parse_review_verdict_classifies_strong_findings_as_requires_revision() {
-    let output = r#"缺少 Work Item 可执行验证命令。
-
-```json
-{
-  "verdict": "revise",
-  "summary": "必须补充验证命令",
-  "findings": [
-{
-  "severity": "must_fix",
-  "message": "Work Item 没有验证命令",
-  "evidence": "Artifact 未出现验证命令段落",
-  "impact": "Coding Workspace 无法执行验收",
-  "required_action": "补充明确验证命令"
-}
-  ]
-}
-```"#;
-
-    let verdict = WorkspaceEngine::parse_review_verdict(output);
-
-    assert_eq!(verdict.verdict, ReviewVerdictType::Revise);
-    assert_eq!(verdict.review_gate, ReviewGate::RequiresRevision);
-    assert_eq!(verdict.findings[0].severity, ReviewFindingSeverity::MustFix);
-}
-
-#[test]
-fn parse_review_verdict_revise_without_findings_requires_user_triage() {
-    let output = r#"建议修改一些描述。
-
-```json
-{"verdict":"revise","summary":"建议修改描述"}
-```"#;
-
-    let verdict = WorkspaceEngine::parse_review_verdict(output);
-
-    assert_eq!(verdict.verdict, ReviewVerdictType::NeedsHuman);
-    assert_eq!(verdict.review_gate, ReviewGate::UserTriageRequired);
-    assert!(verdict.findings.is_empty());
 }

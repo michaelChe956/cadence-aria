@@ -118,10 +118,18 @@ async fn review_decision_continue_after_strong_revise_runs_revision() {
     let revision_provider_type = Arc::new(Mutex::new(None));
     let revision_prompt = Arc::new(Mutex::new(None));
     let revised_artifact = "# Story Spec\n\n\
+        ## 范围\n\
+        来源 source id: Issue issue_0001；覆盖补充失败路径后的版本。\n\n\
+        ## 用户故事\n\
+        作为用户，我希望失败路径有明确反馈。\n\n\
         ## 功能需求\n\
         - [REQ-001] 补充失败路径后的版本。\n\n\
         ## 成功标准\n\
-        - [AC-001] 覆盖失败路径。\n";
+        - [AC-001] 覆盖失败路径。\n\n\
+        ## 待确认项\n\
+        无。\n\n\
+        ## 非功能需求\n\
+        无。\n";
     engine
         .drive_revision_session(
             Arc::new(ReviewVerdictStreamingProvider {
@@ -342,7 +350,7 @@ async fn revision_input_uses_persisted_codex_author_session_when_engine_session_
     let mut session = WorkspaceSession::from_record(session_record);
     session.stage = WorkspaceStage::Revision;
     session.artifact = Some(artifact_payload(
-        "# Story Spec\n\n## 功能需求\n- [REQ-001] 初版。\n\n## 成功标准\n- [AC-001] 初版可验收。\n",
+        "# Story Spec\n\n## 范围\n来源 source id: Issue issue_0001；初版。\n\n## 用户故事\n作为用户，我希望能力可用。\n\n## 功能需求\n- [REQ-001] 初版。\n\n## 成功标准\n- [AC-001] 初版可验收。\n\n## 待确认项\n无。\n\n## 非功能需求\n无。\n",
     ));
     session.messages.push(SessionMessage {
         id: "msg_001".to_string(),
@@ -429,7 +437,13 @@ async fn revision_with_existing_author_provider_session_uses_delta_prompt() {
         .drive_revision_session(
             Arc::new(RevisionInputRecordingProvider {
                 input: captured_input.clone(),
-                output: "# Story Spec\n\n## 功能需求\n- [REQ-001] 补充失败路径。\n\n## 成功标准\n- [AC-001] 覆盖失败路径。\n",
+                output: "# Story Spec\n\n\
+                    ## 范围\n来源 source id: Issue issue_0001；补充失败路径。\n\n\
+                    ## 用户故事\n作为用户，我希望失败路径有明确反馈。\n\n\
+                    ## 功能需求\n- [REQ-001] 补充失败路径。\n\n\
+                    ## 成功标准\n- [AC-001] 覆盖失败路径。\n\n\
+                    ## 待确认项\n无。\n\n\
+                    ## 非功能需求\n无。\n",
             }),
             empty_provider_commands(),
         )
@@ -464,18 +478,18 @@ async fn revision_codex_resume_stall_retries_fresh_full_prompt_for_all_workspace
     for (workspace_type, artifact, output) in [
         (
             WorkspaceType::Story,
-            "# Story Spec\n\n## 功能需求\n- [REQ-001] 初版。\n\n## 成功标准\n- [AC-001] 初版可验收。\n",
-            "# Story Spec\n\n## 功能需求\n- [REQ-001] fresh 返修版本。\n\n## 成功标准\n- [AC-001] fresh 返修可验收。\n",
+            "# Story Spec\n\n## 范围\n来源 source id: Issue issue_0001；初版。\n\n## 用户故事\n作为用户，我希望能力可用。\n\n## 功能需求\n- [REQ-001] 初版。\n\n## 成功标准\n- [AC-001] 初版可验收。\n\n## 待确认项\n无。\n\n## 非功能需求\n无。\n",
+            "# Story Spec\n\n## 范围\n来源 source id: Issue issue_0001；fresh 返修版本。\n\n## 用户故事\n作为用户，我希望能力可用。\n\n## 功能需求\n- [REQ-001] fresh 返修版本。\n\n## 成功标准\n- [AC-001] fresh 返修可验收。\n\n## 待确认项\n无。\n\n## 非功能需求\n无。\n",
         ),
         (
             WorkspaceType::Design,
-            "# Design Spec\n\n## 设计决策\n- [DEC-001] 初版。\n\n## API 契约\n- [API-001] 初版接口。\n",
-            "# Design Spec\n\n## 设计决策\n- [DEC-001] fresh 返修版本。\n\n## API 契约\n- [API-001] fresh 返修接口。\n",
+            "# Design Spec\n\n## 设计范围\n初版。\n\n## 设计决策\n- [DEC-001] 初版。\n\n## 公共组件\n- [CMP-001] 初版组件。\n\n## API 契约\n- [API-001] 初版接口。\n\n## 数据模型\n- 沿用现有模型。\n\n## 风险\n无。\n\n## 追踪关系\n- source ids: Story Spec story_spec_0001, Issue issue_0001。\n- [DEC-001] -> [REQ-001]\n",
+            "# Design Spec\n\n## 设计范围\nfresh 返修版本。\n\n## 设计决策\n- [DEC-001] fresh 返修版本。\n\n## 公共组件\n- [CMP-001] fresh 组件。\n\n## API 契约\n- [API-001] fresh 返修接口。\n\n## 数据模型\n- 沿用现有模型。\n\n## 风险\n无。\n\n## 追踪关系\n- source ids: Story Spec story_spec_0001, Issue issue_0001。\n- [DEC-001] -> [REQ-001]\n",
         ),
         (
             WorkspaceType::WorkItem,
-            "# Work Item\n\n## 目标\n- 初版任务。\n\n## 验证命令\n- cargo test --locked\n",
-            "# Work Item\n\n## 目标\n- fresh 返修任务。\n\n## 验证命令\n- cargo test --locked\n",
+            "# Work Item\n\n## 目标\n初版任务。\n\n## 范围\n仅当前任务。\n\n## 实现步骤\n- 实现当前任务。\n\n## 依赖\n无。\n\n## 验证命令\n- cargo test --locked\n\n## 风险\n无。\n\n## 追踪关系\n- source ids: Story Spec story_spec_0001, Design Spec design_spec_0001。\n- [REQ-001]\n",
+            "# Work Item\n\n## 目标\nfresh 返修任务。\n\n## 范围\n仅当前任务。\n\n## 实现步骤\n- 实现当前任务。\n\n## 依赖\n无。\n\n## 验证命令\n- cargo test --locked\n\n## 风险\n无。\n\n## 追踪关系\n- source ids: Story Spec story_spec_0001, Design Spec design_spec_0001。\n- [REQ-001]\n",
         ),
     ] {
         let (_tmp, store) = setup();

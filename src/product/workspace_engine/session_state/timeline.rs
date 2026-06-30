@@ -84,7 +84,10 @@ impl WorkspaceEngine {
     pub(crate) fn workspace_requires_artifact_gate(&self) -> bool {
         matches!(
             self.session.workspace_type,
-            WorkspaceType::Story | WorkspaceType::Design
+            WorkspaceType::Story
+                | WorkspaceType::Design
+                | WorkspaceType::WorkItem
+                | WorkspaceType::WorkItemPlan
         )
     }
 

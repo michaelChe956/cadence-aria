@@ -565,7 +565,7 @@ impl StreamingProviderAdapter for ChoiceThenArtifactProvider {
         } else {
             "# Story Spec\n\n\
              ## 范围\n\
-             实现 climb_stairs。\n\n\
+             来源 source id: Issue issue_0001；实现 climb_stairs。\n\n\
              ## 用户故事\n\
              作为调用方，我需要计算爬楼梯方法数。\n\n\
              ## 功能需求\n\
@@ -649,7 +649,13 @@ impl StreamingProviderAdapter for RoleResumeRecordingProvider {
                     .unwrap()
                     .push(input.resume_provider_session_id.clone());
                 (
-                    "# Story Spec\n\n## 功能需求\n- 实现登录会话过期提示。\n\n## 成功标准\n- 会话过期时提示用户重新登录。\n",
+                    "# Story Spec\n\n\
+                     ## 范围\n来源 source id: Issue issue_0001；实现登录会话过期提示。\n\n\
+                     ## 用户故事\n作为用户，我希望登录会话过期时获得清晰提示。\n\n\
+                     ## 功能需求\n- [REQ-001] 实现登录会话过期提示。\n\n\
+                     ## 成功标准\n- [AC-001] 会话过期时提示用户重新登录。\n\n\
+                     ## 待确认项\n无\n\n\
+                     ## 非功能需求\n无\n",
                     Some("author-provider-session-1".to_string()),
                 )
             }
@@ -685,4 +691,3 @@ impl StreamingProviderAdapter for RoleResumeRecordingProvider {
 }
 
 struct HangingStreamingProvider;
-

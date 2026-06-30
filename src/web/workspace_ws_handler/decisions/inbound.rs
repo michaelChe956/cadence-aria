@@ -57,12 +57,25 @@ pub(crate) async fn handle_workspace_inbound_message(
             .await;
         }
         WsInMessage::ProviderSelect { role, provider } => {
-            let mut engine = engine.lock().await;
-            if let Err(e) = engine.set_provider(&role, provider) {
+            let result = {
+                let mut engine = engine.lock().await;
+                engine.set_provider(&role, provider)
+            };
+            if let Err(e) = result {
                 let err = WsOutMessage::Error { message: e };
                 let _ = send_json_outbound(&outbound_tx, &err).await;
             } else {
-                let state_msg = engine.build_session_state();
+                if let Err(message) =
+                    refresh_workspace_context_for_session(&run_context, engine.clone()).await
+                {
+                    let err = WsOutMessage::Error { message };
+                    let _ = send_json_outbound(&outbound_tx, &err).await;
+                    return;
+                }
+                let state_msg = {
+                    let engine = engine.lock().await;
+                    engine.build_session_state()
+                };
                 let _ = send_json_outbound(&outbound_tx, &state_msg).await;
             }
         }
@@ -435,6 +448,17 @@ pub(crate) async fn handle_workspace_inbound_message(
             };
             match result {
                 Ok((_node, locked)) => {
+                    let run_context =
+                        match refresh_workspace_context_for_session(&run_context, engine.clone())
+                            .await
+                        {
+                            Ok(run_context) => run_context,
+                            Err(message) => {
+                                let err = WsOutMessage::Error { message };
+                                let _ = send_json_outbound(&outbound_tx, &err).await;
+                                return;
+                            }
+                        };
                     let _ = send_json_outbound(&outbound_tx, &locked).await;
                     let run_kind = {
                         let engine = engine.lock().await;
@@ -604,4 +628,30 @@ pub(crate) async fn handle_workspace_inbound_message(
             // 成功时 apply_revert_mark 已发 EngineEvent::ArtifactUpdate，event forwarder 会推前端
         }
     }
+}
+
+async fn refresh_workspace_context_for_session(
+    run_context: &ProviderRunContext,
+    engine: Arc<Mutex<WorkspaceEngine>>,
+) -> Result<ProviderRunContext, String> {
+    let lifecycle = LifecycleStore::new(run_context.app_paths.clone());
+    let session_record = lifecycle
+        .get_workspace_session(&run_context.session_id)
+        .map_err(|error| format!("reload workspace session after provider lock failed: {error}"))?;
+    let session_record =
+        ensure_workspace_context_message(&run_context.app_paths, &lifecycle, session_record)
+            .map_err(|error| {
+                format!("refresh workspace context after provider lock failed: {error}")
+            })?;
+
+    {
+        let mut engine = engine.lock().await;
+        engine
+            .session
+            .replace_messages_from_records(session_record.messages.clone());
+    }
+
+    let mut refreshed = run_context.clone();
+    refreshed.session_record = session_record;
+    Ok(refreshed)
 }

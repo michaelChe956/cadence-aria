@@ -38,28 +38,60 @@ use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
 const VALID_STORY_SPEC: &str = "# Story Spec\n\n\
+## 范围\n\
+来源 source id: Issue issue_0001；生成可审核的候选产物。\n\n\
+## 用户故事\n\
+作为审核者，我希望候选 Story Spec 结构完整且可追踪。\n\n\
 ## 功能需求\n\
 - [REQ-001] 生成可审核的候选产物。\n\n\
 ## 成功标准\n\
-- [AC-001] 候选产物包含成功标准。\n";
+- [AC-001] 候选产物包含成功标准。\n\n\
+## 待确认项\n\
+无\n\n\
+## 非功能需求\n\
+无\n";
 
 const INITIAL_STORY_SPEC: &str = "# Initial Story Spec\n\n\
+## 范围\n\
+来源 source id: Issue issue_0001；生成初始候选产物。\n\n\
+## 用户故事\n\
+作为审核者，我希望看到初始候选产物。\n\n\
 ## 功能需求\n\
 - [REQ-001] 生成初始候选产物。\n\n\
 ## 成功标准\n\
-- [AC-001] 初始候选产物可进入审核。\n";
+- [AC-001] 初始候选产物可进入审核。\n\n\
+## 待确认项\n\
+无\n\n\
+## 非功能需求\n\
+无\n";
 
 const REVISED_STORY_SPEC: &str = "# Revised Story Spec\n\n\
+## 范围\n\
+来源 source id: Issue issue_0001；补充返修后的候选产物。\n\n\
+## 用户故事\n\
+作为审核者，我希望返修候选产物保留追踪关系。\n\n\
 ## 功能需求\n\
 - [REQ-001] 补充返修后的候选产物。\n\n\
 ## 成功标准\n\
-- [AC-001] 返修候选产物可进入二次审核。\n";
+- [AC-001] 返修候选产物可进入二次审核。\n\n\
+## 待确认项\n\
+无\n\n\
+## 非功能需求\n\
+无\n";
 
 const REVISED_AFTER_RECONNECT_STORY_SPEC: &str = "# Revised After Reconnect\n\n\
+## 范围\n\
+来源 source id: Issue issue_0001；重连后继续生成返修候选产物。\n\n\
+## 用户故事\n\
+作为审核者，我希望重连后的返修产物仍可审核。\n\n\
 ## 功能需求\n\
 - [REQ-001] 重连后继续生成返修候选产物。\n\n\
 ## 成功标准\n\
-- [AC-001] 重连后的返修候选产物可进入审核。\n";
+- [AC-001] 重连后的返修候选产物可进入审核。\n\n\
+## 待确认项\n\
+无\n\n\
+## 非功能需求\n\
+无\n";
 
 #[tokio::test]
 async fn workspace_ws_hydrates_context_for_existing_empty_session() {
@@ -96,8 +128,13 @@ async fn workspace_ws_hydrates_context_for_existing_empty_session() {
             assert!(messages[0].content.contains("候选 spec 生成器"));
             assert!(messages[0].content.contains("OpenSpec"));
             assert!(messages[0].content.contains("必须遵守 using-superpowers"));
-            assert!(messages[0].content.contains("必须优先通过交互提问解决"));
-            assert!(messages[0].content.contains("结构化 AskUserQuestion"));
+            assert!(messages[0].content.contains("必须优先通过可用交互机制解决"));
+            assert!(
+                messages[0]
+                    .content
+                    .contains("当前 author provider 未声明原生结构化交互能力")
+            );
+            assert!(messages[0].content.contains("交给 text_fallback"));
             assert!(
                 messages[0]
                     .content
@@ -152,7 +189,7 @@ async fn workspace_ws_replaces_legacy_context_with_generation_brief() {
             assert!(messages[0].content.contains("候选 spec 生成器"));
             assert!(messages[0].content.contains("OpenSpec"));
             assert!(messages[0].content.contains("必须遵守 using-superpowers"));
-            assert!(messages[0].content.contains("必须优先通过交互提问解决"));
+            assert!(messages[0].content.contains("必须优先通过可用交互机制解决"));
             assert!(messages[0].content.contains("不要直接修改 OpenSpec"));
             assert!(!messages[0].content.contains("Workspace 上下文已准备"));
         }
@@ -355,9 +392,9 @@ async fn workspace_ws_author_recommendation_choice_blocks_reviewer_until_user_an
                  对 `n <= 0` 的输入，这个 issue 希望如何处理？\n\n\
                  推荐选项：只声明本次需求支持 `n >= 1`，`n <= 0` 不纳入当前 issue 范围。  \n\
                  其他可选：返回 `0`；或抛出 `ValueError`。",
-                "# Story Spec\n\n\
+                 "# Story Spec\n\n\
                  ## 范围\n\
-                 实现 climb_stairs。\n\n\
+                 来源 source id: Issue issue_0001；实现 climb_stairs。\n\n\
                  ## 用户故事\n\
                  作为调用方，我需要计算爬楼梯方法数。\n\n\
                  ## 功能需求\n\
@@ -697,4 +734,3 @@ async fn workspace_ws_reconnect_restores_timeline_and_artifact_versions() {
     drop(reconnected);
     server.abort();
 }
-

@@ -44,6 +44,46 @@ fn artifact_payload(markdown: &str) -> ArtifactPayload {
     }
 }
 
+fn complete_story_artifact(requirement: &str, acceptance: &str) -> String {
+    format!(
+        "# Story Spec\n\n\
+         ## 范围\n来源 source id: Issue issue_0001；{requirement}\n\n\
+         ## 用户故事\n作为用户，我希望当前问题被清晰解决。\n\n\
+         ## 功能需求\n- [REQ-001] {requirement}\n\n\
+         ## 成功标准\n- [AC-001] {acceptance}\n\n\
+         ## 待确认项\n无。\n\n\
+         ## 非功能需求\n无。\n"
+    )
+}
+
+fn complete_design_artifact(decision: &str, api: &str) -> String {
+    format!(
+        "# Design Spec\n\n\
+         ## 设计范围\n覆盖当前设计变更。\n\n\
+         ## 设计决策\n- [DEC-001] {decision}\n\n\
+         ## 公共组件\n- [CMP-001] 复用现有组件边界。\n\n\
+         ## API 契约\n- [API-001] {api}\n\n\
+         ## 数据模型\n- 沿用现有数据模型。\n\n\
+         ## 风险\n无。\n\n\
+         ## 追踪关系\n- source ids: Story Spec story_spec_0001, Issue issue_0001。\n\
+         - [DEC-001] -> [REQ-001]\n"
+    )
+}
+
+fn complete_work_item_artifact(goal: &str) -> String {
+    format!(
+        "# Work Item\n\n\
+         ## 目标\n{goal}\n\n\
+         ## 范围\n仅覆盖当前单个可执行任务。\n\n\
+         ## 实现步骤\n- 完成当前任务实现。\n- 补充当前任务验证。\n\n\
+         ## 依赖\n依赖已确认 Story Spec 与 Design Spec。\n\n\
+         ## 验证命令\n- cargo test --locked\n\n\
+         ## 风险\n无。\n\n\
+         ## 追踪关系\n- source ids: Story Spec story_spec_0001, Design Spec design_spec_0001。\n\
+         - [REQ-001]\n"
+    )
+}
+
 fn test_work_item_plan_outline(
     dependency_graph: Vec<WorkItemOutlineDependencyEdge>,
 ) -> WorkItemPlanOutline {
@@ -317,13 +357,13 @@ impl StreamingProviderAdapter for SessionRecordingProvider {
         let (command_tx, _command_rx) = mpsc::channel(8);
         tokio::spawn(async move {
             let output = if call_no == 1 {
-                "climb_stairs(n) 对 n <= 0 应该如何处理？\nA. 返回 0\nB. 抛出 ValueError\n"
+                "climb_stairs(n) 对 n <= 0 应该如何处理？\nA. 返回 0\nB. 抛出 ValueError\n".to_string()
             } else {
-                "# Story Spec\n\n## 功能需求\n- 对 n <= 0 返回 0。\n\n## 成功标准\n- n <= 0 时返回 0。\n"
+                complete_story_artifact("对 n <= 0 返回 0。", "n <= 0 时返回 0。")
             };
             let _ = event_tx
                 .send(ProviderEvent::Completed {
-                    full_output: output.to_string(),
+                    full_output: output,
                     provider_session_id: Some("provider-author-session-1".to_string()),
                 })
                 .await;
@@ -592,13 +632,26 @@ fn design_artifact_gate_accepts_numbered_canonical_headings() {
 
 - [DEC-001] 新建 ProviderCatalog。
 
-## 3. 组件 / API / 数据模型
+## 3. 公共组件
 
 - [CMP-001] ProviderCatalog。
 
-## 4. 风险
+## 4. API 契约
+
+- [API-001] ProviderCatalog::probe。
+
+## 5. 数据模型
+
+- ProviderCapability。
+
+## 6. 风险
 
 无。
+
+## 7. 追踪关系
+
+- source ids: Story Spec story_spec_0001, Issue issue_0001
+- [DEC-001] -> [REQ-001]
 "#;
 
     assert!(content_has_complete_workspace_artifact(

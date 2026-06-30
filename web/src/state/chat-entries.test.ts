@@ -122,6 +122,90 @@ describe("chat entries store", () => {
     ]);
   });
 
+  it("updates prepared context provider guidance when author provider changes locally", () => {
+    const store = useWorkspaceStore.getState();
+    const preparedContext =
+      "Workspace 生成任务已准备\n\n" +
+      "[system]\n你是 Aria 的候选 spec 生成器。\n\n" +
+      "[workflow_discipline]\n" +
+      "必须遵守 using-superpowers 与 brainstorming 的纪律。\n" +
+      "当前 author provider 是 Claude Code；需要向用户确认时，必须使用结构化 AskUserQuestion，让同一个 Claude Code 进程等待用户回答后继续。禁止输出文本 A/B/C 选择题作为交互替代；若仍输出可解析的文本选择题，daemon 仅作为 text_fallback 异常兜底处理，并在用户回答后只追加 compact QA。\n\n" +
+      "[output_schema]\nMarkdown Story Spec";
+
+    store.setSessionState({
+      session_id: "session-provider-guidance",
+      workspace_type: "story",
+      stage: "prepare_context",
+      messages: [
+        {
+          id: "msg_001",
+          role: "system",
+          content: preparedContext,
+          checkpoint_id: null,
+          created_at: "2026-05-21T09:00:00Z",
+        },
+      ],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "claude_code", reviewer: "codex" },
+      timeline_nodes: [],
+      active_node_id: null,
+      artifact_versions: [],
+      timeline_node_details: {},
+      active_run_id: null,
+    });
+
+    store.setProviderSelection("author", "codex");
+
+    const state = useWorkspaceStore.getState();
+    expect(state.messages[0].content).toContain("当前 author provider 是 Codex");
+    expect(state.messages[0].content).toContain("requestUserInput");
+    expect(state.messages[0].content).not.toContain("当前 author provider 是 Claude Code");
+    expect(state.messages[0].content).not.toContain("AskUserQuestion");
+    expect(state.chatEntries[0].content).toBe(state.messages[0].content);
+  });
+
+  it("normalizes stale prepared context guidance from session state provider", () => {
+    const store = useWorkspaceStore.getState();
+    const staleContext =
+      "Workspace 生成任务已准备\n\n" +
+      "[system]\n你是 Aria 的候选 spec 生成器。\n\n" +
+      "[workflow_discipline]\n" +
+      "必须遵守 using-superpowers 与 brainstorming 的纪律。\n" +
+      "当前 author provider 是 Claude Code；需要向用户确认时，必须使用结构化 AskUserQuestion，让同一个 Claude Code 进程等待用户回答后继续。禁止输出文本 A/B/C 选择题作为交互替代；若仍输出可解析的文本选择题，daemon 仅作为 text_fallback 异常兜底处理，并在用户回答后只追加 compact QA。\n\n" +
+      "[output_schema]\nMarkdown Story Spec";
+
+    store.setSessionState({
+      session_id: "session-provider-guidance-state",
+      workspace_type: "story",
+      stage: "prepare_context",
+      messages: [
+        {
+          id: "msg_001",
+          role: "system",
+          content: staleContext,
+          checkpoint_id: null,
+          created_at: "2026-05-21T09:00:00Z",
+        },
+      ],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "codex", reviewer: "claude_code" },
+      timeline_nodes: [],
+      active_node_id: null,
+      artifact_versions: [],
+      timeline_node_details: {},
+      active_run_id: null,
+    });
+
+    const state = useWorkspaceStore.getState();
+    expect(state.messages[0].content).toContain("当前 author provider 是 Codex");
+    expect(state.messages[0].content).toContain("requestUserInput");
+    expect(state.messages[0].content).not.toContain("当前 author provider 是 Claude Code");
+    expect(state.messages[0].content).not.toContain("AskUserQuestion");
+    expect(state.chatEntries[0].content).toBe(state.messages[0].content);
+  });
+
   it("rebuilds chat entries from timeline node details in timeline order", () => {
     const contextNode = makeTimelineNode({
       node_id: "node-context-1",

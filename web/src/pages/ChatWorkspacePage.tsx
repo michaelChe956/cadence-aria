@@ -231,12 +231,13 @@ export function ChatWorkspacePage({
       if (hydratedNodeIdsRef.current.has(nodeId)) {
         continue;
       }
-      if (!useWorkspaceStore.getState().nodeDetails[nodeId]) {
-        continue;
-      }
       hydratedNodeIdsRef.current.add(nodeId);
-      fetchWorkspaceNodeDetail(sessionId, nodeId)
+      Promise.resolve(fetchWorkspaceNodeDetail(sessionId, nodeId))
         .then((detail) => {
+          if (!detail) {
+            hydratedNodeIdsRef.current.delete(nodeId);
+            return;
+          }
           const state = useWorkspaceStore.getState();
           if (state.sessionId !== sessionId) {
             return;
