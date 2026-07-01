@@ -24,6 +24,48 @@ describe("chat workspace entries", () => {
     expect(screen.getByText("需要支持手机号登录")).toBeInTheDocument();
   });
 
+  it("renders prepared story and design context entries as shared audit input", () => {
+    const entry = makeEntry({
+      type: "context_note",
+      role: "user",
+      content: "Workspace 生成任务已准备\n\n[system]\n你是候选 spec 生成器。",
+      metadata: {
+        prepared: true,
+      },
+    });
+
+    render(<UserContextEntry entry={entry} />);
+
+    expect(screen.getByText("初始化输入")).toBeInTheDocument();
+    expect(screen.getByText("CONTEXT")).toBeInTheDocument();
+    expect(screen.getByText("Workspace 初始化上下文")).toBeInTheDocument();
+    expect(screen.getByText("4 行")).toBeInTheDocument();
+    expect(screen.getByText(/候选 spec 生成器/)).toBeInTheDocument();
+    expect(screen.queryByText("PROMPT")).not.toBeInTheDocument();
+  });
+
+  it("renders prepared work item plan prompt entries as audit input", () => {
+    const entry = makeEntry({
+      type: "context_note",
+      role: "user",
+      content: "你是 Aria 的 WorkItemPlan Outline Planner。\n[strict_output_contract]",
+      metadata: {
+        prepared: true,
+        prompt_source: "provider_prompt",
+        prompt_node_title: "WorkItemPlan Outline 生成",
+        provider: "claude_code",
+      },
+    });
+
+    render(<UserContextEntry entry={entry} />);
+
+    expect(screen.getByText("实际执行 Prompt")).toBeInTheDocument();
+    expect(screen.getByText("PROMPT")).toBeInTheDocument();
+    expect(screen.getByText("WorkItemPlan Outline 生成")).toBeInTheDocument();
+    expect(screen.getByText("claude_code")).toBeInTheDocument();
+    expect(screen.getByText(/WorkItemPlan Outline Planner/)).toBeInTheDocument();
+  });
+
   it("renders provider stream entries as markdown-like blocks", () => {
     const entry = makeEntry({
       type: "provider_stream",
@@ -348,6 +390,21 @@ describe("chat workspace entries", () => {
     expect(screen.getByText("读取认证模块 · exit code 0")).toBeInTheDocument();
     expect(screen.getByText("sed -n '1,120p' src/auth.rs")).toBeInTheDocument();
     expect(screen.getByText("ok")).toBeInTheDocument();
+  });
+
+  it("labels provider prompt execution entries explicitly", () => {
+    const entry = makeEntry({
+      type: "execution_event",
+      role: "system",
+      content: "WorkItemPlan Outline Planner · Provider Prompt · 42KB",
+      metadata: { title: "Provider Prompt" },
+      content_ref: { kind: "provider_prompt", nodeId: "node-author-1" },
+    });
+
+    render(<ExecutionEventEntry entry={entry} />);
+
+    expect(screen.getByText("Provider Prompt")).toBeInTheDocument();
+    expect(screen.getByText("WorkItemPlan Outline Planner · Provider Prompt · 42KB")).toBeInTheDocument();
   });
 
   it("renders permission request entries and emits response actions", () => {

@@ -7,6 +7,7 @@ interface ChatEntryContainerProps {
   children: ReactNode;
   className?: string;
   testId?: string;
+  wide?: boolean;
 }
 
 const ROLE_STYLES: Record<
@@ -66,6 +67,7 @@ export function ChatEntryContainer({
   children,
   className = "",
   testId,
+  wide = false,
 }: ChatEntryContainerProps) {
   const styles = ROLE_STYLES[role];
 
@@ -75,7 +77,7 @@ export function ChatEntryContainer({
         data-testid={testId}
         className={[
           "w-full rounded-md border px-3 py-2 text-sm shadow-sm",
-          role === "system" ? "max-w-none" : "max-w-3xl",
+          role === "system" || wide ? "max-w-none" : "max-w-3xl",
           styles.panel,
           className,
         ]

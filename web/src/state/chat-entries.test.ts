@@ -81,8 +81,10 @@ describe("chat entries store", () => {
     expect(useWorkspaceStore.getState().activeStreamEntryId).toBeNull();
   });
 
-  it("shows the prepared workspace context as the first user chat entry", () => {
+  it("shows story prepared workspace context as the first user chat entry", () => {
     const store = useWorkspaceStore.getState();
+    const preparedContext =
+      "Workspace 生成任务已准备\n\n[system]\n你是候选 spec 生成器。\n\n[canonical_inputs]\nIssue: 爬楼梯问题";
     store.setSessionState({
       session_id: "session-prepared-context",
       workspace_type: "story",
@@ -91,8 +93,7 @@ describe("chat entries store", () => {
         {
           id: "msg_001",
           role: "system",
-          content:
-            "Workspace 生成任务已准备\n\n[system]\n你是候选 spec 生成器。\n\n[canonical_inputs]\nIssue: 爬楼梯问题",
+          content: preparedContext,
           checkpoint_id: null,
           created_at: "2026-05-21T09:00:00Z",
         },
@@ -110,16 +111,142 @@ describe("chat entries store", () => {
     store.rebuildChatEntries();
 
     expect(useWorkspaceStore.getState().chatEntries).toEqual([
-      {
+      expect.objectContaining({
         id: "prepared-context:msg_001",
         type: "context_note",
         role: "user",
-        content:
-          "Workspace 生成任务已准备\n\n[system]\n你是候选 spec 生成器。\n\n[canonical_inputs]\nIssue: 爬楼梯问题",
+        content: preparedContext,
         timestamp: "2026-05-21T09:00:00Z",
-        metadata: { prepared: true },
-      },
+        metadata: expect.objectContaining({
+          prepared: true,
+          workspace_type: "story",
+        }),
+      }),
     ]);
+  });
+
+  it("shows design prepared workspace context without replacing it", () => {
+    const store = useWorkspaceStore.getState();
+    const preparedContext =
+      "Workspace 生成任务已准备\n\n[system]\n你是 Aria 的候选 design 生成器。\n\n关联上下文:\n- Story Spec: story_spec_0001";
+    store.setSessionState({
+      session_id: "session-design-prepared-context",
+      workspace_type: "design",
+      stage: "prepare_context",
+      messages: [
+        {
+          id: "msg_design_001",
+          role: "system",
+          content: preparedContext,
+          checkpoint_id: null,
+          created_at: "2026-05-21T09:05:00Z",
+        },
+      ],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "claude_code", reviewer: "codex" },
+      timeline_nodes: [],
+      active_node_id: null,
+      artifact_versions: [],
+      timeline_node_details: {},
+      active_run_id: null,
+    });
+
+    store.rebuildChatEntries();
+
+    expect(useWorkspaceStore.getState().chatEntries).toEqual([
+      expect.objectContaining({
+        id: "prepared-context:msg_design_001",
+        type: "context_note",
+        role: "user",
+        content: preparedContext,
+        metadata: expect.objectContaining({
+          prepared: true,
+          workspace_type: "design",
+        }),
+      }),
+    ]);
+  });
+
+  it("replaces work item plan prepared context with the actual provider prompt", () => {
+    const store = useWorkspaceStore.getState();
+    const preparedContext =
+      "Workspace 生成任务已准备\n\n[work_item_context]\nMarkdown Work Item Plan output schema";
+    const actualPrompt =
+      "你是 Aria 的 WorkItemPlan Outline Planner。\n\n[repository_structure_summary]\ndir: src\n\n[strict_output_contract]\nJSON schema";
+    store.setSessionState({
+      session_id: "session-work-item-plan-prepared-context",
+      workspace_type: "work_item_plan",
+      stage: "running",
+      messages: [
+        {
+          id: "msg_work_item_plan_001",
+          role: "system",
+          content: preparedContext,
+          checkpoint_id: null,
+          created_at: "2026-05-21T09:10:00Z",
+        },
+      ],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "claude_code", reviewer: "codex" },
+      timeline_nodes: [
+        makeTimelineNode({
+          node_id: "timeline_node_outline",
+          node_type: "work_item_plan_outline_run",
+          title: "WorkItemPlan Outline 生成",
+          started_at: "2026-05-21T09:10:01Z",
+        }),
+      ],
+      active_node_id: "timeline_node_outline",
+      artifact_versions: [],
+      timeline_node_details: {
+        timeline_node_outline: makeNodeDetail({
+          node_id: "timeline_node_outline",
+          node_type: "work_item_plan_outline_run",
+          agent_role: "author",
+          provider: { name: "claude_code", model: "claude-opus-4" },
+          execution_events: [
+            {
+              event_id: "timeline_node_outline_prompt",
+              node_id: "timeline_node_outline",
+              agent: "claude_code",
+              kind: "output",
+              status: "started",
+              title: "Provider Prompt",
+              detail: "发送给 Workspace provider 的完整提示词",
+              command: null,
+              cwd: null,
+              output: actualPrompt,
+              exit_code: null,
+            },
+          ],
+        }),
+      },
+      active_run_id: null,
+    });
+
+    store.rebuildChatEntries();
+
+    const entries = useWorkspaceStore.getState().chatEntries;
+    expect(entries).toEqual([
+      expect.objectContaining({
+        id: "prepared-context:msg_work_item_plan_001",
+        type: "context_note",
+        role: "user",
+        content: actualPrompt,
+        node_id: "timeline_node_outline",
+        content_ref: { kind: "provider_prompt", nodeId: "timeline_node_outline" },
+        metadata: expect.objectContaining({
+          prepared: true,
+          workspace_type: "work_item_plan",
+          prompt_source: "provider_prompt",
+          prompt_node_id: "timeline_node_outline",
+          provider: "claude_code",
+        }),
+      }),
+    ]);
+    expect(entries[0].content).not.toContain("[work_item_context]");
   });
 
   it("updates prepared context provider guidance when author provider changes locally", () => {

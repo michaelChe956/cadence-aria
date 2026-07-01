@@ -30,6 +30,13 @@ export type ChatEntryResolution = "confirm" | "request-change" | "terminate";
 export interface ChoiceResponsePayload {
   selected_option_ids: string[];
   free_text: string | null;
+  answers?: ChoiceAnswerPayload[];
+}
+
+export interface ChoiceAnswerPayload {
+  question_id: string;
+  selected_option_ids: string[];
+  free_text: string | null;
 }
 
 export type WorkspaceContentRef =
