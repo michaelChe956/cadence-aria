@@ -14,10 +14,31 @@ pub struct WorkItemPlanOutline {
     pub source_design_spec_ids: Vec<String>,
     pub strategy_summary: String,
     pub work_item_outlines: Vec<WorkItemOutline>,
+    #[serde(default)]
     pub dependency_graph: Vec<WorkItemOutlineDependencyEdge>,
     pub risks: Vec<String>,
     pub handoff_strategy: String,
     pub status: String,
+}
+
+impl WorkItemPlanOutline {
+    pub fn dependency_graph_from_depends_on(&self) -> Vec<WorkItemOutlineDependencyEdge> {
+        self.work_item_outlines
+            .iter()
+            .flat_map(|item| {
+                item.depends_on
+                    .iter()
+                    .map(|dependency| WorkItemOutlineDependencyEdge {
+                        from_outline_id: dependency.clone(),
+                        to_outline_id: item.outline_id.clone(),
+                    })
+            })
+            .collect()
+    }
+
+    pub fn normalize_dependency_graph_from_depends_on(&mut self) {
+        self.dependency_graph = self.dependency_graph_from_depends_on();
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

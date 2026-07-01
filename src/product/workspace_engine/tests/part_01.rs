@@ -156,7 +156,7 @@ fn test_work_item_plan_outline(
 
 #[test]
 fn work_item_plan_outline_topological_order_keeps_original_order_for_ready_items() {
-    let outline = test_work_item_plan_outline(vec![
+    let mut outline = test_work_item_plan_outline(vec![
         WorkItemOutlineDependencyEdge {
             from_outline_id: "outline_a".to_string(),
             to_outline_id: "outline_c".to_string(),
@@ -166,6 +166,27 @@ fn work_item_plan_outline_topological_order_keeps_original_order_for_ready_items
             to_outline_id: "outline_c".to_string(),
         },
     ]);
+    outline.work_item_outlines[2].depends_on =
+        vec!["outline_a".to_string(), "outline_b".to_string()];
+
+    let order = work_item_plan_outline_topological_order(&outline).expect("topological order");
+
+    assert_eq!(
+        order,
+        vec![
+            "outline_a".to_string(),
+            "outline_b".to_string(),
+            "outline_c".to_string()
+        ]
+    );
+}
+
+#[test]
+fn work_item_plan_outline_topological_order_uses_depends_on_as_source() {
+    let mut outline = test_work_item_plan_outline(Vec::new());
+    outline.work_item_outlines[2].depends_on =
+        vec!["outline_a".to_string(), "outline_b".to_string()];
+    outline.work_item_outlines.rotate_right(1);
 
     let order = work_item_plan_outline_topological_order(&outline).expect("topological order");
 
@@ -181,7 +202,7 @@ fn work_item_plan_outline_topological_order_keeps_original_order_for_ready_items
 
 #[test]
 fn work_item_plan_outline_topological_order_rejects_cycles() {
-    let outline = test_work_item_plan_outline(vec![
+    let mut outline = test_work_item_plan_outline(vec![
         WorkItemOutlineDependencyEdge {
             from_outline_id: "outline_a".to_string(),
             to_outline_id: "outline_b".to_string(),
@@ -191,10 +212,13 @@ fn work_item_plan_outline_topological_order_rejects_cycles() {
             to_outline_id: "outline_a".to_string(),
         },
     ]);
+    outline.work_item_outlines[0].depends_on = vec!["outline_b".to_string()];
+    outline.work_item_outlines[1].depends_on = vec!["outline_a".to_string()];
 
     let error = work_item_plan_outline_topological_order(&outline).expect_err("cycle rejected");
 
     assert!(error.contains("cycle"));
+    assert!(error.contains("depends_on"));
 }
 
 #[test]

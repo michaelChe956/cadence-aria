@@ -43,12 +43,6 @@ fn valid_outline_author_output() -> serde_json::Value {
                     "handoff_notes": "消费 API contract"
                 }
             ],
-            "dependency_graph": [
-                {
-                    "from_outline_id": "outline_backend",
-                    "to_outline_id": "outline_frontend"
-                }
-            ],
             "risks": [],
             "handoff_strategy": "后端输出 contract 给前端",
             "status": "draft"

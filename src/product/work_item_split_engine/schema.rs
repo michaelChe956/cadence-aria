@@ -290,18 +290,6 @@ pub(crate) const WORK_ITEM_PLAN_OUTLINE_OUTPUT_SCHEMA: &str = r#"{
             "additionalProperties": false
           }
         },
-        "dependency_graph": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "properties": {
-              "from_outline_id": { "type": "string" },
-              "to_outline_id": { "type": "string" }
-            },
-            "required": ["from_outline_id", "to_outline_id"],
-            "additionalProperties": false
-          }
-        },
         "risks": {
           "type": "array",
           "items": { "type": "string" }
@@ -317,7 +305,6 @@ pub(crate) const WORK_ITEM_PLAN_OUTLINE_OUTPUT_SCHEMA: &str = r#"{
         "source_design_spec_ids",
         "strategy_summary",
         "work_item_outlines",
-        "dependency_graph",
         "risks",
         "handoff_strategy",
         "status"

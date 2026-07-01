@@ -132,7 +132,9 @@ pub(crate) fn validate_outline_dependencies(
     }
 
     for edge in &outline.dependency_graph {
-        if !outline_ids.contains(edge.from_outline_id.as_str()) {
+        let from_known = outline_ids.contains(edge.from_outline_id.as_str());
+        let to_known = outline_ids.contains(edge.to_outline_id.as_str());
+        if !from_known {
             findings.push(error(
                 "dependency_not_in_outline",
                 format!(
@@ -142,7 +144,7 @@ pub(crate) fn validate_outline_dependencies(
                 vec![edge.from_outline_id.clone()],
             ));
         }
-        if !outline_ids.contains(edge.to_outline_id.as_str()) {
+        if !to_known {
             findings.push(error(
                 "dependency_not_in_outline",
                 format!(
@@ -152,10 +154,72 @@ pub(crate) fn validate_outline_dependencies(
                 vec![edge.to_outline_id.clone()],
             ));
         }
-        edges.insert((edge.from_outline_id.clone(), edge.to_outline_id.clone()));
     }
 
+    validate_outline_dependency_graph_projection(outline, &edges, findings);
+
     edges
+}
+
+fn validate_outline_dependency_graph_projection(
+    outline: &WorkItemPlanOutline,
+    derived_edges: &HashSet<(String, String)>,
+    findings: &mut Vec<WorkItemSplitFinding>,
+) {
+    if outline.dependency_graph.is_empty() {
+        return;
+    }
+
+    let outline_ids: HashSet<&str> = outline
+        .work_item_outlines
+        .iter()
+        .map(|item| item.outline_id.as_str())
+        .collect();
+    let declared_edges: HashSet<(String, String)> = outline
+        .dependency_graph
+        .iter()
+        .filter(|edge| {
+            outline_ids.contains(edge.from_outline_id.as_str())
+                && outline_ids.contains(edge.to_outline_id.as_str())
+        })
+        .map(|edge| (edge.from_outline_id.clone(), edge.to_outline_id.clone()))
+        .collect();
+
+    for (dependency, item) in derived_edges {
+        if declared_edges.contains(&(dependency.clone(), item.clone())) {
+            continue;
+        }
+        if declared_edges.contains(&(item.clone(), dependency.clone())) {
+            findings.push(error(
+                "dependency_graph_direction_reversed",
+                format!(
+                    "outline {item} depends_on {dependency}, so dependency_graph must contain {dependency} -> {item}; found reversed {item} -> {dependency}"
+                ),
+                vec![dependency.clone(), item.clone()],
+            ));
+        } else {
+            findings.push(error(
+                "dependency_graph_mismatch",
+                format!(
+                    "outline {item} depends_on {dependency}, so dependency_graph must contain {dependency} -> {item}"
+                ),
+                vec![dependency.clone(), item.clone()],
+            ));
+        }
+    }
+
+    for (from, to) in declared_edges.difference(derived_edges) {
+        if derived_edges.contains(&(to.clone(), from.clone())) {
+            continue;
+        }
+        findings.push(error(
+            "dependency_graph_mismatch",
+            format!(
+                "dependency_graph edge {from} -> {to} is not derived from work_item_outlines[].depends_on"
+            ),
+            vec![from.clone(), to.clone()],
+        ));
+    }
 }
 
 pub(crate) fn validate_outline_dependency_cycles(
@@ -216,7 +280,7 @@ pub(crate) fn validate_outline_dependency_cycles(
     if cycle_found {
         findings.push(error(
             "dependency_cycle",
-            "outline dependency graph contains a cycle",
+            "outline depends_on dependencies contain a cycle",
             Vec::new(),
         ));
     }

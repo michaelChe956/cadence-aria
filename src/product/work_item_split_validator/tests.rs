@@ -32,6 +32,32 @@ fn outline_validator_rejects_dependency_cycle() {
     let report = WorkItemPlanOutlineValidator::validate(&outline);
 
     assert_has_code(&report, "dependency_cycle");
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.message.contains("depends_on")),
+        "cycle diagnostic should identify depends_on as the source, got {:?}",
+        report.findings
+    );
+}
+
+#[test]
+fn outline_validator_reports_reversed_dependency_graph_without_cycle_noise() {
+    let mut outline = valid_outline();
+    outline.dependency_graph = vec![WorkItemOutlineDependencyEdge {
+        from_outline_id: "outline_frontend".to_string(),
+        to_outline_id: "outline_backend".to_string(),
+    }];
+
+    let report = WorkItemPlanOutlineValidator::validate(&outline);
+
+    assert_has_code(&report, "dependency_graph_direction_reversed");
+    assert!(
+        !has_code(&report, "dependency_cycle"),
+        "reversed derived graph should be diagnosed as mismatch, got {:?}",
+        report.findings
+    );
 }
 
 #[test]
@@ -144,10 +170,14 @@ fn local_validator_blocks_scope_conflict_with_direct_dependency() {
 
 fn assert_has_code(report: &WorkItemSplitValidationReport, code: &str) {
     assert!(
-        report.findings.iter().any(|finding| finding.code == code),
+        has_code(report, code),
         "expected code {code}, got {:?}",
         report.findings
     );
+}
+
+fn has_code(report: &WorkItemSplitValidationReport, code: &str) -> bool {
+    report.findings.iter().any(|finding| finding.code == code)
 }
 
 fn valid_outline() -> WorkItemPlanOutline {

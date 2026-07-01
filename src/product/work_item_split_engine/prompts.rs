@@ -23,7 +23,7 @@ use super::types::{
 
 const OUTLINE_WRITE_SCOPE_RULES: &str = "\
          [write_scope_partition_rules]\n\
-         依赖链上的 exclusive_write_scopes 必须互斥：如果 A depends_on B，或 dependency_graph 中 B -> A，则 A 与 B 不得拥有相同路径、父子路径或可能匹配同一文件的 glob。\n\
+         依赖链上的 exclusive_write_scopes 必须互斥：如果 A depends_on B，则 A 与 B 不得拥有相同路径、父子路径或可能匹配同一文件的 glob。\n\
          integration/e2e 测试 outline 只能拥有与实现目录不共享前缀的测试、fixtures、mock 或 CI 配置路径；不要把被测功能实现目录写入测试 outline 的 exclusive_write_scopes。\n\
          不要让 outline_frontend 与 outline_integration_tests 同时拥有 web/src/**；也不要把 web/src/**/*.test.tsx 交给 integration/e2e outline，因为它会与 web/src/components/**、web/src/pages/** 等 frontend 实现范围重叠。\n\
          常见做法是 frontend outline 拥有 web/src/components/**、web/src/pages/** 及其同目录单元测试；integration_tests/e2e outline 只拥有 web/e2e/**、tests/e2e/**、fixtures/**、mocks/**、playwright.config.* 或 CI 配置。\n\
@@ -251,7 +251,8 @@ pub(crate) fn build_outline_prompt_with_nonce(
          不得输出 VerificationPlan、verification_plan、verification_plans、work_item_id、work_item_ids。\n\
          不得输出 repository_profile，不得输出 parallel_groups。\n\
          不要输出 implementation plan 或旧版 Work Item 拆分计划字段：work_item_outlines[] 中不要使用 id、layer、summary、key_paths、reuse_modules、test_strategy、acceptance_refs。\n\
-         work_item_outlines[] 的条目标识字段必须叫 outline_id；dependency_graph[] 必须使用 from_outline_id/to_outline_id 边，不要使用 work_item_id/depends_on 形式。\n\
+         work_item_outlines[] 的条目标识字段必须叫 outline_id；依赖只能写在各 item 的 depends_on 数组中。\n\
+         不要输出 dependency_graph；后端会从 work_item_outlines[].depends_on 自动派生内部 dependency_graph。\n\
          work_item_outlines[] 每项必须包含 estimated_context_tokens(1..19999) 与 session_fit=\"fits_single_agent_session\"；如果预计超过 20k 或单个 Claude Code/Codex 会话无法完成，必须继续拆成更小 outline，不得输出该项。\n\
          不得修改仓库文件，不得创建计划文档。\n\
          如果无法补齐模块边界、关键路径或测试策略，请不要猜测完整拆分；请在 context_blockers 数组中写明需要用户补充的上下文。\n\
@@ -263,7 +264,7 @@ pub(crate) fn build_outline_prompt_with_nonce(
          最后必须输出一个 nonce sentinel JSON block。\n\
          后端只解析最后一个 nonce 匹配的 <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">...</ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\"> block。\n\
          标签内部必须是一个完整 JSON object，不要输出 Markdown code fence。\n\
-         最小正确示例：{{\"outline\":{{\"id\":\"outline_artifact_1\",\"project_id\":\"{project_id}\",\"issue_id\":\"{issue_id}\",\"source_story_spec_ids\":[],\"source_design_spec_ids\":[],\"strategy_summary\":\"...\",\"work_item_outlines\":[{{\"outline_id\":\"outline_backend\",\"title\":\"...\",\"kind\":\"backend\",\"goal\":\"...\",\"scope\":[],\"non_goals\":[],\"estimated_context_tokens\":12000,\"session_fit\":\"fits_single_agent_session\",\"source_story_spec_ids\":[],\"source_design_spec_ids\":[],\"exclusive_write_scopes\":[],\"forbidden_write_scopes\":[],\"depends_on\":[],\"verification_intent\":[],\"handoff_notes\":\"...\"}}],\"dependency_graph\":[{{\"from_outline_id\":\"outline_backend\",\"to_outline_id\":\"outline_frontend\"}}],\"risks\":[],\"handoff_strategy\":\"...\",\"status\":\"draft\"}},\"context_blockers\":[]}}\n\
+         最小正确示例：{{\"outline\":{{\"id\":\"outline_artifact_1\",\"project_id\":\"{project_id}\",\"issue_id\":\"{issue_id}\",\"source_story_spec_ids\":[],\"source_design_spec_ids\":[],\"strategy_summary\":\"...\",\"work_item_outlines\":[{{\"outline_id\":\"outline_backend\",\"title\":\"...\",\"kind\":\"backend\",\"goal\":\"...\",\"scope\":[],\"non_goals\":[],\"estimated_context_tokens\":12000,\"session_fit\":\"fits_single_agent_session\",\"source_story_spec_ids\":[],\"source_design_spec_ids\":[],\"exclusive_write_scopes\":[],\"forbidden_write_scopes\":[],\"depends_on\":[],\"verification_intent\":[],\"handoff_notes\":\"...\"}},{{\"outline_id\":\"outline_frontend\",\"title\":\"...\",\"kind\":\"frontend\",\"goal\":\"...\",\"scope\":[],\"non_goals\":[],\"estimated_context_tokens\":10000,\"session_fit\":\"fits_single_agent_session\",\"source_story_spec_ids\":[],\"source_design_spec_ids\":[],\"exclusive_write_scopes\":[],\"forbidden_write_scopes\":[],\"depends_on\":[\"outline_backend\"],\"verification_intent\":[],\"handoff_notes\":\"...\"}}],\"risks\":[],\"handoff_strategy\":\"...\",\"status\":\"draft\"}},\"context_blockers\":[]}}\n\
          严格按以下 JSON schema 输出。\n\n\
          {schema}",
         title = issue.title,
@@ -313,7 +314,8 @@ pub(crate) fn build_outline_revision_prompt(
          不得输出 VerificationPlan、verification_plan、verification_plans、work_item_id、work_item_ids。\n\
          不得输出 repository_profile，不得输出 parallel_groups。\n\
          不要输出 implementation plan 或旧版 Work Item 拆分计划字段：work_item_outlines[] 中不要使用 id、layer、summary、key_paths、reuse_modules、test_strategy、acceptance_refs。\n\
-         work_item_outlines[] 的条目标识字段必须叫 outline_id；dependency_graph[] 必须使用 from_outline_id/to_outline_id 边，不要使用 work_item_id/depends_on 形式。\n\
+         work_item_outlines[] 的条目标识字段必须叫 outline_id；依赖只能写在各 item 的 depends_on 数组中。\n\
+         不要输出 dependency_graph；后端会从 work_item_outlines[].depends_on 自动派生内部 dependency_graph。\n\
          work_item_outlines[] 每项必须包含 estimated_context_tokens(1..19999) 与 session_fit=\"fits_single_agent_session\"；如果预计超过 20k 或单个 Claude Code/Codex 会话无法完成，必须继续拆成更小 outline，不得输出该项。\n\
          不得修改仓库文件，不得创建计划文档。\n\
          如果能输出完整 outline，不得输出非空 context_blockers。\n\

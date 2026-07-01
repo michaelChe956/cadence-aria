@@ -320,8 +320,12 @@ fn outline_author_prompt_forbids_full_work_items_and_repository_profile() {
         "outline prompt schema must name the required outline item id field: {prompt}"
     );
     assert!(
-        prompt.contains("\"from_outline_id\"") && prompt.contains("\"to_outline_id\""),
-        "outline prompt schema must name dependency edge fields: {prompt}"
+        prompt.contains("不要输出 dependency_graph"),
+        "outline prompt must make depends_on the only provider dependency source: {prompt}"
+    );
+    assert!(
+        !prompt.contains("\"from_outline_id\"") && !prompt.contains("\"to_outline_id\""),
+        "outline provider schema must not expose derived dependency edge fields: {prompt}"
     );
     assert!(
         prompt.contains("不要输出 implementation plan")
@@ -421,6 +425,20 @@ fn outline_output_schema_makes_outline_and_context_blockers_mutually_exclusive()
         serde_json::json!(1)
     );
     assert_eq!(one_of[1]["not"]["required"], serde_json::json!(["outline"]));
+    let outline_properties = schema["properties"]["outline"]["properties"]
+        .as_object()
+        .expect("outline properties");
+    assert!(
+        !outline_properties.contains_key("dependency_graph"),
+        "outline provider schema must not expose dependency_graph"
+    );
+    let outline_required = schema["properties"]["outline"]["required"]
+        .as_array()
+        .expect("outline required");
+    assert!(
+        !outline_required.contains(&serde_json::json!("dependency_graph")),
+        "outline provider schema must not require dependency_graph"
+    );
     let outline_item =
         &schema["properties"]["outline"]["properties"]["work_item_outlines"]["items"];
     assert_eq!(
@@ -443,8 +461,13 @@ fn outline_output_schema_makes_outline_and_context_blockers_mutually_exclusive()
 
 #[test]
 fn outline_parser_accepts_valid_sentinel_json() {
-    let parsed =
-        parse_work_item_plan_outline_output(valid_outline_author_output()).expect("outline");
+    let mut output = valid_outline_author_output();
+    output["outline"]
+        .as_object_mut()
+        .expect("outline object")
+        .remove("dependency_graph");
+
+    let parsed = parse_work_item_plan_outline_output(output).expect("outline");
 
     assert!(parsed.context_blockers.is_empty());
     let outline = parsed.outline.expect("outline payload");
@@ -456,6 +479,28 @@ fn outline_parser_accepts_valid_sentinel_json() {
     assert_eq!(
         outline.dependency_graph[0].from_outline_id,
         "outline_backend"
+    );
+    assert_eq!(outline.dependency_graph[0].to_outline_id, "outline_frontend");
+}
+
+#[test]
+fn outline_parser_rejects_provider_dependency_graph_field() {
+    let mut output = valid_outline_author_output();
+    output["outline"]["dependency_graph"] = serde_json::json!([
+        {
+            "from_outline_id": "outline_backend",
+            "to_outline_id": "outline_frontend"
+        }
+    ]);
+    let error = parse_work_item_plan_outline_output(output).expect_err("forbidden");
+
+    assert_eq!(error.code, "outline_forbidden_field");
+    assert!(
+        error
+            .message
+            .contains("dependency_graph"),
+        "error should identify dependency_graph, got {}",
+        error.message
     );
 }
 

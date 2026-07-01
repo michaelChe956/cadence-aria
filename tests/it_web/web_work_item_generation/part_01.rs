@@ -175,6 +175,8 @@ pub(crate) fn valid_outline_output() -> Value {
                     "goal": "提供登录会话过期检测与刷新相关 API。",
                     "scope": ["src/product/session.rs", "src/web/session_handlers.rs"],
                     "non_goals": ["不实现前端 UI"],
+                    "estimated_context_tokens": 9000,
+                    "session_fit": "fits_single_agent_session",
                     "source_story_spec_ids": ["story_spec_0001"],
                     "source_design_spec_ids": ["design_spec_0001"],
                     "exclusive_write_scopes": ["src/product/session.rs", "src/web/session_handlers.rs"],
@@ -190,6 +192,8 @@ pub(crate) fn valid_outline_output() -> Value {
                     "goal": "在前端展示会话过期提示并触发重新登录入口。",
                     "scope": ["web/src/session/**"],
                     "non_goals": ["不修改后端 API"],
+                    "estimated_context_tokens": 8000,
+                    "session_fit": "fits_single_agent_session",
                     "source_story_spec_ids": ["story_spec_0001"],
                     "source_design_spec_ids": ["design_spec_0001"],
                     "exclusive_write_scopes": ["web/src/session/**"],
@@ -205,6 +209,8 @@ pub(crate) fn valid_outline_output() -> Value {
                     "goal": "覆盖会话过期到前端提示的贯通路径。",
                     "scope": ["tests/session/**"],
                     "non_goals": ["不新增业务功能"],
+                    "estimated_context_tokens": 7000,
+                    "session_fit": "fits_single_agent_session",
                     "source_story_spec_ids": ["story_spec_0001"],
                     "source_design_spec_ids": ["design_spec_0001"],
                     "exclusive_write_scopes": ["tests/session/**"],
@@ -212,16 +218,6 @@ pub(crate) fn valid_outline_output() -> Value {
                     "depends_on": ["outline_frontend_expiry"],
                     "verification_intent": ["cargo test --locked --test it_web session"],
                     "handoff_notes": "验证前后端协议一致性。"
-                }
-            ],
-            "dependency_graph": [
-                {
-                    "from_outline_id": "outline_backend_session",
-                    "to_outline_id": "outline_frontend_expiry"
-                },
-                {
-                    "from_outline_id": "outline_frontend_expiry",
-                    "to_outline_id": "outline_integration_session"
                 }
             ],
             "risks": ["前后端错误码需要保持一致"],
@@ -682,4 +678,3 @@ pub(crate) async fn app_with_confirmed_story_and_design_and_streaming_revision_o
 
     (app, root)
 }
-

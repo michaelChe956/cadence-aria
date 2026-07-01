@@ -377,6 +377,37 @@ fn build_work_item_plan_outline_review_input_includes_boundary_rules() {
     assert_work_item_plan_boundary_rules(&input.prompt);
     assert!(input.prompt.contains("estimated_context_tokens"));
     assert!(input.prompt.contains("session_fit"));
+    for field in [
+        "\"id\"",
+        "\"project_id\"",
+        "\"issue_id\"",
+        "\"source_story_spec_ids\"",
+        "\"source_design_spec_ids\"",
+        "\"strategy_summary\"",
+        "\"work_item_outlines\"",
+        "\"dependency_graph\"",
+        "\"risks\"",
+        "\"handoff_strategy\"",
+        "\"status\"",
+        "\"outline_id\"",
+        "\"title\"",
+        "\"kind\"",
+        "\"goal\"",
+        "\"scope\"",
+        "\"non_goals\"",
+        "\"estimated_context_tokens\"",
+        "\"session_fit\"",
+        "\"exclusive_write_scopes\"",
+        "\"forbidden_write_scopes\"",
+        "\"depends_on\"",
+        "\"verification_intent\"",
+        "\"handoff_notes\"",
+    ] {
+        assert!(
+            input.prompt.contains(field),
+            "outline reviewer prompt must include complete candidate field {field}"
+        );
+    }
     assert!(input.prompt.contains("单个 Claude Code 或 Codex coding 会话"));
     assert!(input.prompt.contains("小于 20k"));
 }

@@ -316,10 +316,26 @@ impl WorkspaceEngine {
             }
         }
 
-        prompt.push_str("\n## Outline\n");
+        let outline_json = serde_json::to_string_pretty(outline)
+            .map_err(|error| format!("serialize outline candidate error: {error}"))?;
+
+        prompt.push_str("\n## Outline JSON (source of truth)\n");
+        prompt.push_str(
+            "以下 JSON 是审核事实来源，包含 author/rewriter 产出的完整 Outline 字段；如果后续可读摘要与 JSON 不一致，以 JSON 为准。\n",
+        );
+        prompt.push_str("<WORK_ITEM_PLAN_OUTLINE_JSON>\n");
+        prompt.push_str(&outline_json);
+        prompt.push_str("\n</WORK_ITEM_PLAN_OUTLINE_JSON>\n");
+
+        prompt.push_str("\n## Outline summary\n");
         prompt.push_str(&format!(
-            "- id: {}\n- strategy_summary: {}\n- handoff_strategy: {}\n",
-            outline.id, outline.strategy_summary, outline.handoff_strategy
+            "- id: {}\n- source_story_spec_ids: [{}]\n- source_design_spec_ids: [{}]\n- strategy_summary: {}\n- handoff_strategy: {}\n- status: {}\n",
+            outline.id,
+            outline.source_story_spec_ids.join(", "),
+            outline.source_design_spec_ids.join(", "),
+            outline.strategy_summary,
+            outline.handoff_strategy,
+            outline.status
         ));
         prompt.push_str("\n### Work item outlines\n");
         for item in &outline.work_item_outlines {
@@ -337,14 +353,17 @@ impl WorkspaceEngine {
                 None => "(missing)",
             };
             prompt.push_str(&format!(
-                "\n- outline_id: {}\n  title: {}\n  kind: {:?}\n  goal: {}\n  scope: [{}]\n  estimated_context_tokens: {}\n  session_fit: {}\n  depends_on: [{}]\n  exclusive_write_scopes: [{}]\n  forbidden_write_scopes: [{}]\n  verification_intent: [{}]\n  handoff_notes: {}\n",
+                "\n- outline_id: {}\n  title: {}\n  kind: {:?}\n  goal: {}\n  scope: [{}]\n  non_goals: [{}]\n  estimated_context_tokens: {}\n  session_fit: {}\n  source_story_spec_ids: [{}]\n  source_design_spec_ids: [{}]\n  depends_on: [{}]\n  exclusive_write_scopes: [{}]\n  forbidden_write_scopes: [{}]\n  verification_intent: [{}]\n  handoff_notes: {}\n",
                 item.outline_id,
                 item.title,
                 item.kind,
                 item.goal,
                 item.scope.join(", "),
+                item.non_goals.join(", "),
                 estimated_context_tokens,
                 session_fit,
+                item.source_story_spec_ids.join(", "),
+                item.source_design_spec_ids.join(", "),
                 item.depends_on.join(", "),
                 item.exclusive_write_scopes.join(", "),
                 item.forbidden_write_scopes.join(", "),
