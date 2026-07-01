@@ -125,7 +125,7 @@ pub(super) fn output_schema_for(workspace_type: &WorkspaceType) -> String {
              - ## 成功标准\n\
              - ## 待确认项\n\
              - ## 非功能需求\n\n\
-             最终候选 Markdown 必须用 ```artifact fenced block 包裹，且 fenced block 内第一行必须是 Story Spec 一级标题，例如 # <名称> Story Spec；过程说明必须放在 fenced block 外。每条需求必须显式写稳定 ID，例如 [REQ-001]；每条验收标准必须显式写稳定 ID，例如 [AC-001]。必须在 ## 范围 或 ## 功能需求 中显式写出来源 source id，例如 Issue issue_0001，并说明需求追踪关系。如果通过交互已解决所有疑问，## 待确认项 写“无”；不要为了填充该 heading 编造未决问题。"
+             最终候选 Markdown 必须用 ```artifact fenced block 包裹，且 fenced block 内第一行必须是 Story Spec 一级标题，例如 # <名称> Story Spec；过程说明必须放在 fenced block 外。每条需求必须显式写稳定 ID，例如 [REQ-001]；每条验收标准必须显式写稳定 ID，例如 [AC-001]。必须在 ## 范围 或 ## 功能需求 中显式写出来源 source id，例如 Issue issue_0001，并说明需求追踪关系。如果通过 AskUserQuestion、requestUserInput 或 text_fallback 结构化交互解决了影响范围、需求、成功标准或验收口径的问题，必须在 artifact 正文加入 ## 用户确认决策，使用稳定 ID（例如 author-decision-001）记录问题、用户选择、来源机制，并把每条决策绑定到受影响的 [REQ-*]/[AC-*]；已解决的选择不得再写入 ## 待确认项。实现细节类选择只记录为 Design 阶段输入，不要固化成 Story 范围或验收标准。如果通过交互已解决所有疑问，## 待确认项 写“无”；不要为了填充该 heading 编造未决问题。"
                 .to_string()
         }
         WorkspaceType::Design => {
@@ -137,15 +137,15 @@ pub(super) fn output_schema_for(workspace_type: &WorkspaceType) -> String {
              - ## 数据模型\n\
              - ## 风险\n\
              - ## 追踪关系\n\n\
-             设计决策使用 [DEC-001]，组件使用 [CMP-001]，API 使用 [API-001]。必须在 ## 追踪关系 中显式写出来源 source ids，例如 Story Spec story_spec_0001、Issue issue_0001，并绑定到对应 [REQ-xxx]/[DEC-xxx]。"
+             设计决策使用 [DEC-001]，组件使用 [CMP-001]，API 使用 [API-001]。如果上游 Story 或本轮 author 通过结构化交互形成用户确认决策，必须在 ## 设计决策 中记录对应 author-decision-* 或将其映射到 [DEC-*]，并说明 AskUserQuestion/requestUserInput/text_fallback 来源；必须在 ## 追踪关系 中把这些用户确认决策绑定到来源 [REQ-*]/[AC-*]/[DEC-*]。必须在 ## 追踪关系 中显式写出来源 source ids，例如 Story Spec story_spec_0001、Issue issue_0001，并绑定到对应 [REQ-xxx]/[DEC-xxx]。"
                 .to_string()
         }
         WorkspaceType::WorkItem => {
-            "Markdown Work Item 必须用 ```artifact fenced block 包裹，且 fenced block 内第一行必须是 Work Item 一级标题；内容必须描述单个可执行任务，包含目标、范围、实现步骤或子步骤、依赖、验证命令、风险和追踪关系。必须在追踪关系中显式写出 Story/Design source ids，例如 Story Spec story_spec_0001、Design Spec design_spec_0001，并绑定来源需求/设计 ID。内容规模应控制在约 20k 以内，确保单个会话可完成；禁止跨任务内容、兄弟任务、Issue 级完整计划和其它任务的交叉内容。"
+            "Markdown Work Item 必须用 ```artifact fenced block 包裹，且 fenced block 内第一行必须是 Work Item 一级标题；内容必须描述单个可执行任务，包含目标、范围、实现步骤或子步骤、依赖、验证命令、风险和追踪关系。如果来源 Story/Design 或本轮 author 包含结构化交互形成的用户确认决策，必须在目标、范围或追踪关系中写明对应 author-decision-*，并绑定到来源需求/设计/验收 ID。必须在追踪关系中显式写出 Story/Design source ids，例如 Story Spec story_spec_0001、Design Spec design_spec_0001，并绑定来源需求/设计 ID。内容规模应控制在约 20k 以内，确保单个会话可完成；禁止跨任务内容、兄弟任务、Issue 级完整计划和其它任务的交叉内容。"
                 .to_string()
         }
         WorkspaceType::WorkItemPlan => {
-            "Markdown Work Item Plan 必须用 ```artifact fenced block 包裹，且 fenced block 内第一行必须是 Work Item Plan 一级标题；内容必须包含计划范围、任务拆分（[TASK-001]）、依赖图、验证计划、执行顺序、风险与追踪关系；每个任务必须显式写出并绑定来源 Story/Design source ids，例如 Story Spec story_spec_0001、Design Spec design_spec_0001。"
+            "Markdown Work Item Plan 必须用 ```artifact fenced block 包裹，且 fenced block 内第一行必须是 Work Item Plan 一级标题；内容必须包含计划范围、任务拆分（[TASK-001]）、依赖图、验证计划、执行顺序、风险与追踪关系；每个任务必须显式写出并绑定来源 Story/Design source ids，例如 Story Spec story_spec_0001、Design Spec design_spec_0001。每个拆分任务必须控制在约 20k 以内，确保单个 Claude Code 或 Codex 会话可完成；如果任务超过该规模，必须继续拆分，不得把过大任务写成单个 [TASK-*]。"
                 .to_string()
         }
     }
@@ -172,8 +172,15 @@ pub(super) fn runtime_contract_for(session: &WorkspaceSessionRecord) -> String {
         }
         (_, false) => "- Superpowers 未启用，但仍需明确假设、风险、验证与下一步。",
     };
+    let code_reading = "\
+         [code_reading_contract]\n\
+         - 大范围理解 Repository 代码、调用链或影响面时，必须优先使用 CodeGraph MCP（mcp__codegraph__codegraph_explore）或等价的 codegraph explore。\n\
+         - 精确结构阅读优先使用 ast-grep outline，再按需读取目标符号或文件片段。\n\
+         - 只有 CodeGraph/MCP 或 ast-grep 不可用时才降级到 rg/find/ls/cat，并在输出中说明降级原因。\n\
+         - 如果使用 MCP/CodeGraph 工具，daemon 会将 mcp__... tool_use 记录为 execution event，供用户审计。";
     format!(
         "{openspec}\n\n\
+         {code_reading}\n\n\
          [allowed_outputs]\n\
          - {}\n\n\
          [forbidden_outputs]\n\

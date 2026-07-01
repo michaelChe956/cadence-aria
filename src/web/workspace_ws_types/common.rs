@@ -18,6 +18,22 @@ pub struct ChoiceOption {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChoiceQuestion {
+    pub id: String,
+    pub prompt: String,
+    pub options: Vec<ChoiceOption>,
+    pub allow_multiple: bool,
+    pub allow_free_text: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChoiceAnswer {
+    pub question_id: String,
+    pub selected_option_ids: Vec<String>,
+    pub free_text: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WsProviderStatus {
     Starting,

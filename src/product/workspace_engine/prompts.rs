@@ -31,19 +31,34 @@ pub(crate) fn normalize_generation_prompt(
 pub(crate) fn build_artifact_retry_prompt(
     workspace_type: &WorkspaceType,
     previous_output: &str,
+    blocking_reasons: &[String],
 ) -> String {
     let artifact_name = workspace_type_title(workspace_type);
     let mut prompt = format!(
         "上一轮已结束，但没有输出完整 artifact。\n\
          不要继续调研，不要只解释。\n\
-         请基于已有上下文和刚才读取的文件，立即输出完整 ```artifact``` {artifact_name}。\n"
+         请基于已有上下文和刚才读取的文件，立即输出完整 ```artifact``` {artifact_name}。\n\
+         只能输出一个完整 artifact fenced block；不要拆成多个 artifact block，不要在 artifact 内输出 <thinking>。\n\
+         如仍有需要用户确认的问题，必须先使用 AskUserQuestion 等结构化交互；不要把未解决问题写进最终 artifact 的待确认项/open_items，若 schema 包含待确认项则写“无”。\n"
     );
+    if !blocking_reasons.is_empty() {
+        prompt.push_str("\n具体失败原因:\n");
+        for reason in blocking_reasons {
+            prompt.push_str("- ");
+            prompt.push_str(reason);
+            prompt.push('\n');
+        }
+    }
     let previous_output = previous_output.trim();
     if !previous_output.is_empty() {
         prompt.push_str("\n上一轮可见输出:\n");
         prompt.push_str(previous_output);
         prompt.push('\n');
     }
+    prompt.push('\n');
+    prompt.push_str(structured_interaction_artifact_decision_contract(
+        workspace_type,
+    ));
     prompt
 }
 
@@ -202,5 +217,27 @@ impl WorkspaceEngine {
             " 一级标题。正文内部包含 ``` 代码块时，外层使用四反引号 ````artifact ... ````，避免和内部代码块冲突。\
              过程说明必须放在 artifact fence 外，最终候选产物必须放在 artifact fence 内。",
         );
+        prompt.push_str(structured_interaction_artifact_decision_contract(
+            &self.session.workspace_type,
+        ));
+    }
+}
+
+fn structured_interaction_artifact_decision_contract(
+    workspace_type: &WorkspaceType,
+) -> &'static str {
+    match workspace_type {
+        WorkspaceType::Story => {
+            "如果本轮或历史会话包含结构化交互审计记录（daemon 捕获的 AskUserQuestion、requestUserInput 或 text_fallback 回答），更新后的 Story Spec 必须在 artifact 正文加入或维护 ## 用户确认决策，使用 author-decision-* 稳定 ID 记录问题、用户选择、来源机制，并把影响范围、需求或验收的决策绑定到对应 [REQ-*]/[AC-*]；已解决的选择不得再写入 ## 待确认项。实现细节类选择只记录为 Design 阶段输入，不要固化成 Story 范围或验收标准。"
+        }
+        WorkspaceType::Design => {
+            "如果本轮或历史会话包含结构化交互审计记录（daemon 捕获的 AskUserQuestion、requestUserInput 或 text_fallback 回答），更新后的 Design Spec 必须把用户确认决策写入 ## 设计决策 或 ## 追踪关系，保留 author-decision-* 或映射到 [DEC-*]，并绑定到来源 [REQ-*]/[AC-*]/[DEC-*]。"
+        }
+        WorkspaceType::WorkItem => {
+            "如果本轮或历史会话包含结构化交互审计记录（daemon 捕获的 AskUserQuestion、requestUserInput 或 text_fallback 回答），更新后的 Work Item 必须在目标、范围或追踪关系中写明相关用户确认决策 author-decision-*，并绑定到来源需求/设计/验收 ID。"
+        }
+        WorkspaceType::WorkItemPlan => {
+            "如果本轮或历史会话包含结构化交互审计记录（daemon 捕获的 AskUserQuestion、requestUserInput 或 text_fallback 回答），更新后的 Work Item Plan 必须在计划范围、任务拆分或追踪关系中写明相关用户确认决策 author-decision-*，并绑定到来源 Story/Design ID。"
+        }
     }
 }

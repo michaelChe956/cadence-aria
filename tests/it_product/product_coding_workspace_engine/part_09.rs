@@ -515,6 +515,7 @@ impl StreamingProviderAdapter for ExecutePlanChoiceThenCompletedTesterProvider {
                 }],
                 allow_multiple: false,
                 allow_free_text: false,
+                questions: vec![],
                 source: ChoiceRequestSource::AskUserQuestion,
             }))
             .expect("send choice request");
@@ -679,4 +680,3 @@ impl StreamingProviderAdapter for NeverStartingTesterProvider {
 }
 
 struct EventEmittingCodingProvider;
-

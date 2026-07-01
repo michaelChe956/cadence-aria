@@ -107,6 +107,7 @@ pub(crate) async fn handle_workspace_inbound_message(
             id,
             selected_option_ids,
             free_text,
+            answers,
         } => {
             tracing::info!(choice_id = %id, "ws inbound choice response");
             eprintln!(
@@ -137,6 +138,17 @@ pub(crate) async fn handle_workspace_inbound_message(
                         id: id.clone(),
                         selected_option_ids: selected_option_ids.clone(),
                         free_text: free_text.clone(),
+                        answers: answers
+                            .clone()
+                            .into_iter()
+                            .map(|answer| {
+                                crate::cross_cutting::streaming_provider::ChoiceAnswerData {
+                                    question_id: answer.question_id,
+                                    selected_option_ids: answer.selected_option_ids,
+                                    free_text: answer.free_text,
+                                }
+                            })
+                            .collect(),
                     })
                     .await
                     .is_ok()

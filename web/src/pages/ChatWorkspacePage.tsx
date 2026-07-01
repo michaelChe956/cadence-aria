@@ -323,6 +323,7 @@ export function ChatWorkspacePage({
       requestId,
       response.selected_option_ids,
       response.free_text,
+      response.answers,
     );
   }
 

@@ -162,6 +162,7 @@ pub enum EngineEvent {
         options: Vec<ChoiceOptionData>,
         allow_multiple: bool,
         allow_free_text: bool,
+        questions: Vec<ChoiceQuestionData>,
         source: ChoiceRequestSource,
     },
     ProviderStatus {

@@ -96,6 +96,7 @@ export type WsInMessage =
       id: string;
       selected_option_ids: string[];
       free_text?: string | null;
+      answers?: ChoiceAnswer[];
     }
   | { type: "review_decision_response"; decision: string; extra_context?: string | null }
   | { type: "author_decision"; decision: AuthorDecision }
@@ -262,6 +263,20 @@ export type ChoiceOption = {
   description?: string | null;
 };
 
+export type ChoiceQuestion = {
+  id: string;
+  prompt: string;
+  options: ChoiceOption[];
+  allow_multiple: boolean;
+  allow_free_text: boolean;
+};
+
+export type ChoiceAnswer = {
+  question_id: string;
+  selected_option_ids: string[];
+  free_text?: string | null;
+};
+
 export type WorkspaceChoiceRequestSource =
   | "ask_user_question"
   | "request_user_input"
@@ -379,6 +394,7 @@ export type WsOutMessage =
       options: ChoiceOption[];
       allow_multiple: boolean;
       allow_free_text: boolean;
+      questions?: ChoiceQuestion[];
       source: WorkspaceChoiceRequestSource;
     }
   | { type: "provider_status"; status: ProviderStatus }

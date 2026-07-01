@@ -375,6 +375,10 @@ fn build_work_item_plan_outline_review_input_includes_boundary_rules() {
         .expect("outline review input");
 
     assert_work_item_plan_boundary_rules(&input.prompt);
+    assert!(input.prompt.contains("estimated_context_tokens"));
+    assert!(input.prompt.contains("session_fit"));
+    assert!(input.prompt.contains("单个 Claude Code 或 Codex coding 会话"));
+    assert!(input.prompt.contains("小于 20k"));
 }
 
 #[tokio::test]
@@ -463,6 +467,8 @@ fn build_work_item_draft_review_input_requires_verdict_and_severity_consistency(
             goal: "实现后端能力".to_string(),
             scope: vec!["实现 src/backend.rs".to_string()],
             non_goals: vec![],
+            estimated_context_tokens: Some(12_000),
+            session_fit: Some(WorkItemOutlineSessionFit::FitsSingleAgentSession),
             source_story_spec_ids: vec!["story_spec_0001".to_string()],
             source_design_spec_ids: vec!["design_spec_0001".to_string()],
             exclusive_write_scopes: vec!["src/backend.rs".to_string()],

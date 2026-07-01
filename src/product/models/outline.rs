@@ -29,6 +29,10 @@ pub struct WorkItemOutline {
     pub goal: String,
     pub scope: Vec<String>,
     pub non_goals: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_context_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_fit: Option<WorkItemOutlineSessionFit>,
     pub source_story_spec_ids: Vec<String>,
     pub source_design_spec_ids: Vec<String>,
     pub exclusive_write_scopes: Vec<String>,
@@ -36,6 +40,13 @@ pub struct WorkItemOutline {
     pub depends_on: Vec<String>,
     pub verification_intent: Vec<String>,
     pub handoff_notes: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkItemOutlineSessionFit {
+    FitsSingleAgentSession,
+    TooLargeMustSplit,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

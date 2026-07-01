@@ -67,6 +67,79 @@ describe("ChoiceRequestEntry", () => {
     });
   });
 
+  it("renders and submits all questions in one structured choice request", () => {
+    const onRespond = vi.fn();
+    const entry = makeChoiceEntry({
+      prompt: "请确认 3 个关键点",
+      questions: [
+        {
+          id: "startup",
+          prompt: "启动自检策略？",
+          allow_multiple: false,
+          allow_free_text: false,
+          options: [
+            { id: "self_check", label: "每次启动都自检" },
+            { id: "failure_only", label: "仅失败后自检" },
+          ],
+        },
+        {
+          id: "scope",
+          prompt: "影响范围？",
+          allow_multiple: false,
+          allow_free_text: false,
+          options: [
+            { id: "story_only", label: "仅 Story Spec" },
+            { id: "shared", label: "Story/Design/Work Item 共享链路" },
+          ],
+        },
+        {
+          id: "mcp_events",
+          prompt: "MCP 事件输出？",
+          allow_multiple: false,
+          allow_free_text: false,
+          options: [
+            { id: "emit_events", label: "输出 MCP 事件" },
+            { id: "logs_only", label: "仅记录日志" },
+          ],
+        },
+      ],
+    });
+
+    render(<ChoiceRequestEntry entry={entry} onRespond={onRespond} />);
+
+    expect(screen.getByText("启动自检策略？")).toBeInTheDocument();
+    expect(screen.getByText("影响范围？")).toBeInTheDocument();
+    expect(screen.getByText("MCP 事件输出？")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByLabelText("每次启动都自检"));
+    expect(screen.getByRole("button", { name: "提交选择" })).toBeDisabled();
+    fireEvent.click(screen.getByLabelText("Story/Design/Work Item 共享链路"));
+    fireEvent.click(screen.getByLabelText("输出 MCP 事件"));
+    fireEvent.click(screen.getByRole("button", { name: "提交选择" }));
+
+    expect(onRespond).toHaveBeenCalledWith(entry, {
+      selected_option_ids: ["self_check", "shared", "emit_events"],
+      free_text: null,
+      answers: [
+        {
+          question_id: "startup",
+          selected_option_ids: ["self_check"],
+          free_text: null,
+        },
+        {
+          question_id: "scope",
+          selected_option_ids: ["shared"],
+          free_text: null,
+        },
+        {
+          question_id: "mcp_events",
+          selected_option_ids: ["emit_events"],
+          free_text: null,
+        },
+      ],
+    });
+  });
+
   it("hides controls when already resolved", () => {
     const onRespond = vi.fn();
     const entry = makeChoiceEntry({

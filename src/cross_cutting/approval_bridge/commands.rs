@@ -36,6 +36,7 @@ pub(super) async fn listen_for_permission_commands(
                 id,
                 selected_option_ids,
                 free_text,
+                answers,
             } => {
                 tracing::info!(choice_id = %id, "bridge received choice response");
                 eprintln!(
@@ -54,6 +55,7 @@ pub(super) async fn listen_for_permission_commands(
                     let _ = decision_tx.send(ChoiceDecision {
                         selected_option_ids,
                         free_text,
+                        answers,
                     });
                 } else {
                     tracing::warn!(choice_id = %id, "bridge: no pending choice entry for id");
@@ -83,6 +85,7 @@ pub(super) async fn listen_for_permission_commands(
                     let _ = decision_tx.send(ChoiceDecision {
                         selected_option_ids: Vec::new(),
                         free_text: Some("aborted".to_string()),
+                        answers: Vec::new(),
                     });
                 }
             }

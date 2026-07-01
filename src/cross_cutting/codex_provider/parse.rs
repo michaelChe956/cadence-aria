@@ -1,7 +1,7 @@
 use serde_json::Value;
 
 use crate::cross_cutting::streaming_provider::{
-    ChoiceOptionData, ProviderExecutionEvent, ProviderExecutionEventKind,
+    ChoiceOptionData, ChoiceQuestionData, ProviderExecutionEvent, ProviderExecutionEventKind,
     ProviderExecutionEventStatus,
 };
 
@@ -20,6 +20,7 @@ pub(crate) struct CodexUserInputRequest {
     pub(crate) prompt: String,
     pub(crate) options: Vec<ChoiceOptionData>,
     pub(crate) allow_free_text: bool,
+    pub(crate) questions: Vec<ChoiceQuestionData>,
 }
 
 #[derive(Debug, Clone)]
@@ -232,12 +233,36 @@ pub(crate) fn parse_user_input_request(value: &Value) -> Option<CodexUserInputRe
 
     let rpc_id = value.get("id")?.clone();
     let id = rpc_id_string(&rpc_id)?;
-    let question = value
+    let questions = value
         .pointer("/params/questions")
         .and_then(Value::as_array)?
-        .first()?;
-    let question_id = question.get("id").and_then(Value::as_str)?.to_string();
-    let question_text = question
+        .iter()
+        .filter_map(parse_user_input_question)
+        .collect::<Vec<_>>();
+    let first_question = questions.first()?;
+    let question_id = first_question.id.clone();
+    let question_text = if questions.len() > 1 {
+        format!("请确认 {} 个问题", questions.len())
+    } else {
+        first_question.prompt.clone()
+    };
+    let options = first_question.options.clone();
+    let allow_free_text = first_question.allow_free_text;
+
+    Some(CodexUserInputRequest {
+        rpc_id,
+        id,
+        question_id,
+        prompt: question_text,
+        options,
+        allow_free_text,
+        questions,
+    })
+}
+
+fn parse_user_input_question(question: &Value) -> Option<ChoiceQuestionData> {
+    let id = question.get("id").and_then(Value::as_str)?.to_string();
+    let prompt = question
         .get("question")
         .and_then(Value::as_str)
         .or_else(|| question.get("header").and_then(Value::as_str))?
@@ -267,13 +292,11 @@ pub(crate) fn parse_user_input_request(value: &Value) -> Option<CodexUserInputRe
             .get("isOther")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-
-    Some(CodexUserInputRequest {
-        rpc_id,
+    Some(ChoiceQuestionData {
         id,
-        question_id,
-        prompt: question_text,
+        prompt,
         options,
+        allow_multiple: false,
         allow_free_text,
     })
 }

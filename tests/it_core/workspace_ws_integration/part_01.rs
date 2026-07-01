@@ -295,6 +295,7 @@ async fn workspace_ws_author_text_choice_blocks_reviewer_until_user_answers() {
             id: choice.id,
             selected_option_ids: vec!["A".to_string()],
             free_text: None,
+            answers: vec![],
         },
     )
     .await;
@@ -446,6 +447,7 @@ async fn workspace_ws_author_recommendation_choice_blocks_reviewer_until_user_an
             id: choice.id,
             selected_option_ids: vec!["A".to_string()],
             free_text: None,
+            answers: vec![],
         },
     )
     .await;
@@ -514,6 +516,7 @@ async fn workspace_ws_claude_author_text_choice_uses_text_fallback_delta_only_fo
             id: choice.id,
             selected_option_ids: vec!["A".to_string()],
             free_text: None,
+            answers: vec![],
         },
     )
     .await;

@@ -111,6 +111,21 @@ impl WorkspaceEngine {
                 .collect(),
             allow_multiple: false,
             allow_free_text: true,
+            questions: vec![ChoiceQuestion {
+                id: "default".to_string(),
+                prompt: pending.prompt.clone(),
+                options: pending
+                    .options
+                    .iter()
+                    .map(|option| ChoiceOption {
+                        id: option.id.clone(),
+                        label: option.label.clone(),
+                        description: option.description.clone(),
+                    })
+                    .collect(),
+                allow_multiple: false,
+                allow_free_text: true,
+            }],
             source: ChoiceRequestSource::TextFallback.as_str().to_string(),
         })
     }

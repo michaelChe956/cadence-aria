@@ -1,6 +1,7 @@
 use super::*;
 use crate::product::models::{
     WorkItemDraftCandidate, WorkItemOutline, WorkItemOutlineDependencyEdge,
+    WorkItemOutlineSessionFit,
 };
 
 #[test]
@@ -48,6 +49,22 @@ fn outline_validator_requires_traceability_and_write_scopes() {
     assert_has_code(&report, "outline_goal_required");
     assert_has_code(&report, "outline_scope_required");
     assert_has_code(&report, "write_scope_required");
+}
+
+#[test]
+fn outline_validator_requires_single_session_budget() {
+    let mut outline = valid_outline();
+    outline.work_item_outlines[0].estimated_context_tokens = None;
+    outline.work_item_outlines[0].session_fit = None;
+    outline.work_item_outlines[1].estimated_context_tokens = Some(20_000);
+    outline.work_item_outlines[1].session_fit = Some(WorkItemOutlineSessionFit::TooLargeMustSplit);
+
+    let report = WorkItemPlanOutlineValidator::validate(&outline);
+
+    assert_has_code(&report, "outline_budget_required");
+    assert_has_code(&report, "outline_session_fit_required");
+    assert_has_code(&report, "outline_exceeds_single_session_budget");
+    assert_has_code(&report, "outline_too_large_must_split");
 }
 
 #[test]
@@ -149,6 +166,8 @@ fn valid_outline() -> WorkItemPlanOutline {
                 goal: "实现 API".to_string(),
                 scope: vec!["src/product".to_string()],
                 non_goals: vec![],
+                estimated_context_tokens: Some(12_000),
+                session_fit: Some(WorkItemOutlineSessionFit::FitsSingleAgentSession),
                 source_story_spec_ids: vec!["story_spec_0001".to_string()],
                 source_design_spec_ids: vec!["design_spec_0001".to_string()],
                 exclusive_write_scopes: vec!["src/product/api.rs".to_string()],
@@ -164,6 +183,8 @@ fn valid_outline() -> WorkItemPlanOutline {
                 goal: "接入 API".to_string(),
                 scope: vec!["web/src".to_string()],
                 non_goals: vec![],
+                estimated_context_tokens: Some(10_000),
+                session_fit: Some(WorkItemOutlineSessionFit::FitsSingleAgentSession),
                 source_story_spec_ids: vec!["story_spec_0001".to_string()],
                 source_design_spec_ids: vec!["design_spec_0001".to_string()],
                 exclusive_write_scopes: vec!["web/src/session.ts".to_string()],

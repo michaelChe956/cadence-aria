@@ -12,6 +12,7 @@ import type {
 } from "../api/types";
 import type {
   ChatEntry,
+  ChoiceAnswerPayload,
   ChatEntryResolution,
   ChatEntryRole,
 } from "./chat-entries";
@@ -326,6 +327,7 @@ export interface WorkspaceWsActions {
     id: string,
     selectedOptionIds: string[],
     freeText: string | null,
+    answers?: ChoiceAnswerPayload[],
   ) => void;
   rejectChoiceRequest: (id: string, reason: string) => void;
   setProviderStatus: (status: ProviderStatus) => void;
@@ -342,4 +344,3 @@ export interface WorkspaceWsActions {
   setAcknowledgedAbortedNodes: (nodeIds: string[]) => void;
   reset: () => void;
 }
-

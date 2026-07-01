@@ -1,8 +1,8 @@
 use super::*;
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
-    FakeStreamingProvider, ProviderExecutionEvent, ProviderExecutionEventKind,
-    ProviderExecutionEventStatus, StreamChunk,
+    ChoiceAnswerData, ChoiceRequestData, FakeStreamingProvider, ProviderExecutionEvent,
+    ProviderExecutionEventKind, ProviderExecutionEventStatus, StreamChunk,
 };
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::lifecycle_store::{
@@ -16,8 +16,8 @@ use crate::product::models::{
     ProviderSnapshot, RepositoryProfileConfidence, VerificationCommand, VerificationCommandSafety,
     VerificationCommandSource, VerificationFallbackPolicy, VerificationManualCheck,
     VerificationScope, WorkItemContextBudget, WorkItemKind, WorkItemOutline,
-    WorkItemOutlineDependencyEdge, WorkItemPlanOutline, WorkItemPlanStatus, WorkItemSplitFinding,
-    WorkItemSplitFindingSeverity, WorkspaceMessageRecord,
+    WorkItemOutlineDependencyEdge, WorkItemOutlineSessionFit, WorkItemPlanOutline,
+    WorkItemPlanStatus, WorkItemSplitFinding, WorkItemSplitFindingSeverity, WorkspaceMessageRecord,
 };
 use crate::protocol::contracts::{AdapterInput, ProviderType};
 use crate::web::workspace_ws_types::{
@@ -102,6 +102,8 @@ fn test_work_item_plan_outline(
                 goal: "A".to_string(),
                 scope: vec!["src/a.rs".to_string()],
                 non_goals: Vec::new(),
+                estimated_context_tokens: Some(12_000),
+                session_fit: Some(WorkItemOutlineSessionFit::FitsSingleAgentSession),
                 source_story_spec_ids: vec!["story_001".to_string()],
                 source_design_spec_ids: vec!["design_001".to_string()],
                 exclusive_write_scopes: vec!["src/a.rs".to_string()],
@@ -117,6 +119,8 @@ fn test_work_item_plan_outline(
                 goal: "B".to_string(),
                 scope: vec!["web/b.ts".to_string()],
                 non_goals: Vec::new(),
+                estimated_context_tokens: Some(10_000),
+                session_fit: Some(WorkItemOutlineSessionFit::FitsSingleAgentSession),
                 source_story_spec_ids: vec!["story_001".to_string()],
                 source_design_spec_ids: vec!["design_001".to_string()],
                 exclusive_write_scopes: vec!["web/b.ts".to_string()],
@@ -132,6 +136,8 @@ fn test_work_item_plan_outline(
                 goal: "C".to_string(),
                 scope: vec!["tests/c.rs".to_string()],
                 non_goals: Vec::new(),
+                estimated_context_tokens: Some(8_000),
+                session_fit: Some(WorkItemOutlineSessionFit::FitsSingleAgentSession),
                 source_story_spec_ids: vec!["story_001".to_string()],
                 source_design_spec_ids: vec!["design_001".to_string()],
                 exclusive_write_scopes: vec!["tests/c.rs".to_string()],
@@ -490,6 +496,182 @@ async fn claude_code_text_choice_output_uses_text_fallback_as_recovery_path() {
         .expect("pending Claude Code text fallback choice prompt");
     assert!(prompt.contains("用户回答了 author 的确认问题"));
     assert!(prompt.contains("A. 返回 0"));
+}
+
+#[tokio::test]
+async fn structured_choice_response_is_audited_for_reviewer_for_workspace_artifacts() {
+    for (workspace_type, artifact) in [
+        (
+            WorkspaceType::Story,
+            complete_story_artifact(
+                "首次启动缺少 Claude Code 时必须阻断并提示安装。",
+                "缺失 Claude Code 时不能继续生成。",
+            ),
+        ),
+        (
+            WorkspaceType::Design,
+            complete_design_artifact(
+                "安装策略由结构化用户交互确认。",
+                "Reviewer 可追溯结构化问答来源。",
+            ),
+        ),
+        (
+            WorkspaceType::WorkItem,
+            complete_work_item_artifact("持久化结构化交互审计记录。"),
+        ),
+    ] {
+        let (event_tx, mut event_rx) = mpsc::channel(32);
+        let mut session = make_session(&format!("sess_choice_audit_{workspace_type:?}"));
+        session.workspace_type = workspace_type.clone();
+        session.author_provider = ProviderName::ClaudeCode;
+        session.reviewer_provider = Some(ProviderName::Codex);
+        let checkpoint_tmp = TempDir::new().unwrap();
+        let mut engine = WorkspaceEngine::new(
+            Arc::new(CheckpointStore::new(checkpoint_tmp.path().to_path_buf())),
+            event_tx,
+            session,
+        );
+        let (provider_event_tx, provider_event_rx) = mpsc::channel(8);
+        let (provider_command_tx, mut provider_command_rx) = mpsc::channel(8);
+        let (command_tx, command_rx) = mpsc::channel(8);
+        let choice_request = ChoiceRequestData {
+            id: "choice_install_policy".to_string(),
+            prompt: "在产出候选 Spec 前确认安装策略。".to_string(),
+            options: Vec::new(),
+            allow_multiple: false,
+            allow_free_text: false,
+            questions: vec![
+                ChoiceQuestionData {
+                    id: "q1".to_string(),
+                    prompt: "Claude Code 是否必装？".to_string(),
+                    options: vec![
+                        ChoiceOptionData {
+                            id: "mandatory_blocking".to_string(),
+                            label: "必装且阻断".to_string(),
+                            description: Some("缺失时阻断生成。".to_string()),
+                        },
+                        ChoiceOptionData {
+                            id: "optional".to_string(),
+                            label: "可选".to_string(),
+                            description: None,
+                        },
+                    ],
+                    allow_multiple: false,
+                    allow_free_text: false,
+                },
+                ChoiceQuestionData {
+                    id: "q2".to_string(),
+                    prompt: "安装记录保存在哪里？".to_string(),
+                    options: vec![ChoiceOptionData {
+                        id: "global_user_dir".to_string(),
+                        label: "全局用户目录".to_string(),
+                        description: None,
+                    }],
+                    allow_multiple: false,
+                    allow_free_text: false,
+                },
+                ChoiceQuestionData {
+                    id: "q3".to_string(),
+                    prompt: "首版 provider 范围是什么？".to_string(),
+                    options: Vec::new(),
+                    allow_multiple: false,
+                    allow_free_text: true,
+                },
+            ],
+            source: ChoiceRequestSource::AskUserQuestion,
+        };
+
+        let drive = engine.drive_provider_session(ProviderSessionDriveInput {
+            session: Ok(ProviderSession {
+                events: provider_event_rx,
+                commands: provider_command_tx,
+            }),
+            command_rx,
+            node_id: Some("timeline_node_author".to_string()),
+            agent: Some(ProviderName::ClaudeCode),
+            role: ProviderConversationRole::Author,
+            artifact_retry: None,
+            revision_resume_fallback: None,
+        });
+        let responder = async {
+            provider_event_tx
+                .send(ProviderEvent::ChoiceRequest(choice_request))
+                .await
+                .expect("send choice request");
+            let event = event_rx.recv().await.expect("choice request event");
+            assert!(
+                matches!(
+                    event,
+                    EngineEvent::ChoiceRequest {
+                        id,
+                        source: ChoiceRequestSource::AskUserQuestion,
+                        ..
+                    } if id == "choice_install_policy"
+                ),
+                "{workspace_type:?} should emit ask_user_question choice request"
+            );
+            command_tx
+                .send(ProviderCommand::ChoiceResponse {
+                    id: "choice_install_policy".to_string(),
+                    selected_option_ids: Vec::new(),
+                    free_text: None,
+                    answers: vec![
+                        ChoiceAnswerData {
+                            question_id: "q1".to_string(),
+                            selected_option_ids: vec!["mandatory_blocking".to_string()],
+                            free_text: None,
+                        },
+                        ChoiceAnswerData {
+                            question_id: "q2".to_string(),
+                            selected_option_ids: vec!["global_user_dir".to_string()],
+                            free_text: None,
+                        },
+                        ChoiceAnswerData {
+                            question_id: "q3".to_string(),
+                            selected_option_ids: Vec::new(),
+                            free_text: Some("首版仅两个 provider".to_string()),
+                        },
+                    ],
+                })
+                .await
+                .expect("send choice response");
+            assert!(
+                matches!(
+                    provider_command_rx.recv().await,
+                    Some(ProviderCommand::ChoiceResponse { id, .. }) if id == "choice_install_policy"
+                ),
+                "{workspace_type:?} should forward choice response to provider"
+            );
+            provider_event_tx
+                .send(ProviderEvent::Completed {
+                    full_output: artifact,
+                    provider_session_id: Some("provider-author-session-1".to_string()),
+                })
+                .await
+                .expect("send completed");
+        };
+
+        tokio::join!(drive, responder);
+
+        let review_input = engine.build_review_input().expect("review input");
+        assert!(
+            review_input.prompt.contains("结构化交互审计记录"),
+            "{workspace_type:?} reviewer prompt should include structured choice audit: {}",
+            review_input.prompt
+        );
+        assert!(
+            review_input.prompt.contains("daemon 捕获"),
+            "{workspace_type:?} reviewer prompt should mark audit as daemon-captured"
+        );
+        assert!(review_input.prompt.contains("ask_user_question"));
+        assert!(review_input.prompt.contains("choice_install_policy"));
+        assert!(review_input.prompt.contains("Claude Code 是否必装？"));
+        assert!(review_input.prompt.contains("必装且阻断"));
+        assert!(review_input.prompt.contains("安装记录保存在哪里？"));
+        assert!(review_input.prompt.contains("全局用户目录"));
+        assert!(review_input.prompt.contains("首版 provider 范围是什么？"));
+        assert!(review_input.prompt.contains("首版仅两个 provider"));
+    }
 }
 
 #[tokio::test]

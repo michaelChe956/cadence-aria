@@ -232,11 +232,12 @@ where
             let decision = match bridge
                 .request_choice(
                     ChoiceRequestData {
-                        id: request.id,
-                        prompt: request.prompt,
-                        options: request.options,
+                        id: request.id.clone(),
+                        prompt: request.prompt.clone(),
+                        options: request.options.clone(),
                         allow_multiple: false,
                         allow_free_text: request.allow_free_text,
+                        questions: request.questions.clone(),
                         source: ChoiceRequestSource::RequestUserInput,
                     },
                     cancel.clone(),

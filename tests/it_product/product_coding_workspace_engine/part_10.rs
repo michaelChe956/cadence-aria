@@ -86,6 +86,7 @@ impl StreamingProviderAdapter for ControlEventCodingProvider {
                 }],
                 allow_multiple: false,
                 allow_free_text: true,
+                questions: vec![],
                 source: ChoiceRequestSource::ProviderChoice,
             }))
             .expect("send choice");
@@ -175,6 +176,7 @@ impl StreamingProviderAdapter for ChoiceAwaitingProvider {
                     }],
                     allow_multiple: false,
                     allow_free_text: true,
+                    questions: vec![],
                     source: ChoiceRequestSource::RequestUserInput,
                 }))
                 .await;
@@ -231,6 +233,7 @@ impl StreamingProviderAdapter for ChoiceThenPermissionProvider {
                 }],
                 allow_multiple: false,
                 allow_free_text: true,
+                questions: vec![],
                 source: ChoiceRequestSource::RequestUserInput,
             }))
             .expect("send choice");
@@ -633,4 +636,3 @@ async fn provide_context_keeps_analyst_human_gate_open_for_retry() {
             && action.action_type == CodingGateActionType::RetryAnalyst
     }));
 }
-

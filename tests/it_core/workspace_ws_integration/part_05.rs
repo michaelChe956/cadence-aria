@@ -73,6 +73,7 @@ impl StreamingProviderAdapter for ChoiceThenHangingStreamingProvider {
                     }],
                     allow_multiple: false,
                     allow_free_text: false,
+                    questions: vec![],
                     source: ChoiceRequestSource::ProviderChoice,
                 }))
                 .await;
@@ -137,6 +138,7 @@ impl StreamingProviderAdapter for ChoiceThenCompletingStreamingProvider {
                     }],
                     allow_multiple: false,
                     allow_free_text: false,
+                    questions: vec![],
                     source: ChoiceRequestSource::ProviderChoice,
                 }))
                 .await;
@@ -215,6 +217,7 @@ impl StreamingProviderAdapter for SequencedChoiceCompletingProvider {
                     }],
                     allow_multiple: false,
                     allow_free_text: false,
+                    questions: vec![],
                     source: ChoiceRequestSource::ProviderChoice,
                 }))
                 .await;

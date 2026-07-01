@@ -235,6 +235,7 @@ fn control_and_legacy_messages_do_not_require_stage_lock_validation() {
         id: "choice-1".to_string(),
         selected_option_ids: vec!["continue".to_string()],
         free_text: None,
+        answers: vec![],
     }));
     assert!(!requires_stage_validation(&WsInMessage::UserMessage {
         content: "legacy generation request".to_string(),
@@ -259,6 +260,7 @@ fn choice_response_message_type_is_reported_for_protocol_errors() {
             id: "choice-1".to_string(),
             selected_option_ids: vec!["continue".to_string()],
             free_text: None,
+            answers: vec![],
         }),
         "choice_response"
     );

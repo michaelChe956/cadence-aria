@@ -389,6 +389,7 @@ impl CodingWorkspaceEngine {
                                     id: id.clone(),
                                     selected_option_ids: selected_option_ids.clone(),
                                     free_text: free_text.clone(),
+                                    answers: vec![],
                                 })
                                 .await
                                 .is_ok()

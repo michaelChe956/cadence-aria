@@ -527,6 +527,7 @@ async fn workspace_ws_claude_author_ask_user_question_choice_continues_same_prov
             id: choice.id,
             selected_option_ids: vec!["opt_0".to_string()],
             free_text: None,
+            answers: vec![],
         },
     )
     .await;
@@ -588,6 +589,7 @@ async fn workspace_ws_hello_during_pending_choice_does_not_block_choice_response
             id: choice.id,
             selected_option_ids: vec!["opt_0".to_string()],
             free_text: None,
+            answers: vec![],
         },
     )
     .await;
@@ -648,6 +650,7 @@ async fn workspace_ws_stale_choice_response_after_new_run_is_rejected_before_pro
             id: first_choice.id.clone(),
             selected_option_ids: vec!["opt_0".to_string()],
             free_text: None,
+            answers: vec![],
         },
     )
     .await;
@@ -666,6 +669,7 @@ async fn workspace_ws_stale_choice_response_after_new_run_is_rejected_before_pro
             id: second_choice.id,
             selected_option_ids: vec!["opt_0".to_string()],
             free_text: None,
+            answers: vec![],
         },
     )
     .await;
@@ -675,4 +679,3 @@ async fn workspace_ws_stale_choice_response_after_new_run_is_rejected_before_pro
     drop(ws);
     server.abort();
 }
-

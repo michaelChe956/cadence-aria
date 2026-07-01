@@ -46,6 +46,33 @@ pub(crate) struct ArtifactValidationReport {
     pub(crate) warnings: Vec<String>,
 }
 
+impl ArtifactValidationReport {
+    pub(crate) fn blocking_reasons(&self) -> Vec<String> {
+        let mut reasons = Vec::new();
+        reasons.extend(
+            self.missing_required_headings
+                .iter()
+                .map(|heading| format!("缺少 heading: {heading}")),
+        );
+        reasons.extend(
+            self.forbidden_headings
+                .iter()
+                .map(|heading| format!("禁止 heading: {heading}")),
+        );
+        reasons.extend(
+            self.forbidden_tokens
+                .iter()
+                .map(|token| format!("禁止内容: {token}")),
+        );
+        reasons.extend(
+            self.missing_required_ids
+                .iter()
+                .map(|id| format!("缺少 {id}")),
+        );
+        reasons
+    }
+}
+
 pub(crate) fn artifact_constraint_spec_for(
     workspace_type: &WorkspaceType,
 ) -> ArtifactConstraintSpec {
@@ -221,6 +248,8 @@ pub(crate) fn validate_workspace_artifact_constraints(
                 .map(|token| format!("{}: {token}", rule.label))
         })
         .collect::<Vec<_>>();
+    forbidden_tokens.extend(structural_artifact_pollution(content));
+    forbidden_tokens.extend(unresolved_open_item_findings(content, &spec.workspace_type));
     if matches!(workspace_type, WorkspaceType::WorkItem) {
         let sibling_task_tokens = find_bracket_prefixed_tokens(&searchable_content, "TASK-");
         if sibling_task_tokens.len() > 1 {
@@ -239,7 +268,7 @@ pub(crate) fn validate_workspace_artifact_constraints(
     missing_required_ids.extend(
         spec.required_tokens
             .iter()
-            .filter(|rule| token_pattern_match(content, &rule.pattern).is_none())
+            .filter(|rule| !required_token_present(content, rule))
             .map(|rule| rule.label.to_string()),
     );
 
@@ -333,6 +362,223 @@ fn content_without_code_fences_and_traceability(content: &str) -> String {
     }
 
     output
+}
+
+fn structural_artifact_pollution(content: &str) -> Vec<String> {
+    let mut findings = Vec::new();
+    if content
+        .lines()
+        .any(|line| artifact_fence_marker(line.trim()).is_some())
+    {
+        findings.push("artifact fence 出现在已抽取 artifact 内".to_string());
+    }
+    if content.contains("<thinking>") || content.contains("</thinking>") {
+        findings.push("<thinking> 出现在 artifact 内".to_string());
+    }
+    findings
+}
+
+fn unresolved_open_item_findings(content: &str, workspace_type: &WorkspaceType) -> Vec<String> {
+    if !matches!(workspace_type, WorkspaceType::Story) {
+        return Vec::new();
+    }
+
+    open_item_sections(content)
+        .into_iter()
+        .filter(|section| !open_item_section_is_resolved(section))
+        .map(|section| {
+            format!(
+                "待确认项未通过 AskUserQuestion 交互解决: {}",
+                open_item_preview(&section)
+            )
+        })
+        .collect()
+}
+
+fn open_item_sections(content: &str) -> Vec<String> {
+    let mut sections = Vec::new();
+    let mut current = None::<String>;
+
+    for line in content.lines() {
+        if let Some(heading) = super::normalize_workspace_heading_line(line) {
+            if let Some(section) = current.take() {
+                sections.push(section);
+            }
+            if open_item_heading_matches(&heading) {
+                current = Some(String::new());
+            }
+            continue;
+        }
+
+        if let Some(section) = current.as_mut() {
+            section.push_str(line);
+            section.push('\n');
+        }
+    }
+
+    if let Some(section) = current {
+        sections.push(section);
+    }
+    sections
+}
+
+fn open_item_heading_matches(heading: &str) -> bool {
+    ["待确认项", "Open Questions", "Open Items", "open_items"]
+        .iter()
+        .any(|candidate| heading.eq_ignore_ascii_case(candidate))
+}
+
+fn open_item_section_is_resolved(section: &str) -> bool {
+    let normalized = section
+        .lines()
+        .map(normalize_open_item_line)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if normalized.is_empty() {
+        return true;
+    }
+
+    let compact = compact_open_item_text(&normalized.join(""));
+    if open_item_empty_marker_matches(&compact) {
+        return true;
+    }
+
+    normalized
+        .iter()
+        .all(|line| open_item_line_is_resolved(line))
+}
+
+fn open_item_line_is_resolved(line: &str) -> bool {
+    let compact = compact_open_item_text(line);
+    if open_item_empty_marker_matches(&compact) {
+        return true;
+    }
+
+    let starts_with_empty_marker = compact.starts_with("无")
+        || compact.starts_with("暂无")
+        || compact.starts_with("none")
+        || compact.starts_with("na")
+        || compact.starts_with("notapplicable")
+        || compact.starts_with("noopenitems")
+        || compact.starts_with("noopenquestions");
+    let has_unresolved_cue = open_item_line_has_unresolved_cue(line);
+    let has_resolved_cue = open_item_line_has_resolved_cue(line);
+    if starts_with_empty_marker {
+        return !has_unresolved_cue || has_resolved_cue;
+    }
+
+    has_resolved_cue && !has_unresolved_cue
+}
+
+fn compact_open_item_text(text: &str) -> String {
+    text.to_ascii_lowercase().replace(
+        [
+            ' ', '\t', '\r', '\n', '。', '.', '，', ',', '：', ':', '/', '-',
+        ],
+        "",
+    )
+}
+
+fn open_item_empty_marker_matches(compact: &str) -> bool {
+    matches!(
+        compact,
+        "无" | "暂无"
+            | "无待确认项"
+            | "none"
+            | "na"
+            | "notapplicable"
+            | "noopenitems"
+            | "noopenquestions"
+    )
+}
+
+fn open_item_line_has_unresolved_cue(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    [
+        "[open-",
+        "open-",
+        "待确认",
+        "需确认",
+        "需要确认",
+        "仍待",
+        "尚待",
+        "待定",
+        "未明确",
+        "未确认",
+        "tbd",
+        "todo",
+    ]
+    .iter()
+    .any(|cue| lower.contains(cue))
+}
+
+fn open_item_line_has_resolved_cue(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    line.contains("已通过结构化交互确认")
+        || line.contains("已通过 AskUserQuestion")
+        || lower.contains("已通过askuserquestion")
+        || line.contains("已确认")
+        || line.contains("均已确认")
+        || line.contains("非待确认项")
+        || line.contains("非未决项")
+        || (line.contains("不属于") && (line.contains("待确认项") || line.contains("未决项")))
+        || lower.contains("not an open item")
+}
+
+fn normalize_open_item_line(line: &str) -> String {
+    line.trim()
+        .trim_start_matches(|ch| {
+            matches!(
+                ch,
+                '-' | '*' | '+' | '•' | ' ' | '\t' | '1'..='9' | '0' | '.' | ')' | '、' | '）'
+            )
+        })
+        .trim()
+        .trim_matches('*')
+        .trim_matches('`')
+        .trim()
+        .to_string()
+}
+
+fn open_item_preview(section: &str) -> String {
+    section
+        .lines()
+        .map(normalize_open_item_line)
+        .find(|line| !line.is_empty())
+        .unwrap_or_else(|| "非空待确认项".to_string())
+}
+
+fn artifact_fence_marker(line: &str) -> Option<&str> {
+    let marker = if line.starts_with("````") {
+        "````"
+    } else if line.starts_with("```") {
+        "```"
+    } else if line.starts_with("~~~~") {
+        "~~~~"
+    } else if line.starts_with("~~~") {
+        "~~~"
+    } else {
+        return None;
+    };
+    let rest = line[marker.len()..].trim_start();
+    rest.starts_with("artifact").then_some(marker)
+}
+
+fn required_token_present(content: &str, rule: &ArtifactTokenRule) -> bool {
+    if rule.label == "source id" && has_explicit_source_id_traceability(content) {
+        return true;
+    }
+    token_pattern_match(content, &rule.pattern).is_some()
+}
+
+fn has_explicit_source_id_traceability(content: &str) -> bool {
+    if token_pattern_match(content, &ArtifactTokenPattern::Literal("source id")).is_some() {
+        return true;
+    }
+    let normalized = content.to_ascii_lowercase().replace(['`', '*'], " ");
+    ["issue_", "story_spec_", "design_spec_", "work_item_"]
+        .iter()
+        .any(|marker| normalized.contains(marker))
 }
 
 fn token_pattern_match(content: &str, pattern: &ArtifactTokenPattern) -> Option<String> {

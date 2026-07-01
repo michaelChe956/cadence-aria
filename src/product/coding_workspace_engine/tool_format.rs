@@ -30,6 +30,7 @@ pub(crate) async fn forward_runner_command_to_provider(
                 id,
                 selected_option_ids,
                 free_text,
+                answers: vec![],
             })
             .await
             .is_ok(),

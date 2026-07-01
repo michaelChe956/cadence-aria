@@ -323,13 +323,28 @@ impl WorkspaceEngine {
         ));
         prompt.push_str("\n### Work item outlines\n");
         for item in &outline.work_item_outlines {
+            let estimated_context_tokens = item
+                .estimated_context_tokens
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "(missing)".to_string());
+            let session_fit = match item.session_fit.as_ref() {
+                Some(crate::product::models::WorkItemOutlineSessionFit::FitsSingleAgentSession) => {
+                    "fits_single_agent_session"
+                }
+                Some(crate::product::models::WorkItemOutlineSessionFit::TooLargeMustSplit) => {
+                    "too_large_must_split"
+                }
+                None => "(missing)",
+            };
             prompt.push_str(&format!(
-                "\n- outline_id: {}\n  title: {}\n  kind: {:?}\n  goal: {}\n  scope: [{}]\n  depends_on: [{}]\n  exclusive_write_scopes: [{}]\n  forbidden_write_scopes: [{}]\n  verification_intent: [{}]\n  handoff_notes: {}\n",
+                "\n- outline_id: {}\n  title: {}\n  kind: {:?}\n  goal: {}\n  scope: [{}]\n  estimated_context_tokens: {}\n  session_fit: {}\n  depends_on: [{}]\n  exclusive_write_scopes: [{}]\n  forbidden_write_scopes: [{}]\n  verification_intent: [{}]\n  handoff_notes: {}\n",
                 item.outline_id,
                 item.title,
                 item.kind,
                 item.goal,
                 item.scope.join(", "),
+                estimated_context_tokens,
+                session_fit,
                 item.depends_on.join(", "),
                 item.exclusive_write_scopes.join(", "),
                 item.forbidden_write_scopes.join(", "),
@@ -355,6 +370,7 @@ impl WorkspaceEngine {
 
         prompt.push_str(
             "\n\n审核边界说明：请只检查拆分策略、覆盖 Story/Design、outline 粒度、依赖图、写入边界、上下文缺口补齐假设与 handoff 策略。\
+             每个 outline 必须能由单个 Claude Code 或 Codex coding 会话完成，estimated_context_tokens 必须存在且小于 20k，session_fit 必须为 fits_single_agent_session；缺失、超限或明显跨多任务/Issue 级范围时返回 `revise` 并要求继续拆分。\
              不要要求 author 在 Outline 阶段输出完整 Work Item 正文、完整 verification plan、required_gates 或 repository_profile。\
              如果问题会影响拆分边界，返回 `revise`；如果需要用户做产品/范围判断，返回 `needs_human`。\n",
         );

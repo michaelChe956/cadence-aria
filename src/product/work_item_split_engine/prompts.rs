@@ -44,6 +44,7 @@ fn work_item_plan_runtime_contract(role: &str) -> String {
          - 必须遵守 using-superpowers 的先读规则与 writing-plans 的计划结构要求。\n\
          - 生成的是计划和任务拆分，不执行代码修改。\n\
          - 每个 draft 必须给出后续 coding agent 可执行的目标、范围、非目标、TDD 顺序、验证命令、依赖输入、交接输出和风险。\n\
+         - 每个 outline 必须拆到单个 Claude Code 或 Codex coding 会话可完成，estimated_context_tokens 必须小于 20k；超出时继续拆分，不得把过大任务作为有效 outline 输出。\n\
          - 结论必须能追溯到已提供的 Story/Design/Outline/Draft 证据。\n\n\
          [allowed_outputs]\n\
          {allowed_outputs}\n\n\
@@ -251,6 +252,7 @@ pub(crate) fn build_outline_prompt_with_nonce(
          不得输出 repository_profile，不得输出 parallel_groups。\n\
          不要输出 implementation plan 或旧版 Work Item 拆分计划字段：work_item_outlines[] 中不要使用 id、layer、summary、key_paths、reuse_modules、test_strategy、acceptance_refs。\n\
          work_item_outlines[] 的条目标识字段必须叫 outline_id；dependency_graph[] 必须使用 from_outline_id/to_outline_id 边，不要使用 work_item_id/depends_on 形式。\n\
+         work_item_outlines[] 每项必须包含 estimated_context_tokens(1..19999) 与 session_fit=\"fits_single_agent_session\"；如果预计超过 20k 或单个 Claude Code/Codex 会话无法完成，必须继续拆成更小 outline，不得输出该项。\n\
          不得修改仓库文件，不得创建计划文档。\n\
          如果无法补齐模块边界、关键路径或测试策略，请不要猜测完整拆分；请在 context_blockers 数组中写明需要用户补充的上下文。\n\
          如果能输出完整 outline，不得输出非空 context_blockers。\n\
@@ -261,7 +263,7 @@ pub(crate) fn build_outline_prompt_with_nonce(
          最后必须输出一个 nonce sentinel JSON block。\n\
          后端只解析最后一个 nonce 匹配的 <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">...</ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\"> block。\n\
          标签内部必须是一个完整 JSON object，不要输出 Markdown code fence。\n\
-         最小正确示例：{{\"outline\":{{\"id\":\"outline_artifact_1\",\"project_id\":\"{project_id}\",\"issue_id\":\"{issue_id}\",\"source_story_spec_ids\":[],\"source_design_spec_ids\":[],\"strategy_summary\":\"...\",\"work_item_outlines\":[{{\"outline_id\":\"outline_backend\",\"title\":\"...\",\"kind\":\"backend\",\"goal\":\"...\",\"scope\":[],\"non_goals\":[],\"source_story_spec_ids\":[],\"source_design_spec_ids\":[],\"exclusive_write_scopes\":[],\"forbidden_write_scopes\":[],\"depends_on\":[],\"verification_intent\":[],\"handoff_notes\":\"...\"}}],\"dependency_graph\":[{{\"from_outline_id\":\"outline_backend\",\"to_outline_id\":\"outline_frontend\"}}],\"risks\":[],\"handoff_strategy\":\"...\",\"status\":\"draft\"}},\"context_blockers\":[]}}\n\
+         最小正确示例：{{\"outline\":{{\"id\":\"outline_artifact_1\",\"project_id\":\"{project_id}\",\"issue_id\":\"{issue_id}\",\"source_story_spec_ids\":[],\"source_design_spec_ids\":[],\"strategy_summary\":\"...\",\"work_item_outlines\":[{{\"outline_id\":\"outline_backend\",\"title\":\"...\",\"kind\":\"backend\",\"goal\":\"...\",\"scope\":[],\"non_goals\":[],\"estimated_context_tokens\":12000,\"session_fit\":\"fits_single_agent_session\",\"source_story_spec_ids\":[],\"source_design_spec_ids\":[],\"exclusive_write_scopes\":[],\"forbidden_write_scopes\":[],\"depends_on\":[],\"verification_intent\":[],\"handoff_notes\":\"...\"}}],\"dependency_graph\":[{{\"from_outline_id\":\"outline_backend\",\"to_outline_id\":\"outline_frontend\"}}],\"risks\":[],\"handoff_strategy\":\"...\",\"status\":\"draft\"}},\"context_blockers\":[]}}\n\
          严格按以下 JSON schema 输出。\n\n\
          {schema}",
         title = issue.title,
@@ -312,6 +314,7 @@ pub(crate) fn build_outline_revision_prompt(
          不得输出 repository_profile，不得输出 parallel_groups。\n\
          不要输出 implementation plan 或旧版 Work Item 拆分计划字段：work_item_outlines[] 中不要使用 id、layer、summary、key_paths、reuse_modules、test_strategy、acceptance_refs。\n\
          work_item_outlines[] 的条目标识字段必须叫 outline_id；dependency_graph[] 必须使用 from_outline_id/to_outline_id 边，不要使用 work_item_id/depends_on 形式。\n\
+         work_item_outlines[] 每项必须包含 estimated_context_tokens(1..19999) 与 session_fit=\"fits_single_agent_session\"；如果预计超过 20k 或单个 Claude Code/Codex 会话无法完成，必须继续拆成更小 outline，不得输出该项。\n\
          不得修改仓库文件，不得创建计划文档。\n\
          如果能输出完整 outline，不得输出非空 context_blockers。\n\
          只有完全无法产出 outline 时才输出 context_blockers，且不要同时输出 outline。\n\
@@ -549,6 +552,7 @@ pub(crate) fn build_work_item_draft_prompt(
          - verification_plan 必须包含 commands、manual_checks、required_gates 三个字段；没有 manual check 时输出 []。\n\
          - verification_plan.required_gates 必须是字符串数组，只能写同一 verification_plan 内 command/manual_check 的 id，例如 [\"cmd_unit\"]。\n\
          - 不要输出 required_gates gate 对象；禁止写 {{\"id\":\"gate_unit\",\"type\":\"command\",\"command_id\":\"cmd_unit\",\"expected\":\"exit 0\"}} 这类对象。\n\
+         - 当前 outline 的 estimated_context_tokens 必须小于 20k 且 session_fit 必须为 fits_single_agent_session；implementation_context 不得扩展成超过单个 Claude Code/Codex 会话可完成的兄弟任务或 Issue 级计划。\n\
          - implementation_context 必须写给后续 coding agent，包含具体模块/文件边界、已有代码入口、TDD 起点、不要触碰的范围、验收命令顺序。\n\
          - handoff_summary 必须写给依赖它的后续 work item，列出本项完成后必须交付的类型、API、状态、测试 seam、错误码或 UI 契约。\n\
          - verification_plan.commands 必须优先包含定向快反馈命令，再包含必要的 fmt/clippy/check/test；Rust 命令必须遵守 cadence/project-rules/build-test-commands.md，禁止 -j 1。\n\

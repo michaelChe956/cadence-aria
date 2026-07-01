@@ -137,7 +137,7 @@ impl WorkspaceEngine {
         let ProviderSessionDriveInput {
             session,
             mut command_rx,
-            node_id,
+            mut node_id,
             agent,
             role,
             mut artifact_retry,
@@ -164,6 +164,7 @@ impl WorkspaceEngine {
         let mut commands_open = true;
         let mut tool_call_titles = BTreeMap::new();
         let mut tool_call_commands = BTreeMap::new();
+        let mut pending_choice_requests: HashMap<String, ChoiceRequestData> = HashMap::new();
 
         while events_open {
             tokio::select! {
@@ -215,9 +216,21 @@ impl WorkspaceEngine {
                             id,
                             selected_option_ids,
                             free_text,
+                            answers,
                         }) => {
                             tracing::info!(choice_id = %id, "engine forwarding choice response");
                             let choice_id = id.clone();
+                            let choice_request = pending_choice_requests.remove(&id);
+                            self.record_choice_response_audit(ChoiceResponseAuditInput {
+                                request: choice_request.as_ref(),
+                                choice_id: &id,
+                                selected_option_ids: &selected_option_ids,
+                                free_text: free_text.as_deref(),
+                                answers: &answers,
+                                node_id: node_id.as_deref(),
+                                agent: agent.as_ref(),
+                                role: &role,
+                            });
                             eprintln!(
                                 "[aria-choice-diag] engine forwarding author choice_response id={} selected={:?} free_text_present={}",
                                 choice_id,
@@ -228,6 +241,7 @@ impl WorkspaceEngine {
                                 id,
                                 selected_option_ids,
                                 free_text,
+                                answers,
                             }).await.is_err() {
                                 eprintln!(
                                     "[aria-choice-diag] engine failed to forward author choice_response id={} to provider session",
@@ -313,6 +327,8 @@ impl WorkspaceEngine {
                                 .await;
                         }
                         ProviderEvent::ChoiceRequest(request) => {
+                            let questions = request.effective_questions();
+                            pending_choice_requests.insert(request.id.clone(), request.clone());
                             let _ = self
                                 .event_tx
                                 .send(EngineEvent::ChoiceRequest {
@@ -321,6 +337,7 @@ impl WorkspaceEngine {
                                     options: request.options,
                                     allow_multiple: request.allow_multiple,
                                     allow_free_text: request.allow_free_text,
+                                    questions,
                                     source: request.source,
                                 })
                                 .await;
@@ -416,7 +433,20 @@ impl WorkspaceEngine {
                             };
 
                             if let Some((provider, retry_input)) = retry_start {
+                                let blocking_reasons = self
+                                    .workspace_artifact_blocking_reasons(&completed_output);
+                                node_id = self
+                                    .begin_artifact_retry_node(
+                                        node_id.as_deref(),
+                                        agent.clone(),
+                                        &blocking_reasons,
+                                    )
+                                    .await
+                                    .or(node_id);
                                 if let Some(node_id) = node_id.as_deref() {
+                                    let _ = self
+                                        .persist_prompt_snapshot(node_id, retry_input.prompt.clone())
+                                        .await;
                                     self.emit_execution_event(
                                         provider_prompt_event(
                                             node_id,
@@ -598,6 +628,96 @@ impl WorkspaceEngine {
         }
     }
 
+    fn record_choice_response_audit(&mut self, input: ChoiceResponseAuditInput<'_>) {
+        let content = build_choice_response_audit_message(&input);
+        let msg_id = format!("msg_{:03}", self.session.messages.len() + 1);
+        let now = chrono::Utc::now().to_rfc3339();
+        self.session.messages.push(SessionMessage {
+            id: msg_id,
+            role: "system".to_string(),
+            content: content.clone(),
+            checkpoint_id: None,
+            created_at: now,
+        });
+        if let Some(store) = &self.lifecycle_store {
+            let _ = store.append_workspace_message(
+                &self.session.session_id,
+                "system".to_string(),
+                content,
+            );
+        }
+    }
+
+    pub(crate) fn workspace_artifact_blocking_reasons(&self, full_content: &str) -> Vec<String> {
+        let artifact_markdown = extract_artifact_content(full_content);
+        validate_workspace_artifact_constraints(&artifact_markdown, &self.session.workspace_type)
+            .blocking_reasons()
+    }
+
+    pub(crate) async fn begin_artifact_retry_node(
+        &mut self,
+        previous_node_id: Option<&str>,
+        agent: Option<ProviderName>,
+        blocking_reasons: &[String],
+    ) -> Option<String> {
+        let previous_node = previous_node_id.and_then(|node_id| {
+            self.timeline_nodes
+                .iter()
+                .find(|node| node.node_id == node_id)
+                .cloned()
+        })?;
+        let _ = self.flush_stream_buffer(&previous_node.node_id).await;
+        let artifact_name = workspace_type_title(&self.session.workspace_type);
+        let summary = if blocking_reasons.is_empty() {
+            format!("Provider 未返回有效的 {artifact_name} artifact")
+        } else {
+            format!(
+                "Provider 未返回有效的 {artifact_name} artifact：{}",
+                blocking_reasons.join("；")
+            )
+        };
+        self.update_timeline_node(
+            &previous_node.node_id,
+            TimelineNodeStatus::Failed,
+            Some(summary),
+        )
+        .await;
+
+        let retry_attempt = previous_node
+            .retry
+            .as_ref()
+            .map(|retry| retry.retry_attempt + 1)
+            .unwrap_or(1);
+        let retry_error_message = if blocking_reasons.is_empty() {
+            format!("缺失或无效的 {artifact_name} artifact")
+        } else {
+            blocking_reasons.join("；")
+        };
+        Some(
+            self.create_timeline_node_with_retry(
+                TimelineNodeDraft {
+                    node_type: previous_node.node_type.clone(),
+                    agent,
+                    stage: workspace_stage_from_ws_stage(&previous_node.stage),
+                    round: previous_node.round,
+                    title: format!("{artifact_name} 自动续写"),
+                    summary: None,
+                    status: TimelineNodeStatus::Active,
+                },
+                Some(TimelineNodeRetry {
+                    retry_of_node_id: previous_node.node_id.clone(),
+                    retry_attempt,
+                    retry_reason: "自动续写缺失或无效 artifact".to_string(),
+                    retry_error: TimelineNodeRetryError {
+                        code: "workspace_artifact_invalid".to_string(),
+                        message: retry_error_message,
+                    },
+                }),
+            )
+            .await,
+        )
+    }
+
     pub(crate) fn build_artifact_retry_input(
         &self,
         base_input: &StreamingProviderInput,
@@ -605,7 +725,12 @@ impl WorkspaceEngine {
         provider_session_id: Option<String>,
     ) -> StreamingProviderInput {
         let mut input = base_input.clone();
-        input.prompt = build_artifact_retry_prompt(&self.session.workspace_type, previous_output);
+        let blocking_reasons = self.workspace_artifact_blocking_reasons(previous_output);
+        input.prompt = build_artifact_retry_prompt(
+            &self.session.workspace_type,
+            previous_output,
+            &blocking_reasons,
+        );
         if let Some(provider_session_id) = provider_session_id
             .map(|id| id.trim().to_string())
             .filter(|id| !id.is_empty())
@@ -670,10 +795,17 @@ impl WorkspaceEngine {
                 .event_tx
                 .send(EngineEvent::ChoiceRequest {
                     id: choice.id,
-                    prompt: choice.prompt,
-                    options: choice.options,
+                    prompt: choice.prompt.clone(),
+                    options: choice.options.clone(),
                     allow_multiple: false,
                     allow_free_text: true,
+                    questions: vec![ChoiceQuestionData {
+                        id: "default".to_string(),
+                        prompt: choice.prompt,
+                        options: choice.options,
+                        allow_multiple: false,
+                        allow_free_text: true,
+                    }],
                     source: ChoiceRequestSource::TextFallback,
                 })
                 .await;
@@ -682,18 +814,22 @@ impl WorkspaceEngine {
 
         self.pending_author_choice = None;
         let artifact_markdown = extract_artifact_content(&full_content);
-        if self.workspace_requires_artifact_gate()
-            && !content_has_complete_workspace_artifact(
+        if self.workspace_requires_artifact_gate() {
+            let report = validate_workspace_artifact_constraints(
                 &artifact_markdown,
                 &self.session.workspace_type,
-            )
-        {
-            if artifact_retry_attempted {
-                self.finish_invalid_workspace_artifact_after_retry().await;
-            } else {
-                self.finish_invalid_workspace_artifact().await;
+            );
+            if !report.passed {
+                let blocking_reasons = report.blocking_reasons();
+                if artifact_retry_attempted {
+                    self.finish_invalid_workspace_artifact_after_retry(&blocking_reasons)
+                        .await;
+                } else {
+                    self.finish_invalid_workspace_artifact(&blocking_reasons)
+                        .await;
+                }
+                return;
             }
-            return;
         }
         if let Some(store) = &self.lifecycle_store
             && matches!(
@@ -757,6 +893,152 @@ impl WorkspaceEngine {
             .await;
         self.enter_author_confirm(Some("等待用户确认 author 结果".to_string()))
             .await;
+    }
+}
+
+struct ChoiceResponseAuditInput<'a> {
+    request: Option<&'a ChoiceRequestData>,
+    choice_id: &'a str,
+    selected_option_ids: &'a [String],
+    free_text: Option<&'a str>,
+    answers: &'a [ChoiceAnswerData],
+    node_id: Option<&'a str>,
+    agent: Option<&'a ProviderName>,
+    role: &'a ProviderConversationRole,
+}
+
+fn build_choice_response_audit_message(input: &ChoiceResponseAuditInput<'_>) -> String {
+    let source = input
+        .request
+        .map(|request| request.source.as_str())
+        .unwrap_or("unknown");
+    let mut message = String::new();
+    message.push_str("结构化交互审计记录（daemon 捕获）\n");
+    message.push_str("- audit_kind: provider_choice_response\n");
+    message.push_str(&format!("- choice_id: {}\n", input.choice_id));
+    message.push_str(&format!("- source: {source}\n"));
+    message.push_str(&format!("- provider_role: {}\n", role_label(input.role)));
+    if let Some(agent) = input.agent {
+        message.push_str(&format!("- agent: {agent:?}\n"));
+    }
+    if let Some(node_id) = input.node_id {
+        message.push_str(&format!("- node_id: {node_id}\n"));
+    }
+    if let Some(request) = input.request {
+        message.push_str(&format!(
+            "- request_prompt: {}\n",
+            audit_one_line(&request.prompt)
+        ));
+    }
+    message.push_str("- answers:\n");
+    append_choice_answers_audit(
+        &mut message,
+        input.request,
+        input.selected_option_ids,
+        input.free_text,
+        input.answers,
+    );
+    message.push_str(
+        "\n说明：以上记录由 daemon 在 ProviderEvent::ChoiceRequest 与 \
+         ProviderCommand::ChoiceResponse 之间捕获，是后续 reviewer 核对 artifact 中 \
+         author-decision/source claims 的可审计来源。\n",
+    );
+    message
+}
+
+fn append_choice_answers_audit(
+    message: &mut String,
+    request: Option<&ChoiceRequestData>,
+    selected_option_ids: &[String],
+    free_text: Option<&str>,
+    answers: &[ChoiceAnswerData],
+) {
+    let questions = request
+        .map(|request| request.effective_questions())
+        .unwrap_or_default();
+    let fallback_options = request
+        .map(|request| request.options.as_slice())
+        .unwrap_or_default();
+    let fallback_free_text = free_text.and_then(trimmed_non_empty).map(str::to_string);
+    let normalized_answers = if answers.is_empty() {
+        if selected_option_ids.is_empty() && fallback_free_text.is_none() {
+            Vec::new()
+        } else {
+            vec![ChoiceAnswerData {
+                question_id: "default".to_string(),
+                selected_option_ids: selected_option_ids.to_vec(),
+                free_text: fallback_free_text,
+            }]
+        }
+    } else {
+        answers.to_vec()
+    };
+
+    if normalized_answers.is_empty() {
+        message.push_str("  - 未捕获到显式答案。\n");
+        return;
+    }
+
+    for answer in normalized_answers {
+        let question = questions
+            .iter()
+            .find(|question| question.id == answer.question_id);
+        let options = question
+            .map(|question| question.options.as_slice())
+            .unwrap_or(fallback_options);
+        message.push_str(&format!("  - question_id: {}\n", answer.question_id));
+        if let Some(question) = question {
+            message.push_str(&format!(
+                "    question: {}\n",
+                audit_one_line(&question.prompt)
+            ));
+        }
+        if !answer.selected_option_ids.is_empty() {
+            let labels = answer
+                .selected_option_ids
+                .iter()
+                .map(|option_id| choice_option_label(option_id, options))
+                .collect::<Vec<_>>()
+                .join("; ");
+            message.push_str(&format!("    selected: {labels}\n"));
+        }
+        if let Some(free_text) = answer.free_text.as_deref().and_then(trimmed_non_empty) {
+            message.push_str(&format!("    free_text: {}\n", audit_one_line(free_text)));
+        }
+    }
+}
+
+fn choice_option_label(option_id: &str, options: &[ChoiceOptionData]) -> String {
+    match options.iter().find(|option| option.id == option_id) {
+        Some(option) if option.label.trim().is_empty() => option_id.to_string(),
+        Some(option) => format!("{option_id} = {}", audit_one_line(&option.label)),
+        None => format!("{option_id} = <unknown option>"),
+    }
+}
+
+fn audit_one_line(value: &str) -> String {
+    value
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn trimmed_non_empty(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
+fn role_label(role: &ProviderConversationRole) -> &'static str {
+    match role {
+        ProviderConversationRole::Author => "author",
+        ProviderConversationRole::Reviewer => "reviewer",
+        ProviderConversationRole::Coder => "coder",
+        ProviderConversationRole::Tester => "tester",
+        ProviderConversationRole::Analyst => "analyst",
+        ProviderConversationRole::CodeReviewer => "code_reviewer",
+        ProviderConversationRole::InternalReviewer => "internal_reviewer",
     }
 }
 

@@ -77,6 +77,271 @@ fn artifact_constraints_require_visible_source_id_traceability() {
 }
 
 #[test]
+fn story_artifact_accepts_explicit_issue_id_traceability_without_literal_source_id() {
+    let report = validate_workspace_artifact_constraints(
+        "# Aria Provider Setup Story Spec\n\n\
+         ## 范围\n**来源**：Issue `issue_0001` — provider 安装引导。\n\n\
+         ## 用户故事\n作为用户，我要完成 provider 安装。\n\n\
+         ## 功能需求\n- [REQ-001] 系统支持 provider 检查。\n\n\
+         ## 成功标准\n- [AC-001] 用户能看到 provider 状态。\n\n\
+         ## 待确认项\n无。\n\n\
+         ## 非功能需求\n无。\n",
+        &WorkspaceType::Story,
+    );
+
+    assert!(report.passed, "{report:?}");
+}
+
+#[test]
+fn story_artifact_rejects_nested_artifact_fence_and_thinking_pollution() {
+    let report = validate_workspace_artifact_constraints(
+        "# Aria Provider Setup Story Spec\n\n\
+         ## 范围\n**来源**：Issue `issue_0001` — provider 安装引导。\n\
+         ```\n\n\
+         <thinking>\nNow I will continue.\n</thinking>\n\n\
+         ```artifact\n\
+         ## 用户故事\n作为用户，我要完成 provider 安装。\n\n\
+         ## 功能需求\n- [REQ-001] 系统支持 provider 检查。\n\n\
+         ## 成功标准\n- [AC-001] 用户能看到 provider 状态。\n\n\
+         ## 待确认项\n无。\n\n\
+         ## 非功能需求\n无。\n",
+        &WorkspaceType::Story,
+    );
+
+    assert!(!report.passed);
+    let reasons = report.blocking_reasons();
+    assert!(
+        reasons.iter().any(|reason| reason.contains("artifact fence")),
+        "{reasons:?}"
+    );
+    assert!(
+        reasons.iter().any(|reason| reason.contains("<thinking>")),
+        "{reasons:?}"
+    );
+}
+
+#[test]
+fn story_artifact_rejects_unresolved_open_items_without_interaction() {
+    let report = validate_workspace_artifact_constraints(
+        "# Aria Provider Setup Story Spec\n\n\
+         ## 范围\n**来源**：Issue `issue_0001` — provider 安装引导。\n\n\
+         ## 用户故事\n作为用户，我要完成 provider 安装。\n\n\
+         ## 功能需求\n- [REQ-001] 系统支持 provider 检查。\n\n\
+         ## 成功标准\n- [AC-001] 用户能看到 provider 状态。\n\n\
+         ## 待确认项\n**[OPEN-001]** Codex 的 npm 包名需要确认。\n\n\
+         ## 非功能需求\n无。\n",
+        &WorkspaceType::Story,
+    );
+
+    assert!(!report.passed);
+    let reasons = report.blocking_reasons();
+    assert!(
+        reasons
+            .iter()
+            .any(|reason| reason.contains("待确认项") && reason.contains("AskUserQuestion")),
+        "{reasons:?}"
+    );
+}
+
+#[test]
+fn story_artifact_accepts_resolved_open_items_with_confirmation_note() {
+    let report = validate_workspace_artifact_constraints(
+        "# Aria Provider Setup Story Spec\n\n\
+         ## 范围\n**来源**：Issue `issue_0001` — provider 安装引导。\n\n\
+         ## 用户故事\n作为用户，我要完成 provider 安装。\n\n\
+         ## 功能需求\n- [REQ-001] 系统支持 provider 检查。\n\n\
+         ## 成功标准\n- [AC-001] 用户能看到 provider 状态。\n\n\
+         ## 待确认项\n无。所有影响范围与验收标准的未决点已通过结构化交互确认（claude code 必装且阻断、记录存全局用户目录、首次强制+后续静默复核不弹窗、首版仅两个 provider）。实现细节（如 npm 具体包名、全局配置目录确切路径、安装命令执行方式）留给 Design 阶段决定，不属于本 Story Spec 的未决项。\n\n\
+         ## 非功能需求\n无。\n",
+        &WorkspaceType::Story,
+    );
+
+    assert!(
+        report.passed,
+        "resolved confirmation note should not be treated as an open item: {:?}",
+        report.blocking_reasons()
+    );
+}
+
+#[test]
+fn story_artifact_still_rejects_no_prefix_followed_by_real_open_item() {
+    let report = validate_workspace_artifact_constraints(
+        "# Aria Provider Setup Story Spec\n\n\
+         ## 范围\n**来源**：Issue `issue_0001` — provider 安装引导。\n\n\
+         ## 用户故事\n作为用户，我要完成 provider 安装。\n\n\
+         ## 功能需求\n- [REQ-001] 系统支持 provider 检查。\n\n\
+         ## 成功标准\n- [AC-001] 用户能看到 provider 状态。\n\n\
+         ## 待确认项\n无。Codex 的 npm 包名仍待确认。\n\n\
+         ## 非功能需求\n无。\n",
+        &WorkspaceType::Story,
+    );
+
+    assert!(!report.passed);
+    let reasons = report.blocking_reasons();
+    assert!(
+        reasons
+            .iter()
+            .any(|reason| reason.contains("待确认项") && reason.contains("AskUserQuestion")),
+        "{reasons:?}"
+    );
+}
+
+#[test]
+fn artifact_retry_prompt_includes_validation_reasons() {
+    let previous_output = "# Story Spec\n\n## 范围\n缺少其余章节。";
+    let reasons = vec![
+        "缺少 heading: 用户故事".to_string(),
+        "缺少 source id".to_string(),
+    ];
+
+    let prompt = build_artifact_retry_prompt(&WorkspaceType::Story, previous_output, &reasons);
+
+    assert!(prompt.contains("具体失败原因"));
+    assert!(prompt.contains("缺少 heading: 用户故事"));
+    assert!(prompt.contains("缺少 source id"));
+    assert!(prompt.contains("只能输出一个完整 artifact fenced block"));
+    assert!(prompt.contains("AskUserQuestion"));
+    assert!(prompt.contains("待确认项"));
+    assert!(prompt.contains("结构化交互"));
+    assert!(prompt.contains("用户确认决策"));
+    assert!(prompt.contains("author-decision"));
+    assert!(prompt.contains("[REQ-"));
+    assert!(prompt.contains("[AC-"));
+}
+
+#[tokio::test]
+async fn automatic_artifact_retry_uses_separate_timeline_node_for_retry_stream() {
+    let (_tmp, lifecycle_store, mut engine) = persistent_test_engine();
+    engine.session.reviewer_provider = None;
+    let provider = Arc::new(StoryOpenItemRetryProvider::default());
+
+    engine
+        .handle_user_message(
+            "开始生成 Story Spec".to_string(),
+            provider.clone(),
+            empty_provider_commands(),
+        )
+        .await;
+
+    assert_eq!(*provider.calls.lock().unwrap(), 2);
+    let author_nodes = engine
+        .timeline_nodes
+        .iter()
+        .filter(|node| node.node_type == TimelineNodeType::AuthorRun)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(author_nodes.len(), 2, "{author_nodes:?}");
+    assert_eq!(author_nodes[0].status, TimelineNodeStatus::Failed);
+    assert!(
+        author_nodes[0]
+            .summary
+            .as_deref()
+            .is_some_and(|summary| summary.contains("待确认项")),
+        "{author_nodes:?}"
+    );
+    assert_eq!(author_nodes[1].status, TimelineNodeStatus::Completed);
+    assert_eq!(
+        author_nodes[1]
+            .retry
+            .as_ref()
+            .map(|retry| retry.retry_of_node_id.as_str()),
+        Some(author_nodes[0].node_id.as_str())
+    );
+
+    let original_detail = lifecycle_store
+        .load_node_detail(&engine.session().session_id, &author_nodes[0].node_id)
+        .expect("original node detail");
+    let retry_detail = lifecycle_store
+        .load_node_detail(&engine.session().session_id, &author_nodes[1].node_id)
+        .expect("retry node detail");
+    assert!(original_detail.streaming_content.contains("[OPEN-001]"));
+    assert!(!original_detail.streaming_content.contains("# Retried Story Spec"));
+    assert!(retry_detail.streaming_content.contains("# Retried Story Spec"));
+    assert!(!retry_detail.streaming_content.contains("[OPEN-001]"));
+
+    let inputs = provider.inputs.lock().unwrap();
+    assert_eq!(inputs.len(), 2);
+    assert!(
+        inputs[1].prompt.contains("具体失败原因")
+            && inputs[1].prompt.contains("待确认项")
+            && inputs[1].prompt.contains("AskUserQuestion"),
+        "{}",
+        inputs[1].prompt
+    );
+}
+
+#[derive(Default)]
+struct StoryOpenItemRetryProvider {
+    inputs: Arc<Mutex<Vec<StreamingProviderInput>>>,
+    calls: Arc<Mutex<u32>>,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for StoryOpenItemRetryProvider {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.inputs.lock().unwrap().push(input);
+        let mut calls = self.calls.lock().unwrap();
+        *calls += 1;
+        let call_no = *calls;
+        drop(calls);
+
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let (command_tx, _command_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            let output = if call_no == 1 {
+                "```artifact\n# Story Spec\n\n\
+                 ## 范围\n来源 source id: Issue issue_0001。\n\n\
+                 ## 用户故事\n作为用户，我希望完成 provider 安装。\n\n\
+                 ## 功能需求\n- [REQ-001] 系统支持 provider 检查。\n\n\
+                 ## 成功标准\n- [AC-001] 用户能看到 provider 状态。\n\n\
+                 ## 待确认项\n**[OPEN-001]** Codex 的 npm 包名需要确认。\n\n\
+                 ## 非功能需求\n无。\n```"
+                    .to_string()
+            } else {
+                format!(
+                    "```artifact\n{}```",
+                    complete_story_artifact("已通过交互确认 provider 包名。", "不再保留待确认项。")
+                        .replacen("# Story Spec", "# Retried Story Spec", 1)
+                )
+            };
+            let _ = event_tx
+                .send(ProviderEvent::TextDelta {
+                    content: output.clone(),
+                })
+                .await;
+            let _ = event_tx
+                .send(ProviderEvent::Completed {
+                    full_output: output,
+                    provider_session_id: Some(format!("story-open-item-retry-{call_no}")),
+                })
+                .await;
+        });
+
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+
+    async fn run_streaming(
+        &self,
+        _input: &AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+        Err(ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "run_streaming is not used by WorkspaceEngine",
+            0,
+        ))
+    }
+}
+
+#[test]
 fn parse_review_verdict_reads_json_contract_from_tail_block() {
     let output = "整体可用，但需要补充异常路径。\n\n```json\n{\"verdict\":\"revise\",\"summary\":\"补充异常路径\"}\n```";
 

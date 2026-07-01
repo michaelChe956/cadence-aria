@@ -138,6 +138,11 @@ fn work_item_plan_outline_prompt_includes_runtime_contracts() {
     assert!(prompt.contains("writing-plans"));
     assert!(prompt.contains("任务拆分"));
     assert!(prompt.contains("追踪关系"));
+    assert!(prompt.contains("Claude Code"));
+    assert!(prompt.contains("Codex"));
+    assert!(prompt.contains("20k"));
+    assert!(prompt.contains("estimated_context_tokens"));
+    assert!(prompt.contains("session_fit=\"fits_single_agent_session\""));
 }
 
 #[test]
@@ -156,6 +161,11 @@ fn work_item_plan_outline_revision_prompt_includes_runtime_contracts() {
     assert!(prompt.contains("writing-plans"));
     assert!(prompt.contains("任务拆分"));
     assert!(prompt.contains("追踪关系"));
+    assert!(prompt.contains("Claude Code"));
+    assert!(prompt.contains("Codex"));
+    assert!(prompt.contains("20k"));
+    assert!(prompt.contains("estimated_context_tokens"));
+    assert!(prompt.contains("session_fit=\"fits_single_agent_session\""));
 }
 
 #[test]
@@ -411,6 +421,24 @@ fn outline_output_schema_makes_outline_and_context_blockers_mutually_exclusive()
         serde_json::json!(1)
     );
     assert_eq!(one_of[1]["not"]["required"], serde_json::json!(["outline"]));
+    let outline_item =
+        &schema["properties"]["outline"]["properties"]["work_item_outlines"]["items"];
+    assert_eq!(
+        outline_item["properties"]["estimated_context_tokens"]["maximum"],
+        serde_json::json!(19999)
+    );
+    assert_eq!(
+        outline_item["properties"]["session_fit"]["enum"],
+        serde_json::json!(["fits_single_agent_session"])
+    );
+    assert!(outline_item["required"]
+        .as_array()
+        .expect("required array")
+        .contains(&serde_json::json!("estimated_context_tokens")));
+    assert!(outline_item["required"]
+        .as_array()
+        .expect("required array")
+        .contains(&serde_json::json!("session_fit")));
 }
 
 #[test]
@@ -421,6 +449,10 @@ fn outline_parser_accepts_valid_sentinel_json() {
     assert!(parsed.context_blockers.is_empty());
     let outline = parsed.outline.expect("outline payload");
     assert_eq!(outline.work_item_outlines[0].outline_id, "outline_backend");
+    assert_eq!(
+        outline.work_item_outlines[0].estimated_context_tokens,
+        Some(12_000)
+    );
     assert_eq!(
         outline.dependency_graph[0].from_outline_id,
         "outline_backend"
@@ -536,6 +568,8 @@ fn single_item_prompt_requires_executable_plan_runtime_contracts() {
     assert!(invocation.prompt.contains("implementation_context"));
     assert!(invocation.prompt.contains("handoff_summary"));
     assert!(invocation.prompt.contains("后续 coding agent"));
+    assert!(invocation.prompt.contains("estimated_context_tokens"));
+    assert!(invocation.prompt.contains("单个 Claude Code/Codex 会话"));
 }
 
 #[test]

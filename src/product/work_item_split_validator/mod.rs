@@ -13,8 +13,8 @@ use crate::cross_cutting::worktree::scopes_may_overlap;
 use crate::product::models::{
     IssueWorkItemPlan, LifecycleWorkItemRecord, RepositoryProfile, RepositoryProfileConfidence,
     VerificationCommandSafety, VerificationCommandSource, VerificationPlan, WorkItemDraftCandidate,
-    WorkItemKind, WorkItemOutline, WorkItemPlanOutline, WorkItemSplitFinding,
-    WorkItemSplitFindingSeverity,
+    WorkItemKind, WorkItemOutline, WorkItemOutlineSessionFit, WorkItemPlanOutline,
+    WorkItemSplitFinding, WorkItemSplitFindingSeverity,
 };
 
 pub use types::{

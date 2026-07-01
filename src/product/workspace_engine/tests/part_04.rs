@@ -474,6 +474,52 @@ async fn revision_with_existing_author_provider_session_uses_delta_prompt() {
 }
 
 #[tokio::test]
+async fn revision_prompt_requires_structured_interaction_decisions_in_artifact() {
+    let (_tmp, store) = setup();
+    let (tx, _) = mpsc::channel(64);
+    let mut session = make_session("sess_revision_structured_decisions");
+    session.stage = WorkspaceStage::Revision;
+    session.workspace_type = WorkspaceType::Story;
+    session.artifact = Some(artifact_payload(
+        "# Story Spec\n\n## 功能需求\n- [REQ-001] 初版。\n\n## 成功标准\n- [AC-001] 初版可验收。\n",
+    ));
+    session.messages.push(SessionMessage {
+        id: "msg_001".to_string(),
+        role: "system".to_string(),
+        content: "结构化交互审计记录（daemon 捕获）\n- choice_id: choice_install_policy\n- source: ask_user_question\n- answers:\n  - question_id: q1\n    question: Claude Code 是否必装？\n    selected: mandatory_blocking = 必装且阻断\n".to_string(),
+        checkpoint_id: None,
+        created_at: chrono::Utc::now().to_rfc3339(),
+    });
+    session
+        .provider_conversations
+        .push(ProviderConversationRef {
+            role: ProviderConversationRole::Author,
+            provider: ProviderName::ClaudeCode,
+            provider_session_id: "provider-author-session-1".to_string(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            last_node_id: Some("timeline_node_002".to_string()),
+        });
+    let mut engine = WorkspaceEngine::new(store, tx, session);
+    engine.latest_review_verdict = Some(ReviewVerdict {
+        verdict: ReviewVerdictType::Revise,
+        comments: "需要把结构化交互确认的安装策略写入 Story Spec。".to_string(),
+        summary: "补充交互决策映射".to_string(),
+        findings: Vec::new(),
+        review_gate: ReviewGate::RequiresRevision,
+        work_item_plan_review: None,
+    });
+
+    let input = engine.build_revision_input().expect("revision input");
+
+    assert!(input.prompt.contains("结构化交互"));
+    assert!(input.prompt.contains("用户确认决策"));
+    assert!(input.prompt.contains("author-decision"));
+    assert!(input.prompt.contains("[REQ-"));
+    assert!(input.prompt.contains("[AC-"));
+    assert!(input.prompt.contains("待确认项"));
+}
+
+#[tokio::test]
 async fn revision_codex_resume_stall_retries_fresh_full_prompt_for_all_workspace_types() {
     for (workspace_type, artifact, output) in [
         (

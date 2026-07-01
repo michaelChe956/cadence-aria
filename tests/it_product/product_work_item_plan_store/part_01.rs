@@ -9,7 +9,7 @@ use cadence_aria::product::models::{
     IssueWorkItemPlanStatus, OutlineContextBlockerResolution, OutlineContextIndex,
     WorkItemBatchRecord, WorkItemBatchStatus, WorkItemDraftCandidate, WorkItemDraftRecord,
     WorkItemDraftStatus, WorkItemDraftSupersedeReason, WorkItemGenerationMode, WorkItemKind,
-    WorkItemOutline, WorkItemOutlineDependencyEdge, WorkItemPlanCommitState,
+    WorkItemOutline, WorkItemOutlineDependencyEdge, WorkItemOutlineSessionFit, WorkItemPlanCommitState,
     WorkItemPlanCompileStatus, WorkItemPlanCompileTransaction, WorkItemPlanDraftActiveIndex,
     WorkItemPlanOutline, WorkspaceType,
 };
@@ -36,6 +36,8 @@ fn work_item_plan_models_roundtrip() {
             goal: "持久化 draft record".to_string(),
             scope: vec!["src/product".to_string()],
             non_goals: vec!["不写真实 work item".to_string()],
+            estimated_context_tokens: Some(12_000),
+            session_fit: Some(WorkItemOutlineSessionFit::FitsSingleAgentSession),
             source_story_spec_ids: vec!["story_1".to_string()],
             source_design_spec_ids: vec!["design_1".to_string()],
             exclusive_write_scopes: vec!["src/product".to_string()],
@@ -687,6 +689,8 @@ fn sample_outline(outline_id: &str, kind: WorkItemKind) -> WorkItemOutline {
         goal: "goal".to_string(),
         scope: vec![format!("scope/{outline_id}")],
         non_goals: Vec::new(),
+        estimated_context_tokens: Some(12_000),
+        session_fit: Some(WorkItemOutlineSessionFit::FitsSingleAgentSession),
         source_story_spec_ids: vec!["story_1".to_string()],
         source_design_spec_ids: vec!["design_1".to_string()],
         exclusive_write_scopes: vec![format!("scope/{outline_id}")],
@@ -696,4 +700,3 @@ fn sample_outline(outline_id: &str, kind: WorkItemKind) -> WorkItemOutline {
         handoff_notes: "handoff".to_string(),
     }
 }
-

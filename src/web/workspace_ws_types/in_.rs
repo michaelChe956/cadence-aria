@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::product::models::ProviderName;
 
-use super::common::{ProviderConfigSnapshot, StructuredFeedback};
+use super::common::{ChoiceAnswer, ProviderConfigSnapshot, StructuredFeedback};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -38,6 +38,8 @@ pub enum WsInMessage {
         id: String,
         selected_option_ids: Vec<String>,
         free_text: Option<String>,
+        #[serde(default)]
+        answers: Vec<ChoiceAnswer>,
     },
     ReviewDecisionResponse {
         decision: String,

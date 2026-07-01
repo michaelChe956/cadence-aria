@@ -71,13 +71,45 @@ pub struct ChoiceOptionData {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChoiceQuestionData {
+    pub id: String,
+    pub prompt: String,
+    pub options: Vec<ChoiceOptionData>,
+    pub allow_multiple: bool,
+    pub allow_free_text: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChoiceAnswerData {
+    pub question_id: String,
+    pub selected_option_ids: Vec<String>,
+    pub free_text: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChoiceRequestData {
     pub id: String,
     pub prompt: String,
     pub options: Vec<ChoiceOptionData>,
     pub allow_multiple: bool,
     pub allow_free_text: bool,
+    pub questions: Vec<ChoiceQuestionData>,
     pub source: ChoiceRequestSource,
+}
+
+impl ChoiceRequestData {
+    pub fn effective_questions(&self) -> Vec<ChoiceQuestionData> {
+        if self.questions.is_empty() {
+            return vec![ChoiceQuestionData {
+                id: "default".to_string(),
+                prompt: self.prompt.clone(),
+                options: self.options.clone(),
+                allow_multiple: self.allow_multiple,
+                allow_free_text: self.allow_free_text,
+            }];
+        }
+        self.questions.clone()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,6 +226,7 @@ pub enum ProviderCommand {
         id: String,
         selected_option_ids: Vec<String>,
         free_text: Option<String>,
+        answers: Vec<ChoiceAnswerData>,
     },
     ToolResult(ProviderToolResult),
     Abort,
@@ -299,6 +332,7 @@ pub trait StreamingProviderAdapter: Send + Sync {
                                 id: request.id,
                                 selected_option_ids: vec![],
                                 free_text: Some("aborted".to_string()),
+                                answers: vec![],
                             })
                             .await;
                         let _ = tx

@@ -37,6 +37,7 @@ async fn workspace_ws_abort_after_choice_response_returns_prepare_context() {
             id: choice.id,
             selected_option_ids: vec!["opt_0".to_string()],
             free_text: None,
+            answers: vec![],
         },
     )
     .await;

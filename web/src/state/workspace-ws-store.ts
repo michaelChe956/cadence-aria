@@ -710,12 +710,13 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
       };
     }),
 
-  resolveChoiceRequest: (id, selectedOptionIds, freeText) =>
+  resolveChoiceRequest: (id, selectedOptionIds, freeText, answers) =>
     set((prev) => {
       let responseContent = "已选择";
       const response: ChoiceResponsePayload = {
         selected_option_ids: selectedOptionIds,
         free_text: freeText,
+        ...(answers && answers.length > 0 ? { answers } : {}),
       };
       const nextEntries = prev.chatEntries.map((entry) => {
         if (entry.type !== "choice_request" || entry.metadata?.request_id !== id) {

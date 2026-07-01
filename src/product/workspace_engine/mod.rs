@@ -10,10 +10,11 @@ use crate::cross_cutting::provider_adapter::{
     DEFAULT_PROVIDER_TIMEOUT_SECS, STRUCTURED_OUTPUT_END, STRUCTURED_OUTPUT_START,
 };
 use crate::cross_cutting::streaming_provider::{
-    ChoiceOptionData, ChoiceRequestSource, ProviderCommand, ProviderEvent, ProviderExecutionEvent,
-    ProviderExecutionEventKind, ProviderExecutionEventStatus, ProviderPermissionMode,
-    ProviderSession, ProviderStatus, ProviderToolCall, ProviderToolResult, RiskLevel,
-    StreamingProviderAdapter, StreamingProviderInput,
+    ChoiceAnswerData, ChoiceOptionData, ChoiceQuestionData, ChoiceRequestData, ChoiceRequestSource,
+    ProviderCommand, ProviderEvent, ProviderExecutionEvent, ProviderExecutionEventKind,
+    ProviderExecutionEventStatus, ProviderPermissionMode, ProviderSession, ProviderStatus,
+    ProviderToolCall, ProviderToolResult, RiskLevel, StreamingProviderAdapter,
+    StreamingProviderInput,
 };
 use crate::product::artifact_extraction::extract_artifact_content;
 use crate::product::checkpoint_store::CheckpointStore;
@@ -51,14 +52,14 @@ use crate::protocol::contracts::{AdapterRole, ProviderType};
 use crate::web::types::GenerateWorkItemsRequest;
 use crate::web::workspace_ws_types::{
     ArtifactPayload, ArtifactVersion, ArtifactVersionSummary, AuthorDecision, ChoiceOption,
-    HumanConfirmDecision, NodeDetailSummary, ProviderConfigSnapshot, RepositoryProfileDto,
-    ReviewFinding, ReviewFindingSeverity, ReviewGate, ReviewVerdict, ReviewVerdictType,
-    TimelineNode, TimelineNodeRetry, TimelineNodeRetryError, TimelineNodeStatus, TimelineNodeType,
-    ValidatorFindingDto, VerificationCommandDto, VerificationManualCheckDto, VerificationPlanDto,
-    WorkItemBatchDecisionDto, WorkItemBatchFailureSummaryDto, WorkItemBatchStatePayload,
-    WorkItemCandidateDto, WorkItemCandidateMetaDto, WorkItemDependencyEdgeDto,
-    WorkItemDraftCandidatePayload, WorkItemDraftDecisionDto, WorkItemGenerationModeDto,
-    WorkItemPlanCandidateDto, WorkItemPlanCompileRecoveryActionDto,
+    ChoiceQuestion, HumanConfirmDecision, NodeDetailSummary, ProviderConfigSnapshot,
+    RepositoryProfileDto, ReviewFinding, ReviewFindingSeverity, ReviewGate, ReviewVerdict,
+    ReviewVerdictType, TimelineNode, TimelineNodeRetry, TimelineNodeRetryError, TimelineNodeStatus,
+    TimelineNodeType, ValidatorFindingDto, VerificationCommandDto, VerificationManualCheckDto,
+    VerificationPlanDto, WorkItemBatchDecisionDto, WorkItemBatchFailureSummaryDto,
+    WorkItemBatchStatePayload, WorkItemCandidateDto, WorkItemCandidateMetaDto,
+    WorkItemDependencyEdgeDto, WorkItemDraftCandidatePayload, WorkItemDraftDecisionDto,
+    WorkItemGenerationModeDto, WorkItemPlanCandidateDto, WorkItemPlanCompileRecoveryActionDto,
     WorkItemPlanCompileReportPayload, WorkItemPlanContextBlockerDto,
     WorkItemPlanContextBlockerPayload, WorkItemPlanDto, WorkItemPlanOutlineCandidateDto,
     WorkItemPlanReviewAction, WorkItemPlanReviewAffectedItem, WorkItemPlanReviewComplete,

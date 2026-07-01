@@ -1,5 +1,12 @@
 use super::*;
 
+fn invalid_artifact_message(base: String, blocking_reasons: &[String]) -> String {
+    if blocking_reasons.is_empty() {
+        return base;
+    }
+    format!("{base}：{}", blocking_reasons.join("；"))
+}
+
 impl WorkspaceEngine {
     pub(crate) async fn transition_stage(&mut self, new_stage: WorkspaceStage) {
         self.session.stage = new_stage;
@@ -49,9 +56,12 @@ impl WorkspaceEngine {
         self.finish_failed_run().await;
     }
 
-    pub(crate) async fn finish_invalid_workspace_artifact(&mut self) {
+    pub(crate) async fn finish_invalid_workspace_artifact(&mut self, blocking_reasons: &[String]) {
         let artifact_name = workspace_type_title(&self.session.workspace_type);
-        let message = format!("Provider 未返回有效的 {artifact_name} artifact");
+        let message = invalid_artifact_message(
+            format!("Provider 未返回有效的 {artifact_name} artifact"),
+            blocking_reasons,
+        );
         let _ = self
             .event_tx
             .send(EngineEvent::Error {
@@ -65,9 +75,15 @@ impl WorkspaceEngine {
         self.finish_failed_run().await;
     }
 
-    pub(crate) async fn finish_invalid_workspace_artifact_after_retry(&mut self) {
+    pub(crate) async fn finish_invalid_workspace_artifact_after_retry(
+        &mut self,
+        blocking_reasons: &[String],
+    ) {
         let artifact_name = workspace_type_title(&self.session.workspace_type);
-        let message = format!("自动续写后仍未返回有效的 {artifact_name} artifact");
+        let message = invalid_artifact_message(
+            format!("自动续写后仍未返回有效的 {artifact_name} artifact"),
+            blocking_reasons,
+        );
         let _ = self
             .event_tx
             .send(EngineEvent::Error {

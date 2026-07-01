@@ -235,6 +235,15 @@ pub(crate) const WORK_ITEM_PLAN_OUTLINE_OUTPUT_SCHEMA: &str = r#"{
                 "type": "array",
                 "items": { "type": "string" }
               },
+              "estimated_context_tokens": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 19999
+              },
+              "session_fit": {
+                "type": "string",
+                "enum": ["fits_single_agent_session"]
+              },
               "source_story_spec_ids": {
                 "type": "array",
                 "items": { "type": "string" }
@@ -268,6 +277,8 @@ pub(crate) const WORK_ITEM_PLAN_OUTLINE_OUTPUT_SCHEMA: &str = r#"{
               "goal",
               "scope",
               "non_goals",
+              "estimated_context_tokens",
+              "session_fit",
               "source_story_spec_ids",
               "source_design_spec_ids",
               "exclusive_write_scopes",

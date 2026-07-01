@@ -1,10 +1,11 @@
 use crate::product::models::{ProviderName, WorkspaceType};
 use crate::web::workspace_ws_types::{
-    ArtifactPayload, ArtifactVersion, ChoiceOption, ProviderConfigSnapshot, RepositoryProfileDto,
-    ReviewGate, ReviewVerdict, ReviewVerdictType, TimelineNode, TimelineNodeStatus,
-    TimelineNodeType, ValidatorFindingDto, VerificationCommandDto, VerificationManualCheckDto,
-    VerificationPlanDto, WorkItemCandidateDto, WorkItemCandidateMetaDto, WorkItemDependencyEdgeDto,
-    WorkItemGenerationModeDto, WorkItemPlanCandidateDto, WorkItemPlanDto, WorkItemPlanReviewAction,
+    ArtifactPayload, ArtifactVersion, ChoiceAnswer, ChoiceOption, ChoiceQuestion,
+    ProviderConfigSnapshot, RepositoryProfileDto, ReviewGate, ReviewVerdict, ReviewVerdictType,
+    TimelineNode, TimelineNodeStatus, TimelineNodeType, ValidatorFindingDto,
+    VerificationCommandDto, VerificationManualCheckDto, VerificationPlanDto, WorkItemCandidateDto,
+    WorkItemCandidateMetaDto, WorkItemDependencyEdgeDto, WorkItemGenerationModeDto,
+    WorkItemPlanCandidateDto, WorkItemPlanDto, WorkItemPlanReviewAction,
     WorkItemPlanReviewComplete, WorkItemPlanReviewGate, WorkItemPlanReviewScope,
     WorkItemPlanReviewVerdict, WorkItemSplitOptionsDto, WorkspaceStage, WsExecutionEvent,
     WsExecutionEventKind, WsExecutionEventStatus, WsInMessage, WsOutMessage, WsPermissionRiskLevel,
@@ -440,6 +441,17 @@ fn choice_request_and_response_roundtrip() {
         ],
         allow_multiple: false,
         allow_free_text: true,
+        questions: vec![ChoiceQuestion {
+            id: "scope".to_string(),
+            prompt: "请选择下一步".to_string(),
+            options: vec![ChoiceOption {
+                id: "continue".to_string(),
+                label: "继续".to_string(),
+                description: Some("继续当前方案".to_string()),
+            }],
+            allow_multiple: false,
+            allow_free_text: true,
+        }],
         source: "ask_user_question".to_string(),
     };
 
@@ -448,6 +460,7 @@ fn choice_request_and_response_roundtrip() {
     assert_eq!(json["type"], "choice_request");
     assert_eq!(json["source"], "ask_user_question");
     assert_eq!(json["options"][0]["id"], "continue");
+    assert_eq!(json["questions"][0]["id"], "scope");
     let back: WsOutMessage = serde_json::from_value(json).unwrap();
     assert_eq!(back, out);
 
@@ -455,10 +468,16 @@ fn choice_request_and_response_roundtrip() {
         id: "choice_001".to_string(),
         selected_option_ids: vec!["continue".to_string()],
         free_text: Some("补充说明".to_string()),
+        answers: vec![ChoiceAnswer {
+            question_id: "scope".to_string(),
+            selected_option_ids: vec!["continue".to_string()],
+            free_text: Some("补充说明".to_string()),
+        }],
     };
     let json = serde_json::to_value(&input).unwrap();
     assert_eq!(json["type"], "choice_response");
     assert_eq!(json["selected_option_ids"][0], "continue");
+    assert_eq!(json["answers"][0]["question_id"], "scope");
     let back: WsInMessage = serde_json::from_value(json).unwrap();
     assert_eq!(back, input);
 }

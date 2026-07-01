@@ -61,6 +61,28 @@ fn story_and_design_runtime_contracts_do_not_inherit_work_item_plan_discipline()
 }
 
 #[test]
+fn workspace_runtime_contract_includes_codegraph_mcp_reading_guidance() {
+    for workspace_type in [
+        WorkspaceType::Story,
+        WorkspaceType::Design,
+        WorkspaceType::WorkItem,
+    ] {
+        let contract = runtime_contract_for(&workspace_session_record(
+            workspace_type.clone(),
+            ProviderName::ClaudeCode,
+        ));
+
+        assert!(contract.contains("CodeGraph MCP"), "{workspace_type:?}");
+        assert!(
+            contract.contains("mcp__codegraph__codegraph_explore"),
+            "{workspace_type:?}"
+        );
+        assert!(contract.contains("ast-grep outline"), "{workspace_type:?}");
+        assert!(contract.contains("降级"), "{workspace_type:?}");
+    }
+}
+
+#[test]
 fn work_item_output_schema_describes_single_task_not_issue_level_split() {
     let schema = output_schema_for(&WorkspaceType::WorkItem);
 
@@ -69,6 +91,16 @@ fn work_item_output_schema_describes_single_task_not_issue_level_split() {
     assert!(schema.contains("20k"));
     assert!(schema.contains("禁止跨任务"));
     assert!(!schema.contains("任务拆分"));
+}
+
+#[test]
+fn work_item_plan_output_schema_requires_single_session_task_sizing() {
+    let schema = output_schema_for(&WorkspaceType::WorkItemPlan);
+
+    assert!(schema.contains("任务拆分"));
+    assert!(schema.contains("20k"));
+    assert!(schema.contains("单个 Claude Code 或 Codex 会话"));
+    assert!(schema.contains("继续拆分"));
 }
 
 #[test]
@@ -92,6 +124,32 @@ fn output_schemas_require_visible_source_id_traceability() {
     assert!(work_item_plan.contains("source id") || work_item_plan.contains("source ids"));
     assert!(work_item_plan.contains("Story/Design"));
     assert!(work_item_plan.contains("追踪关系"));
+}
+
+#[test]
+fn output_schemas_require_structured_interaction_decisions_in_artifacts() {
+    let story = output_schema_for(&WorkspaceType::Story);
+    assert!(story.contains("结构化交互"));
+    assert!(story.contains("用户确认决策"));
+    assert!(story.contains("author-decision"));
+    assert!(story.contains("[REQ-"));
+    assert!(story.contains("[AC-"));
+    assert!(story.contains("AskUserQuestion"));
+    assert!(story.contains("requestUserInput"));
+    assert!(story.contains("待确认项"));
+
+    let design = output_schema_for(&WorkspaceType::Design);
+    assert!(design.contains("结构化交互"));
+    assert!(design.contains("用户确认决策"));
+    assert!(design.contains("author-decision"));
+    assert!(design.contains("[DEC-"));
+    assert!(design.contains("追踪关系"));
+
+    let work_item = output_schema_for(&WorkspaceType::WorkItem);
+    assert!(work_item.contains("结构化交互"));
+    assert!(work_item.contains("用户确认决策"));
+    assert!(work_item.contains("author-decision"));
+    assert!(work_item.contains("追踪关系"));
 }
 
 #[test]
