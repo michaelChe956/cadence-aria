@@ -190,13 +190,6 @@ impl CodingWorkspaceEngine {
     ) -> Result<(), CodingWorkspaceEngineError> {
         let current = self.store.get_attempt(project_id, issue_id, attempt_id)?;
         let active_work_item_id = self.active_work_item_id_for_attempt(&current).to_string();
-        self.ensure_issue_shared_worktree_clean(
-            project_id,
-            issue_id,
-            attempt_id,
-            &active_work_item_id,
-        )
-        .await?;
         self.store.update_attempt_status(
             project_id,
             issue_id,

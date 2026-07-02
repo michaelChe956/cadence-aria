@@ -431,7 +431,7 @@ describe("CodingWorkspacePage shell and actions", () => {
   it("deletes the coding workspace after confirmation and navigates back", async () => {
     mockCodingWs();
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
-    vi.mocked(deleteCodingAttempt).mockResolvedValue({ status: "deleted" });
+    vi.mocked(deleteCodingAttempt).mockResolvedValue(undefined);
     const onBack = vi.fn();
     useCodingWorkspaceStore.setState({
       attemptId: "coding_attempt_0001",

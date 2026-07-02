@@ -631,3 +631,59 @@ async fn delete_coding_attempt_releases_active_lock_when_clean() {
     .await;
     assert_eq!(status, StatusCode::OK);
 }
+
+#[tokio::test]
+async fn delete_coding_attempt_with_dirty_shared_worktree_still_removes_workspace() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    bootstrap_two_ready_confirmed_work_items(app.clone(), root.path(), repo.path()).await;
+
+    let (status, first) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001/coding-attempts",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let attempt_id = first["attempt_id"].as_str().unwrap();
+    let coding_store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = prepare_attempt_with_worktree(
+        &coding_store,
+        repo.path(),
+        "project_0001",
+        "issue_0001",
+        attempt_id,
+    );
+    let worktree_path = attempt.worktree_path.expect("attempt worktree path");
+    fs::write(worktree_path.join("dirty.txt"), "dirty changes").expect("dirty file");
+
+    let (status, _body) = request_json(
+        app.clone(),
+        Method::DELETE,
+        &format!("/api/coding-attempts/{}", attempt_id),
+        json!({}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(!worktree_path.exists());
+    assert!(
+        coding_store
+            .get_attempt("project_0001", "issue_0001", attempt_id)
+            .is_err()
+    );
+
+    let (status, _second) = request_json(
+        app,
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0002/coding-attempts",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}

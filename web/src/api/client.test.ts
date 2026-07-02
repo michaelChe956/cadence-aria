@@ -213,4 +213,15 @@ describe("api client", () => {
     ]);
     expect(calls.every((call) => call.init?.method === "DELETE")).toBe(true);
   });
+
+  it("handles delete coding attempt 204 response without parsing json", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(null, { status: 204 })),
+    );
+
+    await expect(
+      deleteCodingAttempt("coding_attempt_0001"),
+    ).resolves.toBeUndefined();
+  });
 });
