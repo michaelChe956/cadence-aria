@@ -48,31 +48,6 @@ pub(crate) fn build_node_detail_summary(detail: &NodeDetail) -> NodeDetailSummar
     }
 }
 
-pub(crate) fn build_session_state_node_detail(mut detail: NodeDetail) -> NodeDetail {
-    detail.prompt = None;
-    detail.messages.clear();
-    if detail.streaming_content.chars().count() > SUMMARY_PREVIEW_CHARS {
-        detail.streaming_content = preview(&detail.streaming_content);
-    }
-    detail.execution_events = session_state_execution_event_summaries(detail.execution_events);
-    detail.permission_events.clear();
-    detail
-}
-
-pub(crate) fn session_state_execution_event_summaries(
-    events: Vec<serde_json::Value>,
-) -> Vec<serde_json::Value> {
-    events
-        .into_iter()
-        .map(|mut event| {
-            if let Some(object) = event.as_object_mut() {
-                object.insert("output".to_string(), serde_json::Value::Null);
-            }
-            event
-        })
-        .collect()
-}
-
 pub(crate) fn build_artifact_version_summary(version: &ArtifactVersion) -> ArtifactVersionSummary {
     let (markdown_size, markdown_preview) = match &version.payload {
         ArtifactPayload::Markdown { markdown, .. } => (markdown.len(), preview(markdown)),
@@ -251,6 +226,8 @@ pub(crate) fn latest_review_verdict_from_messages(
 
 pub(crate) fn latest_review_verdict_from_node_details(
     lifecycle_store: &LifecycleStore,
+    project_id: &str,
+    issue_id: &str,
     session_id: &str,
     timeline_nodes: &[TimelineNode],
 ) -> Option<ReviewVerdict> {
@@ -268,7 +245,7 @@ pub(crate) fn latest_review_verdict_from_node_details(
         })
         .filter_map(|node| {
             lifecycle_store
-                .load_node_detail(session_id, &node.node_id)
+                .load_node_detail_for_issue_session(project_id, issue_id, session_id, &node.node_id)
                 .ok()
                 .and_then(|detail| detail.verdict)
         })
@@ -320,26 +297,26 @@ impl WorkspaceEngine {
             })
             .collect();
 
-        let mut timeline_node_details = HashMap::new();
+        let timeline_node_details = HashMap::new();
         let mut timeline_node_summaries = HashMap::new();
-        if let Some(store) = self.lifecycle_store.as_ref()
-            && let Ok(ids) = store.list_node_detail_ids(&self.session.session_id)
+        if self.session.workspace_type != WorkspaceType::WorkItemPlan
+            && let Some(store) = self.lifecycle_store.as_ref()
+            && let Ok(ids) = store.list_node_detail_ids_for_issue_session(
+                &self.session.project_id,
+                &self.session.issue_id,
+                &self.session.session_id,
+            )
         {
-            let timeline_node_ids = self
-                .timeline_nodes
-                .iter()
-                .map(|node| node.node_id.as_str())
-                .collect::<HashSet<_>>();
             for id in ids {
-                let Ok(detail) = store.load_node_detail(&self.session.session_id, &id) else {
+                let Ok(detail) = store.load_node_detail_for_issue_session(
+                    &self.session.project_id,
+                    &self.session.issue_id,
+                    &self.session.session_id,
+                    &id,
+                ) else {
                     continue;
                 };
                 timeline_node_summaries.insert(id.clone(), build_node_detail_summary(&detail));
-                if self.session.workspace_type == WorkspaceType::WorkItemPlan
-                    && timeline_node_ids.contains(id.as_str())
-                {
-                    timeline_node_details.insert(id, build_session_state_node_detail(detail));
-                }
             }
         }
         let artifact_version_summaries = self

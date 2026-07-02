@@ -330,7 +330,7 @@ async fn build_session_state_returns_correct_structure() {
 }
 
 #[tokio::test]
-async fn build_session_state_includes_node_details_and_active_run_id() {
+async fn build_session_state_omits_work_item_plan_details_and_keeps_active_run_id() {
     let (tmp, checkpoint_store) = setup();
     let lifecycle_store = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
     let (tx, _) = mpsc::channel(64);
@@ -446,53 +446,8 @@ async fn build_session_state_includes_node_details_and_active_run_id() {
             ..
         } => {
             assert!(artifact_versions.is_empty());
-
-            let inline_detail = timeline_node_details
-                .get("node-1")
-                .expect("inline node detail");
-            assert_eq!(inline_detail.node_id, "node-1");
-            assert_eq!(inline_detail.prompt, None);
-            assert!(inline_detail.messages.is_empty());
-            assert!(inline_detail.streaming_content.chars().count() <= SUMMARY_PREVIEW_CHARS);
-            assert_ne!(inline_detail.streaming_content, huge_stream);
-            assert_eq!(inline_detail.execution_events.len(), 1);
-            assert_eq!(
-                inline_detail.execution_events[0]
-                    .get("event_id")
-                    .and_then(serde_json::Value::as_str),
-                Some("call_read")
-            );
-            assert_eq!(
-                inline_detail.execution_events[0]
-                    .get("command")
-                    .and_then(serde_json::Value::as_str),
-                Some("sed -n '1,120p' src/lib.rs")
-            );
-            assert!(
-                inline_detail.execution_events[0]
-                    .get("output")
-                    .is_some_and(serde_json::Value::is_null)
-            );
-            assert!(inline_detail.permission_events.is_empty());
-            assert_eq!(inline_detail.artifact_ref.as_ref().unwrap().version, 2);
-
-            let summary = timeline_node_summaries.get("node-1").expect("node summary");
-            assert_eq!(summary.node_id, "node-1");
-            assert_eq!(summary.prompt_size, huge_prompt.len());
-            assert!(summary.prompt_preview.as_ref().unwrap().chars().count() <= 2048);
-            assert_ne!(
-                summary.prompt_preview.as_deref(),
-                Some(huge_prompt.as_str())
-            );
-            assert_eq!(summary.stream_size, huge_stream.len());
-            assert!(summary.stream_preview.as_ref().unwrap().chars().count() <= 2048);
-            assert_ne!(
-                summary.stream_preview.as_deref(),
-                Some(huge_stream.as_str())
-            );
-            assert_eq!(summary.execution_event_count, 1);
-            assert_eq!(summary.artifact_ref.as_deref(), Some("artifact-1/v2"));
-            assert!(summary.has_large_outputs);
+            assert!(timeline_node_details.is_empty());
+            assert!(timeline_node_summaries.is_empty());
 
             let artifact_summary = artifact_version_summaries
                 .iter()
@@ -592,6 +547,101 @@ async fn build_session_state_keeps_story_details_out_of_inline_payload() {
                     .and_then(|summary| summary.stream_preview.as_deref())
                     .is_some_and(|stream| stream.contains("Story provider stream"))
             );
+        }
+        _ => panic!("expected SessionState"),
+    }
+}
+
+#[tokio::test]
+async fn persistent_session_state_ignores_malformed_unrelated_session_files() {
+    let (tmp, checkpoint_store) = setup();
+    let app_paths = ProductAppPaths::new(tmp.path().join(".aria"));
+    let lifecycle_store = LifecycleStore::new(app_paths.clone());
+    let (tx, _) = mpsc::channel(64);
+    let session_record = lifecycle_store
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "issue_work_item_plan_0001".to_string(),
+            workspace_type: WorkspaceType::WorkItemPlan,
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: ProviderName::Codex,
+            review_rounds: 2,
+            superpowers_enabled: true,
+            openspec_enabled: true,
+        })
+        .unwrap();
+    let session = WorkspaceSession::from_record(session_record);
+    let session_id = session.session_id.clone();
+    let timeline_node = TimelineNode {
+        node_id: "node-1".to_string(),
+        node_type: TimelineNodeType::AuthorRun,
+        agent: Some(ProviderName::ClaudeCode),
+        stage: WsWorkspaceStage::Completed,
+        round: None,
+        status: TimelineNodeStatus::Completed,
+        title: "Work Item Plan 生成".to_string(),
+        summary: Some("生成完成".to_string()),
+        started_at: "2026-05-20T14:30:00Z".to_string(),
+        completed_at: Some("2026-05-20T14:35:00Z".to_string()),
+        duration_ms: Some(300000),
+        artifact_ref: None,
+        provider_config_snapshot: ProviderConfigSnapshot {
+            author: ProviderName::ClaudeCode,
+            reviewer: Some(ProviderName::Codex),
+            review_rounds: 2,
+        },
+        retry: None,
+    };
+    lifecycle_store
+        .save_timeline_nodes(&session_id, std::slice::from_ref(&timeline_node))
+        .unwrap();
+    lifecycle_store
+        .save_node_detail(
+            &session_id,
+            "node-1",
+            &NodeDetail {
+                node_id: "node-1".to_string(),
+                session_id: session_id.clone(),
+                node_type: TimelineNodeType::AuthorRun,
+                status: TimelineNodeStatus::Completed,
+                agent_role: Some(AgentRole::Author),
+                provider: None,
+                prompt: None,
+                messages: vec![],
+                streaming_content: "Work item plan stream".to_string(),
+                execution_events: vec![],
+                permission_events: vec![],
+                verdict: None,
+                artifact_ref: None,
+                is_revision: false,
+                base_artifact_ref: None,
+                started_at: "2026-05-20T14:30:00Z".to_string(),
+                ended_at: Some("2026-05-20T14:35:00Z".to_string()),
+            },
+        )
+        .unwrap();
+
+    let unrelated_root = app_paths
+        .issue_lifecycle_root("project_0001", "issue_9999")
+        .join("workspace-sessions");
+    std::fs::create_dir_all(&unrelated_root).unwrap();
+    std::fs::write(
+        unrelated_root.join("workspace_session_9999.json"),
+        r#"{ "id": "workspace_session_9999", "messages": ["unterminated" "#,
+    )
+    .unwrap();
+
+    let engine = WorkspaceEngine::new_persistent(checkpoint_store, lifecycle_store, tx, session);
+
+    match engine.build_session_state() {
+        WsOutMessage::SessionState {
+            timeline_nodes,
+            timeline_node_summaries,
+            ..
+        } => {
+            assert_eq!(timeline_nodes, vec![timeline_node]);
+            assert!(timeline_node_summaries.is_empty());
         }
         _ => panic!("expected SessionState"),
     }

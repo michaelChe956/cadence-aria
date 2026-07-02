@@ -11,7 +11,7 @@ import type {
   IssueWorkItemPlanDetailDto,
   WorkItemSplitFinding,
 } from "./work-item-plan";
-import type { ArtifactVersion, WorkspaceSession } from "./workspace";
+import type { ArtifactVersion, WorkspaceSession, WorkspaceSessionSummary } from "./workspace";
 
 export type StorySpec = {
   story_spec_id: string;
@@ -74,7 +74,7 @@ export type IssueLifecycleResponse = {
   design_specs: DesignSpec[];
   work_item_plans: IssueWorkItemPlanDetailDto[];
   work_items: LifecycleWorkItem[];
-  workspace_sessions: WorkspaceSession[];
+  workspace_sessions: WorkspaceSessionSummary[];
   coding_attempts: CodingAttempt[];
 };
 

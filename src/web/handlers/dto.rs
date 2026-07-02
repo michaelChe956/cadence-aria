@@ -1,5 +1,6 @@
 use super::support::{product_execution_workspace_id, product_store_api_error};
 use super::*;
+use crate::product::models::WorkspaceSessionSummaryRecord;
 
 pub(crate) fn issue_work_item_plan_detail_dto(
     plan: &IssueWorkItemPlanRecord,
@@ -162,7 +163,7 @@ pub(crate) fn latest_workspace_artifact_markdown(
 pub(crate) fn story_spec_dto(
     lifecycle: &LifecycleStore,
     record: &StorySpecRecord,
-    session: Option<&WorkspaceSessionRecord>,
+    session_id: Option<&str>,
 ) -> ApiResult<StorySpecDto> {
     Ok(StorySpecDto {
         story_spec_id: record.id.clone(),
@@ -173,14 +174,19 @@ pub(crate) fn story_spec_dto(
         current_markdown_preview: current_markdown_preview(lifecycle, record)?,
         confirmation_status: lifecycle_confirmation_status_text(&record.confirmation_status)
             .to_string(),
-        artifact_versions: artifact_version_dtos(lifecycle, session)?,
+        artifact_versions: artifact_version_dtos(
+            lifecycle,
+            &record.project_id,
+            &record.issue_id,
+            session_id,
+        )?,
     })
 }
 
 pub(crate) fn design_spec_dto(
     lifecycle: &LifecycleStore,
     record: &DesignSpecRecord,
-    session: Option<&WorkspaceSessionRecord>,
+    session_id: Option<&str>,
 ) -> ApiResult<DesignSpecDto> {
     Ok(DesignSpecDto {
         design_spec_id: record.id.clone(),
@@ -191,15 +197,20 @@ pub(crate) fn design_spec_dto(
         current_markdown_preview: current_markdown_preview(lifecycle, record)?,
         confirmation_status: lifecycle_confirmation_status_text(&record.confirmation_status)
             .to_string(),
-        artifact_versions: artifact_version_dtos(lifecycle, session)?,
+        artifact_versions: artifact_version_dtos(
+            lifecycle,
+            &record.project_id,
+            &record.issue_id,
+            session_id,
+        )?,
     })
 }
 
 pub(crate) fn workspace_session_for_entity<'a>(
-    sessions: &'a [WorkspaceSessionRecord],
+    sessions: &'a [WorkspaceSessionSummaryRecord],
     entity_id: &str,
     workspace_type: &WorkspaceType,
-) -> Option<&'a WorkspaceSessionRecord> {
+) -> Option<&'a WorkspaceSessionSummaryRecord> {
     sessions
         .iter()
         .rev()
@@ -208,13 +219,15 @@ pub(crate) fn workspace_session_for_entity<'a>(
 
 pub(crate) fn artifact_version_dtos(
     lifecycle: &LifecycleStore,
-    session: Option<&WorkspaceSessionRecord>,
+    project_id: &str,
+    issue_id: &str,
+    session_id: Option<&str>,
 ) -> ApiResult<Vec<ArtifactVersionDto>> {
-    let Some(session) = session else {
+    let Some(session_id) = session_id else {
         return Ok(Vec::new());
     };
     lifecycle
-        .list_artifact_versions(&session.id)
+        .list_artifact_versions_for_issue_session(project_id, issue_id, session_id)
         .map_err(product_store_api_error)
         .map(|versions| versions.into_iter().map(artifact_version_dto).collect())
 }
@@ -317,8 +330,10 @@ pub(crate) fn lifecycle_work_item_dto(
     lifecycle: &LifecycleStore,
     record: LifecycleWorkItemRecord,
     latest_attempt: Option<CodingAttemptDto>,
-    session: Option<&WorkspaceSessionRecord>,
+    session_id: Option<&str>,
 ) -> ApiResult<LifecycleWorkItemDto> {
+    let artifact_versions =
+        artifact_version_dtos(lifecycle, &record.project_id, &record.issue_id, session_id)?;
     Ok(LifecycleWorkItemDto {
         work_item_id: record.id,
         issue_id: record.issue_id,
@@ -329,7 +344,7 @@ pub(crate) fn lifecycle_work_item_dto(
         plan_status: work_item_plan_status_text(&record.plan_status).to_string(),
         execution_status: work_item_status_text(&record.execution_status).to_string(),
         latest_attempt,
-        artifact_versions: artifact_version_dtos(lifecycle, session)?,
+        artifact_versions,
         work_item_set_id: record.work_item_set_id,
         source_work_item_plan_id: record.source_work_item_plan_id,
         source_outline_id: record.source_outline_id,
@@ -441,10 +456,52 @@ pub(crate) fn active_coding_timeline_node_id(nodes: &[CodingTimelineNode]) -> Op
 }
 
 pub(crate) fn workspace_session_dto(record: WorkspaceSessionRecord) -> WorkspaceSessionDto {
+    let summary_record = workspace_session_summary_record_from_record(&record);
+    let summary = workspace_session_summary_dto(&summary_record);
     WorkspaceSessionDto {
-        workspace_session_id: record.id,
-        issue_id: record.issue_id,
-        entity_id: record.entity_id,
+        workspace_session_id: summary.workspace_session_id,
+        issue_id: summary.issue_id,
+        entity_id: summary.entity_id,
+        workspace_type: summary.workspace_type,
+        status: summary.status,
+        author_provider: summary.author_provider,
+        reviewer_provider: summary.reviewer_provider,
+        review_rounds: summary.review_rounds,
+        superpowers_enabled: summary.superpowers_enabled,
+        openspec_enabled: summary.openspec_enabled,
+        messages: record
+            .messages
+            .into_iter()
+            .map(workspace_message_dto)
+            .collect(),
+    }
+}
+
+fn workspace_session_summary_record_from_record(
+    record: &WorkspaceSessionRecord,
+) -> WorkspaceSessionSummaryRecord {
+    WorkspaceSessionSummaryRecord {
+        id: record.id.clone(),
+        project_id: record.project_id.clone(),
+        issue_id: record.issue_id.clone(),
+        entity_id: record.entity_id.clone(),
+        workspace_type: record.workspace_type.clone(),
+        status: record.status.clone(),
+        author_provider: record.author_provider.clone(),
+        reviewer_provider: record.reviewer_provider.clone(),
+        review_rounds: record.review_rounds,
+        superpowers_enabled: record.superpowers_enabled,
+        openspec_enabled: record.openspec_enabled,
+    }
+}
+
+pub(crate) fn workspace_session_summary_dto(
+    record: &WorkspaceSessionSummaryRecord,
+) -> WorkspaceSessionSummaryDto {
+    WorkspaceSessionSummaryDto {
+        workspace_session_id: record.id.clone(),
+        issue_id: record.issue_id.clone(),
+        entity_id: record.entity_id.clone(),
         workspace_type: workspace_type_text(&record.workspace_type).to_string(),
         status: workspace_session_status_text(&record.status).to_string(),
         author_provider: provider_name_text(&record.author_provider).to_string(),
@@ -452,11 +509,6 @@ pub(crate) fn workspace_session_dto(record: WorkspaceSessionRecord) -> Workspace
         review_rounds: record.review_rounds,
         superpowers_enabled: record.superpowers_enabled,
         openspec_enabled: record.openspec_enabled,
-        messages: record
-            .messages
-            .into_iter()
-            .map(workspace_message_dto)
-            .collect(),
     }
 }
 

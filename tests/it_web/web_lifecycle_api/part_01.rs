@@ -193,6 +193,14 @@ async fn generate_endpoints_create_workspace_sessions_and_first_cards() {
         lifecycle["workspace_sessions"][0]["entity_id"],
         "story_spec_0001"
     );
+    assert!(
+        lifecycle["workspace_sessions"][0]
+            .as_object()
+            .expect("workspace session summary")
+            .get("messages")
+            .is_none(),
+        "lifecycle list should return workspace session summaries without full messages"
+    );
 }
 
 #[tokio::test]
@@ -663,4 +671,3 @@ async fn workspace_session_message_run_and_confirm_update_session_state() {
                     .contains("已由 human 确认"))
     );
 }
-

@@ -4,7 +4,7 @@ import type {
   IssueLifecycleResponse,
   LifecycleWorkItem,
   ProductIssue,
-  WorkspaceSession,
+  WorkspaceSessionSummary,
 } from "../../api/types";
 import type {
   LifecycleCard as LifecycleCardData,
@@ -559,7 +559,7 @@ function compactLifecycleTitle(title: string) {
 export function findWorkspaceSession(
   lifecycles: IssueLifecycleResponse[],
   card: LifecycleCardData,
-): WorkspaceSession | null {
+): WorkspaceSessionSummary | null {
   const workspaceType = workspaceTypeForCard(card);
   if (!workspaceType) {
     return null;
@@ -578,7 +578,7 @@ export function findWorkspaceSession(
 
 function workspaceTypeForCard(
   card: LifecycleCardData,
-): WorkspaceSession["workspace_type"] | null {
+): WorkspaceSessionSummary["workspace_type"] | null {
   if (card.kind === "story_spec") {
     return "story";
   }

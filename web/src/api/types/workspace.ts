@@ -27,7 +27,7 @@ export type WorkspaceMessage = {
   created_at: string;
 };
 
-export type WorkspaceSession = {
+export type WorkspaceSessionSummary = {
   workspace_session_id: string;
   issue_id: string;
   entity_id: string;
@@ -45,6 +45,9 @@ export type WorkspaceSession = {
   review_rounds: number;
   superpowers_enabled: boolean;
   openspec_enabled: boolean;
+};
+
+export type WorkspaceSession = WorkspaceSessionSummary & {
   messages: WorkspaceMessage[];
 };
 
