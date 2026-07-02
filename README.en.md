@@ -235,6 +235,224 @@ See also:
 
 ---
 
+## How to Use the System
+
+### 1. Launch & First-Time Dependency Check
+
+#### For end users
+
+```bash
+npx @cadence-aria/cli
+```
+
+The launcher picks a free port, starts the backend, and opens the browser at `http://127.0.0.1:<port>/workbench`.
+
+#### From source
+
+```bash
+pnpm -C web build
+cargo run --locked -- web --workspace . --host 127.0.0.1 --port 4317
+# In another terminal
+cd web && pnpm dev --port 5173
+```
+
+Then open `http://127.0.0.1:5173`. The dev frontend proxies `/api/*` to the backend on port `4317`.
+
+#### First-launch dependency self-check
+
+On first launch Aria checks the environment:
+
+- `node` / `npm` availability;
+- `claude` (Claude Code, required) on `PATH`;
+- `codex` (optional) on `PATH`.
+
+If anything is missing, a dialog guides you to install the missing provider via `npm install -g`. Claude Code must be installed before you can continue; Codex can be skipped and installed later through the **Provider Config** button in the top-right corner.
+
+---
+
+### 2. The Workbench Main UI
+
+The default route is `/workbench`, split into three areas:
+
+- **Left sidebar**: Project list, repositories for the selected Project, and current Issue count.
+- **Issues column**: all Issues under the selected Project.
+- **Detail panel**: when an Issue is selected, shows Story Spec, Design Spec, and Work Item cards derived from it.
+
+---
+
+### 3. Create a Project
+
+1. Click **+ New Project** at the top of the left sidebar.
+2. Enter the Project name.
+3. The new Project appears in the list and is auto-selected.
+
+A Project is the container for requirements. All Issues, Repositories, Specs, and Work Items belong to a Project.
+
+---
+
+### 4. Add a Repository
+
+An Issue must be bound to a code repository, because Story / Design / Work Item generation and execution all rely on that context.
+
+1. In the left sidebar, under **Repositories**, click **+ Add Repository**.
+2. Enter the absolute path of the local repository.
+3. Save. The Repository appears in the list with its name and path.
+
+If the path later becomes invalid, related Issues and derived cards enter a blocked state until you rebind or fix the path.
+
+---
+
+### 5. Create an Issue
+
+1. Click **+ New Issue** near the Issues column.
+2. Select the Repository to bind.
+3. Enter a title and Markdown description (background, ideas, constraints, etc.).
+4. Save. The Issue appears in the Issues list with status `draft`.
+
+Click an Issue card to enter **focus mode**: the right panel filters Story Spec, Design Spec, and Work Item cards to only those derived from the selected Issue.
+
+---
+
+### 6. Generate a Story Spec
+
+1. Select the target Issue in the Issues list.
+2. Click **Generate Story Spec** on the Issue card or in the detail panel.
+3. The **Provider Workspace dialog** opens:
+   - **Left track**: fixed flow nodes and current status (context preparation, split suggestion, draft generation, cross-review, revision, human confirmation).
+   - **Center chat**: the provider suggests splits based on the Issue description and repository context; you can add instructions or answer clarification questions.
+   - **Right artifact pane**: generated Markdown, version history, review comments.
+4. The provider may propose splitting one Issue into multiple Story Specs.
+5. After reviewing, confirm to create the corresponding Story Spec cards.
+6. Each Story Spec card shows its status, e.g. `confirmed` / `v1`.
+
+---
+
+### 7. Generate a Design Spec
+
+A Design Spec can only be derived from a **confirmed** Story Spec.
+
+1. Select a confirmed Story Spec in the detail panel.
+2. Click **Generate Design Spec**.
+3. In the Workspace dialog, the provider proposes:
+   - Story-to-Design mapping (one-to-one or many-to-one);
+   - Design kind: `frontend`, `backend`, or both.
+4. Review the mapping and kinds, then confirm to create the Design Spec cards.
+5. Each Design Spec also supports multiple versions, cross-review, and human confirmation.
+
+---
+
+### 8. Generate a Work Item Plan and Work Items
+
+A Work Item must be derived from both a Story Spec and a Design Spec.
+
+1. Select confirmed Story Specs and Design Specs.
+2. Click **Generate Work Item** / **Prepare Work Item Plan**.
+3. The **Work Item Plan options dialog** opens. Configure:
+   - `include_integration_tests`
+   - `include_e2e_tests`
+   - `force_frontend_backend_split`
+   - `require_execution_plan_confirm`
+4. After confirming the options, the provider generates a Plan containing:
+   - A list of child Work Items;
+   - A dependency graph between Work Items;
+   - Split findings / validator findings.
+5. Review the Plan and confirm. A Work Item Group card is created.
+6. The Work Item Group card shows child Work Items and associated Coding Attempt status.
+
+**Key rule**: a Work Item must have a Plan and human confirmation before entering the Coding stage.
+
+---
+
+### 9. Working Inside the Provider Workspace Dialog
+
+Whether for Story, Design, or Work Item, the Workspace dialog works the same way:
+
+- **Top config bar**: view or adjust provider combination, review rounds, superpowers / OpenSpec constraints, repository context.
+- **Left flow track**: fixed nodes showing where you are in the process.
+- **Center chat area**:
+  - View provider input summaries;
+  - View streaming provider output;
+  - Add instructions or answer clarifications;
+  - View permission requests, review verdicts, stage changes.
+- **Right artifact pane**:
+  - View full Markdown / JSON artifacts;
+  - Switch between versions (v1, v2, …);
+  - View the review comment chain;
+  - View confirmation records.
+
+When the flow reaches a human confirmation node, it pauses until you confirm or request changes, which triggers another revision round.
+
+---
+
+### 10. Enter the Coding Workspace
+
+1. On a Work Item Group or individual Work Item card, click **Open Workspace** / **Start Coding**.
+2. The app navigates to `/workbench/coding/$attemptId`, the Coding Workspace.
+
+Typical flow inside the Coding Workspace:
+
+- **Analyst**: analyzes requirements and code context;
+- **Planner**: produces an execution plan;
+- **Coder**: changes code according to the plan;
+- **Tester**: runs tests and verifies results;
+- **Reviewer**: reviews the changes.
+
+Each role streams events over WebSocket in real time. The left panel shows the Timeline, the center shows chat/output, and the right panel shows Artifacts / Diff / Test Reports.
+
+During execution you may encounter:
+
+- **Permission requests**: the provider asks before sensitive actions like writing files or running commands;
+- **Stage Gates**: the flow pauses at key nodes for human confirmation, change request, or termination;
+- **Execution-plan change requests**: you can ask the provider to revise the plan;
+- **Abort**: stop the current Coding Attempt at any time;
+- **Rollback**: revert to a previous state if the result is unsatisfactory.
+
+---
+
+### 11. Deleting Projects, Issues, and Artifacts
+
+You can delete directly from the Workbench:
+
+- **Project**: click the delete button next to the Project card in the left sidebar;
+- **Repository**: click the delete button in the repository list;
+- **Issue**: click the delete button on the Issue card;
+- **Story Spec / Design Spec / Work Item**: click the delete button on the card in the detail panel.
+
+Deletions are usually soft-deletes at the product index layer, so records can be reconstructed from runtime data if needed.
+
+---
+
+### 12. Refresh and Status Monitoring
+
+- The page polls the current Project’s Issues, Repositories, and Lifecycle data automatically.
+- Click the **Refresh** button to sync manually.
+- Issue and artifact cards show current status, version, confirmation state, and last update time.
+- The current Project’s Issue count is shown at the bottom of the left sidebar.
+
+---
+
+### 13. CLI Companion Commands
+
+In addition to the web UI, Aria provides a CLI:
+
+```bash
+# Check daemon status
+aria daemon status --workspace .
+
+# Start the daemon
+aria daemon run --workspace .
+
+# Run a task directly
+aria task run --workspace . "your requirement here"
+
+# Start the web server
+aria web --workspace . --host 127.0.0.1 --port 4317
+```
+
+However, most day-to-day operations are performed through the `/workbench` web UI.
+
+---
+
 ## License
 
 [MIT](LICENSE)
