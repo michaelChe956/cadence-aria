@@ -217,6 +217,13 @@ async fn work_item_plan_item_optional_choice_can_apply_findings() {
             .any(|node| node.node_type == TimelineNodeType::Revision),
         "optional item findings should use WorkItemDraft rewrite, not generic revision"
     );
+    let input = engine
+        .build_current_work_item_draft_streaming_input(None)
+        .expect("draft streaming input");
+    assert!(input.prompt.contains("[review_findings]"));
+    assert!(input.prompt.contains("evidence: 主路径完整"));
+    assert!(input.prompt.contains("impact: 不影响继续"));
+    assert!(input.prompt.contains("required_action: 可补充说明"));
 }
 
 #[tokio::test]
@@ -377,6 +384,10 @@ async fn work_item_plan_batch_optional_choice_can_apply_findings() {
             .contains("当前版本可以继续，但有可选建议"),
         "batch rewrite prompt should include optional review feedback"
     );
+    assert!(input.prompt.contains("[review_findings]"));
+    assert!(input.prompt.contains("evidence: 主路径完整"));
+    assert!(input.prompt.contains("impact: 不影响继续"));
+    assert!(input.prompt.contains("required_action: 可补充说明"));
 }
 
 #[tokio::test]

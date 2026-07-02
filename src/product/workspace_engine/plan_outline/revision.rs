@@ -1,4 +1,5 @@
 use super::*;
+use crate::product::workspace_engine::review::format_review_feedback;
 
 /// 从当前 session artifact 与 lifecycle 构建 WorkItemPlan revision 的输入三元组。
 ///
@@ -258,6 +259,10 @@ impl WorkspaceEngine {
                     finding.message
                 ));
             }
+            let detailed_feedback = format_review_feedback(verdict);
+            if !verdict.findings.is_empty() && !detailed_feedback.is_empty() {
+                parts.push(detailed_feedback);
+            }
         }
         if let Some(context) = &self.pending_revision_context {
             parts.push(format!("用户补充信息:\n{}", context));
@@ -291,6 +296,10 @@ impl WorkspaceEngine {
                     serialized_string(&finding.severity),
                     finding.message
                 ));
+            }
+            let detailed_feedback = format_review_feedback(verdict);
+            if !verdict.findings.is_empty() && !detailed_feedback.is_empty() {
+                parts.push(detailed_feedback);
             }
         }
         if let Some(context) = context.map(str::trim).filter(|c| !c.is_empty()) {

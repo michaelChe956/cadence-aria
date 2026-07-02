@@ -1,3 +1,4 @@
+use super::review::format_review_feedback;
 use super::*;
 
 pub(crate) fn human_confirm_payload_description(
@@ -213,7 +214,7 @@ impl WorkspaceEngine {
                             let feedback = self
                                 .latest_review_verdict
                                 .as_ref()
-                                .map(|verdict| verdict.comments.clone());
+                                .map(format_review_feedback);
                             self.pending_revision_context = feedback;
                             self.complete_active_node(Some(
                                 "已选择修复当前 Work Item Draft 的可选建议".to_string(),
@@ -229,7 +230,7 @@ impl WorkspaceEngine {
                             self.pending_revision_context = self
                                 .latest_review_verdict
                                 .as_ref()
-                                .map(|verdict| verdict.comments.clone());
+                                .map(format_review_feedback);
                             let outcome = self.rewrite_current_work_item_batch().await?;
                             return match outcome {
                                 WorkItemBatchDecisionOutcome::StartBatchRun => {
@@ -369,8 +370,11 @@ impl WorkspaceEngine {
                 .as_ref()
                 .and_then(|verdict| verdict.work_item_plan_review.as_ref())
                 .is_some_and(|review| {
-                    review.review_scope == WorkItemPlanReviewScope::Outline
-                        && review.review_action == WorkItemPlanReviewAction::ReviseOutline
+                    review.review_action == WorkItemPlanReviewAction::ReviseOutline
+                        || review.verdict == WorkItemPlanReviewVerdict::PlanReopenRequired
+                        || review
+                            .gates
+                            .contains(&WorkItemPlanReviewGate::RequiresPlanReopen)
                 })
     }
 

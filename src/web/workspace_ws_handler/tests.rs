@@ -16,6 +16,14 @@ fn provider_config() -> ProviderConfigSnapshot {
     }
 }
 
+fn workflow_discipline_section(content: &str) -> &str {
+    content
+        .split("[workflow_discipline]")
+        .nth(1)
+        .and_then(|tail| tail.split("[output_schema]").next())
+        .expect("workflow_discipline section")
+}
+
 #[test]
 fn context_note_is_only_valid_in_prepare_context() {
     let msg = WsInMessage::ContextNote {
@@ -426,10 +434,11 @@ async fn start_generation_refreshes_stale_provider_guidance_before_prompting_aut
         .await
         .expect("provider input should be sent")
         .expect("provider input");
-    assert!(input.prompt.contains("当前 author provider 是 Claude Code"));
-    assert!(input.prompt.contains("必须使用结构化 AskUserQuestion"));
-    assert!(!input.prompt.contains("当前 author provider 是 Codex"));
-    assert!(!input.prompt.contains("requestUserInput"));
+    let workflow = workflow_discipline_section(&input.prompt);
+    assert!(workflow.contains("当前 author provider 是 Claude Code"));
+    assert!(workflow.contains("必须使用结构化 AskUserQuestion"));
+    assert!(!workflow.contains("当前 author provider 是 Codex"));
+    assert!(!workflow.contains("requestUserInput"));
 }
 
 #[tokio::test]
@@ -551,10 +560,11 @@ async fn provider_select_refreshes_provider_guidance_in_session_state() {
     };
     assert_eq!(providers.author, ProviderName::ClaudeCode);
     let context = &messages[0].content;
-    assert!(context.contains("当前 author provider 是 Claude Code"));
-    assert!(context.contains("必须使用结构化 AskUserQuestion"));
-    assert!(!context.contains("当前 author provider 是 Codex"));
-    assert!(!context.contains("requestUserInput"));
+    let workflow = workflow_discipline_section(context);
+    assert!(workflow.contains("当前 author provider 是 Claude Code"));
+    assert!(workflow.contains("必须使用结构化 AskUserQuestion"));
+    assert!(!workflow.contains("当前 author provider 是 Codex"));
+    assert!(!workflow.contains("requestUserInput"));
 }
 
 struct PromptRecordingProvider {
