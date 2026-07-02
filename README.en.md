@@ -9,7 +9,7 @@ An AI-assisted software development workbench. Cadence Aria systematically break
 ## Table of Contents
 
 - [Core Capabilities](#core-capabilities)
-- [Workbench Overview](#workbench-overview)
+- [How to Use the System](#how-to-use-the-system)
 - [Tech Stack](#tech-stack)
 - [Quick Start](#quick-start)
 - [Development Guide](#development-guide)
