@@ -105,6 +105,8 @@ Work Item 确认后进入 Coding Workspace：
 - 实时流式事件、权限请求、Stage Gate 与人工确认。
 - 支持执行计划变更、Abort、Diff 查看与回滚（Rollback）。
 
+![Coding Workspace 概览](assets/readme/coding-workspace-overview.jpg)
+
 ---
 
 ## 技术栈

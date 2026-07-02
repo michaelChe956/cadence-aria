@@ -105,6 +105,8 @@ Once a Work Item is confirmed, it enters the Coding Workspace:
 - Real-time streaming events, permission requests, Stage Gates, and human confirmations.
 - Supports execution-plan changes, Abort, Diff viewing, and Rollback.
 
+![Coding Workspace Overview](assets/readme/coding-workspace-overview.jpg)
+
 ---
 
 ## Tech Stack
