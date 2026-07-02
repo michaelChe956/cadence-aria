@@ -2,9 +2,10 @@ use tokio::sync::mpsc;
 
 use crate::product::coding_attempt_store::CodingAttemptStore;
 use crate::product::coding_models::{
-    CodingAttemptScope, CodingExecutionAttempt, CodingGateRequired as CodingGateRequiredModel,
-    CodingRoleRunEvent, CodingRoleRunEventPreview, CodingRoleRunEventSummary,
-    CodingRoleRunEventType, CodingRoleRunSnapshot, CodingTimelineNode, CodingTimelineNodeStatus,
+    CodingAttemptScope, CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
+    CodingGateRequired as CodingGateRequiredModel, CodingRoleRunEvent, CodingRoleRunEventPreview,
+    CodingRoleRunEventSummary, CodingRoleRunEventType, CodingRoleRunSnapshot, CodingTimelineNode,
+    CodingTimelineNodeStatus,
 };
 use crate::product::coding_workspace_engine::CodingWorkspaceEngineError;
 use crate::product::json_store::ProductStoreError;
@@ -47,11 +48,12 @@ pub(crate) fn build_coding_session_state(
         .into_iter()
         .map(stage_gate_required)
         .collect();
-    pending_gates.extend(coding_store.list_open_blocked_gates(
-        &attempt.project_id,
-        &attempt.issue_id,
-        &attempt.id,
-    )?);
+    pending_gates.extend(
+        coding_store
+            .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+            .into_iter()
+            .filter(|gate| blocked_gate_is_actionable_for_attempt(&attempt, gate)),
+    );
     let role_provider_config_snapshot = coding_store.get_role_provider_config_snapshot(
         &attempt.project_id,
         &attempt.issue_id,
@@ -112,6 +114,28 @@ pub(crate) fn build_coding_session_state(
         work_item_execution_plan: Box::new(work_item_execution_plan),
         work_item_handoff: Box::new(work_item_handoff),
     })
+}
+
+fn blocked_gate_is_actionable_for_attempt(
+    attempt: &CodingExecutionAttempt,
+    gate: &CodingGateRequiredModel,
+) -> bool {
+    let stage_matches = match gate.stage.as_ref() {
+        Some(stage) => stage == &attempt.stage,
+        None => true,
+    };
+    if !stage_matches {
+        return false;
+    }
+
+    match attempt.status {
+        CodingAttemptStatus::Blocked | CodingAttemptStatus::WaitingForHuman => true,
+        CodingAttemptStatus::Running => attempt.stage == CodingExecutionStage::FinalConfirm,
+        CodingAttemptStatus::Created
+        | CodingAttemptStatus::Completed
+        | CodingAttemptStatus::Failed
+        | CodingAttemptStatus::Aborted => false,
+    }
 }
 
 pub(crate) fn coding_role_run_snapshots(

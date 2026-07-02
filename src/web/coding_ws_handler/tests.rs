@@ -1,6 +1,8 @@
 use crate::product::app_paths::ProductAppPaths;
+use crate::product::coding_attempt_store::{CodingAttemptStore, CreateBlockedGateInput};
 use crate::product::coding_models::{
-    CodingAttemptScope, CodingAttemptStatus, CodingExecutionStage,
+    CodingAttemptScope, CodingAttemptStatus, CodingExecutionStage, CodingGateAction,
+    CodingGateActionType,
 };
 use crate::product::lifecycle_store::{
     CreateVerificationPlanInput, CreateWorkItemInput, CreateWorkspaceSessionInput, LifecycleStore,
@@ -18,9 +20,9 @@ use crate::web::workspace_ws_types::{ArtifactPayload, ArtifactVersion};
 use tempfile::TempDir;
 
 use super::{
-    CodingExecutionAttempt, CodingWsInMessage, ProviderConfigSnapshot, coding_execution_context,
-    is_coding_ws_message_allowed, select_work_item_markdown,
-    should_resume_runner_after_gate_response,
+    CodingExecutionAttempt, CodingWsInMessage, CodingWsOutMessage, ProviderConfigSnapshot,
+    build_coding_session_state, coding_execution_context, is_coding_ws_message_allowed,
+    select_work_item_markdown, should_resume_runner_after_gate_response,
 };
 
 #[test]
@@ -273,6 +275,88 @@ fn coding_execution_context_uses_workspace_artifact_when_final_compile_is_missin
     assert!(markdown.contains("# Workspace Work Item"));
     assert!(!markdown.contains("# Final Compile Work Item"));
     assert_eq!(context.verification_commands, vec!["cargo check --locked"]);
+}
+
+#[test]
+fn coding_session_state_omits_stale_blocked_gate_for_inactive_stage() {
+    let (_tmp, app_paths, mut attempt) = seed_compiled_work_item_fixture();
+    attempt.status = CodingAttemptStatus::Running;
+    attempt.stage = CodingExecutionStage::CodeReview;
+
+    let coding_store = CodingAttemptStore::new(app_paths);
+    coding_store
+        .save_coding_attempt(&attempt)
+        .expect("save coding attempt");
+    coding_store
+        .create_blocked_gate(CreateBlockedGateInput {
+            attempt_id: attempt.id.clone(),
+            stage: CodingExecutionStage::FinalConfirm,
+            node_id: None,
+            role: None,
+            title: "Shared worktree has uncommitted changes".to_string(),
+            description: "Issue shared worktree has uncommitted changes".to_string(),
+            reason_code: Some("shared_worktree_dirty_manual_gate".to_string()),
+            evidence_refs: Vec::new(),
+            raw_provider_output_ref: None,
+            available_actions: vec![CodingGateAction {
+                action_id: "manual_continue".to_string(),
+                label: "人工继续".to_string(),
+                action_type: CodingGateActionType::ManualContinue,
+            }],
+        })
+        .expect("create blocked gate");
+
+    let state = build_coding_session_state(&coding_store, attempt).expect("coding session state");
+    let CodingWsOutMessage::CodingSessionState { pending_gates, .. } = state else {
+        panic!("expected coding session state");
+    };
+
+    assert!(
+        pending_gates
+            .iter()
+            .all(|gate| gate.reason_code.as_deref() != Some("shared_worktree_dirty_manual_gate")),
+        "stale final_confirm blocked gate must not be exposed while attempt is running code_review"
+    );
+}
+
+#[test]
+fn coding_session_state_keeps_final_confirm_blocked_gate_for_current_stage() {
+    let (_tmp, app_paths, mut attempt) = seed_compiled_work_item_fixture();
+    attempt.status = CodingAttemptStatus::Running;
+    attempt.stage = CodingExecutionStage::FinalConfirm;
+
+    let coding_store = CodingAttemptStore::new(app_paths);
+    coding_store
+        .save_coding_attempt(&attempt)
+        .expect("save coding attempt");
+    coding_store
+        .create_blocked_gate(CreateBlockedGateInput {
+            attempt_id: attempt.id.clone(),
+            stage: CodingExecutionStage::FinalConfirm,
+            node_id: None,
+            role: None,
+            title: "Shared worktree has uncommitted changes".to_string(),
+            description: "Issue shared worktree has uncommitted changes".to_string(),
+            reason_code: Some("shared_worktree_dirty_manual_gate".to_string()),
+            evidence_refs: Vec::new(),
+            raw_provider_output_ref: None,
+            available_actions: vec![CodingGateAction {
+                action_id: "manual_continue".to_string(),
+                label: "人工继续".to_string(),
+                action_type: CodingGateActionType::ManualContinue,
+            }],
+        })
+        .expect("create blocked gate");
+
+    let state = build_coding_session_state(&coding_store, attempt).expect("coding session state");
+    let CodingWsOutMessage::CodingSessionState { pending_gates, .. } = state else {
+        panic!("expected coding session state");
+    };
+
+    assert!(pending_gates.iter().any(|gate| {
+        gate.reason_code.as_deref() == Some("shared_worktree_dirty_manual_gate")
+            && gate.stage.as_ref() == Some(&CodingExecutionStage::FinalConfirm)
+    }));
 }
 
 #[test]
