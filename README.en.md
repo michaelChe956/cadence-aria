@@ -31,7 +31,7 @@ The product backbone is **Project → Repository → Issue**. The home page show
 
 Clicking an Issue enters focus mode; the right three columns automatically filter to that Issue's full derivation chain, making it easy to trace the path from requirement to code.
 
-![Issue Lifecycle Workbench](readme-pic/5341782975854_.pic.jpg)
+![Issue Lifecycle Workbench](assets/readme/issue-lifecycle-workbench-overview.jpg)
 
 ### 2. Project / Repository / Issue Management
 
@@ -41,7 +41,7 @@ The left sidebar centrally manages Projects and Repositories:
 - Add local repository paths to a Project; Issues are automatically bound to code context upon creation.
 - Issues support Markdown descriptions, phases (clarification / development), and status tracking.
 
-![Project and Repository Management](readme-pic/5351782975870_.pic.jpg)
+![Project and Repository Management](assets/readme/project-repository-management.jpg)
 
 ### 3. AI Provider Driver & Dependency Self-Check
 
@@ -53,7 +53,7 @@ Aria depends on **Claude Code** (required) and **Codex** (optional) as underlyin
 
 The provider architecture is extensible; OpenCode, Kimi Code, and other AI executors can be added with low friction.
 
-![Issue Description: Provider Dependency Self-Check](readme-pic/5361782975881_.pic.jpg)
+![Issue Description: Provider Dependency Self-Check](assets/readme/provider-dependency-self-check.jpg)
 
 ### 4. Story / Design / Work Item Generation & Version History
 
@@ -64,13 +64,13 @@ Every artifact card supports:
 - **Version history**: every generation and revision is kept as a version (v1, v2, …) with full Markdown and review records.
 - **Human confirmation**: confirmed artifacts can flow downstream.
 
-![Story Spec Version History](readme-pic/5371782975894_.pic.jpg)
+![Story Spec Version History](assets/readme/story-spec-version-history.jpg)
 
-![Story Spec Full Preview](readme-pic/5381782975905_.pic.jpg)
+![Story Spec Full Preview](assets/readme/story-spec-full-preview.jpg)
 
-![Design Spec Version History](readme-pic/5391782975921_.pic.jpg)
+![Design Spec Version History](assets/readme/design-spec-version-history.jpg)
 
-![Design Spec Full Preview](readme-pic/5401782975932_.pic.jpg)
+![Design Spec Full Preview](assets/readme/design-spec-full-preview.jpg)
 
 ### 5. Work Item Group & Execution Plan
 
@@ -83,7 +83,7 @@ Work Items are organized as Groups containing:
 
 After a Plan is generated and human-confirmed, the Work Item can enter the Coding Workspace for development, testing, review, rework, and final acceptance.
 
-![Work Item Group Details](readme-pic/5411782975950_.pic.jpg)
+![Work Item Group Details](assets/readme/work-item-group-details.jpg)
 
 ### 6. Provider Workspace Dialog
 
@@ -93,9 +93,9 @@ A unified conversational workspace hosts the full lifecycle of Story, Design, an
 - Center chat area shows provider inputs, outputs, clarification Q&A, and user instructions.
 - Right artifact area shows Markdown/JSON artifacts, version history, review comments, and confirmation records.
 
-![Story Spec Review Flow](readme-pic/5421782975994_.pic.jpg)
+![Story Spec Review Flow](assets/readme/story-spec-review-flow.jpg)
 
-![Design Spec Review Flow](readme-pic/5441782976041_.pic.jpg)
+![Design Spec Review Flow](assets/readme/design-spec-review-flow.jpg)
 
 ### 7. Coding Workspace
 

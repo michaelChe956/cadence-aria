@@ -31,7 +31,7 @@ AI 辅助的软件开发工作平台。Cadence Aria 把需求（Issue）系统�
 
 点击 Issue 进入聚焦态，右侧三列自动过滤出该 Issue 的完整派生链路，方便追踪从需求到代码的完整路径。
 
-![Issue 生命周期工作台](readme-pic/5341782975854_.pic.jpg)
+![Issue 生命周期工作台](assets/readme/issue-lifecycle-workbench-overview.jpg)
 
 ### 2. Project / Repository / Issue 管理
 
@@ -41,7 +41,7 @@ AI 辅助的软件开发工作平台。Cadence Aria 把需求（Issue）系统�
 - 为 Project 添加本地代码库路径，Issue 自动生成即绑定代码上下文。
 - Issue 支持 Markdown 描述、阶段（clarification / development）与状态追踪。
 
-![Project 与代码库管理](readme-pic/5351782975870_.pic.jpg)
+![Project 与代码库管理](assets/readme/project-repository-management.jpg)
 
 ### 3. AI Provider 驱动与依赖自检
 
@@ -53,7 +53,7 @@ Aria 默认依赖 **Claude Code**（必装）与 **Codex**（可选）作为底�
 
 Provider 架构可扩展，后续可低成本接入 OpenCode、Kimi Code 等新的 AI 执行器。
 
-![Issue 描述：Provider 依赖自检](readme-pic/5361782975881_.pic.jpg)
+![Issue 描述：Provider 依赖自检](assets/readme/provider-dependency-self-check.jpg)
 
 ### 4. Story / Design / Work Item 生成与版本历史
 
@@ -64,13 +64,13 @@ Provider 架构可扩展，后续可低成本接入 OpenCode、Kimi Code 等新�
 - **版本历史**：每次生成与修订都保留版本（v1、v2 …），可查看 Markdown 全文与审核记录。
 - **人工确认**：确认后的产物才能进入下游派生。
 
-![Story Spec 版本历史](readme-pic/5371782975894_.pic.jpg)
+![Story Spec 版本历史](assets/readme/story-spec-version-history.jpg)
 
-![Story Spec 全文预览](readme-pic/5381782975905_.pic.jpg)
+![Story Spec 全文预览](assets/readme/story-spec-full-preview.jpg)
 
-![Design Spec 版本历史](readme-pic/5391782975921_.pic.jpg)
+![Design Spec 版本历史](assets/readme/design-spec-version-history.jpg)
 
-![Design Spec 全文预览](readme-pic/5401782975932_.pic.jpg)
+![Design Spec 全文预览](assets/readme/design-spec-full-preview.jpg)
 
 ### 5. Work Item Group 与执行计划
 
@@ -83,7 +83,7 @@ Work Item 以 Group 形式组织，包含：
 
 生成 Plan 并经人工确认后，方可进入 Coding Workspace 执行开发、测试、Review、Rework 与最终验收。
 
-![Work Item Group 明细](readme-pic/5411782975950_.pic.jpg)
+![Work Item Group 明细](assets/readme/work-item-group-details.jpg)
 
 ### 6. Provider Workspace 弹窗
 
@@ -93,9 +93,9 @@ Work Item 以 Group 形式组织，包含：
 - 中间对话区展示 provider 输入、输出、澄清问答与用户补充指令。
 - 右侧产物区展示 Markdown/JSON 产物、版本历史、Review 意见与确认记录。
 
-![Story Spec 审核流程](readme-pic/5421782975994_.pic.jpg)
+![Story Spec 审核流程](assets/readme/story-spec-review-flow.jpg)
 
-![Design Spec 审核流程](readme-pic/5441782976041_.pic.jpg)
+![Design Spec 审核流程](assets/readme/design-spec-review-flow.jpg)
 
 ### 7. Coding Workspace
 
