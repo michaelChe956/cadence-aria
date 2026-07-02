@@ -131,15 +131,11 @@ async fn workspace_ws_abort_discards_partial_stream_without_completion() {
     for _ in 0..80 {
         match recv_json(&mut ws).await {
             WsOutMessage::StageChange { stage } if stage == "prepare_context" => {
-                let lifecycle = lifecycle_json(root.path()).await;
-                let messages = lifecycle["workspace_sessions"][0]["messages"]
-                    .as_array()
-                    .expect("messages");
+                let messages = persisted_workspace_messages(root.path());
                 assert_eq!(messages.len(), 2);
-                assert!(messages.iter().any(|message| message["role"] == "system"));
+                assert!(messages.iter().any(|message| message.role == "system"));
                 assert!(messages.iter().any(|message| {
-                    message["role"] == "user"
-                        && message["content"] == long_message("abort_instruction")
+                    message.role == "user" && message.content == long_message("abort_instruction")
                 }));
                 drop(ws);
                 server.abort();

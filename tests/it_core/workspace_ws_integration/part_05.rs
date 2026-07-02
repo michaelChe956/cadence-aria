@@ -439,6 +439,15 @@ async fn lifecycle_json(root: &std::path::Path) -> Value {
     lifecycle
 }
 
+fn persisted_workspace_messages(
+    root: &std::path::Path,
+) -> Vec<cadence_aria::product::models::WorkspaceMessageRecord> {
+    LifecycleStore::new(ProductAppPaths::new(root.join(".aria")))
+        .get_workspace_session("workspace_session_0001")
+        .expect("workspace session")
+        .messages
+}
+
 async fn send_json(
     ws: &mut tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,

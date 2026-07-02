@@ -10,7 +10,7 @@ import {
   mkdirSync,
   copyFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -86,6 +86,13 @@ test("default web mode injects --port and forwards to binary", async () => {
   assert.ok(existsSync(argsFile), "fake 二进制应被调用");
   const received = JSON.parse(readFileSync(argsFile, "utf8"));
   assert.equal(received[0], "web");
+  const workspaceIndex = received.indexOf("--workspace");
+  assert.notEqual(workspaceIndex, -1, "默认 web mode 应注入 --workspace");
+  assert.equal(
+    received[workspaceIndex + 1],
+    homedir(),
+    "默认 web mode 应以用户 home 作为 workspace root，使产品数据落到 ~/.aria",
+  );
   assert.ok(received.includes("--port"), "应注入 --port");
   assert.ok(
     received.includes("--host") && received.includes("127.0.0.1"),

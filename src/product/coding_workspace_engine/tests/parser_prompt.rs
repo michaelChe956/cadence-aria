@@ -53,6 +53,30 @@ fn coding_prompt_guides_pnpm_install_when_frontend_dependencies_are_missing() {
 }
 
 #[test]
+fn coding_prompt_includes_final_compile_work_item_context_and_commands() {
+    let attempt = test_attempt("coding_attempt_0001");
+    let context = CodingExecutionContext {
+        work_item_markdown: Some(
+            "# Final Compile Work Item\n\n- Work Item ID: work_item_compile_001\n\n## Planned Implementation Context\n\nuse context.rs"
+                .to_string(),
+        ),
+        verification_commands: vec![
+            "cargo test --locked --lib coding_execution_context".to_string(),
+        ],
+    };
+
+    let prompt = build_coding_prompt(&attempt, &context, None, None);
+
+    assert!(prompt.contains("验证命令:"));
+    assert!(prompt.contains("- cargo test --locked --lib coding_execution_context"));
+    assert!(prompt.contains("已确认 Work Item:"));
+    assert!(prompt.contains("# Final Compile Work Item"));
+    assert!(prompt.contains("work_item_compile_001"));
+    assert!(prompt.contains("Planned Implementation Context"));
+    assert!(prompt.contains("优先按已确认 Work Item 的文件落点、范围和验证命令执行"));
+}
+
+#[test]
 fn coding_delta_prompt_guides_pnpm_install_when_frontend_dependencies_are_missing() {
     let attempt = test_attempt("coding_attempt_0001");
     let context = CodingExecutionContext::default();

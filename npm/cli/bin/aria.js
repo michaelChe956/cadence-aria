@@ -3,6 +3,7 @@
 
 const { spawn } = require("node:child_process");
 const http = require("node:http");
+const { homedir } = require("node:os");
 const { resolveBinary } = require("../lib/platform.js");
 const { planInvocation } = require("../lib/args.js");
 const { pickFreePort } = require("../lib/port.js");
@@ -66,7 +67,15 @@ async function main() {
   // 默认 web 模式：launcher 自选端口并以 web --port <p> --host 127.0.0.1 传入。
   if (plan.defaultWebMode) {
     port = await pickFreePort();
-    forwardArgs = ["web", "--port", String(port), "--host", "127.0.0.1"];
+    forwardArgs = [
+      "web",
+      "--workspace",
+      homedir(),
+      "--port",
+      String(port),
+      "--host",
+      "127.0.0.1",
+    ];
   }
 
   const child = spawn(binary, forwardArgs, { stdio: "inherit" });

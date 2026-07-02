@@ -19,13 +19,14 @@ use crate::product::json_store::ProductStoreError;
 use super::active_coding_timeline_node_id;
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::models::{
-    ProviderName, WorkItemExecutionPlanStatus, WorkspaceSessionRecord, WorkspaceSessionStatus,
-    WorkspaceType,
+    LifecycleWorkItemRecord, ProviderName, VerificationPlan, WorkItemExecutionPlanStatus,
+    WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType,
 };
 use crate::product::repository_store::RepositoryStore;
 use crate::product::test_executor::{
     TestCommandSpec, discover_test_commands, planned_test_commands_from_markdown,
 };
+use crate::product::work_item_plan_store::WorkItemPlanStore;
 
 pub(crate) fn current_work_item_id_for_attempt(attempt: &CodingExecutionAttempt) -> &str {
     attempt
@@ -34,12 +35,171 @@ pub(crate) fn current_work_item_id_for_attempt(attempt: &CodingExecutionAttempt)
         .unwrap_or(&attempt.work_item_id)
 }
 
+#[derive(Debug, Clone, Default)]
+struct CompiledWorkItemContext {
+    markdown: Option<String>,
+    verification_commands: Vec<String>,
+    needs_workspace_artifact_fallback: bool,
+}
+
 pub(crate) fn coding_execution_context(
     app_paths: &ProductAppPaths,
     attempt: &CodingExecutionAttempt,
 ) -> Result<CodingExecutionContext, ProductStoreError> {
     let current_work_item_id = current_work_item_id_for_attempt(attempt);
     let lifecycle = LifecycleStore::new(app_paths.clone());
+
+    let compiled_context =
+        compiled_work_item_context(&lifecycle, app_paths, attempt, current_work_item_id)?;
+    let workspace_markdown = if compiled_context.markdown.is_none()
+        || compiled_context.needs_workspace_artifact_fallback
+    {
+        workspace_artifact_work_item_markdown(&lifecycle, attempt, current_work_item_id)?
+    } else {
+        None
+    };
+    let work_item_markdown =
+        merge_work_item_markdown(compiled_context.markdown, workspace_markdown);
+    let verification_commands = merge_verification_commands(
+        compiled_context.verification_commands,
+        work_item_markdown.as_deref(),
+    );
+
+    Ok(CodingExecutionContext {
+        work_item_markdown,
+        verification_commands,
+    })
+}
+
+fn compiled_work_item_context(
+    lifecycle: &LifecycleStore,
+    app_paths: &ProductAppPaths,
+    attempt: &CodingExecutionAttempt,
+    current_work_item_id: &str,
+) -> Result<CompiledWorkItemContext, ProductStoreError> {
+    let Some(work_item) = lifecycle
+        .list_work_items(&attempt.project_id, &attempt.issue_id)?
+        .into_iter()
+        .find(|item| item.id == current_work_item_id)
+    else {
+        return Ok(CompiledWorkItemContext::default());
+    };
+
+    let verification_plan = match work_item.verification_plan_ref.as_deref() {
+        Some(plan_id) => Some(lifecycle.get_verification_plan(
+            &attempt.project_id,
+            &attempt.issue_id,
+            plan_id,
+        )?),
+        None => None,
+    };
+    let verification_commands = verification_plan
+        .as_ref()
+        .map(verification_command_lines)
+        .unwrap_or_default();
+    let needs_draft_supplement = needs_source_draft_supplement(&work_item);
+    let draft_supplement = final_compile_draft_supplement(app_paths, attempt, &work_item)?;
+    let needs_workspace_artifact_fallback = needs_draft_supplement && draft_supplement.is_none();
+
+    Ok(CompiledWorkItemContext {
+        markdown: Some(compiled_work_item_markdown(
+            &work_item,
+            verification_plan.as_ref(),
+            draft_supplement.as_deref(),
+        )),
+        verification_commands,
+        needs_workspace_artifact_fallback,
+    })
+}
+
+fn needs_source_draft_supplement(work_item: &LifecycleWorkItemRecord) -> bool {
+    work_item
+        .planned_implementation_context
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .is_empty()
+        || work_item
+            .planned_handoff_summary
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default()
+            .is_empty()
+}
+
+fn final_compile_draft_supplement(
+    app_paths: &ProductAppPaths,
+    attempt: &CodingExecutionAttempt,
+    work_item: &LifecycleWorkItemRecord,
+) -> Result<Option<String>, ProductStoreError> {
+    if !needs_source_draft_supplement(work_item) {
+        return Ok(None);
+    }
+    let Some(plan_id) = work_item.source_work_item_plan_id.as_deref() else {
+        return Ok(None);
+    };
+    let Some(draft_id) = work_item.source_draft_id.as_deref() else {
+        return Ok(None);
+    };
+
+    let draft = WorkItemPlanStore::new(app_paths.clone())
+        .list_draft_records(&attempt.project_id, &attempt.issue_id, plan_id)?
+        .into_iter()
+        .find(|record| record.draft_id == draft_id);
+
+    let Some(draft) = draft else {
+        return Ok(None);
+    };
+
+    let mut markdown = String::new();
+    markdown.push_str(&format!("- Draft ID: {}\n", draft.draft_id));
+    markdown.push_str(&format!("- Outline ID: {}\n", draft.outline_id));
+    push_markdown_section(
+        &mut markdown,
+        "Draft Implementation Context",
+        Some(&draft.candidate.implementation_context),
+    );
+    push_markdown_section(
+        &mut markdown,
+        "Draft Handoff Summary",
+        Some(&draft.candidate.handoff_summary),
+    );
+    push_string_list(
+        &mut markdown,
+        "Draft Exclusive Write Scopes",
+        &draft.candidate.exclusive_write_scopes,
+    );
+    push_string_list(
+        &mut markdown,
+        "Draft Forbidden Write Scopes",
+        &draft.candidate.forbidden_write_scopes,
+    );
+    push_string_list(
+        &mut markdown,
+        "Draft Depends On Outline IDs",
+        &draft.candidate.depends_on_outline_ids,
+    );
+    push_string_list(
+        &mut markdown,
+        "Draft Required Handoff From Outline IDs",
+        &draft.candidate.required_handoff_from_outline_ids,
+    );
+    if !draft.candidate.verification_plan.is_null() {
+        push_markdown_section(
+            &mut markdown,
+            "Draft Verification Plan JSON",
+            Some(&draft.candidate.verification_plan.to_string()),
+        );
+    }
+
+    Ok((!markdown.trim().is_empty()).then_some(markdown))
+}
+
+fn workspace_artifact_work_item_markdown(
+    lifecycle: &LifecycleStore,
+    attempt: &CodingExecutionAttempt,
+    current_work_item_id: &str,
+) -> Result<Option<String>, ProductStoreError> {
     let sessions = lifecycle.list_workspace_sessions(&attempt.project_id, &attempt.issue_id)?;
     let work_item_session = sessions
         .iter()
@@ -55,7 +215,7 @@ pub(crate) fn coding_execution_context(
                     && session.workspace_type == WorkspaceType::WorkItem
             })
         });
-    let work_item_markdown = match work_item_session {
+    Ok(match work_item_session {
         Some(session) => lifecycle
             .list_artifact_versions(&session.id)?
             .into_iter()
@@ -64,19 +224,166 @@ pub(crate) fn coding_execution_context(
             .and_then(|markdown| select_work_item_markdown(Some(markdown), session))
             .or_else(|| select_work_item_markdown(None, session)),
         None => None,
-    };
-    let verification_commands = work_item_markdown
-        .as_deref()
-        .map(planned_test_commands_from_markdown)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|spec| spec.command.join(" "))
-        .collect();
-
-    Ok(CodingExecutionContext {
-        work_item_markdown,
-        verification_commands,
     })
+}
+
+fn compiled_work_item_markdown(
+    work_item: &LifecycleWorkItemRecord,
+    verification_plan: Option<&VerificationPlan>,
+    draft_supplement: Option<&str>,
+) -> String {
+    let mut markdown = String::new();
+    markdown.push_str("# Final Compile Work Item\n\n");
+    markdown.push_str(&format!("- Work Item ID: {}\n", work_item.id));
+    markdown.push_str(&format!("- Title: {}\n", work_item.title));
+    markdown.push_str(&format!("- Kind: {}\n", work_item.kind.as_str()));
+    push_optional_line(
+        &mut markdown,
+        "source_work_item_plan_id",
+        work_item.source_work_item_plan_id.as_deref(),
+    );
+    push_optional_line(
+        &mut markdown,
+        "source_outline_id",
+        work_item.source_outline_id.as_deref(),
+    );
+    push_optional_line(
+        &mut markdown,
+        "source_draft_id",
+        work_item.source_draft_id.as_deref(),
+    );
+    push_optional_line(
+        &mut markdown,
+        "verification_plan_ref",
+        work_item.verification_plan_ref.as_deref(),
+    );
+
+    push_markdown_section(
+        &mut markdown,
+        "Planned Implementation Context",
+        work_item.planned_implementation_context.as_deref(),
+    );
+    push_markdown_section(
+        &mut markdown,
+        "Planned Handoff Summary",
+        work_item.planned_handoff_summary.as_deref(),
+    );
+    push_string_list(&mut markdown, "Story Spec IDs", &work_item.story_spec_ids);
+    push_string_list(&mut markdown, "Design Spec IDs", &work_item.design_spec_ids);
+    push_string_list(&mut markdown, "Depends On", &work_item.depends_on);
+    push_string_list(
+        &mut markdown,
+        "Required Handoff From",
+        &work_item.required_handoff_from,
+    );
+    push_string_list(
+        &mut markdown,
+        "Exclusive Write Scopes",
+        &work_item.exclusive_write_scopes,
+    );
+    push_string_list(
+        &mut markdown,
+        "Forbidden Write Scopes",
+        &work_item.forbidden_write_scopes,
+    );
+
+    if let Some(plan) = verification_plan {
+        markdown.push_str("\n## Verification Plan\n\n");
+        markdown.push_str(&format!("- Verification Plan ID: {}\n", plan.id));
+        markdown.push_str(&format!("- Scope: {}\n", plan.scope.as_str()));
+        if !plan.commands.is_empty() {
+            markdown.push_str("\n### 验证命令\n\n");
+            for command in &plan.commands {
+                markdown.push_str(&format!(
+                    "- `{}`: {} (cwd: {}, required: {})\n",
+                    command.label, command.command, command.cwd, command.required
+                ));
+            }
+        }
+        push_string_list(&mut markdown, "Required Gates", &plan.required_gates);
+        push_string_list(&mut markdown, "Risk Notes", &plan.risk_notes);
+    }
+
+    push_markdown_section(&mut markdown, "Source Draft Supplement", draft_supplement);
+    markdown
+}
+
+fn verification_command_lines(plan: &VerificationPlan) -> Vec<String> {
+    plan.commands
+        .iter()
+        .map(|command| command.command.trim())
+        .filter(|command| !command.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn merge_work_item_markdown(
+    compiled_markdown: Option<String>,
+    workspace_markdown: Option<String>,
+) -> Option<String> {
+    match (compiled_markdown, workspace_markdown) {
+        (Some(compiled), Some(workspace))
+            if !workspace.trim().is_empty() && workspace.trim() != compiled.trim() =>
+        {
+            Some(format!(
+                "{}\n\n---\n\n## Workspace Artifact Snapshot\n\n{}",
+                compiled.trim(),
+                workspace.trim()
+            ))
+        }
+        (Some(compiled), _) => Some(compiled),
+        (None, Some(workspace)) if !workspace.trim().is_empty() => Some(workspace),
+        (None, _) => None,
+    }
+}
+
+fn merge_verification_commands(
+    compiled_commands: Vec<String>,
+    markdown: Option<&str>,
+) -> Vec<String> {
+    let mut commands = Vec::new();
+    for command in compiled_commands {
+        push_unique_command(&mut commands, command);
+    }
+    if commands.is_empty()
+        && let Some(markdown) = markdown
+    {
+        for spec in planned_test_commands_from_markdown(markdown) {
+            push_unique_command(&mut commands, spec.command.join(" "));
+        }
+    }
+    commands
+}
+
+fn push_unique_command(commands: &mut Vec<String>, command: String) {
+    let command = command.trim();
+    if !command.is_empty() && !commands.iter().any(|existing| existing == command) {
+        commands.push(command.to_string());
+    }
+}
+
+fn push_optional_line(markdown: &mut String, label: &str, value: Option<&str>) {
+    if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
+        markdown.push_str(&format!("- {label}: {}\n", value.trim()));
+    }
+}
+
+fn push_markdown_section(markdown: &mut String, heading: &str, value: Option<&str>) {
+    if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
+        markdown.push_str(&format!("\n## {heading}\n\n{}\n", value.trim()));
+    }
+}
+
+fn push_string_list(markdown: &mut String, heading: &str, values: &[String]) {
+    if values.is_empty() {
+        return;
+    }
+    markdown.push_str(&format!("\n## {heading}\n\n"));
+    for value in values {
+        markdown.push_str("- ");
+        markdown.push_str(value);
+        markdown.push('\n');
+    }
 }
 
 pub(crate) fn ensure_work_item_execution_plan_confirmed(

@@ -1,12 +1,24 @@
-use crate::product::coding_models::{CodingAttemptStatus, CodingExecutionStage};
+use crate::product::app_paths::ProductAppPaths;
+use crate::product::coding_models::{
+    CodingAttemptScope, CodingAttemptStatus, CodingExecutionStage,
+};
+use crate::product::lifecycle_store::{
+    CreateVerificationPlanInput, CreateWorkItemInput, CreateWorkspaceSessionInput, LifecycleStore,
+};
 use crate::product::models::{
-    ProviderName, WorkspaceMessageRecord, WorkspaceSessionRecord, WorkspaceSessionStatus,
-    WorkspaceType,
+    ProviderName, RepositoryProfileConfidence, VerificationCommand, VerificationCommandSafety,
+    VerificationCommandSource, VerificationFallbackPolicy, VerificationScope,
+    WorkItemDraftCandidate, WorkItemDraftRecord, WorkItemDraftStatus, WorkItemGenerationMode,
+    WorkItemKind, WorkItemPlanStatus, WorkspaceMessageRecord, WorkspaceSessionRecord,
+    WorkspaceSessionStatus, WorkspaceType,
 };
 use crate::product::test_executor::planned_test_commands_from_markdown;
+use crate::product::work_item_plan_store::WorkItemPlanStore;
+use crate::web::workspace_ws_types::{ArtifactPayload, ArtifactVersion};
+use tempfile::TempDir;
 
 use super::{
-    CodingExecutionAttempt, CodingWsInMessage, ProviderConfigSnapshot,
+    CodingExecutionAttempt, CodingWsInMessage, ProviderConfigSnapshot, coding_execution_context,
     is_coding_ws_message_allowed, select_work_item_markdown,
     should_resume_runner_after_gate_response,
 };
@@ -49,6 +61,218 @@ fn falls_back_to_assistant_artifact_when_persisted_markdown_lacks_commands() {
             "uv", "run", "python", "-m", "unittest", "discover", "-s", "tests", "-v"
         ]
     );
+}
+
+#[test]
+fn coding_execution_context_uses_final_compile_work_item_when_workspace_artifact_missing() {
+    let (_tmp, app_paths, attempt) = seed_compiled_work_item_fixture();
+
+    let context = coding_execution_context(&app_paths, &attempt).expect("coding context");
+
+    let markdown = context.work_item_markdown.expect("work item markdown");
+    assert!(markdown.contains("# Final Compile Work Item"));
+    assert!(markdown.contains("work_item_compile_20260702063721302_001"));
+    assert!(markdown.contains("Final Compile title"));
+    assert!(markdown.contains("source_work_item_plan_id: issue_work_item_plan_0001"));
+    assert!(markdown.contains("source_outline_id: outline_backend"));
+    assert!(markdown.contains("source_draft_id: draft_backend"));
+    assert!(markdown.contains("planned implementation context for coder"));
+    assert!(markdown.contains("src/web/coding_ws_handler/context.rs"));
+    assert!(markdown.contains("forbidden/path"));
+    assert!(markdown.contains("verification_plan_compile_20260702063721302_001"));
+    assert!(markdown.contains("cargo test --locked --lib coding_execution_context"));
+    assert_eq!(
+        context.verification_commands,
+        vec!["cargo test --locked --lib coding_execution_context".to_string()]
+    );
+}
+
+#[test]
+fn coding_execution_context_supplements_source_draft_when_final_compile_context_is_missing() {
+    let (_tmp, app_paths, mut attempt) = seed_compiled_work_item_fixture();
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    let sparse_work_item_id = "work_item_compile_sparse_001";
+    let plan_id = "issue_work_item_plan_0001";
+    let draft_id = "draft_sparse_backend";
+
+    lifecycle
+        .create_work_item(CreateWorkItemInput {
+            id: Some(sparse_work_item_id.to_string()),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            title: "Sparse final compile title".to_string(),
+            source_work_item_plan_id: Some(plan_id.to_string()),
+            source_outline_id: Some("outline_sparse_backend".to_string()),
+            source_draft_id: Some(draft_id.to_string()),
+            planned_implementation_context: None,
+            planned_handoff_summary: None,
+            verification_plan_ref: None,
+            plan_status: WorkItemPlanStatus::Confirmed,
+            ..Default::default()
+        })
+        .expect("create sparse work item");
+
+    WorkItemPlanStore::new(app_paths.clone())
+        .put_draft_record(&WorkItemDraftRecord {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            plan_id: plan_id.to_string(),
+            draft_id: draft_id.to_string(),
+            outline_id: "outline_sparse_backend".to_string(),
+            generation_round_id: "round_001".to_string(),
+            batch_id: None,
+            attempt_index: 1,
+            outline_version_ref: "outline_version_001".to_string(),
+            generation_mode: WorkItemGenerationMode::Serial,
+            candidate: WorkItemDraftCandidate {
+                outline_id: "outline_sparse_backend".to_string(),
+                title: "Draft sparse backend".to_string(),
+                kind: WorkItemKind::Backend,
+                goal: "restore draft context".to_string(),
+                implementation_context: "draft implementation context used only as supplement"
+                    .to_string(),
+                exclusive_write_scopes: vec!["src/web/coding_ws_handler/context.rs".to_string()],
+                forbidden_write_scopes: vec!["forbidden/draft/path".to_string()],
+                depends_on_outline_ids: Vec::new(),
+                required_handoff_from_outline_ids: Vec::new(),
+                handoff_summary: "draft handoff summary used only as supplement".to_string(),
+                verification_plan: serde_json::json!({
+                    "commands": [
+                        { "command": "cargo check --locked", "label": "check" }
+                    ]
+                }),
+            },
+            status: WorkItemDraftStatus::Accepted,
+            active: true,
+            superseded_by_draft_id: None,
+            supersede_reason: None,
+            copied_from_draft_id: None,
+            review_node_id: None,
+            review_verdict_ref: None,
+            generated_from_node_id: "node_draft_author".to_string(),
+            accepted_at: Some("2026-07-02T00:00:00Z".to_string()),
+            superseded_at: None,
+            created_at: "2026-07-02T00:00:00Z".to_string(),
+            updated_at: "2026-07-02T00:00:00Z".to_string(),
+        })
+        .expect("put draft record");
+
+    attempt.work_item_id = sparse_work_item_id.to_string();
+    attempt.current_work_item_id = Some(sparse_work_item_id.to_string());
+
+    let context = coding_execution_context(&app_paths, &attempt).expect("coding context");
+    let markdown = context.work_item_markdown.expect("work item markdown");
+
+    assert!(markdown.contains("# Final Compile Work Item"));
+    assert!(markdown.contains("Sparse final compile title"));
+    assert!(markdown.contains("## Source Draft Supplement"));
+    assert!(markdown.contains("draft implementation context used only as supplement"));
+    assert!(markdown.contains("draft handoff summary used only as supplement"));
+}
+
+#[test]
+fn coding_execution_context_prefers_final_compile_over_workspace_artifact() {
+    let (_tmp, app_paths, attempt) = seed_compiled_work_item_fixture();
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    let session = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "work_item_compile_20260702063721302_001".to_string(),
+            workspace_type: WorkspaceType::WorkItem,
+            author_provider: ProviderName::Fake,
+            reviewer_provider: ProviderName::Fake,
+            review_rounds: 1,
+            superpowers_enabled: true,
+            openspec_enabled: true,
+        })
+        .expect("create workspace session");
+
+    lifecycle
+        .append_artifact_version(
+            &session.id,
+            ArtifactVersion {
+                version: 1,
+                payload: ArtifactPayload::Markdown {
+                    markdown:
+                        "# Workspace Work Item\n\n## 验证命令\n\n```bash\ncargo check --locked\n```"
+                            .to_string(),
+                    diff: None,
+                },
+                generated_by: ProviderName::Fake,
+                reviewed_by: Some(ProviderName::Fake),
+                review_verdict: None,
+                confirmed_by: Some("user".to_string()),
+                is_current: true,
+                created_at: "2026-07-02T00:00:00Z".to_string(),
+                source_node_id: "node_0001".to_string(),
+            },
+        )
+        .expect("append artifact version");
+
+    let context = coding_execution_context(&app_paths, &attempt).expect("coding context");
+    let markdown = context.work_item_markdown.expect("work item markdown");
+    assert!(markdown.contains("# Final Compile Work Item"));
+    assert!(markdown.contains("planned implementation context for coder"));
+    assert!(!markdown.contains("## Workspace Artifact Snapshot"));
+    assert!(!markdown.contains("# Workspace Work Item"));
+    assert_eq!(
+        context.verification_commands,
+        vec!["cargo test --locked --lib coding_execution_context".to_string()]
+    );
+}
+
+#[test]
+fn coding_execution_context_uses_workspace_artifact_when_final_compile_is_missing() {
+    let (_tmp, app_paths, mut attempt) = seed_compiled_work_item_fixture();
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    let legacy_work_item_id = "legacy_work_item_from_workspace";
+    attempt.work_item_id = legacy_work_item_id.to_string();
+    attempt.current_work_item_id = Some(legacy_work_item_id.to_string());
+
+    let session = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: legacy_work_item_id.to_string(),
+            workspace_type: WorkspaceType::WorkItem,
+            author_provider: ProviderName::Fake,
+            reviewer_provider: ProviderName::Fake,
+            review_rounds: 1,
+            superpowers_enabled: true,
+            openspec_enabled: true,
+        })
+        .expect("create workspace session");
+
+    lifecycle
+        .append_artifact_version(
+            &session.id,
+            ArtifactVersion {
+                version: 1,
+                payload: ArtifactPayload::Markdown {
+                    markdown:
+                        "# Workspace Work Item\n\n## 验证命令\n\n```bash\ncargo check --locked\n```"
+                            .to_string(),
+                    diff: None,
+                },
+                generated_by: ProviderName::Fake,
+                reviewed_by: Some(ProviderName::Fake),
+                review_verdict: None,
+                confirmed_by: Some("user".to_string()),
+                is_current: true,
+                created_at: "2026-07-02T00:00:00Z".to_string(),
+                source_node_id: "node_0001".to_string(),
+            },
+        )
+        .expect("append artifact version");
+
+    let context = coding_execution_context(&app_paths, &attempt).expect("coding context");
+    let markdown = context.work_item_markdown.expect("work item markdown");
+
+    assert!(markdown.contains("# Workspace Work Item"));
+    assert!(!markdown.contains("# Final Compile Work Item"));
+    assert_eq!(context.verification_commands, vec!["cargo check --locked"]);
 }
 
 #[test]
@@ -141,4 +365,104 @@ fn waiting_rework_attempt_allows_continue_rework_message() {
             extra_context: None,
         },
     ));
+}
+
+fn seed_compiled_work_item_fixture() -> (TempDir, ProductAppPaths, CodingExecutionAttempt) {
+    let tmp = TempDir::new().expect("temp dir");
+    let app_paths = ProductAppPaths::new(tmp.path().join(".aria"));
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    let work_item_id = "work_item_compile_20260702063721302_001";
+    let verification_plan_id = "verification_plan_compile_20260702063721302_001";
+
+    lifecycle
+        .create_work_item(CreateWorkItemInput {
+            id: Some(work_item_id.to_string()),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            story_spec_ids: vec!["story_spec_0001".to_string()],
+            design_spec_ids: vec!["design_spec_0001".to_string()],
+            title: "Final Compile title".to_string(),
+            source_work_item_plan_id: Some("issue_work_item_plan_0001".to_string()),
+            source_outline_id: Some("outline_backend".to_string()),
+            source_draft_id: Some("draft_backend".to_string()),
+            planned_implementation_context: Some(
+                "planned implementation context for coder\n- touch src/web/coding_ws_handler/context.rs"
+                    .to_string(),
+            ),
+            planned_handoff_summary: Some(
+                "planned handoff summary for dependent work items".to_string(),
+            ),
+            kind: WorkItemKind::Backend,
+            sequence_hint: Some(1),
+            depends_on: vec!["work_item_compile_dependency_001".to_string()],
+            exclusive_write_scopes: vec!["src/web/coding_ws_handler/context.rs".to_string()],
+            forbidden_write_scopes: vec!["forbidden/path".to_string()],
+            required_handoff_from: vec!["work_item_compile_dependency_001".to_string()],
+            verification_plan_ref: Some(verification_plan_id.to_string()),
+            plan_status: WorkItemPlanStatus::Confirmed,
+            ..Default::default()
+        })
+        .expect("create final compile work item");
+
+    lifecycle
+        .create_verification_plan(CreateVerificationPlanInput {
+            id: Some(verification_plan_id.to_string()),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            work_item_id: work_item_id.to_string(),
+            repository_profile_ref: None,
+            provider_run_ref: None,
+            scope: VerificationScope::Unit,
+            commands: vec![VerificationCommand {
+                id: "cmd_001".to_string(),
+                label: "context unit test".to_string(),
+                command: "cargo test --locked --lib coding_execution_context".to_string(),
+                cwd: ".".to_string(),
+                purpose: "verify coding context uses final compile work item".to_string(),
+                required: true,
+                timeout_seconds: 120,
+                source: VerificationCommandSource::Provider,
+                safety: VerificationCommandSafety::Approved,
+            }],
+            manual_checks: Vec::new(),
+            required_gates: vec!["cargo fmt --check".to_string()],
+            risk_notes: vec!["provider prompt must include final compile context".to_string()],
+            confidence: RepositoryProfileConfidence::High,
+            fallback_policy: VerificationFallbackPolicy::ManualGate,
+        })
+        .expect("create verification plan");
+
+    let attempt = CodingExecutionAttempt {
+        id: "coding_attempt_0001".to_string(),
+        project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        work_item_id: work_item_id.to_string(),
+        attempt_no: 1,
+        scope: CodingAttemptScope::WorkItemGroup,
+        status: CodingAttemptStatus::Running,
+        stage: CodingExecutionStage::Coding,
+        base_branch: "main".to_string(),
+        branch_name: "aria/issues/issue_0001".to_string(),
+        worktree_path: Some(tmp.path().join("coding-worktree")),
+        provider_config_snapshot: ProviderConfigSnapshot {
+            author: ProviderName::Fake,
+            reviewer: Some(ProviderName::Fake),
+            review_rounds: 1,
+        },
+        provider_conversations: Vec::new(),
+        rework_count: 0,
+        max_auto_rework: 2,
+        work_item_group_id: None,
+        current_work_item_id: Some(work_item_id.to_string()),
+        active_unit_id: None,
+        head_commit: None,
+        pushed_remote: None,
+        review_request_id: None,
+        created_at: "2026-07-02T00:00:00Z".to_string(),
+        updated_at: "2026-07-02T00:00:00Z".to_string(),
+        completed_at: None,
+    };
+
+    (tmp, app_paths, attempt)
 }
