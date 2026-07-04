@@ -306,7 +306,8 @@ export const useCodingWorkspaceStore = create<
 
   replacePendingEntry: (entry) =>
     set((state) => ({
-      chatEntries: replacePendingChatEntry(state.chatEntries, entry),
+      chatEntries: replaceCompletedProviderStreamEntry(state.chatEntries, entry),
+      roleRuns: upsertRoleRunFromCompletedProviderEntry(state, entry),
     })),
 
   addPendingGate: (gate) =>
@@ -620,4 +621,95 @@ function replacePendingChatEntry(entries: ChatEntry[], entry: ChatEntry): ChatEn
     return upsertChatEntry(entries, entry);
   }
   return entries.map((existing, currentIndex) => (currentIndex === pendingIndex ? entry : existing));
+}
+
+function replaceCompletedProviderStreamEntry(entries: ChatEntry[], entry: ChatEntry): ChatEntry[] {
+  const entriesWithoutTransientStream =
+    entry.type === "provider_stream" && entry.node_id
+      ? entries.filter((existing) => existing.id !== streamEntryId(entry.node_id))
+      : entries;
+  return replacePendingChatEntry(entriesWithoutTransientStream, entry);
+}
+
+function upsertRoleRunFromCompletedProviderEntry(
+  state: CodingWorkspaceState,
+  entry: ChatEntry,
+): CodingRoleRun[] {
+  if (entry.type !== "provider_stream") return state.roleRuns;
+  const roleRunId = metadataString(entry.metadata, "role_run_id");
+  if (!roleRunId || !state.attemptId) return state.roleRuns;
+  const role = roleRunRoleForChatEntry(entry);
+  if (!role) return state.roleRuns;
+
+  const existing = state.roleRuns.find((run) => run.id === roleRunId) ?? null;
+  const node = nodeForEvent(state.timelineNodes, entry.node_id ?? null);
+  const rawProviderOutputRef = metadataString(entry.metadata, "raw_provider_output_ref");
+  const run: CodingRoleRun = {
+    id: roleRunId,
+    attempt_id: existing?.attempt_id ?? state.attemptId,
+    stage: existing?.stage ?? node?.stage ?? stageForRoleRunRole(role),
+    role,
+    run_no: existing?.run_no ?? metadataNumber(entry.metadata, "run_no") ?? 1,
+    status: "completed",
+    trigger: existing?.trigger ?? "initial",
+    node_id: existing?.node_id ?? entry.node_id ?? null,
+    started_at: existing?.started_at ?? metadataString(entry.metadata, "started_at") ?? entry.timestamp,
+    completed_at: metadataString(entry.metadata, "completed_at") ?? entry.timestamp,
+    supersedes_run_id: existing?.supersedes_run_id ?? null,
+    superseded_by_run_id: existing?.superseded_by_run_id ?? null,
+    reason_code: existing?.reason_code ?? null,
+    raw_provider_output_refs: uniqueStrings([
+      ...(existing?.raw_provider_output_refs ?? []),
+      ...(rawProviderOutputRef ? [rawProviderOutputRef] : []),
+    ]),
+    artifact_refs: uniqueStrings([...(existing?.artifact_refs ?? []), ...(node?.artifact_refs ?? [])]),
+    event_summary: existing?.event_summary ?? null,
+    recent_events: existing?.recent_events ?? [],
+  };
+  return upsertById(state.roleRuns, run);
+}
+
+function roleRunRoleForChatEntry(entry: ChatEntry): CodingProviderRole | null {
+  switch (entry.role) {
+    case "coder":
+    case "tester":
+    case "analyst":
+    case "code_reviewer":
+    case "internal_reviewer":
+      return entry.role;
+    case "user":
+    case "author":
+    case "reviewer":
+    case "system":
+      return null;
+  }
+}
+
+function stageForRoleRunRole(role: CodingProviderRole): CodingExecutionStage {
+  switch (role) {
+    case "coder":
+      return "coding";
+    case "tester":
+      return "testing";
+    case "analyst":
+      return "rework";
+    case "code_reviewer":
+      return "code_review";
+    case "internal_reviewer":
+      return "internal_pr_review";
+  }
+}
+
+function metadataString(metadata: ChatEntry["metadata"], key: string): string | null {
+  const value = metadata?.[key];
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function metadataNumber(metadata: ChatEntry["metadata"], key: string): number | null {
+  const value = metadata?.[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values)];
 }

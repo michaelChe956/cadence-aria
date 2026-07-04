@@ -284,6 +284,116 @@ describe("useCodingWorkspaceWs inbound events", () => {
     vi.useRealTimers();
   });
 
+  it("replaces completed coder stream output and records the coder role run from final chat entry metadata", () => {
+    vi.useFakeTimers();
+    const harness = renderCodingHook();
+
+    act(() => {
+      harness.ws.receive(
+        codingSessionState({
+          stage: "coding",
+          timeline_nodes: [
+            {
+              id: "coding_node_0001",
+              attempt_id: "coding_attempt_0001",
+              stage: "coding",
+              title: "代码编写",
+              status: "running",
+              agent_role: "author",
+              summary: null,
+              started_at: "2026-06-13T00:00:00Z",
+              completed_at: null,
+              artifact_refs: [],
+            },
+          ],
+          active_node_id: "coding_node_0001",
+          role_runs: [],
+        }),
+      );
+      harness.ws.receive({
+        type: "coding_stream_chunk",
+        content: "partial coder output",
+        node_id: "coding_node_0001",
+      });
+    });
+
+    act(() => {
+      vi.advanceTimersByTime(50);
+    });
+
+    expect(useCodingWorkspaceStore.getState().chatEntries).toMatchObject([
+      {
+        id: "coding_stream_coding_node_0001",
+        type: "provider_stream",
+        role: "coder",
+        content: "partial coder output",
+      },
+    ]);
+
+    act(() => {
+      harness.ws.receive({
+        type: "coding_message_complete",
+        node_id: "coding_node_0001",
+      });
+      harness.ws.receive({
+        type: "coding_chat_entry_created",
+        entry: {
+          id: "coding_node_0001_coder_output",
+          attempt_id: "coding_attempt_0001",
+          node_id: "coding_node_0001",
+          role: "author",
+          entry_type: { type: "assistant_message" },
+          content: "final coder output",
+          metadata: {
+            source: "coding",
+            provider: "codex",
+            role_run_id: "coding_role_run_0001",
+            run_no: 1,
+            raw_provider_output_ref: "provider-raw/coding/coder_output_0001.txt",
+            started_at: "2026-06-13T00:00:00Z",
+            completed_at: "2026-06-13T00:02:03Z",
+          },
+          created_at: "2026-06-13T00:02:03Z",
+        },
+      });
+    });
+
+    const state = useCodingWorkspaceStore.getState();
+    expect(state.chatEntries.map((entry) => entry.id)).toEqual(["coding_node_0001_coder_output"]);
+    expect(state.chatEntries[0]).toMatchObject({
+      id: "coding_node_0001_coder_output",
+      type: "provider_stream",
+      role: "coder",
+      content: "final coder output",
+      node_id: "coding_node_0001",
+      metadata: {
+        source: "coding",
+        provider: "codex",
+        role_run_id: "coding_role_run_0001",
+        run_no: 1,
+        raw_provider_output_ref: "provider-raw/coding/coder_output_0001.txt",
+      },
+    });
+    expect(state.roleRuns).toMatchObject([
+      {
+        id: "coding_role_run_0001",
+        attempt_id: "coding_attempt_0001",
+        stage: "coding",
+        role: "coder",
+        run_no: 1,
+        status: "completed",
+        trigger: "initial",
+        node_id: "coding_node_0001",
+        started_at: "2026-06-13T00:00:00Z",
+        completed_at: "2026-06-13T00:02:03Z",
+        raw_provider_output_refs: ["provider-raw/coding/coder_output_0001.txt"],
+      },
+    ]);
+
+    harness.unmount();
+    vi.useRealTimers();
+  });
+
   it("ignores late provider output after a coding attempt is aborted", () => {
     const harness = renderCodingHook();
 
