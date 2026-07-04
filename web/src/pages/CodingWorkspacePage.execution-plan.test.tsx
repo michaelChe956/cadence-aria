@@ -71,7 +71,7 @@ vi.mock("../components/shared/MonacoDiffViewer", () => ({
 describe("CodingWorkspacePage execution plan", () => {
   installCodingWorkspacePageTestHooks();
 
-  it("constrains role run history overflow inside the conversation column", () => {
+  it("opens role run history in a drawer instead of constraining the conversation column", async () => {
     mockCodingWs();
     useCodingWorkspaceStore.setState({
       attemptId: "coding_attempt_0001",
@@ -102,14 +102,13 @@ describe("CodingWorkspacePage execution plan", () => {
 
     render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
 
+    expect(screen.getByTestId("coding-chat-entry-list")).toBeInTheDocument();
+    expect(screen.queryByTestId("coding-role-run-history")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "角色运行历史" }));
+
     const panel = screen.getByTestId("coding-role-run-history");
     expect(panel).toHaveClass("min-w-0", "overflow-hidden");
-    expect(panel.parentElement).toHaveClass("min-w-0", "overflow-hidden");
-    expect(panel.parentElement?.parentElement).toHaveClass("min-w-0", "overflow-hidden");
-    expect(panel.parentElement?.parentElement?.parentElement).toHaveClass(
-      "min-w-0",
-      "overflow-hidden",
-    );
+    expect(screen.getByRole("dialog", { name: "角色运行历史" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "继续返修" })).toBeInTheDocument();
   });
 

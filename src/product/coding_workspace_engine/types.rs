@@ -55,6 +55,12 @@ pub struct CodingExecutionContext {
     pub verification_commands: Vec<String>,
 }
 
+#[derive(Clone, Copy)]
+pub struct ProviderTestingAdapters<'a> {
+    pub plan: &'a dyn StreamingProviderAdapter,
+    pub execute: &'a dyn StreamingProviderAdapter,
+}
+
 pub(crate) struct CodingProviderStreamRun<'a> {
     pub(crate) attempt: &'a CodingExecutionAttempt,
     pub(crate) node_id: &'a str,

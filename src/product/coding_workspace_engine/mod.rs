@@ -27,7 +27,7 @@ use crate::product::coding_attempt_store::{
     CreateQualityBypassAuditInput,
 };
 use crate::product::coding_evaluation_context::{
-    EvaluationContextRole, build_evaluation_context_pack,
+    EvaluationContextRole, build_evaluation_context_pack, build_tester_execution_context_pack,
 };
 use crate::product::coding_models::{
     AnalystDecisionNextStage, AnalystDecisionRecord, AnalystDecisionVerdict,
@@ -52,10 +52,10 @@ use crate::product::models::{
 };
 use crate::product::test_executor::{TestCommandSpec, TestExecutorError, run_all_tests};
 use crate::product::tester_agent_loop::{
-    TesterAgentOptions, build_plan_based_testing_report, build_tester_execute_repair_prompt,
-    build_tester_plan_prompt, build_tester_plan_repair_prompt, build_testing_report,
-    execute_tester_tool_call, format_test_plan_chat_summary, format_testing_report_chat_summary,
-    parse_test_plan_payload,
+    TestContextLoader, TesterAgentOptions, build_plan_based_testing_report,
+    build_tester_execute_repair_prompt, build_tester_plan_prompt, build_tester_plan_repair_prompt,
+    build_testing_report, execute_tester_tool_call_with_context, format_test_plan_chat_summary,
+    format_testing_report_chat_summary, parse_test_plan_payload,
 };
 use crate::protocol::contracts::ProviderType;
 use crate::protocol::contracts::{AdapterInput, AdapterRole};
@@ -90,7 +90,7 @@ pub use testing_parser::{
 };
 pub use types::{
     CodingExecutionContext, CodingWorkspaceEngine, CodingWorkspaceEngineError,
-    CompletionGateReport, TESTING_RESULT_REVIEW_REASON_CODE,
+    CompletionGateReport, ProviderTestingAdapters, TESTING_RESULT_REVIEW_REASON_CODE,
 };
 
 #[allow(unused_imports)]

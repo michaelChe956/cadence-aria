@@ -124,7 +124,8 @@ fn coding_role_provider_config_snapshot_derives_from_legacy_provider_snapshot() 
     });
 
     assert_eq!(snapshot.coder, ProviderName::Codex);
-    assert_eq!(snapshot.tester, ProviderName::Codex);
+    assert_eq!(snapshot.tester_plan, ProviderName::Codex);
+    assert_eq!(snapshot.tester_execute, ProviderName::Codex);
     assert_eq!(snapshot.analyst, ProviderName::Codex);
     assert_eq!(snapshot.code_reviewer, ProviderName::Fake);
     assert_eq!(snapshot.internal_reviewer, ProviderName::Fake);
@@ -135,7 +136,8 @@ fn coding_role_provider_config_snapshot_derives_from_legacy_provider_snapshot() 
         value,
         json!({
             "coder": "codex",
-            "tester": "codex",
+            "tester_plan": "codex",
+            "tester_execute": "codex",
             "analyst": "codex",
             "code_reviewer": "fake",
             "internal_reviewer": "fake",
@@ -160,7 +162,8 @@ fn coding_role_provider_config_snapshot_falls_back_to_author_when_reviewer_is_mi
     });
 
     assert_eq!(snapshot.coder, ProviderName::ClaudeCode);
-    assert_eq!(snapshot.tester, ProviderName::ClaudeCode);
+    assert_eq!(snapshot.tester_plan, ProviderName::ClaudeCode);
+    assert_eq!(snapshot.tester_execute, ProviderName::ClaudeCode);
     assert_eq!(snapshot.analyst, ProviderName::ClaudeCode);
     assert_eq!(snapshot.code_reviewer, ProviderName::ClaudeCode);
     assert_eq!(snapshot.internal_reviewer, ProviderName::ClaudeCode);
@@ -219,7 +222,8 @@ fn coding_stage_gate_state_serializes_open_gate_contract() {
         expires_at: "2026-05-28T00:00:05Z".to_string(),
         provider_snapshot: CodingRoleProviderConfigSnapshot {
             coder: ProviderName::Codex,
-            tester: ProviderName::Fake,
+            tester_plan: ProviderName::Fake,
+            tester_execute: ProviderName::Fake,
             analyst: ProviderName::Codex,
             code_reviewer: ProviderName::Fake,
             internal_reviewer: ProviderName::Fake,
@@ -236,7 +240,8 @@ fn coding_stage_gate_state_serializes_open_gate_contract() {
     assert_eq!(value["status"], "open");
     assert_eq!(value["stage"], "testing");
     assert_eq!(value["role"], "tester");
-    assert_eq!(value["provider_snapshot"]["tester"], "fake");
+    assert_eq!(value["provider_snapshot"]["tester_plan"], "fake");
+    assert_eq!(value["provider_snapshot"]["tester_execute"], "fake");
     assert_eq!(
         serde_json::from_value::<CodingStageGateState>(value).expect("deserialize stage gate"),
         gate

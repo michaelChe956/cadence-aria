@@ -211,7 +211,8 @@ describe("CodingWorkspacePage gate panels", () => {
           expires_at: "2026-05-28T00:00:05Z",
           provider_snapshot: {
             coder: "fake",
-            tester: "fake",
+            tester_plan: "fake",
+            tester_execute: "fake",
             analyst: "fake",
             code_reviewer: "fake",
             internal_reviewer: "fake",
@@ -254,7 +255,8 @@ describe("CodingWorkspacePage gate panels", () => {
           expires_at: new Date(Date.now() + 5_000).toISOString(),
           provider_snapshot: {
             coder: "fake",
-            tester: "codex",
+            tester_plan: "codex",
+            tester_execute: "codex",
             analyst: "fake",
             code_reviewer: "fake",
             internal_reviewer: "fake",
@@ -299,7 +301,8 @@ describe("CodingWorkspacePage gate panels", () => {
       stage: "coding",
       roleProviderConfigSnapshot: {
         coder: "fake",
-        tester: "fake",
+        tester_plan: "fake",
+        tester_execute: "fake",
         analyst: "fake",
         code_reviewer: "fake",
         internal_reviewer: "fake",
@@ -316,16 +319,20 @@ describe("CodingWorkspacePage gate panels", () => {
 
     render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
 
+    expect(screen.queryByTestId("coding-provider-config-panel")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Provider 设置" }));
+
     expect(screen.getByTestId("coding-provider-config-panel")).toHaveTextContent("Coder");
-    expect(screen.getByTestId("coding-provider-config-panel")).toHaveTextContent("Tester");
+    expect(screen.getByTestId("coding-provider-config-panel")).toHaveTextContent("Tester Plan");
+    expect(screen.getByTestId("coding-provider-config-panel")).toHaveTextContent("Tester Execute");
     expect(screen.getByTestId("coding-provider-config-panel")).toHaveTextContent("Auto");
 
-    await userEvent.click(screen.getByRole("button", { name: "将 Tester 切换为 Codex" }));
+    await userEvent.click(screen.getByRole("button", { name: "将 Tester Execute 切换为 Codex" }));
     await userEvent.click(
-      screen.getByRole("button", { name: "将 Tester 授权模式切换为 Supervised" }),
+      screen.getByRole("button", { name: "将 Tester Execute 授权模式切换为 Supervised" }),
     );
 
-    expect(api.sendProviderSelect).toHaveBeenCalledWith("tester", "codex");
+    expect(api.sendProviderSelect).toHaveBeenCalledWith("tester_execute", "codex");
     expect(api.sendPermissionModeSelect).toHaveBeenCalledWith("tester", "supervised");
   });
 

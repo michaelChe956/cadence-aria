@@ -1,13 +1,19 @@
 use std::path::PathBuf;
 
 use super::*;
+use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_models::{
     CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage, TestCommand,
     TestCommandStatus, TestPlan, TestPlanRiskLevel, TestPlanStep, TestPlanTool,
     TestingOverallStatus, TestingStepResult,
 };
+use crate::product::lifecycle_store::{
+    AppendSpecVersionInput, CreateDesignSpecInput, CreateStorySpecInput, CreateWorkItemInput,
+    LifecycleStore,
+};
 use crate::product::models::ProviderName;
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
+use tempfile::TempDir;
 
 fn test_attempt() -> CodingExecutionAttempt {
     CodingExecutionAttempt {
@@ -71,6 +77,106 @@ fn tester_plan_prompt_requires_openspec_superpowers_and_step_bound_tools() {
             .trim_end()
             .ends_with("END OF INSTRUCTIONS: output JSON only.")
     );
+}
+
+#[test]
+fn load_test_context_input_requires_step_reason_selectors_and_rejects_full_mode() {
+    let input = serde_json::json!({
+        "step_id": "step_t1",
+        "reason": "Need exact DEC-006 package metadata",
+        "artifact_refs": ["design_spec_0001@version_0002"],
+        "selectors": ["DEC-006", "CMP-001"]
+    });
+
+    let parsed = super::tools::parse_load_test_context_input(&input).expect("valid input");
+
+    assert_eq!(parsed.step_id, "step_t1");
+    assert_eq!(parsed.reason, "Need exact DEC-006 package metadata");
+    assert_eq!(parsed.artifact_refs, vec!["design_spec_0001@version_0002"]);
+    assert_eq!(parsed.selectors, vec!["DEC-006", "CMP-001"]);
+
+    let missing_step = serde_json::json!({
+        "reason": "Need exact DEC-006 package metadata",
+        "selectors": ["DEC-006"]
+    });
+    assert!(super::tools::parse_load_test_context_input(&missing_step).is_err());
+
+    let too_many_selectors = serde_json::json!({
+        "step_id": "step_t1",
+        "reason": "Need exact DEC-006 package metadata",
+        "selectors": ["S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9"]
+    });
+    assert!(super::tools::parse_load_test_context_input(&too_many_selectors).is_err());
+
+    let full_mode = serde_json::json!({
+        "step_id": "step_t1",
+        "reason": "Need exact DEC-006 package metadata",
+        "mode": "full",
+        "selectors": ["DEC-006"]
+    });
+    assert!(super::tools::parse_load_test_context_input(&full_mode).is_err());
+}
+
+#[test]
+fn load_test_context_returns_targeted_design_snippets_without_full_markdown() {
+    let tmp = TempDir::new().expect("tmp");
+    let paths = ProductAppPaths::new(tmp.path().join(".aria"));
+    let lifecycle = LifecycleStore::new(paths.clone());
+    let story = lifecycle
+        .create_story_spec(CreateStorySpecInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            title: "Story".to_string(),
+        })
+        .expect("story");
+    let design = lifecycle
+        .create_design_spec(CreateDesignSpecInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            story_spec_ids: vec![story.id.clone()],
+            title: "Design".to_string(),
+        })
+        .expect("design");
+    lifecycle
+        .append_version(AppendSpecVersionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: design.id.clone(),
+            markdown: "# Design\n\n前置背景不应整体返回\n\n[DEC-006] provider package is @openai/codex.\n\n全文之外的段落".to_string(),
+            provider_run_refs: Vec::new(),
+            review_refs: Vec::new(),
+            confirmed_by: Some("user".to_string()),
+        })
+        .expect("design version");
+    lifecycle
+        .create_work_item(CreateWorkItemInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            story_spec_ids: vec![story.id],
+            design_spec_ids: vec![design.id.clone()],
+            title: "Work Item".to_string(),
+            ..Default::default()
+        })
+        .expect("work item");
+
+    let input = super::tools::parse_load_test_context_input(&serde_json::json!({
+        "step_id": "step_t1",
+        "reason": "Need exact DEC-006 package metadata",
+        "artifact_refs": [format!("{}@version_0001", design.id)],
+        "selectors": ["DEC-006"]
+    }))
+    .expect("input");
+    let result = super::context_loader::TestContextLoader::new(paths, test_attempt())
+        .load(&input)
+        .expect("snippets");
+
+    assert_eq!(result.snippets.len(), 1);
+    assert_eq!(result.snippets[0].selector, "DEC-006");
+    assert!(result.snippets[0].text.contains("@openai/codex"));
+    assert!(!result.snippets[0].text.contains("全文之外的段落"));
+    assert!(result.warnings.is_empty());
 }
 
 #[test]
@@ -301,4 +407,57 @@ fn test_tool_call_without_step_id_is_unplanned_and_does_not_pass_required_step()
     assert_eq!(report.missing_required_steps, vec!["unit"]);
     assert!(report.steps.is_empty());
     assert_eq!(report.unplanned_commands.len(), 1);
+}
+
+#[test]
+fn test_plan_insufficient_blocked_result_blocks_without_missing_required_step() {
+    let plan = TestPlan {
+        id: "test_plan_0001".to_string(),
+        attempt_id: "coding_attempt_0001".to_string(),
+        role_run_id: None,
+        run_no: None,
+        summary: "context-sensitive checks".to_string(),
+        context_warnings: Vec::new(),
+        assumptions: Vec::new(),
+        steps: vec![TestPlanStep {
+            id: "step_missing_context".to_string(),
+            title: "Verify unavailable design selector".to_string(),
+            intent: "verify design selector".to_string(),
+            required: true,
+            tool: TestPlanTool::ProviderManaged,
+            risk_level: TestPlanRiskLevel::Low,
+            command_or_tool_input: serde_json::json!({}),
+            evidence_expectation: "blocked explanation".to_string(),
+            related_requirements: vec!["REQ-001".to_string()],
+            related_design_constraints: Vec::new(),
+            related_work_item_tasks: Vec::new(),
+        }],
+        created_at: "2026-06-10T00:00:00Z".to_string(),
+        raw_provider_output_ref: None,
+    };
+
+    let report = build_plan_based_testing_report(
+        "testing_report_0001",
+        "coding_attempt_0001",
+        &plan,
+        vec![TestingStepResult {
+            step_id: "step_missing_context".to_string(),
+            status: TestCommandStatus::Blocked,
+            evidence_refs: Vec::new(),
+            command: None,
+            provider_analysis: Some(
+                "test_plan_insufficient: selector DEC-014 unavailable".to_string(),
+            ),
+        }],
+        Vec::new(),
+        None,
+        None,
+    );
+
+    assert_eq!(report.overall_status, TestingOverallStatus::Blocked);
+    assert!(report.missing_required_steps.is_empty());
+    assert_eq!(
+        report.skipped_required_steps,
+        vec!["step_missing_context".to_string()]
+    );
 }

@@ -7,6 +7,20 @@ pub(crate) fn record_tester_step_result(
     result: &ProviderToolResult,
     outputs: TesterStepResultOutputs<'_>,
 ) {
+    if call.tool_name == "load_test_context" {
+        outputs
+            .unplanned_evidence
+            .push(unplanned_evidence_from_tool(
+                call,
+                command_result.as_ref(),
+                result,
+            ));
+        if let Some(command) = command_result {
+            outputs.unplanned_commands.push(command);
+        }
+        return;
+    }
+
     let Some(step_id) = tool_call_step_id(call) else {
         outputs
             .unplanned_evidence

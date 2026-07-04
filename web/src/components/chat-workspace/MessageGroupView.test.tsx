@@ -188,6 +188,29 @@ describe("MessageGroupView", () => {
     expect(screen.getByText(expectedTitle)).toBeInTheDocument();
   });
 
+  it("shows elapsed duration in coder message group title", () => {
+    render(
+      <MessageGroupView
+        group={{
+          id: "group-coder",
+          nodeId: "coding_node_0001",
+          role: "coder",
+          primaryEntry: makeEntry("coder-output", "provider_stream", "coder", "完成代码编写", {
+            provider: "codex",
+            role_run_id: "coding_role_run_0001",
+            run_no: 1,
+            started_at: "2026-06-13T00:00:00Z",
+            completed_at: "2026-06-13T00:02:03Z",
+          }),
+          inlineEvents: [],
+          interruptEntries: [],
+        }}
+      />,
+    );
+
+    expect(screen.getByText("Coder · Codex · Run #1 · 耗时 2分03秒")).toBeInTheDocument();
+  });
+
   it("marks automatic retry groups and exposes the previous attempt error", () => {
     render(
       <MessageGroupView

@@ -19,7 +19,8 @@ const providerConfig = {
 
 const roleProviderConfig = {
   coder: "fake" as const,
-  tester: "fake" as const,
+  tester_plan: "fake" as const,
+  tester_execute: "fake" as const,
   analyst: "fake" as const,
   code_reviewer: "fake" as const,
   internal_reviewer: "fake" as const,

@@ -380,7 +380,7 @@ pub(crate) fn streaming_input_from_adapter(
 pub(crate) fn build_tester_execute_plan_prompt(
     attempt: &CodingExecutionAttempt,
     plan: &TestPlan,
-    evaluation_context_json: &str,
+    execution_context_json: &str,
 ) -> String {
     let plan_json = serde_json::to_string_pretty(plan).unwrap_or_else(|_| "{}".to_string());
     format!(
@@ -394,13 +394,18 @@ pub(crate) fn build_tester_execute_plan_prompt(
          If you cannot run a required step, emit status=\"blocked\" or status=\"skipped\" with provider_analysis explaining why.\n\
          Do not claim overall success in prose without step_results JSON.\n\
          Tool calls meant to satisfy a plan step must include the exact step_id in their input. Tool calls without step_id are unplanned evidence and cannot satisfy required steps.\n\
+         If TestPlan is insufficient, do not redesign it inside execute_test_plan.\n\
+         Use load_test_context only for targeted source artifact snippets; load_test_context is read-only and cannot satisfy a required step by itself.\n\
+         If the plan is wrong, out of scope, or impossible to execute reliably, mark the affected required step blocked.\n\
+         Do not generate new TestPlan steps during execute_test_plan.\n\
+         If the current TestPlan is wrong, out of scope, or impossible to execute reliably, return blocked step_results for affected required steps with provider_analysis prefixed by \"test_plan_insufficient:\".\n\
          At the end of execute_test_plan, output a JSON object with:\n\
          {{\"step_results\":[{{\"step_id\":\"...\",\"status\":\"passed|failed|blocked|skipped\",\"evidence_refs\":[\"...\"],\"provider_analysis\":\"...\"}}]}}\n\
          \n\
          TestPlan:\n```json\n{}\n```\n\
          \n\
-         Evaluation Context JSON:\n```json\n{}\n```\n",
-        attempt.id, attempt.work_item_id, plan_json, evaluation_context_json
+         Execution Context JSON:\n```json\n{}\n```\n",
+        attempt.id, attempt.work_item_id, plan_json, execution_context_json
     )
 }
 

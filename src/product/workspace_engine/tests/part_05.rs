@@ -330,7 +330,7 @@ async fn build_session_state_returns_correct_structure() {
 }
 
 #[tokio::test]
-async fn build_session_state_omits_work_item_plan_details_and_keeps_active_run_id() {
+async fn build_session_state_omits_unneeded_work_item_plan_details_and_keeps_active_run_id() {
     let (tmp, checkpoint_store) = setup();
     let lifecycle_store = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
     let (tx, _) = mpsc::channel(64);

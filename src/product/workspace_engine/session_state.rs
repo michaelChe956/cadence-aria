@@ -48,6 +48,43 @@ pub(crate) fn build_node_detail_summary(detail: &NodeDetail) -> NodeDetailSummar
     }
 }
 
+pub(crate) fn build_session_state_node_detail(mut detail: NodeDetail) -> NodeDetail {
+    detail.prompt = None;
+    detail.messages.clear();
+    if detail.streaming_content.chars().count() > SUMMARY_PREVIEW_CHARS {
+        detail.streaming_content = preview(&detail.streaming_content);
+    }
+    detail.execution_events = session_state_execution_event_summaries(detail.execution_events);
+    detail.permission_events.clear();
+    detail
+}
+
+pub(crate) fn session_state_execution_event_summaries(
+    events: Vec<serde_json::Value>,
+) -> Vec<serde_json::Value> {
+    events
+        .into_iter()
+        .map(|mut event| {
+            if let Some(object) = event.as_object_mut() {
+                object.insert("output".to_string(), serde_json::Value::Null);
+            }
+            event
+        })
+        .collect()
+}
+
+fn should_inline_work_item_plan_detail(node_type: &TimelineNodeType) -> bool {
+    matches!(
+        node_type,
+        TimelineNodeType::WorkItemPlanOutlineRun
+            | TimelineNodeType::WorkItemPlanOutlineReview
+            | TimelineNodeType::WorkItemDraftRun
+            | TimelineNodeType::WorkItemDraftReview
+            | TimelineNodeType::WorkItemBatchRun
+            | TimelineNodeType::WorkItemBatchReview
+    )
+}
+
 pub(crate) fn build_artifact_version_summary(version: &ArtifactVersion) -> ArtifactVersionSummary {
     let (markdown_size, markdown_preview) = match &version.payload {
         ArtifactPayload::Markdown { markdown, .. } => (markdown.len(), preview(markdown)),
@@ -297,26 +334,44 @@ impl WorkspaceEngine {
             })
             .collect();
 
-        let timeline_node_details = HashMap::new();
+        let mut timeline_node_details = HashMap::new();
         let mut timeline_node_summaries = HashMap::new();
-        if self.session.workspace_type != WorkspaceType::WorkItemPlan
-            && let Some(store) = self.lifecycle_store.as_ref()
-            && let Ok(ids) = store.list_node_detail_ids_for_issue_session(
+        if let Some(store) = self.lifecycle_store.as_ref() {
+            if self.session.workspace_type == WorkspaceType::WorkItemPlan {
+                for node in self
+                    .timeline_nodes
+                    .iter()
+                    .filter(|node| should_inline_work_item_plan_detail(&node.node_type))
+                {
+                    let Ok(detail) = store.load_node_detail_for_issue_session(
+                        &self.session.project_id,
+                        &self.session.issue_id,
+                        &self.session.session_id,
+                        &node.node_id,
+                    ) else {
+                        continue;
+                    };
+                    timeline_node_details.insert(
+                        node.node_id.clone(),
+                        build_session_state_node_detail(detail),
+                    );
+                }
+            } else if let Ok(ids) = store.list_node_detail_ids_for_issue_session(
                 &self.session.project_id,
                 &self.session.issue_id,
                 &self.session.session_id,
-            )
-        {
-            for id in ids {
-                let Ok(detail) = store.load_node_detail_for_issue_session(
-                    &self.session.project_id,
-                    &self.session.issue_id,
-                    &self.session.session_id,
-                    &id,
-                ) else {
-                    continue;
-                };
-                timeline_node_summaries.insert(id.clone(), build_node_detail_summary(&detail));
+            ) {
+                for id in ids {
+                    let Ok(detail) = store.load_node_detail_for_issue_session(
+                        &self.session.project_id,
+                        &self.session.issue_id,
+                        &self.session.session_id,
+                        &id,
+                    ) else {
+                        continue;
+                    };
+                    timeline_node_summaries.insert(id.clone(), build_node_detail_summary(&detail));
+                }
             }
         }
         let artifact_version_summaries = self

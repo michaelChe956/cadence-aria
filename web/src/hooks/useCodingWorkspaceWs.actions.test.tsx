@@ -22,7 +22,8 @@ describe("useCodingWorkspaceWs actions and reconnect", () => {
       harness.api.startCoding();
       harness.api.sendContextNote("补充上下文");
       harness.api.sendProviderSelect("author", "codex");
-      harness.api.sendProviderSelect("tester", "fake");
+      harness.api.sendProviderSelect("tester_plan", "claude_code");
+      harness.api.sendProviderSelect("tester_execute", "fake");
       harness.api.sendPermissionModeSelect("tester", "supervised");
       harness.api.confirmStageGate("testing");
       harness.api.finalConfirm();
@@ -34,7 +35,8 @@ describe("useCodingWorkspaceWs actions and reconnect", () => {
       JSON.stringify({ type: "start_coding" }),
       JSON.stringify({ type: "context_note", content: "补充上下文" }),
       JSON.stringify({ type: "provider_select", role: "author", provider: "codex" }),
-      JSON.stringify({ type: "provider_select", role: "tester", provider: "fake" }),
+      JSON.stringify({ type: "provider_select", role: "tester_plan", provider: "claude_code" }),
+      JSON.stringify({ type: "provider_select", role: "tester_execute", provider: "fake" }),
       JSON.stringify({
         type: "permission_mode_select",
         role: "tester",

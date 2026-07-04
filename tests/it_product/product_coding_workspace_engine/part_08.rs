@@ -355,7 +355,8 @@ async fn execute_internal_pr_review_prompt_includes_request_commit_diff_and_func
             &attempt.id,
             CodingRoleProviderConfigSnapshot {
                 coder: ProviderName::Fake,
-                tester: ProviderName::Fake,
+                tester_plan: ProviderName::Fake,
+                tester_execute: ProviderName::Fake,
                 analyst: ProviderName::Fake,
                 code_reviewer: ProviderName::Fake,
                 internal_reviewer: ProviderName::Codex,
@@ -690,4 +691,3 @@ fn git_repo_in(path: &Path) -> PathBuf {
     run_git(path, &["branch", "-m", "main"]);
     path.to_path_buf()
 }
-

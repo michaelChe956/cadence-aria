@@ -607,12 +607,14 @@ fn store_persists_role_provider_config_snapshot_in_attempt_scope() {
         .get_role_provider_config_snapshot("project_0001", "issue_0001", &attempt.id)
         .expect("initial role provider snapshot");
     assert_eq!(initial.coder, ProviderName::Fake);
-    assert_eq!(initial.tester, ProviderName::Fake);
+    assert_eq!(initial.tester_plan, ProviderName::Fake);
+    assert_eq!(initial.tester_execute, ProviderName::Fake);
     assert_eq!(initial.code_reviewer, ProviderName::Fake);
 
     let updated = CodingRoleProviderConfigSnapshot {
         coder: ProviderName::Fake,
-        tester: ProviderName::Codex,
+        tester_plan: ProviderName::ClaudeCode,
+        tester_execute: ProviderName::Codex,
         analyst: ProviderName::Fake,
         code_reviewer: ProviderName::Codex,
         internal_reviewer: ProviderName::Fake,

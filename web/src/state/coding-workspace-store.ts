@@ -8,6 +8,7 @@ import type {
   CodingExecutionStage,
   CodingExecutionUnit,
   CodingGateRequired,
+  CodingProviderSelectRole,
   CodingProviderRole,
   CodingRoleProviderConfigSnapshot,
   CodingRoleRun,
@@ -119,7 +120,7 @@ export interface CodingWorkspaceActions {
   resolvePendingGate: (gateId: string) => void;
   markGateSubmitting: (gateId: string) => void;
   setGateError: (gateId: string, errorCode: string) => void;
-  updateProviderConfig: (role: CodingProviderRole, provider: WorkspaceProviderName) => void;
+  updateProviderConfig: (role: CodingProviderSelectRole | "tester", provider: WorkspaceProviderName) => void;
   appendStreamChunk: (content: string, nodeId?: string | null) => void;
   completeStream: (nodeId?: string | null) => void;
   setConnectionStatus: (status: CodingConnectionStatus) => void;
@@ -339,7 +340,7 @@ export const useCodingWorkspaceStore = create<
   updateProviderConfig: (role, provider) =>
     set((state) => ({
       roleProviderConfigSnapshot: state.roleProviderConfigSnapshot
-        ? { ...state.roleProviderConfigSnapshot, [role]: provider }
+        ? { ...state.roleProviderConfigSnapshot, [providerConfigKeyForRole(role)]: provider }
         : state.roleProviderConfigSnapshot,
       providerConfigSnapshot: updateLegacyProviderConfig(
         state.providerConfigSnapshot,
@@ -453,6 +454,31 @@ function chatRoleForNode(
   }
 }
 
+function providerConfigKeyForRole(
+  role: CodingProviderSelectRole | "tester",
+): keyof Pick<
+  CodingRoleProviderConfigSnapshot,
+  "coder" | "tester_plan" | "tester_execute" | "analyst" | "code_reviewer" | "internal_reviewer"
+> {
+  switch (role) {
+    case "author":
+    case "coder":
+      return "coder";
+    case "reviewer":
+    case "code_reviewer":
+      return "code_reviewer";
+    case "tester":
+    case "tester_execute":
+      return "tester_execute";
+    case "tester_plan":
+      return "tester_plan";
+    case "analyst":
+      return "analyst";
+    case "internal_reviewer":
+      return "internal_reviewer";
+  }
+}
+
 function nodeForEvent(nodes: CodingTimelineNode[], nodeId?: string | null) {
   return nodes.find((node) => node.id === nodeId) ?? null;
 }
@@ -494,12 +520,12 @@ function isProviderPromptEvent(event: ExecutionEvent) {
 
 function updateLegacyProviderConfig(
   snapshot: ProviderConfigSnapshot | null,
-  role: CodingProviderRole,
+  role: CodingProviderSelectRole | "tester",
   provider: WorkspaceProviderName,
 ): ProviderConfigSnapshot | null {
   if (!snapshot) return snapshot;
-  if (role === "coder") return { ...snapshot, author: provider };
-  if (role === "code_reviewer") return { ...snapshot, reviewer: provider };
+  if (role === "author" || role === "coder") return { ...snapshot, author: provider };
+  if (role === "reviewer" || role === "code_reviewer") return { ...snapshot, reviewer: provider };
   return snapshot;
 }
 

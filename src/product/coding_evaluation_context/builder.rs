@@ -143,7 +143,7 @@ pub fn build_evaluation_context_pack(
     })
 }
 
-fn build_group_context(
+pub(super) fn build_group_context(
     lifecycle_paths: ProductAppPaths,
     lifecycle: &LifecycleStore,
     attempt: &CodingExecutionAttempt,

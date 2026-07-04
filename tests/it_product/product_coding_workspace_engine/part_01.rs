@@ -29,7 +29,8 @@ use cadence_aria::product::coding_models::{
     TestingReport, TestingStepResult, WorkItemHandoff,
 };
 use cadence_aria::product::coding_workspace_engine::{
-    CodingExecutionContext, CodingWorkspaceEngine, testing_report_should_enter_analyst,
+    CodingExecutionContext, CodingWorkspaceEngine, ProviderTestingAdapters,
+    testing_report_should_enter_analyst,
 };
 use cadence_aria::product::git_workspace_service::GitWorkspaceService;
 use cadence_aria::product::lifecycle_store::{

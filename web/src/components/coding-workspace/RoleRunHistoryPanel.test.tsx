@@ -8,7 +8,7 @@ import type {
 import { RoleRunHistoryPanel } from "./RoleRunHistoryPanel";
 
 describe("RoleRunHistoryPanel", () => {
-  it("renders run status, trigger, refs and node title", () => {
+  it("renders compact run summaries and expands details on demand", () => {
     render(
       <RoleRunHistoryPanel
         roleRuns={[
@@ -85,6 +85,19 @@ describe("RoleRunHistoryPanel", () => {
     expect(panel).toHaveTextContent("3 events");
     expect(panel).toHaveTextContent("Task update");
     expect(panel).toHaveTextContent("running");
+    expect(panel).toHaveTextContent("Tester #2");
+    expect(panel).toHaveTextContent("已完成");
+    expect(panel).toHaveTextContent("retry_test_plan");
+    expect(panel).toHaveTextContent("执行测试重跑");
+    expect(panel).not.toHaveTextContent("plan_tests_timeout");
+    expect(panel).not.toHaveTextContent("No tasks found");
+    expect(panel).not.toHaveTextContent(
+      "artifacts/role-run-events/coding_role_run_0001/0003_output.txt",
+    );
+    expect(panel).not.toHaveTextContent("provider-raw/testing/plan_tests_0001.txt");
+
+    fireEvent.click(screen.getByRole("button", { name: /Tester #1/ }));
+
     expect(panel).toHaveTextContent("plan_tests_timeout");
     expect(panel).toHaveTextContent("#2");
     expect(panel).toHaveTextContent("#3");
@@ -93,10 +106,6 @@ describe("RoleRunHistoryPanel", () => {
       "artifacts/role-run-events/coding_role_run_0001/0003_output.txt",
     );
     expect(panel).toHaveTextContent("provider-raw/testing/plan_tests_0001.txt");
-    expect(panel).toHaveTextContent("Tester #2");
-    expect(panel).toHaveTextContent("已完成");
-    expect(panel).toHaveTextContent("retry_test_plan");
-    expect(panel).toHaveTextContent("执行测试重跑");
   });
 
   it("selects the linked timeline node", () => {
@@ -113,6 +122,34 @@ describe("RoleRunHistoryPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: /Analyst #1/ }));
 
     expect(onSelectNode).toHaveBeenCalledWith("coding_node_0005");
+  });
+
+  it("shows coder role runs with elapsed duration", () => {
+    render(
+      <RoleRunHistoryPanel
+        roleRuns={[
+          roleRun({
+            id: "coding_role_run_0003",
+            role: "coder",
+            stage: "coding",
+            run_no: 1,
+            status: "completed",
+            trigger: "initial",
+            node_id: "coding_node_0001",
+            started_at: "2026-06-13T00:00:00Z",
+            completed_at: "2026-06-13T00:02:03Z",
+          }),
+        ]}
+        timelineNodes={[node("coding_node_0001", "代码编写")]}
+        selectedNodeId={null}
+        onSelectNode={vi.fn()}
+      />,
+    );
+
+    const panel = screen.getByTestId("coding-role-run-history");
+    expect(panel).toHaveTextContent("Coder #1");
+    expect(panel).toHaveTextContent("已完成");
+    expect(panel).toHaveTextContent("耗时 2分03秒");
   });
 
   it("renders only the latest three recent events", () => {
@@ -133,6 +170,8 @@ describe("RoleRunHistoryPanel", () => {
         onSelectNode={vi.fn()}
       />,
     );
+
+    fireEvent.click(screen.getByRole("button", { name: /Analyst #1/ }));
 
     const panel = screen.getByTestId("coding-role-run-history");
     expect(panel).not.toHaveTextContent("Dropped oldest event");

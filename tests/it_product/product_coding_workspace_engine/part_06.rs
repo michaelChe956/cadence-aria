@@ -123,7 +123,8 @@ async fn execute_code_review_prompt_includes_diff_work_item_rules_and_role_provi
             &attempt.id,
             CodingRoleProviderConfigSnapshot {
                 coder: ProviderName::Fake,
-                tester: ProviderName::Fake,
+                tester_plan: ProviderName::Fake,
+                tester_execute: ProviderName::Fake,
                 analyst: ProviderName::Fake,
                 code_reviewer: ProviderName::Codex,
                 internal_reviewer: ProviderName::Fake,
@@ -636,4 +637,3 @@ async fn execute_rework_consumes_next_stage_code_review() {
     assert_eq!(decision.verdict, AnalystDecisionVerdict::Proceed);
     assert_eq!(decision.next_stage, AnalystDecisionNextStage::CodeReview);
 }
-

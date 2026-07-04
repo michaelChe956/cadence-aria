@@ -24,6 +24,7 @@ interface ChatEntryListProps {
   loadContent?: (sessionId: string, ref: WorkspaceContentRef) => Promise<string>;
   onCacheContent?: (key: string, value: string) => void;
   className?: string;
+  testId?: string;
 }
 
 export const ChatEntryList = forwardRef<ChatEntryListHandle, ChatEntryListProps>(
@@ -39,6 +40,7 @@ export const ChatEntryList = forwardRef<ChatEntryListHandle, ChatEntryListProps>
       loadContent,
       onCacheContent,
       className = "",
+      testId = "chat-entry-list",
     },
     ref,
   ) {
@@ -122,7 +124,7 @@ export const ChatEntryList = forwardRef<ChatEntryListHandle, ChatEntryListProps>
           parentRef.current = node;
           setScrollElement(node);
         }}
-        data-testid="chat-entry-list"
+        data-testid={testId}
         className={[
           "min-h-0 overflow-auto px-3 py-4",
           entries.length === 0 ? "flex items-center justify-center" : "",

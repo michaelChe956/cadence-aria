@@ -245,7 +245,7 @@ async fn coding_ws_provider_select_during_stage_gate_updates_roles_and_refreshes
     send_json(
         &mut ws,
         &CodingWsInMessage::ProviderSelect {
-            role: "tester".to_string(),
+            role: "tester_execute".to_string(),
             provider: ProviderName::Codex,
         },
     )
@@ -267,14 +267,14 @@ async fn coding_ws_provider_select_during_stage_gate_updates_roles_and_refreshes
         refreshed_gate
             .provider_snapshot
             .as_ref()
-            .map(|snapshot| &snapshot.tester),
+            .map(|snapshot| snapshot.tester_execute_provider()),
         Some(&ProviderName::Codex)
     );
     assert_eq!(
         store
             .get_role_provider_config_snapshot("project_0001", "issue_0001", "coding_attempt_0001")
             .expect("role provider snapshot")
-            .tester,
+            .tester_execute,
         ProviderName::Codex
     );
 
@@ -394,7 +394,7 @@ async fn coding_ws_provider_select_rejects_current_running_stage_role_without_ga
     send_json(
         &mut ws,
         &CodingWsInMessage::ProviderSelect {
-            role: "tester".to_string(),
+            role: "tester_execute".to_string(),
             provider: ProviderName::Codex,
         },
     )

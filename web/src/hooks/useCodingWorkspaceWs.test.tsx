@@ -49,7 +49,8 @@ describe("useCodingWorkspaceWs inbound events", () => {
         pushed_remote: null,
         role_provider_config_snapshot: {
           coder: "fake",
-          tester: "fake",
+          tester_plan: "fake",
+      tester_execute: "fake",
           analyst: "fake",
           code_reviewer: "fake",
           internal_reviewer: "fake",
@@ -110,7 +111,7 @@ describe("useCodingWorkspaceWs inbound events", () => {
       status: "completed",
       summary: "代码编写完成",
     });
-    expect(state.roleProviderConfigSnapshot?.tester).toBe("codex");
+    expect(state.roleProviderConfigSnapshot?.tester_execute).toBe("codex");
   });
 
   it("stores role runs from coding session snapshots", () => {
@@ -208,7 +209,8 @@ describe("useCodingWorkspaceWs inbound events", () => {
         pushed_remote: null,
         role_provider_config_snapshot: {
           coder: "fake",
-          tester: "fake",
+          tester_plan: "fake",
+      tester_execute: "fake",
           analyst: "fake",
           code_reviewer: "fake",
           internal_reviewer: "fake",
@@ -300,7 +302,8 @@ describe("useCodingWorkspaceWs inbound events", () => {
         pushed_remote: null,
         role_provider_config_snapshot: {
           coder: "fake",
-          tester: "fake",
+          tester_plan: "fake",
+      tester_execute: "fake",
           analyst: "fake",
           code_reviewer: "fake",
           internal_reviewer: "fake",

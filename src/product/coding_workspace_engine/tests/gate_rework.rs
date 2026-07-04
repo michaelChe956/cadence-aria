@@ -94,6 +94,81 @@ fn tester_tool_results_without_step_id_remain_unplanned_evidence() {
     assert_eq!(report.unplanned_evidence.len(), 3);
 }
 
+#[test]
+fn load_test_context_result_never_satisfies_required_step() {
+    let plan = TestPlan {
+        id: "test_plan_0001".to_string(),
+        attempt_id: "coding_attempt_0001".to_string(),
+        role_run_id: None,
+        run_no: None,
+        summary: "unit checks".to_string(),
+        context_warnings: Vec::new(),
+        assumptions: Vec::new(),
+        steps: vec![crate::product::coding_models::TestPlanStep {
+            id: "unit".to_string(),
+            title: "Unit tests".to_string(),
+            intent: "verify unit behavior".to_string(),
+            required: true,
+            tool: crate::product::coding_models::TestPlanTool::RunCommand,
+            risk_level: crate::product::coding_models::TestPlanRiskLevel::Low,
+            command_or_tool_input: serde_json::json!({"command": ["true"]}),
+            evidence_expectation: "exit 0".to_string(),
+            related_requirements: Vec::new(),
+            related_design_constraints: Vec::new(),
+            related_work_item_tasks: Vec::new(),
+        }],
+        created_at: "2026-06-10T00:00:00Z".to_string(),
+        raw_provider_output_ref: None,
+    };
+    let call = ProviderToolCall {
+        id: "load_context_0001".to_string(),
+        tool_name: "load_test_context".to_string(),
+        input: serde_json::json!({
+            "step_id": "unit",
+            "reason": "Need DEC-001 details",
+            "selectors": ["DEC-001"]
+        }),
+    };
+    let result = ProviderToolResult {
+        tool_use_id: call.id.clone(),
+        output: r#"{"snippets":[{"selector":"DEC-001","text":"details"}]}"#.to_string(),
+        is_error: false,
+    };
+    let mut step_results = Vec::new();
+    let mut unplanned_commands = Vec::new();
+    let mut unplanned_evidence = Vec::new();
+    let mut context_warnings = Vec::new();
+
+    record_tester_step_result(
+        &plan,
+        &call,
+        None,
+        &result,
+        TesterStepResultOutputs {
+            step_results: &mut step_results,
+            unplanned_commands: &mut unplanned_commands,
+            unplanned_evidence: &mut unplanned_evidence,
+            context_warnings: &mut context_warnings,
+        },
+    );
+
+    let mut report = build_plan_based_testing_report(
+        "testing_report_0001",
+        "coding_attempt_0001",
+        &plan,
+        step_results,
+        unplanned_commands,
+        None,
+        None,
+    );
+    report.unplanned_evidence = unplanned_evidence;
+
+    assert_eq!(report.overall_status, TestingOverallStatus::Blocked);
+    assert_eq!(report.missing_required_steps, vec!["unit"]);
+    assert!(report.steps.is_empty());
+    assert_eq!(report.unplanned_evidence.len(), 1);
+}
+
 #[tokio::test]
 async fn blocked_gate_response_is_idempotent_across_reconnects() {
     let store = CodingAttemptStore::new(ProductAppPaths::new(

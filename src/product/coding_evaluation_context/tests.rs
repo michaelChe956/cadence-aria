@@ -22,6 +22,8 @@ use crate::product::models::{
 use crate::product::work_item_plan_store::WorkItemPlanStore;
 use crate::web::workspace_ws_types::{ArtifactPayload, ArtifactVersion, ProviderConfigSnapshot};
 
+mod tester_execution;
+
 const PROJECT_ID: &str = "project_0001";
 const ISSUE_ID: &str = "issue_0001";
 const REPOSITORY_ID: &str = "repository_0001";

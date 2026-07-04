@@ -35,6 +35,13 @@ impl CodingWorkspaceEngine {
             .event_tx
             .send(CodingWsOutMessage::CodingTimelineNodeCreated { node: node.clone() })
             .await;
+        let role_run = self.store.create_role_run(
+            &attempt,
+            CodingExecutionStage::Coding,
+            CodingProviderRole::Coder,
+            CodingRoleRunTrigger::Initial,
+            Some(node.id.clone()),
+        )?;
 
         let coder_provider = self
             .store
@@ -136,11 +143,11 @@ impl CodingWorkspaceEngine {
             env_vars: BTreeMap::new(),
             timeout_secs: legacy_input.timeout,
         };
-        let _full_output = self
+        let stream_result = self
             .run_provider_stream_to_completion(CodingProviderStreamRun {
                 attempt: &attempt,
                 node_id: &node.id,
-                role_run: None,
+                role_run: Some(&role_run),
                 provider,
                 legacy_input: &legacy_input,
                 input,
@@ -151,7 +158,44 @@ impl CodingWorkspaceEngine {
                 timeout: None,
                 timeout_reason_code: None,
             })
-            .await?;
+            .await;
+        let full_output = match stream_result {
+            Ok(output) => output,
+            Err(error) => {
+                let (status, reason_code) = coder_role_run_failure_status(&error);
+                let _ = self.store.update_role_run_status(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &attempt.id,
+                    &role_run.id,
+                    status,
+                    reason_code,
+                );
+                return Err(error);
+            }
+        };
+        let raw_provider_output_ref = self.store.save_provider_raw_output(
+            &attempt.id,
+            CodingExecutionStage::Coding,
+            "coder_output",
+            &full_output,
+        )?;
+        self.store.update_role_run_refs(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &role_run.id,
+            vec![raw_provider_output_ref.clone()],
+            Vec::new(),
+        )?;
+        let completed_role_run = self.store.update_role_run_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &role_run.id,
+            CodingRoleRunStatus::Completed,
+            None,
+        )?;
         self.complete_timeline_node(
             &attempt.project_id,
             &attempt.issue_id,
@@ -161,6 +205,15 @@ impl CodingWorkspaceEngine {
             Some("代码编写完成".to_string()),
         )
         .await?;
+        self.emit_coder_output_chat_entry(
+            &attempt,
+            &node.id,
+            &coder_provider,
+            &completed_role_run,
+            &full_output,
+            &raw_provider_output_ref,
+        )
+        .await;
         Ok(attempt)
     }
 
@@ -280,7 +333,15 @@ impl CodingWorkspaceEngine {
                 if provider_start_is_not_implemented(&error) && allow_legacy_stream_fallback =>
             {
                 return self
-                    .run_legacy_stream_to_completion(attempt, node_id, provider, legacy_input)
+                    .run_legacy_stream_to_completion(
+                        attempt,
+                        node_id,
+                        role_run,
+                        provider,
+                        legacy_input,
+                        provider_name,
+                        provider_role,
+                    )
                     .await;
             }
             Err(error) if !allow_legacy_stream_fallback => {
@@ -755,16 +816,30 @@ impl CodingWorkspaceEngine {
         &self,
         attempt: &CodingExecutionAttempt,
         node_id: &str,
+        role_run: Option<&CodingRoleRun>,
         provider: &dyn StreamingProviderAdapter,
         input: &AdapterInput,
+        provider_name: &ProviderName,
+        provider_role: CodingProviderRole,
     ) -> Result<String, CodingWorkspaceEngineError> {
         let mut stream = provider
             .run_streaming(input, CancellationToken::new())
             .await?;
+        self.record_role_run_event(
+            attempt,
+            role_run,
+            CodingRoleRunEventType::ProviderStart,
+            json!({
+                "provider": provider_name,
+                "role": format!("{provider_role:?}"),
+                "mode": "legacy_stream"
+            }),
+        );
         let mut full_output = String::new();
         while let Some(chunk) = stream.recv().await {
             match chunk {
                 StreamChunk::Text(content) => {
+                    let content_for_event = content.clone();
                     full_output.push_str(&content);
                     let _ = self
                         .event_tx
@@ -773,27 +848,112 @@ impl CodingWorkspaceEngine {
                             node_id: Some(node_id.to_string()),
                         })
                         .await;
+                    self.record_role_run_event(
+                        attempt,
+                        role_run,
+                        CodingRoleRunEventType::TextDelta,
+                        json!({
+                            "content": content_for_event
+                        }),
+                    );
                 }
                 StreamChunk::Done {
                     full_output: completed_output,
                 } => {
+                    let output = if completed_output.trim().is_empty() {
+                        full_output
+                    } else {
+                        completed_output
+                    };
+                    let output_bytes = output.len();
                     let _ = self
                         .event_tx
                         .send(CodingWsOutMessage::CodingMessageComplete {
                             node_id: Some(node_id.to_string()),
                         })
                         .await;
-                    if !completed_output.trim().is_empty() {
-                        return Ok(completed_output);
-                    }
-                    return Ok(full_output);
+                    self.record_role_run_event(
+                        attempt,
+                        role_run,
+                        CodingRoleRunEventType::MessageComplete,
+                        json!({
+                            "provider_session_id": null,
+                            "output_bytes": output_bytes
+                        }),
+                    );
+                    return Ok(output);
                 }
                 StreamChunk::Error(message) => {
+                    self.record_role_run_event(
+                        attempt,
+                        role_run,
+                        CodingRoleRunEventType::ProviderFailed,
+                        json!({
+                            "message": message.clone()
+                        }),
+                    );
                     return self.fail_provider_stream(attempt, node_id, message).await;
                 }
             }
         }
 
         self.fail_provider_stream_ended(attempt, node_id).await
+    }
+
+    async fn emit_coder_output_chat_entry(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        node_id: &str,
+        provider_name: &ProviderName,
+        role_run: &CodingRoleRun,
+        full_output: &str,
+        raw_provider_output_ref: &str,
+    ) {
+        let completed_at = role_run
+            .completed_at
+            .clone()
+            .unwrap_or_else(|| Utc::now().to_rfc3339());
+        let entry = CodingChatEntry {
+            id: format!("{node_id}_coder_output"),
+            attempt_id: attempt.id.clone(),
+            node_id: Some(node_id.to_string()),
+            role: CodingAgentRole::Author,
+            entry_type: CodingEntryType::AssistantMessage,
+            content: Some(full_output.to_string()),
+            metadata: Some(serde_json::json!({
+                "source": "coding",
+                "provider": provider_name,
+                "role_run_id": role_run.id,
+                "run_no": role_run.run_no,
+                "raw_provider_output_ref": raw_provider_output_ref,
+                "started_at": role_run.started_at,
+                "completed_at": completed_at
+            })),
+            created_at: completed_at,
+        };
+        self.save_and_emit_chat_entry(entry).await;
+    }
+}
+
+fn coder_role_run_failure_status(
+    error: &CodingWorkspaceEngineError,
+) -> (CodingRoleRunStatus, Option<String>) {
+    match error {
+        CodingWorkspaceEngineError::Aborted => (
+            CodingRoleRunStatus::Aborted,
+            Some("abort_attempt".to_string()),
+        ),
+        CodingWorkspaceEngineError::ProviderStream(message)
+            if message == "provider_choice_unresolved" =>
+        {
+            (
+                CodingRoleRunStatus::Blocked,
+                Some("provider_choice_unresolved".to_string()),
+            )
+        }
+        CodingWorkspaceEngineError::ProviderStream(message) => {
+            (CodingRoleRunStatus::Failed, Some(message.clone()))
+        }
+        other => (CodingRoleRunStatus::Failed, Some(other.to_string())),
     }
 }

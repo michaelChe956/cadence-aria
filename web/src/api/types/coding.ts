@@ -80,7 +80,12 @@ export type CodingProviderRole =
   | "analyst"
   | "code_reviewer"
   | "internal_reviewer";
-export type CodingProviderSelectRole = "author" | "reviewer" | CodingProviderRole;
+export type CodingTesterProviderSelectRole = "tester_plan" | "tester_execute";
+export type CodingProviderSelectRole =
+  | "author"
+  | "reviewer"
+  | Exclude<CodingProviderRole, "tester">
+  | CodingTesterProviderSelectRole;
 export type CodingProviderPermissionMode = "auto" | "supervised";
 export type CodingRoleRunStatus =
   | "running"
@@ -158,7 +163,8 @@ export type CodingTimelineNode = {
 
 export type CodingRoleProviderConfigSnapshot = {
   coder: WorkspaceProviderName;
-  tester: WorkspaceProviderName;
+  tester_plan: WorkspaceProviderName;
+  tester_execute: WorkspaceProviderName;
   analyst: WorkspaceProviderName;
   code_reviewer: WorkspaceProviderName;
   internal_reviewer: WorkspaceProviderName;

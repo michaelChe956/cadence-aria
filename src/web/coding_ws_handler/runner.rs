@@ -6,7 +6,8 @@ use crate::product::coding_models::{
     CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage, TestingOverallStatus,
 };
 use crate::product::coding_workspace_engine::{
-    CodingWorkspaceEngine, CodingWorkspaceEngineError, testing_report_should_enter_analyst,
+    CodingWorkspaceEngine, CodingWorkspaceEngineError, ProviderTestingAdapters,
+    testing_report_should_enter_analyst,
 };
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::git_workspace_service::GitWorkspaceService;
@@ -237,19 +238,28 @@ pub(crate) async fn execute_start_coding_flow(
             };
             current = next;
             let test_specs = test_specs_for_attempt(&current, &execution_context);
-            let tester_provider_name = coding_store
-                .get_role_provider_config_snapshot(
-                    &current.project_id,
-                    &current.issue_id,
-                    &current.id,
-                )?
-                .tester;
-            let tester_provider =
-                provider_for(state, &tester_provider_name, "coding tester provider")?;
+            let tester_provider_snapshot = coding_store.get_role_provider_config_snapshot(
+                &current.project_id,
+                &current.issue_id,
+                &current.id,
+            )?;
+            let tester_plan_provider = provider_for(
+                state,
+                tester_provider_snapshot.tester_plan_provider(),
+                "coding tester plan provider",
+            )?;
+            let tester_execute_provider = provider_for(
+                state,
+                tester_provider_snapshot.tester_execute_provider(),
+                "coding tester execute provider",
+            )?;
             let testing_report = engine
-                .execute_testing_with_provider_commands(
+                .execute_testing_with_distinct_provider_commands(
                     &current,
-                    tester_provider.as_ref(),
+                    ProviderTestingAdapters {
+                        plan: tester_plan_provider.as_ref(),
+                        execute: tester_execute_provider.as_ref(),
+                    },
                     &execution_context,
                     &test_specs,
                     TesterAgentOptions::default(),

@@ -71,6 +71,67 @@ vi.mock("../components/shared/MonacoDiffViewer", () => ({
 describe("CodingWorkspacePage reports and history", () => {
   installCodingWorkspacePageTestHooks();
 
+  it("keeps provider settings and role history out of the default chat layout", () => {
+    mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      attemptId: "coding_attempt_0001",
+      status: "running",
+      stage: "testing",
+      chatEntries: [],
+      timelineNodes: [
+        {
+          id: "coding_node_testing_0001",
+          attempt_id: "coding_attempt_0001",
+          stage: "testing",
+          title: "执行测试",
+          status: "running",
+          agent_role: "tester",
+          summary: null,
+          started_at: "2026-07-04T00:00:00Z",
+          completed_at: null,
+          artifact_refs: [],
+        },
+      ],
+      roleRuns: [
+        {
+          id: "coding_role_run_0001",
+          attempt_id: "coding_attempt_0001",
+          stage: "testing",
+          role: "tester",
+          run_no: 1,
+          status: "running",
+          trigger: "initial",
+          node_id: "coding_node_testing_0001",
+          started_at: "2026-07-04T00:00:00Z",
+          completed_at: null,
+          supersedes_run_id: null,
+          superseded_by_run_id: null,
+          reason_code: null,
+          raw_provider_output_refs: [],
+          artifact_refs: [],
+        },
+      ],
+      roleProviderConfigSnapshot: {
+        coder: "fake",
+        tester_plan: "codex",
+        tester_execute: "claude_code",
+        analyst: "fake",
+        code_reviewer: "fake",
+        internal_reviewer: "fake",
+        review_rounds: 1,
+        permission_modes: DEFAULT_PERMISSION_MODES,
+      },
+    });
+
+    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+
+    expect(screen.getByTestId("coding-chat-entry-list")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Provider 设置" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "角色运行历史" })).toBeInTheDocument();
+    expect(screen.queryByTestId("coding-provider-config-panel")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("coding-role-run-history")).not.toBeInTheDocument();
+  });
+
   it("renders analyst decision state beside testing report", async () => {
     mockCodingWs();
     useCodingWorkspaceStore.setState({
@@ -504,11 +565,16 @@ describe("CodingWorkspacePage reports and history", () => {
 
     render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
 
+    await userEvent.click(screen.getByRole("button", { name: "角色运行历史" }));
+
     const panel = screen.getByTestId("coding-role-run-history");
     expect(panel).toHaveTextContent("Tester #1");
-    expect(panel).toHaveTextContent("provider-raw/testing/plan_tests_0001.txt");
     expect(panel).toHaveTextContent("Analyst #1");
     expect(panel).toHaveTextContent("analyst_human_gate");
+    expect(panel).not.toHaveTextContent("provider-raw/testing/plan_tests_0001.txt");
+
+    await userEvent.click(screen.getByRole("button", { name: /Tester #1/ }));
+    expect(panel).toHaveTextContent("provider-raw/testing/plan_tests_0001.txt");
 
     await userEvent.click(screen.getByRole("button", { name: /Analyst #1/ }));
 

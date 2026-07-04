@@ -45,7 +45,13 @@ async fn tester_tool_whitelist_rejects_write_tools_without_touching_worktree() {
 
     assert_eq!(
         tester_allowed_tools(),
-        ["run_command", "read_file", "list_files", "search_code"]
+        [
+            "run_command",
+            "read_file",
+            "list_files",
+            "search_code",
+            "load_test_context"
+        ]
     );
     assert!(outcome.result.is_error);
     assert_eq!(outcome.result.tool_use_id, "tool_call_0001");

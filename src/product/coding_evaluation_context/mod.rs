@@ -9,11 +9,13 @@ mod methods;
 mod repo;
 mod sanitize;
 mod specs;
+mod tester_execution;
 
 #[cfg(test)]
 mod tests;
 
 pub use builder::build_evaluation_context_pack;
+pub use tester_execution::build_tester_execution_context_pack;
 
 pub(super) const MAX_CONTEXT_SECTION_CHARS: usize = 30_000;
 pub(super) const MAX_DIFF_CONTEXT_CHARS: usize = 12_000;
@@ -55,6 +57,15 @@ pub struct EvaluationSpecContext {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvaluationSourceArtifactRef {
+    pub artifact_id: String,
+    pub version_id: Option<String>,
+    pub version: Option<u32>,
+    pub title: String,
+    pub workspace_session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvaluationWorkItemContext {
     pub artifact_id: String,
     pub version_id: Option<String>,
@@ -65,6 +76,33 @@ pub struct EvaluationWorkItemContext {
     pub design_spec_ids: Vec<String>,
     pub raw_markdown_or_sections: String,
     pub workspace_session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TesterExecutionWorkItemContext {
+    pub artifact_id: String,
+    pub title: String,
+    pub repository_id: String,
+    pub story_spec_ids: Vec<String>,
+    pub design_spec_ids: Vec<String>,
+    pub workspace_session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TesterExecutionContextPack {
+    pub issue_id: String,
+    pub attempt_id: String,
+    pub work_item: TesterExecutionWorkItemContext,
+    pub source_artifacts: TesterExecutionSourceArtifacts,
+    pub group_context: Option<CodingGroupContextPack>,
+    pub repo_context: EvaluationRepoContext,
+    pub context_warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TesterExecutionSourceArtifacts {
+    pub story_specs: Vec<EvaluationSourceArtifactRef>,
+    pub design_specs: Vec<EvaluationSourceArtifactRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

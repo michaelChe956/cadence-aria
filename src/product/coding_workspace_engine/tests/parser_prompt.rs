@@ -194,3 +194,41 @@ fn dangerous_test_plan_step_requires_permission_or_blocks() {
         Some("high_risk_test_step_requires_permission")
     );
 }
+
+#[test]
+fn tester_execute_prompt_blocks_insufficient_test_plan_without_replanning() {
+    let plan = TestPlan {
+        id: "test_plan_0001".to_string(),
+        attempt_id: "coding_attempt_0001".to_string(),
+        role_run_id: None,
+        run_no: None,
+        summary: "execute fixed plan".to_string(),
+        context_warnings: Vec::new(),
+        assumptions: Vec::new(),
+        steps: vec![crate::product::coding_models::TestPlanStep {
+            id: "step_t1".to_string(),
+            title: "read targeted context".to_string(),
+            intent: "verify available context".to_string(),
+            required: true,
+            tool: crate::product::coding_models::TestPlanTool::ReadFile,
+            risk_level: crate::product::coding_models::TestPlanRiskLevel::Low,
+            command_or_tool_input: serde_json::json!({"path": "src/lib.rs"}),
+            evidence_expectation: "source evidence".to_string(),
+            related_requirements: vec!["REQ-001".to_string()],
+            related_design_constraints: Vec::new(),
+            related_work_item_tasks: Vec::new(),
+        }],
+        created_at: "2026-06-10T00:00:00Z".to_string(),
+        raw_provider_output_ref: None,
+    };
+
+    let prompt = build_tester_execute_plan_prompt(
+        &test_attempt("coding_attempt_0001"),
+        &plan,
+        r#"{"source_artifacts":{"design_specs":[]}}"#,
+    );
+
+    assert!(prompt.contains("Do not generate new TestPlan steps during execute_test_plan"));
+    assert!(prompt.contains("provider_analysis prefixed by \"test_plan_insufficient:\""));
+    assert!(prompt.contains("mark the affected required step blocked"));
+}

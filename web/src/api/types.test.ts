@@ -289,7 +289,8 @@ describe("workspace websocket protocol types", () => {
       pushed_remote: null,
       role_provider_config_snapshot: {
         coder: "fake",
-        tester: "fake",
+        tester_plan: "fake",
+      tester_execute: "fake",
         analyst: "fake",
         code_reviewer: "fake",
         internal_reviewer: "fake",

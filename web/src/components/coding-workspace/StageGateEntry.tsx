@@ -1,6 +1,6 @@
 import { Clock, Play, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import type { CodingGateRequired } from "../../api/types";
+import type { CodingGateRequired, CodingProviderRole } from "../../api/types";
 
 const GATE_COUNTDOWN_MS = 5_000;
 
@@ -30,7 +30,10 @@ export function StageGateEntry({
   const remainingSeconds = Math.ceil(remainingMs / 1000);
   const progress = Math.max(0, Math.min(100, (remainingMs / GATE_COUNTDOWN_MS) * 100));
   const roleLabel = gate.role ? ROLE_LABELS[gate.role] : "Stage";
-  const provider = gate.role && gate.provider_snapshot ? gate.provider_snapshot[gate.role] : null;
+  const provider =
+    gate.role && gate.provider_snapshot
+      ? gate.provider_snapshot[providerSnapshotKeyForRole(gate.role)]
+      : null;
 
   useEffect(() => {
     if (expiresAtMs === null || remainingMs <= 0) {
@@ -93,4 +96,11 @@ export function StageGateEntry({
       </div>
     </div>
   );
+}
+
+function providerSnapshotKeyForRole(
+  role: CodingProviderRole,
+): "coder" | "tester_execute" | "analyst" | "code_reviewer" | "internal_reviewer" {
+  if (role === "tester") return "tester_execute";
+  return role;
 }
