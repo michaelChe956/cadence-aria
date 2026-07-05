@@ -3,26 +3,22 @@ use tokio::sync::mpsc;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::CodingAttemptStore;
 use crate::product::coding_models::{
-    CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage, TestingOverallStatus,
+    CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
 };
 use crate::product::coding_workspace_engine::{
-    CodingWorkspaceEngine, CodingWorkspaceEngineError, ProviderTestingAdapters,
-    testing_report_should_enter_analyst,
+    CodingWorkspaceEngine, CodingWorkspaceEngineError,
 };
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::git_workspace_service::GitWorkspaceService;
-use crate::product::tester_agent_loop::TesterAgentOptions;
 use crate::web::state::WebAppState;
 
 use super::runner_support::{
-    handle_pending_runner_commands, latest_analyst_role_run_evidence, provider_for,
-    testing_result_acceptance_pending_analyst,
+    handle_pending_runner_commands, provider_for,
 };
 use super::{
-    CodingWsOutMessage, await_stage_gate, code_review_rework_evidence, coding_execution_context,
+    CodingWsOutMessage, await_stage_gate, coding_execution_context,
     emit_current_session_state, ensure_work_item_execution_plan_confirmed,
-    internal_pr_review_rework_evidence, repository_path_for_attempt, test_specs_for_attempt,
-    testing_rework_evidence,
+    repository_path_for_attempt,
 };
 
 pub(crate) fn spawn_coding_runner(
@@ -142,41 +138,6 @@ pub(crate) async fn execute_start_coding_flow(
 
         let execution_context = coding_execution_context(&app_paths, &current)?;
 
-        if current.stage == CodingExecutionStage::Rework {
-            let analyst_provider_name = coding_store
-                .get_role_provider_config_snapshot(
-                    &current.project_id,
-                    &current.issue_id,
-                    &current.id,
-                )?
-                .analyst;
-            let analyst_provider =
-                provider_for(state, &analyst_provider_name, "coding analyst provider")?;
-            let evidence = latest_analyst_role_run_evidence(coding_store, &current)?;
-            current = engine
-                .execute_rework_with_commands(
-                    &current,
-                    &evidence,
-                    analyst_provider.as_ref(),
-                    &mut command_rx,
-                )
-                .await?;
-            current =
-                coding_store.get_attempt(&current.project_id, &current.issue_id, &current.id)?;
-            if handle_pending_runner_commands(
-                &mut command_rx,
-                coding_store,
-                engine,
-                event_tx,
-                &current,
-            )
-            .await?
-            {
-                return Ok(());
-            }
-            continue 'pipeline;
-        }
-
         if current.stage.order() <= CodingExecutionStage::Coding.order() {
             let Some(next) = await_stage_gate(
                 &mut command_rx,
@@ -247,54 +208,10 @@ pub(crate) async fn execute_start_coding_flow(
                 &internal_reviewer_provider_name,
                 "coding internal reviewer provider",
             )?;
-            let internal_review = engine
+            let _internal_review = engine
                 .execute_internal_pr_review_with_commands(
                     &current,
                     internal_reviewer_provider.as_ref(),
-                    &mut command_rx,
-                )
-                .await?;
-            current =
-                coding_store.get_attempt(&current.project_id, &current.issue_id, &current.id)?;
-            if handle_pending_runner_commands(
-                &mut command_rx,
-                coding_store,
-                engine,
-                event_tx,
-                &current,
-            )
-            .await?
-            {
-                return Ok(());
-            }
-            let Some(next) = await_stage_gate(
-                &mut command_rx,
-                coding_store,
-                engine,
-                event_tx,
-                &current,
-                CodingExecutionStage::Rework,
-            )
-            .await?
-            else {
-                return Ok(());
-            };
-            current = next;
-            let analyst_provider_name = coding_store
-                .get_role_provider_config_snapshot(
-                    &current.project_id,
-                    &current.issue_id,
-                    &current.id,
-                )?
-                .analyst;
-            let analyst_provider =
-                provider_for(state, &analyst_provider_name, "coding analyst provider")?;
-            let evidence = internal_pr_review_rework_evidence(&internal_review);
-            current = engine
-                .execute_rework_with_commands(
-                    &current,
-                    &evidence,
-                    analyst_provider.as_ref(),
                     &mut command_rx,
                 )
                 .await?;
@@ -343,54 +260,10 @@ pub(crate) async fn execute_start_coding_flow(
                 .code_reviewer;
             let reviewer_provider =
                 provider_for(state, &reviewer_provider_name, "coding reviewer provider")?;
-            let review_report = engine
+            let _review_report = engine
                 .execute_code_review_with_commands(
                     &current,
                     reviewer_provider.as_ref(),
-                    &mut command_rx,
-                )
-                .await?;
-            current =
-                coding_store.get_attempt(&current.project_id, &current.issue_id, &current.id)?;
-            if handle_pending_runner_commands(
-                &mut command_rx,
-                coding_store,
-                engine,
-                event_tx,
-                &current,
-            )
-            .await?
-            {
-                return Ok(());
-            }
-            let Some(next) = await_stage_gate(
-                &mut command_rx,
-                coding_store,
-                engine,
-                event_tx,
-                &current,
-                CodingExecutionStage::Rework,
-            )
-            .await?
-            else {
-                return Ok(());
-            };
-            current = next;
-            let analyst_provider_name = coding_store
-                .get_role_provider_config_snapshot(
-                    &current.project_id,
-                    &current.issue_id,
-                    &current.id,
-                )?
-                .analyst;
-            let analyst_provider =
-                provider_for(state, &analyst_provider_name, "coding analyst provider")?;
-            let evidence = code_review_rework_evidence(&review_report);
-            current = engine
-                .execute_rework_with_commands(
-                    &current,
-                    &evidence,
-                    analyst_provider.as_ref(),
                     &mut command_rx,
                 )
                 .await?;
@@ -500,7 +373,7 @@ pub(crate) async fn execute_start_coding_flow(
                 &internal_reviewer_provider_name,
                 "coding internal reviewer provider",
             )?;
-            let internal_review = engine
+            let _internal_review = engine
                 .execute_internal_pr_review_with_commands(
                     &current,
                     internal_reviewer_provider.as_ref(),
@@ -519,57 +392,6 @@ pub(crate) async fn execute_start_coding_flow(
             .await?
             {
                 return Ok(());
-            }
-            let Some(next) = await_stage_gate(
-                &mut command_rx,
-                coding_store,
-                engine,
-                event_tx,
-                &current,
-                CodingExecutionStage::Rework,
-            )
-            .await?
-            else {
-                return Ok(());
-            };
-            current = next;
-            let analyst_provider_name = coding_store
-                .get_role_provider_config_snapshot(
-                    &current.project_id,
-                    &current.issue_id,
-                    &current.id,
-                )?
-                .analyst;
-            let analyst_provider =
-                provider_for(state, &analyst_provider_name, "coding analyst provider")?;
-            let evidence = internal_pr_review_rework_evidence(&internal_review);
-            current = engine
-                .execute_rework_with_commands(
-                    &current,
-                    &evidence,
-                    analyst_provider.as_ref(),
-                    &mut command_rx,
-                )
-                .await?;
-            current =
-                coding_store.get_attempt(&current.project_id, &current.issue_id, &current.id)?;
-            if handle_pending_runner_commands(
-                &mut command_rx,
-                coding_store,
-                engine,
-                event_tx,
-                &current,
-            )
-            .await?
-            {
-                return Ok(());
-            }
-            match current.stage {
-                CodingExecutionStage::Coding => continue 'pipeline,
-                CodingExecutionStage::FinalConfirm => {
-                    return emit_current_session_state(event_tx, coding_store, &current).await;
-                }
-                _ => return emit_current_session_state(event_tx, coding_store, &current).await,
             }
         }
     }

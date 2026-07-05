@@ -4,9 +4,7 @@ use tokio::sync::mpsc;
 
 use crate::cross_cutting::streaming_provider::StreamingProviderAdapter;
 use crate::product::coding_attempt_store::CodingAttemptStore;
-use crate::product::coding_models::{
-    CodingExecutionAttempt, CodingExecutionStage, CodingProviderRole, CodingRoleRunStatus,
-};
+use crate::product::coding_models::{CodingExecutionAttempt,};
 use crate::product::coding_workspace_engine::{CodingWorkspaceEngine, CodingWorkspaceEngineError};
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::json_store::ProductStoreError;
@@ -17,60 +15,6 @@ use super::{
     CodingWsOutMessage, build_coding_session_state, emit_current_session_state,
     update_provider_selection,
 };
-
-pub(super) fn latest_analyst_role_run_evidence(
-    coding_store: &CodingAttemptStore,
-    attempt: &CodingExecutionAttempt,
-) -> Result<String, CodingWorkspaceEngineError> {
-    let run = coding_store
-        .latest_role_run(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingExecutionStage::Rework,
-            CodingProviderRole::Analyst,
-        )?
-        .ok_or_else(|| {
-            CodingWorkspaceEngineError::ProviderStream("analyst_retry_missing_evidence".to_string())
-        })?;
-    let evidence_ref = run
-        .artifact_refs
-        .iter()
-        .rev()
-        .find(|reference| reference.contains("analyst_evidence"))
-        .cloned()
-        .ok_or_else(|| {
-            CodingWorkspaceEngineError::ProviderStream("analyst_retry_missing_evidence".to_string())
-        })?;
-    coding_store
-        .read_attempt_artifact_text(&attempt.id, &evidence_ref)
-        .map_err(CodingWorkspaceEngineError::Store)
-}
-
-pub(super) fn testing_result_acceptance_pending_analyst(
-    coding_store: &CodingAttemptStore,
-    attempt: &CodingExecutionAttempt,
-) -> Result<bool, CodingWorkspaceEngineError> {
-    if attempt.stage != CodingExecutionStage::Testing {
-        return Ok(false);
-    }
-    let Some(run) = coding_store.latest_role_run(
-        &attempt.project_id,
-        &attempt.issue_id,
-        &attempt.id,
-        CodingExecutionStage::Rework,
-        CodingProviderRole::Analyst,
-    )?
-    else {
-        return Ok(false);
-    };
-    Ok(run.status == CodingRoleRunStatus::Running
-        && run.node_id.is_none()
-        && run
-            .artifact_refs
-            .iter()
-            .any(|reference| reference.contains("analyst_evidence")))
-}
 
 pub(super) async fn handle_pending_runner_commands(
     command_rx: &mut mpsc::Receiver<CodingRunnerCommand>,
