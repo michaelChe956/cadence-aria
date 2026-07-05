@@ -330,7 +330,6 @@ describe("CodingWorkspacePage reports and history", () => {
     render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
 
     const gate = screen.getByTestId("coding-pending-gate");
-    expect(gate).toHaveTextContent("Analyst 建议人工决策");
     expect(gate).toHaveTextContent("人工放行会记录质量豁免");
     expect(gate).toHaveTextContent("max_auto_rework_exceeded");
   });

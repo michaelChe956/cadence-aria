@@ -103,7 +103,6 @@ describe("CodingWorkspacePage gate panels", () => {
 
     const gate = screen.getByTestId("coding-pending-gate");
     expect(gate).toHaveTextContent("Tester 未返回测试计划 JSON");
-    expect(gate).toHaveTextContent("测试被阻塞");
     expect(gate).not.toHaveTextContent("测试失败");
   });
 
@@ -145,7 +144,6 @@ describe("CodingWorkspacePage gate panels", () => {
 
     const gate = screen.getByTestId("coding-pending-gate");
     expect(gate).toHaveTextContent("确认 Tester 测试结果");
-    expect(gate).toHaveTextContent("等待确认 Tester 结果");
     expect(gate).not.toHaveTextContent("测试被阻塞");
 
     await userEvent.click(screen.getByRole("button", { name: "结果可用，进入 Analyst" }));

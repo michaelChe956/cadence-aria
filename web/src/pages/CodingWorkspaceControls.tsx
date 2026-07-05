@@ -273,9 +273,6 @@ export function GatePanel({
   const reasonTooLong = reason.length > 2000;
   const displayedError = reasonTooLong ? "原因不能超过 2000 字" : localError;
   const displayTitle = blockedGateDisplayTitle(activeGate);
-  const testingResultReview = activeGate.reason_code === TESTING_RESULT_REVIEW_REASON_CODE;
-  const testingBlocked = activeGate.stage === "testing" && !testingResultReview;
-  const analystGate = activeGate.role === "analyst";
   const hasQualityBypassAction = activeGate.available_actions.some(actionRequiresReason);
 
   function handleAction(action: CodingGateRequired["available_actions"][number]) {
@@ -307,19 +304,6 @@ export function GatePanel({
       <div className="flex min-w-0 flex-col gap-2 md:flex-row md:items-center md:justify-between">
         <div className="min-w-0">
           <div className="truncate text-sm font-semibold text-amber-900">{displayTitle}</div>
-          {testingBlocked ? (
-            <div className="mt-0.5 text-xs font-semibold text-amber-900">测试被阻塞</div>
-          ) : null}
-          {testingResultReview ? (
-            <div className="mt-0.5 text-xs font-semibold text-amber-900">
-              等待确认 Tester 结果
-            </div>
-          ) : null}
-          {analystGate ? (
-            <div className="mt-0.5 text-xs font-semibold text-amber-900">
-              Analyst 建议人工决策
-            </div>
-          ) : null}
           <div className="mt-0.5 line-clamp-2 text-xs text-amber-800">
             {activeGate.description}
           </div>
@@ -417,14 +401,11 @@ function providerRoleForStage(stage: CodingExecutionStage): CodingProviderRole |
   switch (stage) {
     case "coding":
       return "coder";
-    case "testing":
-      return "tester";
-    case "rework":
-      return "analyst";
     case "code_review":
       return "code_reviewer";
     case "internal_pr_review":
       return "internal_reviewer";
+    // testing 和 rework 阶段不再有独立的角色 UI
     default:
       return null;
   }
