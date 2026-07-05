@@ -47,7 +47,7 @@ export function CodingWorkspacePage({
   const chatListRef = useRef<ChatEntryListHandle | null>(null);
   const pageError = planError ?? deleteError;
   const providerSummary = store.roleProviderConfigSnapshot
-    ? `Coder ${store.roleProviderConfigSnapshot.coder} · Tester ${store.roleProviderConfigSnapshot.tester_plan}/${store.roleProviderConfigSnapshot.tester_execute}`
+    ? `Coder ${store.roleProviderConfigSnapshot.coder} · Reviewer ${store.roleProviderConfigSnapshot.code_reviewer}`
     : "provider pending";
   const roleRunSummary =
     store.roleRuns.length === 0 ? "暂无运行记录" : `${store.roleRuns.length} 次角色运行`;
