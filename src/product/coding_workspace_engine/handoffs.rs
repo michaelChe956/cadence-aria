@@ -245,12 +245,7 @@ impl CodingWorkspaceEngine {
                 return Ok(());
             }
 
-            let handoff = if let Some(provider) = self.provider.as_ref() {
-                self.generate_work_item_handoff_from_provider(provider, attempt)
-                    .await?
-            } else {
-                self.generate_placeholder_work_item_handoff(attempt).await?
-            };
+            let handoff = self.generate_work_item_handoff(attempt).await?;
             self.store.save_coding_unit_handoff(
                 &attempt.project_id,
                 &attempt.issue_id,
@@ -293,12 +288,7 @@ impl CodingWorkspaceEngine {
             return Ok(());
         }
 
-        let handoff = if let Some(provider) = self.provider.as_ref() {
-            self.generate_work_item_handoff_from_provider(provider, attempt)
-                .await?
-        } else {
-            self.generate_placeholder_work_item_handoff(attempt).await?
-        };
+        let handoff = self.generate_work_item_handoff(attempt).await?;
 
         self.store.save_work_item_handoff(&handoff)?;
 
@@ -322,6 +312,36 @@ impl CodingWorkspaceEngine {
         }
 
         Ok(())
+    }
+
+    pub(crate) async fn generate_work_item_handoff(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<WorkItemHandoff, CodingWorkspaceEngineError> {
+        let Some(provider) = self.provider.as_ref() else {
+            return self.generate_placeholder_work_item_handoff(attempt).await;
+        };
+
+        match self
+            .generate_work_item_handoff_from_provider(provider, attempt)
+            .await
+        {
+            Ok(handoff) => Ok(handoff),
+            Err(
+                error @ (CodingWorkspaceEngineError::ProviderAdapter(_)
+                | CodingWorkspaceEngineError::ProviderStream(_)
+                | CodingWorkspaceEngineError::MissingWorktree(_)),
+            ) => {
+                tracing::warn!(
+                    attempt_id = %attempt.id,
+                    work_item_id = %self.active_work_item_id_for_attempt(attempt),
+                    error = %error,
+                    "work item handoff provider failed; falling back to placeholder handoff"
+                );
+                self.generate_placeholder_work_item_handoff(attempt).await
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub(crate) async fn generate_placeholder_work_item_handoff(
@@ -391,10 +411,32 @@ impl CodingWorkspaceEngine {
             },
             "required": ["summary"]
         });
+        let prompt = format!(
+            "Generate a concise handoff summary for the completed work item.\n\
+             Project: {}\n\
+             Issue: {}\n\
+             Work Item: {}\n\
+             Attempt: {}\n\
+             \n\
+             Output requirements:\n\
+             - Return exactly one JSON object inside the sentinel tags.\n\
+             - Do not include Markdown code fences.\n\
+             - Missing array fields must be [].\n\
+             - Use this shape:\n\
+             <ARIA_STRUCTURED_OUTPUT>{{\"summary\":\"...\",\"files_changed\":[],\"diff_summary\":\"\",\"tests_run\":[],\"test_result_summary\":\"\",\"api_or_contract_changes\":[],\"next_work_item_notes\":[]}}</ARIA_STRUCTURED_OUTPUT>\n\
+             \n\
+             JSON schema:\n\
+             {}\n",
+            attempt.project_id,
+            attempt.issue_id,
+            self.active_work_item_id_for_attempt(attempt),
+            attempt.id,
+            output_schema
+        );
         let input = AdapterInput {
             provider_type,
             role: AdapterRole::Handoff,
-            prompt: "Generate a concise handoff summary for the completed work item.".to_string(),
+            prompt,
             worktree_path: Some(worktree_path.to_string_lossy().to_string()),
             context_files: Vec::new(),
             output_schema: output_schema.to_string(),

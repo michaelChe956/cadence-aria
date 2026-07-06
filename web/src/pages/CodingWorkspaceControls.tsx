@@ -174,6 +174,31 @@ export function ActionButtons({
     );
   }
 
+  if (stage === "review_request" && status && ACTIVE_ATTEMPT_STATUSES.has(status)) {
+    return (
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={api.startCoding}
+          className={buttonClass}
+          aria-label={compact ? "底部继续 Coding" : undefined}
+        >
+          <Play className="h-3.5 w-3.5" />
+          继续 Coding
+        </button>
+        <button
+          type="button"
+          onClick={api.abortAttempt}
+          className={buttonClass}
+          aria-label={compact ? "底部中止" : undefined}
+        >
+          <X className="h-3.5 w-3.5" />
+          中止
+        </button>
+      </div>
+    );
+  }
+
   if (stage === "final_confirm" && status === "waiting_for_human") {
     return (
       <div className="flex items-center gap-2">

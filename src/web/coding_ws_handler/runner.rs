@@ -246,7 +246,7 @@ pub(crate) async fn execute_start_coding_flow(
             }
         }
 
-        {
+        if current.stage.order() <= CodingExecutionStage::CodeReview.order() {
             let Some(next) = await_stage_gate(
                 &mut command_rx,
                 coding_store,
@@ -348,62 +348,53 @@ pub(crate) async fn execute_start_coding_flow(
                     )?;
                 }
             }
-            match current.stage {
-                CodingExecutionStage::Coding
-                | CodingExecutionStage::Testing
-                | CodingExecutionStage::CodeReview => continue 'pipeline,
-                CodingExecutionStage::ReviewRequest => {}
-                _ => return emit_current_session_state(event_tx, coding_store, &current).await,
-            }
+        }
+        match current.stage {
+            CodingExecutionStage::Coding
+            | CodingExecutionStage::Testing
+            | CodingExecutionStage::CodeReview => continue 'pipeline,
+            CodingExecutionStage::ReviewRequest => {}
+            _ => return emit_current_session_state(event_tx, coding_store, &current).await,
+        }
 
-            if current.scope == crate::product::coding_models::CodingAttemptScope::WorkItemGroup {
-                current = engine
-                    .complete_group_unit_after_code_review(&current)
-                    .await?;
-                emit_current_session_state(event_tx, coding_store, &current).await?;
-                if current.stage == CodingExecutionStage::PrepareContext {
-                    continue 'pipeline;
-                }
-                if current.stage == CodingExecutionStage::ReviewRequest {
-                    let review_request = engine
-                        .execute_review_request(&current, "origin", "feat: implement work item")
-                        .await?;
-                    current = coding_store.get_attempt(
-                        &current.project_id,
-                        &current.issue_id,
-                        &current.id,
-                    )?;
-                    if review_request.push_status
-                        != crate::product::coding_models::PushStatus::Pushed
-                    {
-                        return emit_current_session_state(event_tx, coding_store, &current).await;
-                    }
-                }
-            } else {
-                let review_request = engine
-                    .execute_review_request(&current, "origin", "feat: implement work item")
-                    .await?;
-                current = coding_store.get_attempt(
-                    &current.project_id,
-                    &current.issue_id,
-                    &current.id,
-                )?;
-                if handle_pending_runner_commands(
-                    &mut command_rx,
-                    coding_store,
-                    engine,
-                    event_tx,
-                    &current,
-                )
-                .await?
-                {
-                    return Ok(());
-                }
-                if review_request.push_status != crate::product::coding_models::PushStatus::Pushed {
-                    return emit_current_session_state(event_tx, coding_store, &current).await;
-                }
+        if current.scope == crate::product::coding_models::CodingAttemptScope::WorkItemGroup
+            && !engine.group_attempt_ready_for_final_review(&current)?
+        {
+            current = engine
+                .complete_group_unit_after_code_review(&current)
+                .await?;
+            emit_current_session_state(event_tx, coding_store, &current).await?;
+            if current.stage == CodingExecutionStage::PrepareContext {
+                continue 'pipeline;
             }
+        }
+        if current.stage != CodingExecutionStage::ReviewRequest {
+            return emit_current_session_state(event_tx, coding_store, &current).await;
+        }
 
+        {
+            let review_request = engine
+                .execute_review_request(&current, "origin", "feat: implement work item")
+                .await?;
+            current =
+                coding_store.get_attempt(&current.project_id, &current.issue_id, &current.id)?;
+            if handle_pending_runner_commands(
+                &mut command_rx,
+                coding_store,
+                engine,
+                event_tx,
+                &current,
+            )
+            .await?
+            {
+                return Ok(());
+            }
+            if review_request.push_status != crate::product::coding_models::PushStatus::Pushed {
+                return emit_current_session_state(event_tx, coding_store, &current).await;
+            }
+        }
+
+        {
             if handle_pending_runner_commands(
                 &mut command_rx,
                 coding_store,

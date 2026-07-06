@@ -324,6 +324,85 @@ async fn completing_group_units_saves_distinct_handoffs_per_unit() {
     assert_ne!(unit1_handoff.work_item_id, unit2_handoff.work_item_id);
 }
 
+struct ParseFailingHandoffProvider;
+
+impl cadence_aria::cross_cutting::provider_adapter::ProviderAdapter
+    for ParseFailingHandoffProvider
+{
+    fn run(
+        &self,
+        input: &AdapterInput,
+    ) -> Result<cadence_aria::protocol::contracts::AdapterOutput, ProviderAdapterError> {
+        assert_eq!(input.role, AdapterRole::Handoff);
+        Err(ProviderAdapterError::parse_error(
+            "missing structured output sentinel",
+            "plain handoff summary",
+            "",
+        ))
+    }
+}
+
+#[tokio::test]
+async fn group_handoff_provider_parse_failure_falls_back_and_advances_next_unit() {
+    let (_root, paths, store, _engine, attempt) = group_engine_with_two_units();
+    let shared_worktree = paths.root().join("shared-worktree");
+    std::fs::create_dir_all(&shared_worktree).expect("create shared worktree");
+    let lifecycle = LifecycleStore::new(paths);
+    lifecycle
+        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: shared_worktree,
+            base_branch: "HEAD".to_string(),
+        })
+        .expect("upsert shared worktree");
+    lifecycle
+        .try_acquire_issue_worktree_lock("project_0001", "issue_0001", "work_item_0001")
+        .expect("acquire shared lock for first unit");
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::with_provider(
+        store.clone(),
+        GitWorkspaceService::new(),
+        Arc::new(ParseFailingHandoffProvider),
+        tx,
+    );
+
+    let updated = engine
+        .complete_group_unit_after_code_review(&attempt)
+        .await
+        .expect("complete unit with fallback handoff");
+
+    let unit1_handoff = store
+        .get_coding_unit_handoff(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            "coding_unit_0001",
+        )
+        .expect("load unit1 handoff")
+        .expect("fallback handoff exists");
+    let units = store
+        .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("units");
+
+    assert_eq!(updated.stage, CodingExecutionStage::PrepareContext);
+    assert_eq!(updated.current_work_item_id.as_deref(), Some("work_item_0002"));
+    assert_eq!(updated.active_unit_id.as_deref(), Some("coding_unit_0002"));
+    assert_eq!(unit1_handoff.work_item_id, "work_item_0001");
+    assert_eq!(
+        unit1_handoff.summary,
+        "Handoff generated from attempt artifacts"
+    );
+    assert_eq!(
+        units[0].handoff_ref.as_deref(),
+        Some("units/coding_unit_0001/work-item-handoff.json")
+    );
+    assert_eq!(units[0].status, CodingExecutionUnitStatus::Completed);
+    assert_eq!(units[1].status, CodingExecutionUnitStatus::Running);
+}
+
 #[test]
 fn group_visible_handoff_returns_last_completed_unit_when_no_active_unit_exists() {
     let (_root, _paths, store, _engine, attempt) = group_engine_with_last_running_unit();

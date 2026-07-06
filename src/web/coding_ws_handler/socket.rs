@@ -612,8 +612,12 @@ pub fn is_coding_ws_message_allowed(
                 | CodingWsInMessage::PermissionModeSelect { .. }
                 | CodingWsInMessage::AbortAttempt
         ),
-        CodingExecutionStage::WorktreePrepare | CodingExecutionStage::ReviewRequest => {
-            matches!(message, CodingWsInMessage::AbortAttempt)
+        CodingExecutionStage::WorktreePrepare => matches!(message, CodingWsInMessage::AbortAttempt),
+        CodingExecutionStage::ReviewRequest => {
+            matches!(
+                message,
+                CodingWsInMessage::StartCoding | CodingWsInMessage::AbortAttempt
+            )
         }
         CodingExecutionStage::Coding
         | CodingExecutionStage::Testing

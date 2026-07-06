@@ -406,6 +406,21 @@ describe("CodingWorkspacePage shell and actions", () => {
     expect(api.startCoding).toHaveBeenCalled();
   });
 
+  it("resumes coding from review request when a group unit needs recovery", async () => {
+    const api = mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      attemptId: "coding_attempt_0001",
+      status: "running",
+      stage: "review_request",
+    });
+
+    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "继续 Coding" }));
+
+    expect(api.startCoding).toHaveBeenCalled();
+  });
+
   it("shows dependency handoff summary in execution plan", () => {
     mockCodingWs();
     useCodingWorkspaceStore.setState({
