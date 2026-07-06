@@ -80,7 +80,6 @@ pub(crate) enum AnalystProviderVerdict {
     NeedsFix,
     NeedsHumanInput,
     NoIssue,
-    RerunTesting,
     Proceed,
     HumanRequired,
     Blocked,
@@ -92,7 +91,6 @@ impl AnalystProviderVerdict {
             Self::NeedsFix => AnalystDecisionVerdict::NeedsFix,
             Self::NeedsHumanInput => AnalystDecisionVerdict::HumanRequired,
             Self::NoIssue => AnalystDecisionVerdict::Proceed,
-            Self::RerunTesting => AnalystDecisionVerdict::RerunTesting,
             Self::Proceed => AnalystDecisionVerdict::Proceed,
             Self::HumanRequired => AnalystDecisionVerdict::HumanRequired,
             Self::Blocked => AnalystDecisionVerdict::Blocked,
@@ -106,12 +104,10 @@ pub(crate) fn default_next_stage_for_legacy_verdict(
 ) -> AnalystDecisionNextStage {
     match verdict {
         AnalystDecisionVerdict::NeedsFix => AnalystDecisionNextStage::Coding,
-        AnalystDecisionVerdict::RerunTesting => AnalystDecisionNextStage::Testing,
         AnalystDecisionVerdict::HumanRequired | AnalystDecisionVerdict::Blocked => {
             AnalystDecisionNextStage::HumanGate
         }
         AnalystDecisionVerdict::Proceed => match source_stage {
-            CodingExecutionStage::Testing => AnalystDecisionNextStage::CodeReview,
             CodingExecutionStage::CodeReview => AnalystDecisionNextStage::ReviewRequest,
             CodingExecutionStage::InternalPrReview => AnalystDecisionNextStage::FinalConfirm,
             _ => AnalystDecisionNextStage::CodeReview,
@@ -209,7 +205,6 @@ pub(crate) fn extract_json_object(value: &str) -> Option<&str> {
 pub(crate) fn default_analyst_decision_summary(verdict: &AnalystDecisionVerdict) -> String {
     match verdict {
         AnalystDecisionVerdict::NeedsFix => "Analyst 判定需要自动修复".to_string(),
-        AnalystDecisionVerdict::RerunTesting => "Analyst 判定需要重跑测试".to_string(),
         AnalystDecisionVerdict::Proceed => "Analyst 未发现阻塞问题".to_string(),
         AnalystDecisionVerdict::HumanRequired => "Analyst 判定需要人工补充信息".to_string(),
         AnalystDecisionVerdict::Blocked => "Analyst 判定当前流程被阻塞".to_string(),

@@ -14,7 +14,6 @@ pub enum AnalystVerdict {
 #[serde(rename_all = "snake_case")]
 pub enum AnalystDecisionVerdict {
     NeedsFix,
-    RerunTesting,
     Proceed,
     HumanRequired,
     Blocked,
@@ -23,7 +22,7 @@ pub enum AnalystDecisionVerdict {
 impl AnalystDecisionVerdict {
     pub fn legacy_chat_verdict(&self) -> AnalystVerdict {
         match self {
-            Self::NeedsFix | Self::RerunTesting => AnalystVerdict::NeedsFix,
+            Self::NeedsFix => AnalystVerdict::NeedsFix,
             Self::Proceed => AnalystVerdict::NoIssue,
             Self::HumanRequired | Self::Blocked => AnalystVerdict::NeedsHumanInput,
         }
