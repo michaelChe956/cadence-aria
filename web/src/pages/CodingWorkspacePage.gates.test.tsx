@@ -321,17 +321,20 @@ describe("CodingWorkspacePage gate panels", () => {
     await userEvent.click(screen.getByRole("button", { name: "Provider 设置" }));
 
     expect(screen.getByTestId("coding-provider-config-panel")).toHaveTextContent("Coder");
-    expect(screen.getByTestId("coding-provider-config-panel")).toHaveTextContent("Tester Plan");
-    expect(screen.getByTestId("coding-provider-config-panel")).toHaveTextContent("Tester Execute");
+    expect(screen.getByTestId("coding-provider-config-panel")).not.toHaveTextContent("Tester Plan");
+    expect(screen.getByTestId("coding-provider-config-panel")).not.toHaveTextContent("Tester Execute");
+    expect(screen.getByTestId("coding-provider-config-panel")).not.toHaveTextContent("Analyst");
+    expect(screen.getByTestId("coding-provider-config-panel")).toHaveTextContent("Code Reviewer");
+    expect(screen.getByTestId("coding-provider-config-panel")).toHaveTextContent("Internal Reviewer");
     expect(screen.getByTestId("coding-provider-config-panel")).toHaveTextContent("Auto");
 
-    await userEvent.click(screen.getByRole("button", { name: "将 Tester Execute 切换为 Codex" }));
+    await userEvent.click(screen.getByRole("button", { name: "将 Code Reviewer 切换为 Codex" }));
     await userEvent.click(
-      screen.getByRole("button", { name: "将 Tester Execute 授权模式切换为 Supervised" }),
+      screen.getByRole("button", { name: "将 Code Reviewer 授权模式切换为 Auto" }),
     );
 
-    expect(api.sendProviderSelect).toHaveBeenCalledWith("tester_execute", "codex");
-    expect(api.sendPermissionModeSelect).toHaveBeenCalledWith("tester", "supervised");
+    expect(api.sendProviderSelect).toHaveBeenCalledWith("code_reviewer", "codex");
+    expect(api.sendPermissionModeSelect).toHaveBeenCalledWith("code_reviewer", "auto");
   });
 
   it("sends coding context notes from the chat input", async () => {

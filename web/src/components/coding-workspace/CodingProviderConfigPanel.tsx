@@ -96,6 +96,13 @@ export function CodingProviderConfigPanel({
       className="grid min-w-0 gap-2 bg-white"
     >
       {ROLES.map(({ selectRole, providerKey, modeRole, lockRole, label }) => {
+        if (
+          selectRole === "tester_plan" ||
+          selectRole === "tester_execute" ||
+          selectRole === "analyst"
+        ) {
+          return null;
+        }
         const current = snapshot[providerKey];
         const permissionMode = modeRole ? snapshot.permission_modes[modeRole] : null;
         const locked = lockedRole === lockRole;
