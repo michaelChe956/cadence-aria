@@ -306,6 +306,20 @@ impl CodingWorkspaceEngine {
             role_run_status,
             reason_code,
         )?;
+        if review.verdict == ReviewVerdict::Blocked {
+            self.create_review_blocked_gate(ReviewBlockedGateInput {
+                attempt: &attempt,
+                node_id: &node.id,
+                stage: CodingExecutionStage::InternalPrReview,
+                role: CodingProviderRole::InternalReviewer,
+                title: "Internal PR review blocked".to_string(),
+                description: review.summary.clone(),
+                reason_code: "internal_review_blocked",
+                evidence_refs: vec![review.id.clone()],
+                raw_provider_output_ref: Some(raw_provider_output_ref),
+            })
+            .await?;
+        }
         Ok(review)
     }
 

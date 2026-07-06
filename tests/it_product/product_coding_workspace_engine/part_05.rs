@@ -644,11 +644,23 @@ async fn review_payload_parse_failure_records_blocked_evidence_for_analyst() {
     let updated = store
         .get_attempt("project_0001", "issue_0001", &attempt.id)
         .expect("updated attempt");
-    assert_eq!(updated.status, CodingAttemptStatus::Running);
+    assert_eq!(updated.status, CodingAttemptStatus::Blocked);
     assert_eq!(updated.stage, CodingExecutionStage::CodeReview);
     let gates = store
         .list_open_blocked_gates("project_0001", "issue_0001", &attempt.id)
         .expect("open blocked gates");
-    assert!(gates.is_empty());
+    assert_eq!(gates.len(), 1);
+    assert_eq!(gates[0].stage, Some(CodingExecutionStage::CodeReview));
+    assert_eq!(gates[0].role, Some(CodingProviderRole::CodeReviewer));
+    assert_eq!(gates[0].reason_code.as_deref(), Some("code_review_blocked"));
+    assert_eq!(
+        gates[0].raw_provider_output_ref.as_deref(),
+        Some("provider-raw/code_review/code_review_0001.txt")
+    );
+    assert!(
+        gates[0]
+            .available_actions
+            .iter()
+            .any(|action| action.action_id == "retry_review")
+    );
 }
-

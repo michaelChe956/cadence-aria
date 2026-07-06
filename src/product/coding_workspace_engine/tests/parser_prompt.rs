@@ -142,6 +142,40 @@ fn review_parser_preserves_findings_with_common_aliases() {
 }
 
 #[test]
+fn review_parser_accepts_fenced_json_with_reviewer_blocker_severity() {
+    let payload = r#"Reviewer summary before the structured payload.
+
+```json
+{
+  "verdict": "request_changes",
+  "summary": "orphaned modules",
+  "findings": [
+    {
+      "severity": "blocker",
+      "file_path": "src/web/mod.rs",
+      "message": "module is not wired",
+      "required_action": "declare the module"
+    }
+  ]
+}
+```"#;
+
+    let parsed = parse_review_payload(payload, CodingExecutionStage::CodeReview);
+
+    assert_eq!(parsed.verdict, ReviewVerdict::RequestChanges);
+    assert_eq!(parsed.summary, "orphaned modules");
+    assert_eq!(parsed.findings.len(), 1);
+    assert_eq!(
+        parsed.findings[0].severity,
+        crate::product::coding_models::FindingSeverity::Error
+    );
+    assert_eq!(
+        parsed.findings[0].required_action.as_deref(),
+        Some("declare the module")
+    );
+}
+
+#[test]
 fn rework_and_internal_review_prompts_require_openspec_and_superpowers() {
     let attempt = test_attempt("coding_attempt_0001");
     let context_notes = ReworkContextNoteInput {

@@ -68,13 +68,26 @@ impl<'de> Deserialize<'de> for FindingSeverity {
     {
         let value = String::deserialize(deserializer)?;
         match value.trim().to_ascii_lowercase().as_str() {
-            "error" | "blocking" | "critical" | "high" => Ok(Self::Error),
-            "warning" | "medium" => Ok(Self::Warning),
-            "info" | "low" => Ok(Self::Info),
+            "error" | "blocker" | "blocking" | "critical" | "high" | "must_fix" => Ok(Self::Error),
+            "warning" | "medium" | "strong_recommend_fix" | "suggestion" => Ok(Self::Warning),
+            "info" | "low" | "minor" | "optional" => Ok(Self::Info),
             other => Err(serde::de::Error::unknown_variant(
                 other,
                 &[
-                    "error", "warning", "info", "blocking", "critical", "high", "medium", "low",
+                    "error",
+                    "warning",
+                    "info",
+                    "blocker",
+                    "blocking",
+                    "critical",
+                    "high",
+                    "medium",
+                    "low",
+                    "must_fix",
+                    "strong_recommend_fix",
+                    "suggestion",
+                    "minor",
+                    "optional",
                 ],
             )),
         }

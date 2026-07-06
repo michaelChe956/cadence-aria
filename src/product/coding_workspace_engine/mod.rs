@@ -97,6 +97,8 @@ pub use types::{
 #[allow(unused_imports)]
 pub(crate) use analyst_parser::*;
 #[allow(unused_imports)]
+pub(crate) use gates::*;
+#[allow(unused_imports)]
 pub(crate) use group::*;
 #[allow(unused_imports)]
 pub(crate) use prompts::*;

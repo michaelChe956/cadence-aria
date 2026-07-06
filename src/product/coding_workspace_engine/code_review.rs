@@ -146,21 +146,24 @@ impl CodingWorkspaceEngine {
                 report: Box::new(report.clone()),
             })
             .await;
-        let (node_status, summary, role_run_status) = match report.verdict {
+        let (node_status, summary, role_run_status, reason_code) = match report.verdict {
             ReviewVerdict::Approve => (
                 CodingTimelineNodeStatus::Completed,
                 Some("code review 通过".to_string()),
                 CodingRoleRunStatus::Completed,
+                None,
             ),
             ReviewVerdict::RequestChanges => (
                 CodingTimelineNodeStatus::Failed,
                 Some("code review 要求修改".to_string()),
                 CodingRoleRunStatus::Completed,
+                None,
             ),
             ReviewVerdict::Blocked => (
                 CodingTimelineNodeStatus::Blocked,
                 Some("code review 被阻塞".to_string()),
                 CodingRoleRunStatus::Blocked,
+                Some("code_review_blocked".to_string()),
             ),
         };
         self.complete_timeline_node(
@@ -178,8 +181,22 @@ impl CodingWorkspaceEngine {
             &attempt.id,
             &role_run.id,
             role_run_status,
-            None,
+            reason_code,
         )?;
+        if report.verdict == ReviewVerdict::Blocked {
+            self.create_review_blocked_gate(ReviewBlockedGateInput {
+                attempt: &attempt,
+                node_id: &node.id,
+                stage: CodingExecutionStage::CodeReview,
+                role: CodingProviderRole::CodeReviewer,
+                title: "Code review blocked".to_string(),
+                description: report.summary.clone(),
+                reason_code: "code_review_blocked",
+                evidence_refs: vec![report.id.clone()],
+                raw_provider_output_ref: Some(raw_provider_output_ref),
+            })
+            .await?;
+        }
         Ok(report)
     }
 }

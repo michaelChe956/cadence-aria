@@ -1,5 +1,5 @@
 #[tokio::test]
-async fn execute_code_review_blocked_keeps_attempt_running_for_analyst() {
+async fn execute_code_review_blocked_creates_retry_gate() {
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
     init_repo(&worktree);
@@ -42,12 +42,27 @@ async fn execute_code_review_blocked_keeps_attempt_running_for_analyst() {
     let updated = store
         .get_attempt("project_0001", "issue_0001", &attempt.id)
         .expect("updated attempt");
-    assert_eq!(updated.status, CodingAttemptStatus::Running);
+    assert_eq!(updated.status, CodingAttemptStatus::Blocked);
     assert_eq!(updated.stage, CodingExecutionStage::CodeReview);
     let gates = store
         .list_open_blocked_gates("project_0001", "issue_0001", &attempt.id)
         .expect("open blocked gates");
-    assert!(gates.is_empty());
+    assert_eq!(gates.len(), 1);
+    let gate = &gates[0];
+    assert_eq!(gate.stage, Some(CodingExecutionStage::CodeReview));
+    assert_eq!(gate.role, Some(CodingProviderRole::CodeReviewer));
+    assert_eq!(gate.reason_code.as_deref(), Some("code_review_blocked"));
+    assert_eq!(
+        gate.raw_provider_output_ref.as_deref(),
+        Some("provider-raw/code_review/code_review_0001.txt")
+    );
+    assert_eq!(
+        gate.available_actions
+            .iter()
+            .map(|action| action.action_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["retry_review", "abort"]
+    );
 }
 
 #[tokio::test]

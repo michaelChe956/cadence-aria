@@ -1,6 +1,61 @@
 use super::*;
 
+pub(crate) struct ReviewBlockedGateInput<'a> {
+    pub(crate) attempt: &'a CodingExecutionAttempt,
+    pub(crate) node_id: &'a str,
+    pub(crate) stage: CodingExecutionStage,
+    pub(crate) role: CodingProviderRole,
+    pub(crate) title: String,
+    pub(crate) description: String,
+    pub(crate) reason_code: &'static str,
+    pub(crate) evidence_refs: Vec<String>,
+    pub(crate) raw_provider_output_ref: Option<String>,
+}
+
 impl CodingWorkspaceEngine {
+    pub(crate) async fn create_review_blocked_gate(
+        &self,
+        input: ReviewBlockedGateInput<'_>,
+    ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
+        let ReviewBlockedGateInput {
+            attempt,
+            node_id,
+            stage,
+            role,
+            title,
+            description,
+            reason_code,
+            evidence_refs,
+            raw_provider_output_ref,
+        } = input;
+        let updated = self.store.update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::Blocked,
+        )?;
+        let gate = self.store.create_blocked_gate(CreateBlockedGateInput {
+            attempt_id: attempt.id.clone(),
+            stage,
+            node_id: Some(node_id.to_string()),
+            role: Some(role),
+            title,
+            description,
+            reason_code: Some(reason_code.to_string()),
+            evidence_refs,
+            raw_provider_output_ref,
+            available_actions: vec![
+                coding_gate_action_for_id("retry_review").expect("retry review action"),
+                coding_gate_action_for_id("abort").expect("abort action"),
+            ],
+        })?;
+        let _ = self
+            .event_tx
+            .send(CodingWsOutMessage::CodingGateRequired { gate })
+            .await;
+        Ok(updated)
+    }
+
     pub(crate) async fn fail_provider_stream<T>(
         &self,
         attempt: &CodingExecutionAttempt,

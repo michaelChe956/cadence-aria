@@ -19,6 +19,7 @@ async fn coding_ws_code_review_blocked_stops_without_analyst_rework() {
 
     let mut confirmed_gates = HashSet::new();
     let mut saw_code_review_blocked = false;
+    let mut saw_code_review_blocked_gate = false;
     let mut saw_rework_node = false;
     let mut stopped_at_code_review = false;
     for _ in 0..120 {
@@ -32,6 +33,19 @@ async fn coding_ws_code_review_blocked_stops_without_analyst_rework() {
                     send_json(&mut ws, &CodingWsInMessage::StageGateConfirm { stage }).await;
                 }
             }
+            Ok(CodingWsOutMessage::CodingGateRequired { gate })
+                if gate.kind == CodingGateKind::Blocked
+                    && gate.stage == Some(CodingExecutionStage::CodeReview) =>
+            {
+                assert_eq!(gate.role, Some(CodingProviderRole::CodeReviewer));
+                assert_eq!(gate.reason_code.as_deref(), Some("code_review_blocked"));
+                assert!(
+                    gate.available_actions
+                        .iter()
+                        .any(|action| action.action_id == "retry_review")
+                );
+                saw_code_review_blocked_gate = true;
+            }
             Ok(CodingWsOutMessage::CodeReviewComplete { report })
                 if report.verdict == ReviewVerdict::Blocked =>
             {
@@ -42,10 +56,22 @@ async fn coding_ws_code_review_blocked_stops_without_analyst_rework() {
             {
                 saw_rework_node = true;
             }
-            Ok(CodingWsOutMessage::CodingSessionState { status, stage, .. })
+            Ok(CodingWsOutMessage::CodingSessionState {
+                status,
+                stage,
+                pending_gates,
+                ..
+            })
                 if saw_code_review_blocked && stage == CodingExecutionStage::CodeReview =>
             {
-                assert_eq!(status, CodingAttemptStatus::Running);
+                assert_eq!(status, CodingAttemptStatus::Blocked);
+                assert!(
+                    pending_gates.iter().any(|gate| {
+                        gate.kind == CodingGateKind::Blocked
+                            && gate.reason_code.as_deref() == Some("code_review_blocked")
+                    }),
+                    "blocked review gate missing from session state"
+                );
                 stopped_at_code_review = true;
                 break;
             }
@@ -59,6 +85,10 @@ async fn coding_ws_code_review_blocked_stops_without_analyst_rework() {
     assert!(
         saw_code_review_blocked,
         "code review blocked report missing"
+    );
+    assert!(
+        saw_code_review_blocked_gate,
+        "code review blocked gate missing"
     );
     assert!(
         stopped_at_code_review,
@@ -76,7 +106,7 @@ async fn coding_ws_code_review_blocked_stops_without_analyst_rework() {
     let attempt = store
         .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
         .expect("attempt");
-    assert_eq!(attempt.status, CodingAttemptStatus::Running);
+    assert_eq!(attempt.status, CodingAttemptStatus::Blocked);
     assert_eq!(attempt.stage, CodingExecutionStage::CodeReview);
     let runs = store
         .list_role_runs("project_0001", "issue_0001", "coding_attempt_0001")
@@ -116,6 +146,7 @@ async fn coding_ws_internal_pr_review_blocked_stops_without_analyst_rework() {
 
     let mut confirmed_gates = HashSet::new();
     let mut saw_internal_review_blocked = false;
+    let mut saw_internal_review_blocked_gate = false;
     let mut saw_rework_node = false;
     let mut stopped_at_internal_review = false;
     for _ in 0..180 {
@@ -129,6 +160,19 @@ async fn coding_ws_internal_pr_review_blocked_stops_without_analyst_rework() {
                     send_json(&mut ws, &CodingWsInMessage::StageGateConfirm { stage }).await;
                 }
             }
+            Ok(CodingWsOutMessage::CodingGateRequired { gate })
+                if gate.kind == CodingGateKind::Blocked
+                    && gate.stage == Some(CodingExecutionStage::InternalPrReview) =>
+            {
+                assert_eq!(gate.role, Some(CodingProviderRole::InternalReviewer));
+                assert_eq!(gate.reason_code.as_deref(), Some("internal_review_blocked"));
+                assert!(
+                    gate.available_actions
+                        .iter()
+                        .any(|action| action.action_id == "retry_review")
+                );
+                saw_internal_review_blocked_gate = true;
+            }
             Ok(CodingWsOutMessage::InternalPrReviewComplete { review })
                 if review.verdict == ReviewVerdict::Blocked =>
             {
@@ -139,10 +183,22 @@ async fn coding_ws_internal_pr_review_blocked_stops_without_analyst_rework() {
             {
                 saw_rework_node = true;
             }
-            Ok(CodingWsOutMessage::CodingSessionState { status, stage, .. })
+            Ok(CodingWsOutMessage::CodingSessionState {
+                status,
+                stage,
+                pending_gates,
+                ..
+            })
                 if saw_internal_review_blocked && stage == CodingExecutionStage::InternalPrReview =>
             {
-                assert_eq!(status, CodingAttemptStatus::Running);
+                assert_eq!(status, CodingAttemptStatus::Blocked);
+                assert!(
+                    pending_gates.iter().any(|gate| {
+                        gate.kind == CodingGateKind::Blocked
+                            && gate.reason_code.as_deref() == Some("internal_review_blocked")
+                    }),
+                    "blocked internal review gate missing from session state"
+                );
                 stopped_at_internal_review = true;
                 break;
             }
@@ -156,6 +212,10 @@ async fn coding_ws_internal_pr_review_blocked_stops_without_analyst_rework() {
     assert!(
         saw_internal_review_blocked,
         "internal review blocked report missing"
+    );
+    assert!(
+        saw_internal_review_blocked_gate,
+        "internal review blocked gate missing"
     );
     assert!(
         stopped_at_internal_review,
@@ -173,7 +233,7 @@ async fn coding_ws_internal_pr_review_blocked_stops_without_analyst_rework() {
     let attempt = store
         .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
         .expect("attempt");
-    assert_eq!(attempt.status, CodingAttemptStatus::Running);
+    assert_eq!(attempt.status, CodingAttemptStatus::Blocked);
     assert_eq!(attempt.stage, CodingExecutionStage::InternalPrReview);
     let runs = store
         .list_role_runs("project_0001", "issue_0001", "coding_attempt_0001")
