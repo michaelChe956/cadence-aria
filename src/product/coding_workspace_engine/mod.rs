@@ -67,6 +67,7 @@ use crate::web::workspace_ws_types::{
 
 mod analyst_parser;
 mod code_review;
+mod coding;
 mod gates;
 mod group;
 mod handoffs;

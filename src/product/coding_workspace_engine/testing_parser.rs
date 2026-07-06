@@ -324,15 +324,6 @@ pub(crate) fn testing_result_review_description(report: &TestingReport) -> Strin
     }
 }
 
-pub(crate) fn testing_report_to_analyst_evidence(report: &TestingReport) -> String {
-    serde_json::to_string_pretty(report).unwrap_or_else(|_| {
-        format!(
-            "TestingReport serialization failed; overall_status={:?}",
-            report.overall_status
-        )
-    })
-}
-
 pub(crate) fn rework_instruction_fields_from_analyst_record(
     decision: &AnalystDecisionRecord,
 ) -> (String, Vec<String>) {
@@ -358,6 +349,7 @@ pub(crate) fn analyst_human_gate_actions(
     if let Some(recommendation) = recommendation {
         for action_id in &recommendation.available_actions {
             if let Some(action) = coding_gate_action_for_id(action_id)
+                && action.action_type != CodingGateActionType::RetryAnalyst
                 && !actions
                     .iter()
                     .any(|existing: &CodingGateAction| existing.action_id == action.action_id)
@@ -367,7 +359,6 @@ pub(crate) fn analyst_human_gate_actions(
         }
     }
     if actions.is_empty() {
-        actions.push(coding_gate_action_for_id("retry_analyst").expect("retry analyst action"));
         actions.push(coding_gate_action_for_id("provide_context").expect("provide context action"));
         actions.push(coding_gate_action_for_id("manual_continue").expect("manual continue action"));
         actions.push(coding_gate_action_for_id("abort").expect("abort action"));

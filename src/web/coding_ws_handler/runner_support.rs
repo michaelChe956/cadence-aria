@@ -4,7 +4,7 @@ use tokio::sync::mpsc;
 
 use crate::cross_cutting::streaming_provider::StreamingProviderAdapter;
 use crate::product::coding_attempt_store::CodingAttemptStore;
-use crate::product::coding_models::{CodingExecutionAttempt,};
+use crate::product::coding_models::CodingExecutionAttempt;
 use crate::product::coding_workspace_engine::{CodingWorkspaceEngine, CodingWorkspaceEngineError};
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::json_store::ProductStoreError;

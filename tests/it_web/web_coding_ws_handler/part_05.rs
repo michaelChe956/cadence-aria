@@ -374,84 +374,6 @@ async fn wait_for_stage_gate(
     panic!("expected stage gate for {stage:?}");
 }
 
-fn is_testing_result_review_gate(gate: &CodingGateRequired) -> bool {
-    gate.reason_code.as_deref() == Some("testing_result_review_required")
-}
-
-async fn respond_to_testing_result_review_gate(
-    ws: &mut tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
-    gate: &CodingGateRequired,
-) -> bool {
-    if !is_testing_result_review_gate(gate) {
-        return false;
-    }
-    send_json(
-        ws,
-        &CodingWsInMessage::GateResponse {
-            gate_id: gate.gate_id.clone(),
-            action_id: "accept_testing_result".to_string(),
-            extra_context: None,
-        },
-    )
-    .await;
-    true
-}
-
-async fn wait_for_testing_result_review_gate(
-    ws: &mut tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
-) -> CodingGateRequired {
-    let mut confirmed_stage_gates = HashSet::new();
-    for _ in 0..80 {
-        match recv_json(ws).await {
-            CodingWsOutMessage::CodingGateRequired { gate }
-                if gate.reason_code.as_deref() == Some("testing_result_review_required") =>
-            {
-                return gate;
-            }
-            CodingWsOutMessage::CodingSessionState { pending_gates, .. } => {
-                if let Some(gate) = pending_gates.iter().find(|gate| {
-                    gate.reason_code.as_deref() == Some("testing_result_review_required")
-                }) {
-                    return gate.clone();
-                }
-                for gate in pending_gates
-                    .into_iter()
-                    .filter(|gate| gate.kind == CodingGateKind::StageGate)
-                {
-                    if let Some(stage) = gate.stage
-                        && confirmed_stage_gates.insert(gate.gate_id)
-                    {
-                        send_json(ws, &CodingWsInMessage::StageGateConfirm { stage }).await;
-                    }
-                }
-            }
-            CodingWsOutMessage::CodingGateRequired { gate }
-                if gate.kind == CodingGateKind::StageGate =>
-            {
-                if let Some(stage) = gate.stage
-                    && confirmed_stage_gates.insert(gate.gate_id)
-                {
-                    send_json(ws, &CodingWsInMessage::StageGateConfirm { stage }).await;
-                }
-            }
-            CodingWsOutMessage::CodingTimelineNodeCreated { node }
-                if node.stage == CodingExecutionStage::Rework =>
-            {
-                panic!("analyst started before tester result review gate was accepted");
-            }
-            CodingWsOutMessage::CodingProtocolError { code, message } => {
-                panic!("unexpected coding protocol error {code}: {message}");
-            }
-            _ => {}
-        }
-    }
-    panic!("expected testing result review gate");
-}
-
 async fn wait_for_timeline_node(
     ws: &mut tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -657,6 +579,4 @@ impl StreamingProviderAdapter for FullChainStreamingProvider {
         Ok(rx)
     }
 }
-
-struct TestingBlockedProvider;
 

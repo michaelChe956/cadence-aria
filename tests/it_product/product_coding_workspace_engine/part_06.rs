@@ -521,7 +521,7 @@ async fn execute_rework_persists_legacy_analyst_verdict_as_decision() {
 }
 
 #[tokio::test]
-async fn execute_rework_consumes_next_stage_testing_without_coding_rework() {
+async fn execute_rework_routes_legacy_rerun_testing_to_human_gate() {
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
     fs::create_dir_all(&worktree).expect("worktree");
@@ -566,8 +566,8 @@ async fn execute_rework_consumes_next_stage_testing_without_coding_rework() {
         .await
         .expect("execute rework");
 
-    assert_eq!(updated.status, CodingAttemptStatus::Running);
-    assert_eq!(updated.stage, CodingExecutionStage::Testing);
+    assert_eq!(updated.status, CodingAttemptStatus::Blocked);
+    assert_eq!(updated.stage, CodingExecutionStage::Rework);
     assert_eq!(updated.rework_count, 0);
     assert!(
         store
@@ -578,9 +578,16 @@ async fn execute_rework_consumes_next_stage_testing_without_coding_rework() {
     let decision = store
         .latest_analyst_decision("project_0001", "issue_0001", &attempt.id)
         .expect("latest decision")
-        .expect("persisted decision");
-    assert_eq!(decision.verdict, AnalystDecisionVerdict::RerunTesting);
-    assert_eq!(decision.next_stage, AnalystDecisionNextStage::Testing);
+            .expect("persisted decision");
+    assert_eq!(decision.verdict, AnalystDecisionVerdict::HumanRequired);
+    assert_eq!(decision.next_stage, AnalystDecisionNextStage::HumanGate);
+    assert!(decision.parse_error.is_some());
+    let gates = store
+        .list_open_blocked_gates("project_0001", "issue_0001", &attempt.id)
+        .expect("open gates");
+    assert_eq!(gates.len(), 1);
+    assert_eq!(gates[0].stage, Some(CodingExecutionStage::Rework));
+    assert_eq!(gates[0].role, Some(CodingProviderRole::Analyst));
 }
 
 #[tokio::test]

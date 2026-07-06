@@ -4,9 +4,9 @@ use crate::product::app_paths::ProductAppPaths;
 use crate::product::artifact_extraction::extract_artifact_content;
 use crate::product::coding_attempt_store::CodingAttemptStore;
 use crate::product::coding_models::{
-    CodeReviewReport, CodingAgentRole, CodingChatEntry, CodingContextNote, CodingEntryType,
-    CodingExecutionAttempt, CodingExecutionStage, CodingProviderPermissionMode, CodingProviderRole,
-    CodingStageGateState, CodingStageGateStatus, InternalPrReview, TestingReport,
+    CodingAgentRole, CodingChatEntry, CodingContextNote, CodingEntryType, CodingExecutionAttempt,
+    CodingExecutionStage, CodingProviderPermissionMode, CodingProviderRole, CodingStageGateState,
+    CodingStageGateStatus,
 };
 use crate::product::coding_workspace_engine::CodingExecutionContext;
 use crate::product::coding_workspace_engine::CodingWorkspaceEngineError;
@@ -23,9 +23,7 @@ use crate::product::models::{
     WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType,
 };
 use crate::product::repository_store::RepositoryStore;
-use crate::product::test_executor::{
-    TestCommandSpec, discover_test_commands, planned_test_commands_from_markdown,
-};
+use crate::product::test_executor::planned_test_commands_from_markdown;
 use crate::product::work_item_plan_store::WorkItemPlanStore;
 
 pub(crate) fn current_work_item_id_for_attempt(attempt: &CodingExecutionAttempt) -> &str {
@@ -580,48 +578,4 @@ pub(crate) fn select_work_item_markdown(
         Some(markdown) => latest_assistant_artifact_markdown(session).or(Some(markdown)),
         None => latest_assistant_artifact_markdown(session),
     }
-}
-
-pub(crate) fn test_specs_for_attempt(
-    attempt: &CodingExecutionAttempt,
-    context: &CodingExecutionContext,
-) -> Vec<TestCommandSpec> {
-    if let Some(markdown) = context.work_item_markdown.as_deref() {
-        let planned = planned_test_commands_from_markdown(markdown);
-        if !planned.is_empty() {
-            return planned;
-        }
-    }
-    attempt
-        .worktree_path
-        .as_ref()
-        .map(discover_test_commands)
-        .unwrap_or_default()
-}
-
-pub(crate) fn testing_rework_evidence(report: &TestingReport) -> String {
-    serde_json::to_string_pretty(report).unwrap_or_else(|_| {
-        format!(
-            "TestingReport serialization failed; overall_status={:?}",
-            report.overall_status
-        )
-    })
-}
-
-pub(crate) fn code_review_rework_evidence(report: &CodeReviewReport) -> String {
-    serde_json::to_string_pretty(report).unwrap_or_else(|_| {
-        format!(
-            "CodeReviewReport serialization failed; verdict={:?}; summary={}",
-            report.verdict, report.summary
-        )
-    })
-}
-
-pub(crate) fn internal_pr_review_rework_evidence(review: &InternalPrReview) -> String {
-    serde_json::to_string_pretty(review).unwrap_or_else(|_| {
-        format!(
-            "InternalPrReview serialization failed; verdict={:?}; summary={}",
-            review.verdict, review.summary
-        )
-    })
 }

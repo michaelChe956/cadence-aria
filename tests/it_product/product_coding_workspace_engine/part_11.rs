@@ -67,7 +67,7 @@ async fn execute_rework_binds_analyst_decision_chat_and_gate_to_role_run() {
 }
 
 #[tokio::test]
-async fn retry_analyst_gate_response_supersedes_latest_analyst_run() {
+async fn retry_analyst_gate_response_is_disabled() {
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
     init_repo(&worktree);
@@ -144,7 +144,7 @@ async fn retry_analyst_gate_response_supersedes_latest_analyst_run() {
         )
         .expect("wait for human");
 
-    let updated = engine
+    let error = engine
         .handle_blocked_gate_response(
             "project_0001",
             "issue_0001",
@@ -154,33 +154,31 @@ async fn retry_analyst_gate_response_supersedes_latest_analyst_run() {
             None,
         )
         .await
-        .expect("retry analyst");
-
-    assert_eq!(updated.status, CodingAttemptStatus::Running);
-    assert_eq!(updated.stage, CodingExecutionStage::Rework);
+        .expect_err("retry analyst disabled");
+    assert!(
+        error.to_string().contains("analyst_rework_disabled"),
+        "unexpected error: {error}"
+    );
 
     let runs = store
         .list_role_runs("project_0001", "issue_0001", &attempt.id)
         .expect("role runs");
-    assert_eq!(runs.len(), 2);
+    assert_eq!(runs.len(), 1);
     let first = runs
         .iter()
         .find(|run| run.id == first_run.id)
         .expect("first run");
-    assert_eq!(first.status, CodingRoleRunStatus::Superseded);
-    let second = runs
-        .iter()
-        .find(|run| run.id != first_run.id)
-        .expect("second run");
-    assert_eq!(second.status, CodingRoleRunStatus::Running);
-    assert_eq!(second.trigger, CodingRoleRunTrigger::RetryAnalyst);
+    assert_eq!(first.status, CodingRoleRunStatus::Blocked);
     assert_eq!(
-        second.supersedes_run_id.as_deref(),
-        Some(first_run.id.as_str())
+        first.artifact_refs,
+        vec!["artifacts/rework/analyst_evidence_0001.txt".to_string()]
     );
     assert_eq!(
-        second.artifact_refs,
-        vec!["artifacts/rework/analyst_evidence_0001.txt".to_string()]
+        store
+            .list_open_blocked_gates("project_0001", "issue_0001", &attempt.id)
+            .expect("open gates")
+            .len(),
+        1
     );
 }
 

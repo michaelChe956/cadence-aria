@@ -492,7 +492,7 @@ impl StreamingProviderAdapter for InternalReviewStreamingProvider {
 }
 
 #[tokio::test]
-async fn analyst_human_gate_offers_retry_analyst_action() {
+async fn analyst_human_gate_does_not_offer_retry_analyst_action() {
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
     init_repo(&worktree);
@@ -533,14 +533,18 @@ async fn analyst_human_gate_offers_retry_analyst_action() {
         .expect("gates");
     assert_eq!(gates.len(), 1);
     assert_eq!(gates[0].role, Some(CodingProviderRole::Analyst));
-    assert!(gates[0].available_actions.iter().any(|action| {
+    assert!(!gates[0].available_actions.iter().any(|action| {
         action.action_id == "retry_analyst"
             && action.action_type == CodingGateActionType::RetryAnalyst
+    }));
+    assert!(gates[0].available_actions.iter().any(|action| {
+        action.action_id == "provide_context"
+            && action.action_type == CodingGateActionType::ProvideContext
     }));
 }
 
 #[tokio::test]
-async fn provide_context_keeps_analyst_human_gate_open_for_retry() {
+async fn provide_context_keeps_legacy_analyst_human_gate_open() {
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
     init_repo(&worktree);
@@ -634,5 +638,9 @@ async fn provide_context_keeps_analyst_human_gate_open_for_retry() {
     assert!(gates[0].available_actions.iter().any(|action| {
         action.action_id == "retry_analyst"
             && action.action_type == CodingGateActionType::RetryAnalyst
+    }));
+    assert!(gates[0].available_actions.iter().any(|action| {
+        action.action_id == "provide_context"
+            && action.action_type == CodingGateActionType::ProvideContext
     }));
 }

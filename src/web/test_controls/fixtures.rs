@@ -632,11 +632,6 @@ fn create_coding_role_run_fixture(
             raw_provider_output_ref: None,
             available_actions: vec![
                 CodingGateAction {
-                    action_id: "retry_analyst".to_string(),
-                    label: "重试 Analyst".to_string(),
-                    action_type: CodingGateActionType::RetryAnalyst,
-                },
-                CodingGateAction {
                     action_id: "manual_continue".to_string(),
                     label: "人工继续".to_string(),
                     action_type: CodingGateActionType::ManualContinue,

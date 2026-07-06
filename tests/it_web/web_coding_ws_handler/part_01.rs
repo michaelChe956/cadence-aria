@@ -15,7 +15,7 @@ use cadence_aria::product::coding_models::{
     CodingProviderRole, CodingRoleProviderConfigSnapshot, CodingRoleRunEventType,
     CodingRoleRunStatus, CodingRoleRunTrigger, CodingTimelineNode, CodingTimelineNodeStatus,
     CodingExecutionUnitStatus, PushStatus, RemoteKind, ReviewRequest, ReviewRequestKind,
-    ReviewVerdict, TestingOverallStatus, WorkItemExecutionPlan,
+    ReviewVerdict, WorkItemExecutionPlan,
 };
 use cadence_aria::product::lifecycle_store::{
     CreateIssueWorkItemPlanInput, CreateWorkItemInput, CreateWorkspaceSessionInput,

@@ -167,9 +167,6 @@ async fn coding_ws_group_attempt_completes_first_unit_before_review_request_and_
     for _ in 0..220 {
         match recv_json(&mut ws).await {
             CodingWsOutMessage::CodingGateRequired { gate } => {
-                if respond_to_testing_result_review_gate(&mut ws, &gate).await {
-                    continue;
-                }
                 if gate.kind == CodingGateKind::StageGate
                     && let Some(stage) = gate.stage.clone()
                     && confirmed_gates.insert(gate.gate_id)

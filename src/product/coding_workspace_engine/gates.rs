@@ -537,43 +537,22 @@ impl CodingWorkspaceEngine {
                 resumed
             }
             CodingGateActionType::RetryAnalyst => {
-                let previous = self.store.latest_role_run(
-                    &current.project_id,
-                    &current.issue_id,
-                    &current.id,
-                    CodingExecutionStage::Rework,
-                    CodingProviderRole::Analyst,
-                )?;
-                let resumed =
-                    self.resume_blocked_attempt_at_stage(&current, CodingExecutionStage::Rework)?;
-                let new_run = self.store.supersede_latest_role_run_and_create(
-                    &resumed,
-                    CodingExecutionStage::Rework,
-                    CodingProviderRole::Analyst,
-                    CodingRoleRunTrigger::RetryAnalyst,
-                    None,
-                    gate.reason_code.clone(),
-                )?;
-                if let Some(previous) = previous {
-                    self.store.update_role_run_refs(
-                        &resumed.project_id,
-                        &resumed.issue_id,
-                        &resumed.id,
-                        &new_run.id,
-                        Vec::new(),
-                        previous.artifact_refs,
-                    )?;
-                }
-                resumed
+                return Err(CodingWorkspaceEngineError::ProviderStream(
+                    "analyst_rework_disabled".to_string(),
+                ));
             }
             CodingGateActionType::AcceptTestingResult => {
-                self.accept_testing_result_for_analyst(&current, &gate)?
+                return Err(CodingWorkspaceEngineError::ProviderStream(
+                    "analyst_rework_disabled".to_string(),
+                ));
             }
             CodingGateActionType::ContinueRework => {
                 self.continue_rework_after_limit_for_attempt(&current, extra_context)?
             }
             CodingGateActionType::SendRawOutputToAnalyst => {
-                self.resume_blocked_attempt_at_stage(&current, CodingExecutionStage::Rework)?
+                return Err(CodingWorkspaceEngineError::ProviderStream(
+                    "analyst_rework_disabled".to_string(),
+                ));
             }
             CodingGateActionType::ProvideContext => {
                 if let Some(content) = extra_context
@@ -665,71 +644,6 @@ impl CodingWorkspaceEngine {
             }
         }
         Ok(steps)
-    }
-
-    pub(crate) fn accept_testing_result_for_analyst(
-        &self,
-        current: &CodingExecutionAttempt,
-        gate: &CodingGateRequired,
-    ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
-        let report = self.testing_report_for_gate(current, gate)?;
-        let running = if current.status == CodingAttemptStatus::Blocked {
-            self.store.update_attempt_status(
-                &current.project_id,
-                &current.issue_id,
-                &current.id,
-                CodingAttemptStatus::Running,
-            )?
-        } else {
-            current.clone()
-        };
-        let role_run = self.store.create_role_run(
-            &running,
-            CodingExecutionStage::Rework,
-            CodingProviderRole::Analyst,
-            CodingRoleRunTrigger::Initial,
-            None,
-        )?;
-        let evidence = testing_report_to_analyst_evidence(&report);
-        let evidence_ref = self.store.save_analyst_evidence(&running.id, &evidence)?;
-        self.store.update_role_run_refs(
-            &running.project_id,
-            &running.issue_id,
-            &running.id,
-            &role_run.id,
-            Vec::new(),
-            vec![evidence_ref],
-        )?;
-        Ok(running)
-    }
-
-    pub(crate) fn testing_report_for_gate(
-        &self,
-        attempt: &CodingExecutionAttempt,
-        gate: &CodingGateRequired,
-    ) -> Result<TestingReport, CodingWorkspaceEngineError> {
-        if let Some(report_id) = gate
-            .evidence_refs
-            .iter()
-            .rev()
-            .find_map(|reference| reference.strip_suffix(".json"))
-        {
-            return Ok(self.store.get_testing_report(
-                &attempt.project_id,
-                &attempt.issue_id,
-                &attempt.id,
-                report_id,
-            )?);
-        }
-        self.store
-            .list_testing_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)?
-            .into_iter()
-            .last()
-            .ok_or_else(|| {
-                CodingWorkspaceEngineError::ProviderStream(
-                    "testing_result_review_missing_report".to_string(),
-                )
-            })
     }
 
     pub(crate) fn resume_blocked_attempt_at_stage(

@@ -173,6 +173,7 @@ pub(crate) fn build_coding_prompt(
          - 优先按已确认 Work Item 的文件落点、范围和验证命令执行。\n\
          - 完成后报告修改文件、测试命令和结果。\n",
     );
+    prompt.push_str(coding_self_check_contract());
     prompt
 }
 
@@ -241,7 +242,16 @@ pub(crate) fn build_coding_delta_prompt(
          - 不要重新生成 Story/Design/Work Item 文档。\n\
          - 完成后报告修改文件、测试命令和结果。\n",
     );
+    prompt.push_str(coding_self_check_contract());
     prompt
+}
+
+pub(crate) fn coding_self_check_contract() -> &'static str {
+    "\n自检契约（完成前必须执行，不得跳过）:\n\
+     - 实际执行上述验证命令并将完整输出粘贴到报告中。\n\
+     - 如果测试输出包含 \"0 tests\" 或 \"running 0 tests\"，视为测试未覆盖，必须补充测试用例。\n\
+     - 每个新增的 .rs 源文件必须已挂载到 crate（通过 mod 声明或 lib.rs/main.rs 的模块树），否则 cargo check 不会发现其编译错误。\n\
+     - 完成前执行 git diff --stat，确认预期文件确实有变更，无多余或遗漏的文件。\n"
 }
 
 pub(crate) fn append_coding_context_notes(
@@ -292,8 +302,8 @@ pub(crate) fn build_rework_prompt(
          严格要求：不要修改代码，不要调用 tool_use，不要执行命令。\n\
          仅根据上一阶段 summary/evidence、本轮新增 ContextNote 与 EvaluationContextPack 输出 AnalystDecision JSON。\n\
          JSON 必须以 {{ 开头，以 }} 结尾。\n\
-         JSON 格式：{{\"verdict\":\"needs_fix|rerun_testing|proceed|human_required|blocked\",\"next_stage\":\"coding|testing|code_review|review_request|internal_pr_review|final_confirm|human_gate\",\"reason\":\"...\",\"evidence_refs\":[\"...\"],\"raw_provider_output_refs\":[\"...\"],\"rework_instructions\":null,\"human_gate\":null}}\n\
-         路由规则：TestingReport 因 test_plan_missing_json、test_plan_invalid_json 或 test_plan_repair_failed 阻塞时，优先判断为 Tester 输出契约问题；若可重试，输出 verdict=rerun_testing,next_stage=testing；只有环境、权限或需求缺失不可自动处理时才 next_stage=human_gate。\n\
+         JSON 格式：{{\"verdict\":\"needs_fix|proceed|human_required|blocked\",\"next_stage\":\"coding|code_review|review_request|internal_pr_review|final_confirm|human_gate\",\"reason\":\"...\",\"evidence_refs\":[\"...\"],\"raw_provider_output_refs\":[\"...\"],\"rework_instructions\":null,\"human_gate\":null}}\n\
+         路由规则：Testing 阶段已从主链路摘除；历史 TestingReport 或 tester 输出契约问题不得路由回 testing，必须降级为 next_stage=human_gate 或根据上下文推进到 code_review。\n\
          Project: {}\n\
          Issue: {}\n\
          Work Item: {}\n\

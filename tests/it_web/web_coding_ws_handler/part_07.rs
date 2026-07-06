@@ -130,7 +130,7 @@ fn app_with_blocked_analyst_attempt(
 }
 
 #[tokio::test]
-async fn coding_ws_retry_analyst_resumes_rework_from_persisted_evidence() {
+async fn coding_ws_retry_analyst_gate_response_is_disabled() {
     let _guard = WS_TEST_LOCK.lock().await;
     let root = tempdir().expect("root");
     let captured = Arc::new(Mutex::new(Vec::new()));
@@ -280,43 +280,29 @@ async fn coding_ws_retry_analyst_resumes_rework_from_persisted_evidence() {
     )
     .await;
 
-    let mut saw_rework_node = false;
-    for _ in 0..240 {
-        match timeout(Duration::from_millis(500), recv_json(&mut ws)).await {
-            Ok(CodingWsOutMessage::CodingTimelineNodeCreated { node })
-                if node.stage == CodingExecutionStage::Rework =>
-            {
-                saw_rework_node = true;
-            }
-            Ok(CodingWsOutMessage::CodingSessionState { ref stage, .. })
-                if saw_rework_node && stage == &CodingExecutionStage::CodeReview =>
-            {
-                break;
-            }
-            Ok(CodingWsOutMessage::CodingProtocolError { code, message }) => {
-                panic!("unexpected protocol error {code}: {message}");
-            }
-            _ => {}
+    match recv_json(&mut ws).await {
+        CodingWsOutMessage::CodingProtocolError { code, message } => {
+            assert_eq!(code, "coding_gate_response_failed");
+            assert!(
+                message.contains("analyst_rework_disabled"),
+                "unexpected error message: {message}"
+            );
         }
+        other => panic!("expected disabled analyst retry protocol error, got {other:?}"),
     }
-    assert!(saw_rework_node, "expected new rework timeline node");
 
     let runs = store
         .list_role_runs("project_0001", "issue_0001", "coding_attempt_0001")
         .expect("role runs");
-    assert_eq!(runs.len(), 2);
-    {
-        let prompts = captured.lock().expect("lock");
-        let prompt = prompts
-            .iter()
-            .find(|prompt| prompt.contains("persisted testing evidence"))
-            .expect("expected analyst prompt to contain persisted evidence");
-        assert!(prompt.contains("[previous_role_run_diagnostic]"));
-        assert!(prompt.contains("Analyst task update"));
-        assert!(prompt.contains("No tasks found"));
-        assert_eq!(prompt.matches("[previous_role_run_diagnostic]").count(), 1);
-        assert!(!prompt.contains(&format!("role_run_id: {}", runs[1].id)));
-    }
+    assert_eq!(runs.len(), 1);
+    assert!(captured.lock().expect("lock").is_empty());
+    assert_eq!(
+        store
+            .list_open_blocked_gates("project_0001", "issue_0001", "coding_attempt_0001")
+            .expect("open gates")
+            .len(),
+        1
+    );
 
     ws.close(None).await.expect("close ws");
     server.abort();

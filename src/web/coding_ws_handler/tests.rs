@@ -2,7 +2,7 @@ use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::{CodingAttemptStore, CreateBlockedGateInput};
 use crate::product::coding_models::{
     CodingAttemptScope, CodingAttemptStatus, CodingExecutionStage, CodingGateAction,
-    CodingGateActionType,
+    CodingGateActionType, ReviewVerdict,
 };
 use crate::product::lifecycle_store::{
     CreateVerificationPlanInput, CreateWorkItemInput, CreateWorkspaceSessionInput, LifecycleStore,
@@ -20,9 +20,10 @@ use crate::web::workspace_ws_types::{ArtifactPayload, ArtifactVersion};
 use tempfile::TempDir;
 
 use super::{
-    CodingExecutionAttempt, CodingWsInMessage, CodingWsOutMessage, ProviderConfigSnapshot,
-    build_coding_session_state, coding_execution_context, is_coding_ws_message_allowed,
-    select_work_item_markdown, should_resume_runner_after_gate_response,
+    CodeReviewFlowDecision, CodingExecutionAttempt, CodingWsInMessage, CodingWsOutMessage,
+    ProviderConfigSnapshot, build_coding_session_state, code_review_flow_decision,
+    coding_execution_context, is_coding_ws_message_allowed, select_work_item_markdown,
+    should_resume_runner_after_gate_response,
 };
 
 #[test]
@@ -86,6 +87,22 @@ fn coding_execution_context_uses_final_compile_work_item_when_workspace_artifact
     assert_eq!(
         context.verification_commands,
         vec!["cargo test --locked --lib coding_execution_context".to_string()]
+    );
+}
+
+#[test]
+fn code_review_flow_decision_routes_reviewer_verdicts() {
+    assert_eq!(
+        code_review_flow_decision(&ReviewVerdict::RequestChanges),
+        CodeReviewFlowDecision::RunReviewerDrivenRework
+    );
+    assert_eq!(
+        code_review_flow_decision(&ReviewVerdict::Blocked),
+        CodeReviewFlowDecision::StopForBlockedReview
+    );
+    assert_eq!(
+        code_review_flow_decision(&ReviewVerdict::Approve),
+        CodeReviewFlowDecision::ContinueAfterApprove
     );
 }
 
@@ -428,7 +445,7 @@ fn manual_continue_gate_response_does_not_auto_resume_runner() {
     ));
 
     attempt.status = CodingAttemptStatus::WaitingForHuman;
-    assert!(should_resume_runner_after_gate_response(
+    assert!(!should_resume_runner_after_gate_response(
         "retry_analyst",
         &attempt
     ));

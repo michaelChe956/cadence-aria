@@ -89,6 +89,24 @@ fn coding_delta_prompt_guides_pnpm_install_when_frontend_dependencies_are_missin
 }
 
 #[test]
+fn coding_prompts_require_completion_self_check_contract() {
+    let attempt = test_attempt("coding_attempt_0001");
+    let context = CodingExecutionContext::default();
+
+    let full_prompt = build_coding_prompt(&attempt, &context, None, None);
+    let delta_prompt = build_coding_delta_prompt(&attempt, &context, None, None);
+
+    for prompt in [full_prompt, delta_prompt] {
+        assert!(prompt.contains("自检契约"));
+        assert!(prompt.contains("完整输出粘贴到报告中"));
+        assert!(prompt.contains("0 tests"));
+        assert!(prompt.contains("running 0 tests"));
+        assert!(prompt.contains("每个新增的 .rs 源文件必须已挂载到 crate"));
+        assert!(prompt.contains("git diff --stat"));
+    }
+}
+
+#[test]
 fn review_parser_preserves_findings_with_common_aliases() {
     let payload = r#"{
       "verdict": "request_changes",

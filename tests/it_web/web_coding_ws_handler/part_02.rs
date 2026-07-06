@@ -536,16 +536,20 @@ async fn coding_ws_start_coding_drives_full_happy_path_to_final_confirm() {
     let mut final_snapshot_seen = false;
     let mut final_chat_entries = Vec::new();
     let mut confirmed_gates = HashSet::new();
+    let mut observed = Vec::new();
     for _ in 0..80 {
         let message = recv_json(&mut ws).await;
         match message {
             CodingWsOutMessage::CodingTimelineNodeCreated { node } => {
+                observed.push(format!("node:{:?}", node.stage));
                 stages.push(node.stage);
             }
             CodingWsOutMessage::CodingGateRequired { gate } => {
-                if respond_to_testing_result_review_gate(&mut ws, &gate).await {
-                    continue;
-                }
+                observed.push(format!(
+                    "gate:{:?}:{:?}",
+                    gate.kind,
+                    gate.stage.as_ref()
+                ));
                 assert_eq!(
                     gate.kind,
                     CodingGateKind::StageGate,
@@ -564,12 +568,15 @@ async fn coding_ws_start_coding_drives_full_happy_path_to_final_confirm() {
                 stage,
                 chat_entries,
                 ..
-            } if status == CodingAttemptStatus::Completed
-                && stage == CodingExecutionStage::FinalConfirm =>
-            {
-                final_chat_entries = *chat_entries;
-                final_snapshot_seen = true;
-                break;
+            } => {
+                observed.push(format!("state:{status:?}:{stage:?}"));
+                if status == CodingAttemptStatus::Completed
+                    && stage == CodingExecutionStage::FinalConfirm
+                {
+                    final_chat_entries = *chat_entries;
+                    final_snapshot_seen = true;
+                    break;
+                }
             }
             CodingWsOutMessage::CodingProtocolError { code, message } => {
                 panic!("unexpected coding protocol error {code}: {message}");
@@ -580,13 +587,11 @@ async fn coding_ws_start_coding_drives_full_happy_path_to_final_confirm() {
 
     assert!(
         final_snapshot_seen,
-        "expected final_confirm snapshot over websocket"
+        "expected final_confirm snapshot over websocket; observed={observed:?}"
     );
     for expected in [
         CodingExecutionStage::WorktreePrepare,
         CodingExecutionStage::Coding,
-        CodingExecutionStage::Testing,
-        CodingExecutionStage::Rework,
         CodingExecutionStage::CodeReview,
         CodingExecutionStage::ReviewRequest,
         CodingExecutionStage::InternalPrReview,
@@ -602,14 +607,8 @@ async fn coding_ws_start_coding_drives_full_happy_path_to_final_confirm() {
             .iter()
             .filter(|stage| **stage == CodingExecutionStage::Rework)
             .count(),
-        3,
-        "expected rework after testing, code review, and internal review; got {stages:?}"
-    );
-    assert!(
-        final_chat_entries
-            .iter()
-            .any(|entry| matches!(entry.entry_type, CodingEntryType::AnalystVerdict { .. })),
-        "expected persisted analyst verdict chat entry"
+        0,
+        "new pipeline should not create analyst rework nodes; got {stages:?}"
     );
     assert!(
         final_chat_entries.iter().any(|entry| {
@@ -643,13 +642,13 @@ async fn coding_ws_start_coding_drives_full_happy_path_to_final_confirm() {
     assert_ne!(worktree, &root.path().join("repo"));
     assert!(worktree.join("src/lib.rs").is_file());
 
-    let report = store
-        .list_testing_reports("project_0001", "issue_0001", &attempt.id)
-        .expect("testing reports")
-        .pop()
-        .expect("testing report");
-    assert_eq!(report.overall_status, TestingOverallStatus::Passed);
-    assert!(report.backend_verified);
+    assert!(
+        store
+            .list_testing_reports("project_0001", "issue_0001", &attempt.id)
+            .expect("testing reports")
+            .is_empty(),
+        "new pipeline should not run tester reports"
+    );
 
     let review_request = store
         .list_review_requests("project_0001", "issue_0001", &attempt.id)

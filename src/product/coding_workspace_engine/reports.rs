@@ -490,16 +490,41 @@ impl CodingWorkspaceEngine {
                 }
             }
             AnalystDecisionNextStage::Testing => {
-                let updated = self.store.update_attempt_stage(
+                let updated = self.store.update_attempt_status(
                     &attempt.project_id,
                     &attempt.issue_id,
                     &attempt.id,
-                    CodingExecutionStage::Testing,
+                    CodingAttemptStatus::Blocked,
                 )?;
+                let gate = self.store.create_blocked_gate(CreateBlockedGateInput {
+                    attempt_id: attempt.id.clone(),
+                    stage: CodingExecutionStage::Rework,
+                    node_id: Some(node_id.to_string()),
+                    role: Some(CodingProviderRole::Analyst),
+                    title: "Testing stage disabled".to_string(),
+                    description: format!(
+                        "{}；Testing 阶段已从 Coding Workspace 主链路摘除，请人工确认下一步。",
+                        decision.summary
+                    ),
+                    reason_code: Some("legacy_testing_stage_disabled".to_string()),
+                    evidence_refs: decision.evidence_refs.clone(),
+                    raw_provider_output_ref: decision.raw_provider_output_refs.first().cloned(),
+                    available_actions: vec![
+                        coding_gate_action_for_id("provide_context")
+                            .expect("provide context action"),
+                        coding_gate_action_for_id("manual_continue")
+                            .expect("manual continue action"),
+                        coding_gate_action_for_id("abort").expect("abort action"),
+                    ],
+                })?;
+                let _ = self
+                    .event_tx
+                    .send(CodingWsOutMessage::CodingGateRequired { gate })
+                    .await;
                 Ok((
                     updated,
-                    CodingTimelineNodeStatus::Completed,
-                    format!("RerunTesting: {}", decision.summary),
+                    CodingTimelineNodeStatus::Blocked,
+                    format!("TestingDisabled: {}", decision.summary),
                 ))
             }
             AnalystDecisionNextStage::CodeReview => {
