@@ -121,6 +121,7 @@ export interface CodingWorkspaceActions {
   markGateSubmitting: (gateId: string) => void;
   setGateError: (gateId: string, errorCode: string) => void;
   updateProviderConfig: (role: CodingProviderSelectRole | "tester", provider: WorkspaceProviderName) => void;
+  setMaxAutoRework: (maxAutoRework: number) => void;
   appendStreamChunk: (content: string, nodeId?: string | null) => void;
   completeStream: (nodeId?: string | null) => void;
   setConnectionStatus: (status: CodingConnectionStatus) => void;
@@ -146,7 +147,7 @@ const initialState: CodingWorkspaceState = {
   baseBranch: null,
   worktreePath: null,
   reworkCount: 0,
-  maxAutoRework: 0,
+  maxAutoRework: 2,
   headCommit: null,
   pushedRemote: null,
   providerConfigSnapshot: null,
@@ -202,7 +203,7 @@ export const useCodingWorkspaceStore = create<
         baseBranch: snapshot.base_branch,
         worktreePath: snapshot.worktree_path,
         reworkCount: snapshot.rework_count,
-        maxAutoRework: snapshot.max_auto_rework,
+        maxAutoRework: clampMaxAutoRework(snapshot.max_auto_rework),
         headCommit: snapshot.head_commit,
         pushedRemote: snapshot.pushed_remote,
         providerConfigSnapshot: snapshot.provider_config_snapshot,
@@ -349,6 +350,9 @@ export const useCodingWorkspaceStore = create<
         provider,
       ),
     })),
+
+  setMaxAutoRework: (maxAutoRework) =>
+    set({ maxAutoRework: clampMaxAutoRework(maxAutoRework) }),
 
   appendStreamChunk: (content, nodeId = null) =>
     set((state) => {
@@ -528,6 +532,11 @@ function updateLegacyProviderConfig(
   if (role === "author" || role === "coder") return { ...snapshot, author: provider };
   if (role === "reviewer" || role === "code_reviewer") return { ...snapshot, reviewer: provider };
   return snapshot;
+}
+
+function clampMaxAutoRework(value: number) {
+  if (!Number.isFinite(value)) return 2;
+  return Math.min(5, Math.max(0, Math.trunc(value)));
 }
 
 function mergeSnapshotPendingGates(

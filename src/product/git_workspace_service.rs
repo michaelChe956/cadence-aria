@@ -235,6 +235,15 @@ impl GitWorkspaceService {
         })
     }
 
+    pub async fn git_current_head(
+        &self,
+        worktree_path: &Path,
+    ) -> Result<String, GitWorkspaceError> {
+        ensure_git_repo(worktree_path).await?;
+        let rev = self.run_git(worktree_path, &["rev-parse", "HEAD"]).await?;
+        Ok(rev.stdout.trim().to_string())
+    }
+
     pub async fn git_push(
         &self,
         worktree_path: &Path,

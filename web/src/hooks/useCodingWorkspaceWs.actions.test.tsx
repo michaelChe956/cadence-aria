@@ -22,9 +22,10 @@ describe("useCodingWorkspaceWs actions and reconnect", () => {
       harness.api.startCoding();
       harness.api.sendContextNote("补充上下文");
       harness.api.sendProviderSelect("author", "codex");
-      harness.api.sendProviderSelect("tester_plan", "claude_code");
-      harness.api.sendProviderSelect("tester_execute", "fake");
-      harness.api.sendPermissionModeSelect("tester", "supervised");
+      harness.api.sendProviderSelect("code_reviewer", "claude_code");
+      harness.api.sendProviderSelect("internal_reviewer", "fake");
+      harness.api.sendPermissionModeSelect("code_reviewer", "supervised");
+      harness.api.sendMaxAutoReworkSelect(4);
       harness.api.confirmStageGate("testing");
       harness.api.finalConfirm();
       harness.api.abortAttempt();
@@ -35,13 +36,14 @@ describe("useCodingWorkspaceWs actions and reconnect", () => {
       JSON.stringify({ type: "start_coding" }),
       JSON.stringify({ type: "context_note", content: "补充上下文" }),
       JSON.stringify({ type: "provider_select", role: "author", provider: "codex" }),
-      JSON.stringify({ type: "provider_select", role: "tester_plan", provider: "claude_code" }),
-      JSON.stringify({ type: "provider_select", role: "tester_execute", provider: "fake" }),
+      JSON.stringify({ type: "provider_select", role: "code_reviewer", provider: "claude_code" }),
+      JSON.stringify({ type: "provider_select", role: "internal_reviewer", provider: "fake" }),
       JSON.stringify({
         type: "permission_mode_select",
-        role: "tester",
+        role: "code_reviewer",
         permission_mode: "supervised",
       }),
+      JSON.stringify({ type: "max_auto_rework_select", max_auto_rework: 4 }),
       JSON.stringify({ type: "stage_gate_confirm", stage: "testing" }),
       JSON.stringify({ type: "final_confirm" }),
       JSON.stringify({ type: "abort_attempt" }),
@@ -142,6 +144,51 @@ describe("useCodingWorkspaceWs actions and reconnect", () => {
         submitting: true,
         errorCode: null,
       },
+    ]);
+
+    act(() => {
+      useCodingWorkspaceStore.getState().addPendingGate(
+        blockedGate({
+          gate_id: "gate_0003",
+          available_actions: [
+            {
+              action_id: "continue_rework",
+              label: "继续返修",
+              action_type: "continue_rework",
+            },
+          ],
+        }),
+      );
+      harness.ws.sent.length = 0;
+      harness.api.respondGate("gate_0003", "continue_rework", "   ");
+    });
+
+    expect(harness.ws.sent).toEqual([]);
+    expect(useCodingWorkspaceStore.getState().pendingGates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          gate_id: "gate_0003",
+          submitting: false,
+          errorCode: "coding_gate_extra_context_required",
+        }),
+      ]),
+    );
+
+    act(() => {
+      harness.api.respondGate(
+        "gate_0003",
+        "continue_rework",
+        " 人工意见：优先修最新 finding ",
+      );
+    });
+
+    expect(harness.ws.sent).toEqual([
+      JSON.stringify({
+        type: "gate_response",
+        gate_id: "gate_0003",
+        action_id: "continue_rework",
+        extra_context: "人工意见：优先修最新 finding",
+      }),
     ]);
   });
 

@@ -1,4 +1,5 @@
 use super::*;
+use crate::product::coding_models::FindingSeverity;
 
 #[test]
 fn tester_tool_results_without_step_id_remain_unplanned_evidence() {
@@ -408,7 +409,7 @@ async fn manual_continue_persists_quality_bypass_audit_and_injects_reviewer_cont
 }
 
 #[tokio::test]
-async fn continue_rework_after_limit_persists_instruction_without_quality_bypass() {
+async fn continue_rework_after_limit_uses_latest_code_review_without_quality_bypass() {
     let paths = ProductAppPaths::new(tempdir().expect("tempdir").path().join(".aria"));
     let store = CodingAttemptStore::new(paths);
     let attempt = store
@@ -458,44 +459,49 @@ async fn continue_rework_after_limit_persists_instruction_without_quality_bypass
         )
         .expect("blocked");
     store
-        .save_analyst_decision(&AnalystDecisionRecord {
-            id: "analyst_decision_0001".to_string(),
+        .save_code_review_report(&CodeReviewReport {
+            id: "code_review_report_0001".to_string(),
             attempt_id: attempt.id.clone(),
-            source_stage: CodingExecutionStage::CodeReview,
-            rework_round: 3,
-            verdict: AnalystDecisionVerdict::NeedsFix,
-            next_stage: AnalystDecisionNextStage::Coding,
-            reason: "CodeReview 仍有阻塞问题".to_string(),
-            evidence_refs: vec!["code_review_0001/findings[0]".to_string()],
-            raw_provider_output_refs: vec![
-                "provider-raw/code_review/code_review_0001.txt".to_string(),
-            ],
-            rework_instructions: Some(AnalystReworkInstructions {
-                summary: "修复 provider install 契约".to_string(),
-                required_changes: vec!["改为 202 installing".to_string()],
-                verification_expectations: vec!["补并发安装测试".to_string()],
-            }),
-            human_gate: None,
+            round: 3,
+            verdict: ReviewVerdict::RequestChanges,
+            findings: vec![ReviewFinding {
+                severity: FindingSeverity::Error,
+                file_path: Some("src/lib.rs".to_string()),
+                line: Some(42),
+                message: "missing validation".to_string(),
+                required_action: Some("add validation".to_string()),
+                source_stage: CodingExecutionStage::CodeReview,
+                evidence: vec!["code_review_0001/findings[0]".to_string()],
+                related_requirements: Vec::new(),
+                related_design_constraints: Vec::new(),
+                related_work_item_tasks: Vec::new(),
+            }],
+            tested_evidence_refs: Vec::new(),
+            diff_refs: vec!["diffs/code_review_0001.patch".to_string()],
+            summary: "reviewer requested validation fix".to_string(),
             created_at: "2026-06-14T00:00:00Z".to_string(),
-            parse_error: None,
+            raw_provider_output_ref: Some(
+                "provider-raw/code_review/code_review_0001.txt".to_string(),
+            ),
             role_run_id: None,
             run_no: Some(1),
         })
-        .expect("analyst decision");
+        .expect("code review report");
     let gate = store
         .create_blocked_gate(CreateBlockedGateInput {
             attempt_id: attempt.id.clone(),
             stage: CodingExecutionStage::Rework,
-            node_id: Some("coding_node_0001".to_string()),
-            role: Some(CodingProviderRole::Analyst),
+            node_id: None,
+            role: Some(CodingProviderRole::Coder),
             title: "Rework limit reached".to_string(),
             description: "已达到自动重写上限".to_string(),
-            reason_code: Some("max_auto_rework_exceeded".to_string()),
+            reason_code: Some("reviewer_rework_limit_reached".to_string()),
             evidence_refs: vec!["code_review_0001/findings[0]".to_string()],
             raw_provider_output_ref: Some(
                 "provider-raw/code_review/code_review_0001.txt".to_string(),
             ),
             available_actions: vec![
+                coding_gate_action_for_id("provide_context").expect("provide context action"),
                 coding_gate_action_for_id("continue_rework").expect("continue rework action"),
                 coding_gate_action_for_id("abort").expect("abort action"),
             ],
@@ -529,10 +535,10 @@ async fn continue_rework_after_limit_persists_instruction_without_quality_bypass
         .list_rework_instructions(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("rework instructions");
     assert_eq!(instructions.len(), 1);
-    assert_eq!(instructions[0].summary, "修复 provider install 契约");
+    assert_eq!(instructions[0].summary, "reviewer requested validation fix");
     assert_eq!(
         instructions[0].fix_hints,
-        vec!["改为 202 installing", "补并发安装测试"]
+        vec!["src/lib.rs:42 missing validation -> add validation"]
     );
     let notes = store
         .list_context_notes(&attempt.project_id, &attempt.issue_id, &attempt.id)
@@ -544,5 +550,136 @@ async fn continue_rework_after_limit_persists_instruction_without_quality_bypass
             .list_quality_bypass_audits(&attempt.project_id, &attempt.issue_id, &attempt.id)
             .expect("quality bypass audits")
             .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn continue_rework_after_limit_accepts_actionable_blocked_code_review() {
+    let paths = ProductAppPaths::new(tempdir().expect("tempdir").path().join(".aria"));
+    let store = CodingAttemptStore::new(paths);
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            work_item_id: "work_item_0001".to_string(),
+            base_branch: "main".to_string(),
+            branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Codex,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+            },
+            max_auto_rework: 2,
+        })
+        .expect("create attempt");
+    let mut attempt = store
+        .update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    attempt = store
+        .increment_attempt_rework_count(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("first rework");
+    attempt = store
+        .increment_attempt_rework_count(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("second rework");
+    attempt = store
+        .update_attempt_stage(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingExecutionStage::Rework,
+        )
+        .expect("rework stage");
+    attempt = store
+        .update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::WaitingForHuman,
+        )
+        .expect("waiting");
+    store
+        .save_code_review_report(&CodeReviewReport {
+            id: "code_review_report_0001".to_string(),
+            attempt_id: attempt.id.clone(),
+            round: 3,
+            verdict: ReviewVerdict::Blocked,
+            findings: vec![ReviewFinding {
+                severity: FindingSeverity::Error,
+                file_path: Some("src/lib.rs".to_string()),
+                line: Some(42),
+                message: "missing validation".to_string(),
+                required_action: Some("add validation".to_string()),
+                source_stage: CodingExecutionStage::CodeReview,
+                evidence: vec!["code_review_0001/findings[0]".to_string()],
+                related_requirements: Vec::new(),
+                related_design_constraints: Vec::new(),
+                related_work_item_tasks: Vec::new(),
+            }],
+            tested_evidence_refs: Vec::new(),
+            diff_refs: vec!["diffs/code_review_0001.patch".to_string()],
+            summary: "reviewer blocked on actionable validation fix".to_string(),
+            created_at: "2026-06-14T00:00:00Z".to_string(),
+            raw_provider_output_ref: Some(
+                "provider-raw/code_review/code_review_0001.txt".to_string(),
+            ),
+            role_run_id: None,
+            run_no: Some(1),
+        })
+        .expect("code review report");
+    let gate = store
+        .create_blocked_gate(CreateBlockedGateInput {
+            attempt_id: attempt.id.clone(),
+            stage: CodingExecutionStage::Rework,
+            node_id: None,
+            role: Some(CodingProviderRole::Coder),
+            title: "Rework limit reached".to_string(),
+            description: "已达到自动重写上限".to_string(),
+            reason_code: Some("reviewer_rework_limit_reached".to_string()),
+            evidence_refs: vec!["code_review_0001/findings[0]".to_string()],
+            raw_provider_output_ref: Some(
+                "provider-raw/code_review/code_review_0001.txt".to_string(),
+            ),
+            available_actions: vec![
+                coding_gate_action_for_id("provide_context").expect("provide context action"),
+                coding_gate_action_for_id("continue_rework").expect("continue rework action"),
+                coding_gate_action_for_id("abort").expect("abort action"),
+            ],
+        })
+        .expect("blocked gate");
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+
+    let updated = engine
+        .handle_blocked_gate_response(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &gate.gate_id,
+            "continue_rework",
+            Some("人工意见：按 blocked finding 继续返修".to_string()),
+        )
+        .await
+        .expect("continue rework");
+
+    assert_eq!(updated.status, CodingAttemptStatus::Running);
+    assert_eq!(updated.stage, CodingExecutionStage::Coding);
+    assert_eq!(updated.rework_count, 3);
+    let instructions = store
+        .list_rework_instructions(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("rework instructions");
+    assert_eq!(instructions.len(), 1);
+    assert_eq!(
+        instructions[0].summary,
+        "reviewer blocked on actionable validation fix"
+    );
+    assert_eq!(
+        instructions[0].fix_hints,
+        vec!["src/lib.rs:42 missing validation -> add validation"]
     );
 }

@@ -9,7 +9,7 @@ const ROLE_LABELS = {
   tester: "Tester",
   analyst: "Analyst",
   code_reviewer: "Code Reviewer",
-  internal_reviewer: "Internal Reviewer",
+  internal_reviewer: "GroupFinalReview",
 } as const;
 
 export function StageGateEntry({

@@ -126,7 +126,7 @@ async fn coding_ws_code_review_blocked_stops_without_analyst_rework() {
 }
 
 #[tokio::test]
-async fn coding_ws_internal_pr_review_blocked_stops_without_analyst_rework() {
+async fn coding_ws_single_work_item_skips_internal_review_blocked_provider() {
     let _guard = WS_TEST_LOCK.lock().await;
     let root = tempdir().expect("root");
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
@@ -145,15 +145,17 @@ async fn coding_ws_internal_pr_review_blocked_stops_without_analyst_rework() {
     send_json(&mut ws, &CodingWsInMessage::StartCoding).await;
 
     let mut confirmed_gates = HashSet::new();
-    let mut saw_internal_review_blocked = false;
+    let mut completed_after_review_request = false;
+    let mut saw_internal_review = false;
     let mut saw_internal_review_blocked_gate = false;
     let mut saw_rework_node = false;
-    let mut stopped_at_internal_review = false;
+    let mut observed = Vec::new();
     for _ in 0..180 {
         match timeout(Duration::from_millis(500), recv_json(&mut ws)).await {
             Ok(CodingWsOutMessage::CodingGateRequired { gate })
                 if gate.kind == CodingGateKind::StageGate =>
             {
+                observed.push(format!("gate:{:?}", gate.stage.as_ref()));
                 if let Some(stage) = gate.stage.clone()
                     && confirmed_gates.insert(gate.gate_id)
                 {
@@ -164,20 +166,9 @@ async fn coding_ws_internal_pr_review_blocked_stops_without_analyst_rework() {
                 if gate.kind == CodingGateKind::Blocked
                     && gate.stage == Some(CodingExecutionStage::InternalPrReview) =>
             {
-                assert_eq!(gate.role, Some(CodingProviderRole::InternalReviewer));
-                assert_eq!(gate.reason_code.as_deref(), Some("internal_review_blocked"));
-                assert!(
-                    gate.available_actions
-                        .iter()
-                        .any(|action| action.action_id == "retry_review")
-                );
                 saw_internal_review_blocked_gate = true;
             }
-            Ok(CodingWsOutMessage::InternalPrReviewComplete { review })
-                if review.verdict == ReviewVerdict::Blocked =>
-            {
-                saw_internal_review_blocked = true;
-            }
+            Ok(CodingWsOutMessage::InternalPrReviewComplete { .. }) => saw_internal_review = true,
             Ok(CodingWsOutMessage::CodingTimelineNodeCreated { node })
                 if node.stage == CodingExecutionStage::Rework =>
             {
@@ -186,20 +177,13 @@ async fn coding_ws_internal_pr_review_blocked_stops_without_analyst_rework() {
             Ok(CodingWsOutMessage::CodingSessionState {
                 status,
                 stage,
-                pending_gates,
                 ..
             })
-                if saw_internal_review_blocked && stage == CodingExecutionStage::InternalPrReview =>
+                if status == CodingAttemptStatus::Completed
+                    && stage == CodingExecutionStage::ReviewRequest =>
             {
-                assert_eq!(status, CodingAttemptStatus::Blocked);
-                assert!(
-                    pending_gates.iter().any(|gate| {
-                        gate.kind == CodingGateKind::Blocked
-                            && gate.reason_code.as_deref() == Some("internal_review_blocked")
-                    }),
-                    "blocked internal review gate missing from session state"
-                );
-                stopped_at_internal_review = true;
+                observed.push(format!("state:{status:?}:{stage:?}"));
+                completed_after_review_request = true;
                 break;
             }
             Ok(CodingWsOutMessage::CodingProtocolError { code, message }) => {
@@ -210,46 +194,49 @@ async fn coding_ws_internal_pr_review_blocked_stops_without_analyst_rework() {
     }
 
     assert!(
-        saw_internal_review_blocked,
-        "internal review blocked report missing"
+        completed_after_review_request,
+        "single WorkItem should complete after ReviewRequest; observed={observed:?}"
     );
     assert!(
-        saw_internal_review_blocked_gate,
-        "internal review blocked gate missing"
+        !saw_internal_review,
+        "single WorkItem must not run InternalPrReview"
     );
     assert!(
-        stopped_at_internal_review,
-        "internal review blocked did not stop at InternalPrReview"
+        !saw_internal_review_blocked_gate,
+        "single WorkItem must not expose InternalPrReview blocked gate"
     );
     assert!(
         !saw_rework_node,
-        "internal review blocked must not enter analyst rework"
+        "single WorkItem internal review skip must not enter analyst rework"
     );
     assert!(
         provider.analyst_prompts().is_empty(),
-        "analyst should not run after internal review blocked"
+        "analyst should not run when single WorkItem skips InternalPrReview"
     );
 
     let attempt = store
         .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
         .expect("attempt");
-    assert_eq!(attempt.status, CodingAttemptStatus::Blocked);
-    assert_eq!(attempt.stage, CodingExecutionStage::InternalPrReview);
+    assert_eq!(attempt.status, CodingAttemptStatus::Completed);
+    assert_eq!(attempt.stage, CodingExecutionStage::ReviewRequest);
     let runs = store
         .list_role_runs("project_0001", "issue_0001", "coding_attempt_0001")
         .expect("role runs");
-    let internal_run = runs
-        .iter()
-        .find(|run| run.role == CodingProviderRole::InternalReviewer)
-        .expect("internal reviewer role run");
-    assert_eq!(internal_run.status, CodingRoleRunStatus::Blocked);
-    assert_eq!(
-        internal_run.reason_code.as_deref(),
-        Some("internal_review_blocked")
+    assert!(
+        runs.iter()
+            .all(|run| run.role != CodingProviderRole::InternalReviewer),
+        "internal reviewer role runs should not be created for single WorkItem"
     );
     assert!(
         runs.iter().all(|run| run.role != CodingProviderRole::Analyst),
         "analyst role runs should not be created"
+    );
+    assert!(
+        store
+            .list_internal_pr_reviews("project_0001", "issue_0001", "coding_attempt_0001")
+            .expect("internal reviews")
+            .is_empty(),
+        "single WorkItem should not persist internal reviews"
     );
 
     ws.close(None).await.expect("close ws");

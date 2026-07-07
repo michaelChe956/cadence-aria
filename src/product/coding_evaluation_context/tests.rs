@@ -6,8 +6,11 @@ use std::process::Command as StdCommand;
 use tempfile::TempDir;
 
 use crate::product::app_paths::ProductAppPaths;
+use crate::product::coding_attempt_store::CodingAttemptStore;
 use crate::product::coding_models::{
-    CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
+    CodingAgentRole, CodingAttemptStatus, CodingChatEntry, CodingEntryType, CodingExecutionAttempt,
+    CodingExecutionStage, CodingProviderRole, CodingRoleRunStatus, CodingRoleRunTrigger,
+    WorkItemHandoff,
 };
 use crate::product::lifecycle_store::{
     AppendSpecVersionInput, CreateDesignSpecInput, CreateIssueWorkItemPlanInput,
@@ -276,6 +279,153 @@ fn evaluation_context_pack_includes_attempt_diff_context() {
     assert!(pack.repo_context.diff_stat.contains("Untracked files"));
     assert!(pack.repo_context.diff_stat.contains("new.txt"));
     assert!(!pack.repo_context.diff_truncated);
+}
+
+#[test]
+fn code_reviewer_context_pack_includes_coder_evidence() {
+    let tmp = TempDir::new().unwrap();
+    let paths = ProductAppPaths::new(tmp.path().join(".aria"));
+    let lifecycle = LifecycleStore::new(paths.clone());
+    let work_item = lifecycle
+        .create_work_item(CreateWorkItemInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            repository_id: REPOSITORY_ID.to_string(),
+            title: "Evidence Work Item".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+    let store = CodingAttemptStore::new(paths.clone());
+    let attempt = CodingExecutionAttempt {
+        id: "coding_attempt_0001".to_string(),
+        project_id: PROJECT_ID.to_string(),
+        issue_id: ISSUE_ID.to_string(),
+        work_item_id: work_item.id.clone(),
+        attempt_no: 1,
+        scope: crate::product::coding_models::CodingAttemptScope::WorkItem,
+        status: CodingAttemptStatus::Running,
+        stage: CodingExecutionStage::CodeReview,
+        base_branch: "main".to_string(),
+        branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+        worktree_path: None,
+        provider_config_snapshot: ProviderConfigSnapshot {
+            author: ProviderName::Codex,
+            reviewer: Some(ProviderName::ClaudeCode),
+            review_rounds: 1,
+        },
+        rework_count: 0,
+        max_auto_rework: 2,
+        work_item_group_id: None,
+        current_work_item_id: Some(work_item.id.clone()),
+        active_unit_id: None,
+        head_commit: Some("abc123".to_string()),
+        pushed_remote: None,
+        review_request_id: None,
+        provider_conversations: Vec::new(),
+        created_at: "2026-06-10T00:00:00Z".to_string(),
+        updated_at: "2026-06-10T00:00:00Z".to_string(),
+        completed_at: None,
+    };
+    store.save_coding_attempt(&attempt).expect("save attempt");
+    let role_run = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::Coding,
+            CodingProviderRole::Coder,
+            CodingRoleRunTrigger::Initial,
+            Some("coding_node_0001".to_string()),
+        )
+        .expect("create role run");
+    let raw_ref = store
+        .save_provider_raw_output(
+            &attempt.id,
+            CodingExecutionStage::Coding,
+            "coder_output",
+            "完整 coder 输出",
+        )
+        .expect("raw output");
+    store
+        .update_role_run_refs(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &role_run.id,
+            vec![raw_ref.clone()],
+            vec!["artifacts/coder/diff-stat.txt".to_string()],
+        )
+        .expect("role run refs");
+    store
+        .update_role_run_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &role_run.id,
+            CodingRoleRunStatus::Completed,
+            None,
+        )
+        .expect("complete role run");
+    store
+        .save_chat_entry(&CodingChatEntry {
+            id: "coding_node_0001_coder_output".to_string(),
+            attempt_id: attempt.id.clone(),
+            node_id: Some("coding_node_0001".to_string()),
+            role: CodingAgentRole::Author,
+            entry_type: CodingEntryType::AssistantMessage,
+            content: Some("执行清单\n验证命令输出: all checks passed".to_string()),
+            metadata: Some(serde_json::json!({
+                "role_run_id": role_run.id,
+                "raw_provider_output_ref": raw_ref,
+            })),
+            created_at: "2026-06-10T00:00:01Z".to_string(),
+        })
+        .expect("chat entry");
+    store
+        .save_work_item_handoff(&WorkItemHandoff {
+            id: "work_item_handoff_0001".to_string(),
+            project_id: attempt.project_id.clone(),
+            issue_id: attempt.issue_id.clone(),
+            work_item_id: work_item.id.clone(),
+            attempt_id: attempt.id.clone(),
+            provider_run_ref: None,
+            summary: "handoff".to_string(),
+            files_changed: Vec::new(),
+            commit_sha: Some("abc123".to_string()),
+            diff_summary: String::new(),
+            tests_run: vec!["./verify".to_string()],
+            test_result_summary: "passed".to_string(),
+            review_summary: None,
+            api_or_contract_changes: Vec::new(),
+            open_risks: Vec::new(),
+            next_work_item_notes: Vec::new(),
+            created_at: "2026-06-10T00:00:02Z".to_string(),
+        })
+        .expect("handoff");
+
+    let pack = build_evaluation_context_pack(paths, &attempt, EvaluationContextRole::CodeReviewer)
+        .expect("context pack");
+    let evidence = pack.coder_evidence.expect("coder evidence");
+
+    assert_eq!(
+        evidence.latest_role_run_id.as_deref(),
+        Some(role_run.id.as_str())
+    );
+    assert_eq!(evidence.run_no, Some(1));
+    assert_eq!(evidence.raw_provider_output_refs, vec![raw_ref]);
+    assert_eq!(
+        evidence.artifact_refs,
+        vec!["artifacts/coder/diff-stat.txt".to_string()]
+    );
+    assert!(
+        evidence
+            .completion_report_excerpt
+            .as_deref()
+            .is_some_and(|excerpt| excerpt.contains("验证命令输出"))
+    );
+    assert_eq!(evidence.handoff_tests_run, vec!["./verify"]);
+    assert_eq!(
+        evidence.handoff_test_result_summary.as_deref(),
+        Some("passed")
+    );
 }
 
 #[test]

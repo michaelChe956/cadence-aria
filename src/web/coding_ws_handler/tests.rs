@@ -1,8 +1,8 @@
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::{CodingAttemptStore, CreateBlockedGateInput};
 use crate::product::coding_models::{
-    CodingAttemptScope, CodingAttemptStatus, CodingExecutionStage, CodingGateAction,
-    CodingGateActionType, ReviewVerdict,
+    CodeReviewReport, CodingAttemptScope, CodingAttemptStatus, CodingExecutionStage,
+    CodingGateAction, CodingGateActionType, FindingSeverity, ReviewFinding, ReviewVerdict,
 };
 use crate::product::lifecycle_store::{
     CreateVerificationPlanInput, CreateWorkItemInput, CreateWorkspaceSessionInput, LifecycleStore,
@@ -93,17 +93,58 @@ fn coding_execution_context_uses_final_compile_work_item_when_workspace_artifact
 #[test]
 fn code_review_flow_decision_routes_reviewer_verdicts() {
     assert_eq!(
-        code_review_flow_decision(&ReviewVerdict::RequestChanges),
+        code_review_flow_decision(&code_review_report_with(
+            ReviewVerdict::RequestChanges,
+            Vec::new()
+        )),
         CodeReviewFlowDecision::RunReviewerDrivenRework
     );
     assert_eq!(
-        code_review_flow_decision(&ReviewVerdict::Blocked),
-        CodeReviewFlowDecision::StopForBlockedReview
+        code_review_flow_decision(&code_review_report_with(
+            ReviewVerdict::Blocked,
+            vec![ReviewFinding {
+                severity: FindingSeverity::Error,
+                file_path: Some("src/lib.rs".to_string()),
+                line: Some(42),
+                message: "missing validation".to_string(),
+                required_action: Some("add validation".to_string()),
+                source_stage: CodingExecutionStage::CodeReview,
+                evidence: Vec::new(),
+                related_requirements: Vec::new(),
+                related_design_constraints: Vec::new(),
+                related_work_item_tasks: Vec::new(),
+            }]
+        )),
+        CodeReviewFlowDecision::RunReviewerDrivenRework
     );
     assert_eq!(
-        code_review_flow_decision(&ReviewVerdict::Approve),
+        code_review_flow_decision(&code_review_report_with(ReviewVerdict::Blocked, Vec::new())),
+        CodeReviewFlowDecision::StopForHumanTriage
+    );
+    assert_eq!(
+        code_review_flow_decision(&code_review_report_with(ReviewVerdict::Approve, Vec::new())),
         CodeReviewFlowDecision::ContinueAfterApprove
     );
+}
+
+fn code_review_report_with(
+    verdict: ReviewVerdict,
+    findings: Vec<ReviewFinding>,
+) -> CodeReviewReport {
+    CodeReviewReport {
+        id: "code_review_report_0001".to_string(),
+        attempt_id: "coding_attempt_0001".to_string(),
+        round: 1,
+        verdict,
+        findings,
+        tested_evidence_refs: Vec::new(),
+        diff_refs: Vec::new(),
+        summary: "summary".to_string(),
+        created_at: "2026-07-07T00:00:00Z".to_string(),
+        raw_provider_output_ref: None,
+        role_run_id: None,
+        run_no: None,
+    }
 }
 
 #[test]

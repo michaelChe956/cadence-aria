@@ -3,9 +3,12 @@ use tokio::sync::mpsc;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::CodingAttemptStore;
 use crate::product::coding_models::{
-    CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage, ReviewVerdict,
+    CodeReviewReport, CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
+    ReviewVerdict,
 };
-use crate::product::coding_workspace_engine::{CodingWorkspaceEngine, CodingWorkspaceEngineError};
+use crate::product::coding_workspace_engine::{
+    CodingWorkspaceEngine, CodingWorkspaceEngineError, code_review_report_has_actionable_findings,
+};
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::git_workspace_service::GitWorkspaceService;
 use crate::web::state::WebAppState;
@@ -81,14 +84,17 @@ pub(crate) fn should_resume_runner_after_gate_response(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CodeReviewFlowDecision {
     RunReviewerDrivenRework,
-    StopForBlockedReview,
+    StopForHumanTriage,
     ContinueAfterApprove,
 }
 
-pub(crate) fn code_review_flow_decision(verdict: &ReviewVerdict) -> CodeReviewFlowDecision {
-    match verdict {
+pub(crate) fn code_review_flow_decision(report: &CodeReviewReport) -> CodeReviewFlowDecision {
+    match report.verdict {
         ReviewVerdict::RequestChanges => CodeReviewFlowDecision::RunReviewerDrivenRework,
-        ReviewVerdict::Blocked => CodeReviewFlowDecision::StopForBlockedReview,
+        ReviewVerdict::Blocked if code_review_report_has_actionable_findings(report) => {
+            CodeReviewFlowDecision::RunReviewerDrivenRework
+        }
+        ReviewVerdict::Blocked => CodeReviewFlowDecision::StopForHumanTriage,
         ReviewVerdict::Approve => CodeReviewFlowDecision::ContinueAfterApprove,
     }
 }
@@ -237,7 +243,15 @@ pub(crate) async fn execute_start_coding_flow(
             }
             match internal_review.verdict {
                 ReviewVerdict::Approve => {
-                    current = engine.complete_attempt_after_final_rework(&current).await?;
+                    current = if current.scope
+                        == crate::product::coding_models::CodingAttemptScope::WorkItemGroup
+                    {
+                        engine
+                            .complete_group_attempt_after_final_review(&current)
+                            .await?
+                    } else {
+                        engine.complete_attempt_after_final_rework(&current).await?
+                    };
                     return emit_current_session_state(event_tx, coding_store, &current).await;
                 }
                 ReviewVerdict::RequestChanges | ReviewVerdict::Blocked => {
@@ -289,7 +303,7 @@ pub(crate) async fn execute_start_coding_flow(
             {
                 return Ok(());
             }
-            match code_review_flow_decision(&review_report.verdict) {
+            match code_review_flow_decision(&review_report) {
                 CodeReviewFlowDecision::RunReviewerDrivenRework => {
                     let coder_provider_name = coding_store
                         .get_role_provider_config_snapshot(
@@ -336,7 +350,7 @@ pub(crate) async fn execute_start_coding_flow(
                         _ => continue 'pipeline,
                     }
                 }
-                CodeReviewFlowDecision::StopForBlockedReview => {
+                CodeReviewFlowDecision::StopForHumanTriage => {
                     return emit_current_session_state(event_tx, coding_store, &current).await;
                 }
                 CodeReviewFlowDecision::ContinueAfterApprove => {
@@ -392,6 +406,12 @@ pub(crate) async fn execute_start_coding_flow(
             if review_request.push_status != crate::product::coding_models::PushStatus::Pushed {
                 return emit_current_session_state(event_tx, coding_store, &current).await;
             }
+            if current.scope == crate::product::coding_models::CodingAttemptScope::WorkItem {
+                current = engine
+                    .complete_attempt_after_review_request(&current)
+                    .await?;
+                return emit_current_session_state(event_tx, coding_store, &current).await;
+            }
         }
 
         {
@@ -433,7 +453,7 @@ pub(crate) async fn execute_start_coding_flow(
                 "coding internal reviewer provider",
             )?;
             let internal_review = engine
-                .execute_internal_pr_review_with_commands(
+                .execute_group_final_review_with_commands(
                     &current,
                     internal_reviewer_provider.as_ref(),
                     &mut command_rx,
@@ -454,7 +474,9 @@ pub(crate) async fn execute_start_coding_flow(
             }
             match internal_review.verdict {
                 ReviewVerdict::Approve => {
-                    current = engine.complete_attempt_after_final_rework(&current).await?;
+                    current = engine
+                        .complete_group_attempt_after_final_review(&current)
+                        .await?;
                     return emit_current_session_state(event_tx, coding_store, &current).await;
                 }
                 ReviewVerdict::RequestChanges | ReviewVerdict::Blocked => {

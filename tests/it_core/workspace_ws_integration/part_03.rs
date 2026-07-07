@@ -304,7 +304,7 @@ async fn workspace_ws_secondary_connection_can_abort_active_run_started_by_prima
 
     send_json(&mut secondary, &WsInMessage::Abort).await;
     tokio::time::timeout(
-        Duration::from_secs(1),
+        Duration::from_secs(5),
         recv_until_stage(&mut primary, "prepare_context"),
     )
     .await

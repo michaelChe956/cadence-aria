@@ -183,7 +183,9 @@ impl CodingWorkspaceEngine {
             role_run_status,
             reason_code,
         )?;
-        if report.verdict == ReviewVerdict::Blocked {
+        if report.verdict == ReviewVerdict::Blocked
+            && !code_review_report_has_actionable_findings(&report)
+        {
             self.create_review_blocked_gate(ReviewBlockedGateInput {
                 attempt: &attempt,
                 node_id: &node.id,

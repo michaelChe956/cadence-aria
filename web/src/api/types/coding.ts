@@ -539,6 +539,7 @@ export type CodingWsInMessage =
       role: CodingProviderRole;
       permission_mode: CodingProviderPermissionMode;
     }
+  | { type: "max_auto_rework_select"; max_auto_rework: number }
   | { type: "stage_gate_confirm"; stage: CodingExecutionStage }
   | { type: "final_confirm" }
   | { type: "abort_attempt" }

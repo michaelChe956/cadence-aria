@@ -50,6 +50,33 @@ fn provider_snapshot() -> ProviderConfigSnapshot {
 }
 
 #[test]
+fn updates_attempt_max_auto_rework_with_range_validation() {
+    let (_tmp, store, attempt) = setup();
+
+    let updated = store
+        .update_attempt_max_auto_rework(&attempt.project_id, &attempt.issue_id, &attempt.id, 4)
+        .expect("update max auto rework");
+
+    assert_eq!(updated.max_auto_rework, 4);
+
+    let rejected = store.update_attempt_max_auto_rework(
+        &attempt.project_id,
+        &attempt.issue_id,
+        &attempt.id,
+        6,
+    );
+    assert!(matches!(
+        rejected,
+        Err(ProductStoreError::Io(message)) if message == "invalid_max_auto_rework: 6"
+    ));
+
+    let unchanged = store
+        .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("attempt");
+    assert_eq!(unchanged.max_auto_rework, 4);
+}
+
+#[test]
 fn legacy_attempt_without_scope_deserializes_as_work_item_scope() {
     let json = serde_json::json!({
         "id": "coding_attempt_0001",

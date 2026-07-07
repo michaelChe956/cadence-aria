@@ -515,7 +515,7 @@ async fn coding_ws_start_coding_keeps_socket_responsive_while_runner_is_active()
 }
 
 #[tokio::test]
-async fn coding_ws_start_coding_drives_full_happy_path_to_final_confirm() {
+async fn coding_ws_start_coding_drives_full_happy_path_to_review_request_completion() {
     let _guard = WS_TEST_LOCK.lock().await;
     let root = tempdir().expect("root");
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
@@ -533,8 +533,8 @@ async fn coding_ws_start_coding_drives_full_happy_path_to_final_confirm() {
     send_json(&mut ws, &CodingWsInMessage::StartCoding).await;
 
     let mut stages = Vec::new();
-    let mut final_snapshot_seen = false;
-    let mut final_chat_entries = Vec::new();
+    let mut completed_snapshot_seen = false;
+    let mut completed_chat_entries = Vec::new();
     let mut confirmed_gates = HashSet::new();
     let mut observed = Vec::new();
     for _ in 0..80 {
@@ -571,10 +571,10 @@ async fn coding_ws_start_coding_drives_full_happy_path_to_final_confirm() {
             } => {
                 observed.push(format!("state:{status:?}:{stage:?}"));
                 if status == CodingAttemptStatus::Completed
-                    && stage == CodingExecutionStage::FinalConfirm
+                    && stage == CodingExecutionStage::ReviewRequest
                 {
-                    final_chat_entries = *chat_entries;
-                    final_snapshot_seen = true;
+                    completed_chat_entries = *chat_entries;
+                    completed_snapshot_seen = true;
                     break;
                 }
             }
@@ -586,16 +586,14 @@ async fn coding_ws_start_coding_drives_full_happy_path_to_final_confirm() {
     }
 
     assert!(
-        final_snapshot_seen,
-        "expected final_confirm snapshot over websocket; observed={observed:?}"
+        completed_snapshot_seen,
+        "expected ReviewRequest completed snapshot over websocket; observed={observed:?}"
     );
     for expected in [
         CodingExecutionStage::WorktreePrepare,
         CodingExecutionStage::Coding,
         CodingExecutionStage::CodeReview,
         CodingExecutionStage::ReviewRequest,
-        CodingExecutionStage::InternalPrReview,
-        CodingExecutionStage::FinalConfirm,
     ] {
         assert!(
             stages.contains(&expected),
@@ -611,7 +609,7 @@ async fn coding_ws_start_coding_drives_full_happy_path_to_final_confirm() {
         "new pipeline should not create analyst rework nodes; got {stages:?}"
     );
     assert!(
-        final_chat_entries.iter().any(|entry| {
+        completed_chat_entries.iter().any(|entry| {
             entry
                 .metadata
                 .as_ref()
@@ -622,22 +620,19 @@ async fn coding_ws_start_coding_drives_full_happy_path_to_final_confirm() {
         "expected persisted code review chat entry"
     );
     assert!(
-        final_chat_entries.iter().any(|entry| {
-            entry
-                .metadata
-                .as_ref()
-                .and_then(|value| value.get("source"))
-                .and_then(|value| value.as_str())
-                == Some("internal_pr_review")
-        }),
-        "expected persisted internal PR review chat entry"
+        !stages.contains(&CodingExecutionStage::InternalPrReview),
+        "single WorkItem should not run InternalPrReview; got {stages:?}"
+    );
+    assert!(
+        !stages.contains(&CodingExecutionStage::FinalConfirm),
+        "single WorkItem should complete at ReviewRequest; got {stages:?}"
     );
 
     let attempt = store
         .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
         .expect("updated attempt");
     assert_eq!(attempt.status, CodingAttemptStatus::Completed);
-    assert_eq!(attempt.stage, CodingExecutionStage::FinalConfirm);
+    assert_eq!(attempt.stage, CodingExecutionStage::ReviewRequest);
     let worktree = attempt.worktree_path.as_ref().expect("worktree path");
     assert_ne!(worktree, &root.path().join("repo"));
     assert!(worktree.join("src/lib.rs").is_file());
@@ -663,7 +658,7 @@ async fn coding_ws_start_coding_drives_full_happy_path_to_final_confirm() {
             .list_internal_pr_reviews("project_0001", "issue_0001", &attempt.id)
             .expect("internal reviews")
             .len(),
-        1
+        0
     );
 
     ws.close(None).await.expect("close ws");

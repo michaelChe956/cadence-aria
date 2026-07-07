@@ -111,8 +111,9 @@ impl CodingWorkspaceEngine {
     ) -> Result<Option<String>, ProductStoreError> {
         let lifecycle = LifecycleStore::new(self.store.paths());
         let sessions = lifecycle.list_workspace_sessions(&attempt.project_id, &attempt.issue_id)?;
+        let active_work_item_id = self.active_work_item_id_for_attempt(attempt);
         let Some(session) = sessions.iter().rev().find(|session| {
-            session.entity_id == attempt.work_item_id
+            session.entity_id == active_work_item_id
                 && session.workspace_type == WorkspaceType::WorkItem
         }) else {
             return Ok(None);

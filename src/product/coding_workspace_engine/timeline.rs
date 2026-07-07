@@ -151,7 +151,14 @@ impl CodingWorkspaceEngine {
             id: format!("coding_node_{:04}", existing.len() + 1),
             attempt_id: attempt.id.clone(),
             stage: CodingExecutionStage::InternalPrReview,
-            title: "内部 PR 审查".to_string(),
+            title: if attempt.scope
+                == crate::product::coding_models::CodingAttemptScope::WorkItemGroup
+            {
+                "GroupFinalReview"
+            } else {
+                "内部 PR 审查"
+            }
+            .to_string(),
             status: CodingTimelineNodeStatus::Running,
             agent_role: Some(CodingAgentRole::Reviewer),
             summary: None,

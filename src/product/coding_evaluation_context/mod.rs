@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::product::coding_models::QualityGateBypassAudit;
+use crate::product::coding_models::{CodingRoleRunStatus, QualityGateBypassAudit};
 
 mod builder;
 mod methods;
@@ -35,6 +35,8 @@ pub struct EvaluationContextPack {
     pub issue_id: String,
     pub attempt_id: String,
     pub provider_role: EvaluationContextRole,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coder_evidence: Option<CoderEvidencePack>,
     pub story_specs: Vec<EvaluationSpecContext>,
     pub design_specs: Vec<EvaluationSpecContext>,
     pub work_item: EvaluationWorkItemContext,
@@ -44,6 +46,19 @@ pub struct EvaluationContextPack {
     pub superpowers_context: SuperpowersContext,
     pub quality_bypass_audits: Vec<QualityGateBypassAudit>,
     pub context_warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoderEvidencePack {
+    pub latest_role_run_id: Option<String>,
+    pub run_no: Option<u32>,
+    pub status: Option<CodingRoleRunStatus>,
+    pub raw_provider_output_refs: Vec<String>,
+    pub artifact_refs: Vec<String>,
+    pub completion_report_excerpt: Option<String>,
+    pub handoff_tests_run: Vec<String>,
+    pub handoff_test_result_summary: Option<String>,
+    pub evidence_warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

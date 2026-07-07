@@ -132,6 +132,17 @@ fn coding_ws_in_messages_deserialize_client_commands() {
             stage: CodingExecutionStage::Testing,
         }
     );
+
+    let max_auto_rework_select: CodingWsInMessage = serde_json::from_value(json!({
+        "type": "max_auto_rework_select",
+        "max_auto_rework": 4
+    }))
+    .expect("deserialize max auto rework select");
+
+    assert_eq!(
+        max_auto_rework_select,
+        CodingWsInMessage::MaxAutoReworkSelect { max_auto_rework: 4 }
+    );
 }
 
 #[test]
@@ -193,6 +204,16 @@ fn coding_ws_stage_validation_matches_attempt_status_and_stage() {
             role: "author".to_string(),
             provider: ProviderName::Codex,
         },
+    ));
+    assert!(is_coding_ws_message_allowed(
+        &CodingAttemptStatus::Created,
+        &CodingExecutionStage::PrepareContext,
+        &CodingWsInMessage::MaxAutoReworkSelect { max_auto_rework: 4 },
+    ));
+    assert!(!is_coding_ws_message_allowed(
+        &CodingAttemptStatus::Running,
+        &CodingExecutionStage::Coding,
+        &CodingWsInMessage::MaxAutoReworkSelect { max_auto_rework: 4 },
     ));
     assert!(is_coding_ws_message_allowed(
         &CodingAttemptStatus::Running,

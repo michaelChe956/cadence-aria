@@ -19,6 +19,7 @@ export function mockCodingWs(overrides: Partial<CodingWsApi> = {}) {
     sendContextNote: vi.fn(),
     sendProviderSelect: vi.fn(),
     sendPermissionModeSelect: vi.fn(),
+    sendMaxAutoReworkSelect: vi.fn(),
     confirmStageGate: vi.fn(),
     respondPermission: vi.fn(),
     respondChoice: vi.fn(),

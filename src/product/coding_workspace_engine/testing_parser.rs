@@ -324,24 +324,6 @@ pub(crate) fn testing_result_review_description(report: &TestingReport) -> Strin
     }
 }
 
-pub(crate) fn rework_instruction_fields_from_analyst_record(
-    decision: &AnalystDecisionRecord,
-) -> (String, Vec<String>) {
-    if let Some(instructions) = &decision.rework_instructions {
-        let mut fix_hints = instructions
-            .required_changes
-            .iter()
-            .chain(instructions.verification_expectations.iter())
-            .cloned()
-            .collect::<Vec<_>>();
-        if fix_hints.is_empty() {
-            fix_hints.push(decision.reason.clone());
-        }
-        return (instructions.summary.clone(), fix_hints);
-    }
-    (decision.reason.clone(), vec![decision.reason.clone()])
-}
-
 pub(crate) fn analyst_human_gate_actions(
     recommendation: Option<&AnalystHumanGateRecommendation>,
 ) -> Vec<CodingGateAction> {

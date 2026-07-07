@@ -45,6 +45,7 @@ export function CodingTimeline({
             const Icon = iconForStage(node.stage);
             const active = node.id === activeNodeId;
             const selected = node.id === selectedNodeId;
+            const title = titleForStage(node);
             return (
               <button
                 key={node.id}
@@ -62,7 +63,7 @@ export function CodingTimeline({
                   <Icon className="mt-0.5 h-4 w-4 shrink-0 text-[var(--aria-primary)]" />
                   <div className="min-w-0 flex-1">
                     <div className="flex min-w-0 items-center justify-between gap-2">
-                      <span className="truncate text-sm font-semibold">{node.title}</span>
+                      <span className="truncate text-sm font-semibold">{title}</span>
                       <span className="rounded bg-[var(--aria-panel-muted)] px-1.5 py-0.5 text-[11px] text-[var(--aria-ink-muted)]">
                         {node.status}
                       </span>
@@ -87,6 +88,13 @@ export function CodingTimeline({
       )}
     </nav>
   );
+}
+
+function titleForStage(node: CodingTimelineNode) {
+  if (node.stage === "internal_pr_review") {
+    return "GroupFinalReview";
+  }
+  return node.title;
 }
 
 function iconForStage(stage: CodingExecutionStage): LucideIcon {

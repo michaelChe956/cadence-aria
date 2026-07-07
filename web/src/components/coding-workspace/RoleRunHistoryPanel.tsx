@@ -185,7 +185,7 @@ function roleLabel(role: CodingRoleRun["role"]) {
     tester: "Tester",
     analyst: "Analyst",
     code_reviewer: "Code Reviewer",
-    internal_reviewer: "Internal Reviewer",
+    internal_reviewer: "GroupFinalReview",
   };
   return labels[role];
 }

@@ -159,6 +159,9 @@ pub enum CodingWsInMessage {
         role: String,
         permission_mode: CodingProviderPermissionMode,
     },
+    MaxAutoReworkSelect {
+        max_auto_rework: u32,
+    },
     StageGateConfirm {
         stage: CodingExecutionStage,
     },

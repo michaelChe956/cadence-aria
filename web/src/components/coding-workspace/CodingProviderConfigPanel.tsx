@@ -1,5 +1,6 @@
 import { Lock } from "lucide-react";
 import type {
+  CodingAttemptScope,
   CodingProviderPermissionMode,
   CodingProviderSelectRole,
   CodingProviderRole,
@@ -11,40 +12,14 @@ const PROVIDERS: WorkspaceProviderName[] = ["fake", "codex", "claude_code"];
 
 type ProviderConfigRow = {
   selectRole: CodingProviderSelectRole;
-  providerKey:
-    | "coder"
-    | "tester_plan"
-    | "tester_execute"
-    | "analyst"
-    | "code_reviewer"
-    | "internal_reviewer";
+  providerKey: "coder" | "code_reviewer" | "internal_reviewer";
   modeRole?: CodingProviderRole;
   lockRole: CodingProviderRole;
   label: string;
 };
 
-const ROLES: ProviderConfigRow[] = [
+const BASE_ROLES: ProviderConfigRow[] = [
   { selectRole: "coder", providerKey: "coder", modeRole: "coder", lockRole: "coder", label: "Coder" },
-  {
-    selectRole: "tester_plan",
-    providerKey: "tester_plan",
-    lockRole: "tester",
-    label: "Tester Plan",
-  },
-  {
-    selectRole: "tester_execute",
-    providerKey: "tester_execute",
-    modeRole: "tester",
-    lockRole: "tester",
-    label: "Tester Execute",
-  },
-  {
-    selectRole: "analyst",
-    providerKey: "analyst",
-    modeRole: "analyst",
-    lockRole: "analyst",
-    label: "Analyst",
-  },
   {
     selectRole: "code_reviewer",
     providerKey: "code_reviewer",
@@ -52,14 +27,15 @@ const ROLES: ProviderConfigRow[] = [
     lockRole: "code_reviewer",
     label: "Code Reviewer",
   },
-  {
-    selectRole: "internal_reviewer",
-    providerKey: "internal_reviewer",
-    modeRole: "internal_reviewer",
-    lockRole: "internal_reviewer",
-    label: "Internal Reviewer",
-  },
 ];
+
+const GROUP_FINAL_REVIEW_ROLE: ProviderConfigRow = {
+  selectRole: "internal_reviewer",
+  providerKey: "internal_reviewer",
+  modeRole: "internal_reviewer",
+  lockRole: "internal_reviewer",
+  label: "GroupFinalReview",
+};
 
 const PROVIDER_LABELS: Record<WorkspaceProviderName, string> = {
   fake: "Fake",
@@ -74,38 +50,41 @@ const PERMISSION_MODE_LABELS: Record<CodingProviderPermissionMode, string> = {
 
 export function CodingProviderConfigPanel({
   snapshot,
+  attemptScope,
   lockedRole,
+  configLocked,
+  maxAutoRework,
   onSelect,
   onPermissionModeSelect,
+  onMaxAutoReworkSelect,
 }: {
   snapshot: CodingRoleProviderConfigSnapshot | null;
+  attemptScope: CodingAttemptScope | null;
   lockedRole: CodingProviderRole | null;
+  configLocked: boolean;
+  maxAutoRework: number;
   onSelect: (role: CodingProviderSelectRole, provider: WorkspaceProviderName) => void;
   onPermissionModeSelect: (
     role: CodingProviderRole,
     permissionMode: CodingProviderPermissionMode,
   ) => void;
+  onMaxAutoReworkSelect: (maxAutoRework: number) => void;
 }) {
   if (!snapshot) {
     return null;
   }
+  const roles =
+    attemptScope === "work_item_group" ? [...BASE_ROLES, GROUP_FINAL_REVIEW_ROLE] : BASE_ROLES;
 
   return (
     <div
       data-testid="coding-provider-config-panel"
       className="grid min-w-0 gap-2 bg-white"
     >
-      {ROLES.map(({ selectRole, providerKey, modeRole, lockRole, label }) => {
-        if (
-          selectRole === "tester_plan" ||
-          selectRole === "tester_execute" ||
-          selectRole === "analyst"
-        ) {
-          return null;
-        }
+      {roles.map(({ selectRole, providerKey, modeRole, lockRole, label }) => {
         const current = snapshot[providerKey];
         const permissionMode = modeRole ? snapshot.permission_modes[modeRole] : null;
-        const locked = lockedRole === lockRole;
+        const locked = configLocked || lockedRole === lockRole;
         return (
           <div
             key={selectRole}
@@ -171,6 +150,32 @@ export function CodingProviderConfigPanel({
           </div>
         );
       })}
+      <div className="grid min-w-0 gap-2 rounded-md border border-[var(--aria-line)] px-3 py-2.5 md:grid-cols-[9rem_minmax(0,1fr)]">
+        <div className="min-w-0">
+          <div className="truncate text-xs font-semibold text-[var(--aria-ink)]">
+            自动返修次数
+          </div>
+          <div className="mt-1 truncate font-mono text-[11px] text-[var(--aria-ink-muted)]">
+            {maxAutoRework}
+          </div>
+        </div>
+        <input
+          aria-label="CodeReview 自动返修次数"
+          type="number"
+          min={0}
+          max={5}
+          step={1}
+          value={maxAutoRework}
+          disabled={configLocked}
+          onChange={(event) => {
+            const next = Number(event.currentTarget.value);
+            if (Number.isFinite(next)) {
+              onMaxAutoReworkSelect(next);
+            }
+          }}
+          className="h-8 w-24 rounded-md border border-[var(--aria-line)] bg-white px-2 text-sm font-semibold text-[var(--aria-ink)] disabled:cursor-not-allowed disabled:opacity-45"
+        />
+      </div>
     </div>
   );
 }

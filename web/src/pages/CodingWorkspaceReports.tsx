@@ -196,9 +196,7 @@ export function ReviewPanel() {
           report={report}
         />
       ))}
-      {internalReview ? (
-        <ReviewReportCard title="Internal PR Review" report={internalReview} />
-      ) : null}
+      {internalReview ? <ReviewReportCard title="GroupFinalReview" report={internalReview} /> : null}
     </div>
   );
 }
@@ -218,7 +216,7 @@ function ReviewReportCard({
       </div>
       <div className="mt-1 text-xs text-[var(--aria-ink-muted)]">{report.summary}</div>
       {isInternalPrReview(report) ? (
-        <InternalPrReviewDetails review={report} />
+        <GroupFinalReviewDetails review={report} />
       ) : null}
       {report.findings.length > 0 ? (
         <div className="mt-2 space-y-2">
@@ -231,7 +229,7 @@ function ReviewReportCard({
   );
 }
 
-function InternalPrReviewDetails({ review }: { review: InternalPrReview }) {
+function GroupFinalReviewDetails({ review }: { review: InternalPrReview }) {
   return (
     <div className="mt-2 space-y-2 text-xs">
       {review.impact_scope.length > 0 ? (

@@ -1,5 +1,5 @@
 #[tokio::test]
-async fn internal_review_request_changes_stops_without_analyst_rework() {
+async fn single_work_item_review_request_completes_without_internal_rework() {
     let _guard = WS_TEST_LOCK.lock().await;
     let root = tempdir().expect("root");
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
@@ -17,12 +17,14 @@ async fn internal_review_request_changes_stops_without_analyst_rework() {
     send_json(&mut ws, &CodingWsInMessage::StartCoding).await;
 
     let mut confirmed_gates = HashSet::new();
-    let mut saw_internal_review_request_changes = false;
+    let mut completed_after_review_request = false;
+    let mut saw_internal_review = false;
     let mut saw_rework_node = false;
-    let mut stopped_at_internal_review = false;
+    let mut observed = Vec::new();
     for _ in 0..140 {
         match recv_json(&mut ws).await {
             CodingWsOutMessage::CodingGateRequired { gate } => {
+                observed.push(format!("gate:{:?}:{:?}", gate.kind, gate.stage.as_ref()));
                 assert_eq!(
                     gate.kind,
                     CodingGateKind::StageGate,
@@ -36,22 +38,18 @@ async fn internal_review_request_changes_stops_without_analyst_rework() {
                     send_json(&mut ws, &CodingWsInMessage::StageGateConfirm { stage }).await;
                 }
             }
-            CodingWsOutMessage::InternalPrReviewComplete { review }
-                if review.verdict == ReviewVerdict::RequestChanges =>
-            {
-                saw_internal_review_request_changes = true;
-            }
+            CodingWsOutMessage::InternalPrReviewComplete { .. } => saw_internal_review = true,
             CodingWsOutMessage::CodingTimelineNodeCreated { node }
                 if node.stage == CodingExecutionStage::Rework =>
             {
                 saw_rework_node = true;
             }
             CodingWsOutMessage::CodingSessionState { status, stage, .. }
-                if saw_internal_review_request_changes
-                    && stage == CodingExecutionStage::InternalPrReview =>
+                if status == CodingAttemptStatus::Completed
+                    && stage == CodingExecutionStage::ReviewRequest =>
             {
-                assert_eq!(status, CodingAttemptStatus::Running);
-                stopped_at_internal_review = true;
+                observed.push(format!("state:{status:?}:{stage:?}"));
+                completed_after_review_request = true;
                 break;
             }
             CodingWsOutMessage::CodingProtocolError { code, message } => {
@@ -62,16 +60,16 @@ async fn internal_review_request_changes_stops_without_analyst_rework() {
     }
 
     assert!(
-        saw_internal_review_request_changes,
-        "internal review request_changes report missing"
+        completed_after_review_request,
+        "single WorkItem should complete after ReviewRequest; observed={observed:?}"
     );
     assert!(
-        stopped_at_internal_review,
-        "internal review request_changes should stop at InternalPrReview"
+        !saw_internal_review,
+        "single WorkItem must not run InternalPrReview"
     );
     assert!(
         !saw_rework_node,
-        "internal review request_changes must not enter analyst rework"
+        "single WorkItem must not enter analyst rework"
     );
     let requests = store
         .list_review_requests("project_0001", "issue_0001", "coding_attempt_0001")
@@ -82,13 +80,13 @@ async fn internal_review_request_changes_stops_without_analyst_rework() {
             .list_internal_pr_reviews("project_0001", "issue_0001", "coding_attempt_0001")
             .expect("internal reviews")
             .len(),
-        1
+        0
     );
     let attempt = store
         .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
         .expect("attempt");
-    assert_eq!(attempt.status, CodingAttemptStatus::Running);
-    assert_eq!(attempt.stage, CodingExecutionStage::InternalPrReview);
+    assert_eq!(attempt.status, CodingAttemptStatus::Completed);
+    assert_eq!(attempt.stage, CodingExecutionStage::ReviewRequest);
     assert_eq!(attempt.review_request_id.as_deref(), Some("review_request_0001"));
     let worktree = attempt.worktree_path.expect("worktree path");
     assert!(!worktree.join("src/internal_fix.rs").is_file());
@@ -143,7 +141,7 @@ async fn code_review_findings_are_injected_into_next_coding_round() {
             CodingWsOutMessage::CodingSessionState { status, stage, .. } => {
                 observed.push(format!("state:{status:?}:{stage:?}"));
                 if status == CodingAttemptStatus::Completed
-                    && stage == CodingExecutionStage::FinalConfirm
+                    && stage == CodingExecutionStage::ReviewRequest
                 {
                     completed = true;
                     break;

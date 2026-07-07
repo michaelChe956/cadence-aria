@@ -545,9 +545,9 @@ async fn reviewer_driven_rework_blocks_when_auto_rework_limit_is_reached() {
         .await
         .expect("blocked reviewer driven rework");
 
-    assert_eq!(updated.status, CodingAttemptStatus::Blocked);
+    assert_eq!(updated.status, CodingAttemptStatus::WaitingForHuman);
     assert_eq!(updated.rework_count, 2);
-    assert_eq!(updated.stage, CodingExecutionStage::CodeReview);
+    assert_eq!(updated.stage, CodingExecutionStage::Rework);
     assert!(provider.input.lock().expect("input lock").is_none());
     let gates = store
         .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
@@ -556,6 +556,14 @@ async fn reviewer_driven_rework_blocks_when_auto_rework_limit_is_reached() {
     assert_eq!(gates[0].stage, Some(CodingExecutionStage::Rework));
     assert_eq!(gates[0].role, Some(CodingProviderRole::Coder));
     assert!(gates[0].title.contains("返修超上限"));
+    assert_eq!(
+        gates[0]
+            .available_actions
+            .iter()
+            .map(|action| action.action_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["provide_context", "continue_rework", "abort"]
+    );
 }
 
 fn review_report_requesting_changes(attempt: &CodingExecutionAttempt) -> CodeReviewReport {

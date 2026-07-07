@@ -51,6 +51,7 @@ export function CodingWorkspacePage({
     : "provider pending";
   const roleRunSummary =
     store.roleRuns.length === 0 ? "暂无运行记录" : `${store.roleRuns.length} 次角色运行`;
+  const pendingGate = store.pendingGates.at(-1) ?? null;
 
   useUnloadGuard({
     enabled: store.status === "running",
@@ -137,7 +138,9 @@ export function CodingWorkspacePage({
           </div>
         </div>
         <div className="flex min-w-0 items-center justify-end gap-2">
-          <ActionButtons api={api} stage={store.stage} status={store.status} />
+          {pendingGate?.kind === "blocked" ? null : (
+            <ActionButtons api={api} stage={store.stage} status={store.status} />
+          )}
         </div>
       </header>
       {store.attemptScope === "work_item_group" && store.units.length > 0 ? (
@@ -231,7 +234,7 @@ export function CodingWorkspacePage({
                 />
               </div>
               <GatePanel
-                gate={store.pendingGates.at(-1) ?? null}
+                gate={pendingGate}
                 onRespond={api.respondGate}
                 onConfirmStage={api.confirmStageGate}
                 onAbort={api.abortAttempt}
@@ -243,8 +246,9 @@ export function CodingWorkspacePage({
                 statusText={
                   store.protocolError
                     ? `${store.protocolError.code}: ${store.protocolError.message}`
-                    : store.pendingGates.at(-1)?.title ?? "Coding Workspace"
+                    : pendingGate?.title ?? "Coding Workspace"
                 }
+                pendingGate={pendingGate}
               />
             </div>
           )}
@@ -287,9 +291,15 @@ export function CodingWorkspacePage({
               {activeDrawer === "providers" ? (
                 <CodingProviderConfigPanel
                   snapshot={store.roleProviderConfigSnapshot}
+                  attemptScope={store.attemptScope}
                   lockedRole={lockedProviderRole(store.stage, store.status, store.pendingGates)}
+                  configLocked={
+                    store.status !== "created" || store.stage !== "prepare_context"
+                  }
+                  maxAutoRework={store.maxAutoRework}
                   onSelect={api.sendProviderSelect}
                   onPermissionModeSelect={api.sendPermissionModeSelect}
+                  onMaxAutoReworkSelect={api.sendMaxAutoReworkSelect}
                 />
               ) : (
                 <RoleRunHistoryPanel

@@ -36,10 +36,10 @@ use crate::product::coding_models::{
     CodingEntryType, CodingExecutionAttempt, CodingExecutionStage, CodingGateAction,
     CodingGateActionType, CodingGateRequired, CodingProviderPermissionMode, CodingProviderRole,
     CodingReworkInstruction, CodingRoleRun, CodingRoleRunEventType, CodingRoleRunStatus,
-    CodingRoleRunTrigger, CodingTimelineNode, CodingTimelineNodeStatus, InternalPrReview,
-    PushStatus, ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict, TestCommand,
-    TestCommandStatus, TestPlan, TestPlanRiskLevel, TestingOverallStatus, TestingReport,
-    TestingStepResult, TestingUnplannedEvidence, WorkItemHandoff,
+    CodingRoleRunTrigger, CodingTimelineNode, CodingTimelineNodeStatus, FindingSeverity,
+    InternalPrReview, PushStatus, ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict,
+    TestCommand, TestCommandStatus, TestPlan, TestPlanRiskLevel, TestingOverallStatus,
+    TestingReport, TestingStepResult, TestingUnplannedEvidence, WorkItemHandoff,
 };
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::git_workspace_service::{GitWorkspaceError, GitWorkspaceService};
@@ -93,6 +93,23 @@ pub use types::{
     CodingExecutionContext, CodingWorkspaceEngine, CodingWorkspaceEngineError,
     CompletionGateReport, ProviderTestingAdapters, TESTING_RESULT_REVIEW_REASON_CODE,
 };
+
+pub(crate) fn code_review_report_has_actionable_findings(report: &CodeReviewReport) -> bool {
+    report.findings.iter().any(|finding| {
+        matches!(
+            finding.severity,
+            FindingSeverity::Error | FindingSeverity::Warning
+        ) && (!finding.message.trim().is_empty()
+            || finding
+                .required_action
+                .as_deref()
+                .is_some_and(|action| !action.trim().is_empty())
+            || finding
+                .file_path
+                .as_deref()
+                .is_some_and(|path| !path.trim().is_empty()))
+    })
+}
 
 #[allow(unused_imports)]
 pub(crate) use analyst_parser::*;

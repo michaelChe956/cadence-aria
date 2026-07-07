@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -240,8 +240,8 @@ describe("CodingWorkspacePage gate panels", () => {
     const api = mockCodingWs();
     useCodingWorkspaceStore.setState({
       attemptId: "coding_attempt_0001",
-      status: "running",
-      stage: "coding",
+      status: "created",
+      stage: "prepare_context",
       pendingGates: [
         {
           gate_id: "coding_stage_gate_0001",
@@ -295,8 +295,9 @@ describe("CodingWorkspacePage gate panels", () => {
     const api = mockCodingWs();
     useCodingWorkspaceStore.setState({
       attemptId: "coding_attempt_0001",
-      status: "running",
-      stage: "coding",
+      status: "created",
+      stage: "prepare_context",
+      maxAutoRework: 2,
       roleProviderConfigSnapshot: {
         coder: "fake",
         tester_plan: "fake",
@@ -325,16 +326,61 @@ describe("CodingWorkspacePage gate panels", () => {
     expect(screen.getByTestId("coding-provider-config-panel")).not.toHaveTextContent("Tester Execute");
     expect(screen.getByTestId("coding-provider-config-panel")).not.toHaveTextContent("Analyst");
     expect(screen.getByTestId("coding-provider-config-panel")).toHaveTextContent("Code Reviewer");
-    expect(screen.getByTestId("coding-provider-config-panel")).toHaveTextContent("Internal Reviewer");
+    expect(screen.getByTestId("coding-provider-config-panel")).not.toHaveTextContent("Internal Reviewer");
+    expect(screen.getByTestId("coding-provider-config-panel")).toHaveTextContent("自动返修次数");
     expect(screen.getByTestId("coding-provider-config-panel")).toHaveTextContent("Auto");
 
     await userEvent.click(screen.getByRole("button", { name: "将 Code Reviewer 切换为 Codex" }));
     await userEvent.click(
       screen.getByRole("button", { name: "将 Code Reviewer 授权模式切换为 Auto" }),
     );
+    fireEvent.change(screen.getByLabelText("CodeReview 自动返修次数"), {
+      target: { value: "4" },
+    });
 
     expect(api.sendProviderSelect).toHaveBeenCalledWith("code_reviewer", "codex");
     expect(api.sendPermissionModeSelect).toHaveBeenCalledWith("code_reviewer", "auto");
+    expect(api.sendMaxAutoReworkSelect).toHaveBeenCalledWith(4);
+  });
+
+  it("shows GroupFinalReview provider only for work item group attempts", async () => {
+    mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      attemptId: "coding_attempt_group_0001",
+      attemptScope: "work_item_group",
+      status: "created",
+      stage: "prepare_context",
+      maxAutoRework: 2,
+      roleProviderConfigSnapshot: {
+        coder: "fake",
+        tester_plan: "fake",
+        tester_execute: "fake",
+        analyst: "fake",
+        code_reviewer: "fake",
+        internal_reviewer: "claude_code",
+        review_rounds: 1,
+        permission_modes: {
+          coder: "supervised",
+          tester: "auto",
+          analyst: "auto",
+          code_reviewer: "supervised",
+          internal_reviewer: "supervised",
+        },
+      },
+    });
+
+    render(<CodingWorkspacePage attemptId="coding_attempt_group_0001" onBack={vi.fn()} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Provider 设置" }));
+
+    const panel = screen.getByTestId("coding-provider-config-panel");
+    expect(panel).toHaveTextContent("Coder");
+    expect(panel).toHaveTextContent("Code Reviewer");
+    expect(panel).toHaveTextContent("GroupFinalReview");
+    expect(panel).not.toHaveTextContent("Internal Reviewer");
+    expect(panel).not.toHaveTextContent("Tester Plan");
+    expect(panel).not.toHaveTextContent("Tester Execute");
+    expect(panel).not.toHaveTextContent("Analyst");
   });
 
   it("sends coding context notes from the chat input", async () => {
@@ -353,6 +399,61 @@ describe("CodingWorkspacePage gate panels", () => {
 
     expect(api.sendContextNote).toHaveBeenCalledWith("请覆盖空输入边界");
     expect(input).toHaveValue("");
+  });
+
+  it("requires manual rework context for continue rework gate actions", async () => {
+    const api = mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      attemptId: "coding_attempt_0001",
+      status: "waiting_for_human",
+      stage: "rework",
+      pendingGates: [
+        {
+          gate_id: "gate_rework_limit",
+          kind: "blocked",
+          title: "Code Review 返修超上限",
+          description: "code review 连续要求修改 2 次，已达上限，请人工介入。",
+          stage: "rework",
+          role: "coder",
+          reason_code: "reviewer_rework_limit_reached",
+          evidence_refs: ["code_review_report_0002"],
+          raw_provider_output_ref: "provider-raw/code_review/code_review_0002.txt",
+          available_actions: [
+            {
+              action_id: "continue_rework",
+              label: "继续返修",
+              action_type: "continue_rework",
+            },
+            {
+              action_id: "abort",
+              label: "终止",
+              action_type: "abort",
+            },
+          ],
+        },
+      ],
+    });
+
+    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+
+    const gate = screen.getByTestId("coding-pending-gate");
+    expect(gate).toHaveTextContent("Code Review 返修超上限");
+    expect(gate).not.toHaveTextContent("质量豁免");
+    expect(screen.queryByRole("button", { name: "发送上下文" })).not.toBeInTheDocument();
+    expect(screen.getByText("请使用上方门禁操作提交人工返修意见")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "继续返修" }));
+    expect(api.respondGate).not.toHaveBeenCalled();
+    expect(gate).toHaveTextContent("需要填写人工返修意见");
+
+    await userEvent.type(screen.getByLabelText("人工返修意见"), "优先处理第 2 条 finding");
+    await userEvent.click(screen.getByRole("button", { name: "继续返修" }));
+
+    expect(api.respondGate).toHaveBeenCalledWith(
+      "gate_rework_limit",
+      "continue_rework",
+      "优先处理第 2 条 finding",
+    );
   });
 
   it("keeps a manually selected artifact tab while the attempt is testing", async () => {

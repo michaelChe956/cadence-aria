@@ -268,6 +268,11 @@ impl CodingWorkspaceEngine {
                 .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
         let rework_round = current.rework_count + 1;
         if current.rework_count >= current.max_auto_rework {
+            let actions = vec![
+                coding_gate_action_for_id("provide_context").expect("provide context action"),
+                coding_gate_action_for_id("continue_rework").expect("continue rework action"),
+                coding_gate_action_for_id("abort").expect("abort action"),
+            ];
             let gate = self.store.create_blocked_gate(CreateBlockedGateInput {
                 attempt_id: current.id.clone(),
                 stage: CodingExecutionStage::Rework,
@@ -282,19 +287,25 @@ impl CodingWorkspaceEngine {
                 reason_code: Some("reviewer_rework_limit_reached".to_string()),
                 evidence_refs: review_report_evidence_refs(review_report),
                 raw_provider_output_ref: review_report.raw_provider_output_ref.clone(),
-                available_actions: Vec::new(),
+                available_actions: actions,
             })?;
             let _ = self
                 .event_tx
                 .send(CodingWsOutMessage::CodingGateRequired { gate })
                 .await;
+            let rework_stage = self.store.update_attempt_stage(
+                &current.project_id,
+                &current.issue_id,
+                &current.id,
+                CodingExecutionStage::Rework,
+            )?;
             return self
                 .store
                 .update_attempt_status(
-                    &current.project_id,
-                    &current.issue_id,
-                    &current.id,
-                    CodingAttemptStatus::Blocked,
+                    &rework_stage.project_id,
+                    &rework_stage.issue_id,
+                    &rework_stage.id,
+                    CodingAttemptStatus::WaitingForHuman,
                 )
                 .map_err(CodingWorkspaceEngineError::from);
         }
@@ -500,19 +511,22 @@ impl CodingWorkspaceEngine {
                 .create_context_note(&current.id, content.trim().to_string())?;
         }
 
-        let decision = self
+        let review_report = self
             .store
-            .latest_analyst_decision(&current.project_id, &current.issue_id, &current.id)?
+            .list_code_review_reports(&current.project_id, &current.issue_id, &current.id)?
+            .into_iter()
+            .last()
             .ok_or_else(|| {
                 CodingWorkspaceEngineError::ProviderStream(
-                    "continue_rework_missing_analyst_decision".to_string(),
+                    "continue_rework_missing_code_review_report".to_string(),
                 )
             })?;
-        if decision.verdict != AnalystDecisionVerdict::NeedsFix
-            || decision.next_stage != AnalystDecisionNextStage::Coding
-        {
+        let can_continue_from_review = review_report.verdict == ReviewVerdict::RequestChanges
+            || (review_report.verdict == ReviewVerdict::Blocked
+                && code_review_report_has_actionable_findings(&review_report));
+        if !can_continue_from_review {
             return Err(CodingWorkspaceEngineError::ProviderStream(
-                "continue_rework_latest_decision_not_coding".to_string(),
+                "continue_rework_latest_review_not_actionable".to_string(),
             ));
         }
 
@@ -521,14 +535,17 @@ impl CodingWorkspaceEngine {
             &current.issue_id,
             &current.id,
         )?;
-        let (summary, fix_hints) = rework_instruction_fields_from_analyst_record(&decision);
         let instruction = CodingReworkInstruction {
             id: next_sequential_id("coding_rework_instruction", existing.len()),
             attempt_id: current.id.clone(),
-            source_stage: decision.source_stage.clone(),
-            rework_round: decision.rework_round,
-            summary,
-            fix_hints,
+            source_stage: CodingExecutionStage::CodeReview,
+            rework_round: current.rework_count + 1,
+            summary: if review_report.summary.trim().is_empty() {
+                format!("code review round {} 要求修改", review_report.round)
+            } else {
+                review_report.summary.clone()
+            },
+            fix_hints: review_findings_fix_hints(&review_report),
             questions: Vec::new(),
             created_at: Utc::now().to_rfc3339(),
             consumed_by_node_id: None,

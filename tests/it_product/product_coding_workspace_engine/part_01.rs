@@ -34,13 +34,14 @@ use cadence_aria::product::coding_workspace_engine::{
 };
 use cadence_aria::product::git_workspace_service::GitWorkspaceService;
 use cadence_aria::product::lifecycle_store::{
-    CreateVerificationPlanInput, CreateWorkItemInput, CreateWorkspaceSessionInput, LifecycleStore,
-    UpsertIssueSharedWorktreeInput,
+    CreateIssueWorkItemPlanInput, CreateVerificationPlanInput, CreateWorkItemInput,
+    CreateWorkspaceSessionInput, LifecycleStore, UpsertIssueSharedWorktreeInput,
 };
 use cadence_aria::product::models::{
-    ProviderConversationRef, ProviderConversationRole, ProviderName, RepositoryProfileConfidence,
-    VerificationCommand, VerificationCommandSafety, VerificationCommandSource,
-    VerificationFallbackPolicy, VerificationScope, WorkItemStatus, WorkspaceType,
+    IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, ProviderConversationRef,
+    ProviderConversationRole, ProviderName, RepositoryProfileConfidence, VerificationCommand,
+    VerificationCommandSafety, VerificationCommandSource, VerificationFallbackPolicy,
+    VerificationScope, WorkItemStatus, WorkspaceType,
 };
 use cadence_aria::product::test_executor::TestCommandSpec;
 use cadence_aria::product::tester_agent_loop::TesterAgentOptions;
@@ -615,7 +616,11 @@ async fn coding_coder_rework_with_resume_uses_delta_prompt() {
     assert!(second_input.prompt.contains("补充 n=0 的输入处理"));
     assert!(second_input.prompt.contains("uv run python -m unittest"));
     assert!(!second_input.prompt.contains("# 爬楼梯问题 Work Item"));
-    assert!(!second_input.prompt.contains("已确认 Work Item"));
+    assert!(
+        !second_input
+            .prompt
+            .contains("这里是一段很长的已确认 Work Item，返修续接时不应重复发送。")
+    );
     assert!(
         !second_input
             .prompt

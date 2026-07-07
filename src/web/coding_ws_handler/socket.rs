@@ -407,6 +407,35 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                     {
                         let _ = send_coding_json(&mut socket_tx, &snapshot).await;
                     }
+                } else if let CodingWsInMessage::MaxAutoReworkSelect { max_auto_rework } = inbound
+                {
+                    let updated = match coding_store.update_attempt_max_auto_rework(
+                        &current_attempt.project_id,
+                        &current_attempt.issue_id,
+                        &current_attempt.id,
+                        max_auto_rework,
+                    ) {
+                        Ok(updated) => updated,
+                        Err(error) => {
+                            let code = if error.to_string().contains("invalid_max_auto_rework") {
+                                "invalid_max_auto_rework"
+                            } else {
+                                "coding_max_auto_rework_select_failed"
+                            };
+                            let _ = send_coding_json(
+                                &mut socket_tx,
+                                &CodingWsOutMessage::CodingProtocolError {
+                                    code: code.to_string(),
+                                    message: error.to_string(),
+                                },
+                            )
+                            .await;
+                            continue;
+                        }
+                    };
+                    if let Ok(snapshot) = build_coding_session_state(&coding_store, updated) {
+                        let _ = send_coding_json(&mut socket_tx, &snapshot).await;
+                    }
                 } else if let CodingWsInMessage::StageGateConfirm { stage } = inbound {
                     if let Some(command_tx) = runner_command_tx.as_ref() {
                         let open_gates = coding_store
@@ -610,6 +639,7 @@ pub fn is_coding_ws_message_allowed(
                 | CodingWsInMessage::StartCoding
                 | CodingWsInMessage::ProviderSelect { .. }
                 | CodingWsInMessage::PermissionModeSelect { .. }
+                | CodingWsInMessage::MaxAutoReworkSelect { .. }
                 | CodingWsInMessage::AbortAttempt
         ),
         CodingExecutionStage::WorktreePrepare => matches!(message, CodingWsInMessage::AbortAttempt),

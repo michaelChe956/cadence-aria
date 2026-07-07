@@ -553,14 +553,119 @@ impl CodingWorkspaceEngine {
         Ok(completed)
     }
 
-    pub async fn complete_group_unit_after_code_review(
+    pub(crate) async fn complete_attempt_after_review_request(
         &self,
         attempt: &CodingExecutionAttempt,
     ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
         self.generate_and_save_work_item_handoff_if_missing(attempt)
             .await?;
-        self.complete_current_group_unit(attempt, Some("当前 Work Item 已完成".to_string()))
+        self.run_completion_gates(attempt).await?;
+        let completed = self.store.update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::Completed,
+        )?;
+        self.mark_work_item_completed_if_present(&completed)?;
+        self.mark_issue_shared_worktree_completed_if_present(
+            &completed.project_id,
+            &completed.issue_id,
+            self.active_work_item_id_for_attempt(&completed),
+        )?;
+        Ok(completed)
+    }
+
+    pub(crate) async fn complete_group_attempt_after_final_review(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
+        if attempt.scope != CodingAttemptScope::WorkItemGroup {
+            return Err(CodingWorkspaceEngineError::FinalConfirmNotReady(
+                attempt.id.clone(),
+            ));
+        }
+        self.run_group_completion_gates(attempt).await?;
+        let completed = self.store.update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::Completed,
+        )?;
+        self.mark_completed_group_work_items_if_present(&completed)?;
+        let current_work_item_id = self.active_work_item_id_for_attempt(attempt).to_string();
+        self.release_issue_shared_worktree_lock_if_holder(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &current_work_item_id,
+        )?;
+        Ok(completed)
+    }
+
+    pub async fn complete_group_unit_after_code_review(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
+        let attempt = self.commit_current_group_unit_changes(attempt).await?;
+        self.generate_and_save_work_item_handoff_if_missing(&attempt)
+            .await?;
+        self.complete_current_group_unit(&attempt, Some("当前 Work Item 已完成".to_string()))
             .await
+    }
+
+    async fn commit_current_group_unit_changes(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
+        if attempt.scope != CodingAttemptScope::WorkItemGroup {
+            return Ok(attempt.clone());
+        }
+        let Some(worktree_path) = attempt.worktree_path.as_ref() else {
+            return Err(CodingWorkspaceEngineError::MissingWorktree(
+                attempt.id.clone(),
+            ));
+        };
+        let active = self
+            .store
+            .get_active_coding_unit(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+            .ok_or_else(|| {
+                CodingWorkspaceEngineError::WorkItemHandoffMissing(attempt.id.clone())
+            })?;
+
+        self._git_service
+            .git_add_work_item_changes(worktree_path)
+            .await?;
+        let completion_commit = if self
+            ._git_service
+            .git_has_staged_changes(worktree_path)
+            .await?
+        {
+            self._git_service
+                .git_commit(
+                    worktree_path,
+                    &format!("feat: complete {}", active.work_item_id),
+                )
+                .await?
+                .commit_sha
+        } else if let Some(head_commit) = attempt.head_commit.clone() {
+            head_commit
+        } else {
+            self._git_service.git_current_head(worktree_path).await?
+        };
+
+        let updated = self.store.update_attempt_head_commit(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            Some(completion_commit.clone()),
+        )?;
+        self.store.update_coding_unit_completion_commit(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &active.id,
+            Some(completion_commit),
+        )?;
+        Ok(updated)
     }
 
     fn mark_completed_group_work_items_if_present(

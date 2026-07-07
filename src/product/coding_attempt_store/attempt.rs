@@ -21,6 +21,7 @@ impl super::CodingAttemptStore {
         validate_relative_id(&input.project_id)?;
         validate_relative_id(&input.issue_id)?;
         validate_relative_id(&input.work_item_id)?;
+        super::validate_max_auto_rework(input.max_auto_rework)?;
 
         if let Some(active) =
             self.get_active_attempt(&input.project_id, &input.issue_id, &input.work_item_id)?
@@ -500,6 +501,22 @@ impl super::CodingAttemptStore {
         let path = self.attempt_path(project_id, issue_id, attempt_id);
         let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
         attempt.rework_count += 1;
+        attempt.updated_at = Utc::now().to_rfc3339();
+        write_json(&path, &attempt)?;
+        Ok(attempt)
+    }
+
+    pub fn update_attempt_max_auto_rework(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        max_auto_rework: u32,
+    ) -> Result<CodingExecutionAttempt, ProductStoreError> {
+        super::validate_max_auto_rework(max_auto_rework)?;
+        let path = self.attempt_path(project_id, issue_id, attempt_id);
+        let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
+        attempt.max_auto_rework = max_auto_rework;
         attempt.updated_at = Utc::now().to_rfc3339();
         write_json(&path, &attempt)?;
         Ok(attempt)

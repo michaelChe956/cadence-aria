@@ -152,6 +152,30 @@ describe("RoleRunHistoryPanel", () => {
     expect(panel).toHaveTextContent("耗时 2分03秒");
   });
 
+  it("labels internal reviewer runs as GroupFinalReview", () => {
+    render(
+      <RoleRunHistoryPanel
+        roleRuns={[
+          roleRun({
+            role: "internal_reviewer",
+            stage: "internal_pr_review",
+            run_no: 1,
+            status: "completed",
+            trigger: "initial",
+            node_id: "coding_node_group_final_review",
+          }),
+        ]}
+        timelineNodes={[node("coding_node_group_final_review", "GroupFinalReview")]}
+        selectedNodeId={null}
+        onSelectNode={vi.fn()}
+      />,
+    );
+
+    const panel = screen.getByTestId("coding-role-run-history");
+    expect(panel).toHaveTextContent("GroupFinalReview #1");
+    expect(panel).not.toHaveTextContent("Internal Reviewer");
+  });
+
   it("renders only the latest three recent events", () => {
     render(
       <RoleRunHistoryPanel

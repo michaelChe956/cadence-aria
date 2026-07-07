@@ -392,7 +392,7 @@ describe("CodingWorkspacePage reports and history", () => {
     expect(screen.getByText("error").className).toContain("text-red");
   });
 
-  it("renders internal PR review impact scope and PR text suggestions", async () => {
+  it("renders GroupFinalReview impact scope and PR text suggestions", async () => {
     mockCodingWs();
     useCodingWorkspaceStore.setState({
       attemptId: "coding_attempt_0001",
@@ -419,6 +419,8 @@ describe("CodingWorkspacePage reports and history", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "运行结果" }));
     const tabs = screen.getByTestId("coding-artifact-tabs");
+    expect(tabs).toHaveTextContent("GroupFinalReview");
+    expect(tabs).not.toHaveTextContent("Internal PR Review");
     expect(tabs).toHaveTextContent("src/solver.py");
     expect(tabs).toHaveTextContent("tests/test_solver.py");
     expect(tabs).toHaveTextContent("实现 climb_stairs 动态规划函数");
