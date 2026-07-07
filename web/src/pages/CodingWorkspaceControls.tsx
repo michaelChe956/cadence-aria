@@ -1,4 +1,4 @@
-import { Check, Play, RotateCcw, Send, X } from "lucide-react";
+import { Check, Play, Send, X } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import type {
   CodingExecutionStage,
@@ -120,7 +120,7 @@ export function CodingComposer({
     return (
       <div className="grid gap-2 border-t border-[var(--aria-line)] bg-white px-3 py-2">
         <div className="text-xs font-semibold text-[var(--aria-ink-muted)]">
-          请使用上方门禁操作提交人工返修意见
+          请使用上方门禁操作提交人工修复意见
         </div>
         <div className="flex min-w-0 items-center justify-between gap-2">
           <div className="truncate text-xs text-[var(--aria-ink-muted)]">{statusText}</div>
@@ -251,31 +251,6 @@ export function ActionButtons({
     );
   }
 
-  if (stage === "rework" && status === "waiting_for_human") {
-    return (
-      <div className="flex items-center gap-2">
-        <button
-          type="button"
-          onClick={() => api.continueRework(null)}
-          className={buttonClass}
-          aria-label={compact ? "底部继续返修" : undefined}
-        >
-          <RotateCcw className="h-3.5 w-3.5" />
-          继续返修
-        </button>
-        <button
-          type="button"
-          onClick={api.abortAttempt}
-          className={buttonClass}
-          aria-label={compact ? "底部中止" : undefined}
-        >
-          <X className="h-3.5 w-3.5" />
-          中止
-        </button>
-      </div>
-    );
-  }
-
   if (status && ACTIVE_ATTEMPT_STATUSES.has(status)) {
     return (
       <button
@@ -321,19 +296,19 @@ export function GatePanel({
   const submitting = activeGate.submitting === true;
   const gateErrorCode = activeGate.errorCode ?? null;
   const needsReason = activeGate.available_actions.some(actionRequiresContext);
-  const needsReworkContext = activeGate.available_actions.some(
-    (action) => action.action_type === "continue_rework",
+  const needsCoderFeedbackContext = activeGate.available_actions.some(
+    (action) => action.action_type === "send_to_coder",
   );
   const trimmedReason = reason.trim();
   const reasonTooLong = reason.length > 2000;
   const displayedError = reasonTooLong ? "原因不能超过 2000 字" : localError;
   const displayTitle = blockedGateDisplayTitle(activeGate);
   const hasQualityBypassAction = activeGate.available_actions.some(actionIsQualityBypass);
-  const reasonLabel = needsReworkContext ? "人工返修意见" : "门禁跳过原因";
-  const reasonPlaceholder = needsReworkContext
-    ? "补充本轮人工返修意见；该意见会优先于 reviewer findings"
+  const reasonLabel = needsCoderFeedbackContext ? "人工修复意见" : "门禁跳过原因";
+  const reasonPlaceholder = needsCoderFeedbackContext
+    ? "补充本轮人工修复意见；该意见会优先于 Code Reviewer findings"
     : "说明跳过该门禁的原因和后续风险处理";
-  const missingReasonMessage = needsReworkContext ? "需要填写人工返修意见" : "需要填写原因";
+  const missingReasonMessage = needsCoderFeedbackContext ? "需要填写人工修复意见" : "需要填写原因";
 
   function handleAction(action: CodingGateRequired["available_actions"][number]) {
     if (action.action_type === "confirm_stage" && activeGate.stage) {
@@ -422,7 +397,7 @@ function actionRequiresContext(action: CodingGateRequired["available_actions"][n
   return (
     action.action_type === "manual_continue" ||
     action.action_type === "accept_risk" ||
-    action.action_type === "continue_rework"
+    action.action_type === "send_to_coder"
   );
 }
 
@@ -473,7 +448,7 @@ function providerRoleForStage(stage: CodingExecutionStage): CodingProviderRole |
       return "code_reviewer";
     case "internal_pr_review":
       return "internal_reviewer";
-    // testing 和 rework 阶段不再有独立的角色 UI
+    // testing 和等待 Coder 修复阶段不再有独立的角色 UI
     default:
       return null;
   }

@@ -2,7 +2,7 @@ import { expect, type Page } from "@playwright/test";
 
 export async function seedCodingRoleRunFixture(
   page: Page,
-  blockedStage: "rework" | "internal_pr_review" = "rework",
+  blockedStage: "code_review" | "internal_pr_review" = "code_review",
 ): Promise<{ attemptId: string; projectId: string; issueId: string }> {
   const response = await page.request.post("/api/test/coding-attempts/role-run-fixture", {
     data: { blocked_stage: blockedStage },

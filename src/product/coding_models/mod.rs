@@ -1,4 +1,3 @@
-pub mod analyst;
 pub mod context;
 pub mod execution;
 pub mod gate;
@@ -13,7 +12,6 @@ pub mod timeline;
 #[cfg(test)]
 pub mod tests;
 
-pub use analyst::*;
 pub use context::*;
 pub use execution::*;
 pub use gate::*;

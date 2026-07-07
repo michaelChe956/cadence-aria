@@ -13,7 +13,6 @@ pub enum CodingExecutionStage {
     Coding,
     Testing,
     CodeReview,
-    Rework,
     ReviewRequest,
     InternalPrReview,
     FinalConfirm,
@@ -27,10 +26,9 @@ impl CodingExecutionStage {
             Self::Coding => 2,
             Self::Testing => 3,
             Self::CodeReview => 4,
-            Self::Rework => 5,
-            Self::ReviewRequest => 6,
-            Self::InternalPrReview => 7,
-            Self::FinalConfirm => 8,
+            Self::ReviewRequest => 5,
+            Self::InternalPrReview => 6,
+            Self::FinalConfirm => 7,
         }
     }
 }
@@ -61,7 +59,6 @@ impl CodingAttemptStatus {
 pub enum CodingProviderRole {
     Coder,
     Tester,
-    Analyst,
     CodeReviewer,
     InternalReviewer,
 }

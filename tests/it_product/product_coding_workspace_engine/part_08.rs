@@ -397,7 +397,6 @@ async fn execute_group_final_review_prompt_includes_request_commit_diff_and_func
                 coder: ProviderName::Fake,
                 tester_plan: ProviderName::Fake,
                 tester_execute: ProviderName::Fake,
-                analyst: ProviderName::Fake,
                 code_reviewer: ProviderName::Fake,
                 internal_reviewer: ProviderName::Codex,
                 review_rounds: 1,

@@ -34,11 +34,6 @@ const ROLE_STYLES: Record<
     panel: "border-purple-200 bg-purple-50",
     title: "text-purple-600",
   },
-  analyst: {
-    wrapper: "justify-start",
-    panel: "border-amber-200 bg-amber-50",
-    title: "text-amber-600",
-  },
   reviewer: {
     wrapper: "justify-start",
     panel: "border-green-200 bg-green-50",

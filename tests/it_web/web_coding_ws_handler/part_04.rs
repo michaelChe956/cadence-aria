@@ -19,7 +19,6 @@ async fn single_work_item_review_request_completes_without_internal_rework() {
     let mut confirmed_gates = HashSet::new();
     let mut completed_after_review_request = false;
     let mut saw_internal_review = false;
-    let mut saw_rework_node = false;
     let mut observed = Vec::new();
     for _ in 0..140 {
         match recv_json(&mut ws).await {
@@ -39,11 +38,6 @@ async fn single_work_item_review_request_completes_without_internal_rework() {
                 }
             }
             CodingWsOutMessage::InternalPrReviewComplete { .. } => saw_internal_review = true,
-            CodingWsOutMessage::CodingTimelineNodeCreated { node }
-                if node.stage == CodingExecutionStage::Rework =>
-            {
-                saw_rework_node = true;
-            }
             CodingWsOutMessage::CodingSessionState { status, stage, .. }
                 if status == CodingAttemptStatus::Completed
                     && stage == CodingExecutionStage::ReviewRequest =>
@@ -66,10 +60,6 @@ async fn single_work_item_review_request_completes_without_internal_rework() {
     assert!(
         !saw_internal_review,
         "single WorkItem must not run InternalPrReview"
-    );
-    assert!(
-        !saw_rework_node,
-        "single WorkItem must not enter analyst rework"
     );
     let requests = store
         .list_review_requests("project_0001", "issue_0001", "coding_attempt_0001")
@@ -160,7 +150,7 @@ async fn code_review_findings_are_injected_into_next_coding_round() {
     );
     let prompts = provider.coding_prompts();
     assert_eq!(prompts.len(), 2);
-    assert!(prompts[1].contains("本轮返修要求"));
+    assert!(prompts[1].contains("本轮修复要求"));
     assert!(prompts[1].contains("移除 __pycache__ 和 .pyc 文件"));
     let attempt = store
         .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")

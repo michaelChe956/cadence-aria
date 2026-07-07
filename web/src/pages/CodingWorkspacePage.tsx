@@ -127,7 +127,7 @@ export function CodingWorkspacePage({
         <div className="min-w-0">
           <div className="flex min-w-0 flex-wrap items-center gap-2">
             <span className="text-xs font-semibold uppercase text-[var(--aria-ink-muted)]">
-              {store.stage ?? "prepare_context"}
+              {displayCodingStage(store.stage ?? "prepare_context")}
             </span>
             <span className="text-xs text-[var(--aria-ink-muted)]">
               {store.baseBranch ?? "HEAD"} {"->"} {store.branchName ?? "未创建分支"}
@@ -156,7 +156,6 @@ export function CodingWorkspacePage({
           nodes={store.timelineNodes}
           activeNodeId={store.activeNodeId}
           selectedNodeId={store.selectedNodeId}
-          latestAnalystDecision={store.latestAnalystDecision}
           onSelectNode={handleSelectTimelineNode}
         />
         <section className="grid min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden bg-[var(--aria-panel)]">
@@ -318,11 +317,11 @@ export function CodingWorkspacePage({
         data-testid="coding-status-bar"
         className="flex h-8 shrink-0 items-center justify-between gap-3 border-t border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 text-xs text-[var(--aria-ink-muted)]"
       >
-        <span>{store.stage ?? "prepare_context"}</span>
+        <span>{displayCodingStage(store.stage ?? "prepare_context")}</span>
         <span className={pageError ? "text-[var(--aria-danger)]" : undefined}>
           {pageError ?? store.connectionStatus}
         </span>
-        <span>rework {store.reworkCount}/{store.maxAutoRework}</span>
+        <span>Coder 修复次数 {store.reworkCount}/{store.maxAutoRework}</span>
       </div>
     </div>
   );
@@ -338,4 +337,18 @@ export function CodingWorkspacePage({
     if (!requestId) return;
     api.respondChoice(requestId, response.selected_option_ids, response.free_text);
   }
+}
+
+function displayCodingStage(stage: string) {
+  const labels: Record<string, string> = {
+    prepare_context: "准备上下文",
+    worktree_prepare: "准备 Worktree",
+    coding: "Coder",
+    testing: "Tester",
+    code_review: "Code Reviewer",
+    review_request: "准备 PR",
+    internal_pr_review: "GroupFinalReview",
+    final_confirm: "最终确认",
+  };
+  return labels[stage] ?? stage;
 }

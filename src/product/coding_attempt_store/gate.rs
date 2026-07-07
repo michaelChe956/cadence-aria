@@ -8,8 +8,9 @@ use crate::product::coding_attempt_store::{
 };
 use crate::product::coding_models::{
     CodingChoiceGate, CodingChoiceGateResponse, CodingChoiceGateStatus, CodingExecutionStage,
-    CodingGateKind, CodingGateRequired, CodingProviderRole, CodingRoleProviderConfigSnapshot,
-    CodingStageGateState, CodingStageGateStatus, QualityGateBypassAudit,
+    CodingGateAction, CodingGateActionType, CodingGateKind, CodingGateRequired, CodingProviderRole,
+    CodingRoleProviderConfigSnapshot, CodingStageGateState, CodingStageGateStatus,
+    QualityGateBypassAudit,
 };
 use crate::product::id::next_sequential_id;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
@@ -96,7 +97,10 @@ impl super::CodingAttemptStore {
         let mut records: Vec<BlockedGateRecord> =
             super::list_json_records(&self.blocked_gates_root(project_id, issue_id, attempt_id))?;
         records.retain(|record| record.status == BlockedGateStatus::Open);
-        Ok(records.into_iter().map(|record| record.gate).collect())
+        Ok(records
+            .into_iter()
+            .map(|record| normalize_blocked_gate(record.gate))
+            .collect())
     }
 
     pub fn resolve_blocked_gate(
@@ -119,7 +123,7 @@ impl super::CodingAttemptStore {
         let mut record: BlockedGateRecord = read_json(&path)?;
         record.status = BlockedGateStatus::Resolved;
         record.updated_at = Utc::now().to_rfc3339();
-        let gate = record.gate.clone();
+        let gate = normalize_blocked_gate(record.gate.clone());
         write_json(
             &gates_root.join("resolved").join(format!("{gate_id}.json")),
             &record,
@@ -403,4 +407,32 @@ fn matching_open_choice_gate_path(
         }
     }
     Ok(None)
+}
+
+fn normalize_blocked_gate(mut gate: CodingGateRequired) -> CodingGateRequired {
+    if gate.reason_code.as_deref() != Some("code_review_blocked")
+        || gate.stage != Some(CodingExecutionStage::CodeReview)
+        || gate.role != Some(CodingProviderRole::CodeReviewer)
+        || gate
+            .available_actions
+            .iter()
+            .any(|action| action.action_type == CodingGateActionType::SendToCoder)
+    {
+        return gate;
+    }
+
+    let insert_index = gate
+        .available_actions
+        .iter()
+        .position(|action| action.action_type == CodingGateActionType::Abort)
+        .unwrap_or(gate.available_actions.len());
+    gate.available_actions.insert(
+        insert_index,
+        CodingGateAction {
+            action_id: "send_to_coder".to_string(),
+            label: "提交给 Coder 修复".to_string(),
+            action_type: CodingGateActionType::SendToCoder,
+        },
+    );
+    gate
 }

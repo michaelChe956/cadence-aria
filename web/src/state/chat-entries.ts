@@ -9,7 +9,6 @@ export type ChatEntryType =
   | "choice_response"
   | "artifact_update"
   | "review_verdict"
-  | "analyst_verdict"
   | "gate_prompt"
   | "human_decision"
   | "stage_change"
@@ -21,7 +20,6 @@ export type ChatEntryRole =
   | "reviewer"
   | "coder"
   | "tester"
-  | "analyst"
   | "code_reviewer"
   | "internal_reviewer"
   | "system";

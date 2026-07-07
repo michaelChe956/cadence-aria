@@ -14,7 +14,6 @@ fn role_provider_config_deserializes_plan_execute_tester_fields_with_default_per
       "coder": "codex",
       "tester_plan": "claude_code",
       "tester_execute": "codex",
-      "analyst": "claude_code",
       "code_reviewer": "codex",
       "internal_reviewer": "claude_code",
       "review_rounds": 1
@@ -41,10 +40,6 @@ fn role_provider_config_deserializes_plan_execute_tester_fields_with_default_per
         CodingProviderPermissionMode::Auto
     );
     assert_eq!(
-        snapshot.permission_mode_for_role(&CodingProviderRole::Analyst),
-        CodingProviderPermissionMode::Auto
-    );
-    assert_eq!(
         snapshot.permission_mode_for_role(&CodingProviderRole::CodeReviewer),
         CodingProviderPermissionMode::Supervised
     );
@@ -59,7 +54,6 @@ fn role_provider_config_rejects_old_single_tester_field() {
     let old_json = r#"{
       "coder": "codex",
       "tester": "claude_code",
-      "analyst": "claude_code",
       "code_reviewer": "codex",
       "internal_reviewer": "claude_code",
       "review_rounds": 1

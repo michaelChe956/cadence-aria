@@ -152,15 +152,15 @@ describe("useCodingWorkspaceWs actions and reconnect", () => {
           gate_id: "gate_0003",
           available_actions: [
             {
-              action_id: "continue_rework",
-              label: "继续返修",
-              action_type: "continue_rework",
+              action_id: "send_to_coder",
+              label: "提交给 Coder 修复",
+              action_type: "send_to_coder",
             },
           ],
         }),
       );
       harness.ws.sent.length = 0;
-      harness.api.respondGate("gate_0003", "continue_rework", "   ");
+      harness.api.respondGate("gate_0003", "send_to_coder", "   ");
     });
 
     expect(harness.ws.sent).toEqual([]);
@@ -177,7 +177,7 @@ describe("useCodingWorkspaceWs actions and reconnect", () => {
     act(() => {
       harness.api.respondGate(
         "gate_0003",
-        "continue_rework",
+        "send_to_coder",
         " 人工意见：优先修最新 finding ",
       );
     });
@@ -186,25 +186,8 @@ describe("useCodingWorkspaceWs actions and reconnect", () => {
       JSON.stringify({
         type: "gate_response",
         gate_id: "gate_0003",
-        action_id: "continue_rework",
+        action_id: "send_to_coder",
         extra_context: "人工意见：优先修最新 finding",
-      }),
-    ]);
-  });
-
-  it("sends continue rework message with trimmed context", () => {
-    const harness = renderCodingHook();
-
-    act(() => {
-      harness.ws.open();
-      harness.ws.sent.length = 0;
-      harness.api.continueRework("  继续按 analyst findings 返修  ");
-    });
-
-    expect(harness.ws.sent).toEqual([
-      JSON.stringify({
-        type: "continue_rework",
-        extra_context: "继续按 analyst findings 返修",
       }),
     ]);
   });

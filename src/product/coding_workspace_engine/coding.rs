@@ -205,27 +205,29 @@ impl CodingWorkspaceEngine {
             Some("代码编写完成".to_string()),
         )
         .await?;
-        self.emit_coder_output_chat_entry(
-            &attempt,
-            &node.id,
-            &coder_provider,
-            &completed_role_run,
-            &full_output,
-            &raw_provider_output_ref,
-        )
+        self.emit_coder_output_chat_entry(CoderOutputChatEntryInput {
+            attempt: &attempt,
+            node_id: &node.id,
+            provider_name: &coder_provider,
+            role_run: &completed_role_run,
+            full_output: &full_output,
+            raw_provider_output_ref: &raw_provider_output_ref,
+            source: "coding",
+        })
         .await;
         Ok(attempt)
     }
 
-    async fn emit_coder_output_chat_entry(
-        &self,
-        attempt: &CodingExecutionAttempt,
-        node_id: &str,
-        provider_name: &ProviderName,
-        role_run: &CodingRoleRun,
-        full_output: &str,
-        raw_provider_output_ref: &str,
-    ) {
+    pub(crate) async fn emit_coder_output_chat_entry(&self, input: CoderOutputChatEntryInput<'_>) {
+        let CoderOutputChatEntryInput {
+            attempt,
+            node_id,
+            provider_name,
+            role_run,
+            full_output,
+            raw_provider_output_ref,
+            source,
+        } = input;
         let completed_at = role_run
             .completed_at
             .clone()
@@ -238,7 +240,7 @@ impl CodingWorkspaceEngine {
             entry_type: CodingEntryType::AssistantMessage,
             content: Some(full_output.to_string()),
             metadata: Some(serde_json::json!({
-                "source": "coding",
+                "source": source,
                 "provider": provider_name,
                 "role_run_id": role_run.id,
                 "run_no": role_run.run_no,

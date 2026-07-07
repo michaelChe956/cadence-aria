@@ -9,30 +9,6 @@ uv run python -m unittest discover -s tests -v
 ```
 "#;
 
-struct RetryAnalystCaptureProvider {
-    captured_prompts: Arc<Mutex<Vec<String>>>,
-}
-
-#[async_trait::async_trait]
-impl StreamingProviderAdapter for RetryAnalystCaptureProvider {
-    async fn run_streaming(
-        &self,
-        input: &AdapterInput,
-        _cancel: CancellationToken,
-    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
-        self.captured_prompts
-            .lock()
-            .expect("lock")
-            .push(input.prompt.clone());
-        let (tx, rx) = mpsc::channel(8);
-        tx.try_send(StreamChunk::Done {
-            full_output: r#"{"verdict":"proceed","next_stage":"code_review","reason":"retry analyst accepted from test","evidence_refs":["artifacts/rework/analyst_evidence_0001.txt"],"raw_provider_output_refs":[]}"#.to_string(),
-        })
-        .expect("send done");
-        Ok(rx)
-    }
-}
-
 struct RetryInternalReviewCaptureProvider {
     captured_prompts: Arc<Mutex<Vec<String>>>,
 }
@@ -51,8 +27,6 @@ impl StreamingProviderAdapter for RetryInternalReviewCaptureProvider {
         let (tx, rx) = mpsc::channel(8);
         let full_output = if input.output_schema == "coding_workspace_internal_pr_review_json" {
             r#"{"verdict":"approve","summary":"internal reviewer retry accepted","findings":[],"impact_scope":["src"],"pr_description":"PR body","commit_message_suggestion":"feat: work"}"#
-        } else if input.output_schema == "coding_workspace_analyst_verdict_json" {
-            r#"{"verdict":"proceed","next_stage":"final_confirm","reason":"internal reviewer retry accepted"}"#
         } else {
             r#"{"verdict":"approve","summary":"review ok","findings":[]}"#
         };
@@ -64,7 +38,7 @@ impl StreamingProviderAdapter for RetryInternalReviewCaptureProvider {
     }
 }
 
-fn app_with_blocked_analyst_attempt(
+fn app_with_coding_attempt(
     root_path: &Path,
     provider: Arc<dyn StreamingProviderAdapter>,
 ) -> (axum::Router, CodingAttemptStore) {
@@ -130,190 +104,11 @@ fn app_with_blocked_analyst_attempt(
 }
 
 #[tokio::test]
-async fn coding_ws_retry_analyst_gate_response_is_disabled() {
-    let _guard = WS_TEST_LOCK.lock().await;
-    let root = tempdir().expect("root");
-    let captured = Arc::new(Mutex::new(Vec::new()));
-    let (app, store) = app_with_blocked_analyst_attempt(
-        root.path(),
-        Arc::new(RetryAnalystCaptureProvider {
-            captured_prompts: captured.clone(),
-        }),
-    );
-
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            "coding_attempt_0001",
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            "coding_attempt_0001",
-            CodingAttemptStatus::Blocked,
-        )
-        .expect("block attempt");
-    store
-        .update_attempt_stage(
-            "project_0001",
-            "issue_0001",
-            "coding_attempt_0001",
-            CodingExecutionStage::Rework,
-        )
-        .expect("set rework stage");
-
-    let first_run = store
-        .create_role_run(
-            &store
-                .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
-                .expect("get attempt"),
-            CodingExecutionStage::Rework,
-            CodingProviderRole::Analyst,
-            CodingRoleRunTrigger::Initial,
-            Some("coding_node_0001".to_string()),
-        )
-        .expect("create first run");
-    store
-        .update_role_run_status(
-            "project_0001",
-            "issue_0001",
-            "coding_attempt_0001",
-            &first_run.id,
-            CodingRoleRunStatus::Blocked,
-            Some("analyst_human_gate".to_string()),
-        )
-        .expect("block first run");
-
-    fs::create_dir_all(
-        root.path()
-            .join(".aria")
-            .join("projects")
-            .join("project_0001")
-            .join("issues")
-            .join("issue_0001")
-            .join("coding-attempts")
-            .join("coding_attempt_0001")
-            .join("artifacts")
-            .join("rework"),
-    )
-    .expect("create evidence dir");
-    fs::write(
-        root.path()
-            .join(".aria")
-            .join("projects")
-            .join("project_0001")
-            .join("issues")
-            .join("issue_0001")
-            .join("coding-attempts")
-            .join("coding_attempt_0001")
-            .join("artifacts")
-            .join("rework")
-            .join("analyst_evidence_0001.txt"),
-        "persisted testing evidence",
-    )
-    .expect("write evidence");
-    store
-        .update_role_run_refs(
-            "project_0001",
-            "issue_0001",
-            "coding_attempt_0001",
-            &first_run.id,
-            Vec::new(),
-            vec!["artifacts/rework/analyst_evidence_0001.txt".to_string()],
-        )
-        .expect("add evidence ref");
-    store
-        .append_role_run_event(
-            &store
-                .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
-                .expect("get attempt"),
-            &first_run,
-            CodingRoleRunEventType::ExecutionEvent,
-            serde_json::json!({
-                "title": "Analyst task update",
-                "status": "running",
-                "detail": "No tasks found"
-            }),
-        )
-        .expect("append analyst event");
-
-    store
-        .create_blocked_gate(CreateBlockedGateInput {
-            attempt_id: "coding_attempt_0001".to_string(),
-            stage: CodingExecutionStage::Rework,
-            node_id: Some("coding_node_0001".to_string()),
-            role: Some(CodingProviderRole::Analyst),
-            title: "Analyst human gate".to_string(),
-            description: "需要重跑 Analyst".to_string(),
-            reason_code: Some("analyst_human_gate".to_string()),
-            evidence_refs: vec!["artifacts/rework/analyst_evidence_0001.txt".to_string()],
-            raw_provider_output_ref: None,
-            available_actions: vec![CodingGateAction {
-                action_id: "retry_analyst".to_string(),
-                label: "重试 Analyst".to_string(),
-                action_type: CodingGateActionType::RetryAnalyst,
-            }],
-        })
-        .expect("create gate");
-
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr = listener.local_addr().expect("local addr");
-    let server = tokio::spawn(async move {
-        axum::serve(listener, app).await.expect("serve");
-    });
-
-    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
-    let (mut ws, _) = connect_async(url).await.expect("connect ws");
-    let _initial = recv_json(&mut ws).await;
-
-    send_json(
-        &mut ws,
-        &CodingWsInMessage::GateResponse {
-            gate_id: "coding_blocked_gate_0001".to_string(),
-            action_id: "retry_analyst".to_string(),
-            extra_context: None,
-        },
-    )
-    .await;
-
-    match recv_json(&mut ws).await {
-        CodingWsOutMessage::CodingProtocolError { code, message } => {
-            assert_eq!(code, "coding_gate_response_failed");
-            assert!(
-                message.contains("analyst_rework_disabled"),
-                "unexpected error message: {message}"
-            );
-        }
-        other => panic!("expected disabled analyst retry protocol error, got {other:?}"),
-    }
-
-    let runs = store
-        .list_role_runs("project_0001", "issue_0001", "coding_attempt_0001")
-        .expect("role runs");
-    assert_eq!(runs.len(), 1);
-    assert!(captured.lock().expect("lock").is_empty());
-    assert_eq!(
-        store
-            .list_open_blocked_gates("project_0001", "issue_0001", "coding_attempt_0001")
-            .expect("open gates")
-            .len(),
-        1
-    );
-
-    ws.close(None).await.expect("close ws");
-    server.abort();
-}
-
-#[tokio::test]
 async fn coding_ws_retry_internal_review_resumes_internal_reviewer_run() {
     let _guard = WS_TEST_LOCK.lock().await;
     let root = tempdir().expect("root");
     let captured = Arc::new(Mutex::new(Vec::new()));
-    let (app, store) = app_with_blocked_analyst_attempt(
+    let (app, store) = app_with_coding_attempt(
         root.path(),
         Arc::new(RetryInternalReviewCaptureProvider {
             captured_prompts: captured.clone(),

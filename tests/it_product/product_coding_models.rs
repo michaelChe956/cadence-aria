@@ -1,82 +1,17 @@
 use std::path::PathBuf;
 
 use cadence_aria::product::coding_models::{
-    AnalystDecisionNextStage, AnalystDecisionRecord, AnalystDecisionVerdict,
-    AnalystHumanGateRecommendation, AnalystReworkInstructions, AnalystVerdict, CodeReviewReport,
-    CodingAgentRole, CodingAttemptStatus, CodingChatEntry, CodingContextNote, CodingEntryType,
-    CodingExecutionAttempt, CodingExecutionStage, CodingGateAction, CodingGateActionType,
-    CodingGateKind, CodingGateRequired, CodingProviderRole, CodingRolePermissionModes,
-    CodingRoleProviderConfigSnapshot, CodingStageGateState, CodingStageGateStatus,
-    CodingTimelineNode, CodingTimelineNodeStatus, FindingSeverity, InternalPrReview, PushStatus,
-    RemoteKind, ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict, TestCommand,
-    TestCommandStatus, TestingOverallStatus, TestingReport,
+    CodeReviewReport, CodingAgentRole, CodingAttemptStatus, CodingChatEntry, CodingContextNote,
+    CodingEntryType, CodingExecutionAttempt, CodingExecutionStage, CodingGateAction,
+    CodingGateActionType, CodingGateKind, CodingGateRequired, CodingProviderRole,
+    CodingRolePermissionModes, CodingRoleProviderConfigSnapshot, CodingStageGateState,
+    CodingStageGateStatus, CodingTimelineNode, CodingTimelineNodeStatus, FindingSeverity,
+    InternalPrReview, PushStatus, RemoteKind, ReviewFinding, ReviewRequest, ReviewRequestKind,
+    ReviewVerdict, TestCommand, TestCommandStatus, TestingOverallStatus, TestingReport,
 };
 use cadence_aria::product::models::ProviderName;
 use cadence_aria::web::workspace_ws_types::ProviderConfigSnapshot;
 use serde_json::json;
-
-#[test]
-fn analyst_decision_record_uses_stable_wire_values() {
-    let record = AnalystDecisionRecord {
-        id: "analyst_decision_0001".to_string(),
-        attempt_id: "coding_attempt_0001".to_string(),
-        source_stage: CodingExecutionStage::Testing,
-        rework_round: 1,
-        verdict: AnalystDecisionVerdict::NeedsFix,
-        next_stage: AnalystDecisionNextStage::Coding,
-        reason: "required 测试步骤被跳过".to_string(),
-        evidence_refs: vec!["testing_report_0001.json".to_string()],
-        raw_provider_output_refs: vec![
-            "provider-raw/testing/execute_test_plan_0001.txt".to_string(),
-        ],
-        rework_instructions: Some(AnalystReworkInstructions {
-            summary: "补齐 required 测试覆盖".to_string(),
-            required_changes: vec!["补充 B6 浏览器测试".to_string()],
-            verification_expectations: vec!["B6 不再出现在 skipped_required_steps".to_string()],
-        }),
-        human_gate: Some(AnalystHumanGateRecommendation {
-            reason_code: Some("external_browser_required".to_string()),
-            available_actions: vec!["provide_context".to_string(), "manual_continue".to_string()],
-        }),
-        created_at: "2026-06-12T00:00:00Z".to_string(),
-        parse_error: None,
-        role_run_id: None,
-        run_no: None,
-    };
-
-    let value = serde_json::to_value(&record).expect("serialize decision");
-    assert_eq!(
-        value,
-        json!({
-            "id": "analyst_decision_0001",
-            "attempt_id": "coding_attempt_0001",
-            "source_stage": "testing",
-            "rework_round": 1,
-            "verdict": "needs_fix",
-            "next_stage": "coding",
-            "reason": "required 测试步骤被跳过",
-            "evidence_refs": ["testing_report_0001.json"],
-            "raw_provider_output_refs": ["provider-raw/testing/execute_test_plan_0001.txt"],
-            "rework_instructions": {
-                "summary": "补齐 required 测试覆盖",
-                "required_changes": ["补充 B6 浏览器测试"],
-                "verification_expectations": ["B6 不再出现在 skipped_required_steps"]
-            },
-            "human_gate": {
-                "reason_code": "external_browser_required",
-                "available_actions": ["provide_context", "manual_continue"]
-            },
-            "created_at": "2026-06-12T00:00:00Z",
-            "parse_error": null,
-            "role_run_id": null,
-            "run_no": null
-        })
-    );
-
-    let parsed: AnalystDecisionRecord =
-        serde_json::from_value(value).expect("deserialize decision");
-    assert_eq!(parsed, record);
-}
 
 #[test]
 fn coding_provider_roles_use_stable_wire_values_and_display_names() {
@@ -87,10 +22,6 @@ fn coding_provider_roles_use_stable_wire_values_and_display_names() {
     assert_eq!(
         serde_json::to_value(CodingProviderRole::Tester).expect("serialize tester"),
         json!("tester")
-    );
-    assert_eq!(
-        serde_json::to_value(CodingProviderRole::Analyst).expect("serialize analyst"),
-        json!("analyst")
     );
     assert_eq!(
         serde_json::to_value(CodingProviderRole::CodeReviewer).expect("serialize code reviewer"),
@@ -104,7 +35,6 @@ fn coding_provider_roles_use_stable_wire_values_and_display_names() {
 
     assert_eq!(CodingProviderRole::Coder.to_string(), "Coder");
     assert_eq!(CodingProviderRole::Tester.to_string(), "Tester");
-    assert_eq!(CodingProviderRole::Analyst.to_string(), "Analyst");
     assert_eq!(
         CodingProviderRole::CodeReviewer.to_string(),
         "Code Reviewer"
@@ -126,7 +56,6 @@ fn coding_role_provider_config_snapshot_derives_from_legacy_provider_snapshot() 
     assert_eq!(snapshot.coder, ProviderName::Codex);
     assert_eq!(snapshot.tester_plan, ProviderName::Codex);
     assert_eq!(snapshot.tester_execute, ProviderName::Codex);
-    assert_eq!(snapshot.analyst, ProviderName::Codex);
     assert_eq!(snapshot.code_reviewer, ProviderName::Fake);
     assert_eq!(snapshot.internal_reviewer, ProviderName::Fake);
     assert_eq!(snapshot.review_rounds, 2);
@@ -138,14 +67,12 @@ fn coding_role_provider_config_snapshot_derives_from_legacy_provider_snapshot() 
             "coder": "codex",
             "tester_plan": "codex",
             "tester_execute": "codex",
-            "analyst": "codex",
             "code_reviewer": "fake",
             "internal_reviewer": "fake",
             "review_rounds": 2,
             "permission_modes": {
                 "coder": "supervised",
                 "tester": "auto",
-                "analyst": "auto",
                 "code_reviewer": "supervised",
                 "internal_reviewer": "supervised"
             }
@@ -164,23 +91,23 @@ fn coding_role_provider_config_snapshot_falls_back_to_author_when_reviewer_is_mi
     assert_eq!(snapshot.coder, ProviderName::ClaudeCode);
     assert_eq!(snapshot.tester_plan, ProviderName::ClaudeCode);
     assert_eq!(snapshot.tester_execute, ProviderName::ClaudeCode);
-    assert_eq!(snapshot.analyst, ProviderName::ClaudeCode);
     assert_eq!(snapshot.code_reviewer, ProviderName::ClaudeCode);
     assert_eq!(snapshot.internal_reviewer, ProviderName::ClaudeCode);
 }
 
 #[test]
-fn coding_chat_entries_context_notes_and_analyst_verdicts_have_stable_json_shape() {
+fn coding_chat_entries_context_notes_and_stage_summaries_have_stable_json_shape() {
     let entry = CodingChatEntry {
         id: "coding_chat_entry_0001".to_string(),
         attempt_id: "coding_attempt_0001".to_string(),
         node_id: Some("coding_node_0001".to_string()),
         role: CodingAgentRole::System,
-        entry_type: CodingEntryType::AnalystVerdict {
-            verdict: AnalystVerdict::NeedsHumanInput,
+        entry_type: CodingEntryType::StageSummary {
+            stage: CodingExecutionStage::CodeReview,
+            summary: "Code Reviewer 等待人工处理".to_string(),
         },
-        content: Some("需要用户补充仓库路径".to_string()),
-        metadata: Some(json!({"source": "analyst"})),
+        content: Some("Code Reviewer 等待人工处理".to_string()),
+        metadata: Some(json!({"source": "code_review"})),
         created_at: "2026-05-28T00:00:00Z".to_string(),
     };
     let note = CodingContextNote {
@@ -192,8 +119,12 @@ fn coding_chat_entries_context_notes_and_analyst_verdicts_have_stable_json_shape
     };
 
     let entry_value = serde_json::to_value(&entry).expect("serialize chat entry");
-    assert_eq!(entry_value["entry_type"]["type"], "analyst_verdict");
-    assert_eq!(entry_value["entry_type"]["verdict"], "needs_human_input");
+    assert_eq!(entry_value["entry_type"]["type"], "stage_summary");
+    assert_eq!(entry_value["entry_type"]["stage"], "code_review");
+    assert_eq!(
+        entry_value["entry_type"]["summary"],
+        "Code Reviewer 等待人工处理"
+    );
     assert_eq!(entry_value["node_id"], "coding_node_0001");
     assert_eq!(entry_value["role"], "system");
 
@@ -224,7 +155,6 @@ fn coding_stage_gate_state_serializes_open_gate_contract() {
             coder: ProviderName::Codex,
             tester_plan: ProviderName::Fake,
             tester_execute: ProviderName::Fake,
-            analyst: ProviderName::Codex,
             code_reviewer: ProviderName::Fake,
             internal_reviewer: ProviderName::Fake,
             review_rounds: 1,
@@ -452,45 +382,17 @@ fn review_request_timeline_and_gate_actions_use_stable_wire_values() {
 }
 
 #[test]
-fn coding_gate_action_type_round_trips_retry_analyst() {
+fn coding_gate_action_type_round_trips_send_to_coder() {
     let action = CodingGateAction {
-        action_id: "retry_analyst".to_string(),
-        label: "重试 Analyst".to_string(),
-        action_type: CodingGateActionType::RetryAnalyst,
+        action_id: "send_to_coder".to_string(),
+        label: "提交给 Coder 修复".to_string(),
+        action_type: CodingGateActionType::SendToCoder,
     };
 
     let value = serde_json::to_value(&action).expect("serialize action");
-    assert_eq!(value["action_type"], "retry_analyst");
+    assert_eq!(value["action_type"], "send_to_coder");
     let decoded: CodingGateAction = serde_json::from_value(value).expect("decode action");
-    assert_eq!(decoded.action_type, CodingGateActionType::RetryAnalyst);
-}
-
-#[test]
-fn analyst_decision_round_trips_role_run_metadata() {
-    let decision = AnalystDecisionRecord {
-        id: "analyst_decision_0001".to_string(),
-        attempt_id: "coding_attempt_0001".to_string(),
-        source_stage: CodingExecutionStage::Testing,
-        rework_round: 1,
-        verdict: AnalystDecisionVerdict::HumanRequired,
-        next_stage: AnalystDecisionNextStage::HumanGate,
-        reason: "Analyst 输出不是有效 JSON".to_string(),
-        evidence_refs: vec!["testing_report_0001.json".to_string()],
-        raw_provider_output_refs: vec!["provider-raw/rework/analyst_decision_0001.txt".to_string()],
-        rework_instructions: None,
-        human_gate: None,
-        created_at: "2026-06-13T00:00:00Z".to_string(),
-        parse_error: Some("expected JSON".to_string()),
-        role_run_id: Some("coding_role_run_0001".to_string()),
-        run_no: Some(1),
-    };
-
-    let value = serde_json::to_value(&decision).expect("serialize decision");
-    assert_eq!(value["role_run_id"], "coding_role_run_0001");
-    assert_eq!(value["run_no"], 1);
-    let decoded: AnalystDecisionRecord = serde_json::from_value(value).expect("decode decision");
-    assert_eq!(decoded.role_run_id.as_deref(), Some("coding_role_run_0001"));
-    assert_eq!(decoded.run_no, Some(1));
+    assert_eq!(decoded.action_type, CodingGateActionType::SendToCoder);
 }
 
 #[test]

@@ -18,7 +18,6 @@ const STANDALONE_ENTRY_TYPES = new Set<string>([
   "choice_response",
   "artifact_update",
   "review_verdict",
-  "analyst_verdict",
   "gate_prompt",
   "stage_change",
   "human_decision",

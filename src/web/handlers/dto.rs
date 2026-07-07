@@ -698,7 +698,6 @@ pub(crate) fn coding_execution_stage_text(stage: &CodingExecutionStage) -> &'sta
         CodingExecutionStage::Coding => "coding",
         CodingExecutionStage::Testing => "testing",
         CodingExecutionStage::CodeReview => "code_review",
-        CodingExecutionStage::Rework => "rework",
         CodingExecutionStage::ReviewRequest => "review_request",
         CodingExecutionStage::InternalPrReview => "internal_pr_review",
         CodingExecutionStage::FinalConfirm => "final_confirm",

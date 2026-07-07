@@ -550,11 +550,11 @@ async fn review_fixture_provider_consumes_queued_outputs_in_order() {
             "coding_attempt_0001".to_string(),
             ReviewFixture {
                 verdict: "no_issue".to_string(),
-                summary: "analyst pass".to_string(),
+                summary: "review pass".to_string(),
                 comments: String::new(),
                 raw_json: Some(json!({
                     "verdict": "no_issue",
-                    "summary": "analyst pass"
+                    "summary": "review pass"
                 })),
                 raw_text: None,
                 findings: Vec::new(),
@@ -584,12 +584,12 @@ async fn review_fixture_provider_consumes_queued_outputs_in_order() {
         .await;
 
     let provider = TestControlledFakeStreamingProvider::new(controls);
-    let mut analyst_session = provider
+    let mut first_review_session = provider
         .start(
             StreamingProviderInput {
                 provider_type: ProviderType::Codex,
                 role: AdapterRole::Reviewer,
-                prompt: "analyst".to_string(),
+                prompt: "review".to_string(),
                 working_dir: std::env::current_dir().expect("current dir"),
                 workspace_session_id: Some("coding_attempt_0001".to_string()),
                 resume_provider_session_id: None,
@@ -600,9 +600,9 @@ async fn review_fixture_provider_consumes_queued_outputs_in_order() {
             CancellationToken::new(),
         )
         .await
-        .expect("analyst fixture provider session");
+        .expect("first review fixture provider session");
     assert!(
-        completed_output(&mut analyst_session)
+        completed_output(&mut first_review_session)
             .await
             .contains("\"verdict\":\"no_issue\"")
     );

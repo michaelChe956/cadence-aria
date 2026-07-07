@@ -38,11 +38,6 @@ pub(crate) fn build_coding_session_state(
         .list_internal_pr_reviews(&attempt.project_id, &attempt.issue_id, &attempt.id)?
         .into_iter()
         .last();
-    let latest_analyst_decision = coding_store.latest_analyst_decision(
-        &attempt.project_id,
-        &attempt.issue_id,
-        &attempt.id,
-    )?;
     let mut pending_gates: Vec<CodingGateRequiredModel> = coding_store
         .list_open_stage_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)?
         .into_iter()
@@ -107,7 +102,6 @@ pub(crate) fn build_coding_session_state(
         internal_pr_review: Box::new(internal_pr_review),
         pending_gates: Box::new(pending_gates),
         pending_choices: Box::new(pending_choices),
-        latest_analyst_decision: Box::new(latest_analyst_decision),
         role_runs: Box::new(role_runs),
         work_item_markdown: Box::new(execution_context.work_item_markdown),
         verification_commands: Box::new(execution_context.verification_commands),

@@ -1,261 +1,7 @@
 use super::*;
 
 impl CodingWorkspaceEngine {
-    pub async fn execute_rework(
-        &self,
-        attempt: &CodingExecutionAttempt,
-        evidence: &str,
-        provider: &dyn StreamingProviderAdapter,
-    ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
-        let (_command_tx, mut command_rx) = mpsc::channel(1);
-        self.execute_rework_with_commands(attempt, evidence, provider, &mut command_rx)
-            .await
-    }
-
-    pub async fn execute_rework_with_commands(
-        &self,
-        attempt: &CodingExecutionAttempt,
-        evidence: &str,
-        provider: &dyn StreamingProviderAdapter,
-        command_rx: &mut mpsc::Receiver<CodingRunnerCommand>,
-    ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
-        let Some(worktree_path) = attempt.worktree_path.as_ref() else {
-            return Err(CodingWorkspaceEngineError::MissingWorktree(
-                attempt.id.clone(),
-            ));
-        };
-        let current =
-            self.store
-                .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
-        let source_stage = current.stage.clone();
-        let rework_round = current.rework_count + 1;
-        if current.status != CodingAttemptStatus::Running {
-            self.store.update_attempt_status(
-                &current.project_id,
-                &current.issue_id,
-                &current.id,
-                CodingAttemptStatus::Running,
-            )?;
-        }
-        let attempt = self.store.update_attempt_stage(
-            &current.project_id,
-            &current.issue_id,
-            &current.id,
-            CodingExecutionStage::Rework,
-        )?;
-        let node = self.create_rework_timeline_node(&attempt, rework_round)?;
-        let _ = self
-            .event_tx
-            .send(CodingWsOutMessage::CodingTimelineNodeCreated { node: node.clone() })
-            .await;
-
-        let role_run = match self.store.latest_role_run(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingExecutionStage::Rework,
-            CodingProviderRole::Analyst,
-        )? {
-            Some(run) if run.status == CodingRoleRunStatus::Running && run.node_id.is_none() => {
-                self.store.attach_role_run_node(
-                    &attempt.project_id,
-                    &attempt.issue_id,
-                    &attempt.id,
-                    &run.id,
-                    node.id.clone(),
-                )?
-            }
-            _ => self.store.create_role_run(
-                &attempt,
-                CodingExecutionStage::Rework,
-                CodingProviderRole::Analyst,
-                CodingRoleRunTrigger::Initial,
-                Some(node.id.clone()),
-            )?,
-        };
-        let evidence_ref = self.store.save_analyst_evidence(&attempt.id, evidence)?;
-        self.store.update_role_run_refs(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            &role_run.id,
-            Vec::new(),
-            vec![evidence_ref.clone()],
-        )?;
-
-        let notes = self.store.list_unconsumed_context_notes(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-        )?;
-        let note_ids = notes.iter().map(|note| note.id.clone()).collect::<Vec<_>>();
-        let context_note_input =
-            format_rework_context_notes(&notes, REWORK_CONTEXT_NOTE_CHAR_LIMIT);
-        let evaluation_context_json =
-            self.evaluation_context_json_for_role(&attempt, EvaluationContextRole::Analyst)?;
-        let analyst_provider = self
-            .store
-            .get_role_provider_config_snapshot(&attempt.project_id, &attempt.issue_id, &attempt.id)?
-            .analyst;
-        let retry_diagnostic = self.retry_diagnostic_for_previous_run(&attempt, &role_run)?;
-        let prompt = build_rework_prompt(
-            &attempt,
-            evidence,
-            &source_stage,
-            rework_round,
-            &context_note_input,
-            &evaluation_context_json,
-            retry_diagnostic.as_deref(),
-        );
-        let _ = self
-            .event_tx
-            .send(CodingWsOutMessage::CodingExecutionEvent {
-                event: provider_prompt_event(
-                    &node.id,
-                    &analyst_provider,
-                    prompt.clone(),
-                    CodingPromptMode::FullConversation.event_detail(),
-                ),
-            })
-            .await;
-
-        let input = AdapterInput {
-            provider_type: provider_type_for_name(&analyst_provider),
-            role: AdapterRole::Reviewer,
-            worktree_path: Some(worktree_path.to_string_lossy().to_string()),
-            prompt,
-            context_files: Vec::new(),
-            output_schema: "coding_workspace_analyst_verdict_json".to_string(),
-            timeout: DEFAULT_PROVIDER_TIMEOUT_SECS,
-            max_retries: 0,
-        };
-        let resume_provider_session_id = self.provider_resume_session_id_for_attempt(
-            &attempt,
-            &CodingProviderRole::Analyst,
-            &analyst_provider,
-        );
-        let mut provider_input = streaming_input_from_adapter(&input, worktree_path.clone());
-        provider_input.workspace_session_id = Some(attempt.id.clone());
-        provider_input.resume_provider_session_id = resume_provider_session_id;
-        provider_input.permission_mode =
-            role_permission_mode_for_attempt(&self.store, &attempt, CodingProviderRole::Analyst)?;
-        let full_output = self
-            .run_provider_stream_to_completion(CodingProviderStreamRun {
-                attempt: &attempt,
-                node_id: &node.id,
-                role_run: Some(&role_run),
-                provider,
-                legacy_input: &input,
-                input: provider_input,
-                provider_name: &analyst_provider,
-                provider_role: CodingProviderRole::Analyst,
-                command_rx,
-                allow_legacy_stream_fallback: true,
-                timeout: None,
-                timeout_reason_code: None,
-            })
-            .await?;
-        let analyst_raw_ref = self.store.save_provider_raw_output(
-            &attempt.id,
-            CodingExecutionStage::Rework,
-            "analyst_decision",
-            &full_output,
-        )?;
-        self.store.update_role_run_refs(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            &role_run.id,
-            vec![analyst_raw_ref.clone()],
-            Vec::new(),
-        )?;
-        if !note_ids.is_empty() {
-            self.store.mark_context_notes_consumed(
-                &attempt.project_id,
-                &attempt.issue_id,
-                &attempt.id,
-                &note_ids,
-                rework_round,
-            )?;
-        }
-        let mut decision = parse_analyst_verdict(&full_output, &source_stage);
-        if decision.parse_error.is_some()
-            && !decision
-                .raw_provider_output_refs
-                .iter()
-                .any(|reference| reference == &analyst_raw_ref)
-        {
-            decision.raw_provider_output_refs.push(analyst_raw_ref);
-        }
-        let existing_decisions = self.store.list_analyst_decisions(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-        )?;
-        let decision_record = AnalystDecisionRecord {
-            id: next_sequential_id("analyst_decision", existing_decisions.len()),
-            attempt_id: attempt.id.clone(),
-            source_stage: source_stage.clone(),
-            rework_round,
-            verdict: decision.structured_verdict.clone(),
-            next_stage: decision.next_stage.clone().unwrap_or_else(|| {
-                default_next_stage_for_legacy_verdict(&decision.structured_verdict, &source_stage)
-            }),
-            reason: decision.reason.clone(),
-            evidence_refs: decision.evidence_refs.clone(),
-            raw_provider_output_refs: decision.raw_provider_output_refs.clone(),
-            rework_instructions: decision.rework_instructions.clone(),
-            human_gate: decision.human_gate.clone(),
-            created_at: Utc::now().to_rfc3339(),
-            parse_error: decision.parse_error.clone(),
-            role_run_id: Some(role_run.id.clone()),
-            run_no: Some(role_run.run_no),
-        };
-        self.store.save_analyst_decision(&decision_record)?;
-        self.emit_analyst_verdict_entry(
-            &attempt,
-            &node.id,
-            rework_round,
-            &source_stage,
-            &decision,
-            &role_run,
-        )
-        .await;
-        let (updated, node_status, summary) = self
-            .apply_analyst_decision(&attempt, &node.id, &source_stage, rework_round, &decision)
-            .await?;
-        let role_run_status = if node_status == CodingTimelineNodeStatus::Blocked {
-            CodingRoleRunStatus::Blocked
-        } else {
-            CodingRoleRunStatus::Completed
-        };
-        self.store.update_role_run_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            &role_run.id,
-            role_run_status,
-            decision.parse_error.clone().or_else(|| {
-                if node_status == CodingTimelineNodeStatus::Blocked {
-                    Some("analyst_human_gate".to_string())
-                } else {
-                    None
-                }
-            }),
-        )?;
-        self.complete_timeline_node(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            &node.id,
-            node_status,
-            Some(summary),
-        )
-        .await?;
-        Ok(updated)
-    }
-
-    pub async fn execute_reviewer_driven_rework(
+    pub async fn execute_coder_fix_from_review(
         &self,
         attempt: &CodingExecutionAttempt,
         review_report: &CodeReviewReport,
@@ -270,17 +16,17 @@ impl CodingWorkspaceEngine {
         if current.rework_count >= current.max_auto_rework {
             let actions = vec![
                 coding_gate_action_for_id("provide_context").expect("provide context action"),
-                coding_gate_action_for_id("continue_rework").expect("continue rework action"),
+                coding_gate_action_for_id("send_to_coder").expect("send to coder action"),
                 coding_gate_action_for_id("abort").expect("abort action"),
             ];
             let gate = self.store.create_blocked_gate(CreateBlockedGateInput {
                 attempt_id: current.id.clone(),
-                stage: CodingExecutionStage::Rework,
+                stage: CodingExecutionStage::CodeReview,
                 node_id: None,
-                role: Some(CodingProviderRole::Coder),
-                title: "Code Review 返修超上限".to_string(),
+                role: Some(CodingProviderRole::CodeReviewer),
+                title: "Code Review 修复超上限".to_string(),
                 description: format!(
-                    "code review 连续要求修改 {} 次，已达上限，请人工介入。\n\n最新 findings:\n{}",
+                    "code review 连续要求修复 {} 次，已达上限，请人工介入。\n\n最新 findings:\n{}",
                     current.rework_count,
                     review_findings_summary(review_report)
                 ),
@@ -293,18 +39,12 @@ impl CodingWorkspaceEngine {
                 .event_tx
                 .send(CodingWsOutMessage::CodingGateRequired { gate })
                 .await;
-            let rework_stage = self.store.update_attempt_stage(
-                &current.project_id,
-                &current.issue_id,
-                &current.id,
-                CodingExecutionStage::Rework,
-            )?;
             return self
                 .store
                 .update_attempt_status(
-                    &rework_stage.project_id,
-                    &rework_stage.issue_id,
-                    &rework_stage.id,
+                    &current.project_id,
+                    &current.issue_id,
+                    &current.id,
                     CodingAttemptStatus::WaitingForHuman,
                 )
                 .map_err(CodingWorkspaceEngineError::from);
@@ -349,18 +89,18 @@ impl CodingWorkspaceEngine {
                 CodingAttemptStatus::Running,
             )?
         };
-        let rework_attempt = self.store.update_attempt_stage(
+        let coding_attempt = self.store.update_attempt_stage(
             &running.project_id,
             &running.issue_id,
             &running.id,
-            CodingExecutionStage::Rework,
+            CodingExecutionStage::Coding,
         )?;
         let updated = self.store.increment_attempt_rework_count(
-            &rework_attempt.project_id,
-            &rework_attempt.issue_id,
-            &rework_attempt.id,
+            &coding_attempt.project_id,
+            &coding_attempt.issue_id,
+            &coding_attempt.id,
         )?;
-        let node = self.create_rework_timeline_node(&updated, rework_round)?;
+        let node = self.create_coding_timeline_node(&updated)?;
         let _ = self
             .event_tx
             .send(CodingWsOutMessage::CodingTimelineNodeCreated { node: node.clone() })
@@ -393,7 +133,7 @@ impl CodingWorkspaceEngine {
 
         let role_run = self.store.create_role_run(
             &updated,
-            CodingExecutionStage::Rework,
+            CodingExecutionStage::Coding,
             CodingProviderRole::Coder,
             CodingRoleRunTrigger::Initial,
             Some(node.id.clone()),
@@ -436,8 +176,8 @@ impl CodingWorkspaceEngine {
             .await?;
         let raw_provider_output_ref = self.store.save_provider_raw_output(
             &updated.id,
-            CodingExecutionStage::Rework,
-            "coder_rework",
+            CodingExecutionStage::Coding,
+            "coder_output",
             &full_output,
         )?;
         self.store.update_role_run_refs(
@@ -445,10 +185,10 @@ impl CodingWorkspaceEngine {
             &updated.issue_id,
             &updated.id,
             &role_run.id,
-            vec![raw_provider_output_ref],
+            vec![raw_provider_output_ref.clone()],
             Vec::new(),
         )?;
-        self.store.update_role_run_status(
+        let completed_role_run = self.store.update_role_run_status(
             &updated.project_id,
             &updated.issue_id,
             &updated.id,
@@ -462,9 +202,19 @@ impl CodingWorkspaceEngine {
             &updated.id,
             &node.id,
             CodingTimelineNodeStatus::Completed,
-            Some(format!("reviewer 返修 round {}", rework_round)),
+            Some(format!("reviewer 修复 round {}", rework_round)),
         )
         .await?;
+        self.emit_coder_output_chat_entry(CoderOutputChatEntryInput {
+            attempt: &updated,
+            node_id: &node.id,
+            provider_name: &coder_provider_name,
+            role_run: &completed_role_run,
+            full_output: &full_output,
+            raw_provider_output_ref: &raw_provider_output_ref,
+            source: "coding",
+        })
+        .await;
 
         self.store
             .update_attempt_stage(
@@ -476,7 +226,7 @@ impl CodingWorkspaceEngine {
             .map_err(CodingWorkspaceEngineError::from)
     }
 
-    pub fn continue_rework_after_limit(
+    pub fn send_review_limit_feedback_to_coder_for_attempt(
         &self,
         project_id: &str,
         issue_id: &str,
@@ -484,15 +234,15 @@ impl CodingWorkspaceEngine {
         extra_context: Option<String>,
     ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
         let current = self.store.get_attempt(project_id, issue_id, attempt_id)?;
-        self.continue_rework_after_limit_for_attempt(&current, extra_context)
+        self.send_review_limit_feedback_to_coder(&current, extra_context)
     }
 
-    pub(crate) fn continue_rework_after_limit_for_attempt(
+    pub(crate) fn send_review_limit_feedback_to_coder(
         &self,
         current: &CodingExecutionAttempt,
         extra_context: Option<String>,
     ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
-        if current.stage != CodingExecutionStage::Rework
+        if current.stage != CodingExecutionStage::CodeReview
             || !matches!(
                 current.status,
                 CodingAttemptStatus::Blocked | CodingAttemptStatus::WaitingForHuman
@@ -500,7 +250,7 @@ impl CodingWorkspaceEngine {
             || current.rework_count < current.max_auto_rework
         {
             return Err(CodingWorkspaceEngineError::ProviderStream(
-                "continue_rework_not_available".to_string(),
+                "send_to_coder_not_available".to_string(),
             ));
         }
 
@@ -518,7 +268,7 @@ impl CodingWorkspaceEngine {
             .last()
             .ok_or_else(|| {
                 CodingWorkspaceEngineError::ProviderStream(
-                    "continue_rework_missing_code_review_report".to_string(),
+                    "send_to_coder_missing_code_review_report".to_string(),
                 )
             })?;
         let can_continue_from_review = review_report.verdict == ReviewVerdict::RequestChanges
@@ -526,7 +276,7 @@ impl CodingWorkspaceEngine {
                 && code_review_report_has_actionable_findings(&review_report));
         if !can_continue_from_review {
             return Err(CodingWorkspaceEngineError::ProviderStream(
-                "continue_rework_latest_review_not_actionable".to_string(),
+                "send_to_coder_latest_review_not_actionable".to_string(),
             ));
         }
 
@@ -563,19 +313,108 @@ impl CodingWorkspaceEngine {
                 CodingAttemptStatus::Running,
             )?
         };
-        let updated = self.store.increment_attempt_rework_count(
+        let coding_attempt = self.store.update_attempt_stage(
             &running.project_id,
             &running.issue_id,
             &running.id,
+            CodingExecutionStage::Coding,
         )?;
-        self.store
-            .update_attempt_stage(
-                &updated.project_id,
-                &updated.issue_id,
-                &updated.id,
-                CodingExecutionStage::Coding,
+        let updated = self.store.increment_attempt_rework_count(
+            &coding_attempt.project_id,
+            &coding_attempt.issue_id,
+            &coding_attempt.id,
+        )?;
+        Ok(updated)
+    }
+
+    pub(crate) fn send_code_review_feedback_to_coder(
+        &self,
+        current: &CodingExecutionAttempt,
+        extra_context: Option<String>,
+    ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
+        if current.stage != CodingExecutionStage::CodeReview
+            || !matches!(
+                current.status,
+                CodingAttemptStatus::Blocked | CodingAttemptStatus::WaitingForHuman
             )
-            .map_err(CodingWorkspaceEngineError::from)
+        {
+            return Err(CodingWorkspaceEngineError::ProviderStream(
+                "send_to_coder_not_available".to_string(),
+            ));
+        }
+
+        let operator_context = extra_context
+            .map(|content| content.trim().to_string())
+            .filter(|content| !content.is_empty())
+            .ok_or_else(|| {
+                CodingWorkspaceEngineError::ProviderStream(
+                    "coding_gate_extra_context_required".to_string(),
+                )
+            })?;
+        self.store
+            .create_context_note(&current.id, operator_context)?;
+
+        let review_report = self
+            .store
+            .list_code_review_reports(&current.project_id, &current.issue_id, &current.id)?
+            .into_iter()
+            .last()
+            .ok_or_else(|| {
+                CodingWorkspaceEngineError::ProviderStream(
+                    "send_to_coder_missing_code_review_report".to_string(),
+                )
+            })?;
+        if review_report.verdict != ReviewVerdict::Blocked {
+            return Err(CodingWorkspaceEngineError::ProviderStream(
+                "send_to_coder_latest_review_not_actionable".to_string(),
+            ));
+        }
+
+        let existing = self.store.list_rework_instructions(
+            &current.project_id,
+            &current.issue_id,
+            &current.id,
+        )?;
+        let instruction = CodingReworkInstruction {
+            id: next_sequential_id("coding_rework_instruction", existing.len()),
+            attempt_id: current.id.clone(),
+            source_stage: CodingExecutionStage::CodeReview,
+            rework_round: current.rework_count + 1,
+            summary: if review_report.summary.trim().is_empty() {
+                format!("code review round {} 被阻塞", review_report.round)
+            } else {
+                review_report.summary.clone()
+            },
+            fix_hints: review_findings_fix_hints(&review_report),
+            questions: Vec::new(),
+            created_at: Utc::now().to_rfc3339(),
+            consumed_by_node_id: None,
+            consumed_at: None,
+        };
+        self.store.save_rework_instruction(&instruction)?;
+
+        let running = if current.status == CodingAttemptStatus::Running {
+            current.clone()
+        } else {
+            self.store.update_attempt_status(
+                &current.project_id,
+                &current.issue_id,
+                &current.id,
+                CodingAttemptStatus::Running,
+            )?
+        };
+        let coding_attempt = self.store.update_attempt_stage(
+            &running.project_id,
+            &running.issue_id,
+            &running.id,
+            CodingExecutionStage::Coding,
+        )?;
+        let updated = self.store.increment_attempt_rework_count(
+            &coding_attempt.project_id,
+            &coding_attempt.issue_id,
+            &coding_attempt.id,
+        )?;
+        Ok(updated)
     }
 }
 

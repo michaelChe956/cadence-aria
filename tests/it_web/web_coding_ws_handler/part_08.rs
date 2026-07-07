@@ -7,7 +7,7 @@ fn app_with_group_full_chain_attempt(root_path: &Path) -> axum::Router {
         .create(CreateRepositoryInput {
             project_id: "project_0001".to_string(),
             name: "repo".to_string(),
-            path: repo,
+            path: repo.clone(),
             default_policy_preset: Some("manual-write".to_string()),
             default_provider_mode: Some("fake".to_string()),
         })
@@ -104,7 +104,7 @@ fn app_with_group_full_chain_attempt(root_path: &Path) -> axum::Router {
             current_work_item_id: "work_item_0001".to_string(),
             base_branch: "HEAD".to_string(),
             branch_name: "aria/issues/issue_0001".to_string(),
-            worktree_path: None,
+            worktree_path: Some(repo),
             provider_config_snapshot: ProviderConfigSnapshot {
                 author: ProviderName::Fake,
                 reviewer: Some(ProviderName::Fake),

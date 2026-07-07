@@ -101,7 +101,6 @@ describe("CodingWorkspacePage shell and actions", () => {
         coder: "fake",
         tester_plan: "fake",
       tester_execute: "fake",
-        analyst: "fake",
         code_reviewer: "fake",
         internal_reviewer: "fake",
         review_rounds: 1,
@@ -115,7 +114,6 @@ describe("CodingWorkspacePage shell and actions", () => {
       internal_pr_review: null,
       pending_gates: [],
       pending_choices: [],
-      latest_analyst_decision: null,
       role_runs: [],
       chat_entries: [],
       work_item_markdown: null,
@@ -201,7 +199,8 @@ describe("CodingWorkspacePage shell and actions", () => {
     await userEvent.click(screen.getByRole("button", { name: "运行结果" }));
 
     expect(screen.getByTestId("coding-artifact-tabs")).toHaveTextContent("passed");
-    expect(screen.getByTestId("coding-status-bar")).toHaveTextContent("testing");
+    expect(screen.getByTestId("coding-status-bar")).toHaveTextContent("Tester");
+    expect(screen.getByTestId("coding-status-bar")).toHaveTextContent("Coder 修复次数 0/2");
   });
 
   it("renders tester assistant chat entries as bubbles", () => {
@@ -493,13 +492,14 @@ describe("CodingWorkspacePage shell and actions", () => {
     useCodingWorkspaceStore.setState({
       attemptId: "coding_attempt_0001",
       status: "blocked",
-      stage: "rework",
+      stage: "code_review",
       pendingGates: [
         {
           gate_id: "gate_0001",
           kind: "blocked",
           title: "需要人工处理",
-          description: "自动返工次数已达上限",
+          description: "Code Reviewer 被阻塞，等待人工处理",
+          reason_code: "code_review_blocked",
           available_actions: [
             {
               action_id: "accept_risk",
@@ -519,6 +519,8 @@ describe("CodingWorkspacePage shell and actions", () => {
     render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
 
     expect(screen.getByTestId("coding-pending-gate")).toHaveTextContent("需要人工处理");
+    expect(screen.getAllByText("Code Reviewer").length).toBeGreaterThan(0);
+    expect(screen.queryByText(/^rework$/)).not.toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: "中止 Attempt" }));
 

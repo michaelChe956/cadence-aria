@@ -1,8 +1,6 @@
 use chrono::Utc;
 
-use crate::product::coding_models::{
-    AnalystDecisionRecord, CodingChatEntry, CodingContextNote, CodingReworkInstruction,
-};
+use crate::product::coding_models::{CodingChatEntry, CodingContextNote, CodingReworkInstruction};
 use crate::product::id::next_sequential_id;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 
@@ -165,40 +163,5 @@ impl super::CodingAttemptStore {
         instruction.consumed_at = Some(Utc::now().to_rfc3339());
         write_json(&path, &instruction)?;
         Ok(instruction)
-    }
-
-    pub fn save_analyst_decision(
-        &self,
-        decision: &AnalystDecisionRecord,
-    ) -> Result<(), ProductStoreError> {
-        validate_relative_id(&decision.id)?;
-        let attempt = self.find_attempt_by_id(&decision.attempt_id)?;
-        write_json(
-            &self
-                .analyst_decisions_root(&attempt.project_id, &attempt.issue_id, &attempt.id)
-                .join(format!("{}.json", decision.id)),
-            decision,
-        )
-    }
-
-    pub fn list_analyst_decisions(
-        &self,
-        project_id: &str,
-        issue_id: &str,
-        attempt_id: &str,
-    ) -> Result<Vec<AnalystDecisionRecord>, ProductStoreError> {
-        super::list_json_records(&self.analyst_decisions_root(project_id, issue_id, attempt_id))
-    }
-
-    pub fn latest_analyst_decision(
-        &self,
-        project_id: &str,
-        issue_id: &str,
-        attempt_id: &str,
-    ) -> Result<Option<AnalystDecisionRecord>, ProductStoreError> {
-        Ok(self
-            .list_analyst_decisions(project_id, issue_id, attempt_id)?
-            .into_iter()
-            .last())
     }
 }

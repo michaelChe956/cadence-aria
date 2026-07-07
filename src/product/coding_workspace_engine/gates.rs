@@ -46,6 +46,7 @@ impl CodingWorkspaceEngine {
             raw_provider_output_ref,
             available_actions: vec![
                 coding_gate_action_for_id("retry_review").expect("retry review action"),
+                coding_gate_action_for_id("send_to_coder").expect("send to coder action"),
                 coding_gate_action_for_id("abort").expect("abort action"),
             ],
         })?;
@@ -591,23 +592,33 @@ impl CodingWorkspaceEngine {
                 )?;
                 resumed
             }
-            CodingGateActionType::RetryAnalyst => {
-                return Err(CodingWorkspaceEngineError::ProviderStream(
-                    "analyst_rework_disabled".to_string(),
-                ));
-            }
             CodingGateActionType::AcceptTestingResult => {
-                return Err(CodingWorkspaceEngineError::ProviderStream(
-                    "analyst_rework_disabled".to_string(),
-                ));
+                let running = if matches!(
+                    current.status,
+                    CodingAttemptStatus::Blocked | CodingAttemptStatus::WaitingForHuman
+                ) {
+                    self.store.update_attempt_status(
+                        project_id,
+                        issue_id,
+                        attempt_id,
+                        CodingAttemptStatus::Running,
+                    )?
+                } else {
+                    current
+                };
+                self.store.update_attempt_stage(
+                    &running.project_id,
+                    &running.issue_id,
+                    &running.id,
+                    CodingExecutionStage::CodeReview,
+                )?
             }
-            CodingGateActionType::ContinueRework => {
-                self.continue_rework_after_limit_for_attempt(&current, extra_context)?
-            }
-            CodingGateActionType::SendRawOutputToAnalyst => {
-                return Err(CodingWorkspaceEngineError::ProviderStream(
-                    "analyst_rework_disabled".to_string(),
-                ));
+            CodingGateActionType::SendToCoder => {
+                if is_code_review_blocked_gate(&gate) {
+                    self.send_code_review_feedback_to_coder(&current, extra_context)?
+                } else {
+                    self.send_review_limit_feedback_to_coder(&current, extra_context)?
+                }
             }
             CodingGateActionType::ProvideContext => {
                 if let Some(content) = extra_context
@@ -729,4 +740,10 @@ impl CodingWorkspaceEngine {
         }
         Ok(updated)
     }
+}
+
+fn is_code_review_blocked_gate(gate: &CodingGateRequired) -> bool {
+    gate.reason_code.as_deref() == Some("code_review_blocked")
+        && gate.stage == Some(CodingExecutionStage::CodeReview)
+        && gate.role == Some(CodingProviderRole::CodeReviewer)
 }

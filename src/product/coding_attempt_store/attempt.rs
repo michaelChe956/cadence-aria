@@ -596,19 +596,14 @@ fn valid_stage_transition(current: &CodingExecutionStage, next: &CodingExecution
     if current == next {
         return true;
     }
-    if matches!(next, CodingExecutionStage::Rework) {
-        return true;
-    }
-    if matches!(current, CodingExecutionStage::Rework) {
-        return matches!(
-            next,
+    if matches!(
+        (current, next),
+        (
+            CodingExecutionStage::CodeReview,
             CodingExecutionStage::Coding
-                | CodingExecutionStage::Testing
-                | CodingExecutionStage::CodeReview
-                | CodingExecutionStage::ReviewRequest
-                | CodingExecutionStage::InternalPrReview
-                | CodingExecutionStage::FinalConfirm
-        );
+        )
+    ) {
+        return true;
     }
     next.order() >= current.order()
 }

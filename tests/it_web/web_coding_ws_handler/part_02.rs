@@ -600,14 +600,6 @@ async fn coding_ws_start_coding_drives_full_happy_path_to_review_request_complet
             "missing timeline stage {expected:?}; got {stages:?}"
         );
     }
-    assert_eq!(
-        stages
-            .iter()
-            .filter(|stage| **stage == CodingExecutionStage::Rework)
-            .count(),
-        0,
-        "new pipeline should not create analyst rework nodes; got {stages:?}"
-    );
     assert!(
         completed_chat_entries.iter().any(|entry| {
             entry

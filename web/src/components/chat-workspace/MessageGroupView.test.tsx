@@ -157,7 +157,6 @@ describe("MessageGroupView", () => {
 
   it.each([
     ["tester", "Tester · Fake · Run #2"],
-    ["analyst", "Analyst · Fake · Run #3"],
     ["code_reviewer", "Code Reviewer · Fake · Run #4"],
     ["internal_reviewer", "Internal Reviewer · Fake · Run #5"],
   ] as const)("shows run number in %s group title", (role, expectedTitle) => {

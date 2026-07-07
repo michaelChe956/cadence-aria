@@ -148,6 +148,38 @@ struct ReviewerDrivenReworkProvider {
     input: Arc<Mutex<Option<StreamingProviderInput>>>,
 }
 
+struct NonJsonCodeReviewProvider;
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for NonJsonCodeReviewProvider {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let (command_tx, _command_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            let output = "验证完成。结论：当前实现还有问题，需要人工介入。".to_string();
+            let _ = event_tx
+                .send(ProviderEvent::TextDelta {
+                    content: output.clone(),
+                })
+                .await;
+            let _ = event_tx
+                .send(ProviderEvent::Completed {
+                    full_output: output,
+                    provider_session_id: None,
+                })
+                .await;
+        });
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+}
+
 impl ReviewerDrivenReworkProvider {
     fn recorded_input(&self) -> StreamingProviderInput {
         self.input
@@ -198,10 +230,6 @@ fn coding_provider_role_maps_to_provider_conversation_role() {
     assert_eq!(
         provider_conversation_role_for_coding_role(&CodingProviderRole::Tester),
         ProviderConversationRole::Tester
-    );
-    assert_eq!(
-        provider_conversation_role_for_coding_role(&CodingProviderRole::Analyst),
-        ProviderConversationRole::Analyst
     );
     assert_eq!(
         provider_conversation_role_for_coding_role(&CodingProviderRole::CodeReviewer),
@@ -265,7 +293,7 @@ fn coding_provider_resume_session_id_is_isolated_by_role_and_provider() {
 }
 
 #[tokio::test]
-async fn testing_without_provider_driven_capability_routes_blocked_report_to_analyst() {
+async fn testing_without_provider_driven_capability_creates_tester_blocked_gate() {
     let (_root, store, attempt) = running_attempt_with_worktree();
     let specs = vec![TestCommandSpec {
         id: "legacy_true".to_string(),
@@ -299,14 +327,14 @@ async fn testing_without_provider_driven_capability_routes_blocked_report_to_ana
     let updated = store
         .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("attempt");
-    assert_eq!(updated.status, CodingAttemptStatus::Running);
-    assert_eq!(
-        store
-            .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
-            .expect("open gates")
-            .len(),
-        0
-    );
+    assert_eq!(updated.status, CodingAttemptStatus::Blocked);
+    assert_eq!(updated.stage, CodingExecutionStage::Testing);
+    let gates = store
+        .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("open gates");
+    assert_eq!(gates.len(), 1);
+    assert_eq!(gates[0].stage, Some(CodingExecutionStage::Testing));
+    assert_eq!(gates[0].role, Some(CodingProviderRole::Tester));
 }
 
 #[tokio::test]
@@ -448,7 +476,7 @@ async fn reviewer_driven_rework_increments_rework_count_and_resumes_coder() {
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let updated = engine
-        .execute_reviewer_driven_rework(
+        .execute_coder_fix_from_review(
             &attempt,
             &review_report_requesting_changes(&attempt),
             &CodingExecutionContext::default(),
@@ -456,7 +484,7 @@ async fn reviewer_driven_rework_increments_rework_count_and_resumes_coder() {
             &mut command_rx,
         )
         .await
-        .expect("reviewer driven rework");
+        .expect("coder fix from review");
 
     assert_eq!(updated.rework_count, 1);
     assert_eq!(updated.stage, CodingExecutionStage::CodeReview);
@@ -481,39 +509,71 @@ async fn reviewer_driven_rework_increments_rework_count_and_resumes_coder() {
     let nodes = store
         .get_timeline_nodes(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("timeline nodes");
-    assert!(nodes.iter().any(|node| {
-        node.stage == CodingExecutionStage::Rework
-            && node.status == CodingTimelineNodeStatus::Completed
-            && node
-                .summary
-                .as_deref()
-                .is_some_and(|summary| summary.contains("reviewer 返修 round 1"))
-    }));
+    let coder_retry_node = nodes
+        .iter()
+        .find(|node| {
+            node.stage == CodingExecutionStage::Coding
+                && node.agent_role == Some(CodingAgentRole::Author)
+                && node
+                    .summary
+                    .as_deref()
+                    .is_some_and(|summary| summary.contains("reviewer 修复 round 1"))
+        })
+        .expect("coder retry timeline node");
+    assert_eq!(coder_retry_node.title, "代码编写");
+    assert_eq!(coder_retry_node.status, CodingTimelineNodeStatus::Completed);
+    assert!(
+        coder_retry_node
+            .summary
+            .as_deref()
+            .is_some_and(|summary| summary.contains("reviewer 修复 round 1"))
+    );
 
     let role_run = store
         .latest_role_run(
             &attempt.project_id,
             &attempt.issue_id,
             &attempt.id,
-            CodingExecutionStage::Rework,
+            CodingExecutionStage::Coding,
             CodingProviderRole::Coder,
         )
         .expect("role run")
-        .expect("coder rework role run");
+        .expect("coder retry role run");
     assert_eq!(role_run.status, CodingRoleRunStatus::Completed);
+
+    let chat_entries = store
+        .list_chat_entries(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("chat entries");
+    let rework_entry = chat_entries
+        .iter()
+        .find(|entry| entry.node_id.as_deref() == Some(coder_retry_node.id.as_str()))
+        .expect("coder retry chat entry");
+    assert_eq!(rework_entry.role, CodingAgentRole::Author);
+    assert_eq!(rework_entry.entry_type, CodingEntryType::AssistantMessage);
+    assert_eq!(
+        rework_entry.content.as_deref(),
+        Some("coder fixed reviewer findings")
+    );
+    let metadata = rework_entry.metadata.as_ref().expect("rework metadata");
+    assert_eq!(metadata["source"], "coding");
+    assert_eq!(metadata["role_run_id"].as_str(), Some(role_run.id.as_str()));
+    assert_eq!(
+        metadata["raw_provider_output_ref"],
+        "provider-raw/coding/coder_output_0001.txt"
+    );
 
     let input = provider.recorded_input();
     assert_eq!(
         input.resume_provider_session_id.as_deref(),
         Some("coder-session-before-rework")
     );
-    assert!(input.prompt.contains("本轮返修要求"));
+    assert!(input.prompt.contains("本轮修复要求"));
     assert!(input.prompt.contains("missing validation"));
     assert!(input.prompt.contains("add validation"));
 }
 
 #[tokio::test]
-async fn reviewer_driven_rework_blocks_when_auto_rework_limit_is_reached() {
+async fn coder_fix_from_review_blocks_when_auto_fix_limit_is_reached() {
     let (_root, store, attempt) = running_attempt_with_worktree();
     let attempt = store
         .increment_attempt_rework_count(&attempt.project_id, &attempt.issue_id, &attempt.id)
@@ -535,7 +595,7 @@ async fn reviewer_driven_rework_blocks_when_auto_rework_limit_is_reached() {
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let updated = engine
-        .execute_reviewer_driven_rework(
+        .execute_coder_fix_from_review(
             &attempt,
             &review_report_requesting_changes(&attempt),
             &CodingExecutionContext::default(),
@@ -543,27 +603,90 @@ async fn reviewer_driven_rework_blocks_when_auto_rework_limit_is_reached() {
             &mut command_rx,
         )
         .await
-        .expect("blocked reviewer driven rework");
+        .expect("blocked coder fix from review");
 
     assert_eq!(updated.status, CodingAttemptStatus::WaitingForHuman);
     assert_eq!(updated.rework_count, 2);
-    assert_eq!(updated.stage, CodingExecutionStage::Rework);
+    assert_eq!(updated.stage, CodingExecutionStage::CodeReview);
     assert!(provider.input.lock().expect("input lock").is_none());
     let gates = store
         .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("open blocked gates");
     assert_eq!(gates.len(), 1);
-    assert_eq!(gates[0].stage, Some(CodingExecutionStage::Rework));
-    assert_eq!(gates[0].role, Some(CodingProviderRole::Coder));
-    assert!(gates[0].title.contains("返修超上限"));
+    assert_eq!(gates[0].stage, Some(CodingExecutionStage::CodeReview));
+    assert_eq!(gates[0].role, Some(CodingProviderRole::CodeReviewer));
+    assert!(gates[0].title.contains("修复超上限"));
     assert_eq!(
         gates[0]
             .available_actions
             .iter()
             .map(|action| action.action_id.as_str())
             .collect::<Vec<_>>(),
-        vec!["provide_context", "continue_rework", "abort"]
+        vec!["provide_context", "send_to_coder", "abort"]
     );
+}
+
+#[tokio::test]
+async fn blocked_code_review_without_structured_findings_accepts_manual_feedback_for_coder() {
+    let (root, store, attempt) = running_attempt_with_worktree();
+    let worktree = attempt
+        .worktree_path
+        .as_ref()
+        .expect("attempt worktree")
+        .clone();
+    init_test_git_repo(&worktree);
+    let (tx, _rx) = mpsc::channel(16);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+
+    let report = engine
+        .execute_code_review(&attempt, &NonJsonCodeReviewProvider)
+        .await
+        .expect("code review blocks on non-json output");
+
+    assert_eq!(report.verdict, ReviewVerdict::Blocked);
+    assert!(
+        report.findings.is_empty(),
+        "non-json reviewer output has no structured findings"
+    );
+    let gates = store
+        .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("open blocked gates");
+    assert_eq!(gates.len(), 1);
+    assert_eq!(gates[0].reason_code.as_deref(), Some("code_review_blocked"));
+    assert_eq!(
+        gates[0]
+            .available_actions
+            .iter()
+            .map(|action| action.action_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["retry_review", "send_to_coder", "abort"]
+    );
+
+    let updated = engine
+        .handle_blocked_gate_response(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &gates[0].gate_id,
+            "send_to_coder",
+            Some("人工意见：先按用户说明修复 JSON 输出协议".to_string()),
+        )
+        .await
+        .expect("send manual feedback to coder");
+
+    assert_eq!(updated.status, CodingAttemptStatus::Running);
+    assert_eq!(updated.stage, CodingExecutionStage::Coding);
+    assert_eq!(updated.rework_count, 1);
+    let notes = store
+        .list_context_notes(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("context notes");
+    assert!(
+        notes.iter().any(|note| note
+            .content
+            .contains("人工意见：先按用户说明修复 JSON 输出协议")),
+        "manual feedback must be preserved for the next coder prompt"
+    );
+    drop(root);
 }
 
 fn review_report_requesting_changes(attempt: &CodingExecutionAttempt) -> CodeReviewReport {

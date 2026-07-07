@@ -8,7 +8,6 @@ type CodingWsApi = ReturnType<typeof useCodingWorkspaceWs>;
 export const DEFAULT_PERMISSION_MODES = {
   coder: "supervised",
   tester: "auto",
-  analyst: "auto",
   code_reviewer: "supervised",
   internal_reviewer: "supervised",
 } as const;
@@ -24,7 +23,6 @@ export function mockCodingWs(overrides: Partial<CodingWsApi> = {}) {
     respondPermission: vi.fn(),
     respondChoice: vi.fn(),
     respondGate: vi.fn(),
-    continueRework: vi.fn(),
     finalConfirm: vi.fn(),
     abortAttempt: vi.fn(),
     requestManualPause: vi.fn(),

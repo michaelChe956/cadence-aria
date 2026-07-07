@@ -525,9 +525,6 @@ pub async fn get_coding_attempt(
         .map_err(product_store_api_error)?
         .into_iter()
         .last();
-    let latest_analyst_decision = coding_store
-        .latest_analyst_decision(&attempt.project_id, &attempt.issue_id, &attempt.id)
-        .map_err(product_store_api_error)?;
     let pending_choices = coding_store
         .list_open_choice_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .map_err(product_store_api_error)?;
@@ -565,7 +562,6 @@ pub async fn get_coding_attempt(
         internal_pr_review,
         pending_gates: Vec::new(),
         pending_choices,
-        latest_analyst_decision,
         work_item_execution_plan,
         work_item_handoff,
     }))

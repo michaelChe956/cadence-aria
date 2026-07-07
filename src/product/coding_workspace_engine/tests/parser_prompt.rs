@@ -42,6 +42,22 @@ fn derive_reason_code_falls_back_to_testing_blocked() {
     );
 }
 
+#[test]
+fn testing_result_review_gate_copy_routes_to_code_reviewer() {
+    let accept_action = testing_result_review_gate_actions()
+        .into_iter()
+        .find(|action| action.action_id == "accept_testing_result")
+        .expect("accept testing result action");
+    assert_eq!(accept_action.label, "结果可用，进入 Code Reviewer");
+
+    let mut report = blocked_report_with(Vec::new(), Vec::new());
+    report.overall_status = TestingOverallStatus::Passed;
+    report.plan_summary = None;
+    let description = testing_result_review_description(&report);
+    assert!(description.contains("进入 Code Reviewer"));
+    assert!(!description.contains("Analyst"));
+}
+
 const FIXED_STACK_TERMS: &[&str] = &[
     "pnpm",
     "node_modules",
@@ -126,7 +142,7 @@ fn coding_delta_prompt_requires_material_driven_rework_without_fixed_stack_terms
 
     assert_no_fixed_stack_terms(&prompt);
     assert!(prompt.contains("Coder 增量执行协议"));
-    assert!(prompt.contains("人工返修意见优先级最高"));
+    assert!(prompt.contains("人工修复意见优先级最高"));
     assert!(prompt.contains("reviewer findings"));
     assert!(prompt.contains("不得引入平台默认技术栈假设"));
 }
@@ -180,6 +196,8 @@ fn code_review_material_protocol_requires_material_derived_checklist() {
     assert!(protocol.contains("required 验证命令的执行证据"));
     assert!(protocol.contains("测试输出显示没有实际测试被执行"));
     assert!(protocol.contains("不得提出执行材料之外的技术栈默认要求"));
+    assert!(protocol.contains("Return ONLY a single JSON object"));
+    assert!(protocol.contains("No markdown, no explanations"));
 }
 
 #[tokio::test]
@@ -414,28 +432,7 @@ fn review_parser_accepts_group_final_review_source_stage_alias() {
 }
 
 #[test]
-fn rework_and_internal_review_prompts_require_openspec_and_superpowers() {
-    let attempt = test_attempt("coding_attempt_0001");
-    let context_notes = ReworkContextNoteInput {
-        text: "manual context".to_string(),
-        truncated: false,
-    };
-    let prompt = build_rework_prompt(
-        &attempt,
-        "testing blocked",
-        &CodingExecutionStage::Testing,
-        1,
-        &context_notes,
-        "{}",
-        None,
-    );
-
-    assert!(prompt.contains("[openspec_contract]"));
-    assert!(prompt.contains("[superpowers_contract]"));
-    assert!(prompt.contains("Story Spec"));
-    assert!(prompt.contains("Design Spec"));
-    assert!(prompt.contains("Work Item"));
-
+fn internal_review_prompt_requires_openspec_and_superpowers() {
     let internal_contract = provider_runtime_contract("InternalReviewer");
     assert!(internal_contract.contains("InternalReviewer"));
     assert!(internal_contract.contains("[openspec_contract]"));

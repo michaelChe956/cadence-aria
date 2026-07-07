@@ -97,7 +97,7 @@ fn code_review_flow_decision_routes_reviewer_verdicts() {
             ReviewVerdict::RequestChanges,
             Vec::new()
         )),
-        CodeReviewFlowDecision::RunReviewerDrivenRework
+        CodeReviewFlowDecision::RunCoderFix
     );
     assert_eq!(
         code_review_flow_decision(&code_review_report_with(
@@ -115,7 +115,7 @@ fn code_review_flow_decision_routes_reviewer_verdicts() {
                 related_work_item_tasks: Vec::new(),
             }]
         )),
-        CodeReviewFlowDecision::RunReviewerDrivenRework
+        CodeReviewFlowDecision::RunCoderFix
     );
     assert_eq!(
         code_review_flow_decision(&code_review_report_with(ReviewVerdict::Blocked, Vec::new())),
@@ -445,7 +445,7 @@ fn manual_continue_gate_response_does_not_auto_resume_runner() {
         attempt_no: 1,
         scope: crate::product::coding_models::CodingAttemptScope::WorkItem,
         status: CodingAttemptStatus::Blocked,
-        stage: CodingExecutionStage::Rework,
+        stage: CodingExecutionStage::CodeReview,
         base_branch: "HEAD".to_string(),
         branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
         worktree_path: None,
@@ -484,10 +484,12 @@ fn manual_continue_gate_response_does_not_auto_resume_runner() {
         "retry_internal_review",
         &attempt
     ));
-
-    attempt.status = CodingAttemptStatus::WaitingForHuman;
-    assert!(!should_resume_runner_after_gate_response(
-        "retry_analyst",
+    assert!(should_resume_runner_after_gate_response(
+        "send_to_coder",
+        &attempt
+    ));
+    assert!(should_resume_runner_after_gate_response(
+        "accept_testing_result",
         &attempt
     ));
 
@@ -499,12 +501,14 @@ fn manual_continue_gate_response_does_not_auto_resume_runner() {
 }
 
 #[test]
-fn waiting_rework_attempt_allows_continue_rework_message() {
+fn waiting_attempt_allows_gate_response_for_coder_feedback() {
     assert!(is_coding_ws_message_allowed(
         &CodingAttemptStatus::WaitingForHuman,
-        &CodingExecutionStage::Rework,
-        &CodingWsInMessage::ContinueRework {
-            extra_context: None,
+        &CodingExecutionStage::CodeReview,
+        &CodingWsInMessage::GateResponse {
+            gate_id: "coding_blocked_gate_0001".to_string(),
+            action_id: "send_to_coder".to_string(),
+            extra_context: Some("人工修复意见".to_string()),
         },
     ));
 }

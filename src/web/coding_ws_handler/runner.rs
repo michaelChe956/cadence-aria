@@ -70,10 +70,11 @@ pub(crate) fn should_resume_runner_after_gate_response(
     matches!(
         action_id,
         "retry_test_plan"
-            | "continue_rework"
+            | "send_to_coder"
             | "rerun_missing_steps"
             | "retry_review"
             | "retry_internal_review"
+            | "accept_testing_result"
             | "rerun_testing"
     ) && matches!(
         previous_attempt.status,
@@ -83,16 +84,16 @@ pub(crate) fn should_resume_runner_after_gate_response(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CodeReviewFlowDecision {
-    RunReviewerDrivenRework,
+    RunCoderFix,
     StopForHumanTriage,
     ContinueAfterApprove,
 }
 
 pub(crate) fn code_review_flow_decision(report: &CodeReviewReport) -> CodeReviewFlowDecision {
     match report.verdict {
-        ReviewVerdict::RequestChanges => CodeReviewFlowDecision::RunReviewerDrivenRework,
+        ReviewVerdict::RequestChanges => CodeReviewFlowDecision::RunCoderFix,
         ReviewVerdict::Blocked if code_review_report_has_actionable_findings(report) => {
-            CodeReviewFlowDecision::RunReviewerDrivenRework
+            CodeReviewFlowDecision::RunCoderFix
         }
         ReviewVerdict::Blocked => CodeReviewFlowDecision::StopForHumanTriage,
         ReviewVerdict::Approve => CodeReviewFlowDecision::ContinueAfterApprove,
@@ -304,7 +305,7 @@ pub(crate) async fn execute_start_coding_flow(
                 return Ok(());
             }
             match code_review_flow_decision(&review_report) {
-                CodeReviewFlowDecision::RunReviewerDrivenRework => {
+                CodeReviewFlowDecision::RunCoderFix => {
                     let coder_provider_name = coding_store
                         .get_role_provider_config_snapshot(
                             &current.project_id,
@@ -315,10 +316,10 @@ pub(crate) async fn execute_start_coding_flow(
                     let coder_provider = provider_for(
                         state,
                         &coder_provider_name,
-                        "coding coder provider (rework)",
+                        "coding coder provider (reviewer feedback fix)",
                     )?;
                     current = engine
-                        .execute_reviewer_driven_rework(
+                        .execute_coder_fix_from_review(
                             &current,
                             &review_report,
                             &execution_context,

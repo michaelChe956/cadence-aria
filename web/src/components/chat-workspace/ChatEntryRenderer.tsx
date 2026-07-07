@@ -1,6 +1,5 @@
 import type { ChatEntry } from "../../state/chat-entries";
 import type { RevisionPath } from "../../api/types";
-import { AnalystVerdictEntry } from "./entries/AnalystVerdictEntry";
 import { ArtifactUpdateEntry } from "./entries/ArtifactUpdateEntry";
 import { ChoiceRequestEntry } from "./entries/ChoiceRequestEntry";
 import { ChoiceResponseEntry } from "./entries/ChoiceResponseEntry";
@@ -59,8 +58,6 @@ export function ChatEntryRenderer({
       return <ArtifactUpdateEntry entry={entry} />;
     case "review_verdict":
       return <ReviewVerdictEntry entry={entry} onSelectPath={onSelectRevisionPath} />;
-    case "analyst_verdict":
-      return <AnalystVerdictEntry entry={entry} />;
     case "gate_prompt":
       return <GatePromptEntry entry={entry} onDecision={onHumanConfirm} />;
     case "human_decision":

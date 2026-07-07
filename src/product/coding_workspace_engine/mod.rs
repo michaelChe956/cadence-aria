@@ -30,16 +30,15 @@ use crate::product::coding_evaluation_context::{
     EvaluationContextRole, build_evaluation_context_pack, build_tester_execution_context_pack,
 };
 use crate::product::coding_models::{
-    AnalystDecisionNextStage, AnalystDecisionRecord, AnalystDecisionVerdict,
-    AnalystHumanGateRecommendation, AnalystReworkInstructions, AnalystVerdict, CodeReviewReport,
-    CodingAgentRole, CodingAttemptStatus, CodingChatEntry, CodingChoiceOption, CodingContextNote,
-    CodingEntryType, CodingExecutionAttempt, CodingExecutionStage, CodingGateAction,
-    CodingGateActionType, CodingGateRequired, CodingProviderPermissionMode, CodingProviderRole,
-    CodingReworkInstruction, CodingRoleRun, CodingRoleRunEventType, CodingRoleRunStatus,
-    CodingRoleRunTrigger, CodingTimelineNode, CodingTimelineNodeStatus, FindingSeverity,
-    InternalPrReview, PushStatus, ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict,
-    TestCommand, TestCommandStatus, TestPlan, TestPlanRiskLevel, TestingOverallStatus,
-    TestingReport, TestingStepResult, TestingUnplannedEvidence, WorkItemHandoff,
+    CodeReviewReport, CodingAgentRole, CodingAttemptStatus, CodingChatEntry, CodingChoiceOption,
+    CodingContextNote, CodingEntryType, CodingExecutionAttempt, CodingExecutionStage,
+    CodingGateAction, CodingGateActionType, CodingGateRequired, CodingProviderPermissionMode,
+    CodingProviderRole, CodingReworkInstruction, CodingRoleRun, CodingRoleRunEventType,
+    CodingRoleRunStatus, CodingRoleRunTrigger, CodingTimelineNode, CodingTimelineNodeStatus,
+    FindingSeverity, InternalPrReview, PushStatus, ReviewFinding, ReviewRequest, ReviewRequestKind,
+    ReviewVerdict, TestCommand, TestCommandStatus, TestPlan, TestPlanRiskLevel,
+    TestingOverallStatus, TestingReport, TestingStepResult, TestingUnplannedEvidence,
+    WorkItemHandoff,
 };
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::git_workspace_service::{GitWorkspaceError, GitWorkspaceService};
@@ -65,7 +64,6 @@ use crate::web::workspace_ws_types::{
     WsPermissionRiskLevel,
 };
 
-mod analyst_parser;
 mod code_review;
 mod coding;
 mod gates;
@@ -86,8 +84,18 @@ mod tool_format;
 mod types;
 mod ws_event_mapper;
 
+pub(crate) struct CoderOutputChatEntryInput<'a> {
+    pub(crate) attempt: &'a CodingExecutionAttempt,
+    pub(crate) node_id: &'a str,
+    pub(crate) provider_name: &'a ProviderName,
+    pub(crate) role_run: &'a CodingRoleRun,
+    pub(crate) full_output: &'a str,
+    pub(crate) raw_provider_output_ref: &'a str,
+    pub(crate) source: &'a str,
+}
+
 pub use testing_parser::{
-    testing_report_has_execution_evidence, testing_report_should_enter_analyst,
+    testing_report_has_execution_evidence, testing_report_needs_blocked_gate,
 };
 pub use types::{
     CodingExecutionContext, CodingWorkspaceEngine, CodingWorkspaceEngineError,
@@ -111,8 +119,39 @@ pub(crate) fn code_review_report_has_actionable_findings(report: &CodeReviewRepo
     })
 }
 
-#[allow(unused_imports)]
-pub(crate) use analyst_parser::*;
+pub(crate) fn extract_json_object(output: &str) -> Option<&str> {
+    let start = output.find('{')?;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (offset, ch) in output[start..].char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            match ch {
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(&output[start..start + offset + ch.len_utf8()]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 #[allow(unused_imports)]
 pub(crate) use gates::*;
 #[allow(unused_imports)]

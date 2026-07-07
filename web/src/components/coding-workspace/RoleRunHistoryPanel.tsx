@@ -183,7 +183,6 @@ function roleLabel(role: CodingRoleRun["role"]) {
   const labels: Record<CodingRoleRun["role"], string> = {
     coder: "Coder",
     tester: "Tester",
-    analyst: "Analyst",
     code_reviewer: "Code Reviewer",
     internal_reviewer: "GroupFinalReview",
   };

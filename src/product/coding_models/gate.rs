@@ -85,7 +85,7 @@ pub struct CodingGateAction {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CodingGateActionType {
-    ContinueRework,
+    SendToCoder,
     ConfirmStage,
     AcceptRisk,
     Abort,
@@ -96,9 +96,7 @@ pub enum CodingGateActionType {
     ProvideContext,
     ManualContinue,
     RetryReview,
-    RetryAnalyst,
     RetryInternalReview,
-    SendRawOutputToAnalyst,
     AcceptTestingResult,
     RerunTesting,
 }

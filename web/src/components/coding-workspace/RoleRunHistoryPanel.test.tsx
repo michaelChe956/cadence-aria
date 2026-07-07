@@ -113,13 +113,13 @@ describe("RoleRunHistoryPanel", () => {
     render(
       <RoleRunHistoryPanel
         roleRuns={[roleRun({ node_id: "coding_node_0005" })]}
-        timelineNodes={[node("coding_node_0005", "Analyst 路由决策")]}
+        timelineNodes={[node("coding_node_0005", "Code Reviewer")]}
         selectedNodeId={null}
         onSelectNode={onSelectNode}
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: /Analyst #1/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Code Reviewer #1/ }));
 
     expect(onSelectNode).toHaveBeenCalledWith("coding_node_0005");
   });
@@ -189,13 +189,13 @@ describe("RoleRunHistoryPanel", () => {
             ],
           }),
         ]}
-        timelineNodes={[node("coding_node_0005", "Analyst 路由决策")]}
+        timelineNodes={[node("coding_node_0005", "系统处理")]}
         selectedNodeId={null}
         onSelectNode={vi.fn()}
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: /Analyst #1/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Code Reviewer #1/ }));
 
     const panel = screen.getByTestId("coding-role-run-history");
     expect(panel).not.toHaveTextContent("Dropped oldest event");
@@ -209,17 +209,17 @@ function roleRun(overrides: Partial<CodingRoleRun> = {}): CodingRoleRun {
   return {
     id: "coding_role_run_0001",
     attempt_id: "coding_attempt_0001",
-    stage: "rework",
-    role: "analyst",
+    stage: "code_review",
+    role: "code_reviewer",
     run_no: 1,
     status: "blocked",
-    trigger: "retry_analyst",
+    trigger: "retry_review",
     node_id: "coding_node_0005",
     started_at: "2026-06-13T00:00:00Z",
     completed_at: null,
     supersedes_run_id: null,
     superseded_by_run_id: null,
-    reason_code: "analyst_human_gate",
+    reason_code: "code_review_blocked",
     raw_provider_output_refs: [],
     artifact_refs: [],
     ...overrides,
@@ -230,10 +230,10 @@ function node(id: string, title: string): CodingTimelineNode {
   return {
     id,
     attempt_id: "coding_attempt_0001",
-    stage: "rework",
+    stage: "code_review",
     title,
     status: "blocked",
-    agent_role: "system",
+    agent_role: "reviewer",
     summary: null,
     started_at: "2026-06-13T00:00:00Z",
     completed_at: null,

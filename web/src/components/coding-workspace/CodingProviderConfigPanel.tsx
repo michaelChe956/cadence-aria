@@ -153,14 +153,14 @@ export function CodingProviderConfigPanel({
       <div className="grid min-w-0 gap-2 rounded-md border border-[var(--aria-line)] px-3 py-2.5 md:grid-cols-[9rem_minmax(0,1fr)]">
         <div className="min-w-0">
           <div className="truncate text-xs font-semibold text-[var(--aria-ink)]">
-            自动返修次数
+            自动修复次数
           </div>
           <div className="mt-1 truncate font-mono text-[11px] text-[var(--aria-ink-muted)]">
             {maxAutoRework}
           </div>
         </div>
         <input
-          aria-label="CodeReview 自动返修次数"
+          aria-label="CodeReview 自动修复次数"
           type="number"
           min={0}
           max={5}

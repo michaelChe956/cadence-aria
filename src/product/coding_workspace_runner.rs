@@ -33,7 +33,6 @@ pub fn coding_provider_role_for_stage(stage: &CodingExecutionStage) -> Option<Co
     match stage {
         CodingExecutionStage::Coding => Some(CodingProviderRole::Coder),
         CodingExecutionStage::Testing => Some(CodingProviderRole::Tester),
-        CodingExecutionStage::Rework => Some(CodingProviderRole::Analyst),
         CodingExecutionStage::CodeReview => Some(CodingProviderRole::CodeReviewer),
         CodingExecutionStage::InternalPrReview => Some(CodingProviderRole::InternalReviewer),
         CodingExecutionStage::PrepareContext
@@ -47,7 +46,6 @@ pub fn parse_coding_provider_role(role: &str) -> Option<CodingProviderRole> {
     match role {
         "author" | "coder" => Some(CodingProviderRole::Coder),
         "tester" | "tester_plan" | "tester_execute" => Some(CodingProviderRole::Tester),
-        "analyst" => Some(CodingProviderRole::Analyst),
         "reviewer" | "code_reviewer" => Some(CodingProviderRole::CodeReviewer),
         "internal_reviewer" => Some(CodingProviderRole::InternalReviewer),
         _ => None,
@@ -65,8 +63,7 @@ pub fn apply_provider_selection_to_snapshots(
             legacy_snapshot.author = provider.clone();
             role_snapshot.coder = provider.clone();
             role_snapshot.tester_plan = provider.clone();
-            role_snapshot.tester_execute = provider.clone();
-            role_snapshot.analyst = provider;
+            role_snapshot.tester_execute = provider;
             Ok(CodingProviderRole::Coder)
         }
         "reviewer" => {
@@ -87,10 +84,6 @@ pub fn apply_provider_selection_to_snapshots(
         "tester_execute" => {
             role_snapshot.set_tester_execute_provider(provider);
             Ok(CodingProviderRole::Tester)
-        }
-        "analyst" => {
-            role_snapshot.analyst = provider;
-            Ok(CodingProviderRole::Analyst)
         }
         "code_reviewer" => {
             legacy_snapshot.reviewer = Some(provider.clone());

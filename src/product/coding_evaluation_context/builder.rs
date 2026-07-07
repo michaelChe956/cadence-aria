@@ -175,11 +175,7 @@ fn coder_evidence_pack(
         .into_iter()
         .rev()
         .find(|run| {
-            run.role == CodingProviderRole::Coder
-                && matches!(
-                    run.stage,
-                    CodingExecutionStage::Coding | CodingExecutionStage::Rework
-                )
+            run.role == CodingProviderRole::Coder && run.stage == CodingExecutionStage::Coding
         });
     let handoff = coding_store.get_visible_work_item_handoff(attempt)?;
     let mut evidence_warnings = Vec::new();

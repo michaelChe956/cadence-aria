@@ -51,14 +51,12 @@ describe("useCodingWorkspaceWs inbound events", () => {
           coder: "fake",
           tester_plan: "fake",
       tester_execute: "fake",
-          analyst: "fake",
           code_reviewer: "fake",
           internal_reviewer: "fake",
           review_rounds: 1,
           permission_modes: {
             coder: "supervised",
             tester: "auto",
-            analyst: "auto",
             code_reviewer: "supervised",
             internal_reviewer: "supervised",
           },
@@ -211,14 +209,12 @@ describe("useCodingWorkspaceWs inbound events", () => {
           coder: "fake",
           tester_plan: "fake",
       tester_execute: "fake",
-          analyst: "fake",
           code_reviewer: "fake",
           internal_reviewer: "fake",
           review_rounds: 1,
           permission_modes: {
             coder: "supervised",
             tester: "auto",
-            analyst: "auto",
             code_reviewer: "supervised",
             internal_reviewer: "supervised",
           },
@@ -414,14 +410,12 @@ describe("useCodingWorkspaceWs inbound events", () => {
           coder: "fake",
           tester_plan: "fake",
       tester_execute: "fake",
-          analyst: "fake",
           code_reviewer: "fake",
           internal_reviewer: "fake",
           review_rounds: 1,
           permission_modes: {
             coder: "supervised",
             tester: "auto",
-            analyst: "auto",
             code_reviewer: "supervised",
             internal_reviewer: "supervised",
           },
@@ -596,7 +590,7 @@ describe("useCodingWorkspaceWs inbound events", () => {
     ]);
   });
 
-  it("maps coding tool calls and analyst verdict chat entries to role-specific entries", () => {
+  it("maps coding tool calls and code reviewer chat entries to role-specific entries", () => {
     const harness = renderCodingHook();
 
     act(() => {
@@ -620,16 +614,13 @@ describe("useCodingWorkspaceWs inbound events", () => {
       harness.ws.receive({
         type: "coding_chat_entry_created",
         entry: {
-          id: "coding_chat_entry_analyst_0001",
+          id: "coding_chat_entry_review_0001",
           attempt_id: "coding_attempt_0001",
           node_id: "coding_node_0003",
-          role: "system",
-          entry_type: {
-            type: "analyst_verdict",
-            verdict: "needs_fix",
-          },
-          content: "测试仍失败",
-          metadata: { fix_hints: ["补充 n=10 测试"] },
+          role: "reviewer",
+          entry_type: { type: "assistant_message" },
+          content: "Code Reviewer 要求修改",
+          metadata: { source: "code_review", verdict: "request_changes" },
           created_at: "2026-05-28T00:00:03Z",
         },
       });
@@ -648,13 +639,13 @@ describe("useCodingWorkspaceWs inbound events", () => {
         },
       },
       {
-        id: "coding_chat_entry_analyst_0001",
-        type: "analyst_verdict",
-        role: "analyst",
-        content: "测试仍失败",
+        id: "coding_chat_entry_review_0001",
+        type: "provider_stream",
+        role: "code_reviewer",
+        content: "Code Reviewer 要求修改",
         metadata: {
-          verdict: "needs_fix",
-          fix_hints: ["补充 n=10 测试"],
+          source: "code_review",
+          verdict: "request_changes",
         },
       },
     ]);

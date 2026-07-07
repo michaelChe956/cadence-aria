@@ -77,6 +77,38 @@ fn updates_attempt_max_auto_rework_with_range_validation() {
 }
 
 #[test]
+fn code_review_can_route_directly_back_to_coding_for_reviewer_feedback() {
+    let (_tmp, store, attempt) = setup();
+    let attempt = store
+        .update_attempt_stage(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingExecutionStage::Coding,
+        )
+        .expect("coding stage");
+    let attempt = store
+        .update_attempt_stage(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingExecutionStage::CodeReview,
+        )
+        .expect("code review stage");
+
+    let updated = store
+        .update_attempt_stage(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingExecutionStage::Coding,
+        )
+        .expect("code review can return to coder");
+
+    assert_eq!(updated.stage, CodingExecutionStage::Coding);
+}
+
+#[test]
 fn legacy_attempt_without_scope_deserializes_as_work_item_scope() {
     let json = serde_json::json!({
         "id": "coding_attempt_0001",

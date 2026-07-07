@@ -1,5 +1,5 @@
 #[tokio::test]
-async fn coding_ws_code_review_blocked_stops_without_analyst_rework() {
+async fn coding_ws_code_review_blocked_stops_at_reviewer_gate() {
     let _guard = WS_TEST_LOCK.lock().await;
     let root = tempdir().expect("root");
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
@@ -20,7 +20,6 @@ async fn coding_ws_code_review_blocked_stops_without_analyst_rework() {
     let mut confirmed_gates = HashSet::new();
     let mut saw_code_review_blocked = false;
     let mut saw_code_review_blocked_gate = false;
-    let mut saw_rework_node = false;
     let mut stopped_at_code_review = false;
     for _ in 0..120 {
         match timeout(Duration::from_millis(500), recv_json(&mut ws)).await {
@@ -50,11 +49,6 @@ async fn coding_ws_code_review_blocked_stops_without_analyst_rework() {
                 if report.verdict == ReviewVerdict::Blocked =>
             {
                 saw_code_review_blocked = true;
-            }
-            Ok(CodingWsOutMessage::CodingTimelineNodeCreated { node })
-                if node.stage == CodingExecutionStage::Rework =>
-            {
-                saw_rework_node = true;
             }
             Ok(CodingWsOutMessage::CodingSessionState {
                 status,
@@ -94,15 +88,6 @@ async fn coding_ws_code_review_blocked_stops_without_analyst_rework() {
         stopped_at_code_review,
         "code review blocked did not stop at CodeReview"
     );
-    assert!(
-        !saw_rework_node,
-        "code review blocked must not enter analyst rework"
-    );
-    assert!(
-        provider.analyst_prompts().is_empty(),
-        "analyst should not run after code review blocked"
-    );
-
     let attempt = store
         .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
         .expect("attempt");
@@ -116,10 +101,6 @@ async fn coding_ws_code_review_blocked_stops_without_analyst_rework() {
         .find(|run| run.role == CodingProviderRole::CodeReviewer)
         .expect("code reviewer role run");
     assert_eq!(reviewer_run.status, CodingRoleRunStatus::Blocked);
-    assert!(
-        runs.iter().all(|run| run.role != CodingProviderRole::Analyst),
-        "analyst role runs should not be created"
-    );
 
     ws.close(None).await.expect("close ws");
     server.abort();
@@ -148,7 +129,6 @@ async fn coding_ws_single_work_item_skips_internal_review_blocked_provider() {
     let mut completed_after_review_request = false;
     let mut saw_internal_review = false;
     let mut saw_internal_review_blocked_gate = false;
-    let mut saw_rework_node = false;
     let mut observed = Vec::new();
     for _ in 0..180 {
         match timeout(Duration::from_millis(500), recv_json(&mut ws)).await {
@@ -169,11 +149,6 @@ async fn coding_ws_single_work_item_skips_internal_review_blocked_provider() {
                 saw_internal_review_blocked_gate = true;
             }
             Ok(CodingWsOutMessage::InternalPrReviewComplete { .. }) => saw_internal_review = true,
-            Ok(CodingWsOutMessage::CodingTimelineNodeCreated { node })
-                if node.stage == CodingExecutionStage::Rework =>
-            {
-                saw_rework_node = true;
-            }
             Ok(CodingWsOutMessage::CodingSessionState {
                 status,
                 stage,
@@ -205,15 +180,6 @@ async fn coding_ws_single_work_item_skips_internal_review_blocked_provider() {
         !saw_internal_review_blocked_gate,
         "single WorkItem must not expose InternalPrReview blocked gate"
     );
-    assert!(
-        !saw_rework_node,
-        "single WorkItem internal review skip must not enter analyst rework"
-    );
-    assert!(
-        provider.analyst_prompts().is_empty(),
-        "analyst should not run when single WorkItem skips InternalPrReview"
-    );
-
     let attempt = store
         .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
         .expect("attempt");
@@ -226,10 +192,6 @@ async fn coding_ws_single_work_item_skips_internal_review_blocked_provider() {
         runs.iter()
             .all(|run| run.role != CodingProviderRole::InternalReviewer),
         "internal reviewer role runs should not be created for single WorkItem"
-    );
-    assert!(
-        runs.iter().all(|run| run.role != CodingProviderRole::Analyst),
-        "analyst role runs should not be created"
     );
     assert!(
         store

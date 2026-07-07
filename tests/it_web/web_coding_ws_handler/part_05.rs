@@ -552,14 +552,6 @@ impl StreamingProviderAdapter for FullChainStreamingProvider {
                 })
                 .expect("send coding done");
             }
-            AdapterRole::Reviewer
-                if input.output_schema == "coding_workspace_analyst_verdict_json" =>
-            {
-                tx.try_send(StreamChunk::Done {
-                    full_output: r#"{"verdict":"no_issue","summary":"testing ok"}"#.to_string(),
-                })
-                .expect("send analyst done");
-            }
             AdapterRole::Reviewer => {
                 tx.try_send(StreamChunk::Text("review approved".to_string()))
                     .expect("send review chunk");
@@ -579,4 +571,3 @@ impl StreamingProviderAdapter for FullChainStreamingProvider {
         Ok(rx)
     }
 }
-

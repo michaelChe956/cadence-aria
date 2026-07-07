@@ -71,7 +71,6 @@ where
         "coding" => Ok(Some(CodingExecutionStage::Coding)),
         "testing" => Ok(Some(CodingExecutionStage::Testing)),
         "code_review" => Ok(Some(CodingExecutionStage::CodeReview)),
-        "rework" => Ok(Some(CodingExecutionStage::Rework)),
         "review_request" => Ok(Some(CodingExecutionStage::ReviewRequest)),
         "internal_pr_review" | "group_final_review" => {
             Ok(Some(CodingExecutionStage::InternalPrReview))
@@ -85,7 +84,6 @@ where
                 "coding",
                 "testing",
                 "code_review",
-                "rework",
                 "review_request",
                 "internal_pr_review",
                 "group_final_review",

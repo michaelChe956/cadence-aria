@@ -79,7 +79,7 @@ describe("chat workspace entries", () => {
     expect(screen.getByText("支持手机号登录。")).toBeInTheDocument();
   });
 
-  it("labels tester and analyst provider stream entries by role", () => {
+  it("labels tester and code reviewer provider stream entries by role", () => {
     render(
       <ProviderStreamEntry
         entry={makeEntry({
@@ -95,14 +95,14 @@ describe("chat workspace entries", () => {
     render(
       <ProviderStreamEntry
         entry={makeEntry({
-          id: "analyst-stream",
+          id: "reviewer-stream",
           type: "provider_stream",
-          role: "analyst",
-          content: "路由判断",
+          role: "code_reviewer",
+          content: "审查结果",
         })}
       />,
     );
-    expect(screen.getByText("Analyst")).toBeInTheDocument();
+    expect(screen.getByText("Code Reviewer")).toBeInTheDocument();
   });
 
   it("renders provider stream content with escaped and single newlines as readable blocks", () => {
@@ -458,71 +458,6 @@ describe("chat workspace entries", () => {
 
     expect(screen.getByText("错误 INVALID_MESSAGE_FOR_STAGE")).toBeInTheDocument();
     expect(screen.getByText("阶段不允许")).toBeInTheDocument();
-  });
-
-  it("renders analyst verdict entries with fix hints and human questions", () => {
-    render(
-      <ChatEntryRenderer
-        entry={makeEntry({
-          type: "analyst_verdict",
-          role: "analyst",
-          content: "测试仍失败",
-          metadata: {
-            verdict: "needs_fix",
-            fix_hints: ["补充 climb_stairs 动态规划实现", "覆盖 n=10"],
-          },
-        })}
-      />,
-    );
-
-    expect(screen.getByTestId("analyst-verdict-entry")).toHaveTextContent("需要修复");
-    expect(screen.getByTestId("analyst-verdict-entry")).toHaveTextContent("测试仍失败");
-    expect(screen.getByText("补充 climb_stairs 动态规划实现")).toBeInTheDocument();
-
-    render(
-      <ChatEntryRenderer
-        entry={makeEntry({
-          id: "entry-2",
-          type: "analyst_verdict",
-          role: "analyst",
-          content: "需要人工补充",
-          metadata: {
-            verdict: "needs_human_input",
-            questions: ["n 的输入范围是多少？"],
-          },
-        })}
-      />,
-    );
-
-    expect(screen.getByText("需要人工输入")).toBeInTheDocument();
-    expect(screen.getByText("n 的输入范围是多少？")).toBeInTheDocument();
-  });
-
-  it("renders analyst routing decisions with parse diagnostics", () => {
-    render(
-      <ChatEntryRenderer
-        entry={makeEntry({
-          type: "analyst_verdict",
-          role: "analyst",
-          content: "Analyst 输出不是有效 JSON，已转人工确认。",
-          metadata: {
-            verdict: "needs_human_input",
-            structured_verdict: "human_required",
-            next_stage: "human_gate",
-            reason: "Analyst 输出不是有效 JSON，已转人工确认。",
-            evidence_refs: ["testing_report_0001.json"],
-            raw_provider_output_refs: ["provider-raw/rework/analyst_decision_0001.txt"],
-            parse_error: "key must be a string at line 1 column 2",
-          },
-        })}
-      />,
-    );
-
-    const entry = screen.getByTestId("analyst-verdict-entry");
-    expect(entry).toHaveTextContent("human_required");
-    expect(entry).toHaveTextContent("human_gate");
-    expect(entry).toHaveTextContent("key must be a string at line 1 column 2");
-    expect(entry).toHaveTextContent("provider-raw/rework/analyst_decision_0001.txt");
   });
 
   it("dispatches entries through the renderer", () => {

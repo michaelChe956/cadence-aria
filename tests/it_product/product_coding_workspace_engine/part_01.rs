@@ -18,10 +18,9 @@ use cadence_aria::product::coding_attempt_store::{
     CreateCodingExecutionUnitInput, CreateGroupCodingAttemptInput,
 };
 use cadence_aria::product::coding_models::{
-    AnalystDecisionNextStage, AnalystDecisionVerdict, AnalystVerdict, CodingAgentRole,
-    CodingAttemptScope, CodingAttemptStatus, CodingChoiceGateStatus, CodingEntryType,
-    CodingExecutionAttempt, CodingExecutionStage, CodingExecutionUnitStatus, CodingGateAction,
-    CodingGateActionType, CodingProviderPermissionMode, CodingProviderRole,
+    CodingAgentRole, CodingAttemptScope, CodingAttemptStatus, CodingChoiceGateStatus,
+    CodingEntryType, CodingExecutionAttempt, CodingExecutionStage, CodingExecutionUnitStatus,
+    CodingGateAction, CodingGateActionType, CodingProviderPermissionMode, CodingProviderRole,
     CodingReworkInstruction, CodingRolePermissionModes, CodingRoleProviderConfigSnapshot,
     CodingRoleRunEventType, CodingRoleRunStatus, CodingRoleRunTrigger, CodingTimelineNode,
     CodingTimelineNodeStatus, FindingSeverity, PushStatus, RemoteKind, ReviewRequest,
@@ -30,7 +29,7 @@ use cadence_aria::product::coding_models::{
 };
 use cadence_aria::product::coding_workspace_engine::{
     CodingExecutionContext, CodingWorkspaceEngine, ProviderTestingAdapters,
-    testing_report_should_enter_analyst,
+    testing_report_needs_blocked_gate,
 };
 use cadence_aria::product::git_workspace_service::GitWorkspaceService;
 use cadence_aria::product::lifecycle_store::{
@@ -138,7 +137,7 @@ fn role_permission_modes_are_persisted_with_role_provider_config() {
 }
 
 #[test]
-fn testing_report_routes_terminal_statuses_to_analyst_rework() {
+fn testing_report_failed_or_blocked_needs_blocked_gate() {
     let blocked = TestingReport {
         id: "testing_report_0001".to_string(),
         attempt_id: "coding_attempt_0001".to_string(),
@@ -160,13 +159,11 @@ fn testing_report_routes_terminal_statuses_to_analyst_rework() {
         context_warnings: vec!["test_plan_parse_error".to_string()],
         raw_provider_output_ref: Some("provider-raw/testing/plan_tests_0001.txt".to_string()),
     };
-    assert!(testing_report_should_enter_analyst(&blocked));
+    assert!(testing_report_needs_blocked_gate(&blocked));
 
     let mut failed_without_evidence = blocked.clone();
     failed_without_evidence.overall_status = TestingOverallStatus::Failed;
-    assert!(testing_report_should_enter_analyst(
-        &failed_without_evidence
-    ));
+    assert!(testing_report_needs_blocked_gate(&failed_without_evidence));
 
     let mut failed_with_evidence = blocked.clone();
     failed_with_evidence.overall_status = TestingOverallStatus::Failed;
@@ -182,11 +179,11 @@ fn testing_report_routes_terminal_statuses_to_analyst_rework() {
         ]),
         provider_analysis: Some("unit failed".to_string()),
     }];
-    assert!(testing_report_should_enter_analyst(&failed_with_evidence));
+    assert!(testing_report_needs_blocked_gate(&failed_with_evidence));
 
     let mut passed = blocked.clone();
     passed.overall_status = TestingOverallStatus::Passed;
-    assert!(testing_report_should_enter_analyst(&passed));
+    assert!(!testing_report_needs_blocked_gate(&passed));
 }
 
 #[tokio::test]

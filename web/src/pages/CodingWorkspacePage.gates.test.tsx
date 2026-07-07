@@ -118,7 +118,7 @@ describe("CodingWorkspacePage gate panels", () => {
           kind: "blocked",
           title: "确认 Tester 测试结果",
           description:
-            "Tester 已完成测试报告 testing_report_0001（测试通过）。请确认是否进入 Analyst 或重新测试。",
+            "Tester 已完成测试报告 testing_report_0001（测试通过）。请确认是否进入 Code Reviewer 或重新测试。",
           stage: "testing",
           role: "tester",
           reason_code: "testing_result_review_required",
@@ -127,7 +127,7 @@ describe("CodingWorkspacePage gate panels", () => {
           available_actions: [
             {
               action_id: "accept_testing_result",
-              label: "结果可用，进入 Analyst",
+              label: "结果可用，进入 Code Reviewer",
               action_type: "accept_testing_result",
             },
             {
@@ -146,7 +146,7 @@ describe("CodingWorkspacePage gate panels", () => {
     expect(gate).toHaveTextContent("确认 Tester 测试结果");
     expect(gate).not.toHaveTextContent("测试被阻塞");
 
-    await userEvent.click(screen.getByRole("button", { name: "结果可用，进入 Analyst" }));
+    await userEvent.click(screen.getByRole("button", { name: "结果可用，进入 Code Reviewer" }));
     expect(api.respondGate).toHaveBeenCalledWith(
       "gate_0001",
       "accept_testing_result",
@@ -211,7 +211,6 @@ describe("CodingWorkspacePage gate panels", () => {
             coder: "fake",
             tester_plan: "fake",
             tester_execute: "fake",
-            analyst: "fake",
             code_reviewer: "fake",
             internal_reviewer: "fake",
             review_rounds: 1,
@@ -255,7 +254,6 @@ describe("CodingWorkspacePage gate panels", () => {
             coder: "fake",
             tester_plan: "codex",
             tester_execute: "codex",
-            analyst: "fake",
             code_reviewer: "fake",
             internal_reviewer: "fake",
             review_rounds: 1,
@@ -302,14 +300,12 @@ describe("CodingWorkspacePage gate panels", () => {
         coder: "fake",
         tester_plan: "fake",
         tester_execute: "fake",
-        analyst: "fake",
         code_reviewer: "fake",
         internal_reviewer: "fake",
         review_rounds: 1,
         permission_modes: {
           coder: "supervised",
           tester: "auto",
-          analyst: "auto",
           code_reviewer: "supervised",
           internal_reviewer: "supervised",
         },
@@ -327,14 +323,14 @@ describe("CodingWorkspacePage gate panels", () => {
     expect(screen.getByTestId("coding-provider-config-panel")).not.toHaveTextContent("Analyst");
     expect(screen.getByTestId("coding-provider-config-panel")).toHaveTextContent("Code Reviewer");
     expect(screen.getByTestId("coding-provider-config-panel")).not.toHaveTextContent("Internal Reviewer");
-    expect(screen.getByTestId("coding-provider-config-panel")).toHaveTextContent("自动返修次数");
+    expect(screen.getByTestId("coding-provider-config-panel")).toHaveTextContent("自动修复次数");
     expect(screen.getByTestId("coding-provider-config-panel")).toHaveTextContent("Auto");
 
     await userEvent.click(screen.getByRole("button", { name: "将 Code Reviewer 切换为 Codex" }));
     await userEvent.click(
       screen.getByRole("button", { name: "将 Code Reviewer 授权模式切换为 Auto" }),
     );
-    fireEvent.change(screen.getByLabelText("CodeReview 自动返修次数"), {
+    fireEvent.change(screen.getByLabelText("CodeReview 自动修复次数"), {
       target: { value: "4" },
     });
 
@@ -355,14 +351,12 @@ describe("CodingWorkspacePage gate panels", () => {
         coder: "fake",
         tester_plan: "fake",
         tester_execute: "fake",
-        analyst: "fake",
         code_reviewer: "fake",
         internal_reviewer: "claude_code",
         review_rounds: 1,
         permission_modes: {
           coder: "supervised",
           tester: "auto",
-          analyst: "auto",
           code_reviewer: "supervised",
           internal_reviewer: "supervised",
         },
@@ -401,28 +395,28 @@ describe("CodingWorkspacePage gate panels", () => {
     expect(input).toHaveValue("");
   });
 
-  it("requires manual rework context for continue rework gate actions", async () => {
+  it("requires manual coder fix context before submitting gate actions to coder", async () => {
     const api = mockCodingWs();
     useCodingWorkspaceStore.setState({
       attemptId: "coding_attempt_0001",
       status: "waiting_for_human",
-      stage: "rework",
+      stage: "code_review",
       pendingGates: [
         {
           gate_id: "gate_rework_limit",
           kind: "blocked",
-          title: "Code Review 返修超上限",
+          title: "Code Review 修复超上限",
           description: "code review 连续要求修改 2 次，已达上限，请人工介入。",
-          stage: "rework",
-          role: "coder",
+          stage: "code_review",
+          role: "code_reviewer",
           reason_code: "reviewer_rework_limit_reached",
           evidence_refs: ["code_review_report_0002"],
           raw_provider_output_ref: "provider-raw/code_review/code_review_0002.txt",
           available_actions: [
             {
-              action_id: "continue_rework",
-              label: "继续返修",
-              action_type: "continue_rework",
+              action_id: "send_to_coder",
+              label: "提交给 Coder 修复",
+              action_type: "send_to_coder",
             },
             {
               action_id: "abort",
@@ -437,21 +431,21 @@ describe("CodingWorkspacePage gate panels", () => {
     render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
 
     const gate = screen.getByTestId("coding-pending-gate");
-    expect(gate).toHaveTextContent("Code Review 返修超上限");
+    expect(gate).toHaveTextContent("Code Review 修复超上限");
     expect(gate).not.toHaveTextContent("质量豁免");
     expect(screen.queryByRole("button", { name: "发送上下文" })).not.toBeInTheDocument();
-    expect(screen.getByText("请使用上方门禁操作提交人工返修意见")).toBeInTheDocument();
+    expect(screen.getByText("请使用上方门禁操作提交人工修复意见")).toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole("button", { name: "继续返修" }));
+    await userEvent.click(screen.getByRole("button", { name: "提交给 Coder 修复" }));
     expect(api.respondGate).not.toHaveBeenCalled();
-    expect(gate).toHaveTextContent("需要填写人工返修意见");
+    expect(gate).toHaveTextContent("需要填写人工修复意见");
 
-    await userEvent.type(screen.getByLabelText("人工返修意见"), "优先处理第 2 条 finding");
-    await userEvent.click(screen.getByRole("button", { name: "继续返修" }));
+    await userEvent.type(screen.getByLabelText("人工修复意见"), "优先处理第 2 条 finding");
+    await userEvent.click(screen.getByRole("button", { name: "提交给 Coder 修复" }));
 
     expect(api.respondGate).toHaveBeenCalledWith(
       "gate_rework_limit",
-      "continue_rework",
+      "send_to_coder",
       "优先处理第 2 条 finding",
     );
   });

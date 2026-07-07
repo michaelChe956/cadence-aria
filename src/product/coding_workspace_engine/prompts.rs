@@ -156,7 +156,7 @@ pub(crate) fn build_coding_prompt(
         prompt.push_str("\n````\n");
     }
     if let Some(instruction) = rework_instruction {
-        prompt.push_str("\n上一轮返修要求:\n");
+        prompt.push_str("\n上一轮修复要求:\n");
         prompt.push_str(&format!(
             "- 来源阶段: {:?}\n- 摘要: {}\n",
             instruction.source_stage, instruction.summary
@@ -220,7 +220,7 @@ pub(crate) fn build_coding_delta_prompt(
     }
 
     if let Some(instruction) = rework_instruction {
-        prompt.push_str("\n本轮返修要求:\n");
+        prompt.push_str("\n本轮修复要求:\n");
         prompt.push_str(&format!(
             "- 来源阶段: {:?}\n- 摘要: {}\n",
             instruction.source_stage, instruction.summary
@@ -242,7 +242,7 @@ pub(crate) fn build_coding_delta_prompt(
         );
     } else {
         prompt.push_str(
-            "\n本轮没有新增返修要求。请基于当前会话和 worktree 状态继续完成未结束的代码编写任务。\n",
+            "\n本轮没有新增修复要求。请基于当前会话和 worktree 状态继续完成未结束的代码编写任务。\n",
         );
     }
     append_coding_context_notes(&mut prompt, context_notes);
@@ -270,9 +270,9 @@ pub(crate) fn coding_execution_protocol() -> &'static str {
 pub(crate) fn coding_delta_execution_protocol() -> &'static str {
     "\nCoder 增量执行协议:\n\
      - 继续以本会话中的“已确认 Work Item”和 Verification Plan 作为任务来源。\n\
-     - 在继续修改前，必须重新核对本轮返修要求、补充上下文和原 Work Item 中的执行要求。\n\
-     - 若存在人工返修意见，人工返修意见优先级最高；当人工返修意见与 reviewer findings、原 Work Item 或既有上下文冲突时，优先遵循人工返修意见，并在最终报告说明冲突和取舍。\n\
-     - 若没有人工返修意见，但本轮 reviewer findings 与原 Work Item 冲突，优先遵循更具体、更新的本轮 reviewer findings；同时在最终报告说明冲突和取舍。\n\
+     - 在继续修改前，必须重新核对本轮修复要求、补充上下文和原 Work Item 中的执行要求。\n\
+     - 若存在人工修复意见，人工修复意见优先级最高；当人工修复意见与 reviewer findings、原 Work Item 或既有上下文冲突时，优先遵循人工修复意见，并在最终报告说明冲突和取舍。\n\
+     - 若没有人工修复意见，但本轮 reviewer findings 与原 Work Item 冲突，优先遵循更具体、更新的本轮 reviewer findings；同时在最终报告说明冲突和取舍。\n\
      - 不得引入平台默认技术栈假设；语言、构建系统、包管理器、测试框架相关动作必须来自 Work Item、Verification Plan、仓库文件或项目规则。\n\
      - 如果判断依据不足，必须在最终报告中说明“不足以确定”，并列出需要人工确认的问题。\n"
 }
@@ -290,7 +290,8 @@ pub(crate) fn coding_completion_report_contract() -> &'static str {
 }
 
 pub(crate) fn code_review_material_protocol() -> &'static str {
-    "\nCodeReviewer 审查协议:\n\
+    "\nCRITICAL: Return ONLY a single JSON object. No markdown, no explanations, no validation reports, no tables.\n\
+     CodeReviewer 审查协议:\n\
      - 只分析当前变更 diff，不修改代码、不执行写操作。\n\
      - 在给出 verdict 前，必须从“原始需求上下文”和 EvaluationContextPack 中提取本次任务的审查清单。\n\
      - 审查清单必须覆盖：实现目标、允许修改范围、禁止修改范围、TDD/测试要求、验证命令与证据、完成前自检要求、handoff 承诺、需求/设计追踪关系。\n\
@@ -298,8 +299,9 @@ pub(crate) fn code_review_material_protocol() -> &'static str {
      - 不得重复执行 required verification commands；除非证据缺失、证据自相矛盾或用户/Work Item 明确要求 reviewer 复跑，否则只基于 CoderEvidencePack、diff 和任务材料判断。\n\
      - 必须审查 diff 是否满足 Work Item 的实现目标、写入范围、禁止范围、验证计划、自检要求和 handoff 承诺。\n\
      - 如果 coder 报告或 EvaluationContextPack 中缺少 required 验证命令的执行证据，必须作为 finding 记录；若该证据是完成本 Work Item 的必要条件，verdict 应为 request_changes 或 blocked。\n\
-     - 如果测试输出显示没有实际测试被执行，不能把它当作有效覆盖；必须结合 Work Item 要求判断是否需要返修。\n\
-     - 不得提出执行材料之外的技术栈默认要求。\n"
+     - 如果测试输出显示没有实际测试被执行，不能把它当作有效覆盖；必须结合 Work Item 要求判断是否需要修复。\n\
+     - 不得提出执行材料之外的技术栈默认要求。\n\
+     - JSON 必须以 { 开头，以 } 结尾；不要输出 Markdown 代码块或自然语言总结。\n"
 }
 
 pub(crate) fn group_final_review_material_protocol() -> &'static str {
@@ -331,60 +333,8 @@ pub(crate) fn append_coding_context_notes(
         context_notes.truncated, context_notes.text
     ));
     prompt.push_str(
-        "请将这些人工补充要求与本轮返修要求一起执行；如有冲突，优先遵循更具体的人工补充上下文。\n",
+        "请将这些人工补充要求与本轮修复要求一起执行；如有冲突，优先遵循更具体的人工补充上下文。\n",
     );
-}
-
-pub(crate) fn build_rework_prompt(
-    attempt: &CodingExecutionAttempt,
-    evidence: &str,
-    source_stage: &CodingExecutionStage,
-    rework_round: u32,
-    context_notes: &ReworkContextNoteInput,
-    evaluation_context_json: &str,
-    retry_diagnostic: Option<&str>,
-) -> String {
-    let retry_diagnostic_section = retry_diagnostic
-        .map(|summary| format!("\n上一轮 Analyst role run 诊断摘要:\n{}\n", summary))
-        .unwrap_or_default();
-    format!(
-        "CRITICAL: Return ONLY a single JSON object. No markdown, no explanations, no validation reports, no tables.\n\
-         Coding Workspace Rework 分析官\n\
-         {}\n\
-         你是 Coding Workspace Rework 分析官，只做分析和路由决策。\n\
-         严格要求：不要修改代码，不要调用 tool_use，不要执行命令。\n\
-         仅根据上一阶段 summary/evidence、本轮新增 ContextNote 与 EvaluationContextPack 输出 AnalystDecision JSON。\n\
-         JSON 必须以 {{ 开头，以 }} 结尾。\n\
-         JSON 格式：{{\"verdict\":\"needs_fix|proceed|human_required|blocked\",\"next_stage\":\"coding|code_review|review_request|internal_pr_review|final_confirm|human_gate\",\"reason\":\"...\",\"evidence_refs\":[\"...\"],\"raw_provider_output_refs\":[\"...\"],\"rework_instructions\":null,\"human_gate\":null}}\n\
-         路由规则：Testing 阶段已从主链路摘除；历史 TestingReport 或 tester 输出契约问题不得路由回 testing，必须降级为 next_stage=human_gate 或根据上下文推进到 code_review。\n\
-         Project: {}\n\
-         Issue: {}\n\
-         Work Item: {}\n\
-         Attempt: {}\n\
-         Branch: {}\n\
-         Previous Stage: {:?}\n\
-         Rework Round: {}\n\
-         ContextNotes Truncated: {}\n\
-         \n上一阶段 summary/evidence:\n{}\n\
-         \n本轮新增 ContextNote:\n{}\n\
-         \nEvaluationContextPack:\n````json\n{}\n````\n\
-         {}\
-         \nCRITICAL: Return ONLY a single JSON object. Do not summarize validation. Do not include markdown.\n\
-         END OF INSTRUCTIONS: output JSON only.",
-        provider_runtime_contract("Analyst"),
-        attempt.project_id,
-        attempt.issue_id,
-        active_work_item_id_for_prompt(attempt),
-        attempt.id,
-        attempt.branch_name,
-        source_stage,
-        rework_round,
-        context_notes.truncated,
-        evidence,
-        context_notes.text,
-        evaluation_context_json,
-        retry_diagnostic_section
-    )
 }
 
 pub(crate) fn provider_runtime_contract(role: &str) -> String {

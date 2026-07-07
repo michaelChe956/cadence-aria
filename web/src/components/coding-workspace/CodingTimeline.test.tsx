@@ -16,7 +16,6 @@ describe("CodingTimeline", () => {
         ]}
         activeNodeId={null}
         selectedNodeId={null}
-        latestAnalystDecision={null}
         onSelectNode={vi.fn()}
       />,
     );

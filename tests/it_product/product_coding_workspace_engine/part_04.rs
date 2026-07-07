@@ -49,7 +49,7 @@ async fn coding_prompt_includes_rework_fix_hints() {
         .expect("prompt lock")
         .clone()
         .expect("captured prompt");
-    assert!(prompt.contains("上一轮返修要求"));
+    assert!(prompt.contains("上一轮修复要求"));
     assert!(prompt.contains("来源阶段: CodeReview"));
     assert!(prompt.contains("reviewer 要求移除运行产物"));
     assert!(prompt.contains("移除 __pycache__ 和 .pyc 文件"));
@@ -146,7 +146,6 @@ async fn execute_coding_emits_prompt_for_coder_provider() {
                 coder: ProviderName::Codex,
                 tester_plan: ProviderName::Fake,
                 tester_execute: ProviderName::Fake,
-                analyst: ProviderName::Fake,
                 code_reviewer: ProviderName::Fake,
                 internal_reviewer: ProviderName::Fake,
                 review_rounds: 1,
@@ -211,7 +210,6 @@ async fn execute_coding_forwards_provider_execution_and_tool_events() {
                 coder: ProviderName::Codex,
                 tester_plan: ProviderName::Fake,
                 tester_execute: ProviderName::Fake,
-                analyst: ProviderName::Fake,
                 code_reviewer: ProviderName::Fake,
                 internal_reviewer: ProviderName::Fake,
                 review_rounds: 1,

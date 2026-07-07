@@ -1,6 +1,5 @@
 import { create } from "zustand";
 import type {
-  AnalystDecisionRecord,
   CodeReviewReport,
   CodingAttemptScope,
   CodingAttemptStatus,
@@ -84,7 +83,6 @@ export interface CodingWorkspaceState {
   codeReviewReports: CodeReviewReport[];
   internalPrReview: InternalPrReview | null;
   reviewRequest: ReviewRequest | null;
-  latestAnalystDecision: AnalystDecisionRecord | null;
   roleRuns: CodingRoleRun[];
   logs: CodingLogEntry[];
   connectionStatus: CodingConnectionStatus;
@@ -164,7 +162,6 @@ const initialState: CodingWorkspaceState = {
   codeReviewReports: [],
   internalPrReview: null,
   reviewRequest: null,
-  latestAnalystDecision: null,
   roleRuns: [],
   logs: [],
   connectionStatus: "disconnected",
@@ -219,7 +216,6 @@ export const useCodingWorkspaceStore = create<
         codeReviewReports: snapshot.code_review_reports,
         reviewRequest: snapshot.review_request,
         internalPrReview: snapshot.internal_pr_review,
-        latestAnalystDecision: snapshot.latest_analyst_decision ?? null,
         roleRuns: snapshot.role_runs ?? [],
         pendingGates: mergeSnapshotPendingGates(snapshot.pending_gates, prev.pendingGates),
         workItemExecutionPlan: snapshot.work_item_execution_plan ?? null,
@@ -421,7 +417,6 @@ function stageToArtifactTab(stage: CodingExecutionStage): CodingArtifactTab | nu
     case "review_request":
       return "git";
     case "coding":
-    case "rework":
       return "diff";
     case "testing":
       return "tests";
@@ -444,8 +439,6 @@ function chatRoleForNode(
       return "coder";
     case "testing":
       return "tester";
-    case "rework":
-      return "analyst";
     case "code_review":
       return "code_reviewer";
     case "internal_pr_review":
@@ -463,7 +456,7 @@ function providerConfigKeyForRole(
   role: CodingProviderSelectRole | "tester",
 ): keyof Pick<
   CodingRoleProviderConfigSnapshot,
-  "coder" | "tester_plan" | "tester_execute" | "analyst" | "code_reviewer" | "internal_reviewer"
+  "coder" | "tester_plan" | "tester_execute" | "code_reviewer" | "internal_reviewer"
 > {
   switch (role) {
     case "author":
@@ -477,8 +470,6 @@ function providerConfigKeyForRole(
       return "tester_execute";
     case "tester_plan":
       return "tester_plan";
-    case "analyst":
-      return "analyst";
     case "internal_reviewer":
       return "internal_reviewer";
   }
@@ -603,8 +594,6 @@ function chatRoleForChoiceRole(role: CodingProviderRole): ChatEntryRole {
       return "coder";
     case "tester":
       return "tester";
-    case "analyst":
-      return "analyst";
     case "code_reviewer":
       return "code_reviewer";
     case "internal_reviewer":
@@ -682,7 +671,6 @@ function roleRunRoleForChatEntry(entry: ChatEntry): CodingProviderRole | null {
   switch (entry.role) {
     case "coder":
     case "tester":
-    case "analyst":
     case "code_reviewer":
     case "internal_reviewer":
       return entry.role;
@@ -700,8 +688,6 @@ function stageForRoleRunRole(role: CodingProviderRole): CodingExecutionStage {
       return "coding";
     case "tester":
       return "testing";
-    case "analyst":
-      return "rework";
     case "code_reviewer":
       return "code_review";
     case "internal_reviewer":

@@ -409,7 +409,7 @@ async fn manual_continue_persists_quality_bypass_audit_and_injects_reviewer_cont
 }
 
 #[tokio::test]
-async fn continue_rework_after_limit_uses_latest_code_review_without_quality_bypass() {
+async fn send_to_coder_after_review_limit_uses_latest_code_review_without_quality_bypass() {
     let paths = ProductAppPaths::new(tempdir().expect("tempdir").path().join(".aria"));
     let store = CodingAttemptStore::new(paths);
     let attempt = store
@@ -447,9 +447,9 @@ async fn continue_rework_after_limit_uses_latest_code_review_without_quality_byp
             &attempt.project_id,
             &attempt.issue_id,
             &attempt.id,
-            CodingExecutionStage::Rework,
+            CodingExecutionStage::CodeReview,
         )
-        .expect("rework stage");
+        .expect("code review stage");
     attempt = store
         .update_attempt_status(
             &attempt.project_id,
@@ -490,11 +490,11 @@ async fn continue_rework_after_limit_uses_latest_code_review_without_quality_byp
     let gate = store
         .create_blocked_gate(CreateBlockedGateInput {
             attempt_id: attempt.id.clone(),
-            stage: CodingExecutionStage::Rework,
+            stage: CodingExecutionStage::CodeReview,
             node_id: None,
-            role: Some(CodingProviderRole::Coder),
-            title: "Rework limit reached".to_string(),
-            description: "已达到自动重写上限".to_string(),
+            role: Some(CodingProviderRole::CodeReviewer),
+            title: "Code Review 修复超上限".to_string(),
+            description: "已达到自动修复上限".to_string(),
             reason_code: Some("reviewer_rework_limit_reached".to_string()),
             evidence_refs: vec!["code_review_0001/findings[0]".to_string()],
             raw_provider_output_ref: Some(
@@ -502,7 +502,7 @@ async fn continue_rework_after_limit_uses_latest_code_review_without_quality_byp
             ),
             available_actions: vec![
                 coding_gate_action_for_id("provide_context").expect("provide context action"),
-                coding_gate_action_for_id("continue_rework").expect("continue rework action"),
+                coding_gate_action_for_id("send_to_coder").expect("send to coder action"),
                 coding_gate_action_for_id("abort").expect("abort action"),
             ],
         })
@@ -516,11 +516,11 @@ async fn continue_rework_after_limit_uses_latest_code_review_without_quality_byp
             &attempt.issue_id,
             &attempt.id,
             &gate.gate_id,
-            "continue_rework",
+            "send_to_coder",
             Some("继续修 CodeReview findings".to_string()),
         )
         .await
-        .expect("continue rework");
+        .expect("send to coder");
 
     assert_eq!(updated.status, CodingAttemptStatus::Running);
     assert_eq!(updated.stage, CodingExecutionStage::Coding);
@@ -554,7 +554,7 @@ async fn continue_rework_after_limit_uses_latest_code_review_without_quality_byp
 }
 
 #[tokio::test]
-async fn continue_rework_after_limit_accepts_actionable_blocked_code_review() {
+async fn send_to_coder_after_review_limit_accepts_actionable_blocked_code_review() {
     let paths = ProductAppPaths::new(tempdir().expect("tempdir").path().join(".aria"));
     let store = CodingAttemptStore::new(paths);
     let attempt = store
@@ -592,9 +592,9 @@ async fn continue_rework_after_limit_accepts_actionable_blocked_code_review() {
             &attempt.project_id,
             &attempt.issue_id,
             &attempt.id,
-            CodingExecutionStage::Rework,
+            CodingExecutionStage::CodeReview,
         )
-        .expect("rework stage");
+        .expect("code review stage");
     attempt = store
         .update_attempt_status(
             &attempt.project_id,
@@ -635,11 +635,11 @@ async fn continue_rework_after_limit_accepts_actionable_blocked_code_review() {
     let gate = store
         .create_blocked_gate(CreateBlockedGateInput {
             attempt_id: attempt.id.clone(),
-            stage: CodingExecutionStage::Rework,
+            stage: CodingExecutionStage::CodeReview,
             node_id: None,
-            role: Some(CodingProviderRole::Coder),
-            title: "Rework limit reached".to_string(),
-            description: "已达到自动重写上限".to_string(),
+            role: Some(CodingProviderRole::CodeReviewer),
+            title: "Code Review 修复超上限".to_string(),
+            description: "已达到自动修复上限".to_string(),
             reason_code: Some("reviewer_rework_limit_reached".to_string()),
             evidence_refs: vec!["code_review_0001/findings[0]".to_string()],
             raw_provider_output_ref: Some(
@@ -647,7 +647,7 @@ async fn continue_rework_after_limit_accepts_actionable_blocked_code_review() {
             ),
             available_actions: vec![
                 coding_gate_action_for_id("provide_context").expect("provide context action"),
-                coding_gate_action_for_id("continue_rework").expect("continue rework action"),
+                coding_gate_action_for_id("send_to_coder").expect("send to coder action"),
                 coding_gate_action_for_id("abort").expect("abort action"),
             ],
         })
@@ -661,11 +661,11 @@ async fn continue_rework_after_limit_accepts_actionable_blocked_code_review() {
             &attempt.issue_id,
             &attempt.id,
             &gate.gate_id,
-            "continue_rework",
-            Some("人工意见：按 blocked finding 继续返修".to_string()),
+            "send_to_coder",
+            Some("人工意见：按 blocked finding 继续修复".to_string()),
         )
         .await
-        .expect("continue rework");
+        .expect("send to coder");
 
     assert_eq!(updated.status, CodingAttemptStatus::Running);
     assert_eq!(updated.stage, CodingExecutionStage::Coding);

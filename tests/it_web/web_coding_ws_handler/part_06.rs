@@ -6,29 +6,19 @@ enum BlockedReviewerStage {
 
 struct ReviewerBlockedProvider {
     blocked_stage: BlockedReviewerStage,
-    analyst_prompts: Mutex<Vec<String>>,
 }
 
 impl ReviewerBlockedProvider {
     fn code_review() -> Self {
         Self {
             blocked_stage: BlockedReviewerStage::CodeReview,
-            analyst_prompts: Mutex::new(Vec::new()),
         }
     }
 
     fn internal_pr_review() -> Self {
         Self {
             blocked_stage: BlockedReviewerStage::InternalPrReview,
-            analyst_prompts: Mutex::new(Vec::new()),
         }
-    }
-
-    fn analyst_prompts(&self) -> Vec<String> {
-        self.analyst_prompts
-            .lock()
-            .expect("analyst prompts lock")
-            .clone()
     }
 }
 
@@ -66,34 +56,6 @@ impl StreamingProviderAdapter for ReviewerBlockedProvider {
                     full_output: "implemented climb_stairs".to_string(),
                 })
                 .expect("send coding done");
-            }
-            AdapterRole::Reviewer
-                if input.output_schema == "coding_workspace_analyst_verdict_json" =>
-            {
-                self.analyst_prompts
-                    .lock()
-                    .expect("analyst prompts lock")
-                    .push(input.prompt.clone());
-                let full_output = if input.prompt.contains("Previous Stage: Testing") {
-                    r#"{"verdict":"proceed","next_stage":"code_review","reason":"testing evidence accepted"}"#
-                } else if input.prompt.contains("Previous Stage: CodeReview") {
-                    match self.blocked_stage {
-                        BlockedReviewerStage::CodeReview => {
-                            r#"{"verdict":"needs_fix","next_stage":"coding","reason":"code review blocked requires coder follow-up","fix_hints":["补充 review 所需上下文"]}"#
-                        }
-                        BlockedReviewerStage::InternalPrReview => {
-                            r#"{"verdict":"proceed","next_stage":"review_request","reason":"code review accepted"}"#
-                        }
-                    }
-                } else if input.prompt.contains("Previous Stage: InternalPrReview") {
-                    r#"{"verdict":"proceed","next_stage":"final_confirm","reason":"internal review blocked is accepted for final confirmation"}"#
-                } else {
-                    r#"{"verdict":"no_issue","summary":"ok"}"#
-                };
-                tx.try_send(StreamChunk::Done {
-                    full_output: full_output.to_string(),
-                })
-                .expect("send analyst done");
             }
             AdapterRole::Reviewer if input.output_schema == "coding_workspace_code_review_json" => {
                 let full_output = match self.blocked_stage {
@@ -199,21 +161,6 @@ impl StreamingProviderAdapter for InternalReviewReworkProvider {
                 .expect("send coding done");
             }
             AdapterRole::Reviewer
-                if input.output_schema == "coding_workspace_analyst_verdict_json" =>
-            {
-                let full_output = if input.prompt.contains("Previous Stage: InternalPrReview")
-                    && input.prompt.contains(r#""verdict": "request_changes""#)
-                {
-                    r#"{"verdict":"needs_fix","summary":"internal review 要求修复","fix_hints":["补充 internal_fix.rs"]}"#
-                } else {
-                    r#"{"verdict":"no_issue","summary":"ok"}"#
-                };
-                tx.try_send(StreamChunk::Done {
-                    full_output: full_output.to_string(),
-                })
-                .expect("send analyst done");
-            }
-            AdapterRole::Reviewer
                 if input.output_schema == "coding_workspace_internal_pr_review_json" =>
             {
                 let internal_review_call = {
@@ -257,7 +204,6 @@ struct CodeReviewReworkProvider {
 #[derive(Default)]
 struct CodeReviewReworkState {
     coding_calls: usize,
-    analyst_calls: usize,
     code_review_calls: usize,
     coding_prompts: Vec<String>,
 }
@@ -333,24 +279,6 @@ impl StreamingProviderAdapter for CodeReviewReworkProvider {
                     full_output: format!("coding round {coding_call} done"),
                 })
                 .expect("send coding done");
-            }
-            AdapterRole::Reviewer
-                if input.output_schema == "coding_workspace_analyst_verdict_json" =>
-            {
-                let analyst_call = {
-                    let mut state = self.state.lock().expect("state lock");
-                    state.analyst_calls += 1;
-                    state.analyst_calls
-                };
-                let full_output = if analyst_call == 2 {
-                    r#"{"verdict":"needs_fix","summary":"code review 要求移除运行产物","fix_hints":["移除 __pycache__ 和 .pyc 文件"]}"#
-                } else {
-                    r#"{"verdict":"no_issue","summary":"ok"}"#
-                };
-                tx.try_send(StreamChunk::Done {
-                    full_output: full_output.to_string(),
-                })
-                .expect("send analyst done");
             }
             AdapterRole::Reviewer if input.output_schema == "coding_workspace_code_review_json" => {
                 let code_review_call = {
@@ -487,11 +415,6 @@ impl StreamingProviderAdapter for HangingCodingProvider {
                     .await;
                 tokio::time::sleep(Duration::from_secs(60)).await;
             });
-        } else if input.output_schema == "coding_workspace_analyst_verdict_json" {
-            tx.try_send(StreamChunk::Done {
-                full_output: r#"{"verdict":"no_issue","summary":"testing ok"}"#.to_string(),
-            })
-            .expect("send analyst done");
         } else {
             tx.try_send(StreamChunk::Done {
                 full_output: r#"{"verdict":"approve","summary":"review ok","findings":[]}"#

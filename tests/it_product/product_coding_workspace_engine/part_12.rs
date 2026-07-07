@@ -8,6 +8,8 @@ fn group_engine_with_two_units() -> (
     let root = tempdir().expect("root");
     let paths = ProductAppPaths::new(root.path().join(".aria"));
     let store = CodingAttemptStore::new(paths.clone());
+    let worktree = root.path().join("group-worktree");
+    init_group_worktree(&worktree);
     let attempt = store
         .create_group_attempt(CreateGroupCodingAttemptInput {
             project_id: "project_0001".to_string(),
@@ -16,7 +18,7 @@ fn group_engine_with_two_units() -> (
             current_work_item_id: "work_item_0001".to_string(),
             base_branch: "HEAD".to_string(),
             branch_name: "aria/issues/issue_0001".to_string(),
-            worktree_path: None,
+            worktree_path: Some(worktree),
             provider_config_snapshot: ProviderConfigSnapshot {
                 author: ProviderName::Fake,
                 reviewer: Some(ProviderName::Fake),
@@ -62,6 +64,8 @@ fn group_engine_with_last_running_unit() -> (
     let root = tempdir().expect("root");
     let paths = ProductAppPaths::new(root.path().join(".aria"));
     let store = CodingAttemptStore::new(paths.clone());
+    let worktree = root.path().join("group-worktree");
+    init_group_worktree(&worktree);
     let attempt = store
         .create_group_attempt(CreateGroupCodingAttemptInput {
             project_id: "project_0001".to_string(),
@@ -70,7 +74,7 @@ fn group_engine_with_last_running_unit() -> (
             current_work_item_id: "work_item_0002".to_string(),
             base_branch: "HEAD".to_string(),
             branch_name: "aria/issues/issue_0001".to_string(),
-            worktree_path: None,
+            worktree_path: Some(worktree),
             provider_config_snapshot: ProviderConfigSnapshot {
                 author: ProviderName::Fake,
                 reviewer: Some(ProviderName::Fake),
@@ -104,6 +108,15 @@ fn group_engine_with_last_running_unit() -> (
     let (tx, _rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
     (root, paths, store, engine, attempt)
+}
+
+fn init_group_worktree(worktree: &Path) {
+    init_repo(worktree);
+    fs::create_dir_all(worktree.join("src")).expect("create group src dir");
+    fs::write(worktree.join("src/backend.rs"), "// backend\n").expect("write backend file");
+    fs::write(worktree.join("src/frontend.rs"), "// frontend\n").expect("write frontend file");
+    run_git(worktree, &["add", "."]);
+    run_git(worktree, &["commit", "-m", "seed group files"]);
 }
 
 fn completed_group_attempt_with_handoffs() -> (

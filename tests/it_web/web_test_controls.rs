@@ -118,7 +118,7 @@ async fn coding_role_run_fixture_seed_route_creates_attempt_with_runs() {
         app.clone(),
         Method::POST,
         "/api/test/coding-attempts/role-run-fixture",
-        json!({"blocked_stage":"rework"}),
+        json!({"blocked_stage":"code_review"}),
     )
     .await;
 
@@ -137,6 +137,6 @@ async fn coding_role_run_fixture_seed_route_creates_attempt_with_runs() {
     );
     assert!(
         runs.iter()
-            .any(|run| run.role == CodingProviderRole::Analyst)
+            .any(|run| run.role == CodingProviderRole::CodeReviewer)
     );
 }

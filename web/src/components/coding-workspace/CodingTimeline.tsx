@@ -4,29 +4,22 @@ import {
   FlaskConical,
   GitBranch,
   GitPullRequest,
-  RefreshCw,
   SearchCode,
   ShieldCheck,
   UserCheck,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import type {
-  AnalystDecisionRecord,
-  CodingExecutionStage,
-  CodingTimelineNode,
-} from "../../api/types";
+import type { CodingExecutionStage, CodingTimelineNode } from "../../api/types";
 
 export function CodingTimeline({
   nodes,
   activeNodeId,
   selectedNodeId,
-  latestAnalystDecision,
   onSelectNode,
 }: {
   nodes: CodingTimelineNode[];
   activeNodeId: string | null;
   selectedNodeId: string | null;
-  latestAnalystDecision?: AnalystDecisionRecord | null;
   onSelectNode: (nodeId: string) => void;
 }) {
   return (
@@ -73,12 +66,6 @@ export function CodingTimeline({
                         {node.summary}
                       </p>
                     ) : null}
-                    {node.stage === "rework" && latestAnalystDecision ? (
-                      <p className="mt-1 truncate font-mono text-[11px] text-[var(--aria-primary)]">
-                        {latestAnalystDecision.verdict} {"->"}{" "}
-                        {latestAnalystDecision.next_stage}
-                      </p>
-                    ) : null}
                   </div>
                 </div>
               </button>
@@ -107,8 +94,6 @@ function iconForStage(stage: CodingExecutionStage): LucideIcon {
       return FlaskConical;
     case "code_review":
       return SearchCode;
-    case "rework":
-      return RefreshCw;
     case "review_request":
       return GitPullRequest;
     case "internal_pr_review":

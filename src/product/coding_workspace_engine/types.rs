@@ -98,7 +98,6 @@ pub(crate) fn provider_conversation_role_for_coding_role(
     match role {
         CodingProviderRole::Coder => ProviderConversationRole::Coder,
         CodingProviderRole::Tester => ProviderConversationRole::Tester,
-        CodingProviderRole::Analyst => ProviderConversationRole::Analyst,
         CodingProviderRole::CodeReviewer => ProviderConversationRole::CodeReviewer,
         CodingProviderRole::InternalReviewer => ProviderConversationRole::InternalReviewer,
     }
