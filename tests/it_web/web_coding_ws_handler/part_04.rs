@@ -308,6 +308,51 @@ async fn coding_ws_abort_attempt_closes_active_node_and_sends_snapshot() {
     server.abort();
 }
 
+#[tokio::test]
+async fn coding_ws_abort_attempt_aborts_all_registered_runners() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let (app, state) = app_with_running_testing_attempt_and_state(root.path());
+    let (first_runner_tx, mut first_runner_rx) = mpsc::channel(1);
+    let (second_runner_tx, mut second_runner_rx) = mpsc::channel(1);
+    state
+        .coding_runs
+        .insert("coding_attempt_0001".to_string(), first_runner_tx);
+    state
+        .coding_runs
+        .insert("coding_attempt_0001".to_string(), second_runner_tx);
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(&mut ws, &CodingWsInMessage::AbortAttempt).await;
+
+    assert_eq!(
+        timeout(Duration::from_secs(5), first_runner_rx.recv())
+            .await
+            .expect("first runner abort timeout")
+            .expect("first runner abort"),
+        CodingRunnerCommand::AbortAttempt
+    );
+    assert_eq!(
+        timeout(Duration::from_secs(5), second_runner_rx.recv())
+            .await
+            .expect("second runner abort timeout")
+            .expect("second runner abort"),
+        CodingRunnerCommand::AbortAttempt
+    );
+    assert_eq!(state.coding_runs.runner_count("coding_attempt_0001"), 0);
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
 fn app_with_attempt(root_path: &std::path::Path) -> axum::Router {
     let app_paths = ProductAppPaths::new(root_path.join(".aria"));
     let repo = root_path.join("repo");

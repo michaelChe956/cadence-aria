@@ -624,3 +624,56 @@ async fn coding_coder_rework_with_resume_uses_delta_prompt() {
             .contains("不要只输出计划或 Story/Design/Work Item 文档")
     );
 }
+
+#[tokio::test]
+async fn group_next_work_item_coder_run_does_not_resume_previous_unit_session() {
+    let (_root, _paths, store, _engine, attempt) = group_engine_with_last_running_unit();
+    let attempt = store
+        .update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running attempt");
+    let attempt = store
+        .replace_attempt_provider_conversations(
+            &attempt.id,
+            vec![ProviderConversationRef {
+                role: ProviderConversationRole::Coder,
+                provider: ProviderName::Fake,
+                provider_session_id: "coder-session-from-unit-1".to_string(),
+                updated_at: "2026-07-08T00:00:00Z".to_string(),
+                last_node_id: Some("coding_node_0002".to_string()),
+            }],
+        )
+        .expect("seed previous coder session");
+    let context = CodingExecutionContext {
+        work_item_markdown: Some(
+            "# Work Item 002\n\n实现 ProviderDescriptor 元数据层与全局 ProviderStateStore。"
+                .to_string(),
+        ),
+        verification_commands: vec!["cargo test --locked --lib provider_metadata".to_string()],
+    };
+    let (tx, mut rx) = mpsc::channel(64);
+    tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
+    let provider = SessionInputCapturingProvider::with_outputs(
+        ["unit 2 coding done"],
+        [Some("coder-session-unit-2".to_string())],
+    );
+
+    engine
+        .execute_coding(&attempt, &provider, &context)
+        .await
+        .expect("execute second unit coding");
+
+    let inputs = provider.inputs.lock().expect("inputs lock");
+    assert_eq!(inputs.len(), 1);
+    let input = &inputs[0];
+    assert_eq!(input.resume_provider_session_id, None);
+    assert!(input.prompt.contains("# Work Item 002"));
+    assert!(input.prompt.contains("ProviderDescriptor 元数据层"));
+    assert!(!input.prompt.contains("增量代码编写指令"));
+    assert!(!input.prompt.contains("本轮没有新增修复要求"));
+}

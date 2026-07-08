@@ -26,6 +26,11 @@ pub(crate) fn spawn_coding_runner(
     attempt: CodingExecutionAttempt,
 ) -> mpsc::Sender<CodingRunnerCommand> {
     let (command_tx, command_rx) = mpsc::channel(32);
+    let registry_attempt_id = attempt.id.clone();
+    let registry_run_id = state
+        .coding_runs
+        .insert(registry_attempt_id.clone(), command_tx.clone());
+    let coding_runs = state.coding_runs.clone();
     tokio::spawn(async move {
         let engine = CodingWorkspaceEngine::with_provider(
             coding_store.clone(),
@@ -33,7 +38,7 @@ pub(crate) fn spawn_coding_runner(
             state.provider_adapter.clone(),
             event_tx.clone(),
         );
-        if let Err(error) = execute_start_coding_flow(
+        let result = execute_start_coding_flow(
             &state,
             &coding_store,
             &engine,
@@ -41,11 +46,10 @@ pub(crate) fn spawn_coding_runner(
             command_rx,
             &attempt,
         )
-        .await
+        .await;
+        if let Err(error) = result
+            && !matches!(error, CodingWorkspaceEngineError::Aborted)
         {
-            if matches!(error, CodingWorkspaceEngineError::Aborted) {
-                return;
-            }
             let code = match &error {
                 CodingWorkspaceEngineError::ExecutionPlanNotConfirmed(_) => {
                     "work_item_execution_plan_not_confirmed".to_string()
@@ -59,6 +63,7 @@ pub(crate) fn spawn_coding_runner(
                 })
                 .await;
         }
+        coding_runs.remove(&registry_attempt_id, registry_run_id);
     });
     command_tx
 }

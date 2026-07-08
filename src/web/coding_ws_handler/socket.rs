@@ -167,19 +167,18 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                         let _ = send_coding_json(&mut socket_tx, &snapshot).await;
                     }
                 } else if inbound == CodingWsInMessage::AbortAttempt {
-                    if let Some(command_tx) = runner_command_tx.as_ref() {
-                        let open_gates = coding_store
-                            .list_open_stage_gates(
-                                &current_attempt.project_id,
-                                &current_attempt.issue_id,
-                                &current_attempt.id,
-                            )
-                            .unwrap_or_default();
-                        if !open_gates.is_empty() {
-                            let _ = command_tx.send(CodingRunnerCommand::AbortAttempt).await;
-                            continue;
-                        }
-                        let _ = command_tx.send(CodingRunnerCommand::AbortAttempt).await;
+                    let open_gates = coding_store
+                        .list_open_stage_gates(
+                            &current_attempt.project_id,
+                            &current_attempt.issue_id,
+                            &current_attempt.id,
+                        )
+                        .unwrap_or_default();
+                    let aborted_runners = state.coding_runs.abort_attempt(&current_attempt.id).await;
+                    runner_command_tx = None;
+                    runner_started = false;
+                    if aborted_runners > 0 && !open_gates.is_empty() {
+                        continue;
                     }
                     let engine = CodingWorkspaceEngine::new(
                         coding_store.clone(),

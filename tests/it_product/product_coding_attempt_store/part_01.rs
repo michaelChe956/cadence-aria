@@ -87,6 +87,60 @@ fn create_attempt_assigns_attempt_number_and_blocks_active_attempts() {
 }
 
 #[test]
+fn create_attempt_does_not_reuse_id_after_delete() {
+    let root = tempdir().expect("tempdir");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+
+    let first = store
+        .create_attempt(create_input("work_item_0001"))
+        .expect("create first attempt");
+    assert_eq!(first.id, "coding_attempt_0001");
+    std::fs::remove_file(
+        root.path().join(
+            ".aria/projects/project_0001/issues/issue_0001/coding-attempts/.meta/coding-attempt-sequence.json",
+        ),
+    )
+    .expect("remove legacy-missing sequence");
+    store
+        .delete_attempt("project_0001", "issue_0001", &first.id)
+        .expect("delete first attempt");
+
+    let second = store
+        .create_attempt(create_input("work_item_0001"))
+        .expect("create second attempt");
+
+    assert_eq!(second.id, "coding_attempt_0002");
+    assert_eq!(second.attempt_no, 1);
+}
+
+#[test]
+fn create_group_attempt_does_not_reuse_id_after_delete() {
+    let root = tempdir().expect("tempdir");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+
+    let first = store
+        .create_group_attempt(group_create_input("work_item_0001"))
+        .expect("create first group attempt");
+    assert_eq!(first.id, "coding_attempt_0001");
+    std::fs::remove_file(
+        root.path().join(
+            ".aria/projects/project_0001/issues/issue_0001/coding-attempts/.meta/coding-attempt-sequence.json",
+        ),
+    )
+    .expect("remove legacy-missing sequence");
+    store
+        .delete_attempt("project_0001", "issue_0001", &first.id)
+        .expect("delete first group attempt");
+
+    let second = store
+        .create_group_attempt(group_create_input("work_item_0001"))
+        .expect("create second group attempt");
+
+    assert_eq!(second.id, "coding_attempt_0002");
+    assert_eq!(second.attempt_no, 1);
+}
+
+#[test]
 fn coding_attempt_provider_conversations_default_for_legacy_json() {
     let root = tempdir().expect("tempdir");
     let paths = ProductAppPaths::new(root.path().join(".aria"));

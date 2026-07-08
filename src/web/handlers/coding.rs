@@ -605,6 +605,7 @@ pub async fn abort_coding_attempt(
     let attempt = coding_store
         .get_attempt_by_id(&attempt_id)
         .map_err(product_store_api_error)?;
+    state.coding_runs.abort_attempt(&attempt.id).await;
     let engine = coding_workspace_engine_with_dummy_events(coding_store);
     let aborted = engine
         .handle_abort(&attempt.project_id, &attempt.issue_id, &attempt.id)
@@ -623,6 +624,7 @@ pub async fn delete_coding_attempt(
     let attempt = coding_store
         .get_attempt_by_id(&attempt_id)
         .map_err(product_store_api_error)?;
+    state.coding_runs.abort_attempt(&attempt.id).await;
     let active_work_item_id = attempt
         .current_work_item_id
         .as_deref()

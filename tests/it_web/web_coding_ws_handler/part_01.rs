@@ -8,6 +8,7 @@ use cadence_aria::product::coding_attempt_store::{
     CodingAttemptStore, CreateBlockedGateInput, CreateCodingAttemptInput,
     CreateCodingExecutionUnitInput, CreateGroupCodingAttemptInput,
 };
+use cadence_aria::product::coding_workspace_runner::CodingRunnerCommand;
 use cadence_aria::product::coding_models::{
     CodingAgentRole, CodingAttemptStatus, CodingEntryType, CodingExecutionStage,
     CodingExecutionUnitStatus, CodingGateAction, CodingGateActionType, CodingGateKind,

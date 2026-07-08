@@ -7,6 +7,7 @@ use crate::cross_cutting::codex_provider::CodexProvider;
 use crate::cross_cutting::provider_adapter::ProviderAdapter;
 use crate::cross_cutting::provider_registry::ProviderRegistry;
 use crate::cross_cutting::streaming_provider::ProviderCommand;
+use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::models::ProviderName;
 use crate::web::events::EventHub;
 use crate::web::provider_availability::provider_name_available;
@@ -22,6 +23,69 @@ pub struct WorkspaceActiveRun {
     pub cancel: CancellationToken,
     pub command_tx: mpsc::Sender<ProviderCommand>,
     pub pending_choice_ids: Arc<AsyncMutex<HashSet<String>>>,
+}
+
+#[derive(Clone, Default)]
+pub struct CodingRunRegistry {
+    inner: Arc<StdMutex<CodingRunRegistryInner>>,
+}
+
+#[derive(Default)]
+struct CodingRunRegistryInner {
+    next_run_id: u64,
+    runs: HashMap<String, HashMap<u64, mpsc::Sender<CodingRunnerCommand>>>,
+}
+
+impl CodingRunRegistry {
+    pub fn insert(&self, attempt_id: String, command_tx: mpsc::Sender<CodingRunnerCommand>) -> u64 {
+        let mut inner = self.inner.lock().expect("coding run registry lock");
+        inner.next_run_id += 1;
+        let run_id = inner.next_run_id;
+        inner
+            .runs
+            .entry(attempt_id)
+            .or_default()
+            .insert(run_id, command_tx);
+        run_id
+    }
+
+    pub fn remove(&self, attempt_id: &str, run_id: u64) {
+        let mut inner = self.inner.lock().expect("coding run registry lock");
+        if let Some(runs) = inner.runs.get_mut(attempt_id) {
+            runs.remove(&run_id);
+            if runs.is_empty() {
+                inner.runs.remove(attempt_id);
+            }
+        }
+    }
+
+    pub async fn abort_attempt(&self, attempt_id: &str) -> usize {
+        let senders = {
+            let mut inner = self.inner.lock().expect("coding run registry lock");
+            inner
+                .runs
+                .remove(attempt_id)
+                .map(|runs| runs.into_values().collect::<Vec<_>>())
+                .unwrap_or_default()
+        };
+        let mut sent = 0;
+        for sender in senders {
+            if sender.send(CodingRunnerCommand::AbortAttempt).await.is_ok() {
+                sent += 1;
+            }
+        }
+        sent
+    }
+
+    pub fn runner_count(&self, attempt_id: &str) -> usize {
+        self.inner
+            .lock()
+            .expect("coding run registry lock")
+            .runs
+            .get(attempt_id)
+            .map(HashMap::len)
+            .unwrap_or(0)
+    }
 }
 
 #[derive(Clone, Default)]
@@ -91,6 +155,7 @@ pub struct WebAppState {
     pub provider_adapter: Arc<dyn ProviderAdapter + Send + Sync>,
     pub test_controls: TestControls,
     pub workspace_runs: WorkspaceRunRegistry,
+    pub coding_runs: CodingRunRegistry,
 }
 
 impl WebAppState {
@@ -116,6 +181,7 @@ impl WebAppState {
             provider_adapter,
             test_controls,
             workspace_runs: WorkspaceRunRegistry::default(),
+            coding_runs: CodingRunRegistry::default(),
         }
     }
 
@@ -167,6 +233,7 @@ impl WebAppState {
             provider_adapter,
             test_controls: TestControls::default(),
             workspace_runs: WorkspaceRunRegistry::default(),
+            coding_runs: CodingRunRegistry::default(),
         }
     }
 
@@ -250,6 +317,32 @@ mod tests {
                 std::env::remove_var("ARIA_PROVIDER_MODE");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn coding_run_registry_aborts_all_runs_for_attempt_and_removes_them() {
+        let registry = CodingRunRegistry::default();
+        let (first_tx, mut first_rx) = mpsc::channel(1);
+        let (second_tx, mut second_rx) = mpsc::channel(1);
+        let (other_tx, mut other_rx) = mpsc::channel(1);
+
+        registry.insert("coding_attempt_0001".to_string(), first_tx);
+        registry.insert("coding_attempt_0001".to_string(), second_tx);
+        registry.insert("coding_attempt_0002".to_string(), other_tx);
+
+        assert_eq!(registry.runner_count("coding_attempt_0001"), 2);
+        assert_eq!(registry.abort_attempt("coding_attempt_0001").await, 2);
+        assert_eq!(registry.runner_count("coding_attempt_0001"), 0);
+        assert_eq!(registry.runner_count("coding_attempt_0002"), 1);
+        assert_eq!(
+            first_rx.recv().await.expect("first abort"),
+            CodingRunnerCommand::AbortAttempt
+        );
+        assert_eq!(
+            second_rx.recv().await.expect("second abort"),
+            CodingRunnerCommand::AbortAttempt
+        );
+        assert!(other_rx.try_recv().is_err());
     }
 
     #[tokio::test]

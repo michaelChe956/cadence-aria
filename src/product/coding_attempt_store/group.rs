@@ -35,8 +35,7 @@ impl super::CodingAttemptStore {
             )));
         }
 
-        let root = self.coding_attempts_root(&input.project_id, &input.issue_id);
-        let id = next_sequential_id("coding_attempt", super::count_json_files(&root)?);
+        let id = self.allocate_coding_attempt_id(&input.project_id, &input.issue_id)?;
         let attempt_no = self
             .list_attempts_for_work_item(
                 &input.project_id,

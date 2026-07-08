@@ -47,11 +47,16 @@ impl CodingWorkspaceEngine {
             .store
             .get_role_provider_config_snapshot(&attempt.project_id, &attempt.issue_id, &attempt.id)?
             .coder;
-        let resume_provider_session_id = self.provider_resume_session_id_for_attempt(
+        let mut resume_provider_session_id = self.provider_resume_session_id_for_attempt(
             &attempt,
             &CodingProviderRole::Coder,
             &coder_provider,
         );
+        if resume_provider_session_id.is_some()
+            && !self.should_resume_coder_session_for_role_run(&attempt, &role_run.id)?
+        {
+            resume_provider_session_id = None;
+        }
         let rework_instruction = self.store.latest_unconsumed_rework_instruction(
             &attempt.project_id,
             &attempt.issue_id,
@@ -218,6 +223,39 @@ impl CodingWorkspaceEngine {
         Ok(attempt)
     }
 
+    fn should_resume_coder_session_for_role_run(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        current_role_run_id: &str,
+    ) -> Result<bool, CodingWorkspaceEngineError> {
+        if attempt.scope != crate::product::coding_models::CodingAttemptScope::WorkItemGroup {
+            return Ok(true);
+        }
+
+        let Some(active_unit) = self.store.get_active_coding_unit(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+        )?
+        else {
+            return Ok(false);
+        };
+        let Some(unit_started_at) = active_unit.started_at.as_deref() else {
+            return Ok(false);
+        };
+
+        Ok(self
+            .store
+            .list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+            .into_iter()
+            .any(|run| {
+                run.id != current_role_run_id
+                    && run.stage == CodingExecutionStage::Coding
+                    && run.role == CodingProviderRole::Coder
+                    && started_at_or_after(&run.started_at, unit_started_at)
+            }))
+    }
+
     pub(crate) async fn emit_coder_output_chat_entry(&self, input: CoderOutputChatEntryInput<'_>) {
         let CoderOutputChatEntryInput {
             attempt,
@@ -251,6 +289,16 @@ impl CodingWorkspaceEngine {
             created_at: completed_at,
         };
         self.save_and_emit_chat_entry(entry).await;
+    }
+}
+
+fn started_at_or_after(left: &str, right: &str) -> bool {
+    match (
+        chrono::DateTime::parse_from_rfc3339(left),
+        chrono::DateTime::parse_from_rfc3339(right),
+    ) {
+        (Ok(left), Ok(right)) => left >= right,
+        _ => left >= right,
     }
 }
 

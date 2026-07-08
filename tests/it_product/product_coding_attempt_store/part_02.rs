@@ -126,6 +126,24 @@ fn create_input(work_item_id: &str) -> CreateCodingAttemptInput {
     }
 }
 
+fn group_create_input(current_work_item_id: &str) -> CreateGroupCodingAttemptInput {
+    CreateGroupCodingAttemptInput {
+        project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        plan_id: "work_item_plan_0001".to_string(),
+        current_work_item_id: current_work_item_id.to_string(),
+        base_branch: "main".to_string(),
+        branch_name: "aria/issues/issue_0001".to_string(),
+        worktree_path: None,
+        provider_config_snapshot: ProviderConfigSnapshot {
+            author: ProviderName::Fake,
+            reviewer: Some(ProviderName::Fake),
+            review_rounds: 1,
+        },
+        max_auto_rework: 2,
+    }
+}
+
 fn sample_testing_report(attempt_id: &str) -> TestingReport {
     TestingReport {
         id: "testing_report_0001".to_string(),

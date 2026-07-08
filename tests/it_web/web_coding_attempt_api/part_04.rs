@@ -226,7 +226,7 @@ async fn deletes_coding_attempt_and_preserves_work_item() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(second["attempt_id"], "coding_attempt_0001");
+    assert_eq!(second["attempt_id"], "coding_attempt_0002");
     assert_eq!(second["attempt_no"], 1);
 }
 

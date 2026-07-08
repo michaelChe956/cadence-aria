@@ -190,12 +190,14 @@ impl CodingWorkspaceEngine {
     ) -> Result<(), CodingWorkspaceEngineError> {
         let current = self.store.get_attempt(project_id, issue_id, attempt_id)?;
         let active_work_item_id = self.active_work_item_id_for_attempt(&current).to_string();
-        self.store.update_attempt_status(
-            project_id,
-            issue_id,
-            attempt_id,
-            CodingAttemptStatus::Aborted,
-        )?;
+        if current.status.is_active() {
+            self.store.update_attempt_status(
+                project_id,
+                issue_id,
+                attempt_id,
+                CodingAttemptStatus::Aborted,
+            )?;
+        }
         self.release_issue_shared_worktree_lock_if_holder(
             project_id,
             issue_id,

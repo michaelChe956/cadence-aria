@@ -197,6 +197,12 @@ fn app_with_hanging_coding_attempt(root_path: &Path) -> axum::Router {
 }
 
 fn app_with_running_testing_attempt(root_path: &std::path::Path) -> axum::Router {
+    app_with_running_testing_attempt_and_state(root_path).0
+}
+
+fn app_with_running_testing_attempt_and_state(
+    root_path: &std::path::Path,
+) -> (axum::Router, WebAppState) {
     let store = CodingAttemptStore::new(ProductAppPaths::new(root_path.join(".aria")));
     let attempt = store
         .create_attempt(CreateCodingAttemptInput {
@@ -244,10 +250,11 @@ fn app_with_running_testing_attempt(root_path: &std::path::Path) -> axum::Router
             artifact_refs: Vec::new(),
         })
         .expect("save testing node");
-    build_web_router(WebAppState::new(
+    let state = WebAppState::new(
         root_path.to_path_buf(),
         WebRuntime::new_fake(root_path.to_path_buf()),
-    ))
+    );
+    (build_web_router(state.clone()), state)
 }
 
 fn app_with_final_confirm_attempt(root_path: &std::path::Path) -> axum::Router {
