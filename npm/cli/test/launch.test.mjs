@@ -100,6 +100,27 @@ test("default web mode injects --port and forwards to binary", async () => {
   );
 });
 
+test("web command with args injects home workspace when workspace is omitted", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "aria-launch-"));
+  const argsFile = join(dir, "args.json");
+  const fakeBin = makeFakeBinary(dir, argsFile);
+  installFakeSubpackage(dir, fakeBin);
+
+  const res = await runLauncher(dir, ["web", "--port", "0", "--host", "127.0.0.1"]);
+  assert.equal(res.code, 0, `launcher 退出码应为 0，stderr=${res.stderr}`);
+  assert.ok(existsSync(argsFile), "fake 二进制应被调用");
+  const received = JSON.parse(readFileSync(argsFile, "utf8"));
+  assert.deepEqual(received, [
+    "web",
+    "--workspace",
+    homedir(),
+    "--port",
+    "0",
+    "--host",
+    "127.0.0.1",
+  ]);
+});
+
 test("explicit subcommand forwarded verbatim", async () => {
   const dir = mkdtempSync(join(tmpdir(), "aria-launch-"));
   const argsFile = join(dir, "args.json");
