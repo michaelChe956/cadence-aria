@@ -49,6 +49,11 @@ function waitForReady(port, timeoutMs = 30000) {
   });
 }
 
+function withDefaultWorkspace(args) {
+  if (args[0] !== "web" || args.includes("--workspace")) return args;
+  return ["web", "--workspace", homedir(), ...args.slice(1)];
+}
+
 async function main() {
   const argv = process.argv.slice(2);
   const plan = planInvocation(argv);
@@ -67,16 +72,9 @@ async function main() {
   // 默认 web 模式：launcher 自选端口并以 web --port <p> --host 127.0.0.1 传入。
   if (plan.defaultWebMode) {
     port = await pickFreePort();
-    forwardArgs = [
-      "web",
-      "--workspace",
-      homedir(),
-      "--port",
-      String(port),
-      "--host",
-      "127.0.0.1",
-    ];
+    forwardArgs = ["web", "--port", String(port), "--host", "127.0.0.1"];
   }
+  forwardArgs = withDefaultWorkspace(forwardArgs);
 
   const child = spawn(binary, forwardArgs, { stdio: "inherit" });
 
