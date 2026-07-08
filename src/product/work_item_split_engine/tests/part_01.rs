@@ -115,6 +115,60 @@ fn build_split_prompt_includes_revision_feedback() {
 }
 
 #[test]
+fn work_item_plan_outline_prompt_includes_runtime_contracts() {
+    let (request, issue, repository) = split_prompt_fixture();
+
+    let prompt = build_outline_prompt(
+        &request,
+        &issue,
+        &repository,
+        &["Story context [REQ-001]".to_string()],
+        &["Design context [DEC-001]".to_string()],
+        "src/product\nweb/src",
+        &[],
+        &[],
+    );
+
+    assert!(prompt.contains("[openspec_contract]"));
+    assert!(prompt.contains("[superpowers_contract]"));
+    assert!(prompt.contains("[allowed_outputs]"));
+    assert!(prompt.contains("多任务拆解、任务追踪关系、依赖图、验收与验证建议"));
+    assert!(prompt.contains("[forbidden_outputs]"));
+    assert!(prompt.contains("代码实现、Story/Design 重写"));
+    assert!(prompt.contains("writing-plans"));
+    assert!(prompt.contains("任务拆分"));
+    assert!(prompt.contains("追踪关系"));
+    assert!(prompt.contains("Claude Code"));
+    assert!(prompt.contains("Codex"));
+    assert!(prompt.contains("20k"));
+    assert!(prompt.contains("estimated_context_tokens"));
+    assert!(prompt.contains("session_fit=\"fits_single_agent_session\""));
+}
+
+#[test]
+fn work_item_plan_outline_revision_prompt_includes_runtime_contracts() {
+    let (request, issue, _repository) = split_prompt_fixture();
+
+    let (prompt, _nonce) =
+        build_outline_revision_prompt(&request, &issue, "补齐 forbidden_write_scopes");
+
+    assert!(prompt.contains("[openspec_contract]"));
+    assert!(prompt.contains("[superpowers_contract]"));
+    assert!(prompt.contains("[allowed_outputs]"));
+    assert!(prompt.contains("多任务拆解、任务追踪关系、依赖图、验收与验证建议"));
+    assert!(prompt.contains("[forbidden_outputs]"));
+    assert!(prompt.contains("代码实现、Story/Design 重写"));
+    assert!(prompt.contains("writing-plans"));
+    assert!(prompt.contains("任务拆分"));
+    assert!(prompt.contains("追踪关系"));
+    assert!(prompt.contains("Claude Code"));
+    assert!(prompt.contains("Codex"));
+    assert!(prompt.contains("20k"));
+    assert!(prompt.contains("estimated_context_tokens"));
+    assert!(prompt.contains("session_fit=\"fits_single_agent_session\""));
+}
+
+#[test]
 fn build_outline_revision_prompt_is_delta_only() {
     let request = GenerateWorkItemsRequest {
         title: "test plan".to_string(),
@@ -266,8 +320,12 @@ fn outline_author_prompt_forbids_full_work_items_and_repository_profile() {
         "outline prompt schema must name the required outline item id field: {prompt}"
     );
     assert!(
-        prompt.contains("\"from_outline_id\"") && prompt.contains("\"to_outline_id\""),
-        "outline prompt schema must name dependency edge fields: {prompt}"
+        prompt.contains("不要输出 dependency_graph"),
+        "outline prompt must make depends_on the only provider dependency source: {prompt}"
+    );
+    assert!(
+        !prompt.contains("\"from_outline_id\"") && !prompt.contains("\"to_outline_id\""),
+        "outline provider schema must not expose derived dependency edge fields: {prompt}"
     );
     assert!(
         prompt.contains("不要输出 implementation plan")
@@ -367,19 +425,82 @@ fn outline_output_schema_makes_outline_and_context_blockers_mutually_exclusive()
         serde_json::json!(1)
     );
     assert_eq!(one_of[1]["not"]["required"], serde_json::json!(["outline"]));
+    let outline_properties = schema["properties"]["outline"]["properties"]
+        .as_object()
+        .expect("outline properties");
+    assert!(
+        !outline_properties.contains_key("dependency_graph"),
+        "outline provider schema must not expose dependency_graph"
+    );
+    let outline_required = schema["properties"]["outline"]["required"]
+        .as_array()
+        .expect("outline required");
+    assert!(
+        !outline_required.contains(&serde_json::json!("dependency_graph")),
+        "outline provider schema must not require dependency_graph"
+    );
+    let outline_item =
+        &schema["properties"]["outline"]["properties"]["work_item_outlines"]["items"];
+    assert_eq!(
+        outline_item["properties"]["estimated_context_tokens"]["maximum"],
+        serde_json::json!(19999)
+    );
+    assert_eq!(
+        outline_item["properties"]["session_fit"]["enum"],
+        serde_json::json!(["fits_single_agent_session"])
+    );
+    assert!(outline_item["required"]
+        .as_array()
+        .expect("required array")
+        .contains(&serde_json::json!("estimated_context_tokens")));
+    assert!(outline_item["required"]
+        .as_array()
+        .expect("required array")
+        .contains(&serde_json::json!("session_fit")));
 }
 
 #[test]
 fn outline_parser_accepts_valid_sentinel_json() {
-    let parsed =
-        parse_work_item_plan_outline_output(valid_outline_author_output()).expect("outline");
+    let mut output = valid_outline_author_output();
+    output["outline"]
+        .as_object_mut()
+        .expect("outline object")
+        .remove("dependency_graph");
+
+    let parsed = parse_work_item_plan_outline_output(output).expect("outline");
 
     assert!(parsed.context_blockers.is_empty());
     let outline = parsed.outline.expect("outline payload");
     assert_eq!(outline.work_item_outlines[0].outline_id, "outline_backend");
     assert_eq!(
+        outline.work_item_outlines[0].estimated_context_tokens,
+        Some(12_000)
+    );
+    assert_eq!(
         outline.dependency_graph[0].from_outline_id,
         "outline_backend"
+    );
+    assert_eq!(outline.dependency_graph[0].to_outline_id, "outline_frontend");
+}
+
+#[test]
+fn outline_parser_rejects_provider_dependency_graph_field() {
+    let mut output = valid_outline_author_output();
+    output["outline"]["dependency_graph"] = serde_json::json!([
+        {
+            "from_outline_id": "outline_backend",
+            "to_outline_id": "outline_frontend"
+        }
+    ]);
+    let error = parse_work_item_plan_outline_output(output).expect_err("forbidden");
+
+    assert_eq!(error.code, "outline_forbidden_field");
+    assert!(
+        error
+            .message
+            .contains("dependency_graph"),
+        "error should identify dependency_graph, got {}",
+        error.message
     );
 }
 
@@ -466,6 +587,37 @@ fn single_item_prompt_forbids_work_item_id_and_outline_changes() {
 }
 
 #[test]
+fn single_item_prompt_requires_executable_plan_runtime_contracts() {
+    let outline = parse_work_item_plan_outline_output(valid_outline_author_output())
+        .expect("outline output")
+        .outline
+        .expect("outline");
+
+    let invocation = build_work_item_draft_invocation(
+        &outline,
+        "outline_backend",
+        WorkItemGenerationMode::Serial,
+        &[],
+        None,
+    )
+    .expect("draft invocation");
+
+    assert!(invocation.prompt.contains("[openspec_contract]"));
+    assert!(invocation.prompt.contains("[superpowers_contract]"));
+    assert!(invocation.prompt.contains("[allowed_outputs]"));
+    assert!(invocation.prompt.contains("多任务拆解、任务追踪关系、依赖图、验收与验证建议"));
+    assert!(invocation.prompt.contains("[forbidden_outputs]"));
+    assert!(invocation.prompt.contains("代码实现、Story/Design 重写"));
+    assert!(invocation.prompt.contains("writing-plans"));
+    assert!(invocation.prompt.contains("TDD"));
+    assert!(invocation.prompt.contains("implementation_context"));
+    assert!(invocation.prompt.contains("handoff_summary"));
+    assert!(invocation.prompt.contains("后续 coding agent"));
+    assert!(invocation.prompt.contains("estimated_context_tokens"));
+    assert!(invocation.prompt.contains("单个 Claude Code/Codex 会话"));
+}
+
+#[test]
 fn single_item_prompt_requires_required_gates_as_string_id_array() {
     let outline = parse_work_item_plan_outline_output(valid_outline_author_output())
         .expect("outline output")
@@ -527,161 +679,3 @@ fn single_item_parser_rejects_backend_status_fields() {
     let error = parse_work_item_draft_output(output).expect_err("status must be rejected");
     assert_eq!(error.code, "work_item_draft_forbidden_field");
 }
-
-#[test]
-fn build_split_prompt_inlines_schema_and_kind_guidance() {
-    // 回归 Bug: prompt 曾引用不存在的 `src/product/work_item_split_output_schema.json`,
-    // 而 WORK_ITEM_SPLIT_OUTPUT_SCHEMA 常量未注入 prompt,导致 provider 不知道
-    // `kind` 是必填字段,按习惯输出 `type` 触发 `missing field kind`。
-    // 修复后 prompt 必须内联 schema 正文并给出 kind 合法取值。
-    let (request, issue, repository) = split_prompt_fixture();
-    let prompt = build_split_prompt(&request, &issue, &repository, &[], &[], "(empty)");
-
-    assert!(
-        !prompt.contains("work_item_split_output_schema.json"),
-        "prompt must not reference a non-existent schema file path: {prompt}"
-    );
-    // schema 正文必须内联进 prompt(取 schema 常量里的标志性片段)。
-    assert!(
-        prompt.contains("\"kind\""),
-        "prompt must inline the schema's `kind` property: {prompt}"
-    );
-    assert!(
-        prompt.contains("\"required\""),
-        "prompt must inline the schema's `required` clause: {prompt}"
-    );
-    // kind 合法取值引导(provider 必须知道有哪些枚举值可选)。
-    for kind_value in [
-        "backend",
-        "frontend",
-        "integration",
-        "e2e",
-        "docs",
-        "infra",
-        "other",
-    ] {
-        assert!(
-            prompt.contains(kind_value),
-            "prompt must list kind value `{kind_value}`: {prompt}"
-        );
-    }
-}
-
-#[test]
-fn build_split_prompt_allows_readable_stream_before_final_sentinel() {
-    let (request, issue, repository) = split_prompt_fixture();
-    let prompt = build_split_prompt(&request, &issue, &repository, &[], &[], "(empty)");
-
-    assert!(prompt.contains("<ARIA_STRUCTURED_OUTPUT nonce=\""));
-    assert!(prompt.contains("</ARIA_STRUCTURED_OUTPUT nonce=\""));
-    assert!(prompt.contains("可以在最终结构化 JSON 前输出简短、可读的拆分过程"));
-    assert!(prompt.contains("最后必须输出一个 nonce sentinel JSON block"));
-    assert!(prompt.contains("后端只解析最后一个 nonce 匹配的 <ARIA_STRUCTURED_OUTPUT"));
-    assert!(prompt.contains("不要输出 Markdown code fence"));
-}
-
-#[test]
-fn split_prompt_requests_progress_before_long_operations() {
-    let (request, issue, repository) = split_prompt_fixture();
-    let prompt = build_split_prompt(&request, &issue, &repository, &[], &[], "(empty)");
-
-    assert!(prompt.contains("长时间分析、探索代码库或自动修正前"));
-    assert!(prompt.contains("先输出一行简短可读状态"));
-    assert!(prompt.contains("每完成一组探索后输出一句当前发现摘要"));
-}
-
-#[test]
-fn build_revision_prompt_inlines_schema_and_kind_guidance() {
-    let (request, issue, repository) = split_prompt_fixture();
-    let redo_specs = vec![RedoSpec {
-        old_id: "work_item_0001".to_string(),
-        feedback: "拆得太粗".to_string(),
-    }];
-    let prompt = build_revision_prompt(
-        &request,
-        &issue,
-        &repository,
-        &[],
-        &redo_specs,
-        &[],
-        &[],
-        "(empty)",
-    );
-
-    assert!(
-        !prompt.contains("work_item_split_output_schema.json"),
-        "revision prompt must not reference a non-existent schema file path: {prompt}"
-    );
-    assert!(
-        prompt.contains("\"kind\""),
-        "revision prompt must inline the schema's `kind` property: {prompt}"
-    );
-    assert!(
-        prompt.contains("\"required\""),
-        "revision prompt must inline the schema's `required` clause: {prompt}"
-    );
-    for kind_value in [
-        "backend",
-        "frontend",
-        "integration",
-        "e2e",
-        "docs",
-        "infra",
-        "other",
-    ] {
-        assert!(
-            prompt.contains(kind_value),
-            "revision prompt must list kind value `{kind_value}`: {prompt}"
-        );
-    }
-}
-
-#[test]
-fn build_revision_prompt_allows_readable_stream_before_final_sentinel() {
-    let (request, issue, repository) = split_prompt_fixture();
-    let redo_specs = vec![RedoSpec {
-        old_id: "work_item_0001".to_string(),
-        feedback: "拆得太粗".to_string(),
-    }];
-    let prompt = build_revision_prompt(
-        &request,
-        &issue,
-        &repository,
-        &[],
-        &redo_specs,
-        &[],
-        &[],
-        "(empty)",
-    );
-
-    assert!(prompt.contains("<ARIA_STRUCTURED_OUTPUT nonce=\""));
-    assert!(prompt.contains("</ARIA_STRUCTURED_OUTPUT nonce=\""));
-    assert!(prompt.contains("可以在最终结构化 JSON 前输出简短、可读的拆分过程"));
-    assert!(prompt.contains("最后必须输出一个 nonce sentinel JSON block"));
-    assert!(prompt.contains("后端只解析最后一个 nonce 匹配的 <ARIA_STRUCTURED_OUTPUT"));
-    assert!(prompt.contains("不要输出 Markdown code fence"));
-}
-
-#[test]
-fn revision_prompt_requests_progress_before_long_operations() {
-    let (request, issue, repository) = split_prompt_fixture();
-    let redo_specs = vec![RedoSpec {
-        old_id: "work_item_0001".to_string(),
-        feedback: "拆得太粗".to_string(),
-    }];
-    let prompt = build_revision_prompt(
-        &request,
-        &issue,
-        &repository,
-        &[],
-        &redo_specs,
-        &[],
-        &[],
-        "(empty)",
-    );
-
-    assert!(prompt.contains("长时间分析、探索代码库或自动修正前"));
-    assert!(prompt.contains("先输出一行简短可读状态"));
-    assert!(prompt.contains("每完成一组探索后输出一句当前发现摘要"));
-}
-

@@ -4,29 +4,22 @@ import {
   FlaskConical,
   GitBranch,
   GitPullRequest,
-  RefreshCw,
   SearchCode,
   ShieldCheck,
   UserCheck,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import type {
-  AnalystDecisionRecord,
-  CodingExecutionStage,
-  CodingTimelineNode,
-} from "../../api/types";
+import type { CodingExecutionStage, CodingTimelineNode } from "../../api/types";
 
 export function CodingTimeline({
   nodes,
   activeNodeId,
   selectedNodeId,
-  latestAnalystDecision,
   onSelectNode,
 }: {
   nodes: CodingTimelineNode[];
   activeNodeId: string | null;
   selectedNodeId: string | null;
-  latestAnalystDecision?: AnalystDecisionRecord | null;
   onSelectNode: (nodeId: string) => void;
 }) {
   return (
@@ -45,6 +38,7 @@ export function CodingTimeline({
             const Icon = iconForStage(node.stage);
             const active = node.id === activeNodeId;
             const selected = node.id === selectedNodeId;
+            const title = titleForStage(node);
             return (
               <button
                 key={node.id}
@@ -62,7 +56,7 @@ export function CodingTimeline({
                   <Icon className="mt-0.5 h-4 w-4 shrink-0 text-[var(--aria-primary)]" />
                   <div className="min-w-0 flex-1">
                     <div className="flex min-w-0 items-center justify-between gap-2">
-                      <span className="truncate text-sm font-semibold">{node.title}</span>
+                      <span className="truncate text-sm font-semibold">{title}</span>
                       <span className="rounded bg-[var(--aria-panel-muted)] px-1.5 py-0.5 text-[11px] text-[var(--aria-ink-muted)]">
                         {node.status}
                       </span>
@@ -70,12 +64,6 @@ export function CodingTimeline({
                     {node.summary ? (
                       <p className="mt-1 truncate text-xs text-[var(--aria-ink-muted)]">
                         {node.summary}
-                      </p>
-                    ) : null}
-                    {node.stage === "rework" && latestAnalystDecision ? (
-                      <p className="mt-1 truncate font-mono text-[11px] text-[var(--aria-primary)]">
-                        {latestAnalystDecision.verdict} {"->"}{" "}
-                        {latestAnalystDecision.next_stage}
                       </p>
                     ) : null}
                   </div>
@@ -89,6 +77,13 @@ export function CodingTimeline({
   );
 }
 
+function titleForStage(node: CodingTimelineNode) {
+  if (node.stage === "internal_pr_review") {
+    return "GroupFinalReview";
+  }
+  return node.title;
+}
+
 function iconForStage(stage: CodingExecutionStage): LucideIcon {
   switch (stage) {
     case "worktree_prepare":
@@ -99,8 +94,6 @@ function iconForStage(stage: CodingExecutionStage): LucideIcon {
       return FlaskConical;
     case "code_review":
       return SearchCode;
-    case "rework":
-      return RefreshCw;
     case "review_request":
       return GitPullRequest;
     case "internal_pr_review":

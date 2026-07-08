@@ -27,6 +27,16 @@ pub(crate) fn ws_choice_option(option: ChoiceOptionData) -> ChoiceOption {
     }
 }
 
+pub(crate) fn ws_choice_question(question: ChoiceQuestionData) -> ChoiceQuestion {
+    ChoiceQuestion {
+        id: question.id,
+        prompt: question.prompt,
+        options: question.options.into_iter().map(ws_choice_option).collect(),
+        allow_multiple: question.allow_multiple,
+        allow_free_text: question.allow_free_text,
+    }
+}
+
 pub(crate) fn ws_provider_status(status: ProviderStatus) -> WsProviderStatus {
     match status {
         ProviderStatus::Starting => WsProviderStatus::Starting,
@@ -225,6 +235,7 @@ pub(crate) fn spawn_engine_event_forward_task(
                     options,
                     allow_multiple,
                     allow_free_text,
+                    questions,
                     source,
                 } => {
                     eprintln!(
@@ -246,6 +257,7 @@ pub(crate) fn spawn_engine_event_forward_task(
                         options: options.into_iter().map(ws_choice_option).collect(),
                         allow_multiple,
                         allow_free_text,
+                        questions: questions.into_iter().map(ws_choice_question).collect(),
                         source: source.as_str().to_string(),
                     }
                 }

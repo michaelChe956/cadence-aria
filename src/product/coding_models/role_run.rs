@@ -20,7 +20,6 @@ pub enum CodingRoleRunTrigger {
     RetryTestPlan,
     RerunMissingSteps,
     RetryReview,
-    RetryAnalyst,
     RetryInternalReview,
     ManualRerun,
 }

@@ -69,6 +69,11 @@ fn lifecycle_work_item_serializes_new_split_fields_as_snake_case() {
         execution_status: WorkItemStatus::Pending,
         worktree_path: None,
         work_item_set_id: Some("work_item_set_0001".to_string()),
+        source_work_item_plan_id: Some("issue_work_item_plan_0001".to_string()),
+        source_outline_id: Some("outline_backend".to_string()),
+        source_draft_id: Some("draft_backend".to_string()),
+        planned_implementation_context: Some("实现 Backend API".to_string()),
+        planned_handoff_summary: Some("交付 Backend API contract".to_string()),
         kind: WorkItemKind::Backend,
         sequence_hint: Some(10),
         depends_on: vec!["work_item_0001".to_string()],
@@ -95,6 +100,17 @@ fn lifecycle_work_item_serializes_new_split_fields_as_snake_case() {
         "verification_plan_work_item_0002"
     );
     assert_eq!(value["work_item_set_id"], "work_item_set_0001");
+    assert_eq!(
+        value["source_work_item_plan_id"],
+        "issue_work_item_plan_0001"
+    );
+    assert_eq!(value["source_outline_id"], "outline_backend");
+    assert_eq!(value["source_draft_id"], "draft_backend");
+    assert_eq!(value["planned_implementation_context"], "实现 Backend API");
+    assert_eq!(
+        value["planned_handoff_summary"],
+        "交付 Backend API contract"
+    );
     assert_eq!(value["depends_on"], serde_json::json!(["work_item_0001"]));
     assert_eq!(
         value["exclusive_write_scopes"],

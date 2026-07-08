@@ -154,22 +154,6 @@ fn run_git(cwd: &Path, args: &[&str]) {
     );
 }
 
-fn git_stdout(cwd: &Path, args: &[&str]) -> String {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .expect("run git");
-    assert!(
-        output.status.success(),
-        "git {:?} failed\nstdout:{}\nstderr:{}",
-        args,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8_lossy(&output.stdout).to_string()
-}
-
 fn sample_review_request(attempt_id: &str) -> ReviewRequest {
     ReviewRequest {
         id: "review_request_0001".to_string(),
@@ -515,6 +499,7 @@ impl StreamingProviderAdapter for ExecutePlanChoiceThenCompletedTesterProvider {
                 }],
                 allow_multiple: false,
                 allow_free_text: false,
+                questions: vec![],
                 source: ChoiceRequestSource::AskUserQuestion,
             }))
             .expect("send choice request");
@@ -679,4 +664,3 @@ impl StreamingProviderAdapter for NeverStartingTesterProvider {
 }
 
 struct EventEmittingCodingProvider;
-

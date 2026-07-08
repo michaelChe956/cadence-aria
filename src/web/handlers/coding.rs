@@ -525,9 +525,6 @@ pub async fn get_coding_attempt(
         .map_err(product_store_api_error)?
         .into_iter()
         .last();
-    let latest_analyst_decision = coding_store
-        .latest_analyst_decision(&attempt.project_id, &attempt.issue_id, &attempt.id)
-        .map_err(product_store_api_error)?;
     let pending_choices = coding_store
         .list_open_choice_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .map_err(product_store_api_error)?;
@@ -565,7 +562,6 @@ pub async fn get_coding_attempt(
         internal_pr_review,
         pending_gates: Vec::new(),
         pending_choices,
-        latest_analyst_decision,
         work_item_execution_plan,
         work_item_handoff,
     }))
@@ -609,6 +605,7 @@ pub async fn abort_coding_attempt(
     let attempt = coding_store
         .get_attempt_by_id(&attempt_id)
         .map_err(product_store_api_error)?;
+    state.coding_runs.abort_attempt(&attempt.id).await;
     let engine = coding_workspace_engine_with_dummy_events(coding_store);
     let aborted = engine
         .handle_abort(&attempt.project_id, &attempt.issue_id, &attempt.id)
@@ -627,6 +624,7 @@ pub async fn delete_coding_attempt(
     let attempt = coding_store
         .get_attempt_by_id(&attempt_id)
         .map_err(product_store_api_error)?;
+    state.coding_runs.abort_attempt(&attempt.id).await;
     let active_work_item_id = attempt
         .current_work_item_id
         .as_deref()

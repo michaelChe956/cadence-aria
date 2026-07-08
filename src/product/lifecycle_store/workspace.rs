@@ -6,14 +6,15 @@ use crate::product::id::next_sequential_id;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::models::{
     ProviderConversationRef, WorkspaceMessageRecord, WorkspaceSessionRecord,
-    WorkspaceSessionStatus, WorkspaceType,
+    WorkspaceSessionStatus, WorkspaceSessionSummaryRecord, WorkspaceType,
 };
 use crate::web::workspace_ws_types::{ArtifactVersion, TimelineNode};
 
 use super::{
     CreateWorkspaceSessionInput, LifecycleStore, child_directories, json_file_paths,
-    list_workspace_session_records, path_exists, read_workspace_session_record,
-    remove_dir_all_if_exists, remove_file_if_exists, workspace_session_file_paths,
+    list_workspace_session_records, path_exists, path_is_regular_file,
+    read_workspace_session_record, remove_dir_all_if_exists, remove_file_if_exists,
+    workspace_session_file_paths,
 };
 
 impl LifecycleStore {
@@ -60,6 +61,22 @@ impl LifecycleStore {
         validate_relative_id(project_id)?;
         validate_relative_id(issue_id)?;
         list_workspace_session_records(&self.workspace_sessions_root(project_id, issue_id))
+    }
+
+    pub fn list_workspace_session_summaries(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+    ) -> Result<Vec<WorkspaceSessionSummaryRecord>, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        let entries =
+            workspace_session_file_paths(&self.workspace_sessions_root(project_id, issue_id))?;
+        let mut records = Vec::with_capacity(entries.len());
+        for entry in entries {
+            records.push(read_json(&entry)?);
+        }
+        Ok(records)
     }
 
     pub fn get_workspace_session(
@@ -190,6 +207,21 @@ impl LifecycleStore {
         read_json(&path)
     }
 
+    pub fn load_timeline_nodes_for_issue_session(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        session_id: &str,
+    ) -> Result<Vec<TimelineNode>, ProductStoreError> {
+        let path = self
+            .workspace_timeline_root_for_issue_session(project_id, issue_id, session_id)?
+            .join("timeline_nodes.json");
+        if !path_exists(&path)? {
+            return Ok(Vec::new());
+        }
+        read_json(&path)
+    }
+
     pub fn save_node_detail(
         &self,
         session_id: &str,
@@ -225,10 +257,50 @@ impl LifecycleStore {
         read_json(&path)
     }
 
+    pub fn load_node_detail_for_issue_session(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        session_id: &str,
+        node_id: &str,
+    ) -> Result<crate::product::models::NodeDetail, ProductStoreError> {
+        validate_relative_id(node_id)?;
+        let path = self
+            .workspace_timeline_root_for_issue_session(project_id, issue_id, session_id)?
+            .join("timeline_node_details")
+            .join(format!("{node_id}.json"));
+        if !path_exists(&path)? {
+            return Err(ProductStoreError::NotFound {
+                kind: "node_detail",
+                id: format!("{session_id}/{node_id}"),
+            });
+        }
+        read_json(&path)
+    }
+
     pub fn list_node_detail_ids(&self, session_id: &str) -> Result<Vec<String>, ProductStoreError> {
         validate_relative_id(session_id)?;
         let dir = self
             .workspace_timeline_root_for_session(session_id)?
+            .join("timeline_node_details");
+        let entries = json_file_paths(&dir)?;
+        let mut ids = Vec::with_capacity(entries.len());
+        for entry in entries {
+            if let Some(stem) = entry.file_stem() {
+                ids.push(stem.to_string_lossy().to_string());
+            }
+        }
+        Ok(ids)
+    }
+
+    pub fn list_node_detail_ids_for_issue_session(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        session_id: &str,
+    ) -> Result<Vec<String>, ProductStoreError> {
+        let dir = self
+            .workspace_timeline_root_for_issue_session(project_id, issue_id, session_id)?
             .join("timeline_node_details");
         let entries = json_file_paths(&dir)?;
         let mut ids = Vec::with_capacity(entries.len());
@@ -257,6 +329,24 @@ impl LifecycleStore {
         validate_relative_id(session_id)?;
         let path = self
             .workspace_timeline_root_for_session(session_id)?
+            .join("artifact_versions.json");
+        if !path_exists(&path)? {
+            return Ok(Vec::new());
+        }
+        read_json(&path)
+    }
+
+    pub fn list_artifact_versions_for_issue_session(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        session_id: &str,
+    ) -> Result<Vec<ArtifactVersion>, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(session_id)?;
+        let path = self
+            .workspace_timeline_root_for_issue_session(project_id, issue_id, session_id)?
             .join("artifact_versions.json");
         if !path_exists(&path)? {
             return Ok(Vec::new());
@@ -307,25 +397,30 @@ impl LifecycleStore {
     }
 
     fn find_workspace_session_path(&self, session_id: &str) -> Result<PathBuf, ProductStoreError> {
+        validate_relative_id(session_id)?;
+        let session_file_name = format!("{session_id}.json");
         let mut matched_path = None;
         for project_path in child_directories(&self.paths.projects_root())? {
             let issues_root = project_path.join("issues");
             for issue_path in child_directories(&issues_root)? {
-                let workspace_sessions_root = issue_path.join("workspace-sessions");
-                for session_path in workspace_session_file_paths(&workspace_sessions_root)? {
-                    let Some(session) = read_workspace_session_record(&session_path)? else {
-                        continue;
-                    };
-                    if session.id != session_id {
-                        continue;
-                    }
-                    if matched_path.is_some() {
-                        return Err(ProductStoreError::Io(
-                            "workspace_session_ambiguous".to_string(),
-                        ));
-                    }
-                    matched_path = Some(session_path);
+                let session_path = issue_path
+                    .join("workspace-sessions")
+                    .join(&session_file_name);
+                if !path_is_regular_file(&session_path)? {
+                    continue;
                 }
+                let Some(session) = read_workspace_session_record(&session_path)? else {
+                    continue;
+                };
+                if session.id != session_id {
+                    continue;
+                }
+                if matched_path.is_some() {
+                    return Err(ProductStoreError::Io(
+                        "workspace_session_ambiguous".to_string(),
+                    ));
+                }
+                matched_path = Some(session_path);
             }
         }
 
@@ -353,6 +448,22 @@ impl LifecycleStore {
             ))
         })?;
         Ok(issue_root.join("workspace-timelines").join(session_id))
+    }
+
+    pub(crate) fn workspace_timeline_root_for_issue_session(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        session_id: &str,
+    ) -> Result<PathBuf, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(session_id)?;
+        Ok(self
+            .paths
+            .issue_lifecycle_root(project_id, issue_id)
+            .join("workspace-timelines")
+            .join(session_id))
     }
 }
 

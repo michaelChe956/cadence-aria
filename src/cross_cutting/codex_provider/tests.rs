@@ -7,8 +7,9 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::cross_cutting::streaming_provider::{
-    ProviderCommand, ProviderEvent, ProviderExecutionEventKind, ProviderExecutionEventStatus,
-    ProviderPermissionMode, StreamingProviderAdapter, StreamingProviderInput,
+    ChoiceAnswerData, ProviderCommand, ProviderEvent, ProviderExecutionEventKind,
+    ProviderExecutionEventStatus, ProviderPermissionMode, StreamingProviderAdapter,
+    StreamingProviderInput,
 };
 use crate::protocol::contracts::{AdapterRole, ProviderType};
 
@@ -363,12 +364,90 @@ async fn codex_provider_bridges_request_user_input_and_completes() {
             id: choice.id,
             selected_option_ids: vec!["O(n)".to_string()],
             free_text: None,
+            answers: vec![],
         })
         .await
         .unwrap();
 
     let completed = recv_completed(&mut session.events).await;
     assert_eq!(completed, "Codex received O(n)");
+}
+
+#[tokio::test]
+async fn codex_provider_bridges_all_request_user_input_questions() {
+    let fixture =
+        executable_fixture("tests/fixtures/provider/codex_app_server_multi_user_input_fixture.sh");
+    let provider = CodexProvider::new(fixture);
+    let input = streaming_input(ProviderType::Codex, ProviderPermissionMode::Auto);
+    let mut session = provider
+        .start(input, CancellationToken::new())
+        .await
+        .unwrap();
+
+    let choice = loop {
+        match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+            .await
+            .expect("provider should emit a choice request")
+            .expect("provider event channel should stay open")
+        {
+            ProviderEvent::ChoiceRequest(request) => break request,
+            ProviderEvent::StatusChanged(_)
+            | ProviderEvent::Execution(_)
+            | ProviderEvent::TextDelta { .. }
+            | ProviderEvent::PermissionRequest(_)
+            | ProviderEvent::ToolCall(_)
+            | ProviderEvent::ToolResult(_) => {}
+            ProviderEvent::Completed { full_output, .. } => {
+                panic!("provider completed before choice request: {full_output}")
+            }
+            ProviderEvent::Failed { message } => panic!("provider failed: {message}"),
+            ProviderEvent::ProtocolError { message, .. } => {
+                panic!("provider protocol error: {message}")
+            }
+            ProviderEvent::PermissionTimeout { permission_id } => {
+                panic!("provider permission timed out: {permission_id}")
+            }
+        }
+    };
+
+    assert_eq!(choice.id, "91");
+    assert_eq!(choice.questions.len(), 3);
+    assert_eq!(choice.questions[0].id, "startup");
+    assert_eq!(choice.questions[0].prompt, "启动自检策略？");
+    assert_eq!(choice.questions[1].id, "scope");
+    assert_eq!(choice.questions[1].prompt, "影响范围？");
+    assert_eq!(choice.questions[2].id, "mcp_events");
+    assert_eq!(choice.questions[2].prompt, "MCP 事件输出？");
+
+    session
+        .commands
+        .send(ProviderCommand::ChoiceResponse {
+            id: choice.id,
+            selected_option_ids: vec![],
+            free_text: None,
+            answers: vec![
+                ChoiceAnswerData {
+                    question_id: "startup".to_string(),
+                    selected_option_ids: vec!["每次启动都自检".to_string()],
+                    free_text: None,
+                },
+                ChoiceAnswerData {
+                    question_id: "scope".to_string(),
+                    selected_option_ids: vec!["Story/Design/Work Item 共享链路".to_string()],
+                    free_text: None,
+                },
+                ChoiceAnswerData {
+                    question_id: "mcp_events".to_string(),
+                    selected_option_ids: vec!["输出 MCP 事件".to_string()],
+                    free_text: None,
+                },
+            ],
+        })
+        .await
+        .unwrap();
+
+    let completed = recv_completed(&mut session.events).await;
+    assert_eq!(completed, "Codex received all answers");
 }
 
 #[tokio::test]
@@ -610,6 +689,7 @@ async fn codex_provider_request_user_input_emits_protocol_error_on_write_failure
             id: choice.id,
             selected_option_ids: vec!["是".to_string()],
             free_text: None,
+            answers: vec![],
         })
         .await
         .expect("send choice response");

@@ -355,6 +355,7 @@ impl StreamingProviderAdapter for ChoiceEmittingProvider {
                     options: vec![],
                     allow_multiple: false,
                     allow_free_text: true,
+                    questions: vec![],
                     source: ChoiceRequestSource::AskUserQuestion,
                 }))
                 .await;

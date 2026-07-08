@@ -18,6 +18,29 @@ impl CodingWorkspaceEngine {
         options: TesterAgentOptions,
         command_rx: &mut mpsc::Receiver<CodingRunnerCommand>,
     ) -> Result<TestingReport, CodingWorkspaceEngineError> {
+        self.execute_testing_with_distinct_provider_commands(
+            attempt,
+            ProviderTestingAdapters {
+                plan: provider,
+                execute: provider,
+            },
+            _context,
+            _specs,
+            options,
+            command_rx,
+        )
+        .await
+    }
+
+    pub async fn execute_testing_with_distinct_provider_commands(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        providers: ProviderTestingAdapters<'_>,
+        _context: &CodingExecutionContext,
+        _specs: &[TestCommandSpec],
+        options: TesterAgentOptions,
+        command_rx: &mut mpsc::Receiver<CodingRunnerCommand>,
+    ) -> Result<TestingReport, CodingWorkspaceEngineError> {
         let Some(worktree_path) = attempt.worktree_path.as_ref() else {
             return Err(CodingWorkspaceEngineError::MissingWorktree(
                 attempt.id.clone(),
@@ -60,7 +83,9 @@ impl CodingWorkspaceEngine {
             )?,
         };
 
-        if !provider.supports_provider_driven_testing() {
+        if !providers.plan.supports_provider_driven_testing()
+            || !providers.execute.supports_provider_driven_testing()
+        {
             return self
                 .block_provider_driven_testing(
                     &attempt,
@@ -81,32 +106,35 @@ impl CodingWorkspaceEngine {
                 attempt: attempt.clone(),
                 node: node.clone(),
                 role_run: role_run.clone(),
-                provider,
+                provider: providers.plan,
                 worktree_path: worktree_path.clone(),
                 options: &options,
                 command_rx,
             })
             .await?;
         let ProviderTestingPlanPhase {
-            tester_provider,
-            evaluation_context_json,
+            tester_provider: _plan_tester_provider,
             plan,
             chat_entry_sequence,
         } = match plan_phase {
             ProviderTestingPlanOutcome::EarlyReport(report) => return Ok(report),
             ProviderTestingPlanOutcome::Completed(phase) => phase,
         };
+        let execute_tester_provider = self
+            .store
+            .get_role_provider_config_snapshot(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+            .tester_execute_provider()
+            .clone();
 
         let execution = self
             .run_provider_testing_execution_phase(ProviderTestingExecutionInput {
                 attempt: attempt.clone(),
                 node: node.clone(),
                 role_run: role_run.clone(),
-                provider,
+                provider: providers.execute,
                 worktree_path: worktree_path.clone(),
-                tester_provider: tester_provider.clone(),
+                tester_provider: execute_tester_provider.clone(),
                 plan: plan.clone(),
-                evaluation_context_json,
                 chat_entry_sequence,
                 options: &options,
                 command_rx,
@@ -121,9 +149,9 @@ impl CodingWorkspaceEngine {
             attempt,
             node,
             role_run,
-            provider,
+            provider: providers.execute,
             worktree_path,
-            tester_provider,
+            tester_provider: execute_tester_provider,
             plan,
             options: &options,
             command_rx,

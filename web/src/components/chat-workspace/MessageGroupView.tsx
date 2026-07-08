@@ -10,6 +10,7 @@ import {
   normalizeProviderStreamEntryContent,
 } from "./entries/ProviderStreamEntry";
 import type { MessageGroup } from "./message-grouping";
+import { elapsedDurationText } from "../shared/duration";
 
 interface MessageGroupViewProps {
   group: MessageGroup;
@@ -109,10 +110,12 @@ function groupTitle(group: MessageGroup) {
   const provider = providerForGroup(group);
   const runNo = runNoForGroup(group);
   const retry = retryForGroup(group);
+  const duration = durationForGroup(group);
   return [
     base,
     provider ? providerLabel(provider) : null,
     runNo ? `Run #${runNo}` : null,
+    duration ? `耗时 ${duration}` : null,
     retry ? `自动重跑 #${retry.retry_attempt}` : null,
   ]
     .filter(Boolean)
@@ -125,7 +128,6 @@ const ROLE_LABELS: Record<string, string> = {
   reviewer: "审核者",
   coder: "Coder",
   tester: "Tester",
-  analyst: "Analyst",
   code_reviewer: "Code Reviewer",
   internal_reviewer: "Internal Reviewer",
   system: "系统",
@@ -159,6 +161,32 @@ function runNoForGroup(group: MessageGroup) {
     }
   }
   return null;
+}
+
+function durationForGroup(group: MessageGroup) {
+  const entries = [
+    group.primaryEntry,
+    ...group.inlineEvents,
+    ...group.interruptEntries,
+  ].filter((entry): entry is ChatEntry => Boolean(entry));
+  for (const entry of entries) {
+    const duration = durationForMetadata(entry.metadata);
+    if (duration) {
+      return duration;
+    }
+  }
+  return null;
+}
+
+function durationForMetadata(metadata: ChatEntry["metadata"]) {
+  const durationMs = metadata?.duration_ms;
+  const startedAt = metadata?.started_at;
+  const completedAt = metadata?.completed_at;
+  return elapsedDurationText(
+    typeof startedAt === "string" ? startedAt : null,
+    typeof completedAt === "string" ? completedAt : null,
+    typeof durationMs === "number" ? durationMs : null,
+  );
 }
 
 function metadataProvider(metadata: ChatEntry["metadata"]) {

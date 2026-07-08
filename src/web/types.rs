@@ -3,9 +3,8 @@ use serde_json::Value;
 use std::path::PathBuf;
 
 use crate::product::coding_models::{
-    AnalystDecisionRecord, CodeReviewReport, CodingChoiceGate, CodingGateRequired,
-    CodingTimelineNode, InternalPrReview, ReviewRequest, TestingReport, WorkItemExecutionPlan,
-    WorkItemHandoff,
+    CodeReviewReport, CodingChoiceGate, CodingGateRequired, CodingTimelineNode, InternalPrReview,
+    ReviewRequest, TestingReport, WorkItemExecutionPlan, WorkItemHandoff,
 };
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
@@ -379,7 +378,7 @@ pub struct IssueLifecycleResponse {
     pub design_specs: Vec<DesignSpecDto>,
     pub work_item_plans: Vec<IssueWorkItemPlanDetailDto>,
     pub work_items: Vec<LifecycleWorkItemDto>,
-    pub workspace_sessions: Vec<WorkspaceSessionDto>,
+    pub workspace_sessions: Vec<WorkspaceSessionSummaryDto>,
     pub coding_attempts: Vec<CodingAttemptDto>,
 }
 
@@ -436,6 +435,11 @@ pub struct LifecycleWorkItemDto {
     pub latest_attempt: Option<CodingAttemptDto>,
     pub artifact_versions: Vec<ArtifactVersionDto>,
     pub work_item_set_id: Option<String>,
+    pub source_work_item_plan_id: Option<String>,
+    pub source_outline_id: Option<String>,
+    pub source_draft_id: Option<String>,
+    pub planned_implementation_context: Option<String>,
+    pub planned_handoff_summary: Option<String>,
     pub kind: String,
     pub sequence_hint: Option<u32>,
     pub depends_on: Vec<String>,
@@ -538,7 +542,6 @@ pub struct CodingAttemptSnapshotResponse {
     pub internal_pr_review: Option<InternalPrReview>,
     pub pending_gates: Vec<CodingGateRequired>,
     pub pending_choices: Vec<CodingChoiceGate>,
-    pub latest_analyst_decision: Option<AnalystDecisionRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_item_execution_plan: Option<WorkItemExecutionPlan>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -695,6 +698,21 @@ pub struct WorkspaceMessageDto {
     pub role: String,
     pub content: String,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkspaceSessionSummaryDto {
+    pub workspace_session_id: String,
+    pub issue_id: String,
+    pub entity_id: String,
+    pub workspace_type: String,
+    pub status: String,
+    pub author_provider: String,
+    pub reviewer_provider: String,
+    pub review_rounds: u32,
+    pub superpowers_enabled: bool,
+    pub openspec_enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

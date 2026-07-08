@@ -116,30 +116,6 @@ impl CodingWorkspaceEngine {
         Ok(node)
     }
 
-    pub(crate) fn create_rework_timeline_node(
-        &self,
-        attempt: &CodingExecutionAttempt,
-        rework_round: u32,
-    ) -> Result<CodingTimelineNode, ProductStoreError> {
-        let existing =
-            self.store
-                .get_timeline_nodes(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
-        let node = CodingTimelineNode {
-            id: format!("coding_node_{:04}", existing.len() + 1),
-            attempt_id: attempt.id.clone(),
-            stage: CodingExecutionStage::Rework,
-            title: format!("分析官判定 #{}", rework_round),
-            status: CodingTimelineNodeStatus::Running,
-            agent_role: Some(CodingAgentRole::System),
-            summary: None,
-            started_at: Utc::now().to_rfc3339(),
-            completed_at: None,
-            artifact_refs: Vec::new(),
-        };
-        self.store.save_timeline_node(node.clone())?;
-        Ok(node)
-    }
-
     pub(crate) fn create_internal_pr_review_timeline_node(
         &self,
         attempt: &CodingExecutionAttempt,
@@ -151,7 +127,14 @@ impl CodingWorkspaceEngine {
             id: format!("coding_node_{:04}", existing.len() + 1),
             attempt_id: attempt.id.clone(),
             stage: CodingExecutionStage::InternalPrReview,
-            title: "内部 PR 审查".to_string(),
+            title: if attempt.scope
+                == crate::product::coding_models::CodingAttemptScope::WorkItemGroup
+            {
+                "GroupFinalReview"
+            } else {
+                "内部 PR 审查"
+            }
+            .to_string(),
             status: CodingTimelineNodeStatus::Running,
             agent_role: Some(CodingAgentRole::Reviewer),
             summary: None,
@@ -178,7 +161,7 @@ impl CodingWorkspaceEngine {
             title: "最终确认".to_string(),
             status: CodingTimelineNodeStatus::Completed,
             agent_role: Some(CodingAgentRole::System),
-            summary: Some("Analyst 最终判定通过，attempt 已完成".to_string()),
+            summary: Some("系统处理通过，attempt 已完成".to_string()),
             started_at: now.clone(),
             completed_at: Some(now),
             artifact_refs: Vec::new(),

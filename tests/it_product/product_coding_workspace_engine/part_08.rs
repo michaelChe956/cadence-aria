@@ -114,19 +114,31 @@ async fn execute_review_request_blocks_attempt_when_push_fails() {
 }
 
 #[tokio::test]
-async fn execute_internal_pr_review_persists_review_and_waits_for_final_rework() {
+async fn execute_group_final_review_persists_review_and_waits_for_final_confirm() {
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
     init_repo(&worktree);
     fs::write(worktree.join("src.txt"), "hello\ninternal review\n").expect("modify file");
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    seed_group_work_items_and_plan(&app_paths);
+    let store = CodingAttemptStore::new(app_paths);
     let attempt = store
-        .create_attempt(CreateCodingAttemptInput {
+        .create_group_attempt(CreateGroupCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            plan_id: "work_item_plan_0001".to_string(),
+            current_work_item_id: "work_item_0001".to_string(),
             worktree_path: Some(worktree),
             base_branch: "HEAD".to_string(),
-            ..create_input()
+            branch_name: "aria/issues/issue_0001".to_string(),
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Fake,
+                reviewer: Some(ProviderName::Fake),
+                review_rounds: 1,
+            },
+            max_auto_rework: 2,
         })
-        .expect("create attempt");
+        .expect("create group attempt");
     store
         .update_attempt_status(
             "project_0001",
@@ -201,7 +213,7 @@ async fn execute_internal_pr_review_persists_review_and_waits_for_final_rework()
                 event
                     .output
                     .as_deref()
-                    .is_some_and(|output| output.contains("InternalReviewer"))
+                    .is_some_and(|output| output.contains("GroupFinalReview"))
             );
         }
         other => panic!("expected internal review provider prompt, got {other:?}"),
@@ -254,7 +266,7 @@ async fn execute_internal_pr_review_persists_review_and_waits_for_final_rework()
         } => {
             assert_eq!(node_id, "coding_node_0001");
             assert_eq!(status, CodingTimelineNodeStatus::Completed);
-            assert_eq!(summary.as_deref(), Some("internal PR review 通过"));
+            assert_eq!(summary.as_deref(), Some("GroupFinalReview 通过"));
             assert!(completed_at.is_some());
         }
         other => panic!("expected internal review node completed, got {other:?}"),
@@ -263,19 +275,31 @@ async fn execute_internal_pr_review_persists_review_and_waits_for_final_rework()
 }
 
 #[tokio::test]
-async fn execute_internal_pr_review_blocked_keeps_attempt_running_for_analyst() {
+async fn execute_group_final_review_blocked_opens_human_gate() {
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
     init_repo(&worktree);
     fs::write(worktree.join("src.txt"), "hello\ninternal review\n").expect("modify file");
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    seed_group_work_items_and_plan(&app_paths);
+    let store = CodingAttemptStore::new(app_paths);
     let attempt = store
-        .create_attempt(CreateCodingAttemptInput {
+        .create_group_attempt(CreateGroupCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            plan_id: "work_item_plan_0001".to_string(),
+            current_work_item_id: "work_item_0001".to_string(),
             worktree_path: Some(worktree),
             base_branch: "HEAD".to_string(),
-            ..create_input()
+            branch_name: "aria/issues/issue_0001".to_string(),
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Fake,
+                reviewer: Some(ProviderName::Fake),
+                review_rounds: 1,
+            },
+            max_auto_rework: 2,
         })
-        .expect("create attempt");
+        .expect("create group attempt");
     store
         .update_attempt_status(
             "project_0001",
@@ -321,16 +345,21 @@ async fn execute_internal_pr_review_blocked_keeps_attempt_running_for_analyst() 
     let updated = store
         .get_attempt("project_0001", "issue_0001", &attempt.id)
         .expect("updated attempt");
-    assert_eq!(updated.status, CodingAttemptStatus::Running);
+    assert_eq!(updated.status, CodingAttemptStatus::Blocked);
     assert_eq!(updated.stage, CodingExecutionStage::InternalPrReview);
     let gates = store
         .list_open_blocked_gates("project_0001", "issue_0001", &attempt.id)
         .expect("open blocked gates");
-    assert!(gates.is_empty());
+    assert_eq!(gates.len(), 1);
+    assert_eq!(gates[0].title, "GroupFinalReview blocked");
+    assert_eq!(
+        gates[0].reason_code.as_deref(),
+        Some("group_final_review_blocked")
+    );
 }
 
 #[tokio::test]
-async fn execute_internal_pr_review_prompt_includes_request_commit_diff_and_function_context() {
+async fn execute_group_final_review_prompt_includes_request_commit_diff_and_function_context() {
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
     init_repo(&worktree);
@@ -340,14 +369,25 @@ async fn execute_internal_pr_review_prompt_includes_request_commit_diff_and_func
         &app_paths,
         "函数 climb_stairs(n: i32) -> i32 需要测试 n=10。",
     );
+    seed_group_plan(&app_paths);
     let store = CodingAttemptStore::new(app_paths);
     let attempt = store
-        .create_attempt(CreateCodingAttemptInput {
+        .create_group_attempt(CreateGroupCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            plan_id: "work_item_plan_0001".to_string(),
+            current_work_item_id: "work_item_0001".to_string(),
             worktree_path: Some(worktree),
             base_branch: "HEAD".to_string(),
-            ..create_input()
+            branch_name: "aria/issues/issue_0001".to_string(),
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Fake,
+                reviewer: Some(ProviderName::Fake),
+                review_rounds: 1,
+            },
+            max_auto_rework: 2,
         })
-        .expect("create attempt");
+        .expect("create group attempt");
     store
         .update_role_provider_config_snapshot(
             "project_0001",
@@ -355,8 +395,8 @@ async fn execute_internal_pr_review_prompt_includes_request_commit_diff_and_func
             &attempt.id,
             CodingRoleProviderConfigSnapshot {
                 coder: ProviderName::Fake,
-                tester: ProviderName::Fake,
-                analyst: ProviderName::Fake,
+                tester_plan: ProviderName::Fake,
+                tester_execute: ProviderName::Fake,
                 code_reviewer: ProviderName::Fake,
                 internal_reviewer: ProviderName::Codex,
                 review_rounds: 1,
@@ -408,7 +448,8 @@ async fn execute_internal_pr_review_prompt_includes_request_commit_diff_and_func
         input.output_schema,
         "coding_workspace_internal_pr_review_json"
     );
-    assert!(input.prompt.contains("InternalReviewer"));
+    assert!(input.prompt.contains("GroupFinalReview"));
+    assert!(!input.prompt.contains("Coding Workspace InternalReviewer"));
     assert!(input.prompt.contains("Review Request: review_request_0001"));
     assert!(
         input
@@ -622,6 +663,48 @@ fn create_input() -> CreateCodingAttemptInput {
     }
 }
 
+fn seed_group_work_items_and_plan(app_paths: &ProductAppPaths) {
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    for work_item_id in ["work_item_0001", "work_item_0002"] {
+        lifecycle
+            .create_work_item(CreateWorkItemInput {
+                id: Some(work_item_id.to_string()),
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                repository_id: "repository_0001".to_string(),
+                title: format!("Coding work item {work_item_id}"),
+                ..Default::default()
+            })
+            .expect("create group work item");
+    }
+    seed_group_plan(app_paths);
+}
+
+fn seed_group_plan(app_paths: &ProductAppPaths) {
+    LifecycleStore::new(app_paths.clone())
+        .create_issue_work_item_plan(CreateIssueWorkItemPlanInput {
+            id: Some("work_item_plan_0001".to_string()),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            source_story_spec_ids: Vec::new(),
+            source_design_spec_ids: Vec::new(),
+            options: IssueWorkItemPlanOptions {
+                include_integration_tests: false,
+                include_e2e_tests: false,
+                force_frontend_backend_split: false,
+                require_execution_plan_confirm: false,
+            },
+            status: IssueWorkItemPlanStatus::Confirmed,
+            work_item_ids: vec!["work_item_0001".to_string(), "work_item_0002".to_string()],
+            repository_profile_ref: None,
+            verification_plan_ids: Vec::new(),
+            dependency_graph: Vec::new(),
+            created_from_provider_run: None,
+            validator_findings: Vec::new(),
+        })
+        .expect("create group issue work item plan");
+}
+
 fn seed_work_item_markdown(app_paths: &ProductAppPaths, markdown: &str) {
     let lifecycle = LifecycleStore::new(app_paths.clone());
     lifecycle
@@ -690,4 +773,3 @@ fn git_repo_in(path: &Path) -> PathBuf {
     run_git(path, &["branch", "-m", "main"]);
     path.to_path_buf()
 }
-

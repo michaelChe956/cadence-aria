@@ -14,10 +14,10 @@ use crate::cross_cutting::approval_bridge::{ApprovalBridge, ChoiceDecision};
 use crate::cross_cutting::process_manager::ProcessManager;
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
-    ChoiceOptionData, ChoiceRequestData, ChoiceRequestSource, ProviderEvent,
-    ProviderExecutionEvent, ProviderExecutionEventKind, ProviderExecutionEventStatus,
-    ProviderPermissionMode, ProviderSession, ProviderStatus, RiskLevel, StreamingProviderAdapter,
-    StreamingProviderInput,
+    ChoiceAnswerData, ChoiceOptionData, ChoiceQuestionData, ChoiceRequestData, ChoiceRequestSource,
+    ProviderEvent, ProviderExecutionEvent, ProviderExecutionEventKind,
+    ProviderExecutionEventStatus, ProviderPermissionMode, ProviderSession, ProviderStatus,
+    RiskLevel, StreamingProviderAdapter, StreamingProviderInput,
 };
 
 mod ask_user_question;

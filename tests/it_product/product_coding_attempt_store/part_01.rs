@@ -6,14 +6,13 @@ use cadence_aria::product::coding_attempt_store::{
     CreateCodingExecutionUnitInput, CreateGroupCodingAttemptInput,
 };
 use cadence_aria::product::coding_models::{
-    AnalystDecisionNextStage, AnalystDecisionRecord, AnalystDecisionVerdict,
-    AnalystReworkInstructions, CodeReviewReport, CodingAgentRole, CodingAttemptStatus,
-    CodingChatEntry, CodingChoiceGateStatus, CodingChoiceOption, CodingContextNote,
-    CodingEntryType, CodingExecutionStage, CodingExecutionUnitStatus, CodingProviderRole,
-    CodingReworkInstruction, CodingRolePermissionModes, CodingRoleProviderConfigSnapshot,
-    CodingRoleRunEventType, CodingRoleRunStatus, CodingRoleRunTrigger, CodingStageGateStatus,
-    CodingTimelineNode, CodingTimelineNodeStatus, FindingSeverity, InternalPrReview, PushStatus,
-    RemoteKind, ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict, TestCommand,
+    CodeReviewReport, CodingAgentRole, CodingAttemptStatus, CodingChatEntry,
+    CodingChoiceGateStatus, CodingChoiceOption, CodingContextNote, CodingEntryType,
+    CodingExecutionStage, CodingExecutionUnitStatus, CodingProviderRole, CodingReworkInstruction,
+    CodingRolePermissionModes, CodingRoleProviderConfigSnapshot, CodingRoleRunEventType,
+    CodingRoleRunStatus, CodingRoleRunTrigger, CodingStageGateStatus, CodingTimelineNode,
+    CodingTimelineNodeStatus, FindingSeverity, InternalPrReview, PushStatus, RemoteKind,
+    ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict, TestCommand,
     TestCommandStatus, TestingOverallStatus, TestingReport, WorkItemExecutionPlan,
     WorkItemHandoff,
 };
@@ -85,6 +84,60 @@ fn create_attempt_assigns_attempt_number_and_blocks_active_attempts() {
         .expect("create second attempt after terminal status");
     assert_eq!(second.id, "coding_attempt_0002");
     assert_eq!(second.attempt_no, 2);
+}
+
+#[test]
+fn create_attempt_does_not_reuse_id_after_delete() {
+    let root = tempdir().expect("tempdir");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+
+    let first = store
+        .create_attempt(create_input("work_item_0001"))
+        .expect("create first attempt");
+    assert_eq!(first.id, "coding_attempt_0001");
+    std::fs::remove_file(
+        root.path().join(
+            ".aria/projects/project_0001/issues/issue_0001/coding-attempts/.meta/coding-attempt-sequence.json",
+        ),
+    )
+    .expect("remove legacy-missing sequence");
+    store
+        .delete_attempt("project_0001", "issue_0001", &first.id)
+        .expect("delete first attempt");
+
+    let second = store
+        .create_attempt(create_input("work_item_0001"))
+        .expect("create second attempt");
+
+    assert_eq!(second.id, "coding_attempt_0002");
+    assert_eq!(second.attempt_no, 1);
+}
+
+#[test]
+fn create_group_attempt_does_not_reuse_id_after_delete() {
+    let root = tempdir().expect("tempdir");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+
+    let first = store
+        .create_group_attempt(group_create_input("work_item_0001"))
+        .expect("create first group attempt");
+    assert_eq!(first.id, "coding_attempt_0001");
+    std::fs::remove_file(
+        root.path().join(
+            ".aria/projects/project_0001/issues/issue_0001/coding-attempts/.meta/coding-attempt-sequence.json",
+        ),
+    )
+    .expect("remove legacy-missing sequence");
+    store
+        .delete_attempt("project_0001", "issue_0001", &first.id)
+        .expect("delete first group attempt");
+
+    let second = store
+        .create_group_attempt(group_create_input("work_item_0001"))
+        .expect("create second group attempt");
+
+    assert_eq!(second.id, "coding_attempt_0002");
+    assert_eq!(second.attempt_no, 1);
 }
 
 #[test]
@@ -268,12 +321,12 @@ fn store_lists_chat_entries_by_created_at_not_filename() {
         .expect("create attempt");
 
     let earlier = CodingChatEntry {
-        id: "coding_node_0019_analyst_verdict".to_string(),
+        id: "coding_node_0019_code_review".to_string(),
         attempt_id: attempt.id.clone(),
         node_id: Some("coding_node_0019".to_string()),
         role: CodingAgentRole::Author,
         entry_type: CodingEntryType::UserMessage,
-        content: Some("Analyst human gate".to_string()),
+        content: Some("Code Reviewer blocked".to_string()),
         metadata: None,
         created_at: "2026-06-14T15:02:43Z".to_string(),
     };
@@ -283,19 +336,19 @@ fn store_lists_chat_entries_by_created_at_not_filename() {
         node_id: Some("coding_node_0019".to_string()),
         role: CodingAgentRole::Author,
         entry_type: CodingEntryType::UserMessage,
-        content: Some("请重试 Analyst，并严格只返回系统支持的 JSON schema。".to_string()),
+        content: Some("请把这条人工修复意见优先提交给 Coder。".to_string()),
         metadata: Some(serde_json::json!({
             "context_note_id": "coding_context_note_0003",
         })),
         created_at: "2026-06-14T15:48:40Z".to_string(),
     };
     let latest = CodingChatEntry {
-        id: "coding_node_0020_analyst_verdict".to_string(),
+        id: "coding_node_0020_coder_fix".to_string(),
         attempt_id: attempt.id.clone(),
         node_id: Some("coding_node_0020".to_string()),
         role: CodingAgentRole::Author,
         entry_type: CodingEntryType::UserMessage,
-        content: Some("Analyst retry".to_string()),
+        content: Some("Coder fix retry".to_string()),
         metadata: None,
         created_at: "2026-06-14T16:00:00Z".to_string(),
     };
@@ -316,9 +369,9 @@ fn store_lists_chat_entries_by_created_at_not_filename() {
     assert_eq!(
         ids,
         vec![
-            "coding_node_0019_analyst_verdict",
+            "coding_node_0019_code_review",
             "coding_chat_entry_0003",
-            "coding_node_0020_analyst_verdict",
+            "coding_node_0020_coder_fix",
         ]
     );
 }
@@ -466,70 +519,6 @@ fn saves_reads_and_consumes_latest_coding_rework_instruction() {
     );
 }
 
-#[test]
-fn saves_reads_and_lists_latest_analyst_decision() {
-    let root = tempdir().expect("tempdir");
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
-    let attempt = store
-        .create_attempt(create_input("work_item_0001"))
-        .expect("create attempt");
-    let first = AnalystDecisionRecord {
-        id: "analyst_decision_0001".to_string(),
-        attempt_id: attempt.id.clone(),
-        source_stage: CodingExecutionStage::Testing,
-        rework_round: 1,
-        verdict: AnalystDecisionVerdict::NeedsFix,
-        next_stage: AnalystDecisionNextStage::Coding,
-        reason: "测试失败，需要返修".to_string(),
-        evidence_refs: vec!["testing_report_0001.json".to_string()],
-        raw_provider_output_refs: Vec::new(),
-        rework_instructions: Some(AnalystReworkInstructions {
-            summary: "修复 failing test".to_string(),
-            required_changes: vec!["补充边界输入处理".to_string()],
-            verification_expectations: vec!["cargo test --locked --test it_product".to_string()],
-        }),
-        human_gate: None,
-        created_at: "2026-06-12T00:00:00Z".to_string(),
-        parse_error: None,
-        role_run_id: None,
-        run_no: None,
-    };
-    let second = AnalystDecisionRecord {
-        id: "analyst_decision_0002".to_string(),
-        attempt_id: attempt.id.clone(),
-        source_stage: CodingExecutionStage::CodeReview,
-        rework_round: 2,
-        verdict: AnalystDecisionVerdict::Proceed,
-        next_stage: AnalystDecisionNextStage::ReviewRequest,
-        reason: "审查通过，可以创建 review request".to_string(),
-        evidence_refs: vec!["code_review_0001.json".to_string()],
-        raw_provider_output_refs: vec!["provider-raw/code_review/code_review_0001.txt".to_string()],
-        rework_instructions: None,
-        human_gate: None,
-        created_at: "2026-06-12T00:01:00Z".to_string(),
-        parse_error: None,
-        role_run_id: None,
-        run_no: None,
-    };
-
-    store
-        .save_analyst_decision(&first)
-        .expect("save first decision");
-    store
-        .save_analyst_decision(&second)
-        .expect("save second decision");
-
-    let decisions = store
-        .list_analyst_decisions("project_0001", "issue_0001", &attempt.id)
-        .expect("list decisions");
-    assert_eq!(decisions, vec![first.clone(), second.clone()]);
-    assert_eq!(
-        store
-            .latest_analyst_decision("project_0001", "issue_0001", &attempt.id)
-            .expect("latest decision"),
-        Some(second)
-    );
-}
 
 #[test]
 fn saves_reads_and_supersedes_coding_role_runs() {
@@ -607,13 +596,14 @@ fn store_persists_role_provider_config_snapshot_in_attempt_scope() {
         .get_role_provider_config_snapshot("project_0001", "issue_0001", &attempt.id)
         .expect("initial role provider snapshot");
     assert_eq!(initial.coder, ProviderName::Fake);
-    assert_eq!(initial.tester, ProviderName::Fake);
+    assert_eq!(initial.tester_plan, ProviderName::Fake);
+    assert_eq!(initial.tester_execute, ProviderName::Fake);
     assert_eq!(initial.code_reviewer, ProviderName::Fake);
 
     let updated = CodingRoleProviderConfigSnapshot {
         coder: ProviderName::Fake,
-        tester: ProviderName::Codex,
-        analyst: ProviderName::Fake,
+        tester_plan: ProviderName::ClaudeCode,
+        tester_execute: ProviderName::Codex,
         code_reviewer: ProviderName::Codex,
         internal_reviewer: ProviderName::Fake,
         review_rounds: 1,

@@ -9,7 +9,6 @@ export type ChatEntryType =
   | "choice_response"
   | "artifact_update"
   | "review_verdict"
-  | "analyst_verdict"
   | "gate_prompt"
   | "human_decision"
   | "stage_change"
@@ -21,13 +20,19 @@ export type ChatEntryRole =
   | "reviewer"
   | "coder"
   | "tester"
-  | "analyst"
   | "code_reviewer"
   | "internal_reviewer"
   | "system";
 export type ChatEntryResolution = "confirm" | "request-change" | "terminate";
 
 export interface ChoiceResponsePayload {
+  selected_option_ids: string[];
+  free_text: string | null;
+  answers?: ChoiceAnswerPayload[];
+}
+
+export interface ChoiceAnswerPayload {
+  question_id: string;
   selected_option_ids: string[];
   free_text: string | null;
 }

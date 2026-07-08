@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-use super::analyst::AnalystVerdict;
 use super::execution::{CodingAgentRole, CodingExecutionStage};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -20,9 +19,6 @@ pub enum CodingEntryType {
     StageGate {
         stage: CodingExecutionStage,
         countdown_seconds: u8,
-    },
-    AnalystVerdict {
-        verdict: AnalystVerdict,
     },
     StageSummary {
         stage: CodingExecutionStage,

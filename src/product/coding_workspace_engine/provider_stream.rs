@@ -1,169 +1,6 @@
 use super::*;
 
 impl CodingWorkspaceEngine {
-    pub async fn execute_coding(
-        &self,
-        attempt: &CodingExecutionAttempt,
-        provider: &dyn StreamingProviderAdapter,
-        context: &CodingExecutionContext,
-    ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
-        let (_command_tx, mut command_rx) = mpsc::channel(1);
-        self.execute_coding_with_commands(attempt, provider, context, &mut command_rx)
-            .await
-    }
-
-    pub async fn execute_coding_with_commands(
-        &self,
-        attempt: &CodingExecutionAttempt,
-        provider: &dyn StreamingProviderAdapter,
-        context: &CodingExecutionContext,
-        command_rx: &mut mpsc::Receiver<CodingRunnerCommand>,
-    ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
-        let Some(worktree_path) = attempt.worktree_path.as_ref() else {
-            return Err(CodingWorkspaceEngineError::MissingWorktree(
-                attempt.id.clone(),
-            ));
-        };
-        let attempt = self.store.update_attempt_stage(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingExecutionStage::Coding,
-        )?;
-        let node = self.create_coding_timeline_node(&attempt)?;
-        let _ = self
-            .event_tx
-            .send(CodingWsOutMessage::CodingTimelineNodeCreated { node: node.clone() })
-            .await;
-
-        let coder_provider = self
-            .store
-            .get_role_provider_config_snapshot(&attempt.project_id, &attempt.issue_id, &attempt.id)?
-            .coder;
-        let resume_provider_session_id = self.provider_resume_session_id_for_attempt(
-            &attempt,
-            &CodingProviderRole::Coder,
-            &coder_provider,
-        );
-        let rework_instruction = self.store.latest_unconsumed_rework_instruction(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-        )?;
-        let context_notes = self.store.list_unconsumed_context_notes(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-        )?;
-        let context_note_ids = context_notes
-            .iter()
-            .map(|note| note.id.clone())
-            .collect::<Vec<_>>();
-        let context_note_input =
-            format_rework_context_notes(&context_notes, REWORK_CONTEXT_NOTE_CHAR_LIMIT);
-        let coding_context_notes = (!context_note_ids.is_empty()).then_some(&context_note_input);
-        let prompt_mode = if resume_provider_session_id.is_some() {
-            CodingPromptMode::DeltaOnly
-        } else {
-            CodingPromptMode::FullConversation
-        };
-        let prompt = match prompt_mode {
-            CodingPromptMode::FullConversation => build_coding_prompt(
-                &attempt,
-                context,
-                rework_instruction.as_ref(),
-                coding_context_notes,
-            ),
-            CodingPromptMode::DeltaOnly => build_coding_delta_prompt(
-                &attempt,
-                context,
-                rework_instruction.as_ref(),
-                coding_context_notes,
-            ),
-        };
-        let _ = self
-            .event_tx
-            .send(CodingWsOutMessage::CodingExecutionEvent {
-                event: provider_prompt_event(
-                    &node.id,
-                    &coder_provider,
-                    prompt.clone(),
-                    prompt_mode.event_detail(),
-                ),
-            })
-            .await;
-        if let Some(instruction) = rework_instruction.as_ref() {
-            self.store.mark_rework_instruction_consumed(
-                &attempt.project_id,
-                &attempt.issue_id,
-                &attempt.id,
-                &instruction.id,
-                &node.id,
-            )?;
-        }
-        if !context_note_ids.is_empty() {
-            self.store.mark_context_notes_consumed(
-                &attempt.project_id,
-                &attempt.issue_id,
-                &attempt.id,
-                &context_note_ids,
-                attempt.rework_count,
-            )?;
-        }
-
-        let legacy_input = AdapterInput {
-            provider_type: provider_type_for_name(&coder_provider),
-            role: AdapterRole::Executor,
-            worktree_path: Some(worktree_path.to_string_lossy().to_string()),
-            prompt,
-            context_files: Vec::new(),
-            output_schema: "coding_workspace_markdown".to_string(),
-            timeout: DEFAULT_PROVIDER_TIMEOUT_SECS,
-            max_retries: 0,
-        };
-        let input = StreamingProviderInput {
-            provider_type: legacy_input.provider_type.clone(),
-            role: legacy_input.role.clone(),
-            prompt: legacy_input.prompt.clone(),
-            working_dir: worktree_path.clone(),
-            workspace_session_id: Some(attempt.id.clone()),
-            resume_provider_session_id,
-            permission_mode: role_permission_mode_for_attempt(
-                &self.store,
-                &attempt,
-                CodingProviderRole::Coder,
-            )?,
-            env_vars: BTreeMap::new(),
-            timeout_secs: legacy_input.timeout,
-        };
-        let _full_output = self
-            .run_provider_stream_to_completion(CodingProviderStreamRun {
-                attempt: &attempt,
-                node_id: &node.id,
-                role_run: None,
-                provider,
-                legacy_input: &legacy_input,
-                input,
-                provider_name: &coder_provider,
-                provider_role: CodingProviderRole::Coder,
-                command_rx,
-                allow_legacy_stream_fallback: true,
-                timeout: None,
-                timeout_reason_code: None,
-            })
-            .await?;
-        self.complete_timeline_node(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            &node.id,
-            CodingTimelineNodeStatus::Completed,
-            Some("代码编写完成".to_string()),
-        )
-        .await?;
-        Ok(attempt)
-    }
-
     pub(crate) fn record_role_run_event(
         &self,
         attempt: &CodingExecutionAttempt,
@@ -280,7 +117,15 @@ impl CodingWorkspaceEngine {
                 if provider_start_is_not_implemented(&error) && allow_legacy_stream_fallback =>
             {
                 return self
-                    .run_legacy_stream_to_completion(attempt, node_id, provider, legacy_input)
+                    .run_legacy_stream_to_completion(
+                        attempt,
+                        node_id,
+                        role_run,
+                        provider,
+                        legacy_input,
+                        provider_name,
+                        provider_role,
+                    )
                     .await;
             }
             Err(error) if !allow_legacy_stream_fallback => {
@@ -389,6 +234,7 @@ impl CodingWorkspaceEngine {
                                     id: id.clone(),
                                     selected_option_ids: selected_option_ids.clone(),
                                     free_text: free_text.clone(),
+                                    answers: vec![],
                                 })
                                 .await
                                 .is_ok()
@@ -750,20 +596,35 @@ impl CodingWorkspaceEngine {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn run_legacy_stream_to_completion(
         &self,
         attempt: &CodingExecutionAttempt,
         node_id: &str,
+        role_run: Option<&CodingRoleRun>,
         provider: &dyn StreamingProviderAdapter,
         input: &AdapterInput,
+        provider_name: &ProviderName,
+        provider_role: CodingProviderRole,
     ) -> Result<String, CodingWorkspaceEngineError> {
         let mut stream = provider
             .run_streaming(input, CancellationToken::new())
             .await?;
+        self.record_role_run_event(
+            attempt,
+            role_run,
+            CodingRoleRunEventType::ProviderStart,
+            json!({
+                "provider": provider_name,
+                "role": format!("{provider_role:?}"),
+                "mode": "legacy_stream"
+            }),
+        );
         let mut full_output = String::new();
         while let Some(chunk) = stream.recv().await {
             match chunk {
                 StreamChunk::Text(content) => {
+                    let content_for_event = content.clone();
                     full_output.push_str(&content);
                     let _ = self
                         .event_tx
@@ -772,22 +633,50 @@ impl CodingWorkspaceEngine {
                             node_id: Some(node_id.to_string()),
                         })
                         .await;
+                    self.record_role_run_event(
+                        attempt,
+                        role_run,
+                        CodingRoleRunEventType::TextDelta,
+                        json!({
+                            "content": content_for_event
+                        }),
+                    );
                 }
                 StreamChunk::Done {
                     full_output: completed_output,
                 } => {
+                    let output = if completed_output.trim().is_empty() {
+                        full_output
+                    } else {
+                        completed_output
+                    };
+                    let output_bytes = output.len();
                     let _ = self
                         .event_tx
                         .send(CodingWsOutMessage::CodingMessageComplete {
                             node_id: Some(node_id.to_string()),
                         })
                         .await;
-                    if !completed_output.trim().is_empty() {
-                        return Ok(completed_output);
-                    }
-                    return Ok(full_output);
+                    self.record_role_run_event(
+                        attempt,
+                        role_run,
+                        CodingRoleRunEventType::MessageComplete,
+                        json!({
+                            "provider_session_id": null,
+                            "output_bytes": output_bytes
+                        }),
+                    );
+                    return Ok(output);
                 }
                 StreamChunk::Error(message) => {
+                    self.record_role_run_event(
+                        attempt,
+                        role_run,
+                        CodingRoleRunEventType::ProviderFailed,
+                        json!({
+                            "message": message.clone()
+                        }),
+                    );
                     return self.fail_provider_stream(attempt, node_id, message).await;
                 }
             }

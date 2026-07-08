@@ -1,3 +1,4 @@
+use super::feedback::format_review_feedback;
 use super::*;
 
 impl WorkspaceEngine {
@@ -219,7 +220,7 @@ impl WorkspaceEngine {
                     .await;
                     return;
                 }
-                self.pending_revision_context = Some(verdict.comments);
+                self.pending_revision_context = Some(format_review_feedback(&verdict));
                 if let Err(message) = self
                     .start_serial_work_item_draft_run_for(&current_outline_id)
                     .await

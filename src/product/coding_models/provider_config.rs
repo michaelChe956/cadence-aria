@@ -18,7 +18,6 @@ pub enum CodingProviderPermissionMode {
 pub struct CodingRolePermissionModes {
     pub coder: CodingProviderPermissionMode,
     pub tester: CodingProviderPermissionMode,
-    pub analyst: CodingProviderPermissionMode,
     pub code_reviewer: CodingProviderPermissionMode,
     pub internal_reviewer: CodingProviderPermissionMode,
 }
@@ -28,7 +27,6 @@ impl Default for CodingRolePermissionModes {
         Self {
             coder: CodingProviderPermissionMode::Supervised,
             tester: CodingProviderPermissionMode::Auto,
-            analyst: CodingProviderPermissionMode::Auto,
             code_reviewer: CodingProviderPermissionMode::Supervised,
             internal_reviewer: CodingProviderPermissionMode::Supervised,
         }
@@ -40,7 +38,6 @@ impl fmt::Display for CodingProviderRole {
         let label = match self {
             Self::Coder => "Coder",
             Self::Tester => "Tester",
-            Self::Analyst => "Analyst",
             Self::CodeReviewer => "Code Reviewer",
             Self::InternalReviewer => "Internal Reviewer",
         };
@@ -49,10 +46,11 @@ impl fmt::Display for CodingProviderRole {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CodingRoleProviderConfigSnapshot {
     pub coder: ProviderName,
-    pub tester: ProviderName,
-    pub analyst: ProviderName,
+    pub tester_plan: ProviderName,
+    pub tester_execute: ProviderName,
     pub code_reviewer: ProviderName,
     pub internal_reviewer: ProviderName,
     pub review_rounds: u32,
@@ -74,8 +72,8 @@ impl From<&ProviderConfigSnapshot> for CodingRoleProviderConfigSnapshot {
             .unwrap_or_else(|| snapshot.author.clone());
         Self {
             coder: snapshot.author.clone(),
-            tester: snapshot.author.clone(),
-            analyst: snapshot.author.clone(),
+            tester_plan: snapshot.author.clone(),
+            tester_execute: snapshot.author.clone(),
             code_reviewer: reviewer.clone(),
             internal_reviewer: reviewer,
             review_rounds: snapshot.review_rounds,
@@ -88,8 +86,7 @@ impl CodingRoleProviderConfigSnapshot {
     pub fn provider_for_role(&self, role: &CodingProviderRole) -> &ProviderName {
         match role {
             CodingProviderRole::Coder => &self.coder,
-            CodingProviderRole::Tester => &self.tester,
-            CodingProviderRole::Analyst => &self.analyst,
+            CodingProviderRole::Tester => &self.tester_execute,
             CodingProviderRole::CodeReviewer => &self.code_reviewer,
             CodingProviderRole::InternalReviewer => &self.internal_reviewer,
         }
@@ -102,7 +99,6 @@ impl CodingRoleProviderConfigSnapshot {
         match role {
             CodingProviderRole::Coder => self.permission_modes.coder,
             CodingProviderRole::Tester => self.permission_modes.tester,
-            CodingProviderRole::Analyst => self.permission_modes.analyst,
             CodingProviderRole::CodeReviewer => self.permission_modes.code_reviewer,
             CodingProviderRole::InternalReviewer => self.permission_modes.internal_reviewer,
         }
@@ -111,8 +107,7 @@ impl CodingRoleProviderConfigSnapshot {
     pub fn set_provider_for_role(&mut self, role: &CodingProviderRole, provider: ProviderName) {
         match role {
             CodingProviderRole::Coder => self.coder = provider,
-            CodingProviderRole::Tester => self.tester = provider,
-            CodingProviderRole::Analyst => self.analyst = provider,
+            CodingProviderRole::Tester => self.tester_execute = provider,
             CodingProviderRole::CodeReviewer => self.code_reviewer = provider,
             CodingProviderRole::InternalReviewer => self.internal_reviewer = provider,
         }
@@ -126,9 +121,24 @@ impl CodingRoleProviderConfigSnapshot {
         match role {
             CodingProviderRole::Coder => self.permission_modes.coder = mode,
             CodingProviderRole::Tester => self.permission_modes.tester = mode,
-            CodingProviderRole::Analyst => self.permission_modes.analyst = mode,
             CodingProviderRole::CodeReviewer => self.permission_modes.code_reviewer = mode,
             CodingProviderRole::InternalReviewer => self.permission_modes.internal_reviewer = mode,
         }
+    }
+
+    pub fn tester_plan_provider(&self) -> &ProviderName {
+        &self.tester_plan
+    }
+
+    pub fn tester_execute_provider(&self) -> &ProviderName {
+        &self.tester_execute
+    }
+
+    pub fn set_tester_plan_provider(&mut self, provider: ProviderName) {
+        self.tester_plan = provider;
+    }
+
+    pub fn set_tester_execute_provider(&mut self, provider: ProviderName) {
+        self.tester_execute = provider;
     }
 }

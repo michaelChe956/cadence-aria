@@ -71,9 +71,9 @@ async fn retry_test_plan_supersedes_latest_testing_role_run_and_resumes_testing(
                     action_type: CodingGateActionType::RetryTestPlan,
                 },
                 CodingGateAction {
-                    action_id: "send_raw_output_to_analyst".to_string(),
-                    label: "发送给 Analyst 决策".to_string(),
-                    action_type: CodingGateActionType::SendRawOutputToAnalyst,
+                    action_id: "provide_context".to_string(),
+                    label: "补充上下文".to_string(),
+                    action_type: CodingGateActionType::ProvideContext,
                 },
                 CodingGateAction {
                     action_id: "abort".to_string(),
@@ -477,70 +477,6 @@ async fn coding_code_reviewer_run_uses_fresh_provider_session() {
 }
 
 #[tokio::test]
-async fn coding_analyst_rework_uses_fresh_provider_session() {
-    let root = tempdir().expect("root");
-    let worktree = root.path().join("worktree");
-    fs::create_dir_all(&worktree).expect("worktree");
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
-    let attempt = store
-        .create_attempt(CreateCodingAttemptInput {
-            worktree_path: Some(worktree),
-            provider_config_snapshot: ProviderConfigSnapshot {
-                author: ProviderName::ClaudeCode,
-                reviewer: Some(ProviderName::Codex),
-                review_rounds: 1,
-            },
-            ..create_input()
-        })
-        .expect("create attempt");
-    let attempt = store
-        .replace_attempt_provider_conversations(
-            &attempt.id,
-            vec![ProviderConversationRef {
-                role: ProviderConversationRole::Analyst,
-                provider: ProviderName::ClaudeCode,
-                provider_session_id: "analyst-session-1".to_string(),
-                updated_at: "2026-06-01T00:00:00Z".to_string(),
-                last_node_id: Some("rework-node-1".to_string()),
-            }],
-        )
-        .expect("persist analyst conversation");
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
-    store
-        .update_attempt_stage(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingExecutionStage::Testing,
-        )
-        .expect("testing stage");
-    let (tx, _rx) = mpsc::channel(8);
-    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
-    let provider = SessionInputCapturingProvider::with_outputs(
-        [r#"{"verdict":"no_issue","summary":"testing ok"}"#],
-        [Some("analyst-session-2".to_string())],
-    );
-
-    engine
-        .execute_rework(&attempt, "testing evidence", &provider)
-        .await
-        .expect("analyst rework provider run");
-
-    let inputs = provider.inputs.lock().expect("inputs lock");
-    assert_eq!(inputs.len(), 1);
-    assert_eq!(inputs[0].permission_mode, ProviderPermissionMode::Auto);
-    assert_eq!(inputs[0].timeout_secs, 10_800);
-    assert_eq!(inputs[0].resume_provider_session_id, None);
-}
-
-#[tokio::test]
 async fn coding_internal_reviewer_uses_fresh_provider_session() {
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
@@ -665,4 +601,3 @@ async fn execute_coding_includes_work_item_context_in_provider_prompt() {
     assert!(prompt.contains("# 爬楼梯问题 Work Item"));
     assert!(prompt.contains("uv run python -m unittest -v tests.test_climbing_stairs"));
 }
-

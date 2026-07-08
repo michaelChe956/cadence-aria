@@ -20,6 +20,7 @@ impl super::CodingAttemptStore {
         validate_relative_id(&input.issue_id)?;
         validate_relative_id(&input.plan_id)?;
         validate_relative_id(&input.current_work_item_id)?;
+        super::validate_max_auto_rework(input.max_auto_rework)?;
 
         let existing_attempts: Vec<CodingExecutionAttempt> = super::list_json_records(
             &self.coding_attempts_root(&input.project_id, &input.issue_id),
@@ -34,8 +35,7 @@ impl super::CodingAttemptStore {
             )));
         }
 
-        let root = self.coding_attempts_root(&input.project_id, &input.issue_id);
-        let id = next_sequential_id("coding_attempt", super::count_json_files(&root)?);
+        let id = self.allocate_coding_attempt_id(&input.project_id, &input.issue_id)?;
         let attempt_no = self
             .list_attempts_for_work_item(
                 &input.project_id,
@@ -279,6 +279,26 @@ impl super::CodingAttemptStore {
         let path = self.coding_unit_path(project_id, issue_id, attempt_id, unit_id);
         let mut unit: CodingExecutionUnit = read_json(&path)?;
         unit.handoff_ref = handoff_ref;
+        unit.updated_at = Utc::now().to_rfc3339();
+        write_json(&path, &unit)?;
+        Ok(unit)
+    }
+
+    pub fn update_coding_unit_completion_commit(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        unit_id: &str,
+        completion_commit: Option<String>,
+    ) -> Result<CodingExecutionUnit, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(attempt_id)?;
+        validate_relative_id(unit_id)?;
+        let path = self.coding_unit_path(project_id, issue_id, attempt_id, unit_id);
+        let mut unit: CodingExecutionUnit = read_json(&path)?;
+        unit.completion_commit = completion_commit;
         unit.updated_at = Utc::now().to_rfc3339();
         write_json(&path, &unit)?;
         Ok(unit)

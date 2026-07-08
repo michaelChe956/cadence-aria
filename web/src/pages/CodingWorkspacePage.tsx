@@ -1,4 +1,4 @@
-import { ArrowLeft, Trash2, Wifi, WifiOff } from "lucide-react";
+import { ArrowLeft, History, Settings2, Trash2, Wifi, WifiOff, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { deleteCodingAttempt } from "../api/client";
 import { CodingTimeline } from "../components/coding-workspace/CodingTimeline";
@@ -26,6 +26,8 @@ import {
 import { CodingWorkspaceGroupProgress } from "./CodingWorkspaceGroupProgress";
 import { PrepareExecutionPlanPanel, StatusBadge } from "./CodingWorkspaceReports";
 
+type CodingWorkspaceDrawer = "providers" | "runs";
+
 export function CodingWorkspacePage({
   attemptId,
   onBack,
@@ -41,8 +43,15 @@ export function CodingWorkspacePage({
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [planError, setPlanError] = useState<string | null>(null);
+  const [activeDrawer, setActiveDrawer] = useState<CodingWorkspaceDrawer | null>(null);
   const chatListRef = useRef<ChatEntryListHandle | null>(null);
   const pageError = planError ?? deleteError;
+  const providerSummary = store.roleProviderConfigSnapshot
+    ? `Coder ${store.roleProviderConfigSnapshot.coder} · Reviewer ${store.roleProviderConfigSnapshot.code_reviewer}`
+    : "provider pending";
+  const roleRunSummary =
+    store.roleRuns.length === 0 ? "暂无运行记录" : `${store.roleRuns.length} 次角色运行`;
+  const pendingGate = store.pendingGates.at(-1) ?? null;
 
   useUnloadGuard({
     enabled: store.status === "running",
@@ -68,6 +77,16 @@ export function CodingWorkspacePage({
       setDeleteError(errorMessage(reason, "删除 Coding Workspace 失败"));
     } finally {
       setDeleteBusy(false);
+    }
+  }
+
+  function handleSelectTimelineNode(nodeId: string) {
+    useCodingWorkspaceStore.getState().setSelectedNode(nodeId);
+    const targetEntry = useCodingWorkspaceStore
+      .getState()
+      .chatEntries.find((entry) => entry.node_id === nodeId);
+    if (targetEntry) {
+      chatListRef.current?.scrollToEntry(targetEntry.id);
     }
   }
 
@@ -108,7 +127,7 @@ export function CodingWorkspacePage({
         <div className="min-w-0">
           <div className="flex min-w-0 flex-wrap items-center gap-2">
             <span className="text-xs font-semibold uppercase text-[var(--aria-ink-muted)]">
-              {store.stage ?? "prepare_context"}
+              {displayCodingStage(store.stage ?? "prepare_context")}
             </span>
             <span className="text-xs text-[var(--aria-ink-muted)]">
               {store.baseBranch ?? "HEAD"} {"->"} {store.branchName ?? "未创建分支"}
@@ -119,7 +138,9 @@ export function CodingWorkspacePage({
           </div>
         </div>
         <div className="flex min-w-0 items-center justify-end gap-2">
-          <ActionButtons api={api} stage={store.stage} status={store.status} />
+          {pendingGate?.kind === "blocked" ? null : (
+            <ActionButtons api={api} stage={store.stage} status={store.status} />
+          )}
         </div>
       </header>
       {store.attemptScope === "work_item_group" && store.units.length > 0 ? (
@@ -135,16 +156,7 @@ export function CodingWorkspacePage({
           nodes={store.timelineNodes}
           activeNodeId={store.activeNodeId}
           selectedNodeId={store.selectedNodeId}
-          latestAnalystDecision={store.latestAnalystDecision}
-          onSelectNode={(nodeId) => {
-            useCodingWorkspaceStore.getState().setSelectedNode(nodeId);
-            const targetEntry = useCodingWorkspaceStore
-              .getState()
-              .chatEntries.find((entry) => entry.node_id === nodeId);
-            if (targetEntry) {
-              chatListRef.current?.scrollToEntry(targetEntry.id);
-            }
-          }}
+          onSelectNode={handleSelectTimelineNode}
         />
         <section className="grid min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden bg-[var(--aria-panel)]">
           <CodingPanelTabs activePanel={activePanel} onSelectPanel={setActivePanel} />
@@ -155,8 +167,8 @@ export function CodingWorkspacePage({
               className={[
                 "grid min-h-0 min-w-0 overflow-hidden",
                 store.stage === "prepare_context" && store.workItemExecutionPlan
-                  ? "grid-rows-[auto_auto_auto_minmax(0,1fr)_auto_auto]"
-                  : "grid-rows-[auto_auto_minmax(0,1fr)_auto_auto]",
+                  ? "grid-rows-[auto_auto_minmax(0,1fr)_auto_auto]"
+                  : "grid-rows-[auto_minmax(0,1fr)_auto_auto]",
               ].join(" ")}
             >
               {store.stage === "prepare_context" && store.workItemExecutionPlan ? (
@@ -167,34 +179,61 @@ export function CodingWorkspacePage({
                   onError={setPlanError}
                 />
               ) : null}
-              <CodingProviderConfigPanel
-                snapshot={store.roleProviderConfigSnapshot}
-                lockedRole={lockedProviderRole(store.stage, store.status, store.pendingGates)}
-                onSelect={api.sendProviderSelect}
-                onPermissionModeSelect={api.sendPermissionModeSelect}
-              />
-              <RoleRunHistoryPanel
-                roleRuns={store.roleRuns}
-                timelineNodes={store.timelineNodes}
-                selectedNodeId={store.selectedNodeId}
-                onSelectNode={(nodeId) => {
-                  useCodingWorkspaceStore.getState().setSelectedNode(nodeId);
-                  const targetEntry = useCodingWorkspaceStore
-                    .getState()
-                    .chatEntries.find((entry) => entry.node_id === nodeId);
-                  if (targetEntry) {
-                    chatListRef.current?.scrollToEntry(targetEntry.id);
-                  }
-                }}
-              />
-              <ChatEntryList
-                ref={chatListRef}
-                entries={store.chatEntries}
-                onPermissionResponse={handlePermissionResponse}
-                onChoiceResponse={handleChoiceResponse}
-              />
+              <div
+                data-testid="coding-chat-toolbar"
+                className="flex h-11 min-w-0 items-center justify-between gap-2 border-b border-[var(--aria-line)] bg-white px-3"
+              >
+                <div className="min-w-0 truncate text-xs text-[var(--aria-ink-muted)]">
+                  <span className="font-semibold text-[var(--aria-ink)]">运行对话</span>
+                  <span className="ml-2">{store.chatEntries.length} 条消息</span>
+                </div>
+                <div className="flex min-w-0 shrink-0 items-center gap-1.5">
+                  <button
+                    type="button"
+                    aria-label="Provider 设置"
+                    onClick={() => setActiveDrawer("providers")}
+                    className="inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-md border border-[var(--aria-line)] bg-white px-2 text-xs font-semibold text-[var(--aria-ink)] transition-colors hover:bg-[var(--aria-panel-muted)]"
+                  >
+                    <Settings2 className="h-3.5 w-3.5" />
+                    <span>Provider 设置</span>
+                    <span
+                      aria-hidden="true"
+                      className="hidden max-w-[14rem] truncate font-mono text-[11px] font-normal text-[var(--aria-ink-muted)] lg:inline"
+                    >
+                      {providerSummary}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    aria-label="角色运行历史"
+                    onClick={() => setActiveDrawer("runs")}
+                    className="inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-md border border-[var(--aria-line)] bg-white px-2 text-xs font-semibold text-[var(--aria-ink)] transition-colors hover:bg-[var(--aria-panel-muted)]"
+                  >
+                    <History className="h-3.5 w-3.5" />
+                    <span>角色运行历史</span>
+                    <span
+                      aria-hidden="true"
+                      className="hidden max-w-[8rem] truncate text-[11px] font-normal text-[var(--aria-ink-muted)] md:inline"
+                    >
+                      {roleRunSummary}
+                    </span>
+                  </button>
+                </div>
+              </div>
+              <div
+                data-testid="coding-chat-entry-list"
+                className="min-h-0 min-w-0 overflow-hidden"
+              >
+                <ChatEntryList
+                  ref={chatListRef}
+                  entries={store.chatEntries}
+                  onPermissionResponse={handlePermissionResponse}
+                  onChoiceResponse={handleChoiceResponse}
+                  className="h-full"
+                />
+              </div>
               <GatePanel
-                gate={store.pendingGates.at(-1) ?? null}
+                gate={pendingGate}
                 onRespond={api.respondGate}
                 onConfirmStage={api.confirmStageGate}
                 onAbort={api.abortAttempt}
@@ -206,23 +245,83 @@ export function CodingWorkspacePage({
                 statusText={
                   store.protocolError
                     ? `${store.protocolError.code}: ${store.protocolError.message}`
-                    : store.pendingGates.at(-1)?.title ?? "Coding Workspace"
+                    : pendingGate?.title ?? "Coding Workspace"
                 }
+                pendingGate={pendingGate}
               />
             </div>
           )}
         </section>
       </main>
 
+      {activeDrawer ? (
+        <div className="fixed inset-0 z-40 flex justify-end bg-black/20">
+          <button
+            type="button"
+            aria-label="关闭辅助面板"
+            className="absolute inset-0 cursor-default"
+            onClick={() => setActiveDrawer(null)}
+          />
+          <aside
+            role="dialog"
+            aria-modal="true"
+            aria-label={activeDrawer === "providers" ? "Provider 设置" : "角色运行历史"}
+            className="relative grid h-full w-full max-w-[42rem] grid-rows-[auto_minmax(0,1fr)] overflow-hidden border-l border-[var(--aria-line)] bg-white shadow-xl"
+          >
+            <div className="flex h-12 min-w-0 items-center justify-between gap-3 border-b border-[var(--aria-line)] px-4">
+              <div className="min-w-0">
+                <div className="truncate text-sm font-semibold text-[var(--aria-ink)]">
+                  {activeDrawer === "providers" ? "Provider 设置" : "角色运行历史"}
+                </div>
+                <div className="truncate text-xs text-[var(--aria-ink-muted)]">
+                  {activeDrawer === "providers" ? providerSummary : roleRunSummary}
+                </div>
+              </div>
+              <button
+                type="button"
+                aria-label="关闭辅助面板"
+                onClick={() => setActiveDrawer(null)}
+                className="inline-flex h-8 w-8 cursor-pointer items-center justify-center rounded-md text-[var(--aria-ink-muted)] transition-colors hover:bg-[var(--aria-panel-muted)]"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="min-h-0 overflow-auto p-4">
+              {activeDrawer === "providers" ? (
+                <CodingProviderConfigPanel
+                  snapshot={store.roleProviderConfigSnapshot}
+                  attemptScope={store.attemptScope}
+                  lockedRole={lockedProviderRole(store.stage, store.status, store.pendingGates)}
+                  configLocked={
+                    store.status !== "created" || store.stage !== "prepare_context"
+                  }
+                  maxAutoRework={store.maxAutoRework}
+                  onSelect={api.sendProviderSelect}
+                  onPermissionModeSelect={api.sendPermissionModeSelect}
+                  onMaxAutoReworkSelect={api.sendMaxAutoReworkSelect}
+                />
+              ) : (
+                <RoleRunHistoryPanel
+                  roleRuns={store.roleRuns}
+                  timelineNodes={store.timelineNodes}
+                  selectedNodeId={store.selectedNodeId}
+                  onSelectNode={handleSelectTimelineNode}
+                />
+              )}
+            </div>
+          </aside>
+        </div>
+      ) : null}
+
       <div
         data-testid="coding-status-bar"
         className="flex h-8 shrink-0 items-center justify-between gap-3 border-t border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 text-xs text-[var(--aria-ink-muted)]"
       >
-        <span>{store.stage ?? "prepare_context"}</span>
+        <span>{displayCodingStage(store.stage ?? "prepare_context")}</span>
         <span className={pageError ? "text-[var(--aria-danger)]" : undefined}>
           {pageError ?? store.connectionStatus}
         </span>
-        <span>rework {store.reworkCount}/{store.maxAutoRework}</span>
+        <span>Coder 修复次数 {store.reworkCount}/{store.maxAutoRework}</span>
       </div>
     </div>
   );
@@ -238,4 +337,18 @@ export function CodingWorkspacePage({
     if (!requestId) return;
     api.respondChoice(requestId, response.selected_option_ids, response.free_text);
   }
+}
+
+function displayCodingStage(stage: string) {
+  const labels: Record<string, string> = {
+    prepare_context: "准备上下文",
+    worktree_prepare: "准备 Worktree",
+    coding: "Coder",
+    testing: "Tester",
+    code_review: "Code Reviewer",
+    review_request: "准备 PR",
+    internal_pr_review: "GroupFinalReview",
+    final_confirm: "最终确认",
+  };
+  return labels[stage] ?? stage;
 }

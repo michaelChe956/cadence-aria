@@ -78,7 +78,7 @@ fn last_closing_fence_start(input: &str, content_start: usize, fence: &str) -> O
     for line in input[content_start..].split_inclusive('\n') {
         let line_start = offset;
         let trimmed = line.trim();
-        if trimmed.starts_with(fence) && trimmed[fence.len()..].trim().is_empty() {
+        if trimmed.starts_with(fence) {
             last = Some(line_start);
         }
         offset += line.len();
@@ -130,6 +130,17 @@ mod tests {
         assert_eq!(
             extract_artifact_content(input),
             "# Work Item\n\n## 验证命令\n\n```bash\nuv run python -m unittest discover -s tests -v\n```\n\n## 风险\n\n- 无"
+        );
+    }
+
+    #[test]
+    fn strips_inline_process_text_after_artifact_closing_fence() {
+        let input =
+            "前缀\n```artifact\n# Story Spec\n\n## 范围\n正文\n```Story Spec 已生成完毕。过程说明";
+
+        assert_eq!(
+            extract_artifact_content(input),
+            "# Story Spec\n\n## 范围\n正文"
         );
     }
 

@@ -49,7 +49,7 @@ async fn coding_prompt_includes_rework_fix_hints() {
         .expect("prompt lock")
         .clone()
         .expect("captured prompt");
-    assert!(prompt.contains("上一轮返修要求"));
+    assert!(prompt.contains("上一轮修复要求"));
     assert!(prompt.contains("来源阶段: CodeReview"));
     assert!(prompt.contains("reviewer 要求移除运行产物"));
     assert!(prompt.contains("移除 __pycache__ 和 .pyc 文件"));
@@ -144,8 +144,8 @@ async fn execute_coding_emits_prompt_for_coder_provider() {
             &attempt.id,
             CodingRoleProviderConfigSnapshot {
                 coder: ProviderName::Codex,
-                tester: ProviderName::Fake,
-                analyst: ProviderName::Fake,
+                tester_plan: ProviderName::Fake,
+                tester_execute: ProviderName::Fake,
                 code_reviewer: ProviderName::Fake,
                 internal_reviewer: ProviderName::Fake,
                 review_rounds: 1,
@@ -208,8 +208,8 @@ async fn execute_coding_forwards_provider_execution_and_tool_events() {
             &attempt.id,
             CodingRoleProviderConfigSnapshot {
                 coder: ProviderName::Codex,
-                tester: ProviderName::Fake,
-                analyst: ProviderName::Fake,
+                tester_plan: ProviderName::Fake,
+                tester_execute: ProviderName::Fake,
                 code_reviewer: ProviderName::Fake,
                 internal_reviewer: ProviderName::Fake,
                 review_rounds: 1,
@@ -278,6 +278,95 @@ async fn execute_coding_forwards_provider_execution_and_tool_events() {
                 && event.command.as_deref() == Some("uv run pytest")
                 && event.output.as_deref() == Some("1 passed")),
         "expected tool result execution event, got {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn execute_coding_persists_coder_role_run_and_full_output_chat_entry() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            ..create_input()
+        })
+        .expect("create attempt");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    let provider = FileWritingStreamingProvider;
+    let (tx, _rx) = mpsc::channel(16);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+
+    engine
+        .execute_coding(&attempt, &provider, &CodingExecutionContext::default())
+        .await
+        .expect("execute coding");
+
+    let role_runs = store
+        .list_role_runs("project_0001", "issue_0001", &attempt.id)
+        .expect("role runs");
+    assert_eq!(role_runs.len(), 1);
+    let role_run = &role_runs[0];
+    assert_eq!(role_run.role, CodingProviderRole::Coder);
+    assert_eq!(role_run.stage, CodingExecutionStage::Coding);
+    assert_eq!(role_run.status, CodingRoleRunStatus::Completed);
+    assert_eq!(role_run.trigger, CodingRoleRunTrigger::Initial);
+    assert_eq!(role_run.node_id.as_deref(), Some("coding_node_0001"));
+    assert_eq!(role_run.run_no, 1);
+    assert!(role_run.completed_at.is_some());
+    assert_eq!(
+        role_run.raw_provider_output_refs,
+        vec!["provider-raw/coding/coder_output_0001.txt".to_string()]
+    );
+
+    let events = store
+        .list_role_run_events("project_0001", "issue_0001", &attempt.id, &role_run.id)
+        .expect("role run events");
+    assert!(
+        events
+            .iter()
+            .any(|event| event.event_type == CodingRoleRunEventType::ProviderPrompt)
+    );
+    assert!(
+        events.iter().any(|event| {
+            event.event_type == CodingRoleRunEventType::TextDelta
+                && event.payload["content"] == "created generated.txt"
+        }),
+        "expected text delta event, got {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event.event_type == CodingRoleRunEventType::MessageComplete)
+    );
+
+    let chat_entries = store
+        .list_chat_entries("project_0001", "issue_0001", &attempt.id)
+        .expect("chat entries");
+    assert_eq!(chat_entries.len(), 1);
+    let entry = &chat_entries[0];
+    assert_eq!(entry.node_id.as_deref(), Some("coding_node_0001"));
+    assert_eq!(entry.role, CodingAgentRole::Author);
+    assert_eq!(entry.entry_type, CodingEntryType::AssistantMessage);
+    assert_eq!(entry.content.as_deref(), Some("done"));
+    let metadata = entry.metadata.as_ref().expect("entry metadata");
+    assert_eq!(metadata["source"], "coding");
+    assert_eq!(metadata["provider"], "fake");
+    assert_eq!(metadata["role_run_id"].as_str(), Some(role_run.id.as_str()));
+    assert_eq!(metadata["run_no"], 1);
+    assert_eq!(metadata["raw_provider_output_ref"], "provider-raw/coding/coder_output_0001.txt");
+    assert_eq!(metadata["started_at"].as_str(), Some(role_run.started_at.as_str()));
+    assert_eq!(
+        metadata["completed_at"].as_str(),
+        Some(role_run.completed_at.as_ref().expect("completed_at").as_str())
     );
 }
 
@@ -669,4 +758,3 @@ async fn execute_coding_stops_forwarding_provider_events_after_abort_command() {
     assert_eq!(error.to_string(), "coding_aborted");
     assert!(abort_sent);
 }
-

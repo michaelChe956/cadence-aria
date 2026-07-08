@@ -360,6 +360,8 @@ fn fake_workspace_markdown(prompt: &str) -> String {
     let issue = extract_prompt_field(prompt, "Issue")
         .or_else(|| extract_prompt_field(prompt, "Issue 描述"))
         .unwrap_or_else(|| "当前 Issue".to_string());
+    let issue_source_id =
+        extract_prompt_id(prompt, "Issue").unwrap_or_else(|| "issue_0001".to_string());
     let user_intent = latest_user_message(prompt)
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "开始生成".to_string());
@@ -380,7 +382,31 @@ fn fake_workspace_markdown(prompt: &str) -> String {
              ## 风险\n\n\
              [RISK-001] 需求边界不完整时，在待确认项中保留人工确认入口。\n\n\
              ## 追踪关系\n\n\
-             - 覆盖关联 Story Spec 与 Issue 约束。"
+             - source ids: Story Spec story_spec_0001, Issue {issue_source_id}。\n\
+             - [DEC-001] -> [REQ-001]。"
+        );
+    }
+
+    if prompt.contains("Workspace 类型: Work Item Plan") {
+        return format!(
+            "# Work Item Plan\n\n\
+             ## 计划范围\n\n\
+             为 {issue} 生成 Issue 级任务计划，响应用户指令：{user_intent}。\n\n\
+             ## 任务拆分\n\n\
+             [TASK-001] 实现核心逻辑。\n\
+             [TASK-002] 补充自动化测试。\n\n\
+             ## 依赖图\n\n\
+             [TASK-001] -> [TASK-002]。\n\n\
+             ## 验证计划\n\n\
+             - 运行项目现有测试命令。\n\n\
+             ## 执行顺序\n\n\
+             先执行 [TASK-001]，再执行 [TASK-002]。\n\n\
+             ## 风险\n\n\
+             输入约束变化时需重新确认计划。\n\n\
+             ## 追踪关系\n\n\
+             - source ids: Story Spec story_spec_0001, Design Spec design_spec_0001。\n\
+             - [TASK-001] -> [REQ-001]。\n\
+             - [TASK-002] -> [AC-001]。"
         );
     }
 
@@ -391,9 +417,9 @@ fn fake_workspace_markdown(prompt: &str) -> String {
              为 {issue} 拆分可执行任务，响应用户指令：{user_intent}。\n\n\
              ## 范围\n\n\
              覆盖实现、测试与验证命令。\n\n\
-             ## 任务拆分\n\n\
-             [TASK-001] 实现核心逻辑。\n\
-             [TASK-002] 补充自动化测试。\n\n\
+             ## 实现步骤\n\n\
+             - 实现核心逻辑。\n\
+             - 补充自动化测试。\n\n\
              ## 依赖\n\n\
              依赖已确认 Story Spec 与 Design Spec。\n\n\
              ## 验证命令\n\n\
@@ -401,14 +427,15 @@ fn fake_workspace_markdown(prompt: &str) -> String {
              ## 风险\n\n\
              输入约束变化时需重新确认计划。\n\n\
              ## 追踪关系\n\n\
-             - 绑定来源 Story/Design。"
+             - source ids: Story Spec story_spec_0001, Design Spec design_spec_0001。\n\
+             - 绑定来源 [REQ-001] / [DEC-001]。"
         );
     }
 
     format!(
         "# Story Spec\n\n\
          ## 范围\n\n\
-         覆盖 {issue} 的候选 Story Spec，响应用户指令：{user_intent}。\n\n\
+         来源 source id: Issue {issue_source_id}；覆盖 {issue} 的候选 Story Spec，响应用户指令：{user_intent}。\n\n\
          ## 用户故事\n\n\
          作为使用者，我希望系统能清晰解决该问题并提供可运行验证。\n\n\
          ## 功能需求\n\n\
@@ -433,6 +460,16 @@ fn extract_prompt_field(prompt: &str, field: &str) -> Option<String> {
         .find_map(|line| line.trim().strip_prefix(&prefix).map(str::trim))
         .filter(|value| !value.is_empty())
         .map(|value| value.split(" (").next().unwrap_or(value).trim().to_string())
+}
+
+fn extract_prompt_id(prompt: &str, field: &str) -> Option<String> {
+    let prefix = format!("{field}:");
+    prompt.lines().find_map(|line| {
+        let value = line.trim().strip_prefix(&prefix)?.trim();
+        let start = value.rfind('(')?;
+        let end = value.rfind(')')?;
+        (end > start + 1).then(|| value[start + 1..end].trim().to_string())
+    })
 }
 
 fn latest_user_message(prompt: &str) -> Option<String> {

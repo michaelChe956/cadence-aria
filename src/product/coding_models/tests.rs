@@ -9,18 +9,27 @@ use crate::product::coding_models::{
 };
 
 #[test]
-fn role_provider_config_deserializes_legacy_json_with_default_permission_modes() {
-    let legacy = r#"{
+fn role_provider_config_deserializes_plan_execute_tester_fields_with_default_permission_modes() {
+    let current = r#"{
       "coder": "codex",
-      "tester": "claude_code",
-      "analyst": "claude_code",
+      "tester_plan": "claude_code",
+      "tester_execute": "codex",
       "code_reviewer": "codex",
       "internal_reviewer": "claude_code",
       "review_rounds": 1
     }"#;
 
     let snapshot: CodingRoleProviderConfigSnapshot =
-        serde_json::from_str(legacy).expect("legacy role config");
+        serde_json::from_str(current).expect("role config");
+
+    assert_eq!(
+        snapshot.tester_plan,
+        crate::product::models::ProviderName::ClaudeCode
+    );
+    assert_eq!(
+        snapshot.tester_execute,
+        crate::product::models::ProviderName::Codex
+    );
 
     assert_eq!(
         snapshot.permission_mode_for_role(&CodingProviderRole::Coder),
@@ -31,10 +40,6 @@ fn role_provider_config_deserializes_legacy_json_with_default_permission_modes()
         CodingProviderPermissionMode::Auto
     );
     assert_eq!(
-        snapshot.permission_mode_for_role(&CodingProviderRole::Analyst),
-        CodingProviderPermissionMode::Auto
-    );
-    assert_eq!(
         snapshot.permission_mode_for_role(&CodingProviderRole::CodeReviewer),
         CodingProviderPermissionMode::Supervised
     );
@@ -42,6 +47,21 @@ fn role_provider_config_deserializes_legacy_json_with_default_permission_modes()
         snapshot.permission_mode_for_role(&CodingProviderRole::InternalReviewer),
         CodingProviderPermissionMode::Supervised
     );
+}
+
+#[test]
+fn role_provider_config_rejects_old_single_tester_field() {
+    let old_json = r#"{
+      "coder": "codex",
+      "tester": "claude_code",
+      "code_reviewer": "codex",
+      "internal_reviewer": "claude_code",
+      "review_rounds": 1
+    }"#;
+
+    let result = serde_json::from_str::<CodingRoleProviderConfigSnapshot>(old_json);
+
+    assert!(result.is_err());
 }
 
 #[test]

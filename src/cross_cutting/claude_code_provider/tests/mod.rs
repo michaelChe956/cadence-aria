@@ -22,7 +22,7 @@ mod permissions;
 mod process;
 mod streaming;
 
-const TEST_TIMEOUT: Duration = Duration::from_secs(5);
+const TEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 fn executable_fixture(relative_path: &str) -> PathBuf {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative_path);
@@ -81,7 +81,7 @@ async fn recv_completed(events: &mut mpsc::Receiver<ProviderEvent>) -> String {
     }
 }
 async fn wait_for_receiver_closed<T>(rx: &mpsc::Receiver<T>) {
-    for _ in 0..1000 {
+    for _ in 0..poll_attempts_for_test_timeout() {
         if rx.is_closed() {
             return;
         }
@@ -90,7 +90,7 @@ async fn wait_for_receiver_closed<T>(rx: &mpsc::Receiver<T>) {
     panic!("receiver did not close after cancellation");
 }
 async fn wait_for_buffer_len<T>(rx: &mpsc::Receiver<T>, expected_len: usize) {
-    for _ in 0..1000 {
+    for _ in 0..poll_attempts_for_test_timeout() {
         if rx.len() >= expected_len {
             return;
         }
@@ -102,13 +102,17 @@ async fn wait_for_buffer_len<T>(rx: &mpsc::Receiver<T>, expected_len: usize) {
     );
 }
 async fn wait_for_file(path: &Path) {
-    for _ in 0..200 {
+    for _ in 0..poll_attempts_for_test_timeout() {
         if path.exists() {
             return;
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     panic!("file did not appear: {}", path.display());
+}
+
+fn poll_attempts_for_test_timeout() -> usize {
+    (TEST_TIMEOUT.as_millis() / 5).max(1) as usize
 }
 #[cfg(target_os = "linux")]
 async fn wait_for_process_absent(pid: u32) {

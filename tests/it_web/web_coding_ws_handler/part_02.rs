@@ -245,7 +245,7 @@ async fn coding_ws_provider_select_during_stage_gate_updates_roles_and_refreshes
     send_json(
         &mut ws,
         &CodingWsInMessage::ProviderSelect {
-            role: "tester".to_string(),
+            role: "tester_execute".to_string(),
             provider: ProviderName::Codex,
         },
     )
@@ -267,14 +267,14 @@ async fn coding_ws_provider_select_during_stage_gate_updates_roles_and_refreshes
         refreshed_gate
             .provider_snapshot
             .as_ref()
-            .map(|snapshot| &snapshot.tester),
+            .map(|snapshot| snapshot.tester_execute_provider()),
         Some(&ProviderName::Codex)
     );
     assert_eq!(
         store
             .get_role_provider_config_snapshot("project_0001", "issue_0001", "coding_attempt_0001")
             .expect("role provider snapshot")
-            .tester,
+            .tester_execute,
         ProviderName::Codex
     );
 
@@ -394,7 +394,7 @@ async fn coding_ws_provider_select_rejects_current_running_stage_role_without_ga
     send_json(
         &mut ws,
         &CodingWsInMessage::ProviderSelect {
-            role: "tester".to_string(),
+            role: "tester_execute".to_string(),
             provider: ProviderName::Codex,
         },
     )
@@ -515,7 +515,7 @@ async fn coding_ws_start_coding_keeps_socket_responsive_while_runner_is_active()
 }
 
 #[tokio::test]
-async fn coding_ws_start_coding_drives_full_happy_path_to_final_confirm() {
+async fn coding_ws_start_coding_drives_full_happy_path_to_review_request_completion() {
     let _guard = WS_TEST_LOCK.lock().await;
     let root = tempdir().expect("root");
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
@@ -533,19 +533,23 @@ async fn coding_ws_start_coding_drives_full_happy_path_to_final_confirm() {
     send_json(&mut ws, &CodingWsInMessage::StartCoding).await;
 
     let mut stages = Vec::new();
-    let mut final_snapshot_seen = false;
-    let mut final_chat_entries = Vec::new();
+    let mut completed_snapshot_seen = false;
+    let mut completed_chat_entries = Vec::new();
     let mut confirmed_gates = HashSet::new();
+    let mut observed = Vec::new();
     for _ in 0..80 {
         let message = recv_json(&mut ws).await;
         match message {
             CodingWsOutMessage::CodingTimelineNodeCreated { node } => {
+                observed.push(format!("node:{:?}", node.stage));
                 stages.push(node.stage);
             }
             CodingWsOutMessage::CodingGateRequired { gate } => {
-                if respond_to_testing_result_review_gate(&mut ws, &gate).await {
-                    continue;
-                }
+                observed.push(format!(
+                    "gate:{:?}:{:?}",
+                    gate.kind,
+                    gate.stage.as_ref()
+                ));
                 assert_eq!(
                     gate.kind,
                     CodingGateKind::StageGate,
@@ -564,12 +568,15 @@ async fn coding_ws_start_coding_drives_full_happy_path_to_final_confirm() {
                 stage,
                 chat_entries,
                 ..
-            } if status == CodingAttemptStatus::Completed
-                && stage == CodingExecutionStage::FinalConfirm =>
-            {
-                final_chat_entries = *chat_entries;
-                final_snapshot_seen = true;
-                break;
+            } => {
+                observed.push(format!("state:{status:?}:{stage:?}"));
+                if status == CodingAttemptStatus::Completed
+                    && stage == CodingExecutionStage::ReviewRequest
+                {
+                    completed_chat_entries = *chat_entries;
+                    completed_snapshot_seen = true;
+                    break;
+                }
             }
             CodingWsOutMessage::CodingProtocolError { code, message } => {
                 panic!("unexpected coding protocol error {code}: {message}");
@@ -579,40 +586,22 @@ async fn coding_ws_start_coding_drives_full_happy_path_to_final_confirm() {
     }
 
     assert!(
-        final_snapshot_seen,
-        "expected final_confirm snapshot over websocket"
+        completed_snapshot_seen,
+        "expected ReviewRequest completed snapshot over websocket; observed={observed:?}"
     );
     for expected in [
         CodingExecutionStage::WorktreePrepare,
         CodingExecutionStage::Coding,
-        CodingExecutionStage::Testing,
-        CodingExecutionStage::Rework,
         CodingExecutionStage::CodeReview,
         CodingExecutionStage::ReviewRequest,
-        CodingExecutionStage::InternalPrReview,
-        CodingExecutionStage::FinalConfirm,
     ] {
         assert!(
             stages.contains(&expected),
             "missing timeline stage {expected:?}; got {stages:?}"
         );
     }
-    assert_eq!(
-        stages
-            .iter()
-            .filter(|stage| **stage == CodingExecutionStage::Rework)
-            .count(),
-        3,
-        "expected rework after testing, code review, and internal review; got {stages:?}"
-    );
     assert!(
-        final_chat_entries
-            .iter()
-            .any(|entry| matches!(entry.entry_type, CodingEntryType::AnalystVerdict { .. })),
-        "expected persisted analyst verdict chat entry"
-    );
-    assert!(
-        final_chat_entries.iter().any(|entry| {
+        completed_chat_entries.iter().any(|entry| {
             entry
                 .metadata
                 .as_ref()
@@ -623,33 +612,30 @@ async fn coding_ws_start_coding_drives_full_happy_path_to_final_confirm() {
         "expected persisted code review chat entry"
     );
     assert!(
-        final_chat_entries.iter().any(|entry| {
-            entry
-                .metadata
-                .as_ref()
-                .and_then(|value| value.get("source"))
-                .and_then(|value| value.as_str())
-                == Some("internal_pr_review")
-        }),
-        "expected persisted internal PR review chat entry"
+        !stages.contains(&CodingExecutionStage::InternalPrReview),
+        "single WorkItem should not run InternalPrReview; got {stages:?}"
+    );
+    assert!(
+        !stages.contains(&CodingExecutionStage::FinalConfirm),
+        "single WorkItem should complete at ReviewRequest; got {stages:?}"
     );
 
     let attempt = store
         .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
         .expect("updated attempt");
     assert_eq!(attempt.status, CodingAttemptStatus::Completed);
-    assert_eq!(attempt.stage, CodingExecutionStage::FinalConfirm);
+    assert_eq!(attempt.stage, CodingExecutionStage::ReviewRequest);
     let worktree = attempt.worktree_path.as_ref().expect("worktree path");
     assert_ne!(worktree, &root.path().join("repo"));
     assert!(worktree.join("src/lib.rs").is_file());
 
-    let report = store
-        .list_testing_reports("project_0001", "issue_0001", &attempt.id)
-        .expect("testing reports")
-        .pop()
-        .expect("testing report");
-    assert_eq!(report.overall_status, TestingOverallStatus::Passed);
-    assert!(report.backend_verified);
+    assert!(
+        store
+            .list_testing_reports("project_0001", "issue_0001", &attempt.id)
+            .expect("testing reports")
+            .is_empty(),
+        "new pipeline should not run tester reports"
+    );
 
     let review_request = store
         .list_review_requests("project_0001", "issue_0001", &attempt.id)
@@ -664,7 +650,7 @@ async fn coding_ws_start_coding_drives_full_happy_path_to_final_confirm() {
             .list_internal_pr_reviews("project_0001", "issue_0001", &attempt.id)
             .expect("internal reviews")
             .len(),
-        1
+        0
     );
 
     ws.close(None).await.expect("close ws");

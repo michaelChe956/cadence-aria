@@ -12,6 +12,16 @@ use crate::product::json_store::{ProductStoreError, read_json};
 pub(crate) const ROLE_RUN_EVENT_INLINE_STRING_LIMIT: usize = 16_384;
 pub(crate) const ROLE_RUN_RETRY_DIAGNOSTIC_LIMIT: usize = 8_000;
 pub(crate) const ROLE_RUN_RETRY_DIAGNOSTIC_FIELD_LIMIT: usize = 512;
+pub(crate) const MAX_AUTO_REWORK_LIMIT: u32 = 5;
+
+pub(crate) fn validate_max_auto_rework(value: u32) -> Result<(), ProductStoreError> {
+    if value <= MAX_AUTO_REWORK_LIMIT {
+        return Ok(());
+    }
+    Err(ProductStoreError::Io(format!(
+        "invalid_max_auto_rework: {value}"
+    )))
+}
 
 pub(crate) fn list_json_records<T: for<'de> Deserialize<'de>>(
     path: &Path,
@@ -211,7 +221,6 @@ pub(crate) fn coding_stage_dir_name(stage: &CodingExecutionStage) -> &'static st
         CodingExecutionStage::Coding => "coding",
         CodingExecutionStage::Testing => "testing",
         CodingExecutionStage::CodeReview => "code_review",
-        CodingExecutionStage::Rework => "rework",
         CodingExecutionStage::ReviewRequest => "review_request",
         CodingExecutionStage::InternalPrReview => "internal_pr_review",
         CodingExecutionStage::FinalConfirm => "final_confirm",

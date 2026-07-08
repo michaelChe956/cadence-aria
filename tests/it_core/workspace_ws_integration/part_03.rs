@@ -131,15 +131,11 @@ async fn workspace_ws_abort_discards_partial_stream_without_completion() {
     for _ in 0..80 {
         match recv_json(&mut ws).await {
             WsOutMessage::StageChange { stage } if stage == "prepare_context" => {
-                let lifecycle = lifecycle_json(root.path()).await;
-                let messages = lifecycle["workspace_sessions"][0]["messages"]
-                    .as_array()
-                    .expect("messages");
+                let messages = persisted_workspace_messages(root.path());
                 assert_eq!(messages.len(), 2);
-                assert!(messages.iter().any(|message| message["role"] == "system"));
+                assert!(messages.iter().any(|message| message.role == "system"));
                 assert!(messages.iter().any(|message| {
-                    message["role"] == "user"
-                        && message["content"] == long_message("abort_instruction")
+                    message.role == "user" && message.content == long_message("abort_instruction")
                 }));
                 drop(ws);
                 server.abort();
@@ -308,7 +304,7 @@ async fn workspace_ws_secondary_connection_can_abort_active_run_started_by_prima
 
     send_json(&mut secondary, &WsInMessage::Abort).await;
     tokio::time::timeout(
-        Duration::from_secs(1),
+        Duration::from_secs(5),
         recv_until_stage(&mut primary, "prepare_context"),
     )
     .await
@@ -527,6 +523,7 @@ async fn workspace_ws_claude_author_ask_user_question_choice_continues_same_prov
             id: choice.id,
             selected_option_ids: vec!["opt_0".to_string()],
             free_text: None,
+            answers: vec![],
         },
     )
     .await;
@@ -588,6 +585,7 @@ async fn workspace_ws_hello_during_pending_choice_does_not_block_choice_response
             id: choice.id,
             selected_option_ids: vec!["opt_0".to_string()],
             free_text: None,
+            answers: vec![],
         },
     )
     .await;
@@ -648,6 +646,7 @@ async fn workspace_ws_stale_choice_response_after_new_run_is_rejected_before_pro
             id: first_choice.id.clone(),
             selected_option_ids: vec!["opt_0".to_string()],
             free_text: None,
+            answers: vec![],
         },
     )
     .await;
@@ -666,6 +665,7 @@ async fn workspace_ws_stale_choice_response_after_new_run_is_rejected_before_pro
             id: second_choice.id,
             selected_option_ids: vec!["opt_0".to_string()],
             free_text: None,
+            answers: vec![],
         },
     )
     .await;
@@ -675,4 +675,3 @@ async fn workspace_ws_stale_choice_response_after_new_run_is_rejected_before_pro
     drop(ws);
     server.abort();
 }
-

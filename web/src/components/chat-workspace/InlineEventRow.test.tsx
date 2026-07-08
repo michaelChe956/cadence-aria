@@ -156,9 +156,10 @@ describe("InlineEventRow", () => {
       />,
     );
 
+    expect(screen.getByText("PROMPT")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /Provider Prompt/ }));
 
-    expect(screen.getByText("加载输出中...")).toBeInTheDocument();
+    expect(screen.getByText("加载 Prompt 中...")).toBeInTheDocument();
     expect(await screen.findByText(/完整提示词 large-prompt-0/)).toBeInTheDocument();
     expect(loadContent).toHaveBeenCalledWith("session-1", {
       kind: "provider_prompt",

@@ -1,4 +1,4 @@
-import { Check, Play, RotateCcw, Send, X } from "lucide-react";
+import { Check, Play, Send, X } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import type {
   CodingExecutionStage,
@@ -93,16 +93,19 @@ export function CodingComposer({
   stage,
   status,
   statusText,
+  pendingGate,
 }: {
   api: ReturnType<typeof useCodingWorkspaceWs>;
   stage: CodingExecutionStage | null;
   status: string | null;
   statusText: string;
+  pendingGate?: CodingPendingGate | null;
 }) {
   const [input, setInput] = useState("");
   const trimmedInput = input.trim();
   const inputDisabled = status === "completed" || status === "aborted";
   const canSend = !inputDisabled && trimmedInput.length > 0;
+  const blockedByGate = pendingGate?.kind === "blocked";
 
   function handleSubmit(event: FormEvent) {
     event.preventDefault();
@@ -111,6 +114,30 @@ export function CodingComposer({
     }
     api.sendContextNote(trimmedInput);
     setInput("");
+  }
+
+  if (blockedByGate) {
+    return (
+      <div className="grid gap-2 border-t border-[var(--aria-line)] bg-white px-3 py-2">
+        <div className="text-xs font-semibold text-[var(--aria-ink-muted)]">
+          请使用上方门禁操作提交人工修复意见
+        </div>
+        <div className="flex min-w-0 items-center justify-between gap-2">
+          <div className="truncate text-xs text-[var(--aria-ink-muted)]">{statusText}</div>
+          {status && ACTIVE_ATTEMPT_STATUSES.has(status) ? (
+            <button
+              type="button"
+              onClick={api.abortAttempt}
+              className="inline-flex h-8 items-center gap-1 rounded-md border border-[var(--aria-line)] bg-white px-2 text-xs font-semibold hover:bg-[var(--aria-panel-muted)]"
+              aria-label="底部中止"
+            >
+              <X className="h-3.5 w-3.5" />
+              中止
+            </button>
+          ) : null}
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -174,17 +201,17 @@ export function ActionButtons({
     );
   }
 
-  if (stage === "final_confirm" && status === "waiting_for_human") {
+  if (stage === "review_request" && status && ACTIVE_ATTEMPT_STATUSES.has(status)) {
     return (
       <div className="flex items-center gap-2">
         <button
           type="button"
-          onClick={api.finalConfirm}
+          onClick={api.startCoding}
           className={buttonClass}
-          aria-label={compact ? "底部确认完成" : undefined}
+          aria-label={compact ? "底部继续 Coding" : undefined}
         >
-          <Check className="h-3.5 w-3.5" />
-          确认完成
+          <Play className="h-3.5 w-3.5" />
+          继续 Coding
         </button>
         <button
           type="button"
@@ -199,17 +226,17 @@ export function ActionButtons({
     );
   }
 
-  if (stage === "rework" && status === "waiting_for_human") {
+  if (stage === "final_confirm" && status === "waiting_for_human") {
     return (
       <div className="flex items-center gap-2">
         <button
           type="button"
-          onClick={() => api.continueRework(null)}
+          onClick={api.finalConfirm}
           className={buttonClass}
-          aria-label={compact ? "底部继续返修" : undefined}
+          aria-label={compact ? "底部确认完成" : undefined}
         >
-          <RotateCcw className="h-3.5 w-3.5" />
-          继续返修
+          <Check className="h-3.5 w-3.5" />
+          确认完成
         </button>
         <button
           type="button"
@@ -268,24 +295,29 @@ export function GatePanel({
   const activeGate = gate;
   const submitting = activeGate.submitting === true;
   const gateErrorCode = activeGate.errorCode ?? null;
-  const needsReason = activeGate.available_actions.some(actionRequiresReason);
+  const needsReason = activeGate.available_actions.some(actionRequiresContext);
+  const needsCoderFeedbackContext = activeGate.available_actions.some(
+    (action) => action.action_type === "send_to_coder",
+  );
   const trimmedReason = reason.trim();
   const reasonTooLong = reason.length > 2000;
   const displayedError = reasonTooLong ? "原因不能超过 2000 字" : localError;
   const displayTitle = blockedGateDisplayTitle(activeGate);
-  const testingResultReview = activeGate.reason_code === TESTING_RESULT_REVIEW_REASON_CODE;
-  const testingBlocked = activeGate.stage === "testing" && !testingResultReview;
-  const analystGate = activeGate.role === "analyst";
-  const hasQualityBypassAction = activeGate.available_actions.some(actionRequiresReason);
+  const hasQualityBypassAction = activeGate.available_actions.some(actionIsQualityBypass);
+  const reasonLabel = needsCoderFeedbackContext ? "人工修复意见" : "门禁跳过原因";
+  const reasonPlaceholder = needsCoderFeedbackContext
+    ? "补充本轮人工修复意见；该意见会优先于 Code Reviewer findings"
+    : "说明跳过该门禁的原因和后续风险处理";
+  const missingReasonMessage = needsCoderFeedbackContext ? "需要填写人工修复意见" : "需要填写原因";
 
   function handleAction(action: CodingGateRequired["available_actions"][number]) {
     if (action.action_type === "confirm_stage" && activeGate.stage) {
       onConfirmStage(activeGate.stage);
       return;
     }
-    if (actionRequiresReason(action)) {
+    if (actionRequiresContext(action)) {
       if (!trimmedReason) {
-        setLocalError("需要填写原因");
+        setLocalError(missingReasonMessage);
         return;
       }
       if (reasonTooLong) {
@@ -307,19 +339,6 @@ export function GatePanel({
       <div className="flex min-w-0 flex-col gap-2 md:flex-row md:items-center md:justify-between">
         <div className="min-w-0">
           <div className="truncate text-sm font-semibold text-amber-900">{displayTitle}</div>
-          {testingBlocked ? (
-            <div className="mt-0.5 text-xs font-semibold text-amber-900">测试被阻塞</div>
-          ) : null}
-          {testingResultReview ? (
-            <div className="mt-0.5 text-xs font-semibold text-amber-900">
-              等待确认 Tester 结果
-            </div>
-          ) : null}
-          {analystGate ? (
-            <div className="mt-0.5 text-xs font-semibold text-amber-900">
-              Analyst 建议人工决策
-            </div>
-          ) : null}
           <div className="mt-0.5 line-clamp-2 text-xs text-amber-800">
             {activeGate.description}
           </div>
@@ -332,7 +351,7 @@ export function GatePanel({
           {needsReason ? (
             <div className="mt-2 grid gap-1">
               <textarea
-                aria-label="门禁跳过原因"
+                aria-label={reasonLabel}
                 value={reason}
                 onChange={(event) => {
                   setReason(event.target.value);
@@ -340,7 +359,7 @@ export function GatePanel({
                 }}
                 rows={2}
                 maxLength={2100}
-                placeholder="说明跳过该门禁的原因和后续风险处理"
+                placeholder={reasonPlaceholder}
                 className="min-h-14 w-full resize-y rounded-md border border-amber-300 bg-white px-2 py-1.5 text-xs text-amber-950 placeholder:text-amber-700"
               />
               {displayedError ? (
@@ -361,7 +380,7 @@ export function GatePanel({
             <button
               key={action.action_id}
               type="button"
-              disabled={submitting || (actionRequiresReason(action) && reasonTooLong)}
+              disabled={submitting || (actionRequiresContext(action) && reasonTooLong)}
               onClick={() => handleAction(action)}
               className="inline-flex h-8 items-center justify-center rounded-md border border-amber-300 bg-white px-3 text-xs font-semibold text-amber-900 hover:bg-amber-100"
             >
@@ -374,7 +393,15 @@ export function GatePanel({
   );
 }
 
-function actionRequiresReason(action: CodingGateRequired["available_actions"][number]) {
+function actionRequiresContext(action: CodingGateRequired["available_actions"][number]) {
+  return (
+    action.action_type === "manual_continue" ||
+    action.action_type === "accept_risk" ||
+    action.action_type === "send_to_coder"
+  );
+}
+
+function actionIsQualityBypass(action: CodingGateRequired["available_actions"][number]) {
   return action.action_type === "manual_continue" || action.action_type === "accept_risk";
 }
 
@@ -417,14 +444,11 @@ function providerRoleForStage(stage: CodingExecutionStage): CodingProviderRole |
   switch (stage) {
     case "coding":
       return "coder";
-    case "testing":
-      return "tester";
-    case "rework":
-      return "analyst";
     case "code_review":
       return "code_reviewer";
     case "internal_pr_review":
       return "internal_reviewer";
+    // testing 和等待 Coder 修复阶段不再有独立的角色 UI
     default:
       return null;
   }

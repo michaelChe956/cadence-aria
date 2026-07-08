@@ -9,8 +9,9 @@ use cadence_aria::product::coding_attempt_store::{
     CodingAttemptStore, CreateChoiceGateInput, CreateCodingExecutionUnitInput,
     CreateGroupCodingAttemptInput,
 };
+use cadence_aria::product::coding_workspace_runner::CodingRunnerCommand;
 use cadence_aria::product::coding_models::{
-    CodeReviewReport, CodingAgentRole, CodingChoiceOption, CodingExecutionAttempt,
+    CodeReviewReport, CodingAgentRole, CodingAttemptStatus, CodingChoiceOption, CodingExecutionAttempt,
     CodingExecutionStage, CodingExecutionUnitStatus, CodingProviderRole, CodingTimelineNode,
     CodingTimelineNodeStatus, FindingSeverity, InternalPrReview, PushStatus, RemoteKind,
     ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict, TestCommand,
@@ -31,6 +32,7 @@ use cadence_aria::web::runtime::WebRuntime;
 use cadence_aria::web::state::WebAppState;
 use serde_json::{Value, json};
 use tempfile::tempdir;
+use tokio::sync::mpsc;
 use tower::ServiceExt;
 
 #[tokio::test]
@@ -521,7 +523,7 @@ async fn group_coding_attempt_retry_is_not_blocked_after_unit_creation_failure()
     .await;
 
     assert_eq!(retry_status, StatusCode::OK);
-    assert_eq!(retry_body["attempt_id"], "coding_attempt_0001");
+    assert_eq!(retry_body["attempt_id"], "coding_attempt_0002");
     assert_eq!(retry_body["active_unit_id"], "coding_unit_0001");
 }
 
@@ -555,10 +557,11 @@ async fn rejects_coding_attempt_when_required_dependency_handoff_is_missing() {
 async fn abort_coding_attempt_releases_issue_shared_worktree_lock() {
     let root = tempdir().expect("root");
     let repo = git_repo();
-    let app = build_web_router(WebAppState::new(
+    let state = WebAppState::new(
         root.path().to_path_buf(),
         WebRuntime::new_fake(root.path().to_path_buf()),
-    ));
+    );
+    let app = build_web_router(state.clone());
     bootstrap_two_ready_confirmed_work_items(app.clone(), root.path(), repo.path()).await;
 
     let (status, first) = request_json(
@@ -569,18 +572,33 @@ async fn abort_coding_attempt_releases_issue_shared_worktree_lock() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    let attempt_id = first["attempt_id"].as_str().unwrap();
+    let (first_runner_tx, mut first_runner_rx) = mpsc::channel(1);
+    let (second_runner_tx, mut second_runner_rx) = mpsc::channel(1);
+    state
+        .coding_runs
+        .insert(attempt_id.to_string(), first_runner_tx);
+    state
+        .coding_runs
+        .insert(attempt_id.to_string(), second_runner_tx);
 
     let (status, _body) = request_json(
         app.clone(),
         Method::POST,
-        &format!(
-            "/api/coding-attempts/{}/abort",
-            first["attempt_id"].as_str().unwrap()
-        ),
+        &format!("/api/coding-attempts/{attempt_id}/abort"),
         json!({}),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        first_runner_rx.recv().await.expect("first runner abort"),
+        CodingRunnerCommand::AbortAttempt
+    );
+    assert_eq!(
+        second_runner_rx.recv().await.expect("second runner abort"),
+        CodingRunnerCommand::AbortAttempt
+    );
+    assert_eq!(state.coding_runs.runner_count(attempt_id), 0);
 
     let (status, second) = request_json(
         app,
@@ -621,6 +639,152 @@ async fn delete_coding_attempt_releases_active_lock_when_clean() {
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, _second) = request_json(
+        app,
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0002/coding-attempts",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn delete_coding_attempt_with_dirty_shared_worktree_still_removes_workspace() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    bootstrap_two_ready_confirmed_work_items(app.clone(), root.path(), repo.path()).await;
+
+    let (status, first) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001/coding-attempts",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let attempt_id = first["attempt_id"].as_str().unwrap();
+    let coding_store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = prepare_attempt_with_worktree(
+        &coding_store,
+        repo.path(),
+        "project_0001",
+        "issue_0001",
+        attempt_id,
+    );
+    let worktree_path = attempt.worktree_path.expect("attempt worktree path");
+    fs::write(worktree_path.join("dirty.txt"), "dirty changes").expect("dirty file");
+
+    let (status, _body) = request_json(
+        app.clone(),
+        Method::DELETE,
+        &format!("/api/coding-attempts/{}", attempt_id),
+        json!({}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(!worktree_path.exists());
+    assert!(
+        coding_store
+            .get_attempt("project_0001", "issue_0001", attempt_id)
+            .is_err()
+    );
+
+    let (status, _second) = request_json(
+        app,
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0002/coding-attempts",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn delete_failed_coding_attempt_with_dirty_shared_worktree_still_removes_workspace() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let state = WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    );
+    let app = build_web_router(state.clone());
+    bootstrap_two_ready_confirmed_work_items(app.clone(), root.path(), repo.path()).await;
+
+    let (status, first) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001/coding-attempts",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let attempt_id = first["attempt_id"].as_str().unwrap();
+    let coding_store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = prepare_attempt_with_worktree(
+        &coding_store,
+        repo.path(),
+        "project_0001",
+        "issue_0001",
+        attempt_id,
+    );
+    let worktree_path = attempt.worktree_path.expect("attempt worktree path");
+    fs::write(worktree_path.join("dirty.txt"), "dirty changes").expect("dirty file");
+    coding_store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            attempt_id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("mark attempt running");
+    coding_store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            attempt_id,
+            CodingAttemptStatus::Failed,
+        )
+        .expect("mark attempt failed");
+    let (first_runner_tx, mut first_runner_rx) = mpsc::channel(1);
+    let (second_runner_tx, mut second_runner_rx) = mpsc::channel(1);
+    state
+        .coding_runs
+        .insert(attempt_id.to_string(), first_runner_tx);
+    state
+        .coding_runs
+        .insert(attempt_id.to_string(), second_runner_tx);
+
+    let (status, _body) = request_json(
+        app.clone(),
+        Method::DELETE,
+        &format!("/api/coding-attempts/{}", attempt_id),
+        json!({}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(
+        first_runner_rx.recv().await.expect("first runner abort"),
+        CodingRunnerCommand::AbortAttempt
+    );
+    assert_eq!(
+        second_runner_rx.recv().await.expect("second runner abort"),
+        CodingRunnerCommand::AbortAttempt
+    );
+    assert_eq!(state.coding_runs.runner_count(attempt_id), 0);
+    assert!(!worktree_path.exists());
+    assert!(
+        coding_store
+            .get_attempt("project_0001", "issue_0001", attempt_id)
+            .is_err()
+    );
 
     let (status, _second) = request_json(
         app,

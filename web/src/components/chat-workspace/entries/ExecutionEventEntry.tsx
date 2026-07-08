@@ -1,15 +1,22 @@
-import { Wrench } from "lucide-react";
+import { FileText, Wrench } from "lucide-react";
 import type { ChatEntry } from "../../../state/chat-entries";
 import { ChatEntryContainer } from "../ChatEntryContainer";
 
 export function ExecutionEventEntry({ entry }: { entry: ChatEntry }) {
   const event = entry.metadata as Record<string, unknown> | undefined;
+  const isProviderPrompt =
+    entry.content_ref?.kind === "provider_prompt" || event?.title === "Provider Prompt";
+  const EventIcon = isProviderPrompt ? FileText : Wrench;
 
   return (
-    <ChatEntryContainer role="system" title="执行事件">
+    <ChatEntryContainer
+      role="system"
+      title={isProviderPrompt ? "Provider Prompt" : "执行事件"}
+      className={isProviderPrompt ? "border-solid border-[var(--aria-line)] bg-white" : ""}
+    >
       <div className="space-y-2">
         <div className="flex items-start gap-2 text-sm text-[var(--aria-ink)]">
-          <Wrench className="mt-0.5 h-4 w-4 shrink-0 text-[var(--aria-primary)]" />
+          <EventIcon className="mt-0.5 h-4 w-4 shrink-0 text-[var(--aria-primary)]" />
           <div className="min-w-0">
             <div className="font-medium">{entry.content}</div>
             {event?.command && typeof event.command === "string" ? (

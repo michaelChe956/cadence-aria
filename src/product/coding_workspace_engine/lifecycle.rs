@@ -1,4 +1,5 @@
 use super::*;
+use crate::product::coding_models::CodingAttemptScope;
 
 impl CodingWorkspaceEngine {
     pub fn new(
@@ -95,12 +96,32 @@ impl CodingWorkspaceEngine {
         issue_id: &str,
         attempt_id: &str,
     ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
-        self.store.update_attempt_status(
-            project_id,
-            issue_id,
-            attempt_id,
-            CodingAttemptStatus::Running,
-        )?;
+        let current = self.store.get_attempt(project_id, issue_id, attempt_id)?;
+        let running = if current.status == CodingAttemptStatus::Running {
+            current
+        } else {
+            self.store.update_attempt_status(
+                project_id,
+                issue_id,
+                attempt_id,
+                CodingAttemptStatus::Running,
+            )?
+        };
+        if running.scope == CodingAttemptScope::WorkItemGroup && running.worktree_path.is_some() {
+            let attempt = self.store.update_attempt_stage(
+                project_id,
+                issue_id,
+                attempt_id,
+                CodingExecutionStage::Coding,
+            )?;
+            let _ = self
+                .event_tx
+                .send(CodingWsOutMessage::CodingStageChange {
+                    stage: CodingExecutionStage::Coding,
+                })
+                .await;
+            return Ok(attempt);
+        }
         let attempt = self.store.update_attempt_stage(
             project_id,
             issue_id,

@@ -14,9 +14,9 @@ pub(crate) use tokio_util::sync::CancellationToken;
 pub(crate) use crate::cross_cutting::provider_adapter::parse_last_structured_output;
 pub(crate) use crate::cross_cutting::provider_registry::ProviderRegistry;
 pub(crate) use crate::cross_cutting::streaming_provider::{
-    ChoiceOptionData, ChoiceRequestSource, ProviderCommand, ProviderExecutionEvent,
-    ProviderExecutionEventKind, ProviderExecutionEventStatus, ProviderStatus, RiskLevel,
-    StreamingProviderAdapter,
+    ChoiceOptionData, ChoiceQuestionData, ChoiceRequestSource, ProviderCommand,
+    ProviderExecutionEvent, ProviderExecutionEventKind, ProviderExecutionEventStatus,
+    ProviderStatus, RiskLevel, StreamingProviderAdapter,
 };
 pub(crate) use crate::product::app_paths::ProductAppPaths;
 pub(crate) use crate::product::checkpoint_store::CheckpointStore;
@@ -43,7 +43,7 @@ pub(crate) use crate::web::test_controls::WorkspaceSocketControl;
 pub(crate) use crate::web::types::GenerateWorkItemsRequest;
 pub(crate) use crate::web::workspace_context::ensure_workspace_context_message;
 pub(crate) use crate::web::workspace_ws_types::{
-    ChoiceOption, HumanConfirmDecision, RevisionPath, TimelineNodeRetryError,
+    ChoiceOption, ChoiceQuestion, HumanConfirmDecision, RevisionPath, TimelineNodeRetryError,
     WorkItemGenerationModeDto, WsExecutionEvent, WsExecutionEventKind, WsExecutionEventStatus,
     WsInMessage, WsOutMessage, WsPermissionRiskLevel, WsProviderStatus,
 };

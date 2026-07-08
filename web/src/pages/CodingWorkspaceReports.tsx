@@ -5,7 +5,6 @@ import {
   requestWorkItemExecutionPlanChange,
 } from "../api/client";
 import type {
-  AnalystDecisionRecord,
   CodeReviewReport,
   InternalPrReview,
   ReviewFinding,
@@ -17,10 +16,6 @@ import { errorMessage } from "./CodingWorkspaceControls";
 
 export function TestsPanel() {
   const report = useCodingWorkspaceStore((state) => state.testingReport);
-  const stage = useCodingWorkspaceStore((state) => state.stage);
-  const latestAnalystDecision = useCodingWorkspaceStore(
-    (state) => state.latestAnalystDecision,
-  );
   if (!report) {
     return <div className="text-[var(--aria-ink-muted)]">暂无测试报告</div>;
   }
@@ -41,10 +36,6 @@ export function TestsPanel() {
   return (
     <div className="space-y-3">
       <StatusBadge value={report.overall_status} />
-      <AnalystDecisionStatus
-        decision={latestAnalystDecision}
-        waiting={stage === "rework" && !latestAnalystDecision}
-      />
       {hasPlanDetails ? (
         <div data-testid="coding-test-plan-report" className="space-y-2">
           {report.plan_summary ? (
@@ -99,36 +90,6 @@ export function TestsPanel() {
           </div>
         </div>
       ))}
-    </div>
-  );
-}
-
-function AnalystDecisionStatus({
-  decision,
-  waiting,
-}: {
-  decision: AnalystDecisionRecord | null;
-  waiting: boolean;
-}) {
-  if (!decision) {
-    return waiting ? (
-      <div className="rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-2 text-xs font-semibold text-[var(--aria-ink-muted)]">
-        等待 Analyst 决策
-      </div>
-    ) : null;
-  }
-
-  return (
-    <div className="rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-2 text-xs">
-      <div className="font-semibold text-[var(--aria-ink)]">Analyst 已决策</div>
-      <div className="mt-1 font-mono text-[var(--aria-ink-muted)]">
-        {decision.verdict} {"->"} {decision.next_stage}
-      </div>
-      <div className="mt-1 break-words text-[var(--aria-ink)]">{decision.reason}</div>
-      <TestingList label="analyst evidence" values={decision.evidence_refs} />
-      {decision.raw_provider_output_refs.length > 0 ? (
-        <TestingList label="analyst raw" values={decision.raw_provider_output_refs} />
-      ) : null}
     </div>
   );
 }
@@ -196,9 +157,7 @@ export function ReviewPanel() {
           report={report}
         />
       ))}
-      {internalReview ? (
-        <ReviewReportCard title="Internal PR Review" report={internalReview} />
-      ) : null}
+      {internalReview ? <ReviewReportCard title="GroupFinalReview" report={internalReview} /> : null}
     </div>
   );
 }
@@ -218,7 +177,7 @@ function ReviewReportCard({
       </div>
       <div className="mt-1 text-xs text-[var(--aria-ink-muted)]">{report.summary}</div>
       {isInternalPrReview(report) ? (
-        <InternalPrReviewDetails review={report} />
+        <GroupFinalReviewDetails review={report} />
       ) : null}
       {report.findings.length > 0 ? (
         <div className="mt-2 space-y-2">
@@ -231,7 +190,7 @@ function ReviewReportCard({
   );
 }
 
-function InternalPrReviewDetails({ review }: { review: InternalPrReview }) {
+function GroupFinalReviewDetails({ review }: { review: InternalPrReview }) {
   return (
     <div className="mt-2 space-y-2 text-xs">
       {review.impact_scope.length > 0 ? (

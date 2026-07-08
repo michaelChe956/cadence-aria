@@ -105,16 +105,8 @@ fn status_and_stage_transitions_reject_invalid_backwards_moves() {
                 CodingExecutionStage::Coding,
             )
             .is_err(),
-        "stage cannot move backwards outside rework"
+        "stage cannot move backwards"
     );
-    store
-        .update_attempt_stage(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingExecutionStage::Rework,
-        )
-        .expect("enter rework");
 }
 
 fn create_input(work_item_id: &str) -> CreateCodingAttemptInput {
@@ -124,6 +116,24 @@ fn create_input(work_item_id: &str) -> CreateCodingAttemptInput {
         work_item_id: work_item_id.to_string(),
         base_branch: "main".to_string(),
         branch_name: format!("aria/work-items/{work_item_id}/attempt-1"),
+        worktree_path: None,
+        provider_config_snapshot: ProviderConfigSnapshot {
+            author: ProviderName::Fake,
+            reviewer: Some(ProviderName::Fake),
+            review_rounds: 1,
+        },
+        max_auto_rework: 2,
+    }
+}
+
+fn group_create_input(current_work_item_id: &str) -> CreateGroupCodingAttemptInput {
+    CreateGroupCodingAttemptInput {
+        project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        plan_id: "work_item_plan_0001".to_string(),
+        current_work_item_id: current_work_item_id.to_string(),
+        base_branch: "main".to_string(),
+        branch_name: "aria/issues/issue_0001".to_string(),
         worktree_path: None,
         provider_config_snapshot: ProviderConfigSnapshot {
             author: ProviderName::Fake,
@@ -264,8 +274,8 @@ fn updates_coding_role_run_refs_without_duplicates() {
     let run = store
         .create_role_run(
             &attempt,
-            CodingExecutionStage::Rework,
-            CodingProviderRole::Analyst,
+            CodingExecutionStage::CodeReview,
+            CodingProviderRole::CodeReviewer,
             CodingRoleRunTrigger::Initial,
             None,
         )
@@ -277,8 +287,8 @@ fn updates_coding_role_run_refs_without_duplicates() {
             "issue_0001",
             &attempt.id,
             &run.id,
-            vec!["provider-raw/rework/analyst_decision_0001.txt".to_string()],
-            vec!["provider-raw/rework/analyst_evidence_0001.txt".to_string()],
+            vec!["provider-raw/code_review/code_review_0001.txt".to_string()],
+            vec!["artifacts/code_review/reviewer_evidence_0001.txt".to_string()],
         )
         .expect("update refs");
     assert_eq!(updated.raw_provider_output_refs.len(), 1);
@@ -290,8 +300,8 @@ fn updates_coding_role_run_refs_without_duplicates() {
             "issue_0001",
             &attempt.id,
             &run.id,
-            vec!["provider-raw/rework/analyst_decision_0001.txt".to_string()],
-            vec!["provider-raw/rework/analyst_evidence_0001.txt".to_string()],
+            vec!["provider-raw/code_review/code_review_0001.txt".to_string()],
+            vec!["artifacts/code_review/reviewer_evidence_0001.txt".to_string()],
         )
         .expect("update refs again");
     assert_eq!(updated.raw_provider_output_refs.len(), 1);
@@ -690,4 +700,3 @@ fn role_run_retry_diagnostic_summary_keeps_recent_metadata_and_payload_refs() {
         "retry diagnostic summary must stay prompt-safe"
     );
 }
-

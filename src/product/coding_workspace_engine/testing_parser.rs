@@ -7,6 +7,20 @@ pub(crate) fn record_tester_step_result(
     result: &ProviderToolResult,
     outputs: TesterStepResultOutputs<'_>,
 ) {
+    if call.tool_name == "load_test_context" {
+        outputs
+            .unplanned_evidence
+            .push(unplanned_evidence_from_tool(
+                call,
+                command_result.as_ref(),
+                result,
+            ));
+        if let Some(command) = command_result {
+            outputs.unplanned_commands.push(command);
+        }
+        return;
+    }
+
     let Some(step_id) = tool_call_step_id(call) else {
         outputs
             .unplanned_evidence
@@ -212,18 +226,17 @@ pub fn testing_report_has_execution_evidence(report: &TestingReport) -> bool {
             .any(|command| !command.stdout_ref.is_empty() || !command.stderr_ref.is_empty())
 }
 
-pub fn testing_report_should_enter_analyst(report: &TestingReport) -> bool {
+pub fn testing_report_needs_blocked_gate(report: &TestingReport) -> bool {
     match report.overall_status {
-        TestingOverallStatus::Failed
-        | TestingOverallStatus::Blocked
-        | TestingOverallStatus::SkippedByUserDecision
+        TestingOverallStatus::Failed | TestingOverallStatus::Blocked => true,
+        TestingOverallStatus::SkippedByUserDecision
         | TestingOverallStatus::Passed
-        | TestingOverallStatus::PassedWithWarnings => true,
+        | TestingOverallStatus::PassedWithWarnings => false,
     }
 }
 
 pub(crate) fn testing_blocked_report_needs_gate(report: &TestingReport, reason_code: &str) -> bool {
-    !testing_report_should_enter_analyst(report)
+    testing_report_needs_blocked_gate(report)
         || matches!(
             reason_code,
             "plan_tests_timeout" | "execute_test_plan_timeout"
@@ -270,7 +283,7 @@ pub(crate) fn testing_result_review_gate_actions() -> Vec<CodingGateAction> {
     vec![
         CodingGateAction {
             action_id: "accept_testing_result".to_string(),
-            label: "结果可用，进入 Analyst".to_string(),
+            label: "结果可用，进入 Code Reviewer".to_string(),
             action_type: CodingGateActionType::AcceptTestingResult,
         },
         CodingGateAction {
@@ -297,68 +310,17 @@ pub(crate) fn testing_result_review_description(report: &TestingReport) -> Strin
     match report.plan_summary.as_deref() {
         Some(summary) if !summary.trim().is_empty() => {
             format!(
-                "Tester 已完成测试报告 {}（{}）：{}。请确认是否进入 Analyst 或重新测试。",
+                "Tester 已完成测试报告 {}（{}）：{}。请确认是否进入 Code Reviewer 或重新测试。",
                 report.id,
                 status,
                 summary.trim()
             )
         }
         _ => format!(
-            "Tester 已完成测试报告 {}（{}）。请确认是否进入 Analyst 或重新测试。",
+            "Tester 已完成测试报告 {}（{}）。请确认是否进入 Code Reviewer 或重新测试。",
             report.id, status
         ),
     }
-}
-
-pub(crate) fn testing_report_to_analyst_evidence(report: &TestingReport) -> String {
-    serde_json::to_string_pretty(report).unwrap_or_else(|_| {
-        format!(
-            "TestingReport serialization failed; overall_status={:?}",
-            report.overall_status
-        )
-    })
-}
-
-pub(crate) fn rework_instruction_fields_from_analyst_record(
-    decision: &AnalystDecisionRecord,
-) -> (String, Vec<String>) {
-    if let Some(instructions) = &decision.rework_instructions {
-        let mut fix_hints = instructions
-            .required_changes
-            .iter()
-            .chain(instructions.verification_expectations.iter())
-            .cloned()
-            .collect::<Vec<_>>();
-        if fix_hints.is_empty() {
-            fix_hints.push(decision.reason.clone());
-        }
-        return (instructions.summary.clone(), fix_hints);
-    }
-    (decision.reason.clone(), vec![decision.reason.clone()])
-}
-
-pub(crate) fn analyst_human_gate_actions(
-    recommendation: Option<&AnalystHumanGateRecommendation>,
-) -> Vec<CodingGateAction> {
-    let mut actions = Vec::new();
-    if let Some(recommendation) = recommendation {
-        for action_id in &recommendation.available_actions {
-            if let Some(action) = coding_gate_action_for_id(action_id)
-                && !actions
-                    .iter()
-                    .any(|existing: &CodingGateAction| existing.action_id == action.action_id)
-            {
-                actions.push(action);
-            }
-        }
-    }
-    if actions.is_empty() {
-        actions.push(coding_gate_action_for_id("retry_analyst").expect("retry analyst action"));
-        actions.push(coding_gate_action_for_id("provide_context").expect("provide context action"));
-        actions.push(coding_gate_action_for_id("manual_continue").expect("manual continue action"));
-        actions.push(coding_gate_action_for_id("abort").expect("abort action"));
-    }
-    actions
 }
 
 pub(crate) fn coding_gate_action_for_id(action_id: &str) -> Option<CodingGateAction> {
@@ -368,10 +330,10 @@ pub(crate) fn coding_gate_action_for_id(action_id: &str) -> Option<CodingGateAct
             label: "补充上下文".to_string(),
             action_type: CodingGateActionType::ProvideContext,
         }),
-        "continue_rework" => Some(CodingGateAction {
-            action_id: "continue_rework".to_string(),
-            label: "继续返修".to_string(),
-            action_type: CodingGateActionType::ContinueRework,
+        "send_to_coder" => Some(CodingGateAction {
+            action_id: "send_to_coder".to_string(),
+            label: "提交给 Coder 修复".to_string(),
+            action_type: CodingGateActionType::SendToCoder,
         }),
         "manual_continue" => Some(CodingGateAction {
             action_id: "manual_continue".to_string(),
@@ -398,24 +360,14 @@ pub(crate) fn coding_gate_action_for_id(action_id: &str) -> Option<CodingGateAct
             label: "重试审查".to_string(),
             action_type: CodingGateActionType::RetryReview,
         }),
-        "retry_analyst" => Some(CodingGateAction {
-            action_id: "retry_analyst".to_string(),
-            label: "重试 Analyst".to_string(),
-            action_type: CodingGateActionType::RetryAnalyst,
-        }),
         "retry_internal_review" => Some(CodingGateAction {
             action_id: "retry_internal_review".to_string(),
             label: "重试 Internal Review".to_string(),
             action_type: CodingGateActionType::RetryInternalReview,
         }),
-        "send_raw_output_to_analyst" => Some(CodingGateAction {
-            action_id: "send_raw_output_to_analyst".to_string(),
-            label: "转交分析官".to_string(),
-            action_type: CodingGateActionType::SendRawOutputToAnalyst,
-        }),
         "accept_testing_result" => Some(CodingGateAction {
             action_id: "accept_testing_result".to_string(),
-            label: "结果可用，进入 Analyst".to_string(),
+            label: "结果可用，进入 Code Reviewer".to_string(),
             action_type: CodingGateActionType::AcceptTestingResult,
         }),
         "rerun_testing" => Some(CodingGateAction {

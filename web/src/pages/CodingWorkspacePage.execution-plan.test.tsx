@@ -71,46 +71,45 @@ vi.mock("../components/shared/MonacoDiffViewer", () => ({
 describe("CodingWorkspacePage execution plan", () => {
   installCodingWorkspacePageTestHooks();
 
-  it("constrains role run history overflow inside the conversation column", () => {
+  it("opens role run history in a drawer instead of constraining the conversation column", async () => {
     mockCodingWs();
     useCodingWorkspaceStore.setState({
       attemptId: "coding_attempt_0001",
       status: "waiting_for_human",
-      stage: "rework",
+      stage: "code_review",
       roleRuns: Array.from({ length: 12 }, (_, index) => ({
         id: `coding_role_run_${String(index + 1).padStart(4, "0")}`,
         attempt_id: "coding_attempt_0001",
-        stage: index % 2 === 0 ? "testing" : "rework",
-        role: index % 2 === 0 ? "tester" : "analyst",
+        stage: index % 2 === 0 ? "coding" : "code_review",
+        role: index % 2 === 0 ? "coder" : "code_reviewer",
         run_no: index + 1,
         status: index % 3 === 0 ? "blocked" : "completed",
-        trigger: "initial",
+        trigger: index % 2 === 0 ? "initial" : "retry_review",
         node_id: `coding_node_${String(index + 1).padStart(4, "0")}`,
         started_at: `2026-06-13T00:00:${String(index).padStart(2, "0")}Z`,
         completed_at: null,
         supersedes_run_id: null,
         superseded_by_run_id: null,
-        reason_code: "max_auto_rework_exceeded",
+        reason_code: "code_review_blocked",
         raw_provider_output_refs: [
-          "provider-raw/rework/very-long-role-run-output-reference-that-must-not-widen-page.txt",
+          "provider-raw/code-review/very-long-role-run-output-reference-that-must-not-widen-page.txt",
         ],
         artifact_refs: [
-          "artifacts/rework/very-long-analyst-evidence-reference-that-must-scroll-inside-panel.json",
+          "artifacts/code-review/very-long-reviewer-evidence-reference-that-must-scroll-inside-panel.json",
         ],
       })),
     });
 
     render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
 
+    expect(screen.getByTestId("coding-chat-entry-list")).toBeInTheDocument();
+    expect(screen.queryByTestId("coding-role-run-history")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "角色运行历史" }));
+
     const panel = screen.getByTestId("coding-role-run-history");
     expect(panel).toHaveClass("min-w-0", "overflow-hidden");
-    expect(panel.parentElement).toHaveClass("min-w-0", "overflow-hidden");
-    expect(panel.parentElement?.parentElement).toHaveClass("min-w-0", "overflow-hidden");
-    expect(panel.parentElement?.parentElement?.parentElement).toHaveClass(
-      "min-w-0",
-      "overflow-hidden",
-    );
-    expect(screen.getByRole("button", { name: "继续返修" })).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "角色运行历史" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "提交给 Coder 修复" })).not.toBeInTheDocument();
   });
 
   it("shows work item execution plan during prepare stage as non blocking by default", () => {

@@ -1,6 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type {
-  AnalystDecisionRecord,
   CodeReviewReport,
   CodingGateRequired,
   CodingRoleRun,
@@ -19,15 +18,14 @@ const providerConfig = {
 
 const roleProviderConfig = {
   coder: "fake" as const,
-  tester: "fake" as const,
-  analyst: "fake" as const,
+  tester_plan: "fake" as const,
+  tester_execute: "fake" as const,
   code_reviewer: "fake" as const,
   internal_reviewer: "fake" as const,
   review_rounds: 1,
   permission_modes: {
     coder: "supervised" as const,
     tester: "auto" as const,
-    analyst: "auto" as const,
     code_reviewer: "supervised" as const,
     internal_reviewer: "supervised" as const,
   },
@@ -90,27 +88,6 @@ function testingReport(overrides: Partial<TestingReport> = {}): TestingReport {
     skipped_required_steps: [],
     context_warnings: ["missing_design_spec"],
     raw_provider_output_ref: "provider-raw/testing/execute_test_plan_0001.txt",
-    ...overrides,
-  };
-}
-
-function analystDecision(
-  overrides: Partial<AnalystDecisionRecord> = {},
-): AnalystDecisionRecord {
-  return {
-    id: "analyst_decision_0001",
-    attempt_id: "coding_attempt_0001",
-    source_stage: "testing",
-    rework_round: 1,
-    verdict: "needs_fix",
-    next_stage: "coding",
-    reason: "required 测试步骤被跳过，需要回到 Coder",
-    evidence_refs: ["testing_report_0001.json"],
-    raw_provider_output_refs: ["provider-raw/testing/execute_test_plan_0001.txt"],
-    rework_instructions: null,
-    human_gate: null,
-    created_at: "2026-06-12T00:00:00Z",
-    parse_error: null,
     ...overrides,
   };
 }
@@ -209,7 +186,6 @@ function sessionState(
     internal_pr_review: null,
     pending_gates: [],
     pending_choices: [],
-    latest_analyst_decision: null,
     chat_entries: [],
     work_item_markdown: null,
     verification_commands: [],
@@ -324,7 +300,6 @@ describe("coding workspace store", () => {
       internal_pr_review: null,
       pending_gates: [],
       pending_choices: [],
-      latest_analyst_decision: null,
       role_runs: [],
       work_item_markdown: null,
       verification_commands: [],
@@ -345,13 +320,13 @@ describe("coding workspace store", () => {
       sessionState({
         chat_entries: [
           {
-            id: "coding_chat_entry_analyst_0001",
+            id: "coding_chat_entry_coder_0001",
             attempt_id: "coding_attempt_0001",
             node_id: "coding_node_0002",
-            role: "system",
-            entry_type: { type: "analyst_verdict", verdict: "no_issue" },
-            content: "测试阶段无问题",
-            metadata: { source: "rework" },
+            role: "author",
+            entry_type: { type: "assistant_message" },
+            content: "Coder 已按 reviewer findings 修复",
+            metadata: { source: "coding" },
             created_at: "2026-05-28T00:00:01Z",
           },
           {
@@ -380,13 +355,13 @@ describe("coding workspace store", () => {
 
     expect(useCodingWorkspaceStore.getState().chatEntries).toEqual([
       {
-        id: "coding_chat_entry_analyst_0001",
-        type: "analyst_verdict",
-        role: "analyst",
-        content: "测试阶段无问题",
+        id: "coding_chat_entry_coder_0001",
+        type: "provider_stream",
+        role: "coder",
+        content: "Coder 已按 reviewer findings 修复",
         timestamp: "2026-05-28T00:00:01Z",
         node_id: "coding_node_0002",
-        metadata: { source: "rework", verdict: "no_issue" },
+        metadata: { source: "coding" },
       },
       {
         id: "coding_chat_entry_code_review_0001",
@@ -519,31 +494,6 @@ describe("coding workspace store", () => {
     expect(useCodingWorkspaceStore.getState().pendingGates).toHaveLength(0);
   });
 
-  it("stores latest analyst decision from session snapshots", () => {
-    const store = useCodingWorkspaceStore.getState();
-
-    store.setSessionState(
-      sessionState({
-        testing_report: testingReport(),
-        latest_analyst_decision: analystDecision({
-          reason: "测试阻塞已归因，要求 Coder 补齐浏览器步骤",
-        }),
-      }),
-    );
-
-    expect(useCodingWorkspaceStore.getState().latestAnalystDecision).toMatchObject({
-      id: "analyst_decision_0001",
-      source_stage: "testing",
-      verdict: "needs_fix",
-      next_stage: "coding",
-      reason: "测试阻塞已归因，要求 Coder 补齐浏览器步骤",
-    });
-
-    store.setSessionState(sessionState({ latest_analyst_decision: null }));
-
-    expect(useCodingWorkspaceStore.getState().latestAnalystDecision).toBeNull();
-  });
-
   it("tracks gate submission without removing gate until snapshot confirms", () => {
     const store = useCodingWorkspaceStore.getState();
     store.addPendingGate(blockedGate());
@@ -595,6 +545,29 @@ describe("coding workspace store", () => {
 
     expect(useCodingWorkspaceStore.getState().streamingContent).toBeNull();
     expect(useCodingWorkspaceStore.getState().activeStreamNodeId).toBeNull();
+  });
+
+  it("uses coder role for reviewer-driven coder retry stream entries", () => {
+    const store = useCodingWorkspaceStore.getState();
+    store.addTimelineNode(
+      codingNode({
+        id: "coding_node_0004",
+        stage: "coding",
+        title: "代码编写",
+        agent_role: "author",
+      }),
+    );
+
+    store.appendStreamChunk("fixed reviewer findings", "coding_node_0004");
+
+    expect(useCodingWorkspaceStore.getState().chatEntries).toMatchObject([
+      {
+        type: "provider_stream",
+        role: "coder",
+        content: "fixed reviewer findings",
+        node_id: "coding_node_0004",
+      },
+    ]);
   });
 
   it("uses concrete commands for coding execution event chat titles and logs", () => {

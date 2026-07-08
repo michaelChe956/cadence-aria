@@ -2,7 +2,6 @@ use super::*;
 
 pub(crate) struct ProviderTestingPlanPhase {
     pub(crate) tester_provider: ProviderName,
-    pub(crate) evaluation_context_json: String,
     pub(crate) plan: TestPlan,
     pub(crate) chat_entry_sequence: usize,
 }
@@ -39,7 +38,8 @@ impl CodingWorkspaceEngine {
         let tester_provider = self
             .store
             .get_role_provider_config_snapshot(&attempt.project_id, &attempt.issue_id, &attempt.id)?
-            .tester;
+            .tester_plan_provider()
+            .clone();
         let evaluation_context = build_evaluation_context_pack(
             self.store.paths(),
             &attempt,
@@ -288,7 +288,6 @@ impl CodingWorkspaceEngine {
         Ok(ProviderTestingPlanOutcome::Completed(
             ProviderTestingPlanPhase {
                 tester_provider,
-                evaluation_context_json,
                 plan,
                 chat_entry_sequence,
             },

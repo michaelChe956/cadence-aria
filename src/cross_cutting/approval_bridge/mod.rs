@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
-    ChoiceRequestData, PermissionRequestData, ProviderCommand, ProviderEvent,
+    ChoiceAnswerData, ChoiceRequestData, PermissionRequestData, ProviderCommand, ProviderEvent,
     ProviderExecutionEvent, ProviderExecutionEventKind, ProviderExecutionEventStatus,
     ProviderPermissionMode, RiskLevel,
 };
@@ -35,6 +35,7 @@ pub struct PermissionDecision {
 pub struct ChoiceDecision {
     pub selected_option_ids: Vec<String>,
     pub free_text: Option<String>,
+    pub answers: Vec<ChoiceAnswerData>,
 }
 
 type PendingPermissions =

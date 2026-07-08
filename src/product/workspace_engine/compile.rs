@@ -431,6 +431,13 @@ impl WorkspaceEngine {
                         design_spec_ids: work_item.design_spec_ids.clone(),
                         title: work_item.title.clone(),
                         work_item_set_id: work_item.work_item_set_id.clone(),
+                        source_work_item_plan_id: work_item.source_work_item_plan_id.clone(),
+                        source_outline_id: work_item.source_outline_id.clone(),
+                        source_draft_id: work_item.source_draft_id.clone(),
+                        planned_implementation_context: work_item
+                            .planned_implementation_context
+                            .clone(),
+                        planned_handoff_summary: work_item.planned_handoff_summary.clone(),
                         kind: work_item.kind.clone(),
                         sequence_hint: work_item.sequence_hint,
                         depends_on: work_item.depends_on.clone(),

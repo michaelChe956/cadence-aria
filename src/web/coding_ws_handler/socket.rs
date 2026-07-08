@@ -167,19 +167,18 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                         let _ = send_coding_json(&mut socket_tx, &snapshot).await;
                     }
                 } else if inbound == CodingWsInMessage::AbortAttempt {
-                    if let Some(command_tx) = runner_command_tx.as_ref() {
-                        let open_gates = coding_store
-                            .list_open_stage_gates(
-                                &current_attempt.project_id,
-                                &current_attempt.issue_id,
-                                &current_attempt.id,
-                            )
-                            .unwrap_or_default();
-                        if !open_gates.is_empty() {
-                            let _ = command_tx.send(CodingRunnerCommand::AbortAttempt).await;
-                            continue;
-                        }
-                        let _ = command_tx.send(CodingRunnerCommand::AbortAttempt).await;
+                    let open_gates = coding_store
+                        .list_open_stage_gates(
+                            &current_attempt.project_id,
+                            &current_attempt.issue_id,
+                            &current_attempt.id,
+                        )
+                        .unwrap_or_default();
+                    let aborted_runners = state.coding_runs.abort_attempt(&current_attempt.id).await;
+                    runner_command_tx = None;
+                    runner_started = false;
+                    if aborted_runners > 0 && !open_gates.is_empty() {
+                        continue;
                     }
                     let engine = CodingWorkspaceEngine::new(
                         coding_store.clone(),
@@ -274,45 +273,6 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                             ));
                         }
                     }
-                } else if let CodingWsInMessage::ContinueRework { extra_context } = inbound {
-                    let engine = CodingWorkspaceEngine::new(
-                        coding_store.clone(),
-                        GitWorkspaceService::new(),
-                        event_tx.clone(),
-                    );
-                    let updated = match engine.continue_rework_after_limit(
-                        &current_attempt.project_id,
-                        &current_attempt.issue_id,
-                        &current_attempt.id,
-                        extra_context,
-                    ) {
-                        Ok(updated) => updated,
-                        Err(error) => {
-                            let _ = send_coding_json(
-                                &mut socket_tx,
-                                &CodingWsOutMessage::CodingProtocolError {
-                                    code: "coding_continue_rework_failed".to_string(),
-                                    message: error.to_string(),
-                                },
-                            )
-                            .await;
-                            continue;
-                        }
-                    };
-                    if let Ok(snapshot) =
-                        build_coding_session_state(&coding_store, updated.clone())
-                    {
-                        let _ = send_coding_json(&mut socket_tx, &snapshot).await;
-                    }
-                    if updated.status == CodingAttemptStatus::Running {
-                        runner_started = true;
-                        runner_command_tx = Some(spawn_coding_runner(
-                            state.clone(),
-                            coding_store.clone(),
-                            event_tx.clone(),
-                            updated,
-                        ));
-                    }
                 } else if let CodingWsInMessage::ProviderSelect { role, provider } = inbound {
                     if let Some(command_tx) = runner_command_tx.as_ref() {
                         let open_gates = coding_store
@@ -405,6 +365,35 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                     if let Ok(snapshot) =
                         build_coding_session_state(&coding_store, current_attempt.clone())
                     {
+                        let _ = send_coding_json(&mut socket_tx, &snapshot).await;
+                    }
+                } else if let CodingWsInMessage::MaxAutoReworkSelect { max_auto_rework } = inbound
+                {
+                    let updated = match coding_store.update_attempt_max_auto_rework(
+                        &current_attempt.project_id,
+                        &current_attempt.issue_id,
+                        &current_attempt.id,
+                        max_auto_rework,
+                    ) {
+                        Ok(updated) => updated,
+                        Err(error) => {
+                            let code = if error.to_string().contains("invalid_max_auto_rework") {
+                                "invalid_max_auto_rework"
+                            } else {
+                                "coding_max_auto_rework_select_failed"
+                            };
+                            let _ = send_coding_json(
+                                &mut socket_tx,
+                                &CodingWsOutMessage::CodingProtocolError {
+                                    code: code.to_string(),
+                                    message: error.to_string(),
+                                },
+                            )
+                            .await;
+                            continue;
+                        }
+                    };
+                    if let Ok(snapshot) = build_coding_session_state(&coding_store, updated) {
                         let _ = send_coding_json(&mut socket_tx, &snapshot).await;
                     }
                 } else if let CodingWsInMessage::StageGateConfirm { stage } = inbound {
@@ -588,10 +577,6 @@ pub fn is_coding_ws_message_allowed(
     if matches!(message, CodingWsInMessage::PermissionModeSelect { .. }) && status.is_active() {
         return true;
     }
-    if matches!(message, CodingWsInMessage::ContinueRework { .. }) {
-        return *status == CodingAttemptStatus::WaitingForHuman
-            && *stage == CodingExecutionStage::Rework;
-    }
     if matches!(message, CodingWsInMessage::GateResponse { .. })
         && *status == CodingAttemptStatus::WaitingForHuman
     {
@@ -610,14 +595,18 @@ pub fn is_coding_ws_message_allowed(
                 | CodingWsInMessage::StartCoding
                 | CodingWsInMessage::ProviderSelect { .. }
                 | CodingWsInMessage::PermissionModeSelect { .. }
+                | CodingWsInMessage::MaxAutoReworkSelect { .. }
                 | CodingWsInMessage::AbortAttempt
         ),
-        CodingExecutionStage::WorktreePrepare | CodingExecutionStage::ReviewRequest => {
-            matches!(message, CodingWsInMessage::AbortAttempt)
+        CodingExecutionStage::WorktreePrepare => matches!(message, CodingWsInMessage::AbortAttempt),
+        CodingExecutionStage::ReviewRequest => {
+            matches!(
+                message,
+                CodingWsInMessage::StartCoding | CodingWsInMessage::AbortAttempt
+            )
         }
         CodingExecutionStage::Coding
         | CodingExecutionStage::Testing
-        | CodingExecutionStage::Rework
         | CodingExecutionStage::CodeReview
         | CodingExecutionStage::InternalPrReview => matches!(
             message,

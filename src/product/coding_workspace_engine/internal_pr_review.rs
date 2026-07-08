@@ -29,12 +29,8 @@ impl CodingWorkspaceEngine {
                 created_at: Utc::now().to_rfc3339(),
                 updated_at: Utc::now().to_rfc3339(),
             });
-        let handoffs = self.collect_completed_group_unit_handoffs(attempt)?;
-        Ok(format!(
-            "Review Request: {}\nCompleted Units:\n{}",
-            review_request.id,
-            self.format_group_unit_handoff_section(&handoffs)
-        ))
+        self.build_group_internal_pr_review_prompt(attempt, &review_request, None, None)
+            .await
     }
 
     async fn build_group_internal_pr_review_prompt(
@@ -64,9 +60,9 @@ impl CodingWorkspaceEngine {
             .unwrap_or_else(|| "未提供".to_string());
 
         Ok(format!(
-            "Coding Workspace InternalReviewer\n\
+            "Coding Workspace GroupFinalReview\n\
              {}\n\
-             你是整组 PR 的最终 reviewer，在所有 coding units 完成后对整组变更做内部 PR 审查。\n\
+             你是 WorkItemGroup GroupFinalReview reviewer，仅在 WorkItemGroup 全部 coding units 完成且 ReviewRequest push 之后做整组功能审查。单 WorkItem scope 不应生成本 prompt。\n\
              Project: {}\n\
              Issue: {}\n\
              Scope: WorkItemGroup\n\
@@ -80,14 +76,16 @@ impl CodingWorkspaceEngine {
              \nEvaluationContextPack:\n````json\n{}\n````\n\
              \n完整变更 git diff:\n````diff\n{}\n````\n\
              {}\
+             {}\
+             {}\
              \n输出要求:\n\
              - 基于所有 completed units 的 handoff 汇总评估整组风险、测试覆盖和剩余问题。\n\
              - 分析影响范围（影响范围/impact_scope）。\n\
              - 给出 PR description 预览。\n\
              - 给出 commit message 建议。\n\
-             - findings 必须包含 source_stage=internal_pr_review。\n\
+             - findings 必须包含 source_stage=group_final_review。\n\
              \n只输出 JSON：{{\"verdict\":\"approve|request_changes|blocked\",\"summary\":\"...\",\"findings\":[...],\"impact_scope\":[\"...\"],\"pr_description\":\"...\",\"commit_message_suggestion\":\"...\"}}\n",
-            provider_runtime_contract("InternalReviewer"),
+            provider_runtime_contract("GroupFinalReview"),
             attempt.project_id,
             attempt.issue_id,
             attempt.id,
@@ -99,6 +97,8 @@ impl CodingWorkspaceEngine {
             units_section,
             evaluation_context_json,
             truncate_prompt_section(&diff, 30_000),
+            group_final_review_material_protocol(),
+            no_default_stack_assumption_contract(),
             retry_diagnostic_section
         ))
     }
@@ -172,7 +172,8 @@ impl CodingWorkspaceEngine {
             .get_role_provider_config_snapshot(&attempt.project_id, &attempt.issue_id, &attempt.id)?
             .internal_reviewer;
         let retry_diagnostic = self.retry_diagnostic_for_previous_run(&attempt, &role_run)?;
-        let prompt = if attempt.scope == CodingAttemptScope::WorkItemGroup {
+        let is_group_final_review = attempt.scope == CodingAttemptScope::WorkItemGroup;
+        let prompt = if is_group_final_review {
             self.build_group_internal_pr_review_prompt(
                 &attempt,
                 &review_request,
@@ -242,7 +243,11 @@ impl CodingWorkspaceEngine {
         let raw_provider_output_ref = self.store.save_provider_raw_output(
             &attempt.id,
             CodingExecutionStage::InternalPrReview,
-            "internal_pr_review",
+            if is_group_final_review {
+                "group_final_review"
+            } else {
+                "internal_pr_review"
+            },
             &full_output,
         )?;
         self.store.update_role_run_refs(
@@ -272,21 +277,49 @@ impl CodingWorkspaceEngine {
         let (node_status, summary, role_run_status, reason_code) = match review.verdict {
             ReviewVerdict::Approve => (
                 CodingTimelineNodeStatus::Completed,
-                Some("internal PR review 通过".to_string()),
+                Some(
+                    if is_group_final_review {
+                        "GroupFinalReview 通过"
+                    } else {
+                        "internal PR review 通过"
+                    }
+                    .to_string(),
+                ),
                 CodingRoleRunStatus::Completed,
                 None,
             ),
             ReviewVerdict::RequestChanges => (
                 CodingTimelineNodeStatus::Failed,
-                Some("internal PR review 要求修改".to_string()),
+                Some(
+                    if is_group_final_review {
+                        "GroupFinalReview 要求修改"
+                    } else {
+                        "internal PR review 要求修改"
+                    }
+                    .to_string(),
+                ),
                 CodingRoleRunStatus::Completed,
                 None,
             ),
             ReviewVerdict::Blocked => (
                 CodingTimelineNodeStatus::Blocked,
-                Some("internal PR review 被阻塞".to_string()),
+                Some(
+                    if is_group_final_review {
+                        "GroupFinalReview 被阻塞"
+                    } else {
+                        "internal PR review 被阻塞"
+                    }
+                    .to_string(),
+                ),
                 CodingRoleRunStatus::Blocked,
-                Some("internal_review_blocked".to_string()),
+                Some(
+                    if is_group_final_review {
+                        "group_final_review_blocked"
+                    } else {
+                        "internal_review_blocked"
+                    }
+                    .to_string(),
+                ),
             ),
         };
         self.complete_timeline_node(
@@ -306,7 +339,45 @@ impl CodingWorkspaceEngine {
             role_run_status,
             reason_code,
         )?;
+        if review.verdict == ReviewVerdict::Blocked {
+            self.create_review_blocked_gate(ReviewBlockedGateInput {
+                attempt: &attempt,
+                node_id: &node.id,
+                stage: CodingExecutionStage::InternalPrReview,
+                role: CodingProviderRole::InternalReviewer,
+                title: if is_group_final_review {
+                    "GroupFinalReview blocked"
+                } else {
+                    "Internal PR review blocked"
+                }
+                .to_string(),
+                description: review.summary.clone(),
+                reason_code: if is_group_final_review {
+                    "group_final_review_blocked"
+                } else {
+                    "internal_review_blocked"
+                },
+                evidence_refs: vec![review.id.clone()],
+                raw_provider_output_ref: Some(raw_provider_output_ref),
+            })
+            .await?;
+        }
         Ok(review)
+    }
+
+    pub(crate) async fn execute_group_final_review_with_commands(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        provider: &dyn StreamingProviderAdapter,
+        command_rx: &mut mpsc::Receiver<CodingRunnerCommand>,
+    ) -> Result<InternalPrReview, CodingWorkspaceEngineError> {
+        if attempt.scope != CodingAttemptScope::WorkItemGroup {
+            return Err(CodingWorkspaceEngineError::FinalConfirmNotReady(
+                attempt.id.clone(),
+            ));
+        }
+        self.execute_internal_pr_review_with_commands(attempt, provider, command_rx)
+            .await
     }
 
     pub async fn execute_review_request(
@@ -335,11 +406,18 @@ impl CodingWorkspaceEngine {
         self._git_service
             .git_add_work_item_changes(worktree_path)
             .await?;
-        if !self
+        let has_staged_changes = self
             ._git_service
             .git_has_staged_changes(worktree_path)
-            .await?
-        {
+            .await?;
+        let commit_sha = if has_staged_changes {
+            self._git_service
+                .git_commit(worktree_path, commit_message)
+                .await?
+                .commit_sha
+        } else if attempt.head_commit.is_some() {
+            self._git_service.git_current_head(worktree_path).await?
+        } else {
             let summary =
                 "过滤运行产物后没有可提交的业务变更，请检查上一轮 Coder 是否只修改了运行产物。"
                     .to_string();
@@ -366,11 +444,7 @@ impl CodingWorkspaceEngine {
             )
             .await?;
             return Err(CodingWorkspaceEngineError::NoReviewableChanges(summary));
-        }
-        let commit = self
-            ._git_service
-            .git_commit(worktree_path, commit_message)
-            .await?;
+        };
         let push = self
             ._git_service
             .git_push(worktree_path, remote, &attempt.branch_name)
@@ -388,7 +462,7 @@ impl CodingWorkspaceEngine {
             remote: remote.to_string(),
             base_branch: attempt.base_branch.clone(),
             branch_name: attempt.branch_name.clone(),
-            commit_sha: commit.commit_sha,
+            commit_sha,
             push_status: push.status,
             external_url: None,
             manual_instructions: vec![format!(

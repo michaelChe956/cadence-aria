@@ -226,41 +226,7 @@ pub(crate) fn content_has_complete_workspace_artifact(
     content: &str,
     workspace_type: &WorkspaceType,
 ) -> bool {
-    match workspace_type {
-        WorkspaceType::Story => content.contains("## 功能需求") && content.contains("## 成功标准"),
-        WorkspaceType::Design => design_artifact_has_required_headings(content),
-        WorkspaceType::WorkItem | WorkspaceType::WorkItemPlan => false,
-    }
-}
-
-pub(crate) fn design_artifact_has_required_headings(content: &str) -> bool {
-    let headings = workspace_artifact_headings(content).collect::<Vec<_>>();
-    let has_decisions = headings
-        .iter()
-        .any(|heading| heading_matches(heading, &["设计决策", "Design Decisions"]));
-    let has_structure = headings.iter().any(|heading| {
-        heading_matches(
-            heading,
-            &[
-                "公共组件",
-                "Shared Components",
-                "shared_components",
-                "API 契约",
-                "API Contract",
-                "api_entries",
-                "数据模型",
-                "数据实体",
-                "Data Entities",
-                "data_entities",
-            ],
-        ) || heading_contains_component_api_data_bucket(heading)
-    });
-
-    has_decisions && has_structure
-}
-
-pub(crate) fn workspace_artifact_headings(content: &str) -> impl Iterator<Item = String> + '_ {
-    content.lines().filter_map(normalize_workspace_heading_line)
+    validate_workspace_artifact_constraints(content, workspace_type).passed
 }
 
 pub(crate) fn normalize_workspace_heading_line(line: &str) -> Option<String> {
@@ -309,16 +275,6 @@ pub(crate) fn is_heading_number_token(token: &str) -> bool {
         && number
             .split('.')
             .all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()))
-}
-
-pub(crate) fn heading_matches(heading: &str, candidates: &[&str]) -> bool {
-    candidates
-        .iter()
-        .any(|candidate| heading.eq_ignore_ascii_case(candidate))
-}
-
-pub(crate) fn heading_contains_component_api_data_bucket(heading: &str) -> bool {
-    heading.contains("组件") && heading.contains("API") && heading.contains("数据模型")
 }
 
 pub(crate) fn parse_choice_option_line(line: &str) -> Option<ChoiceOptionData> {

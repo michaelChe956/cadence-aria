@@ -24,7 +24,6 @@ pub(crate) struct ProviderTestingExecutionInput<'a> {
     pub(crate) worktree_path: PathBuf,
     pub(crate) tester_provider: ProviderName,
     pub(crate) plan: TestPlan,
-    pub(crate) evaluation_context_json: String,
     pub(crate) chat_entry_sequence: usize,
     pub(crate) options: &'a TesterAgentOptions,
     pub(crate) command_rx: &'a mut mpsc::Receiver<CodingRunnerCommand>,
@@ -43,13 +42,20 @@ impl CodingWorkspaceEngine {
             worktree_path,
             tester_provider,
             plan,
-            evaluation_context_json,
             chat_entry_sequence,
             options,
             command_rx,
         } = input;
         let mut chat_entry_sequence = chat_entry_sequence;
-        let prompt = build_tester_execute_plan_prompt(&attempt, &plan, &evaluation_context_json);
+        let execution_context = build_tester_execution_context_pack(self.store.paths(), &attempt)?;
+        let execution_context_json =
+            serde_json::to_string_pretty(&execution_context).map_err(|error| {
+                CodingWorkspaceEngineError::ProviderStream(format!(
+                    "serialize_tester_execution_context_failed: {error}"
+                ))
+            })?;
+        let prompt = build_tester_execute_plan_prompt(&attempt, &plan, &execution_context_json);
+        let context_loader = TestContextLoader::new(self.store.paths(), attempt.clone());
         let _ = self
             .event_tx
             .send(CodingWsOutMessage::CodingExecutionEvent {
@@ -286,6 +292,7 @@ impl CodingWorkspaceEngine {
                                     id: id.clone(),
                                     selected_option_ids: selected_option_ids.clone(),
                                     free_text: free_text.clone(),
+                                    answers: vec![],
                                 })
                                 .await
                                 .is_ok()
@@ -440,10 +447,11 @@ impl CodingWorkspaceEngine {
                                 &attempt.id,
                             );
                             let outcome =
-                                execute_tester_tool_call(
+                                execute_tester_tool_call_with_context(
                                     &call,
                                     worktree_path.clone(),
                                     artifact_output_root,
+                                    Some(&context_loader),
                                 )
                                 .await?;
                             let command_result = outcome.command.clone();

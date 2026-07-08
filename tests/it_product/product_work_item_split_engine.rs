@@ -375,6 +375,8 @@ fn valid_outline_author_output() -> Value {
                     "goal": "实现 API",
                     "scope": ["src/product"],
                     "non_goals": [],
+                    "estimated_context_tokens": 12000,
+                    "session_fit": "fits_single_agent_session",
                     "source_story_spec_ids": ["story_spec_0001"],
                     "source_design_spec_ids": ["design_spec_0001"],
                     "exclusive_write_scopes": ["src/product/**"],
@@ -390,6 +392,8 @@ fn valid_outline_author_output() -> Value {
                     "goal": "接入 API",
                     "scope": ["web/src"],
                     "non_goals": [],
+                    "estimated_context_tokens": 10000,
+                    "session_fit": "fits_single_agent_session",
                     "source_story_spec_ids": ["story_spec_0001"],
                     "source_design_spec_ids": ["design_spec_0001"],
                     "exclusive_write_scopes": ["web/src/**"],
@@ -397,12 +401,6 @@ fn valid_outline_author_output() -> Value {
                     "depends_on": ["outline_backend"],
                     "verification_intent": ["pnpm -C web test"],
                     "handoff_notes": "消费 API contract"
-                }
-            ],
-            "dependency_graph": [
-                {
-                    "from_outline_id": "outline_backend",
-                    "to_outline_id": "outline_frontend"
                 }
             ],
             "risks": [],
@@ -544,6 +542,11 @@ async fn generate_revision_keeps_retained_and_redoes_marked() {
                 design_spec_ids: item.design_spec_ids.clone(),
                 title: item.title.clone(),
                 work_item_set_id: item.work_item_set_id.clone(),
+                source_work_item_plan_id: item.source_work_item_plan_id.clone(),
+                source_outline_id: item.source_outline_id.clone(),
+                source_draft_id: item.source_draft_id.clone(),
+                planned_implementation_context: item.planned_implementation_context.clone(),
+                planned_handoff_summary: item.planned_handoff_summary.clone(),
                 kind: item.kind.clone(),
                 sequence_hint: item.sequence_hint,
                 depends_on: item.depends_on.clone(),

@@ -70,6 +70,10 @@ async fn coding_tester_does_not_resume_coder_provider_session() {
     assert_eq!(inputs.len(), 2);
     assert!(inputs[0].prompt.contains("Phase: plan_tests"));
     assert!(inputs[1].prompt.contains("Phase: execute_test_plan"));
+    assert!(inputs[1].prompt.contains("Execution Context JSON"));
+    assert!(inputs[1].prompt.contains("source_artifacts"));
+    assert!(!inputs[1].prompt.contains("Evaluation Context JSON"));
+    assert!(!inputs[1].prompt.contains("raw_markdown_or_sections"));
     for input in inputs.iter() {
         assert_eq!(input.permission_mode, ProviderPermissionMode::Auto);
         assert_eq!(input.timeout_secs, 10_800);
@@ -82,6 +86,99 @@ async fn coding_tester_does_not_resume_coder_provider_session() {
         conversation.role == ProviderConversationRole::Tester
             && conversation.provider == ProviderName::ClaudeCode
             && conversation.provider_session_id == "tester-session-2"
+    }));
+}
+
+#[tokio::test]
+async fn coding_tester_uses_distinct_plan_and_execute_providers() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+            },
+            ..create_input()
+        })
+        .expect("create attempt");
+    let mut role_config = store
+        .get_role_provider_config_snapshot("project_0001", "issue_0001", &attempt.id)
+        .expect("role config");
+    role_config.set_tester_plan_provider(ProviderName::ClaudeCode);
+    role_config.set_tester_execute_provider(ProviderName::Codex);
+    store
+        .update_role_provider_config_snapshot(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            role_config,
+        )
+        .expect("save role config");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+    let (tx, mut rx) = mpsc::channel(64);
+    tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let plan_provider = SessionInputCapturingProvider::with_outputs(
+        [r#"{"summary":"testing plan","steps":[{"id":"provider_check","title":"Provider check","intent":"verify provider split","required":true,"tool":"provider_managed","risk_level":"low","command_or_tool_input":{},"evidence_expectation":"provider evidence","related_requirements":["REQ-TEST"],"related_design_constraints":["DEC-TEST"],"related_work_item_tasks":["TASK-TEST"]}]}"#],
+        [None],
+    );
+    let execute_provider = SessionInputCapturingProvider::with_outputs(
+        [r#"{"step_results":[{"step_id":"provider_check","status":"passed","evidence_refs":["provider-session.log"],"provider_analysis":"provider split"}]}"#],
+        [Some("execute-session-1".to_string())],
+    );
+
+    let (_command_tx, mut command_rx) = mpsc::channel(1);
+    let _report = engine
+        .execute_testing_with_distinct_provider_commands(
+            &attempt,
+            ProviderTestingAdapters {
+                plan: &plan_provider,
+                execute: &execute_provider,
+            },
+            &CodingExecutionContext::default(),
+            &[],
+            TesterAgentOptions::default(),
+            &mut command_rx,
+        )
+        .await
+        .expect("testing provider run");
+
+    let plan_inputs = plan_provider.inputs.lock().expect("plan inputs lock");
+    let execute_inputs = execute_provider
+        .inputs
+        .lock()
+        .expect("execute inputs lock");
+    assert_eq!(plan_inputs.len(), 1);
+    assert_eq!(execute_inputs.len(), 1);
+    assert_eq!(plan_inputs[0].provider_type, ProviderType::ClaudeCode);
+    assert_eq!(execute_inputs[0].provider_type, ProviderType::Codex);
+    assert!(plan_inputs[0].prompt.contains("Phase: plan_tests"));
+    assert!(
+        execute_inputs[0]
+            .prompt
+            .contains("Phase: execute_test_plan")
+    );
+    assert_eq!(plan_inputs[0].resume_provider_session_id, None);
+    assert_eq!(execute_inputs[0].resume_provider_session_id, None);
+    let updated = store
+        .get_attempt("project_0001", "issue_0001", &attempt.id)
+        .expect("updated attempt");
+    assert!(updated.provider_conversations.iter().any(|conversation| {
+        conversation.role == ProviderConversationRole::Tester
+            && conversation.provider == ProviderName::Codex
+            && conversation.provider_session_id == "execute-session-1"
     }));
 }
 
@@ -619,4 +716,3 @@ async fn blocked_testing_gate_reason_overrides_report_warning_for_role_run() {
         Some("execute_test_plan_timeout")
     );
 }
-

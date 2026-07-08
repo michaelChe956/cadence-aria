@@ -4,8 +4,14 @@ use crate::product::test_executor::{TestCommandSpec, infer_test_commands};
 
 use super::tools::detect_changed_files;
 
-pub fn tester_allowed_tools() -> [&'static str; 4] {
-    ["run_command", "read_file", "list_files", "search_code"]
+pub fn tester_allowed_tools() -> [&'static str; 5] {
+    [
+        "run_command",
+        "read_file",
+        "list_files",
+        "search_code",
+        "load_test_context",
+    ]
 }
 
 pub fn build_tester_system_prompt(

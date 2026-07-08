@@ -108,8 +108,8 @@ pub fn parse_work_item_plan_outline_output(
         ));
     }
 
-    let output: super::types::ProviderOutlineAuthorOutput =
-        serde_json::from_value(value).map_err(|error| {
+    let mut output: super::types::ProviderOutlineAuthorOutput = serde_json::from_value(value)
+        .map_err(|error| {
             ApiError::runtime(
                 "outline_parse_error",
                 format!("failed to parse WorkItemPlan Outline output: {error}"),
@@ -129,6 +129,10 @@ pub fn parse_work_item_plan_outline_output(
             "outline_mixed_context_blockers",
             "WorkItemPlan Outline output must not include context_blockers when outline is present",
         ));
+    }
+
+    if let Some(outline) = output.outline.as_mut() {
+        outline.normalize_dependency_graph_from_depends_on();
     }
 
     Ok(super::types::OutlineAuthorOutput {
@@ -271,6 +275,7 @@ fn is_forbidden_outline_key(key: &str) -> bool {
             | "work_item_ids"
             | "verification_plan"
             | "verification_plans"
+            | "dependency_graph"
             | "repository_profile"
             | "parallel_groups"
     )
@@ -354,6 +359,11 @@ pub(crate) fn parse_provider_output(
             execution_status: WorkItemStatus::Pending,
             worktree_path: None,
             work_item_set_id: None,
+            source_work_item_plan_id: None,
+            source_outline_id: None,
+            source_draft_id: None,
+            planned_implementation_context: None,
+            planned_handoff_summary: None,
             kind: parse_work_item_kind(&item.kind),
             sequence_hint: item.sequence_hint,
             depends_on,

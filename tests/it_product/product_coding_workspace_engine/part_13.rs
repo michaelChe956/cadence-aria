@@ -324,6 +324,85 @@ async fn completing_group_units_saves_distinct_handoffs_per_unit() {
     assert_ne!(unit1_handoff.work_item_id, unit2_handoff.work_item_id);
 }
 
+struct ParseFailingHandoffProvider;
+
+impl cadence_aria::cross_cutting::provider_adapter::ProviderAdapter
+    for ParseFailingHandoffProvider
+{
+    fn run(
+        &self,
+        input: &AdapterInput,
+    ) -> Result<cadence_aria::protocol::contracts::AdapterOutput, ProviderAdapterError> {
+        assert_eq!(input.role, AdapterRole::Handoff);
+        Err(ProviderAdapterError::parse_error(
+            "missing structured output sentinel",
+            "plain handoff summary",
+            "",
+        ))
+    }
+}
+
+#[tokio::test]
+async fn group_handoff_provider_parse_failure_falls_back_and_advances_next_unit() {
+    let (_root, paths, store, _engine, attempt) = group_engine_with_two_units();
+    let shared_worktree = paths.root().join("shared-worktree");
+    std::fs::create_dir_all(&shared_worktree).expect("create shared worktree");
+    let lifecycle = LifecycleStore::new(paths);
+    lifecycle
+        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: shared_worktree,
+            base_branch: "HEAD".to_string(),
+        })
+        .expect("upsert shared worktree");
+    lifecycle
+        .try_acquire_issue_worktree_lock("project_0001", "issue_0001", "work_item_0001")
+        .expect("acquire shared lock for first unit");
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::with_provider(
+        store.clone(),
+        GitWorkspaceService::new(),
+        Arc::new(ParseFailingHandoffProvider),
+        tx,
+    );
+
+    let updated = engine
+        .complete_group_unit_after_code_review(&attempt)
+        .await
+        .expect("complete unit with fallback handoff");
+
+    let unit1_handoff = store
+        .get_coding_unit_handoff(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            "coding_unit_0001",
+        )
+        .expect("load unit1 handoff")
+        .expect("fallback handoff exists");
+    let units = store
+        .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("units");
+
+    assert_eq!(updated.stage, CodingExecutionStage::PrepareContext);
+    assert_eq!(updated.current_work_item_id.as_deref(), Some("work_item_0002"));
+    assert_eq!(updated.active_unit_id.as_deref(), Some("coding_unit_0002"));
+    assert_eq!(unit1_handoff.work_item_id, "work_item_0001");
+    assert_eq!(
+        unit1_handoff.summary,
+        "Handoff generated from attempt artifacts"
+    );
+    assert_eq!(
+        units[0].handoff_ref.as_deref(),
+        Some("units/coding_unit_0001/work-item-handoff.json")
+    );
+    assert_eq!(units[0].status, CodingExecutionUnitStatus::Completed);
+    assert_eq!(units[1].status, CodingExecutionUnitStatus::Running);
+}
+
 #[test]
 fn group_visible_handoff_returns_last_completed_unit_when_no_active_unit_exists() {
     let (_root, _paths, store, _engine, attempt) = group_engine_with_last_running_unit();
@@ -407,7 +486,7 @@ fn group_visible_handoff_returns_last_completed_unit_when_no_active_unit_exists(
 }
 
 #[tokio::test]
-async fn group_internal_review_prompt_includes_all_unit_handoffs() {
+async fn group_final_review_prompt_includes_all_unit_handoffs() {
     let (_root, _paths, _store, engine, attempt) = completed_group_attempt_with_handoffs();
 
     let prompt = engine
@@ -415,6 +494,10 @@ async fn group_internal_review_prompt_includes_all_unit_handoffs() {
         .await
         .expect("prompt");
 
+    assert!(prompt.contains("Coding Workspace GroupFinalReview"));
+    assert!(prompt.contains("WorkItemGroup GroupFinalReview"));
+    assert!(prompt.contains("source_stage=group_final_review"));
+    assert!(!prompt.contains("Coding Workspace InternalReviewer"));
     assert!(prompt.contains("work_item_0001"));
     assert!(prompt.contains("work_item_0002"));
     assert!(prompt.contains("handoff summary for backend"));
@@ -668,109 +751,4 @@ async fn group_final_confirm_rejects_when_any_unit_not_completed() {
         cadence_aria::product::coding_workspace_engine::CodingWorkspaceEngineError::FinalConfirmNotReady(id)
             if id == attempt.id
     ));
-}
-
-fn create_required_verification_plan(
-    lifecycle: &LifecycleStore,
-    work_item_id: &str,
-    plan_id: &str,
-) {
-    lifecycle
-        .create_verification_plan(CreateVerificationPlanInput {
-            id: Some(plan_id.to_string()),
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            work_item_id: work_item_id.to_string(),
-            repository_profile_ref: None,
-            provider_run_ref: None,
-            scope: VerificationScope::Unit,
-            commands: vec![VerificationCommand {
-                id: "unit_tests".to_string(),
-                label: "Unit tests".to_string(),
-                command: "cargo test --locked --lib unit".to_string(),
-                cwd: ".".to_string(),
-                purpose: "unit tests".to_string(),
-                required: true,
-                timeout_seconds: 120,
-                source: VerificationCommandSource::Provider,
-                safety: VerificationCommandSafety::Approved,
-            }],
-            manual_checks: Vec::new(),
-            required_gates: vec!["unit_tests".to_string()],
-            risk_notes: Vec::new(),
-            confidence: RepositoryProfileConfidence::High,
-            fallback_policy: VerificationFallbackPolicy::ManualGate,
-        })
-        .expect("create verification plan");
-}
-
-fn save_minimal_unit_handoff(
-    store: &CodingAttemptStore,
-    attempt: &CodingExecutionAttempt,
-    unit_id: &str,
-    work_item_id: &str,
-) {
-    store
-        .save_coding_unit_handoff(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            unit_id,
-            &WorkItemHandoff {
-                id: format!("work_item_handoff_{unit_id}"),
-                project_id: attempt.project_id.clone(),
-                issue_id: attempt.issue_id.clone(),
-                work_item_id: work_item_id.to_string(),
-                attempt_id: attempt.id.clone(),
-                provider_run_ref: None,
-                summary: format!("handoff summary for {work_item_id}"),
-                files_changed: Vec::new(),
-                commit_sha: Some(format!("{work_item_id}-sha")),
-                diff_summary: String::new(),
-                tests_run: vec!["cargo test --locked --lib unit".to_string()],
-                test_result_summary: "passed".to_string(),
-                review_summary: None,
-                api_or_contract_changes: Vec::new(),
-                open_risks: Vec::new(),
-                next_work_item_notes: Vec::new(),
-                created_at: "2026-06-27T00:00:00Z".to_string(),
-            },
-        )
-        .expect("save unit handoff");
-}
-
-fn passed_testing_report_for_plan(
-    attempt_id: &str,
-    report_id: &str,
-    plan_id: &str,
-) -> TestingReport {
-    TestingReport {
-        id: report_id.to_string(),
-        attempt_id: attempt_id.to_string(),
-        role_run_id: None,
-        run_no: None,
-        commands: vec![TestCommand {
-            command: vec!["cargo".to_string(), "test".to_string()],
-            cwd: PathBuf::from("/tmp/worktree"),
-            exit_code: Some(0),
-            duration_ms: 100,
-            stdout_ref: "artifacts/stdout.txt".to_string(),
-            stderr_ref: "artifacts/stderr.txt".to_string(),
-            status: TestCommandStatus::Passed,
-        }],
-        overall_status: TestingOverallStatus::Passed,
-        provider_claim: None,
-        backend_verified: true,
-        started_at: "2026-06-27T00:00:00Z".to_string(),
-        completed_at: Some("2026-06-27T00:01:00Z".to_string()),
-        plan_id: Some(plan_id.to_string()),
-        plan_summary: None,
-        steps: Vec::new(),
-        unplanned_commands: Vec::new(),
-        unplanned_evidence: Vec::new(),
-        missing_required_steps: Vec::new(),
-        skipped_required_steps: Vec::new(),
-        context_warnings: Vec::new(),
-        raw_provider_output_ref: None,
-    }
 }

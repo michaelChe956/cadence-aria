@@ -3,11 +3,11 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::product::coding_models::{
-    AnalystDecisionRecord, CodeReviewReport, CodingAttemptStatus, CodingChatEntry,
-    CodingChoiceGate, CodingExecutionStage, CodingGateRequired as CodingGateRequiredModel,
-    CodingProviderPermissionMode, CodingProviderRole, CodingRoleProviderConfigSnapshot,
-    CodingRoleRunSnapshot, CodingTimelineNode, CodingTimelineNodeStatus, InternalPrReview,
-    ReviewRequest, TestingReport, WorkItemExecutionPlan, WorkItemHandoff,
+    CodeReviewReport, CodingAttemptStatus, CodingChatEntry, CodingChoiceGate, CodingExecutionStage,
+    CodingGateRequired as CodingGateRequiredModel, CodingProviderPermissionMode,
+    CodingProviderRole, CodingRoleProviderConfigSnapshot, CodingRoleRunSnapshot,
+    CodingTimelineNode, CodingTimelineNodeStatus, InternalPrReview, ReviewRequest, TestingReport,
+    WorkItemExecutionPlan, WorkItemHandoff,
 };
 use crate::product::models::ProviderName;
 use crate::web::types::CodingExecutionUnitDto;
@@ -45,7 +45,6 @@ pub enum CodingWsOutMessage {
         internal_pr_review: Box<Option<InternalPrReview>>,
         pending_gates: Box<Vec<CodingGateRequiredModel>>,
         pending_choices: Box<Vec<CodingChoiceGate>>,
-        latest_analyst_decision: Box<Option<AnalystDecisionRecord>>,
         role_runs: Box<Vec<CodingRoleRunSnapshot>>,
         work_item_markdown: Box<Option<String>>,
         verification_commands: Box<Vec<String>>,
@@ -148,9 +147,6 @@ pub enum CodingWsInMessage {
         action_id: String,
         extra_context: Option<String>,
     },
-    ContinueRework {
-        extra_context: Option<String>,
-    },
     ProviderSelect {
         role: String,
         provider: ProviderName,
@@ -158,6 +154,9 @@ pub enum CodingWsInMessage {
     PermissionModeSelect {
         role: String,
         permission_mode: CodingProviderPermissionMode,
+    },
+    MaxAutoReworkSelect {
+        max_auto_rework: u32,
     },
     StageGateConfirm {
         stage: CodingExecutionStage,

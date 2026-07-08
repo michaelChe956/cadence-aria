@@ -1,6 +1,9 @@
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::CodingAttemptStore;
-use crate::product::coding_models::{CodingAttemptScope, CodingExecutionAttempt};
+use crate::product::coding_models::{
+    CodingAgentRole, CodingAttemptScope, CodingEntryType, CodingExecutionAttempt,
+    CodingExecutionStage, CodingProviderRole,
+};
 use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::models::{
@@ -11,14 +14,17 @@ use crate::product::work_item_plan_store::WorkItemPlanStore;
 
 use super::methods::required_methods_by_role;
 use super::repo::repo_context;
+use super::sanitize::sanitize_context_text;
 use super::specs::{
     contexts_for_design_specs, contexts_for_story_specs, latest_artifact_version_for_session,
     latest_session_for, work_item_context,
 };
 use super::{
-    CodingGroupContextPack, EvaluationContextPack, EvaluationContextRole,
+    CoderEvidencePack, CodingGroupContextPack, EvaluationContextPack, EvaluationContextRole,
     EvaluationWorkItemContext, OpenSpecContext, SuperpowersContext,
 };
+
+const MAX_CODER_EVIDENCE_EXCERPT_CHARS: usize = 6_000;
 
 pub fn build_evaluation_context_pack(
     paths: ProductAppPaths,
@@ -40,6 +46,12 @@ pub fn build_evaluation_context_pack(
         .as_deref()
         .unwrap_or(&attempt.work_item_id);
     let mut context_warnings = Vec::new();
+    let coder_evidence = coder_evidence_pack(
+        &coding_store,
+        attempt,
+        &provider_role,
+        &mut context_warnings,
+    )?;
     let group_context = build_group_context(
         lifecycle_paths.clone(),
         &lifecycle,
@@ -58,6 +70,7 @@ pub fn build_evaluation_context_pack(
             issue_id: attempt.issue_id.clone(),
             attempt_id: attempt.id.clone(),
             provider_role,
+            coder_evidence,
             story_specs: Vec::new(),
             design_specs: Vec::new(),
             work_item: EvaluationWorkItemContext {
@@ -123,6 +136,7 @@ pub fn build_evaluation_context_pack(
         issue_id: attempt.issue_id.clone(),
         attempt_id: attempt.id.clone(),
         provider_role,
+        coder_evidence,
         story_specs,
         design_specs,
         work_item: work_item_context,
@@ -143,7 +157,127 @@ pub fn build_evaluation_context_pack(
     })
 }
 
-fn build_group_context(
+fn coder_evidence_pack(
+    coding_store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+    provider_role: &EvaluationContextRole,
+    context_warnings: &mut Vec<String>,
+) -> Result<Option<CoderEvidencePack>, ProductStoreError> {
+    if !matches!(
+        provider_role,
+        EvaluationContextRole::CodeReviewer | EvaluationContextRole::InternalReviewer
+    ) {
+        return Ok(None);
+    }
+
+    let latest_run = coding_store
+        .list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+        .into_iter()
+        .rev()
+        .find(|run| {
+            run.role == CodingProviderRole::Coder && run.stage == CodingExecutionStage::Coding
+        });
+    let handoff = coding_store.get_visible_work_item_handoff(attempt)?;
+    let mut evidence_warnings = Vec::new();
+
+    if latest_run.is_none() {
+        evidence_warnings.push("coder_role_run_missing".to_string());
+    }
+    if handoff.is_none() {
+        evidence_warnings.push("work_item_handoff_missing".to_string());
+    }
+
+    let completion_report_excerpt = match latest_run.as_ref() {
+        Some(run) => coder_completion_report_excerpt(coding_store, attempt, run, context_warnings)?,
+        None => None,
+    };
+    if latest_run
+        .as_ref()
+        .is_some_and(|run| run.raw_provider_output_refs.is_empty())
+    {
+        evidence_warnings.push("coder_raw_provider_output_refs_missing".to_string());
+    }
+    if completion_report_excerpt.is_none() {
+        evidence_warnings.push("coder_completion_report_missing".to_string());
+    }
+
+    Ok(Some(CoderEvidencePack {
+        latest_role_run_id: latest_run.as_ref().map(|run| run.id.clone()),
+        run_no: latest_run.as_ref().map(|run| run.run_no),
+        status: latest_run.as_ref().map(|run| run.status.clone()),
+        raw_provider_output_refs: latest_run
+            .as_ref()
+            .map(|run| run.raw_provider_output_refs.clone())
+            .unwrap_or_default(),
+        artifact_refs: latest_run
+            .as_ref()
+            .map(|run| run.artifact_refs.clone())
+            .unwrap_or_default(),
+        completion_report_excerpt,
+        handoff_tests_run: handoff
+            .as_ref()
+            .map(|handoff| handoff.tests_run.clone())
+            .unwrap_or_default(),
+        handoff_test_result_summary: handoff
+            .as_ref()
+            .map(|handoff| handoff.test_result_summary.trim().to_string())
+            .filter(|summary| !summary.is_empty()),
+        evidence_warnings,
+    }))
+}
+
+fn coder_completion_report_excerpt(
+    coding_store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+    run: &crate::product::coding_models::CodingRoleRun,
+    context_warnings: &mut Vec<String>,
+) -> Result<Option<String>, ProductStoreError> {
+    let entries =
+        coding_store.list_chat_entries(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+    let entry = entries
+        .iter()
+        .rev()
+        .find(|entry| {
+            entry.role == CodingAgentRole::Author
+                && matches!(&entry.entry_type, CodingEntryType::AssistantMessage)
+                && entry
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("role_run_id"))
+                    .and_then(|value| value.as_str())
+                    == Some(run.id.as_str())
+        })
+        .or_else(|| {
+            run.node_id.as_ref().and_then(|node_id| {
+                entries.iter().rev().find(|entry| {
+                    entry.role == CodingAgentRole::Author
+                        && matches!(&entry.entry_type, CodingEntryType::AssistantMessage)
+                        && entry.node_id.as_deref() == Some(node_id.as_str())
+                })
+            })
+        })
+        .or_else(|| {
+            entries.iter().rev().find(|entry| {
+                entry.role == CodingAgentRole::Author
+                    && matches!(&entry.entry_type, CodingEntryType::AssistantMessage)
+            })
+        });
+    let Some(content) = entry.and_then(|entry| entry.content.as_deref()) else {
+        return Ok(None);
+    };
+    let (sanitized, sanitized_truncated) = sanitize_context_text(content);
+    let mut excerpt: String = sanitized
+        .chars()
+        .take(MAX_CODER_EVIDENCE_EXCERPT_CHARS)
+        .collect();
+    if sanitized_truncated || sanitized.chars().count() > MAX_CODER_EVIDENCE_EXCERPT_CHARS {
+        context_warnings.push("coder_evidence_truncated".to_string());
+        excerpt.push_str("\n[...coder evidence truncated...]");
+    }
+    Ok(Some(excerpt))
+}
+
+pub(super) fn build_group_context(
     lifecycle_paths: ProductAppPaths,
     lifecycle: &LifecycleStore,
     attempt: &CodingExecutionAttempt,
@@ -169,8 +303,21 @@ fn build_group_context(
     }
     let dependency_handoff_refs =
         dependency_handoff_refs_for_current(work_items, current_work_item_id).unwrap_or_default();
-    let (source_outline_id, source_draft_id) =
-        resolve_group_draft_context(lifecycle_paths, &plan, current_work_item_id, warnings)?;
+    let current_work_item = work_items
+        .iter()
+        .find(|record| record.id == current_work_item_id);
+    let explicit_source = current_work_item.and_then(|item| {
+        item.source_outline_id
+            .clone()
+            .zip(item.source_draft_id.clone())
+    });
+    let (source_outline_id, source_draft_id) = if let Some((outline_id, draft_id)) = explicit_source
+    {
+        warnings.push("group_draft_context_loaded_from_work_item".to_string());
+        (Some(outline_id), Some(draft_id))
+    } else {
+        resolve_group_draft_context(lifecycle_paths, &plan, current_work_item_id, warnings)?
+    };
 
     Ok(Some(CodingGroupContextPack {
         plan_id: plan.id,

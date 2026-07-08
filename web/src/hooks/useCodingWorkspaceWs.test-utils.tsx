@@ -59,15 +59,14 @@ export function codingSessionState(overrides: Record<string, unknown> = {}) {
     pushed_remote: null,
     role_provider_config_snapshot: {
       coder: "fake",
-      tester: "fake",
-      analyst: "fake",
+      tester_plan: "fake",
+      tester_execute: "fake",
       code_reviewer: "fake",
       internal_reviewer: "fake",
       review_rounds: 1,
       permission_modes: {
         coder: "supervised",
         tester: "auto",
-        analyst: "auto",
         code_reviewer: "supervised",
         internal_reviewer: "supervised",
       },

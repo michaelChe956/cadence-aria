@@ -237,48 +237,6 @@ async fn execute_code_review_records_permission_timeout_as_timeout_event() {
 }
 
 #[tokio::test]
-async fn execute_rework_forwards_provider_execution_events() {
-    let root = tempdir().expect("root");
-    let worktree = root.path().join("worktree");
-    fs::create_dir_all(&worktree).expect("worktree");
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
-    let attempt = store
-        .create_attempt(CreateCodingAttemptInput {
-            worktree_path: Some(worktree),
-            ..create_input()
-        })
-        .expect("create attempt");
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
-    store
-        .update_attempt_stage(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingExecutionStage::Testing,
-        )
-        .expect("testing stage");
-    let provider = EventThenCompletedProvider {
-        output: r#"{"verdict":"no_issue","summary":"testing ok"}"#.to_string(),
-    };
-    let (tx, mut rx) = mpsc::channel(16);
-    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
-
-    engine
-        .execute_rework(&attempt, "testing evidence", &provider)
-        .await
-        .expect("execute rework");
-
-    assert_provider_command_event(&drain_events(&mut rx));
-}
-
-#[tokio::test]
 async fn execute_internal_pr_review_forwards_provider_execution_events() {
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
@@ -388,7 +346,7 @@ async fn execute_testing_runs_commands_persists_report_and_emits_update() {
 }
 
 #[tokio::test]
-async fn execute_testing_keeps_attempt_running_when_no_commands_are_available_for_analyst() {
+async fn execute_testing_blocks_attempt_when_no_commands_are_available() {
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
     fs::create_dir_all(&worktree).expect("worktree");
@@ -419,7 +377,7 @@ async fn execute_testing_keeps_attempt_running_when_no_commands_are_available_fo
     let updated = store
         .get_attempt("project_0001", "issue_0001", &attempt.id)
         .expect("updated attempt");
-    assert_eq!(updated.status, CodingAttemptStatus::Running);
+    assert_eq!(updated.status, CodingAttemptStatus::Blocked);
     assert_eq!(updated.stage, CodingExecutionStage::Testing);
 }
 
@@ -606,7 +564,7 @@ async fn parses_real_provider_review_finding_aliases() {
 }
 
 #[tokio::test]
-async fn review_payload_parse_failure_records_blocked_evidence_for_analyst() {
+async fn review_payload_parse_failure_records_blocked_reviewer_evidence() {
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
     init_repo(&worktree);
@@ -644,11 +602,23 @@ async fn review_payload_parse_failure_records_blocked_evidence_for_analyst() {
     let updated = store
         .get_attempt("project_0001", "issue_0001", &attempt.id)
         .expect("updated attempt");
-    assert_eq!(updated.status, CodingAttemptStatus::Running);
+    assert_eq!(updated.status, CodingAttemptStatus::Blocked);
     assert_eq!(updated.stage, CodingExecutionStage::CodeReview);
     let gates = store
         .list_open_blocked_gates("project_0001", "issue_0001", &attempt.id)
         .expect("open blocked gates");
-    assert!(gates.is_empty());
+    assert_eq!(gates.len(), 1);
+    assert_eq!(gates[0].stage, Some(CodingExecutionStage::CodeReview));
+    assert_eq!(gates[0].role, Some(CodingProviderRole::CodeReviewer));
+    assert_eq!(gates[0].reason_code.as_deref(), Some("code_review_blocked"));
+    assert_eq!(
+        gates[0].raw_provider_output_ref.as_deref(),
+        Some("provider-raw/code_review/code_review_0001.txt")
+    );
+    assert!(
+        gates[0]
+            .available_actions
+            .iter()
+            .any(|action| action.action_id == "retry_review")
+    );
 }
-

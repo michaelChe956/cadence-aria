@@ -1,5 +1,7 @@
 import { Circle, CircleCheck, CircleDot, History, RotateCcw, XCircle } from "lucide-react";
+import { useState } from "react";
 import type { CodingRoleRun, CodingTimelineNode } from "../../api/types";
+import { elapsedDurationText } from "../shared/duration";
 
 interface RoleRunHistoryPanelProps {
   roleRuns: CodingRoleRun[];
@@ -14,6 +16,7 @@ export function RoleRunHistoryPanel({
   selectedNodeId,
   onSelectNode,
 }: RoleRunHistoryPanelProps) {
+  const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
   const ordered = [...roleRuns].sort((a, b) =>
     a.started_at === b.started_at ? a.run_no - b.run_no : a.started_at.localeCompare(b.started_at),
   );
@@ -23,27 +26,35 @@ export function RoleRunHistoryPanel({
     <section
       data-testid="coding-role-run-history"
       aria-label="角色运行历史"
-      className="min-w-0 overflow-hidden border-b border-[var(--aria-line)] bg-white px-3 py-2"
+      className="min-w-0 overflow-hidden bg-white"
     >
-      <div className="mb-2 flex min-w-0 items-center gap-2 text-xs font-semibold text-[var(--aria-ink)]">
+      <div className="mb-3 flex min-w-0 items-center gap-2 text-xs font-semibold text-[var(--aria-ink)]">
         <History className="h-3.5 w-3.5" />
         <span>角色运行历史</span>
       </div>
       {ordered.length === 0 ? (
         <div className="text-xs text-[var(--aria-ink-muted)]">暂无角色运行记录</div>
       ) : (
-        <div className="flex min-w-0 gap-2 overflow-x-auto pb-1">
+        <div className="grid min-w-0 gap-2">
           {ordered.map((run) => {
             const selected = run.node_id !== null && run.node_id === selectedNodeId;
+            const expanded = expandedRunId === run.id;
             const title = run.node_id ? nodeTitleById.get(run.node_id) ?? run.node_id : "未绑定节点";
+            const duration = elapsedDurationText(run.started_at, run.completed_at);
             return (
               <button
                 key={run.id}
                 type="button"
                 disabled={!run.node_id}
-                onClick={() => run.node_id && onSelectNode(run.node_id)}
+                onClick={() => {
+                  setExpandedRunId((current) => (current === run.id ? null : run.id));
+                  if (run.node_id) {
+                    onSelectNode(run.node_id);
+                  }
+                }}
+                aria-expanded={expanded}
                 className={[
-                  "grid min-w-[13rem] max-w-[18rem] gap-1 rounded-md border px-2 py-1.5 text-left text-xs",
+                  "grid min-w-0 gap-1 rounded-md border px-2.5 py-2 text-left text-xs transition-colors",
                   selected
                     ? "border-[var(--aria-primary)] bg-[var(--aria-primary-soft)]"
                     : "border-[var(--aria-line)] bg-[var(--aria-panel-muted)] hover:bg-white",
@@ -56,6 +67,7 @@ export function RoleRunHistoryPanel({
                   <span className="inline-flex shrink-0 items-center gap-1 text-[var(--aria-ink-muted)]">
                     {statusIcon(run.status)}
                     {roleRunStatusLabel(run.status)}
+                    {duration ? <span className="font-mono">耗时 {duration}</span> : null}
                   </span>
                 </div>
                 <div className="truncate text-[var(--aria-ink-muted)]">{title}</div>
@@ -66,8 +78,13 @@ export function RoleRunHistoryPanel({
                   <div className="truncate text-[var(--aria-ink-muted)]">{run.reason_code}</div>
                 ) : null}
                 <EventSummary run={run} />
-                <RecentEvents run={run} />
-                <RefsSummary run={run} />
+                {expanded ? (
+                  <div className="grid min-w-0 gap-2 border-t border-[var(--aria-line)] pt-2">
+                    <EventDetails run={run} />
+                    <RecentEvents run={run} />
+                    <RefsSummary run={run} />
+                  </div>
+                ) : null}
               </button>
             );
           })}
@@ -91,11 +108,14 @@ function EventSummary({ run }: { run: CodingRoleRun }) {
           <span className="shrink-0 font-mono">{summary.last_event_status}</span>
         ) : null}
       </div>
-      {summary.terminal_reason ? (
-        <div className="truncate">{summary.terminal_reason}</div>
-      ) : null}
     </div>
   );
+}
+
+function EventDetails({ run }: { run: CodingRoleRun }) {
+  const terminalReason = run.event_summary?.terminal_reason;
+  if (!terminalReason) return null;
+  return <div className="truncate text-[10px] text-[var(--aria-ink-muted)]">{terminalReason}</div>;
 }
 
 function RecentEvents({ run }: { run: CodingRoleRun }) {
@@ -163,9 +183,8 @@ function roleLabel(role: CodingRoleRun["role"]) {
   const labels: Record<CodingRoleRun["role"], string> = {
     coder: "Coder",
     tester: "Tester",
-    analyst: "Analyst",
     code_reviewer: "Code Reviewer",
-    internal_reviewer: "Internal Reviewer",
+    internal_reviewer: "GroupFinalReview",
   };
   return labels[role];
 }

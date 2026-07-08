@@ -1,9 +1,64 @@
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::types::{MAX_LISTED_FILES, MAX_SEARCH_MATCHES};
+
+const MAX_LOAD_TEST_CONTEXT_SELECTORS: usize = 8;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoadTestContextInput {
+    pub step_id: String,
+    pub reason: String,
+    #[serde(default)]
+    pub artifact_refs: Vec<String>,
+    #[serde(default)]
+    pub selectors: Vec<String>,
+}
+
+pub(super) fn parse_load_test_context_input(input: &Value) -> Result<LoadTestContextInput, String> {
+    if input
+        .get("mode")
+        .and_then(Value::as_str)
+        .is_some_and(|mode| mode.eq_ignore_ascii_case("full"))
+    {
+        return Err("load_test_context 不支持 mode=full".to_string());
+    }
+
+    let parsed: LoadTestContextInput = serde_json::from_value(input.clone())
+        .map_err(|error| format!("load_test_context 输入格式无效: {error}"))?;
+    if parsed.step_id.trim().is_empty() {
+        return Err("load_test_context 缺少 step_id".to_string());
+    }
+    if parsed.reason.trim().is_empty() {
+        return Err("load_test_context 缺少 reason".to_string());
+    }
+    if parsed.selectors.is_empty() {
+        return Err("load_test_context 至少需要一个 selector".to_string());
+    }
+    if parsed.selectors.len() > MAX_LOAD_TEST_CONTEXT_SELECTORS {
+        return Err(format!(
+            "load_test_context selectors 最多 {MAX_LOAD_TEST_CONTEXT_SELECTORS} 个"
+        ));
+    }
+    if parsed
+        .selectors
+        .iter()
+        .any(|selector| selector.trim().is_empty())
+    {
+        return Err("load_test_context selector 不能为空".to_string());
+    }
+    if parsed
+        .artifact_refs
+        .iter()
+        .any(|artifact_ref| artifact_ref.trim().is_empty())
+    {
+        return Err("load_test_context artifact_refs 不能为空".to_string());
+    }
+    Ok(parsed)
+}
 
 pub(super) fn read_file_tool(input: &Value, worktree_path: &Path) -> Result<String, String> {
     let path = input_path(input, "path", ".")?;

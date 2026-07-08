@@ -350,17 +350,10 @@ async fn workspace_ws_rollback_truncates_persistent_messages() {
         other => panic!("expected session_state, got {other:?}"),
     }
 
-    let lifecycle = lifecycle_json(root.path()).await;
-    let messages = lifecycle["workspace_sessions"][0]["messages"]
-        .as_array()
-        .expect("messages");
+    let messages = persisted_workspace_messages(root.path());
     assert_eq!(messages.len(), 3);
-    assert!(messages.iter().any(|message| message["role"] == "system"));
-    assert!(
-        !messages
-            .iter()
-            .any(|message| message["content"] == "second")
-    );
+    assert!(messages.iter().any(|message| message.role == "system"));
+    assert!(!messages.iter().any(|message| message.content == "second"));
 
     drop(ws);
     server.abort();
@@ -480,12 +473,9 @@ async fn workspace_ws_start_generation_includes_context_note_in_author_prompt() 
         "author prompt should include context note, got: {prompt}"
     );
 
-    let lifecycle = lifecycle_json(root.path()).await;
-    let messages = lifecycle["workspace_sessions"][0]["messages"]
-        .as_array()
-        .expect("messages");
+    let messages = persisted_workspace_messages(root.path());
     assert!(messages.iter().any(|message| {
-        message["role"] == "user" && message["content"] == "用户补充：必须覆盖 n=10 -> 89。"
+        message.role == "user" && message.content == "用户补充：必须覆盖 n=10 -> 89。"
     }));
 
     drop(ws);
@@ -668,4 +658,3 @@ async fn workspace_ws_author_decision_reject_returns_to_prepare_and_survives_rec
     drop(reconnected);
     server.abort();
 }
-

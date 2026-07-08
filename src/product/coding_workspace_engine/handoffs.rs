@@ -190,19 +190,14 @@ impl CodingWorkspaceEngine {
     ) -> Result<(), CodingWorkspaceEngineError> {
         let current = self.store.get_attempt(project_id, issue_id, attempt_id)?;
         let active_work_item_id = self.active_work_item_id_for_attempt(&current).to_string();
-        self.ensure_issue_shared_worktree_clean(
-            project_id,
-            issue_id,
-            attempt_id,
-            &active_work_item_id,
-        )
-        .await?;
-        self.store.update_attempt_status(
-            project_id,
-            issue_id,
-            attempt_id,
-            CodingAttemptStatus::Aborted,
-        )?;
+        if current.status.is_active() {
+            self.store.update_attempt_status(
+                project_id,
+                issue_id,
+                attempt_id,
+                CodingAttemptStatus::Aborted,
+            )?;
+        }
         self.release_issue_shared_worktree_lock_if_holder(
             project_id,
             issue_id,
@@ -252,12 +247,7 @@ impl CodingWorkspaceEngine {
                 return Ok(());
             }
 
-            let handoff = if let Some(provider) = self.provider.as_ref() {
-                self.generate_work_item_handoff_from_provider(provider, attempt)
-                    .await?
-            } else {
-                self.generate_placeholder_work_item_handoff(attempt).await?
-            };
+            let handoff = self.generate_work_item_handoff(attempt).await?;
             self.store.save_coding_unit_handoff(
                 &attempt.project_id,
                 &attempt.issue_id,
@@ -300,12 +290,7 @@ impl CodingWorkspaceEngine {
             return Ok(());
         }
 
-        let handoff = if let Some(provider) = self.provider.as_ref() {
-            self.generate_work_item_handoff_from_provider(provider, attempt)
-                .await?
-        } else {
-            self.generate_placeholder_work_item_handoff(attempt).await?
-        };
+        let handoff = self.generate_work_item_handoff(attempt).await?;
 
         self.store.save_work_item_handoff(&handoff)?;
 
@@ -329,6 +314,36 @@ impl CodingWorkspaceEngine {
         }
 
         Ok(())
+    }
+
+    pub(crate) async fn generate_work_item_handoff(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<WorkItemHandoff, CodingWorkspaceEngineError> {
+        let Some(provider) = self.provider.as_ref() else {
+            return self.generate_placeholder_work_item_handoff(attempt).await;
+        };
+
+        match self
+            .generate_work_item_handoff_from_provider(provider, attempt)
+            .await
+        {
+            Ok(handoff) => Ok(handoff),
+            Err(
+                error @ (CodingWorkspaceEngineError::ProviderAdapter(_)
+                | CodingWorkspaceEngineError::ProviderStream(_)
+                | CodingWorkspaceEngineError::MissingWorktree(_)),
+            ) => {
+                tracing::warn!(
+                    attempt_id = %attempt.id,
+                    work_item_id = %self.active_work_item_id_for_attempt(attempt),
+                    error = %error,
+                    "work item handoff provider failed; falling back to placeholder handoff"
+                );
+                self.generate_placeholder_work_item_handoff(attempt).await
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub(crate) async fn generate_placeholder_work_item_handoff(
@@ -398,10 +413,32 @@ impl CodingWorkspaceEngine {
             },
             "required": ["summary"]
         });
+        let prompt = format!(
+            "Generate a concise handoff summary for the completed work item.\n\
+             Project: {}\n\
+             Issue: {}\n\
+             Work Item: {}\n\
+             Attempt: {}\n\
+             \n\
+             Output requirements:\n\
+             - Return exactly one JSON object inside the sentinel tags.\n\
+             - Do not include Markdown code fences.\n\
+             - Missing array fields must be [].\n\
+             - Use this shape:\n\
+             <ARIA_STRUCTURED_OUTPUT>{{\"summary\":\"...\",\"files_changed\":[],\"diff_summary\":\"\",\"tests_run\":[],\"test_result_summary\":\"\",\"api_or_contract_changes\":[],\"next_work_item_notes\":[]}}</ARIA_STRUCTURED_OUTPUT>\n\
+             \n\
+             JSON schema:\n\
+             {}\n",
+            attempt.project_id,
+            attempt.issue_id,
+            self.active_work_item_id_for_attempt(attempt),
+            attempt.id,
+            output_schema
+        );
         let input = AdapterInput {
             provider_type,
             role: AdapterRole::Handoff,
-            prompt: "Generate a concise handoff summary for the completed work item.".to_string(),
+            prompt,
             worktree_path: Some(worktree_path.to_string_lossy().to_string()),
             context_files: Vec::new(),
             output_schema: output_schema.to_string(),
@@ -518,14 +555,119 @@ impl CodingWorkspaceEngine {
         Ok(completed)
     }
 
-    pub async fn complete_group_unit_after_code_review(
+    pub(crate) async fn complete_attempt_after_review_request(
         &self,
         attempt: &CodingExecutionAttempt,
     ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
         self.generate_and_save_work_item_handoff_if_missing(attempt)
             .await?;
-        self.complete_current_group_unit(attempt, Some("当前 Work Item 已完成".to_string()))
+        self.run_completion_gates(attempt).await?;
+        let completed = self.store.update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::Completed,
+        )?;
+        self.mark_work_item_completed_if_present(&completed)?;
+        self.mark_issue_shared_worktree_completed_if_present(
+            &completed.project_id,
+            &completed.issue_id,
+            self.active_work_item_id_for_attempt(&completed),
+        )?;
+        Ok(completed)
+    }
+
+    pub(crate) async fn complete_group_attempt_after_final_review(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
+        if attempt.scope != CodingAttemptScope::WorkItemGroup {
+            return Err(CodingWorkspaceEngineError::FinalConfirmNotReady(
+                attempt.id.clone(),
+            ));
+        }
+        self.run_group_completion_gates(attempt).await?;
+        let completed = self.store.update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::Completed,
+        )?;
+        self.mark_completed_group_work_items_if_present(&completed)?;
+        let current_work_item_id = self.active_work_item_id_for_attempt(attempt).to_string();
+        self.release_issue_shared_worktree_lock_if_holder(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &current_work_item_id,
+        )?;
+        Ok(completed)
+    }
+
+    pub async fn complete_group_unit_after_code_review(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
+        let attempt = self.commit_current_group_unit_changes(attempt).await?;
+        self.generate_and_save_work_item_handoff_if_missing(&attempt)
+            .await?;
+        self.complete_current_group_unit(&attempt, Some("当前 Work Item 已完成".to_string()))
             .await
+    }
+
+    async fn commit_current_group_unit_changes(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
+        if attempt.scope != CodingAttemptScope::WorkItemGroup {
+            return Ok(attempt.clone());
+        }
+        let Some(worktree_path) = attempt.worktree_path.as_ref() else {
+            return Err(CodingWorkspaceEngineError::MissingWorktree(
+                attempt.id.clone(),
+            ));
+        };
+        let active = self
+            .store
+            .get_active_coding_unit(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+            .ok_or_else(|| {
+                CodingWorkspaceEngineError::WorkItemHandoffMissing(attempt.id.clone())
+            })?;
+
+        self._git_service
+            .git_add_work_item_changes(worktree_path)
+            .await?;
+        let completion_commit = if self
+            ._git_service
+            .git_has_staged_changes(worktree_path)
+            .await?
+        {
+            self._git_service
+                .git_commit(
+                    worktree_path,
+                    &format!("feat: complete {}", active.work_item_id),
+                )
+                .await?
+                .commit_sha
+        } else if let Some(head_commit) = attempt.head_commit.clone() {
+            head_commit
+        } else {
+            self._git_service.git_current_head(worktree_path).await?
+        };
+
+        let updated = self.store.update_attempt_head_commit(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            Some(completion_commit.clone()),
+        )?;
+        self.store.update_coding_unit_completion_commit(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &active.id,
+            Some(completion_commit),
+        )?;
+        Ok(updated)
     }
 
     fn mark_completed_group_work_items_if_present(

@@ -27,6 +27,8 @@ impl CodingWorkspaceEngine {
              Attempt: {}\n\
              Branch: {}\n\
              Base: {}\n\
+             {}\
+             {}\
              \n代码规范:\n\
              - 优先检查正确性、边界条件、测试覆盖、安全、性能和可维护性。\n\
              - findings 必须包含 severity、file_path、line、message、required_action、source_stage=code_review。\n\
@@ -39,10 +41,12 @@ impl CodingWorkspaceEngine {
             provider_runtime_contract("CodeReviewer"),
             attempt.project_id,
             attempt.issue_id,
-            attempt.work_item_id,
+            active_work_item_id_for_prompt(attempt),
             attempt.id,
             attempt.branch_name,
             attempt.base_branch,
+            code_review_material_protocol(),
+            no_default_stack_assumption_contract(),
             work_item.unwrap_or_else(
                 || "未找到 Work Item markdown，上下文仅包含 attempt 元数据。".to_string()
             ),
@@ -70,9 +74,9 @@ impl CodingWorkspaceEngine {
             .map(|summary| format!("\n上一轮 role run 诊断摘要:\n{}\n", summary))
             .unwrap_or_default();
         Ok(format!(
-            "Coding Workspace InternalReviewer\n\
+            "Coding Workspace GroupFinalReview\n\
              {}\n\
-             你是 InternalReviewer，在 ReviewRequest(push) 之后做内部 PR 审查。\n\
+             你是 WorkItemGroup GroupFinalReview reviewer，仅在 WorkItemGroup 全部 coding units 完成且 ReviewRequest push 之后做整组功能审查。单 WorkItem scope 不应生成本 prompt。\n\
              Project: {}\n\
              Issue: {}\n\
              Work Item: {}\n\
@@ -85,16 +89,18 @@ impl CodingWorkspaceEngine {
              \nEvaluationContextPack:\n````json\n{}\n````\n\
              \n完整变更 git diff:\n````diff\n{}\n````\n\
              {}\
+             {}\
+             {}\
              \n输出要求:\n\
              - 分析影响范围（影响范围/impact_scope）。\n\
              - 给出 PR description 预览。\n\
              - 给出 commit message 建议。\n\
-             - findings 必须包含 source_stage=internal_pr_review。\n\
+             - findings 必须包含 source_stage=group_final_review。\n\
              \n只输出 JSON：{{\"verdict\":\"approve|request_changes|blocked\",\"summary\":\"...\",\"findings\":[...],\"impact_scope\":[\"...\"],\"pr_description\":\"...\",\"commit_message_suggestion\":\"...\"}}\n",
-            provider_runtime_contract("InternalReviewer"),
+            provider_runtime_contract("GroupFinalReview"),
             attempt.project_id,
             attempt.issue_id,
-            attempt.work_item_id,
+            active_work_item_id_for_prompt(attempt),
             attempt.id,
             attempt.branch_name,
             review_request.id,
@@ -105,6 +111,8 @@ impl CodingWorkspaceEngine {
             ),
             evaluation_context_json,
             truncate_prompt_section(&diff, 30_000),
+            group_final_review_material_protocol(),
+            no_default_stack_assumption_contract(),
             retry_diagnostic_section
         ))
     }
@@ -124,7 +132,11 @@ pub(crate) fn build_coding_prompt(
          Work Item: {}\n\
          Attempt: {}\n\
          Branch: {}\n",
-        attempt.project_id, attempt.issue_id, attempt.work_item_id, attempt.id, attempt.branch_name
+        attempt.project_id,
+        attempt.issue_id,
+        active_work_item_id_for_prompt(attempt),
+        attempt.id,
+        attempt.branch_name
     );
     if let Some(worktree_path) = attempt.worktree_path.as_ref() {
         prompt.push_str(&format!("Worktree Path: {}\n", worktree_path.display()));
@@ -144,7 +156,7 @@ pub(crate) fn build_coding_prompt(
         prompt.push_str("\n````\n");
     }
     if let Some(instruction) = rework_instruction {
-        prompt.push_str("\n上一轮返修要求:\n");
+        prompt.push_str("\n上一轮修复要求:\n");
         prompt.push_str(&format!(
             "- 来源阶段: {:?}\n- 摘要: {}\n",
             instruction.source_stage, instruction.summary
@@ -166,13 +178,9 @@ pub(crate) fn build_coding_prompt(
         );
     }
     append_coding_context_notes(&mut prompt, context_notes);
-    prompt.push_str(dependency_bootstrap_guidance());
-    prompt.push_str(
-        "\n执行要求:\n\
-         - 遵循仓库规则和 TDD 流程。\n\
-         - 优先按已确认 Work Item 的文件落点、范围和验证命令执行。\n\
-         - 完成后报告修改文件、测试命令和结果。\n",
-    );
+    prompt.push_str(coding_execution_protocol());
+    prompt.push_str(no_default_stack_assumption_contract());
+    prompt.push_str(coding_completion_report_contract());
     prompt
 }
 
@@ -190,7 +198,11 @@ pub(crate) fn build_coding_delta_prompt(
          Work Item: {}\n\
          Attempt: {}\n\
          Branch: {}\n",
-        attempt.project_id, attempt.issue_id, attempt.work_item_id, attempt.id, attempt.branch_name
+        attempt.project_id,
+        attempt.issue_id,
+        active_work_item_id_for_prompt(attempt),
+        attempt.id,
+        attempt.branch_name
     );
     if let Some(worktree_path) = attempt.worktree_path.as_ref() {
         prompt.push_str(&format!("Worktree Path: {}\n", worktree_path.display()));
@@ -208,7 +220,7 @@ pub(crate) fn build_coding_delta_prompt(
     }
 
     if let Some(instruction) = rework_instruction {
-        prompt.push_str("\n本轮返修要求:\n");
+        prompt.push_str("\n本轮修复要求:\n");
         prompt.push_str(&format!(
             "- 来源阶段: {:?}\n- 摘要: {}\n",
             instruction.source_stage, instruction.summary
@@ -230,18 +242,79 @@ pub(crate) fn build_coding_delta_prompt(
         );
     } else {
         prompt.push_str(
-            "\n本轮没有新增返修要求。请基于当前会话和 worktree 状态继续完成未结束的代码编写任务。\n",
+            "\n本轮没有新增修复要求。请基于当前会话和 worktree 状态继续完成未结束的代码编写任务。\n",
         );
     }
     append_coding_context_notes(&mut prompt, context_notes);
-    prompt.push_str(dependency_bootstrap_guidance());
-    prompt.push_str(
-        "\n执行要求:\n\
-         - 遵循仓库规则和 TDD 流程。\n\
-         - 不要重新生成 Story/Design/Work Item 文档。\n\
-         - 完成后报告修改文件、测试命令和结果。\n",
-    );
+    prompt.push_str(coding_delta_execution_protocol());
+    prompt.push_str(no_default_stack_assumption_contract());
+    prompt.push_str(coding_completion_report_contract());
     prompt
+}
+
+pub(crate) fn no_default_stack_assumption_contract() -> &'static str {
+    "\n不得用平台默认技术栈假设替代任务材料。语言、构建系统、包管理器、测试框架、依赖初始化和模块接入要求，必须来自 Work Item、Source Draft Supplement、Verification Plan、EvaluationContextPack、项目规则、仓库文件事实或用户补充上下文。若材料不足，必须报告不确定性，不得臆造具体命令或工具。\n"
+}
+
+pub(crate) fn coding_execution_protocol() -> &'static str {
+    "\nCoder 执行协议:\n\
+     - 在修改代码前，必须先阅读“已确认 Work Item”，并从其中提取本次任务的执行清单。\n\
+     - 执行清单必须覆盖：实现目标、允许修改范围、禁止修改范围、TDD/测试要求、依赖初始化或环境诊断要求、验证命令与执行顺序、完成前自检要求、handoff 中要求交付给下游的契约。\n\
+     - 如果 Work Item、Source Draft Supplement、Verification Plan 已明确给出某项要求，必须按其内容执行。\n\
+     - 如果执行材料没有给出语言、构建系统、包管理器或测试框架相关要求，不得臆造具体技术栈命令。\n\
+     - 需要判断环境或依赖问题时，必须优先根据 Work Item、Verification Plan、仓库文件和项目规则判断。\n\
+     - 如果判断依据不足，必须在最终报告中说明“不足以确定”，并列出需要人工确认的问题。\n\
+     - 不得用平台默认技术栈假设替代 Work Item 内容。\n"
+}
+
+pub(crate) fn coding_delta_execution_protocol() -> &'static str {
+    "\nCoder 增量执行协议:\n\
+     - 继续以本会话中的“已确认 Work Item”和 Verification Plan 作为任务来源。\n\
+     - 在继续修改前，必须重新核对本轮修复要求、补充上下文和原 Work Item 中的执行要求。\n\
+     - 若存在人工修复意见，人工修复意见优先级最高；当人工修复意见与 reviewer findings、原 Work Item 或既有上下文冲突时，优先遵循人工修复意见，并在最终报告说明冲突和取舍。\n\
+     - 若没有人工修复意见，但本轮 reviewer findings 与原 Work Item 冲突，优先遵循更具体、更新的本轮 reviewer findings；同时在最终报告说明冲突和取舍。\n\
+     - 不得引入平台默认技术栈假设；语言、构建系统、包管理器、测试框架相关动作必须来自 Work Item、Verification Plan、仓库文件或项目规则。\n\
+     - 如果判断依据不足，必须在最终报告中说明“不足以确定”，并列出需要人工确认的问题。\n"
+}
+
+pub(crate) fn coding_completion_report_contract() -> &'static str {
+    "\n完成报告要求:\n\
+     - 先列出你从 Work Item / Final Compile / Verification Plan 提取出的执行清单。\n\
+     - 列出实际修改文件。\n\
+     - 列出实际执行的验证命令。\n\
+     - 粘贴每条验证命令的完整输出。\n\
+     - 报告 git diff --stat。\n\
+     - 明确说明是否触碰 Forbidden Write Scopes。\n\
+     - 如果测试命令显示没有测试被执行或没有实际测试被执行，包括 \"0 tests\" 或 \"running 0 tests\"，不能直接视为已覆盖；必须说明处理方式或风险。\n\
+     - 如果某项要求无法执行，说明阻塞原因、已尝试的诊断步骤和需要人工确认的内容。\n"
+}
+
+pub(crate) fn code_review_material_protocol() -> &'static str {
+    "\nCRITICAL: Return ONLY a single JSON object. No markdown, no explanations, no validation reports, no tables.\n\
+     CodeReviewer 审查协议:\n\
+     - 只分析当前变更 diff，不修改代码、不执行写操作。\n\
+     - 在给出 verdict 前，必须从“原始需求上下文”和 EvaluationContextPack 中提取本次任务的审查清单。\n\
+     - 审查清单必须覆盖：实现目标、允许修改范围、禁止修改范围、TDD/测试要求、验证命令与证据、完成前自检要求、handoff 承诺、需求/设计追踪关系。\n\
+     - EvaluationContextPack.CoderEvidencePack 是 coder 已执行工作的证据包；必须优先审查其中的 role run、raw/artifact refs、completion report、handoff tests_run/test_result_summary 和 evidence_warnings。\n\
+     - 不得重复执行 required verification commands；除非证据缺失、证据自相矛盾或用户/Work Item 明确要求 reviewer 复跑，否则只基于 CoderEvidencePack、diff 和任务材料判断。\n\
+     - 必须审查 diff 是否满足 Work Item 的实现目标、写入范围、禁止范围、验证计划、自检要求和 handoff 承诺。\n\
+     - 如果 coder 报告或 EvaluationContextPack 中缺少 required 验证命令的执行证据，必须作为 finding 记录；若该证据是完成本 Work Item 的必要条件，verdict 应为 request_changes 或 blocked。\n\
+     - 如果测试输出显示没有实际测试被执行，不能把它当作有效覆盖；必须结合 Work Item 要求判断是否需要修复。\n\
+     - 不得提出执行材料之外的技术栈默认要求。\n\
+     - JSON 必须以 { 开头，以 } 结尾；不要输出 Markdown 代码块或自然语言总结。\n"
+}
+
+pub(crate) fn group_final_review_material_protocol() -> &'static str {
+    "\nWorkItemGroup GroupFinalReview 审查协议:\n\
+     - 你必须从 Completed Units、unit handoff、EvaluationContextPack 和完整 diff 中提取整组审查清单。\n\
+     - 必须确认每个 completed unit 的 handoff 承诺是否体现在最终 diff 或最终报告中。\n\
+     - 必须检查依赖 handoff 是否断裂：上游 unit 承诺的 API、状态、文件、测试证据是否被下游正确消费。\n\
+     - 必须检查整组 diff 是否越过任何 unit 的 Forbidden Write Scopes。\n\
+     - 如果某个 unit 的验证证据缺失、handoff 未闭环、或最终 PR 描述遗漏关键影响，必须 request_changes 或 blocked。\n\
+     - 如果 ReviewRequest 已 push 的 commit 与 completed units、diff 或验证证据不一致，必须 request_changes 或 blocked。\n\
+     - impact_scope、pr_description、commit_message_suggestion 必须基于实际 diff、completed units 和 handoff，不得编造未实现内容。\n\
+     - 不得用平台默认技术栈假设替代 unit handoff 或 Work Item 内容。\n\
+     - findings 必须包含 source_stage=group_final_review。\n"
 }
 
 pub(crate) fn append_coding_context_notes(
@@ -260,68 +333,8 @@ pub(crate) fn append_coding_context_notes(
         context_notes.truncated, context_notes.text
     ));
     prompt.push_str(
-        "请将这些人工补充要求与本轮返修要求一起执行；如有冲突，优先遵循更具体的人工补充上下文。\n",
+        "请将这些人工补充要求与本轮修复要求一起执行；如有冲突，优先遵循更具体的人工补充上下文。\n",
     );
-}
-
-pub(crate) fn dependency_bootstrap_guidance() -> &'static str {
-    "\n依赖初始化诊断要求:\n\
-     - 如果前端命令出现 `Local package.json exists, but node_modules missing`、`tsc EACCES`、`vitest EACCES`、`Permission denied` 或 `spawn ... EACCES`，先不要判定 pnpm 环境不可用。\n\
-     - 先运行 `pnpm --version` 区分 pnpm 是否存在；只有该命令失败时，才报告 pnpm 不可用。\n\
-     - 如果 pnpm 可用且对应 package 目录存在 lockfile，请先运行 `pnpm -C <package-dir> install --frozen-lockfile`，例如 Aria 前端为 `pnpm -C web install --frozen-lockfile`，然后重试 build/test。\n\
-     - 不要把缺少 node_modules 误判为 pnpm 不可用。\n"
-}
-
-pub(crate) fn build_rework_prompt(
-    attempt: &CodingExecutionAttempt,
-    evidence: &str,
-    source_stage: &CodingExecutionStage,
-    rework_round: u32,
-    context_notes: &ReworkContextNoteInput,
-    evaluation_context_json: &str,
-    retry_diagnostic: Option<&str>,
-) -> String {
-    let retry_diagnostic_section = retry_diagnostic
-        .map(|summary| format!("\n上一轮 Analyst role run 诊断摘要:\n{}\n", summary))
-        .unwrap_or_default();
-    format!(
-        "CRITICAL: Return ONLY a single JSON object. No markdown, no explanations, no validation reports, no tables.\n\
-         Coding Workspace Rework 分析官\n\
-         {}\n\
-         你是 Coding Workspace Rework 分析官，只做分析和路由决策。\n\
-         严格要求：不要修改代码，不要调用 tool_use，不要执行命令。\n\
-         仅根据上一阶段 summary/evidence、本轮新增 ContextNote 与 EvaluationContextPack 输出 AnalystDecision JSON。\n\
-         JSON 必须以 {{ 开头，以 }} 结尾。\n\
-         JSON 格式：{{\"verdict\":\"needs_fix|rerun_testing|proceed|human_required|blocked\",\"next_stage\":\"coding|testing|code_review|review_request|internal_pr_review|final_confirm|human_gate\",\"reason\":\"...\",\"evidence_refs\":[\"...\"],\"raw_provider_output_refs\":[\"...\"],\"rework_instructions\":null,\"human_gate\":null}}\n\
-         路由规则：TestingReport 因 test_plan_missing_json、test_plan_invalid_json 或 test_plan_repair_failed 阻塞时，优先判断为 Tester 输出契约问题；若可重试，输出 verdict=rerun_testing,next_stage=testing；只有环境、权限或需求缺失不可自动处理时才 next_stage=human_gate。\n\
-         Project: {}\n\
-         Issue: {}\n\
-         Work Item: {}\n\
-         Attempt: {}\n\
-         Branch: {}\n\
-         Previous Stage: {:?}\n\
-         Rework Round: {}\n\
-         ContextNotes Truncated: {}\n\
-         \n上一阶段 summary/evidence:\n{}\n\
-         \n本轮新增 ContextNote:\n{}\n\
-         \nEvaluationContextPack:\n````json\n{}\n````\n\
-         {}\
-         \nCRITICAL: Return ONLY a single JSON object. Do not summarize validation. Do not include markdown.\n\
-         END OF INSTRUCTIONS: output JSON only.",
-        provider_runtime_contract("Analyst"),
-        attempt.project_id,
-        attempt.issue_id,
-        attempt.work_item_id,
-        attempt.id,
-        attempt.branch_name,
-        source_stage,
-        rework_round,
-        context_notes.truncated,
-        evidence,
-        context_notes.text,
-        evaluation_context_json,
-        retry_diagnostic_section
-    )
 }
 
 pub(crate) fn provider_runtime_contract(role: &str) -> String {
@@ -380,7 +393,7 @@ pub(crate) fn streaming_input_from_adapter(
 pub(crate) fn build_tester_execute_plan_prompt(
     attempt: &CodingExecutionAttempt,
     plan: &TestPlan,
-    evaluation_context_json: &str,
+    execution_context_json: &str,
 ) -> String {
     let plan_json = serde_json::to_string_pretty(plan).unwrap_or_else(|_| "{}".to_string());
     format!(
@@ -394,14 +407,29 @@ pub(crate) fn build_tester_execute_plan_prompt(
          If you cannot run a required step, emit status=\"blocked\" or status=\"skipped\" with provider_analysis explaining why.\n\
          Do not claim overall success in prose without step_results JSON.\n\
          Tool calls meant to satisfy a plan step must include the exact step_id in their input. Tool calls without step_id are unplanned evidence and cannot satisfy required steps.\n\
+         If TestPlan is insufficient, do not redesign it inside execute_test_plan.\n\
+         Use load_test_context only for targeted source artifact snippets; load_test_context is read-only and cannot satisfy a required step by itself.\n\
+         If the plan is wrong, out of scope, or impossible to execute reliably, mark the affected required step blocked.\n\
+         Do not generate new TestPlan steps during execute_test_plan.\n\
+         If the current TestPlan is wrong, out of scope, or impossible to execute reliably, return blocked step_results for affected required steps with provider_analysis prefixed by \"test_plan_insufficient:\".\n\
          At the end of execute_test_plan, output a JSON object with:\n\
          {{\"step_results\":[{{\"step_id\":\"...\",\"status\":\"passed|failed|blocked|skipped\",\"evidence_refs\":[\"...\"],\"provider_analysis\":\"...\"}}]}}\n\
          \n\
          TestPlan:\n```json\n{}\n```\n\
          \n\
-         Evaluation Context JSON:\n```json\n{}\n```\n",
-        attempt.id, attempt.work_item_id, plan_json, evaluation_context_json
+         Execution Context JSON:\n```json\n{}\n```\n",
+        attempt.id,
+        active_work_item_id_for_prompt(attempt),
+        plan_json,
+        execution_context_json
     )
+}
+
+pub(crate) fn active_work_item_id_for_prompt(attempt: &CodingExecutionAttempt) -> &str {
+    attempt
+        .current_work_item_id
+        .as_deref()
+        .unwrap_or(&attempt.work_item_id)
 }
 
 pub(crate) struct ReworkContextNoteInput {

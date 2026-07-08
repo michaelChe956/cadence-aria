@@ -18,21 +18,11 @@ import type {
 export function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
   const entries: ChatEntry[] = [];
   const retriedNodeIds = retriedTimelineNodeIds(state.timelineNodes);
-
-  for (const message of state.messages) {
-    if (!isPreparedWorkspaceContextMessage(message)) {
-      continue;
-    }
-
-    entries.push({
-      id: `prepared-context:${message.id}`,
-      type: "context_note",
-      role: "user",
-      content: message.content,
-      timestamp: message.created_at,
-      metadata: { prepared: true },
-    });
-  }
+  const preparedPrompt = workItemPlanPreparedProviderPrompt(state, retriedNodeIds);
+  const preparedEntries = preparedWorkspaceContextEntries(state, preparedPrompt);
+  entries.push(...preparedEntries);
+  const embeddedPromptNodeId =
+    preparedEntries.length > 0 && preparedPrompt ? preparedPrompt.nodeId : null;
 
   for (const node of state.timelineNodes) {
     if (retriedNodeIds.has(node.node_id)) {
@@ -87,7 +77,8 @@ export function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
     const latestProviderPrompt = latestProviderPromptEvent(detail.execution_events);
     let renderedProviderPromptEntry = false;
     const prompt = detail.prompt?.trim();
-    if (prompt && !latestProviderPrompt) {
+    const providerPromptEmbeddedInPreparedEntry = embeddedPromptNodeId === node.node_id;
+    if (prompt && !latestProviderPrompt && !providerPromptEmbeddedInPreparedEntry) {
       const provider = providerNameForNode(node, detail);
       entries.push({
         id: chatEntryId(node.node_id, "provider-prompt"),
@@ -140,6 +131,10 @@ export function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
       const timestamp = detail.started_at || node.started_at;
       const provider = providerNameForNode(node, detail, event);
       if (isProviderPromptEvent(event)) {
+        if (providerPromptEmbeddedInPreparedEntry) {
+          renderedProviderPromptEntry = true;
+          continue;
+        }
         if (event !== latestProviderPrompt) {
           continue;
         }
@@ -285,6 +280,91 @@ export function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
   }
 
   return entries;
+}
+
+interface PreparedProviderPrompt {
+  nodeId: string;
+  nodeTitle: string;
+  provider: string | null;
+  content: string;
+}
+
+function preparedWorkspaceContextEntries(
+  state: WorkspaceWsState,
+  preparedPrompt: PreparedProviderPrompt | null,
+): ChatEntry[] {
+  const entries: ChatEntry[] = [];
+  for (const message of state.messages) {
+    if (!isPreparedWorkspaceContextMessage(message)) {
+      continue;
+    }
+
+    const promptContent = preparedPrompt?.content.trim();
+    const content = state.workspaceType === "work_item_plan" && promptContent
+      ? promptContent
+      : message.content;
+    const contentSize = content.length;
+    entries.push({
+      id: `prepared-context:${message.id}`,
+      type: "context_note",
+      role: "user",
+      content,
+      timestamp: message.created_at,
+      node_id: preparedPrompt?.nodeId,
+      metadata: {
+        prepared: true,
+        workspace_type: state.workspaceType,
+        ...(preparedPrompt
+          ? {
+              prompt_source: "provider_prompt",
+              prompt_node_id: preparedPrompt.nodeId,
+              prompt_node_title: preparedPrompt.nodeTitle,
+              provider: preparedPrompt.provider,
+              prompt_size: contentSize,
+            }
+          : {}),
+      },
+      content_ref: preparedPrompt ? { kind: "provider_prompt", nodeId: preparedPrompt.nodeId } : undefined,
+      content_size: contentSize,
+      has_full_content: true,
+    });
+  }
+  return entries;
+}
+
+function workItemPlanPreparedProviderPrompt(
+  state: WorkspaceWsState,
+  retriedNodeIds: Set<string>,
+): PreparedProviderPrompt | null {
+  if (state.workspaceType !== "work_item_plan") {
+    return null;
+  }
+
+  for (const node of state.timelineNodes) {
+    if (retriedNodeIds.has(node.node_id)) {
+      continue;
+    }
+    const detail = state.nodeDetails[node.node_id];
+    if (!detail || chatRoleForNode(node, state.workspaceType, detail) !== "author") {
+      continue;
+    }
+
+    const eventPrompt = latestProviderPromptEvent(detail.execution_events)?.output.trim();
+    const detailPrompt = detail.prompt?.trim();
+    const content = eventPrompt || detailPrompt;
+    if (!content) {
+      continue;
+    }
+
+    return {
+      nodeId: node.node_id,
+      nodeTitle: node.title,
+      provider: providerNameForNode(node, detail),
+      content,
+    };
+  }
+
+  return null;
 }
 
 function providerSummaryEntries(
@@ -625,11 +705,39 @@ function permissionResponseLabel(toolName: string, response: unknown) {
 
 export function choiceResponseSummary(entry: ChatEntry, response: ChoiceResponsePayload) {
   const metadata = entry.metadata;
+  if (response.answers && response.answers.length > 0) {
+    const labels = response.answers.flatMap((answer) => {
+      const selected = answer.selected_option_ids.map((id) =>
+        choiceQuestionOptionLabel(metadata?.questions, answer.question_id, id, metadata?.options),
+      );
+      if (answer.free_text) {
+        selected.push(answer.free_text);
+      }
+      return selected;
+    });
+    return labels.length > 0 ? `：${labels.join("、")}` : "";
+  }
   const labels = response.selected_option_ids.map((id) => choiceOptionLabel(metadata?.options, id));
   if (response.free_text) {
     labels.push(response.free_text);
   }
   return labels.length > 0 ? `：${labels.join("、")}` : "";
+}
+
+function choiceQuestionOptionLabel(
+  questions: unknown,
+  questionId: string,
+  id: string,
+  fallbackOptions: unknown,
+) {
+  if (!Array.isArray(questions)) {
+    return choiceOptionLabel(fallbackOptions, id);
+  }
+  const question = questions.find(
+    (item) => isRecord(item) && stringField(item, "id") === questionId,
+  );
+  const options = isRecord(question) ? question.options : null;
+  return choiceOptionLabel(options, id);
 }
 
 function choiceOptionLabel(options: unknown, id: string) {

@@ -14,10 +14,31 @@ pub struct WorkItemPlanOutline {
     pub source_design_spec_ids: Vec<String>,
     pub strategy_summary: String,
     pub work_item_outlines: Vec<WorkItemOutline>,
+    #[serde(default)]
     pub dependency_graph: Vec<WorkItemOutlineDependencyEdge>,
     pub risks: Vec<String>,
     pub handoff_strategy: String,
     pub status: String,
+}
+
+impl WorkItemPlanOutline {
+    pub fn dependency_graph_from_depends_on(&self) -> Vec<WorkItemOutlineDependencyEdge> {
+        self.work_item_outlines
+            .iter()
+            .flat_map(|item| {
+                item.depends_on
+                    .iter()
+                    .map(|dependency| WorkItemOutlineDependencyEdge {
+                        from_outline_id: dependency.clone(),
+                        to_outline_id: item.outline_id.clone(),
+                    })
+            })
+            .collect()
+    }
+
+    pub fn normalize_dependency_graph_from_depends_on(&mut self) {
+        self.dependency_graph = self.dependency_graph_from_depends_on();
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,6 +50,10 @@ pub struct WorkItemOutline {
     pub goal: String,
     pub scope: Vec<String>,
     pub non_goals: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_context_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_fit: Option<WorkItemOutlineSessionFit>,
     pub source_story_spec_ids: Vec<String>,
     pub source_design_spec_ids: Vec<String>,
     pub exclusive_write_scopes: Vec<String>,
@@ -36,6 +61,13 @@ pub struct WorkItemOutline {
     pub depends_on: Vec<String>,
     pub verification_intent: Vec<String>,
     pub handoff_notes: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkItemOutlineSessionFit {
+    FitsSingleAgentSession,
+    TooLargeMustSplit,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

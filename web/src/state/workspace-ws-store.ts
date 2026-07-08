@@ -5,6 +5,7 @@ import {
   getWorkspaceContentCacheValue,
   setWorkspaceContentCacheEntry,
 } from "./workspace-content-cache";
+import { refreshPreparedContextAuthorGuidance } from "./workspace-ws-store-guidance";
 import {
   buildChatEntries,
   chatEntryId,
@@ -136,6 +137,10 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
         state.providers.author,
         state.providers.reviewer ?? null,
       );
+      const messages = refreshPreparedContextAuthorGuidance(
+        state.messages,
+        state.providers.author,
+      );
 
       const nextState: WorkspaceWsState = {
         ...prev,
@@ -145,7 +150,7 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
         superpowersEnabled: state.superpowers_enabled ?? false,
         openSpecEnabled: state.openspec_enabled ?? false,
         visitedStages: visitedStagesFor(state.stage),
-        messages: state.messages,
+        messages,
         checkpoints: state.checkpoints,
         chatEntries: [],
         artifact: artifactMarkdown,
@@ -658,12 +663,13 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
       };
     }),
 
-  resolveChoiceRequest: (id, selectedOptionIds, freeText) =>
+  resolveChoiceRequest: (id, selectedOptionIds, freeText, answers) =>
     set((prev) => {
       let responseContent = "已选择";
       const response: ChoiceResponsePayload = {
         selected_option_ids: selectedOptionIds,
         free_text: freeText,
+        ...(answers && answers.length > 0 ? { answers } : {}),
       };
       const nextEntries = prev.chatEntries.map((entry) => {
         if (entry.type !== "choice_request" || entry.metadata?.request_id !== id) {
@@ -763,11 +769,22 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
   setProviderSelection: (role, provider) =>
     set((prev) => {
       const current = prev.providers ?? { author: "claude_code", reviewer: "codex" };
+      const providers =
+        role === "author"
+          ? { ...current, author: provider }
+          : { ...current, reviewer: provider };
+      const messages =
+        role === "author"
+          ? refreshPreparedContextAuthorGuidance(prev.messages, provider)
+          : prev.messages;
+      const shouldRebuildChatEntries = messages !== prev.messages;
+      const nextState = { ...prev, providers, messages };
       return {
-        providers:
-          role === "author"
-            ? { ...current, author: provider }
-            : { ...current, reviewer: provider },
+        providers,
+        messages,
+        chatEntries: shouldRebuildChatEntries
+          ? buildChatEntries(nextState)
+          : prev.chatEntries,
       };
     }),
 
@@ -776,4 +793,3 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
 
   reset: () => set(initialState),
 }));
-

@@ -75,6 +75,16 @@ export function useCodingWorkspaceWs(attemptId: string | null) {
     [sendJson],
   );
 
+  const sendMaxAutoReworkSelect = useCallback(
+    (maxAutoRework: number) => {
+      if (!Number.isFinite(maxAutoRework)) return;
+      const value = Math.min(5, Math.max(0, Math.trunc(maxAutoRework)));
+      if (!sendJson({ type: "max_auto_rework_select", max_auto_rework: value })) return;
+      useCodingWorkspaceStore.getState().setMaxAutoRework(value);
+    },
+    [sendJson],
+  );
+
   const confirmStageGate = useCallback(
     (stage: Extract<CodingWsInMessage, { type: "stage_gate_confirm" }>["stage"]) => {
       sendJson({ type: "stage_gate_confirm", stage });
@@ -127,17 +137,6 @@ export function useCodingWorkspaceWs(attemptId: string | null) {
         return;
       }
       useCodingWorkspaceStore.getState().markGateSubmitting(gateId);
-    },
-    [sendJson],
-  );
-
-  const continueRework = useCallback(
-    (extraContext?: string | null) => {
-      const trimmedExtraContext = extraContext?.trim() ?? "";
-      sendJson({
-        type: "continue_rework",
-        extra_context: trimmedExtraContext ? trimmedExtraContext : null,
-      });
     },
     [sendJson],
   );
@@ -286,11 +285,11 @@ export function useCodingWorkspaceWs(attemptId: string | null) {
     sendContextNote,
     sendProviderSelect,
     sendPermissionModeSelect,
+    sendMaxAutoReworkSelect,
     confirmStageGate,
     respondPermission,
     respondChoice,
     respondGate,
-    continueRework,
     finalConfirm,
     abortAttempt,
     requestManualPause,
@@ -524,7 +523,11 @@ function choiceRequestEntryId(id: string) {
 }
 
 function gateActionRequiresContext(actionId: string) {
-  return actionId === "manual_continue" || actionId === "accept_risk";
+  return (
+    actionId === "manual_continue" ||
+    actionId === "accept_risk" ||
+    actionId === "send_to_coder"
+  );
 }
 
 function markSubmittingGateError(errorCode: string) {

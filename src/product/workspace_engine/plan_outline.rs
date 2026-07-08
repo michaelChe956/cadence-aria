@@ -22,6 +22,22 @@ pub(crate) fn work_item_plan_outline_topological_order(
         .collect();
     let mut outgoing: HashMap<String, Vec<String>> = HashMap::new();
 
+    for item in &outline.work_item_outlines {
+        for dependency in &item.depends_on {
+            if !known_ids.contains(dependency) {
+                return Err(format!(
+                    "outline `{}` depends_on missing outline_id `{}`",
+                    item.outline_id, dependency
+                ));
+            }
+            *indegree.entry(item.outline_id.clone()).or_default() += 1;
+            outgoing
+                .entry(dependency.clone())
+                .or_default()
+                .push(item.outline_id.clone());
+        }
+    }
+
     for edge in &outline.dependency_graph {
         if !known_ids.contains(&edge.from_outline_id) {
             return Err(format!(
@@ -35,11 +51,6 @@ pub(crate) fn work_item_plan_outline_topological_order(
                 edge.to_outline_id
             ));
         }
-        *indegree.entry(edge.to_outline_id.clone()).or_default() += 1;
-        outgoing
-            .entry(edge.from_outline_id.clone())
-            .or_default()
-            .push(edge.to_outline_id.clone());
     }
 
     let mut queue: VecDeque<String> = outline_ids
@@ -65,7 +76,7 @@ pub(crate) fn work_item_plan_outline_topological_order(
     }
 
     if order.len() != outline_ids.len() {
-        return Err("dependency graph contains a cycle".to_string());
+        return Err("outline depends_on dependencies contain a cycle".to_string());
     }
 
     Ok(order)

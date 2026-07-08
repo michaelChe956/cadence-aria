@@ -363,6 +363,22 @@ function diffOutlineArtifacts(base: WorkItemPlanOutline, compare: WorkItemPlanOu
     );
     pushDiffRow(
       rows,
+      "estimated_context_tokens",
+      baseItem.estimated_context_tokens !== undefined
+        ? String(baseItem.estimated_context_tokens)
+        : "",
+      compareItem.estimated_context_tokens !== undefined
+        ? String(compareItem.estimated_context_tokens)
+        : "",
+    );
+    pushDiffRow(
+      rows,
+      "session_fit",
+      baseItem.session_fit ?? "",
+      compareItem.session_fit ?? "",
+    );
+    pushDiffRow(
+      rows,
       "exclusive_write_scopes",
       baseItem.exclusive_write_scopes,
       compareItem.exclusive_write_scopes,
@@ -529,6 +545,13 @@ function WorkItemOutlineCard({ item, index }: { item: WorkItemPlanOutlineItem; i
         rows={[
           ["Scope", item.scope ?? []],
           ["Non-goals", item.non_goals ?? []],
+          [
+            "Budget",
+            item.estimated_context_tokens
+              ? [`${item.estimated_context_tokens} tokens`]
+              : [],
+          ],
+          ["Session fit", item.session_fit ? [item.session_fit] : []],
           ["Depends on", item.depends_on ?? item.depends_on_outline_ids ?? []],
           ["Required handoff", item.required_handoff_from_outline_ids ?? []],
           ["Write scopes", item.exclusive_write_scopes],

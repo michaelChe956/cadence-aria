@@ -62,6 +62,11 @@ fn create_work_item_persists_split_fields() {
             design_spec_ids: vec!["design_spec_0001".to_string()],
             title: "后端 API".to_string(),
             work_item_set_id: Some("work_item_set_0001".to_string()),
+            source_work_item_plan_id: Some("issue_work_item_plan_0001".to_string()),
+            source_outline_id: Some("outline_backend".to_string()),
+            source_draft_id: Some("draft_backend".to_string()),
+            planned_implementation_context: Some("实现后端 API".to_string()),
+            planned_handoff_summary: Some("交付后端 API contract".to_string()),
             kind: WorkItemKind::Backend,
             sequence_hint: Some(10),
             depends_on: Vec::new(),
@@ -79,6 +84,20 @@ fn create_work_item_persists_split_fields() {
     assert_eq!(
         work_item.work_item_set_id.as_deref(),
         Some("work_item_set_0001")
+    );
+    assert_eq!(
+        work_item.source_work_item_plan_id.as_deref(),
+        Some("issue_work_item_plan_0001")
+    );
+    assert_eq!(work_item.source_outline_id.as_deref(), Some("outline_backend"));
+    assert_eq!(work_item.source_draft_id.as_deref(), Some("draft_backend"));
+    assert_eq!(
+        work_item.planned_implementation_context.as_deref(),
+        Some("实现后端 API")
+    );
+    assert_eq!(
+        work_item.planned_handoff_summary.as_deref(),
+        Some("交付后端 API contract")
     );
     assert_eq!(work_item.kind, WorkItemKind::Backend);
     assert_eq!(work_item.exclusive_write_scopes, vec!["src/product/**"]);
@@ -411,6 +430,11 @@ fn new_split_output_with_ids(
                     execution_status: WorkItemStatus::Pending,
                     worktree_path: None,
                     work_item_set_id: None,
+                    source_work_item_plan_id: None,
+                    source_outline_id: None,
+                    source_draft_id: None,
+                    planned_implementation_context: None,
+                    planned_handoff_summary: None,
                     kind: WorkItemKind::Backend,
                     sequence_hint: Some((index as u32 + 1) * 10),
                     depends_on: Vec::new(),
@@ -643,4 +667,3 @@ fn replace_issue_work_item_plan_candidate_swaps_draft_work_items_and_updates_pla
             .all(|p| p.id != "issue_work_item_plan_9999")
     );
 }
-

@@ -7,6 +7,7 @@ interface ChatEntryContainerProps {
   children: ReactNode;
   className?: string;
   testId?: string;
+  wide?: boolean;
 }
 
 const ROLE_STYLES: Record<
@@ -32,11 +33,6 @@ const ROLE_STYLES: Record<
     wrapper: "justify-start",
     panel: "border-purple-200 bg-purple-50",
     title: "text-purple-600",
-  },
-  analyst: {
-    wrapper: "justify-start",
-    panel: "border-amber-200 bg-amber-50",
-    title: "text-amber-600",
   },
   reviewer: {
     wrapper: "justify-start",
@@ -66,6 +62,7 @@ export function ChatEntryContainer({
   children,
   className = "",
   testId,
+  wide = false,
 }: ChatEntryContainerProps) {
   const styles = ROLE_STYLES[role];
 
@@ -75,7 +72,7 @@ export function ChatEntryContainer({
         data-testid={testId}
         className={[
           "w-full rounded-md border px-3 py-2 text-sm shadow-sm",
-          role === "system" ? "max-w-none" : "max-w-3xl",
+          role === "system" || wide ? "max-w-none" : "max-w-3xl",
           styles.panel,
           className,
         ]

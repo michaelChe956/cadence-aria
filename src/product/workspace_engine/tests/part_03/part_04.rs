@@ -100,6 +100,73 @@ fn final_compile_projects_plan_dependency_graph_from_accepted_drafts() {
     assert!(plan_edges.contains(&("work_item_a".to_string(), "work_item_c".to_string())));
 }
 
+#[test]
+fn final_compile_projects_source_draft_context_into_work_items() {
+    let (_tmp, _checkpoint_store, lifecycle, plan_id, mut engine) =
+        make_work_item_plan_engine_with_draft_candidate("sess_wip_compile_source_context");
+    engine.session.artifact = Some(ArtifactPayload::WorkItemPlanOutlineCandidate {
+        outline_candidate: Box::new(WorkItemPlanOutlineCandidateDto {
+            outline: test_work_item_plan_outline(vec![]),
+            design_context_gaps: vec![],
+            validator_findings: vec![],
+            context_blockers: vec![],
+            current_generation_round_id: Some("round_0001".to_string()),
+            selected_generation_mode: Some(WorkItemGenerationModeDto::Serial),
+        }),
+    });
+    let previous_plan = lifecycle
+        .get_issue_work_item_plan("project_0001", "issue_0001", &plan_id)
+        .expect("load previous plan");
+    let draft_a = test_work_item_draft_record(
+        &plan_id,
+        "outline_a",
+        "draft_a",
+        WorkItemDraftStatus::Accepted,
+        WorkItemGenerationMode::Serial,
+        None,
+    );
+
+    let (_compiled_plan, work_items, _verification_plans) = engine
+        .project_work_item_plan_drafts_for_compile(
+            &previous_plan,
+            &[draft_a],
+            WorkItemPlanCompileProjectionContext {
+                outline_order: &["outline_a".to_string()],
+                outline_to_work_item_id: &BTreeMap::from([(
+                    "outline_a".to_string(),
+                    "work_item_a".to_string(),
+                )]),
+                outline_to_verification_plan_id: &BTreeMap::from([(
+                    "outline_a".to_string(),
+                    "verification_plan_a".to_string(),
+                )]),
+                repository_id: "repo_0001",
+                now: "2026-06-30T00:00:00Z",
+            },
+        )
+        .expect("project compile records");
+
+    let work_item = work_items.first().expect("work item");
+    assert_eq!(
+        work_item.source_work_item_plan_id.as_deref(),
+        Some(plan_id.as_str())
+    );
+    assert_eq!(work_item.source_outline_id.as_deref(), Some("outline_a"));
+    assert_eq!(work_item.source_draft_id.as_deref(), Some("draft_a"));
+    assert!(
+        work_item
+            .planned_implementation_context
+            .as_deref()
+            .expect("planned implementation context")
+            .contains("实现 src/outline_a.rs")
+    );
+    assert_eq!(
+        work_item.planned_handoff_summary.as_deref(),
+        Some("outline_a handoff")
+    );
+    assert_eq!(work_item.handoff_summary_ref, None);
+}
+
 #[tokio::test]
 async fn final_compile_failure_updates_artifact_with_failed_compile_report() {
     let (_tmp, _checkpoint_store, _lifecycle, plan_id, mut engine) =

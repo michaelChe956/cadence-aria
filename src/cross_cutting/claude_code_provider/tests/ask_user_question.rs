@@ -1,7 +1,8 @@
 use serde_json::json;
 
 use crate::cross_cutting::streaming_provider::{
-    ProviderCommand, ProviderEvent, ProviderSession, ProviderStatus, StreamingProviderAdapter,
+    ChoiceAnswerData, ProviderCommand, ProviderEvent, ProviderSession, ProviderStatus,
+    StreamingProviderAdapter,
 };
 
 use super::*;
@@ -75,6 +76,7 @@ async fn claude_provider_continues_same_session_after_ask_user_question_choice()
             id: choice.id,
             selected_option_ids: vec!["opt_0".to_string()],
             free_text: None,
+            answers: vec![],
         })
         .await
         .expect("send choice response");
@@ -83,6 +85,120 @@ async fn claude_provider_continues_same_session_after_ask_user_question_choice()
     assert!(completed.contains("# Story Spec"));
     assert!(completed.contains("## 功能需求"));
     assert!(completed.contains("## 成功标准"));
+}
+
+#[tokio::test]
+async fn claude_provider_bridges_all_ask_user_question_questions() {
+    let fixture = write_fixture(
+        "claude_multi_ask_user_question_fixture.sh",
+        r##"#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == "--version" ]]; then
+  echo "claude 2.1.160"
+  exit 0
+fi
+
+sent_request=0
+while IFS= read -r line; do
+  if [[ "$line" == *'"initialize"'* ]]; then
+    continue
+  fi
+  if [[ "$line" == *'"set_permission_mode"'* ]]; then
+    continue
+  fi
+  if [[ "$sent_request" == "0" && "$line" == *'"user"'* ]]; then
+    sent_request=1
+    echo '{"type":"control_request","request_id":"ask_req_multi","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"启动自检策略？","options":[{"label":"每次启动都自检"},{"label":"仅失败后自检"}]},{"question":"影响范围？","options":[{"label":"仅 Story Spec"},{"label":"Story/Design/Work Item 共享链路"}]},{"question":"MCP 事件？","options":[{"label":"输出 MCP 事件"},{"label":"仅记录日志"}]}]},"tool_use_id":"toolu_multi_question"}}'
+    continue
+  fi
+  if [[ "$line" == *'"control_response"'* ]]; then
+    if [[ "$line" != *'"启动自检策略？"'* || "$line" != *'"每次启动都自检"'* ]]; then
+      echo "missing Q1 answer: $line" >&2
+      exit 41
+    fi
+    if [[ "$line" != *'"影响范围？"'* || "$line" != *'"Story/Design/Work Item 共享链路"'* ]]; then
+      echo "missing Q2 answer: $line" >&2
+      exit 42
+    fi
+    if [[ "$line" != *'"MCP 事件？"'* || "$line" != *'"输出 MCP 事件"'* ]]; then
+      echo "missing Q3 answer: $line" >&2
+      exit 43
+    fi
+    echo '{"type":"result","subtype":"success","is_error":false,"result":"# Story Spec\n\n## 功能需求\n- [REQ-001] 多个 AskUserQuestion 问题全部回填。\n\n## 成功标准\n- [AC-001] Q1/Q2/Q3 都进入 provider 控制响应。\n\n## 待确认项\n无\n","session_id":"claude_multi_question_session"}'
+    exit 0
+  fi
+done
+"##,
+    );
+    let provider = ClaudeCodeProvider::new(fixture);
+    let input = streaming_input(ProviderType::ClaudeCode, ProviderPermissionMode::Supervised);
+
+    let mut session = provider
+        .start(input, CancellationToken::new())
+        .await
+        .expect("start provider");
+
+    let choice = loop {
+        match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+            .await
+            .expect("provider should emit choice")
+            .expect("provider event channel should stay open")
+        {
+            ProviderEvent::ChoiceRequest(choice) => break choice,
+            ProviderEvent::Failed { message } => {
+                panic!("provider failed before choice: {message}")
+            }
+            ProviderEvent::ProtocolError { message, .. } => {
+                panic!("provider protocol error before choice: {message}")
+            }
+            ProviderEvent::PermissionTimeout { permission_id } => {
+                panic!("provider permission timed out before choice: {permission_id}")
+            }
+            ProviderEvent::StatusChanged(_)
+            | ProviderEvent::Execution(_)
+            | ProviderEvent::TextDelta { .. }
+            | ProviderEvent::PermissionRequest(_)
+            | ProviderEvent::ToolCall(_)
+            | ProviderEvent::ToolResult(_)
+            | ProviderEvent::Completed { .. } => {}
+        }
+    };
+    assert_eq!(choice.id, "ask_req_multi");
+    assert_eq!(choice.questions.len(), 3);
+    assert_eq!(choice.questions[0].prompt, "启动自检策略？");
+    assert_eq!(choice.questions[1].prompt, "影响范围？");
+    assert_eq!(choice.questions[2].prompt, "MCP 事件？");
+
+    session
+        .commands
+        .send(ProviderCommand::ChoiceResponse {
+            id: choice.id,
+            selected_option_ids: vec![],
+            free_text: None,
+            answers: vec![
+                ChoiceAnswerData {
+                    question_id: "q_0".to_string(),
+                    selected_option_ids: vec!["opt_0".to_string()],
+                    free_text: None,
+                },
+                ChoiceAnswerData {
+                    question_id: "q_1".to_string(),
+                    selected_option_ids: vec!["opt_1".to_string()],
+                    free_text: None,
+                },
+                ChoiceAnswerData {
+                    question_id: "q_2".to_string(),
+                    selected_option_ids: vec!["opt_0".to_string()],
+                    free_text: None,
+                },
+            ],
+        })
+        .await
+        .expect("send choice response");
+
+    let completed = recv_completed(&mut session.events).await;
+    assert!(completed.contains("多个 AskUserQuestion 问题全部回填"));
 }
 #[tokio::test]
 async fn claude_provider_deduplicates_assistant_then_control_ask_user_question() {
@@ -169,6 +285,7 @@ done
             id: choice.id,
             selected_option_ids: vec!["opt_0".to_string()],
             free_text: None,
+            answers: vec![],
         })
         .await
         .expect("send choice response");
@@ -514,6 +631,7 @@ async fn claude_provider_ask_user_question_emits_protocol_error_on_tool_result_e
             id: choice.id,
             selected_option_ids: vec!["opt_0".to_string()],
             free_text: None,
+            answers: vec![],
         })
         .await
         .expect("send choice response");

@@ -133,6 +133,10 @@ export type WorkItemPlanCandidateDto = {
 
 export type WorkItemGenerationMode = "serial" | "batch";
 
+export type WorkItemOutlineSessionFit =
+  | "fits_single_agent_session"
+  | "too_large_must_split";
+
 export type WorkItemPlanOutlineItem = {
   outline_id: string;
   title: string;
@@ -140,6 +144,8 @@ export type WorkItemPlanOutlineItem = {
   goal?: string;
   scope?: string[];
   non_goals?: string[];
+  estimated_context_tokens?: number;
+  session_fit?: WorkItemOutlineSessionFit;
   source_story_spec_ids?: string[];
   source_design_spec_ids?: string[];
   depends_on?: string[];

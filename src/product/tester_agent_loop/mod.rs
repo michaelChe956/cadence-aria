@@ -1,3 +1,4 @@
+mod context_loader;
 mod executor;
 mod plan_parser;
 mod prompts;
@@ -7,7 +8,8 @@ mod tests;
 mod tools;
 mod types;
 
-pub use executor::execute_tester_tool_call;
+pub use context_loader::TestContextLoader;
+pub use executor::{execute_tester_tool_call, execute_tester_tool_call_with_context};
 pub use plan_parser::parse_test_plan_payload;
 pub use prompts::{
     build_tester_execute_repair_prompt, build_tester_plan_prompt, build_tester_plan_repair_prompt,

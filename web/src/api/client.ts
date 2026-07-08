@@ -58,7 +58,11 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   if (!response.ok) {
     throw new ApiRequestError(await normalizeApiError(response));
   }
-  return response.json() as Promise<T>;
+  const text = await response.text();
+  if (!text.trim()) {
+    return undefined as T;
+  }
+  return JSON.parse(text) as T;
 }
 
 export function listProjects(): Promise<{ projects: Project[] }> {
@@ -299,8 +303,8 @@ export function getCodingAttemptDiff(
 
 export function deleteCodingAttempt(
   attemptId: string,
-): Promise<{ status: string }> {
-  return requestJson<{ status: string }>(
+): Promise<void> {
+  return requestJson<void>(
     `/api/coding-attempts/${encodeURIComponent(attemptId)}`,
     {
       method: "DELETE",

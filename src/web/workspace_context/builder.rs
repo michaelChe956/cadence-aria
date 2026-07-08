@@ -1,7 +1,8 @@
 use super::entity::{repository_for, work_item_context_summary, workspace_entity_context};
 use super::prompts::{
     completion_or_failure_for, constraint_summary_for, node_id_for, output_schema_for,
-    system_prompt_for, workflow_discipline_for, workspace_runtime_role, workspace_type_label,
+    runtime_contract_for, system_prompt_for, workflow_discipline_for, workspace_runtime_role,
+    workspace_type_label,
 };
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::issue_store::IssueStore;
@@ -96,6 +97,7 @@ fn build_workspace_context_message(
     } else {
         format!("\n\n[work_item_context]\n{work_item_context}")
     };
+    let runtime_contract = runtime_contract_for(session);
 
     Ok(format!(
         "Workspace 生成任务已准备\n\n\
@@ -115,6 +117,8 @@ fn build_workspace_context_message(
          Repository 路径: {}\n\
          关联上下文:\n{}{}\n\n\
          [constraint_summary]\n\
+         {}\n\n\
+         [runtime_contract]\n\
          {}\n\n\
          [workflow_discipline]\n\
          {}\n\n\
@@ -137,6 +141,7 @@ fn build_workspace_context_message(
         linked_context,
         work_item_context_block,
         constraint_summary_for(session),
+        runtime_contract,
         workflow_discipline_for(session),
         output_schema_for(&session.workspace_type),
         completion_or_failure_for(session),

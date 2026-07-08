@@ -27,7 +27,6 @@ export type CodingExecutionStage =
   | "coding"
   | "testing"
   | "code_review"
-  | "rework"
   | "review_request"
   | "internal_pr_review"
   | "final_confirm";
@@ -77,10 +76,14 @@ export type CodingAgentRole = "author" | "tester" | "reviewer" | "git" | "system
 export type CodingProviderRole =
   | "coder"
   | "tester"
-  | "analyst"
   | "code_reviewer"
   | "internal_reviewer";
-export type CodingProviderSelectRole = "author" | "reviewer" | CodingProviderRole;
+export type CodingTesterProviderSelectRole = "tester_plan" | "tester_execute";
+export type CodingProviderSelectRole =
+  | "author"
+  | "reviewer"
+  | Exclude<CodingProviderRole, "tester">
+  | CodingTesterProviderSelectRole;
 export type CodingProviderPermissionMode = "auto" | "supervised";
 export type CodingRoleRunStatus =
   | "running"
@@ -94,7 +97,6 @@ export type CodingRoleRunTrigger =
   | "retry_test_plan"
   | "rerun_missing_steps"
   | "retry_review"
-  | "retry_analyst"
   | "retry_internal_review"
   | "manual_rerun";
 
@@ -138,7 +140,6 @@ export type CodingRoleRunEventPreview = {
 export type CodingRolePermissionModes = {
   coder: CodingProviderPermissionMode;
   tester: CodingProviderPermissionMode;
-  analyst: CodingProviderPermissionMode;
   code_reviewer: CodingProviderPermissionMode;
   internal_reviewer: CodingProviderPermissionMode;
 };
@@ -158,8 +159,8 @@ export type CodingTimelineNode = {
 
 export type CodingRoleProviderConfigSnapshot = {
   coder: WorkspaceProviderName;
-  tester: WorkspaceProviderName;
-  analyst: WorkspaceProviderName;
+  tester_plan: WorkspaceProviderName;
+  tester_execute: WorkspaceProviderName;
   code_reviewer: WorkspaceProviderName;
   internal_reviewer: WorkspaceProviderName;
   review_rounds: number;
@@ -337,58 +338,12 @@ export type InternalPrReview = {
   run_no?: number | null;
 };
 
-export type AnalystVerdict = "needs_fix" | "needs_human_input" | "no_issue";
-export type AnalystDecisionVerdict =
-  | "needs_fix"
-  | "rerun_testing"
-  | "proceed"
-  | "human_required"
-  | "blocked";
-export type AnalystDecisionNextStage =
-  | "coding"
-  | "testing"
-  | "code_review"
-  | "review_request"
-  | "internal_pr_review"
-  | "final_confirm"
-  | "human_gate";
-
-export type AnalystReworkInstructions = {
-  summary: string;
-  required_changes: string[];
-  verification_expectations: string[];
-};
-
-export type AnalystHumanGateRecommendation = {
-  reason_code?: string | null;
-  available_actions: string[];
-};
-
-export type AnalystDecisionRecord = {
-  id: string;
-  attempt_id: string;
-  source_stage: CodingExecutionStage;
-  rework_round: number;
-  verdict: AnalystDecisionVerdict;
-  next_stage: AnalystDecisionNextStage;
-  reason: string;
-  evidence_refs: string[];
-  raw_provider_output_refs: string[];
-  rework_instructions?: AnalystReworkInstructions | null;
-  human_gate?: AnalystHumanGateRecommendation | null;
-  created_at: string;
-  parse_error?: string | null;
-  role_run_id?: string | null;
-  run_no?: number | null;
-};
-
 export type CodingEntryType =
   | { type: "user_message" }
   | { type: "assistant_message" }
   | { type: "tool_call"; tool_name: string; input: unknown }
   | { type: "tool_result"; tool_use_id: string; output: string; is_error: boolean }
   | { type: "stage_gate"; stage: CodingExecutionStage; countdown_seconds: number }
-  | { type: "analyst_verdict"; verdict: AnalystVerdict }
   | { type: "stage_summary"; stage: CodingExecutionStage; summary: string }
   | { type: "system_event"; event_type: string; message: string };
 
@@ -404,7 +359,7 @@ export type CodingChatEntry = {
 };
 
 export type CodingGateActionType =
-  | "continue_rework"
+  | "send_to_coder"
   | "confirm_stage"
   | "accept_risk"
   | "abort"
@@ -415,9 +370,7 @@ export type CodingGateActionType =
   | "provide_context"
   | "manual_continue"
   | "retry_review"
-  | "retry_analyst"
   | "retry_internal_review"
-  | "send_raw_output_to_analyst"
   | "accept_testing_result"
   | "rerun_testing";
 export type CodingGateKind = "permission" | "stage_gate" | "blocked" | "final_confirm";
@@ -486,7 +439,6 @@ export type CodingAttemptSnapshotResponse = {
   internal_pr_review: InternalPrReview | null;
   pending_gates: CodingGateRequired[];
   pending_choices: CodingChoiceGate[];
-  latest_analyst_decision: AnalystDecisionRecord | null;
   role_runs?: CodingRoleRun[];
   work_item_execution_plan: WorkItemExecutionPlan | null;
   work_item_handoff: WorkItemHandoff | null;
@@ -526,13 +478,13 @@ export type CodingWsInMessage =
       action_id: string;
       extra_context?: string | null;
     }
-  | { type: "continue_rework"; extra_context?: string | null }
   | { type: "provider_select"; role: CodingProviderSelectRole; provider: WorkspaceProviderName }
   | {
       type: "permission_mode_select";
       role: CodingProviderRole;
       permission_mode: CodingProviderPermissionMode;
     }
+  | { type: "max_auto_rework_select"; max_auto_rework: number }
   | { type: "stage_gate_confirm"; stage: CodingExecutionStage }
   | { type: "final_confirm" }
   | { type: "abort_attempt" }

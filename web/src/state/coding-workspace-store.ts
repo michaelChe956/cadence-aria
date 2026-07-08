@@ -1,6 +1,5 @@
 import { create } from "zustand";
 import type {
-  AnalystDecisionRecord,
   CodeReviewReport,
   CodingAttemptScope,
   CodingAttemptStatus,
@@ -8,6 +7,7 @@ import type {
   CodingExecutionStage,
   CodingExecutionUnit,
   CodingGateRequired,
+  CodingProviderSelectRole,
   CodingProviderRole,
   CodingRoleProviderConfigSnapshot,
   CodingRoleRun,
@@ -83,7 +83,6 @@ export interface CodingWorkspaceState {
   codeReviewReports: CodeReviewReport[];
   internalPrReview: InternalPrReview | null;
   reviewRequest: ReviewRequest | null;
-  latestAnalystDecision: AnalystDecisionRecord | null;
   roleRuns: CodingRoleRun[];
   logs: CodingLogEntry[];
   connectionStatus: CodingConnectionStatus;
@@ -119,7 +118,8 @@ export interface CodingWorkspaceActions {
   resolvePendingGate: (gateId: string) => void;
   markGateSubmitting: (gateId: string) => void;
   setGateError: (gateId: string, errorCode: string) => void;
-  updateProviderConfig: (role: CodingProviderRole, provider: WorkspaceProviderName) => void;
+  updateProviderConfig: (role: CodingProviderSelectRole | "tester", provider: WorkspaceProviderName) => void;
+  setMaxAutoRework: (maxAutoRework: number) => void;
   appendStreamChunk: (content: string, nodeId?: string | null) => void;
   completeStream: (nodeId?: string | null) => void;
   setConnectionStatus: (status: CodingConnectionStatus) => void;
@@ -145,7 +145,7 @@ const initialState: CodingWorkspaceState = {
   baseBranch: null,
   worktreePath: null,
   reworkCount: 0,
-  maxAutoRework: 0,
+  maxAutoRework: 2,
   headCommit: null,
   pushedRemote: null,
   providerConfigSnapshot: null,
@@ -162,7 +162,6 @@ const initialState: CodingWorkspaceState = {
   codeReviewReports: [],
   internalPrReview: null,
   reviewRequest: null,
-  latestAnalystDecision: null,
   roleRuns: [],
   logs: [],
   connectionStatus: "disconnected",
@@ -201,7 +200,7 @@ export const useCodingWorkspaceStore = create<
         baseBranch: snapshot.base_branch,
         worktreePath: snapshot.worktree_path,
         reworkCount: snapshot.rework_count,
-        maxAutoRework: snapshot.max_auto_rework,
+        maxAutoRework: clampMaxAutoRework(snapshot.max_auto_rework),
         headCommit: snapshot.head_commit,
         pushedRemote: snapshot.pushed_remote,
         providerConfigSnapshot: snapshot.provider_config_snapshot,
@@ -217,7 +216,6 @@ export const useCodingWorkspaceStore = create<
         codeReviewReports: snapshot.code_review_reports,
         reviewRequest: snapshot.review_request,
         internalPrReview: snapshot.internal_pr_review,
-        latestAnalystDecision: snapshot.latest_analyst_decision ?? null,
         roleRuns: snapshot.role_runs ?? [],
         pendingGates: mergeSnapshotPendingGates(snapshot.pending_gates, prev.pendingGates),
         workItemExecutionPlan: snapshot.work_item_execution_plan ?? null,
@@ -305,7 +303,8 @@ export const useCodingWorkspaceStore = create<
 
   replacePendingEntry: (entry) =>
     set((state) => ({
-      chatEntries: replacePendingChatEntry(state.chatEntries, entry),
+      chatEntries: replaceCompletedProviderStreamEntry(state.chatEntries, entry),
+      roleRuns: upsertRoleRunFromCompletedProviderEntry(state, entry),
     })),
 
   addPendingGate: (gate) =>
@@ -339,7 +338,7 @@ export const useCodingWorkspaceStore = create<
   updateProviderConfig: (role, provider) =>
     set((state) => ({
       roleProviderConfigSnapshot: state.roleProviderConfigSnapshot
-        ? { ...state.roleProviderConfigSnapshot, [role]: provider }
+        ? { ...state.roleProviderConfigSnapshot, [providerConfigKeyForRole(role)]: provider }
         : state.roleProviderConfigSnapshot,
       providerConfigSnapshot: updateLegacyProviderConfig(
         state.providerConfigSnapshot,
@@ -347,6 +346,9 @@ export const useCodingWorkspaceStore = create<
         provider,
       ),
     })),
+
+  setMaxAutoRework: (maxAutoRework) =>
+    set({ maxAutoRework: clampMaxAutoRework(maxAutoRework) }),
 
   appendStreamChunk: (content, nodeId = null) =>
     set((state) => {
@@ -415,7 +417,6 @@ function stageToArtifactTab(stage: CodingExecutionStage): CodingArtifactTab | nu
     case "review_request":
       return "git";
     case "coding":
-    case "rework":
       return "diff";
     case "testing":
       return "tests";
@@ -438,8 +439,6 @@ function chatRoleForNode(
       return "coder";
     case "testing":
       return "tester";
-    case "rework":
-      return "analyst";
     case "code_review":
       return "code_reviewer";
     case "internal_pr_review":
@@ -450,6 +449,29 @@ function chatRoleForNode(
     case "final_confirm":
     case undefined:
       return "system";
+  }
+}
+
+function providerConfigKeyForRole(
+  role: CodingProviderSelectRole | "tester",
+): keyof Pick<
+  CodingRoleProviderConfigSnapshot,
+  "coder" | "tester_plan" | "tester_execute" | "code_reviewer" | "internal_reviewer"
+> {
+  switch (role) {
+    case "author":
+    case "coder":
+      return "coder";
+    case "reviewer":
+    case "code_reviewer":
+      return "code_reviewer";
+    case "tester":
+    case "tester_execute":
+      return "tester_execute";
+    case "tester_plan":
+      return "tester_plan";
+    case "internal_reviewer":
+      return "internal_reviewer";
   }
 }
 
@@ -494,13 +516,18 @@ function isProviderPromptEvent(event: ExecutionEvent) {
 
 function updateLegacyProviderConfig(
   snapshot: ProviderConfigSnapshot | null,
-  role: CodingProviderRole,
+  role: CodingProviderSelectRole | "tester",
   provider: WorkspaceProviderName,
 ): ProviderConfigSnapshot | null {
   if (!snapshot) return snapshot;
-  if (role === "coder") return { ...snapshot, author: provider };
-  if (role === "code_reviewer") return { ...snapshot, reviewer: provider };
+  if (role === "author" || role === "coder") return { ...snapshot, author: provider };
+  if (role === "reviewer" || role === "code_reviewer") return { ...snapshot, reviewer: provider };
   return snapshot;
+}
+
+function clampMaxAutoRework(value: number) {
+  if (!Number.isFinite(value)) return 2;
+  return Math.min(5, Math.max(0, Math.trunc(value)));
 }
 
 function mergeSnapshotPendingGates(
@@ -567,8 +594,6 @@ function chatRoleForChoiceRole(role: CodingProviderRole): ChatEntryRole {
       return "coder";
     case "tester":
       return "tester";
-    case "analyst":
-      return "analyst";
     case "code_reviewer":
       return "code_reviewer";
     case "internal_reviewer":
@@ -594,4 +619,92 @@ function replacePendingChatEntry(entries: ChatEntry[], entry: ChatEntry): ChatEn
     return upsertChatEntry(entries, entry);
   }
   return entries.map((existing, currentIndex) => (currentIndex === pendingIndex ? entry : existing));
+}
+
+function replaceCompletedProviderStreamEntry(entries: ChatEntry[], entry: ChatEntry): ChatEntry[] {
+  const entriesWithoutTransientStream =
+    entry.type === "provider_stream" && entry.node_id
+      ? entries.filter((existing) => existing.id !== streamEntryId(entry.node_id))
+      : entries;
+  return replacePendingChatEntry(entriesWithoutTransientStream, entry);
+}
+
+function upsertRoleRunFromCompletedProviderEntry(
+  state: CodingWorkspaceState,
+  entry: ChatEntry,
+): CodingRoleRun[] {
+  if (entry.type !== "provider_stream") return state.roleRuns;
+  const roleRunId = metadataString(entry.metadata, "role_run_id");
+  if (!roleRunId || !state.attemptId) return state.roleRuns;
+  const role = roleRunRoleForChatEntry(entry);
+  if (!role) return state.roleRuns;
+
+  const existing = state.roleRuns.find((run) => run.id === roleRunId) ?? null;
+  const node = nodeForEvent(state.timelineNodes, entry.node_id ?? null);
+  const rawProviderOutputRef = metadataString(entry.metadata, "raw_provider_output_ref");
+  const run: CodingRoleRun = {
+    id: roleRunId,
+    attempt_id: existing?.attempt_id ?? state.attemptId,
+    stage: existing?.stage ?? node?.stage ?? stageForRoleRunRole(role),
+    role,
+    run_no: existing?.run_no ?? metadataNumber(entry.metadata, "run_no") ?? 1,
+    status: "completed",
+    trigger: existing?.trigger ?? "initial",
+    node_id: existing?.node_id ?? entry.node_id ?? null,
+    started_at: existing?.started_at ?? metadataString(entry.metadata, "started_at") ?? entry.timestamp,
+    completed_at: metadataString(entry.metadata, "completed_at") ?? entry.timestamp,
+    supersedes_run_id: existing?.supersedes_run_id ?? null,
+    superseded_by_run_id: existing?.superseded_by_run_id ?? null,
+    reason_code: existing?.reason_code ?? null,
+    raw_provider_output_refs: uniqueStrings([
+      ...(existing?.raw_provider_output_refs ?? []),
+      ...(rawProviderOutputRef ? [rawProviderOutputRef] : []),
+    ]),
+    artifact_refs: uniqueStrings([...(existing?.artifact_refs ?? []), ...(node?.artifact_refs ?? [])]),
+    event_summary: existing?.event_summary ?? null,
+    recent_events: existing?.recent_events ?? [],
+  };
+  return upsertById(state.roleRuns, run);
+}
+
+function roleRunRoleForChatEntry(entry: ChatEntry): CodingProviderRole | null {
+  switch (entry.role) {
+    case "coder":
+    case "tester":
+    case "code_reviewer":
+    case "internal_reviewer":
+      return entry.role;
+    case "user":
+    case "author":
+    case "reviewer":
+    case "system":
+      return null;
+  }
+}
+
+function stageForRoleRunRole(role: CodingProviderRole): CodingExecutionStage {
+  switch (role) {
+    case "coder":
+      return "coding";
+    case "tester":
+      return "testing";
+    case "code_reviewer":
+      return "code_review";
+    case "internal_reviewer":
+      return "internal_pr_review";
+  }
+}
+
+function metadataString(metadata: ChatEntry["metadata"], key: string): string | null {
+  const value = metadata?.[key];
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function metadataNumber(metadata: ChatEntry["metadata"], key: string): number | null {
+  const value = metadata?.[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values)];
 }

@@ -140,6 +140,16 @@ pub struct LifecycleWorkItemRecord {
     pub worktree_path: Option<PathBuf>,
     #[serde(default)]
     pub work_item_set_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_work_item_plan_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_outline_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_draft_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planned_implementation_context: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planned_handoff_summary: Option<String>,
     #[serde(default)]
     pub kind: WorkItemKind,
     #[serde(default)]

@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use chrono::Utc;
 
 use crate::product::coding_attempt_store::CreateCodingAttemptInput;
@@ -6,7 +8,6 @@ use crate::product::coding_models::{
     CodingRoleProviderConfigSnapshot,
 };
 use crate::product::coding_models::{WorkItemExecutionPlan, WorkItemHandoff};
-use crate::product::id::next_sequential_id;
 use crate::product::json_store::{
     ProductStoreError, read_json, validate_relative_artifact_ref, validate_relative_id, write_json,
 };
@@ -21,6 +22,7 @@ impl super::CodingAttemptStore {
         validate_relative_id(&input.project_id)?;
         validate_relative_id(&input.issue_id)?;
         validate_relative_id(&input.work_item_id)?;
+        super::validate_max_auto_rework(input.max_auto_rework)?;
 
         if let Some(active) =
             self.get_active_attempt(&input.project_id, &input.issue_id, &input.work_item_id)?
@@ -31,8 +33,7 @@ impl super::CodingAttemptStore {
             )));
         }
 
-        let root = self.coding_attempts_root(&input.project_id, &input.issue_id);
-        let id = next_sequential_id("coding_attempt", super::count_json_files(&root)?);
+        let id = self.allocate_coding_attempt_id(&input.project_id, &input.issue_id)?;
         let attempt_no = self
             .list_attempts_for_work_item(&input.project_id, &input.issue_id, &input.work_item_id)?
             .iter()
@@ -96,6 +97,48 @@ impl super::CodingAttemptStore {
             &CodingRoleProviderConfigSnapshot::from(&attempt.provider_config_snapshot),
         )?;
         Ok(())
+    }
+
+    pub(crate) fn allocate_coding_attempt_id(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+    ) -> Result<String, ProductStoreError> {
+        let sequence_path = self.coding_attempt_sequence_path(project_id, issue_id);
+        let last_sequence = if super::path_is_regular_file(&sequence_path)? {
+            read_json::<u64>(&sequence_path)?
+        } else {
+            max_existing_coding_attempt_sequence(&self.coding_attempts_root(project_id, issue_id))?
+        };
+        let next_sequence = last_sequence + 1;
+        write_json(&sequence_path, &next_sequence)?;
+        Ok(format!("coding_attempt_{next_sequence:04}"))
+    }
+
+    fn record_coding_attempt_sequence_at_least(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        sequence: u64,
+    ) -> Result<(), ProductStoreError> {
+        let sequence_path = self.coding_attempt_sequence_path(project_id, issue_id);
+        let sequence_file_exists = super::path_is_regular_file(&sequence_path)?;
+        let current = if sequence_file_exists {
+            read_json::<u64>(&sequence_path)?
+        } else {
+            max_existing_coding_attempt_sequence(&self.coding_attempts_root(project_id, issue_id))?
+        };
+        let recorded = current.max(sequence);
+        if !sequence_file_exists || recorded > current {
+            write_json(&sequence_path, &recorded)?;
+        }
+        Ok(())
+    }
+
+    fn coding_attempt_sequence_path(&self, project_id: &str, issue_id: &str) -> std::path::PathBuf {
+        self.coding_attempts_root(project_id, issue_id)
+            .join(".meta")
+            .join("coding-attempt-sequence.json")
     }
 
     pub fn get_attempt(
@@ -321,6 +364,9 @@ impl super::CodingAttemptStore {
         validate_relative_id(issue_id)?;
         validate_relative_id(attempt_id)?;
         let attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
+        if let Some(sequence) = coding_attempt_sequence_from_id(attempt_id) {
+            self.record_coding_attempt_sequence_at_least(project_id, issue_id, sequence)?;
+        }
         super::remove_file_if_exists(&self.attempt_path(project_id, issue_id, attempt_id))?;
         super::remove_dir_all_if_exists(&self.attempt_dir(project_id, issue_id, attempt_id))?;
         Ok(attempt)
@@ -505,6 +551,22 @@ impl super::CodingAttemptStore {
         Ok(attempt)
     }
 
+    pub fn update_attempt_max_auto_rework(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        max_auto_rework: u32,
+    ) -> Result<CodingExecutionAttempt, ProductStoreError> {
+        super::validate_max_auto_rework(max_auto_rework)?;
+        let path = self.attempt_path(project_id, issue_id, attempt_id);
+        let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
+        attempt.max_auto_rework = max_auto_rework;
+        attempt.updated_at = Utc::now().to_rfc3339();
+        write_json(&path, &attempt)?;
+        Ok(attempt)
+    }
+
     pub fn replace_attempt_provider_conversations(
         &self,
         attempt_id: &str,
@@ -534,6 +596,27 @@ impl super::CodingAttemptStore {
         fs::read_to_string(&path)
             .map_err(|error| ProductStoreError::Io(format!("read {}: {error}", path.display())))
     }
+}
+
+fn max_existing_coding_attempt_sequence(root: &Path) -> Result<u64, ProductStoreError> {
+    let mut max_sequence = 0;
+    for path in super::json_file_paths(root)? {
+        let Some(file_stem) = path.file_stem().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        let Some(sequence) = file_stem.strip_prefix("coding_attempt_") else {
+            continue;
+        };
+        let Ok(sequence) = sequence.parse::<u64>() else {
+            continue;
+        };
+        max_sequence = max_sequence.max(sequence);
+    }
+    Ok(max_sequence)
+}
+
+fn coding_attempt_sequence_from_id(attempt_id: &str) -> Option<u64> {
+    attempt_id.strip_prefix("coding_attempt_")?.parse().ok()
 }
 
 fn valid_status_transition(current: &CodingAttemptStatus, next: &CodingAttemptStatus) -> bool {
@@ -579,19 +662,14 @@ fn valid_stage_transition(current: &CodingExecutionStage, next: &CodingExecution
     if current == next {
         return true;
     }
-    if matches!(next, CodingExecutionStage::Rework) {
-        return true;
-    }
-    if matches!(current, CodingExecutionStage::Rework) {
-        return matches!(
-            next,
+    if matches!(
+        (current, next),
+        (
+            CodingExecutionStage::CodeReview,
             CodingExecutionStage::Coding
-                | CodingExecutionStage::Testing
-                | CodingExecutionStage::CodeReview
-                | CodingExecutionStage::ReviewRequest
-                | CodingExecutionStage::InternalPrReview
-                | CodingExecutionStage::FinalConfirm
-        );
+        )
+    ) {
+        return true;
     }
     next.order() >= current.order()
 }

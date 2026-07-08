@@ -1,5 +1,10 @@
 use super::*;
 
+mod artifact_retry;
+mod choice_audit;
+
+use choice_audit::ChoiceResponseAuditInput;
+
 impl WorkspaceEngine {
     pub async fn handle_user_message(
         &mut self,
@@ -137,7 +142,7 @@ impl WorkspaceEngine {
         let ProviderSessionDriveInput {
             session,
             mut command_rx,
-            node_id,
+            mut node_id,
             agent,
             role,
             mut artifact_retry,
@@ -164,6 +169,7 @@ impl WorkspaceEngine {
         let mut commands_open = true;
         let mut tool_call_titles = BTreeMap::new();
         let mut tool_call_commands = BTreeMap::new();
+        let mut pending_choice_requests: HashMap<String, ChoiceRequestData> = HashMap::new();
 
         while events_open {
             tokio::select! {
@@ -215,9 +221,21 @@ impl WorkspaceEngine {
                             id,
                             selected_option_ids,
                             free_text,
+                            answers,
                         }) => {
                             tracing::info!(choice_id = %id, "engine forwarding choice response");
                             let choice_id = id.clone();
+                            let choice_request = pending_choice_requests.remove(&id);
+                            self.record_choice_response_audit(ChoiceResponseAuditInput {
+                                request: choice_request.as_ref(),
+                                choice_id: &id,
+                                selected_option_ids: &selected_option_ids,
+                                free_text: free_text.as_deref(),
+                                answers: &answers,
+                                node_id: node_id.as_deref(),
+                                agent: agent.as_ref(),
+                                role: &role,
+                            });
                             eprintln!(
                                 "[aria-choice-diag] engine forwarding author choice_response id={} selected={:?} free_text_present={}",
                                 choice_id,
@@ -228,6 +246,7 @@ impl WorkspaceEngine {
                                 id,
                                 selected_option_ids,
                                 free_text,
+                                answers,
                             }).await.is_err() {
                                 eprintln!(
                                     "[aria-choice-diag] engine failed to forward author choice_response id={} to provider session",
@@ -313,6 +332,8 @@ impl WorkspaceEngine {
                                 .await;
                         }
                         ProviderEvent::ChoiceRequest(request) => {
+                            let questions = request.effective_questions();
+                            pending_choice_requests.insert(request.id.clone(), request.clone());
                             let _ = self
                                 .event_tx
                                 .send(EngineEvent::ChoiceRequest {
@@ -321,6 +342,7 @@ impl WorkspaceEngine {
                                     options: request.options,
                                     allow_multiple: request.allow_multiple,
                                     allow_free_text: request.allow_free_text,
+                                    questions,
                                     source: request.source,
                                 })
                                 .await;
@@ -416,7 +438,20 @@ impl WorkspaceEngine {
                             };
 
                             if let Some((provider, retry_input)) = retry_start {
+                                let blocking_reasons = self
+                                    .workspace_artifact_blocking_reasons(&completed_output);
+                                node_id = self
+                                    .begin_artifact_retry_node(
+                                        node_id.as_deref(),
+                                        agent.clone(),
+                                        &blocking_reasons,
+                                    )
+                                    .await
+                                    .or(node_id);
                                 if let Some(node_id) = node_id.as_deref() {
+                                    let _ = self
+                                        .persist_prompt_snapshot(node_id, retry_input.prompt.clone())
+                                        .await;
                                     self.emit_execution_event(
                                         provider_prompt_event(
                                             node_id,
@@ -598,23 +633,6 @@ impl WorkspaceEngine {
         }
     }
 
-    pub(crate) fn build_artifact_retry_input(
-        &self,
-        base_input: &StreamingProviderInput,
-        previous_output: &str,
-        provider_session_id: Option<String>,
-    ) -> StreamingProviderInput {
-        let mut input = base_input.clone();
-        input.prompt = build_artifact_retry_prompt(&self.session.workspace_type, previous_output);
-        if let Some(provider_session_id) = provider_session_id
-            .map(|id| id.trim().to_string())
-            .filter(|id| !id.is_empty())
-        {
-            input.resume_provider_session_id = Some(provider_session_id);
-        }
-        input
-    }
-
     pub(crate) async fn complete_assistant_message(
         &mut self,
         assistant_msg_id: String,
@@ -670,10 +688,17 @@ impl WorkspaceEngine {
                 .event_tx
                 .send(EngineEvent::ChoiceRequest {
                     id: choice.id,
-                    prompt: choice.prompt,
-                    options: choice.options,
+                    prompt: choice.prompt.clone(),
+                    options: choice.options.clone(),
                     allow_multiple: false,
                     allow_free_text: true,
+                    questions: vec![ChoiceQuestionData {
+                        id: "default".to_string(),
+                        prompt: choice.prompt,
+                        options: choice.options,
+                        allow_multiple: false,
+                        allow_free_text: true,
+                    }],
                     source: ChoiceRequestSource::TextFallback,
                 })
                 .await;
@@ -682,18 +707,22 @@ impl WorkspaceEngine {
 
         self.pending_author_choice = None;
         let artifact_markdown = extract_artifact_content(&full_content);
-        if self.workspace_requires_artifact_gate()
-            && !content_has_complete_workspace_artifact(
+        if self.workspace_requires_artifact_gate() {
+            let report = validate_workspace_artifact_constraints(
                 &artifact_markdown,
                 &self.session.workspace_type,
-            )
-        {
-            if artifact_retry_attempted {
-                self.finish_invalid_workspace_artifact_after_retry().await;
-            } else {
-                self.finish_invalid_workspace_artifact().await;
+            );
+            if !report.passed {
+                let blocking_reasons = report.blocking_reasons();
+                if artifact_retry_attempted {
+                    self.finish_invalid_workspace_artifact_after_retry(&blocking_reasons)
+                        .await;
+                } else {
+                    self.finish_invalid_workspace_artifact(&blocking_reasons)
+                        .await;
+                }
+                return;
             }
-            return;
         }
         if let Some(store) = &self.lifecycle_store
             && matches!(

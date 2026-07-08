@@ -638,6 +638,83 @@ fn workspace_session_lookup_ignores_unrelated_json_files() {
 }
 
 #[test]
+fn workspace_session_lookup_ignores_malformed_unrelated_session_files() {
+    let root = tempdir().expect("tempdir");
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let store = LifecycleStore::new(paths.clone());
+
+    let session = store
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "story_spec_0001".to_string(),
+            workspace_type: WorkspaceType::Story,
+            author_provider: ProviderName::Codex,
+            reviewer_provider: ProviderName::ClaudeCode,
+            review_rounds: 1,
+            superpowers_enabled: true,
+            openspec_enabled: false,
+        })
+        .expect("session");
+
+    let unrelated_root = paths
+        .issue_lifecycle_root("project_0001", "issue_9999")
+        .join("workspace-sessions");
+    std::fs::create_dir_all(&unrelated_root).expect("unrelated sessions root");
+    std::fs::write(
+        unrelated_root.join("workspace_session_9999.json"),
+        r#"{ "id": "workspace_session_9999", "messages": ["unterminated" "#,
+    )
+    .expect("write malformed unrelated session");
+
+    let loaded = store
+        .get_workspace_session(&session.id)
+        .expect("session lookup ignores unrelated malformed file");
+
+    assert_eq!(loaded.id, session.id);
+}
+
+#[test]
+fn workspace_session_summaries_do_not_parse_messages() {
+    let root = tempdir().expect("tempdir");
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let store = LifecycleStore::new(paths.clone());
+
+    let session = store
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "story_spec_0001".to_string(),
+            workspace_type: WorkspaceType::Story,
+            author_provider: ProviderName::Codex,
+            reviewer_provider: ProviderName::ClaudeCode,
+            review_rounds: 1,
+            superpowers_enabled: true,
+            openspec_enabled: false,
+        })
+        .expect("session");
+
+    let session_path = paths
+        .issue_lifecycle_root("project_0001", "issue_0001")
+        .join("workspace-sessions")
+        .join(format!("{}.json", session.id));
+    let mut raw: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&session_path).expect("session json"))
+            .expect("valid json");
+    raw["messages"] = serde_json::json!(["malformed message"]);
+    std::fs::write(&session_path, serde_json::to_string(&raw).expect("raw json"))
+        .expect("write malformed messages");
+
+    let summaries = store
+        .list_workspace_session_summaries("project_0001", "issue_0001")
+        .expect("session summaries ignore messages");
+
+    assert_eq!(summaries.len(), 1);
+    assert_eq!(summaries[0].id, session.id);
+    assert_eq!(summaries[0].entity_id, "story_spec_0001");
+}
+
+#[test]
 fn persists_issue_shared_worktree_and_active_lock() {
     let root = tempdir().expect("tempdir");
     let store = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")));
@@ -678,4 +755,3 @@ fn persists_issue_shared_worktree_and_active_lock() {
         .expect("release");
     assert_eq!(released.current_active_work_item_id, None);
 }
-

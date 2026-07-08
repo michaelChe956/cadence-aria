@@ -183,6 +183,7 @@ impl WorkspaceEngine {
                             id,
                             selected_option_ids,
                             free_text,
+                            answers,
                         }) => {
                             tracing::info!(choice_id = %id, "engine forwarding choice response");
                             let choice_id = id.clone();
@@ -198,6 +199,7 @@ impl WorkspaceEngine {
                                     id,
                                     selected_option_ids,
                                     free_text,
+                                    answers,
                                 })
                                 .await
                                 .is_err()
@@ -286,6 +288,7 @@ impl WorkspaceEngine {
                                 .await;
                         }
                         ProviderEvent::ChoiceRequest(request) => {
+                            let questions = request.effective_questions();
                             let _ = self
                                 .event_tx
                                 .send(EngineEvent::ChoiceRequest {
@@ -294,6 +297,7 @@ impl WorkspaceEngine {
                                     options: request.options,
                                     allow_multiple: request.allow_multiple,
                                     allow_free_text: request.allow_free_text,
+                                    questions,
                                     source: request.source,
                                 })
                                 .await;

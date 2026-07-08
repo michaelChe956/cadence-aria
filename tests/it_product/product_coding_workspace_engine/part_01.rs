@@ -18,10 +18,9 @@ use cadence_aria::product::coding_attempt_store::{
     CreateCodingExecutionUnitInput, CreateGroupCodingAttemptInput,
 };
 use cadence_aria::product::coding_models::{
-    AnalystDecisionNextStage, AnalystDecisionVerdict, AnalystVerdict, CodingAgentRole,
-    CodingAttemptScope, CodingAttemptStatus, CodingChoiceGateStatus, CodingEntryType,
-    CodingExecutionAttempt, CodingExecutionStage, CodingExecutionUnitStatus, CodingGateAction,
-    CodingGateActionType, CodingProviderPermissionMode, CodingProviderRole,
+    CodingAgentRole, CodingAttemptScope, CodingAttemptStatus, CodingChoiceGateStatus,
+    CodingEntryType, CodingExecutionAttempt, CodingExecutionStage, CodingExecutionUnitStatus,
+    CodingGateAction, CodingGateActionType, CodingProviderPermissionMode, CodingProviderRole,
     CodingReworkInstruction, CodingRolePermissionModes, CodingRoleProviderConfigSnapshot,
     CodingRoleRunEventType, CodingRoleRunStatus, CodingRoleRunTrigger, CodingTimelineNode,
     CodingTimelineNodeStatus, FindingSeverity, PushStatus, RemoteKind, ReviewRequest,
@@ -29,17 +28,19 @@ use cadence_aria::product::coding_models::{
     TestingReport, TestingStepResult, WorkItemHandoff,
 };
 use cadence_aria::product::coding_workspace_engine::{
-    CodingExecutionContext, CodingWorkspaceEngine, testing_report_should_enter_analyst,
+    CodingExecutionContext, CodingWorkspaceEngine, ProviderTestingAdapters,
+    testing_report_needs_blocked_gate,
 };
 use cadence_aria::product::git_workspace_service::GitWorkspaceService;
 use cadence_aria::product::lifecycle_store::{
-    CreateVerificationPlanInput, CreateWorkItemInput, CreateWorkspaceSessionInput, LifecycleStore,
-    UpsertIssueSharedWorktreeInput,
+    CreateIssueWorkItemPlanInput, CreateVerificationPlanInput, CreateWorkItemInput,
+    CreateWorkspaceSessionInput, LifecycleStore, UpsertIssueSharedWorktreeInput,
 };
 use cadence_aria::product::models::{
-    ProviderConversationRef, ProviderConversationRole, ProviderName, RepositoryProfileConfidence,
-    VerificationCommand, VerificationCommandSafety, VerificationCommandSource,
-    VerificationFallbackPolicy, VerificationScope, WorkItemStatus, WorkspaceType,
+    IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, ProviderConversationRef,
+    ProviderConversationRole, ProviderName, RepositoryProfileConfidence, VerificationCommand,
+    VerificationCommandSafety, VerificationCommandSource, VerificationFallbackPolicy,
+    VerificationScope, WorkItemStatus, WorkspaceType,
 };
 use cadence_aria::product::test_executor::TestCommandSpec;
 use cadence_aria::product::tester_agent_loop::TesterAgentOptions;
@@ -136,7 +137,7 @@ fn role_permission_modes_are_persisted_with_role_provider_config() {
 }
 
 #[test]
-fn testing_report_routes_terminal_statuses_to_analyst_rework() {
+fn testing_report_failed_or_blocked_needs_blocked_gate() {
     let blocked = TestingReport {
         id: "testing_report_0001".to_string(),
         attempt_id: "coding_attempt_0001".to_string(),
@@ -158,13 +159,11 @@ fn testing_report_routes_terminal_statuses_to_analyst_rework() {
         context_warnings: vec!["test_plan_parse_error".to_string()],
         raw_provider_output_ref: Some("provider-raw/testing/plan_tests_0001.txt".to_string()),
     };
-    assert!(testing_report_should_enter_analyst(&blocked));
+    assert!(testing_report_needs_blocked_gate(&blocked));
 
     let mut failed_without_evidence = blocked.clone();
     failed_without_evidence.overall_status = TestingOverallStatus::Failed;
-    assert!(testing_report_should_enter_analyst(
-        &failed_without_evidence
-    ));
+    assert!(testing_report_needs_blocked_gate(&failed_without_evidence));
 
     let mut failed_with_evidence = blocked.clone();
     failed_with_evidence.overall_status = TestingOverallStatus::Failed;
@@ -180,11 +179,11 @@ fn testing_report_routes_terminal_statuses_to_analyst_rework() {
         ]),
         provider_analysis: Some("unit failed".to_string()),
     }];
-    assert!(testing_report_should_enter_analyst(&failed_with_evidence));
+    assert!(testing_report_needs_blocked_gate(&failed_with_evidence));
 
     let mut passed = blocked.clone();
     passed.overall_status = TestingOverallStatus::Passed;
-    assert!(testing_report_should_enter_analyst(&passed));
+    assert!(!testing_report_needs_blocked_gate(&passed));
 }
 
 #[tokio::test]
@@ -614,10 +613,67 @@ async fn coding_coder_rework_with_resume_uses_delta_prompt() {
     assert!(second_input.prompt.contains("补充 n=0 的输入处理"));
     assert!(second_input.prompt.contains("uv run python -m unittest"));
     assert!(!second_input.prompt.contains("# 爬楼梯问题 Work Item"));
-    assert!(!second_input.prompt.contains("已确认 Work Item"));
+    assert!(
+        !second_input
+            .prompt
+            .contains("这里是一段很长的已确认 Work Item，返修续接时不应重复发送。")
+    );
     assert!(
         !second_input
             .prompt
             .contains("不要只输出计划或 Story/Design/Work Item 文档")
     );
+}
+
+#[tokio::test]
+async fn group_next_work_item_coder_run_does_not_resume_previous_unit_session() {
+    let (_root, _paths, store, _engine, attempt) = group_engine_with_last_running_unit();
+    let attempt = store
+        .update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running attempt");
+    let attempt = store
+        .replace_attempt_provider_conversations(
+            &attempt.id,
+            vec![ProviderConversationRef {
+                role: ProviderConversationRole::Coder,
+                provider: ProviderName::Fake,
+                provider_session_id: "coder-session-from-unit-1".to_string(),
+                updated_at: "2026-07-08T00:00:00Z".to_string(),
+                last_node_id: Some("coding_node_0002".to_string()),
+            }],
+        )
+        .expect("seed previous coder session");
+    let context = CodingExecutionContext {
+        work_item_markdown: Some(
+            "# Work Item 002\n\n实现 ProviderDescriptor 元数据层与全局 ProviderStateStore。"
+                .to_string(),
+        ),
+        verification_commands: vec!["cargo test --locked --lib provider_metadata".to_string()],
+    };
+    let (tx, mut rx) = mpsc::channel(64);
+    tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
+    let provider = SessionInputCapturingProvider::with_outputs(
+        ["unit 2 coding done"],
+        [Some("coder-session-unit-2".to_string())],
+    );
+
+    engine
+        .execute_coding(&attempt, &provider, &context)
+        .await
+        .expect("execute second unit coding");
+
+    let inputs = provider.inputs.lock().expect("inputs lock");
+    assert_eq!(inputs.len(), 1);
+    let input = &inputs[0];
+    assert_eq!(input.resume_provider_session_id, None);
+    assert!(input.prompt.contains("# Work Item 002"));
+    assert!(input.prompt.contains("ProviderDescriptor 元数据层"));
+    assert!(!input.prompt.contains("增量代码编写指令"));
+    assert!(!input.prompt.contains("本轮没有新增修复要求"));
 }

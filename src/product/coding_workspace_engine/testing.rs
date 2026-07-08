@@ -61,7 +61,7 @@ impl CodingWorkspaceEngine {
         if matches!(
             report.overall_status,
             TestingOverallStatus::Failed | TestingOverallStatus::Blocked
-        ) && !testing_report_should_enter_analyst(&report)
+        ) && testing_report_needs_blocked_gate(&report)
         {
             self.store.update_attempt_status(
                 &attempt.project_id,

@@ -42,7 +42,7 @@ pub(crate) struct RawReviewFinding {
     pub(crate) message: Option<String>,
     #[serde(default, alias = "recommendation", alias = "fix")]
     pub(crate) required_action: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_review_finding_source_stage")]
     pub(crate) source_stage: Option<CodingExecutionStage>,
     #[serde(default)]
     pub(crate) title: Option<String>,
@@ -54,6 +54,43 @@ pub(crate) struct RawReviewFinding {
     pub(crate) related_design_constraints: Vec<String>,
     #[serde(default)]
     pub(crate) related_work_item_tasks: Vec<String>,
+}
+
+fn deserialize_review_finding_source_stage<'de, D>(
+    deserializer: D,
+) -> Result<Option<CodingExecutionStage>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let Some(value) = Option::<String>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    match value.trim() {
+        "prepare_context" => Ok(Some(CodingExecutionStage::PrepareContext)),
+        "worktree_prepare" => Ok(Some(CodingExecutionStage::WorktreePrepare)),
+        "coding" => Ok(Some(CodingExecutionStage::Coding)),
+        "testing" => Ok(Some(CodingExecutionStage::Testing)),
+        "code_review" => Ok(Some(CodingExecutionStage::CodeReview)),
+        "review_request" => Ok(Some(CodingExecutionStage::ReviewRequest)),
+        "internal_pr_review" | "group_final_review" => {
+            Ok(Some(CodingExecutionStage::InternalPrReview))
+        }
+        "final_confirm" => Ok(Some(CodingExecutionStage::FinalConfirm)),
+        other => Err(serde::de::Error::unknown_variant(
+            other,
+            &[
+                "prepare_context",
+                "worktree_prepare",
+                "coding",
+                "testing",
+                "code_review",
+                "review_request",
+                "internal_pr_review",
+                "group_final_review",
+                "final_confirm",
+            ],
+        )),
+    }
 }
 
 pub(crate) fn parse_review_payload(

@@ -85,15 +85,15 @@ describe("groupEntries", () => {
     });
   });
 
-  it("groups coding roles by node and keeps analyst verdicts standalone", () => {
+  it("groups coding roles by node and keeps review verdicts standalone", () => {
     const items = groupEntries([
       makeEntry("tester-stream", "provider_stream", "tester", "测试中", "coding_node_0002"),
       makeEntry("tester-tool", "execution_event", "tester", "run_command", "coding_node_0002"),
       makeEntry(
-        "analyst-verdict",
-        "analyst_verdict",
-        "analyst",
-        "测试仍失败",
+        "review-verdict",
+        "review_verdict",
+        "code_reviewer",
+        "Code Reviewer 要求修改",
         "coding_node_0003",
       ),
       makeEntry(
@@ -111,7 +111,7 @@ describe("groupEntries", () => {
     expect(items[0].group.inlineEvents.map((entry) => entry.id)).toEqual(["tester-tool"]);
     expect(items[1]).toMatchObject({
       kind: "entry",
-      entry: expect.objectContaining({ id: "analyst-verdict" }),
+      entry: expect.objectContaining({ id: "review-verdict" }),
     });
     expect(items[2].group.role).toBe("code_reviewer");
   });

@@ -6,14 +6,26 @@ use crate::cross_cutting::streaming_provider::{ProviderToolCall, ProviderToolRes
 use crate::product::coding_models::TestCommandStatus;
 use crate::product::test_executor::{TestCommandSpec, execute_test_command};
 
+use super::context_loader::TestContextLoader;
 use super::prompts::tester_allowed_tools;
-use super::tools::{list_files_tool, read_file_tool, search_code_tool};
+use super::tools::{
+    list_files_tool, parse_load_test_context_input, read_file_tool, search_code_tool,
+};
 use super::types::{TesterAgentError, TesterToolOutcome};
 
 pub async fn execute_tester_tool_call(
     call: &ProviderToolCall,
     worktree_path: impl AsRef<Path>,
     artifact_output_root: impl AsRef<Path>,
+) -> Result<TesterToolOutcome, TesterAgentError> {
+    execute_tester_tool_call_with_context(call, worktree_path, artifact_output_root, None).await
+}
+
+pub async fn execute_tester_tool_call_with_context(
+    call: &ProviderToolCall,
+    worktree_path: impl AsRef<Path>,
+    artifact_output_root: impl AsRef<Path>,
+    context_loader: Option<&TestContextLoader>,
 ) -> Result<TesterToolOutcome, TesterAgentError> {
     let worktree_path = worktree_path.as_ref();
     let artifact_output_root = artifact_output_root.as_ref();
@@ -34,8 +46,25 @@ pub async fn execute_tester_tool_call(
             call,
             search_code_tool(&call.input, worktree_path),
         )),
+        "load_test_context" => Ok(text_tool_outcome(
+            call,
+            load_test_context_tool(&call.input, context_loader),
+        )),
         _ => Ok(error_outcome(call, "Tester 不允许修改文件或调用未授权工具")),
     }
+}
+
+fn load_test_context_tool(
+    input: &Value,
+    context_loader: Option<&TestContextLoader>,
+) -> Result<String, String> {
+    let parsed = parse_load_test_context_input(input)?;
+    let Some(context_loader) = context_loader else {
+        return Err("load_test_context 当前执行环境缺少上下文加载器".to_string());
+    };
+    let loaded = context_loader.load(&parsed)?;
+    serde_json::to_string(&loaded)
+        .map_err(|error| format!("load_test_context 序列化结果失败: {error}"))
 }
 
 async fn run_command_tool(

@@ -98,16 +98,6 @@ impl super::CodingAttemptStore {
             .join("work-item-handoff.json")
     }
 
-    pub(crate) fn analyst_decisions_root(
-        &self,
-        project_id: &str,
-        issue_id: &str,
-        attempt_id: &str,
-    ) -> PathBuf {
-        self.attempt_dir(project_id, issue_id, attempt_id)
-            .join("analyst-decisions")
-    }
-
     pub(crate) fn test_plans_root(
         &self,
         project_id: &str,
@@ -287,30 +277,5 @@ impl super::CodingAttemptStore {
             coding_stage_dir_name(&stage),
             file_name
         ))
-    }
-
-    pub fn save_analyst_evidence(
-        &self,
-        attempt_id: &str,
-        evidence: &str,
-    ) -> Result<String, ProductStoreError> {
-        use std::fs;
-
-        let attempt = self.find_attempt_by_id(attempt_id)?;
-        let evidence_root = self
-            .attempt_dir(&attempt.project_id, &attempt.issue_id, &attempt.id)
-            .join("artifacts")
-            .join("rework");
-        fs::create_dir_all(&evidence_root).map_err(|error| {
-            ProductStoreError::Io(format!("create {}: {error}", evidence_root.display()))
-        })?;
-
-        let sequence = super::next_text_file_sequence(&evidence_root, "analyst_evidence")?;
-        let file_name = format!("analyst_evidence_{sequence:04}.txt");
-        let path = evidence_root.join(&file_name);
-        fs::write(&path, evidence)
-            .map_err(|error| ProductStoreError::Io(format!("write {}: {error}", path.display())))?;
-
-        Ok(format!("artifacts/rework/{}", file_name))
     }
 }

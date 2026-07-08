@@ -15,6 +15,7 @@ import { useWorkspaceWsReconnect } from "./useWorkspaceWsReconnect";
 import {
   useWorkspaceStore,
 } from "../state/workspace-ws-store";
+import type { ChoiceAnswerPayload } from "../state/chat-entries";
 import {
   ACTIVE_PROVIDER_STAGES,
   handleWorkspaceWsMessage,
@@ -459,7 +460,12 @@ export function useWorkspaceWs(sessionId: string | null) {
   );
 
   const sendChoiceResponse = useCallback(
-    (id: string, selectedOptionIds: string[], freeText?: string | null) => {
+    (
+      id: string,
+      selectedOptionIds: string[],
+      freeText?: string | null,
+      answers?: ChoiceAnswerPayload[],
+    ) => {
       const trimmedText = freeText?.trim();
       const store = useWorkspaceStore.getState();
       const choiceEntry = store.chatEntries.find(
@@ -479,6 +485,7 @@ export function useWorkspaceWs(sessionId: string | null) {
         id,
         selected_option_ids: selectedOptionIds,
         free_text: trimmedText ? trimmedText : null,
+        answers: answers && answers.length > 0 ? answers : undefined,
       });
       console.info("[aria-choice-diag] frontend choice_response send result", {
         id,
@@ -487,7 +494,7 @@ export function useWorkspaceWs(sessionId: string | null) {
       if (sent) {
         useWorkspaceStore
           .getState()
-          .resolveChoiceRequest(id, selectedOptionIds, trimmedText ? trimmedText : null);
+          .resolveChoiceRequest(id, selectedOptionIds, trimmedText ? trimmedText : null, answers);
       }
     },
     [sendJson],

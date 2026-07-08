@@ -3,15 +3,15 @@ async fn context_notes_are_included_in_author_prompt_for_all_workspace_types() {
     for (workspace_type, output) in [
         (
             WorkspaceType::Story,
-            "# Story Spec\n\n## 功能需求\n- [REQ-001] 记录用户补充上下文。\n\n## 成功标准\n- [AC-001] author prompt 包含补充上下文。\n",
+            complete_story_artifact("记录用户补充上下文。", "author prompt 包含补充上下文。"),
         ),
         (
             WorkspaceType::Design,
-            "# Design Spec\n\n## 设计决策\n- [DEC-001] 使用用户补充上下文。\n\n## API 契约\n- 无新增 API。\n",
+            complete_design_artifact("使用用户补充上下文。", "无新增 API。"),
         ),
         (
             WorkspaceType::WorkItem,
-            "# Work Item\n\n## 目标\n- 使用用户补充上下文。\n\n## 验证命令\n- cargo test --locked\n",
+            complete_work_item_artifact("使用用户补充上下文。"),
         ),
     ] {
         let (_tmp, store) = setup();
@@ -23,7 +23,7 @@ async fn context_notes_are_included_in_author_prompt_for_all_workspace_types() {
         let inputs = Arc::new(Mutex::new(Vec::new()));
         let provider = Arc::new(ImmediateOutputRecordingProvider {
             inputs: inputs.clone(),
-            output: output.to_string(),
+            output,
         });
 
         engine
@@ -60,7 +60,10 @@ async fn legacy_context_note_timeline_nodes_are_included_in_author_prompt() {
     let inputs = Arc::new(Mutex::new(Vec::new()));
     let provider = Arc::new(ImmediateOutputRecordingProvider {
         inputs: inputs.clone(),
-        output: "# Story Spec\n\n## 功能需求\n- [REQ-001] 记录旧补充上下文。\n\n## 成功标准\n- [AC-001] author prompt 包含旧补充上下文。\n".to_string(),
+        output: complete_story_artifact(
+            "记录旧补充上下文。",
+            "author prompt 包含旧补充上下文。",
+        ),
     });
 
     engine
@@ -236,15 +239,15 @@ async fn author_completion_enters_author_confirm_for_all_workspace_types() {
     for (workspace_type, output) in [
         (
             WorkspaceType::Story,
-            "# Story Spec\n\n## 功能需求\n- [REQ-001] 生成候选草稿。\n\n## 成功标准\n- [AC-001] 候选草稿可进入人工处理。\n",
+            complete_story_artifact("生成候选草稿。", "候选草稿可进入人工处理。"),
         ),
         (
             WorkspaceType::Design,
-            "# Design Spec\n\n## 设计决策\n- [DEC-001] 生成候选设计。\n\n## 公共组件\n- [CMP-001] 无新增组件。\n",
+            complete_design_artifact("生成候选设计。", "无新增 API。"),
         ),
         (
             WorkspaceType::WorkItem,
-            "# Work Item\n\n## 目标\n- 生成候选实施计划。\n\n## 验证命令\n- cargo test --locked\n",
+            complete_work_item_artifact("生成候选单个可执行任务。"),
         ),
     ] {
         let (_tmp, store) = setup();
@@ -260,7 +263,7 @@ async fn author_completion_enters_author_confirm_for_all_workspace_types() {
                 "开始生成".to_string(),
                 Arc::new(ImmediateOutputRecordingProvider {
                     inputs: Arc::new(Mutex::new(Vec::new())),
-                    output: output.to_string(),
+                    output,
                 }),
                 empty_provider_commands(),
             )
@@ -306,7 +309,7 @@ async fn author_decision_accept_starts_review_or_final_confirmation() {
             "开始生成".to_string(),
             Arc::new(ImmediateOutputRecordingProvider {
                 inputs: Arc::new(Mutex::new(Vec::new())),
-                output: "# Story Spec\n\n## 功能需求\n- [REQ-001] 候选。\n\n## 成功标准\n- [AC-001] 可审核。\n".to_string(),
+                output: complete_story_artifact("候选。", "可审核。"),
             }),
             empty_provider_commands(),
         )
@@ -333,7 +336,7 @@ async fn author_decision_accept_starts_review_or_final_confirmation() {
             "开始生成".to_string(),
             Arc::new(ImmediateOutputRecordingProvider {
                 inputs: Arc::new(Mutex::new(Vec::new())),
-                output: "# Story Spec\n\n## 功能需求\n- [REQ-001] 候选。\n\n## 成功标准\n- [AC-001] 可确认。\n".to_string(),
+                output: complete_story_artifact("候选。", "可确认。"),
             }),
             empty_provider_commands(),
         )
@@ -364,7 +367,7 @@ async fn author_decision_reject_returns_to_prepare_without_losing_history() {
             "开始生成".to_string(),
             Arc::new(ImmediateOutputRecordingProvider {
                 inputs: Arc::new(Mutex::new(Vec::new())),
-                output: "# Story Spec\n\n## 功能需求\n- [REQ-001] 不满意的候选。\n\n## 成功标准\n- [AC-001] 需要重新写。\n".to_string(),
+                output: complete_story_artifact("不满意的候选。", "需要重新写。"),
             }),
             empty_provider_commands(),
         )
@@ -413,7 +416,7 @@ async fn rejected_author_artifact_is_not_restored_after_reconnect() {
             "开始生成".to_string(),
             Arc::new(ImmediateOutputRecordingProvider {
                 inputs: Arc::new(Mutex::new(Vec::new())),
-                output: "# Story Spec\n\n## 功能需求\n- [REQ-001] 被拒绝候选。\n\n## 成功标准\n- [AC-001] 不应恢复为当前稿。\n".to_string(),
+                output: complete_story_artifact("被拒绝候选。", "不应恢复为当前稿。"),
             }),
             empty_provider_commands(),
         )
@@ -457,19 +460,15 @@ impl StreamingProviderAdapter for RecordingStreamingProvider {
         let (event_tx, event_rx) = mpsc::channel(8);
         let (command_tx, _command_rx) = mpsc::channel(8);
         tokio::spawn(async move {
-            let output = "# Story Spec\n\n\
-                ## 功能需求\n\
-                - [REQ-001] 生成候选草稿。\n\n\
-                ## 成功标准\n\
-                - [AC-001] 候选草稿可进入审核。\n";
+            let output = complete_story_artifact("生成候选草稿。", "候选草稿可进入审核。");
             let _ = event_tx
                 .send(ProviderEvent::TextDelta {
-                    content: output.to_string(),
+                    content: output.clone(),
                 })
                 .await;
             let _ = event_tx
                 .send(ProviderEvent::Completed {
-                    full_output: output.to_string(),
+                    full_output: output,
                     provider_session_id: None,
                 })
                 .await;
@@ -648,15 +647,17 @@ impl StreamingProviderAdapter for StreamedArtifactSummaryProvider {
         let (event_tx, event_rx) = mpsc::channel(8);
         let (command_tx, _command_rx) = mpsc::channel(8);
         tokio::spawn(async move {
-            let streamed = "```artifact\n# Streamed Story Spec\n\n\
-                ## 功能需求\n\
-                - [REQ-001] 使用流式正文中的候选产物。\n\n\
-                ## 成功标准\n\
-                - [AC-001] Completed 摘要不含 artifact 时仍能进入审核。\n\
-                ```";
+            let streamed = format!(
+                "```artifact\n{}```",
+                complete_story_artifact(
+                    "使用流式正文中的候选产物。",
+                    "Completed 摘要不含 artifact 时仍能进入审核。",
+                )
+                .replacen("# Story Spec", "# Streamed Story Spec", 1)
+            );
             let _ = event_tx
                 .send(ProviderEvent::TextDelta {
-                    content: streamed.to_string(),
+                    content: streamed,
                 })
                 .await;
             let _ = event_tx

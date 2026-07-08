@@ -21,8 +21,6 @@ function chatEntryTypeFromCodingEntry(entry: CodingChatEntry): ChatEntryType {
       return "provider_stream";
     case "stage_gate":
       return "gate_prompt";
-    case "analyst_verdict":
-      return "analyst_verdict";
     case "stage_summary":
       return "stage_change";
     case "tool_call":
@@ -35,7 +33,6 @@ function chatEntryTypeFromCodingEntry(entry: CodingChatEntry): ChatEntryType {
 function chatEntryRoleFromCodingEntry(entry: CodingChatEntry): ChatEntryRole {
   const source = chatEntrySource(entry);
   if (entry.entry_type.type === "user_message") return "user";
-  if (entry.entry_type.type === "analyst_verdict") return "analyst";
   if (source === "internal_pr_review") return "internal_reviewer";
   if (source === "code_review") return "code_reviewer";
   switch (entry.role) {
@@ -60,8 +57,6 @@ function chatEntryContentFromCodingEntry(entry: CodingChatEntry): string {
       return entry.entry_type.output;
     case "system_event":
       return entry.entry_type.message;
-    case "analyst_verdict":
-      return entry.entry_type.verdict;
     case "stage_gate":
       return entry.entry_type.stage;
     case "stage_summary":
@@ -84,9 +79,6 @@ function chatEntryMetadataFromCodingEntry(
       metadata.tool_use_id = entry.entry_type.tool_use_id;
       metadata.output = entry.entry_type.output;
       metadata.is_error = entry.entry_type.is_error;
-      break;
-    case "analyst_verdict":
-      metadata.verdict = entry.entry_type.verdict;
       break;
     case "system_event":
       metadata.event_type = entry.entry_type.event_type;

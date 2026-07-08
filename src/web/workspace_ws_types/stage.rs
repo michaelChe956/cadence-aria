@@ -12,17 +12,3 @@ pub enum WorkspaceStage {
     HumanConfirm,
     Completed,
 }
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CodingWorkspaceStage {
-    PrepareContext,
-    PlanGeneration,
-    PlanConfirm,
-    Coding,
-    Testing,
-    CodeReview,
-    Rework,
-    HumanConfirm,
-    Completed,
-}

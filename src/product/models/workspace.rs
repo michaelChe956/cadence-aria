@@ -48,6 +48,22 @@ pub struct WorkspaceSessionRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub struct WorkspaceSessionSummaryRecord {
+    pub id: String,
+    pub project_id: String,
+    pub issue_id: String,
+    pub entity_id: String,
+    pub workspace_type: WorkspaceType,
+    pub status: WorkspaceSessionStatus,
+    pub author_provider: ProviderName,
+    pub reviewer_provider: ProviderName,
+    pub review_rounds: u32,
+    pub superpowers_enabled: bool,
+    pub openspec_enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct WorkspaceMessageRecord {
     pub role: String,
     pub content: String,

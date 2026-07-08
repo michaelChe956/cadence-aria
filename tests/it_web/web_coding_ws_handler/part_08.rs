@@ -7,7 +7,7 @@ fn app_with_group_full_chain_attempt(root_path: &Path) -> axum::Router {
         .create(CreateRepositoryInput {
             project_id: "project_0001".to_string(),
             name: "repo".to_string(),
-            path: repo,
+            path: repo.clone(),
             default_policy_preset: Some("manual-write".to_string()),
             default_provider_mode: Some("fake".to_string()),
         })
@@ -104,7 +104,7 @@ fn app_with_group_full_chain_attempt(root_path: &Path) -> axum::Router {
             current_work_item_id: "work_item_0001".to_string(),
             base_branch: "HEAD".to_string(),
             branch_name: "aria/issues/issue_0001".to_string(),
-            worktree_path: None,
+            worktree_path: Some(repo),
             provider_config_snapshot: ProviderConfigSnapshot {
                 author: ProviderName::Fake,
                 reviewer: Some(ProviderName::Fake),
@@ -167,9 +167,6 @@ async fn coding_ws_group_attempt_completes_first_unit_before_review_request_and_
     for _ in 0..220 {
         match recv_json(&mut ws).await {
             CodingWsOutMessage::CodingGateRequired { gate } => {
-                if respond_to_testing_result_review_gate(&mut ws, &gate).await {
-                    continue;
-                }
                 if gate.kind == CodingGateKind::StageGate
                     && let Some(stage) = gate.stage.clone()
                     && confirmed_gates.insert(gate.gate_id)
@@ -209,6 +206,81 @@ async fn coding_ws_group_attempt_completes_first_unit_before_review_request_and_
             .expect("review requests")
             .is_empty(),
         "group attempt must not create final review request before all units complete"
+    );
+    let attempt = store
+        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("attempt");
+    assert_eq!(attempt.current_work_item_id.as_deref(), Some("work_item_0002"));
+    let units = store
+        .list_coding_units("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("units");
+    assert_eq!(units[0].status, CodingExecutionUnitStatus::Completed);
+    assert_eq!(units[1].status, CodingExecutionUnitStatus::Running);
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+#[tokio::test]
+async fn coding_ws_group_attempt_recovers_review_request_running_unit_without_rerunning_review() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let app = app_with_group_full_chain_attempt(root.path());
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            "coding_attempt_0001",
+            CodingAttemptStatus::Running,
+        )
+        .expect("set running");
+    store
+        .update_attempt_stage(
+            "project_0001",
+            "issue_0001",
+            "coding_attempt_0001",
+            CodingExecutionStage::ReviewRequest,
+        )
+        .expect("set review request stage");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+    send_json(&mut ws, &CodingWsInMessage::StartCoding).await;
+
+    let mut saw_second_unit = false;
+    for _ in 0..80 {
+        match recv_json(&mut ws).await {
+            CodingWsOutMessage::CodingGateRequired { gate } => {
+                if gate.stage == Some(CodingExecutionStage::CodeReview) {
+                    panic!("review_request recovery must not rerun CodeReviewer");
+                }
+            }
+            CodingWsOutMessage::CodingSessionState {
+                current_work_item_id,
+                ..
+            } => {
+                if current_work_item_id.as_deref() == Some("work_item_0002") {
+                    saw_second_unit = true;
+                    break;
+                }
+            }
+            CodingWsOutMessage::CodingProtocolError { code, message } => {
+                panic!("unexpected coding protocol error {code}: {message}");
+            }
+            _ => {}
+        }
+    }
+
+    assert!(
+        saw_second_unit,
+        "expected review_request recovery to advance to the next unit"
     );
     let attempt = store
         .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")

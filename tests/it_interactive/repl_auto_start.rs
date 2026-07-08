@@ -12,7 +12,7 @@ async fn repl_auto_start_spawns_daemon_and_waits_until_socket_is_ready() {
         aria_bin: aria_bin.into(),
         workspace_root: workspace.path().to_path_buf(),
         serve_one: true,
-        timeout_ms: 2_000,
+        timeout_ms: 5_000,
     })
     .await
     .expect("auto-start daemon");

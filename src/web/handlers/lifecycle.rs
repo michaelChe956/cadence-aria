@@ -17,7 +17,7 @@ pub async fn issue_lifecycle(
     let lifecycle = LifecycleStore::new(app_paths.clone());
     backfill_legacy_spec_versions(&lifecycle, &project_id, &issue_id)?;
     let workspace_sessions = lifecycle
-        .list_workspace_sessions(&project_id, &issue_id)
+        .list_workspace_session_summaries(&project_id, &issue_id)
         .map_err(product_store_api_error)?;
     let story_specs = lifecycle
         .list_story_specs(&project_id, &issue_id)
@@ -26,7 +26,11 @@ pub async fn issue_lifecycle(
         .map(|story| {
             let session =
                 workspace_session_for_entity(&workspace_sessions, &story.id, &WorkspaceType::Story);
-            story_spec_dto(&lifecycle, &story, session)
+            story_spec_dto(
+                &lifecycle,
+                &story,
+                session.map(|session| session.id.as_str()),
+            )
         })
         .collect::<ApiResult<Vec<_>>>()?;
     let design_specs = lifecycle
@@ -39,7 +43,11 @@ pub async fn issue_lifecycle(
                 &design.id,
                 &WorkspaceType::Design,
             );
-            design_spec_dto(&lifecycle, &design, session)
+            design_spec_dto(
+                &lifecycle,
+                &design,
+                session.map(|session| session.id.as_str()),
+            )
         })
         .collect::<ApiResult<Vec<_>>>()?;
     let work_item_plans = lifecycle
@@ -65,12 +73,17 @@ pub async fn issue_lifecycle(
                 &work_item.id,
                 &WorkspaceType::WorkItem,
             );
-            lifecycle_work_item_dto(&lifecycle, work_item, latest_attempt, session)
+            lifecycle_work_item_dto(
+                &lifecycle,
+                work_item,
+                latest_attempt,
+                session.map(|session| session.id.as_str()),
+            )
         })
         .collect::<ApiResult<Vec<_>>>()?;
     let workspace_sessions = workspace_sessions
-        .into_iter()
-        .map(workspace_session_dto)
+        .iter()
+        .map(workspace_session_summary_dto)
         .collect();
 
     Ok(Json(IssueLifecycleResponse {
@@ -131,7 +144,7 @@ pub async fn generate_story_specs(
     let session = ensure_workspace_context_message(&app_paths, &lifecycle, session)
         .map_err(product_store_api_error)?;
 
-    let story_dto = story_spec_dto(&lifecycle, &story, Some(&session))?;
+    let story_dto = story_spec_dto(&lifecycle, &story, Some(session.id.as_str()))?;
     Ok(Json(GenerateStorySpecsResponse {
         story_specs: vec![story_dto],
         workspace_session: workspace_session_dto(session),
@@ -181,7 +194,7 @@ pub async fn generate_design_specs(
     let session = ensure_workspace_context_message(&app_paths, &lifecycle, session)
         .map_err(product_store_api_error)?;
 
-    let design_dto = design_spec_dto(&lifecycle, &design, Some(&session))?;
+    let design_dto = design_spec_dto(&lifecycle, &design, Some(session.id.as_str()))?;
     Ok(Json(GenerateDesignSpecsResponse {
         design_specs: vec![design_dto],
         workspace_session: workspace_session_dto(session),

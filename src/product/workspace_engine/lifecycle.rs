@@ -34,10 +34,18 @@ impl WorkspaceEngine {
         mut session: WorkspaceSession,
     ) -> Self {
         let persisted_timeline_nodes = lifecycle_store
-            .load_timeline_nodes(&session.session_id)
+            .load_timeline_nodes_for_issue_session(
+                &session.project_id,
+                &session.issue_id,
+                &session.session_id,
+            )
             .unwrap_or_default();
         let persisted_artifact_versions = lifecycle_store
-            .list_artifact_versions(&session.session_id)
+            .list_artifact_versions_for_issue_session(
+                &session.project_id,
+                &session.issue_id,
+                &session.session_id,
+            )
             .unwrap_or_default();
         if !persisted_artifact_versions.is_empty() {
             session.artifact = persisted_artifact_versions
@@ -65,6 +73,8 @@ impl WorkspaceEngine {
         };
         let latest_review_verdict = latest_review_verdict_from_node_details(
             &lifecycle_store,
+            &session.project_id,
+            &session.issue_id,
             &session.session_id,
             &timeline_nodes,
         )
@@ -111,6 +121,21 @@ impl WorkspaceEngine {
                 .collect(),
             allow_multiple: false,
             allow_free_text: true,
+            questions: vec![ChoiceQuestion {
+                id: "default".to_string(),
+                prompt: pending.prompt.clone(),
+                options: pending
+                    .options
+                    .iter()
+                    .map(|option| ChoiceOption {
+                        id: option.id.clone(),
+                        label: option.label.clone(),
+                        description: option.description.clone(),
+                    })
+                    .collect(),
+                allow_multiple: false,
+                allow_free_text: true,
+            }],
             source: ChoiceRequestSource::TextFallback.as_str().to_string(),
         })
     }

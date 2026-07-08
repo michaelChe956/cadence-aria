@@ -29,6 +29,7 @@ impl WorkspaceEngine {
             "Workspace 类型: {}\n",
             workspace_type_title(&self.session.workspace_type)
         ));
+        prompt.push_str(&reviewer_boundary_rules_for(&self.session.workspace_type));
         prompt.push_str("会话上下文:\n");
         for msg in &self.session.messages {
             if matches!(msg.role.as_str(), "assistant" | "provider") {
@@ -120,6 +121,7 @@ impl WorkspaceEngine {
             "Workspace 类型: {}\n",
             workspace_type_title(&self.session.workspace_type)
         ));
+        prompt.push_str(&reviewer_boundary_rules_for(&self.session.workspace_type));
         prompt.push_str("会话上下文:\n");
         for msg in &self.session.messages {
             if matches!(msg.role.as_str(), "assistant" | "provider") {
@@ -283,6 +285,7 @@ impl WorkspaceEngine {
             "Workspace 类型: {}\n",
             workspace_type_title(&self.session.workspace_type)
         ));
+        prompt.push_str(&reviewer_boundary_rules_for(&self.session.workspace_type));
         prompt.push_str("会话上下文:\n");
         for msg in &self.session.messages {
             if matches!(msg.role.as_str(), "assistant" | "provider") {
@@ -313,20 +316,54 @@ impl WorkspaceEngine {
             }
         }
 
-        prompt.push_str("\n## Outline\n");
+        let outline_json = serde_json::to_string_pretty(outline)
+            .map_err(|error| format!("serialize outline candidate error: {error}"))?;
+
+        prompt.push_str("\n## Outline JSON (source of truth)\n");
+        prompt.push_str(
+            "以下 JSON 是审核事实来源，包含 author/rewriter 产出的完整 Outline 字段；如果后续可读摘要与 JSON 不一致，以 JSON 为准。\n",
+        );
+        prompt.push_str("<WORK_ITEM_PLAN_OUTLINE_JSON>\n");
+        prompt.push_str(&outline_json);
+        prompt.push_str("\n</WORK_ITEM_PLAN_OUTLINE_JSON>\n");
+
+        prompt.push_str("\n## Outline summary\n");
         prompt.push_str(&format!(
-            "- id: {}\n- strategy_summary: {}\n- handoff_strategy: {}\n",
-            outline.id, outline.strategy_summary, outline.handoff_strategy
+            "- id: {}\n- source_story_spec_ids: [{}]\n- source_design_spec_ids: [{}]\n- strategy_summary: {}\n- handoff_strategy: {}\n- status: {}\n",
+            outline.id,
+            outline.source_story_spec_ids.join(", "),
+            outline.source_design_spec_ids.join(", "),
+            outline.strategy_summary,
+            outline.handoff_strategy,
+            outline.status
         ));
         prompt.push_str("\n### Work item outlines\n");
         for item in &outline.work_item_outlines {
+            let estimated_context_tokens = item
+                .estimated_context_tokens
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "(missing)".to_string());
+            let session_fit = match item.session_fit.as_ref() {
+                Some(crate::product::models::WorkItemOutlineSessionFit::FitsSingleAgentSession) => {
+                    "fits_single_agent_session"
+                }
+                Some(crate::product::models::WorkItemOutlineSessionFit::TooLargeMustSplit) => {
+                    "too_large_must_split"
+                }
+                None => "(missing)",
+            };
             prompt.push_str(&format!(
-                "\n- outline_id: {}\n  title: {}\n  kind: {:?}\n  goal: {}\n  scope: [{}]\n  depends_on: [{}]\n  exclusive_write_scopes: [{}]\n  forbidden_write_scopes: [{}]\n  verification_intent: [{}]\n  handoff_notes: {}\n",
+                "\n- outline_id: {}\n  title: {}\n  kind: {:?}\n  goal: {}\n  scope: [{}]\n  non_goals: [{}]\n  estimated_context_tokens: {}\n  session_fit: {}\n  source_story_spec_ids: [{}]\n  source_design_spec_ids: [{}]\n  depends_on: [{}]\n  exclusive_write_scopes: [{}]\n  forbidden_write_scopes: [{}]\n  verification_intent: [{}]\n  handoff_notes: {}\n",
                 item.outline_id,
                 item.title,
                 item.kind,
                 item.goal,
                 item.scope.join(", "),
+                item.non_goals.join(", "),
+                estimated_context_tokens,
+                session_fit,
+                item.source_story_spec_ids.join(", "),
+                item.source_design_spec_ids.join(", "),
                 item.depends_on.join(", "),
                 item.exclusive_write_scopes.join(", "),
                 item.forbidden_write_scopes.join(", "),
@@ -352,6 +389,7 @@ impl WorkspaceEngine {
 
         prompt.push_str(
             "\n\n审核边界说明：请只检查拆分策略、覆盖 Story/Design、outline 粒度、依赖图、写入边界、上下文缺口补齐假设与 handoff 策略。\
+             每个 outline 必须能由单个 Claude Code 或 Codex coding 会话完成，estimated_context_tokens 必须存在且小于 20k，session_fit 必须为 fits_single_agent_session；缺失、超限或明显跨多任务/Issue 级范围时返回 `revise` 并要求继续拆分。\
              不要要求 author 在 Outline 阶段输出完整 Work Item 正文、完整 verification plan、required_gates 或 repository_profile。\
              如果问题会影响拆分边界，返回 `revise`；如果需要用户做产品/范围判断，返回 `needs_human`。\n",
         );
@@ -410,6 +448,7 @@ impl WorkspaceEngine {
         let mut prompt = String::new();
         prompt
             .push_str("请作为 reviewer 审核 WorkItemPlan 自动模式生成的整组 Work Item Draft。\n\n");
+        prompt.push_str(&reviewer_boundary_rules_for(&self.session.workspace_type));
         prompt.push_str(&format!(
             "generation_round_id: {}\nbatch_id: {}\n\n",
             batch.generation_round_id, batch.batch_id
@@ -485,6 +524,7 @@ impl WorkspaceEngine {
         let mut prompt = String::new();
         prompt.push_str("请作为 reviewer 审核当前单个 Work Item Draft。\n\n");
         prompt.push_str("审核边界：只能审核当前 draft 是否符合对应 outline 以及是否正确消费已接受依赖。若需要修改当前 item，返回 `revise`；若需要修改前序 item 或拆分边界，必须返回 `plan_reopen_required`；不得用 `revise` 修改非当前 item。\n\n");
+        prompt.push_str(&reviewer_boundary_rules_for(&self.session.workspace_type));
         prompt.push_str(&format!(
             "generation_round_id: {}\ndraft_id: {}\ntarget_outline_id: {}\n\n",
             draft_candidate.draft_record.generation_round_id,

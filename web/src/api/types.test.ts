@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import type {
-  AnalystDecisionRecord,
   CodeReviewReport,
   CodingGateRequired,
   CodingAttempt,
@@ -254,21 +253,6 @@ describe("workspace websocket protocol types", () => {
       work_item_execution_plan: null,
       work_item_handoff: null,
       require_execution_plan_confirm: false,
-      latest_analyst_decision: {
-        id: "analyst_decision_0001",
-        attempt_id: "coding_attempt_0001",
-        source_stage: "testing",
-        rework_round: 1,
-        verdict: "needs_fix",
-        next_stage: "coding",
-        reason: "required 测试步骤被跳过，需要回到 Coder",
-        evidence_refs: ["testing_report_0001.json"],
-        raw_provider_output_refs: ["provider-raw/testing/execute_test_plan_0001.txt"],
-        rework_instructions: null,
-        human_gate: null,
-        created_at: "2026-06-12T00:00:00Z",
-        parse_error: null,
-      },
     };
     const outbound: Extract<CodingWsOutMessage, { type: "coding_session_state" }> = {
       type: "coding_session_state",
@@ -289,15 +273,14 @@ describe("workspace websocket protocol types", () => {
       pushed_remote: null,
       role_provider_config_snapshot: {
         coder: "fake",
-        tester: "fake",
-        analyst: "fake",
+        tester_plan: "fake",
+      tester_execute: "fake",
         code_reviewer: "fake",
         internal_reviewer: "fake",
         review_rounds: 1,
         permission_modes: {
           coder: "supervised",
           tester: "auto",
-          analyst: "auto",
           code_reviewer: "supervised",
           internal_reviewer: "supervised",
         },
@@ -355,7 +338,6 @@ describe("workspace websocket protocol types", () => {
       internal_pr_review: null,
       pending_gates: [],
       pending_choices: [],
-      latest_analyst_decision: snapshot.latest_analyst_decision,
     };
     const inbound: CodingWsInMessage = { type: "start_coding" };
 
@@ -363,34 +345,8 @@ describe("workspace websocket protocol types", () => {
     expect(outbound.type).toBe("coding_session_state");
     expect(outbound.role_runs?.[0].event_summary?.event_count).toBe(2);
     expect(outbound.role_runs?.[0].recent_events?.[0].detail).toBe("No tasks found");
-    expect(outbound.latest_analyst_decision?.next_stage).toBe("coding");
     expect(outbound.units[0].unit_id).toBe("coding_unit_0001");
     expect(inbound.type).toBe("start_coding");
-  });
-
-  it("accepts analyst decision records for coding workspace display", () => {
-    const decision: AnalystDecisionRecord = {
-      id: "analyst_decision_0002",
-      attempt_id: "coding_attempt_0001",
-      source_stage: "code_review",
-      rework_round: 2,
-      verdict: "proceed",
-      next_stage: "review_request",
-      reason: "CodeReviewer 通过，进入 ReviewRequest",
-      evidence_refs: ["code_review_0001.json"],
-      raw_provider_output_refs: ["provider-raw/code_review/code_review_0001.txt"],
-      rework_instructions: null,
-      human_gate: {
-        reason_code: "manual_triage",
-        available_actions: ["provide_context", "manual_continue", "abort"],
-      },
-      created_at: "2026-06-12T00:01:00Z",
-      parse_error: null,
-    };
-
-    expect(decision.verdict).toBe("proceed");
-    expect(decision.next_stage).toBe("review_request");
-    expect(decision.human_gate?.available_actions).toContain("manual_continue");
   });
 
   it("accepts plan based testing reports and blocked gate metadata", () => {
@@ -445,34 +401,14 @@ describe("workspace websocket protocol types", () => {
     expect(gate.available_actions[0].action_type).toBe("rerun_missing_steps");
   });
 
-  it("accepts retry analyst gate actions", () => {
+  it("accepts send to coder gate actions", () => {
     const action: import("./types").CodingGateAction = {
-      action_id: "retry_analyst",
-      label: "重试 Analyst",
-      action_type: "retry_analyst",
+      action_id: "send_to_coder",
+      label: "提交给 Coder 修复",
+      action_type: "send_to_coder",
     };
 
-    expect(action.action_type).toBe("retry_analyst");
-  });
-
-  it("accepts role run metadata on analyst decisions", () => {
-    const decision: AnalystDecisionRecord = {
-      id: "analyst_decision_0001",
-      attempt_id: "coding_attempt_0001",
-      source_stage: "testing",
-      rework_round: 1,
-      verdict: "human_required",
-      next_stage: "human_gate",
-      reason: "Analyst 输出不是有效 JSON",
-      evidence_refs: [],
-      raw_provider_output_refs: [],
-      created_at: "2026-06-13T00:00:00Z",
-      role_run_id: "coding_role_run_0001",
-      run_no: 1,
-    };
-
-    expect(decision.role_run_id).toBe("coding_role_run_0001");
-    expect(decision.run_no).toBe(1);
+    expect(action.action_type).toBe("send_to_coder");
   });
 
   it("accepts prepare work item plan request and response shapes", () => {

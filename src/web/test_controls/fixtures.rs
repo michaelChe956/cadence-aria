@@ -251,7 +251,7 @@ pub struct CodingRoleRunFixtureRequest {
 }
 
 fn default_blocked_stage() -> String {
-    "rework".to_string()
+    "code_review".to_string()
 }
 
 static CODING_FIXTURE_ATTEMPT_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -330,7 +330,17 @@ fn create_coding_role_run_fixture(
     let attempt_index = CODING_FIXTURE_ATTEMPT_COUNTER.fetch_add(1, Ordering::SeqCst);
     let attempt_id = format!("coding_attempt_{attempt_index:04}");
     let now = chrono::Utc::now().to_rfc3339();
-    let blocked_stage_internal = blocked_stage == "internal_pr_review";
+    let blocked_stage_internal = match blocked_stage {
+        "code_review" => false,
+        "internal_pr_review" => true,
+        other => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("unsupported_blocked_stage: {other}"),
+            )
+            .into());
+        }
+    };
     let attempt = CodingExecutionAttempt {
         id: attempt_id,
         project_id: project.id.clone(),
@@ -342,7 +352,7 @@ fn create_coding_role_run_fixture(
         stage: if blocked_stage_internal {
             FixtureStage::InternalPrReview
         } else {
-            FixtureStage::Rework
+            FixtureStage::CodeReview
         },
         base_branch: "HEAD".to_string(),
         branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
@@ -433,7 +443,7 @@ fn create_coding_role_run_fixture(
         created_at: now.clone(),
     })?;
 
-    if blocked_stage == "internal_pr_review" {
+    if blocked_stage_internal {
         let review_request = ReviewRequest {
             id: "review_request_0001".to_string(),
             attempt_id: attempt.id.clone(),
@@ -549,97 +559,95 @@ fn create_coding_role_run_fixture(
             ],
         })?;
     } else {
-        let analyst_node = CodingTimelineNode {
+        let review_node = CodingTimelineNode {
             id: "coding_node_0002".to_string(),
             attempt_id: attempt.id.clone(),
-            stage: FixtureStage::Rework,
-            title: "Analyst 路由决策".to_string(),
+            stage: FixtureStage::CodeReview,
+            title: "Code Review".to_string(),
             status: CodingTimelineNodeStatus::Blocked,
-            agent_role: Some(CodingAgentRole::System),
-            summary: Some("需要人工处理".to_string()),
+            agent_role: Some(CodingAgentRole::Reviewer),
+            summary: Some("Code Reviewer 阻塞，等待人工修复意见".to_string()),
             started_at: now.clone(),
             completed_at: None,
             artifact_refs: Vec::new(),
         };
-        store.save_timeline_node(analyst_node.clone())?;
+        store.save_timeline_node(review_node.clone())?;
 
-        let analyst_evidence = store.save_provider_raw_output(
+        let review_raw = store.save_provider_raw_output(
             &attempt.id,
-            FixtureStage::Rework,
-            "analyst_evidence",
-            "fixture analyst evidence",
+            FixtureStage::CodeReview,
+            "code_review",
+            "fixture code review raw output",
         )?;
-        let analyst_run = store.create_role_run(
+        let review_run = store.create_role_run(
             &attempt,
-            FixtureStage::Rework,
-            CodingProviderRole::Analyst,
+            FixtureStage::CodeReview,
+            CodingProviderRole::CodeReviewer,
             CodingRoleRunTrigger::Initial,
             Some("coding_node_0002".to_string()),
         )?;
         store.append_role_run_event(
             &attempt,
-            &analyst_run,
+            &review_run,
             CodingRoleRunEventType::ExecutionEvent,
             json!({
-                "title": "Analyst task update",
+                "title": "Code Reviewer task update",
                 "status": "blocked",
-                "detail": "Inspecting previous testing evidence"
+                "detail": "Review output needs manual coder feedback"
             }),
         )?;
         store.update_role_run_refs(
             &project.id,
             &issue.id,
             &attempt.id,
-            &analyst_run.id,
+            &review_run.id,
+            vec![review_raw],
             Vec::new(),
-            vec![analyst_evidence],
         )?;
         store.update_role_run_status(
             &project.id,
             &issue.id,
             &attempt.id,
-            &analyst_run.id,
+            &review_run.id,
             CodingRoleRunStatus::Blocked,
-            Some("analyst_human_gate".to_string()),
+            Some("code_review_blocked".to_string()),
         )?;
 
         store.save_chat_entry(&CodingChatEntry {
-            id: "coding_node_0002_analyst_verdict".to_string(),
+            id: "coding_node_0002_code_review".to_string(),
             attempt_id: attempt.id.clone(),
             node_id: Some("coding_node_0002".to_string()),
-            role: CodingAgentRole::System,
-            entry_type: CodingEntryType::AnalystVerdict {
-                verdict: crate::product::coding_models::AnalystVerdict::NeedsFix,
-            },
-            content: Some("fixture analyst verdict".to_string()),
+            role: CodingAgentRole::Reviewer,
+            entry_type: CodingEntryType::AssistantMessage,
+            content: Some("fixture code review blocked".to_string()),
             metadata: Some(json!({
-                "source": "rework",
-                "role_run_id": analyst_run.id,
-                "run_no": analyst_run.run_no,
+                "source": "code_review",
+                "role_run_id": review_run.id,
+                "run_no": review_run.run_no,
             })),
             created_at: now.clone(),
         })?;
 
         store.create_blocked_gate(CreateBlockedGateInput {
             attempt_id: attempt.id.clone(),
-            stage: FixtureStage::Rework,
+            stage: FixtureStage::CodeReview,
             node_id: Some("coding_node_0002".to_string()),
-            role: Some(CodingProviderRole::Analyst),
-            title: "Analyst human gate".to_string(),
-            description: "需要重跑 Analyst".to_string(),
-            reason_code: Some("analyst_human_gate".to_string()),
-            evidence_refs: vec!["provider-raw/rework/analyst_evidence_0001.txt".to_string()],
+            role: Some(CodingProviderRole::CodeReviewer),
+            title: "Code review blocked".to_string(),
+            description: "需要提交人工修复意见给 Coder，或重试 Code Reviewer".to_string(),
+            reason_code: Some("code_review_blocked".to_string()),
+            evidence_refs: vec!["code_review_report_0001".to_string()],
             raw_provider_output_ref: None,
             available_actions: vec![
                 CodingGateAction {
-                    action_id: "retry_analyst".to_string(),
-                    label: "重试 Analyst".to_string(),
-                    action_type: CodingGateActionType::RetryAnalyst,
+                    action_id: "retry_review".to_string(),
+                    label: "重试审查".to_string(),
+                    action_type: CodingGateActionType::RetryReview,
                 },
                 CodingGateAction {
-                    action_id: "manual_continue".to_string(),
-                    label: "人工继续".to_string(),
-                    action_type: CodingGateActionType::ManualContinue,
+                    action_id: "send_to_coder".to_string(),
+                    label: "提交给 Coder 修复".to_string(),
+                    action_type: CodingGateActionType::SendToCoder,
                 },
                 CodingGateAction {
                     action_id: "abort".to_string(),

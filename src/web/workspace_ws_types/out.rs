@@ -7,8 +7,8 @@ use crate::product::models::{NodeDetail, WorkspaceType};
 use super::artifact::ArtifactPayload;
 use super::artifact_version::{ArtifactVersion, ArtifactVersionSummary};
 use super::common::{
-    ChoiceOption, ProviderConfigSnapshot, ProviderDefaults, WsCheckpointDto, WsExecutionEvent,
-    WsMessageDto, WsPermissionRiskLevel, WsProviderConfig, WsProviderStatus,
+    ChoiceOption, ChoiceQuestion, ProviderConfigSnapshot, ProviderDefaults, WsCheckpointDto,
+    WsExecutionEvent, WsMessageDto, WsPermissionRiskLevel, WsProviderConfig, WsProviderStatus,
 };
 use super::review::{ReviewFinding, ReviewGate, ReviewVerdictType, WorkItemPlanReviewComplete};
 use super::timeline::{NodeDetailSummary, TimelineNode, TimelineNodeStatus};
@@ -50,6 +50,7 @@ pub enum WsOutMessage {
         options: Vec<ChoiceOption>,
         allow_multiple: bool,
         allow_free_text: bool,
+        questions: Vec<ChoiceQuestion>,
         source: String,
     },
     ProviderStatus {

@@ -236,6 +236,7 @@ const store = useWorkspaceStore.getState();
           request_id: msg.id as string,
           prompt: msg.prompt as string,
           options: (msg.options as unknown[]) ?? [],
+          questions: Array.isArray(msg.questions) ? msg.questions : [],
           allow_multiple: msg.allow_multiple === true,
           allow_free_text: msg.allow_free_text === true,
           source: typeof msg.source === "string" ? msg.source : "provider_choice",

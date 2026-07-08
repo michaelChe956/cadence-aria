@@ -11,7 +11,7 @@ import type {
   IssueWorkItemPlanDetailDto,
   WorkItemSplitFinding,
 } from "./work-item-plan";
-import type { ArtifactVersion, WorkspaceSession } from "./workspace";
+import type { ArtifactVersion, WorkspaceSession, WorkspaceSessionSummary } from "./workspace";
 
 export type StorySpec = {
   story_spec_id: string;
@@ -47,6 +47,11 @@ export type LifecycleWorkItem = {
   latest_attempt: CodingAttempt | null;
   artifact_versions: ArtifactVersion[];
   work_item_set_id: string | null;
+  source_work_item_plan_id?: string | null;
+  source_outline_id?: string | null;
+  source_draft_id?: string | null;
+  planned_implementation_context?: string | null;
+  planned_handoff_summary?: string | null;
   kind: WorkItemKind;
   sequence_hint: number | null;
   depends_on: string[];
@@ -69,7 +74,7 @@ export type IssueLifecycleResponse = {
   design_specs: DesignSpec[];
   work_item_plans: IssueWorkItemPlanDetailDto[];
   work_items: LifecycleWorkItem[];
-  workspace_sessions: WorkspaceSession[];
+  workspace_sessions: WorkspaceSessionSummary[];
   coding_attempts: CodingAttempt[];
 };
 

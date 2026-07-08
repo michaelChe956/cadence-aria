@@ -197,6 +197,12 @@ fn app_with_hanging_coding_attempt(root_path: &Path) -> axum::Router {
 }
 
 fn app_with_running_testing_attempt(root_path: &std::path::Path) -> axum::Router {
+    app_with_running_testing_attempt_and_state(root_path).0
+}
+
+fn app_with_running_testing_attempt_and_state(
+    root_path: &std::path::Path,
+) -> (axum::Router, WebAppState) {
     let store = CodingAttemptStore::new(ProductAppPaths::new(root_path.join(".aria")));
     let attempt = store
         .create_attempt(CreateCodingAttemptInput {
@@ -244,10 +250,11 @@ fn app_with_running_testing_attempt(root_path: &std::path::Path) -> axum::Router
             artifact_refs: Vec::new(),
         })
         .expect("save testing node");
-    build_web_router(WebAppState::new(
+    let state = WebAppState::new(
         root_path.to_path_buf(),
         WebRuntime::new_fake(root_path.to_path_buf()),
-    ))
+    );
+    (build_web_router(state.clone()), state)
 }
 
 fn app_with_final_confirm_attempt(root_path: &std::path::Path) -> axum::Router {
@@ -372,84 +379,6 @@ async fn wait_for_stage_gate(
         }
     }
     panic!("expected stage gate for {stage:?}");
-}
-
-fn is_testing_result_review_gate(gate: &CodingGateRequired) -> bool {
-    gate.reason_code.as_deref() == Some("testing_result_review_required")
-}
-
-async fn respond_to_testing_result_review_gate(
-    ws: &mut tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
-    gate: &CodingGateRequired,
-) -> bool {
-    if !is_testing_result_review_gate(gate) {
-        return false;
-    }
-    send_json(
-        ws,
-        &CodingWsInMessage::GateResponse {
-            gate_id: gate.gate_id.clone(),
-            action_id: "accept_testing_result".to_string(),
-            extra_context: None,
-        },
-    )
-    .await;
-    true
-}
-
-async fn wait_for_testing_result_review_gate(
-    ws: &mut tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
-) -> CodingGateRequired {
-    let mut confirmed_stage_gates = HashSet::new();
-    for _ in 0..80 {
-        match recv_json(ws).await {
-            CodingWsOutMessage::CodingGateRequired { gate }
-                if gate.reason_code.as_deref() == Some("testing_result_review_required") =>
-            {
-                return gate;
-            }
-            CodingWsOutMessage::CodingSessionState { pending_gates, .. } => {
-                if let Some(gate) = pending_gates.iter().find(|gate| {
-                    gate.reason_code.as_deref() == Some("testing_result_review_required")
-                }) {
-                    return gate.clone();
-                }
-                for gate in pending_gates
-                    .into_iter()
-                    .filter(|gate| gate.kind == CodingGateKind::StageGate)
-                {
-                    if let Some(stage) = gate.stage
-                        && confirmed_stage_gates.insert(gate.gate_id)
-                    {
-                        send_json(ws, &CodingWsInMessage::StageGateConfirm { stage }).await;
-                    }
-                }
-            }
-            CodingWsOutMessage::CodingGateRequired { gate }
-                if gate.kind == CodingGateKind::StageGate =>
-            {
-                if let Some(stage) = gate.stage
-                    && confirmed_stage_gates.insert(gate.gate_id)
-                {
-                    send_json(ws, &CodingWsInMessage::StageGateConfirm { stage }).await;
-                }
-            }
-            CodingWsOutMessage::CodingTimelineNodeCreated { node }
-                if node.stage == CodingExecutionStage::Rework =>
-            {
-                panic!("analyst started before tester result review gate was accepted");
-            }
-            CodingWsOutMessage::CodingProtocolError { code, message } => {
-                panic!("unexpected coding protocol error {code}: {message}");
-            }
-            _ => {}
-        }
-    }
-    panic!("expected testing result review gate");
 }
 
 async fn wait_for_timeline_node(
@@ -630,14 +559,6 @@ impl StreamingProviderAdapter for FullChainStreamingProvider {
                 })
                 .expect("send coding done");
             }
-            AdapterRole::Reviewer
-                if input.output_schema == "coding_workspace_analyst_verdict_json" =>
-            {
-                tx.try_send(StreamChunk::Done {
-                    full_output: r#"{"verdict":"no_issue","summary":"testing ok"}"#.to_string(),
-                })
-                .expect("send analyst done");
-            }
             AdapterRole::Reviewer => {
                 tx.try_send(StreamChunk::Text("review approved".to_string()))
                     .expect("send review chunk");
@@ -657,6 +578,3 @@ impl StreamingProviderAdapter for FullChainStreamingProvider {
         Ok(rx)
     }
 }
-
-struct TestingBlockedProvider;
-

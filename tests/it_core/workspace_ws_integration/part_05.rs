@@ -73,6 +73,7 @@ impl StreamingProviderAdapter for ChoiceThenHangingStreamingProvider {
                     }],
                     allow_multiple: false,
                     allow_free_text: false,
+                    questions: vec![],
                     source: ChoiceRequestSource::ProviderChoice,
                 }))
                 .await;
@@ -137,6 +138,7 @@ impl StreamingProviderAdapter for ChoiceThenCompletingStreamingProvider {
                     }],
                     allow_multiple: false,
                     allow_free_text: false,
+                    questions: vec![],
                     source: ChoiceRequestSource::ProviderChoice,
                 }))
                 .await;
@@ -215,6 +217,7 @@ impl StreamingProviderAdapter for SequencedChoiceCompletingProvider {
                     }],
                     allow_multiple: false,
                     allow_free_text: false,
+                    questions: vec![],
                     source: ChoiceRequestSource::ProviderChoice,
                 }))
                 .await;
@@ -434,6 +437,15 @@ async fn lifecycle_json(root: &std::path::Path) -> Value {
     .await;
     assert_eq!(status, StatusCode::OK);
     lifecycle
+}
+
+fn persisted_workspace_messages(
+    root: &std::path::Path,
+) -> Vec<cadence_aria::product::models::WorkspaceMessageRecord> {
+    LifecycleStore::new(ProductAppPaths::new(root.join(".aria")))
+        .get_workspace_session("workspace_session_0001")
+        .expect("workspace session")
+        .messages
 }
 
 async fn send_json(
