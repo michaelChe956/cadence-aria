@@ -148,6 +148,7 @@ impl WorkspaceEngine {
                 previous_plan.issue_id.clone(),
                 work_item_id,
                 now.to_string(),
+                self.session.repository_path.as_deref(),
             ));
         }
         let work_item_ids: Vec<String> = outline_order

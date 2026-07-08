@@ -71,6 +71,7 @@ use crate::web::workspace_ws_types::{
 mod artifact_constraints;
 mod author_confirm;
 mod compile;
+mod compile_parse;
 mod controls;
 mod decisions;
 mod draft_batch;
@@ -95,7 +96,7 @@ pub use types::{
 };
 
 pub(crate) use artifact_constraints::*;
-pub(crate) use compile::*;
+pub(crate) use compile_parse::*;
 pub(crate) use mappings::*;
 pub(crate) use parsers::*;
 pub(crate) use plan_outline::*;
