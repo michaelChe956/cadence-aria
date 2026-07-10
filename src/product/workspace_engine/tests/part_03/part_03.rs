@@ -445,6 +445,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 struct QueuedReviewProvider {
     outputs: Arc<Mutex<VecDeque<String>>>,
     prompts: Arc<Mutex<Vec<String>>>,
+    resume_provider_session_ids: Arc<Mutex<Vec<Option<String>>>>,
     starts: Arc<AtomicUsize>,
 }
 
@@ -453,6 +454,7 @@ impl QueuedReviewProvider {
         Self {
             outputs: Arc::new(Mutex::new(outputs.into())),
             prompts: Arc::new(Mutex::new(Vec::new())),
+            resume_provider_session_ids: Arc::new(Mutex::new(Vec::new())),
             starts: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -467,6 +469,10 @@ impl StreamingProviderAdapter for QueuedReviewProvider {
     ) -> Result<ProviderSession, ProviderAdapterError> {
         let start = self.starts.fetch_add(1, Ordering::SeqCst) + 1;
         self.prompts.lock().unwrap().push(input.prompt.clone());
+        self.resume_provider_session_ids
+            .lock()
+            .unwrap()
+            .push(input.resume_provider_session_id.clone());
         let template = self
             .outputs
             .lock()
@@ -595,6 +601,10 @@ async fn review_structured_output_repair_succeeds_without_new_round() {
     assert!(prompts[1].contains("Artifact 未覆盖失败路径"));
     assert!(prompts[1].contains("不得改变 verdict、summary、findings"));
     drop(prompts);
+    assert_eq!(
+        provider.resume_provider_session_ids.lock().unwrap()[1],
+        Some("review-session-1".to_string())
+    );
 
     let verdict = engine
         .latest_review_verdict

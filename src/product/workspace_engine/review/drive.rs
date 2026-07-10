@@ -46,15 +46,6 @@ impl WorkspaceEngine {
         match self.parse_review_completion_for_active_node(&first_completion) {
             Ok(verdict) => self.complete_review(first_completion, verdict).await,
             Err(first_error) if first_error.is_repairable() => {
-                self.emit_execution_event(
-                    structured_output_repair_event(
-                        ProviderExecutionEventStatus::Started,
-                        first_error.code(),
-                    ),
-                    self.active_node_id.clone(),
-                    Some(reviewer.clone()),
-                )
-                .await;
                 let repair_input = match self.build_review_repair_input(
                     &input,
                     &first_completion,
@@ -63,31 +54,44 @@ impl WorkspaceEngine {
                 ) {
                     Ok(input) => input,
                     Err(_) => {
-                        self.emit_execution_event(
-                            structured_output_repair_event(
-                                ProviderExecutionEventStatus::Failed,
-                                first_error.code(),
-                            ),
-                            self.active_node_id.clone(),
-                            Some(reviewer.clone()),
-                        )
-                        .await;
                         let verdict =
                             fallback_review_verdict(&first_completion, &first_error, false);
                         self.complete_review(first_completion, verdict).await;
                         return;
                     }
                 };
+                let repair_node_id = self.active_node_id.clone();
+                self.emit_execution_event(
+                    structured_output_repair_event(
+                        ProviderExecutionEventStatus::Started,
+                        first_error.code(),
+                    ),
+                    repair_node_id.clone(),
+                    Some(reviewer.clone()),
+                )
+                .await;
                 let repair_session = provider.start(repair_input, self.cancel.clone()).await;
-                let ReviewProviderRunResult::Completed(repaired_completion) = self
+                let repair_result = self
                     .drive_reviewer_provider_session_once(
                         repair_session,
                         &mut command_rx,
                         &reviewer,
                     )
-                    .await
-                else {
-                    return;
+                    .await;
+                let repaired_completion = match repair_result {
+                    ReviewProviderRunResult::Completed(completion) => completion,
+                    ReviewProviderRunResult::Terminal => {
+                        self.emit_execution_event(
+                            structured_output_repair_event(
+                                ProviderExecutionEventStatus::Failed,
+                                first_error.code(),
+                            ),
+                            repair_node_id,
+                            Some(reviewer.clone()),
+                        )
+                        .await;
+                        return;
+                    }
                 };
 
                 match self.parse_review_completion_for_active_node(&repaired_completion) {
@@ -110,7 +114,7 @@ impl WorkspaceEngine {
                                 ProviderExecutionEventStatus::Completed,
                                 first_error.code(),
                             ),
-                            self.active_node_id.clone(),
+                            repair_node_id.clone(),
                             Some(reviewer.clone()),
                         )
                         .await;
@@ -123,7 +127,7 @@ impl WorkspaceEngine {
                                 ProviderExecutionEventStatus::Failed,
                                 error.code(),
                             ),
-                            self.active_node_id.clone(),
+                            repair_node_id.clone(),
                             Some(reviewer.clone()),
                         )
                         .await;
@@ -145,7 +149,7 @@ impl WorkspaceEngine {
                                 ProviderExecutionEventStatus::Failed,
                                 second_error.code(),
                             ),
-                            self.active_node_id.clone(),
+                            repair_node_id,
                             Some(reviewer.clone()),
                         )
                         .await;

@@ -10,6 +10,11 @@ impl WorkspaceEngine {
         error: &ReviewCompletionError,
         provider_session_id: Option<String>,
     ) -> Result<StreamingProviderInput, String> {
+        let provider_session_id = provider_session_id
+            .filter(|session_id| !session_id.trim().is_empty())
+            .ok_or_else(|| {
+                "structured output repair requires a non-empty provider session id".to_string()
+            })?;
         let nonce = structured_output_nonce();
         let recoverable_value = error
             .recoverable_value()
@@ -43,7 +48,7 @@ impl WorkspaceEngine {
             prompt,
             working_dir: base_input.working_dir.clone(),
             workspace_session_id: base_input.workspace_session_id.clone(),
-            resume_provider_session_id: provider_session_id,
+            resume_provider_session_id: Some(provider_session_id),
             permission_mode: ProviderPermissionMode::Supervised,
             structured_output_contract: Some(StructuredOutputContract { nonce, schema_name }),
             env_vars: base_input.env_vars.clone(),
