@@ -295,12 +295,12 @@ where
                 &cancel,
             )
             .await?;
-            send_provider_event(
-                &event_tx,
-                ProviderEvent::Completed(ProviderCompletion::plain(full_output, thread_id)),
-                &cancel,
-            )
-            .await?;
+            let completion = ProviderCompletion::from_output(
+                full_output,
+                input.structured_output_contract.as_ref(),
+                thread_id,
+            );
+            send_provider_event(&event_tx, ProviderEvent::Completed(completion), &cancel).await?;
             return Ok(());
         }
 

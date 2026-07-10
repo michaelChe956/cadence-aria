@@ -1,5 +1,6 @@
 use super::ClaudeCodeProvider;
 use super::*;
+use crate::cross_cutting::structured_output::StructuredOutputContract;
 
 pub(crate) async fn terminate_aborted_child(child: &mut AsyncGroupChild) {
     #[cfg(unix)]
@@ -38,6 +39,7 @@ pub(crate) async fn read_claude_stream(
     bridge: ApprovalBridge,
     event_tx: mpsc::Sender<ProviderEvent>,
     cancel: CancellationToken,
+    structured_output_contract: Option<StructuredOutputContract>,
 ) -> Result<ClaudeStreamOutcome, ProviderAdapterError> {
     let mut lines = BufReader::new(stdout).lines();
     let mut pending_tool_uses: HashMap<String, ToolUseBlock> = HashMap::new();
@@ -365,17 +367,13 @@ pub(crate) async fn read_claude_stream(
                 &cancel,
             )
             .await?;
-            send_provider_event(
-                &event_tx,
-                ProviderEvent::Completed(
-                    crate::cross_cutting::streaming_provider::ProviderCompletion::plain(
-                        full_output,
-                        provider_session_id,
-                    ),
-                ),
-                &cancel,
-            )
-            .await?;
+            let completion =
+                crate::cross_cutting::streaming_provider::ProviderCompletion::from_output(
+                    full_output,
+                    structured_output_contract.as_ref(),
+                    provider_session_id,
+                );
+            send_provider_event(&event_tx, ProviderEvent::Completed(completion), &cancel).await?;
             return Ok(ClaudeStreamOutcome::TerminalEventEmitted);
         }
     }

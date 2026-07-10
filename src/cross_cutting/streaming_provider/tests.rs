@@ -245,6 +245,39 @@ async fn fake_streaming_provider_session_emits_text_and_completed() {
 }
 
 #[tokio::test]
+async fn fake_streaming_provider_parses_requested_structured_output() {
+    let provider = FakeStreamingProvider;
+    let mut input = make_provider_input("请作为 reviewer 审核当前 Workspace 产物。");
+    input.role = crate::protocol::contracts::AdapterRole::Reviewer;
+    input.structured_output_contract = Some(StructuredOutputContract {
+        nonce: "96aca42f".to_string(),
+        schema_name: "workspace_review".to_string(),
+    });
+    let mut session = provider
+        .start(input, CancellationToken::new())
+        .await
+        .expect("start provider");
+
+    let completion = loop {
+        match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+            .await
+            .expect("provider should emit completion")
+            .expect("provider event channel should stay open")
+        {
+            ProviderEvent::Completed(completion) => break completion,
+            ProviderEvent::TextDelta { .. } => {}
+            other => panic!("unexpected provider event: {other:?}"),
+        }
+    };
+
+    assert!(matches!(
+        completion.structured_output,
+        StructuredOutputState::Parsed(ref value) if value["verdict"] == "pass"
+    ));
+    assert_eq!(completion.readable_output, "审核说明");
+}
+
+#[tokio::test]
 async fn fake_streaming_provider_outputs_work_item_split_sentinel() {
     let provider = FakeStreamingProvider;
     let input = StreamingProviderInput {

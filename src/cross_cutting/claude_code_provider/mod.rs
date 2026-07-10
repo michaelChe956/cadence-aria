@@ -403,6 +403,7 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
         let (event_tx, event_rx) = mpsc::channel(32);
         let bridge = ApprovalBridge::new(input.permission_mode.clone(), event_tx.clone());
         let commands = bridge.command_sender();
+        let structured_output_contract = input.structured_output_contract.clone();
 
         let _ = event_tx
             .send(ProviderEvent::StatusChanged(ProviderStatus::Starting))
@@ -484,8 +485,15 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
                 }))
                 .await;
 
-            let result =
-                stream::read_claude_stream(stdout, stdin, bridge, event_tx.clone(), cancel).await;
+            let result = stream::read_claude_stream(
+                stdout,
+                stdin,
+                bridge,
+                event_tx.clone(),
+                cancel,
+                structured_output_contract,
+            )
+            .await;
             match result {
                 Ok(ClaudeStreamOutcome::Aborted) => {
                     stderr_task.abort();

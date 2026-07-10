@@ -359,6 +359,31 @@ fn build_work_item_plan_review_input_includes_trimmed_candidate_fields() {
     );
     assert!(input.prompt.contains("\"summary\""));
     assert!(input.prompt.contains("\"findings\""));
+    assert_review_contract(&input, "work_item_plan_review");
+}
+
+#[test]
+fn build_review_input_carries_workspace_review_contract_for_general_artifacts() {
+    for workspace_type in [
+        WorkspaceType::Story,
+        WorkspaceType::Design,
+        WorkspaceType::WorkItem,
+    ] {
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let mut session = make_session(&format!("sess_review_contract_{workspace_type:?}"));
+        session.workspace_type = workspace_type;
+        session.artifact = Some(artifact_payload("# Artifact\n\n## 内容\n待审核。\n"));
+        let checkpoint_tmp = TempDir::new().expect("checkpoint tempdir");
+        let engine = WorkspaceEngine::new(
+            Arc::new(CheckpointStore::new(checkpoint_tmp.path().to_path_buf())),
+            event_tx,
+            session,
+        );
+
+        let input = engine.build_review_input().expect("review input");
+
+        assert_review_contract(&input, "workspace_review");
+    }
 }
 
 #[test]
@@ -410,6 +435,7 @@ fn build_work_item_plan_outline_review_input_includes_boundary_rules() {
     }
     assert!(input.prompt.contains("单个 Claude Code 或 Codex coding 会话"));
     assert!(input.prompt.contains("小于 20k"));
+    assert_review_contract(&input, "work_item_plan_outline_review");
 }
 
 #[tokio::test]
@@ -429,6 +455,7 @@ async fn build_work_item_draft_review_input_includes_boundary_rules() {
         .expect("draft review input");
 
     assert_work_item_plan_boundary_rules(&input.prompt);
+    assert_review_contract(&input, "work_item_plan_item_review");
 }
 
 #[tokio::test]
@@ -443,6 +470,23 @@ async fn build_work_item_batch_review_input_includes_boundary_rules() {
         .expect("batch review input");
 
     assert_work_item_plan_boundary_rules(&input.prompt);
+    assert_review_contract(&input, "work_item_plan_batch_review");
+}
+
+fn assert_review_contract(input: &StreamingProviderInput, expected_schema_name: &str) {
+    let contract = input
+        .structured_output_contract
+        .as_ref()
+        .expect("review input should carry structured output contract");
+    assert_eq!(contract.schema_name, expected_schema_name);
+    assert_eq!(
+        input
+            .prompt
+            .matches(&format!("nonce=\"{}\"", contract.nonce))
+            .count(),
+        2,
+        "review prompt should use the same nonce in both sentinel tags"
+    );
 }
 
 fn assert_work_item_plan_boundary_rules(prompt: &str) {

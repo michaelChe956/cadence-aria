@@ -1,8 +1,78 @@
 use crate::cross_cutting::streaming_provider::{
-    ProviderEvent, ProviderExecutionEventStatus, ProviderPermissionMode, StreamingProviderAdapter,
+    ProviderCompletion, ProviderEvent, ProviderExecutionEventStatus, ProviderPermissionMode,
+    StreamingProviderAdapter,
+};
+use crate::cross_cutting::structured_output::{
+    StructuredOutputContract, StructuredOutputErrorCode, StructuredOutputState,
 };
 
 use super::*;
+
+async fn recv_completion(events: &mut mpsc::Receiver<ProviderEvent>) -> ProviderCompletion {
+    loop {
+        match tokio::time::timeout(TEST_TIMEOUT, events.recv())
+            .await
+            .expect("provider should emit completion")
+            .expect("provider event channel should stay open")
+        {
+            ProviderEvent::Completed(completion) => return completion,
+            ProviderEvent::StatusChanged(_)
+            | ProviderEvent::Execution(_)
+            | ProviderEvent::TextDelta { .. }
+            | ProviderEvent::PermissionRequest(_)
+            | ProviderEvent::ChoiceRequest(_)
+            | ProviderEvent::ToolCall(_)
+            | ProviderEvent::ToolResult(_) => {}
+            ProviderEvent::Failed { message } => panic!("provider failed: {message}"),
+            ProviderEvent::ProtocolError { message, .. } => {
+                panic!("provider protocol error: {message}")
+            }
+            ProviderEvent::PermissionTimeout { permission_id } => {
+                panic!("provider permission timed out: {permission_id}")
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn claude_provider_classifies_missing_end_nonce() {
+    let fixture = write_fixture(
+        "claude_structured_output_fixture.sh",
+        r##"#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == "--version" ]]; then
+  echo "claude 2.1.160"
+  exit 0
+fi
+
+while IFS= read -r line; do
+  if [[ "$line" == *'"user"'* ]]; then
+    echo '{"type":"result","subtype":"success","is_error":false,"result":"审核说明\n<ARIA_STRUCTURED_OUTPUT nonce=\"96aca42f\">{\"verdict\":\"revise\",\"summary\":\"需要修正\",\"findings\":[]}</ARIA_STRUCTURED_OUTPUT>","session_id":"claude_structured_session"}'
+    exit 0
+  fi
+done
+"##,
+    );
+    let provider = ClaudeCodeProvider::new(fixture);
+    let mut input = streaming_input(ProviderType::ClaudeCode, ProviderPermissionMode::Supervised);
+    input.structured_output_contract = Some(StructuredOutputContract {
+        nonce: "96aca42f".to_string(),
+        schema_name: "workspace_review".to_string(),
+    });
+    let mut session = provider
+        .start(input, CancellationToken::new())
+        .await
+        .expect("start provider");
+
+    let completion = recv_completion(&mut session.events).await;
+
+    let StructuredOutputState::Failed(error) = completion.structured_output else {
+        panic!("expected structured output failure");
+    };
+    assert_eq!(error.code, StructuredOutputErrorCode::MissingEndNonce);
+    assert_eq!(completion.readable_output, "审核说明");
+}
 
 #[tokio::test]
 async fn claude_provider_emits_assistant_final_text_after_stream_delta_when_result_is_empty() {

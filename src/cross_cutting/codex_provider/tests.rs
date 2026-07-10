@@ -7,10 +7,11 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::cross_cutting::streaming_provider::{
-    ChoiceAnswerData, ProviderCommand, ProviderEvent, ProviderExecutionEventKind,
-    ProviderExecutionEventStatus, ProviderPermissionMode, StreamingProviderAdapter,
-    StreamingProviderInput,
+    ChoiceAnswerData, ProviderCommand, ProviderCompletion, ProviderEvent,
+    ProviderExecutionEventKind, ProviderExecutionEventStatus, ProviderPermissionMode,
+    StreamingProviderAdapter, StreamingProviderInput,
 };
+use crate::cross_cutting::structured_output::{StructuredOutputContract, StructuredOutputState};
 use crate::protocol::contracts::{AdapterRole, ProviderType};
 
 use super::CodexProvider;
@@ -84,6 +85,32 @@ async fn recv_completed(events: &mut mpsc::Receiver<ProviderEvent>) -> String {
     }
 }
 
+async fn recv_completion(events: &mut mpsc::Receiver<ProviderEvent>) -> ProviderCompletion {
+    loop {
+        match tokio::time::timeout(TEST_TIMEOUT, events.recv())
+            .await
+            .expect("provider should emit completion")
+            .expect("provider event channel should stay open")
+        {
+            ProviderEvent::Completed(completion) => return completion,
+            ProviderEvent::StatusChanged(_)
+            | ProviderEvent::Execution(_)
+            | ProviderEvent::TextDelta { .. }
+            | ProviderEvent::PermissionRequest(_)
+            | ProviderEvent::ChoiceRequest(_)
+            | ProviderEvent::ToolCall(_)
+            | ProviderEvent::ToolResult(_) => {}
+            ProviderEvent::Failed { message } => panic!("provider failed: {message}"),
+            ProviderEvent::ProtocolError { message, .. } => {
+                panic!("provider protocol error: {message}")
+            }
+            ProviderEvent::PermissionTimeout { permission_id } => {
+                panic!("provider permission timed out: {permission_id}")
+            }
+        }
+    }
+}
+
 #[test]
 fn codex_provider_enables_default_mode_request_user_input_feature() {
     let provider = CodexProvider::new(PathBuf::from("codex"));
@@ -96,6 +123,30 @@ fn codex_provider_enables_default_mode_request_user_input_feature() {
             "default_mode_request_user_input".to_string(),
         ]
     );
+}
+
+#[tokio::test]
+async fn codex_provider_carries_structured_completion() {
+    let fixture =
+        executable_fixture("tests/fixtures/provider/codex_app_server_structured_output_fixture.sh");
+    let provider = CodexProvider::new(fixture);
+    let mut input = streaming_input(ProviderType::Codex, ProviderPermissionMode::Auto);
+    input.structured_output_contract = Some(StructuredOutputContract {
+        nonce: "96aca42f".to_string(),
+        schema_name: "workspace_review".to_string(),
+    });
+    let mut session = provider
+        .start(input, CancellationToken::new())
+        .await
+        .expect("start provider");
+
+    let completion = recv_completion(&mut session.events).await;
+
+    assert_eq!(completion.readable_output, "审核说明");
+    assert!(matches!(
+        completion.structured_output,
+        StructuredOutputState::Parsed(ref value) if value["verdict"] == "pass"
+    ));
 }
 
 #[tokio::test]

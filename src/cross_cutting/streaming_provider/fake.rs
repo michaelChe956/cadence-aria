@@ -4,6 +4,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
+use crate::protocol::contracts::AdapterRole;
 
 use super::{
     ProviderCommand, ProviderCompletion, ProviderEvent, ProviderSession, StreamingProviderAdapter,
@@ -27,7 +28,8 @@ impl StreamingProviderAdapter for FakeStreamingProvider {
     ) -> Result<ProviderSession, ProviderAdapterError> {
         let (event_tx, event_rx) = mpsc::channel(32);
         let (command_tx, mut command_rx) = mpsc::channel(8);
-        let output = fake_workspace_markdown(&input.prompt);
+        let output = fake_provider_output(&input);
+        let structured_output_contract = input.structured_output_contract;
 
         tokio::spawn(async move {
             let chunks = fake_stream_chunks(&output);
@@ -54,9 +56,11 @@ impl StreamingProviderAdapter for FakeStreamingProvider {
             if fake_streaming_should_stop(&cancel, &mut command_rx, &mut commands_open).await {
                 return;
             }
+            let completion =
+                ProviderCompletion::from_output(output, structured_output_contract.as_ref(), None);
             let _ = fake_streaming_send_event(
                 &event_tx,
-                ProviderEvent::Completed(ProviderCompletion::plain(output, None)),
+                ProviderEvent::Completed(completion),
                 &cancel,
                 &mut command_rx,
                 &mut commands_open,
@@ -69,6 +73,18 @@ impl StreamingProviderAdapter for FakeStreamingProvider {
             commands: command_tx,
         })
     }
+}
+
+fn fake_provider_output(input: &StreamingProviderInput) -> String {
+    if matches!(input.role, AdapterRole::Reviewer)
+        && let Some(contract) = input.structured_output_contract.as_ref()
+    {
+        return format!(
+            "审核说明\n<ARIA_STRUCTURED_OUTPUT nonce=\"{}\">{{\"verdict\":\"pass\",\"summary\":\"审核通过\",\"findings\":[]}}</ARIA_STRUCTURED_OUTPUT nonce=\"{}\">",
+            contract.nonce, contract.nonce
+        );
+    }
+    fake_workspace_markdown(&input.prompt)
 }
 
 async fn fake_streaming_should_stop(
