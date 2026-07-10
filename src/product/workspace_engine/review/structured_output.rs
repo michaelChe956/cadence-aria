@@ -47,7 +47,7 @@ impl WorkspaceEngine {
                 }
                 Some(TimelineNodeType::WorkItemDraftReview) => WorkItemPlanReviewScope::Item,
                 Some(TimelineNodeType::WorkItemBatchReview) => WorkItemPlanReviewScope::Batch,
-                _ => WorkItemPlanReviewScope::Batch,
+                _ => WorkItemPlanReviewScope::Outline,
             };
             return parse_work_item_plan_review_value(
                 value,

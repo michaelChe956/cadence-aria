@@ -119,6 +119,21 @@ impl WorkspaceEngine {
             .reviewer_provider
             .clone()
             .unwrap_or(ProviderName::Codex);
+        let generation_round_id = self
+            .work_item_plan_store()
+            .ok()
+            .and_then(|store| {
+                store
+                    .load_active_index(
+                        &self.session.project_id,
+                        &self.session.issue_id,
+                        &self.session.entity_id,
+                    )
+                    .ok()
+                    .flatten()
+            })
+            .map(|index| index.current_generation_round_id)
+            .unwrap_or_else(|| "legacy_work_item_plan_candidate".to_string());
 
         let mut prompt = String::new();
         prompt
@@ -230,9 +245,13 @@ impl WorkspaceEngine {
             nonce: nonce.clone(),
             schema_name: "work_item_plan_review".to_string(),
         };
+        let schema = format!(
+            r#"{{"verdict":"pass|revise|needs_human","review_scope":"outline","generation_round_id":"{}","summary":"一句话摘要","findings":[{{"severity":"blocking|must_fix|strong_recommend_fix|suggestion|minor|optional","message":"问题描述","evidence":"当前产物中的具体证据","impact":"为什么影响或不影响下一阶段","required_action":"需要作者执行的最小动作"}}]}}"#,
+            generation_round_id
+        );
         prompt.push_str(&reviewer_output_contract(
             &nonce,
-            r#"{"verdict":"pass|revise|needs_human","summary":"一句话摘要","findings":[{"severity":"blocking|must_fix|strong_recommend_fix|suggestion|minor|optional","message":"问题描述","evidence":"当前产物中的具体证据","impact":"为什么影响或不影响下一阶段","required_action":"需要作者执行的最小动作"}]}"#,
+            &schema,
             "\n\n请输出审核意见；可以先输出简短可读说明，最终 JSON 必须放在 nonce sentinel block 中，不得使用 Markdown code fence：\n\
              - 只有影响下一阶段可用性的 finding 才能标记为 `blocking`、`must_fix` 或 `strong_recommend_fix`。\n\
              - 风格、措辞、文档美化、未来扩展、非必要补充只能标记为 `suggestion`、`minor` 或 `optional`。\n\
@@ -240,7 +259,7 @@ impl WorkspaceEngine {
              - 如果输出 `verdict=revise`，必须给出至少一个结构化 finding；否则系统会进入人工裁决而不是自动返修。\n\
              - 第二轮及后续 review 只复核上一轮强返修项是否关闭；除非 revision 新引入真正阻塞问题，不得重新发散普通建议。\n\
              - `pass`：产物可进入最终人工确认。\n\
-             - `revise`：仅当存在 blocking/must_fix/strong_recommend_fix finding。\n\
+             - `revise`：仅当存在 blocking/must_fix/strong_recommend_fix finding；语义为重开 Outline 并重新生成拆分。\n\
              - `needs_human`：没有明确可自动返修内容，需要用户做产品/范围判断。\n",
         ));
 

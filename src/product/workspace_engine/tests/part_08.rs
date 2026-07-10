@@ -357,9 +357,47 @@ fn build_work_item_plan_review_input_includes_trimmed_candidate_fields() {
             .prompt
             .contains("\"verdict\":\"pass|revise|needs_human\"")
     );
+    assert!(input.prompt.contains("\"review_scope\":\"outline\""));
+    assert!(
+        input
+            .prompt
+            .contains("\"generation_round_id\":\"legacy_work_item_plan_candidate\"")
+    );
+    assert!(!input.prompt.contains("revise_batch"));
+    assert!(!input.prompt.contains("plan_reopen_required"));
     assert!(input.prompt.contains("\"summary\""));
     assert!(input.prompt.contains("\"findings\""));
     assert_review_contract(&input, "work_item_plan_review");
+}
+
+#[test]
+fn build_work_item_plan_review_input_prefers_active_generation_round() {
+    let (_tmp, _checkpoint_store, lifecycle, plan_id, engine) =
+        make_work_item_plan_engine_with_draft_candidate("sess_wip_review_active_round");
+    WorkItemPlanStore::new(lifecycle.app_paths())
+        .save_active_index(&WorkItemPlanDraftActiveIndex {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            plan_id,
+            current_generation_round_id: "round_active_0007".to_string(),
+            outline_state: "confirmed".to_string(),
+            active_outline_id: None,
+            outline_to_current_draft_id: BTreeMap::new(),
+            draft_statuses: BTreeMap::new(),
+            batches: Vec::new(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        })
+        .expect("save active index");
+
+    let input = engine
+        .build_work_item_plan_review_input()
+        .expect("review input");
+
+    assert!(
+        input
+            .prompt
+            .contains("\"generation_round_id\":\"round_active_0007\"")
+    );
 }
 
 #[test]

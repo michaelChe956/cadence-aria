@@ -78,7 +78,9 @@ impl WorkspaceEngine {
             &session.session_id,
             &timeline_nodes,
         )
-        .or_else(|| latest_review_verdict_from_messages(&session.messages));
+        .or_else(|| {
+            latest_review_verdict_from_messages(&session.messages, &session.workspace_type)
+        });
         let pending_author_choice =
             recover_pending_author_choice(&session, active_node_id.as_deref(), &timeline_nodes);
         Self {

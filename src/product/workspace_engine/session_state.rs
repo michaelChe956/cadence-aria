@@ -253,12 +253,15 @@ pub(crate) fn recover_pending_author_choice(
 
 pub(crate) fn latest_review_verdict_from_messages(
     messages: &[SessionMessage],
+    workspace_type: &WorkspaceType,
 ) -> Option<ReviewVerdict> {
     messages
         .iter()
         .rev()
         .find(|message| message.role == "reviewer")
-        .map(|message| WorkspaceEngine::parse_review_verdict(&message.content))
+        .map(|message| {
+            WorkspaceEngine::parse_review_verdict_for_workspace(&message.content, workspace_type)
+        })
 }
 
 pub(crate) fn latest_review_verdict_from_node_details(

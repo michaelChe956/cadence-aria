@@ -185,12 +185,17 @@ pub(crate) fn parse_work_item_plan_review_value(
         .get("verdict")
         .and_then(|value| value.as_str())
         .ok_or(ReviewStructuredOutputErrorCode::MissingVerdict)?;
-    let parsed_verdict = match verdict {
-        "pass" => WorkItemPlanReviewVerdict::Pass,
-        "revise" => WorkItemPlanReviewVerdict::Revise,
-        "revise_batch" => WorkItemPlanReviewVerdict::ReviseBatch,
-        "needs_human" => WorkItemPlanReviewVerdict::NeedsHuman,
-        "plan_reopen_required" => WorkItemPlanReviewVerdict::PlanReopenRequired,
+    let parsed_verdict = match (&scope, verdict) {
+        (_, "pass") => WorkItemPlanReviewVerdict::Pass,
+        (WorkItemPlanReviewScope::Outline | WorkItemPlanReviewScope::Item, "revise") => {
+            WorkItemPlanReviewVerdict::Revise
+        }
+        (WorkItemPlanReviewScope::Batch, "revise_batch") => WorkItemPlanReviewVerdict::ReviseBatch,
+        (_, "needs_human") => WorkItemPlanReviewVerdict::NeedsHuman,
+        (
+            WorkItemPlanReviewScope::Item | WorkItemPlanReviewScope::Batch,
+            "plan_reopen_required",
+        ) => WorkItemPlanReviewVerdict::PlanReopenRequired,
         _ => return Err(ReviewStructuredOutputErrorCode::InvalidVerdict),
     };
     let summary = value

@@ -353,6 +353,7 @@ impl WorkspaceEngine {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn parse_review_verdict(output: &str) -> ReviewVerdict {
         Self::parse_review_verdict_for_workspace(output, &WorkspaceType::Story)
     }
@@ -368,9 +369,8 @@ impl WorkspaceEngine {
                     &json,
                     &comments,
                     &[],
-                    WorkItemPlanReviewScope::Batch,
+                    WorkItemPlanReviewScope::Outline,
                 )
-                .or_else(|| parse_review_json(&json, &comments))
             } else {
                 parse_review_json(&json, &comments)
             }

@@ -225,6 +225,29 @@ fn parse_work_item_plan_review_value_reports_too_many_invalid_affects_items() {
 }
 
 #[test]
+fn parse_work_item_plan_review_value_rejects_cross_scope_verdicts() {
+    let cases = [
+        (WorkItemPlanReviewScope::Outline, "revise_batch"),
+        (WorkItemPlanReviewScope::Outline, "plan_reopen_required"),
+        (WorkItemPlanReviewScope::Item, "revise_batch"),
+        (WorkItemPlanReviewScope::Batch, "revise"),
+    ];
+
+    for (scope, verdict) in cases {
+        let value = serde_json::json!({
+            "verdict": verdict,
+            "generation_round_id": "round_0001"
+        });
+
+        assert_eq!(
+            parse_work_item_plan_review_value(&value, "", &[], scope.clone()),
+            Err(ReviewStructuredOutputErrorCode::InvalidVerdict),
+            "scope {scope:?} must reject verdict {verdict}"
+        );
+    }
+}
+
+#[test]
 fn review_complete_event_preserves_work_item_plan_extension() {
     let extension = WorkItemPlanReviewComplete {
         verdict: WorkItemPlanReviewVerdict::PlanReopenRequired,
