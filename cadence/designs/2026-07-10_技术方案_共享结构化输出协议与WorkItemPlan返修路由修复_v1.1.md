@@ -3,7 +3,7 @@
 ## 文档信息
 
 - 文档类型：技术方案
-- 版本：v1.0
+- 版本：v1.1
 - 日期：2026-07-10
 - 目标分支：`feat-b-0709`
 - 案例：`Work Item Plan #workspace_session_0003`
@@ -158,6 +158,7 @@ pub struct StructuredOutputError {
     pub message: String,
     pub expected_nonce: Option<String>,
     pub observed_nonce: Option<String>,
+    pub recoverable_value: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -173,10 +174,15 @@ pub enum StructuredOutputErrorCode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderCompletion {
     pub full_output: String,
+    pub readable_output: String,
     pub structured_output: StructuredOutputState,
     pub provider_session_id: Option<String>,
 }
 ```
+
+`readable_output` 由 Adapter 在同一次 sentinel 解析中产生：成功时移除目标 structured block，失败时尽可能移除已定位的 block；无法安全定位结束边界时退回 `full_output`。Workspace 使用 `readable_output` 作为 reviewer comments，`full_output` 仅用于诊断、修复 Prompt 与原始输出查看。
+
+`recoverable_value` 只在 JSON 本身合法、但结束标签或 nonce 契约不合法时存在。格式修复成功后必须比较修复结果与 `recoverable_value`；不一致时禁止自动采用，转人工确认。
 
 `ProviderEvent::Completed` 调整为：
 
@@ -580,4 +586,3 @@ Reviewer 后续轮次优先检查上一轮 finding 是否闭合，再检查返�
 - Story Spec、Design Spec、Work Item、Work Item Plan 的结构化错误恢复测试全部通过。
 - 当前案例下一轮 Outline revision 明确补齐 `it_core` Repository POST 调用方和 fake runtime BootstrapGuard owner。
 - Rust 标准验证命令通过，且任何 Cargo 命令均不使用 `-j 1`。
-
