@@ -523,10 +523,36 @@ async fn queued_review_engine(
     mpsc::Receiver<EngineEvent>,
     String,
 ) {
+    queued_review_engine_for(
+        session_id,
+        WorkspaceType::Story,
+        artifact_payload("# Story Spec\n\n需要审核的候选版本"),
+    )
+    .await
+}
+
+async fn queued_review_engine_for(
+    session_id: &str,
+    workspace_type: WorkspaceType,
+    artifact: ArtifactPayload,
+) -> (
+    TempDir,
+    WorkspaceEngine,
+    mpsc::Receiver<EngineEvent>,
+    String,
+) {
     let (tmp, store) = setup();
     let (tx, rx) = mpsc::channel(64);
     let mut session = make_session(session_id);
-    session.artifact = Some(artifact_payload("# Story Spec\n\n需要审核的候选版本"));
+    session.entity_id = match workspace_type {
+        WorkspaceType::Story => "story_spec_0001",
+        WorkspaceType::Design => "design_spec_0001",
+        WorkspaceType::WorkItem => "work_item_0001",
+        WorkspaceType::WorkItemPlan => "work_item_plan_0001",
+    }
+    .to_string();
+    session.workspace_type = workspace_type;
+    session.artifact = Some(artifact);
     let mut engine = WorkspaceEngine::new(store, tx, session);
     engine.start_review_or_skip().await;
     let review_node_id = engine
@@ -560,75 +586,6 @@ fn valid_structured_output(json: &str) -> String {
     format!(
         "格式修复完成。\n<ARIA_STRUCTURED_OUTPUT nonce=\"__NONCE__\">{json}</ARIA_STRUCTURED_OUTPUT nonce=\"__NONCE__\">"
     )
-}
-
-#[tokio::test]
-async fn review_structured_output_repair_succeeds_without_new_round() {
-    let review_json = r#"{
-        "verdict": "revise",
-        "summary": "补充失败路径",
-        "findings": [{
-            "severity": "must_fix",
-            "message": "缺少失败路径",
-            "evidence": "Artifact 未覆盖失败路径",
-            "impact": "下一阶段无法验收异常流程",
-            "required_action": "补充失败路径说明"
-        }]
-    }"#;
-    let provider = QueuedReviewProvider::new(vec![
-        missing_end_nonce_output(review_json),
-        valid_structured_output(review_json),
-    ]);
-    let (_tmp, mut engine, mut rx, review_node_id) =
-        queued_review_engine("sess_review_repair_success").await;
-
-    engine
-        .drive_review_session(Arc::new(provider.clone()), empty_provider_commands())
-        .await;
-
-    assert_eq!(provider.starts.load(Ordering::SeqCst), 2);
-    assert_eq!(
-        engine
-            .timeline_nodes
-            .iter()
-            .filter(|node| node.node_type == TimelineNodeType::ReviewerRun)
-            .count(),
-        1
-    );
-    let prompts = provider.prompts.lock().unwrap();
-    assert_eq!(prompts.len(), 2);
-    assert!(prompts[1].contains("missing_end_nonce"));
-    assert!(prompts[1].contains("Artifact 未覆盖失败路径"));
-    assert!(prompts[1].contains("不得改变 verdict、summary、findings"));
-    drop(prompts);
-    assert_eq!(
-        provider.resume_provider_session_ids.lock().unwrap()[1],
-        Some("review-session-1".to_string())
-    );
-
-    let verdict = engine
-        .latest_review_verdict
-        .as_ref()
-        .expect("repaired review verdict");
-    assert_eq!(verdict.verdict, ReviewVerdictType::Revise);
-    assert_eq!(verdict.findings.len(), 1);
-    assert_eq!(verdict.findings[0].message, "缺少失败路径");
-    let diagnostic = verdict
-        .structured_output_diagnostic
-        .as_ref()
-        .expect("repair diagnostic");
-    assert!(diagnostic.repair_attempted);
-    assert!(diagnostic.repair_succeeded);
-    assert!(diagnostic.raw_output_preview.is_none());
-
-    let repair_events = repair_event_statuses(&mut rx);
-    assert_eq!(
-        repair_events.last(),
-        Some(&(
-            ProviderExecutionEventStatus::Completed,
-            Some(review_node_id)
-        ))
-    );
 }
 
 #[tokio::test]

@@ -125,6 +125,97 @@ impl StreamingProviderAdapter for RepairTerminalProvider {
 }
 
 #[tokio::test]
+async fn review_structured_output_repair_succeeds_for_all_general_workspace_types() {
+    let review_json = r#"{
+        "verdict": "revise",
+        "summary": "补充失败路径",
+        "findings": [{
+            "severity": "must_fix",
+            "message": "缺少失败路径",
+            "evidence": "Artifact 未覆盖失败路径",
+            "impact": "下一阶段无法验收异常流程",
+            "required_action": "补充失败路径说明"
+        }]
+    }"#;
+    let cases = vec![
+        (
+            WorkspaceType::Story,
+            artifact_payload(&complete_story_artifact("补充格式修复", "修复后可继续审核")),
+        ),
+        (
+            WorkspaceType::Design,
+            artifact_payload(&complete_design_artifact("保持业务 payload", "复用 reviewer session")),
+        ),
+        (
+            WorkspaceType::WorkItem,
+            artifact_payload(&complete_work_item_artifact("修复 reviewer 结构化输出")),
+        ),
+    ];
+
+    for (workspace_type, artifact) in cases {
+        let session_id = format!("sess_review_repair_success_{workspace_type:?}");
+        let provider = QueuedReviewProvider::new(vec![
+            missing_end_nonce_output(review_json),
+            valid_structured_output(review_json),
+        ]);
+        let (_tmp, mut engine, mut rx, review_node_id) =
+            queued_review_engine_for(&session_id, workspace_type, artifact).await;
+
+        engine
+            .drive_review_session(Arc::new(provider.clone()), empty_provider_commands())
+            .await;
+
+        assert_eq!(provider.starts.load(Ordering::SeqCst), 2);
+        let review_nodes = engine
+            .timeline_nodes
+            .iter()
+            .filter(|node| node.node_type == TimelineNodeType::ReviewerRun)
+            .collect::<Vec<_>>();
+        assert_eq!(review_nodes.len(), 1);
+        assert_eq!(review_nodes[0].node_id, review_node_id);
+        assert_eq!(review_nodes[0].round, Some(1));
+        let prompts = provider.prompts.lock().unwrap();
+        assert_eq!(prompts.len(), 2);
+        assert!(prompts[1].contains("missing_end_nonce"));
+        assert!(prompts[1].contains("Artifact 未覆盖失败路径"));
+        assert!(prompts[1].contains("不得改变 verdict、summary、findings"));
+        drop(prompts);
+        assert_eq!(
+            provider.resume_provider_session_ids.lock().unwrap()[1],
+            Some("review-session-1".to_string())
+        );
+
+        let verdict = engine
+            .latest_review_verdict
+            .as_ref()
+            .expect("repaired review verdict");
+        assert_eq!(verdict.verdict, ReviewVerdictType::Revise);
+        assert_eq!(verdict.findings.len(), 1);
+        assert_eq!(verdict.findings[0].message, "缺少失败路径");
+        let diagnostic = verdict
+            .structured_output_diagnostic
+            .as_ref()
+            .expect("repair diagnostic");
+        assert!(diagnostic.repair_attempted);
+        assert!(diagnostic.repair_succeeded);
+        assert!(diagnostic.raw_output_preview.is_none());
+        assert_eq!(
+            repair_event_statuses(&mut rx),
+            vec![
+                (
+                    ProviderExecutionEventStatus::Started,
+                    Some(review_node_id.clone())
+                ),
+                (
+                    ProviderExecutionEventStatus::Completed,
+                    Some(review_node_id)
+                ),
+            ]
+        );
+    }
+}
+
+#[tokio::test]
 async fn repair_terminal_paths_close_started_event_as_failed() {
     for mode in [
         RepairTerminalMode::StartError,
