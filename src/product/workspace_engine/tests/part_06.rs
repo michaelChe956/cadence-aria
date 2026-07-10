@@ -184,6 +184,7 @@ async fn handle_human_confirm_request_change_starts_revision() {
         findings: Vec::new(),
         review_gate: ReviewGate::UserConfirmAllowed,
         work_item_plan_review: None,
+        structured_output_diagnostic: None,
     });
     engine
         .enter_human_confirm(Some("等待人工确认".to_string()))

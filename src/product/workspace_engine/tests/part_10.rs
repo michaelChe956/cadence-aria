@@ -514,3 +514,211 @@ fn parse_review_verdict_revise_without_findings_requires_user_triage() {
     assert_eq!(verdict.review_gate, ReviewGate::UserTriageRequired);
     assert!(verdict.findings.is_empty());
 }
+
+#[test]
+fn generic_workspace_review_parses_provider_structured_value_for_all_artifact_types() {
+    for workspace_type in [
+        WorkspaceType::Story,
+        WorkspaceType::Design,
+        WorkspaceType::WorkItem,
+    ] {
+        let (_tmp, store) = setup();
+        let (tx, _rx) = mpsc::channel(16);
+        let mut session = make_session(&format!("sess_review_value_{workspace_type:?}"));
+        session.workspace_type = workspace_type;
+        let engine = WorkspaceEngine::new(store, tx, session);
+        let completion =
+            crate::cross_cutting::streaming_provider::ProviderCompletion {
+                full_output: "审核通过".to_string(),
+                readable_output: "审核通过".to_string(),
+                structured_output:
+                    crate::cross_cutting::structured_output::StructuredOutputState::Parsed(
+                        serde_json::json!({
+                            "verdict": "pass",
+                            "summary": "审核通过",
+                            "findings": []
+                        }),
+                    ),
+                provider_session_id: None,
+            };
+
+        let verdict = engine
+            .parse_review_completion_for_active_node(&completion)
+            .expect("structured review should parse");
+        assert_eq!(verdict.verdict, ReviewVerdictType::Pass);
+        assert_eq!(verdict.comments, "审核通过");
+    }
+}
+
+#[test]
+fn review_completion_reports_syntax_error() {
+    let (_tmp, store) = setup();
+    let (tx, _rx) = mpsc::channel(16);
+    let engine = WorkspaceEngine::new(store, tx, make_session("sess_review_syntax_error"));
+    let contract = crate::cross_cutting::structured_output::StructuredOutputContract {
+        nonce: "nonce001".to_string(),
+        schema_name: "workspace_review".to_string(),
+    };
+    let completion = crate::cross_cutting::streaming_provider::ProviderCompletion::from_output(
+        "审核意见\n<ARIA_STRUCTURED_OUTPUT nonce=\"nonce001\">{\"verdict\":\"pass\",\"summary\":\"审核通过\"}</ARIA_STRUCTURED_OUTPUT>".to_string(),
+        Some(&contract),
+        None,
+    );
+
+    assert!(matches!(
+        engine.parse_review_completion_for_active_node(&completion),
+        Err(ReviewCompletionError::Syntax(error))
+            if error.code
+                == crate::cross_cutting::structured_output::StructuredOutputErrorCode::MissingEndNonce
+    ));
+}
+
+#[test]
+fn review_completion_reports_strict_schema_errors() {
+    let (_tmp, store) = setup();
+    let (tx, _rx) = mpsc::channel(16);
+    let engine = WorkspaceEngine::new(store, tx, make_session("sess_review_schema_errors"));
+    let cases = [
+        (
+            serde_json::json!({"summary": "missing verdict"}),
+            ReviewStructuredOutputErrorCode::MissingVerdict,
+        ),
+        (
+            serde_json::json!({"verdict": 42}),
+            ReviewStructuredOutputErrorCode::MissingVerdict,
+        ),
+        (
+            serde_json::json!({"verdict": "unknown"}),
+            ReviewStructuredOutputErrorCode::InvalidVerdict,
+        ),
+        (
+            serde_json::json!({
+                "verdict": "pass",
+                "findings": [{"severity": "must_fix", "message": 42}]
+            }),
+            ReviewStructuredOutputErrorCode::MalformedFindings,
+        ),
+    ];
+
+    for (value, expected) in cases {
+        let completion =
+            crate::cross_cutting::streaming_provider::ProviderCompletion {
+                full_output: value.to_string(),
+                readable_output: "审核意见".to_string(),
+                structured_output:
+                    crate::cross_cutting::structured_output::StructuredOutputState::Parsed(value),
+                provider_session_id: None,
+            };
+
+        assert_eq!(
+            engine.parse_review_completion_for_active_node(&completion),
+            Err(ReviewCompletionError::Schema(expected))
+        );
+    }
+}
+
+#[test]
+fn work_item_plan_review_reports_invalid_outline_reference() {
+    let (_tmp, store) = setup();
+    let (tx, _rx) = mpsc::channel(16);
+    let mut session = make_session("sess_review_invalid_outline");
+    session.workspace_type = WorkspaceType::WorkItemPlan;
+    session.artifact = Some(ArtifactPayload::WorkItemPlanOutlineCandidate {
+        outline_candidate: Box::new(WorkItemPlanOutlineCandidateDto {
+            outline: test_work_item_plan_outline(Vec::new()),
+            design_context_gaps: Vec::new(),
+            validator_findings: Vec::new(),
+            context_blockers: Vec::new(),
+            current_generation_round_id: Some("round_0001".to_string()),
+            selected_generation_mode: None,
+        }),
+    });
+    let engine = WorkspaceEngine::new(store, tx, session);
+    let completion = crate::cross_cutting::streaming_provider::ProviderCompletion {
+        full_output: "invalid outline reference".to_string(),
+        readable_output: "invalid outline reference".to_string(),
+        structured_output:
+            crate::cross_cutting::structured_output::StructuredOutputState::Parsed(
+                serde_json::json!({
+                    "verdict": "needs_human",
+                    "target_outline_id": "outline_missing",
+                    "generation_round_id": "round_0001"
+                }),
+            ),
+        provider_session_id: None,
+    };
+
+    assert_eq!(
+        engine.parse_review_completion_for_active_node(&completion),
+        Err(ReviewCompletionError::Schema(
+            ReviewStructuredOutputErrorCode::InvalidOutlineReference
+        ))
+    );
+}
+
+#[test]
+fn work_item_plan_review_reports_invalid_generation_round() {
+    let (_tmp, store) = setup();
+    let (tx, _rx) = mpsc::channel(16);
+    let mut session = make_session("sess_review_invalid_generation_round");
+    session.workspace_type = WorkspaceType::WorkItemPlan;
+    let engine = WorkspaceEngine::new(store, tx, session);
+    let completion = crate::cross_cutting::streaming_provider::ProviderCompletion {
+        full_output: "invalid generation round".to_string(),
+        readable_output: "invalid generation round".to_string(),
+        structured_output:
+            crate::cross_cutting::structured_output::StructuredOutputState::Parsed(
+                serde_json::json!({
+                    "verdict": "needs_human",
+                    "generation_round_id": ""
+                }),
+            ),
+        provider_session_id: None,
+    };
+
+    assert_eq!(
+        engine.parse_review_completion_for_active_node(&completion),
+        Err(ReviewCompletionError::Schema(
+            ReviewStructuredOutputErrorCode::InvalidGenerationRound
+        ))
+    );
+}
+
+#[test]
+fn fallback_review_verdict_records_stable_diagnostic_and_bounded_preview() {
+    let (_tmp, store) = setup();
+    let (tx, _rx) = mpsc::channel(16);
+    let engine = WorkspaceEngine::new(store, tx, make_session("sess_review_fallback"));
+    let contract = crate::cross_cutting::structured_output::StructuredOutputContract {
+        nonce: "nonce001".to_string(),
+        schema_name: "workspace_review".to_string(),
+    };
+    let full_output = format!(
+        "{}<ARIA_STRUCTURED_OUTPUT nonce=\"nonce001\">{{\"verdict\":\"pass\"}}</ARIA_STRUCTURED_OUTPUT>",
+        "x".repeat(2_100)
+    );
+    let completion = crate::cross_cutting::streaming_provider::ProviderCompletion::from_output(
+        full_output,
+        Some(&contract),
+        None,
+    );
+    let error = engine
+        .parse_review_completion_for_active_node(&completion)
+        .expect_err("missing end nonce should fail");
+
+    let verdict = fallback_review_verdict(&completion, &error, false);
+    let diagnostic = verdict
+        .structured_output_diagnostic
+        .expect("fallback diagnostic");
+    assert_eq!(diagnostic.code, "missing_end_nonce");
+    assert!(!diagnostic.repair_attempted);
+    assert!(!diagnostic.repair_succeeded);
+    assert_eq!(
+        diagnostic
+            .raw_output_preview
+            .expect("raw output preview")
+            .chars()
+            .count(),
+        2_048
+    );
+}

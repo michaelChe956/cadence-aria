@@ -9,6 +9,7 @@ use crate::cross_cutting::streaming_provider::{
     ProviderCommand, ProviderEvent, ProviderPermissionMode, StreamingProviderAdapter,
     StreamingProviderInput,
 };
+use crate::cross_cutting::structured_output::{StructuredOutputContract, StructuredOutputState};
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::protocol::contracts::{AdapterRole, ProviderType};
@@ -346,7 +347,10 @@ async fn review_fixture_fake_provider_emits_json_contract_for_reviewer() {
                 workspace_session_id: Some("workspace_session_1".to_string()),
                 resume_provider_session_id: None,
                 permission_mode: ProviderPermissionMode::Supervised,
-                structured_output_contract: None,
+                structured_output_contract: Some(StructuredOutputContract {
+                    nonce: "review01".to_string(),
+                    schema_name: "workspace_review".to_string(),
+                }),
                 env_vars: Default::default(),
                 timeout_secs: 60,
             },
@@ -360,6 +364,10 @@ async fn review_fixture_fake_provider_emits_json_contract_for_reviewer() {
         match event {
             ProviderEvent::TextDelta { content } => output.push_str(&content),
             ProviderEvent::Completed(completion) => {
+                assert!(matches!(
+                    &completion.structured_output,
+                    StructuredOutputState::Parsed(value) if value["verdict"] == "revise"
+                ));
                 let full_output = completion.full_output;
                 output.push_str(&full_output);
                 break;

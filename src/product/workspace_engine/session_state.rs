@@ -303,6 +303,7 @@ pub(crate) fn review_complete_event_from_verdict(
         findings: verdict.findings.clone(),
         review_gate: verdict.review_gate.clone(),
         work_item_plan_review: verdict.work_item_plan_review.clone(),
+        structured_output_diagnostic: verdict.structured_output_diagnostic.clone(),
     }
 }
 

@@ -115,6 +115,7 @@ async fn work_item_plan_item_plan_reopen_review_decision_restarts_outline_revisi
             affects_items: vec![],
             warnings: vec![],
         }),
+        structured_output_diagnostic: None,
     });
     engine
         .enter_review_decision(1, "需要重开 Outline".to_string())

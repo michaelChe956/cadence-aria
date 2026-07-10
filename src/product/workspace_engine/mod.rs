@@ -11,11 +11,12 @@ use crate::cross_cutting::provider_adapter::{
 };
 use crate::cross_cutting::streaming_provider::{
     ChoiceAnswerData, ChoiceOptionData, ChoiceQuestionData, ChoiceRequestData, ChoiceRequestSource,
-    ProviderCommand, ProviderEvent, ProviderExecutionEvent, ProviderExecutionEventKind,
-    ProviderExecutionEventStatus, ProviderPermissionMode, ProviderSession, ProviderStatus,
-    ProviderToolCall, ProviderToolResult, RiskLevel, StreamingProviderAdapter,
-    StreamingProviderInput,
+    ProviderCommand, ProviderCompletion, ProviderEvent, ProviderExecutionEvent,
+    ProviderExecutionEventKind, ProviderExecutionEventStatus, ProviderPermissionMode,
+    ProviderSession, ProviderStatus, ProviderToolCall, ProviderToolResult, RiskLevel,
+    StreamingProviderAdapter, StreamingProviderInput,
 };
+use crate::cross_cutting::structured_output::{StructuredOutputError, StructuredOutputState};
 use crate::product::artifact_extraction::extract_artifact_content;
 use crate::product::checkpoint_store::CheckpointStore;
 use crate::product::json_store::ProductStoreError;
@@ -54,12 +55,13 @@ use crate::web::workspace_ws_types::{
     ArtifactPayload, ArtifactVersion, ArtifactVersionSummary, AuthorDecision, ChoiceOption,
     ChoiceQuestion, HumanConfirmDecision, NodeDetailSummary, ProviderConfigSnapshot,
     RepositoryProfileDto, ReviewFinding, ReviewFindingSeverity, ReviewGate, ReviewVerdict,
-    ReviewVerdictType, TimelineNode, TimelineNodeRetry, TimelineNodeRetryError, TimelineNodeStatus,
-    TimelineNodeType, ValidatorFindingDto, VerificationCommandDto, VerificationManualCheckDto,
-    VerificationPlanDto, WorkItemBatchDecisionDto, WorkItemBatchFailureSummaryDto,
-    WorkItemBatchStatePayload, WorkItemCandidateDto, WorkItemCandidateMetaDto,
-    WorkItemDependencyEdgeDto, WorkItemDraftCandidatePayload, WorkItemDraftDecisionDto,
-    WorkItemGenerationModeDto, WorkItemPlanCandidateDto, WorkItemPlanCompileRecoveryActionDto,
+    ReviewVerdictType, StructuredOutputDiagnostic, TimelineNode, TimelineNodeRetry,
+    TimelineNodeRetryError, TimelineNodeStatus, TimelineNodeType, ValidatorFindingDto,
+    VerificationCommandDto, VerificationManualCheckDto, VerificationPlanDto,
+    WorkItemBatchDecisionDto, WorkItemBatchFailureSummaryDto, WorkItemBatchStatePayload,
+    WorkItemCandidateDto, WorkItemCandidateMetaDto, WorkItemDependencyEdgeDto,
+    WorkItemDraftCandidatePayload, WorkItemDraftDecisionDto, WorkItemGenerationModeDto,
+    WorkItemPlanCandidateDto, WorkItemPlanCompileRecoveryActionDto,
     WorkItemPlanCompileReportPayload, WorkItemPlanContextBlockerDto,
     WorkItemPlanContextBlockerPayload, WorkItemPlanDto, WorkItemPlanOutlineCandidateDto,
     WorkItemPlanReviewAction, WorkItemPlanReviewAffectedItem, WorkItemPlanReviewComplete,
@@ -101,6 +103,8 @@ pub(crate) use mappings::*;
 pub(crate) use parsers::*;
 pub(crate) use plan_outline::*;
 pub(crate) use prompts::*;
+#[cfg(test)]
+pub(crate) use review::{ReviewCompletionError, fallback_review_verdict};
 pub(crate) use session_state::*;
 pub(crate) use types::{
     ArtifactRetryContext, AuthorPromptMode, PendingAuthorChoice, ProviderSessionDriveInput,

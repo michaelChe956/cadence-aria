@@ -37,6 +37,7 @@ async fn work_item_plan_outline_optional_choice_can_apply_findings() {
             affects_items: Vec::new(),
             warnings: Vec::new(),
         }),
+        structured_output_diagnostic: None,
     });
     engine
         .enter_review_decision(1, "仅有可选建议".to_string())
@@ -668,5 +669,6 @@ fn optional_work_item_plan_pass_review(
             affects_items: vec![],
             warnings: vec![],
         }),
+        structured_output_diagnostic: None,
     }
 }

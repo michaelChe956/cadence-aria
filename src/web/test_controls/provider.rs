@@ -12,6 +12,7 @@ use crate::cross_cutting::streaming_provider::{
     ProviderEvent, ProviderSession, RiskLevel, StreamChunk, StreamingProviderAdapter,
     StreamingProviderInput,
 };
+use crate::cross_cutting::structured_output::StructuredOutputContract;
 use crate::protocol::contracts::{AdapterInput, AdapterRole};
 use crate::web::state::WebAppState;
 
@@ -211,6 +212,7 @@ impl StreamingProviderAdapter for TestControlledFakeStreamingProvider {
         input: StreamingProviderInput,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
+        let structured_output_contract = input.structured_output_contract.clone();
         if input.role == AdapterRole::Reviewer
             && let Some(session_id) = input.workspace_session_id.as_deref()
             && let Some(run) = self
@@ -225,7 +227,11 @@ impl StreamingProviderAdapter for TestControlledFakeStreamingProvider {
             && let Some(session_id) = input.workspace_session_id.as_deref()
             && let Some(fixture) = self.controls.consume_review_fixture(session_id).await
         {
-            return Ok(start_review_fixture_session(fixture, cancel));
+            return Ok(start_review_fixture_session(
+                fixture,
+                structured_output_contract,
+                cancel,
+            ));
         }
 
         let use_fixture = match input.workspace_session_id.as_deref() {
@@ -254,6 +260,7 @@ impl StreamingProviderAdapter for TestControlledFakeStreamingProvider {
 
 fn start_review_fixture_session(
     fixture: ReviewFixture,
+    structured_output_contract: Option<StructuredOutputContract>,
     cancel: tokio_util::sync::CancellationToken,
 ) -> ProviderSession {
     let (event_tx, event_rx) = mpsc::channel(8);
@@ -288,8 +295,9 @@ fn start_review_fixture_session(
             return;
         }
         let _ = event_tx
-            .send(ProviderEvent::Completed(ProviderCompletion::plain(
-                output, None,
+            .send(ProviderEvent::Completed(review_fixture_completion(
+                output,
+                structured_output_contract.as_ref(),
             )))
             .await;
     });
@@ -298,6 +306,41 @@ fn start_review_fixture_session(
         events: event_rx,
         commands: command_tx,
     }
+}
+
+fn review_fixture_completion(
+    output: String,
+    contract: Option<&StructuredOutputContract>,
+) -> ProviderCompletion {
+    let Some(contract) = contract else {
+        return ProviderCompletion::plain(output, None);
+    };
+    let (comments, json) = review_fixture_output_parts(&output);
+    let full_output = format!(
+        "{comments}\n<ARIA_STRUCTURED_OUTPUT nonce=\"{}\">{json}</ARIA_STRUCTURED_OUTPUT nonce=\"{}\">",
+        contract.nonce, contract.nonce
+    );
+    ProviderCompletion::from_output(full_output, Some(contract), None)
+}
+
+fn review_fixture_output_parts(output: &str) -> (&str, &str) {
+    let trimmed = output.trim();
+    if trimmed.starts_with('{') {
+        return ("", trimmed);
+    }
+    let Some(end) = output.rfind("```") else {
+        return ("", trimmed);
+    };
+    let before_end = &output[..end];
+    let Some(start) = before_end.rfind("```") else {
+        return ("", trimmed);
+    };
+    let json = before_end[start + 3..]
+        .trim()
+        .strip_prefix("json")
+        .unwrap_or(&before_end[start + 3..])
+        .trim();
+    (output[..start].trim_end(), json)
 }
 
 fn start_testing_fixture_session(

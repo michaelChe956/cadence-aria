@@ -258,14 +258,31 @@ impl StreamingProviderAdapter for ReviewVerdictStreamingProvider {
         let (event_tx, event_rx) = mpsc::channel(8);
         let (command_tx, _command_rx) = mpsc::channel(8);
         let output = self.output.to_string();
+        let structured_output_contract = input.structured_output_contract;
         tokio::spawn(async move {
             let _ = event_tx
                 .send(ProviderEvent::TextDelta {
                     content: output.clone(),
                 })
                 .await;
+            let full_output = if let Some(contract) = structured_output_contract.as_ref() {
+                let (comments, json) =
+                    extract_structured_json(&output).expect("review fixture structured output");
+                format!(
+                    "{comments}\n<ARIA_STRUCTURED_OUTPUT nonce=\"{}\">{json}</ARIA_STRUCTURED_OUTPUT nonce=\"{}\">",
+                    contract.nonce, contract.nonce
+                )
+            } else {
+                output
+            };
             let _ = event_tx
-                .send(ProviderEvent::Completed(crate::cross_cutting::streaming_provider::ProviderCompletion::plain(output, None)))
+                .send(ProviderEvent::Completed(
+                    crate::cross_cutting::streaming_provider::ProviderCompletion::from_output(
+                        full_output,
+                        structured_output_contract.as_ref(),
+                        None,
+                    ),
+                ))
                 .await;
         });
         Ok(ProviderSession {

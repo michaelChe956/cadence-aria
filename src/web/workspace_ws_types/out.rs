@@ -10,7 +10,10 @@ use super::common::{
     ChoiceOption, ChoiceQuestion, ProviderConfigSnapshot, ProviderDefaults, WsCheckpointDto,
     WsExecutionEvent, WsMessageDto, WsPermissionRiskLevel, WsProviderConfig, WsProviderStatus,
 };
-use super::review::{ReviewFinding, ReviewGate, ReviewVerdictType, WorkItemPlanReviewComplete};
+use super::review::{
+    ReviewFinding, ReviewGate, ReviewVerdictType, StructuredOutputDiagnostic,
+    WorkItemPlanReviewComplete,
+};
 use super::timeline::{NodeDetailSummary, TimelineNode, TimelineNodeStatus};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -78,6 +81,8 @@ pub enum WsOutMessage {
         review_gate: ReviewGate,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         work_item_plan_review: Option<WorkItemPlanReviewComplete>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        structured_output_diagnostic: Option<StructuredOutputDiagnostic>,
     },
     ReviewDecisionRequired {
         node_id: String,

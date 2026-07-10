@@ -191,6 +191,7 @@ pub enum EngineEvent {
         findings: Vec<ReviewFinding>,
         review_gate: ReviewGate,
         work_item_plan_review: Option<WorkItemPlanReviewComplete>,
+        structured_output_diagnostic: Option<StructuredOutputDiagnostic>,
     },
     ReviewDecisionRequired {
         node_id: String,

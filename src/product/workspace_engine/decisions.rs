@@ -407,13 +407,12 @@ impl WorkspaceEngine {
                 if self.latest_review_verdict.is_none() {
                     self.latest_review_verdict = Some(ReviewVerdict {
                         verdict: ReviewVerdictType::Revise,
-                        comments: context
-                            .clone()
-                            .unwrap_or_else(|| "人工请求修改".to_string()),
+                        comments: context.clone().unwrap_or_else(|| "人工请求修改".into()),
                         summary: "人工请求修改".to_string(),
                         findings: Vec::new(),
                         review_gate: ReviewGate::RequiresRevision,
                         work_item_plan_review: None,
+                        structured_output_diagnostic: None,
                     });
                 }
                 self.pending_revision_context = context;

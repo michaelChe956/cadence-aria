@@ -211,6 +211,7 @@ async fn review_decision_with_context_requires_non_empty_context_for_all_workspa
             findings: Vec::new(),
             review_gate: ReviewGate::RequiresRevision,
             work_item_plan_review: None,
+            structured_output_diagnostic: None,
         });
 
         let result = engine
@@ -293,6 +294,7 @@ async fn review_decision_continue_with_work_item_plan_outline_candidate_restarts
         findings: Vec::new(),
         review_gate: ReviewGate::UserConfirmAllowed,
         work_item_plan_review: None,
+        structured_output_diagnostic: None,
     });
 
     let outcome = engine
@@ -368,6 +370,7 @@ async fn revision_input_uses_persisted_codex_author_session_when_engine_session_
         findings: Vec::new(),
         review_gate: ReviewGate::RequiresRevision,
         work_item_plan_review: None,
+        structured_output_diagnostic: None,
     });
 
     let input = engine.build_revision_input().expect("revision input");
@@ -429,6 +432,7 @@ async fn revision_with_existing_author_provider_session_uses_delta_prompt() {
         findings: Vec::new(),
         review_gate: ReviewGate::RequiresRevision,
         work_item_plan_review: None,
+        structured_output_diagnostic: None,
     });
     engine.pending_revision_context = Some("补充登录错误码".to_string());
     let captured_input = Arc::new(Mutex::new(None));
@@ -507,6 +511,7 @@ async fn revision_prompt_requires_structured_interaction_decisions_in_artifact()
         findings: Vec::new(),
         review_gate: ReviewGate::RequiresRevision,
         work_item_plan_review: None,
+        structured_output_diagnostic: None,
     });
 
     let input = engine.build_revision_input().expect("revision input");
@@ -569,6 +574,7 @@ async fn revision_codex_resume_stall_retries_fresh_full_prompt_for_all_workspace
             findings: Vec::new(),
             review_gate: ReviewGate::RequiresRevision,
             work_item_plan_review: None,
+            structured_output_diagnostic: None,
         });
         engine
             .handle_review_decision(
@@ -654,6 +660,7 @@ fn revision_input_reminds_design_author_to_return_artifact_fenced_block() {
         findings: Vec::new(),
         review_gate: ReviewGate::RequiresRevision,
         work_item_plan_review: None,
+        structured_output_diagnostic: None,
     });
 
     let input = engine.build_revision_input().expect("revision input");
@@ -707,6 +714,7 @@ async fn revision_delta_prompt_includes_legacy_context_note() {
         findings: Vec::new(),
         review_gate: ReviewGate::RequiresRevision,
         work_item_plan_review: None,
+        structured_output_diagnostic: None,
     });
     engine
         .append_completed_timeline_event(

@@ -345,8 +345,7 @@ impl WorkspaceEngine {
                                 .await;
                         }
                         ProviderEvent::Completed(completion) => {
-                            let full_output = completion.full_output;
-                            let provider_session_id = completion.provider_session_id;
+                            let provider_session_id = completion.provider_session_id.clone();
                             if let Some(node_id) = node_id.as_deref() {
                                 let _ = self.flush_stream_buffer(node_id).await;
                             }
@@ -357,11 +356,18 @@ impl WorkspaceEngine {
                                 node_id.clone(),
                             )
                             .await;
-                            if full_output.is_empty() {
+                            if completion.full_output.is_empty() {
                                 self.finish_empty_assistant_output().await;
                                 return;
                             }
-                            self.complete_review(full_output).await;
+                            let verdict =
+                                match self.parse_review_completion_for_active_node(&completion) {
+                                    Ok(verdict) => verdict,
+                                    Err(error) => {
+                                        fallback_review_verdict(&completion, &error, false)
+                                    }
+                                };
+                            self.complete_review(completion, verdict).await;
                             return;
                         }
                         ProviderEvent::Failed { message } => {
@@ -419,7 +425,12 @@ impl WorkspaceEngine {
             if let Some(node_id) = node_id.as_deref() {
                 let _ = self.flush_stream_buffer(node_id).await;
             }
-            self.complete_review(full_content).await;
+            let completion = ProviderCompletion::plain(full_content, None);
+            let verdict = match self.parse_review_completion_for_active_node(&completion) {
+                Ok(verdict) => verdict,
+                Err(error) => fallback_review_verdict(&completion, &error, false),
+            };
+            self.complete_review(completion, verdict).await;
         }
     }
 }

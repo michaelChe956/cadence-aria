@@ -277,6 +277,7 @@ impl StreamingProviderAdapter for ScriptedStreamingProvider {
         _cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
         self.prompts.lock().unwrap().push(input.prompt);
+        let structured_output_contract = input.structured_output_contract;
         let output = self
             .outputs
             .lock()
@@ -292,7 +293,9 @@ impl StreamingProviderAdapter for ScriptedStreamingProvider {
                 })
                 .await;
             let _ = event_tx
-                .send(ProviderEvent::Completed(cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::plain(output, None)))
+                .send(ProviderEvent::Completed(
+                    scripted_provider_completion(output, structured_output_contract.as_ref()),
+                ))
                 .await;
         });
         Ok(ProviderSession {
@@ -316,6 +319,45 @@ impl StreamingProviderAdapter for ScriptedStreamingProvider {
             0,
         ))
     }
+}
+
+fn scripted_provider_completion(
+    output: String,
+    contract: Option<
+        &cadence_aria::cross_cutting::structured_output::StructuredOutputContract,
+    >,
+) -> cadence_aria::cross_cutting::streaming_provider::ProviderCompletion {
+    let Some(contract) = contract else {
+        return cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::plain(
+            output, None,
+        );
+    };
+    let (comments, json) = review_output_parts(&output);
+    let full_output = format!(
+        "{comments}\n<ARIA_STRUCTURED_OUTPUT nonce=\"{}\">{json}</ARIA_STRUCTURED_OUTPUT nonce=\"{}\">",
+        contract.nonce, contract.nonce
+    );
+    cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::from_output(
+        full_output,
+        Some(contract),
+        None,
+    )
+}
+
+fn review_output_parts(output: &str) -> (&str, &str) {
+    let trimmed = output.trim();
+    if trimmed.starts_with('{') {
+        return ("", trimmed);
+    }
+    let end = output.rfind("```").expect("review fixture closing fence");
+    let before_end = &output[..end];
+    let start = before_end.rfind("```").expect("review fixture opening fence");
+    let json = before_end[start + 3..]
+        .trim()
+        .strip_prefix("json")
+        .unwrap_or(&before_end[start + 3..])
+        .trim();
+    (output[..start].trim_end(), json)
 }
 
 async fn create_workspace_session_fixture(root: &TempDir) -> TempDir {

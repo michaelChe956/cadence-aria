@@ -29,6 +29,16 @@ pub struct ReviewFinding {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StructuredOutputDiagnostic {
+    pub code: String,
+    pub message: String,
+    pub repair_attempted: bool,
+    pub repair_succeeded: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_output_preview: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewGate {
     RequiresRevision,
@@ -107,6 +117,8 @@ pub struct ReviewVerdict {
     pub review_gate: ReviewGate,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_item_plan_review: Option<WorkItemPlanReviewComplete>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured_output_diagnostic: Option<StructuredOutputDiagnostic>,
 }
 
 fn default_review_gate() -> ReviewGate {

@@ -189,6 +189,7 @@ fn work_item_plan_outline_revision_feedback_assembles_review_and_context() {
         }],
         review_gate: ReviewGate::UserConfirmAllowed,
         work_item_plan_review: None,
+        structured_output_diagnostic: None,
     });
 
     let feedback = engine

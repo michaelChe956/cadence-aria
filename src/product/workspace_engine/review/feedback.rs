@@ -82,6 +82,7 @@ mod tests {
                 affects_items: vec![],
                 warnings: vec![],
             }),
+            structured_output_diagnostic: None,
         };
 
         let feedback = format_review_feedback(&verdict);

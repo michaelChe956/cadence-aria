@@ -80,13 +80,55 @@ pub(crate) fn extract_markdown_fence_json(output: &str) -> Option<(String, Strin
     Some((comments, json))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReviewStructuredOutputErrorCode {
+    MissingVerdict,
+    InvalidVerdict,
+    MalformedFindings,
+    InvalidOutlineReference,
+    InvalidGenerationRound,
+}
+
+impl ReviewStructuredOutputErrorCode {
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            Self::MissingVerdict => "missing_verdict",
+            Self::InvalidVerdict => "invalid_verdict",
+            Self::MalformedFindings => "malformed_findings",
+            Self::InvalidOutlineReference => "invalid_outline_reference",
+            Self::InvalidGenerationRound => "invalid_generation_round",
+        }
+    }
+
+    pub(crate) fn message(&self) -> &'static str {
+        match self {
+            Self::MissingVerdict => "review verdict is missing or is not a string",
+            Self::InvalidVerdict => "review verdict is not supported by the active schema",
+            Self::MalformedFindings => "review findings are malformed",
+            Self::InvalidOutlineReference => "review outline reference is invalid",
+            Self::InvalidGenerationRound => "review generation round is missing or empty",
+        }
+    }
+}
+
 pub(crate) fn parse_review_json(json: &str, comments: &str) -> Option<ReviewVerdict> {
     let value: serde_json::Value = serde_json::from_str(json).ok()?;
-    let parsed_verdict = match value.get("verdict")?.as_str()? {
+    parse_review_value(&value, comments).ok()
+}
+
+pub(crate) fn parse_review_value(
+    value: &serde_json::Value,
+    comments: &str,
+) -> Result<ReviewVerdict, ReviewStructuredOutputErrorCode> {
+    let verdict = value
+        .get("verdict")
+        .and_then(|value| value.as_str())
+        .ok_or(ReviewStructuredOutputErrorCode::MissingVerdict)?;
+    let parsed_verdict = match verdict {
         "pass" => ReviewVerdictType::Pass,
         "revise" => ReviewVerdictType::Revise,
         "needs_human" => ReviewVerdictType::NeedsHuman,
-        _ => return None,
+        _ => return Err(ReviewStructuredOutputErrorCode::InvalidVerdict),
     };
     let summary = value
         .get("summary")
@@ -98,6 +140,9 @@ pub(crate) fn parse_review_json(json: &str, comments: &str) -> Option<ReviewVerd
         })
         .to_string();
     let parsed_findings = parse_review_findings(value.get("findings"));
+    if parsed_findings.malformed {
+        return Err(ReviewStructuredOutputErrorCode::MalformedFindings);
+    }
     let review_gate = review_gate_for(&parsed_verdict, &parsed_findings);
     let verdict = match review_gate {
         ReviewGate::RequiresRevision => ReviewVerdictType::Revise,
@@ -109,13 +154,14 @@ pub(crate) fn parse_review_json(json: &str, comments: &str) -> Option<ReviewVerd
         },
         ReviewGate::UserTriageRequired => ReviewVerdictType::NeedsHuman,
     };
-    Some(ReviewVerdict {
+    Ok(ReviewVerdict {
         verdict,
         comments: comments.trim().to_string(),
         summary,
         findings: parsed_findings.findings,
         review_gate,
         work_item_plan_review: None,
+        structured_output_diagnostic: None,
     })
 }
 
@@ -126,7 +172,27 @@ pub(crate) fn parse_work_item_plan_review_json(
     scope: WorkItemPlanReviewScope,
 ) -> Option<ReviewVerdict> {
     let value: serde_json::Value = serde_json::from_str(json).ok()?;
-    let parsed_verdict = parse_work_item_plan_review_verdict(value.get("verdict")?.as_str()?);
+    parse_work_item_plan_review_value(&value, comments, valid_outline_ids, scope).ok()
+}
+
+pub(crate) fn parse_work_item_plan_review_value(
+    value: &serde_json::Value,
+    comments: &str,
+    valid_outline_ids: &[String],
+    scope: WorkItemPlanReviewScope,
+) -> Result<ReviewVerdict, ReviewStructuredOutputErrorCode> {
+    let verdict = value
+        .get("verdict")
+        .and_then(|value| value.as_str())
+        .ok_or(ReviewStructuredOutputErrorCode::MissingVerdict)?;
+    let parsed_verdict = match verdict {
+        "pass" => WorkItemPlanReviewVerdict::Pass,
+        "revise" => WorkItemPlanReviewVerdict::Revise,
+        "revise_batch" => WorkItemPlanReviewVerdict::ReviseBatch,
+        "needs_human" => WorkItemPlanReviewVerdict::NeedsHuman,
+        "plan_reopen_required" => WorkItemPlanReviewVerdict::PlanReopenRequired,
+        _ => return Err(ReviewStructuredOutputErrorCode::InvalidVerdict),
+    };
     let summary = value
         .get("summary")
         .and_then(|value| value.as_str())
@@ -138,28 +204,33 @@ pub(crate) fn parse_work_item_plan_review_json(
             WorkItemPlanReviewVerdict::PlanReopenRequired => "需要重开 Outline",
         })
         .to_string();
-    let target_outline_id = value
-        .get("target_outline_id")
-        .and_then(|value| value.as_str())
-        .map(ToString::to_string);
+    let target_outline_id = match value.get("target_outline_id") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(id)) => Some(id.clone()),
+        Some(_) => return Err(ReviewStructuredOutputErrorCode::InvalidOutlineReference),
+    };
     if target_outline_id
         .as_ref()
         .is_some_and(|id| !valid_outline_ids.iter().any(|valid| valid == id))
     {
-        return Some(work_item_plan_review_invalid_reference(comments));
+        return Err(ReviewStructuredOutputErrorCode::InvalidOutlineReference);
     }
 
     let (affects_items, warnings, total_affects, invalid_affects) =
         parse_work_item_plan_review_affects_items(value.get("affects_items"), valid_outline_ids);
     if total_affects > 0 && invalid_affects * 2 > total_affects {
-        return Some(work_item_plan_review_invalid_reference(comments));
+        return Err(ReviewStructuredOutputErrorCode::InvalidOutlineReference);
     }
 
     let parsed_findings = parse_review_findings(value.get("findings"));
+    if parsed_findings.malformed {
+        return Err(ReviewStructuredOutputErrorCode::MalformedFindings);
+    }
     let generation_round_id = value
         .get("generation_round_id")
         .and_then(|value| value.as_str())
-        .unwrap_or("generation_round_unknown")
+        .filter(|value| !value.trim().is_empty())
+        .ok_or(ReviewStructuredOutputErrorCode::InvalidGenerationRound)?
         .to_string();
     let draft_id = value
         .get("draft_id")
@@ -186,25 +257,15 @@ pub(crate) fn parse_work_item_plan_review_json(
         warnings,
     };
 
-    Some(ReviewVerdict {
+    Ok(ReviewVerdict {
         verdict: generic_verdict,
         comments: comments.trim().to_string(),
         summary,
         findings: parsed_findings.findings,
         review_gate,
         work_item_plan_review: Some(extension),
+        structured_output_diagnostic: None,
     })
-}
-
-pub(crate) fn parse_work_item_plan_review_verdict(value: &str) -> WorkItemPlanReviewVerdict {
-    match value {
-        "pass" => WorkItemPlanReviewVerdict::Pass,
-        "revise" => WorkItemPlanReviewVerdict::Revise,
-        "revise_batch" => WorkItemPlanReviewVerdict::ReviseBatch,
-        "needs_human" => WorkItemPlanReviewVerdict::NeedsHuman,
-        "plan_reopen_required" => WorkItemPlanReviewVerdict::PlanReopenRequired,
-        _ => WorkItemPlanReviewVerdict::NeedsHuman,
-    }
 }
 
 fn effective_work_item_plan_review_verdict(
@@ -339,17 +400,6 @@ pub(crate) fn parse_work_item_plan_review_affects_items(
     }
 
     (valid_items, warnings, items.len(), invalid_count)
-}
-
-pub(crate) fn work_item_plan_review_invalid_reference(comments: &str) -> ReviewVerdict {
-    ReviewVerdict {
-        verdict: ReviewVerdictType::NeedsHuman,
-        comments: comments.trim().to_string(),
-        summary: "WorkItemPlan reviewer 引用无效，需要人工确认".to_string(),
-        findings: Vec::new(),
-        review_gate: ReviewGate::UserTriageRequired,
-        work_item_plan_review: None,
-    }
 }
 
 pub(crate) struct ParsedReviewFindings {

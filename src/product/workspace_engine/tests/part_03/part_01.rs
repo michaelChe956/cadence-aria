@@ -136,7 +136,7 @@ fn work_item_plan_outline_review_pass_with_strong_finding_requires_outline_revis
 }
 
 #[test]
-fn work_item_plan_review_invalid_target_outline_id_downgrades_to_needs_human() {
+fn parse_work_item_plan_review_value_reports_invalid_target_outline_id() {
     let json = r#"{
         "verdict": "plan_reopen_required",
         "summary": "outline 不可局部修复",
@@ -145,18 +145,19 @@ fn work_item_plan_review_invalid_target_outline_id_downgrades_to_needs_human() {
         "draft_id": "draft_0001"
     }"#;
 
-    let verdict = parse_work_item_plan_review_json(
-        json,
+    let value = serde_json::from_str(json).expect("review json");
+    let error = parse_work_item_plan_review_value(
+        &value,
         "raw comments",
         &["outline_api".to_string()],
         WorkItemPlanReviewScope::Item,
     )
-    .expect("work item plan review");
+    .expect_err("invalid target outline should fail");
 
-    assert_eq!(verdict.verdict, ReviewVerdictType::NeedsHuman);
-    assert_eq!(verdict.review_gate, ReviewGate::UserTriageRequired);
-    assert!(verdict.work_item_plan_review.is_none());
-    assert!(verdict.summary.contains("引用无效"));
+    assert_eq!(
+        error,
+        ReviewStructuredOutputErrorCode::InvalidOutlineReference
+    );
 }
 
 #[test]
@@ -196,7 +197,7 @@ fn work_item_plan_review_drops_invalid_affects_items_below_threshold() {
 }
 
 #[test]
-fn work_item_plan_review_invalid_affects_items_over_half_downgrades() {
+fn parse_work_item_plan_review_value_reports_too_many_invalid_affects_items() {
     let json = r#"{
         "verdict": "needs_human",
         "summary": "引用大量不存在 item",
@@ -208,18 +209,19 @@ fn work_item_plan_review_invalid_affects_items_over_half_downgrades() {
         ]
     }"#;
 
-    let verdict = parse_work_item_plan_review_json(
-        json,
+    let value = serde_json::from_str(json).expect("review json");
+    let error = parse_work_item_plan_review_value(
+        &value,
         "raw comments",
         &["outline_api".to_string(), "outline_ui".to_string()],
         WorkItemPlanReviewScope::Batch,
     )
-    .expect("work item plan review");
+    .expect_err("too many invalid references should fail");
 
-    assert_eq!(verdict.verdict, ReviewVerdictType::NeedsHuman);
-    assert_eq!(verdict.review_gate, ReviewGate::UserTriageRequired);
-    assert!(verdict.work_item_plan_review.is_none());
-    assert!(verdict.summary.contains("引用无效"));
+    assert_eq!(
+        error,
+        ReviewStructuredOutputErrorCode::InvalidOutlineReference
+    );
 }
 
 #[test]
@@ -243,6 +245,15 @@ fn review_complete_event_preserves_work_item_plan_extension() {
         findings: Vec::new(),
         review_gate: ReviewGate::UserTriageRequired,
         work_item_plan_review: Some(extension.clone()),
+        structured_output_diagnostic: Some(
+            crate::web::workspace_ws_types::StructuredOutputDiagnostic {
+                code: "invalid_outline_reference".to_string(),
+                message: "review target outline reference is invalid".to_string(),
+                repair_attempted: false,
+                repair_succeeded: false,
+                raw_output_preview: Some("invalid outline".to_string()),
+            },
+        ),
     };
 
     let event = review_complete_event_from_verdict("node_review_001".to_string(), 2, &verdict);
@@ -250,8 +261,12 @@ fn review_complete_event_preserves_work_item_plan_extension() {
     match event {
         EngineEvent::ReviewComplete {
             work_item_plan_review: Some(actual),
+            structured_output_diagnostic: Some(diagnostic),
             ..
-        } => assert_eq!(actual, extension),
+        } => {
+            assert_eq!(actual, extension);
+            assert_eq!(diagnostic.code, "invalid_outline_reference");
+        }
         _ => panic!("expected review extension"),
     }
 }
@@ -437,6 +452,7 @@ async fn work_item_plan_outline_optional_choice_can_skip_and_continue() {
             affects_items: Vec::new(),
             warnings: Vec::new(),
         }),
+        structured_output_diagnostic: None,
     });
     engine
         .enter_review_decision(1, "仅有可选建议".to_string())
@@ -504,6 +520,7 @@ async fn work_item_plan_optional_outline_review_actions_survive_session_restore(
             affects_items: Vec::new(),
             warnings: Vec::new(),
         }),
+        structured_output_diagnostic: None,
     };
     let review_node_id = engine
         .create_timeline_node(TimelineNodeDraft {
@@ -646,4 +663,3 @@ async fn request_outline_revision_is_allowed_from_outline_confirm_node() {
         "requesting outline revision from confirm should start a new outline run"
     );
 }
-
