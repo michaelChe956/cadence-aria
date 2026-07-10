@@ -348,6 +348,11 @@ pub(crate) struct ProviderSessionDriveInput {
     pub(crate) revision_resume_fallback: Option<RevisionResumeFallbackContext>,
 }
 
+pub(crate) enum ReviewProviderRunResult {
+    Completed(ProviderCompletion),
+    Terminal,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PendingAuthorChoiceError {
     NotFound { id: String },

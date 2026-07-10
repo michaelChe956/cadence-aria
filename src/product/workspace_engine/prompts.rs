@@ -1,6 +1,7 @@
 use super::*;
 
 mod review;
+mod review_repair;
 mod revision;
 
 pub(crate) fn workspace_type_title(workspace_type: &WorkspaceType) -> &'static str {

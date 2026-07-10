@@ -108,8 +108,8 @@ pub(crate) use review::{ReviewCompletionError, fallback_review_verdict};
 pub(crate) use session_state::*;
 pub(crate) use types::{
     ArtifactRetryContext, AuthorPromptMode, PendingAuthorChoice, ProviderSessionDriveInput,
-    RevisionResumeFallbackContext, StructuredOutputDisplayFilter, TimelineNodeDraft,
-    WorkItemPlanCompileProjectionContext,
+    ReviewProviderRunResult, RevisionResumeFallbackContext, StructuredOutputDisplayFilter,
+    TimelineNodeDraft, WorkItemPlanCompileProjectionContext,
 };
 
 const SUMMARY_PREVIEW_CHARS: usize = 2048;

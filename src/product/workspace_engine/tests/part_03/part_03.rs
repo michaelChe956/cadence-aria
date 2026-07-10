@@ -438,3 +438,313 @@ async fn drive_review_session_strong_revise_pauses_for_decision() {
         _ => panic!("expected SessionState"),
     }
 }
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+#[derive(Clone)]
+struct QueuedReviewProvider {
+    outputs: Arc<Mutex<VecDeque<String>>>,
+    prompts: Arc<Mutex<Vec<String>>>,
+    starts: Arc<AtomicUsize>,
+}
+
+impl QueuedReviewProvider {
+    fn new(outputs: Vec<String>) -> Self {
+        Self {
+            outputs: Arc::new(Mutex::new(outputs.into())),
+            prompts: Arc::new(Mutex::new(Vec::new())),
+            starts: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for QueuedReviewProvider {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let start = self.starts.fetch_add(1, Ordering::SeqCst) + 1;
+        self.prompts.lock().unwrap().push(input.prompt.clone());
+        let template = self
+            .outputs
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("queued review output");
+        let output = input
+            .structured_output_contract
+            .as_ref()
+            .map(|contract| template.replace("__NONCE__", &contract.nonce))
+            .unwrap_or(template);
+        let completion = ProviderCompletion::from_output(
+            output,
+            input.structured_output_contract.as_ref(),
+            Some(format!("review-session-{start}")),
+        );
+        let (event_tx, event_rx) = mpsc::channel(4);
+        let (command_tx, _command_rx) = mpsc::channel(4);
+        event_tx
+            .send(ProviderEvent::Completed(completion))
+            .await
+            .unwrap();
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+
+    async fn run_streaming(
+        &self,
+        _input: &AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+        Err(ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "run_streaming is not used by WorkspaceEngine",
+            0,
+        ))
+    }
+}
+
+async fn queued_review_engine(
+    session_id: &str,
+) -> (
+    TempDir,
+    WorkspaceEngine,
+    mpsc::Receiver<EngineEvent>,
+    String,
+) {
+    let (tmp, store) = setup();
+    let (tx, rx) = mpsc::channel(64);
+    let mut session = make_session(session_id);
+    session.artifact = Some(artifact_payload("# Story Spec\n\n需要审核的候选版本"));
+    let mut engine = WorkspaceEngine::new(store, tx, session);
+    engine.start_review_or_skip().await;
+    let review_node_id = engine
+        .active_node_id
+        .clone()
+        .expect("active review node id");
+    (tmp, engine, rx, review_node_id)
+}
+
+fn repair_event_statuses(
+    rx: &mut mpsc::Receiver<EngineEvent>,
+) -> Vec<(ProviderExecutionEventStatus, Option<String>)> {
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let EngineEvent::ExecutionEvent { event, node_id, .. } = event
+            && event.event_id == "structured_output_repair"
+        {
+            events.push((event.status, node_id));
+        }
+    }
+    events
+}
+
+fn missing_end_nonce_output(json: &str) -> String {
+    format!(
+        "审核发现需要返修。\n<ARIA_STRUCTURED_OUTPUT nonce=\"__NONCE__\">{json}</ARIA_STRUCTURED_OUTPUT>"
+    )
+}
+
+fn valid_structured_output(json: &str) -> String {
+    format!(
+        "格式修复完成。\n<ARIA_STRUCTURED_OUTPUT nonce=\"__NONCE__\">{json}</ARIA_STRUCTURED_OUTPUT nonce=\"__NONCE__\">"
+    )
+}
+
+#[tokio::test]
+async fn review_structured_output_repair_succeeds_without_new_round() {
+    let review_json = r#"{
+        "verdict": "revise",
+        "summary": "补充失败路径",
+        "findings": [{
+            "severity": "must_fix",
+            "message": "缺少失败路径",
+            "evidence": "Artifact 未覆盖失败路径",
+            "impact": "下一阶段无法验收异常流程",
+            "required_action": "补充失败路径说明"
+        }]
+    }"#;
+    let provider = QueuedReviewProvider::new(vec![
+        missing_end_nonce_output(review_json),
+        valid_structured_output(review_json),
+    ]);
+    let (_tmp, mut engine, mut rx, review_node_id) =
+        queued_review_engine("sess_review_repair_success").await;
+
+    engine
+        .drive_review_session(Arc::new(provider.clone()), empty_provider_commands())
+        .await;
+
+    assert_eq!(provider.starts.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        engine
+            .timeline_nodes
+            .iter()
+            .filter(|node| node.node_type == TimelineNodeType::ReviewerRun)
+            .count(),
+        1
+    );
+    let prompts = provider.prompts.lock().unwrap();
+    assert_eq!(prompts.len(), 2);
+    assert!(prompts[1].contains("missing_end_nonce"));
+    assert!(prompts[1].contains("Artifact 未覆盖失败路径"));
+    assert!(prompts[1].contains("不得改变 verdict、summary、findings"));
+    drop(prompts);
+
+    let verdict = engine
+        .latest_review_verdict
+        .as_ref()
+        .expect("repaired review verdict");
+    assert_eq!(verdict.verdict, ReviewVerdictType::Revise);
+    assert_eq!(verdict.findings.len(), 1);
+    assert_eq!(verdict.findings[0].message, "缺少失败路径");
+    let diagnostic = verdict
+        .structured_output_diagnostic
+        .as_ref()
+        .expect("repair diagnostic");
+    assert!(diagnostic.repair_attempted);
+    assert!(diagnostic.repair_succeeded);
+    assert!(diagnostic.raw_output_preview.is_none());
+
+    let repair_events = repair_event_statuses(&mut rx);
+    assert_eq!(
+        repair_events.last(),
+        Some(&(
+            ProviderExecutionEventStatus::Completed,
+            Some(review_node_id)
+        ))
+    );
+}
+
+#[tokio::test]
+async fn review_structured_output_repair_failure_persists_diagnostic() {
+    let review_json = r#"{"verdict":"revise","summary":"补充失败路径","findings":[{"severity":"must_fix","message":"缺少失败路径","evidence":"当前产物遗漏","impact":"无法验收","required_action":"补充失败路径"}]}"#;
+    let provider = QueuedReviewProvider::new(vec![
+        missing_end_nonce_output(review_json),
+        missing_end_nonce_output(review_json),
+    ]);
+    let (_tmp, mut engine, mut rx, review_node_id) =
+        queued_review_engine("sess_review_repair_failure").await;
+
+    engine
+        .drive_review_session(Arc::new(provider.clone()), empty_provider_commands())
+        .await;
+
+    assert_eq!(provider.starts.load(Ordering::SeqCst), 2);
+    let verdict = engine.latest_review_verdict.as_ref().expect("fallback verdict");
+    assert_eq!(verdict.verdict, ReviewVerdictType::NeedsHuman);
+    let diagnostic = verdict
+        .structured_output_diagnostic
+        .as_ref()
+        .expect("repair failure diagnostic");
+    assert_eq!(diagnostic.code, "missing_end_nonce");
+    assert!(diagnostic.repair_attempted);
+    assert!(!diagnostic.repair_succeeded);
+    assert!(
+        diagnostic
+            .raw_output_preview
+            .as_ref()
+            .expect("raw output preview")
+            .chars()
+            .count()
+            <= 2_048
+    );
+    let repair_events = repair_event_statuses(&mut rx);
+    assert_eq!(
+        repair_events.last(),
+        Some(&(
+            ProviderExecutionEventStatus::Failed,
+            Some(review_node_id)
+        ))
+    );
+}
+
+#[tokio::test]
+async fn review_structured_output_repair_rejects_payload_change() {
+    let first_json = r#"{"verdict":"revise","summary":"必须修复","findings":[{"severity":"must_fix","message":"缺少失败路径","evidence":"当前产物遗漏","impact":"无法验收","required_action":"补充失败路径"}]}"#;
+    let changed_json = r#"{"verdict":"pass","summary":"可以确认","findings":[]}"#;
+    let provider = QueuedReviewProvider::new(vec![
+        missing_end_nonce_output(first_json),
+        valid_structured_output(changed_json),
+    ]);
+    let (_tmp, mut engine, mut rx, review_node_id) =
+        queued_review_engine("sess_review_repair_payload_changed").await;
+
+    engine
+        .drive_review_session(Arc::new(provider.clone()), empty_provider_commands())
+        .await;
+
+    assert_eq!(provider.starts.load(Ordering::SeqCst), 2);
+    let verdict = engine.latest_review_verdict.as_ref().expect("fallback verdict");
+    assert_eq!(verdict.verdict, ReviewVerdictType::NeedsHuman);
+    let diagnostic = verdict
+        .structured_output_diagnostic
+        .as_ref()
+        .expect("payload change diagnostic");
+    assert_eq!(diagnostic.code, "repair_payload_changed");
+    assert!(diagnostic.repair_attempted);
+    assert!(!diagnostic.repair_succeeded);
+    let repair_events = repair_event_statuses(&mut rx);
+    assert_eq!(
+        repair_events.last(),
+        Some(&(
+            ProviderExecutionEventStatus::Failed,
+            Some(review_node_id)
+        ))
+    );
+}
+
+#[tokio::test]
+async fn invalid_review_json_does_not_trigger_unverifiable_repair() {
+    let provider = QueuedReviewProvider::new(vec![valid_structured_output(
+        r#"{"verdict":"pass","summary":}"#,
+    )]);
+    let (_tmp, mut engine, _rx, _review_node_id) =
+        queued_review_engine("sess_review_invalid_json_no_repair").await;
+
+    engine
+        .drive_review_session(Arc::new(provider.clone()), empty_provider_commands())
+        .await;
+
+    assert_eq!(provider.starts.load(Ordering::SeqCst), 1);
+    let verdict = engine.latest_review_verdict.as_ref().expect("fallback verdict");
+    assert_eq!(verdict.verdict, ReviewVerdictType::NeedsHuman);
+    assert_eq!(
+        verdict
+            .structured_output_diagnostic
+            .as_ref()
+            .expect("invalid json diagnostic")
+            .code,
+        "invalid_json"
+    );
+}
+
+#[tokio::test]
+async fn malformed_review_findings_do_not_trigger_business_rewrite() {
+    let provider = QueuedReviewProvider::new(vec![valid_structured_output(
+        r#"{"verdict":"revise","summary":"findings 非法","findings":[{"severity":"must_fix","message":42}]}"#,
+    )]);
+    let (_tmp, mut engine, _rx, _review_node_id) =
+        queued_review_engine("sess_review_malformed_findings_no_repair").await;
+
+    engine
+        .drive_review_session(Arc::new(provider.clone()), empty_provider_commands())
+        .await;
+
+    assert_eq!(provider.starts.load(Ordering::SeqCst), 1);
+    let verdict = engine.latest_review_verdict.as_ref().expect("fallback verdict");
+    assert_eq!(verdict.verdict, ReviewVerdictType::NeedsHuman);
+    assert_eq!(
+        verdict
+            .structured_output_diagnostic
+            .as_ref()
+            .expect("malformed findings diagnostic")
+            .code,
+        "malformed_findings"
+    );
+}

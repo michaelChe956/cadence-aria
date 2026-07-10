@@ -600,7 +600,7 @@ async fn complete_review_persists_structured_output_diagnostic() {
         .load_node_detail(&engine.session().session_id, &node_id)
         .unwrap();
     let diagnostic = &detail.verdict.as_ref().unwrap()["structured_output_diagnostic"];
-    assert_eq!(diagnostic["code"], "not_requested");
+    assert_eq!(diagnostic["code"], "structured_output_not_requested");
     assert_eq!(diagnostic["repair_attempted"], false);
     assert_eq!(diagnostic["repair_succeeded"], false);
 }

@@ -102,11 +102,11 @@ impl ReviewStructuredOutputErrorCode {
 
     pub(crate) fn message(&self) -> &'static str {
         match self {
-            Self::MissingVerdict => "review verdict is missing or is not a string",
-            Self::InvalidVerdict => "review verdict is not supported by the active schema",
-            Self::MalformedFindings => "review findings are malformed",
-            Self::InvalidOutlineReference => "review outline reference is invalid",
-            Self::InvalidGenerationRound => "review generation round is missing or empty",
+            Self::MissingVerdict => "审核结论缺失或不是字符串",
+            Self::InvalidVerdict => "审核结论不符合当前范围的 schema",
+            Self::MalformedFindings => "审核 findings 结构不合法",
+            Self::InvalidOutlineReference => "审核引用了无效的 outline",
+            Self::InvalidGenerationRound => "审核 generation round 缺失或为空",
         }
     }
 }
