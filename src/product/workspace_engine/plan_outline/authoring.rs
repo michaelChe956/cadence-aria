@@ -65,8 +65,12 @@ impl WorkspaceEngine {
                     .to_string(),
             );
         }
+        if active_node_type == Some(TimelineNodeType::WorkItemPlanOutlineConfirm) {
+            self.mark_work_item_plan_outline_revising_if_present()?;
+        } else {
+            self.mark_work_item_plan_outline_revising()?;
+        }
         self.pending_revision_context = feedback;
-        self.mark_work_item_plan_outline_revising()?;
         self.complete_active_node(Some("已返回 WorkItemPlan Outline 返修".to_string()))
             .await;
         self.transition_stage(WorkspaceStage::Running).await;

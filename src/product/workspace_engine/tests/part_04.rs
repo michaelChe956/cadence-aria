@@ -238,8 +238,20 @@ async fn review_decision_continue_with_work_item_plan_outline_candidate_restarts
     let (tmp, checkpoint_store) = setup();
     let lifecycle_store = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
     let (tx, _rx) = mpsc::channel(64);
-    let mut session = make_session("sess_wip_outline_review_fallback");
-    session.workspace_type = WorkspaceType::WorkItemPlan;
+    let session_record = lifecycle_store
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "issue_work_item_plan_0001".to_string(),
+            workspace_type: WorkspaceType::WorkItemPlan,
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: ProviderName::Codex,
+            review_rounds: 1,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+        })
+        .expect("create persisted outline review session");
+    let mut session = WorkspaceSession::from_record(session_record);
     session.stage = WorkspaceStage::ReviewDecision;
     session.artifact = Some(ArtifactPayload::WorkItemPlanOutlineCandidate {
         outline_candidate: Box::new(WorkItemPlanOutlineCandidateDto {

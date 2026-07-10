@@ -238,15 +238,28 @@ impl WorkspaceEngine {
     }
 
     pub(crate) fn mark_work_item_plan_outline_revising(&self) -> Result<(), String> {
+        self.mark_work_item_plan_outline_revising_with_missing_policy(false)
+    }
+
+    pub(crate) fn mark_work_item_plan_outline_revising_if_present(&self) -> Result<(), String> {
+        self.mark_work_item_plan_outline_revising_with_missing_policy(true)
+    }
+
+    fn mark_work_item_plan_outline_revising_with_missing_policy(
+        &self,
+        allow_missing_active_index: bool,
+    ) -> Result<(), String> {
         let store = self.work_item_plan_store()?;
         let project_id = self.session.project_id.clone();
         let issue_id = self.session.issue_id.clone();
         let plan_id = self.session.entity_id.clone();
-        let Some(mut index) = store
+        let index = store
             .load_active_index(&project_id, &issue_id, &plan_id)
-            .map_err(|error| format!("load work item plan active index failed: {error}"))?
-        else {
-            return Ok(());
+            .map_err(|error| format!("load work item plan active index failed: {error}"))?;
+        let mut index = match index {
+            Some(index) => index,
+            None if allow_missing_active_index => return Ok(()),
+            None => return Err("work item plan active index missing".to_string()),
         };
         let now = chrono::Utc::now().to_rfc3339();
         self.supersede_current_generation_drafts_for_outline_revision(&store, &mut index, &now)?;

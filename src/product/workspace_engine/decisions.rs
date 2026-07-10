@@ -386,17 +386,6 @@ impl WorkspaceEngine {
             },
             HumanConfirmDecision::RequestChange => {
                 let context = human_confirm_payload_description(payload);
-                if self.latest_review_verdict.is_none() {
-                    self.latest_review_verdict = Some(ReviewVerdict {
-                        verdict: ReviewVerdictType::Revise,
-                        comments: context.clone().unwrap_or_else(|| "人工请求修改".into()),
-                        summary: "人工请求修改".to_string(),
-                        findings: Vec::new(),
-                        review_gate: ReviewGate::RequiresRevision,
-                        work_item_plan_review: None,
-                        structured_output_diagnostic: None,
-                    });
-                }
                 if self.human_confirm_should_revise_work_item_plan_outline() {
                     let feedback = self
                         .prepare_work_item_plan_outline_revision(
@@ -406,6 +395,17 @@ impl WorkspaceEngine {
                         .await?;
                     return Ok(ReviewDecisionOutcome::StartWorkItemPlanOutlineRevision {
                         feedback,
+                    });
+                }
+                if self.latest_review_verdict.is_none() {
+                    self.latest_review_verdict = Some(ReviewVerdict {
+                        verdict: ReviewVerdictType::Revise,
+                        comments: context.clone().unwrap_or_else(|| "人工请求修改".into()),
+                        summary: "人工请求修改".to_string(),
+                        findings: Vec::new(),
+                        review_gate: ReviewGate::RequiresRevision,
+                        work_item_plan_review: None,
+                        structured_output_diagnostic: None,
                     });
                 }
                 self.pending_revision_context = context;

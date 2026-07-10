@@ -142,9 +142,34 @@ impl WorkspaceEngine {
         source: WorkItemPlanOutlineRevisionSource,
     ) -> Result<Option<String>, String> {
         let outline_feedback = self.work_item_plan_outline_revision_feedback(feedback.as_deref());
+        let lifecycle = self
+            .lifecycle_store
+            .clone()
+            .ok_or_else(|| "lifecycle_store unavailable".to_string())?;
+        let original_status = lifecycle
+            .get_workspace_session(&self.session.session_id)
+            .map_err(|error| {
+                format!("load workspace session status before outline revision failed: {error}")
+            })?
+            .status;
+        lifecycle
+            .update_workspace_session_status(&self.session.session_id, WorkspaceSessionStatus::Open)
+            .map_err(|error| {
+                format!("update workspace session status before outline revision failed: {error}")
+            })?;
+        if let Err(mark_error) = self.mark_work_item_plan_outline_revising_if_present() {
+            return match lifecycle
+                .update_workspace_session_status(&self.session.session_id, original_status.clone())
+            {
+                Ok(_) => Err(mark_error),
+                Err(rollback_error) => Err(format!(
+                    "{mark_error}; rollback workspace session status to {original_status:?} failed: {rollback_error}"
+                )),
+            };
+        }
+
         self.pending_revision_context = feedback;
         self.mark_latest_artifact_rejected();
-        self.mark_work_item_plan_outline_revising()?;
         let summary = match source {
             WorkItemPlanOutlineRevisionSource::AuthorConfirm => {
                 "Author Confirm 已请求返修 WorkItemPlan Outline"
@@ -157,12 +182,6 @@ impl WorkspaceEngine {
             }
         };
         self.complete_active_node(Some(summary.to_string())).await;
-        if let Some(store) = &self.lifecycle_store {
-            let _ = store.update_workspace_session_status(
-                &self.session.session_id,
-                WorkspaceSessionStatus::Open,
-            );
-        }
         self.transition_stage(WorkspaceStage::Running).await;
         self.work_item_plan_author_retry_count = 0;
         self.work_item_plan_revision_retry_count = 0;

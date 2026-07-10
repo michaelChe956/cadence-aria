@@ -294,7 +294,7 @@ fn work_item_plan_outline_revision_feedback_returns_none_when_empty() {
 }
 
 fn make_work_item_plan_engine_with_draft_candidate(
-    session_id: &str,
+    _session_id: &str,
 ) -> (
     TempDir,
     Arc<CheckpointStore>,
@@ -532,7 +532,6 @@ fn make_work_item_plan_engine_with_draft_candidate(
         event_tx,
         session,
     );
-    engine.session.session_id = session_id.to_string();
     engine.session.stage = WorkspaceStage::AuthorConfirm;
     engine.session.reviewer_provider = Some(ProviderName::Codex);
 
