@@ -432,6 +432,7 @@ async fn outline_revision_status_update_failure_keeps_engine_state() {
         .prepare_work_item_plan_outline_revision(
             Some("新返修上下文".to_string()),
             WorkItemPlanOutlineRevisionSource::AuthorConfirm,
+            OutlineRevisionPersistencePolicy::AllowMissingInitialRound,
         )
         .await
         .expect_err("missing session status update must fail");
@@ -462,6 +463,7 @@ async fn outline_revision_status_save_failure_keeps_engine_state() {
         .prepare_work_item_plan_outline_revision(
             Some("新返修上下文".to_string()),
             WorkItemPlanOutlineRevisionSource::AuthorConfirm,
+            OutlineRevisionPersistencePolicy::AllowMissingInitialRound,
         )
         .await;
 
@@ -493,6 +495,7 @@ async fn outline_revision_active_index_load_failure_rolls_back_session_and_engin
         .prepare_work_item_plan_outline_revision(
             Some("新返修上下文".to_string()),
             WorkItemPlanOutlineRevisionSource::ReviewDecision,
+            OutlineRevisionPersistencePolicy::AllowMissingInitialRound,
         )
         .await
         .expect_err("active index load failure must fail");
@@ -530,6 +533,7 @@ async fn outline_revision_active_index_save_failure_rolls_back_session_and_engin
         .prepare_work_item_plan_outline_revision(
             Some("新返修上下文".to_string()),
             WorkItemPlanOutlineRevisionSource::HumanConfirm,
+            OutlineRevisionPersistencePolicy::AllowMissingInitialRound,
         )
         .await;
     std::fs::set_permissions(index_parent, original_permissions)

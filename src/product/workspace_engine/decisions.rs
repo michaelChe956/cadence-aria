@@ -159,6 +159,7 @@ impl WorkspaceEngine {
                 self.prepare_work_item_plan_outline_revision(
                     None,
                     WorkItemPlanOutlineRevisionSource::AuthorConfirm,
+                    OutlineRevisionPersistencePolicy::AllowMissingInitialRound,
                 )
                 .await?;
                 self.begin_work_item_plan_outline_run().await;
@@ -272,6 +273,7 @@ impl WorkspaceEngine {
                         .prepare_work_item_plan_outline_revision(
                             normalized_context,
                             WorkItemPlanOutlineRevisionSource::ReviewDecision,
+                            self.review_decision_outline_revision_persistence_policy(),
                         )
                         .await?;
                     return Ok(ReviewDecisionOutcome::StartWorkItemPlanOutlineRevision {
@@ -391,6 +393,7 @@ impl WorkspaceEngine {
                         .prepare_work_item_plan_outline_revision(
                             context,
                             WorkItemPlanOutlineRevisionSource::HumanConfirm,
+                            OutlineRevisionPersistencePolicy::AllowMissingInitialRound,
                         )
                         .await?;
                     return Ok(ReviewDecisionOutcome::StartWorkItemPlanOutlineRevision {

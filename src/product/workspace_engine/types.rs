@@ -236,6 +236,12 @@ pub(crate) enum WorkItemPlanOutlineRevisionSource {
     HumanConfirm,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OutlineRevisionPersistencePolicy {
+    AllowMissingInitialRound,
+    RequireActiveRound,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkspaceConfirmOutcome {
     WorkItemPlan {

@@ -257,6 +257,20 @@ impl LifecycleStore {
         read_json(&path)
     }
 
+    pub(crate) fn delete_node_detail(
+        &self,
+        session_id: &str,
+        node_id: &str,
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(session_id)?;
+        validate_relative_id(node_id)?;
+        let path = self
+            .workspace_timeline_root_for_session(session_id)?
+            .join("timeline_node_details")
+            .join(format!("{node_id}.json"));
+        remove_file_if_exists(&path)
+    }
+
     pub fn load_node_detail_for_issue_session(
         &self,
         project_id: &str,
