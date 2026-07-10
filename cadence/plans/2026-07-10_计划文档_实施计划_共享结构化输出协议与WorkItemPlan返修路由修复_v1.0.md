@@ -914,6 +914,7 @@ git commit -m "feat: parse structured output in streaming providers"
 **Files:**
 - Create: `src/product/workspace_engine/review/structured_output.rs`
 - Modify: `src/product/workspace_engine/review.rs`
+- Modify: `src/product/workspace_engine/review/drive.rs:250-370`
 - Modify: `src/product/workspace_engine/parsers.rs:65-430`
 - Modify: `src/product/workspace_engine/review/routing.rs:4-470`
 - Modify: `src/product/workspace_engine/session_state.rs:254-309`
@@ -1110,6 +1111,46 @@ impl WorkspaceEngine {
 }
 ```
 
+本任务先实现“无 repair”的安全降级，Task 5 再在同一入口前增加一次修复编排：
+
+```rust
+pub(crate) fn fallback_review_verdict(
+    completion: &ProviderCompletion,
+    error: &ReviewCompletionError,
+    repair_attempted: bool,
+) -> ReviewVerdict {
+    ReviewVerdict {
+        verdict: ReviewVerdictType::NeedsHuman,
+        comments: completion.readable_output.clone(),
+        summary: "需要人工确认".to_string(),
+        findings: Vec::new(),
+        review_gate: ReviewGate::UserTriageRequired,
+        work_item_plan_review: None,
+        structured_output_diagnostic: Some(StructuredOutputDiagnostic {
+            code: error.code().to_string(),
+            message: error.message(),
+            repair_attempted,
+            repair_succeeded: false,
+            raw_output_preview: Some(preview(&completion.full_output)),
+        }),
+    }
+}
+```
+
+Task 4 为 `ReviewCompletionError` 实现 `code()` / `message()` 稳定映射；Task 5 再扩展 `RepairPayloadChanged`、`recoverable_value()` 和 `is_repairable()`。
+
+`review/drive.rs` 的当前完成分支先改为：
+
+```rust
+let verdict = match self.parse_review_completion_for_active_node(&completion) {
+    Ok(verdict) => verdict,
+    Err(error) => fallback_review_verdict(&completion, &error, false),
+};
+self.complete_review(completion, verdict).await;
+```
+
+该路径保证 Task 4 独立提交可编译且已具备类型化诊断；不得在 Task 4 内启动第二次 Provider。
+
 - [ ] **Step 6: complete_review 不再解析文本**
 
 签名改为：
@@ -1221,6 +1262,7 @@ Expected: PASS。
 git add \
   src/product/workspace_engine/review.rs \
   src/product/workspace_engine/review/structured_output.rs \
+  src/product/workspace_engine/review/drive.rs \
   src/product/workspace_engine/review/routing.rs \
   src/product/workspace_engine/parsers.rs \
   src/product/workspace_engine/session_state.rs \
@@ -1558,7 +1600,7 @@ match self.parse_review_completion_for_active_node(&first_completion) {
 }
 ```
 
-Task 5 将 `ReviewCompletionError` 增加 `RepairPayloadChanged` 变体，并实现：
+Task 5 将既有 `ReviewCompletionError` 增加 `RepairPayloadChanged` 变体，并复用 Task 4 已有的 `fallback_review_verdict()`：
 
 ```rust
 pub(crate) fn fallback_review_verdict(
