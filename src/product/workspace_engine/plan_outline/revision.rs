@@ -1,6 +1,13 @@
 use super::*;
 use crate::product::workspace_engine::review::format_review_feedback;
 
+const WORK_ITEM_PLAN_IMPACT_CLOSURE_CONTRACT: &str = "[impact_closure_contract]
+当 finding 涉及 API 契约、共享状态或测试迁移时：
+1. 不得只修改 reviewer 点名的文件。
+2. 必须重新检索 src/**、tests/it_web/**、tests/it_core/**、tests/it_product/**、web/src/**。
+3. 必须为每个 matched file 声明 owner，或明确无需修改的原因。
+4. 返修摘要必须包含 searched_scopes、matched_files、owner_mapping。";
+
 /// 从当前 session artifact 与 lifecycle 构建 WorkItemPlan revision 的输入三元组。
 ///
 /// - `retained`: candidate 中未标记 revert 的项，从 lifecycle 取完整记录。
@@ -92,6 +99,76 @@ pub(crate) fn build_work_item_plan_revision_input(
 }
 
 impl WorkspaceEngine {
+    pub(crate) fn review_decision_restarts_work_item_plan_outline(&self) -> bool {
+        self.session.workspace_type == WorkspaceType::WorkItemPlan
+            && self
+                .latest_review_verdict
+                .as_ref()
+                .and_then(|verdict| verdict.work_item_plan_review.as_ref())
+                .is_some_and(|review| {
+                    review.review_action == WorkItemPlanReviewAction::ReviseOutline
+                        || review.verdict == WorkItemPlanReviewVerdict::PlanReopenRequired
+                        || review
+                            .gates
+                            .contains(&WorkItemPlanReviewGate::RequiresPlanReopen)
+                })
+    }
+
+    pub(crate) fn human_confirm_should_revise_work_item_plan_outline(&self) -> bool {
+        if self.session.workspace_type != WorkspaceType::WorkItemPlan
+            || !self.current_artifact_is_work_item_plan_outline_candidate()
+        {
+            return false;
+        }
+
+        self.timeline_nodes
+            .iter()
+            .rev()
+            .find(|node| {
+                node.status == TimelineNodeStatus::Completed
+                    && matches!(
+                        &node.node_type,
+                        TimelineNodeType::WorkItemPlanOutlineReview
+                            | TimelineNodeType::WorkItemDraftReview
+                            | TimelineNodeType::WorkItemBatchReview
+                    )
+            })
+            .is_some_and(|node| node.node_type == TimelineNodeType::WorkItemPlanOutlineReview)
+    }
+
+    pub(crate) async fn prepare_work_item_plan_outline_revision(
+        &mut self,
+        feedback: Option<String>,
+        source: WorkItemPlanOutlineRevisionSource,
+    ) -> Result<Option<String>, String> {
+        let outline_feedback = self.work_item_plan_outline_revision_feedback(feedback.as_deref());
+        self.pending_revision_context = feedback;
+        self.mark_latest_artifact_rejected();
+        self.mark_work_item_plan_outline_revising()?;
+        let summary = match source {
+            WorkItemPlanOutlineRevisionSource::AuthorConfirm => {
+                "Author Confirm 已请求返修 WorkItemPlan Outline"
+            }
+            WorkItemPlanOutlineRevisionSource::ReviewDecision => {
+                "Review Decision 已请求返修 WorkItemPlan Outline"
+            }
+            WorkItemPlanOutlineRevisionSource::HumanConfirm => {
+                "Human Confirm 已请求返修 WorkItemPlan Outline"
+            }
+        };
+        self.complete_active_node(Some(summary.to_string())).await;
+        if let Some(store) = &self.lifecycle_store {
+            let _ = store.update_workspace_session_status(
+                &self.session.session_id,
+                WorkspaceSessionStatus::Open,
+            );
+        }
+        self.transition_stage(WorkspaceStage::Running).await;
+        self.work_item_plan_author_retry_count = 0;
+        self.work_item_plan_revision_retry_count = 0;
+        Ok(outline_feedback)
+    }
+
     /// WorkItemPlan Revision 完成：validate → replace Draft candidate → 组装 DTO →
     /// `update_artifact(WorkItemPlanCandidate)`（新 version）→ 回 AuthorConfirm。
     ///
@@ -197,21 +274,12 @@ impl WorkspaceEngine {
         if self.active_node_type() == Some(TimelineNodeType::WorkItemPlanOutlineConfirm)
             || self.current_artifact_is_work_item_plan_outline_candidate()
         {
-            let outline_feedback =
-                self.work_item_plan_outline_revision_feedback(feedback.as_deref());
-            self.pending_revision_context = feedback;
-            self.work_item_plan_revision_retry_count = 0;
-            self.mark_latest_artifact_rejected();
-            self.complete_active_node(Some("已请求重写 WorkItemPlan Outline".to_string()))
-                .await;
-            if let Some(store) = &self.lifecycle_store {
-                let _ = store.update_workspace_session_status(
-                    &self.session.session_id,
-                    WorkspaceSessionStatus::Open,
-                );
-            }
-            self.transition_stage(WorkspaceStage::Running).await;
-            self.work_item_plan_author_retry_count = 0;
+            let outline_feedback = self
+                .prepare_work_item_plan_outline_revision(
+                    feedback,
+                    WorkItemPlanOutlineRevisionSource::AuthorConfirm,
+                )
+                .await?;
             return Ok(ReviewDecisionOutcome::StartWorkItemPlanOutlineRevision {
                 feedback: outline_feedback,
             });
@@ -304,6 +372,22 @@ impl WorkspaceEngine {
         }
         if let Some(context) = context.map(str::trim).filter(|c| !c.is_empty()) {
             parts.push(format!("用户补充信息:\n{}", context));
+        }
+        let requires_impact_closure = self.latest_review_verdict.as_ref().is_some_and(|verdict| {
+            verdict.findings.iter().any(|finding| {
+                matches!(
+                    &finding.severity,
+                    ReviewFindingSeverity::Blocking
+                        | ReviewFindingSeverity::MustFix
+                        | ReviewFindingSeverity::StrongRecommendFix
+                )
+            }) || verdict
+                .structured_output_diagnostic
+                .as_ref()
+                .is_some_and(|diagnostic| !diagnostic.repair_succeeded)
+        });
+        if requires_impact_closure {
+            parts.push(WORK_ITEM_PLAN_IMPACT_CLOSURE_CONTRACT.to_string());
         }
         if parts.is_empty() {
             None

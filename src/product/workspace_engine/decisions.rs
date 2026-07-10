@@ -156,11 +156,11 @@ impl WorkspaceEngine {
                 }
             }
             AuthorDecision::Reject => {
-                self.mark_latest_artifact_rejected();
-                self.complete_active_node(Some("用户要求重写 WorkItemPlan Outline".to_string()))
-                    .await;
-                self.mark_work_item_plan_outline_revising()?;
-                self.transition_stage(WorkspaceStage::Running).await;
+                self.prepare_work_item_plan_outline_revision(
+                    None,
+                    WorkItemPlanOutlineRevisionSource::AuthorConfirm,
+                )
+                .await?;
                 self.begin_work_item_plan_outline_run().await;
                 Ok(AuthorDecisionOutcome::HumanConfirm)
             }
@@ -269,14 +269,11 @@ impl WorkspaceEngine {
                     || self.current_artifact_is_work_item_plan_outline_candidate()
                 {
                     let outline_feedback = self
-                        .work_item_plan_outline_revision_feedback(normalized_context.as_deref());
-                    self.pending_revision_context = normalized_context;
-                    self.complete_active_node(Some("已选择返修 WorkItemPlan Outline".to_string()))
-                        .await;
-                    self.mark_work_item_plan_outline_revising()?;
-                    self.transition_stage(WorkspaceStage::Running).await;
-                    self.work_item_plan_author_retry_count = 0;
-                    self.work_item_plan_revision_retry_count = 0;
+                        .prepare_work_item_plan_outline_revision(
+                            normalized_context,
+                            WorkItemPlanOutlineRevisionSource::ReviewDecision,
+                        )
+                        .await?;
                     return Ok(ReviewDecisionOutcome::StartWorkItemPlanOutlineRevision {
                         feedback: outline_feedback,
                     });
@@ -363,21 +360,6 @@ impl WorkspaceEngine {
         }
     }
 
-    pub(crate) fn review_decision_restarts_work_item_plan_outline(&self) -> bool {
-        self.session.workspace_type == WorkspaceType::WorkItemPlan
-            && self
-                .latest_review_verdict
-                .as_ref()
-                .and_then(|verdict| verdict.work_item_plan_review.as_ref())
-                .is_some_and(|review| {
-                    review.review_action == WorkItemPlanReviewAction::ReviseOutline
-                        || review.verdict == WorkItemPlanReviewVerdict::PlanReopenRequired
-                        || review
-                            .gates
-                            .contains(&WorkItemPlanReviewGate::RequiresPlanReopen)
-                })
-    }
-
     pub async fn handle_human_confirm(
         &mut self,
         decision: HumanConfirmDecision,
@@ -413,6 +395,17 @@ impl WorkspaceEngine {
                         review_gate: ReviewGate::RequiresRevision,
                         work_item_plan_review: None,
                         structured_output_diagnostic: None,
+                    });
+                }
+                if self.human_confirm_should_revise_work_item_plan_outline() {
+                    let feedback = self
+                        .prepare_work_item_plan_outline_revision(
+                            context,
+                            WorkItemPlanOutlineRevisionSource::HumanConfirm,
+                        )
+                        .await?;
+                    return Ok(ReviewDecisionOutcome::StartWorkItemPlanOutlineRevision {
+                        feedback,
                     });
                 }
                 self.pending_revision_context = context;

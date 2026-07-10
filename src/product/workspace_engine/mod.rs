@@ -109,7 +109,7 @@ pub(crate) use session_state::*;
 pub(crate) use types::{
     ArtifactRetryContext, AuthorPromptMode, PendingAuthorChoice, ProviderSessionDriveInput,
     ReviewProviderRunResult, RevisionResumeFallbackContext, StructuredOutputDisplayFilter,
-    TimelineNodeDraft, WorkItemPlanCompileProjectionContext,
+    TimelineNodeDraft, WorkItemPlanCompileProjectionContext, WorkItemPlanOutlineRevisionSource,
 };
 
 const SUMMARY_PREVIEW_CHARS: usize = 2048;
