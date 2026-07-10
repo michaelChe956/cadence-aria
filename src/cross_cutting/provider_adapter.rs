@@ -1,3 +1,4 @@
+use crate::cross_cutting::structured_output::parse_last_structured_output_value;
 use crate::protocol::contracts::{AdapterOutput, AdapterRole, TimeoutStatus};
 use crate::protocol::provider_errors::ProviderErrorCode;
 use serde_json::{Value, json};
@@ -5,8 +6,6 @@ use serde_json::{Value, json};
 pub const STRUCTURED_OUTPUT_START: &str = "<ARIA_STRUCTURED_OUTPUT>";
 pub const STRUCTURED_OUTPUT_END: &str = "</ARIA_STRUCTURED_OUTPUT>";
 pub const DEFAULT_PROVIDER_TIMEOUT_SECS: u64 = 3 * 60 * 60;
-const STRUCTURED_OUTPUT_START_PREFIX: &str = "<ARIA_STRUCTURED_OUTPUT";
-const STRUCTURED_OUTPUT_END_PREFIX: &str = "</ARIA_STRUCTURED_OUTPUT";
 
 pub trait ProviderAdapter {
     fn run(
@@ -208,123 +207,9 @@ impl ProviderAdapter for FakeProviderAdapter {
 }
 
 pub fn parse_last_structured_output(stdout: &str) -> Result<Option<Value>, ProviderAdapterError> {
-    let Some(start_index) = stdout.rfind(STRUCTURED_OUTPUT_START_PREFIX) else {
-        return Ok(None);
-    };
-    let after_start_prefix = &stdout[start_index + STRUCTURED_OUTPUT_START_PREFIX.len()..];
-    let (nonce, start_tag_len) =
-        parse_structured_output_tag(after_start_prefix, "structured output start")?;
-    let json_start = start_index + STRUCTURED_OUTPUT_START_PREFIX.len() + start_tag_len;
-    let after_start = &stdout[json_start..];
-    let Some((end_index, _end_tag_len)) =
-        find_structured_output_end(after_start, nonce.as_deref())?
-    else {
-        return Err(ProviderAdapterError::parse_error(
-            "missing structured output end sentinel",
-            stdout.to_string(),
-            String::new(),
-        ));
-    };
-    let json_text = after_start[..end_index].trim();
-    parse_structured_json_text(json_text)
-        .or_else(|_| {
-            extract_json_candidate(json_text)
-                .ok_or_else(|| {
-                    ProviderAdapterError::parse_error(
-                        "invalid structured output json: no JSON object or array found",
-                        stdout.to_string(),
-                        String::new(),
-                    )
-                })
-                .and_then(parse_structured_json_text)
-        })
-        .map(Some)
-        .map_err(|mut error| {
-            error.stdout = stdout.to_string();
-            error
-        })
-}
-
-fn find_structured_output_end(
-    after_start: &str,
-    start_nonce: Option<&str>,
-) -> Result<Option<(usize, usize)>, ProviderAdapterError> {
-    let Some(end_index) = after_start.find(STRUCTURED_OUTPUT_END_PREFIX) else {
-        return Ok(None);
-    };
-    let after_end_prefix = &after_start[end_index + STRUCTURED_OUTPUT_END_PREFIX.len()..];
-    let (end_nonce, end_tag_len) =
-        parse_structured_output_tag(after_end_prefix, "structured output end")?;
-    if start_nonce != end_nonce.as_deref() {
-        return Err(ProviderAdapterError::parse_error(
-            "structured output nonce mismatch",
-            String::new(),
-            String::new(),
-        ));
-    }
-    Ok(Some((
-        end_index,
-        STRUCTURED_OUTPUT_END_PREFIX.len() + end_tag_len,
-    )))
-}
-
-fn parse_structured_output_tag(
-    after_prefix: &str,
-    tag_name: &str,
-) -> Result<(Option<String>, usize), ProviderAdapterError> {
-    let Some(end_offset) = after_prefix.find('>') else {
-        return Err(ProviderAdapterError::parse_error(
-            format!("missing {tag_name} tag close"),
-            String::new(),
-            String::new(),
-        ));
-    };
-    let attrs = after_prefix[..end_offset].trim();
-    let nonce = parse_structured_output_nonce(attrs).map_err(|details| {
-        ProviderAdapterError::parse_error(
-            format!("{tag_name} {details}"),
-            String::new(),
-            String::new(),
-        )
-    })?;
-    Ok((nonce, end_offset + 1))
-}
-
-fn parse_structured_output_nonce(attrs: &str) -> Result<Option<String>, &'static str> {
-    if attrs.is_empty() {
-        return Ok(None);
-    }
-    let Some(nonce) = attrs
-        .strip_prefix("nonce=\"")
-        .and_then(|value| value.strip_suffix('"'))
-    else {
-        return Err("has unsupported attributes");
-    };
-    if nonce.len() != 8 || !nonce.chars().all(|ch| ch.is_ascii_alphanumeric()) {
-        return Err("has invalid nonce");
-    }
-    Ok(Some(nonce.to_string()))
-}
-
-fn parse_structured_json_text(json_text: &str) -> Result<Value, ProviderAdapterError> {
-    serde_json::from_str(json_text).map_err(|error| {
-        ProviderAdapterError::parse_error(
-            format!("invalid structured output json: {error}"),
-            String::new(),
-            String::new(),
-        )
+    parse_last_structured_output_value(stdout).map_err(|error| {
+        ProviderAdapterError::parse_error(error.message, stdout.to_string(), String::new())
     })
-}
-
-fn extract_json_candidate(text: &str) -> Option<&str> {
-    let start = text.find(['{', '['])?;
-    let close = match text.as_bytes()[start] {
-        b'{' => '}',
-        b'[' => ']',
-        _ => return None,
-    };
-    let end = text.rfind(close)?;
-    (end >= start).then_some(&text[start..=end])
 }
 
 fn default_structured_output_for_role(role: &AdapterRole) -> Option<Value> {
