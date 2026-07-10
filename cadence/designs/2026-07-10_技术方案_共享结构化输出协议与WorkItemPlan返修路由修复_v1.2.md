@@ -3,7 +3,7 @@
 ## 文档信息
 
 - 文档类型：技术方案
-- 版本：v1.1
+- 版本：v1.2
 - 日期：2026-07-10
 - 目标分支：`feat-b-0709`
 - 案例：`Work Item Plan #workspace_session_0003`
@@ -87,7 +87,7 @@ work_item_plan_review = null
 - Workspace Engine 不再从原始文本中查找 sentinel。
 - 保持首尾 nonce 严格一致，不通过放宽解析掩盖 Provider 格式错误。
 - 结构化输出失败必须返回类型化错误，而不是 `None`。
-- Reviewer 结构化输出格式失败时自动修复一次；修复只允许更正封装，不允许重新审核或改变 verdict/findings。
+- Reviewer 已恢复出合法 JSON、仅 sentinel/nonce 封装失败时自动修复一次；修复只允许更正封装，且修复前后 JSON 必须严格等价。
 - 自动修复仍失败时，前端明确展示错误类型与可读 reviewer 原文。
 - Work Item Plan Outline 从 Human Confirm 请求修改时必须进入 Outline 专用返修链路。
 - Story Spec、Design Spec、Work Item、Work Item Plan 共用结构化输出错误模型。
@@ -180,7 +180,7 @@ pub struct ProviderCompletion {
 }
 ```
 
-`readable_output` 由 Adapter 在同一次 sentinel 解析中产生：成功时移除目标 structured block，失败时尽可能移除已定位的 block；无法安全定位结束边界时退回 `full_output`。Workspace 使用 `readable_output` 作为 reviewer comments，`full_output` 仅用于诊断、修复 Prompt 与原始输出查看。
+`readable_output` 由 Adapter 在同一次 sentinel 解析中产生：成功时移除目标 structured block，失败时尽可能移除已定位的 block；无法安全定位结束边界时退回 `full_output`。Workspace 使用 `readable_output` 作为 reviewer comments，`full_output` 仅用于当次诊断与修复 Prompt；持久化和 WebSocket 只保留最多 2048 字符的原始输出预览，避免无上限复制 Provider 输出。
 
 `recoverable_value` 只在 JSON 本身合法、但结束标签或 nonce 契约不合法时存在。格式修复成功后必须比较修复结果与 `recoverable_value`；不一致时禁止自动采用，转人工确认。
 
@@ -292,22 +292,21 @@ Workspace 不再调用 `extract_structured_json(full_output)`。
 
 ### 5.2 语法错误自动修复
 
-以下错误允许自动修复一次：
+以下错误在 `recoverable_value` 存在时允许自动修复一次：
 
 - `MissingEndTag`
 - `MissingEndNonce`
 - `NonceMismatch`
-- `InvalidJson`
 
 自动修复使用同一 reviewer provider 的新一轮调用，并优先续接原生 provider session。修复 Prompt 只包含：
 
 - 原始完整输出。
-- 期望 nonce。
-- 当前 schema 示例。
+- Adapter 已恢复的 canonical JSON。
+- 新一次输出期望的 nonce 和 schema name。
 - 具体错误码。
 - “不得重新审核、不得改变 verdict/findings/summary，只修复 JSON 与 sentinel 封装”的硬约束。
 
-修复次数固定为 1，不做循环重试。
+修复次数固定为 1，不做循环重试。修复返回的 JSON 必须与首次 `recoverable_value` 严格相等，否则以 `repair_payload_changed` 转人工确认。`InvalidJson` 没有可验证的原业务 Value，不触发 Provider 修复。
 
 修复节点不创建新的业务 Review Round；仍归属于当前 review timeline node，并在 execution events 中记录一次 `structured_output_repair`。
 
@@ -325,7 +324,7 @@ pub enum ReviewStructuredOutputErrorCode {
 }
 ```
 
-业务 Schema 错误同样允许一次格式修复，但修复 Prompt 必须明确列出无效字段，不允许 reviewer重新分析候选内容。
+业务 Schema 错误不触发自动修复，直接产生类型化诊断并转人工确认。原因是补写 `verdict`、改写 findings 结构或替换 outline 引用都属于业务内容变更，无法证明修复前后审核结论不变。
 
 ### 5.4 最终降级
 
@@ -360,8 +359,12 @@ pub struct StructuredOutputDiagnostic {
     pub message: String,
     pub repair_attempted: bool,
     pub repair_succeeded: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_output_preview: Option<String>,
 }
 ```
+
+`raw_output_preview` 使用现有字符预览逻辑截断到 2048 字符，不持久化无上限的 `full_output`。
 
 该字段需要贯通：
 
@@ -391,7 +394,7 @@ pub struct StructuredOutputDiagnostic {
 同时提供：
 
 - “查看 Reviewer 可读说明”区域。
-- 默认折叠的“查看原始输出”区域。
+- 默认折叠的“查看原始输出片段”区域。
 
 不得将原始 JSON 渲染为 findings 卡片，避免用户误以为其已经通过可信校验。
 
@@ -418,11 +421,13 @@ AND 最近完成的 review node 是 work_item_plan_outline_review
 抽取内部方法：
 
 ```rust
-start_work_item_plan_outline_revision(
+prepare_work_item_plan_outline_revision(
     feedback: Option<String>,
     source: WorkItemPlanOutlineRevisionSource,
-) -> Result<ReviewDecisionOutcome, String>
+) -> Result<Option<String>, String>
 ```
+
+返回值是已注入 review findings 和影响面闭合契约的 Outline feedback。不同入口各自映射为 `AuthorDecisionOutcome` 或 `ReviewDecisionOutcome`，避免底层方法耦合某一种上层 outcome。
 
 调用方包括：
 
@@ -463,6 +468,13 @@ start_work_item_plan_outline_revision(
 
 Reviewer 后续轮次优先检查上一轮 finding 是否闭合，再检查返修引入的新影响面。
 
+影响面闭合契约在以下任一条件满足时追加：
+
+- 存在 blocking / must_fix / strong_recommend_fix finding。
+- Outline Review 存在最终失败的 `structured_output_diagnostic`。
+
+第二种情况只追加通用检索与 owner 声明契约，不从未校验 JSON 恢复 findings。
+
 该 Prompt 改进用于降低遗漏概率，但不宣称能够通过 Prompt 完全替代 reviewer。
 
 ## 10. 当前案例的计划内容修正要求
@@ -487,7 +499,7 @@ Reviewer 后续轮次优先检查上一轮 finding 是否闭合，再检查返�
 - 缺少结束标签返回 `MissingEndTag`。
 - 结束标签缺少 nonce 返回 `MissingEndNonce`。
 - nonce 不一致返回 `NonceMismatch`。
-- JSON 非法返回 `InvalidJson`。
+- JSON 非法返回 `InvalidJson`，且不触发无法校验等价性的自动修复。
 - 未请求结构化输出返回 `NotRequested`。
 - 非流式 Adapter 与流式 Adapter 复用同一解析器。
 
@@ -510,7 +522,8 @@ Reviewer 后续轮次优先检查上一轮 finding 是否闭合，再检查返�
 验证：
 
 - parsed value 正常形成 verdict/findings。
-- syntax error 触发一次 repair。
+- 存在 `recoverable_value` 的 sentinel/nonce syntax error 触发一次 repair。
+- `InvalidJson` 和业务 Schema error 直接转人工诊断。
 - repair 成功后不产生额外业务 review round。
 - repair 失败后 diagnostic 被持久化。
 - 刷新恢复后 diagnostic 与可读说明不丢失。
@@ -580,7 +593,7 @@ Reviewer 后续轮次优先检查上一轮 finding 是否闭合，再检查返�
 - Workspace Engine 不再直接从 reviewer `full_output` 提取 sentinel JSON。
 - 流式与非流式 Provider 使用同一结构化输出语法解析实现。
 - 第二轮案例中的缺失结束 nonce 能被识别为 `missing_end_nonce`，而不是无信息的 `needs_human`。
-- 格式错误自动修复最多一次，且不增加业务 Review Round。
+- 可恢复 JSON 的 sentinel/nonce 格式错误自动修复最多一次，且不增加业务 Review Round。
 - 修复失败时 UI 清楚展示错误原因、是否已重试以及 reviewer 可读原文。
 - Work Item Plan Outline 在 Human Confirm 请求修改后进入 Outline 专用 revision，不再触发 Markdown heading/`[TASK-*]` 校验错误。
 - Story Spec、Design Spec、Work Item、Work Item Plan 的结构化错误恢复测试全部通过。
